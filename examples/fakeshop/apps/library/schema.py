@@ -14,6 +14,7 @@ from django.db.models import (
     Model,
     Prefetch,
     QuerySet,
+    TextChoices,
     TextField,
     Value,
 )
@@ -2534,6 +2535,143 @@ class CreateShelfWithInjectedTopic(SerializerMutation):
         return {"topic": "stamped-by-injection"}
 
 
+class ShelfHookKey(TextChoices):
+    """The keyword names the member-keyed shelf hooks return, as a project's own constants.
+
+    Each member is a ``str`` subclass whose text is the plain keyword: a hook returning
+    ``{ShelfHookKey.STAMP: ...}`` means ``stamp=...`` to Python's ``**`` and to DRF, so the
+    framework reads it as that exact text.
+    """
+
+    TENANT = "tenant"
+    TOPIC = "topic"
+    STAMP = "stamp"
+    PARTIAL = "partial"
+
+
+class CreateShelfViaSchemaHookSerializerByMember(CreateShelfViaSchemaHookSerializer):
+    """``CreateShelfViaSchemaHookSerializer`` with its runtime ``tenant`` kwarg keyed by a member.
+
+    ``get_serializer_kwargs`` returns ``ShelfHookKey.TENANT`` where the plain twin returns
+    ``"tenant"``; the live test proves both write the same row with the same stamped
+    ``topic``.
+    """
+
+    class Meta(CreateShelfViaSchemaHookSerializer.Meta):
+        serializer_class = serializers.TenantShelfSerializer
+        operation = "create"
+        permission_classes = []
+
+    @override
+    def get_serializer_kwargs(
+        self,
+        info: Info[object, object],
+        *,
+        data: Mapping[str, object],
+        hook_context: SerializerHookContext,
+    ) -> dict[str, object]:
+        user = getattr(getattr(info.context, "request", None), "user", None)
+        return {ShelfHookKey.TENANT: getattr(user, "username", "") or "anonymous"}
+
+
+class CreateShelfWithInjectedTopicByMember(CreateShelfWithInjectedTopic):
+    """``CreateShelfWithInjectedTopic`` with its injected ``topic`` keyed by a member.
+
+    ``get_serializer_injected_data`` returns ``ShelfHookKey.TOPIC`` where the plain twin
+    returns ``"topic"``; the key still matches ``Meta.injected_fields`` exactly, and the live
+    test proves both write the same row with the same injected ``topic``.
+    """
+
+    class Meta(CreateShelfWithInjectedTopic.Meta):
+        serializer_class = serializers.OwnerStampShelfSerializer
+        operation = "create"
+        fields = ("code", "branch")
+        injected_fields = ("topic",)
+        permission_classes = []
+
+    @override
+    def get_serializer_injected_data(
+        self,
+        info: Info,
+        *,
+        data: Mapping[str, object],
+        hook_context: SerializerHookContext,
+    ) -> dict[str, object]:
+        return {ShelfHookKey.TOPIC: "stamped-by-injection"}
+
+
+class CreateShelfWithSaveKwargsByMember(CreateShelfWithSaveKwargs):
+    """``CreateShelfWithSaveKwargs`` with its save-time ``stamp`` keyed by a member.
+
+    ``get_serializer_save_kwargs`` returns ``ShelfHookKey.STAMP`` where the plain twin returns
+    ``"stamp"``; the live test proves both write the same row with the same stamped
+    ``topic``.
+    """
+
+    class Meta(CreateShelfWithSaveKwargs.Meta):
+        serializer_class = serializers.SaveKwargsShelfSerializer
+        operation = "create"
+        permission_classes = []
+
+    @override
+    def get_serializer_save_kwargs(
+        self,
+        info: Info,
+        *,
+        data: Mapping[str, object],
+        hook_context: SerializerHookContext,
+    ) -> dict[str, object]:
+        return {ShelfHookKey.STAMP: "stamped-at-save"}
+
+
+class CreateShelfWithModelFieldSaveKwargsByMember(CreateShelfWithModelFieldSaveKwargs):
+    """``CreateShelfWithModelFieldSaveKwargs`` with its model-field save kwarg keyed by a member.
+
+    ``get_serializer_save_kwargs`` returns ``ShelfHookKey.TOPIC`` where the plain twin returns
+    ``"topic"``; the live test proves the member is refused with the twin's message, naming
+    the plain text ``'topic'``.
+    """
+
+    class Meta(CreateShelfWithModelFieldSaveKwargs.Meta):
+        serializer_class = serializers.ShelfSerializer
+        operation = "create"
+        permission_classes = []
+
+    @override
+    def get_serializer_save_kwargs(
+        self,
+        info: Info,
+        *,
+        data: Mapping[str, object],
+        hook_context: SerializerHookContext,
+    ) -> dict[str, object]:
+        return {ShelfHookKey.TOPIC: "smuggled-model-field"}
+
+
+class CreateShelfWithPartialKwargByMember(SerializerMutation):
+    """A DELIBERATELY-misconfigured create whose kwargs hook returns ``partial`` keyed by a member.
+
+    ``partial`` is framework-owned; ``ShelfHookKey.PARTIAL`` spells it, so the live test proves
+    the member is refused as the plain name is: a top-level ``ConfigurationError`` naming the
+    ``partial`` kwarg over ``/graphql/``, and no row written.
+    """
+
+    class Meta:
+        serializer_class = serializers.ShelfSerializer
+        operation = "create"
+        permission_classes = []
+
+    @override
+    def get_serializer_kwargs(
+        self,
+        info: Info[object, object],
+        *,
+        data: Mapping[str, object],
+        hook_context: SerializerHookContext,
+    ) -> dict[str, object]:
+        return {ShelfHookKey.PARTIAL: False}
+
+
 class UpdateBookWithInjectedStatus(SerializerMutation):
     """UPDATE a ``Book`` narrowing away a REQUIRED ``status`` and INJECTING it via ``Meta.injected_fields``.
 
@@ -3092,6 +3230,11 @@ class Mutation:
     and ``createShelfViaOptionalCodeSerializer`` share one serializer and prove mutation-level
     ``Meta.optional_fields`` produces a distinct input with weaker GraphQL requiredness while
     leaving DRF to enforce the omitted required field in-band.
+    ``createShelfViaSchemaHookSerializerByMember``, ``createShelfWithInjectedTopicByMember`` and
+    ``createShelfWithSaveKwargsByMember`` key their hook's return by a ``TextChoices`` member
+    and write what their plain-keyed twins write; ``createShelfWithModelFieldSaveKwargsByMember``
+    and ``createShelfWithPartialKwargByMember`` spell a model field and the framework-owned
+    ``partial`` by a member and are refused as the plain names are.
     ``createPatronProfileViaSerializer`` / ``updatePatronProfileViaSerializer`` write the
     ``to_field`` key ``PatronProfile.favorite_genre`` (the column stores the genre name) and
     are attested against that name, as is ``createPatronProfileViaRenamedSerializer`` (the
@@ -3217,6 +3360,21 @@ class Mutation:
     )
     create_shelf_with_renamed_save_kwargs_collision = DjangoMutationField(
         CreateShelfWithRenamedSaveKwargsCollision,
+    )
+    create_shelf_via_schema_hook_serializer_by_member = DjangoMutationField(
+        CreateShelfViaSchemaHookSerializerByMember,
+    )
+    create_shelf_with_injected_topic_by_member = DjangoMutationField(
+        CreateShelfWithInjectedTopicByMember,
+    )
+    create_shelf_with_save_kwargs_by_member = DjangoMutationField(
+        CreateShelfWithSaveKwargsByMember,
+    )
+    create_shelf_with_model_field_save_kwargs_by_member = DjangoMutationField(
+        CreateShelfWithModelFieldSaveKwargsByMember,
+    )
+    create_shelf_with_partial_kwarg_by_member = DjangoMutationField(
+        CreateShelfWithPartialKwargByMember,
     )
     update_book_genres_via_serializer = DjangoMutationField(UpdateBookGenresViaSerializer)
     update_book_title_with_alias_validator = DjangoMutationField(

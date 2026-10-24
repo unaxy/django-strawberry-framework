@@ -2329,7 +2329,7 @@ def test_hook_mapping_iteration_error_propagates() -> None:
 
 
 _HOOK_MAPPING_TAIL = (
-    "; hook mappings become serializer kwargs / data keys, so every key must be a plain string."
+    "; hook mappings become serializer kwargs / data keys, so every key must be a string."
 )
 
 

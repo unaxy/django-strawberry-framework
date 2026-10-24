@@ -1986,10 +1986,9 @@ def test_schema_field_map_reports_malformed_entries() -> None:
 def test_schema_field_map_rejects_str_subclass_key() -> None:
     """A ``str``-subclass key is rejected before any comparison or dict-set dispatch.
 
-    Keys become input field names, so the plain-string gate (the resolver-tier
-    ``_hook_mapping`` precedent) lets only an exact ``str`` reach the downstream
-    key-hashing consumers, never an overridable ``__hash__`` / ``__ne__`` a ``str``
-    subclass could carry.
+    Keys become input field names, so the plain-string gate lets only an exact ``str``
+    reach the downstream key-hashing consumers, never an overridable ``__hash__`` /
+    ``__ne__`` a ``str`` subclass could carry.
     """
 
     class RaisingHashStr(str):

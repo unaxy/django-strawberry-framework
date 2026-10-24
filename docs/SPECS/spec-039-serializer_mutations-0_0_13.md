@@ -1947,8 +1947,12 @@ The pipeline steps:
      could mutate to reach the authoritative data.
    - **Every hook result crosses a typed mapping boundary** (`_hook_mapping`): a
      non-`Mapping` return, a mapping that cannot be materialized, and a mapping carrying
-     a non-`str` key are each a `ConfigurationError` naming the hook — never a silent
-     coercion.
+     a non-`str` key (an `int`, `bytes`, a lazy translation proxy) are each a
+     `ConfigurationError` naming the hook — never a silent repair. A `str` subclass key (a
+     `TextChoices` or `StrEnum` member) is a string to Python's `**` and to DRF, so it is
+     read as its exact text: the checks below compare plain `str` and refuse a member
+     spelling a reserved, undeclared or model-field name exactly as they refuse the plain
+     name.
    - **`data`, `instance`, `partial`, `context["request"]`, and `context["write_alias"]`
      are framework-owned.** The reserved returns are checked by **omission sentinel +
      object identity**, never deep equality: a returned `data` must be omitted or the

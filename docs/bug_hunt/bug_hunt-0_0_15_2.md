@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 244 done, 176 to do.
+Progress: 245 done, 177 to do.
 
 ## Done
 
@@ -1116,6 +1116,11 @@ Progress: 244 done, 176 to do.
   no consumer mapping is mutated, and a mapping already holding a prefixed key is kept as bound. The products
   prefixed-form live rows and the forms resolver rows pin it; spec-038, the README and the `djangomodelformmutation`
   glossary term say so
+- [x] 408. fixed: a `SerializerMutation` hook returning a mapping keyed by a `TextChoices` or `StrEnum` member is
+  admitted: `rest_framework/resolvers.py::_hook_mapping` refuses only a non-`str` key and keys the result by each key's
+  exact text, so the member answers like its plain-`str` twin and a member spelling a reserved, undeclared or
+  model-field name is refused with the plain name's message. The library member-key live rows pin it; spec-039 says so.
+  The `rest_framework/sets.py` Meta-map key gates stay exact-`str` (dry-0_0_15_3 item 44)
 
 ## Outside review of the fixes
 
@@ -1370,8 +1375,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 407. `utils/sessions.py` test gaps: no row for a custom client-side session store that does not subclass the
   signed-cookie store (treated as server-side, as `docs/README.md` documents), and no row for the exact window edge of
   `consumers.py::_actor_is_current` (strict `<`)
-- [ ] 408. `rest_framework/resolvers.py::_hook_mapping`'s exact-`str` key gate refuses `StrEnum` keys Python accepts
-  (the `str`-subclass family of 224)
 - [ ] 429. Every fakeshop root list served by a plain sync `strawberry.field(resolver=...)` that returns a lazy
   QuerySet (`allLibraryLoans`, `allLibraryBooks`, `allLibraryPatrons`, ...) raises `SynchronousOnlyOperation` on the
   async executor (`asyncio.run(config.schema.schema.execute(...))`, the schema the async view mounts), hook or no
@@ -1389,12 +1392,18 @@ tracker number are recorded there; open remainders and new defects are filed as 
   resolver"), `tests/mutations/test_resolvers.py` ("pre-fix"), and the "exactly as before" comment beside
   `utils/querysets.py::_prefetch_relation_target_or_none`; an rg of `tests/` for that vocabulary ("now", "no longer",
   "used to", "previously", "pre-fix", "old") gives about 120 hits to judge. Restate each as behaviour. Found fixing 324
+- [ ] 583. (robustness) `rest_framework/resolvers.py::_hook_mapping`'s non-string-key refusal renders a lazy
+  translation key (`gettext_lazy("a")`) as `'a'` in its offender list, which reads as a string; naming each offender's
+  kind (`truth.kind`) would say why it was refused. Same output before 408. Found verifying 408
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 582. CHANGELOG entry for item 408: a `SerializerMutation` hook may return a mapping keyed by `TextChoices` or
+  `StrEnum` members, each read as its exact text; before, any key that was not exactly `str` was a
+  `ConfigurationError`. The non-string-key refusal now says "every key must be a string"
 - [ ] 544. CHANGELOG entry for item 424: a `DjangoModelFormMutation` whose form carries a prefix (class-level
   `prefix`, `get_form_kwargs` `prefix=`, or a `get_form` binding the package's data to a prefixed form) is now bound
   under it, so the form reads every value the client sent and an explicit `null` or a required-file clear is answered

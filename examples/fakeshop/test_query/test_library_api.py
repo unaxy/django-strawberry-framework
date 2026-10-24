@@ -16488,6 +16488,131 @@ def test_serializer_save_kwargs_hook_injects_server_side_data_over_http() -> Non
     ).exists()
 
 
+# A hook keyed by a ``TextChoices`` member answers as its plain-keyed twin: the plain field,
+# the member field, and the ``topic`` both write (the kwargs twin runs anonymous, so its
+# stamped tenant is ``anonymous``).
+_MEMBER_KEYED_HOOK_TWINS = [
+    pytest.param(
+        "createShelfViaSchemaHookSerializer",
+        "createShelfViaSchemaHookSerializerByMember",
+        "tenant:anonymous",
+        id="kwargs",
+    ),
+    pytest.param(
+        "createShelfWithInjectedTopic",
+        "createShelfWithInjectedTopicByMember",
+        "stamped-by-injection",
+        id="injected-data",
+    ),
+    pytest.param(
+        "createShelfWithSaveKwargs",
+        "createShelfWithSaveKwargsByMember",
+        "stamped-at-save",
+        id="save-kwargs",
+    ),
+]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("plain_field", "member_field", "topic"), _MEMBER_KEYED_HOOK_TWINS)
+def test_serializer_hook_member_key_answers_like_its_plain_twin_over_http(
+    plain_field: str,
+    member_field: str,
+    topic: str,
+) -> None:
+    """A hook returning a ``TextChoices`` member key writes what its plain-``str`` twin writes.
+
+    Each ``...ByMember`` mutation returns ``ShelfHookKey.<NAME>`` where its twin returns the
+    plain keyword (``tenant`` to the serializer constructor, ``topic`` as injected data,
+    ``stamp`` to ``serializer.save()``). A member is a string to Python's ``**`` and to DRF,
+    so the framework reads it as its exact text: both mutations answer the same envelope with
+    the same stamped ``topic``, in the same number of queries, and both rows are written.
+    """
+    branch = models.Branch.objects.create(name="MemberKeyBranch", city="Boston")
+
+    def _create(field: str, code: str) -> tuple[dict[str, object], int]:
+        with CaptureQueriesContext(connection) as captured:
+            response = _post_graphql(
+                f"mutation {{ {field}(data: {{ "
+                f'code: "{code}", branchId: {branch.pk} '
+                "}) { result { code topic } errors { field messages } } }",
+            )
+        assert response.status_code == 200
+        payload = response_json(response)
+        assert "errors" not in payload, payload
+        return json_object(payload, "data", field), len(captured)
+
+    plain, plain_queries = _create(plain_field, "PlainKeyShelf")
+    member, member_queries = _create(member_field, "MemberKeyShelf")
+    assert plain == {"result": {"code": "PlainKeyShelf", "topic": topic}, "errors": []}
+    assert member == {"result": {"code": "MemberKeyShelf", "topic": topic}, "errors": []}
+    assert member_queries == plain_queries
+    assert set(models.Shelf.objects.filter(branch=branch).values_list("code", "topic")) == {
+        ("PlainKeyShelf", topic),
+        ("MemberKeyShelf", topic),
+    }
+
+
+@pytest.mark.django_db
+@override_settings(**_ERROR_POLICY_PASS_THROUGH)
+def test_serializer_save_kwargs_member_naming_a_model_field_is_rejected_like_its_twin() -> None:
+    """A member save kwarg spelling a model field is refused with its plain twin's message.
+
+    ``CreateShelfWithModelFieldSaveKwargsByMember`` returns ``{ShelfHookKey.TOPIC: ...}``
+    where ``CreateShelfWithModelFieldSaveKwargs`` returns ``{"topic": ...}``. The member reads
+    as the text ``topic``: both are refused before ``serializer.save()``, the messages differ
+    only in the mutation name and render the key as ``'topic'``, and neither writes a row.
+    ``DEBUG=True`` opens the spec-048 error policy's pass-through gate to read the messages.
+    """
+    branch = models.Branch.objects.create(name="MemberModelFieldBranch", city="Boston")
+
+    def _message(field: str, code: str) -> str:
+        response = _post_graphql(
+            f"mutation($d: ShelfSerializerInput!) {{ {field}(data: $d) {{ "
+            "result { code } errors { field messages } } }",
+            variables={"d": {"code": code, "branchId": branch.pk}},
+        )
+        assert response.status_code == 200
+        payload = response_json(response)
+        assert payload["data"] is None
+        assert json_at(payload, "errors", 0, "path") == [field]
+        return json_str(payload, "errors", 0, "message")
+
+    plain = _message("createShelfWithModelFieldSaveKwargs", "PlainModelFieldShelf")
+    member = _message("createShelfWithModelFieldSaveKwargsByMember", "MemberModelFieldShelf")
+    assert "returned kwarg(s) ['topic'] that name Shelf model field(s)" in plain
+    assert member == plain.replace(
+        "CreateShelfWithModelFieldSaveKwargs.",
+        "CreateShelfWithModelFieldSaveKwargsByMember.",
+    )
+    assert not models.Shelf.objects.filter(branch=branch).exists()
+
+
+@pytest.mark.django_db
+@override_settings(**_ERROR_POLICY_PASS_THROUGH)
+def test_serializer_kwargs_member_spelling_partial_is_rejected_over_http() -> None:
+    """A ``TextChoices`` member spelling the framework-owned ``partial`` is refused as the name is.
+
+    ``CreateShelfWithPartialKwargByMember`` returns ``{ShelfHookKey.PARTIAL: False}`` from
+    ``get_serializer_kwargs``. The member reads as the text ``partial``, so the reserved-name
+    check refuses it with the ``partial`` message - not a key-type refusal - and no row is
+    written. The ``ConfigurationError`` is masked by the spec-048 error policy, so
+    ``DEBUG=True`` opens its pass-through gate to read the message.
+    """
+    branch = models.Branch.objects.create(name="MemberPartialBranch", city="Boston")
+    response = _post_graphql(
+        "mutation($d: ShelfSerializerInput!) { createShelfWithPartialKwargByMember(data: $d) { "
+        "result { code } errors { field messages } } }",
+        variables={"d": {"code": "MemberPartialShelf", "branchId": branch.pk}},
+    )
+    assert response.status_code == 200
+    payload = response_json(response)
+    assert payload["data"] is None
+    assert json_at(payload, "errors", 0, "path") == ["createShelfWithPartialKwargByMember"]
+    assert "returned a `partial` kwarg" in json_str(payload, "errors", 0, "message")
+    assert not models.Shelf.objects.filter(code="MemberPartialShelf").exists()
+
+
 @pytest.mark.django_db
 @override_settings(**_ERROR_POLICY_PASS_THROUGH)
 def test_serializer_save_kwargs_naming_a_model_field_is_rejected_over_http() -> None:

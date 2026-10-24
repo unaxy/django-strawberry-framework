@@ -192,9 +192,9 @@ def _validate_schema_field_map(name: str, field_map: object) -> dict[str, DRFFie
             )
             continue
         field_name, field = pair
-        # The PLAIN-string gate (the ``_hook_mapping`` precedent): only an exact ``str``
-        # key may proceed to the downstream ``normalized[...] = field`` dict-set and
-        # comparisons, which then run ``str``'s own hash and equality.
+        # The PLAIN-string gate: only an exact ``str`` key may proceed to the downstream
+        # ``normalized[...] = field`` dict-set and comparisons, which then run ``str``'s own
+        # hash and equality.
         if type(field_name) is not str:
             errors.append(
                 f"a field-map key must be a plain string; got {truth.render(field_name)}",
@@ -304,8 +304,8 @@ def _validate_serializer_nested_fields(
     ``{field_name: NestedSerializerConfig}`` map. Validated all at class creation:
 
     - it must be a mapping of plain ``str -> NestedSerializerConfig`` (a wrong container /
-      wrong value type fails loud; the plain-string gate is the resolver-tier ``_hook_mapping``
-      precedent, so the downstream key-hashing consumers run ``str``'s own hash and equality);
+      wrong value type fails loud; the plain-string gate keeps the downstream key-hashing
+      consumers on ``str``'s own hash and equality);
     - each key must name a field in the schema-time ``field_map`` that IS a nested
       ``Serializer`` / ``ListSerializer`` (a typo / non-nested field fails loud - the deeper
       per-level key validation runs in the recursive build);
@@ -335,9 +335,8 @@ def _validate_serializer_nested_fields(
                 f"unpacked as (field_name, NestedSerializerConfig) ({truth.render(entry)}).",
             )
         field_name, config = pair
-        # The PLAIN-string gate (the ``_hook_mapping`` precedent): only an exact ``str``
-        # key may proceed to ``field_map.get()`` and the ``normalized`` dict-set, which
-        # then run ``str``'s own hash and equality.
+        # The PLAIN-string gate: only an exact ``str`` key may proceed to ``field_map.get()``
+        # and the ``normalized`` dict-set, which then run ``str``'s own hash and equality.
         if type(field_name) is not str:
             raise ConfigurationError(
                 f"SerializerMutation {name}.Meta.nested_fields keys must be plain strings; "
