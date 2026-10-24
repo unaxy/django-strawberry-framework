@@ -1407,6 +1407,11 @@ def _login_with_add_item(username: str = "staff_1") -> Client:
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize(
+    "category_id",
+    ["not-a-valid-global-id", "cHJvZHVjdHMuY2F0ZWdvcnk="],
+    ids=["bad-base64", "no-separator"],
+)
+@pytest.mark.parametrize(
     ("field", "input_name"),
     [
         ("createItem", "ItemInput"),
@@ -1415,20 +1420,21 @@ def _login_with_add_item(username: str = "staff_1") -> Client:
     ],
     ids=["model", "form", "serializer"],
 )
-def test_a_malformed_relation_globalid_is_masked_with_a_correlation_id(
+def test_a_malformed_relation_id_is_the_relation_field_error_never_a_masked_error(
     field: str,
     input_name: str,
+    category_id: str,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A malformed relation ``GlobalID`` is an unexpected argument-conversion failure.
+    """A malformed relation id is the relation ``FieldError``; the error policy never sees it.
 
-    Relation inputs are typed ``GlobalID``, so a malformed value fails inside
-    Strawberry's argument conversion before any resolver runs, raising a plain
-    ``ValueError`` the structural classifier masks: the client reads the policy
-    message plus a correlation id (no code), the log carries the original under
-    the same id, and no row is written. All three write flavors share the one
-    input scalar, so they answer the same masked shape apart from ``path``
-    (and the fresh correlation id).
+    A Relay relation input is the raw ``ID`` string the package decodes, so an id that
+    is not a GlobalID at all - bad base64, or base64 text with no ``type:id``
+    separator - fails the package decode, not Strawberry's argument conversion: the
+    mutation answers its payload with the ``categoryId`` relation error, the response
+    carries no top-level error, the package logger records nothing, and no row is
+    written. All three write flavors share the one input scalar and the one decode,
+    so they answer the same envelope.
     """
     create_users(1)
     seed_data(1)
@@ -1439,25 +1445,18 @@ def test_a_malformed_relation_globalid_is_masked_with_a_correlation_id(
     _, payload = _post(
         "/graphql/",
         f"mutation($d: {input_name}!) {{ {field}(data: $d) {{ "
-        "node { __typename } errors { field } } }",
-        variables={"d": {"name": marker, "categoryId": "not-a-valid-global-id"}},
+        "node { __typename } errors { field messages } } }",
+        variables={"d": {"name": marker, "categoryId": category_id}},
         client=client,
     )
-    assert json_at(payload, "data") is None, payload
-    error = _masked_error(payload)
-    assert error["path"] == [field], error
-    assert "code" not in json_object(error, "extensions"), error
-    correlation_id = json_str(error, "extensions", "correlationId")
-
-    records = [
-        record
-        for record in caplog.records
-        if record.name == _PACKAGE_LOGGER and record.levelno == logging.ERROR
-    ]
-    assert len(records) == 1, caplog.records
-    assert correlation_id in records[0].getMessage()
-    assert records[0].exc_info is not None
-    assert isinstance(records[0].exc_info[1], ValueError)
+    assert "errors" not in payload, payload
+    assert json_at(payload, "data", field) == {
+        "node": None,
+        "errors": [
+            {"field": "categoryId", "messages": ["Invalid id for relation 'categoryId'."]},
+        ],
+    }
+    assert _package_error_records(caplog) == []
     assert not product_models.Item.objects.filter(name=marker).exists()
 
 

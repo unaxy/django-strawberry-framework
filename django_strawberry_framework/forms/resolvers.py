@@ -29,8 +29,8 @@ and the form-specific invariants this module owns:
 - **The dedicated form relation decoder visibility-checks EVERY branch**
   (Decision 7 / Decision 8 step 1). Every model-choice field the input carries is a
   relation id (the build refuses one over a column that is no relation,
-  ``forms/inputs.py::require_column_kind_agreement``). Each relation id - a ``relay.GlobalID``
-  *or* a raw pk - is type-checked (``decode_model_global_id`` for the Relay
+  ``forms/inputs.py::require_column_kind_agreement``). Each relation id - a GlobalID string
+  *or* a raw pk, by target - is type-checked (``decode_model_global_id`` for the Relay
   branch, ``coerce_relation_pk_or_none`` for the raw-pk branch), then **resolved
   to the visible object through the related primary ``DjangoType.get_queryset``**
   (``apply_type_visibility_sync(initial_queryset(...))``). The model flavor's

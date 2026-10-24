@@ -305,19 +305,6 @@ _CREATE = (
 # ---------------------------------------------------------------------------
 
 
-def _relay_global_id(type_cls: type, pk: object) -> relay.GlobalID:
-    """Build a ``relay.GlobalID`` object (the coerced shape Strawberry hands the resolver).
-
-    The unit-tier decode is called below ``Strawberry``'s argument coercion, so the
-    relation value must be a ``relay.GlobalID`` instance (a plain base64 string
-    takes the raw-pk branch). Reconstructs the exact GlobalID object from the wire
-    string ``global_id_for`` mints (``from_id`` parses the type's actual encoding
-    strategy), so the ``type_name`` / ``node_id`` slots match what live emission
-    produces.
-    """
-    return relay.GlobalID.from_id(global_id_for(type_cls, pk))
-
-
 @pytest.mark.django_db
 def test_decode_split_relation_lands_under_form_key_not_id_attr() -> None:
     """``categoryId`` decodes to ``{"category": pk}`` in ``provided_data``.
@@ -340,7 +327,7 @@ def test_decode_split_relation_lands_under_form_key_not_id_attr() -> None:
     assert input_cls is not None
     data = _keyword_constructor(input_cls)(
         name="X",
-        category_id=_relay_global_id(CategoryT, saved_pk(cat)),
+        category_id=global_id_for(CategoryT, saved_pk(cat)),
     )
     info = make_info(context=SimpleNamespace())
     provided_data, provided_files, error = form_resolvers._decode_form_data(CreateItem, data, info)

@@ -13,7 +13,8 @@ and the load-bearing invariants this module owns:
   its M2M ``.set(...)`` calls, and the payload snapshot are atomic and never
   interleave ORM work with ``await``s.
 - **Relation ``GlobalID`` decode is type-checked against the relation's Django
-  target model**: a well-formed id for the wrong model is a
+  target model**: a Relay target's relation input is the raw ``ID`` string the
+  package decodes, so a malformed id, or a well-formed id for the wrong model, is a
   ``FieldError`` on that relation field, never coerced cross-model and never a
   raw ``DoesNotExist``. The type-checked id is then **resolved through the
   related model's primary ``DjangoType`` visibility ``get_queryset``** (spec-036
@@ -630,7 +631,7 @@ def _decode_relations(
     - EXCLUDED (spec-040 D6) -> ``excluded_values``; the raw value never
       reaches ``model(**scalar_and_fk_attrs)``.
 
-    Relation ids (``relay.GlobalID`` or raw pk) are type-checked +
+    Relation ids (a GlobalID string or a raw pk, by target) are type-checked +
     visibility-checked by ``_decode_single_relation_id`` /
     ``_decode_relation_id_list``. A decode ``FieldError`` short-circuits; the
     caller discards the dest dicts so the spine's partial-fill-on-error is
@@ -761,9 +762,9 @@ def _decode_single_relation_id(
     ``decode_visible_relation_ids`` (type-check + coerce + visibility), and unwraps
     the single stored key. ``single=True`` tells the set decoder the list is that
     wrapper, not a client list, so a text error keys to the FK input
-    (``editionId``), never to an element index (``editionId.0``). A non-``GlobalID``
-    value (a raw pk) is coerced and visibility-checked by that compose, the same
-    contract the M2M path uses. The id names the related row by pk; the value
+    (``editionId``), never to an element index (``editionId.0``). A raw-pk target's
+    value is coerced and visibility-checked by that compose, the same contract the M2M
+    path uses. The id names the related row by pk; the value
     returned for the ``<field>_id`` attname is the key the column stores
     (``ForeignKey.target_field``: the pk, or the ``to_field`` value the spec's
     ``key_attname`` names), read by the same visibility query.

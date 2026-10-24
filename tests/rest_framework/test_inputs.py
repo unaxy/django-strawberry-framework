@@ -36,6 +36,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, NoReturn
 
 import pytest
+import strawberry
 from apps.library import models as library_models
 from apps.library.models import Book, Genre
 from apps.products import models as product_models
@@ -448,8 +449,8 @@ def test_fk_to_non_relay_products_target_uses_raw_pk_id() -> None:
     assert cat_spec.kind == RELATION_SINGLE
 
 
-def test_serializer_only_relation_to_relay_target_uses_globalid() -> None:
-    """A serializer-only relation to a Relay primary becomes ``<name>_id: GlobalID``."""
+def test_serializer_only_relation_to_relay_target_uses_id() -> None:
+    """A serializer-only relation to a Relay primary becomes ``<name>_id: ID``."""
     relay_target, _ = _make_relay_target()
 
     class PickSer(serializers.Serializer[object]):
@@ -459,7 +460,7 @@ def test_serializer_only_relation_to_relay_target_uses_globalid() -> None:
 
     cre, _, _, _ = _build_serializer_inputs(PickSer)
     fields = _field_map(cre)
-    assert _inner_type(fields["target_id"]) is relay.GlobalID
+    assert _inner_type(fields["target_id"]) is strawberry.ID
 
 
 # ---------------------------------------------------------------------------
@@ -765,7 +766,7 @@ def test_descriptor_name_distinguishes_relation_target_model() -> None:
             "create",
             is_full_shape=False,
             field_specs=(spec,),
-            annotations=("relay.GlobalID",),  # identical annotation for both targets
+            annotations=("strawberry.ID",),  # identical annotation for both targets
             required_state=(True,),
             descriptions=(None,),
         )

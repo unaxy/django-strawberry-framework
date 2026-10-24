@@ -942,12 +942,11 @@ def test_bind_rejects_raw_pk_relation_override_for_relay_target() -> None:
     """A raw-pk relation override for a Relay-Node target raises at bind (Decision 10).
 
     ``Category`` has a primary Relay-Node type, so the generated ``category_id`` input
-    is a ``relay.GlobalID`` that is type-checked AND visibility-checked through
-    ``Category``'s ``get_queryset`` (Decision 10) at decode. A consumer
-    ``input_class`` declaring ``category_id: int`` (a raw pk) would, at decode, be seen
-    as a non-``GlobalID`` value and passed through as a raw pk - bypassing both checks
-    and letting a permitted writer attach a ``Category`` row they could not *see*. The
-    bind rejects it fail-loud.
+    is a ``strawberry.ID`` decoded as a GlobalID, type-checked AND visibility-checked
+    through ``Category``'s ``get_queryset`` (Decision 10) at decode. A consumer
+    ``input_class`` declaring ``category_id: int`` (a raw pk) publishes an ``Int`` the
+    GlobalID decode can never read, so every request would be the invalid-relation
+    ``FieldError``. The bind rejects it fail-loud.
 
     Enforced at finalization, not class creation: whether ``Category`` has a primary
     Relay-Node type is a ``registry.get`` lookup only reliably populated at the
@@ -959,7 +958,7 @@ def test_bind_rejects_raw_pk_relation_override_for_relay_target() -> None:
     @strawberry.input
     class RawPkItemInput:
         name: str
-        category_id: int  # raw pk: would bypass the GlobalID type/visibility contract
+        category_id: int  # raw pk: the GlobalID decode can never read it
 
     class CreateItem(DjangoMutation):
         class Meta:
@@ -993,19 +992,46 @@ def test_bind_rejects_raw_pk_relation_override_on_partial_input() -> None:
         finalize_django_types()
 
 
-def test_bind_accepts_globalid_relation_override_for_relay_target() -> None:
-    """A relation override that keeps the generated ``GlobalID`` id type binds clean.
+def test_bind_rejects_strawberry_parsed_globalid_relation_override() -> None:
+    """A ``relay.GlobalID`` relation override for a Relay-Node target raises at bind.
+
+    ``relay.GlobalID`` makes Strawberry parse the id during argument conversion, before the
+    resolver runs, so a malformed id would fail there as a masked top-level error instead
+    of reaching the package decode as the ``categoryId`` relation ``FieldError`` the
+    generated ``strawberry.ID`` input answers. The bind rejects the divergent core.
+    """
+    _declare_products_primaries()
+
+    @strawberry.input
+    class ParsedGidItemInput:
+        name: str
+        category_id: relay.GlobalID
+
+    class CreateItem(DjangoMutation):
+        class Meta:
+            model = product_models.Item
+            operation = "create"
+            input_class = ParsedGidItemInput
+
+    assert CreateItem in iter_mutations()
+
+    with pytest.raises(ConfigurationError, match=r"Declare 'category_id' as strawberry\.ID"):
+        finalize_django_types()
+
+
+def test_bind_accepts_id_relation_override_for_relay_target() -> None:
+    """A relation override that keeps the generated ``strawberry.ID`` id type binds clean.
 
     The contract-compliant form: the consumer customizes the relation field's
-    representation (here a description) while keeping the ``relay.GlobalID`` id type, so
-    the id type-check and the Decision-10 visibility contract still ride the merged
+    representation (here a description) while keeping the ``strawberry.ID`` id type, so
+    the GlobalID decode and the Decision-10 visibility contract still ride the merged
     field. The merge honors the consumer's field, and the generator fills the remainder.
     """
     _declare_products_primaries()
 
     @strawberry.input
     class GidItemInput:
-        category_id: strawberry.relay.GlobalID = strawberry.field(
+        category_id: strawberry.ID = strawberry.field(
             description="custom category ref",
         )
 
@@ -1029,7 +1055,7 @@ def _declare_book_m2m_primaries() -> tuple[type[DjangoType], type[DjangoType], t
 
     The M2M analogue of ``_declare_products_primaries``: ``Book.genres`` is a forward
     M2M to ``Genre`` (a Relay-Node primary), so the generated relation input is
-    ``list[relay.GlobalID]`` - the shape an override must keep.
+    ``list[strawberry.ID]`` - the shape an override must keep.
     """
 
     class GenreT(DjangoType, relay.Node):
@@ -1053,19 +1079,19 @@ def _declare_book_m2m_primaries() -> tuple[type[DjangoType], type[DjangoType], t
     return GenreT, ShelfT, BookT
 
 
-def test_bind_rejects_m2m_relation_override_as_scalar_globalid() -> None:
-    """An M2M override declared as a SCALAR ``relay.GlobalID`` raises at bind.
+def test_bind_rejects_m2m_relation_override_as_scalar_id() -> None:
+    """An M2M override declared as a SCALAR ``strawberry.ID`` raises at bind.
 
-    ``Book.genres`` generates ``list[relay.GlobalID]``; a consumer ``genres:
-    relay.GlobalID`` keeps the GlobalID core but loses the list container, so the
-    resolver would mis-handle the scalar (the M2M decode iterates a list). The core-
-    only type-lock missed this - the shape-aware lock catches the list-depth mismatch.
+    ``Book.genres`` generates ``list[strawberry.ID]``; a consumer ``genres:
+    strawberry.ID`` keeps the ``ID`` core but loses the list container, so the M2M decode
+    would refuse the string atom on every request. A core-only type-lock would miss
+    this - the shape-aware lock catches the list-depth mismatch.
     """
     _declare_book_m2m_primaries()
 
     @strawberry.input
     class BadBookInput:
-        genres: relay.GlobalID
+        genres: strawberry.ID
 
     class CreateBook(DjangoMutation):
         class Meta:
@@ -1080,19 +1106,18 @@ def test_bind_rejects_m2m_relation_override_as_scalar_globalid() -> None:
         finalize_django_types()
 
 
-def test_bind_rejects_m2m_relation_override_as_nested_globalid_list() -> None:
-    """An M2M override declared as a NESTED ``list[list[relay.GlobalID]]`` raises at bind.
+def test_bind_rejects_m2m_relation_override_as_nested_id_list() -> None:
+    """An M2M override declared as a NESTED ``list[list[strawberry.ID]]`` raises at bind.
 
-    The nested-list shape has the GlobalID core but list depth 2 vs the generated
-    depth 1; the inner lists are not ``relay.GlobalID`` instances, so each would be
-    passed through as a raw pk into ``.set(...)`` - a top-level ORM error at runtime.
+    The nested-list shape has the ``ID`` core but list depth 2 vs the generated depth 1;
+    the inner lists are not id strings, so the GlobalID decode would fail every member.
     The shape-lock rejects the depth mismatch at the bind.
     """
     _declare_book_m2m_primaries()
 
     @strawberry.input
     class BadBookInput:
-        genres: list[list[relay.GlobalID]]
+        genres: list[list[strawberry.ID]]
 
     class CreateBook(DjangoMutation):
         class Meta:
@@ -1107,20 +1132,20 @@ def test_bind_rejects_m2m_relation_override_as_nested_globalid_list() -> None:
         finalize_django_types()
 
 
-def test_bind_rejects_fk_relation_override_as_globalid_list() -> None:
-    """A forward-FK override declared as a ``list[relay.GlobalID]`` raises at bind (bug 1/2).
+def test_bind_rejects_fk_relation_override_as_id_list() -> None:
+    """A forward-FK override declared as a ``list[strawberry.ID]`` raises at bind.
 
-    ``Item.category`` generates a SCALAR ``relay.GlobalID``; a ``category_id:
-    list[relay.GlobalID]`` has the GlobalID core but list depth 1 vs the generated 0.
-    At runtime the list would be stored as the ``category_id`` attr and Django would
-    raise against the scalar FK column under the MODEL field name (``category``), not
-    the ``categoryId`` input field. The shape-lock rejects it at the bind.
+    ``Item.category`` generates a SCALAR ``strawberry.ID``; a ``category_id:
+    list[strawberry.ID]`` has the ``ID`` core but list depth 1 vs the generated 0. The FK
+    decode wraps the value in a one-element list, the inner list fails the GlobalID
+    decode, and every request would be the invalid-relation ``FieldError``. The
+    shape-lock rejects it at the bind.
     """
     _declare_products_primaries()
 
     @strawberry.input
     class BadItemInput:
-        category_id: list[relay.GlobalID]
+        category_id: list[strawberry.ID]
 
     class CreateItem(DjangoMutation):
         class Meta:
@@ -1134,18 +1159,18 @@ def test_bind_rejects_fk_relation_override_as_globalid_list() -> None:
         finalize_django_types()
 
 
-def test_bind_accepts_m2m_relation_override_as_globalid_list() -> None:
-    """The contract-compliant M2M override - ``list[relay.GlobalID]`` - binds clean (positive control).
+def test_bind_accepts_m2m_relation_override_as_id_list() -> None:
+    """The contract-compliant M2M override - ``list[strawberry.ID]`` - binds clean (positive control).
 
     Proves the shape-lock does not over-reject: an override that keeps BOTH the
-    ``relay.GlobalID`` core AND the one-level ``list`` container (here adding a
+    ``strawberry.ID`` core AND the one-level ``list`` container (here adding a
     description) is honored, and the generator fills the remainder.
     """
     _declare_book_m2m_primaries()
 
     @strawberry.input
     class GidBookInput:
-        genres: list[relay.GlobalID] = strawberry.field(description="custom genres ref")
+        genres: list[strawberry.ID] = strawberry.field(description="custom genres ref")
 
     class CreateBook(DjangoMutation):
         class Meta:
@@ -1479,10 +1504,10 @@ def test_meta_permission_classes_non_iterable_raises() -> None:
 def test_bind_skips_relation_lock_for_non_relay_target() -> None:
     """The relation-type-lock skips a relation whose target type is NOT Relay-Node.
 
-    The relation-type-lock only guards a Relay-Node relation's ``GlobalID`` core
+    The relation-type-lock only guards a Relay-Node relation's ``strawberry.ID`` core
     and container shape against a consumer ``input_class`` override. When the FK
     target's ``DjangoType`` is a plain (non-Node) type, the generated ``<field>_id`` is
-    a raw pk with no ``GlobalID`` decode to defeat, so the lock skips it and
+    a raw pk with no GlobalID decode to feed, so the lock skips it and
     the consumer ``input_class`` merges with the raw-pk remainder. Products' relation
     targets are all Relay-Node, so this skip branch is earned with a non-Node pair here.
     """

@@ -319,8 +319,8 @@ def test_list_field_file_child_raises() -> None:
         convert_serializer_field(field)
 
 
-def test_serializer_only_many_related_field_maps_to_globalid_list() -> None:
-    """A serializer-only ``PrimaryKeyRelatedField(many=True)`` -> ``list[GlobalID]``.
+def test_serializer_only_many_related_field_maps_to_id_list() -> None:
+    """A serializer-only ``PrimaryKeyRelatedField(many=True)`` -> ``list[ID]``.
 
     This is the column-less M2M annotation.
 
@@ -338,7 +338,7 @@ def test_serializer_only_many_related_field_maps_to_globalid_list() -> None:
         RELATION_MULTI,
     )
     assert input_attr == "targets"
-    assert annotation == list[relay.GlobalID]
+    assert annotation == list[strawberry.ID]
     assert related_model is relay_target
 
 
@@ -1334,7 +1334,7 @@ def test_many_pk_related_field_over_reverse_fk_column_emits_multi() -> None:
     assert spec.graphql_name == "shelves"
     assert spec.related_model is library_models.Shelf
     assert get_origin(annotation) is list
-    assert relay.GlobalID in _type_args(annotation)
+    assert strawberry.ID in _type_args(annotation)
 
 
 def test_many_pk_related_field_over_generic_relation_column_emits_multi() -> None:
@@ -1644,8 +1644,8 @@ def test_serializer_only_relation_resolves_target_from_queryset_model() -> None:
     assert annotation is int
 
 
-def test_serializer_only_relation_to_relay_target_uses_globalid() -> None:
-    """A serializer-only relation to a Relay primary becomes ``GlobalID``."""
+def test_serializer_only_relation_to_relay_target_uses_id() -> None:
+    """A serializer-only relation to a Relay primary becomes ``ID``."""
     relay_target, _ = _make_relay_target()
 
     class PlainSer(serializers.Serializer[object]):
@@ -1655,7 +1655,7 @@ def test_serializer_only_relation_to_relay_target_uses_globalid() -> None:
 
     field = bound_fields(PlainSer())["target"]
     _python_attr, annotation, _spec = resolve_serializer_field(field, None, "X")
-    assert annotation is relay.GlobalID
+    assert annotation is strawberry.ID
 
 
 def test_relation_with_no_backing_column_and_no_queryset_raises() -> None:

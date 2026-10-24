@@ -47,7 +47,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, ClassVar, TypeGuard, cast, get_origin
 
 import strawberry
-from strawberry import relay
 from strawberry.types.base import StrawberryList, StrawberryObjectDefinition
 
 from django_strawberry_framework.exceptions import ConfigurationError
@@ -60,7 +59,7 @@ from django_strawberry_framework.utils.inputs import (
     make_shape_build_cache,
 )
 from django_strawberry_framework.utils.relations import is_model_class
-from django_strawberry_framework.utils.typing import unwrap_return_type
+from django_strawberry_framework.utils.write_values import relation_takes_global_id
 from django_strawberry_framework.write_mixins import (
     MODEL_BACKED_WRITE_META_KEYS,
     _ValidatedMutationMeta,
@@ -900,54 +899,50 @@ def _validate_relation_override_types(
     """Type- and shape-lock a relation override to the generated id (spec-036 Decision 10).
 
     A relation column whose related model HAS a primary Relay-Node type generates a
-    ``relay.GlobalID`` (forward FK / OneToOne) or ``list[relay.GlobalID]`` (M2M) input
-    whose decode is **type-checked against the relation target** AND
-    **visibility-checked through the related type's ``get_queryset``** (spec-036
-    Decision 10) - so a permitted writer cannot attach a row they could
-    not *see*. The visibility check holds for any input shape:
-    ``utils/write_values.py::decode_visible_relation_ids`` confirms every decoded
-    pk, raw or from a ``GlobalID``, through the related primary type's
-    ``get_queryset``. The type-check rides the EXACT generated shape: the same
-    decoder decodes a ``relay.GlobalID`` against the relation target (the FK path
-    unwraps a one-element list, the M2M path iterates a flat list) and coerces
-    anything else as a raw pk through the target's pk field.
+    ``strawberry.ID`` (forward FK / OneToOne) or ``list[strawberry.ID]`` (M2M) input: the
+    raw id string, decoded server-side - **type-checked against the relation target**
+    AND **visibility-checked through the related type's ``get_queryset``** (spec-036
+    Decision 10) - so a permitted writer cannot attach a row they could not *see*, and a
+    malformed, wrong-model or hidden id is the relation ``FieldError`` in the payload.
+    The decode branch is the target's
+    (``utils/write_values.py::relation_takes_global_id``), never the value's, so every
+    value an override admits still meets the GlobalID decode and the visibility check;
+    what the lock protects is the WIRE contract that decode needs:
 
-    The naming half (``_validate_input_class``) lets a consumer override a
-    relation field's *representation* under its generated ``<field>_id`` / ``list``
-    name, but it name-checks only - so a consumer could declare a divergent TYPE or
-    CONTAINER SHAPE and the merge would honor it, defeating the decode:
+    - ``category_id: int`` (non-string core) - the decode cannot read an integer as a
+      GlobalID, so every request is the field-keyed invalid-relation ``FieldError``;
+    - ``category_id: relay.GlobalID`` (Strawberry-parsed core) - Strawberry parses the
+      value during argument conversion, before the resolver runs, so a malformed id
+      fails there as a top-level error the error policy masks instead of reaching the
+      decode as the relation ``FieldError``, and the legacy-SDL setting
+      (``relay_use_legacy_global_id``) renders the input ``GlobalID`` while the root
+      ``id:`` stays ``ID``;
+    - ``genres: strawberry.ID`` (M2M overridden as a SCALAR) - the M2M decoder
+      materializes the value as a container and refuses a string atom, so every request
+      is the field-keyed invalid-relation ``FieldError``;
+    - ``genres: list[list[strawberry.ID]]`` (NESTED list) - each inner list is not an id
+      string, the decode fails, and every request is the field-keyed invalid-relation
+      ``FieldError``;
+    - ``category_id: list[strawberry.ID]`` (FK overridden as a LIST) - the FK decoder
+      wraps the value in a one-element list, the inner list fails the same decode, and
+      every request is the field-keyed invalid-relation ``FieldError``.
 
-    - ``category_id: int`` (raw pk core) - the value is coerced as a raw pk and
-      still confirmed through the related primary type's ``get_queryset``, but the
-      ``GlobalID`` decode never runs (target-model match, node-id coercion through
-      the type's id field, mapping to the real pk), so the input takes raw pks
-      where the generated schema takes ``GlobalID``s;
-    - ``genres: relay.GlobalID`` (M2M overridden as a SCALAR) - the M2M decoder
-      materializes the value as a container, a ``GlobalID`` is not iterable, so every
-      request is the field-keyed invalid-relation ``FieldError``;
-    - ``genres: list[list[relay.GlobalID]]`` (NESTED list) - each inner list is not a
-      ``relay.GlobalID``, so it is coerced as a raw pk through the target's pk field,
-      fails, and every request is the field-keyed invalid-relation ``FieldError``;
-    - ``category_id: list[relay.GlobalID]`` (FK overridden as a LIST) - the FK decoder
-      wraps the value in a one-element list, the inner list fails the same raw-pk
-      coercion, and every request is the field-keyed invalid-relation ``FieldError``.
-
-    So a relation override MUST keep BOTH the generated ``relay.GlobalID`` core AND its
+    So a relation override MUST keep BOTH the generated ``strawberry.ID`` core AND its
     container shape (scalar for FK / OneToOne, one-level ``list`` for M2M); any
     divergence in core type or list depth is a fail-loud ``ConfigurationError``,
-    caught at the bind rather than as a relation error on every request.
+    caught at the bind rather than on every request.
 
     Enforced at the phase-2.5 bind, NOT at class creation: whether the related model
     has a primary Relay-Node type is a ``registry.get`` lookup only reliably populated
     at finalization (this is exactly why ``_validate_input_class`` passes
     ``related_primary_type=None`` - the python-attr name is registry-independent, the
-    id *type* is not). The expected shape is single-sourced with the generator by
-    reading ``relation_input_annotation``'s emitted annotation (core via
-    ``_annotation_core_is_global_id``, list depth via ``get_origin(...) is list``), so
-    "GlobalID iff Relay-Node primary" and "list iff collection-valued" cannot drift from what
-    ``build_mutation_input`` produces. A raw-pk relation (a non-Relay target)
-    generates a raw pk input already, so there is no ``GlobalID`` decode to defeat
-    and an override there is left alone.
+    id *type* is not). Which relations are locked is the decode's own rule
+    (``relation_takes_global_id`` over the same ``registry.get``), and the expected list
+    depth reads ``relation_input_annotation``'s emitted annotation (``get_origin(...) is
+    list``), so "ID iff Relay-Node primary" and "list iff collection-valued" cannot drift
+    from what ``build_mutation_input`` produces or the decode reads. A raw-pk relation (a
+    non-Relay target) generates a raw pk input already, and an override there is left
+    alone.
     """
     # A validated ``@strawberry.input`` class: its definition slot holds an input definition.
     consumer_definition = require_instance(
@@ -958,59 +953,47 @@ def _validate_relation_override_types(
     for field in shape.selected:
         if not getattr(field, "is_relation", False):
             continue
+        # A relation field's ``related_model`` is its resolved target model class.
+        related_primary_type = registry.get(require(field.related_model, is_model_class))
+        if not relation_takes_global_id(related_primary_type):
+            continue  # raw-pk relation (non-Relay target): no GlobalID decode to feed.
         python_attr, _graphql_name, annotation = relation_input_annotation(
             field,
-            # A relation field's ``related_model`` is its resolved target model class.
-            related_primary_type=registry.get(require(field.related_model, is_model_class)),
+            related_primary_type=related_primary_type,
         )
-        if not _annotation_core_is_global_id(annotation):
-            continue  # raw-pk relation (non-Relay target): no GlobalID decode to bypass.
         consumer_field = consumer_fields.get(python_attr)
         if consumer_field is None:
-            continue  # not overridden; the generated GlobalID remainder is used.
+            continue  # not overridden; the generated ID remainder is used.
         expected_depth = 1 if get_origin(annotation) is list else 0
         consumer_depth, consumer_core = _strawberry_field_shape(consumer_field)
-        if consumer_core is not relay.GlobalID or consumer_depth != expected_depth:
-            expected = "list[relay.GlobalID]" if expected_depth else "relay.GlobalID"
+        if consumer_core is not strawberry.ID or consumer_depth != expected_depth:
+            expected = "list[strawberry.ID]" if expected_depth else "strawberry.ID"
             kind = "M2M" if expected_depth else "forward FK/OneToOne"
             raise ConfigurationError(
                 f"DjangoMutation {mutation_name}.Meta.{attr_name} overrides relation field "
                 f"{python_attr!r} with an id type/shape that diverges from the generated input. "
                 f"{truth.name(field.related_model)} has a primary Relay-Node type, so the {kind} "
-                f"relation input is {expected} - type- and visibility-checked at decode (spec-036 "
-                "Decision 10). A divergent core type would skip the GlobalID decode (the "
-                "input would take raw pks where the schema takes GlobalIDs; visibility is "
-                "still confirmed through the related primary type's get_queryset), and a "
-                "divergent container shape would reject every id as an invalid relation. "
+                f"relation input is {expected} - the raw id string, decoded, type- and "
+                "visibility-checked by the package (spec-036 Decision 10). Another core type "
+                "either cannot carry the id string (every id is an invalid relation) or, as "
+                "relay.GlobalID, is parsed by Strawberry before the decode (a malformed id is "
+                "a top-level error, not the relation FieldError); a divergent container "
+                "shape rejects every id as an invalid relation. "
                 f"Declare {python_attr!r} as {expected}.",
             )
-
-
-def _annotation_core_is_global_id(annotation: object) -> bool:
-    """Return whether a generated relation annotation's core id type is ``relay.GlobalID``.
-
-    ``relation_input_annotation`` emits ``relay.GlobalID`` (forward FK / OneToOne) or
-    ``list[relay.GlobalID]`` (M2M) for a Relay-Node-primary target, and the related
-    model's raw pk scalar (or ``list[<scalar>]``) otherwise. This peels the M2M ``list``
-    wrapper via ``utils/typing.py::unwrap_return_type`` (the shared one-layer list /
-    Strawberry-list peeler) and compares the core against ``relay.GlobalID`` so both id
-    shapes are recognized from the one generator-emitted annotation (no separate
-    Relay-vs-pk re-derivation).
-    """
-    return unwrap_return_type(annotation) is relay.GlobalID
 
 
 def _strawberry_field_shape(field: StrawberryField) -> tuple[int, object]:
     """Return a consumer field's ``(list_depth, core_type)``, peeling Strawberry wrappers.
 
     A consumer relation override resolves to nested ``StrawberryOptional`` /
-    ``StrawberryList`` wrappers around a core type: ``relay.GlobalID | None`` is a
-    ``StrawberryOptional(GlobalID)`` (depth 0), ``list[relay.GlobalID]`` is a
-    ``StrawberryList(GlobalID)`` (depth 1), ``list[list[relay.GlobalID]]`` is depth 2.
+    ``StrawberryList`` wrappers around a core type: ``strawberry.ID | None`` is a
+    ``StrawberryOptional(ID)`` (depth 0), ``list[strawberry.ID]`` is a
+    ``StrawberryList(ID)`` (depth 1), ``list[list[strawberry.ID]]`` is depth 2.
     Optional wrappers are nullability (ignored for the shape); each ``StrawberryList``
     counts one level of list depth. Returning ``(depth, core)`` lets the shape-lock
-    compare BOTH the core identity (``is relay.GlobalID``) and the list depth against
-    the generated relation annotation, so a wrong core (``int`` / ``strawberry.ID``), a
+    compare BOTH the core identity (``is strawberry.ID``) and the list depth against
+    the generated relation annotation, so a wrong core (``int`` / ``relay.GlobalID``), a
     scalar-for-M2M, a list-for-FK, or a nested list are all caught.
     """
     type_ = field.type

@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 241 done, 177 to do.
+Progress: 242 done, 176 to do.
 
 ## Done
 
@@ -1096,6 +1096,13 @@ Progress: 241 done, 177 to do.
   surfaces. The suspend-before-recorded, continue-before-recorded, shared-fd reader-gone and errno rows pin it, a
   `gate(layout, ["floor"])` row pins the floor install's lock holding, and the two `SIGCONT` routes were already
   told apart by their own rows (not a defect)
+- [x] 135. fixed: a malformed GlobalID in a relation input, single (`categoryId: "not-base64!!"`) or an `[ID!]`
+  element (`genres: ["not-base64!!"]`), is the field-keyed relation `FieldError` (`Invalid id for relation ...`) in
+  the payload in the model, ModelForm and serializer flavors, never a masked top-level error: a relation into a Relay
+  target is typed `strawberry.ID` and decoded server-side, the decode branching on the target
+  (`utils/write_values.py::relation_takes_global_id`), and a consumer override of such a relation must be
+  `strawberry.ID` (a `relay.GlobalID` override is refused at finalize). The error-policy, products and library
+  live rows pin it; spec-036, 038, 039, 053 and the `input-type-generation` glossary term say so
 
 ## Outside review of the fixes
 
@@ -1822,14 +1829,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
     Also: it adds a second deadline read per parent (about 270 ns on many-side relations, unmeasured); writes check the
     deadline before `coerce_lookup_id`, and this item never names writes; nested resolvers call
     `getattr(root, accessor).all()` before admission, so consumer manager code runs ahead of P1 / P2.
-- [ ] 135. A malformed GlobalID in a relation input, single (`categoryId: "not-base64!!"`) or an `[ID!]` element
-  (`genres: ["not-base64!!"]`), is a masked top-level error with `data: null` in the model, ModelForm and serializer
-  flavors: Strawberry raises `GlobalIDValueError` at the mutation resolver before any package decode, so the field-keyed
-  envelope (which a well-formed but missing, wrong-type or hidden id gets) never applies;
-  `test_products_api.py::test_create_item_malformed_category_id_is_top_level_coercion_error` pins the outcome but its
-  docstring says variable coercion. Return the field-keyed `FieldError` (spec-036 says a malformed relation id surfaces a
-  `FieldError` on the field), or keep the top-level error and correct spec-036 and that docstring? Item 191 (a
-  committed sibling mutation beside `data: null`) follows the answer
 - [ ] 236. One guarded-`isinstance` idiom and one set of hostile test values: `types/base.py` keeps private TypeIs-typed
   `_guarded_isinstance` / `_guarded_issubclass` / `_guarded_narrow`, while `utils/inputs.py`, `filters/sets.py`,
   `sets_mixins.py` and `routers.py` call `exceptions.py::_safe_predicate(isinstance, ...)` and `cast` after it; move the

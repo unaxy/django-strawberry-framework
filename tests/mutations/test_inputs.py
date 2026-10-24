@@ -523,8 +523,8 @@ def test_relation_id_scalar_types_a_relation_valued_pk_from_the_column_storing_i
 def test_relation_id_annotation_wraps_multi_as_list_of_the_same_scalar() -> None:
     """Cardinality wrap is the only extra axis on top of ``relation_id_scalar``."""
     relay_model, relay_type = _make_relay_target()
-    assert relation_id_annotation(relay_model, relay_type, many=False) is relay.GlobalID
-    assert relation_id_annotation(relay_model, relay_type, many=True) == list[relay.GlobalID]
+    assert relation_id_annotation(relay_model, relay_type, many=False) is strawberry.ID
+    assert relation_id_annotation(relay_model, relay_type, many=True) == list[strawberry.ID]
     plain_model, _plain_type = _make_non_relay_target()
     assert relation_id_annotation(plain_model, None, many=False) is int
     assert relation_id_annotation(plain_model, None, many=True) == list[int]
@@ -568,7 +568,7 @@ def test_annotate_queryset_relation_packages_id_type_and_related_model() -> None
         missing=lambda: ConfigurationError("untyped"),
     )
     assert python_attr == "target_id"
-    assert annotation is relay.GlobalID
+    assert annotation is strawberry.ID
     assert related_model is relay_model
 
     python_attr, annotation, related_model = annotate_queryset_relation(
@@ -579,7 +579,7 @@ def test_annotate_queryset_relation_packages_id_type_and_related_model() -> None
         missing=lambda: ConfigurationError("untyped"),
     )
     assert python_attr == "targets"
-    assert annotation == list[relay.GlobalID]
+    assert annotation == list[strawberry.ID]
     assert related_model is relay_model
 
 
@@ -774,8 +774,8 @@ def _make_non_relay_target() -> tuple[type[library_models.Branch], type[DjangoTy
     return library_models.Branch, BranchPlainType
 
 
-def test_o2o_to_relay_target_uses_globalid_id() -> None:
-    """A forward OneToOne to a Relay-Node primary also becomes ``<field>_id: GlobalID``.
+def test_o2o_to_relay_target_uses_id_input() -> None:
+    """A forward OneToOne to a Relay-Node primary also becomes ``<field>_id: ID``.
 
     ``MembershipCard.patron`` carries the shape; no fakeshop mutation writes a
     membership card, so no generated input publishes it over HTTP.
@@ -799,7 +799,7 @@ def test_o2o_to_relay_target_uses_globalid_id() -> None:
         primary_type=MembershipCardNode,
     )
     fields = _field_map(cls)
-    assert _inner_type(fields["patron_id"]) is relay.GlobalID
+    assert _inner_type(fields["patron_id"]) is strawberry.ID
 
 
 # ---------------------------------------------------------------------------

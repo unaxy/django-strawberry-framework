@@ -543,7 +543,7 @@ def test_decode_relation_single_wrong_model_global_id_is_field_error() -> None:
     # A GlobalID whose type slot names a DIFFERENT model (`library.shelf`) than the
     # Genre-typed relation: `decode_model_global_id` rejects the model mismatch ->
     # field error, never a cross-model pk lookup.
-    wrong_gid = relay.GlobalID(type_name="library.shelf", node_id=str(saved_pk(genre)))
+    wrong_gid = str(relay.GlobalID(type_name="library.shelf", node_id=str(saved_pk(genre))))
     pk, error = serializer_resolvers._decode_relation_single(
         wrong_gid,
         graphql_name="genreId",
@@ -1589,7 +1589,7 @@ def test_relation_decode_consumes_recorded_strategy_after_strategy_resolver_fail
 
     finalize_django_types()
     category = product_models.Category.objects.create(name="StrategyCat")
-    gid = relay.GlobalID.from_id(global_id_for(CategoryT, saved_pk(category)))
+    gid = global_id_for(CategoryT, saved_pk(category))
 
     def _boom(*_args: object, **_kwargs: object) -> NoReturn:
         raise AssertionError("_resolve_globalid_strategy must not run on the query path")
@@ -1713,12 +1713,14 @@ async def test_async_entry_rejects_data_rewriting_hook_too() -> None:
     del CategoryT, ItemT
 
     category = await sync_to_async(product_models.Category.objects.create)(name="AsyncRewriteCat")
-    gid = relay.GlobalID(type_name="products.category", node_id=str(saved_pk(category)))
+    gid = strawberry.ID(
+        str(relay.GlobalID(type_name="products.category", node_id=str(saved_pk(category)))),
+    )
 
     @strawberry.input
     class _Data:
         name: str
-        category_id: relay.GlobalID = strawberry.field(name="categoryId")
+        category_id: strawberry.ID = strawberry.field(name="categoryId")
 
     request = HttpRequest()
     request.user = User(username="async-u")

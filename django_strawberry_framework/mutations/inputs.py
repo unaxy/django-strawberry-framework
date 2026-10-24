@@ -43,7 +43,6 @@ from typing import TYPE_CHECKING, NamedTuple, cast
 import strawberry
 from django.core.exceptions import FieldDoesNotExist
 from django.db import models
-from strawberry import relay
 from strawberry.utils.str_converters import to_camel_case
 
 from django_strawberry_framework.exceptions import ConfigurationError
@@ -87,6 +86,7 @@ from django_strawberry_framework.utils.relations import (
     stored_value_column,
 )
 from django_strawberry_framework.utils.strings import graphql_camel_name
+from django_strawberry_framework.utils.write_values import relation_takes_global_id
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterable
@@ -473,19 +473,25 @@ def relation_id_scalar(
 ) -> object:
     """Return the GraphQL id scalar for a write-input relation to ``related_model``.
 
-    ``relay.GlobalID`` when the related model's primary ``DjangoType`` is
-    Relay-Node-shaped; otherwise the scalar of the column storing the related
-    model's primary key via ``scalar_for_field`` (a one-to-one primary key or a
-    parent-link chain is followed to the column it references,
-    ``utils/relations.py::stored_value_column``). This is the one id-type rule the
-    three write flavors share: model-backed ``relation_input_annotation`` and
-    column-less ``annotate_queryset_relation`` (form + serializer).
-    Primary-required vs raw-pk fallback stays at those call sites (the serializer
-    flavor requires a registered primary and raises before calling this, spec-039;
-    form / model pass ``registry.get``, which may be ``None``).
+    ``strawberry.ID`` when the related model's primary ``DjangoType`` is
+    Relay-Node-shaped (``utils/write_values.py::relation_takes_global_id``); otherwise
+    the scalar of the column storing the related model's primary key via
+    ``scalar_for_field`` (a one-to-one primary key or a parent-link chain is followed to
+    the column it references, ``utils/relations.py::stored_value_column``). This is the
+    one id-type rule the three write flavors share: model-backed
+    ``relation_input_annotation`` and column-less ``annotate_queryset_relation`` (form +
+    serializer). Primary-required vs raw-pk fallback stays at those call sites (the
+    serializer flavor requires a registered primary and raises before calling this,
+    spec-039; form / model pass ``registry.get``, which may be ``None``).
+
+    A Relay relation id is the raw ``ID`` string, never ``relay.GlobalID``, for the
+    reason the root ``id:`` argument is (``mutations/fields.py`` module docstring): the
+    package decodes it server-side (``utils/write_values.py::type_check_relation_id``),
+    so a malformed id is the relation ``FieldError`` in the payload rather than an
+    argument-conversion failure Strawberry raises before the resolver runs.
     """
-    if related_primary_type is not None and implements_relay_node(related_primary_type):
-        return relay.GlobalID
+    if relation_takes_global_id(related_primary_type):
+        return strawberry.ID
     return scalar_for_field(stored_value_column(related_model._meta.pk))
 
 
@@ -593,7 +599,7 @@ def relation_input_annotation(
     ``list[<id>]`` (spec-036 Decision 6). List-vs-single is
     ``model_column_write_kind``'s collection rule, the same answer the python attr
     reads. The id type rides
-    ``relation_id_annotation`` (Relay ``GlobalID`` vs raw pk scalar).
+    ``relation_id_annotation`` (Relay ``ID`` vs raw pk scalar).
 
     The python attr is ``<field.name>_id`` for FK / OneToOne so the
     resolver maps it back to the column with no per-field declaration (and a

@@ -1,8 +1,8 @@
 """Direct pins of write-value decode internals a GraphQL request cannot name.
 
 Omitted-vs-null-vs-provided identity, hostile containers, generator materialization,
-and GraphQL-unrepresentable member shapes (string-in-a-list, mixed GlobalID+pk) stay
-here because the wire never delivers them. Consumer envelopes for hidden vs missing
+and GraphQL-unrepresentable member shapes (string-in-a-list, a raw pk member on a Relay
+target) stay here because the wire never delivers them. Consumer envelopes for hidden vs missing
 relation ids, batched ``pk__in`` cost, duplicate members, and empty M2M clears live in
 ``examples/fakeshop/test_query/test_products_api.py`` and
 ``examples/fakeshop/test_query/test_library_api.py``.
@@ -887,11 +887,13 @@ def test_decode_provided_fields_short_circuits_on_handler_error() -> None:
 def test_decode_visible_relation_ids_accepts_global_id_members_with_one_query() -> None:
     """GlobalID members decode end-to-end at the batch seam and still batch to ONE query.
 
-    A valid ``GlobalID`` beside a raw pk decodes both to real pks and confirms
+    Two valid GlobalID strings for a Relay target decode to real pks and confirm
     visibility in the single ``pk__in`` query (the GlobalID decode itself is
     non-raising and query-free for a pk ``id_attr``; it reads the executing schema
-    off ``info``); a wrong-model GlobalID and a malformed pk token are the uniform
-    field-keyed error.
+    off ``info``); a wrong-model GlobalID, a malformed pk token, and a raw pk member
+    (the target, not the value, picks the GlobalID decode) are the uniform field-keyed
+    error. The malformed-string member reaches this seam live
+    (``test_query/test_library_api.py``), so it is not repeated here.
     """
 
     class GidBatchPinType(DjangoType):
@@ -908,7 +910,7 @@ def test_decode_visible_relation_ids_accepts_global_id_members_with_one_query() 
 
     with CaptureQueriesContext(connection) as ctx:
         pks, error = decode_visible_relation_ids(
-            [relay.GlobalID("products.category", str(saved_pk(row))), saved_pk(row)],
+            [str(relay.GlobalID("products.category", str(saved_pk(row))))] * 2,
             graphql_name="categoryIds",
             related_model=Category,
             info=make_info(),
@@ -918,12 +920,13 @@ def test_decode_visible_relation_ids_accepts_global_id_members_with_one_query() 
     assert pks == [saved_pk(row), saved_pk(row)]
     assert len(ctx.captured_queries) == 1
 
-    for bad_gid in (
-        relay.GlobalID("unknown.model", str(saved_pk(row))),
-        relay.GlobalID("products.category", "not-a-pk"),
+    for bad_member in (
+        str(relay.GlobalID("unknown.model", str(saved_pk(row)))),
+        str(relay.GlobalID("products.category", "not-a-pk")),
+        saved_pk(row),
     ):
         pks, error = decode_visible_relation_ids(
-            [bad_gid],
+            [bad_member],
             graphql_name="categoryIds",
             related_model=Category,
             info=make_info(),
@@ -960,7 +963,7 @@ def test_custom_node_id_relation_set_batches_real_pk_lookup() -> None:
     recourse = "Use a synchronous visibility hook."
     rows = [Category.objects.create(name=f"BatchNode{i}") for i in range(4)]
     for size in (1, 2, 4):
-        members = [relay.GlobalID("products.category", rows[i].name) for i in range(size)]
+        members = [str(relay.GlobalID("products.category", rows[i].name)) for i in range(size)]
         with CaptureQueriesContext(connection) as ctx:
             pks, error = decode_visible_relation_ids(
                 members,
@@ -975,7 +978,7 @@ def test_custom_node_id_relation_set_batches_real_pk_lookup() -> None:
 
     with CaptureQueriesContext(connection) as ctx:
         pks, error = decode_visible_relation_ids(
-            [relay.GlobalID("products.category", "no-such-batch-name")],
+            [str(relay.GlobalID("products.category", "no-such-batch-name"))],
             graphql_name="categoryIds",
             related_model=Category,
             info=make_info(),
@@ -993,7 +996,9 @@ def test_custom_node_id_relation_set_refuses_unencodable_text_before_the_mapping
 
     A non-pk ``NodeID[str]`` decodes to the text value the batched ``__in`` mapping query
     would bind, so it meets the same text preflight a raw text pk meets: the answer is the
-    preflight's ``invalid`` error keyed to the member's index, before any query.
+    preflight's ``invalid`` error keyed to the member's index, before any query. The
+    members are ``relay.GlobalID`` objects, which the decode accepts beside the wire
+    string: no base64 wire string decodes to a lone surrogate.
     """
 
     class SurrogateBatchNodeType(DjangoType):
@@ -1055,7 +1060,7 @@ def test_custom_node_id_relation_set_mapping_uses_pipeline_alias(
     monkeypatch.setattr(manager, "using", using)
     with write_pipeline("default", lock=False):
         pks, error = decode_visible_relation_ids(
-            [relay.GlobalID("products.category", row.name)],
+            [str(relay.GlobalID("products.category", row.name))],
             graphql_name="categoryIds",
             related_model=Category,
             info=make_info(),
