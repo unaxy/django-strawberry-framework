@@ -204,7 +204,7 @@ what such a term makes the database do is not something this package reads.
 The contract is strictly **ordered offset**, not stable or repeatable pagination. Flat lists
 inject no primary-key tiebreaker and no `DISTINCT`; consumers wanting deterministic
 pagination across pages with duplicate values must append a unique final term to the ordering
-themselves. Under async execution the field's queryset, and any lazy queryset a plain
+themselves. Under async execution the field's queryset, and any lazy `QuerySet` a plain
 resolver hands a list field, completes off the event loop through the package's internal
 [async queryset completion adapter][glossary-async-queryset-completion-adapter] without
 requiring `DJANGO_ALLOW_ASYNC_UNSAFE`. See

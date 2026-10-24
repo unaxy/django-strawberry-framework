@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 250 done, 175 to do.
+Progress: 251 done, 174 to do.
 
 ## Done
 
@@ -1151,6 +1151,14 @@ Progress: 250 done, 175 to do.
   every default run; the owner / symlink refusal is unchanged and still guards a squatted per-user name, and an
   explicit `--scratch-root` behaves as before. A two-uid row pins it (it fails through the real refusal with the
   shared name); the module docstring, the `--scratch-root` help and `docs/builder/BUILD.md` say per user
+- [x] 585. Not a defect under rule 37: no contract row covers a `RawQuerySet`. The async completion arm, the
+  `async-queryset-completion-adapter` glossary term and spec-050 Decision 12 adapt a Django `QuerySet` only and leave
+  every other value on graphql-core 3.2's synchronous completion, and the `get_queryset` seal already refuses a
+  `RawQuerySet`; the README async sentence now says "lazy `QuerySet`". Fact finding: a plain or `async def` root, or a
+  nested resolver, returning `.raw(...)` raises `SynchronousOnlyOperation` on the async executor with the optimizer on
+  or off and answers on the sync one; a `DjangoListField` / `DjangoConnectionField` `resolver=` returning one raises
+  there in the package's own row iteration. Widening the arm to `RawQuerySet` is two lines, and graphql-core 3.3
+  completes it async-first
 
 ## Outside review of the fixes
 
@@ -1385,10 +1393,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 583. (robustness) `rest_framework/resolvers.py::_hook_mapping`'s non-string-key refusal renders a lazy
   translation key (`gettext_lazy("a")`) as `'a'` in its offender list, which reads as a string; naming each offender's
   kind (`truth.kind`) would say why it was refused. Same output before 408. Found verifying 408
-- [ ] 585. (robustness) A plain root returning `Model.objects.raw(...)` to a list field still raises
-  `SynchronousOnlyOperation` on the async executor: the completion arm adapts only `QuerySet`, though
-  `RawQuerySet.__aiter__` is the same `sync_to_async(_fetch_all)` generator and graphql-core 3.3 completes it; no
-  contract row names `RawQuerySet`. Found verifying 429
 - [ ] 501. (robustness) `scripts/workspace.py::workspace_base` uses a fixed `$TMPDIR/dsf-ws` with no owner, symlink or
   mode check, the shared-name shape 330 removed from `prove_failability.py`: on a shared Linux `/tmp` (no `TMPDIR`) a
   second user's flows land in, or are refused by, the first user's directory, and a planted symlink is followed. Name
