@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 255 done, 171 to do.
+Progress: 256 done, 170 to do.
 
 ## Done
 
@@ -1182,6 +1182,13 @@ Progress: 255 done, 171 to do.
   is unchanged; a plain list relation prefetches the probe parent's children too. Upstream strawberry-django
   prefetches the probe row the same way. Prefetching only the page rows touches every root connection path (offset,
   keyset, async, `hasNextPage`); that is a new card, not a fix
+- [x] 407. test gap closed, not a defect (behaviour matches the README transport-support paragraph and the "younger
+  than" window in `consumers.py` / spec-046): `tests/auth/test_sessions.py` pins that a custom client-side engine
+  outside the signed-cookie hierarchy reads as server-side (WebSocket logout supported), and `tests/test_routers.py`
+  pins `_actor_is_current`'s strict window edge (ages 7.5 / 8.0 / 8.5 on an 8.0 window: 0 / 1 / 1 session reads, the
+  stamp rewritten only on a read) and that a 0.0 window never writes the revalidation stamp; each row kills a mutant
+  the suite let through (a non-DB-store test, `<=`, an unconditional write-back). Package tier: fakeshop has no
+  WebSocket mount
 
 ## Outside review of the fixes
 
@@ -1392,9 +1399,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   stand-in left behind when the row was promoted to
   `examples/fakeshop/test_query/test_connection_pagination_api.py::test_negative_offset_cursor_on_a_sequence_resolver_is_a_cursor_error`:
   prove it redundant and delete it, or keep it
-- [ ] 407. `utils/sessions.py` test gaps: no row for a custom client-side session store that does not subclass the
-  signed-cookie store (treated as server-side, as `docs/README.md` documents), and no row for the exact window edge of
-  `consumers.py::_actor_is_current` (strict `<`)
 - [ ] 500. Process provenance in test docstrings and comments outside `tests/utils/test_querysets.py`, the class 324
   restates there: e.g. `tests/utils/test_permissions.py` ("It used to reach it"), `tests/test_permissions.py` ("no
   longer compare ... (the old ...", "no longer trips"), `tests/utils/test_policies.py` ("no longer", "The pre-fix

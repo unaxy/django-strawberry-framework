@@ -25,6 +25,7 @@ from types import MappingProxyType, SimpleNamespace
 from unittest import mock
 
 import pytest
+from django.contrib.sessions.backends.base import SessionBase
 from django.contrib.sessions.backends.signed_cookies import (
     SessionStore as SignedCookieSessionStore,
 )
@@ -344,6 +345,34 @@ def test_signed_cookie_detection_follows_a_subclassed_engine() -> None:
         with override_settings(SESSION_ENGINE=module_name):
             assert uses_signed_cookie_sessions() is True
             assert logout_supported(Transport.CHANNELS_WEBSOCKET) is False
+    finally:
+        del sys.modules[module_name]
+
+
+def test_a_custom_client_side_engine_outside_the_signed_cookie_hierarchy_reads_as_server_side() -> (
+    None
+):
+    """Only the signed-cookie store's subclasses count as signed-cookie sessions.
+
+    The detection is a subclass test against Django's signed-cookie store, never a
+    "not a database store" test, so a custom client-side engine whose store derives
+    from ``SessionBase`` directly is treated as server-side and its WebSocket logout
+    reads as supported - the behaviour the README's transport-support section
+    documents and warns against relying on. The stub engine module is registered in
+    ``sys.modules`` for ``import_string`` to resolve, then removed so no global
+    state leaks.
+    """
+    module_name = "tests.auth._stub_client_side_engine"
+
+    class SessionStore(SessionBase):
+        pass
+
+    module = stub_module(module_name, SessionStore=SessionStore)
+    sys.modules[module_name] = module
+    try:
+        with override_settings(SESSION_ENGINE=module_name):
+            assert uses_signed_cookie_sessions() is False
+            assert logout_supported(Transport.CHANNELS_WEBSOCKET) is True
     finally:
         del sys.modules[module_name]
 
