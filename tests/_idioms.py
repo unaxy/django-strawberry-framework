@@ -91,6 +91,19 @@ call into ``calls``, so a row asserts both the honest outcome and that nothing r
 through its own dunders. Build the declaration first, then clear ``calls``: building a ``set``
 or ``dict`` hashes its members.
 
+``canonical_order`` sorts names by ``canonical_sort_key``, the order the package expands an
+unordered declaration in. ``scrambled`` builds a ``set`` or ``frozenset`` over ``members``
+(plus every ``drop`` name, which the order judgement ignores) that iterates out of that order
+in this process, so a row asserting the canonical expansion fails under every
+``PYTHONHASHSEED`` when the package follows the hash order instead. A set iterates in
+hash-table slot order, and the slot moves with the seed and the table size, so the search
+tries every subset of at least two members, largest first, in several layouts: the
+constructor, a ``dict.fromkeys`` copy, and for a ``set`` the same names left alone in a table
+grown through padding names that are then discarded (a ``discard`` never shrinks the table).
+A ``frozenset`` is re-sized by its member count, so its extra layouts are copies of those
+grown sets, whose insertion order can resolve a slot collision differently. A pool no layout
+scrambles fails the test naming the kind and the members, never a row that passes vacuously.
+
 ``is_object_dict`` / ``is_object_list`` narrow an ``object`` (a JSON payload, a GraphQL
 result, a hook's input) the way ``isinstance`` does at run time, but to ``dict[object,
 object]`` / ``list[object]``: a bare ``isinstance`` on an ``object`` narrows to the class
@@ -132,10 +145,11 @@ no fetch modes, it is empty, so a row that reads it carries ``requires_fetch_mod
 
 import enum
 import inspect
+import itertools
 import json
 import pickle
 import sys
-from collections.abc import Callable, Generator, Iterable, Mapping
+from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from types import FunctionType, ModuleType
 from typing import (
@@ -144,6 +158,7 @@ from typing import (
     Literal,
     NoReturn,
     Protocol,
+    TypeAlias,
     TypeGuard,
     TypeVar,
     cast,
@@ -166,6 +181,7 @@ from django_strawberry_framework.utils._narrowing import (
     pk_of,
     read_attr,
 )
+from django_strawberry_framework.utils.canonical import canonical_sort_key
 from django_strawberry_framework.utils.querysets import model_for
 from django_strawberry_framework.utils.typing import object_result
 
@@ -204,6 +220,16 @@ _MetaT = TypeVar("_MetaT", bound=type)
 _T = TypeVar("_T")
 _ModelT = TypeVar("_ModelT", bound=Model)
 _DRFFieldT = TypeVar("_DRFFieldT", bound="DRFField")
+_UnorderedKind: TypeAlias = "type[set[str] | frozenset[str]]"
+# Padding counts ``scrambled`` grows a layout through before discarding it: each re-tables the names anew.
+_GROWN_SIZES = (
+    0,
+    8,
+    32,
+    128,
+    512,
+    2048,
+)
 
 
 class ModelSerializerBase(serializers.ModelSerializer[_ModelT]):
@@ -309,6 +335,49 @@ def str_subclass_name(kind: str, text: str, calls: list[str]) -> str:
     assert isinstance(member, str)
     assert type(member) is not str
     return member
+
+
+def canonical_order(names: Iterable[str]) -> list[str]:
+    """``names`` in ``canonical_sort_key`` order."""
+    return sorted(names, key=canonical_sort_key)
+
+
+def _grown(names: Iterable[str], size: int) -> set[str]:
+    """A ``set`` of ``names`` alone in a table grown by ``size`` discarded padding names."""
+    padding = [f"padding_{index}" for index in range(size)]
+    grown = set(names)
+    grown.update(padding)
+    for name in padding:
+        grown.discard(name)
+    return grown
+
+
+def _layouts(kind: _UnorderedKind, names: tuple[str, ...]) -> Iterator[set[str] | frozenset[str]]:
+    """``kind`` over ``names`` in each hash-table layout ``scrambled`` searches."""
+    yield kind(names)
+    yield kind(dict.fromkeys(names))
+    for size in _GROWN_SIZES:
+        grown = _grown(names, size)
+        yield grown if kind is set else frozenset(grown)
+
+
+def scrambled(
+    kind: _UnorderedKind,
+    members: Sequence[str],
+    *,
+    drop: tuple[str, ...] = (),
+) -> set[str] | frozenset[str]:
+    """A ``kind`` over ``members`` (plus every ``drop`` name) iterating out of canonical order."""
+    for size in range(len(members), 1, -1):
+        for combo in itertools.combinations(members, size):
+            for declared in _layouts(kind, combo + drop):
+                kept = [name for name in declared if name not in drop]
+                if kept != canonical_order(kept):
+                    assert isinstance(declared, kind), declared
+                    assert set(declared) == {*combo, *drop}, declared
+                    assert [name for name in declared if name not in drop] != canonical_order(kept)
+                    return declared
+    pytest.fail(f"no {kind.__name__} over {tuple(members)!r} iterates out of canonical order")
 
 
 def resolver_function(field: "StrawberryField") -> FunctionType:

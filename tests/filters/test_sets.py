@@ -23,7 +23,6 @@ import dataclasses
 import datetime
 import enum
 import inspect
-import itertools
 import threading
 import uuid
 from collections import OrderedDict
@@ -163,7 +162,6 @@ from django_strawberry_framework.utils._narrowing import (
     read_attr,
     require,
 )
-from django_strawberry_framework.utils.canonical import canonical_sort_key
 from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.relations import ClassifiedPath, classify_path
 from django_strawberry_framework.utils.typing import object_result
@@ -171,12 +169,14 @@ from tests._idioms import (
     STR_ENUM,
     STR_SUBCLASS_KINDS,
     ClassReadRaises,
+    canonical_order,
     comparing_metaclass,
     definition_raises,
     is_object_dict,
     is_object_list,
     pickle_roundtrip,
     saved_pk,
+    scrambled,
     str_subclass_name,
 )
 from tests._subprocess import run_in_fresh_process
@@ -3178,6 +3178,7 @@ _CATEGORY_COLUMNS = (
     "is_private",
     "created_date",
     "updated_date",
+    "id",
 )
 _NAME_LOOKUPS = (
     "exact",
@@ -3193,62 +3194,6 @@ _LOOKUP_INPUT_FIELDS = {
     "iendswith": "i_ends_with",
 }
 _LOGIC_INPUT_FIELDS = frozenset({"and_", "or_", "not_"})
-
-
-def _canonical(names: Iterable[str]) -> list[str]:
-    return sorted(names, key=canonical_sort_key)
-
-
-def _layouts(
-    kind: Callable[[Iterable[str]], Collection[str]],
-    names: tuple[str, ...],
-) -> Iterator[Collection[str]]:
-    """``kind`` over ``names``, then (for a ``set``) the same names in ever larger hash tables.
-
-    A set iterates in hash-table slot order, and the slot is the hash modulo the
-    table size, so each table size orders the same names independently. A
-    ``discard`` never shrinks the table, so growing a copy through padding names
-    and discarding them leaves the names alone in the larger table.
-    """
-    yield kind(names)
-    if kind is not set:
-        return
-    for size in (
-        8,
-        32,
-        128,
-        512,
-        2048,
-    ):
-        padding = [f"padding_{index}" for index in range(size)]
-        grown = set(names)
-        grown.update(padding)
-        for name in padding:
-            grown.discard(name)
-        yield grown
-
-
-def _scrambled(
-    kind: Callable[[Iterable[str]], Collection[str]],
-    members: Sequence[str],
-    *,
-    drop: tuple[str, ...] = (),
-) -> Collection[str]:
-    """A ``kind`` over ``members`` (plus every ``drop`` name) iterating out of canonical order.
-
-    The order is read in this process, so the row exercises the reorder under
-    whatever ``PYTHONHASHSEED`` the run has; the ``drop`` names are ignored when
-    judging the order, since ``Meta.exclude`` removes them before it matters.
-    A ``set`` is also tried in larger hash tables, since a few members can land
-    in canonical order in every subset of the smallest table.
-    """
-    for size in range(len(members), 1, -1):
-        for combo in itertools.combinations(members, size):
-            for declared in _layouts(kind, combo + drop):
-                kept = [name for name in declared if name not in drop]
-                if kept != _canonical(kept):
-                    return declared
-    pytest.fail(f"no {kind.__name__} over {members!r} iterates out of canonical order")
 
 
 def _filter_input_order(filterset: type[FilterSet]) -> list[tuple[str, list[str]]]:
@@ -3276,30 +3221,31 @@ class _CanonicalOrderRow(NamedTuple):
 _RowBuilder: TypeAlias = Callable[[], _CanonicalOrderRow]
 
 
-def _names_meta(key: str, kind: Callable[[Iterable[str]], Collection[str]]) -> _RowBuilder:
+def _names_meta(key: str, kind: type[set[str] | frozenset[str]]) -> _RowBuilder:
     def build() -> _CanonicalOrderRow:
-        names = _scrambled(kind, _CATEGORY_COLUMNS)
+        names = scrambled(kind, _CATEGORY_COLUMNS)
         return _CanonicalOrderRow(
             {key: names},
-            [(name, ["exact"]) for name in _canonical(names)],
+            [(name, ["exact"]) for name in canonical_order(names)],
         )
 
     return build
 
 
 def _excluded_meta() -> _CanonicalOrderRow:
-    names = _scrambled(set, _CATEGORY_COLUMNS[:-1], drop=("updated_date",))
+    kept = tuple(name for name in _CATEGORY_COLUMNS if name != "updated_date")
+    names = scrambled(set, kept, drop=("updated_date",))
     return _CanonicalOrderRow(
         {"fields": names, "exclude": {"updated_date"}},
-        [(name, ["exact"]) for name in _canonical(names) if name != "updated_date"],
+        [(name, ["exact"]) for name in canonical_order(names) if name != "updated_date"],
     )
 
 
 def _lookup_set_meta() -> _CanonicalOrderRow:
-    lookups = _scrambled(set, _NAME_LOOKUPS)
+    lookups = scrambled(set, _NAME_LOOKUPS)
     return _CanonicalOrderRow(
         {"fields": {"name": lookups, "description": ["exact"]}},
-        [("name", _canonical(lookups)), ("description", ["exact"])],
+        [("name", canonical_order(lookups)), ("description", ["exact"])],
     )
 
 

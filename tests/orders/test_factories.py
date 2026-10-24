@@ -13,7 +13,6 @@ Factory construction and collision guards have no wire shape. Published
 
 from __future__ import annotations
 
-import itertools
 from collections.abc import Iterator
 from typing import get_args
 
@@ -34,9 +33,8 @@ from django_strawberry_framework.orders.inputs import (
     _materialized_names,
 )
 from django_strawberry_framework.utils._narrowing import is_tuple, read_attr
-from django_strawberry_framework.utils.canonical import canonical_sort_key
 from django_strawberry_framework.utils.inputs import _type_name_claims
-from tests._idioms import definition_raises, type_args
+from tests._idioms import canonical_order, definition_raises, scrambled, type_args
 
 
 @pytest.fixture(autouse=True)
@@ -432,23 +430,13 @@ _BOOK_COLUMNS = (
 )
 
 
-def _out_of_canonical_order_set() -> set[str]:
-    """A set of ``Book`` columns this process iterates out of canonical order."""
-    for size in range(len(_BOOK_COLUMNS), 1, -1):
-        for combo in itertools.combinations(_BOOK_COLUMNS, size):
-            declared: set[str] = set(combo)
-            if list(declared) != sorted(declared, key=canonical_sort_key):
-                return declared
-    pytest.fail(f"no set over {_BOOK_COLUMNS!r} iterates out of canonical order")
-
-
 def test_orderset_set_shaped_meta_fields_expand_in_canonical_order() -> None:
     """Class-declared set-shaped ``Meta.fields`` expand in ``canonical_sort_key`` order.
 
     The set iterates out of canonical order in this process, so the row fails
     under every ``PYTHONHASHSEED`` when the expansion follows the hash order.
     """
-    declared = _out_of_canonical_order_set()
+    declared = scrambled(set, _BOOK_COLUMNS)
     snapshot = set(declared)
 
     class BookOrderSetFields(OrderSet):
@@ -456,7 +444,7 @@ def test_orderset_set_shaped_meta_fields_expand_in_canonical_order() -> None:
             model = library_models.Book
             fields = declared
 
-    assert list(BookOrderSetFields.get_fields()) == sorted(declared, key=canonical_sort_key)
+    assert list(BookOrderSetFields.get_fields()) == canonical_order(declared)
     assert BookOrderSetFields.Meta.fields == snapshot
 
 

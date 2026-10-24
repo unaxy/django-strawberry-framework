@@ -95,14 +95,30 @@ from tests._idioms import (
     STR_SUBCLASS_KINDS,
     ClaimsClass,
     ClassReadRaises,
+    canonical_order,
     definition_raises,
     module_binding,
+    scrambled,
     str_subclass_name,
 )
 from tests._soft_dependency import blocked_modules
 
 if TYPE_CHECKING:
     from django_strawberry_framework.utils.inputs import SetInputNamespace
+
+# Field names and lookups an unordered ``Meta.fields`` declares, scrambled per process.
+_BOOK_NAMES = (
+    "title",
+    "subtitle",
+    "circulation_status",
+    "shelf",
+)
+_NAME_LOOKUPS = (
+    "exact",
+    "icontains",
+    "istartswith",
+    "iendswith",
+)
 
 # ---------------------------------------------------------------------------
 # build_strawberry_input_class
@@ -630,11 +646,12 @@ def test_meta_fields_canonicalization_passes_a_value_whose_class_read_raises_thr
 
 def test_read_set_meta_fields_sorts_a_lazy_set_as_the_set_it_stands_for() -> None:
     """A lazy proxy of a set expands as that set: sorted, never in hash order, never refused."""
+    names = scrambled(set, _BOOK_NAMES)
 
     class Meta:
-        fields = SimpleLazyObject(lambda: {"b", "a"})
+        fields = SimpleLazyObject(lambda: names)
 
-    assert read_set_meta_fields(Meta) == ["a", "b"]
+    assert read_set_meta_fields(Meta) == canonical_order(names)
 
 
 @pytest.mark.parametrize("escape", [RuntimeError, KeyboardInterrupt])
@@ -750,20 +767,22 @@ def test_promote_set_meta_fields_writes_the_alias_onto_class_meta() -> None:
 
 def test_read_set_meta_fields_canonicalizes_sets_without_mutating_source() -> None:
     """Expansion reads process-stable order; class Meta keeps the original set."""
-    names = {"title", "subtitle"}
+    names = scrambled(set, _BOOK_NAMES)
+    lookups = scrambled(set, _NAME_LOOKUPS)
+    snapshot = (set(names), set(lookups))
 
     class Meta:
         fields = names
 
-    assert read_set_meta_fields(Meta) == sorted(["title", "subtitle"], key=repr)
+    assert read_set_meta_fields(Meta) == canonical_order(names)
     assert Meta.fields is names
 
     class LookupMeta:
-        fields = {"name": {"exact", "contains"}}
+        fields = {"name": lookups}
 
-    assert read_set_meta_fields(LookupMeta) == {
-        "name": sorted(["contains", "exact"], key=repr),
-    }
+    assert read_set_meta_fields(LookupMeta) == {"name": canonical_order(lookups)}
+    assert LookupMeta.fields["name"] is lookups
+    assert (names, lookups) == snapshot
     assert read_set_meta_fields(None) is None
 
 
