@@ -1056,7 +1056,7 @@ def test_hook_manager_result_is_coerced_sync() -> None:
 
 
 async def test_hook_manager_result_is_coerced_async() -> None:
-    """An async-path ``Manager`` return is coerced too - previously it flowed through verbatim."""
+    """An async-path ``Manager`` return is coerced too, never passed through verbatim."""
 
     @_as_stand_in_hook_type
     class _ManagerAsyncType:
@@ -2254,14 +2254,13 @@ def test_clean_queryset_transforms_after_seal() -> None:
 
 
 def test_additive_only_subclass_result_is_sealed_to_plain_queryset() -> None:
-    """A subclass that only ADDS methods is now accepted but returns a SEALED plain QuerySet.
+    """A subclass that only ADDS methods comes back as a SEALED plain QuerySet.
 
-    The old contract passed an additive-only subclass through unchanged (same
-    object, same class). The sealed-execution contract instead rebuilds a plain
-    ``QuerySet`` from the validated query state: the subclass identity is
-    deliberately dropped (it is not needed to select rows), while the SQL
-    predicate is preserved. This closes the vector where an "additive-only"
-    subclass could still override an unlisted downstream method.
+    The hook result is rebuilt as a plain ``QuerySet`` from its validated query
+    state, never returned as the same object or class. The subclass identity is
+    deliberately dropped (it is not needed to select rows) whatever methods the
+    subclass defines, while the SQL predicate is preserved. The seal inspects no
+    override, so no subclass method dispatches on the result.
     """
 
     class _AddOnly(models.QuerySet[Category]):
@@ -2270,7 +2269,7 @@ def test_additive_only_subclass_result_is_sealed_to_plain_queryset() -> None:
 
     shaped = _AddOnly(model=Category).filter(name="ok")
     result = apply_type_visibility_sync(_sync_hook_type(shaped), Category.objects.all(), info=None)
-    assert type(result) is models.QuerySet  # sealed - no longer an _AddOnly instance
+    assert type(result) is models.QuerySet  # sealed: the _AddOnly class is dropped
     assert not isinstance(result, _AddOnly)
     assert "ok" in str(result.query)
 
@@ -2459,10 +2458,10 @@ def test_seal_copies_hints_into_a_fresh_dict() -> None:
 def test_identity_hook_result_is_resealed_dropping_injected_cache_sync() -> None:
     """A hook that mutates the received source's ``_result_cache`` and returns it is re-sealed.
 
-    Object identity is not immutability (spec-045 Decision 3): the removed
-    identity fast path let a hook inject a synthetic unsaved row into the sealed
-    source's ``_result_cache`` and return the SAME object, serving that row with
-    zero SQL. The result is now ALWAYS re-sealed, so the returned queryset has
+    Object identity is not immutability (spec-045 Decision 3): a hook can inject
+    a synthetic unsaved row into the sealed source's ``_result_cache`` and return
+    the SAME object, which an identity fast path would serve with zero SQL. The
+    result is ALWAYS re-sealed, so the returned queryset has
     ``_result_cache is None`` and only the real visible rows survive on evaluation.
     """
     Category.objects.create(name="visible_row", is_private=False)
@@ -2837,7 +2836,7 @@ async def test_identity_hook_result_is_resealed_dropping_injected_cache_async() 
 # ---------------------------------------------------------------------------
 # Decision 2: sql.Query.clone and
 # add_q are NOT no-dispatch boundaries -- their bodies dispatch bound methods on
-# the graph's sub-objects. The seal now proves EVERY compiler-reachable node is a
+# the graph's sub-objects. The seal proves EVERY compiler-reachable node is a
 # genuine, unshadowed Django implementation (by object identity, not __module__)
 # and bakes a deferred filter onto a DETACHED clone, so clone / add_q / compile
 # dispatch only trusted code and the candidate is never mutated.
@@ -3325,11 +3324,11 @@ def test_lookup_hostile_lhs_fails_closed() -> None:
 
 
 def test_hostile_order_by_expression_fails_closed() -> None:
-    """A consumer ``order_by`` expression (never walked before) fails closed.
+    """A consumer ``order_by`` expression fails closed.
 
     ``order_by`` holds field-reference strings and expressions the compiler
-    dispatches ``as_sql`` on; the old inventory never walked it, so a consumer
-    ordering expression rode through to compile time.
+    dispatches ``as_sql`` on; the seal walks it, since a walk that skips it
+    lets a consumer ordering expression ride through to compile time.
     """
     fired: list[str] = []
 
@@ -3359,8 +3358,8 @@ def test_hostile_order_by_expression_fails_closed() -> None:
 def test_consumer_expression_nested_in_genuine_func_fails_closed() -> None:
     """A consumer expression nested inside a genuine ``Func`` fails closed.
 
-    The old top-level check trusted a genuine ``Func`` annotation without walking
-    its operands, so a consumer expression in operand position reached compile. The
+    A top-level check that trusts a genuine ``Func`` annotation without walking
+    its operands lets a consumer expression in operand position reach compile. The
     recursive operand walk (``get_source_expressions``) rejects it.
     """
 
@@ -3389,8 +3388,8 @@ def test_module_spoofed_type_is_not_genuine_django() -> None:
 
     A consumer class declaring ``__module__ = "django.db.models.functions"`` is NOT
     the object Django exposes at ``sys.modules[module].<qualname>``, so identity
-    provenance rejects it where the old ``__module__.startswith("django.")`` check
-    accepted it.
+    provenance rejects it where a ``__module__.startswith("django.")`` check would
+    accept it.
     """
 
     class _SpoofFunc(models.Func):
@@ -6052,9 +6051,9 @@ def test_reject_awaitable_sync_source_raises_for_awaitable() -> None:
 def test_prefetch_child_over_unrelated_model_fails_closed() -> None:
     """A Prefetch child over an unrelated same-FK-name model fails closed.
 
-    Pre-fix this sealed clean and the fetch populated ``category.items`` with
-    Property rows from ``products_property`` (Django ticket #37267) -- foreign-table
-    rows no Item visibility hook ever ran on.
+    Without the guard this seals clean and the fetch populates ``category.items``
+    with Property rows from ``products_property`` (Django ticket #37267) --
+    foreign-table rows no Item visibility hook ever ran on.
     """
     seed_data(2)
     qs = Category.objects.prefetch_related(Prefetch("items", queryset=Property.objects.all()))
@@ -6233,7 +6232,7 @@ def test_prefetch_relation_target_unresolvable_paths_fail_open() -> None:
     The proof only ever NARROWS shapes Django itself mishandles; a path it
     cannot resolve here (unknown segment, plain column, unresolved lazy FK
     string) returns ``None`` and the entry is left to Django's own fetch-time
-    traversal, exactly as before the guard existed.
+    traversal, exactly as if no guard ran.
     """
 
     class _BrokenFkHolder(models.Model):
@@ -6347,10 +6346,9 @@ def test_prefetch_child_default_accessor_wrong_model_fails_closed() -> None:
     ``ContentType`` and neither declares a ``related_name``, so both are reached
     through the default ``permission_set`` / ``logentry_set`` ACCESSOR spellings
     -- which ``_meta.get_field`` does not know (it registers the reverse field
-    under the bare child model name). A ``LogEntry`` child here sealed clean
-    before the accessor scan existed, and the fetch populated
-    ``ContentType.permission_set`` with admin ``LogEntry`` rows -- the same
-    #37267 leak, one spelling over.
+    under the bare child model name). Without the accessor scan a ``LogEntry``
+    child here seals clean, and the fetch populates ``ContentType.permission_set``
+    with admin ``LogEntry`` rows -- the same #37267 leak, one spelling over.
     """
     qs = ContentType.objects.prefetch_related(
         Prefetch("permission_set", queryset=LogEntry.objects.all()),
@@ -6430,7 +6428,7 @@ def test_prefetch_relation_target_resolves_every_installed_default_accessor() ->
 
 @pytest.mark.django_db
 def test_prefetch_queryset_none_and_string_lookups_still_seal() -> None:
-    """queryset=None Prefetch and plain string lookups are untouched by the new guard."""
+    """queryset=None Prefetch and plain string lookups are outside the relation-target proof."""
     qs = Category.objects.prefetch_related(
         Prefetch("items"),
         "items",
@@ -6445,16 +6443,16 @@ def test_seal_policy_presets_answer_slice_and_combinator_independently() -> None
     """Each preset rejects exactly the shapes its surface cannot recompose onto.
 
     ``reject_sliced`` and ``require_model_rows`` are deliberately independent
-    fields: fusing them is what forced the cascade to re-implement the slice
-    rejection at both of its own entry points, and it is why a
-    ``require_model_rows=False`` surface used to get the slice licence it never
-    asked for. The four presets pin the four answers in one place - a read
-    surface rejects a slice, the one-edge-down child whose own gate classifies a
-    slice admits one, the plain-list-relation child does not (Django refilters it
-    at fetch time), and the cascade rejects a slice because it narrows by
-    ``.filter(...)``. Every one of them serves a combinator as its primary-key
-    set, which each can narrow and re-project; only the raw-list row source,
-    which recomposes nothing, keeps the combinator as it is.
+    fields: fusing them would force the cascade to re-implement the slice
+    rejection at both of its own entry points, and would hand a
+    ``require_model_rows=False`` surface a slice licence it never asked for. The
+    four presets pin the four answers in one place - a read surface rejects a
+    slice, the one-edge-down child whose own gate classifies a slice admits one,
+    the plain-list-relation child does not (Django refilters it at fetch time),
+    and the cascade rejects a slice because it narrows by ``.filter(...)``.
+    Every one of them serves a combinator as its primary-key set, which each can
+    narrow and re-project; only the raw-list row source, which recomposes
+    nothing, keeps the combinator as it is.
     """
     base = Category.objects.all()
     sliced = base[:5]
@@ -6693,10 +6691,10 @@ def test_unrendered_defect_code_says_so_instead_of_mislabelling() -> None:
     """A code with no arm at a site names itself; it never borrows another code's prose.
 
     Every message-building site renders only the subset of codes IT can reach,
-    so each ladder used to end in an unconditional branch for its own last code.
-    That shape cannot fail loudly: a code added to the seal without an arm here
-    would be reported to the schema author as an alias mismatch or a wrong-table
-    error - a false description of a real rejection. Dispatch is exhaustive
+    so a ladder ending in an unconditional branch for its own last code cannot
+    fail loudly: a code added to the seal without an arm here would be reported
+    to the schema author as an alias mismatch or a wrong-table error - a false
+    description of a real rejection. Dispatch is exhaustive
     instead, and the fallback is legible on both halves: it names the code and
     carries the detail, so the rejection still fails closed.
     """
