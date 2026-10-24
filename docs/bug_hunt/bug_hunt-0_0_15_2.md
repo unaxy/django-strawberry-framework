@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 269 done, 171 to do.
+Progress: 270 done, 172 to do.
 
 ## Done
 
@@ -1295,6 +1295,16 @@ Progress: 269 done, 171 to do.
   documented message names the gate, which the nested and flat spellings already answer identically. Live rows pin
   branches, arms, both nestings, flat copies inside each and a fakeshop `ShelfFilter` form-level refusal, sync and
   async; the README, spec-027 and the `FilterSet` glossary term say so
+- [x] 383. fixed: a per-field `"__all__"` publishes Django's text-pattern lookups (`iexact`, `contains`,
+  `startswith`, `endswith`, `regex` and their case-insensitive forms) only on a text column, one whose package default
+  filter is `CharFilter` (`CharField` and subclasses, `TextField`, `GenericIPAddressField`, `FilePathField`); a date,
+  time, number, Boolean or UUID column keeps `exact`, `in`, `isNull` and its comparisons. A column whose filter the
+  consumer supplies (`Meta.filter_overrides`, a `FILTER_DEFAULTS` of its own) keeps the whole bag as before. A pattern
+  lookup listed by name on a non-text column generates a `TextPatternFilter` (a `CharFilter`) typed `String`, matched
+  against the backend's text rendering of the column as Django's ORM matches it, so no generated leaf answers the masked
+  error or a silent `[]` for a value the backend cannot use; the right-hand side of a leaf is typed by what Django
+  compares (spec-027). Live rows on SQLite and PostgreSQL, sync and async; package rows per column kind and override
+  shape; README, spec-027 and the `FilterSet` glossary term say so
 
 ## Outside review of the fixes
 
@@ -1401,9 +1411,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 382. PostgreSQL refuses a datetime or time whose UTC offset is +-16:00..+-23:59 (`time zone displacement out of
   range`), which Python and the Strawberry `DateTime` / `Time` scalars accept: a filter bound or write value with such
   an offset raises the masked uncoded error on PostgreSQL only
-- [ ] 383. A pattern lookup on a temporal column (`iExact` / `regex` / `iRegex` on PostgreSQL; `time` `regex` / `iRegex`
-  on SQLite) still answers the masked uncoded error for a value the backend cannot use; the generated temporal pattern
-  leaves on SQLite answer `[]`; decide refuse vs serve per backend
 - [ ] 384. A declared django-filter whose scalar kind differs from its column escapes the unbindable-temporal refusal: a
   `date` value on a `DateTimeField` (`date(1, 1, 1)` under a `TIME_ZONE` east of UTC) and a `datetime` through a
   `DateField` or a `__date` transform (`0001-01-01T00:00+05:00`, `9999-12-31T23:59-05:00`) overflow at evaluation as the
@@ -1498,12 +1505,22 @@ tracker number are recorded there; open remainders and new defects are filed as 
   subscriptable` on annotations in `forms/resolvers.py` (`_unstorable_cleaned_fields`, `_is_unstorable_blank`,
   `_coerced_null_fields`, `_column_null_errors`) and `utils/querysets.py::_built_queryset`; it fails identically at
   c9bdcd2b and b007a47b. Found verifying 353
+- [ ] 549. (robustness) An invalid regular expression (`"("`) sent to any generated or declared `regex` / `iRegex`
+  leaf, a text column's included, answers the masked uncoded error on SQLite and PostgreSQL, sync and async, instead of
+  `FILTER_INVALID` keyed to its field. Found verifying 383
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 548. CHANGELOG entry for item 383: a per-field `"__all__"` on a date, time, number, Boolean or UUID column no
+  longer publishes the text-pattern leaves (`iExact`, `contains`, `startsWith`, `endsWith`, `regex` and their
+  case-insensitive forms), so a client sending one gets a GraphQL validation error and django-filter form data naming
+  one (a `DjangoFilterBackend` query string such as `price__contains=`) is ignored like any unknown key; a pattern
+  lookup listed by name on such a column is now a `String` input matched against the backend's text rendering of the
+  column, where it was typed by the column (or its choice enum); a column whose filter `Meta.filter_overrides` or a
+  project `FILTER_DEFAULTS` supplies is unchanged
 - [ ] 590. CHANGELOG entry for item 503 (breaking): `FILTER_INVALID` `extensions.errors` keys carry the field's path
   from the filter root: a leaf inside a nested `RelatedFilter` branch is `<branch>__<leaf>` (equal to the flat copy's
   key), a leaf inside an `and` / `or` / `not` arm is `and_<i>__<leaf>` / `or_<i>__<leaf>` / `not__<leaf>`, composing

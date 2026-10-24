@@ -27,7 +27,11 @@ plain ``MultiWidget`` and ``priceInUnderscoredBoxes`` over a consumer widget rea
 keys) apply every bound they are sent, under the keys each widget reads.
 The per-field ``"__all__"`` leaves never publish a ``django.contrib.postgres``
 lookup Django registers onto a core field (``containedBy`` on the numeric and
-temporal leaves), whether or not a PostgreSQL driver is installed.
+temporal leaves), whether or not a PostgreSQL driver is installed, and publish
+the text-pattern lookups (``iExact`` / ``contains`` / ``startsWith`` / ``regex`` / ...)
+only on the text column ``label``. Listed explicitly on ``occurredAt`` or
+``unsignedBig``, a pattern leaf is a ``String`` the backend matches against its text
+rendering of the column, on SQLite and PostgreSQL alike.
 """
 
 import datetime
@@ -39,7 +43,7 @@ from apps.scalars import models
 from django.db import connection
 from graphql_client import assert_graphql_data as _assert_graphql_data
 from graphql_client import assert_graphql_success as _assert_graphql_success
-from graphql_client import json_at, json_list, json_object, post_graphql, response_json
+from graphql_client import json_at, json_list, json_object, json_str, post_graphql, response_json
 
 _DATE = datetime.date(2021, 6, 15)
 _DATETIME = datetime.datetime(2021, 6, 15, 9, 30, tzinfo=datetime.timezone.utc)
@@ -910,4 +914,141 @@ def test_scalars_filter_by_reverse_fk_primary_keys() -> None:
         _BY_PARENT,
         {"allScalarSpecimens": [{"label": "root-a"}, {"label": "root-b"}]},
         variables={"filter": {"children": {"exact": [child_a.pk, child_b.pk]}}},
+    )
+
+
+_TEXT_PATTERN_LEAVES = frozenset(
+    {
+        "iExact",
+        "contains",
+        "iContains",
+        "startsWith",
+        "iStartsWith",
+        "endsWith",
+        "iEndsWith",
+        "regex",
+        "iRegex",
+    },
+)
+
+_LEAF_TYPES_QUERY = """
+query ($name: String!) {
+  __type(name: $name) { inputFields { name type { name } } }
+}
+"""
+
+
+def _leaf_types(type_name: str) -> dict[str, object]:
+    """Map each input field of ``type_name`` to its named GraphQL type."""
+    data = _assert_graphql_success(_LEAF_TYPES_QUERY, variables={"name": type_name})
+    return {
+        json_str(field, "name"): json_at(field, "type", "name")
+        for field in json_list(data, "__type", "inputFields")
+    }
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "type_name",
+    [
+        "ScalarSpecimenFilterOccurredAtFilterInputType",
+        "ScalarSpecimenFilterOccurredOnFilterInputType",
+        "ScalarSpecimenFilterOccurredTimeFilterInputType",
+        "ScalarSpecimenFilterPriceFilterInputType",
+        "ScalarSpecimenFilterScoreFilterInputType",
+        "ScalarSpecimenFilterFlagFilterInputType",
+        "ScalarSpecimenFilterExternalIdFilterInputType",
+        "ScalarSpecimenFilterSignedBigFilterInputType",
+        "ScalarSpecimenFilterIdFilterInputType",
+    ],
+)
+def test_all_lookups_on_a_non_text_column_publish_no_text_pattern_leaf(type_name: str) -> None:
+    """A per-field ``"__all__"`` on a non-text column keeps ``exact`` and drops every text pattern.
+
+    Django matches a text-pattern lookup against the column's text rendering, which an
+    input typed by the column cannot express, so only a text column publishes them.
+    """
+    leaves = set(_leaf_types(type_name))
+
+    assert {"exact", "in", "isNull"} <= leaves
+    assert leaves.isdisjoint(_TEXT_PATTERN_LEAVES)
+
+
+@pytest.mark.django_db
+def test_all_lookups_on_a_text_column_keep_every_text_pattern_leaf() -> None:
+    """``label`` (a ``TextField``) keeps every text-pattern leaf, each a ``String``."""
+    leaf_types = _leaf_types("ScalarSpecimenFilterLabelFilterInputType")
+
+    assert {name: leaf_types[name] for name in _TEXT_PATTERN_LEAVES} == dict.fromkeys(
+        _TEXT_PATTERN_LEAVES,
+        "String",
+    )
+
+
+@pytest.mark.django_db
+def test_explicit_text_pattern_leaf_on_a_non_text_column_is_a_string() -> None:
+    """An explicitly listed pattern lookup on a datetime or integer column is a ``String`` leaf."""
+    occurred_at = _leaf_types("NullableScalarSpecimenFilterOccurredAtFilterInputType")
+    unsigned_big = _leaf_types("NullableScalarSpecimenFilterUnsignedBigFilterInputType")
+
+    assert occurred_at == {
+        "exact": "DateTime",
+        "iExact": "String",
+        "iContains": "String",
+        "startsWith": "String",
+        "regex": "String",
+        "iRegex": "String",
+    }
+    assert unsigned_big == {"exact": "BigInt", "contains": "String"}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("leaf", "sqlite_value", "postgresql_value"),
+    [
+        pytest.param("iExact", "2021-06-15 09:30:00", "2021-06-15 09:30:00+00", id="iexact"),
+        pytest.param("iContains", "2021-06", "2021-06", id="icontains"),
+        pytest.param("startsWith", "2021-06-15 09", "2021-06-15 09", id="startswith"),
+        pytest.param("regex", "^2021-06-15 09:30", "^2021-06-15 09:30", id="regex"),
+        pytest.param("iRegex", "^2021-06-15 09:30", "^2021-06-15 09:30", id="iregex"),
+    ],
+)
+def test_explicit_datetime_text_pattern_matches_the_backend_text_rendering(
+    leaf: str,
+    sqlite_value: str,
+    postgresql_value: str,
+) -> None:
+    """A partial pattern on a datetime column matches the row whose text rendering it matches.
+
+    The pattern runs against the backend's text rendering of the stored value, as
+    Django's ORM compares it: SQLite stores ``2021-06-15 09:30:00`` (UTC), PostgreSQL
+    renders the ``timestamptz`` as ``2021-06-15 09:30:00+00`` in the connection's UTC.
+    """
+    models.NullableScalarSpecimen.objects.create(
+        label="june",
+        occurred_at=datetime.datetime(2021, 6, 15, 9, 30, tzinfo=datetime.timezone.utc),
+    )
+    models.NullableScalarSpecimen.objects.create(
+        label="march",
+        occurred_at=datetime.datetime(2022, 3, 1, 18, 0, tzinfo=datetime.timezone.utc),
+    )
+    value = postgresql_value if connection.vendor == "postgresql" else sqlite_value
+
+    _assert_graphql_data(
+        _BY_NULLABLE_FILTER,
+        {"allNullableScalarSpecimens": [{"label": "june"}]},
+        variables={"filter": {"occurredAt": {leaf: value}}},
+    )
+
+
+@pytest.mark.django_db
+def test_explicit_integer_contains_matches_the_digits() -> None:
+    """``unsignedBig: { contains }`` takes a digit string and matches the column's decimal text."""
+    models.NullableScalarSpecimen.objects.create(label="hit", unsigned_big=1234)
+    models.NullableScalarSpecimen.objects.create(label="miss", unsigned_big=5678)
+
+    _assert_graphql_data(
+        _BY_NULLABLE_FILTER,
+        {"allNullableScalarSpecimens": [{"label": "hit"}]},
+        variables={"filter": {"unsignedBig": {"contains": "23"}}},
     )

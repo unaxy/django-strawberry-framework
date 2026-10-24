@@ -563,7 +563,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 │   ├── test_debug.py             # DjangoDebugExtension tests for payload serialization, SQL capture, errors, and execution isolation.
 │   └── test_operation_state.py   # The operation-state boundary: what one operation reads, writes, and leaves behind.
 ├── filters/    # Package tests for the FilterSet subsystem.
-│   ├── test_all_lookups.py       # Per-field ``"__all__"`` lookup expansion against lookups registered from outside the field.
+│   ├── test_all_lookups.py       # Per-field ``"__all__"`` lookup expansion: foreign registrations and text-pattern lookups.
 │   ├── test_base.py              # Filter primitive tests for typed, list, range, global-ID, and related filters.
 │   ├── test_factories.py         # FilterArgumentsFactory tests for BFS input generation.
 │   ├── test_finalizer.py         # Finalizer tests for filter binding, owner-aware materialization, and orphan validation.
@@ -861,7 +861,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 │   └── test_operation_state.py   # The operation-state boundary: what one operation reads, writes, and leaves behind.
 ├── fieldset/    # planned by TODO-BETA-059-0.1.1 - Mirrored package tests for the fieldset subsystem.
 ├── filters/    # Package tests for the FilterSet subsystem.
-│   ├── test_all_lookups.py       # Per-field ``"__all__"`` lookup expansion against lookups registered from outside the field.
+│   ├── test_all_lookups.py       # Per-field ``"__all__"`` lookup expansion: foreign registrations and text-pattern lookups.
 │   ├── test_base.py              # Filter primitive tests for typed, list, range, global-ID, and related filters.
 │   ├── test_factories.py         # FilterArgumentsFactory tests for BFS input generation.
 │   ├── test_finalizer.py         # Finalizer tests for filter binding, owner-aware materialization, and orphan validation.

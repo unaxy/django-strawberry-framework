@@ -37,6 +37,7 @@ import django_filters
 from django.core.exceptions import FieldDoesNotExist, FieldError
 from django.db import models
 from django.db.models import Exists, Q
+from django.db.models import lookups as model_lookups
 from django.db.models.constants import LOOKUP_SEP
 from django.db.models.fields.related import ManyToManyRel, ManyToOneRel, OneToOneRel
 from django_filters import (
@@ -166,6 +167,7 @@ from .base import (
     RelatedFilter,
     RelationPkFilter,
     RelationPkMultipleFilter,
+    TextPatternFilter,
     _bound_field_name,
     _relation_uses_non_pk_to_field,
     membership_in_filter_class,
@@ -208,7 +210,7 @@ if TYPE_CHECKING:
 
     from django_strawberry_framework.types.base import DjangoType
     from django_strawberry_framework.types.definition import DjangoTypeDefinition
-    from django_strawberry_framework.utils.typing import ForeignKeyField, ModelField
+    from django_strawberry_framework.utils.typing import ConcreteField, ForeignKeyField, ModelField
 
     # ``(field_name, target_type, child_filterset, child_input, child_base)`` per active
     # related branch, as ``FilterSet._iter_visibility_steps`` yields it.
@@ -265,8 +267,12 @@ _LOOKUP_PYTHON_ATTRS: frozenset[str] = frozenset(
 )
 
 
-def _lookups_for_field(model_field: ModelField | None) -> list[str]:
-    """Return every concrete (non-transform) lookup valid for ``model_field``.
+def _lookups_for_field(
+    model_field: ModelField | None,
+    *,
+    package_default: bool = True,
+) -> list[str]:
+    """Return the concrete (non-transform) lookups ``"__all__"`` publishes for ``model_field``.
 
     Backs the per-field ``Meta.fields = {"<field>": "__all__"}`` shorthand
     (``graphene-django`` / cookbook ``filter_fields`` parity). ``django-filter``
@@ -288,6 +294,21 @@ def _lookups_for_field(model_field: ModelField | None) -> list[str]:
     consumer who wants a transform (e.g. ``created__year``) declares it as an
     explicit lookup expression instead.
 
+    When the column's filter is the package's own default (``package_default``:
+    ``FilterSet._origin_for_selection_class`` is ``framework_default``), Django's
+    text-pattern lookups (``_TEXT_PATTERN_LOOKUPS``: ``iexact``, the
+    ``contains`` / ``startswith`` / ``endswith`` families and ``regex`` /
+    ``iregex``) are published only on a text column (``_is_text_column``): each
+    compares the column's text rendering against a string pattern, so on a
+    date, time, number, Boolean or UUID column it is a text match no
+    column-typed input can express. Every other such column keeps ``exact`` /
+    ``in`` / ``isnull`` and its comparisons. A consumer who wants a pattern
+    match on such a column declares the lookup explicitly
+    (``FilterSet.filter_for_lookup`` gives it a ``String`` input). A column whose
+    filter the consumer supplies (``Meta.filter_overrides`` or a
+    ``FILTER_DEFAULTS`` shadow) keeps the whole set: its filter class owns the
+    lookups it accepts.
+
     Lookups ``django.contrib.postgres`` registers onto a field that is not its
     own are EXCLUDED too (``_without_foreign_postgres_lookups``): importing its
     range module registers ``contained_by`` (a range-operand lookup) onto the
@@ -300,9 +321,11 @@ def _lookups_for_field(model_field: ModelField | None) -> list[str]:
     lookup the consumer registers is published like a built-in one. A consumer
     who wants ``search`` or a trigram lookup declares it explicitly.
 
-    Memoized by ``type(model_field)`` (see ``_lookups_for_field_class_cache``):
-    the lookup set is class-determined, so same-typed fields share one crawl.
-    A COPY is returned so a caller mutating the list cannot corrupt the cache.
+    The whole set is memoized by ``type(model_field)`` (see
+    ``_lookups_for_field_class_cache``): it is class-determined, so same-typed
+    fields share one crawl. The text-pattern withholding is applied to a COPY,
+    since it depends on the owning set's filter selection, and a caller mutating
+    the returned list cannot corrupt the cache.
     """
     if model_field is None:
         return []
@@ -312,7 +335,63 @@ def _lookups_for_field(model_field: ModelField | None) -> list[str]:
         lookups = _without_foreign_postgres_lookups(field_class, model_field.get_lookups())
         cached = _non_transform_lookups(lookups)
         _lookups_for_field_class_cache[field_class] = cached
-    return list(cached)
+    if not package_default or _is_text_column(field_class):
+        return list(cached)
+    registered = model_field.get_lookups()
+    return [
+        lookup_expr
+        for lookup_expr in cached
+        if not _is_text_pattern_lookup(registered.get(lookup_expr))
+    ]
+
+
+# Django's text-pattern lookups. Each compares the column's TEXT rendering against
+# the right-hand side and never runs it through the column's value conversion
+# (``prepare_rhs = False``), so its operand is a string whatever the column type.
+# Matched by class, so a field's own lookup registered under one of these names
+# (``ArrayField``'s ``contains`` is array containment) is not one of them.
+_TEXT_PATTERN_LOOKUPS: tuple[type[object], ...] = (
+    model_lookups.IExact,
+    model_lookups.Contains,
+    model_lookups.IContains,
+    model_lookups.StartsWith,
+    model_lookups.IStartsWith,
+    model_lookups.EndsWith,
+    model_lookups.IEndsWith,
+    model_lookups.Regex,
+    model_lookups.IRegex,
+)
+
+
+def _is_text_pattern_lookup(lookup: object) -> bool:
+    """Return whether ``lookup`` is a lookup class deriving from a Django text-pattern lookup."""
+    return isinstance(lookup, type) and issubclass(lookup, _TEXT_PATTERN_LOOKUPS)
+
+
+def _is_text_column(field_class: type[ModelField]) -> bool:
+    """Return whether the package's default filter for ``field_class`` is a ``CharFilter``.
+
+    Read off ``_PUBLIC_PACKAGE_FILTER_DEFAULTS`` (the package's own class-level
+    defaults table, matching django-filter's) by the field class's MRO, never off
+    ``Meta.filter_overrides``: the text columns are ``CharField`` and its
+    subclasses, ``TextField``, ``GenericIPAddressField``, ``FilePathField`` and
+    ``CommaSeparatedIntegerField``.
+    """
+    entry = _entry_by_mro(_PUBLIC_PACKAGE_FILTER_DEFAULTS, field_class)
+    filter_class = entry.get("filter_class") if entry is not None else None
+    return isinstance(filter_class, type) and issubclass(filter_class, CharFilter)
+
+
+def _is_text_pattern_on_non_text(field: ConcreteField, lookup_type: str) -> bool:
+    """Return whether ``lookup_type`` is a text-pattern lookup ``field`` registers, on a non-text field.
+
+    ``field`` is the non-relation field the lookup applies to (a transform's output
+    field when the expression names one) and ``lookup_type`` one terminal lookup
+    name, the pair django-filter hands ``filter_for_lookup``.
+    """
+    return not _is_text_column(type(field)) and _is_text_pattern_lookup(
+        field.get_lookup(lookup_type),
+    )
 
 
 # Package prefix every ``django.contrib.postgres`` module name starts with.
@@ -928,6 +1007,8 @@ _FILTER_FAMILY_REGISTRY: truth.IdentityMap[type[object], _FilterFamilyProfile] =
         # plus the enum-member-is-a-value predicate, so each shares its base's family.
         EnumChoiceFilter: _CHOICE_PROFILE,
         EnumLookupFilter: _SCALAR_LOOKUP_PROFILE,
+        # The text-pattern leaf on a non-text column: ``CharFilter`` under its own name.
+        TextPatternFilter: _SCALAR_LOOKUP_PROFILE,
         # Plain-lookup scalar Filter families, each enumerated by class (they share
         # only ``Filter`` as a base, which must never be a key). A scalar key here is
         # also the audited scalar base the dynamic-CSV validator accepts as the SECOND
@@ -2893,7 +2974,11 @@ class FilterSet(
             for field_name in list(fields):
                 if fields[field_name] == "__all__":
                     model_field = get_model_field(model, field_name)
-                    lookups = _lookups_for_field(model_field)
+                    lookups = _lookups_for_field(
+                        model_field,
+                        package_default=cls._origin_for_selection_class(type(model_field))
+                        == "framework_default",
+                    )
                     if cls._is_own_pk_under_relay_owner(model_field):
                         # A Relay node's own PK is a GlobalID over the wire, so
                         # only equality / membership / null are meaningful.
@@ -3260,6 +3345,18 @@ class FilterSet(
         # its ``extra`` provider -- a restricted relation queryset, a ``to_field_name``,
         # requiredness), so an ``extra``-only override is caught, not just a
         # ``filter_class`` change.
+        return cls._origin_for_selection_class(selection_cls)
+
+    @classmethod
+    def _origin_for_selection_class(cls, selection_cls: type[ModelField]) -> FilterOrigin:
+        """Return the origin of the filter django-filter selects for ``selection_cls``.
+
+        Step 3 of ``_generation_origin_for_field``, for a caller that already holds the
+        resolved field (``filter_for_lookup`` receives the output field django-filter
+        resolved): ``framework_default`` when the merged ``FILTER_DEFAULTS`` plus
+        ``Meta.filter_overrides`` selection equals the package baseline by normalized
+        value, ``override_generated`` otherwise.
+        """
         # ``_entry_by_mro`` is ``try_dbfield``'s walk: each read is one of its mapping's values.
         selected_entry = _entry_by_mro(cls._merged_filter_defaults(), selection_cls)
         selected_norm = _normalize_policy_entry(selected_entry)
@@ -3446,7 +3543,11 @@ class FilterSet(
 
         Non-relation fields defer to the upstream pair-return shape unless
         the field is the owner's own PK and the owner is Relay-Node-shaped
-        (own-PK branch per spec-027 Decision 4), the lookup is a choice
+        (own-PK branch per spec-027 Decision 4), the lookup is a text-pattern
+        lookup (``iexact`` / ``contains`` / ``startswith`` / ``regex`` / ...) on a
+        non-text column with the framework's default filter (``CharFilter``: the
+        operand is a string matched against the column's text rendering, as
+        Django's ORM compares it), the lookup is a choice
         column's ``exact`` (``EnumChoiceFilter``) or another single-value lookup
         on a text choice column (``EnumLookupFilter``), where every member of the
         column's choice enum is a value (``BLANK`` is ``""`` on each lookup; a
@@ -3523,6 +3624,21 @@ class FilterSet(
                 "only 'exact', 'in', and 'isnull'. Remove it from Meta.fields.",
             )
         if not field.is_relation:
+            if (
+                default_class is not None
+                and isinstance(field, models.Field)
+                and _is_text_pattern_on_non_text(field, lookup_type)
+                and cls._origin_for_selection_class(type(field)) == "framework_default"
+            ):
+                # A text-pattern lookup matches the column's text rendering against a string
+                # pattern (``_TEXT_PATTERN_LOOKUPS``), so on a date, number, Boolean or UUID
+                # column its operand is a string: ``TextPatternFilter`` (a ``CharFilter``)
+                # cleans it as one, and the input types it ``String``, where the
+                # column's own filter would clean a full value and bind it typed. A
+                # consumer-selected filter (``Meta.filter_overrides``) is returned unchanged,
+                # and a column with no default filter (a ``FileField``, a ``JSONField``) keeps
+                # django-filter's unrecognized-field contract.
+                return TextPatternFilter, params
             if lookup_type == "exact" and default_class is ChoiceFilter:
                 # The ``exact`` input is the column's generated enum, so every member it
                 # carries is a value -- ``BLANK`` (``""``) included, never django-filter's
