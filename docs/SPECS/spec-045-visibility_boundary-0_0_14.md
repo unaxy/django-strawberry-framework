@@ -632,8 +632,10 @@ container. What it shares is:
   relation descriptors, which are the queried model's own definitions rather than
   state the hook injected, and whose rebuild would detach the compiler from the
   model's own descriptors;
-- a `models.Model` instance in bound-value position, which IS the bound value and
-  from which Django's own code extracts a pk.
+- a `models.Model` instance in bound-value position, which IS the bound value: in a
+  lookup, Django's own code extracts its pk; in a raw-SQL parameter, it reaches the
+  driver as is, which binds it only where the project registered an adapter for it,
+  as in plain Django.
 
 Every other bound payload — a direct `Lookup` right-hand side, an expression's own
 payload slot (`Value.value`), a raw-SQL parameter, a mapping key — goes through the one

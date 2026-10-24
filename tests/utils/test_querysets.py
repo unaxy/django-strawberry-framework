@@ -7776,6 +7776,66 @@ def test_member_term_seals_to_the_exact_text_of_every_slot(shape: str, kind: str
         assert str(sealed.query) == str(_MEMBER_TERM_SHAPES[shape]("text").query)
 
 
+def _extra_select_params(query: SqlQuery) -> object:
+    """The params of ``query``'s ``later`` ``extra(select=...)`` payload."""
+    extra: dict[str, tuple[str, object]] = query.extra
+    return extra["later"][1]
+
+
+def _raw_sql_annotation_params(query: SqlQuery) -> object:
+    """The params of ``query``'s ``later`` ``RawSQL`` annotation."""
+    return read_attr(query.annotations["later"], "params")
+
+
+#: Every raw-SQL parameter slot, as a builder binding one value there and a reader of
+#: that slot's params on a query.
+_RAW_PARAM_SLOTS: dict[
+    str,
+    tuple[Callable[[object], models.QuerySet[Book, object]], Callable[[SqlQuery], object]],
+] = {
+    "extra-where-params": (
+        lambda value: Book.objects.extra(where=["library_book.shelf_id = %s"], params=[value]),
+        lambda query: _extra_where_lists(query)[1],
+    ),
+    "extra-select-params": (
+        lambda value: Book.objects.extra(
+            select={"later": "library_book.shelf_id = %s"},
+            select_params=[value],
+        ),
+        _extra_select_params,
+    ),
+    "raw-sql-params": (
+        lambda value: Book.objects.annotate(
+            later=RawSQL("library_book.shelf_id = %s", [value]),
+        ),
+        _raw_sql_annotation_params,
+    ),
+}
+
+
+@pytest.mark.parametrize("slot", list(_RAW_PARAM_SLOTS))
+def test_raw_sql_parameter_model_instance_is_retained_by_reference(slot: str) -> None:
+    """A model instance in a raw-SQL parameter passes the seal and is retained as itself.
+
+    The seal admits a raw parameter by plain-data ancestry, and ``models.Model`` is a
+    plain-data base, so the instance passes; canonical reconstruction retains a model
+    instance as trusted schema, so the sealed query binds the very object the candidate
+    carried. Whether the database driver can bind it is the driver's question, as in
+    plain Django.
+    """
+    branch = Branch(name="raw-param-carrier")
+    build, params_of = _RAW_PARAM_SLOTS[slot]
+    candidate = build(branch)
+    sealed, defect = _seal_or_defect(candidate, Book, None)
+
+    assert defect is None
+    assert sealed is not None
+    sealed_params = params_of(sealed.query)
+    assert is_list_or_tuple(sealed_params)
+    assert len(sealed_params) == 1
+    assert sealed_params[0] is branch
+
+
 _member_table_apps = Apps([])
 
 

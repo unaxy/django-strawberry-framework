@@ -1089,8 +1089,10 @@ def _type_is_genuinely_django(node_type: type[object]) -> bool:
 # Inert query-parameter leaf types: a bound value the compiler renders as ``%s`` with
 # the value as a parameter, never dispatching an ``as_sql`` / ``resolve_expression``
 # the seal would have to trust. These terminate the genuineness walk. A model
-# instance is handled separately (only legal as a deferred-filter value, where Django
-# extracts its pk to a bound parameter -- ``related_descriptors.py`` ``core_filters``).
+# instance is not inert. It is admitted as a direct lookup value and as a raw-SQL
+# parameter by plain-data ancestry (``_DIRECT_RHS_DATA_BASES``), and as a deferred-filter
+# value when it carries no ``resolve_expression`` (``_deferred_value_defect``);
+# reconstruction retains it by reference as trusted schema (``_normalized_bound_value``).
 # Membership is tested by EXACT type, never ``isinstance``: a ``str`` / ``int`` /
 # ``datetime`` SUBCLASS can define ``resolve_expression`` (or an ``as_sql``) and would
 # then be dispatched by ``add_q`` / the compiler, so a subclass is NOT inert and must
@@ -1298,7 +1300,7 @@ def _node_metadata_defect(node: object, label: str) -> tuple[str, str] | None:
 
 
 def _raw_sql_params_defect(params: object, label: str) -> tuple[str, str] | None:
-    """Return a defect unless raw-SQL parameters are an exact sequence of bindable leaves.
+    """Return a defect unless raw-SQL parameters are an exact sequence of plain-data leaves.
 
     Django passes ``RawSQL.params``, ``ExtraWhere.params`` and an ``extra(select=...)``
     payload's params straight to the database adapter. A container subclass can dispatch
@@ -1308,7 +1310,11 @@ def _raw_sql_params_defect(params: object, label: str) -> tuple[str, str] | None
     direct lookup value meets (``_plain_data_leaf_defect``): a ``TextChoices`` / ``StrEnum``
     member or a ``Decimal`` / date subclass binds here exactly as it does in a lookup,
     and canonical reconstruction rebinds it as its exact inert value
-    (``_normalized_bound_value``). A container inside the params stays refused.
+    (``_normalized_bound_value``). A container inside the params stays refused. The rule
+    reads type ancestry only; whether the driver can bind an admitted leaf stays Django's
+    and the driver's question, so a model instance, which reconstruction retains by
+    reference, binds only where the project registered a driver adapter for it, as in
+    plain Django.
     """
     if not is_exact_list_or_tuple(params):
         return ("untrusted", f"{label} params is a {truth.kind(params)}")
@@ -1685,12 +1691,13 @@ def _direct_rhs_defect(value: object, walk: _GraphWalk, label: str) -> tuple[str
     reads run consumer code, fails closed. Every check is type-level, so no hook on the
     value is invoked while deciding.
 
-    Admission here is not retention: a permitted SUBCLASS instance never reaches the
+    Admission here is not retention: a permitted scalar-base SUBCLASS instance (a
+    ``TextChoices`` member, a ``Decimal`` / ``UUID`` / date subclass) never reaches the
     sealed query by reference, because Django and the database adapter invoke ordinary
     methods on a bound parameter that no hook scan can enumerate. Canonical
-    reconstruction replaces each admitted plain-data subclass with an exact inert value
-    (``_normalized_bound_value``), so this rule decides only what MAY be bound, not which
-    object is.
+    reconstruction replaces each such instance with an exact inert value and retains a
+    model instance as trusted schema (``_normalized_bound_value``), so this rule decides
+    only what MAY be bound, not which object is.
     """
     if _is_inert_value(value):
         return None
@@ -2082,10 +2089,11 @@ _RETAINED_LEAF_TYPES: truth.IdentitySet[type[object]] = truth.IdentitySet(
 # which rebuilding would detach from the model's descriptors), ``ForeignObjectRel``
 # relation descriptors (the reverse side of those same fields -- a ``Join.join_field``
 # over a reverse relation, whose state legitimately carries the model's own ``on_delete``
-# / ``limit_choices_to`` callables), and ``models.Model`` instances (a bound foreign-key
-# value Django's own code extracts a pk from). One tuple so the rebuild-versus-retain
-# policy (``_is_reconstructable_node``) and the bound-value rule
-# (``_normalized_bound_value``) decide "trusted schema" identically and cannot drift.
+# / ``limit_choices_to`` callables), and ``models.Model`` instances (a bound value: in a
+# lookup Django's own code extracts its pk; in a raw-SQL parameter it reaches the driver
+# as is). One tuple so the rebuild-versus-retain policy (``_is_reconstructable_node``)
+# and the bound-value rule (``_normalized_bound_value``) decide "trusted schema"
+# identically and cannot drift.
 _RETAINED_SCHEMA_BASES: tuple[type[object], ...] = (
     type,
     models.Field,
@@ -2143,7 +2151,8 @@ def _is_reconstructable_node(node_type: type[object]) -> bool:
       carries the model's own callables (``on_delete``), which are schema, not a bound
       payload;
     - a ``models.Model`` instance in an expression slot is a BOUND PARAMETER (Django
-      extracts its pk), inert with respect to SQL structure.
+      extracts a lookup's pk from it; a raw-SQL parameter reaches the driver as is),
+      inert with respect to SQL structure.
 
     Anything whose type is NOT genuine Django is likewise not rebuilt as a node: the only
     such objects the proofs admit are direct lookup right-hand-side values -- plain query
@@ -2279,7 +2288,8 @@ def _normalized_uuid(value: uuid.UUID) -> uuid.UUID:
 # of it, and the scalar bases precede the ``enum.Enum`` fallback so a ``TextChoices`` /
 # ``IntegerChoices`` member (a ``str`` / ``int`` SUBCLASS) normalizes straight to its
 # underlying exact scalar. ``bool`` is absent because it cannot be subclassed, and
-# ``models.Model`` is absent because a model instance IS the bound foreign-key value.
+# ``models.Model`` is absent because a model instance IS the bound value, retained as
+# trusted schema.
 # basedpyright: each normalizer takes its own pair's base, so no one Callable parameter type
 # admits them all (parameters are contravariant); the issubclass test is the pairing proof
 _BOUND_VALUE_NORMALIZERS: tuple[tuple[type[object], Callable[[Any], object]], ...] = (  # pyright: ignore[reportExplicitAny]
@@ -2319,7 +2329,7 @@ class _UntrustedBoundValueError(TypeError):
 
 
 def _normalized_bound_value(value: object) -> object:
-    """Return an EXACT inert replacement for a plain-data SUBCLASS bound value.
+    """Return an EXACT inert replacement for a plain-data SUBCLASS value; retain trusted schema.
 
     An admitted bound value is bound on plain-data ancestry rather than exact type,
     because real schemas bind ``TextChoices`` members and ``Decimal`` / ``UUID`` /
@@ -2337,9 +2347,10 @@ def _normalized_bound_value(value: object) -> object:
     An ``enum.Enum`` member with no scalar base is normalized to its underlying
     ``_value_``, read straight from the member's instance ``__dict__`` and normalized in
     turn. Trusted schema (``_RETAINED_SCHEMA_BASES``) is returned unchanged: a
-    ``models.Model`` instance in foreign-key position IS the bound value -- Django's own
-    code extracts its pk from a genuine-metaclass instance -- and a ``models.Field`` or a
-    class is the queried model's own definition, not state the hook injected.
+    ``models.Model`` instance IS the bound value -- in foreign-key position Django's own
+    code extracts its pk from a genuine-metaclass instance, and in a raw-SQL parameter it
+    reaches the driver as is -- and a ``models.Field`` or a class is the queried model's
+    own definition, not state the hook injected.
 
     Everything else FAILS CLOSED (spec-045 Decision 8): a bound payload that neither
     reduces to an exact inert value nor is trusted schema has no framework-owned
@@ -2572,8 +2583,9 @@ def _rebuild_query_payloads(query: object) -> None:
     -- it is normalized to an exact inert equivalent, because an ordinary overridden
     method on it (``__str__``, ``__int__``, an adapter hook) would otherwise run consumer
     code at compile time and could change the bound value after sealing. A model instance
-    in foreign-key position IS the bound value and is retained, its pk extracted by
-    Django's own code from a genuine-metaclass instance; ``models.Field`` instances and
+    IS the bound value and is retained: in foreign-key position Django's own code extracts
+    its pk from a genuine-metaclass instance, and in a raw-SQL parameter it reaches the
+    driver as is; ``models.Field`` instances and
     model classes are the trusted schema the boundary composes over, and rebuilding them
     would detach the compiler from the model's own descriptors. Any OTHER consumer
     payload -- an opaque object or a container subclass in an expression's own payload
