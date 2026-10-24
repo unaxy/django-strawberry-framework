@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 251 done, 174 to do.
+Progress: 252 done, 173 to do.
 
 ## Done
 
@@ -1159,6 +1159,10 @@ Progress: 251 done, 174 to do.
   or off and answers on the sync one; a `DjangoListField` / `DjangoConnectionField` `resolver=` returning one raises
   there in the package's own row iteration. Widening the arm to `RawQuerySet` is two lines, and graphql-core 3.3
   completes it async-first
+- [x] 583. not a defect: a hook's mapping keys are application Python (GOAL "Trust boundary") and no wire input
+  reaches them; `utils/truth.py::render` documents that a value outside the builtin scalars renders through its own
+  `__repr__`, which is what a lazy translation proxy's `'a'` is, and the refusal states the rule ("every key must be a
+  string") beside it, so no code
 
 ## Outside review of the fixes
 
@@ -1390,9 +1394,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   resolver"), `tests/mutations/test_resolvers.py` ("pre-fix"), and the "exactly as before" comment beside
   `utils/querysets.py::_prefetch_relation_target_or_none`; an rg of `tests/` for that vocabulary ("now", "no longer",
   "used to", "previously", "pre-fix", "old") gives about 120 hits to judge. Restate each as behaviour. Found fixing 324
-- [ ] 583. (robustness) `rest_framework/resolvers.py::_hook_mapping`'s non-string-key refusal renders a lazy
-  translation key (`gettext_lazy("a")`) as `'a'` in its offender list, which reads as a string; naming each offender's
-  kind (`truth.kind`) would say why it was refused. Same output before 408. Found verifying 408
 - [ ] 501. (robustness) `scripts/workspace.py::workspace_base` uses a fixed `$TMPDIR/dsf-ws` with no owner, symlink or
   mode check, the shared-name shape 330 removed from `prove_failability.py`: on a shared Linux `/tmp` (no `TMPDIR`) a
   second user's flows land in, or are refused by, the first user's directory, and a planted symlink is followed. Name
