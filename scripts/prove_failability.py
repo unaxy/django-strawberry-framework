@@ -32,14 +32,21 @@ Deliberate properties, each one a hand-run failure mode this encodes away:
   ``SIGHUP`` and ``SIGQUIT`` (Ctrl-C; ``kill``, ``timeout`` or a CI cancel; a
   closed terminal; Ctrl-backslash) never unwind from wherever they land. The
   handler records the signal and forwards it to the running scope, which runs in
-  a session of its own, so signalling its process group reaches ``uv``, pytest
-  and every xdist worker together and lets pytest tear down. A stop signal that
-  arrives at least ``STOP_REPEAT_GRACE`` (one second) after the first kills that
-  group outright; one inside that window is the same stop delivered twice
-  (``uv run`` forwards a Ctrl-C the terminal already sent to the whole
-  foreground group) and sends nothing. The run waits for the whole group, so
-  nothing is left reading the tree. The run stops where that scope returns:
-  before anything is mutated when the baseline was cut short, after the
+  a session of its own, so signalling its process group reaches pytest, every
+  xdist worker and whatever they started together, each exactly once. The
+  scope is pytest itself, started in the environment ``uv run`` resolves but
+  not under ``uv run`` (``scripts/_stop_signals.py::uv_run_launch``): uv
+  would sit in that group and hand pytest each stop a second time, ``SIGINT``
+  about 0.2 s later, and a second ``SIGINT`` aborts a teardown still running.
+  ``SIGINT`` starts pytest's teardown, which is allowed to finish; ``SIGTERM``,
+  ``SIGHUP`` and ``SIGQUIT`` end pytest without one, since pytest installs no
+  handler for them. A stop signal that arrives at least
+  ``STOP_REPEAT_GRACE`` (one second) after the first kills that group
+  outright; one inside that window is the same stop delivered twice (``uv
+  run`` forwards a Ctrl-C the terminal already sent to the whole foreground
+  group when it runs this script) and sends nothing. The run waits for the
+  whole group, so nothing is left reading the tree. The run stops where that
+  scope returns: before anything is mutated when the baseline was cut short, after the
   ``finally`` has restored and proved every file when the mutant run was. It
   writes no record, since the cut-short run measured nothing, and ends by that
   signal, as an unhandled one would, when the interpreter runs this script
@@ -248,7 +255,9 @@ at least one entry is weakly pinned, misses its declared ``expect_failing`` or
 exactly once, or the manifest is unusable, or ``--output`` was asked for without
 a baseline, or ``--workspace`` refused the root, or the scope's executable
 (``uv``) is not on ``PATH`` (refused before anything is mutated, run or written;
-``--check-anchors-only`` runs no scope and needs none), or another run holds this
+``--check-anchors-only`` runs no scope and needs none), or ``uv run`` cannot
+resolve the environment the scopes run in, or pytest is not in it (refused
+before anything is mutated or run), or another run holds this
 tree's lock, or a crashed run's marker is unresolved; ``3`` a restore could not
 be proved (the tree may still hold a mutation - read the marker files the run
 leaves in the tree's state directory; the partial report is still written to
@@ -320,18 +329,20 @@ RESTORE_FAILED_MARKER_NAME = "RESTORE-FAILED.json"
 # scope run returns, never mid-restore.
 STOP_SIGNALS = _stop_signals.STOP_SIGNALS
 # A repeat stop signal inside this many seconds of the first is the same stop delivered
-# twice, so only a later one escalates to ``SIGKILL``; inside the window pytest's teardown is
-# left to finish.
+# twice, so only a later one escalates to ``SIGKILL``; inside the window a teardown the first
+# ``SIGINT`` started is left to finish.
 STOP_REPEAT_GRACE = _stop_signals.STOP_REPEAT_GRACE
+# How each scope's environment is resolved: ``uv run`` syncs the project's environment and
+# reports it once per run; the scopes then run ``PYTEST_COMMAND`` in it directly
+# (``scripts/_stop_signals.py::uv_run_launch``), so no uv sits between this run and pytest.
+UV_RUN = ("uv", "run")
 # ``--no-cov`` is mandatory: pytest.ini's addopts turn coverage on, and coverage
 # gating belongs to the full-suite run, not to this tool. ``--color=no`` and
 # ``-p no:cacheprovider`` keep the captured output parseable and keep the run
 # from writing cache state into the repo. ``--tb=line`` puts each failing row's
 # crash line (``path:line: message``) in the raw log beside the probe's
-# per-row record of the same line.
+# per-row record of the same line. Its first word is looked up as ``uv run`` looks it up.
 PYTEST_COMMAND = (
-    "uv",
-    "run",
     "pytest",
     "--no-cov",
     "--color=no",
@@ -2027,13 +2038,38 @@ class _StopRequest:
 _STOP = _StopRequest()
 
 
+@dataclass
+class _ScopeLaunch:
+    """The program and environment every scope of the running :func:`main` starts with."""
+
+    command: tuple[str, ...] = ()
+    environment: dict[str, str] | None = None
+
+
+_LAUNCH = _ScopeLaunch()
+
+
+def _resolve_scope_launch() -> tuple[tuple[str, ...], dict[str, str]]:
+    """Return ``PYTEST_COMMAND`` and its environment as ``uv run`` in the root would start them.
+
+    Raises:
+        _stop_signals.LaunchError: ``uv run`` could not resolve the environment, or pytest is
+            not in it.
+
+    """
+    command, environment = _stop_signals.uv_run_launch(UV_RUN, PYTEST_COMMAND, cwd=REPO_ROOT)
+    return tuple(command), environment
+
+
 def _request_stop(signum: int, _frame: FrameType | None) -> None:
     """Signal handler: record the stop and signal the running scope's process group; never raise.
 
     Raising here would unwind from whatever bytecode the signal lands on,
     including the middle of a restore. The scope runs in its own session, so
-    the first stop is forwarded to its whole group as received, which lets
-    pytest tear down. A repeat stop at least :data:`STOP_REPEAT_GRACE`
+    the first stop is forwarded to its whole group as received; no uv is in
+    that group to deliver it a second time, so a ``SIGINT`` lets pytest tear
+    down, while ``SIGTERM``, ``SIGHUP`` and ``SIGQUIT`` end it without a
+    teardown. A repeat stop at least :data:`STOP_REPEAT_GRACE`
     seconds after the first sends ``SIGKILL`` for a scope that will not end;
     one inside that window is the first delivered twice and sends nothing.
     The run waits for the group either way, so nothing is left reading the
@@ -2084,22 +2120,29 @@ def _run_scope(entry: ProofEntry, capture: RunCapture | None = None) -> RunOutco
     and its raw stdout and stderr are kept at ``capture.log_path``, headed by the
     exact argv and the environment additions.
 
-    The scope runs in a session of its own, so a stop signal reaches it only
-    through :func:`_request_stop`, which forwards it to the whole group; a
-    scope started after a stop is sent that signal as soon as it is recorded.
+    The scope is ``PYTEST_COMMAND`` in the environment :func:`main` resolved
+    for its run (resolved here when called outside one). It runs in a session
+    of its own, so a stop signal reaches it only through
+    :func:`_request_stop`, which forwards it to the whole group; a scope
+    started after a stop is sent that signal as soon as it is recorded.
     Either way this raises :class:`RunInterruptedError` instead of returning:
     a cut-short run measured nothing.
     """
-    command = [*PYTEST_COMMAND, *entry.scope]
+    launch, resolved = (
+        (_LAUNCH.command, _LAUNCH.environment)
+        if _LAUNCH.environment is not None
+        else _resolve_scope_launch()
+    )
+    command = [*launch, *entry.scope]
     additions: dict[str, str] = {}
     if capture is not None:
         command = [
-            *PYTEST_COMMAND,
+            *launch,
             "-p",
             PROBE_MODULE_NAME,
             *entry.scope,
         ]
-        inherited = os.environ.get("PYTHONPATH")
+        inherited = resolved.get("PYTHONPATH")
         python_path = str(capture.probe_directory)
         if inherited:
             python_path += os.pathsep + inherited
@@ -2108,7 +2151,7 @@ def _run_scope(entry: ProofEntry, capture: RunCapture | None = None) -> RunOutco
             PROBE_OUTPUT_ENV: str(capture.probe_output),
             PROBE_PACKAGE_ENV: PACKAGE_NAME,
         }
-    environment = None if capture is None else {**os.environ, **additions}
+    environment = {**resolved, **additions}
     started = time.monotonic()
     with subprocess.Popen(
         command,
@@ -3129,7 +3172,7 @@ def workspace_options_in(arguments: Sequence[str]) -> tuple[str, ...]:
 
 def _missing_scope_executable() -> str | None:
     """Return why no scope can run when its executable is not on ``PATH``, else ``None``."""
-    executable = PYTEST_COMMAND[0]
+    executable = UV_RUN[0]
     if shutil.which(executable) is not None:
         return None
     return (
@@ -3183,6 +3226,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             scratch_root_given=_given_scratch_root(raw_scratch_root),
         )
         with _stop_on_signals():
+            if not arguments.check_anchors_only:
+                try:
+                    _LAUNCH.command, _LAUNCH.environment = _resolve_scope_launch()
+                except _stop_signals.LaunchError as error:
+                    _raise_if_stopped()
+                    print(f"scope refused: {error}; nothing was mutated or run", file=sys.stderr)
+                    return 1
+                _raise_if_stopped()
             return _run_selected(
                 arguments,
                 selected,
@@ -3198,6 +3249,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 128 + stop.signum
     finally:
+        _LAUNCH.environment = None
         os.close(lock)
 
 

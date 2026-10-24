@@ -52,13 +52,16 @@ dies. The original single-anchor shape reads and grades exactly as it did.
 ``REPO_ROOT`` is monkeypatched to a ``tmp_path`` fake repo (as
 ``tests/test_clean_up.py`` does), ``XDG_STATE_HOME`` and the system temporary
 directory (``tempfile.tempdir`` and ``TMPDIR``) point into ``tmp_path``, and
-``_run_scope`` is stubbed or given a stand-in command for ``uv run pytest``, so
-no test here mutates a real file, writes under the home or temporary directory
-or spawns a real pytest.
+``_run_scope`` is stubbed or given a stand-in command for pytest, so no test
+here mutates a real file, writes under the home or temporary directory or spawns
+a real pytest. In process, a scope starts as ``PYTEST_COMMAND`` in this
+process's environment; a run in a child process resolves it through a stand-in
+``uv`` on ``PATH`` that, like uv, stays the parent of what it runs and forwards
+every stop signal it gets to it, ``SIGINT`` 0.2 s late.
 
 A stop signal (SIGINT, SIGTERM, SIGHUP, SIGQUIT) is delivered for real, by the kernel, to
 ``main`` running in a child process against the fake repo: the stand-in scope
-blocks with a grandchild of its own, as uv, pytest and an xdist worker do, so a
+blocks with a grandchild of its own, as pytest and an xdist worker do, so a
 row can see the restore, the exit code and every scope process ended. Sending
 the signal to the test process instead would end the worker itself whenever the
 handler under test was missing.
@@ -144,6 +147,24 @@ def system_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(tempfile, "tempdir", str(directory))
     monkeypatch.setenv("TMPDIR", str(directory))
     return directory
+
+
+_RESOLVE_SCOPE_LAUNCH = prove_failability._resolve_scope_launch
+
+
+@pytest.fixture(autouse=True)
+def scope_launch_in_this_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Start an in-process scope as ``PYTEST_COMMAND`` in this process's environment.
+
+    The real resolution runs ``uv run`` in the fake repo, which is no project; the rows that
+    prove it run ``main`` in a child process with a stand-in ``uv`` on ``PATH``, or put
+    ``_RESOLVE_SCOPE_LAUNCH`` back.
+    """
+    monkeypatch.setattr(
+        prove_failability,
+        "_resolve_scope_launch",
+        lambda: (tuple(prove_failability.PYTEST_COMMAND), dict(os.environ)),
+    )
 
 
 @pytest.fixture
@@ -596,6 +617,50 @@ def test_the_state_directory_named_for_a_root_is_the_one_a_run_against_it_uses(
     assert prove_failability.tree_state_directory(fake_repo) == state_directory
     assert state_directory.parent == state_home.resolve() / prove_failability.STATE_DIRECTORY_NAME
     assert prove_failability.tree_state_directory(tmp_path / "repo-b") != state_directory
+
+
+@pytest.mark.usefixtures("fake_repo")
+@pytest.mark.parametrize(
+    ("uv_source", "reason"),
+    [
+        (
+            "import sys; sys.stderr.write('the lockfile needs to be updated\\n'); sys.exit(2)",
+            "uv run found no environment (2): the lockfile needs to be updated",
+        ),
+        (
+            "import sys; sys.stdout.write('PATH=' + sys.argv[0] + '-bin' + chr(0))",
+            "pytest is not on the PATH uv run gives its command",
+        ),
+    ],
+    ids=["no-environment", "no-pytest"],
+)
+def test_a_scope_launch_uv_run_cannot_resolve_is_refused_before_anything_is_mutated(
+    uv_source: str,
+    reason: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(prove_failability, "_resolve_scope_launch", _RESOLVE_SCOPE_LAUNCH)
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    uv = tools / "uv"
+    _ = uv.write_text(f"#!{sys.executable}\n{uv_source}\n", encoding="utf-8")
+    uv.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tools))
+    target = prove_failability.REPO_ROOT / "package" / "views.py"
+
+    code = prove_failability.main(
+        [str(_manifest(tmp_path)), "--scratch-root", str(tmp_path / "scratch")],
+    )
+
+    assert code == 1
+    assert capsys.readouterr().err.endswith(
+        f"scope refused: {reason}; nothing was mutated or run\n",
+    )
+    assert target.read_text(encoding="utf-8") == SOURCE
+    # No mutation was ever live, so the tree's state directory is not there.
+    assert not prove_failability._tree_state_directory().exists()
 
 
 @pytest.mark.usefixtures("fake_repo")
@@ -1946,7 +2011,7 @@ def test_the_table_prints_the_scope_as_a_runnable_command_not_a_bare_path(
         [prove_failability.execute_entry(entry, scratch_root)],
     )
 
-    assert entry.scope_as_run.startswith("uv run pytest --no-cov")
+    assert entry.scope_as_run.startswith("pytest --no-cov")
     assert entry.scope_as_run.endswith("tests/test_x.py")
     assert f"| `{entry.scope_as_run}` |" in report
 
@@ -2258,13 +2323,14 @@ STOP_SIGNALS = (
 )
 
 
-# Stands in for ``uv run pytest`` in a stop-signal run (``cwd`` is the fake repo): it
-# appends its phase to ``<P_READY>.started``; in the phase ``P_BLOCK`` names it starts a
-# grandchild, says so in ``P_READY`` and blocks until ``<P_READY>.release`` exists, the
-# shape of uv -> pytest -> xdist worker; in every other phase it passes at once. While it
-# blocks, ``P_ON_STOP=teardown`` makes a stop signal take half a second, write the signal's
-# name to ``<P_READY>.teardown`` and exit, as pytest's teardown does; ``P_ON_STOP=ignore`` makes it
-# and its grandchild ignore every stop signal.
+# Stands in for pytest in a stop-signal run (``cwd`` is the fake repo): it appends its phase
+# to ``<P_READY>.started``; in the phase ``P_BLOCK`` names it writes its parent's pid and its
+# ``argv[0]`` to ``<P_READY>.launched``, starts a grandchild, says so in ``P_READY`` and blocks
+# until ``<P_READY>.release`` exists, the shape of pytest -> xdist worker; in every other phase
+# it passes at once. While it blocks, ``P_ON_STOP=teardown`` makes a stop signal append its
+# name to ``<P_READY>.got``, take half a second, write the name to ``<P_READY>.teardown`` and
+# exit, as pytest's teardown does; ``P_ON_STOP=ignore`` makes it and its grandchild ignore
+# every stop signal.
 _SCOPE_STANDIN = """
 import os
 import signal
@@ -2281,6 +2347,8 @@ if phase == os.environ["P_BLOCK"]:
     stop_signals = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
 
     def teardown(signum, _frame):
+        with open(os.environ["P_READY"] + ".got", "a", encoding="utf-8") as got:
+            got.write(signal.Signals(signum).name + "\\n")
         time.sleep(0.5)
         Path(os.environ["P_READY"] + ".teardown").write_text(signal.Signals(signum).name)
         sys.exit(1)
@@ -2290,6 +2358,7 @@ if phase == os.environ["P_BLOCK"]:
             signal.signal(stop_signal, teardown)
         if os.environ["P_ON_STOP"] == "ignore":
             signal.signal(stop_signal, signal.SIG_IGN)
+    Path(os.environ["P_READY"] + ".launched").write_text(f"{os.getppid()} {sys.argv[0]}")
     child = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(30)"],
         stdout=subprocess.DEVNULL,
@@ -2306,7 +2375,8 @@ print("1 passed in 0.01s")
 """
 
 # Runs ``main`` in a process of its own, as the CLI does, against the fake repo and the
-# stand-in scope. ``restore`` signals the process itself twice inside every restore;
+# stand-in scope (``P_SCOPE``; empty keeps ``PYTEST_COMMAND``, so the stand-in ``uv`` finds
+# ``pytest`` in ``P_VENV``). ``restore`` signals the process itself twice inside every restore;
 # ``starting`` signals it as each scope process starts, before the run has recorded it;
 # ``cli`` runs it through ``_cli``, the script's entry point, instead of ``main``.
 _SIGNALLED_RUN = """
@@ -2320,7 +2390,8 @@ from scripts import prove_failability
 repo, manifest, scratch, mode = sys.argv[1:5]
 signum = int(os.environ["P_SIGNUM"])
 prove_failability.REPO_ROOT = Path(repo)
-prove_failability.PYTEST_COMMAND = (sys.executable, "-c", os.environ["P_SCOPE"])
+if os.environ["P_SCOPE"]:
+    prove_failability.PYTEST_COMMAND = (sys.executable, "-c", os.environ["P_SCOPE"])
 if mode == "restore":
     restore = prove_failability._restore_and_prove
 
@@ -2336,7 +2407,8 @@ if mode == "starting":
     class SignalledPopen(subprocess.Popen):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
-            os.kill(os.getpid(), signum)
+            if kwargs.get("start_new_session"):
+                os.kill(os.getpid(), signum)
 
     subprocess.Popen = SignalledPopen
 arguments = [manifest, "--scratch-root", scratch]
@@ -2344,6 +2416,44 @@ if mode == "cli":
     sys.argv = ["prove_failability.py", *arguments]
     prove_failability._cli()
 raise SystemExit(prove_failability.main(arguments))
+"""
+
+# Stands in for ``uv`` on ``PATH``: ``uv run [options] [--] <command>`` runs ``<command>``,
+# looked up on a ``PATH`` led by ``<P_VENV>/bin``, with ``VIRTUAL_ENV`` set to ``P_VENV``, as a
+# child it waits for, and exits with its code. Like uv it forwards every stop signal it gets to
+# that child, ``SIGINT`` after 0.2 s and the others at once.
+_UV_STANDIN = """
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+
+arguments = sys.argv[2:]
+command = arguments[arguments.index("--") + 1 :] if "--" in arguments else arguments
+venv = os.environ["P_VENV"]
+env = {
+    **os.environ,
+    "VIRTUAL_ENV": venv,
+    "PATH": os.path.join(venv, "bin") + os.pathsep + os.environ["PATH"],
+}
+program = shutil.which(command[0], path=env["PATH"]) or command[0]
+child = subprocess.Popen([program, *command[1:]], env=env)
+
+
+def forward(signum, _frame):
+    def send():
+        if child.poll() is None:
+            child.send_signal(signum)
+
+    threading.Timer(0.2 if signum == signal.SIGINT else 0.0, send).start()
+
+
+for stop_signal in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT):
+    signal.signal(stop_signal, forward)
+code = child.wait()
+sys.exit(128 - code if code < 0 else code)
 """
 
 # Sets ``P_SIGNUM`` to ``SIG_IGN`` and execs the rest of its argv under a fresh interpreter,
@@ -2368,18 +2478,32 @@ def _signalled_run(
     block: str = "none",
     ignored: bool = False,
     on_stop: str = "",
+    through_path: bool = False,
 ) -> "subprocess.Popen[str]":
     """Start ``main`` in a child process whose scope is ``_SCOPE_STANDIN``.
 
-    ``ignored`` starts it the way ``nohup`` or a background job does: ``signum`` is
-    already ``SIG_IGN`` when the run's interpreter starts, inherited across ``exec``.
+    ``_UV_STANDIN`` is the ``uv`` on its ``PATH``. ``ignored`` starts it the way ``nohup`` or
+    a background job does: ``signum`` is already ``SIG_IGN`` when the run's interpreter
+    starts, inherited across ``exec``. ``through_path`` keeps ``PYTEST_COMMAND``, so the
+    scope is ``_SCOPE_STANDIN`` installed as ``<tmp_path>/venv/bin/pytest``.
     """
+    tools = tmp_path / "tools"
+    tools.mkdir(exist_ok=True)
+    uv = tools / "uv"
+    _ = uv.write_text(f"#!{sys.executable}\n{_UV_STANDIN}", encoding="utf-8")
+    uv.chmod(0o755)
+    venv_pytest = tmp_path / "venv" / "bin" / "pytest"
+    venv_pytest.parent.mkdir(parents=True, exist_ok=True)
+    _ = venv_pytest.write_text(f"#!{sys.executable}\n{_SCOPE_STANDIN}", encoding="utf-8")
+    venv_pytest.chmod(0o755)
     environment = {
         **os.environ,
+        "PATH": str(tools) + os.pathsep + os.environ["PATH"],
         "PYTHONPATH": str(Path(prove_failability.__file__).resolve().parents[1]),
         # ``int`` first: on Python 3.10 ``str`` of a ``Signals`` member is ``Signals.SIGTERM``.
         "P_SIGNUM": str(int(signum)),
-        "P_SCOPE": _SCOPE_STANDIN,
+        "P_SCOPE": "" if through_path else _SCOPE_STANDIN,
+        "P_VENV": str(venv_pytest.parents[1]),
         "P_BLOCK": block,
         "P_ON_STOP": on_stop,
         "P_READY": str(tmp_path / "ready"),
@@ -2587,6 +2711,43 @@ def test_the_first_stop_signal_is_forwarded_to_the_scope_so_pytest_can_tear_down
             _stop_run(driver, tmp_path)
 
     assert (tmp_path / "ready.teardown").read_text(encoding="utf-8") == signum.name
+    assert driver.returncode == 128 + signum
+    assert f"stopped by {signum.name}" in error
+    assert (fake_repo / "package" / "views.py").read_text(encoding="utf-8") == SOURCE
+
+
+@pytest.mark.parametrize("signum", STOP_SIGNALS, ids=[signum.name for signum in STOP_SIGNALS])
+def test_the_scope_is_pytest_itself_so_its_teardown_gets_the_first_stop_once(
+    fake_repo: Path,
+    tmp_path: Path,
+    signum: signal.Signals,
+) -> None:
+    # ``uv run`` stays the parent of what it runs and forwards every stop it gets, so a scope
+    # started under it would get the group's stop and then uv's copy, SIGINT 0.2 s later,
+    # inside a teardown that takes half a second. The scope is the ``pytest`` the stand-in
+    # ``uv`` puts on ``PATH``, started by the run itself, so the teardown gets one stop and
+    # finishes.
+    with _signalled_run(
+        fake_repo,
+        tmp_path,
+        _manifest(tmp_path),
+        signum,
+        block="mutant",
+        on_stop="teardown",
+        through_path=True,
+    ) as driver:
+        try:
+            assert _poll(lambda: bool(_scope_pids(tmp_path)))
+            os.kill(driver.pid, signum)
+            _, error = driver.communicate(timeout=10)
+        finally:
+            _stop_run(driver, tmp_path)
+
+    assert (tmp_path / "ready.got").read_text(encoding="utf-8").split() == [signum.name]
+    assert (tmp_path / "ready.teardown").read_text(encoding="utf-8") == signum.name
+    # The scope is the environment's ``pytest``, and the run itself is its parent.
+    launched = (tmp_path / "ready.launched").read_text(encoding="utf-8")
+    assert launched == f"{driver.pid} {tmp_path / 'venv' / 'bin' / 'pytest'}"
     assert driver.returncode == 128 + signum
     assert f"stopped by {signum.name}" in error
     assert (fake_repo / "package" / "views.py").read_text(encoding="utf-8") == SOURCE
