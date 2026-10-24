@@ -46,6 +46,12 @@ published by a per-field ``"__all__"`` only on a text column (``label``).
 ``unsigned_big``: each such leaf is a ``String`` the backend matches against its text
 rendering of the column, beside the column-typed ``exact``.
 
+``signed_big_span`` / ``unsigned_big_span`` and ``signed_big_among`` / ``unsigned_big_among``
+on ``ScalarSpecimenFilter`` are the same declared ``RangeFilter`` (``range``) and ``ListFilter``
+(``in``) over the two ``BigInt`` columns: the acceptance surface for an integer bound or
+element past the column's 64-bit range, which answers as the generated ``signedBig: { range }``
+/ ``{ in }`` answer it (widening or matching nothing), never a backend overflow.
+
 ``price_between``, ``occurred_between`` and ``occurred_in_boxes`` on ``ScalarSpecimenFilter``
 are django-filter's own range filters (``RangeFilter`` over ``price``,
 ``DateFromToRangeFilter`` over ``occurred_on``, and the same date filter over a plain
@@ -92,6 +98,10 @@ class ScalarSpecimenFilter(FilterSet):
     tag = RelatedFilter(ScalarSpecimenTagFilter, field_name="tag")
     price_span = RangeFilter(field_name="price", lookup_expr="range")
     price_among = ListFilter(field_name="price", lookup_expr="in")
+    signed_big_span = RangeFilter(field_name="signed_big", lookup_expr="range")
+    unsigned_big_span = RangeFilter(field_name="unsigned_big", lookup_expr="range")
+    signed_big_among = ListFilter(field_name="signed_big", lookup_expr="in")
+    unsigned_big_among = ListFilter(field_name="unsigned_big", lookup_expr="in")
     price_between = django_filters.RangeFilter(field_name="price")
     occurred_between = django_filters.DateFromToRangeFilter(field_name="occurred_on")
     occurred_in_boxes = django_filters.DateFromToRangeFilter(

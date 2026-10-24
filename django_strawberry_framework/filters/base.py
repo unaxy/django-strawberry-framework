@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple, TypeVar, cast, final
 
 from django.core.exceptions import ValidationError
-from django.db import models
+from django.db import connections, models
 from django.db.models.options import Options
 from django.forms import (
     CharField,
@@ -899,10 +899,15 @@ class RangeField(Field):
 class RangeFilter(_ColumnCleanedFilter):
     """Filter that consumes a two-element list via `RangeField`.
 
-    Both bounds apply the declared lookup (``lookup_expr="range"`` compiles to ``BETWEEN``). A
-    range with one bound left out or ``null`` applies that lone bound: a start alone as
-    ``<field>__gte``, an end alone as ``<field>__lte`` (django-filter's ``RangeFilter`` reads a
-    one-sided range the same way). A range with neither bound constrains nothing.
+    Both bounds apply the declared lookup (``lookup_expr="range"`` compiles to ``BETWEEN``),
+    except over an integer column, where a ``range`` applies them as ``<field>__gte`` and
+    ``<field>__lte`` in one predicate, as the generated ``range`` does
+    (``IntegerRangeFilter``): Django's range-aware integer lookups read a bound past the
+    column's range as widening or matching nothing, where ``BETWEEN`` would bind it raw and
+    overflow the backend. A range with one bound left out or ``null`` applies that lone
+    bound: a start alone as ``<field>__gte``, an end alone as ``<field>__lte``
+    (django-filter's ``RangeFilter`` reads a one-sided range the same way). A range with
+    neither bound constrains nothing.
 
     Each bound is cleaned by the form field of the column's own ``gte`` filter
     (``_column_form_field``), so a bound the column cannot hold (a non-finite decimal, a
@@ -921,12 +926,15 @@ class RangeFilter(_ColumnCleanedFilter):
 
     @override
     def filter(self, qs: models.QuerySet[_M], value: object) -> models.QuerySet[_M]:
-        """Apply a one-sided range as its lone bound; a two-bound range keeps the declared lookup.
+        """Apply a one-sided range as its lone bound, an integer range as ``gte`` + ``lte``.
 
         A range input with one bound left out (or ``null``) reaches here as ``[start, None]`` /
         ``[None, end]``. The declared ``range`` lookup would compile it to ``BETWEEN x AND NULL``,
         which matches no row, so the lone bound applies on its own through `_apply_lookups`
-        (``distinct`` and ``exclude`` honoured). ``[None, None]`` returns ``qs`` unchanged.
+        (``distinct`` and ``exclude`` honoured). ``[None, None]`` returns ``qs`` unchanged. Two
+        bounds of a ``range`` over an integer column apply as ``gte`` + ``lte`` in one
+        predicate (``IntegerRangeFilter.filter``), so a bound past the column's range never
+        reaches the backend; any other two-bound range keeps the declared lookup.
         """
         if not (is_list_or_tuple(value) and len(value) == _RANGE_BOUNDS):
             return super().filter(qs, value)
@@ -937,7 +945,48 @@ class RangeFilter(_ColumnCleanedFilter):
             return _apply_lookups(self, qs, {f"{self.field_name}__gte": start})
         if start is None:
             return _apply_lookups(self, qs, {f"{self.field_name}__lte": end})
+        if self.lookup_expr == "range" and isinstance(
+            _bound_model_field(self),
+            models.IntegerField,
+        ):
+            lookups = {f"{self.field_name}__gte": start, f"{self.field_name}__lte": end}
+            return _apply_lookups(self, qs, lookups)
         return super().filter(qs, value)
+
+
+def _backend_storable_int_members(
+    model_field: models.IntegerField[object, object],
+    members: list[object],
+    alias: str,
+) -> list[object]:
+    """Return the members ``model_field`` converts to an integer inside its backend range.
+
+    The range is the one the database ``alias`` stores for the column's internal type
+    (``DatabaseOperations.integer_field_range``), the range Django's integer comparison
+    lookups test a bound against before binding it. A member ``to_python`` refuses, or
+    one outside that range, identifies no row and is dropped; the column's own validators
+    are not run, since a row holding a value they would refuse can still be stored.
+    """
+    bounds = connections[alias].ops.integer_field_range(model_field.get_internal_type())
+    kept: list[object] = []
+    for member in members:
+        try:
+            number = object_result(model_field.to_python, member)
+        except ValidationError:
+            continue
+        if isinstance(number, int) and _within_integer_range(number, bounds):
+            kept.append(number)
+    return kept
+
+
+def _within_integer_range(number: int, bounds: tuple[int | None, int | None]) -> bool:
+    """Whether ``number`` lies inside ``bounds``, either end of which a backend may leave open.
+
+    ``None`` at an end is no limit there, as Django's range-aware integer lookups read it
+    (``django.db.models.lookups.IntegerFieldOverflow``).
+    """
+    low, high = bounds
+    return (low is None or number >= low) and (high is None or number <= high)
 
 
 class ListFilterMethod(_EmptyListAwareFilterMethod):
@@ -955,6 +1004,11 @@ class ListFilter(_ElementCleanedFilter):
     its members, so an element the column cannot hold is a form error rather than a
     value handed to the ORM, a text element is stripped and a naive datetime element
     made aware; an element off a choice column's choices is a value like any other.
+    Over an integer column, an ``in`` drops each element outside the column's integer
+    range on the queryset's database: it can identify no row, and bound raw it would
+    overflow the backend. A list whose every element drops matches nothing (every row
+    when excluding). The column's own validators are not applied, so an element they
+    would refuse still matches a row that holds it.
     """
 
     # basedpyright: typeshed declares ``Filter.method`` a plain attribute, not the property it is,
@@ -976,7 +1030,10 @@ class ListFilter(_ElementCleanedFilter):
         and a string value under an ``in`` lookup is never iterated
         char-by-char (``in: "26"`` compiling to ``IN ('2','6')``). Only the list/tuple
         shapes the form contract delivers are meaningful; everything else is
-        a coded reject.
+        a coded reject. An ``in`` over an integer column then keeps only the elements inside
+        the column's integer range on the queryset's database
+        (``_backend_storable_int_members``); a list with none left matches nothing, or every
+        row under ``exclude`` (``_match_none_queryset``).
         """
         if value is None:
             return super().filter(qs, value)
@@ -987,6 +1044,12 @@ class ListFilter(_ElementCleanedFilter):
         )
         if len(value) == 0:
             return _match_none_queryset(self, qs)
+        model_field = _bound_model_field(self) if self.lookup_expr == "in" else None
+        if isinstance(model_field, models.IntegerField):
+            kept = _backend_storable_int_members(model_field, value, qs.db)
+            if not kept:
+                return _match_none_queryset(self, qs)
+            return super().filter(qs, kept)
         return super().filter(qs, value)
 
 
