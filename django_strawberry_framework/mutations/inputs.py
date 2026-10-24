@@ -80,6 +80,7 @@ from django_strawberry_framework.utils.relations import (
     is_forward_many_to_many,
     is_many_side_relation_kind,
     is_model_class,
+    is_row_key_column,
     non_pk_relation_key_attname,
     relation_bool,
     relation_kind,
@@ -288,13 +289,15 @@ def editable_input_fields(
     Kept (in declaration order): concrete editable columns whose ``editable``
     flag is ``True`` and that are not the primary key, plus forward M2M fields,
     plus - on the ``CREATE`` ``operation_kind`` only - a client-assigned primary
-    key (``_client_assigned_primary_key``: a ``OneToOneField(primary_key=True)`` or a
-    text / integer key Django does not assign itself), the one way a create names its
+    key (``_client_assigned_primary_key``: a ``OneToOneField(primary_key=True)``, a
+    text / integer key Django does not assign itself, or each member column of a
+    ``CompositePrimaryKey``), the one way a create names its
     row; it is required exactly when ``input_field_required`` says so (a key with a
     ``default`` or a ``db_default`` is optional). Dropped: a primary key Django assigns itself (the auto
     ``AutoField`` reports ``editable=True``, so the ``primary_key`` flag - not
     ``editable`` - is what drops it; FK targets come via ``<field>_id``), every
-    primary key on the ``PARTIAL`` (update) input (the ``id`` argument names the
+    primary-key column on the ``PARTIAL`` (update) input, a composite key's members
+    included (``is_row_key_column``; the ``id`` argument names the
     row and an update never writes its key; naming it in ``fields`` raises the
     shared row-identity error of ``utils/inputs.py::resolve_effective_fields``, and
     naming it in ``exclude`` is accepted),
@@ -339,12 +342,13 @@ def editable_input_fields(
         # Concrete column-backed fields only (``hasattr(f, "column")`` is the
         # cookbook idiom); reverse FKs have no ``column``. Drop every
         # ``editable=False`` column (the ``auto_now`` / ``auto_now_add`` timestamps
-        # among them) and a pk Django assigns itself (``primary_key`` - the auto
-        # ``AutoField`` is ``editable=True``); a client-assigned pk stays in the
-        # basis for the row-identity rule below to keep (create) or drop (update).
+        # among them) and a pk Django assigns itself (``is_row_key_column`` - the auto
+        # ``AutoField`` is ``editable=True``); a client-assigned pk, each member of a
+        # composite one included, stays in the basis for the row-identity rule below
+        # to keep (create) or drop (update).
         if not is_concrete_field(field) or not getattr(field, "editable", False):
             continue
-        if not field.primary_key or _client_assigned_primary_key(field):
+        if not is_row_key_column(field) or _client_assigned_primary_key(field):
             selected.append(field)
 
     by_name = {field.name: field for field in selected}
@@ -352,7 +356,7 @@ def editable_input_fields(
     row_identity: frozenset[str] = (
         frozenset()
         if operation_kind == CREATE
-        else frozenset(name for name, column in by_name.items() if column.primary_key)
+        else frozenset(name for name, column in by_name.items() if is_row_key_column(column))
     )
     fields = normalize_field_name_sequence(fields, label="fields", flavor="DjangoMutation")
     exclude = normalize_field_name_sequence(exclude, label="exclude", flavor="DjangoMutation")

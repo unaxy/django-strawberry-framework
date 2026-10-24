@@ -82,7 +82,7 @@ from django_strawberry_framework.utils.inputs import (
     pascalize_token,
     resolve_effective_fields,
 )
-from django_strawberry_framework.utils.relations import written_model_field
+from django_strawberry_framework.utils.relations import is_row_key_column, written_model_field
 from django_strawberry_framework.utils.strings import graphql_camel_name
 from django_strawberry_framework.utils.typing import object_result
 
@@ -685,7 +685,8 @@ def _writes_primary_key(model: type[models.Model] | None, field: DRFField, name:
     ``source`` (else its declared ``name``) to, so every spelling of the key counts: the key's own
     name (``patron``, ``isbn_13``), its ``attname``, the ``pk`` alias, and a renamed field
     whose ``source`` names any of them. Under multi-table inheritance an inherited parent
-    key (``id`` on a child) is a primary key too. A source naming no concrete field, a
+    key (``id`` on a child) is a primary key too, and so is each member of a
+    ``CompositePrimaryKey`` (``utils/relations.py::is_row_key_column``). A source naming no concrete field, a
     dotted or ``"*"`` source, and a model-less serializer write no key. Neither does a
     nested serializer field, even one sourced on the key relation: its validated data is a
     nested mapping the consumer's own ``create()`` / ``update()`` writes (DRF refuses to
@@ -694,7 +695,7 @@ def _writes_primary_key(model: type[models.Model] | None, field: DRFField, name:
     if model is None or is_nested_serializer_field(field):
         return False
     target = written_model_field(model, field.source or name)
-    return target is not None and target.primary_key
+    return target is not None and is_row_key_column(target)
 
 
 def writable_serializer_fields(

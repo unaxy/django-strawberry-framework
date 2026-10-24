@@ -134,6 +134,7 @@ from tests._idioms import (
     saved_pk,
 )
 from tests._info import make_info, unread_info
+from tests._relation_fixtures import RpCompositeParent, relation_fixture_tables
 from tests.optimizer import _link_models
 
 if TYPE_CHECKING:
@@ -959,6 +960,152 @@ def test_located_row_update_fields_leaves_out_deferred_columns() -> None:
     deferred = library_models.LendingDesk.objects.only("name").get(pk=desk.pk)
 
     assert resolvers.located_row_update_fields(deferred) == ("name",)
+
+
+_COMPOSITE_UPDATE = (
+    "mutation($id: ID!, $d: RpCompositeParentPartialInput!){ updateComposite(id: $id, "
+    "data: $d){ errors{ field messages codes } } }"
+)
+
+
+def _composite_update_schema() -> strawberry.Schema:
+    """Return a schema whose ``updateComposite`` updates an ``RpCompositeParent`` row.
+
+    No fakeshop model has a composite key (the live tier cannot reach it), so the unmanaged
+    ``RpCompositeParent`` stands in; the ``id`` argument names the row as the JSON list
+    ``CompositePrimaryKey.to_python`` reads.
+    """
+    type(
+        "RpCompositeParentT",
+        (DjangoType,),
+        {
+            "Meta": type(
+                "Meta",
+                (),
+                {
+                    "model": RpCompositeParent,
+                    "fields": ("tenant_id", "code", "label"),
+                    "primary": True,
+                },
+            ),
+        },
+    )
+
+    class UpdateComposite(DjangoMutation):
+        class Meta:
+            model = RpCompositeParent
+            operation = "update"
+            permission_classes = [_AllowAll]
+
+    @strawberry.type
+    class Mutation:
+        update_composite = DjangoMutationField(UpdateComposite)
+
+    finalize_django_types()
+    return _schema(Mutation)
+
+
+def _composite_update_variables(member: str | None) -> dict[str, object]:
+    """Variables relabelling row ``(1, "X")``, re-keying it onto row ``(2, "Y")`` via ``member``."""
+    data: dict[str, object] = {"label": "NEW"}
+    if member is not None:
+        data[member] = {"tenantId": 2, "code": "Y"}[member]
+    return {"id": json.dumps([1, "X"]), "d": data}
+
+
+def _composite_member_refusal(member: str) -> str:
+    """The validation error a composite update naming key ``member`` answers."""
+    sent = _composite_update_variables(member)["d"]
+    return (
+        f"Variable '$d' got invalid value {sent!r}; "
+        f"Field '{member}' is not defined by type 'RpCompositeParentPartialInput'."
+    )
+
+
+_COMPOSITE_MEMBERS = pytest.mark.parametrize("member", ["tenantId", "code"])
+
+
+@pytest.mark.django_db(transaction=True)
+@_COMPOSITE_MEMBERS
+def test_update_over_a_composite_key_offers_no_key_member(member: str) -> None:
+    """An update over a ``CompositePrimaryKey`` model takes its non-key columns and no key member.
+
+    The key's member columns carry ``primary_key=False``, yet a write to one re-keys the
+    located row, so the generated update input leaves every member out: a document naming
+    one fails validation with both rows untouched, and the same update without it writes.
+    """
+    schema = _composite_update_schema()
+    with relation_fixture_tables(connection):
+        RpCompositeParent.objects.create(tenant_id=1, code="X", label="OLD")
+        RpCompositeParent.objects.create(tenant_id=2, code="Y", label="OTHER")
+
+        refused = schema.execute_sync(
+            _COMPOSITE_UPDATE,
+            variable_values=_composite_update_variables(member),
+        )
+        assert refused.data is None
+        assert [error.message for error in refused.errors or ()] == [
+            _composite_member_refusal(member),
+        ]
+        assert sorted(RpCompositeParent.objects.values_list("tenant_id", "code", "label")) == [
+            (1, "X", "OLD"),
+            (2, "Y", "OTHER"),
+        ]
+
+        written = schema.execute_sync(
+            _COMPOSITE_UPDATE,
+            variable_values=_composite_update_variables(None),
+        )
+        assert written.errors is None, written.errors
+        assert written.data == {"updateComposite": {"errors": []}}
+        assert sorted(RpCompositeParent.objects.values_list("tenant_id", "code", "label")) == [
+            (1, "X", "NEW"),
+            (2, "Y", "OTHER"),
+        ]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@_COMPOSITE_MEMBERS
+async def test_async_update_over_a_composite_key_offers_no_key_member(member: str) -> None:
+    """The async pipeline serves the same composite update input: no key member, one row written."""
+    schema = _composite_update_schema()
+
+    def _rows() -> list[tuple[int, str, str]]:
+        return sorted(RpCompositeParent.objects.values_list("tenant_id", "code", "label"))
+
+    async with contextlib.AsyncExitStack() as stack:
+        tables = contextlib.ExitStack()
+        await sync_to_async(tables.enter_context, thread_sensitive=True)(
+            relation_fixture_tables(connection),
+        )
+        stack.push_async_callback(sync_to_async(tables.close, thread_sensitive=True))
+        await RpCompositeParent.objects.acreate(tenant_id=1, code="X", label="OLD")
+        await RpCompositeParent.objects.acreate(tenant_id=2, code="Y", label="OTHER")
+
+        refused = await schema.execute(
+            _COMPOSITE_UPDATE,
+            variable_values=_composite_update_variables(member),
+        )
+        assert refused.data is None
+        assert [error.message for error in refused.errors or ()] == [
+            _composite_member_refusal(member),
+        ]
+        assert await sync_to_async(_rows, thread_sensitive=True)() == [
+            (1, "X", "OLD"),
+            (2, "Y", "OTHER"),
+        ]
+
+        written = await schema.execute(
+            _COMPOSITE_UPDATE,
+            variable_values=_composite_update_variables(None),
+        )
+        assert written.errors is None, written.errors
+        assert written.data == {"updateComposite": {"errors": []}}
+        assert await sync_to_async(_rows, thread_sensitive=True)() == [
+            (1, "X", "NEW"),
+            (2, "Y", "OTHER"),
+        ]
 
 
 @pytest.mark.django_db(transaction=True)

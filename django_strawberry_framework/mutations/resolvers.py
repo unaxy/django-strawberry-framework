@@ -161,6 +161,7 @@ from django_strawberry_framework.utils.querysets import (
     run_in_one_sync_boundary,
     sync_pipeline_recourse,
 )
+from django_strawberry_framework.utils.relations import is_row_key_column
 from django_strawberry_framework.utils.typing import (
     graphql_input_fields,
     graphql_type_of,
@@ -1570,12 +1571,11 @@ def located_row_update_fields(row: models.Model) -> tuple[str, ...]:
     tables = _tables_of(row)
     if len(tables) == 1:
         return ()
-    key_fields = {field for table in tables for field in table._meta.pk_fields}
     deferred = row.get_deferred_fields()
     return tuple(
         field.name
         for field in type(row)._meta.concrete_fields
-        if field not in key_fields and not field.generated and field.attname not in deferred
+        if not is_row_key_column(field) and not field.generated and field.attname not in deferred
     )
 
 

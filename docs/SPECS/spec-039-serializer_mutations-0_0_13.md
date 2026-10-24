@@ -1536,7 +1536,8 @@ is every input field optional.
 
 **An update input never carries the primary key.** A writable field whose `source`
 resolves (through `django_strawberry_framework/rest_framework/inputs.py::write_source_key`)
-to the model's primary key is a create input and is left out of the root
+to the model's primary key or to a member column of a `CompositePrimaryKey`
+(`django_strawberry_framework/utils/relations.py::is_row_key_column`) is a create input and is left out of the root
 `<Serializer>PartialInput`: DRF's own `ModelSerializer` publishes a
 `OneToOneField(primary_key=True)` such as `PatronProfile.patron` as a writable
 `PrimaryKeyRelatedField` and a client-assigned text key such as `Edition.isbn_13` as a

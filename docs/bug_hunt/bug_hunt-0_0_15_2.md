@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 266 done, 171 to do.
+Progress: 267 done, 171 to do.
 
 ## Done
 
@@ -1272,6 +1272,13 @@ Progress: 266 done, 171 to do.
   consumer `save()` that fills the value still writes, and shares one predicate with the ModelForm
   (`utils/write_values.py::unstorable_columns`). Live rows pin omitted and `null` on both flavors, sync and async;
   spec-036, spec-038, the README and the `DjangoMutation` / `fielderror-envelope` glossary terms say so
+- [x] 586. fixed: an update input over a model with a `CompositePrimaryKey` leaves out every member column of the
+  key, as it does a `OneToOneField(primary_key=True)` or a text key, in the model, ModelForm and serializer flavors;
+  one predicate (`utils/relations.py::is_row_key_column`: the column's own pk flag, or membership in its declaring
+  model's `pk_fields`) answers row identity for the three input builders and `located_row_update_fields`. Package
+  rows pin the predicate over auto, one-to-one, text, multi-table and composite keys, each flavor's input and a sync
+  and async update over a real composite table; the live row waits on a fakeshop composite model
+  (`docs/builder/TODO.md` item 27). The README, spec-036, 038, 039 and three glossary terms say so
 
 ## Outside review of the fixes
 
@@ -1449,12 +1456,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   which `workspace.py prove` points into the `$TMPDIR` flow folder, so the macOS purge can remove the entry between
   the two calls (the window 331 closed in `workspace.py`). Read it once and treat a missing entry as absent. Found
   fact-finding 331
-- [ ] 586. A `DjangoMutation(operation="update")` over a model with a `CompositePrimaryKey` offers the key's member
-  columns (e.g. `tenantId`, `code`) in its partial input: `mutations/inputs.py::editable_input_fields` reads row
-  identity from `column.primary_key`, which is false on composite members, so an update naming one answers `field:
-  id` "The row was changed or removed by a concurrent operation; retry." with the row unchanged, against the
-  docstring's "an update never writes its key"; reading `model._meta.pk_fields` would drop them. Fakeshop has no
-  composite-pk model yet (`docs/builder/TODO.md` item 27). Found fact-finding 404
 - [ ] 503. A nested branch's child form error is keyed by the child's bare leaf name (`books: {probe: ...}` with a
   `required` sibling answers `FILTER_INVALID` `{"probe": ...}`), so two branches sharing a leaf name report the same
   key and the wire cannot tell which branch failed; a flat copy's error is keyed `books__probe`. Decide whether a
@@ -1489,6 +1490,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 589. CHANGELOG entry for item 586 (breaking, composite primary keys only): an update input over a model with a
+  `CompositePrimaryKey` no longer offers the key's member columns in the model, ModelForm and serializer flavors, so
+  re-sending them (even unchanged) is a GraphQL validation error; an update `Meta.fields` naming a member raises the
+  row-identity `ConfigurationError`, and an update over a composite model with no non-key column fails at class
+  creation ("narrowed the editable column set to empty"); a create still takes every member
 - [ ] 588. CHANGELOG entry for item 401: a model-flavor create that leaves out a `blank=True, null=False` column with
   no default now answers that column's field-keyed `null` error (code `null`, "This field cannot be null.") instead
   of the unattributed `__all__` `constraint` error, nothing written; a `save()` that fills the column still writes

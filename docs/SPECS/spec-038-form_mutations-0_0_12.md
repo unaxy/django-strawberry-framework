@@ -1231,7 +1231,8 @@ optional one may be omitted.
 
 **An update input never carries the primary key.** A `ModelForm` field whose backing
 column is the model's primary key (a `OneToOneField(primary_key=True)` such as
-`PatronProfile.patron`, a client-assigned text key such as `Edition.isbn_13`) is a create
+`PatronProfile.patron`, a client-assigned text key such as `Edition.isbn_13`, a member column
+of a `CompositePrimaryKey`) is a create
 input (a create names its row by it) and is left out of `<FormClass>PartialInput`: the
 mutation's `id` argument names the row, and `construct_instance` would assign a sent key
 to the located instance so that `save()` updates or inserts a different row (an
