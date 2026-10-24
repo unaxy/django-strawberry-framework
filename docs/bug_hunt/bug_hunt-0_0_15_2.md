@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 270 done, 172 to do.
+Progress: 271 done, 178 to do.
 
 ## Done
 
@@ -1305,6 +1305,18 @@ Progress: 270 done, 172 to do.
   error or a silent `[]` for a value the backend cannot use; the right-hand side of a leaf is typed by what Django
   compares (spec-027). Live rows on SQLite and PostgreSQL, sync and async; package rows per column kind and override
   shape; README, spec-027 and the `FilterSet` glossary term say so
+- [x] 423. fixed: a `DjangoModelFormMutation` input is typed by the shape its form field reads wherever that shape
+  disagrees with the column: besides 305's multiple-choice field over a single-value column, a built-in single-value
+  form field (`ChoiceField`, `TypedChoiceField`, `CharField`, `IntegerField`, `DecimalField`, ...) over an `ArrayField`
+  takes one value (a `ChoiceField` over an `ArrayField` whose base field lists choices takes that element enum,
+  narrowed by the form's choices), the form's `clean_<field>` turning it into the column's list; the package never
+  wraps it. Which form fields read a list is one converter-owned fact
+  (`forms/converter.py::form_field_reads_list`, `form_field_reads_one_value`), so the default `SimpleArrayField`,
+  `SplitArrayField`, `MultipleChoiceField`, `JSONField` and any form field the converter does not register stay typed
+  by the column as before. An omitted update binds the form's initial, one build warning per such field names its
+  direction, and the predicate and helpers are renamed for the shape disagreement. Package rows on SQLite and a real
+  PostgreSQL `ArrayField`; spec-038 Decisions 7 and 8, the README and the `DjangoModelFormMutation` glossary term say
+  so
 
 ## Outside review of the fixes
 
@@ -1404,10 +1416,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `plans.py::_consumer_owned_paths` (and `_release_select_related_to_prefetches`) never match it and the JOIN still
   serves the row; no fakeshop or `tests/` model has the shape (a library `PatronBadge(patron=OneToOneField(Patron,
   related_name="badge", related_query_name="badges"))` would). Found landing 379/380
-- [ ] 423. A single `ChoiceField` (or `TypedChoiceField`) over a choiceless `ArrayField` publishes the column's list
-  input while `ChoiceField.clean` refuses a list, so every create and update through it fails; the mirror of 305 (a
-  list-writing field over a single-value column); say whether the form flavor types it by the form field (a scalar) or
-  refuses at build. Found verifying 305
 - [ ] 382. PostgreSQL refuses a datetime or time whose UTC offset is +-16:00..+-23:59 (`time zone displacement out of
   range`), which Python and the Strawberry `DateTime` / `Time` scalars accept: a filter bound or write value with such
   an offset raises the masked uncoded error on PostgreSQL only
@@ -1508,12 +1516,39 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 549. (robustness) An invalid regular expression (`"("`) sent to any generated or declared `regex` / `iRegex`
   leaf, a text column's included, answers the masked uncoded error on SQLite and PostgreSQL, sync and async, instead of
   `FILTER_INVALID` keyed to its field. Found verifying 383
+- [ ] 541. (robustness) A `DjangoModelFormMutation` single-value form field over an `ArrayField` whose form does not
+  turn the value into a list (no `clean_<field>`, or a `required=False` field cleaning an empty input to `""` / `None`)
+  raises a raw `JSONDecodeError` / `TypeError` from `ArrayField.to_python` / `validate`, or a `DataError` "malformed
+  array literal" at save, as the masked error instead of a field-keyed error. Found fixing 423
+- [ ] 542. (robustness) The serializer twin of 423: a DRF single-value field (`ChoiceField`, ...) over an `ArrayField`
+  with no `validate_<field>` turning the value into a list raises the raw `DataError` "malformed array literal" at save
+  as the masked error. Found fixing 423
+- [ ] 551. (robustness) A `SimpleArrayField` with no model column behind it (a plain `Form` field or a ModelForm extra
+  field) is published as `String` (`forms/converter.py::convert_form_field` matches it as a `CharField`), though it reads
+  a list as readily as a delimited string; say whether it should publish the base field's list. Found implementing 423
+- [ ] 552. (robustness) A `SplitArrayField` with no model column behind it fails at schema build with
+  `ConfigurationError` "Unsupported form field type 'SplitArrayField'": the converter has no row for this
+  `django.contrib.postgres` form field. Found implementing 423
+- [ ] 553. A `DjangoModelFormMutation` whose form declares a `SplitArrayField` over an `ArrayField` fails every create
+  and update with "This field is required.": `SplitArrayWidget` reads `<name>_0` .. `<name>_N` from the form data while
+  the package binds the list under `<name>`; probe and say whether the binding should feed the widget's keys. Found
+  verifying 423
+- [ ] 554. A partial `DjangoModelFormMutation` update that omits a built-in single-value field over an `ArrayField`
+  whose form sets no initial silently writes a value made from the stored list where that field accepts the list (a
+  `CharField` stores its text, `["['x']"]`; a `BooleanField` stores its truthiness, `[True]` over `[False]`) instead of
+  refusing; the build warning and the docs say so; say whether the package should refuse it. Found verifying 423
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 550. CHANGELOG entry for item 423: a `DjangoModelFormMutation` built-in single-value form field (`ChoiceField`,
+  `TypedChoiceField`, `CharField`, `IntegerField`, `DecimalField`, ...) over a PostgreSQL `ArrayField` now takes one
+  value (a `ChoiceField` over a choice-listing base field takes the element enum) instead of the column's list, which
+  its own `clean` refused, so every write through it failed; the form's `clean_<field>` turns it into the list. An
+  update build warns once per such field, and the warning for 305's multiple-choice field over a single-value column is
+  reworded; the default `SimpleArrayField` and every list-reading form field keep the column's list
 - [ ] 548. CHANGELOG entry for item 383: a per-field `"__all__"` on a date, time, number, Boolean or UUID column no
   longer publishes the text-pattern leaves (`iExact`, `contains`, `startsWith`, `endsWith`, `regex` and their
   case-insensitive forms), so a client sending one gets a GraphQL validation error and django-filter form data naming

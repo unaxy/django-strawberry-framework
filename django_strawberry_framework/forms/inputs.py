@@ -27,9 +27,12 @@ The shape is the ``036`` discipline adapted to forms (spec-038 Decision 7):
   column's (``require_column_kind_agreement``); a choice field whose static choices
   admit fewer of a choice column's values than the column lists publishes a generated
   enum of the admitted values instead (``_form_choice_narrowing``). A plain ``Form``
-  field with no column, and a ``MultipleChoiceField`` over a single-value column that
-  lists no choices (``_writes_list_over_single_value``), use
-  ``converter.convert_form_field`` (the model-less table).
+  field with no column, and a field whose input shape disagrees with its column's (a
+  ``MultipleChoiceField`` over a single-value column that lists no choices, or a field
+  built-in field reading a single value over an ``ArrayField``: ``_input_shape_disagrees``), use
+  ``converter.convert_form_field`` (the model-less table), except a single-value
+  ``ChoiceField`` over an ``ArrayField`` whose ``base_field`` lists choices, which is
+  typed by that element column (``_input_typing_column``).
   The two key spaces (``forms.Field`` / ``models.Field``) stay strictly separate: the column is
   resolved first, then handed to the ``models.Field``-keyed converters.
 - Shape identity is ``(form_class, operation_kind, frozenset(effective field
@@ -108,6 +111,7 @@ from .converter import (
     SCALAR,
     convert_form_field,
     form_field_kind,
+    form_field_reads_one_value,
     form_field_required,
 )
 
@@ -857,73 +861,120 @@ def _form_admits_choice_value(
     return bool(field.valid_value(value))
 
 
-def _writes_list_over_single_value(field: forms.Field, column: ConcreteField) -> bool:
-    """Return whether ``field`` writes a list over a single-value column listing no choices.
+def _input_shape_disagrees(field: forms.Field, column: ConcreteField) -> bool:
+    """Return whether ``field`` reads its value in another shape than ``column`` stores it.
 
-    A ``MultipleChoiceField`` (``TypedMultipleChoiceField`` included) cleans to a list and
-    reads only a list or tuple, while a scalar column that is neither an ``ArrayField`` nor a
-    ``JSONField`` stores one value: the form itself turns the list into that value (a
-    ``clean_<field>`` joining it). The input types such a field as the form field reads it
-    (``convert_form_field``), and an update binds its omitted value from the form's initial
-    (``forms/resolvers.py::_bind_omitted_list_initials``). Over a column listing choices
-    the field is refused instead (``_form_choice_narrowing``); a relation or file column
-    keeps its own kind.
+    Two directions, each where the form itself turns its value into the stored one (a
+    ``clean_<field>``), so the input types the field as the form field reads it:
+
+    - A ``MultipleChoiceField`` (``TypedMultipleChoiceField`` included) cleans to a list and
+      reads only a list or tuple, over a scalar column that is neither an ``ArrayField`` nor
+      a ``JSONField`` and lists no choices: the column stores one value (a ``clean_<field>``
+      joins the list). Over a column listing choices the field is refused instead
+      (``_form_choice_narrowing``); a relation or file column keeps its own kind.
+    - A built-in form field that reads a single value (``converter.form_field_reads_one_value``:
+      a ``ChoiceField``, a ``CharField``, an ``IntegerField``) over an ``ArrayField``: the
+      column stores a list (a ``clean_<field>`` wraps the value into one). A field reading
+      a list (``converter.form_field_reads_list``: ``SimpleArrayField``, the field
+      ``ArrayField.formfield`` builds, ``SplitArrayField``, ``MultipleChoiceField``,
+      ``JSONField``) reads the column's list, and a bare ``forms.Field`` or a consumer field
+      no registered class covers is typed by the column, as nothing states what it reads.
+
+    An update binds such a field's omitted value from the form's initial
+    (``forms/resolvers.py::_bind_omitted_shape_disagreeing_initials``), never the stored value.
     """
+    if array_element_field(column) is not None:
+        return form_field_reads_one_value(field)
     return (
         truth.is_instance(field, forms.MultipleChoiceField)
         and model_column_write_kind(column) == SCALAR
-        and array_element_field(column) is None
         and not truth.is_instance(column, models.JSONField)
         and not column.choices
     )
 
 
-def list_over_single_value_column(
+def _input_typing_column(field: forms.Field, column: ConcreteField | None) -> ConcreteField | None:
+    """Return the column ``field``'s input is typed by, or ``None`` to type it by the form field.
+
+    The backing ``column`` itself, unless the field's input shape disagrees with it
+    (``_input_shape_disagrees``): then ``None`` (``converter.convert_form_field`` types the
+    field), except a single-value ``ChoiceField`` over an ``ArrayField`` whose ``base_field``
+    lists choices, whose one value is an element: the ``base_field``, so the input is the
+    element's read enum, the one the column's list carries, narrowed by the form's choices
+    as any choice column is (``_form_choice_narrowing``).
+    """
+    if column is None or not _input_shape_disagrees(field, column):
+        return column
+    element = array_element_field(column)
+    if (
+        element is not None
+        and element.choices
+        and truth.is_instance(field, forms.ChoiceField)
+        and not truth.is_instance(field, _MODEL_CHOICE_FIELD)
+    ):
+        return element
+    return None
+
+
+def shape_disagreeing_column(
     form_class: FormClass,
     name: str,
     field: forms.Field,
 ) -> ConcreteField | None:
-    """Return the single-value column a list-writing form field ``name`` is declared over, or ``None``.
+    """Return the column form field ``name`` reads in another shape than it stores, or ``None``.
 
-    The backing column (``_model_column_for``) when ``_writes_list_over_single_value``
-    holds for it, else ``None``.
+    The backing column (``_model_column_for``) when ``_input_shape_disagrees`` holds for
+    it, else ``None``.
     """
     column = _model_column_for(form_class, name)
-    if column is None or not _writes_list_over_single_value(field, column):
+    if column is None or not _input_shape_disagrees(field, column):
         return None
     return column
 
 
-def _advise_list_over_single_value(
+def _advise_shape_disagreement(
     form_class: FormClass,
     form_fields: Mapping[str, forms.Field] | None,
 ) -> None:
-    """Log one warning per list-writing field over a single-value column an update binds.
+    """Log one warning per field an update binds whose input shape disagrees with its column.
 
     An update binds every declared field and an omitted one from the form's initial
-    (``forms/resolvers.py::_bind_omitted_list_initials``), which a ``ModelForm`` reads off
-    the row: the stored single value, which the field refuses unless the form presents it
-    as a list. The build cannot see a bound form's initial, so it advises instead of
-    refusing.
+    (``forms/resolvers.py::_bind_omitted_shape_disagreeing_initials``), which a ``ModelForm``
+    reads off the row: the stored value, in the column's shape, which the field refuses
+    unless the form presents it in the field's. The build cannot see a bound form's
+    initial, so it advises instead of refusing. The warning names the direction: a scalar
+    input over a list column, or a list input over a single-value column.
     """
     for name, field in _form_field_basis(form_class, form_fields).items():
-        column = list_over_single_value_column(form_class, name, field)
+        column = shape_disagreeing_column(form_class, name, field)
         if column is None:
             continue
+        column_label = f"{truth.name(column.model)}.{column.name}"
+        if array_element_field(column) is None:
+            column_words = f"single-value column {column_label}, which lists no choices"
+            value_words, write_hint, initial_hint = "a list", "joined", "split into"
+            failure = "fails validation"
+        else:
+            column_words = f"list column {column_label}"
+            value_words = "a single value"
+            write_hint, initial_hint = "wrapped into a list", "picked from the stored list into"
+            failure = "fails validation or writes a value made from the stored list"
         logger.warning(
-            "Form %s field %r is a %s over the single-value column %s.%s, which lists no "
-            "choices: its input is a list, which the form must turn into the stored value "
-            "(e.g. joined in clean_%s). An update omitting the field binds the field's "
-            "initial value, so the form must present the stored value as a list (e.g. split "
-            "into self.initial[%r] in __init__), or that update fails with "
-            '"Enter a list of values.".',
+            "Form %s field %r is a %s over the %s: its input is %s, which the form "
+            "must turn into the column's value (e.g. %s in clean_%s). An update omitting the "
+            "field binds the field's initial value, so the form must present the stored "
+            "value as %s (e.g. %s self.initial[%r] in __init__), or that update %s.",
             truth.name(form_class),
             name,
             truth.kind(field),
-            truth.name(column.model),
-            column.name,
+            column_words,
+            value_words,
+            write_hint,
             name,
+            value_words,
+            initial_hint,
             name,
+            failure,
         )
 
 
@@ -957,11 +1008,11 @@ def _form_choice_narrowing(
     no list is a value the column lists. A field admitting no non-empty value the column lists
     is refused: its input could carry at most the empty value (where the column lists ``""``
     and the form admits it), and every other value fails validation. A column without choices, a
-    relation or file column (even one declaring choices), a non-choice form field and a
-    single-value ``ChoiceField`` over an ``ArrayField`` answer ``None``: the column's type is
-    published, except for a ``MultipleChoiceField`` over a single-value column without choices,
-    which ``_field_triple_and_spec`` types as the form field reads it, a list
-    (``_writes_list_over_single_value``). A
+    relation or file column (even one declaring choices) and a non-choice form field answer
+    ``None``: the column's type is published. A field whose input shape disagrees with its
+    column never reaches this with that column (``_input_typing_column``): a single-value
+    ``ChoiceField`` over an ``ArrayField`` whose ``base_field`` lists choices is narrowed
+    against that ``base_field``, a single-value choice column. A
     ``ModelChoiceField`` never narrows: its choices are its queryset's rows, read per request,
     and the shape identity (``_choice_narrowing_identity``) reaches this for every basis field,
     one over a scalar choice column that ``require_column_kind_agreement`` has not refused yet,
@@ -990,8 +1041,6 @@ def _form_choice_narrowing(
             "column's choices. Declare a ChoiceField to write one value, or store many values in "
             "an ArrayField column whose base_field declares the choices.",
         )
-    if element is not None and not writes_list:
-        return None
     choices: object = field.choices
     if truth.is_instance(choices, CallableChoiceIterator) or not list_of(choices):
         return None
@@ -1047,15 +1096,17 @@ def _choice_narrowing_identity(
 ) -> object:
     """Project the column values a choice field narrows its input to, for the shape identity.
 
-    ``None`` when the field publishes its column's type; otherwise ``(writes_list, values)``.
+    ``None`` when the field publishes its typing column's type (``_input_typing_column``) or
+    is typed by the form field; otherwise ``(writes_list, values)``.
     A refusal projects ``None`` instead of escaping the identity walk: the projection walks the
     whole basis, an excluded field must not fail the build, and the build re-runs the narrowing
     for every emitted field, where the refusal is raised.
     """
-    if column is None:
+    typed_column = _input_typing_column(field, column)
+    if typed_column is None:
         return None
     try:
-        narrowing = _form_choice_narrowing(name, field, column, form_class)
+        narrowing = _form_choice_narrowing(name, field, typed_column, form_class)
     except ConfigurationError:
         return None
     if narrowing is None:
@@ -1094,9 +1145,11 @@ def _field_triple_and_spec(
     lists, which publishes the generated enum of the admitted values
     (``_form_choice_narrowing``).
     A column-less field (a plain ``Form`` field or a ``ModelForm`` extra field), and a
-    list-writing field over a single-value column without choices
-    (``_writes_list_over_single_value``: the form field, not the column, is what reads the
-    value), use ``converter.convert_form_field`` (the model-less table) for the kind,
+    field whose input shape disagrees with its column's (``_input_shape_disagrees``: the
+    form field, not the column, is what reads the value), use
+    ``converter.convert_form_field`` (the model-less table) for the kind, except a
+    single-value ``ChoiceField`` over an ``ArrayField`` whose ``base_field`` lists choices,
+    typed (and narrowed) as that element column (``_input_typing_column``),
     and the relation / file annotations are finalized here (where ``Upload`` and
     the model-less relation id-type are known).
 
@@ -1119,9 +1172,7 @@ def _field_triple_and_spec(
     # (so a NullBooleanField backed by a nullable model column is forced optional
     # too, not just the model-less one) - see ``converter.form_field_required``.
     field_required = form_field_required(field, column=column)
-    typed_column = (
-        None if column is None or _writes_list_over_single_value(field, column) else column
-    )
+    typed_column = _input_typing_column(field, column)
     narrowing = (
         None
         if typed_column is None
@@ -1156,7 +1207,7 @@ def _field_triple_and_spec(
             # (possibly ``None``) ``queryset.model``.
             related_model = typed_column.related_model
     else:
-        # Column-less form field, or a list-writing field over a single-value column:
+        # Column-less form field, or one whose input shape disagrees with its column:
         # the model-less ``convert_form_field`` table owns the kind; relation / file
         # annotations are finalized here. Requiredness was already decided above via
         # ``form_field_required``, so the partial input still widens a column-backed one.
@@ -1253,7 +1304,7 @@ def build_form_input_class(
     an update, the input's own for a create) must agree with its backing column's kind
     (``require_column_kind_agreement``) and read a relation key that names one row
     (``require_readable_choice_keys``). An update's build also logs a warning for each
-    list-writing field over a single-value column it binds (``_advise_list_over_single_value``).
+    field it binds whose input shape disagrees with its column (``_advise_shape_disagreement``).
     """
     if operation_kind not in CREATE_SHAPED_KINDS | {PARTIAL}:
         raise ConfigurationError(
@@ -1273,7 +1324,7 @@ def build_form_input_class(
     require_column_kind_agreement(form_class, bound_fields)
     require_readable_choice_keys(form_class, bound_fields)
     if operation_kind == PARTIAL:
-        _advise_list_over_single_value(form_class, bound_fields)
+        _advise_shape_disagreement(form_class, bound_fields)
     # The un-narrowed shape of the same operation: the canonical-name comparison basis,
     # so an update input that drops only the row identity keeps the canonical name.
     full_field_names = tuple(

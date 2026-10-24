@@ -1048,15 +1048,31 @@ every listed value (Django's generated `TypedChoiceField`, an equal set, a super
 extra values the column never stores) keeps the read enum. A `MultipleChoiceField` narrows
 an `ArrayField`'s `base_field` elements and is a schema-build
 [`ConfigurationError`][glossary-configurationerror] over a single-value choice column (it
-writes a list). Over a single-value column that lists no choices and is neither an
-`ArrayField` nor a `JSONField` (a text column a `clean_<field>` joins the list into), a
-`MultipleChoiceField` / `TypedMultipleChoiceField` is typed as the same field off-column,
-`list[str]` (`django_strawberry_framework/forms/inputs.py::_writes_list_over_single_value`),
-since the form field, not the column, reads the value; an update's build logs one
-`logger.warning` per such field it binds
-(`django_strawberry_framework/forms/inputs.py::_advise_list_over_single_value`): an omitted
-one binds the form's own initial (Decision 8), which must present the stored value as a list.
-A `JSONField` column keeps `JSON`. A field admitting no non-empty value the column lists is a
+writes a list). A field whose input shape disagrees with its column's is typed as the same
+field off-column (`convert_form_field`), since the form field, not the column, reads the
+value and a `clean_<field>` turns it into the column's
+(`django_strawberry_framework/forms/inputs.py::_input_shape_disagrees`), in two directions:
+a `MultipleChoiceField` / `TypedMultipleChoiceField` over a single-value column that lists
+no choices and is neither an `ArrayField` nor a `JSONField` (a text column a
+`clean_<field>` joins the list into) is `list[str]`; a built-in single-value form field over
+an `ArrayField` (a `ChoiceField`, `TypedChoiceField`, `CharField`, `IntegerField`, ... a
+`clean_<field>` wraps into a list) is that value's scalar. Both facts are the converter's:
+whether a form field reads a list
+(`django_strawberry_framework/forms/converter.py::form_field_reads_list`: a
+`MultipleChoiceField`, a `JSONField`, PostgreSQL's `SimpleArrayField` and
+`SplitArrayField`, subclasses included) and whether it is a built-in single-value field
+(`django_strawberry_framework/forms/converter.py::form_field_reads_one_value`: a registered
+scalar form field, subclasses included, reading no list). So the default `ModelForm` field
+over an `ArrayField` (the `SimpleArrayField` `ArrayField.formfield` builds) keeps the
+column's list, and so do a bare `forms.Field` and a consumer field no registered class
+covers, whose `to_python` may read the list. A single-value `ChoiceField` over an `ArrayField` whose `base_field` lists choices is
+typed by that `base_field` (`django_strawberry_framework/forms/inputs.py::_input_typing_column`):
+the element's read enum, the one the column's list carries, narrowed by the form's choices as
+a single-value choice column is. The package never wraps or joins the value itself. An
+update's build logs one `logger.warning` per such field it binds, naming its direction
+(`django_strawberry_framework/forms/inputs.py::_advise_shape_disagreement`): an omitted one
+binds the form's own initial (Decision 8), which must present the stored value in the
+field's shape. A `JSONField` column keeps `JSON`. A field admitting no non-empty value the column lists is a
 `ConfigurationError` (its input could carry at most the empty value, so no non-empty value
 passes the form). The input is built once, at schema
 build, from the field basis, so callable choices (re-evaluated on every read) and choices
@@ -1522,16 +1538,22 @@ write flavor rides.
      - **A file field contributes no key at all.** `model_to_dict` yields the stored
        relative path, which is not a re-bindable `data=` value for a field fed from
        `files=`, so file fields are excluded from the reconstruction entirely.
-     - **A list-writing field over a single-value column binds the form's initial.** A
-       `MultipleChoiceField` over a column without choices that is neither an `ArrayField`
-       nor a `JSONField` (Decision 7) stores the single value its form made of a list,
-       which the field refuses ("Enter a list of values."). The reconstruction leaves it
+     - **A field whose input shape disagrees with its column binds the form's initial.**
+       A `MultipleChoiceField` over a column without choices that is neither an
+       `ArrayField` nor a `JSONField` stores the single value its form made of a list, and a
+       built-in single-value field over an `ArrayField` the list its form made of one value
+       (Decision 7); the field refuses either stored value, except a field that accepts the
+       stored list itself (a `CharField` reads its text, a `BooleanField` its truthiness).
+       The reconstruction leaves it
        out, and once `get_form` has built the form its omitted value is bound from
        `form.get_initial_for_field`
-       (`django_strawberry_framework/forms/resolvers.py::_bind_omitted_list_initials`): the
-       `ModelForm`'s row-derived `initial` after any `__init__` adjustment, so a form that
-       splits the stored value into `self.initial[<field>]` keeps it unchanged, and one that
-       does not fails the update under full-form validation. Reading the built form rather
+       (`django_strawberry_framework/forms/resolvers.py::_bind_omitted_shape_disagreeing_initials`):
+       the `ModelForm`'s row-derived `initial` after any `__init__` adjustment, so a form
+       that presents the stored value in the field's shape in `self.initial[<field>]`
+       (splitting the text, picking an element of the list) keeps it unchanged, and one
+       that does not fails the update under full-form validation or, through a field
+       that accepts the stored list itself, writes the value it makes of it. Reading the
+       built form rather
        than constructing another honors `get_form` / `get_form_kwargs` overrides and adds no
        query. The initial is bound under `form.add_prefix(<field>)` into a replacement of the
        bound data (`django_strawberry_framework/forms/resolvers.py::_bind_form_values`): a
@@ -2010,6 +2032,10 @@ Rationale companion: [Decision 14][rationale-d14].
   one admitting none of the column's non-empty values, or a `MultipleChoiceField` over a
   single-value choice column,
   is a schema-build `ConfigurationError`.
+  A partial update validates an omitted narrowed field's stored value against the form's
+  choices, as Django's form does: a row holding a value the form does not admit (a
+  `checked_out` book through `BookRepairDeskForm`) is refused field-keyed with nothing
+  written unless the request sends an admitted value.
 - **A `MultipleChoiceField` over a single-value column without choices.** A
   `MultipleChoiceField` (or `TypedMultipleChoiceField`) over `Branch.city`, a `TextField`
   listing no choices, joined in `clean_city`: the input types it `[String!]!` on create and
@@ -2022,10 +2048,24 @@ Rationale companion: [Decision 14][rationale-d14].
   comma string on such a field (e.g. `django_filters.widgets.CSVWidget`) takes a list, not a
   `String`: the field types as a list like the same field off-column. A `JSONField` column
   keeps `JSON`; an `ArrayField` column keeps its list; a relation column keeps its id.
-  A partial update validates an omitted narrowed field's stored value against the form's
-  choices, as Django's form does: a row holding a value the form does not admit (a
-  `checked_out` book through `BookRepairDeskForm`) is refused field-keyed with nothing
-  written unless the request sends an admitted value.
+- **A built-in single-value form field over an `ArrayField`.** A `ChoiceField`,
+  `TypedChoiceField`, `CharField`, `IntegerField` or `DecimalField` (any of the converter's
+  registered scalar form fields) over an `ArrayField` (e.g. "pick one tag", wrapped into a
+  one-element list in `clean_tags`) is typed as the same field off-column, a required scalar
+  on create and an optional one on update, never the column's list, and an update's build
+  logs a warning naming the list column. A `ChoiceField` over an `ArrayField` whose
+  `base_field` lists choices takes the element's read enum, or the generated enum of the
+  element values its choices admit. A create and an update naming the field store the list
+  `clean_<field>` makes; an omitted one binds the form's initial (its `__init__` or
+  `get_form_kwargs`): kept when it presents one stored element, otherwise the stored list is
+  bound and the update is refused field-keyed with nothing written (`invalid_choice` for a
+  choice field, `invalid` for a number field), except through a field that accepts the
+  stored list itself (a `CharField` binds its text, a `BooleanField` its truthiness), whose
+  value is then written. The default `ModelForm` field
+  (`SimpleArrayField`), a `SplitArrayField`, a `MultipleChoiceField`, a `JSONField` and their
+  subclasses read the list and keep the column's list type, and a bare `forms.Field` or a
+  consumer field no registered class covers keeps the column's type, since nothing states
+  it reads one value.
 - **A declared field of another kind than its column.** A `ModelChoiceField` over a text
   column would store the `str()` of any row its queryset holds, one the target's
   visibility query hides included, and a file field over a text column reads `files`, so
@@ -2343,7 +2383,19 @@ behavior reachable through `/graphql/`, package tests own internals.
     column without choices is typed `list[str]` (optional on update), a
     `MultipleChoiceField` over a `JSONField` keeps `JSON`, and an update build, an
     excluding one included, warns once of the text column and a create or a `JSONField`
-    column not at all. **Column kind agreement:** a relation field over a
+    column not at all; a `ChoiceField` / `TypedChoiceField` / `CharField` / `IntegerField` /
+    `DecimalField` over an `ArrayField` is typed by the field's scalar (optional on update), a
+    `ChoiceField` over a `base_field` listing choices by the element enum (narrowed by a
+    subset), a `MultipleChoiceField`, a `JSONField`, a bare `forms.Field` and a consumer
+    `forms.Field` subclass keep the column's list, and an update build warns of the list
+    column and a create or a list-reading field not at all (`tests/forms/test_inputs.py`;
+    `form_field_reads_list` and `form_field_reads_one_value` in
+    `tests/forms/test_converter.py`);
+    on the Postgres tier the default `ModelForm` `SimpleArrayField`, a subclass of it and a
+    `MultipleChoiceField` over a real `ArrayField` keep `[String!]!` while a `ChoiceField` is
+    `String!`, and a built-in single-value field over an `ArrayField` creates, updates and keeps an
+    omitted value through the form's initial, refused field-keyed without one
+    (`tests/forms/test_resolvers.py::test_single_value_fields_over_array_columns_update`). **Column kind agreement:** a relation field over a
     scalar, file or other-cardinality relation column, a file field over a scalar or
     relation column and a scalar field over a file column are refused on both inputs, a
     narrowed-out field on an update but not on a create, while a scalar field over a
@@ -2537,8 +2589,10 @@ The completion contract.
    [choice-enum][glossary-choice-enum-generation] /
    [`Upload`][glossary-upload-scalar] converters where overlapping; a choice field
    admitting fewer of its column's values publishes the generated enum of the values it
-   admits, and a `MultipleChoiceField` over a single-value column without choices is typed
-   as the same field off-column, with an update-build warning) with a **fail-loud
+   admits, and a field whose input shape disagrees with its column, a `MultipleChoiceField`
+   over a single-value column without choices or a built-in single-value field over an
+   `ArrayField`,
+   is typed as the same field off-column, with an update-build warning) with a **fail-loud
    dispatch — no base-`forms.Field` catch-all**: a bare `forms.Field` → `str` (exact
    special case), a known subclass maps via MRO, but a custom `forms.Field` subclass
    hits the **raising** default → [`ConfigurationError`][glossary-configurationerror]
@@ -2618,8 +2672,8 @@ The completion contract.
    files, instance=None)` hook — `create` builds `form_class(**get_form_kwargs(…,
    data=provided_data, files=provided_files))`, `update` reconstructs the **full partial
    payload** from the located row over the form's full declared field set, overlaid by
-   `provided_data` and in the three shapes a provided field decodes to (an omitted
-   `MultipleChoiceField` over a single-value column binds the built form's initial), with
+   `provided_data` and in the three shapes a provided field decodes to (an omitted field
+   whose input shape disagrees with its column binds the built form's initial), with
    `files = provided_files`, then `form_class(**get_form_kwargs(…, instance=<located
    row>))` — so omitted scalar / FK / M2M / file values are preserved and
    `unique_item_per_category` validates on a one-field change. `form.errors` maps

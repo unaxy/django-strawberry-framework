@@ -57,6 +57,7 @@ from __future__ import annotations
 import contextlib
 import datetime
 import decimal
+import functools
 import itertools
 from collections.abc import Callable, Generator, Iterator
 from enum import Enum
@@ -106,9 +107,11 @@ from django_strawberry_framework.mutations.inputs import NON_FIELD_ERROR_KEY, Fi
 from django_strawberry_framework.optimizer.plans import OptimizationPlan
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing.relay import global_id_for
+from django_strawberry_framework.types import converters
 from django_strawberry_framework.utils._narrowing import (
     dict_of,
     enum_value,
+    list_of,
     pk_of,
     read_attr,
     require_instance,
@@ -119,6 +122,7 @@ from django_strawberry_framework.utils.typing import call_forwarded, object_resu
 from tests._generated_inputs import keyword_constructor as _keyword_constructor
 from tests._idioms import is_object_dict, is_object_list, saved_pk
 from tests._info import make_info, unread_info
+from tests._postgres_fields import FakeArrayField
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -2329,7 +2333,7 @@ def test_partial_reconstruction_leaves_an_omitted_list_field_over_a_single_value
     """The stored single value of a list field is never rebound; the form's initial is.
 
     ``Branch.city`` stores the text the form joined, which the ``MultipleChoiceField``
-    refuses, so the reconstruction leaves it out for ``_bind_omitted_list_initials``.
+    refuses, so the reconstruction leaves it out for ``_bind_omitted_shape_disagreeing_initials``.
     """
     branch = library_models.Branch.objects.create(name=_uniq("Br"), city="north")
     data, unresolved = form_resolvers._reconstruct_partial_data(_update_city_picks(), branch, {})
@@ -2353,7 +2357,11 @@ def test_omitted_list_field_binds_the_initial_of_the_field_the_bound_form_declar
     form = _CityPicksForm(data={"name": "Renamed"}, instance=branch)
     if dropped:
         del form.fields["city"]
-    form_resolvers._bind_omitted_list_initials(_update_city_picks(), form, {"name": "Renamed"})
+    form_resolvers._bind_omitted_shape_disagreeing_initials(
+        _update_city_picks(),
+        form,
+        {"name": "Renamed"},
+    )
     assert dict(form.data) == {"name": "Renamed", **bound}
 
 
@@ -2368,7 +2376,11 @@ def test_omitted_list_field_initial_joins_an_immutable_query_dict_as_its_values(
     branch = library_models.Branch.objects.create(name=_uniq("Br"), city="north")
     posted = QueryDict("name=Renamed")
     form = _CityPicksForm(data=posted, instance=branch)
-    form_resolvers._bind_omitted_list_initials(_update_city_picks(), form, {"name": "Renamed"})
+    form_resolvers._bind_omitted_shape_disagreeing_initials(
+        _update_city_picks(),
+        form,
+        {"name": "Renamed"},
+    )
     bound = form.data
     assert isinstance(bound, QueryDict)
     assert bound.getlist("name") == ["Renamed"]
@@ -2381,8 +2393,279 @@ def test_omitted_list_field_initial_binds_under_the_form_prefix() -> None:
     """A prefixed form reads ``<prefix>-<name>``, so the initial is bound under that key."""
     branch = library_models.Branch.objects.create(name=_uniq("Br"), city="north")
     form = _CityPicksForm(data={"p-name": "Renamed"}, instance=branch, prefix="p")
-    form_resolvers._bind_omitted_list_initials(_update_city_picks(), form, {"name": "Renamed"})
+    form_resolvers._bind_omitted_shape_disagreeing_initials(
+        _update_city_picks(),
+        form,
+        {"name": "Renamed"},
+    )
     assert dict(form.data) == {"p-name": "Renamed", "p-city": "north"}
+
+
+class _PlainTagged(models.Model):
+    """An unmanaged owner of a choiceless ``tags`` array column beside a ``title``."""
+
+    title: models.TextField[str | Combinable, str] = models.TextField()
+    tags = FakeArrayField(models.TextField())
+
+    class Meta:
+        managed = False
+        app_label = "test_forms_one_tag"
+
+
+class _OneTagForm(forms.ModelForm[_PlainTagged]):
+    """A single-value ``ChoiceField`` over the ``tags`` array column."""
+
+    tags = forms.ChoiceField(choices=[("x", "X"), ("y", "Y")])
+
+    class Meta:
+        model = _PlainTagged
+        fields = ("title", "tags")
+
+
+def _update_one_tag(monkeypatch: pytest.MonkeyPatch) -> type[DjangoModelFormMutation]:
+    """Declare an update mutation over ``_OneTagForm``, its column read as an ``ArrayField``."""
+    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
+
+    class UpdateOneTag(DjangoModelFormMutation):
+        class Meta:
+            form_class = _OneTagForm
+            operation = "update"
+
+    return UpdateOneTag
+
+
+def test_partial_reconstruction_leaves_an_omitted_single_value_field_over_an_array_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stored list of a single-value field over an ``ArrayField`` is never rebound.
+
+    ``tags`` stores the list the form wrapped, which the ``ChoiceField`` refuses, so the
+    reconstruction leaves it out for ``_bind_omitted_shape_disagreeing_initials``.
+    """
+    row = _PlainTagged(pk=1, title="Kept", tags=["x"])
+    data, unresolved = form_resolvers._reconstruct_partial_data(
+        _update_one_tag(monkeypatch),
+        row,
+        {},
+    )
+    assert unresolved == {}
+    assert data == {"title": "Kept"}
+
+
+def test_omitted_single_value_field_over_an_array_binds_the_form_initial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An omitted single-value field over an ``ArrayField`` binds the one value the form presents."""
+    row = _PlainTagged(pk=1, title="Kept", tags=["y", "x"])
+    form = _OneTagForm(data={"title": "Renamed"}, instance=row, initial={"tags": "y"})
+    form_resolvers._bind_omitted_shape_disagreeing_initials(
+        _update_one_tag(monkeypatch),
+        form,
+        {"title": "Renamed"},
+    )
+    assert dict(form.data) == {"title": "Renamed", "tags": "y"}
+
+
+@functools.cache
+def _pg_tagged_note_model() -> type[models.Model]:
+    """Declare the Postgres-tier owner of a real choiceless and a choice ``ArrayField``."""
+    from django.contrib.postgres.fields import ArrayField  # noqa: PLC0415 - needs the Postgres driver
+
+    return type(
+        "PgTaggedNote",
+        (models.Model,),
+        {
+            "__module__": __name__,
+            "title": models.TextField(),
+            "tags": ArrayField(models.TextField()),
+            "labels": ArrayField(models.TextField(choices=[("x", "X"), ("y", "Y")])),
+            "Meta": type("Meta", (), {"managed": False, "app_label": "test_forms_pg_arrays"}),
+        },
+    )
+
+
+def _pg_one_value_form() -> type[forms.ModelForm[models.Model]]:
+    """A ``ModelForm`` reading one ``tags`` and one ``labels`` value, each wrapped into a list."""
+    note_model = _pg_tagged_note_model()
+
+    class OneValueForm(forms.ModelForm[models.Model]):
+        tags = forms.ChoiceField(choices=[("x", "X"), ("y", "Y")])
+        labels = forms.ChoiceField(choices=[("x", "X"), ("y", "Y")])
+
+        class Meta:
+            model = note_model
+            fields = ("title", "tags", "labels")
+
+        def clean_tags(self) -> list[object]:
+            return [self.cleaned_data["tags"]]
+
+        def clean_labels(self) -> list[object]:
+            return [self.cleaned_data["labels"]]
+
+    return OneValueForm
+
+
+def _pg_one_value_schema(*, presents_initial: bool) -> strawberry.Schema:
+    """Build ``createNote`` / ``updateNote`` over ``_pg_one_value_form``, rows by raw pk.
+
+    With ``presents_initial`` the update hands the form an ``initial`` of each column's
+    first stored element (``get_form_kwargs``), the one value the field presents.
+    """
+    note_form = _pg_one_value_form()
+    note_model = _pg_tagged_note_model()
+
+    class NoteT(DjangoType):
+        class Meta:
+            model = note_model
+            fields = ("id", "title")
+            primary = True
+
+    assert registry.get(note_model) is NoteT
+
+    class CreateNote(DjangoModelFormMutation):
+        class Meta:
+            form_class = note_form
+            operation = "create"
+            permission_classes = [_AllowAll]
+
+    class UpdateNote(DjangoModelFormMutation):
+        class Meta:
+            form_class = note_form
+            operation = "update"
+            permission_classes = [_AllowAll]
+
+        @override
+        def get_form_kwargs(
+            self,
+            info: strawberry.Info[object, object],
+            *,
+            data: dict[str, object],
+            files: dict[str, object],
+            instance: models.Model | None = None,
+        ) -> dict[str, object]:
+            kwargs = super().get_form_kwargs(info, data=data, files=files, instance=instance)
+            if presents_initial and instance is not None:
+                kwargs["initial"] = {
+                    name: list_of(read_attr(instance, name))[0] for name in ("tags", "labels")
+                }
+            return kwargs
+
+    @strawberry.type
+    class Mutation:
+        create_note = DjangoMutationField(CreateNote)
+        update_note = DjangoMutationField(UpdateNote)
+
+    finalize_django_types()
+    return _schema(Mutation)
+
+
+@contextlib.contextmanager
+def _pg_tagged_note_table() -> Generator[type[models.Model], None, None]:
+    """Give the unmanaged ``PgTaggedNote`` a real table for the test, then drop it."""
+    model = _pg_tagged_note_model()
+    with connection.schema_editor() as editor:
+        editor.create_model(model)
+    try:
+        yield model
+    finally:
+        with connection.schema_editor() as editor:
+            editor.delete_model(model)
+
+
+_CREATE_NOTE = (
+    "mutation($d: OneValueFormInput!){ createNote(data:$d){ "
+    "result{ title } errors{ field messages } } }"
+)
+_UPDATE_NOTE = (
+    "mutation($id: ID!, $d: OneValueFormPartialInput!){ updateNote(id:$id, data:$d){ "
+    "result{ title } errors{ field messages } } }"
+)
+
+
+@pytest.mark.pg
+@pytest.mark.django_db
+def test_single_value_fields_over_array_columns_create_the_wrapped_list() -> None:
+    """A create sends one value per field, which ``clean_<field>`` wraps into the stored list."""
+    schema = _pg_one_value_schema(presents_initial=True)
+    with _pg_tagged_note_table() as model:
+        res = schema.execute_sync(
+            _CREATE_NOTE,
+            variable_values={"d": {"title": "New", "tags": "x", "labels": "y"}},
+        )
+        assert res.errors is None, res.errors
+        assert _json_at(res.data, "createNote") == {"result": {"title": "New"}, "errors": []}
+        assert list(model._base_manager.values_list("tags", "labels")) == [(["x"], ["y"])]
+
+
+@pytest.mark.pg
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "presents_initial",
+        "data",
+        "stored",
+        "errors",
+    ),
+    [
+        pytest.param(
+            True,
+            {"tags": "y", "labels": "x"},
+            (["y"], ["x"]),
+            [],
+            id="named",
+        ),
+        pytest.param(
+            True,
+            {"title": "Renamed"},
+            (["x"], ["y"]),
+            [],
+            id="omitted",
+        ),
+        pytest.param(
+            False,
+            {"title": "Renamed"},
+            (["x"], ["y"]),
+            [
+                {
+                    "field": "tags",
+                    "messages": [
+                        "Select a valid choice. ['x'] is not one of the available choices.",
+                    ],
+                },
+                {
+                    "field": "labels",
+                    "messages": [
+                        "Select a valid choice. ['y'] is not one of the available choices.",
+                    ],
+                },
+            ],
+            id="omitted-without-initial",
+        ),
+    ],
+)
+def test_single_value_fields_over_array_columns_update(
+    data: dict[str, object],
+    stored: tuple[list[str], list[str]],
+    errors: list[dict[str, object]],
+    *,
+    presents_initial: bool,
+) -> None:
+    """An update writes a named value wrapped, and an omitted one from the form's initial.
+
+    An omitted field binds the one value the form's ``__init__`` presents, so the stored
+    list is kept; a form presenting none binds the stored list, which the field refuses as
+    a field error, and nothing is written.
+    """
+    schema = _pg_one_value_schema(presents_initial=presents_initial)
+    with _pg_tagged_note_table() as model:
+        note = model._base_manager.create(title="Old", tags=["x"], labels=["y"])
+        res = schema.execute_sync(
+            _UPDATE_NOTE,
+            variable_values={"id": str(saved_pk(note)), "d": data},
+        )
+        assert res.errors is None, res.errors
+        assert _json_at(res.data, "updateNote", "errors") == errors
+        assert list(model._base_manager.values_list("tags", "labels")) == [stored]
 
 
 @pytest.mark.django_db
