@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 252 done, 173 to do.
+Progress: 253 done, 172 to do.
 
 ## Done
 
@@ -1163,6 +1163,10 @@ Progress: 252 done, 173 to do.
   reaches them; `utils/truth.py::render` documents that a value outside the builtin scalars renders through its own
   `__repr__`, which is what a lazy translation proxy's `'a'` is, and the refusal states the rule ("every key must be a
   string") beside it, so no code
+- [x] 580. not a defect: a `check_<field>_permission` name is application Python (GOAL "Trust boundary"), and no
+  contract row says a FilterSet / OrderSet gate whose name matches no gated input is detected; gates are dispatched by
+  name at request time, as DRF's `validate_<field>` methods are, so a misspelled one is never called there either.
+  A finalize audit of gate names would be a new card, not a fix
 
 ## Outside review of the fixes
 
@@ -1383,11 +1387,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 407. `utils/sessions.py` test gaps: no row for a custom client-side session store that does not subclass the
   signed-cookie store (treated as server-side, as `docs/README.md` documents), and no row for the exact window edge of
   `consumers.py::_actor_is_current` (strict `<`)
-- [ ] 580. (robustness) A FilterSet / OrderSet `check_<name>_permission` whose name matches no gated input (a typo, a
-  wrong case, or a model field the set does not expose) never fires and never errors: neither set metaclass nor
-  finalize audits gate names, and names are knowable only after expansion (`types/finalizer.py::_bind_sidecar_sets`'s
-  `post_expand_audit` sees them for wired sets; unwired `RelatedFilter` targets never finalize). Found fact-finding
-  409
 - [ ] 500. Process provenance in test docstrings and comments outside `tests/utils/test_querysets.py`, the class 324
   restates there: e.g. `tests/utils/test_permissions.py` ("It used to reach it"), `tests/test_permissions.py` ("no
   longer compare ... (the old ...", "no longer trips"), `tests/utils/test_policies.py` ("no longer", "The pre-fix
