@@ -66,6 +66,7 @@ from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.mutations.inputs import CREATE, PARTIAL
 from django_strawberry_framework.registry import register_subsystem_clear
 from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._narrowing import is_mapping
 from django_strawberry_framework.utils.inputs import (
     InputFieldSpec,
     build_strawberry_input_class,
@@ -363,8 +364,11 @@ def read_nested_serializer_fields(
     return dict(fields)
 
 
-def require_nested_fields_mapping(owner_name: str, nested_fields: object) -> None:
-    """Reject a ``nested_fields`` declaration that is not a mapping.
+def require_nested_fields_mapping(
+    owner_name: str,
+    nested_fields: object,
+) -> Mapping[object, object]:
+    """Return a ``nested_fields`` declaration as a mapping, rejecting one that is not.
 
     The container rejection is worded once for the ``Meta`` validation
     (``rest_framework/sets.py::_validate_serializer_nested_fields``) and the per-level key
@@ -372,15 +376,20 @@ def require_nested_fields_mapping(owner_name: str, nested_fields: object) -> Non
     depths of the same opt-in tree. The test is ``isinstance``, so a ``Mapping`` subclass and
     a faithful proxy (``SimpleLazyObject``) pass.
     """
-    if not isinstance(nested_fields, Mapping):
+    if not is_mapping(nested_fields):
         raise ConfigurationError(
             f"SerializerMutation {owner_name}.Meta.nested_fields must be a mapping of "
             f"{{field_name: NestedSerializerConfig}}; got {truth.render(nested_fields)}.",
         )
+    return nested_fields
 
 
-def require_nested_serializer_config(owner_name: str, field_name: object, config: object) -> None:
-    """Reject a ``nested_fields`` value that is not a ``NestedSerializerConfig``.
+def require_nested_serializer_config(
+    owner_name: str,
+    field_name: object,
+    config: object,
+) -> NestedSerializerConfig:
+    """Return a ``nested_fields`` value as a ``NestedSerializerConfig``, rejecting one that is not.
 
     The per-entry value rejection paired with ``require_nested_fields_mapping``; the same
     two callers apply it, with the same ``isinstance`` test.
@@ -390,6 +399,7 @@ def require_nested_serializer_config(owner_name: str, field_name: object, config
             f"SerializerMutation {owner_name}.Meta.nested_fields[{field_name!r}] must be a "
             f"NestedSerializerConfig; got {truth.render(config)}.",
         )
+    return config
 
 
 def get_serializer_for_schema(
@@ -1722,9 +1732,9 @@ def validate_nested_config_keys(
     """
     if not nested_configs:
         return
-    require_nested_fields_mapping(truth.name(serializer_class), nested_configs)
+    _ = require_nested_fields_mapping(truth.name(serializer_class), nested_configs)
     for name, config in nested_configs.items():
-        require_nested_serializer_config(truth.name(serializer_class), name, config)
+        _ = require_nested_serializer_config(truth.name(serializer_class), name, config)
         field = effective.get(name)
         if field is None:
             raise ConfigurationError(

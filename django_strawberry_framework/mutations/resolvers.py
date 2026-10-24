@@ -122,6 +122,7 @@ from django_strawberry_framework.types.relay import implements_relay_node
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     call_method,
+    is_concrete_field,
     is_exact_dict,
     is_exact_pair,
     is_str,
@@ -207,7 +208,7 @@ if TYPE_CHECKING:
     from django_strawberry_framework.types.base import DjangoType
     from django_strawberry_framework.utils.errors import ErrorKeyMap
     from django_strawberry_framework.utils.inputs import InputFieldSpec
-    from django_strawberry_framework.utils.typing import ConcreteField, ModelField
+    from django_strawberry_framework.utils.typing import ModelField
     from django_strawberry_framework.write_mixins import WriteMutationClass
 
     from .inputs import ModelFieldIndex
@@ -1004,10 +1005,7 @@ def _constraint_groups(model: type[models.Model]) -> list[set[str]]:
     groups.extend(
         {field.name}
         for field in model._meta.get_fields()
-        # Only a concrete ``Field`` carries a ``column``; a reverse ``*Rel`` has none.
-        if hasattr(field, "column")
-        and getattr(field, "unique", False)
-        and not cast("ConcreteField", field).primary_key
+        if is_concrete_field(field) and getattr(field, "unique", False) and not field.primary_key
     )
     return groups
 
@@ -2015,7 +2013,7 @@ def payload_cls_for(mutation_cls: _AuthorizedClass) -> type[_GeneratedPayload]:
     # payload class as a module global of ``mutations.inputs``.
     return cast(
         "type[_GeneratedPayload]",
-        getattr(inputs, cast("str", mutation_cls._payload_type_name)),
+        getattr(inputs, require_instance(mutation_cls._payload_type_name, str)),
     )
 
 

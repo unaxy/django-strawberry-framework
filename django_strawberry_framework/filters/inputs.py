@@ -43,13 +43,17 @@ from strawberry import relay
 from django_strawberry_framework.conf import hide_flat_filters_setting
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.registry import register_subsystem_clear
+from django_strawberry_framework.sets_mixins import declaration_map
 from django_strawberry_framework.types.converters import scalar_for_field
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     dict_of,
     enum_value,
     is_list_or_tuple,
+    is_mapping,
+    optional_annotation,
     read_attr,
+    require,
 )
 from django_strawberry_framework.utils.converters import MRO_CONTINUE, convert_with_mro
 from django_strawberry_framework.utils.input_values import (
@@ -107,11 +111,7 @@ if TYPE_CHECKING:
 
     from django_strawberry_framework.types.definition import DjangoTypeDefinition
     from django_strawberry_framework.utils.inputs import SetInputNamespace
-    from django_strawberry_framework.utils.typing import (
-        ConcreteField,
-        ModelField,
-        OptionalWidenable,
-    )
+    from django_strawberry_framework.utils.typing import ConcreteField, ModelField
 
     from .sets import FilterSet
 
@@ -304,7 +304,7 @@ def _pascal_case(name: str) -> str:
     )
 
 
-def _scalar_from_form_field(form_field: object) -> OptionalWidenable:
+def _scalar_from_form_field(form_field: object) -> object:
     """Pick a Strawberry-compatible scalar for a Django form field.
 
     Used by ``convert_filter_to_input_annotation`` for the
@@ -348,7 +348,7 @@ def _scalar_from_form_field(form_field: object) -> OptionalWidenable:
     return str
 
 
-def _scalar_from_model_field(model_field: ModelField | None) -> OptionalWidenable:
+def _scalar_from_model_field(model_field: ModelField | None) -> object:
     """Map a Django model field to its scalar via the shared ``SCALAR_MAP`` lookup.
 
     Delegates to ``types/converters.py::scalar_for_field`` -- a LOCAL import, to
@@ -364,13 +364,13 @@ def _scalar_from_model_field(model_field: ModelField | None) -> OptionalWidenabl
         return str
 
     # A ``SCALAR_MAP`` value is a registered runtime annotation (a class or ``NewType``).
-    return cast("OptionalWidenable", scalar_for_field(model_field))
+    return scalar_for_field(model_field)
 
 
 def _relation_identity_annotation(
     filter_instance: Filter,
     model_field: ModelField | None,
-) -> OptionalWidenable:
+) -> object:
     """Type a raw-pk relation leaf from the target's primary-key column.
 
     The scalar comes from ``filters/base.py::relation_identity_column`` through the
@@ -404,7 +404,7 @@ def _model_choice_identity_annotation(
     filter_instance: Filter,
     model_field: ModelField | None,
     filterset_cls: type[FilterSet] | None,
-) -> OptionalWidenable:
+) -> object:
     """Type one value of a consumer model-choice filter from the column its form cleans.
 
     The column is ``filters/base.py::model_choice_identity_column``'s (the ``queryset``
@@ -463,7 +463,7 @@ def _element_annotation(
     filter_instance: Filter,
     model_field: ModelField | None,
     owner_definition: DjangoTypeDefinition | None,
-) -> OptionalWidenable:
+) -> object:
     """Single-element Strawberry type with the MODEL FIELD as source of truth.
 
     A backing model field's choices become the shared GraphQL enum and its
@@ -656,9 +656,7 @@ def convert_filter_to_input_annotation(
         fallthrough_error_factory=_unexpected_filter_dispatch,
     )
     if not required:
-        # Every precheck handler above returns a runtime annotation (a class, ``NewType``,
-        # or scalar), and the registry is empty.
-        annotation = cast("OptionalWidenable", annotation) | None
+        annotation = optional_annotation(annotation)
     return annotation
 
 
@@ -848,7 +846,7 @@ def _unwrap_enum_member(value: object) -> object:
 
 def _build_range_input_class(
     filter_instance: Filter,
-    inner: OptionalWidenable,
+    inner: object,
     filterset_cls: type[FilterSet] | None = None,
 ) -> type[object]:
     """Return a Strawberry input dataclass with ``start: T | None`` and ``end: T | None``.
@@ -882,7 +880,10 @@ def _build_range_input_class(
     cls_name = f"{prefix}{_pascal_case(field_name)}RangeInputType"
     return build_input_class(
         cls_name,
-        [("start", inner | None, {"default": None}), ("end", inner | None, {"default": None})],
+        [
+            ("start", optional_annotation(inner), {"default": None}),
+            ("end", optional_annotation(inner), {"default": None}),
+        ],
     )
 
 
@@ -1013,14 +1014,12 @@ def _build_logic_fields(type_name: str) -> list[tuple[str, object, dict[str, obj
     ``optional_field_kwargs`` -> ``strawberry.field(name=...)`` because the
     wire tokens are Python keywords and cannot be dataclass field names.
     """
-    # The checker reads an ``Annotated[...]`` value as the bare special form, with no ``|``;
-    # the runtime ``Annotated`` alias widens with ``| None`` below.
-    self_ref = cast("OptionalWidenable", Annotated[type_name, strawberry.lazy(INPUTS_MODULE_PATH)])
+    self_ref: object = Annotated[type_name, strawberry.lazy(INPUTS_MODULE_PATH)]
     list_ref = GenericAlias(list, (self_ref,))
     return [
         (
             op.python_attr,
-            (list_ref if op.is_sequence else self_ref) | None,
+            optional_annotation(list_ref if op.is_sequence else self_ref),
             optional_field_kwargs(op.python_attr, op.wire_name),
         )
         for op in LOGIC_OPERATORS
@@ -1080,9 +1079,9 @@ def _group_filters_by_head(
     input, so that raises. Returns the grouping and the set of declared heads.
     """
     # django-filter's metaclass stores ``declared_filters`` as the name-keyed declared map.
-    declared_filters = cast(
-        "Mapping[str, Filter]",
+    declared_filters = require(
         truth.static_attr(filterset_cls, "declared_filters", {}),
+        is_mapping,
     )
     grouped: OrderedDict[str, OrderedDict[str, FormKeyedFilter]] = OrderedDict()
     declared_heads: set[str] = set()
@@ -1181,9 +1180,9 @@ def _build_input_fields(
     """
     # The metaclass stores ``related_filters`` from
     # ``sets_mixins.py::collect_related_declarations`` (``RelatedFilter`` only).
-    related_filters = cast(
-        "Mapping[str, RelatedFilter]",
+    related_filters = declaration_map(
         truth.static_attr(filterset_cls, "related_filters", OrderedDict[str, object]()),
+        RelatedFilter,
     )
     lookup_table = filter_lookup_table(filterset_cls)
 

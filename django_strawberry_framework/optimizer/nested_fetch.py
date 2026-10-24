@@ -86,6 +86,7 @@ from typing_extensions import override
 from django_strawberry_framework.conf import nested_connection_strategy_setting
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._narrowing import is_str, require, require_instance
 from django_strawberry_framework.utils._queryset_private import (
     chain_queryset,
     super_clone_queryset,
@@ -211,8 +212,7 @@ class RecognizedFetchQuerySet(QuerySet[models.Model, models.Model]):
 
         clone = chain_queryset(queryset)
         clone.__class__ = cls  # truth: ok a write that rebinds a framework-built clone, not a read
-        # The class swap above made the clone an instance of ``cls``.
-        rebound = cast("RecognizedFetchQuerySet", clone)
+        rebound = require_instance(clone, cls)
         setattr(rebound, cls._dst_spec_attr, spec)
         rebound._dst_window_signature = window_predicate_signature(queryset.query)
         return rebound
@@ -349,7 +349,7 @@ def attach_windowed_prefetch(
         request.child_queryset,
         # A request's join is windowable by construction, and a windowable
         # join always carries its partition.
-        partition_by=cast("str", request.join.partition_expr),
+        partition_by=require(request.join.partition_expr, is_str),
         order_by=request.order_by,
         offset=request.offset,
         limit=request.limit,

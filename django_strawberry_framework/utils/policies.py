@@ -23,16 +23,16 @@ validated on the same terms.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import fields
-from typing import TYPE_CHECKING, TypeVar, cast
+from typing import TYPE_CHECKING, TypeVar
 
 from django_strawberry_framework.exceptions import ConfigurationError
 
 from . import truth
+from ._narrowing import is_real_mapping
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from _typeshed import DataclassInstance
 
@@ -149,7 +149,7 @@ def resolve_policy(
         return canonical_policy(overrides, policy_cls=policy_cls)
     # The mapping protocol is asked of the real class, so a value whose
     # ``__class__`` raises or lies is the typed rejection below, never its own error.
-    if not issubclass(truth.class_of(overrides), Mapping):
+    if not is_real_mapping(overrides):
         raise ConfigurationError(
             f"The {display_name} must be {_article(truth.name(policy_cls))} "
             f"{truth.name(policy_cls)} or a mapping of {unit} names to values; "
@@ -163,8 +163,7 @@ def resolve_policy(
     # ``TypeError`` instead of the typed rejection) or never see at all. One
     # consumption point is the same hardening ``conf.py::
     # upstream_patches_enabled`` applies to its own settings mapping.
-    # The real-class ``Mapping`` check above does not narrow for the checker.
-    plain = dict(cast("Mapping[object, object]", overrides))
+    plain = dict(overrides)
     # Key-type guard FIRST: a non-string key must reach this typed rejection,
     # not a bare ``TypeError`` from a ``sorted()`` over mixed unorderable names
     # (the ``conf.py::upstream_patches_enabled`` key-guard precedent). A string

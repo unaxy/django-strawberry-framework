@@ -62,6 +62,7 @@ from strawberry.types.nodes import (
     convert_directives,
 )
 
+from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.utils.typing import (
     inline_fragment_type_condition,
     schema_config_from_info,
@@ -97,8 +98,6 @@ if TYPE_CHECKING:
     #: A converted FIELD selection (never a fragment): Strawberry's
     #: ``SelectedField`` or the walker's field-shaped ``SimpleNamespace`` clone.
     FieldSelection: TypeAlias = SelectedField | SimpleNamespace
-    #: A converted fragment selection, the ones ``is_fragment`` accepts.
-    FragmentSelection: TypeAlias = FragmentSpread | InlineFragment | SimpleNamespace
     #: A ``resolve_unvisited_fragment`` visit key: the fragment name, or
     #: ``(name, depth)`` for the depth-sensitive walk.
     FragmentVisitKey: TypeAlias = str | tuple[str, int]
@@ -231,9 +230,8 @@ def ast_to_converted_selections(
         return out
 
     converted = _convert(field_nodes)
-    if memo is not None:
-        # ``memo_key`` was computed in the ``memo is not None`` branch above.
-        memo[cast("ConvertedMemoKey", memo_key)] = converted
+    if memo is not None and memo_key is not None:
+        memo[memo_key] = converted
     return converted
 
 
@@ -278,13 +276,9 @@ def prime_selected_fields(info: Info[object, object]) -> None:
     field_nodes: list[FieldNode] | None = getattr(raw_info, "field_nodes", None)
     # Strawberry's own ``cached_property`` slot on the Info it handed us.
     namespace = info.__dict__  # truth: ok seeds Strawberry Info's cache slot, not an identity read
-    if not field_nodes or "selected_fields" in namespace:
+    if raw_info is None or not field_nodes or "selected_fields" in namespace:
         return
-    namespace["selected_fields"] = ast_to_converted_selections(
-        # ``field_nodes`` was read off it, so the raw info is present.
-        cast("GraphQLResolveInfo", raw_info),
-        field_nodes,
-    )
+    namespace["selected_fields"] = ast_to_converted_selections(raw_info, field_nodes)
 
 
 # ---------------------------------------------------------------------------
@@ -545,7 +539,7 @@ def with_runtime_prefix(
         return SimpleNamespace(
             name=getattr(selection, "name", None),
             # ``is_fragment`` accepted it, so it carries a ``type_condition``.
-            type_condition=cast("FragmentSelection", selection).type_condition,
+            type_condition=read_attr(selection, "type_condition"),
             directives=getattr(selection, "directives", None) or {},
             selections=[with_runtime_prefix(child, runtime_prefixes) for child in members],
         )

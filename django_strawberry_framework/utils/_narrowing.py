@@ -39,6 +39,18 @@ enum member's ``value`` ``Any``, django-stubs declares ``Model.pk`` ``Any``, and
 ``object`` match no overload; under the checker each answers in ``object`` terms,
 which the caller narrows like any other consumer value.
 
+``is_concrete_field`` and ``is_queryset`` are ``isinstance`` checks (like ``is_dict``, each
+name IS the class's own ``__instancecheck__``) whose claim is only what the check proves:
+a model ``Field`` (never a reverse ``ForeignObjectRel``), and a ``QuerySet`` whose rows are
+``object`` (a ``.values()`` queryset passes the same check, so no model-row claim is made).
+``is_real_mapping`` / ``is_real_collection`` stand with ``is_class`` / ``is_str``: the
+``issubclass(type(value), ABC)`` check asked of the real type.
+
+``optional_annotation``, ``get_item`` / ``set_item`` / ``del_item`` and ``iter_of`` are typed
+slots over ``annotation | None``, ``operator.getitem`` / ``setitem`` / ``delitem`` and
+``iter``: each takes and answers ``object``, which is all the operation guarantees, so a
+call site narrows the answer like any other consumer value.
+
 ``require_instance`` / ``require`` are the narrowing for a value whose source
 guarantees its class but types it loosely: each checks the guarantee (``isinstance``,
 or a ``TypeIs`` predicate for a generic class) and raises ``TypeError`` the moment it
@@ -48,7 +60,7 @@ stops holding. ``optional_instance`` is ``require_instance`` for a slot that may
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from collections.abc import Set as AbstractSet
 from typing import TYPE_CHECKING, TypeGuard, TypeVar
 
@@ -59,8 +71,10 @@ if TYPE_CHECKING:
     from enum import Enum
     from typing import Protocol, overload
 
-    from django.db.models import Model
+    from django.db.models import Model, QuerySet
     from typing_extensions import TypeIs
+
+    from .typing import ConcreteField
 
     _KeyT = TypeVar("_KeyT")
     _ValueT = TypeVar("_ValueT")
@@ -99,6 +113,23 @@ if TYPE_CHECKING:
 
     def is_mapping(_value: object, /) -> TypeIs[Mapping[object, object]]:
         """Return whether the value is a ``Mapping`` (registered virtual subclasses included)."""
+        ...
+
+    def is_concrete_field(_value: object, /) -> TypeIs[ConcreteField]:
+        """Return whether the value is a model ``Field`` (a reverse ``ForeignObjectRel`` is not one).
+
+        Any ``models.Field``, not only a ``.concrete`` column: a many-to-many, a
+        ``GenericRelation`` and a ``GenericForeignKey`` (a ``Field`` subclass in the Django
+        releases this package supports) pass too.
+        """
+        ...
+
+    def is_queryset(_value: object, /) -> TypeIs[QuerySet[Model, object]]:
+        """Return whether the value is a ``QuerySet`` (subclasses included).
+
+        The claim is ``object`` rows: a ``.values()`` queryset passes the same check, so
+        a caller reads ``model`` / ``db`` and nothing about the rows.
+        """
         ...
 
     def dict_items(_value: dict[_KeyT, _ValueT], /) -> ItemsView[_KeyT, _ValueT]:
@@ -149,6 +180,30 @@ if TYPE_CHECKING:
         """
         ...
 
+    def optional_annotation(_annotation: object, /) -> object:
+        """Return ``annotation | None``: the annotation widened to accept ``None``.
+
+        A class, an alias or a special form (``Annotated[...]``) widens; a value with no
+        ``|`` raises the ``TypeError`` the expression raises.
+        """
+        ...
+
+    def get_item(_container: object, _key: object, /) -> object:
+        """Return ``container[key]``: the lookup raises whatever the container raises."""
+        ...
+
+    def set_item(_container: object, _key: object, _value: object, /) -> None:
+        """Run ``container[key] = value``: the store raises whatever the container raises."""
+        ...
+
+    def del_item(_container: object, _key: object, /) -> None:
+        """Run ``del container[key]``: the delete raises whatever the container raises."""
+        ...
+
+    def iter_of(_value: object, /) -> Iterator[object]:
+        """Return ``iter(value)``, raising whatever ``iter`` raises for a value it cannot iterate."""
+        ...
+
     class _AttrReader(Protocol):
         """``getattr``'s two call shapes, each answering ``object``."""
 
@@ -196,7 +251,9 @@ if TYPE_CHECKING:
 
 else:
     import inspect
-    from operator import attrgetter
+    from operator import attrgetter, delitem, getitem, setitem
+
+    from django.db import models
 
     is_dict = dict.__instancecheck__
     is_list = list.__instancecheck__
@@ -207,6 +264,8 @@ else:
     is_iterable = Iterable.__instancecheck__
     is_abstract_set = AbstractSet.__instancecheck__
     is_memoryview = memoryview.__instancecheck__
+    is_concrete_field = models.Field.__instancecheck__
+    is_queryset = models.QuerySet.__instancecheck__
     dict_items = dict.items
     dict_get = dict.get
     list_iter = list.__iter__
@@ -224,6 +283,13 @@ else:
     dict_of = dict
     list_of = list
     instance_dict = truth.instance_state
+    get_item = getitem
+    set_item = setitem
+    del_item = delitem
+    iter_of = iter
+
+    def optional_annotation(annotation: object, /) -> object:
+        return annotation | None
 
     def call_method(value: object, name: str, /, *args: object) -> object:
         return getattr(value, name)(*args)
@@ -232,16 +298,19 @@ else:
 __all__ = (
     "call_method",
     "class_dict",
+    "del_item",
     "dict_get",
     "dict_items",
     "dict_of",
     "enum_value",
     "frozenset_iter",
+    "get_item",
     "instance_dict",
     "is_abstract_set",
     "is_awaitable",
     "is_char_wise",
     "is_class",
+    "is_concrete_field",
     "is_dict",
     "is_exact_dict",
     "is_exact_list",
@@ -255,18 +324,24 @@ __all__ = (
     "is_list_or_tuple",
     "is_mapping",
     "is_memoryview",
+    "is_queryset",
+    "is_real_collection",
+    "is_real_mapping",
     "is_set",
     "is_set_or_frozenset",
     "is_str",
     "is_tuple",
+    "iter_of",
     "list_iter",
     "list_of",
     "mapping_get",
+    "optional_annotation",
     "optional_instance",
     "pk_of",
     "read_attr",
     "require",
     "require_instance",
+    "set_item",
     "set_iter",
     "tuple_iter",
     "type_attr",
@@ -291,6 +366,25 @@ def is_class(value: object) -> TypeIs[type[object]]:
     type cannot be restated by a ``__class__`` property on the value.
     """
     return issubclass(type(value), type)
+
+
+def is_real_mapping(value: object) -> TypeIs[Mapping[object, object]]:
+    """Return whether ``value`` IS a ``Mapping`` (virtual subclasses included), asked of its real type.
+
+    ``issubclass(type(value), Mapping)`` rather than ``isinstance``: a ``__class__``
+    property on the value can neither claim ``Mapping`` nor raise.
+    """
+    return issubclass(type(value), Mapping)
+
+
+def is_real_collection(value: object) -> TypeIs[Collection[object]]:
+    """Return whether ``value`` IS a ``Collection`` (virtual subclasses included), asked of its real type.
+
+    ``issubclass(type(value), Collection)`` rather than ``isinstance``, as in
+    ``is_real_mapping``. A ``str`` is a ``Collection``; a caller that refuses text
+    asks ``is_char_wise`` first.
+    """
+    return issubclass(type(value), Collection)
 
 
 _InstanceT = TypeVar("_InstanceT")

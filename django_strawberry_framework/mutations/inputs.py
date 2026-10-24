@@ -52,6 +52,7 @@ from django_strawberry_framework.scalars import Upload
 from django_strawberry_framework.types.converters import convert_scalar, scalar_for_field
 from django_strawberry_framework.types.relay import implements_relay_node
 from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._narrowing import is_concrete_field, require
 
 # ``FieldError`` and ``NON_FIELD_ERROR_KEY`` are defined in ``utils/errors.py``
 # (below every write flavor, so the shared constructors import nothing upward);
@@ -79,6 +80,7 @@ from django_strawberry_framework.utils.relations import (
     is_forward_concrete_relation,
     is_forward_many_to_many,
     is_many_side_relation_kind,
+    is_model_class,
     non_pk_relation_key_attname,
     relation_bool,
     relation_kind,
@@ -340,12 +342,10 @@ def editable_input_fields(
         # among them) and a pk Django assigns itself (``primary_key`` - the auto
         # ``AutoField`` is ``editable=True``); a client-assigned pk stays in the
         # basis for the row-identity rule below to keep (create) or drop (update).
-        if not hasattr(field, "column") or not getattr(field, "editable", False):
+        if not is_concrete_field(field) or not getattr(field, "editable", False):
             continue
-        # Only a concrete ``Field`` carries a ``column``; a reverse ``*Rel`` has none.
-        column = cast("ConcreteField", field)
-        if not column.primary_key or _client_assigned_primary_key(column):
-            selected.append(column)
+        if not field.primary_key or _client_assigned_primary_key(field):
+            selected.append(field)
 
     by_name = {field.name: field for field in selected}
     # A create keeps a client-assigned key; any other input never carries one.
@@ -609,7 +609,7 @@ def relation_input_annotation(
     many = model_column_write_kind(field) == RELATION_MULTI
     # A relation field's ``related_model`` is its resolved target model class.
     annotation = relation_id_annotation(
-        cast("type[models.Model]", field.related_model),
+        require(field.related_model, is_model_class),
         related_primary_type,
         many=many,
     )
@@ -761,7 +761,7 @@ def model_column_write_annotation(
     kind = model_column_write_kind(field)
     if kind in (RELATION_SINGLE, RELATION_MULTI):
         # A relation field's ``related_model`` is its resolved target model class.
-        related_model = cast("type[models.Model]", field.related_model)
+        related_model = require(field.related_model, is_model_class)
         return relation_id_annotation(
             related_model,
             primary_of(related_model),
@@ -771,7 +771,7 @@ def model_column_write_annotation(
         return Upload
     # ``model_column_write_kind`` classifies every reverse ``ForeignObjectRel`` as a
     # relation, so a SCALAR column is a concrete ``Field``.
-    return convert_scalar(cast("ConcreteField", field), type_name, force_nullable=False)
+    return convert_scalar(require(field, is_concrete_field), type_name, force_nullable=False)
 
 
 def model_column_input_annotation(
@@ -800,7 +800,7 @@ def model_column_input_annotation(
         # A relation field's ``related_model`` is its resolved target model class.
         return relation_input_annotation(
             field,
-            related_primary_type=primary_of(cast("type[models.Model]", field.related_model)),
+            related_primary_type=primary_of(require(field.related_model, is_model_class)),
         )
     python_attr = field.name
     graphql_name = graphql_camel_name(python_attr)

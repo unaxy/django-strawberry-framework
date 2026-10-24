@@ -76,12 +76,12 @@ repos:
         require_serial: true
 
       - id: check-type-suppressions
-        name: type suppressions (no ignore on a locked rule, no file-level directive, on budget)
+        name: type suppressions (no ignore on a locked rule, no file-level directive, on the site ledger)
         entry: uv run python scripts/check_type_suppressions.py
         language: system
-        # Every tracked file, as in CI: the budget counts the whole tree. Fires on any
-        # staged `.py` or the config that holds the locks and the budget.
-        files: ^(.*\.py|pyproject\.toml)$
+        # Every tracked file, as in CI: the ledger covers the whole tree. Fires on any
+        # staged `.py`, the config that holds the locks, or the ledger.
+        files: ^(.*\.py|pyproject\.toml|scripts/type_suppressions\.toml)$
         pass_filenames: false
 
       - id: check-public-types

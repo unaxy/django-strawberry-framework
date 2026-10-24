@@ -83,7 +83,7 @@ import copy
 import threading
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, TypeVar, cast
+from typing import TYPE_CHECKING, TypeVar
 
 from django.core.exceptions import ValidationError
 from django.db import DEFAULT_DB_ALIAS, DatabaseError, connections, router, transaction
@@ -97,9 +97,11 @@ from django_strawberry_framework.utils.errors import FIELD_ERROR_CODE_CONFLICT, 
 from . import truth
 from ._narrowing import (
     call_method,
+    is_set_or_frozenset,
     list_of,
     pk_of,
     read_attr,
+    require,
 )
 from ._queryset_private import queryset_db, queryset_fetch_mode, set_queryset_fetch_mode
 from .canonical import base_container_values, canonical_sort_key
@@ -1152,7 +1154,7 @@ def _field_fingerprint(value: object) -> str:
             stack.extend(reversed(base_container_values(item)))
         else:
             # The container check above leaves a ``set`` / ``frozenset`` as the only kind here.
-            members = cast("set[object] | frozenset[object]", item)
+            members = require(item, is_set_or_frozenset)
             parts.append("s{")
             stack.append(_SnapshotClose("}s", container_id))
             stack.extend(

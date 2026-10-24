@@ -74,6 +74,7 @@ from strawberry import relay
 from strawberry.relay.types import NodeIterableType
 from strawberry.relay.utils import should_resolve_list_connection_edges
 from strawberry.types import Info, get_object_definition
+from strawberry.types.field import StrawberryField
 from strawberry.utils.await_maybe import AwaitableOrValue
 from typing_extensions import override
 
@@ -113,7 +114,15 @@ from .registry import register_subsystem_clear
 from .resource_policy import check_deadline
 from .types.resolvers import _check_n1
 from .utils import truth
-from .utils._narrowing import is_awaitable, is_list, read_attr, require, require_instance
+from .utils._narrowing import (
+    is_awaitable,
+    is_list,
+    is_queryset,
+    optional_annotation,
+    read_attr,
+    require,
+    require_instance,
+)
 from .utils.connections import (
     CONNECTION_FILTER_KWARG,
     CONNECTION_ORDER_KWARG,
@@ -158,9 +167,7 @@ if TYPE_CHECKING:
     from typing import Literal, TypeAlias
 
     from strawberry.relay.types import NodeIterableType
-    from strawberry.types.base import WithStrawberryObjectDefinition
-    from strawberry.types.field import StrawberryField
-    from typing_extensions import Self
+    from typing_extensions import Self, TypeIs
 
     from .filters.sets import FilterSet
     from .optimizer.selections import ConnectionFieldNames, ConvertedSelection
@@ -169,7 +176,6 @@ if TYPE_CHECKING:
     from .types.definition import DjangoTypeDefinition
     from .utils.connections import ConnectionWindowBounds
     from .utils.querysets import NormalizedSource
-    from .utils.typing import OptionalWidenable
 
     #: One sidecar step: its kind pairs the set class with that family's apply entry.
     _SidecarStep: TypeAlias = (
@@ -355,6 +361,11 @@ def _build_windowed_fallback(
     )
 
 
+def _is_edge_class(value: object) -> TypeIs[type[relay.Edge[relay.Node]]]:
+    """Return whether ``value`` is a ``relay.Edge`` subclass; its node parameter is erased at run time."""
+    return truth.is_subclass(value, relay.Edge)
+
+
 def _window_edge_class(cls: type[_ConnectionT]) -> type[relay.Edge[relay.Node]]:
     """Resolve the connection's edge class exactly as ``ListConnection`` does.
 
@@ -369,12 +380,10 @@ def _window_edge_class(cls: type[_ConnectionT]) -> type[relay.Edge[relay.Node]]:
     if cached is not None:
         return cached
     type_def = get_object_definition(cls, strict=True)
-    # Every Relay connection type declares ``edges``.
-    field_def = cast("StrawberryField", type_def.get_field("edges"))
-    # ``edges`` is ``list[Edge[Node]]``, so the unwrapped container is the Edge subclass.
-    edge_class = cast(
-        "type[relay.Edge[relay.Node]]",
+    field_def = require_instance(type_def.get_field("edges"), StrawberryField)
+    edge_class = require(
         unwrap_container_type(field_def.resolve_type(type_definition=type_def)),
+        _is_edge_class,
     )
     _window_edge_class_cache[cls] = edge_class
     return edge_class
@@ -1591,8 +1600,12 @@ def _build_total_count_connection(
     return _generate_connection_class(target_type, definition, _populate, description=None)
 
 
-def _guard_total_count_countable(nodes: object, *, want_count: bool) -> None:
-    """Raise ``GraphQLError`` when ``totalCount`` is selected over a non-queryset.
+def _guard_total_count_countable(
+    nodes: object,
+    *,
+    want_count: bool,
+) -> models.QuerySet[models.Model, object] | None:
+    """Return the queryset to count, ``None`` when no count is wanted; raise for a non-queryset.
 
     spec-030 Decision 7: ``totalCount`` renders ``Int!``, and a
     non-queryset iterable cannot be ``.count()``-ed. Rather than skip the count
@@ -1602,32 +1615,26 @@ def _guard_total_count_countable(nodes: object, *, want_count: bool) -> None:
     ``_guard_sidecar_input_against_non_queryset``. Single-sited so the sync and
     async count helpers share one rule.
     """
-    if want_count and not isinstance(nodes, models.QuerySet):
+    if not want_count:
+        return None
+    if not is_queryset(nodes):
         raise GraphQLError(
             "`totalCount` was selected on a connection whose resolver returned a "
             "non-queryset iterable; `totalCount` requires a QuerySet source it "
             "can count. Return a QuerySet (or a Manager) from the connection "
             "resolver, or do not select `totalCount`.",
         )
+    return nodes
 
 
 def _attach_count_sync(conn: _ConnectionT, nodes: object, *, want_count: bool) -> _ConnectionT:
     """Attach the post-filter pre-slice count to a resolved connection (sync)."""
-    _guard_total_count_countable(nodes, want_count=want_count)
-    if not want_count:
-        # The ``.count`` READ must be gated on ``want_count`` even though the
-        # CALL already is: ``value=nodes.count`` evaluates the attribute
-        # EAGERLY, and a non-queryset source without a ``.count`` attribute (a
-        # generator, a set, a one-shot iterator - shapes the consumer-resolver
-        # contract admits) would raise ``AttributeError`` on every page whose
-        # selection did not include ``totalCount``. The guard above has
-        # already raised for the ``totalCount``-selected-over-a-non-queryset
-        # shape, so past this point ``want_count=True`` implies a QuerySet and
-        # the bound method is safe to read (and only called when wanted).
+    counted = _guard_total_count_countable(nodes, want_count=want_count)
+    if counted is None:
+        # No ``totalCount`` selected: the source is never read, so a non-queryset
+        # source without a ``.count`` attribute (a generator, a set, a one-shot
+        # iterator - shapes the consumer-resolver contract admits) pages unchanged.
         return conn
-    # ``_guard_total_count_countable`` raised for a non-QuerySet under ``want_count``; a raising
-    # guard in another function cannot narrow ``nodes`` here
-    counted = cast("models.QuerySet[models.Model, object]", nodes)
     return _set_total_count(conn, want_count=True, value=counted.count)
 
 
@@ -1646,14 +1653,11 @@ async def _attach_count_async(
     # decision depends only on ``nodes`` / ``want_count``, never on ``conn``,
     # so awaiting first is side-effect-safe.
     conn = await conn_awaitable
-    _guard_total_count_countable(nodes, want_count=want_count)
-    if want_count:
+    counted = _guard_total_count_countable(nodes, want_count=want_count)
+    if counted is not None:
         # The ``await`` keeps this step explicitly colored (the package's
         # sync/async convention); the attr write itself still routes through
         # the single ``_set_total_count`` writer.
-        # ``_guard_total_count_countable`` raised for a non-QuerySet under ``want_count``; a
-        # raising guard in another function cannot narrow ``nodes`` here
-        counted = cast("models.QuerySet[models.Model, object]", nodes)
         _ = _set_total_count(conn, want_count=True, value=await counted.acount())
     return conn
 
@@ -1713,10 +1717,7 @@ def _connection_type_for(
             target_type,
             definition,
             # ``ListConnection``'s ``strawberry.type`` decoration is inherited here.
-            description=cast(
-                "type[WithStrawberryObjectDefinition]",
-                DjangoConnection,
-            ).__strawberry_definition__.description,
+            description=get_object_definition(DjangoConnection, strict=True).description,
         )
     _connection_type_cache[target_type] = _CachedConnectionType(definition, connection_type)
     return connection_type
@@ -2233,9 +2234,7 @@ def _synthesized_signature(
     if definition.filterset_class is not None:
         # ``filter_input_type`` returns a ``strawberry.LazyType``, whose ``__or__`` widens
         # with ``| None``
-        filter_ann: object = (
-            cast("OptionalWidenable", filter_input_type(definition.filterset_class)) | None
-        )
+        filter_ann = optional_annotation(filter_input_type(definition.filterset_class))
         params.append(
             inspect.Parameter(
                 CONNECTION_FILTER_KWARG,

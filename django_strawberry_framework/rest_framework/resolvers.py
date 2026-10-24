@@ -158,6 +158,7 @@ from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     dict_of,
     is_dict,
+    is_frozenset,
     is_list,
     is_list_or_tuple,
     is_mapping,
@@ -851,6 +852,11 @@ def _is_frozen_container(value: object) -> TypeIs[_FrozenContainer]:
     return truth.is_one_of(value, _FROZEN_VIEW_CONTAINERS)
 
 
+def _is_django_file(value: object) -> TypeIs[_FileAny]:
+    """Whether ``value``'s real class is a Django ``File`` (subclasses included)."""
+    return truth.is_instance(value, File)
+
+
 @overload
 def _frozen_hook_view(value: dict[str, object]) -> Mapping[str, object]: ...
 @overload
@@ -891,8 +897,8 @@ def _frozen_hook_view(value: object) -> object:
     """
 
     def _freeze_leaf(item: object) -> object:
-        if truth.is_instance(item, File):
-            return _upload_metadata(cast("_FileAny", item))
+        if _is_django_file(item):
+            return _upload_metadata(item)
         if truth.is_instance(item, bytearray):
             return bytes(item)
         if truth.is_one_of(item, _IMMUTABLE_LEAF_TYPES):
@@ -920,9 +926,9 @@ def _frozen_hook_view(value: object) -> object:
         return {} if truth.is_instance(container, dict) else []
 
     def _finalize(source: object, acc: _FrozenAccumulator) -> object:
-        if truth.is_instance(source, dict):
-            # ``_new_acc`` built a dict accumulator for exactly this dict source.
-            return MappingProxyType(cast("dict[object, object]", acc))
+        # ``_new_acc`` built a dict accumulator for exactly a dict source.
+        if truth.is_instance(acc, dict):
+            return MappingProxyType(acc)
         if truth.is_one_of(source, (set, frozenset)):
             return frozenset(acc)
         return tuple(acc)
@@ -1588,7 +1594,11 @@ def _pin_validator_querysets(serializer: DRFField, alias: str, *, path: str = ""
         field.validators = _pinned(field.validators, f"{serializer_name}.{field_path}")
         if isinstance(field, serializers.ListSerializer):
             # ``ListSerializer.__init__`` asserts a ``child``; drf-stubs keep the class-level None.
-            _pin_validator_querysets(cast("DRFField", field.child), alias, path=field_path)
+            _pin_validator_querysets(
+                require(read_attr(field, "child"), is_drf_field),
+                alias,
+                path=field_path,
+            )
             return
         if isinstance(field, serializers.BaseSerializer):
             _pin_validator_querysets(field, alias, path=field_path)
@@ -1683,7 +1693,7 @@ def _scope_specs_over_serializer(
         # no primary type (no visibility contract to AND on - the pin + lock still apply).
         visible = related_visibility_queryset(
             # A relation spec always records its target model.
-            cast("type[models.Model]", spec.related_model),
+            require(spec.related_model, is_model_class),
             info,
             _SERIALIZER_ASYNC_RECOURSE,
         )
@@ -1695,7 +1705,7 @@ def _scope_specs_over_serializer(
             )
         if pipeline.lock:
             scoped = base_locked_queryset(
-                cast("type[models.Model]", spec.related_model),
+                require(spec.related_model, is_model_class),
                 pipeline.alias,
                 scoped,
             )
@@ -2346,7 +2356,7 @@ def _attest_saved_relations(
                     f"SerializerMutation {truth.name(mutation_cls)}: after {name}.save(), the "
                     f"M2M relation {spec.target_name!r} holds pk set {sorted(map(str, current))!r}, "
                     "not the validated set "
-                    f"{sorted(map(str, cast('frozenset[object]', expected)))!r}; the custom "
+                    f"{sorted(map(str, require(expected, is_frozenset)))!r}; the custom "
                     "create()/update() ignored or replaced a validated relation set.",
                 )
         elif source in m2m_before and current != m2m_before[source]:

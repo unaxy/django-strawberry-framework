@@ -23,7 +23,16 @@ from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from functools import cache
 from types import MappingProxyType
-from typing import TYPE_CHECKING, ClassVar, Literal, NoReturn, SupportsIndex, TypeVar, cast
+from typing import (
+    TYPE_CHECKING,
+    ClassVar,
+    Literal,
+    NoReturn,
+    SupportsIndex,
+    TypeVar,
+    cast,
+    overload,
+)
 
 import django_filters
 from django import forms
@@ -87,10 +96,13 @@ from django_strawberry_framework.utils._narrowing import (
     dict_items,
     is_dict,
     is_list_or_tuple,
+    is_queryset,
     is_str,
+    list_of,
     optional_instance,
     read_attr,
     require,
+    require_instance,
 )
 from django_strawberry_framework.utils.errors import (
     FIELD_ERROR_CODE_INVALID,
@@ -1308,7 +1320,7 @@ def _absence_filters_nothing(
     if absent is _UNPROVEN:
         return False
     if isinstance(source, ChoiceFilter) and _null_value_is_absent(
-        cast("object", source.null_value),
+        read_attr(source, "null_value"),
         absent,
     ):
         return False
@@ -1867,13 +1879,10 @@ def _projected_class_for(filter_cls: type[Filter]) -> type[ProjectedChildFilter]
     """Return the projected subclass of ``filter_cls``, one per class; a projected class is its own."""
     if truth.is_subclass(filter_cls, ProjectedChildFilter):
         return filter_cls
-    return cast(
-        "type[ProjectedChildFilter]",
-        type(
-            f"Projected{truth.name(filter_cls)}",
-            (ProjectedChildFilter, filter_cls),
-            {"_projected_from": filter_cls},
-        ),
+    return type(
+        f"Projected{truth.name(filter_cls)}",
+        (ProjectedChildFilter, filter_cls),
+        {"_projected_from": filter_cls},
     )
 
 
@@ -1949,6 +1958,24 @@ def _reaches_related(
 ) -> Exists:
     """Return the ``_restrict_to_related`` test itself, for a caller that composes or negates it."""
     return related_rows_exist(queryset.model, relation, related_rows, using=queryset.db, via=via)
+
+
+@overload
+def _admitted_rows(
+    owner: type[object],
+    declared_attr: str,
+    related_filter: RelatedFilter,
+    child_rows: models.QuerySet[models.Model],
+) -> models.QuerySet[models.Model]: ...
+
+
+@overload
+def _admitted_rows(
+    owner: type[object],
+    declared_attr: str,
+    related_filter: RelatedFilter,
+    child_rows: models.QuerySet[models.Model] | None,
+) -> models.QuerySet[models.Model] | None: ...
 
 
 def _admitted_rows(
@@ -2156,7 +2183,7 @@ def _require_relation_path(owner: type[FilterSet], declared_attr: str, f: Relate
     """
     field_name = _bound_field_name(f)
     # Only model-backed sets expand their ``related_filters`` (see ``get_filters``).
-    model = cast("type[models.Model]", owner._meta.model)
+    model = require(owner._meta.model, is_model_class)
     hops = leading_relation_hops(model, field_name)
     segments = field_name.split(LOOKUP_SEP)
     if len(hops) < len(segments):
@@ -2196,7 +2223,7 @@ def _require_correlated_target(
         return
     field_name = _bound_field_name(f)
     # Only model-backed sets expand their ``related_filters`` (see ``get_filters``).
-    model = cast("type[models.Model]", owner._meta.model)
+    model = require(owner._meta.model, is_model_class)
     target_model: type[models.Model] | None = target._meta.model
     if target_model is not None and correlates_related_rows(model, field_name, target_model):
         return
@@ -2217,14 +2244,13 @@ def _require_correlated_target(
     )
 
 
-def _filter_paths(filterset: type[object]) -> Iterator[str]:
+def _filter_paths(filterset: type[FilterSet]) -> Iterator[str]:
     """Yield the ORM path of every leaf a target filter set exposes, its expanded copies included.
 
     A ``RelatedFilter`` (declared, or copied by an expansion) is a branch, not a
     leaf; ``reject_captured_branches`` reads the declared ones apart.
     """
-    # ``reject_captured_branches`` hands back a ``RelatedFilter`` target, a ``FilterSet``.
-    for filter_instance in cast("type[FilterSet]", filterset).get_filters().values():
+    for filter_instance in filterset.get_filters().values():
         if not isinstance(filter_instance, RelatedFilter):
             yield _bound_field_name(filter_instance)
 
@@ -2464,7 +2490,7 @@ def _expand_related_filter(
         field_copy.field_name = f"{relation}__{field.field_name}"
         if _owner_bound_child(target_filterset, field):
             field_copy.__class__ = _projected_class_for(type(field_copy))  # truth: ok class store
-            projected = cast("ProjectedChildFilter", field_copy)
+            projected = require_instance(field_copy, ProjectedChildFilter)
             projected._projection = ChildProjection(target_filterset, child_name, filter_name)
             # An instance ``filter`` (``_own_filter``: django-filter's ``method`` setter
             # installs a ``FilterMethod``, the package's list filters theirs the same
@@ -2842,6 +2868,7 @@ class FilterSet(
                 reject_captured_branches(
                     cls,
                     related_filters_val,
+                    family=FilterSet,
                     related_attr="related_filters",
                     target_attr="filterset",
                     reached_paths=_filter_paths,
@@ -3135,7 +3162,7 @@ class FilterSet(
             # ``str`` is exempt here (unlike the order family): the top-level
             # ``"__all__"`` shorthand IS a string declaration, and any other
             # string is upstream's to reject.
-            require_re_readable_field_declaration(
+            _ = require_re_readable_field_declaration(
                 cls,
                 meta_fields,
                 subject="FilterSet",
@@ -3146,7 +3173,7 @@ class FilterSet(
         if options.exclude is not None:
             # No ``str`` exemption: upstream reads ``exclude`` only by membership, so a
             # string would exclude every field whose name is a substring of it.
-            require_re_readable_field_declaration(
+            _ = require_re_readable_field_declaration(
                 cls,
                 options.exclude,
                 subject="FilterSet",
@@ -3664,9 +3691,9 @@ class FilterSet(
         if child is None:
             # A ``RelatedFilter`` target always declares ``Meta.model``
             # (``_iter_visibility_steps`` trusts the same).
-            child_model = cast("type[models.Model]", filterset_cls._meta.model)
+            child_model = require(filterset_cls._meta.model, is_model_class)
             # Never ``None`` on an instance (see ``ProjectedChildFilter.filter``).
-            parent_qs = cast("models.QuerySet[models.Model]", self.queryset)
+            parent_qs = require(self.queryset, is_queryset)
             with _pipeline_built():
                 child = filterset_cls(
                     queryset=base_queryset(child_model, using=parent_qs.db),
@@ -4070,12 +4097,9 @@ class FilterSet(
                 continue
             cls._validate_logic_branch_shape(op.wire_name, branch_value)
             if op.is_sequence:
-                # ``_validate_logic_branch_shape`` refused anything but a list or tuple
-                # for a sequence operator.
-                elements = cast("list[object] | tuple[object, ...]", branch_value)
                 children = [
                     child
-                    for child in elements
+                    for child in list_of(branch_value)
                     if not is_inactive_value(child, unset_sentinel=UNSET)
                 ]
             else:
@@ -4505,7 +4529,7 @@ class FilterSet(
             # metaclass collected (``sets_mixins.py::collect_related_declarations``).
             target_type, child_filterset, child_base = cls._branch_visibility_seed(
                 field_name,
-                cast("RelatedFilter", declaration),
+                require_instance(declaration, RelatedFilter),
                 parent_db,
             )
             yield field_name, target_type, child_filterset, child_input, child_base
@@ -4553,9 +4577,8 @@ class FilterSet(
                 "silently return unfiltered rows. Register a DjangoType for "
                 "the target model or remove the RelatedFilter.",
             )
-        # Trusted, not checked here: a branch's child filterset declares
-        # ``Meta.model`` (a model-less child would fail inside ``base_queryset``).
-        child_model = cast("type[models.Model]", child_filterset._meta.model)
+        # A branch's child filterset declares ``Meta.model``.
+        child_model = require(child_filterset._meta.model, is_model_class)
         return target_type, child_filterset, base_queryset(child_model, using=parent_db)
 
     @classmethod
@@ -5177,7 +5200,7 @@ class FilterSet(
             into[key] = await apply_type_visibility_async(target_type, child_base, info)
         for _name, declaration, _child_input in cls._iter_active_related_branches(input_value):
             # ``related_filters`` holds only ``RelatedFilter`` declarations.
-            for scope in cls._branch_via_types(cast("RelatedFilter", declaration)):
+            for scope in cls._branch_via_types(require_instance(declaration, RelatedFilter)):
                 await cls._await_scoped_rows(scope, info, into, parent_db)
 
     @classmethod
@@ -5200,7 +5223,7 @@ class FilterSet(
         return relation_path_visibility_types(
             # A branch's declaring set is model-backed (``related_filters`` is collected
             # for model-backed sets only).
-            cast("type[models.Model]", cls._meta.model),
+            require(cls._meta.model, is_model_class),
             relation.rpartition(LOOKUP_SEP)[0],
             root=set_bound_type(cls),
         )
@@ -5365,7 +5388,7 @@ class FilterSet(
     ) -> models.QuerySet[models.Model]:
         """Return the unscoped rows for ``chain``'s terminal: the last hop target's, else ``queryset``."""
         if not chain.hops:
-            return cast("models.QuerySet[models.Model]", queryset)
+            return queryset
         return base_queryset(_hop_model(chain.hops[-1]), using=queryset.db)
 
     def _apply_relation_leaf(
@@ -5515,10 +5538,7 @@ class FilterSet(
         related_filter = cast("RelatedFilter", hop.related_obj)
         # A declared hop's owner is the ``FilterSet`` declaring it.
         owner = cast("type[FilterSet]", hop.owner)
-        admitted = cast(
-            "models.QuerySet[models.Model]",
-            _admitted_rows(owner, hop.declared_attr, related_filter, rows),
-        )
+        admitted = _admitted_rows(owner, hop.declared_attr, related_filter, rows)
         via = owner._via_rows(related_filter, self._apply_info, self._hop_visibility(), outer.db)
         return _reaches_related(outer, _bound_field_name(related_filter), admitted, via)
 
@@ -5572,8 +5592,8 @@ class FilterSet(
         null_extends = (
             terminal.method is None and terminal.lookup_expr == "isnull" and value is True
         )
-        if not chain.hops:
-            key_hop = cast("RelationHop", chain.key_hop)
+        key_hop = chain.key_hop
+        if not chain.hops and key_hop is not None:
             if negate:
                 inner = self._filter_child_rows(terminal, correlated_inner_root(queryset), value)
                 inner = inner.filter(
@@ -6018,14 +6038,15 @@ class FilterSet(
             # ``_derive_related_visibility_querysets_*``); ``related_filters`` holds
             # only the ``RelatedFilter`` declarations the metaclass collected
             # (``sets_mixins.py::collect_related_declarations``).
+            related_filter = require_instance(declaration, RelatedFilter)
             constrained = _restrict_through_branch(
                 constrained,
                 cls,
                 field_name,
-                cast("RelatedFilter", declaration),
+                related_filter,
                 child_qs_by_branch.get(field_name),
                 cls._via_rows(
-                    cast("RelatedFilter", declaration),
+                    related_filter,
                     info,
                     hop_visibility,
                     parent_qs.db,

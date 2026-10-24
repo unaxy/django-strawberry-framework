@@ -70,6 +70,7 @@ from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     list_of,
     read_attr,
+    require,
     require_instance,
 )
 from django_strawberry_framework.utils.imports import loaded_attr
@@ -95,8 +96,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
     from django.db import models
-    from django.db.models.options import Options
-    from strawberry.types.fields.resolver import StrawberryResolver
 
     from django_strawberry_framework.filters.base import RelatedFilter
     from django_strawberry_framework.filters.sets import FilterSet
@@ -476,8 +475,7 @@ def _warn_model_label_secondary_collapse(
         if not secondaries:
             continue
         secondary_names = ", ".join(sorted(truth.name(type_cls) for type_cls in secondaries))
-        # A model class's ``_meta`` is its ``Options``.
-        model_meta = cast("Options[models.Model]", truth.static_attr(model, "_meta"))
+        model_meta = model._meta
         logger.warning(
             "GlobalID identity collapse on model %s.%s: %s emit model-anchored GlobalIDs "
             "that decode to the primary type %s, so node(id:)/nodes(ids:) refetch them as %s "
@@ -559,9 +557,7 @@ def _register_relation_connection_teardown(
     lifecycle, not a general unfinalizer for Strawberry-decorated classes.
     """
     # The synthesized connection field is always built around a resolver.
-    # basedpyright: Strawberry types ``StrawberryResolver.wrapped_func`` with the bare generics
-    # ``staticmethod`` / ``classmethod``, so the read is partially Unknown
-    generated_resolver = cast("StrawberryResolver[object]", field_obj.base_resolver).wrapped_func  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    generated_resolver = read_attr(read_attr(field_obj, "base_resolver"), "wrapped_func")
 
     def teardown() -> None:
         current = truth.class_dict(type_cls).get(generated, _MISSING_CLASS_MEMBER)
@@ -1112,12 +1108,9 @@ def finalize_django_types() -> None:
     # The attribute is the package's own
     # ``django_strawberry_framework/auth/mutations.py::bind_auth_mutations``, read by
     # name so an unloaded auth subsystem stays unimported.
-    bind_auth = cast(
-        "Callable[[], object] | None",
-        loaded_attr("django_strawberry_framework.auth.mutations", "bind_auth_mutations"),
-    )
+    bind_auth = loaded_attr("django_strawberry_framework.auth.mutations", "bind_auth_mutations")
     if bind_auth is not None:
-        _ = bind_auth()
+        _ = require(bind_auth, callable)()
     bind_mutations()
     # Bind plain ``DjangoFormMutation`` declarations (spec-038 Decision
     # 6 / Decision 13) in the SAME phase-2.5 window. The model-less plain-form

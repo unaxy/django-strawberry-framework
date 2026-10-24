@@ -29,12 +29,12 @@ be conflated when refactoring.
 from __future__ import annotations
 
 import contextlib
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final
 
-from ._narrowing import is_dict
+from ._narrowing import del_item, get_item, is_dict, set_item
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Mapping, MutableMapping
+    from collections.abc import Generator
 
 __all__ = (
     "MISSING",
@@ -103,7 +103,7 @@ def get_context_value(context: object, key: str, default: object = None) -> obje
             return found
         # Item access is attempted on any context shape: one without ``__getitem__``
         # raises ``TypeError``, which the ``except`` below turns into ``default``.
-        return cast("Mapping[str, object]", context)[key]
+        return get_item(context, key)
     except (KeyError, TypeError, AttributeError):
         # A missing key, a non-subscriptable context, or a ``__getitem__``
         # bridged to attribute access all mean that this key is unavailable.
@@ -147,7 +147,7 @@ def stash_on_context(context: object, key: str, value: object) -> None:
     """
     if context is None:
         return
-    if not isinstance(context, dict):
+    if not is_dict(context):
         try:
             setattr(context, key, value)
         except (AttributeError, TypeError):
@@ -171,7 +171,7 @@ def stash_on_context(context: object, key: str, value: object) -> None:
     try:
         # Every context shape is tried: one without ``__setitem__`` raises ``TypeError``,
         # absorbed below like a frozen mapping's.
-        cast("MutableMapping[str, object]", context)[key] = value
+        set_item(context, key, value)
     except (TypeError, AttributeError):
         # ``MappingProxyType`` and other frozen mappings raise ``TypeError``
         # on ``__setitem__``; Django's locked ``QueryDict`` (a ``dict``
@@ -201,7 +201,7 @@ def clear_context_key(context: object, key: str) -> None:
     """
     if context is None:
         return
-    if not isinstance(context, dict):
+    if not is_dict(context):
         try:
             delattr(context, key)
         except (AttributeError, TypeError):
@@ -214,7 +214,7 @@ def clear_context_key(context: object, key: str) -> None:
     try:
         # Every context shape is tried: one without ``__delitem__`` raises ``TypeError``,
         # absorbed below like an absent key's ``KeyError``.
-        del cast("MutableMapping[str, object]", context)[key]
+        del_item(context, key)
     except (TypeError, AttributeError, KeyError):
         # Absent key, frozen mapping, or locked QueryDict (a ``dict`` subclass
         # whose ``__delitem__`` raises ``AttributeError`` when immutable) -

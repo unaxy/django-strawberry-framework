@@ -80,6 +80,7 @@ from django.db import connections
 from django.db.models import QuerySet
 from django.db.models.expressions import Col, Window
 from django.db.models.sql.where import AND, WhereNode
+from django.utils.tree import Node
 from typing_extensions import override
 
 from django_strawberry_framework.keyset import keyset_seek_sql
@@ -87,6 +88,7 @@ from django_strawberry_framework.utils._narrowing import (
     call_method,
     is_iterable,
     is_list_or_tuple,
+    is_str,
     list_of,
     read_attr,
     require,
@@ -122,7 +124,7 @@ if TYPE_CHECKING:
     from django.db.backends.base.base import BaseDatabaseWrapper
     from django.db.models.options import Options
     from django.db.models.sql.query import Query
-    from django.utils.tree import Node, _NodeChildren
+    from django.utils.tree import _NodeChildren
 
     from django_strawberry_framework.keyset import KeysetSeek
     from django_strawberry_framework.utils.typing import ConcreteField, ForeignKeyField
@@ -347,7 +349,7 @@ def build_lateral_sql(
             f"{through_table} AS {through} INNER JOIN {child_table} AS {child}"
             # ``through_child_column`` is set exactly when ``through_table`` is.
             f" ON {child}.{qn(spec.child_join_column)} = "
-            f"{through}.{qn(cast('str', spec.through_child_column))}"
+            f"{through}.{qn(require(spec.through_child_column, is_str))}"
         )
         link_table = through
     else:
@@ -386,7 +388,7 @@ def build_lateral_sql(
         # itself is ``keyset.keyset_seek_sql`` - the raw-SQL twin of
         # ``keyset_seek_q`` - so the dialects cannot drift.
         seek_sql, seek_params = _keyset_seek_sql(
-            spec,
+            spec.keyset_seek,
             qn,
             child,
             prepare_value=prepare_value,
@@ -466,13 +468,13 @@ def build_lateral_sql(
 
 
 def _keyset_seek_sql(
-    spec: LateralWindowSpec,
+    seek: KeysetSeek,
     qn: Callable[[str], str],
     child: str,
     *,
     prepare_value: PrepareValue | None,
 ) -> CompiledSQL:
-    """Bind ``spec``'s keyset seek into quoted child-column refs for ``keyset_seek_sql``.
+    """Bind a spec's keyset ``seek`` into quoted child-column refs for ``keyset_seek_sql``.
 
     Lateral-specific adapter only: prepares values through each cursor
     column's Django field, quotes the child-table column refs, and hands
@@ -481,15 +483,13 @@ def _keyset_seek_sql(
     cursor vocabulary), aligned index-for-index with the decoded cursor values -
     ``_build_lateral_spec`` guarantees the arity.
     """
-    # Reached only for a spec that carries a seek.
-    seek = cast("KeysetSeek", spec.keyset_seek)
     values = [
         prepare_value(column.field, value) if prepare_value is not None else value
         for column, value in zip(seek.columns, seek.cursor.values, strict=True)
     ]
     plan = seek.plan(values)
     # A cursor column is a concrete field, whose ``column`` is its db column name.
-    refs = [f"{child}.{qn(cast('str', column.field.column))}" for column in seek.columns]
+    refs = [f"{child}.{qn(require(column.field.column, is_str))}" for column in seek.columns]
     return keyset_seek_sql(refs, plan)
 
 
@@ -736,10 +736,8 @@ def _is_window_qual(node: object) -> bool:
     recognizers use it to separate the window quals from the prefetch ``__in`` /
     visibility / keyset residue while scanning the fetch-time WHERE tree.
     """
-    children: _NodeChildren | None = getattr(node, "children", None)
-    if children is not None:
-        # A qual carrying ``children`` is a ``WhereNode``.
-        return not cast("Node", node).negated and all(_is_window_qual(sub) for sub in children)
+    if isinstance(node, Node):
+        return not node.negated and all(_is_window_qual(sub) for sub in node.children)
     return isinstance(getattr(node, "lhs", None), Window)
 
 
@@ -758,20 +756,17 @@ def _normalize_window_node(node: object, names_by_id: dict[int, str]) -> WindowS
     Django lookup) rides the signature verbatim, so a ``gt`` bound never compares
     equal to an ``lte`` one.
     """
-    children: _NodeChildren | None = getattr(node, "children", None)
-    if children is not None:
+    if isinstance(node, Node):
         subs: list[WindowSignature] = []
-        for child in children:
+        for child in node.children:
             normalized = _normalize_window_node(child, names_by_id)
             if normalized is None:
                 return None
             subs.append(normalized)
-        # A qual carrying ``children`` is a ``WhereNode``.
-        tree_node = cast("Node", node)
         return (
             "node",
-            tree_node.connector,
-            bool(tree_node.negated),
+            node.connector,
+            bool(node.negated),
             tuple(sorted(subs, key=repr)),
         )
     name = names_by_id.get(id(getattr(node, "lhs", None)))
@@ -1037,10 +1032,8 @@ def _plain_single_table_where(node: Node, base_table: str) -> bool:
     shapes the lateral SQL cannot splice against the real, unaliased table.
     """
     for child in node.children:
-        grandchildren = getattr(child, "children", None)
-        if grandchildren is not None:
-            # A qual carrying ``children`` is a ``WhereNode``.
-            if not _plain_single_table_where(cast("Node", child), base_table):
+        if isinstance(child, Node):
+            if not _plain_single_table_where(child, base_table):
                 return False
             continue
         lhs = getattr(child, "lhs", None)
@@ -1159,7 +1152,7 @@ def _build_lateral_spec(request: NestedConnectionRequest) -> LateralWindowSpec |
         if child_target_field.model._meta.db_table != child_meta.db_table:
             return None
         # A foreign key targets a concrete field, whose ``column`` is its db column name.
-        child_join_column = cast("str", child_target_field.column)
+        child_join_column = require(child_target_field.column, is_str)
         through_table = parent_link_field.model._meta.db_table
         parent_link_table = through_table
         through_child_column = through_child_field.column
@@ -1239,7 +1232,7 @@ def _order_columns(
         if field is None or field.model._meta.db_table != child_meta.db_table:
             return None
         # A local concrete field's ``column`` is its db column name.
-        columns.append((cast("str", field.column), descending))
+        columns.append((require(field.column, is_str), descending))
     return tuple(columns)
 
 
@@ -1274,4 +1267,4 @@ def _select_columns(
     if any(field.model._meta.db_table != child_meta.db_table for field in fields):
         return None
     # A concrete field's ``column`` is its db column name.
-    return tuple((field.attname, cast("str", field.column)) for field in fields)
+    return tuple((field.attname, require(field.column, is_str)) for field in fields)

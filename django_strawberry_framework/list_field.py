@@ -940,8 +940,7 @@ def _approved_order_transform(lhs: Expression, name: str) -> Expression | None:
     transform = lhs.output_field.get_transform(name)
     if transform is None or transform not in _APPROVED_ORDER_TRANSFORMS:
         return None
-    # The stubs type ``Expression.output_field`` ``Any``; this is a ``Transform`` of ``lhs``.
-    return cast("Expression", transform(lhs))
+    return transform(lhs)
 
 
 def _is_deterministic_order_lookup_chain(field: ModelField, pieces: Sequence[str]) -> bool:
@@ -1634,7 +1633,9 @@ def DjangoListField(  # noqa: N802  # PascalCase for graphene-django parity - co
 
         # Each wrapper is built in its own scope: one is a coroutine function and the
         # other is not, and both keep ``_wrap`` as the resolver name Strawberry reads.
-        def _async_wrap() -> Callable[..., object]:
+        def _async_wrap(
+            async_resolver: Callable[..., Coroutine[object, Never, object]],
+        ) -> Callable[..., object]:
 
             async def _wrap(
                 *args: object,
@@ -1651,12 +1652,6 @@ def DjangoListField(  # noqa: N802  # PascalCase for graphene-django parity - co
                     offset=offset,
                     limit=limit,
                     order_by=order_by,
-                )
-                # ``_async_wrap`` is built only when ``is_async_callable(user_resolver)``
-                # held; its narrowing does not reach into this closure.
-                async_resolver = cast(
-                    "Callable[..., Coroutine[object, Never, object]]",
-                    user_resolver,
                 )
                 raw_source = await async_resolver(root, info)
                 prepared = prepared_resolver_source(
@@ -1756,7 +1751,7 @@ def DjangoListField(  # noqa: N802  # PascalCase for graphene-django parity - co
 
             return _wrap
 
-        wrapped = _async_wrap() if is_async_callable(user_resolver) else _sync_wrap()
+        wrapped = _async_wrap(user_resolver) if is_async_callable(user_resolver) else _sync_wrap()
 
     signature, annotations = _synthesized_list_signature(orderset_class)
     wrapped.__signature__ = signature

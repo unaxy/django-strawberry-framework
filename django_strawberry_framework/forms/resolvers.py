@@ -159,11 +159,11 @@ reconstruction.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal
 
 from django import forms
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
-from django.db import IntegrityError
+from django.db import IntegrityError, models
 from django.forms.models import model_to_dict
 from django.utils.datastructures import MultiValueDict
 
@@ -185,6 +185,7 @@ from django_strawberry_framework.utils._narrowing import (
     list_of,
     read_attr,
     require,
+    require_instance,
 )
 from django_strawberry_framework.utils.errors import (
     build_error_key_map,
@@ -212,7 +213,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Container, Mapping
     from typing import Protocol, TypeAlias, TypeVar
 
-    from django.db import models
     from strawberry.types import Info
     from typing_extensions import TypeIs
 
@@ -491,12 +491,11 @@ def _decode_form_relation_multi(
     """
     if _is_empty_form_value(values, form_field):
         return [], None
-    provided_values, container_error = materialize_relation_id_container(values, graphql_name)
-    if container_error is not None:
-        return None, container_error
+    container = materialize_relation_id_container(values, graphql_name)
+    if container[1] is not None:
+        return None, container[1]
     keys: list[object] = []
-    # The shared materializer answers the values exactly when it reports no error.
-    for index, value in enumerate(cast("list[object]", provided_values)):
+    for index, value in enumerate(container[0]):
         key, error = decode_visible_relation(
             value,
             graphql_name=graphql_name,
@@ -1228,7 +1227,7 @@ def _modelform_write_step(
         return StepFailure(write_error)
     # ``get_form`` returns a ``ModelForm[Any]`` (its model parameter is invariant),
     # whose ``instance`` is the saved row.
-    return cast("models.Model", form.instance)
+    return require_instance(read_attr(form, "instance"), models.Model)
 
 
 def _plain_form_write_step(

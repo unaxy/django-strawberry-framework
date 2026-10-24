@@ -66,7 +66,7 @@ import time
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, fields, replace
 from itertools import islice
-from typing import TYPE_CHECKING, TypeGuard, TypeVar, cast, overload
+from typing import TYPE_CHECKING, TypeGuard, TypeVar, overload
 
 from django.db.models import Model, QuerySet
 from graphql import GraphQLError
@@ -75,7 +75,7 @@ from typing_extensions import override
 from .conf import resource_policy_setting
 from .exceptions import ConfigurationError, DjangoStrawberryFrameworkError
 from .utils import truth
-from .utils._narrowing import read_attr
+from .utils._narrowing import iter_of, read_attr
 from .utils.context import get_context_value, stash_on_context
 from .utils.errors import coded_error_extensions
 from .utils.operation_lease import OperationLease
@@ -1045,7 +1045,7 @@ def _consumer_rows(result: object) -> Iterator[object]:
     ``TypeError`` ``islice`` would, and an object iterable only through
     ``__getitem__`` iterates through it, exactly as ``islice`` would have.
     """
-    return iter(cast("Iterable[object]", result))
+    return iter_of(result)
 
 
 def _raw_list_bound(info: object, declared: int | None, *, trusted: bool = False) -> int:

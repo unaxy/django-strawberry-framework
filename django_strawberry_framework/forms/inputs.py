@@ -73,7 +73,13 @@ from django_strawberry_framework.types.converters import (
     choice_enum_name,
 )
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import dict_of, is_str, read_attr
+from django_strawberry_framework.utils._narrowing import (
+    dict_of,
+    is_str,
+    list_of,
+    read_attr,
+    require_instance,
+)
 from django_strawberry_framework.utils.inputs import (
     InputFieldSpec,
     build_strawberry_input_class,
@@ -984,9 +990,7 @@ def _form_choice_narrowing(
     if element is not None and not writes_list:
         return None
     choices: object = field.choices
-    if truth.is_instance(choices, CallableChoiceIterator) or not list(
-        cast("Iterable[object]", choices),
-    ):
+    if truth.is_instance(choices, CallableChoiceIterator) or not list_of(choices):
         return None
     listed = choice_column_pairs(choice_column)
     admitted = [
@@ -1161,7 +1165,7 @@ def _field_triple_and_spec(
             # ``ModelChoiceField`` (the multi variant subclasses it).
             python_attr, annotation, related_model = _model_less_relation_annotation(
                 name,
-                cast("forms.ModelChoiceField[models.Model]", field),
+                require_instance(field, _MODEL_CHOICE_FIELD),
                 form_class,
             )
             graphql_name = graphql_camel_name(python_attr)

@@ -322,10 +322,7 @@ def _validate_serializer_nested_fields(
     """
     if nested_fields is None:
         return None
-    require_nested_fields_mapping(name, nested_fields)
-    # ``require_nested_fields_mapping`` raised unless this is a ``Mapping`` (a raising helper
-    # cannot narrow its argument); every key / value is still checked per entry below.
-    nested_mapping = cast("Mapping[object, object]", nested_fields)
+    nested_mapping = require_nested_fields_mapping(name, nested_fields)
     # The SAME entry shape check the schema field map applies: the mapping's own
     # ``items()`` runs untouched, and each entry is accepted only as a real 2-tuple.
     entries: tuple[object, ...] = tuple(nested_mapping.items())
@@ -346,9 +343,7 @@ def _validate_serializer_nested_fields(
                 f"SerializerMutation {name}.Meta.nested_fields keys must be plain strings; "
                 f"got {truth.render(field_name)}.",
             )
-        require_nested_serializer_config(name, field_name, config)
-        # ``require_nested_serializer_config`` raised unless this is a ``NestedSerializerConfig``.
-        nested_config = cast("NestedSerializerConfig", config)
+        nested_config = require_nested_serializer_config(name, field_name, config)
         field = field_map.get(field_name)
         if field is None:
             raise ConfigurationError(

@@ -134,7 +134,9 @@ from ._narrowing import (
     is_exact_set_or_frozenset,
     is_exact_tuple,
     is_str,
+    iter_of,
     pk_of,
+    require,
 )
 from ._queryset_private import (
     is_django_fetch_mode,
@@ -148,7 +150,12 @@ from ._queryset_private import (
     set_queryset_prefetch_lookups,
     set_queryset_sticky_filter,
 )
-from .relations import leading_relation_hops, order_column_paths, stored_value_column
+from .relations import (
+    is_model_class,
+    leading_relation_hops,
+    order_column_paths,
+    stored_value_column,
+)
 from .typing import MISSING_ATTRIBUTE, is_async_callable
 from .write_transaction import (
     current_write_pipeline,
@@ -2181,9 +2188,17 @@ def _is_reconstructable_node(node_type: type[object]) -> bool:
     return True
 
 
-def _normalized_str(value: str) -> str:
-    """Return the exact ``str`` content of a ``str`` subclass instance."""
-    return str.__str__(value)
+if TYPE_CHECKING:
+
+    def _normalized_str(_value: object, /) -> str:
+        """Return the exact ``str`` content of a ``str`` subclass instance.
+
+        The base slot itself refuses a value that is not a ``str`` with ``TypeError``.
+        """
+        ...
+
+else:
+    _normalized_str = str.__str__
 
 
 def _normalized_bytes(value: bytes) -> bytes:
@@ -2468,9 +2483,9 @@ def _reconstructed_value(value: object, memo: dict[int, object]) -> object:
     rebuilt = memo.get(value_id)
     if rebuilt is not None:
         return rebuilt
-    if value_type is bytearray:
+    if type(value) is bytearray:
         # The one MUTABLE member of the inert-parameter set: copied, never shared.
-        return bytearray(cast("bytearray", value))
+        return bytearray(value)
     # A MUTABLE container is memoized EMPTY before its members are reconstructed, so a
     # graph that reaches it again mid-traversal terminates on the memo entry instead of
     # recursing forever.
@@ -2933,7 +2948,7 @@ def _is_django_iterable_class(value: object) -> TypeGuard[type[BaseIterable[obje
 def _prefetch_path_or_defect(
     entry_state: Mapping[str, object],
     cls_name: str,
-) -> tuple[_PrefetchPath | None, tuple[str, str] | None]:
+) -> tuple[_PrefetchPath, None] | tuple[None, tuple[str, str]]:
     """Return a ``Prefetch``'s ``(prefetch_through, prefetch_to, to_attr)`` as exact text.
 
     The path state is what ``Prefetch.__init__`` stores from the consumer's lookup and
@@ -3069,7 +3084,7 @@ def _sealed_prefetch_related_lookups(
     cls_name: str,
     required_alias: str | None,
     parent_model: type[models.Model],
-) -> tuple[tuple[str | _SealedPrefetch, ...] | None, tuple[str, str] | None]:
+) -> tuple[tuple[str | _SealedPrefetch, ...], None] | tuple[None, tuple[str, str]]:
     """Seal every ``Prefetch`` entry's inner queryset; pass string lookups through.
 
     ``_prefetch_related_lookups`` entries are either plain string lookups (safe --
@@ -3158,11 +3173,10 @@ def _sealed_prefetch_related_lookups(
         entry_state = truth.instance_state(entry)
         # The path is read as exact text BEFORE the relation-target guard below, so a
         # ``StrEnum`` lookup resolves its relation exactly as its text does.
-        path, path_defect = _prefetch_path_or_defect(entry_state, cls_name)
-        if path_defect is not None:
-            return None, path_defect
-        # A ``None`` path defect means the path was read.
-        path = cast("_PrefetchPath", path)
+        path_read = _prefetch_path_or_defect(entry_state, cls_name)
+        if path_read[1] is not None:
+            return None, path_read[1]
+        path = path_read[0]
         lookup = path[0]
         inner = entry_state.get("queryset")
         sealed_inner: models.QuerySet[models.Model, object] | None = None
@@ -3232,9 +3246,7 @@ def _sealed_prefetch_related_lookups(
             # Both facts are the two fields ``_PREFETCH_CHILD_POLICY`` sets.
             sealed_inner, defect = _seal_or_defect(
                 inner,
-                # ``_concrete_or_none`` answered a model for this same slot above, which it
-                # does only for a ``models.Model`` subclass.
-                cast("type[models.Model]", inner_state.get("model")),
+                require(inner_state.get("model"), is_model_class),
                 required_alias,
                 _PREFETCH_CHILD_POLICY,
             )
@@ -3274,7 +3286,7 @@ def _deferred_value_defect(value: object, walk: _GraphWalk, label: str) -> tuple
     if _is_inert_value(value):
         return None
     value_type = type(value)
-    if value_type is models.Q:
+    if type(value) is models.Q:
         # ``Q`` trees and plain containers take the same three-state walk as the
         # expression graph: Django never produces a self-referential ``Q`` / list /
         # dict, so a node reached while it is still being validated closes a cycle and
@@ -3284,8 +3296,7 @@ def _deferred_value_defect(value: object, walk: _GraphWalk, label: str) -> tuple
         state = walk.begin(value_id)
         if state is not _WalkState.ENTERED:
             return _walk_short_circuit(state, f"{label} contains a reference cycle")
-        # ``value_type is models.Q`` above; neither checker narrows through the cached type.
-        q_children: Sequence[object] = cast("models.Q", value).children
+        q_children: Sequence[object] = value.children
         for child in q_children:
             if type(child) is models.Q:
                 child_defect = _deferred_value_defect(child, walk, label)
@@ -3371,12 +3382,14 @@ def _bake_deferred_filter_or_defect(
         arg_defect = _deferred_value_defect(value, walk, f"{cls_name} deferred filter arg")
         if arg_defect is not None:
             return arg_defect
+    text_kwargs: dict[str, object] = {}
     for key, value in kwargs.items():
         if type(key) is not str:
             return ("untrusted", f"{cls_name} deferred filter kwarg key is a {truth.kind(key)}")
         kwarg_defect = _deferred_value_defect(value, walk, f"{cls_name} deferred filter {key!r}")
         if kwarg_defect is not None:
             return kwarg_defect
+        text_kwargs[key] = value
     # ``add_q`` builds the predicate from the arguments as they stand, so they are
     # canonically reconstructed first: the baked predicate then holds framework-owned
     # nodes and containers, a ``TextChoices`` / ``StrEnum`` member rebound as its exact
@@ -3384,14 +3397,15 @@ def _bake_deferred_filter_or_defect(
     memo: dict[int, object] = {}
     try:
         owned_args = [_reconstructed_value(value, memo) for value in args]
-        owned_kwargs = {key: _reconstructed_value(value, memo) for key, value in kwargs.items()}
+        owned_kwargs = {
+            key: _reconstructed_value(value, memo) for key, value in text_kwargs.items()
+        }
     except _UntrustedBoundValueError as refusal:
         return ("untrusted", f"{cls_name} deferred filter {refusal}")
     except Exception:  # noqa: BLE001 - consumer code may raise anything
         return ("untrusted", f"{cls_name} deferred filter state cannot be reconstructed")
     try:
-        # Every kwarg key was proven an exact ``str`` by the loop above.
-        predicate = models.Q(*owned_args, **cast("dict[str, object]", owned_kwargs))
+        predicate = models.Q(*owned_args, **owned_kwargs)
         sql.Query.add_q(rebuilt_query, ~predicate if negate else predicate)
     except Exception:  # noqa: BLE001 - consumer code may raise anything
         return ("untrusted", f"{cls_name} carries malformed deferred-filter state")
@@ -3454,7 +3468,7 @@ def _queryset_state_defect(state: Mapping[str, object], cls_name: str) -> tuple[
 def _normalized_db(state: Mapping[str, object]) -> str | None:
     """Return the ``_db`` alias ``_queryset_state_defect`` proved, as its exact text."""
     db = state.get("_db")
-    return None if db is None else _normalized_str(cast("str", db))
+    return None if db is None else _normalized_str(db)
 
 
 def _normalized_fields(state: Mapping[str, object]) -> tuple[str, ...] | None:
@@ -3462,7 +3476,7 @@ def _normalized_fields(state: Mapping[str, object]) -> tuple[str, ...] | None:
     fields = state.get("_fields")
     if fields is None:
         return None
-    return tuple([_normalized_str(name) for name in cast("tuple[str, ...]", fields)])
+    return tuple([_normalized_str(name) for name in iter_of(fields)])
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -4162,7 +4176,7 @@ def _combined_lost_property(
 def _pk_membership_query_or_defect(
     query: sql.Query,
     model: type[models.Model],
-) -> tuple[sql.Query | None, tuple[str, str] | None]:
+) -> tuple[sql.Query, None] | tuple[None, tuple[str, str]]:
     """Rewrite a combined ``query`` as ``<model>.filter(pk__in=<combined>.values("pk"))``.
 
     Returns ``(rewritten, None)``: a fresh single-table ``sql.Query`` over
@@ -4205,7 +4219,7 @@ def _seal_or_defect(
     *,
     expected_routing: _RoutingIntent | None = None,
     keep_class: bool = False,
-) -> tuple[models.QuerySet[models.Model, object] | None, tuple[str, str] | None]:
+) -> tuple[models.QuerySet[models.Model, object], None] | tuple[None, tuple[str, str]]:
     """Rebuild a framework-owned ``QuerySet`` from ``candidate``'s validated state.
 
     The single sealing primitive both boundary sites run. Returns
@@ -4486,24 +4500,27 @@ def _seal_or_defect(
     # UNROUTED parent (effective alias ``None``) can hold an explicitly cross-routed
     # child -- one GraphQL resolution never spans two database connections.
     effective_alias = required_alias if required_alias is not None else db
-    sealed_prefetch, prefetch_defect = _sealed_prefetch_related_lookups(
+    sealed_prefetch = _sealed_prefetch_related_lookups(
         state.get("_prefetch_related_lookups"),
         cls_name,
         effective_alias,
         qmodel,
     )
-    if prefetch_defect is not None:
-        return None, prefetch_defect
+    if sealed_prefetch[1] is not None:
+        return None, sealed_prefetch[1]
     result_cache = state.get("_result_cache")
-    if policy.carry_result_cache and result_cache is not None and type(result_cache) is not list:
-        # ``type(...) is list``, never ``isinstance``: a ``list`` SUBCLASS brings its
+    carried_rows: list[object] | None = None
+    if policy.carry_result_cache and result_cache is not None:
+        # An exact ``list``, never ``isinstance``: a ``list`` SUBCLASS brings its
         # own ``__getitem__``, and ``QuerySet.__getitem__`` returns
         # ``self._result_cache[k]`` once the cache is populated - so carrying a
         # subclass would put the raw-list ceiling back inside consumer code, which is
         # the one thing this seam exists to prevent. Django stores an exact ``list``
         # here and nothing else, so refusing every other shape fails closed on state
         # Django does not produce.
-        return None, ("untrusted", f"{cls_name}._result_cache is a {truth.kind(result_cache)}")
+        if not is_exact_list(result_cache):
+            return None, ("untrusted", f"{cls_name}._result_cache is a {truth.kind(result_cache)}")
+        carried_rows = result_cache
     if policy.require_unevaluated and result_cache is not None:
         return None, ("evaluated", "the result cache is populated")
     if policy.reject_sliced and rebuilt_query.is_sliced:
@@ -4523,16 +4540,16 @@ def _seal_or_defect(
     # ``.values()`` combinator a model-row surface refuses is never turned into
     # model rows. A shape whose rows that rewrite would change fails closed.
     if policy.rewrite_combined and rebuilt_query.combinator:
-        rewritten, combined_defect = _pk_membership_query_or_defect(rebuilt_query, qmodel)
-        if combined_defect is None:
-            # The rewrite builds a fresh ``Query(model)``, which bakes ``Meta.db_table``
-            # as given (a ``TextChoices`` / ``StrEnum`` member included) into its alias
-            # map, so the rewritten query is canonically reconstructed in turn.
-            combined_defect = _reconstruction_defect(rewritten, cls_name)
+        rewritten = _pk_membership_query_or_defect(rebuilt_query, qmodel)
+        if rewritten[1] is not None:
+            return None, rewritten[1]
+        # The rewrite builds a fresh ``Query(model)``, which bakes ``Meta.db_table``
+        # as given (a ``TextChoices`` / ``StrEnum`` member included) into its alias
+        # map, so the rewritten query is canonically reconstructed in turn.
+        combined_defect = _reconstruction_defect(rewritten[0], cls_name)
         if combined_defect is not None:
             return None, combined_defect
-        # The rewrite returns a query exactly when it returns no defect.
-        rebuilt_query = cast("sql.Query", rewritten)
+        rebuilt_query = rewritten[0]
         iterable = ModelIterable
         fields = None
     if policy.require_shared_alias:
@@ -4561,8 +4578,7 @@ def _seal_or_defect(
         iterable=iterable,
         fields=fields,
         fetch_mode=state.get("_fetch_mode"),
-        # The prefetch seal returns lookups exactly when it returns no defect.
-        prefetch_lookups=cast("tuple[str | _SealedPrefetch, ...]", sealed_prefetch),
+        prefetch_lookups=sealed_prefetch[0],
         sticky_filter=state.get("_sticky_filter") is True,
         for_write=state.get("_for_write") is True,
     )
@@ -4575,7 +4591,7 @@ def _seal_or_defect(
         # exists to make cheap. Every other policy leaves the ``None`` that
         # ``models.QuerySet.__init__`` already set. Under this policy the check above
         # refused every populated cache that is not an exact ``list``.
-        sealed._result_cache = cast("list[object] | None", result_cache)
+        sealed._result_cache = carried_rows
     return sealed, None
 
 
@@ -4729,13 +4745,12 @@ def normalized_row_source(
     if source_type is models.QuerySet or not truth.is_subclass(source_type, models.QuerySet):
         return value
     model = _row_source_model(_readable_queryset_state(value), origin)
-    sealed, defect = _seal_or_defect(value, model, None, _RAW_LIST_SOURCE_POLICY)
-    if defect is not None:
+    sealed = _seal_or_defect(value, model, None, _RAW_LIST_SOURCE_POLICY)
+    if sealed[1] is not None:
         raise ConfigurationError(
-            _raw_list_source_message(defect, truth.kind(value), origin),
+            _raw_list_source_message(sealed[1], truth.kind(value), origin),
         )
-    # ``_seal_or_defect`` returns a queryset exactly when it returns no defect.
-    return cast("models.QuerySet[models.Model, object]", sealed)
+    return sealed[0]
 
 
 def materialized_rows(value: object) -> list[object] | None:
@@ -5089,8 +5104,9 @@ def _prepared_visibility_source(
     ``object`` source is typed ``QuerySet[Model, object]``.
     """
     model = _captured_model(type_cls, model)
-    candidate, defect = _seal_or_defect(queryset, model, None, policy, keep_class=keep_class)
-    if defect is not None:
+    candidate = _seal_or_defect(queryset, model, None, policy, keep_class=keep_class)
+    if candidate[1] is not None:
+        defect = candidate[1]
         code, detail = defect
         if render_error is not None:
             raise ConfigurationError(render_error(code, detail))
@@ -5136,8 +5152,7 @@ def _prepared_visibility_source(
                 f"The apply_type_visibility source for {name}",
             ),
         )
-    # ``_seal_or_defect`` returns a queryset exactly when it returns no defect.
-    sealed = cast("models.QuerySet[models.Model, object]", candidate)
+    sealed = candidate[0]
     pipeline = current_write_pipeline()
     if pipeline is not None:
         sealed = pin_write_queryset(
@@ -5195,11 +5210,10 @@ def _normalized_visibility_result(
     model = _captured_model(type_cls, model)
     if isinstance(result, models.Manager):
         result = _coerced_manager_queryset(result)
-    sealed, defect = _seal_or_defect(result, model, required_alias, policy)
-    if defect is not None:
-        raise _visibility_result_error(type_cls, model, required_alias, defect, render_error)
-    # ``_seal_or_defect`` returns a queryset exactly when it returns no defect.
-    return cast("models.QuerySet[models.Model, object]", sealed)
+    sealed = _seal_or_defect(result, model, required_alias, policy)
+    if sealed[1] is not None:
+        raise _visibility_result_error(type_cls, model, required_alias, sealed[1], render_error)
+    return sealed[0]
 
 
 @overload

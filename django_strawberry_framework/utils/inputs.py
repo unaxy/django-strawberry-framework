@@ -41,7 +41,7 @@ import sys
 from collections import Counter
 from collections.abc import Collection
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Generic, TypeVar, cast, final
+from typing import TYPE_CHECKING, Annotated, ClassVar, Generic, TypeVar, cast, final
 from weakref import WeakKeyDictionary
 
 import strawberry
@@ -54,7 +54,17 @@ from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.registry import register_subsystem_clear
 
 from . import truth
-from ._narrowing import dict_items, is_mapping, is_str, list_of, read_attr
+from ._narrowing import (
+    call_method,
+    dict_items,
+    is_mapping,
+    is_real_collection,
+    is_str,
+    list_of,
+    optional_annotation,
+    read_attr,
+    require,
+)
 from .canonical import base_container_values, canonical_sort_key
 from .imports import import_attr_if_importable
 from .input_values import UNSET
@@ -88,8 +98,6 @@ if TYPE_CHECKING:
 
     from django_strawberry_framework.sets_mixins import ClassBasedTypeNameMixin
     from django_strawberry_framework.types.definition import DjangoTypeDefinition
-
-    from .typing import OptionalWidenable
 
     class _NamedInputSpec(Protocol):
         """A generated-input naming record: its dataclass attr and its GraphQL name."""
@@ -206,8 +214,7 @@ def optional_input_field(
     if python_attr != graphql_name:
         field_kwargs["name"] = graphql_name
     if widen:
-        # Every flavor's converted annotation is a runtime annotation.
-        annotation = cast("OptionalWidenable", annotation) | None
+        annotation = optional_annotation(annotation)
         field_kwargs["default"] = UNSET
     return annotation, field_kwargs
 
@@ -292,10 +299,7 @@ def emit_set_input_field_triples(
             target_name = input_type_name_for(target)
             # A runtime-built annotation: the object ``Annotated[...]`` builds from a
             # runtime name has no static type either checker models.
-            # basedpyright: it narrows to the ``Annotated`` special form, which neither widens
-            # with ``| None`` nor casts to ``OptionalWidenable`` (reportInvalidCast)
-            inner: Any = Annotated[target_name, strawberry.lazy(module_path)]  # pyright: ignore[reportExplicitAny]
-            annotation: object = inner | None
+            annotation = optional_annotation(Annotated[target_name, strawberry.lazy(module_path)])
             django_source_path = related_source_path_of(top_name, entry)
         else:
             annotation, django_source_path = leaf_of(top_name, python_attr, entry)
@@ -741,8 +745,8 @@ def plain_set_meta_fields(fields: object) -> object:
         if truth.is_instance(fields, set):
             return set(plain)
         return plain if truth.is_instance(fields, tuple) else list(plain)
-    if not truth.is_instance(fields, str) and issubclass(truth.class_of(fields), Collection):
-        members = tuple(cast("Collection[object]", fields))
+    if not truth.is_instance(fields, str) and is_real_collection(fields):
+        members = tuple(fields)
         plain = tuple(_plain_name(member) for member in members)
         return fields if _unchanged(members, plain) else _PlainNames(plain)
     return _plain_name(fields)
@@ -1870,18 +1874,12 @@ def clear_generated_input_namespace(
 
     # The family names its own ``GeneratedInputArgumentsFactory`` subclass and that
     # factory's collision-registry dict (``make_set_input_namespace``'s kwargs).
-    factory_cls = cast(
-        "type[GeneratedInputArgumentsFactory[ClassBasedTypeNameMixin]] | None",
-        _safe_import(factory_module, factory_class_name),
-    )
+    factory_cls = _safe_import(factory_module, factory_class_name)
     if factory_cls is not None:
-        factory_cls.input_object_types.clear()
-        collision_registry = cast(
-            "_Clearable | None",
-            getattr(factory_cls, collision_registry_attr, None),
-        )
+        _ = call_method(read_attr(factory_cls, "input_object_types"), "clear")
+        collision_registry = read_attr(factory_cls, collision_registry_attr, None)
         if collision_registry is not None:
-            collision_registry.clear()
+            _ = call_method(collision_registry, "clear")
 
     set_root = _safe_import(set_module, set_class_name)
     if set_root is not None:
@@ -1892,7 +1890,7 @@ def clear_generated_input_namespace(
         # The set base declares ``_lifecycle`` as a ``SetLifecycleAttrs``.
         binding_attrs: tuple[str, ...] = getattr(lifecycle, "binding_attrs", ())
         # The family names its own set base class (``make_set_input_namespace``'s kwargs).
-        for subclass in iter_set_subclasses(cast("type[object]", set_root)):
+        for subclass in iter_set_subclasses(require(set_root, truth.is_type)):
             # ``delattr`` on the subclass so it reads as unbound again: its own
             # slot is gone (``utils/permissions.py::set_bound_definition`` reads
             # only that one). Each attribute is removed only when set directly

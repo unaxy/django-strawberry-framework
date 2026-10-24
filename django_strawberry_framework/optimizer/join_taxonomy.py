@@ -58,9 +58,16 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
-from django_strawberry_framework.utils._narrowing import call_method, is_str, read_attr, require
+from django_strawberry_framework.utils._narrowing import (
+    call_method,
+    is_str,
+    is_tuple,
+    optional_instance,
+    read_attr,
+    require,
+)
 from django_strawberry_framework.utils.relations import (
     RelationKind,
     is_single_column_foreign_key,
@@ -186,23 +193,22 @@ def _partition_expr(field: object) -> str | None:
     accessor when ``related_name`` is absent).
     """
     remote_field = _attr(field, "remote_field")
-    # A relation's ``attname`` / ``name`` slots hold strings.
-    return cast(
-        "str | None",
+    return optional_instance(
         _first_truthy(
             _attr(remote_field, "attname"),
             _attr(remote_field, "name"),
         ),
+        str,
     )
 
 
 def _precomputed_attnames(field: object, slot: str) -> tuple[str, ...]:
     """Return the ``FieldMeta`` link slot stamped from ``relation_link``; ``()`` if absent or malformed."""
     precomputed = _attr(field, slot)
-    if isinstance(precomputed, tuple) and all(
-        isinstance(attname, str) for attname in cast("tuple[object, ...]", precomputed)
-    ):
-        return cast("tuple[str, ...]", precomputed)
+    if is_tuple(precomputed):
+        attnames = tuple(attname for attname in precomputed if isinstance(attname, str))
+        if len(attnames) == len(precomputed):
+            return attnames
     return ()
 
 

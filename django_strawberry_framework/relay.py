@@ -224,7 +224,7 @@ def _coerce_pk_or_none(
 
 
 def _check_typed_match(
-    target_type: type[object] | None,
+    target_type: type[DjangoType] | None,
     resolved: type[_RelayDjangoType],
     schema: Schema | None,
 ) -> None:
@@ -240,8 +240,7 @@ def _check_typed_match(
     """
     if target_type is None or resolved is target_type:
         return
-    # The factory's ``_validate_node_target`` admitted ``target_type`` as a ``DjangoType``.
-    expected = _client_type_name(cast("type[DjangoType]", target_type), schema)
+    expected = _client_type_name(target_type, schema)
     received = _client_type_name(resolved, schema)
     raise GraphQLError(
         f"Wrong node type: expected a {expected} id, received a {received} id.",
@@ -482,16 +481,17 @@ def decode_model_global_id(
     return DecodeResult(GlobalIDDecode.OK, real_pk, resolved_type)
 
 
-def _validate_node_target(target_type: type[object], *, field: str) -> None:
+def _validate_node_target(target_type: type[object], *, field: str) -> type[DjangoType]:
     """Run the four shared target guards plus the Relay-Node-shaped fifth guard.
 
     Thin wrapper over ``list_field.py::_validate_relay_djangotype_target`` -- the
     Relay-shaped target guard shared with ``connection.py::DjangoConnectionField``.
     A refetch field has no ``resolver=`` seam, so ``None``
     is passed; ``field`` is interpolated into the messages so each factory
-    (``DjangoNodeField`` / ``DjangoNodesField``) names itself.
+    (``DjangoNodeField`` / ``DjangoNodesField``) names itself. Returns the validated
+    registered ``DjangoType`` the target resolved to.
     """
-    _ = _validate_relay_djangotype_target(
+    return _validate_relay_djangotype_target(
         target_type,
         None,
         field=field,
@@ -499,7 +499,7 @@ def _validate_node_target(target_type: type[object], *, field: str) -> None:
             f"{field} requires a Relay-Node-shaped DjangoType target; add "
             "`relay.Node` to `Meta.interfaces` (or inherit `relay.Node` directly)"
         ),
-    )
+    ).origin
 
 
 def _interleave(
@@ -647,8 +647,11 @@ def DjangoNodeField(  # noqa: N802  # PascalCase for graphene-django parity - co
     consumer's class-body ``node: T | None = DjangoNodeField(T)`` or
     ``node: relay.Node | None = DjangoNodeField()`` type-checks.
     """
-    if target_type is not None:
-        _validate_node_target(target_type, field="DjangoNodeField")
+    pinned = (
+        None
+        if target_type is None
+        else _validate_node_target(target_type, field="DjangoNodeField")
+    )
     # Validate the directives BEFORE the declaration ledger is appended: a
     # rejected construction must not leave a phantom entry behind the finalize-time
     # no-Node-types check. See ``utils/directives.py::validated_field_directives`` -
@@ -674,7 +677,7 @@ def DjangoNodeField(  # noqa: N802  # PascalCase for graphene-django parity - co
         resolved, node_id = _decode_or_graphql_error(id_, schema)
         # Everything below runs OUTSIDE the decode try/except so a dispatch-time
         # ``SyncMisuseError`` surfaces as itself (see ``_decode_or_graphql_error``).
-        _check_typed_match(target_type, resolved, schema)
+        _check_typed_match(pinned, resolved, schema)
         if _coerce_pk_or_none(resolved, node_id) is None:
             # Uncoercible literal -> null with no query issued.
             return None
@@ -764,8 +767,11 @@ def DjangoNodesField(  # noqa: N802  # PascalCase for graphene-django parity - c
     ``ConfigurationError`` naming the type rather than producing silently
     wrong rows.
     """
-    if target_type is not None:
-        _validate_node_target(target_type, field="DjangoNodesField")
+    pinned = (
+        None
+        if target_type is None
+        else _validate_node_target(target_type, field="DjangoNodesField")
+    )
     # Same validation and same ordering rationale as ``DjangoNodeField``'s.
     directives = validated_field_directives("DjangoNodesField", directives)
     _node_fields_declared.append("DjangoNodesField")
@@ -788,7 +794,7 @@ def DjangoNodesField(  # noqa: N802  # PascalCase for graphene-django parity - c
         schema = strawberry_schema_from_info(info)
         decoded = [_decode_or_graphql_error(raw_id, schema) for raw_id in ids]
         for resolved, _ in decoded:
-            _check_typed_match(target_type, resolved, schema)
+            _check_typed_match(pinned, resolved, schema)
         # Group coercible ids by decoded type - insertion-ordered, ids in input
         # order with duplicates preserved; uncoercible positions are reserved
         # null holes that never poison the batch ``pk__in``. Each group carries

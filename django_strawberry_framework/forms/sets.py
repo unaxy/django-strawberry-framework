@@ -540,8 +540,7 @@ def _build_and_stash_form_input(
     serializer flavor) so a future change to the materialize-and-stash sequence
     touches one place.
     """
-    # The form flavor's ``_validate_meta`` stored a ``require_subclass``-checked form class.
-    form_class = cast("FormClass", meta.form_class)
+    form_class = require(meta.form_class, _is_form_class)
     form_fields = _mutation_form_fields(cls, form_class)
     return build_and_stash_input(
         cls,
@@ -576,8 +575,7 @@ def _form_input_type_name_for(
     narrowing). Single-sited with ``_build_and_stash_form_input`` so the bind's name
     choice and the field-factory's ``data:`` ref derive the name identically.
     """
-    # The form flavor's ``_validate_meta`` stored a ``require_subclass``-checked form class.
-    form_class = cast("FormClass", meta.form_class)
+    form_class = require(meta.form_class, _is_form_class)
     form_fields = _mutation_form_fields(mutation_cls, form_class)
     effective = _resolve_effective_form_field_names(
         form_class,
