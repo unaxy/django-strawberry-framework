@@ -1665,7 +1665,9 @@ write flavor rides.
    that stores no empty string, is reported
    (`django_strawberry_framework/forms/resolvers.py::_unstorable_cleaned_fields`) as the
    field-keyed error with the same field, code `null` and path the model flavor answers
-   an explicit `null` on a non-nullable column or foreign key with, and the column's
+   the same input with (an explicit `null` on a non-nullable column or foreign key at
+   decode, an omitted one after its failed INSERT, through the same column walk,
+   `django_strawberry_framework/utils/write_values.py::unstorable_columns`), and the column's
    Django `error_messages["null"]` as the message (the form is the message source of
    truth, so a custom or translated message is sent as is, where the model flavor's
    message is fixed). The check reads only the in-memory instance, so no query runs on a
@@ -2303,9 +2305,10 @@ behavior reachable through `/graphql/`, package tests own internals.
   error. **Write-time unstorable `blank=True, null=False` column** — an explicit
   `tier: null` on `createShelfViaForm` (`Shelf.tier` is a `blank=True` integer choice
   column with a default) returns the `tier` / `null` envelope with no row written, while
-  a member writes and an omission keeps the default; an explicit `itemId: null` on
-  `createItemHoldViaForm` (`ItemHold.item` is a `blank=True, null=False` foreign key)
-  returns the `itemId` / `null` envelope `createItemHold` returns, with no row written.
+  a member writes and an omission keeps the default; an omitted or explicit `null`
+  `itemId` on `createItemHoldViaForm` (`ItemHold.item` is a `blank=True, null=False`
+  foreign key with no default) returns the `itemId` / `null` envelope `createItemHold`
+  returns, with no row written (the omission also over the async view).
   **Explicit `null` coerced to a storable value** — `description: null` on
   `createItemViaForm` / `updateItemViaForm` (`Item.description` is a `blank=True,
   null=False` text column) returns the `description` / `null` envelope `createItem` /

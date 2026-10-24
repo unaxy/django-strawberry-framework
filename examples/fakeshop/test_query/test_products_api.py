@@ -495,21 +495,37 @@ _CREATE_ITEM_HOLD_VIA_FORM = (
 )
 
 
-@pytest.mark.django_db
-@pytest.mark.parametrize(
-    ("document", "root"),
-    [(_CREATE_ITEM_HOLD, "createItemHold"), (_CREATE_ITEM_HOLD_VIA_FORM, "createItemHoldViaForm")],
-    ids=["model", "modelform"],
-)
-def test_create_item_hold_explicit_null_item_is_a_field_error(document: str, root: str) -> None:
-    """An explicit ``itemId: null`` on the ``blank=True, null=False`` FK is keyed to ``itemId``.
+_ITEM_HOLD_FLAVORS = [
+    pytest.param(_CREATE_ITEM_HOLD, "createItemHold", id="model"),
+    pytest.param(_CREATE_ITEM_HOLD_VIA_FORM, "createItemHoldViaForm", id="modelform"),
+]
+_ITEM_HOLD_NULL_ITEM_ERRORS = [
+    {"field": "itemId", "messages": ["This field cannot be null."], "codes": ["null"]},
+]
 
-    ``full_clean`` skips a ``blank=True`` empty value, so the write would reach a
-    NOT NULL ``IntegrityError`` and the generic ``__all__`` constraint envelope; the
-    client must learn which field failed, with the same field, message and code on
-    both flavors. The model flavor refuses the ``null`` at decode
-    (``django_strawberry_framework/mutations/resolvers.py::_decode_single_relation_id``);
-    the ``ModelForm``'s optional ``ModelChoiceField`` cleans it to ``None``, and the
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("document", "root"), _ITEM_HOLD_FLAVORS)
+@pytest.mark.parametrize(
+    "item",
+    [pytest.param({}, id="omitted"), pytest.param({"itemId": None}, id="null")],
+)
+def test_create_item_hold_null_item_is_a_field_error(
+    document: str,
+    root: str,
+    item: JSONObject,
+) -> None:
+    """An omitted or ``null`` ``itemId`` on the ``blank=True, null=False`` FK is keyed to it.
+
+    The column has no default, ``full_clean`` skips a ``blank=True`` empty value, and
+    the database's NOT NULL ``IntegrityError`` names no field; the client learns which
+    field failed, with the same field, message and code on both flavors and both
+    spellings. The model flavor refuses an
+    explicit ``null`` at decode
+    (``django_strawberry_framework/mutations/resolvers.py::_decode_single_relation_id``)
+    and names an omitted one from the row its INSERT was refused on
+    (``django_strawberry_framework/mutations/resolvers.py::_created_row_integrity_errors``);
+    the ``ModelForm``'s optional ``ModelChoiceField`` cleans either to ``None``, and the
     refused save is diagnosed by
     ``django_strawberry_framework/forms/resolvers.py::_unstorable_cleaned_fields``.
     No row is written.
@@ -520,13 +536,9 @@ def test_create_item_hold_explicit_null_item_is_a_field_error(document: str, roo
     data = _graphql_data(
         document,
         client=client,
-        variables={"d": {"reason": "reserved", "itemId": None}},
+        variables={"d": {"reason": "reserved", **item}},
     )
-    result = json_at(data, root)
-    assert json_at(result, "node") is None, result
-    assert json_at(result, "errors") == [
-        {"field": "itemId", "messages": ["This field cannot be null."], "codes": ["null"]},
-    ]
+    assert json_at(data, root) == {"node": None, "errors": _ITEM_HOLD_NULL_ITEM_ERRORS}
     assert not models.ItemHold.objects.exists()
 
 
@@ -1137,12 +1149,11 @@ def test_update_item_nul_in_name_is_the_same_field_error_in_every_flavor(flavor:
 def test_create_category_explicit_null_on_nonnullable_description_is_field_error() -> None:
     """An explicit ``null`` on the non-nullable ``description`` -> ``FieldError``, not a vague ``__all__``.
 
-    ``Category.description`` is ``blank=True, null=False``. An explicit ``null`` slips
-    past ``full_clean`` (Django skips a blank-allowed field whose value is an empty
-    value) and would otherwise hit a NOT NULL ``IntegrityError`` at ``save()``,
-    surfacing as the generic ``"__all__"`` "A database constraint was violated." with
-    no field attribution. It is now rejected at decode as a field-keyed ``FieldError``
-    on ``description`` before any write; no row is created.
+    ``Category.description`` is ``blank=True, null=False``. ``full_clean`` skips a
+    blank-allowed field whose value is an empty value, and the database's NOT NULL
+    ``IntegrityError`` names no field. The explicit ``null`` is rejected at decode as a
+    field-keyed ``FieldError`` on ``description``, before validation and before any
+    write; no row is created.
     """
     create_users(1)
     client = _login_with_perm("view_category_1", "add_category")
@@ -5682,6 +5693,35 @@ async def test_create_item_via_form_over_graphql_async() -> None:
     }
     created = await models.Item.objects.aget(name="AsyncFormWidget")
     assert created.category_id == category.pk
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(("document", "root"), _ITEM_HOLD_FLAVORS)
+async def test_create_item_hold_omitted_item_is_a_field_error_over_graphql_async(
+    document: str,
+    root: str,
+) -> None:
+    """An omitted ``itemId`` over ``/graphql-async/`` is the ``itemId`` ``null`` error, no row.
+
+    The async view runs the same sync write pipeline behind one ``sync_to_async``
+    boundary, so the refused INSERT is diagnosed from the in-memory row on both flavors
+    exactly as over ``/graphql/``.
+    """
+    await sync_to_async(create_users)(1)
+
+    def _user() -> User:
+        user = User.objects.get(username="staff_1")
+        perm = Permission.objects.get(codename="add_itemhold", content_type__app_label="products")
+        user.user_permissions.add(perm)
+        return User.objects.get(username=user.username)
+
+    client = AsyncClient()
+    await sync_to_async(client.force_login)(await sync_to_async(_user)())
+
+    payload = await _post_async_shipped(document, client=client, variables={"d": {"reason": "x"}})
+    assert "errors" not in payload, payload
+    assert json_at(payload, "data", root) == {"node": None, "errors": _ITEM_HOLD_NULL_ITEM_ERRORS}
+    assert not await models.ItemHold.objects.aexists()
 
 
 @pytest.mark.django_db(transaction=True)

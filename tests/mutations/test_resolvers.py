@@ -3,9 +3,11 @@
 Internals a live fakeshop request cannot express: custom ``relay.NodeID`` write
 locate (shipped ``CategoryType`` uses pk; changing it would retarget every
 Category GlobalID), ``_unprovided_exclude`` / ``coerce_lookup_id`` helpers, a
-create over a multi-table child of a client-keyed parent and through a ``save()``
-override that saves twice, the ``update_fields`` an update names for a proxy, a three-table
-row, a non-key parent link, a generated column and a deferred row,
+create over a multi-table child of a client-keyed parent, through a ``save()``
+override that saves twice and through one that fills in an omitted ``blank=True,
+null=False`` column (no fakeshop model fills a column in from ``save()``), the
+``update_fields`` an update names for a proxy, a three-table row, a non-key parent
+link, a generated column and a deferred row,
 ``async def get_queryset`` ``SyncMisuseError``,
 async-row leak isolation, Relay M2M hide on a second ``Genre`` primary
 (shipped ``GenreType`` has no hide hook; a second primary cannot coexist in the
@@ -31,7 +33,7 @@ late-declaration reject). Consumer-visible create/update/delete, empty-name
 ``full_clean``, unresolvable relation ids, M2M replace/clear/omit, choice-enum
 unwrap, raw-pk create visibility, model-flavor ``Item.attachment`` omit /
 replace, the ``PROTECT`` / ``RESTRICT`` refused delete and the
-``blank=True, null=False`` FK null guard live in
+``blank=True, null=False`` FK omitted / null guard live in
 ``examples/fakeshop/test_query/test_products_api.py`` and
 ``examples/fakeshop/test_query/test_library_api.py``; file-column update omit /
 replace / explicit null live in ``examples/fakeshop/test_query/test_uploads_api.py``. Atomicity live in
@@ -588,6 +590,23 @@ class TwiceSavedRow(models.Model):
         call_forwarded(super().save, args, kwargs)
 
 
+class OmittedAmountRow(models.Model):
+    """A ``blank=True, null=False`` integer, no default, that ``save()`` fills in from ``None``."""
+
+    amount: _Int = models.IntegerField(blank=True)
+
+    class Meta:
+        app_label = "products"
+        managed = False
+        db_table = "tests_mutations_omitted_amount_row"
+
+    @override
+    def save(self, *args: object, **kwargs: object) -> None:
+        if vars(self)["amount"] is None:
+            self.amount = 5
+        call_forwarded(super().save, args, kwargs)
+
+
 class SoftDeletedRow(models.Model):
     """A row whose ``delete()`` override flags and saves it, returning ``None`` (soft delete)."""
 
@@ -875,6 +894,23 @@ def test_create_through_a_save_override_that_saves_twice(
 
     assert answered == errors
     assert stored == rows
+
+
+@pytest.mark.django_db(transaction=True)
+def test_create_omitting_a_column_a_save_override_fills_in_writes() -> None:
+    """An omitted ``blank=True, null=False`` column a model ``save()`` fills in writes.
+
+    The create diagnoses an omitted column only after its INSERT fails
+    (``_created_row_integrity_errors``), never before the save (django-trac 13776): the
+    row reaches ``save()`` holding ``None``, the override stores ``5`` and the row is
+    written with no error. No fakeshop model fills a column in from ``save()``.
+    """
+    with _tables(OmittedAmountRow):
+        errors = _create_row(OmittedAmountRow, ("amount",), {})
+        stored = list(OmittedAmountRow._base_manager.values_list("amount", flat=True))
+
+    assert errors == []
+    assert stored == [5]
 
 
 @pytest.mark.parametrize(
