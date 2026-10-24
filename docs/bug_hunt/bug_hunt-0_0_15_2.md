@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 262 done, 168 to do.
+Progress: 263 done, 167 to do.
 
 ## Done
 
@@ -1244,6 +1244,13 @@ Progress: 262 done, 168 to do.
   an older version left in the flow folder moves to the state home under `pool.lock`. The module docstring and
   START.md say what survives where on macOS and Linux. Rows pin the location and mode, a purge of every file, a
   removed base, the lifecycle, the migration and its read race
+- [x] 402. not a defect, confirmed: `mutations/inputs.py::build_mutation_input` reads
+  `relation_bool(field, "many_to_many")`, and only the model and user flavors call it, over
+  `editable_input_fields`, which drops every reverse and virtual relation (no column or `editable=False`) and
+  refuses one named in `Meta.fields` / `exclude` with `ConfigurationError`; a reverse kind never reaches the read. Over
+  775 reaching (model, operation, field) rows the read and `model_column_write_kind(...) == RELATION_MULTI` agree,
+  and routing it through the classifier leaves the printed schema and every generated input byte-identical. The
+  forward-M2M optional rule is pinned live by `test_input_shapes_api.py`. No code
 
 ## Outside review of the fixes
 
@@ -1412,9 +1419,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   and handle many-to-many differently from `fields = "__all__"`; probe both against one model and align them
 - [ ] 401. Unprobed: the model flavor of `createItemHold` with `itemId` omitted (not sent `null`) may not answer with
   the field-keyed `itemId` / `null` envelope the ModelForm flavor gives since `8c0aaf17`
-- [ ] 402. `mutations/inputs.py::build_mutation_input` decides requiredness with `is_m2m = getattr(field,
-  "many_to_many", False)`, so a reverse foreign key is not counted as a collection there, unlike
-  `model_column_write_kind` (`02711b23`); behaviour appears identical today: confirm or route it through the classifier
 - [ ] 403. Neither spec-027 nor the GLOSSARY `FilterSet` entry states the re-readability rule `67e23c5d` enforces: add
   the edge-case row "`Meta.fields` / `filter_fields` / `Meta.exclude` must be re-readable collections; one-shot
   iterators and a bare-string `Meta.exclude` raise `ConfigurationError` at class creation" (GLOSSARY through the DB)
