@@ -35,6 +35,7 @@ from typing import BinaryIO, cast
 
 import pytest
 import yaml
+from typing_extensions import override
 
 from django_strawberry_framework.utils.typing import object_result
 from scripts import prove_failability, workspace
@@ -3775,6 +3776,8 @@ STOP_SIGNALS = (
     signal.SIGHUP,
     signal.SIGQUIT,
 )
+# Ctrl-Z; a background job reading from or writing to its terminal.
+JOB_SIGNALS = (signal.SIGTSTP, signal.SIGTTIN, signal.SIGTTOU)
 
 # Stands in for ``uv run <command>``: it writes ``<pid> <pgid> <grandchild pid>`` to
 # ``S_READY`` once it has started a grandchild (uv -> pytest -> xdist worker), appends the
@@ -3821,10 +3824,15 @@ print("released", flush=True)
 """
 
 # Runs the real ``stream`` in a process of its own, as ``run`` does, holding an ``flock`` on
-# ``S_LOCK`` it hands the command, and writes what ``stream`` returned to ``S_RESULT``.
+# ``S_LOCK`` it hands the command, writes what ``stream`` returned to ``S_RESULT``, writes a
+# footer to stderr as ``execute`` does, and exits with the code ``stream`` returned (``run``
+# instead ends by signal ``N`` on a stop's ``128 + N``).
 # ``starting`` signals the process itself as the command is being started, before the fork;
 # ``started`` signals it once the command has started, before ``stream`` has recorded it;
-# ``sink-stdout`` and ``sink-stderr`` point that stream at a pipe whose reader has gone.
+# ``started-continued`` then sends it ``SIGCONT`` as well, each signal handled before the next;
+# ``pipe-<stream>`` points that stream (``stdout`` or ``stderr``) at a pipe whose reader has
+# gone, ``tty-<stream>`` at a terminal whose master side has closed; ``<sink>-both`` points
+# the descriptors 1 and 2 at that one dead file, as ``2>&1 | head`` does.
 _STREAM_RUN = """
 import json, os, signal, subprocess, sys
 from pathlib import Path
@@ -3833,22 +3841,37 @@ from scripts import workspace
 
 mode = os.environ["S_MODE"]
 signum = int(os.environ["S_SIGNUM"])
-if mode in {"starting", "started"}:
+
+
+def deliver(signal_number):
+    # A call of its own: the handler of one runs on entering the next, never after it.
+    os.kill(os.getpid(), signal_number)
+
+
+if mode in {"starting", "started", "started-continued"}:
 
     class SignalledPopen(subprocess.Popen):
         def __init__(self, *args, **kwargs):
             if mode == "starting":
-                os.kill(os.getpid(), signum)
+                deliver(signum)
             super().__init__(*args, **kwargs)
-            if mode == "started":
-                os.kill(os.getpid(), signum)
+            if mode.startswith("started"):
+                deliver(signum)
+            if mode == "started-continued":
+                deliver(signal.SIGCONT)
 
     subprocess.Popen = SignalledPopen
-if mode.startswith("sink-"):
-    reader, writer = os.pipe()
+if mode.startswith(("pipe-", "tty-")):
+    sink, name = mode.split("-")
+    reader, writer = os.pipe() if sink == "pipe" else os.openpty()
     os.close(reader)
     signal.signal(signal.SIGPIPE, signal.SIG_IGN)
-    setattr(sys, mode[len("sink-") :], os.fdopen(writer, "w"))
+    if name == "both":
+        os.dup2(writer, 1)
+        os.dup2(writer, 2)
+        os.close(writer)
+    else:
+        setattr(sys, name, os.fdopen(writer, "w"))
 command = [sys.executable, "-c", os.environ["S_COMMAND"]]
 with workspace.file_lock(Path(os.environ["S_LOCK"])) as held:
     finished = workspace.stream(
@@ -3859,6 +3882,8 @@ with workspace.file_lock(Path(os.environ["S_LOCK"])) as held:
         holding=(held,),
     )
 Path(os.environ["S_RESULT"]).write_text(json.dumps([finished.code, finished.stopped_by]))
+sys.stderr.write(f"workspace run exit {finished.code}\\n")
+sys.exit(finished.code)
 """
 
 # Sets ``S_SIGNUM`` to ``SIG_IGN`` and execs the rest of its argv under a fresh interpreter,
@@ -3997,6 +4022,7 @@ class _StreamRun:
         self.lock = tmp_path / "copy.lock"
         self.log = tmp_path / "run.log"
         self.result = tmp_path / "result.json"
+        self.err: str = ""
         environment = {
             **os.environ,
             "PYTHONPATH": str(Path(workspace.__file__).resolve().parents[1]),
@@ -4063,9 +4089,14 @@ class _StreamRun:
         (self.tmp_path / "ready.release").touch()
 
     def finish(self, timeout: float = 30) -> tuple[object, object]:
-        """Return the code and stop signal ``stream`` returned; fail on a run that never ends."""
+        """Return the code and stop signal ``stream`` returned; fail on a run that never ends.
+
+        What the run wrote to its own stderr lands in ``err``.
+        """
         try:
-            _ = self.process.communicate(timeout=timeout)
+            _, err = self.process.communicate(timeout=timeout)
+            if isinstance(err, str):
+                self.err = err
         except subprocess.TimeoutExpired:
             self.process.kill()
             pytest.fail("the run never finished")
@@ -4263,18 +4294,73 @@ def test_a_killed_stream_leaves_its_lock_held_while_its_command_runs(
     assert _poll(lambda: not _lock_is_held(run.lock))
 
 
-@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+@pytest.mark.parametrize("code", [0, 7])
+@pytest.mark.parametrize("sink", ["pipe", "tty"])
+@pytest.mark.parametrize("stream", ["stdout", "stderr", "both"])
 def test_a_reader_gone_from_the_run_keeps_the_log_and_never_blocks_the_command(
     tmp_path: Path,
     stream_runs: list[_StreamRun],
     stream: str,
+    sink: str,
+    code: int,
 ) -> None:
-    # ``workspace.py run ... | head``, or a closed terminal: the echo fails, the log does not.
-    run = _StreamRun(tmp_path, mode=f"sink-{stream}", command=_FLOOD, stream=stream)
+    # A pipe whose reader exited (``| head``) or a terminal whose master side closed, on one
+    # stream or on both (``2>&1 | head``): the echo fails, the log does not.
+    run = _StreamRun(
+        tmp_path,
+        mode=f"{sink}-{stream}",
+        command=f"{_FLOOD}\nsys.exit({code})",
+        stream="stdout" if stream == "both" else stream,
+    )
     stream_runs.append(run)
 
-    assert run.finish(timeout=15) == (0, None)
+    assert run.finish(timeout=15) == (code, None)
     assert run.log.stat().st_size == len("header\n") + 20000 * 100
+    # The run ends with the command's own code: nothing it left buffered for the dead sink fails
+    # its exit.
+    assert run.process.returncode == code
+    assert "Exception ignored" not in run.err
+
+
+@pytest.mark.parametrize(
+    ("error", "names"),
+    [
+        (errno.EPIPE, "devnull"),
+        (errno.EIO, "devnull"),
+        (errno.ENOSPC, "sink"),
+        (errno.EFBIG, "sink"),
+    ],
+    ids=[
+        "EPIPE",
+        "EIO",
+        "ENOSPC",
+        "EFBIG",
+    ],
+)
+def test_only_a_sink_whose_reader_is_gone_is_pointed_at_devnull(
+    tmp_path: Path,
+    error: int,
+    names: str,
+) -> None:
+    # A full disk is no reader gone: the sink is dropped, its descriptor still names its file.
+
+    class FailingSink(io.BufferedWriter):
+        @override
+        def write(self, buffer: object, /) -> int:
+            raise OSError(error, os.strerror(error))
+
+    reader, writer = os.pipe()
+    _ = os.write(writer, b"chunk\n")
+    os.close(writer)
+    log = io.BytesIO()
+    path = tmp_path / "sink"
+    with os.fdopen(reader, "rb") as source, FailingSink(io.FileIO(path, "wb")) as sink:
+        workspace._pump(source, sink, log, threading.Lock())
+        found = os.fstat(sink.fileno())
+
+    expected = Path(os.devnull).stat() if names == "devnull" else path.stat()
+    assert log.getvalue() == b"chunk\n"
+    assert (found.st_dev, found.st_ino) == (expected.st_dev, expected.st_ino)
 
 
 @pytest.fixture
@@ -4502,6 +4588,61 @@ def test_ctrl_z_suspends_the_command_with_the_run_and_fg_continues_both(
     assert _poll(lambda: "exited 0" in run.shell_said())
     assert json_list(json_loads(run.result.read_text(encoding="utf-8"))) == [0, None]
     assert run.log.read_text(encoding="utf-8").endswith("released\n")
+
+
+@pytest.mark.parametrize("signum", JOB_SIGNALS, ids=[signum.name for signum in JOB_SIGNALS])
+@pytest.mark.parametrize("mode", ["starting", "started"])
+def test_a_suspend_before_the_command_is_recorded_stops_it_with_the_run_once_it_is(
+    tmp_path: Path,
+    terminal: tuple[int, int],
+    stream_runs: list[_StreamRun],
+    mode: str,
+    signum: signal.Signals,
+) -> None:
+    _master, tty = terminal
+    run = _StreamRun(tmp_path, mode=mode, signum=signum, command=_BEATING, tty=tty)
+    stream_runs.append(run)
+
+    assert _poll(lambda: "stopped" in run.shell_said())
+    # Stopped with the run: a command left running would beat on, holding the run's leases.
+    stopped_at = run.beats()
+    time.sleep(0.5)
+    assert run.beats() == stopped_at
+    Path(f"{run.shell}.fg").touch()  # fg
+    assert _poll(lambda: run.beats() > stopped_at + 3)
+    command, _, _ = run.pids()
+    assert not _is_stopped(command)
+    run.release()
+
+    assert _poll(lambda: "exited 0" in run.shell_said())
+    assert run.shell_said().count("stopped") == 1
+    assert json_list(json_loads(run.result.read_text(encoding="utf-8"))) == [0, None]
+    assert run.log.read_text(encoding="utf-8").endswith("released\n")
+
+
+@pytest.mark.parametrize("signum", JOB_SIGNALS, ids=[signum.name for signum in JOB_SIGNALS])
+def test_a_continue_before_the_command_is_recorded_drops_the_suspend_before_it(
+    tmp_path: Path,
+    terminal: tuple[int, int],
+    stream_runs: list[_StreamRun],
+    signum: signal.Signals,
+) -> None:
+    _master, tty = terminal
+    run = _StreamRun(
+        tmp_path,
+        mode="started-continued",
+        signum=signum,
+        command=_BEATING,
+        tty=tty,
+    )
+    stream_runs.append(run)
+
+    assert _poll(lambda: run.beats() > 10)
+    run.release()
+
+    assert _poll(lambda: "exited 0" in run.shell_said())
+    assert "stopped" not in run.shell_said()
+    assert json_list(json_loads(run.result.read_text(encoding="utf-8"))) == [0, None]
 
 
 def test_ctrl_z_the_run_inherited_as_ignored_stays_ignored_and_stops_nothing(
@@ -4750,6 +4891,55 @@ def test_a_stopped_gate_runs_no_later_suite_and_ends_by_the_signal(
     result = json_object(json_loads(result_path.read_text(encoding="utf-8")))
     assert result["stopped_by"] == "SIGINT"
     assert list(json_object(result, "suites")) == ["lint"]
+
+
+def test_the_floor_suite_installs_and_runs_holding_the_locks_the_gate_holds(
+    layout: workspace.Layout,
+    syncs: _Syncs,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in ("pyproject.toml", "uv.lock"):
+        _ = _write(layout.repo_root / name, f"{name}\n")
+    installed: list[list[tuple[int, int]]] = []
+    streamed: list[tuple[list[str], list[tuple[int, int]]]] = []
+
+    def floor_venv(_layout: workspace.Layout, holding: Sequence[int] = ()) -> object:
+        installed.append([(os.fstat(fd).st_dev, os.fstat(fd).st_ino) for fd in holding])
+        return {
+            "python": "floor-python",
+            "pins": {},
+            "key": "key",
+            "reused": False,
+        }
+
+    def recorded_stream(
+        command: list[str],
+        _env: dict[str, str],
+        log_path: Path,
+        header: str,
+        cwd: Path | None = None,
+        *,
+        holding: tuple[int, ...] = (),
+    ) -> workspace.Finished:
+        del cwd
+        streamed.append((command, [(os.fstat(fd).st_dev, os.fstat(fd).st_ino) for fd in holding]))
+        _ = _write(log_path, header)
+        return workspace.Finished(0)
+
+    monkeypatch.setattr(workspace, "ensure_floor_venv", floor_venv)
+    monkeypatch.setattr(workspace, "stream", recorded_stream)
+
+    code = workspace.gate(layout, [workspace.FLOOR_SUITE])
+
+    assert code == 0
+    ((command, holding),) = streamed
+    assert command == ["floor-python", "-m", *workspace.GATE_SUITES[workspace.FLOOR_SUITE][0]]
+    # The copy's sync, the floor install and the suite hold the flow's lease and the gate's lock.
+    locks = [layout.flow_dir, layout.flow_dir / "gate.lock"]
+    files = [(path.stat().st_dev, path.stat().st_ino) for path in locks]
+    assert syncs.holding == [files]
+    assert installed == [files]
+    assert holding == files
 
 
 # Runs ``_cli`` with ``main`` returning ``W_CODE``, as the script's entry point does.
