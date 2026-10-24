@@ -120,6 +120,7 @@ from django_strawberry_framework.utils.inputs import (
 )
 from django_strawberry_framework.utils.strings import graphql_camel_name
 from tests._idioms import module_binding
+from tests._relation_fixtures import RpCompositeParent
 from tests.optimizer import _link_models
 
 if TYPE_CHECKING:
@@ -364,6 +365,58 @@ def test_editable_fields_carry_a_client_assigned_primary_key_on_create_only(
         match=re.escape(_ROW_IDENTITY_FIELDS_ERROR.format(model=model.__name__, names=[key])),
     ):
         editable_input_fields(model, fields=(key, *update), operation_kind=PARTIAL)
+
+
+class _CompositeLine(models.Model):
+    """An unmanaged owner of a ``CompositePrimaryKey`` over a foreign key and a text column."""
+
+    pk = models.CompositePrimaryKey("category_id", "tag")
+    category: models.ForeignKey[product_models.Category, product_models.Category] = (
+        models.ForeignKey(product_models.Category, on_delete=models.CASCADE)
+    )
+    tag: models.TextField[str | Combinable, str] = models.TextField()
+    note: models.TextField[str | Combinable, str] = models.TextField()
+
+    class Meta:
+        managed = False
+        app_label = "test_mutation_inputs_composite_line"
+
+
+@pytest.mark.parametrize(
+    ("model", "members", "other"),
+    [
+        pytest.param(RpCompositeParent, ["tenant_id", "code"], "label", id="scalar-members"),
+        pytest.param(_CompositeLine, ["category", "tag"], "note", id="foreign-key-member"),
+    ],
+)
+def test_editable_fields_carry_every_composite_key_member_on_create_only(
+    model: type[models.Model],
+    members: list[str],
+    other: str,
+) -> None:
+    """Each member column of a ``CompositePrimaryKey`` is a create input and never an update input.
+
+    A member's own ``primary_key`` flag is ``False`` (only the ``CompositePrimaryKey`` field
+    carries it), yet a write to one re-keys the located row. The update input leaves every
+    member out, naming one in ``fields`` is refused and in ``exclude`` accepted, and the
+    create keeps them all: a composite key is client-assigned.
+    """
+    create = [field.name for field in editable_input_fields(model, operation_kind=CREATE)]
+    update = [field.name for field in editable_input_fields(model, operation_kind=PARTIAL)]
+
+    assert create == [*members, other]
+    assert update == [other]
+    assert [
+        field.name
+        for field in editable_input_fields(model, exclude=(members[0],), operation_kind=PARTIAL)
+    ] == update
+    with pytest.raises(
+        ConfigurationError,
+        match=re.escape(
+            _ROW_IDENTITY_FIELDS_ERROR.format(model=model.__name__, names=[members[0]]),
+        ),
+    ):
+        editable_input_fields(model, fields=(members[0], other), operation_kind=PARTIAL)
 
 
 @pytest.mark.parametrize(

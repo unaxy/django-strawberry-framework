@@ -98,6 +98,7 @@ from django_strawberry_framework.utils.inputs import InputFieldSpec
 from django_strawberry_framework.utils.relations import is_model_class
 from tests._idioms import ClassReadRaises, module_binding
 from tests._postgres_fields import FakeArrayField
+from tests._relation_fixtures import RpCompositeParent
 
 if TYPE_CHECKING:
     from django.db.models import Model
@@ -451,6 +452,37 @@ def test_partial_input_leaves_out_the_primary_key_the_create_input_carries(
     assert set(_field_map(cre)) == {input_key, other}
     assert set(_field_map(par)) == {other}
     assert par.__name__ == f"{form_cls.__name__}PartialInput"
+
+
+def test_partial_input_leaves_out_every_composite_key_member_the_create_input_carries() -> None:
+    """Each member column of a ``CompositePrimaryKey`` is a create input and never an update input.
+
+    A member's own ``primary_key`` flag is ``False``, yet ``construct_instance`` writing one
+    re-keys the located row. Naming a member in an update ``fields`` is refused and in
+    ``exclude`` accepted, stating what the update input already does.
+    """
+    form_cls = forms.modelform_factory(
+        RpCompositeParent,
+        fields=("tenant_id", "code", "label"),
+    )
+
+    cre, _ = build_form_input_class(form_cls, operation_kind=CREATE)
+    par, _ = build_form_input_class(form_cls, operation_kind=PARTIAL)
+
+    assert list(_field_map(cre)) == ["tenant_id", "code", "label"]
+    assert list(_field_map(par)) == ["label"]
+    assert list(
+        resolve_effective_form_fields(form_cls, exclude=("code",), operation_kind=PARTIAL),
+    ) == ["label"]
+    with pytest.raises(
+        ConfigurationError,
+        match=re.escape("declares `fields` naming ['tenant_id'], which write(s) the row's"),
+    ):
+        resolve_effective_form_fields(
+            form_cls,
+            fields=("tenant_id", "label"),
+            operation_kind=PARTIAL,
+        )
 
 
 class _FrozenKeyRow(models.Model):

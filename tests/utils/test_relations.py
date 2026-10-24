@@ -65,6 +65,7 @@ from django_strawberry_framework.utils.relations import (
     is_forward_concrete_relation,
     is_forward_many_to_many,
     is_many_side_relation_kind,
+    is_row_key_column,
     is_single_column_foreign_key,
     m2m_through_link_fields,
     non_pk_forward_link,
@@ -1014,6 +1015,40 @@ def test_has_composite_pk_follows_a_rebound_pk(monkeypatch: pytest.MonkeyPatch) 
 
     assert has_composite_pk(Book) is True
     assert has_composite_pk(RpCompositeParent) is False
+
+
+@pytest.mark.parametrize(
+    ("model", "name", "expected"),
+    [
+        pytest.param(Book, "id", True, id="auto-key"),
+        pytest.param(Book, "title", False, id="plain-column"),
+        pytest.param(PatronProfile, "patron", True, id="one-to-one-key"),
+        pytest.param(PatronProfile, "address_2", False, id="one-to-one-owner-column"),
+        pytest.param(LendingDesk, "id", True, id="inherited-parent-key"),
+        pytest.param(LendingDesk, "venue_ptr", True, id="parent-link"),
+        pytest.param(LendingDesk, "window_count", False, id="child-column"),
+        pytest.param(SelfServeDesk, "venue_ptr", True, id="grandparent-link"),
+        pytest.param(SelfServeDesk, "lendingdesk_ptr", True, id="grandchild-link"),
+        pytest.param(SelfServeDesk, "kiosk_code", False, id="grandchild-column"),
+        pytest.param(RpCompositeParent, "tenant_id", True, id="composite-member"),
+        pytest.param(RpCompositeParent, "code", True, id="composite-second-member"),
+        pytest.param(RpCompositeParent, "pk", True, id="composite-key-field"),
+        pytest.param(RpCompositeParent, "label", False, id="composite-owner-column"),
+    ],
+)
+def test_is_row_key_column_names_every_column_of_a_primary_key(
+    model: type[Model],
+    name: str,
+    expected: bool,  # noqa: FBT001 - a parametrized expectation
+) -> None:
+    """A column is a row key when it is the key itself or a member of a ``CompositePrimaryKey``.
+
+    A composite member carries ``primary_key=False``, so the flag alone cannot name it; the
+    key a multi-table child inherits and its parent links are keys of their own tables.
+    """
+    column = model._meta.get_field(name)
+    assert isinstance(column, models.Field)
+    assert is_row_key_column(column) is expected
 
 
 def test_relation_bool_none_value_falls_back_to_default() -> None:

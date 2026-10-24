@@ -54,6 +54,7 @@ __all__ = [
     "is_forward_single_relation",
     "is_many_side_relation_kind",
     "is_model_class",
+    "is_row_key_column",
     "is_single_column_foreign_key",
     "m2m_through_link_fields",
     "m2m_through_model",
@@ -1043,6 +1044,19 @@ def has_composite_pk(model: type[models.Model]) -> bool:
       rejects a Relay-declared type over a composite-pk model.
     """
     return model._meta.is_composite_pk
+
+
+def is_row_key_column(column: ConcreteField) -> bool:
+    """Return whether a write to ``column`` lands on the primary key of the table holding it.
+
+    The key itself (``primary_key``: an auto key, a ``OneToOneField(primary_key=True)``, a
+    multi-table child's parent link, the key a child inherits from its parent, and the
+    ``CompositePrimaryKey`` field a ``pk`` alias resolves to) or a member of it (``Options.pk_fields``
+    of the declaring model: each column of a ``CompositePrimaryKey``). A composite member's own
+    ``primary_key`` flag is ``False``, so the flag alone cannot answer this; Django's own unique
+    check reads the same membership (``Model._perform_unique_checks``).
+    """
+    return column.primary_key or column in column.model._meta.pk_fields
 
 
 def written_model_field(model: type[models.Model], source: str) -> ConcreteField | None:

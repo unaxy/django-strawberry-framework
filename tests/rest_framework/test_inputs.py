@@ -101,6 +101,7 @@ from tests._idioms import (
     definition_raises,
     module_binding,
 )
+from tests._relation_fixtures import RpCompositeParent
 
 if TYPE_CHECKING:
     from typing import TypeAlias, TypeVar
@@ -1137,6 +1138,24 @@ def _patron_key(source: str | None = None) -> DRFField:
             _edition_serializer(key=serializers.CharField(source="pk")),
             "key",
             id="pk-alias",
+        ),
+        pytest.param(
+            _keyed_serializer(
+                RpCompositeParent,
+                "label",
+                tenant_id=serializers.IntegerField(),
+            ),
+            "tenant_id",
+            id="composite-member",
+        ),
+        pytest.param(
+            _keyed_serializer(
+                RpCompositeParent,
+                "label",
+                key=serializers.JSONField(source="pk"),
+            ),
+            "key",
+            id="composite-pk-alias",
         ),
     ],
 )

@@ -95,6 +95,7 @@ from django_strawberry_framework.utils.relations import (
     is_forward_concrete_relation,
     is_forward_many_to_many,
     is_model_class,
+    is_row_key_column,
     non_pk_relation_key_attname,
     relation_bool,
 )
@@ -457,11 +458,13 @@ def _form_row_identity(
     """Return the form fields an ``operation_kind`` input leaves out as the row's identity.
 
     Only the ``PARTIAL`` (update) input has any: the declared fields whose backing
-    model column (``_model_column_for``) is an editable primary key - a
-    ``OneToOneField(primary_key=True)``, a client-assigned text key, or an inherited parent
-    key. ``construct_instance`` would assign a provided value to the located instance and
-    ``save()`` would then update or insert a different row, so the update input never
-    carries it (the model flavor's ``mutations/inputs.py::editable_input_fields`` rule). An
+    model column (``_model_column_for``) is an editable primary key
+    (``utils/relations.py::is_row_key_column``) - a ``OneToOneField(primary_key=True)``, a
+    client-assigned text key, an inherited parent key, or a member of a
+    ``CompositePrimaryKey``. ``construct_instance`` would assign a provided value to the
+    located instance and ``save()`` would then update or insert a different row, so the
+    update input never carries it (the model flavor's
+    ``mutations/inputs.py::editable_input_fields`` rule). An
     ``editable=False`` key is no such field: ``construct_instance`` never writes a
     non-editable column, so a declared form field named like one is an ordinary input. A
     create input keeps every field: a client-assigned key is how a create names its row.
@@ -472,7 +475,7 @@ def _form_row_identity(
         name
         for name in _form_field_basis(form_class, form_fields)
         if (column := _model_column_for(form_class, name)) is not None
-        and column.primary_key
+        and is_row_key_column(column)
         and column.editable
     )
 
