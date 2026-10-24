@@ -37,11 +37,11 @@ conversion own it. The SDL renders
 a Relay-Node primary takes a GlobalID, type-checked against the mutation's target
 model (a malformed / unresolvable / wrong-model id is a ``FieldError`` on ``id``,
 never coerced to a bare pk); a non-Relay primary, which no GlobalID names, takes
-the raw pk (an uncoercible literal is the not-found ``FieldError``). This is
-a single, consistent contract; the relation ``<field>_id`` inputs, by
-contrast, are typed by their target: ``GlobalID`` for a Relay-Node target (so a malformed
-*relation* id is a Strawberry coercion error while a well-formed-but-invalid one is the
-in-band ``FieldError``) and the raw pk type for a plain target.
+the raw pk (an uncoercible literal is the not-found ``FieldError``). The
+relation ``<field>_id`` inputs follow the same rule by their target: the raw ``ID``
+string for a Relay-Node target, decoded server-side (a malformed, wrong-model or hidden
+*relation* id is the in-band relation ``FieldError``), and the raw pk type for a plain
+target.
 
 The field is assigned with no class-attribute annotation
 (``create_item = DjangoMutationField(CreateItem)``); there is no ``.field()``

@@ -166,7 +166,7 @@ def serializer_input_slot(mutation_cls: type[object]) -> str:
     ``DjangoMutationField`` builds the ``data:`` ``strawberry.lazy`` reference when the
     root ``Mutation`` class body runs, before ``finalize_django_types``; the input class
     and its descriptor-derived name exist only after the bind walks the serializer
-    against the finalized registry (a relation id is a ``GlobalID`` only once its target
+    against the finalized registry (a relation id is a GlobalID ``ID`` only once its target
     type is a Relay node, which ``Meta.interfaces`` makes true at finalization). So the
     reference names this slot, derived from the mutation alone, and
     ``SerializerMutation.build_input`` materializes the bound class under it beside the

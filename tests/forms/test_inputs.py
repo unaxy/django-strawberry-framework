@@ -629,8 +629,8 @@ def test_fk_to_non_relay_products_target_uses_raw_pk_id() -> None:
     assert cat_spec.nested_specs is None
 
 
-def test_model_choice_field_to_relay_target_uses_globalid() -> None:
-    """A model-less ``ModelChoiceField`` to a Relay primary becomes ``<name>_id: GlobalID``."""
+def test_model_choice_field_to_relay_target_uses_id() -> None:
+    """A model-less ``ModelChoiceField`` to a Relay primary becomes ``<name>_id: ID``."""
     relay_target, _ = _make_relay_target()
 
     class PickForm(forms.Form):
@@ -638,7 +638,7 @@ def test_model_choice_field_to_relay_target_uses_globalid() -> None:
 
     cre, specs = build_form_input_class(PickForm, operation_kind=FORM)
     fields = _field_map(cre)
-    assert _inner_type(fields["target_id"]) is relay.GlobalID
+    assert _inner_type(fields["target_id"]) is strawberry.ID
     spec = next(s for s in specs if s.target_name == "target")
     assert spec.input_attr == "target_id"
     assert spec.kind == RELATION_SINGLE
@@ -657,8 +657,8 @@ def test_model_choice_field_to_non_relay_target_uses_raw_pk() -> None:
     assert _inner_type(fields["target_id"]) is int
 
 
-def test_model_multiple_choice_field_to_relay_target_is_list_of_globalid() -> None:
-    """A ``ModelMultipleChoiceField`` to a Relay primary becomes ``list[GlobalID]``, kind multi."""
+def test_model_multiple_choice_field_to_relay_target_is_list_of_id() -> None:
+    """A ``ModelMultipleChoiceField`` to a Relay primary becomes ``list[ID]``, kind multi."""
     relay_target, _ = _make_relay_target()
 
     class PickManyForm(forms.Form):
@@ -667,7 +667,7 @@ def test_model_multiple_choice_field_to_relay_target_is_list_of_globalid() -> No
     cre, specs = build_form_input_class(PickManyForm, operation_kind=FORM)
     fields = _field_map(cre)
     inner = _inner_type(fields["targets"])
-    assert inner == list[relay.GlobalID]
+    assert inner == list[strawberry.ID]
     spec = next(s for s in specs if s.target_name == "targets")
     assert spec.input_attr == "targets"
     assert spec.kind == RELATION_MULTI

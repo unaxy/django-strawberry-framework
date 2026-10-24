@@ -992,7 +992,7 @@ type Mutation {
 input ItemSerializerInput {
   name: String!
   description: String
-  categoryId: GlobalID!
+  categoryId: ID!
   isPrivate: Boolean
 }
 
@@ -1876,14 +1876,16 @@ The pipeline steps:
    decoder** that mirrors the `038` form decoder (serializer-field-keyed, not the
    model-attr-keyed `036` decoder). **The generated input field carries
    exactly ONE annotation, strategy-dependent** (Decision 7): a relation whose target
-   primary [`DjangoType`][glossary-djangotype] is Relay-shaped exposes a `GlobalID`; a
-   non-Relay / raw-pk target exposes the scalar of the column storing its primary key.
-   So a *live* GraphQL request can only ever deliver the **one shape the annotation admits** — a raw integer
-   against a `GlobalID`-typed field is a **top-level variable-coercion error before the
-   resolver runs** (verified: products' `test_create_item_malformed_category_id_is_top_level_coercion_error`,
-   because relation inputs are typed `GlobalID`, not `ID!`). The **shared decode helper**
-   accepts **both** a `GlobalID` and a raw pk because it is reused; the raw-pk / non-Relay
-   branch is live wherever the relation target's primary is non-Relay (fakeshop's
+   primary [`DjangoType`][glossary-djangotype] is Relay-shaped exposes `ID` (the raw
+   GlobalID string the package decodes server-side); a non-Relay / raw-pk target exposes
+   the scalar of the column storing its primary key. The **shared decode helper** reads
+   which shape from the **target**, never from the value
+   (`django_strawberry_framework/utils/write_values.py::relation_takes_global_id`): every
+   id for a Relay target meets the GlobalID decode, a malformed string or a raw integer
+   (which `ID` coerces to a string) included, and anything that is not a GlobalID for the target model
+   is the field-keyed relation `FieldError` in the payload, never a top-level error
+   (verified: products' `test_create_item_malformed_category_id_is_relation_field_error`).
+   The raw-pk / non-Relay branch is live wherever the relation target's primary is non-Relay (fakeshop's
    `createShelfViaSerializer` `branchId` into `BranchType`, and `createPrintingViaSerializer` /
    `updatePrintingViaSerializer` `editionId` / `boundWith` into the text-keyed `EditionType`),
    and package tests also drive it by **direct call**. Each id the decoder does see

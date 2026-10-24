@@ -31,8 +31,8 @@ The serializer-specific invariants this module owns:
 
 - **The dedicated serializer relation decoder mirrors the ``038`` form decoder**
   (serializer-field-keyed, NOT the model-attr-keyed ``036`` decode; all three
-  ride ``decode_provided_fields``). Each relation id - a ``relay.GlobalID`` *or* a raw
-  pk - is type-checked against the relation's **target model**, which is recorded on
+  ride ``decode_provided_fields``). Each relation id - a GlobalID string *or* a raw
+  pk, by target - is type-checked against the relation's **target model**, which is recorded on
   the bind-stashed reverse map (``InputFieldSpec.related_model``, resolved once at
   build from the backing FK via the serializer field's ``source``, or
   ``field.queryset.model`` for a serializer-only relation (spec-039), so the
@@ -44,9 +44,10 @@ The serializer-specific invariants this module owns:
   ``PrimaryKeyRelatedField`` expects. A hidden / wrong-model / uncoercible id is a
   field-keyed ``FieldError`` keyed to ``spec.graphql_name`` (the GraphQL wire name
   the client sent, e.g. ``categoryId``). The generated input field exposes exactly
-  ONE strategy-dependent shape (spec-039 Decision 7 - a ``GlobalID`` for a Relay target,
-  else the raw-pk scalar); the shared decode helper accepts BOTH only because
-  package tests drive the raw-pk / non-Relay branch by direct call.
+  ONE strategy-dependent shape (spec-039 Decision 7 - an ``ID`` carrying a GlobalID for a
+  Relay target, else the raw-pk scalar); the shared decode helper reads which one from
+  the target (``utils/write_values.py::relation_takes_global_id``), never from the
+  value.
 
 - **A relation ``GlobalID`` is decoded against the target type's RECORDED
   ``effective_globalid_strategy``** via ``decode_model_global_id`` (which takes the
@@ -357,9 +358,8 @@ def _decode_relation_single(
     through unchanged so the serializer's own validation decides (a required
     relation raises its field-keyed required error via ``is_valid()``, an optional
     one clears). The generated GraphQL input field exposes only the one
-    strategy-dependent shape (spec-039 Decision 7); this helper accepts BOTH a ``GlobalID``
-    and a raw pk because package tests drive the raw-pk / non-Relay branch by direct
-    call.
+    strategy-dependent shape (spec-039 Decision 7), and the decode reads which one from
+    the target model, never from the value.
     """
     return decode_visible_relation(
         value,

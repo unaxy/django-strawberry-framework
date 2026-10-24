@@ -1799,11 +1799,11 @@ def test_a_field_failing_validation_is_left_out_of_its_uniqueness_checks() -> No
 
 @pytest.mark.django_db
 def test_globalid_relation_override_flows_through_visibility_contract() -> None:
-    """A ``GlobalID`` relation override is still relation-visibility-checked (Decision 10).
+    """A Relay relation override is still relation-visibility-checked (Decision 10).
 
     The bind-time type-lock (``sets.py::_validate_relation_override_types``) forces a
-    relation override to keep the generated ``relay.GlobalID`` id type, so the override
-    decodes through the same ``GlobalID`` type-check and Decision-10 visibility check
+    relation override to keep the generated ``strawberry.ID`` id type, so the override
+    decodes through the same GlobalID type-check and Decision-10 visibility check
     as the generated input. This pins the end-to-end guarantee: a
     ``createItem`` whose ``categoryId`` names a ``Category`` hidden by
     ``Category.get_queryset`` is a ``FieldError`` on ``categoryId`` (hidden
@@ -1823,7 +1823,7 @@ def test_globalid_relation_override_flows_through_visibility_contract() -> None:
 
     @strawberry.input
     class GidItemInput:
-        category_id: relay.GlobalID = strawberry.field(description="custom category ref")
+        category_id: strawberry.ID = strawberry.field(description="custom category ref")
 
     schema, (CategoryT, _ItemT) = _build_item_schema(
         category_get_queryset=_hide_private,
@@ -3539,7 +3539,7 @@ def test_relation_target_hidden_while_its_lock_waited_is_a_relation_error() -> N
 
     @strawberry.input
     class GidItemInput:
-        category_id: relay.GlobalID = strawberry.field(description="custom category ref")
+        category_id: strawberry.ID = strawberry.field(description="custom category ref")
 
     schema, (CategoryT, _ItemT) = _build_item_schema(
         category_get_queryset=classmethod(_public_rows),

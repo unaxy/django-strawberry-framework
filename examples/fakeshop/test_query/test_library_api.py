@@ -13924,6 +13924,60 @@ def test_update_book_via_form_explicit_null_genres_is_form_required_error() -> N
     assert set(book.genres.values_list("pk", flat=True)) == {genre.pk}
 
 
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("field", "input_name"),
+    [
+        ("updateBookViaCustomInput", "BookPartialInput"),
+        ("updateBookViaForm", "BookGenresModelFormPartialInput"),
+        ("updateBookGenresViaSerializer", "BookGenresSerializerPartialInput"),
+    ],
+    ids=["model", "form", "serializer"],
+)
+def test_update_book_malformed_genre_element_is_relation_field_error_over_http(
+    field: str,
+    input_name: str,
+) -> None:
+    """A malformed ``genres`` ELEMENT is the ``genres`` relation ``FieldError``, nothing written.
+
+    ``genres`` targets the Relay-Node ``GenreType``, so each element is the raw ``ID``
+    string the package decodes. A list holding a valid genre id beside one that is not a
+    GlobalID at all fails that element's decode inside the resolver, in all three write
+    flavors: the payload answers the uniform relation error on ``genres``, the response
+    carries no top-level error, and neither the title nor the stored genre set changes.
+    """
+    shelf = _seed_shelf()
+    kept = models.Genre.objects.create(name="MalformedKept")
+    offered = models.Genre.objects.create(name="MalformedOffered")
+    book = models.Book.objects.create(title="MalformedBefore", shelf=shelf)
+    book.genres.set([kept])
+
+    response = _post_graphql(
+        f"mutation($id: ID!, $d: {input_name}!){{ {field}(id:$id, data:$d){{ "
+        "node{ title } errors{ field messages } } }",
+        variables={
+            "id": global_id_for(library_schema.BookType, book.pk),
+            "d": {
+                "title": "MalformedAfter",
+                "genres": [
+                    global_id_for(library_schema.GenreType, offered.pk),
+                    "not-a-valid-global-id",
+                ],
+            },
+        },
+    )
+    assert response.status_code == 200
+    payload = response_json(response)
+    assert "errors" not in payload, payload
+    assert json_at(payload, "data", field) == {
+        "node": None,
+        "errors": [{"field": "genres", "messages": ["Invalid id for relation 'genres'."]}],
+    }
+    book.refresh_from_db()
+    assert book.title == "MalformedBefore"
+    assert list(book.genres.values_list("name", flat=True)) == ["MalformedKept"]
+
+
 _UPDATE_BOOK_AT_REPAIR_DESK = (
     "mutation($id: ID!, $d: BookRepairDeskFormPartialInput!){ "
     "updateBookAtRepairDeskViaForm(id:$id, data:$d){ node{ circulationStatus } "

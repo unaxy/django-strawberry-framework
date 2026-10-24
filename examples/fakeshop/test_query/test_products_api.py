@@ -1663,14 +1663,13 @@ def test_update_item_malformed_id_is_field_error_no_coercion_crash() -> None:
 
 
 @pytest.mark.django_db(transaction=True)
-def test_create_item_malformed_category_id_is_top_level_coercion_error() -> None:
-    """A MALFORMED `categoryId` is a top-level coercion error, not a `FieldError`.
+def test_create_item_malformed_category_id_is_relation_field_error() -> None:
+    """A MALFORMED `categoryId` is the in-band relation `FieldError`, not a top-level error.
 
-    Relation ids are typed `GlobalID` (not `ID!`), so Strawberry rejects a malformed
-    value during argument coercion BEFORE the resolver runs - a top-level GraphQL
-    error, `data` null. The in-band `FieldError` envelope is reserved for a
-    well-formed-but-invalid / wrong-type / hidden relation id (the decode-time
-    type-check + visibility checks). This pins the boundary the spec documents.
+    Relation ids are the raw `ID` string the package decodes server-side, so a value
+    that is not a GlobalID at all fails that decode inside the resolver: the payload
+    carries the same `categoryId` relation error a well-formed wrong-type or hidden id
+    gets, `data` is not nulled, and no row is written.
     """
     create_users(1)
     seed_data(1)
@@ -1683,9 +1682,13 @@ def test_create_item_malformed_category_id_is_top_level_coercion_error() -> None
     )
     assert response.status_code == 200
     payload = response_json(response)
-    # Top-level GraphQL error (variable coercion), NOT an in-band FieldError envelope.
-    assert payload.get("errors"), payload
-    assert json_at(payload, "data") is None
+    assert "errors" not in payload, payload
+    assert json_at(payload, "data", "createItem") == {
+        "node": None,
+        "errors": [
+            {"field": "categoryId", "messages": ["Invalid id for relation 'categoryId'."]},
+        ],
+    }
     assert not models.Item.objects.filter(name="Malformed").exists()
 
 

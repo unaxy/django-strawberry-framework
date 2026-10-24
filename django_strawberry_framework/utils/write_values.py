@@ -7,6 +7,7 @@ mutation resolver is not the utility module for the other write flavors):
 - ``unstorable_text_error`` - the text storability preflight (lone surrogate, NUL);
 - ``raw_choice_value`` - choice-enum member unwrapping;
 - ``coerce_relation_pk_or_none`` - raw relation-pk coercion;
+- ``relation_takes_global_id`` - whether a relation's id is a Relay GlobalID;
 - ``type_check_relation_id`` - the structural relation-id check;
 - ``decode_scalar_leaf`` - the shared text-preflight + choice-unwrap compose;
 - ``decode_visible_relation`` - the visibility-on-every-branch single-relation
@@ -27,6 +28,8 @@ from enum import Enum
 from typing import TYPE_CHECKING, cast
 
 from strawberry import relay
+
+from django_strawberry_framework.registry import registry
 
 from . import truth
 from ._narrowing import (
@@ -58,6 +61,7 @@ if TYPE_CHECKING:
     from django.db import models
     from strawberry import Info
 
+    from django_strawberry_framework.types.base import DjangoType
     from django_strawberry_framework.types.relay import _RelayDjangoType
     from django_strawberry_framework.utils.errors import FieldError
 
@@ -164,6 +168,26 @@ def coerce_relation_pk_or_none(related_model: type[models.Model], pk: object) ->
     return coerce_field_value_or_none(pk_field, pk)
 
 
+def relation_takes_global_id(related_primary_type: type[DjangoType] | None) -> bool:
+    """Return whether a write-input relation to a target with this primary takes a GlobalID.
+
+    The one Relay-vs-raw-pk rule for a relation id, read at both ends of a write: the
+    schema side types the input from it (``mutations/inputs.py::relation_id_scalar``:
+    ``ID`` when it holds, the target pk column's scalar otherwise), and the decode side
+    picks the id's interpretation from it, never from the value
+    (``type_check_relation_id`` and ``decode_visible_relation_ids``, passing
+    ``registry.get`` of the target model - the lookup every flavor's bind types the input
+    from). It holds when the target model's primary ``DjangoType`` is Relay-Node-shaped,
+    the subclass test ``types/relay.py::implements_relay_node`` applies (read here off
+    ``strawberry.relay.Node`` directly, so ``utils`` imports no ``types`` module); a
+    target with no registered primary, or a non-Relay one, takes its raw pk.
+    """
+    return related_primary_type is not None and truth.is_subclass(
+        related_primary_type,
+        relay.Node,
+    )
+
+
 def type_check_relation_id(
     value: object,
     *,
@@ -174,9 +198,9 @@ def type_check_relation_id(
 ) -> tuple[object, FieldError | None]:
     """Type-check + coerce ONE relation id to a pk.
 
-    The "GlobalID -> ``decode_model_global_id`` (non-``OK`` -> uniform relation
-    error) | raw pk -> ``coerce_relation_pk_or_none`` (``None`` -> uniform relation
-    error)" two-branch structural check the three write flavors share. Promoted here
+    The "Relay target -> ``decode_model_global_id`` (non-``OK`` -> uniform relation
+    error) | raw-pk target -> ``coerce_relation_pk_or_none`` (``None`` -> uniform
+    relation error)" two-branch structural check the three write flavors share. Promoted here
     (from the serializer's cleanly-factored ``_type_check_relation_id``) so the
     single definition of "what counts as a well-formed relation id" is shared: the
     serializer single decoder and the form single decoder call it (the form keeping
@@ -186,11 +210,17 @@ def type_check_relation_id(
     its real pk with a query (batched per set by ``decode_visible_relation_ids``)
     - visibility is confirmed separately by the caller in both branches.
 
-    A ``relay.GlobalID`` is decoded against the target model under the schema
-    executing ``info`` (``strawberry_schema_from_info``), whose published type
-    names a ``type``-strategy slot carries (a non-``OK`` status is the uniform
-    ``relation_field_error``); a raw pk is coerced through the target pk field
-    (``None`` -> the uniform error) and never reads ``info``.
+    The branch is the TARGET's, never the value's: ``relation_takes_global_id`` over the
+    target model's registered primary (``registry.get``), the rule the input's id type was
+    generated from.
+    For a Relay target the value is the raw ``ID`` string the input carries, decoded
+    against the target model under the schema executing ``info``
+    (``strawberry_schema_from_info``), whose published type names a ``type``-strategy
+    slot carries; every non-``OK`` status - a malformed string (bad base64, no
+    ``type:id`` separator), an unresolvable or wrong-model type, an uncoercible node id
+    - is the uniform ``relation_field_error``. For a raw-pk target the value is
+    coerced through the target pk field (``None`` -> the uniform error) and ``info`` is
+    never read.
 
     The coerced pk is then held to the text storability preflight
     (``unstorable_text_error``) before any caller binds it into an existence query: a
@@ -202,14 +232,14 @@ def type_check_relation_id(
     in a relation-id list. A pk coerced to a non-text value (an int, a UUID) passes
     through it unchanged. An embedded NUL never reaches it: the coercion
     (``querysets.py::coerce_field_value_or_none``) answers a NUL-bearing text id as
-    naming no row, so it is the uniform relation error, raw pk and ``GlobalID`` alike.
+    naming no row, so it is the uniform relation error, raw pk and GlobalID alike.
 
     The ``decode_model_global_id`` / ``GlobalIDDecode`` import is function-local:
     the package's ``relay`` module imports ``utils.querysets`` at module level, so
     a module-level import here would risk an import cycle through the utils
     package.
     """
-    if isinstance(value, relay.GlobalID):
+    if relation_takes_global_id(registry.get(related_model)):
         from django_strawberry_framework.relay import GlobalIDDecode, decode_model_global_id  # noqa: PLC0415 - import cycle
 
         result = decode_model_global_id(
@@ -365,9 +395,10 @@ def decode_visible_relation_ids(
     The batched compose the model FK / M2M set decoder and the serializer
     ``RELATION_MULTI`` decoder share:
 
-    (i) every element is type-checked query-free first - a raw pk through
-    ``type_check_relation_id``, a ``GlobalID`` through the shared decode/coerce
-    half (a non-``OK`` decode / uncoercible literal is the uniform field-keyed
+    (i) every element is type-checked query-free first, by the target's id kind
+    (``relation_takes_global_id``) - a raw pk through the target pk field, a Relay
+    target's ``ID`` string through the shared decode/coerce half (a malformed string, a
+    non-``OK`` decode or an uncoercible literal is the uniform field-keyed
     ``FieldError``, short-circuiting before any query) - then the decoded
     non-pk NodeID values are mapped to real pks in one ``__in`` query per
     distinct ``(type, id_attr)`` group (a value matching no row is the same
@@ -411,13 +442,14 @@ def decode_visible_relation_ids(
     )
 
     members = container[0]
+    takes_global_id = relation_takes_global_id(registry.get(related_model))
     slots: dict[type[_RelayDjangoType], tuple[str, ModelField | None]] = {}
     pks: list[object] = [None] * len(members)
     pending: list[tuple[int, type[_RelayDjangoType], object]] = []
     for position, value in enumerate(members):
         index = None if single else position
-        if isinstance(value, relay.GlobalID):
-            # Only a GlobalID member reads ``info`` (for the executing schema); raw pks never do.
+        if takes_global_id:
+            # Only a Relay target reads ``info`` (for the executing schema); raw pks never do.
             intermediate = _decode_and_coerce(
                 value,
                 related_model,

@@ -665,7 +665,7 @@ type Mutation {
 input ItemModelFormInput {
   name: String!
   description: String
-  categoryId: GlobalID!
+  categoryId: ID!
   isPrivate: Boolean
 }
 
@@ -1385,9 +1385,8 @@ write flavor rides.
 1. **Locate** (`update`, `ModelForm` only): the top-level `id:` argument is
    `strawberry.ID` (a raw GlobalID **string** the package decodes server-side via the
    reused `036` `coerce_lookup_id` — the same `node(id: ID!)` contract the shipped
-   [`DjangoNodeField`][glossary-djangonodefield] uses, **distinct** from a relation
-   `data:` field whose value is a
-   Strawberry-coerced `GlobalID`); a malformed / wrong-model / uncoercible `id:` (a text
+   [`DjangoNodeField`][glossary-djangonodefield] uses, and the same raw `ID` string a
+   Relay relation `data:` field carries into the relation decode); a malformed / wrong-model / uncoercible `id:` (a text
    id holding an embedded NUL names no row: the not-found error), or a
    raw pk holding unencodable text (a lone surrogate in a text-keyed primary's id), is an
    `id`-keyed `FieldError` **before** any lookup (no existence leak — the mutation
