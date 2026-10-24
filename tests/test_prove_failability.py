@@ -603,7 +603,7 @@ def test_a_state_home_that_is_not_an_absolute_path_falls_back_to_the_xdg_default
     monkeypatch.setenv(prove_failability.STATE_HOME_ENV, value)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
-    assert prove_failability._state_home() == tmp_path / "home" / ".local" / "state"
+    assert prove_failability.state_home() == tmp_path / "home" / ".local" / "state"
 
 
 def test_the_state_directory_named_for_a_root_is_the_one_a_run_against_it_uses(

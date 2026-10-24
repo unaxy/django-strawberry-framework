@@ -1216,7 +1216,7 @@ def _refuse_inside_repository(directory: Path) -> None:
         )
 
 
-def _state_home() -> Path:
+def state_home() -> Path:
     """Return the XDG state home: ``$XDG_STATE_HOME`` when absolute, else ``~/.local/state``."""
     configured = os.environ.get(STATE_HOME_ENV, "")
     if configured and Path(configured).is_absolute():
@@ -1228,11 +1228,11 @@ def tree_state_directory(repo_root: Path) -> Path:
     """Return the state directory a run against ``repo_root`` uses, creating nothing.
 
     It is ``<state home>/prove_failability/tree-<digest>``, the state home read
-    from this process's environment (:func:`_state_home`). ``scripts/workspace.py``
+    from this process's environment (:func:`state_home`). ``scripts/workspace.py``
     calls this for a copy it resets or deletes, so the path it removes is the
     one a run in that copy wrote, never a re-derived one.
     """
-    return _state_home().resolve() / STATE_DIRECTORY_NAME / tree_namespace(repo_root)
+    return state_home().resolve() / STATE_DIRECTORY_NAME / tree_namespace(repo_root)
 
 
 def _tree_state_directory() -> Path:
@@ -1272,7 +1272,7 @@ def _claim_private_directory(directory: Path) -> None:
 
 def _claim_state_home() -> None:
     """Create the state home and its ``prove_failability`` directory, refusing a foreign one."""
-    home = _state_home().resolve()
+    home = state_home().resolve()
     home.mkdir(mode=STATE_DIRECTORY_MODE, parents=True, exist_ok=True)
     _claim_private_directory(home / STATE_DIRECTORY_NAME)
 

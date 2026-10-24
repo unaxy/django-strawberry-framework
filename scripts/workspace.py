@@ -107,8 +107,9 @@ Worker-0 commands
         Print copies, bindings, active runs and Postgres leases.
     ``gc <flow>``
         Delete everything the flow holds: copies, gate copy, run log, proof
-        scratch, the prover's state directory of each copy (a killed proof's
-        marker and pristine copies) and its Postgres databases. The Postgres
+        scratch, its ``state.json``, the prover's state directory of each copy
+        (a killed proof's marker and pristine copies) and its Postgres
+        databases; a flow whose folder a reboot removed still loses its state. The Postgres
         container is stopped when this script started it and no database of
         any flow remains. Run it after ``## Outcomes`` records what the
         evidence showed. It refuses while any command of the flow runs, one
@@ -126,19 +127,35 @@ id; ``audit`` checks it.
 
 Layout: ``$TMPDIR/dsf-ws/<sha16 of the repo root>/<flow>/`` holds
 ``slots/slot-N/`` (the copies), ``gate/``, ``gate-floor/`` (the floor
-suite's virtualenv), ``evidence/`` and ``state.json``.
-It lives outside the repository, keyed per checkout (so a git worktree gets
-its own), and is harness-agnostic. ``DSF_WS_ROOT`` replaces
+suite's virtualenv) and ``evidence/``. The flow's ``state.json`` (bindings
+and item baselines) lives in the XDG state home, ``$XDG_STATE_HOME`` or
+``~/.local/state`` (the prover's, ``scripts/prove_failability.py::state_home``),
+at ``dsf-ws/<sha16 of that workspace folder>/<flow>/state.json``.
+Both live outside the repository, keyed per checkout (so a git worktree gets
+its own), and are harness-agnostic. ``DSF_WS_ROOT`` replaces
 ``$TMPDIR/dsf-ws``; a root inside the repository is refused, since copies of
 a tree holding its own copies recurse. ``DSF_WS_SLOTS`` caps each flow's pool
 (default 4: three parallel roles and the pinned ``before``). New copies are
-refused below 6 GB free. macOS deletes, daily, files under ``$TMPDIR``
-created and not read for three days, open or locked or not, and keeps every
-directory, so a copy left idle loses its files and evidence while
-``state.json`` may still list it ``ready``. The flow's marker is a directory,
-so ``gc`` still owns the folder; ``gc`` the flow before reusing it after an
-idle stretch. Every lock is a directory too, so the purge never takes one
-from a command that holds it.
+refused below 6 GB free.
+
+The temporary directory is cleaned behind this script's back. macOS deletes,
+daily, every regular file under ``$TMPDIR`` whose creation and last access
+are both over three days old, open or locked or not, and keeps every
+directory; a read renews the access time only of a file written since it was
+last read, so a file ages from its last write however often it is read. On
+Linux the directory is ``/tmp``: often a tmpfs that every reboot empties, or
+one systemd-tmpfiles cleans of entries unused for about ten days. The state
+therefore lives in the state home, which neither touches: an address keeps
+its copy's slot number whatever the temporary directory lost, no copy is
+renumbered or resynced for another address, and no address gets two copies. A binding whose
+copy's manifest is gone (the copy aged out, or a reboot took the flow folder)
+is resynced into that same slot on its next run. A copy that lost files but
+kept its manifest is used as it stands, and its run log may restart, so
+``gc`` the flow before reusing it after an idle stretch. A ``state.json`` an
+older version of this script left in the flow folder is moved to the state
+home by the next command that takes ``pool.lock``. The flow's marker is a
+directory, so ``gc`` still owns the folder after a purge. Every lock is a
+directory too, so the purge never takes one from a command that holds it.
 
 Guarantees, each one a hand-run failure this encodes away:
 
@@ -193,9 +210,11 @@ Guarantees, each one a hand-run failure this encodes away:
   the evidence the last one produced.
 * **Cleanup leaves nothing.** ``release`` unbinds copies and drops their
   databases; a released copy's next binding resyncs it. ``gc`` removes the
-  flow folder, each copy's prover state directory (once that copy is gone, so
-  no copy outlives the marker of a mutation it may hold), its databases, and
-  the empty parent folders; a removal cut short keeps the folder's marker, so
+  flow folder, the flow's ``state.json`` folder, each copy's prover state
+  directory (once that copy is gone, so no copy outlives the marker of a
+  mutation it may hold), its databases, and the empty parent folders, in the
+  temporary directory and the state home; a removal cut short keeps the
+  folder's marker, so
   ``gc`` finishes it on the next run. The state directory is the one the
   prover names (``scripts/prove_failability.py::tree_state_directory``) under
   the state home this script sees, which every command inherits. A crashed
@@ -329,6 +348,9 @@ DEFAULT_SLOTS = 4
 MIN_FREE_BYTES = 6 * 1024**3
 REFUSED = 125
 MARKER_NAME = ".dsf-ws"
+# The folder under the XDG state home (``prove_failability.py::state_home``) that holds each
+# flow's ``state.json``, out of the temporary directory the OS cleans.
+STATE_DIRECTORY_NAME = "dsf-ws"
 # The signals that ask a run to stop (``scripts/_stop_signals.py``). A run relays each to its
 # command and ends only once that has ended.
 STOP_SIGNALS = _stop_signals.STOP_SIGNALS
@@ -1072,6 +1094,18 @@ def workspace_base(repo_root: Path, environ: dict[str, str] | None = None) -> Pa
     return base
 
 
+def state_root(base: Path) -> Path:
+    """Return the folder under the XDG state home that holds the flows' state of ``base``.
+
+    It is ``<state home>/dsf-ws/<sha16 of base>``, ``base`` being the
+    checkout's workspace folder (:func:`workspace_base`), so two checkouts, or
+    two ``DSF_WS_ROOT`` folders of one checkout, never share a flow's state.
+    The state home is the prover's (:func:`prove_failability.state_home`), read
+    from this process's environment.
+    """
+    return prove_failability.state_home().resolve() / STATE_DIRECTORY_NAME / repo_key(base)
+
+
 def pool_size(environ: dict[str, str] | None = None) -> int:
     """Return the per-flow copy cap from ``DSF_WS_SLOTS`` (default 4)."""
     raw = (os.environ if environ is None else environ).get(SLOTS_ENV, "")
@@ -1099,12 +1133,22 @@ class Layout:
 
     @property
     def flow_dir(self) -> Path:
-        """The flow's folder; ``gc`` removes exactly this."""
+        """The flow's folder under the workspace root; ``gc`` removes it and :attr:`state_dir`."""
         return self.base / self.flow
 
     @property
+    def state_dir(self) -> Path:
+        """The flow's folder under the XDG state home, holding :attr:`state_path` alone."""
+        return state_root(self.base) / self.flow
+
+    @property
     def state_path(self) -> Path:
-        """Bindings and item baselines."""
+        """Bindings and item baselines, out of the temporary directory the OS cleans."""
+        return self.state_dir / "state.json"
+
+    @property
+    def legacy_state_path(self) -> Path:
+        """Where an older version of this script kept :attr:`state_path`, in the flow folder."""
         return self.flow_dir / "state.json"
 
     @property
@@ -2116,10 +2160,17 @@ class _PoolState(TypedDict):
 
 
 def _load_state(layout: Layout) -> _PoolState:
-    # Only this script writes the state file, always from a ``_PoolState``.
-    return cast(
-        "_PoolState",
-        _read_json_object(
+    """Return the pool state: the state home's file, else an older version's, else an empty pool.
+
+    The older version's file (:attr:`Layout.legacy_state_path`) is read until
+    a command holding ``pool.lock`` moves it (:func:`_held_state`); one moved
+    between the two reads is found by reading the state home's file again.
+    """
+    document = _read_json_object(layout.state_path, None)
+    if document is None:
+        document = _read_json_object(layout.legacy_state_path, None)
+    if document is None:
+        document = _read_json_object(
             layout.state_path,
             {
                 "version": 1,
@@ -2127,8 +2178,60 @@ def _load_state(layout: Layout) -> _PoolState:
                 "slots": {},
                 "items": {},
             },
-        ),
-    )
+        )
+    # Only this script writes the state file, always from a ``_PoolState``.
+    return cast("_PoolState", document)
+
+
+def _held_state(layout: Layout) -> _PoolState:
+    """Return the pool state to a caller holding ``pool.lock``, an older version's file moved first.
+
+    A flow an older version of this script bound keeps its bindings in the
+    flow folder; they are written to the state home and that file removed,
+    so the slot numbers its copies hold carry over and no copy is renumbered
+    and resynced.
+    """
+    state = _load_state(layout)
+    if not layout.state_path.exists() and layout.legacy_state_path.exists():
+        _write_state(layout, state)
+    return state
+
+
+def _make_state_dir(layout: Layout) -> None:
+    """Make the flow's state folder and each missing parent with the XDG mode, as the prover does.
+
+    Each level gets ``STATE_DIRECTORY_MODE`` (``0o700``), and the levels are
+    made again when a ``gc`` of another flow removed the empty parents
+    meanwhile (``ENOENT``, or on macOS ``EINVAL``, or a level gone right after
+    ``EEXIST``).
+    """
+    mode = prove_failability.STATE_DIRECTORY_MODE
+    home = prove_failability.state_home().resolve()
+    levels = (home / STATE_DIRECTORY_NAME, layout.state_dir.parent, layout.state_dir)
+    while True:
+        try:
+            home.mkdir(mode=mode, parents=True, exist_ok=True)
+            for level in levels:
+                level.mkdir(mode=mode, exist_ok=True)
+        except FileExistsError:
+            if all(os.path.lexists(level) for level in (home, *levels)):
+                raise
+        except OSError as error:
+            if error.errno not in {errno.ENOENT, errno.EINVAL}:
+                raise
+        else:
+            return
+
+
+def _write_state(layout: Layout, state: _PoolState) -> None:
+    """Write the pool state to the state home; the caller holds ``pool.lock``.
+
+    Its folder is made (:func:`_make_state_dir`), and an older version's
+    file in the flow folder goes.
+    """
+    _make_state_dir(layout)
+    _write_json(layout.state_path, state)
+    layout.legacy_state_path.unlink(missing_ok=True)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2173,7 +2276,7 @@ def bind(layout: Layout, address: Address) -> Binding:
     """
     layout.ensure_marked()
     with file_lock(layout.pool_lock):
-        state = _load_state(layout)
+        state = _held_state(layout)
         slots = state["slots"]
         for slot, bound in slots.items():
             if bound and bound["address"] == str(address):
@@ -2202,7 +2305,7 @@ def bind(layout: Layout, address: Address) -> Binding:
             "bound_at": _now(),
             "status": "syncing",
         }
-        _write_json(layout.state_path, state)
+        _write_state(layout, state)
         return Binding(slot, layout.slot_dir(slot))
 
 
@@ -2234,7 +2337,7 @@ def _admit(
 
     """
     with file_lock(layout.pool_lock):
-        state = _load_state(layout)
+        state = _held_state(layout)
         bound = state["slots"].get(slot)
         if not bound or bound["address"] != str(address):
             msg = f"{address}: {slot} was released while this command waited for it; run it again"
@@ -2246,7 +2349,7 @@ def _admit(
                 return cast("_Manifest", synced)
         if bound["status"] != "syncing":
             bound["status"] = "syncing"
-            _write_json(layout.state_path, state)
+            _write_state(layout, state)
         return None
 
 
@@ -2318,7 +2421,7 @@ def _mark_synced(
 
     """
     with file_lock(layout.pool_lock):
-        state = _load_state(layout)
+        state = _held_state(layout)
         bound = state["slots"].get(slot)
         if not bound or bound["address"] != str(address):
             msg = f"{slot} no longer holds {address}: it was released during the sync"
@@ -2329,7 +2432,7 @@ def _mark_synced(
             tree_digest=manifest["tree_digest"],
             package_digest=manifest["package_digest"],
         )
-        _write_json(layout.state_path, state)
+        _write_state(layout, state)
 
 
 def sync_slot(
@@ -2847,17 +2950,19 @@ def release(
     Each copy's lock is taken without waiting and kept until its binding is
     gone from ``state.json``, so no command enters a copy this release is
     freeing; one that was bound but still waiting for the copy refuses when
-    it gets the lock, unless its address holds that copy again by then.
+    it gets the lock, unless its address holds that copy again by then. A
+    flow whose folder is gone (a reboot emptied the temporary directory)
+    while its state lives on gets the folder back to hold those locks.
 
     Raises:
         LockBusyError: a command still runs in one of them.
 
     """
-    with flow_lease(layout, create=False) as flow:
+    with flow_lease(layout, create=_folder_gone_state_kept(layout)) as flow:
         if not flow.marked:
             return []
         with file_lock(layout.pool_lock), contextlib.ExitStack() as leases:
-            state = _load_state(layout)
+            state = _held_state(layout)
             chosen = [
                 slot
                 for slot, bound in state["slots"].items()
@@ -2886,7 +2991,7 @@ def release(
                 state["slots"][slot] = None
             forgot = not roles and not keep and state["items"].pop(item, None) is not None
             if released or forgot:
-                _write_json(layout.state_path, state)
+                _write_state(layout, state)
     return released
 
 
@@ -2943,6 +3048,17 @@ def _remove_flow_dir(flow_dir: Path) -> None:
     flow_dir.rmdir()
 
 
+def _folder_gone_state_kept(layout: Layout) -> bool:
+    """Report whether the flow's state outlives its folder, which a reboot or a cleaner removed."""
+    return layout.state_path.exists() and not os.path.lexists(layout.flow_dir)
+
+
+def _forget_state(layout: Layout) -> None:
+    """Remove the flow's folder under the state home; its empty parents go at the end of ``gc``."""
+    with contextlib.suppress(FileNotFoundError):
+        shutil.rmtree(layout.state_dir)
+
+
 def _copies(layout: Layout) -> list[Path]:
     """Return every copy directory the flow folder holds: its slots and its gate copy."""
     slots = layout.flow_dir / "slots"
@@ -2963,6 +3079,9 @@ def gc(layout: Layout) -> list[str]:
     The flow's lease is taken exclusively without waiting and kept until the
     folder is gone, so ``gc`` refuses while any command of the flow runs, a
     command waiting for a copy included, and no command starts inside it.
+    The flow's state goes with the folder. A flow whose folder is gone (a
+    reboot emptied the temporary directory) while its state lives on gets the
+    folder back, marked, so its state is removed under that same lease.
 
     Raises:
         LockBusyError: a command of the flow still runs.
@@ -2971,8 +3090,9 @@ def gc(layout: Layout) -> list[str]:
     """
     report: list[str] = []
     flow_dir = layout.flow_dir
+    recreate = _folder_gone_state_kept(layout)
     try:
-        descriptor = _lock_flow_dir(layout, fcntl.LOCK_EX | fcntl.LOCK_NB, create=False)
+        descriptor = _lock_flow_dir(layout, fcntl.LOCK_EX | fcntl.LOCK_NB, create=recreate)
     except BlockingIOError:
         state = _load_state(layout)
         busy = running_slots(layout, sorted(state["slots"], key=_slot_number))
@@ -2980,6 +3100,8 @@ def gc(layout: Layout) -> list[str]:
         msg = f"a command still runs in {layout.flow}{where}; wait for it to finish"
         raise LockBusyError(msg) from None
     try:
+        if recreate and descriptor is not None:
+            layout.ensure_marked()
         if descriptor is not None and not (flow_dir / MARKER_NAME).exists():
             msg = f"{flow_dir} carries no {MARKER_NAME} marker; refusing to delete it"
             raise WorkspaceError(msg)
@@ -3001,6 +3123,7 @@ def gc(layout: Layout) -> list[str]:
                 resolved = copy.resolve()
                 shutil.rmtree(copy)
                 forget_proof_state(resolved, frozenset())
+            _forget_state(layout)
             _remove_flow_dir(flow_dir)
             report.append(f"removed {flow_dir} ({size / 1024**2:.0f} MB)")
     finally:
@@ -3008,6 +3131,9 @@ def gc(layout: Layout) -> list[str]:
             os.close(descriptor)
     # The default ``dsf-ws`` parent is this script's to remove; a DSF_WS_ROOT folder is not.
     parents = [layout.base] if os.environ.get(ROOT_ENV) else [layout.base, layout.base.parent]
+    # The state home's ``dsf-ws`` folders are this script's whatever the root; the flow's own
+    # goes too when a crash between making it and writing its state left it empty.
+    parents.extend((layout.state_dir, layout.state_dir.parent, layout.state_dir.parent.parent))
     for parent in parents:
         with contextlib.suppress(OSError):
             parent.rmdir()
@@ -3020,9 +3146,10 @@ def status(repo_root: Path, flow: str | None) -> list[str]:
     """Describe every flow's copies, bindings, active runs and Postgres leases."""
     base = workspace_base(repo_root)
     lines = [f"root {base}"]
-    flows = (
-        [flow] if flow else sorted(p.name for p in base.glob("*") if (p / MARKER_NAME).exists())
-    )
+    # A flow whose folder a reboot removed is listed from its state, so it can be released or gc'd.
+    marked = {p.name for p in base.glob("*") if (p / MARKER_NAME).exists()}
+    stored = {p.name for p in state_root(base).glob("*") if (p / "state.json").exists()}
+    flows = [flow] if flow else sorted(marked | stored)
     for name in flows:
         layout = Layout(repo_root, base, name)
         state = _load_state(layout)
@@ -3505,9 +3632,9 @@ def _cmd_baseline(args: _Args) -> int:
             head = _git(layout.repo_root, "rev-parse", "HEAD").strip()
             sha = snapshot_commit(layout.repo_root, held.directory, manifest, head)
         with file_lock(layout.pool_lock):
-            state = _load_state(layout)
+            state = _held_state(layout)
             state["items"][ref.item] = {"item_baseline": sha, "at": _now()}
-            _write_json(layout.state_path, state)
+            _write_state(layout, state)
     print(f"ITEM_BASELINE={sha}")
     print(
         f"before: {address} -> {held.directory} "
