@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 258 done, 169 to do.
+Progress: 259 done, 168 to do.
 
 ## Done
 
@@ -1205,6 +1205,13 @@ Progress: 258 done, 169 to do.
   batched visibility read, attach-only writes and the hidden-shelf `shelves` relation error with no write; the
   package stand-in `test_many_pk_related_field_over_reverse_fk_column_emits_multi` is deleted, its lines and mutants
   all covered live. The `CompositePrimaryKey` and `db_column=` gaps are `docs/builder/TODO.md` item 27's
+- [x] 405. the package row was not yet redundant, so it is promoted, then deleted: the live
+  `_NEGATIVE_CURSOR_ROWS` gain a `before` + `last` row (sync and async sequence resolvers; the only live killer of a
+  `before` decode skipped unless `first` is set or `last` is unset), and `test_minted_offset_cursors_still_page` now
+  pages the root `QuerySet`, the list resolver and the tuple resolver from a minted `after` (a valid `after` serving
+  an empty sequence page now fails live). `tests/test_connection.py::
+  test_consumer_resolver_sequence_negative_cursor_raises_graphql_error` is deleted, every mutant it killed failing a
+  live row
 
 ## Outside review of the fixes
 
@@ -1402,10 +1409,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 403. Neither spec-027 nor the GLOSSARY `FilterSet` entry states the re-readability rule `67e23c5d` enforces: add
   the edge-case row "`Meta.fields` / `filter_fields` / `Meta.exclude` must be re-readable collections; one-shot
   iterators and a bare-string `Meta.exclude` raise `ConfigurationError` at class creation" (GLOSSARY through the DB)
-- [ ] 405. `tests/test_connection.py::test_consumer_resolver_sequence_negative_cursor_raises_graphql_error` may be a
-  stand-in left behind when the row was promoted to
-  `examples/fakeshop/test_query/test_connection_pagination_api.py::test_negative_offset_cursor_on_a_sequence_resolver_is_a_cursor_error`:
-  prove it redundant and delete it, or keep it
 - [ ] 500. Process provenance in test docstrings and comments outside `tests/utils/test_querysets.py`, the class 324
   restates there: e.g. `tests/utils/test_permissions.py` ("It used to reach it"), `tests/test_permissions.py` ("no
   longer compare ... (the old ...", "no longer trips"), `tests/utils/test_policies.py` ("no longer", "The pre-fix
