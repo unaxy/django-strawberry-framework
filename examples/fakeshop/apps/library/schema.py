@@ -603,6 +603,7 @@ class IssueType(DjangoType):
         interfaces = (relay.Node,)
         cursor_field = ("-number", "id")
         connection = {"total_count": True}
+        filterset_class = filters.IssueFilter
         orderset_class = orders.IssueOrder
 
 
@@ -618,6 +619,7 @@ class PeriodicalType(DjangoType):
         fields = ("id", "name", "issues")
         interfaces = (relay.Node,)
         relation_shapes = {"issues": "connection"}
+        filterset_class = filters.PeriodicalFilter
         orderset_class = orders.PeriodicalOrder
 
 

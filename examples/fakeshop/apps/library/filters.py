@@ -1,6 +1,6 @@
 """FilterSet declarations for the library acceptance app.
 
-Twenty-seven filtersets mirror the relation shape ``apps.library.schema`` exposes
+Twenty-nine filtersets mirror the relation shape ``apps.library.schema`` exposes
 through the live ``/graphql/`` endpoint. Inter-filterset references use
 the same-module unqualified-name form (e.g. ``RelatedFilter("ShelfFilter")``)
 so the lazy-resolution Layer-2 prefix-with-owner branch is exercised end
@@ -21,7 +21,7 @@ from django import forms
 from django.contrib.auth.models import AbstractUser
 from django.db.models import Model, QuerySet
 from django.http import HttpRequest, QueryDict
-from django_filters import CharFilter, ModelChoiceFilter, ModelMultipleChoiceFilter
+from django_filters import BooleanFilter, CharFilter, ModelChoiceFilter, ModelMultipleChoiceFilter
 from django_filters.filters import BaseInFilter
 
 from apps.library import models
@@ -356,6 +356,33 @@ class SeriesFilter(FilterSet):
         fields = {"id": ["exact", "in"]}
 
 
+class IssueFilter(FilterSet):
+    """Issue filterset bound to ``IssueType``: a child leaf whose absence acts.
+
+    ``embargoed`` is django-filter's checkbox idiom: a ``CheckboxInput`` reads an
+    absent key as ``False``, so this set's own form keeps only open issues on
+    every request that builds it (at its root, or a nested ``issues`` branch of
+    ``PeriodicalFilter``). The flat copy ``issuesEmbargoed`` on the parent is a
+    spelling of the request, applied only when the request names it.
+    """
+
+    embargoed = BooleanFilter(field_name="embargoed", widget=forms.CheckboxInput)
+
+    class Meta:
+        model = models.Issue
+        fields = {"title": ["exact"]}
+
+
+class PeriodicalFilter(FilterSet):
+    """Periodical filterset bound to ``PeriodicalType``, expanding ``issues`` over ``IssueFilter``."""
+
+    issues = RelatedFilter("IssueFilter", field_name="issues")
+
+    class Meta:
+        model = models.Periodical
+        fields = {"name": ["exact"]}
+
+
 class PatronProfileFilter(FilterSet):
     """Patron-profile filterset bound to ``PatronProfileType`` at finalize phase 2.5.
 
@@ -581,11 +608,13 @@ __all__ = (
     "DeskShiftFilter",
     "DistributorFilter",
     "EditionFilter",
+    "IssueFilter",
     "LendingDeskFilter",
     "LoanFilter",
     "OpenVenueFilter",
     "PatronFilter",
     "PatronProfileFilter",
+    "PeriodicalFilter",
     "PrintingFilter",
     "PublisherFilter",
     "ReadingListEntryFilter",

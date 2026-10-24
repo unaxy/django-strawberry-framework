@@ -424,46 +424,27 @@ query {
 
 @pytest.mark.django_db
 @pytest.mark.parametrize(
-    ("field_name", "required", "forbidden"),
-    [
-        (
-            "allLibraryGenresConnection",
-            (
-                "filter",
-                "orderBy",
-                "first",
-                "last",
-                "before",
-                "after",
-            ),
-            (),
-        ),
-        (
-            "allLibraryIssuesConnection",
-            (
-                "orderBy",
-                "first",
-                "last",
-                "before",
-                "after",
-            ),
-            ("filter",),
-        ),
-    ],
-    ids=["genres-both-sidecars", "issues-order-only"],
+    "field_name",
+    ["allLibraryGenresConnection", "allLibraryIssuesConnection"],
 )
-def test_root_connection_arguments_follow_declared_sidecars(
-    field_name: str,
-    required: tuple[str, ...],
-    forbidden: tuple[str, ...],
-) -> None:
-    """``filter:`` / ``orderBy:`` are published exactly when the node type declared those sidecars."""
+def test_root_connection_arguments_follow_declared_sidecars(field_name: str) -> None:
+    """``filter:`` / ``orderBy:`` are published when the node type declared those sidecars.
+
+    ``GenreType`` and ``IssueType`` declare both. The shapes omitting a sidecar are
+    ``tests/test_connection.py::test_connection_field_omits_args_without_sidecars``.
+    """
     data = assert_graphql_success(_QUERY_FIELD_ARGS)
     fields = {json_str(field, "name"): field for field in json_list(data, "__type", "fields")}
     assert field_name in fields, sorted(fields)
     names = {json_at(arg, "name") for arg in json_list(fields, field_name, "args")}
-    assert set(required) <= names, names
-    assert names.isdisjoint(forbidden), names
+    assert {
+        "filter",
+        "orderBy",
+        "first",
+        "last",
+        "before",
+        "after",
+    } <= names, names
 
 
 _NESTED_CONNECTION_FIELD_ARGS = """
@@ -516,14 +497,14 @@ query {
 
 @pytest.mark.django_db
 def test_nested_connection_arguments_follow_declared_sidecars() -> None:
-    """Nested connection fields expose ``filter`` and ``orderBy`` only when target declared them.
+    """Nested connection fields expose the ``filter`` and ``orderBy`` their target declares.
 
-    Target-driven contract: ``GenreType.booksConnection`` targets ``BookType`` which declares
-    both ``filterset_class`` and ``orderset_class``, so it exposes ``filter: BookFilterInputType``
-    and ``orderBy: [BookOrderInputType!]``. Conversely, ``PeriodicalType.issuesConnection`` targets
-    ``IssueType`` which declares ``orderset_class`` but no ``filterset_class``, so it exposes
-    ``orderBy`` but never ``filter``. Opted-in connection types carry ``totalCount``, while
-    unopted types omit it.
+    Target-driven contract: ``GenreType.booksConnection`` targets ``BookType`` and
+    ``PeriodicalType.issuesConnection`` targets ``IssueType``, each declaring both
+    ``filterset_class`` and ``orderset_class``, so each exposes its target's
+    ``filter:`` input type and ``orderBy``; the shapes omitting a sidecar are
+    ``tests/test_connection.py::test_connection_field_omits_args_without_sidecars``.
+    Opted-in connection types carry ``totalCount``, while unopted types omit it.
     """
     data = assert_graphql_success(_NESTED_CONNECTION_FIELD_ARGS)
 
@@ -550,7 +531,7 @@ def test_nested_connection_arguments_follow_declared_sidecars() -> None:
     assert "before" in issues_conn_args
     assert "after" in issues_conn_args
     assert "orderBy" in issues_conn_args
-    assert "filter" not in issues_conn_args
+    assert json_at(issues_conn_args, "filter", "type", "name") == "IssueFilterInputType"
 
     genre_conn_fields = {json_at(f, "name") for f in json_list(data, "genre_conn", "fields")}
     assert "totalCount" in genre_conn_fields

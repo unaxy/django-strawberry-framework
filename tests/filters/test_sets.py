@@ -78,11 +78,10 @@ from django_filters import (
     MultipleChoiceFilter,
     NumberFilter,
 )
-from django_filters.filters import FilterMethod
 from django_filters.filterset import FILTER_FOR_DBFIELD_DEFAULTS as UPSTREAM
 from django_filters.filterset import BaseFilterSet, UnknownFieldBehavior
 from django_filters.filterset import FilterSetMetaclass as DjangoFilterMetaclass
-from django_filters.widgets import RangeWidget, SuffixedMultiWidget
+from django_filters.widgets import SuffixedMultiWidget
 from graphql import GraphQLError
 from strawberry.types.base import StrawberryOptional, get_object_definition
 from typing_extensions import override
@@ -101,7 +100,6 @@ from django_strawberry_framework.filters import (
     GlobalIDFilter,
     GlobalIDMultipleChoiceFilter,
     ListFilter,
-    ListFilterMethod,
     RangeFilter,
     RelatedFilter,
 )
@@ -1479,43 +1477,57 @@ def test_a_bound_form_holds_the_copied_filters_and_an_unbound_one_every_filter(
     assert list(unbound.form.fields) == list(filterset.base_filters)
 
 
+class _DunderRangeWidget(SuffixedMultiWidget):
+    """A two-box range widget reading ``<name>__low`` / ``<name>__high``, a ``__`` past the name."""
+
+    suffixes: list[str] = ["_low", "_high"]
+
+    def __init__(self, attrs: dict[str, object] | None = None) -> None:
+        super().__init__((forms.TextInput, forms.TextInput), attrs)
+
+
 @pytest.mark.parametrize(
     ("data", "prefix", "expected"),
     [
         ({"p-desks__shelf__code": "N-1"}, "p", ["desks__shelf__code"]),
         ({"desks__shelf__code": "N-1"}, "p", []),
-        ({"desks__name_min": "A", "desks__name": "B"}, None, ["desks__name"]),
-        ({"other": "x", "desks__shelf__code_0": "N"}, None, ["desks__shelf__code"]),
-        ({"desks__shelf__code": "N-1"}, None, ["desks__shelf__code"]),
+        ({"desks__name_min": "A"}, None, ["desks__name"]),
+        ({"desks__name": "A"}, None, []),
+        ({"desks__span__low": "1"}, None, ["desks__span"]),
+        ({"desks__probe_min": "x"}, None, ["desks__probe_min"]),
+        ({"desks__shelf__code_0": "N", "desks__shelf": "1"}, None, []),
     ],
     ids=[
         "prefixed",
         "unprefixed-under-a-prefix",
         "widget-suffix",
-        "multi-value-suffix",
-        "relation-path",
+        "multi-widget-bare-name",
+        "dunder-widget-suffix",
+        "suffix-head-is-not-a-name",
+        "relation-heads-and-unread-suffixes",
     ],
 )
-def test_the_flat_copies_a_request_names_are_read_off_its_form_keys(
+def test_the_flat_copies_a_request_names_are_the_ones_whose_widgets_read_its_keys(
     data: dict[str, object],
     prefix: str | None,
     expected: list[str],
 ) -> None:
-    """A form key names a flat copy by the copy's name after the form prefix, or by a suffixed name.
+    """A form key names exactly the flat copies whose form field widget reads it, after the prefix.
 
-    A multi-value widget reads ``<name><suffix>``, the suffix opening on one
-    underscore, so the part of a key before one names a copy too; the relation
-    heads a ``__`` path passes through are not named.
+    A multi-widget's copy is named by its own keys (``_min``, or a consumer's
+    ``__low``), never by its bare name; a plain copy by its name. A key's head before a
+    suffix or a relation separator names nothing, so ``desks__probe_min`` never names
+    ``desks__probe``.
     """
-    deferred = frozenset(
-        {
-            "desks",
-            "desks__name",
-            "desks__shelf",
-            "desks__shelf__code",
-        },
-    )
-    assert sorted(set(sets_module._named_flat_copies(data, deferred, prefix))) == expected
+    filters: dict[str, Filter] = {
+        "desks__shelf__code": CharFilter(field_name="code"),
+        "desks__name": django_filters.RangeFilter(field_name="name"),
+        "desks__span": django_filters.RangeFilter(field_name="name", widget=_DunderRangeWidget),
+        "desks__probe": CharFilter(field_name="name", required=True),
+        "desks__probe_min": CharFilter(field_name="name"),
+    }
+    copy_keys = sets_module._copy_form_keys(filters, frozenset(filters))
+    assert sorted(set(sets_module._named_flat_copies(data, copy_keys, prefix))) == expected
 
 
 @pytest.mark.django_db
@@ -1625,16 +1637,23 @@ def test_a_subclass_init_editing_a_deferred_flat_copy_edits_the_copy_the_request
     assert CaseFoldingBranchFilter.base_filters["desks__shelf__code"].lookup_expr == "exact"
 
 
-@pytest.mark.parametrize("method", [None, "filter_code"], ids=["rebound", "projected"])
-def test_a_required_flat_copy_is_copied_by_every_request_and_fails_the_form_when_absent(
-    method: str | None,
-) -> None:
-    """A child's ``required`` filter copied flat stays required on the parent's form.
+class _SettlingFilterSet(FilterSet):
+    """A filter set whose ``__init__`` reads ``self.filters``, which copies every filter, named or not."""
 
-    A required copy is never deferred, rebound or projected (a ``method=`` filter
-    runs inside the child), so a request that does not name it fails the parent's
-    form on it, as a copy of every filter would.
-    """
+    def __init__(
+        self,
+        data: Mapping[str, object] | None = None,
+        queryset: QuerySet[django_models.Model] | None = None,
+        *,
+        request: HttpRequest | None = None,
+        prefix: str | None = None,
+    ) -> None:
+        super().__init__(data, queryset, request=request, prefix=prefix)
+        assert self.filters
+
+
+def _required_child_branch_filter(base: type[FilterSet], method: str | None) -> type[FilterSet]:
+    """A ``Branch`` filter set on ``base`` expanding ``shelves`` over a child with a required leaf."""
 
     class RequiredCodeShelfFilter(FilterSet):
         code_required = CharFilter(field_name="code", required=True, method=method)
@@ -1651,25 +1670,74 @@ def test_a_required_flat_copy_is_copied_by_every_request_and_fails_the_form_when
             model = library_models.Shelf
             fields = {"topic": ["exact"]}
 
-    class RequiredChildBranchFilter(FilterSet):
+    class RequiredChildBranchFilter(base):
         shelves = RelatedFilter(RequiredCodeShelfFilter, field_name="shelves")
 
         class Meta:
             model = library_models.Branch
             fields = {"name": ["exact"]}
 
-    RequiredChildBranchFilter.get_filters()
-    assert _snapshot(RequiredChildBranchFilter).deferred_copies == frozenset({"shelves__topic"})
+    return RequiredChildBranchFilter
 
-    instance = _pipeline_instance(
-        RequiredChildBranchFilter,
-        data={"name": "North"},
-        queryset=library_models.Branch.objects.all(),
-    )
 
-    assert "shelves__code_required" in instance._copied_filters
-    assert instance.form.errors.get_json_data() == {
-        "shelves__code_required": [{"message": "This field is required.", "code": "required"}],
+_REQUIRED_CHILD_LEAF_REQUESTS: dict[str, tuple[dict[str, object], list[str] | None]] = {
+    "nothing": ({}, ["North", "South"]),
+    "own-leaf": ({"name": {"exact": "South"}}, ["South"]),
+    "flat-sibling": ({"shelves__topic": {"exact": "maps"}}, ["North"]),
+    "or-of-flat-sibling": ({"or_": [{"shelves__topic": {"exact": "maps"}}]}, ["North"]),
+    "flat-named": ({"shelves__code_required": {"exact": "S-1"}}, ["South"]),
+    # A nested branch builds the child's own form, which requires the leaf.
+    "nested-sibling": ({"shelves": {"topic": {"exact": "maps"}}}, None),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("parent_init", ["inherited", "reads-filters"])
+@pytest.mark.parametrize("method", [None, "filter_code"], ids=["rebound", "projected"])
+@pytest.mark.parametrize("request_id", sorted(_REQUIRED_CHILD_LEAF_REQUESTS))
+def test_a_required_child_leaf_is_required_only_on_the_form_that_declares_it(
+    request_id: str,
+    method: str | None,
+    parent_init: str,
+) -> None:
+    """A child's ``required`` leaf binds the child's own form, never a parent request's form.
+
+    A parent request that does not name the flat copy ``shelves__code_required``
+    holds no such field, so nothing, its own leaves, a sibling flat copy and a
+    logic arm answer without it, also once a parent ``__init__`` has read
+    ``self.filters`` (which copies every filter). Named flat, the copy filters by
+    the value sent. A nested branch builds the child's own form, which refuses
+    the request under the child's own name.
+    """
+    filter_input, expected = _REQUIRED_CHILD_LEAF_REQUESTS[request_id]
+    base = _SettlingFilterSet if parent_init == "reads-filters" else FilterSet
+    parent = _required_child_branch_filter(base, method)
+    north = library_models.Branch.objects.create(name="North", city="Oslo")
+    south = library_models.Branch.objects.create(name="South", city="Rome")
+    library_models.Shelf.objects.create(branch=north, code="N-1", topic="maps")
+    library_models.Shelf.objects.create(branch=south, code="S-1", topic="law")
+    _register_plain_types(library_models.Shelf)
+    parent.get_filters()
+    assert "shelves__code_required" in _snapshot(parent).deferred_copies
+
+    def names() -> list[str]:
+        rows = parent.apply_sync(
+            filter_input,
+            library_models.Branch.objects.order_by("name"),
+            _make_info(),
+        )
+        return list(rows.values_list("name", flat=True))
+
+    if expected is not None:
+        assert names() == expected
+        return
+    with pytest.raises(GraphQLError) as excinfo:
+        names()
+    extensions = excinfo.value.extensions
+    assert extensions is not None
+    assert extensions["code"] == "FILTER_INVALID"
+    assert extensions["errors"] == {
+        "code_required": [{"message": "This field is required.", "code": "required"}],
     }
 
 
@@ -1740,33 +1808,12 @@ def _issue_filter_whose_absence_filters(shape: str) -> type[FilterSet]:
     )
 
 
-@pytest.mark.django_db
-@pytest.mark.parametrize(
-    ("shape", "expected"),
-    [
-        ("checkbox", ["Open Review"]),
-        ("disabled", ["Open Review"]),
-        ("disabled-text", ["Open Review"]),
-        ("consumer-filter", ["Open Review"]),
-        ("consumer-boolean-filter", ["Open Review"]),
-        ("null-choice", []),
-        ("null-model-choice", []),
-        ("consumer-widget", ["Open Review"]),
-    ],
-)
-def test_a_flat_copy_whose_absence_constrains_is_copied_by_every_request(
-    shape: str,
-    expected: list[str],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A flat copy that filters even when the request does not name it is never deferred.
-
-    Such a copy constrained every request when django-filter copied every filter,
-    so a pipeline-built request still copies it and the parent answers as one
-    copying every filter does.
-    """
-    issue_filter = _issue_filter_whose_absence_filters(shape)
-    periodical_filter = type(
+def _absence_periodical_filter(
+    issue_filter: type[FilterSet],
+    **namespace: object,
+) -> type[FilterSet]:
+    """A ``Periodical`` filter set expanding ``issues`` over ``issue_filter``, plus ``namespace``."""
+    return type(
         "AbsencePeriodicalFilter",
         (FilterSet,),
         {
@@ -1776,681 +1823,369 @@ def test_a_flat_copy_whose_absence_constrains_is_copied_by_every_request(
                 (),
                 {"model": library_models.Periodical, "fields": {"name": ["exact"]}},
             ),
+            **namespace,
         },
     )
+
+
+def _seed_absence_periodicals() -> None:
+    """Two periodicals: ``Closed Review`` with embargoed issue ``A``, ``Open Review`` with open ``B``."""
     closed = library_models.Periodical.objects.create(name="Closed Review")
     library_models.Issue.objects.create(periodical=closed, number=1, title="A", embargoed=True)
     open_ = library_models.Periodical.objects.create(name="Open Review")
     library_models.Issue.objects.create(periodical=open_, number=1, title="B", embargoed=False)
+
+
+def _periodical_names(periodical_filter: type[FilterSet], filter_input: object) -> list[str]:
+    """The periodical names ``periodical_filter.apply_sync`` answers ``filter_input`` with."""
+    rows = periodical_filter.apply_sync(
+        filter_input,
+        library_models.Periodical.objects.order_by("name"),
+        _make_info(),
+    )
+    return list(rows.values_list("name", flat=True))
+
+
+def _django_filter_form_class(self: FilterSet) -> type[forms.Form]:
+    """A consumer ``get_form_class`` returning django-filter's own form over every filter."""
+    return BaseFilterSet.get_form_class(self)
+
+
+_ABSENCE_SHAPES: list[str] = [
+    "checkbox",
+    "disabled",
+    "disabled-text",
+    "consumer-filter",
+    "consumer-boolean-filter",
+    "null-choice",
+    "null-model-choice",
+    "consumer-widget",
+]
+
+_UNNAMED_COPY_REQUESTS: dict[str, tuple[dict[str, object], list[str]]] = {
+    "nothing": ({}, ["Closed Review", "Open Review"]),
+    "own-leaf": ({"name": {"exact": "Closed Review"}}, ["Closed Review"]),
+    "flat-sibling": ({"issues__title": {"exact": "B"}}, ["Open Review"]),
+    "or-of-flat-sibling": ({"or_": [{"issues__title": {"exact": "A"}}]}, ["Closed Review"]),
+    "not-of-flat-sibling": ({"not_": {"issues__title": {"exact": "B"}}}, ["Closed Review"]),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("form_class", ["package", "django-filter"])
+@pytest.mark.parametrize("request_id", sorted(_UNNAMED_COPY_REQUESTS))
+@pytest.mark.parametrize("shape", _ABSENCE_SHAPES)
+def test_an_unnamed_flat_copy_applies_nothing_whatever_its_absence_would_do(
+    shape: str,
+    request_id: str,
+    form_class: str,
+) -> None:
+    """A flat copy the request does not name constrains nothing, whatever its absence would do.
+
+    ``issues__open_only`` acts on an absent key (a checkbox, a disabled field, a
+    consumer ``filter`` or widget, a ``null_value`` equal to the absent value), yet
+    a parent request that does not name it answers by its own leaves alone, in a
+    logic arm too, and is never refused. The applicator skips an unnamed copy
+    also when a consumer ``get_form_class`` puts every filter on the form.
+    """
+    filter_input, expected = _UNNAMED_COPY_REQUESTS[request_id]
+    namespace: dict[str, object] = {}
+    if form_class == "django-filter":
+        namespace["get_form_class"] = _django_filter_form_class
+    periodical_filter = _absence_periodical_filter(
+        _issue_filter_whose_absence_filters(shape),
+        **namespace,
+    )
+    _seed_absence_periodicals()
     _register_plain_types(library_models.Issue)
     periodical_filter.get_filters()
-    snapshot = _snapshot(periodical_filter)
-    assert "issues__open_only" not in snapshot.deferred_copies
-    assert "issues__title" in snapshot.deferred_copies
+    assert "issues__open_only" in _snapshot(periodical_filter).deferred_copies
 
-    def names() -> list[str]:
-        instance = _pipeline_instance(
-            periodical_filter,
-            data={"unrelated": "x"},
-            queryset=library_models.Periodical.objects.order_by("pk"),
-            request=HttpRequest(),
-        )
-        return list(instance.qs.values_list("name", flat=True))
+    assert _periodical_names(periodical_filter, filter_input) == expected
 
-    deferring = names()
-    monkeypatch.setattr(
+
+# The ``issues__open_only`` operator bag each shape is named with, and the periodicals it answers.
+_NAMED_OPEN_ONLY: dict[str, tuple[dict[str, object], list[str]]] = {
+    "checkbox": ({"exact": True}, ["Closed Review"]),
+    "disabled": ({"exact": True}, ["Open Review"]),
+    "disabled-text": ({"exact": "A"}, ["Open Review"]),
+    "consumer-filter": ({"exact": "A"}, ["Open Review"]),
+    "consumer-boolean-filter": ({"exact": True}, ["Open Review"]),
+    "null-choice": ({"exact": "B"}, ["Open Review"]),
+    "null-model-choice": ({"exact": "closed"}, ["Closed Review"]),
+    "consumer-widget": ({"exact": True}, ["Open Review"]),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("shape", _ABSENCE_SHAPES)
+def test_a_child_leaf_whose_absence_acts_answers_alike_named_flat_nested_or_both(
+    shape: str,
+) -> None:
+    """Named flat, nested or both, a child leaf whose absence acts gives one answer.
+
+    A nested branch builds the child's own form, so a nested sibling leaf
+    answers as the child set does at its own root, where the leaf's absence
+    acts; the flat sibling is its own predicate and answers without it.
+    """
+    issue_filter = _issue_filter_whose_absence_filters(shape)
+    periodical_filter = _absence_periodical_filter(issue_filter)
+    _seed_absence_periodicals()
+    _register_plain_types(library_models.Issue)
+    periodical_filter.get_filters()
+    bag, expected = _NAMED_OPEN_ONLY[shape]
+    if bag == {"exact": "closed"}:
+        bag = {"exact": saved_pk(library_models.Periodical.objects.get(name="Closed Review"))}
+
+    flat = _periodical_names(periodical_filter, {"issues__open_only": bag})
+    nested = _periodical_names(periodical_filter, {"issues": {"open_only": bag}})
+    both = _periodical_names(
         periodical_filter,
-        "_expanded_snapshot",
-        dataclasses.replace(snapshot, deferred_copies=frozenset()),
+        {"issues__open_only": bag, "issues": {"open_only": bag}},
     )
-    assert deferring == names() == expected
+    assert flat == nested == both == expected
+
+    child_root = issue_filter(
+        data={"title": "B"},
+        queryset=library_models.Issue.objects.all(),
+        request=HttpRequest(),
+    )
+    at_child_root = sorted(set(child_root.qs.values_list("periodical__name", flat=True)))
+    nested_sibling = {"issues": {"title": {"exact": "B"}}}
+    assert _periodical_names(periodical_filter, nested_sibling) == at_child_root
+    assert _periodical_names(periodical_filter, {"issues__title": {"exact": "B"}}) == [
+        "Open Review",
+    ]
 
 
-@pytest.mark.parametrize("member", ["branch", "shelf"])
-def test_a_set_with_its_own_form_class_defers_no_flat_copy(member: str) -> None:
-    """A consumer ``Meta.form`` may read any cleaned key, so its set copies every filter up front."""
-
-    class ReadingForm(forms.Form):
-        pass
-
-    ring_member = _desk_ring()[member]
-    ring_member.get_filters()
-    assert _snapshot(ring_member).deferred_copies
-    meta = {
-        "model": ring_member._meta.model,
-        "fields": ring_member._meta.fields,
-        "form": ReadingForm,
-    }
-
-    own_form = type("OwnFormFilter", (ring_member,), {"Meta": type("Meta", (), meta)})
-    own_form.get_filters()
-    assert _snapshot(own_form).deferred_copies == frozenset()
-
-
-class _TypedChoiceFilter(ChoiceFilter):
-    """A ``ChoiceFilter`` whose field is a typed choice field."""
-
-    field_class = forms.TypedChoiceField
-
-
+@pytest.mark.django_db
 @pytest.mark.parametrize(
-    ("make", "runs_null_branch"),
+    ("filter_input", "expected"),
     [
-        (lambda: ChoiceFilter(field_name="title", null_value=""), True),
-        (lambda: ChoiceFilter(field_name="title"), False),
-        (lambda: ChoiceFilter(field_name="title", null_value=None), False),
-        (lambda: ChoiceFilter(field_name="title", null_value=0), True),
-        (lambda: ModelChoiceFilter(field_name="periodical", null_value=None), True),
-        (lambda: ModelChoiceFilter(field_name="periodical", null_value=""), False),
-        (lambda: _TypedChoiceFilter(field_name="number", null_value="", empty_value=""), True),
-        (lambda: _TypedChoiceFilter(field_name="number", null_value="x", empty_value=""), False),
-        (lambda: _TypedChoiceFilter(field_name="number", null_value="", empty_value=0), True),
+        ({}, ["Closed Review", "Open Review"]),
+        ({"name": {"exact": "Open Review"}}, ["Open Review"]),
     ],
-    ids=[
-        "choice-empty",
-        "choice-default",
-        "choice-none",
-        "choice-int",
-        "model-choice-none",
-        "model-choice-empty",
-        "typed-empty",
-        "typed-other",
-        "typed-int-empty-value",
-    ],
+    ids=["nothing", "own-leaf"],
 )
-def test_a_choice_filter_whose_null_value_is_the_absent_value_runs_its_null_branch(
-    make: Callable[[], ChoiceFilter],
-    runs_null_branch: bool,  # noqa: FBT001
+def test_an_unnamed_flat_copy_reads_no_hop_visibility_under_apply_async(
+    filter_input: dict[str, object],
+    expected: list[str],
 ) -> None:
-    """A ``null_value`` equal to what the field cleans an absent key to keeps the copy up front.
+    """A flat copy the request does not name reads no hop, so an async-only target hook never runs.
 
-    A choice field cleans an absent key to ``""``, a model-choice field to ``None``, a
-    typed one to its ``empty_value``; a value that is neither ``None`` nor a plain
-    ``str`` is never compared and counts as matching.
+    ``apply_async`` awaits the visibility of the hops the request's supplied
+    leaves walk. An unnamed copy whose absence would act walks none, so the
+    ``Issue`` type's async-only ``get_queryset`` is never called from the sync
+    boundary.
     """
-    choice_filter = make()
-    field_class: type[forms.Field] = choice_filter.field_class
-    absent = sets_module._absent_cleaned_value(field_class, choice_filter.extra, None)
-    assert (
-        sets_module._null_value_is_absent(cast("object", choice_filter.null_value), absent)
-        is runs_null_branch
+    calls: list[str] = []
+
+    class AsyncOnlyIssueType(DjangoType):
+        class Meta:
+            model = library_models.Issue
+            fields = ("id", "title")
+
+        @classmethod
+        @override
+        # basedpyright: an ``async def get_queryset`` is a supported hook, awaited on the async path,
+        # but the base hook has one signature, and its return cannot admit both a sync child's
+        # ``QuerySet`` and an async child's coroutine without breaking every sync caller that
+        # reads ``super().get_queryset(...)`` as a ``QuerySet``
+        async def get_queryset(  # pyright: ignore[reportIncompatibleMethodOverride]
+            cls,
+            queryset: QuerySet[library_models.Issue],
+            info: object,
+            **kwargs: object,
+        ) -> QuerySet[library_models.Issue]:
+            calls.append("get_queryset")
+            return await sync_to_async(lambda: queryset)()
+
+    assert registry.get(library_models.Issue) is AsyncOnlyIssueType
+    periodical_filter = _absence_periodical_filter(_issue_filter_whose_absence_filters("checkbox"))
+    _seed_absence_periodicals()
+    periodical_filter.get_filters()
+
+    rows = asyncio.run(
+        periodical_filter.apply_async(
+            filter_input,
+            library_models.Periodical.objects.order_by("name"),
+            _make_info(),
+        ),
     )
 
-
-class _DefaultingCharField(forms.CharField):
-    """A consumer form field whose ``clean`` reads an absent value as ``"B"``."""
-
-    @override
-    def clean(self, value: object) -> object:
-        cleaned = object_result(super().clean, value)
-        return cleaned or "B"
+    assert list(rows.values_list("name", flat=True)) == expected
+    assert calls == []
 
 
-class _DefaultingCharFilter(CharFilter):
-    """A consumer ``CharFilter`` over ``_DefaultingCharField``, keeping django-filter's ``filter``."""
+@pytest.mark.django_db
+def test_an_unnamed_flat_copy_fires_no_gate_and_a_named_one_fires_the_childs_gate() -> None:
+    """A copy the request does not name fires no ``check_*``; naming it fires the child leaf's gate.
 
-    field_class = _DefaultingCharField
-
-
-class _OwnFieldCharFilter(CharFilter):
-    """A consumer ``CharFilter`` that builds its own form field, whose absence cleans to ``"B"``."""
-
-    @property
-    @override
-    def field(self) -> forms.Field:
-        return forms.CharField(empty_value="B", required=False)
-
-
-class _PlainBooleanFieldFilter(Filter):
-    """A consumer filter over Django's two-state ``BooleanField``."""
-
-    field_class = forms.BooleanField
-
-
-class _FileFieldFilter(Filter):
-    """A filter over Django's ``FileField``, which cleans an absent key to its ``initial``."""
-
-    field_class = forms.FileField
-
-
-class _ComboFieldFilter(Filter):
-    """A filter over Django's ``ComboField``, which cleans through its sub-fields."""
-
-    field_class = forms.ComboField
-
-
-class _BareMultiValueFieldFilter(Filter):
-    """A filter over Django's abstract ``MultiValueField``, whose ``compress`` raises."""
-
-    field_class = forms.MultiValueField
-
-
-class _TitleInFilter(BaseInFilter, CharFilter):
-    """A consumer ``in`` filter over titles: django-filter's CSV field over ``CharField``."""
-
-
-class _TextListFilter(ListFilter):
-    """A consumer list filter over ``CharField``, which cleans an absent key to ``""``."""
-
-    field_class = forms.CharField
-
-
-_TITLE_CHOICES = [("A", "A"), ("B", "B")]
-
-
-@pytest.mark.parametrize(
-    ("make", "deferred"),
-    [
-        (lambda: Filter(field_name="title"), True),
-        (lambda: CharFilter(field_name="title"), True),
-        (lambda: CharFilter(field_name="title", empty_value=None), True),
-        (lambda: NumberFilter(field_name="number"), True),
-        (lambda: BooleanFilter(field_name="embargoed"), True),
-        (lambda: ChoiceFilter(field_name="title", choices=_TITLE_CHOICES), True),
-        (
-            lambda: django_filters.TypedChoiceFilter(field_name="title", choices=_TITLE_CHOICES),
-            True,
-        ),
-        (
-            lambda: MultipleChoiceFilter(
-                field_name="title",
-                choices=_TITLE_CHOICES,
-                widget=forms.TextInput,
-            ),
-            True,
-        ),
-        (
-            lambda: django_filters.TypedMultipleChoiceFilter(
-                field_name="title",
-                choices=_TITLE_CHOICES,
-                widget=forms.TextInput,
-            ),
-            True,
-        ),
-        (lambda: EnumLookupFilter(field_name="title"), True),
-        (lambda: _TitleInFilter(field_name="title", lookup_expr="in"), True),
-        (lambda: RangeFilter(field_name="number"), True),
-        (lambda: ListFilter(field_name="title"), True),
-        (lambda: django_filters.DateFromToRangeFilter(field_name="number"), True),
-        (lambda: _DefaultingCharFilter(field_name="title"), False),
-        (lambda: _OwnFieldCharFilter(field_name="title"), False),
-        (lambda: CharFilter(field_name="title", empty_value="B"), False),
-        (
-            lambda: django_filters.TypedChoiceFilter(
-                field_name="title",
-                choices=_TITLE_CHOICES,
-                empty_value="B",
-            ),
-            False,
-        ),
-        (
-            lambda: django_filters.TypedChoiceFilter(
-                field_name="number",
-                choices=[(1, "1")],
-                coerce=int,
-                empty_value=0,
-            ),
-            False,
-        ),
-        (lambda: _PlainBooleanFieldFilter(field_name="embargoed", widget=forms.TextInput), False),
-        (
-            lambda: ModelMultipleChoiceFilter(
-                field_name="periodical",
-                queryset=library_models.Periodical.objects.all(),
-                widget=forms.TextInput,
-            ),
-            False,
-        ),
-        (lambda: _FileFieldFilter(field_name="title"), False),
-        (lambda: _ComboFieldFilter(field_name="title", fields=[forms.CharField()]), False),
-        (
-            lambda: _BareMultiValueFieldFilter(field_name="title", fields=[forms.CharField()]),
-            False,
-        ),
-        (
-            lambda: CharFilter(
-                field_name="title",
-                widget=forms.MultiWidget(widgets=(forms.TextInput, forms.TextInput)),
-            ),
-            False,
-        ),
-        (
-            lambda: django_filters.DateFromToRangeFilter(
-                field_name="number",
-                widget=forms.MultiWidget(widgets=(forms.SplitDateTimeWidget, forms.TextInput)),
-            ),
-            False,
-        ),
-        (lambda: _TextListFilter(field_name="title"), False),
-    ],
-    ids=[
-        "field",
-        "char",
-        "char-none-empty-value",
-        "number",
-        "null-boolean",
-        "choice",
-        "typed-choice",
-        "multiple-choice-text-widget",
-        "typed-multiple-choice-text-widget",
-        "enum-lookup",
-        "csv-in",
-        "package-range-pair",
-        "package-list-filter",
-        "multi-value-range",
-        "consumer-field-clean",
-        "consumer-field-property",
-        "char-empty-value",
-        "typed-choice-empty-value",
-        "typed-choice-int-empty-value",
-        "boolean-field-text-widget",
-        "model-multiple-choice-text-widget",
-        "file-field",
-        "combo-field",
-        "abstract-multi-value-field",
-        "multi-widget-on-char-field",
-        "nested-multi-widget-on-multi-value-field",
-        "package-list-filter-empty-string",
-    ],
-)
-@pytest.mark.parametrize("built", [False, True], ids=["unbuilt", "built"])
-def test_a_flat_copy_is_deferred_only_when_its_field_provably_cleans_absence_to_a_skipped_value(
-    make: Callable[[], Filter],
-    deferred: bool,  # noqa: FBT001
-    built: bool,  # noqa: FBT001
-) -> None:
-    """A copy is deferred only when its form field cleans an absent key to a value its filter skips.
-
-    A filter whose form field is already built (django-filter caches it on the
-    filter, and every copy keeps it) is judged by that field and answers as the
-    field its class and ``extra`` would build.
-    The value is proven from the field class's family, never by running field code:
-    Django's, django-filter's and the package's own fields with an empty
-    ``empty_value`` defer, as do multi-value fields that fold one ``None`` per
-    sub-widget. A consumer field class or ``field`` property, a nonempty
-    ``empty_value``, a two-state ``BooleanField`` (absent is ``False``), a
-    ``ModelMultipleChoiceField`` (absent is a queryset), a ``FileField`` (absent is
-    its ``initial``), a ``ComboField``, the abstract ``MultiValueField``, a
-    multi-widget value reaching a single-value field, and an empty string reaching
-    a package filter (which skips only ``None``) keep the copy up front.
+    So every copy that constrains a request was gated: the unnamed checkbox copy
+    neither runs nor asks permission.
     """
-    declared = make()
-    if built:
-        assert isinstance(declared.field, forms.Field)
-    assert sets_module._absence_filters_nothing("issues__x", declared, {}) is deferred
+    fired: list[str] = []
 
+    class GatedIssueFilter(FilterSet):
+        open_only = BooleanFilter(field_name="embargoed", widget=forms.CheckboxInput)
 
-def _clean_to_b(*_args: object) -> str:
-    """A form field or widget method an instance carries of its own: it answers ``"B"``."""
-    return "B"
-
-
-@pytest.mark.parametrize(
-    ("make", "attribute"),
-    [
-        (lambda: CharFilter(field_name="title"), "clean"),
-        (lambda: CharFilter(field_name="title"), "to_python"),
-        (lambda: CharFilter(field_name="title"), "validate"),
-        (lambda: CharFilter(field_name="title"), "run_validators"),
-        (lambda: CharFilter(field_name="title"), "_clean_bound_field"),
-        (lambda: CharFilter(field_name="title"), "bound_data"),
-        (lambda: django_filters.DateFromToRangeFilter(field_name="number"), "compress"),
-    ],
-    ids=[
-        "clean",
-        "to-python",
-        "validate",
-        "run-validators",
-        "clean-bound-field",
-        "bound-data",
-        "multi-value-compress",
-    ],
-)
-def test_a_built_field_carrying_its_own_cleaning_method_keeps_its_copy_up_front(
-    make: Callable[[], Filter],
-    attribute: str,
-) -> None:
-    """A built field holding a method of its own no longer cleans as its class says.
-
-    The same filter with its field built and left alone stays deferred.
-    """
-    declared = make()
-    assert sets_module._absence_filters_nothing("issues__x", declared, {}) is True
-    vars(declared.field)[attribute] = _clean_to_b
-    assert sets_module._absence_filters_nothing("issues__x", declared, {}) is False
-
-
-def _char_with(method: str | None) -> Filter:
-    """A ``CharFilter`` over titles, with ``method`` when one is given."""
-    return CharFilter(field_name="title", method=method)
-
-
-def _number_with(method: str | None) -> Filter:
-    """A ``NumberFilter`` over numbers, with ``method`` when one is given."""
-    return NumberFilter(field_name="number", method=method)
-
-
-def _package_list_with(method: str | None) -> Filter:
-    """The package's ``ListFilter`` over titles, with ``method`` when one is given."""
-    return ListFilter(field_name="title", method=method)
-
-
-def _char_empty_value_with(method: str | None) -> Filter:
-    """A ``CharFilter`` whose field cleans absence to ``"B"``, with ``method`` when one is given."""
-    return CharFilter(field_name="title", empty_value="B", method=method)
-
-
-@pytest.mark.parametrize(
-    "make",
-    [
-        _char_with,
-        _number_with,
-        _package_list_with,
-        _char_empty_value_with,
-    ],
-    ids=[
-        "char",
-        "number",
-        "package-list",
-        "char-empty-value",
-    ],
-)
-def test_a_method_filter_is_judged_as_the_same_filter_without_its_method(
-    make: Callable[[str | None], Filter],
-) -> None:
-    """The ``FilterMethod`` a ``method=`` installs on the instance keeps the copy's verdict.
-
-    django-filter's skips every empty value and the package's list one skips only
-    ``None``, each no less than the class's own ``filter`` skips.
-    """
-    plain = sets_module._absence_filters_nothing("issues__x", make(None), {})
-    with_method = make("filter_title")
-    assert isinstance(vars(with_method)["filter"], FilterMethod)
-    assert sets_module._absence_filters_nothing("issues__x", with_method, {}) is plain
-
-
-class _OwnFilterMethod(FilterMethod):
-    """A consumer ``FilterMethod`` subclass."""
-
-
-def _own_callable(_declared: Filter) -> object:
-    """A ``filter`` of the instance's own that is no ``FilterMethod``."""
-    return _clean_to_b
-
-
-def _method_of_another_filter(_declared: Filter) -> object:
-    """django-filter's ``FilterMethod``, bound to a different filter."""
-    return FilterMethod(CharFilter(field_name="title"))
-
-
-def _consumer_filter_method(declared: Filter) -> object:
-    """A consumer ``FilterMethod`` subclass bound to the filter."""
-    return _OwnFilterMethod(declared)
-
-
-def _list_filter_method(declared: Filter) -> object:
-    """The package's list ``FilterMethod``, which passes an empty string to its method."""
-    return ListFilterMethod(declared)
-
-
-def _django_filter_method(declared: Filter) -> object:
-    """django-filter's ``FilterMethod`` bound to the filter, as ``method=`` installs it."""
-    return FilterMethod(declared)
-
-
-@pytest.mark.parametrize(
-    ("install", "deferred"),
-    [
-        (_own_callable, False),
-        (_method_of_another_filter, False),
-        (_consumer_filter_method, False),
-        (_list_filter_method, False),
-        (_django_filter_method, True),
-    ],
-    ids=[
-        "own-callable",
-        "method-of-another-filter",
-        "consumer-filter-method",
-        "list-filter-method-on-char",
-        "django-filter-method",
-    ],
-)
-def test_a_filter_holding_its_own_filter_is_deferred_only_for_a_proven_filter_method(
-    install: Callable[[Filter], object],
-    deferred: bool,  # noqa: FBT001
-) -> None:
-    """An instance ``filter`` replaces the class's, so only a proven ``FilterMethod`` defers.
-
-    The absent key cleans to ``""``: django-filter's ``FilterMethod`` skips it, the
-    package's list one hands it to the method.
-    """
-    declared = CharFilter(field_name="title", method="filter_title")
-    vars(declared)["filter"] = install(declared)
-    assert sets_module._absence_filters_nothing("issues__x", declared, {}) is deferred
-
-
-def _own_field_class(declared: Filter) -> None:
-    """Give the filter a form field class of its own."""
-    declared.field_class = _DefaultingCharField
-
-
-def _own_null_value(declared: Filter) -> None:
-    """Make the filter's ``null_value`` the value an absent key cleans to."""
-    vars(declared)["null_value"] = ""
-
-
-@pytest.mark.parametrize(
-    "edit",
-    [_own_field_class, _own_null_value],
-    ids=["field-class", "null-value"],
-)
-def test_a_filter_attribute_set_on_the_instance_is_the_one_judged(
-    edit: Callable[[Filter], None],
-) -> None:
-    """The proof reads ``field_class`` and ``null_value`` through the instance, as the request does."""
-    declared = ChoiceFilter(field_name="title", choices=_TITLE_CHOICES)
-    assert sets_module._absence_filters_nothing("issues__x", declared, {}) is True
-    edit(declared)
-    assert sets_module._absence_filters_nothing("issues__x", declared, {}) is False
-
-
-def _own_empty_values(declared: Filter) -> None:
-    """Give the built field ``empty_values`` of its own."""
-    vars(declared.field)["empty_values"] = []
-
-
-def _not_a_form_field(declared: Filter) -> None:
-    """Cache an object that is no form field as the filter's built field."""
-    vars(declared)["_field"] = object()
-
-
-def _widget_class(declared: Filter) -> None:
-    """Hand the built field a widget class where ``Field.__init__`` builds an instance."""
-    declared.field.widget = forms.TextInput
-
-
-def _required_field(declared: Filter) -> None:
-    """Make the built field required."""
-    declared.field.required = True
-
-
-def _disabled_field(declared: Filter) -> None:
-    """Disable the built field."""
-    declared.field.disabled = True
-
-
-@pytest.mark.parametrize(
-    "edit",
-    [
-        _own_empty_values,
-        _not_a_form_field,
-        _widget_class,
-        _required_field,
-        _disabled_field,
-    ],
-    ids=[
-        "own-empty-values",
-        "not-a-form-field",
-        "widget-class",
-        "required",
-        "disabled",
-    ],
-)
-def test_a_built_field_whose_own_state_may_act_on_absence_keeps_its_copy_up_front(
-    edit: Callable[[Filter], None],
-) -> None:
-    """A built field's own state that may act on an absent key keeps the copy up front.
-
-    Its own ``empty_values`` (an empty one makes ``CharField`` clean an absent
-    ``None`` to ``"None"``), ``required`` or ``disabled``, a widget that is no widget
-    instance, or a cached object that is no form field, is not proven to clean
-    absence to nothing.
-    """
-    declared = CharFilter(field_name="title")
-    assert isinstance(declared.field, forms.Field)
-    assert sets_module._absence_filters_nothing("issues__x", declared, {}) is True
-    edit(declared)
-    assert sets_module._absence_filters_nothing("issues__x", declared, {}) is False
-
-
-def test_a_projected_copy_its_child_set_does_not_publish_is_copied_up_front() -> None:
-    """A projected copy runs the filter its child set publishes by name; with none it is unproven."""
-
-    class PlainIssueFilter(FilterSet):
         class Meta:
             model = library_models.Issue
             fields = {"title": ["exact"]}
 
-    projected = sets_module._new_projected(CharFilter)
-    vars(projected).update(vars(CharFilter(field_name="issues__title")))
-    projected._projection = ChildProjection(PlainIssueFilter, "title", "issues")
-    assert sets_module._absence_filters_nothing("issues__title", projected, {}) is True
-    projected._projection = ChildProjection(PlainIssueFilter, "missing", "issues")
-    assert sets_module._absence_filters_nothing("issues__missing", projected, {}) is False
+        def check_open_only_permission(self, _request: object) -> None:
+            fired.append("open_only")
+
+    periodical_filter = _absence_periodical_filter(GatedIssueFilter)
+    _seed_absence_periodicals()
+    _register_plain_types(library_models.Issue)
+    periodical_filter.get_filters()
+
+    assert _periodical_names(periodical_filter, {}) == ["Closed Review", "Open Review"]
+    assert fired == []
+    named = {"issues__open_only": {"exact": True}}
+    assert _periodical_names(periodical_filter, named) == ["Closed Review"]
+    assert fired == ["open_only"]
 
 
-class _NeedsArgumentWidget(forms.TextInput):
-    """A widget class that cannot be built without an argument."""
+class _DunderRangeIssueFilter(FilterSet):
+    """An ``Issue`` filter set whose range widget reads ``number__low`` / ``number__high``."""
 
-    def __init__(self, required: str) -> None:
-        super().__init__(attrs={"data-required": required})
+    span = django_filters.RangeFilter(field_name="number", widget=_DunderRangeWidget)
 
-
-class _ReadingWidget(forms.TextInput):
-    """A consumer widget that reads the data its own way."""
-
-    @override
-    def value_omitted_from_data(
-        self,
-        data: Mapping[str, object],
-        files: object,
-        name: str,
-    ) -> bool:
-        return name not in data
+    class Meta:
+        model = library_models.Issue
+        fields = {"title": ["exact"]}
 
 
-class _DunderSuffixWidget(forms.MultiWidget):
-    """A multi-widget whose second sub-key reads like a relation path."""
-
-    def __init__(self) -> None:
-        super().__init__(widgets={"": forms.TextInput, "__end": forms.TextInput})
-
-    @override
-    def decompress(self, value: object) -> list[object]:
-        return [value, None]
-
-
-def _read_b_from_bound_data(data: Mapping[str, object], _files: object, _name: str) -> object:
-    """A widget ``value_from_datadict`` an instance carries of its own: ``"B"`` from any data."""
-    return "B" if data else None
-
-
-def _own_reader_widget() -> forms.TextInput:
-    """A Django ``TextInput`` instance whose own reader answers ``None`` only for empty data."""
-    widget = forms.TextInput()
-    vars(widget)["value_from_datadict"] = _read_b_from_bound_data
-    return widget
-
-
+@pytest.mark.django_db
 @pytest.mark.parametrize(
-    ("widget", "omitted"),
+    ("filter_input", "expected"),
     [
-        (forms.TextInput, True),
-        (forms.TextInput(), True),
-        (_own_reader_widget(), False),
-        (_NeedsArgumentWidget, False),
-        (_ReadingWidget, False),
-        (_ReadingWidget(), False),
-        (_DunderSuffixWidget, False),
-        (_DunderSuffixWidget(), False),
-        (forms.CheckboxInput, False),
-        (forms.SelectMultiple(), False),
+        ({}, ["Closed Review", "Open Review"]),
+        ({"issues__span": {"exact": {"start": 2, "end": 3}}}, ["Open Review"]),
+        ({"issues__span": {"exact": {"end": 1}}}, ["Closed Review"]),
+        ({"issues": {"span": {"exact": {"start": 2}}}}, ["Open Review"]),
     ],
     ids=[
-        "django-class",
-        "django-instance",
-        "django-instance-own-reader",
-        "unbuildable",
-        "consumer-reader-class",
-        "consumer-reader-instance",
-        "dunder-suffix-class",
-        "dunder-suffix-instance",
-        "checkbox",
-        "select-multiple",
+        "unnamed",
+        "named-both",
+        "named-end",
+        "nested",
     ],
 )
-def test_a_widget_that_reads_data_its_own_way_keeps_its_copy_up_front(
-    widget: forms.Widget | type[forms.Widget],
-    omitted: bool,  # noqa: FBT001
+def test_a_flat_copy_whose_widget_reads_a_dunder_key_is_named_by_that_key(
+    filter_input: dict[str, object],
+    expected: list[str],
 ) -> None:
-    """Only a widget of Django's, django-filter's or the package's that can be asked defers its copy.
+    """A flat range copy whose widget reads ``<name>__low`` / ``__high`` applies its bounds when named.
 
-    A widget class that cannot be built, a consumer widget reading the data its own
-    way (by its class, or a Django widget instance carrying its own reader), and a
-    multi-widget with a ``__`` sub-key suffix (which the named-key scan reads as a
-    relation path) keep their copies up front.
+    The request names the copy by exactly the keys its widget reads, so the
+    ``__``-suffixed keys bind it; unnamed, it applies nothing.
     """
-    deferred = sets_module._absence_filters_nothing(
-        "issues__title",
-        CharFilter(field_name="title", widget=widget),
-        {},
+    closed = library_models.Periodical.objects.create(name="Closed Review")
+    library_models.Issue.objects.create(periodical=closed, number=1, title="A", embargoed=False)
+    open_ = library_models.Periodical.objects.create(name="Open Review")
+    library_models.Issue.objects.create(periodical=open_, number=3, title="B", embargoed=False)
+    _register_plain_types(library_models.Issue)
+    periodical_filter = _absence_periodical_filter(_DunderRangeIssueFilter)
+    periodical_filter.get_filters()
+    assert _snapshot(periodical_filter).copy_keys["issues__span__low"] == {"issues__span"}
+
+    assert _periodical_names(periodical_filter, filter_input) == expected
+
+
+class _ProbeIssueFilter(FilterSet):
+    """An ``Issue`` filter set with a required ``probe`` beside a plain ``probe_min``."""
+
+    probe = CharFilter(field_name="title", required=True)
+    probe_min = CharFilter(field_name="title")
+
+    class Meta:
+        model = library_models.Issue
+        fields = {"number": ["exact"]}
+
+
+@pytest.mark.django_db
+def test_naming_a_copy_never_binds_the_copy_its_key_begins_with() -> None:
+    """``issues__probe_min`` named binds that copy alone, never the required ``issues__probe``.
+
+    A key names only the copies whose widget reads it, so the required copy whose
+    name heads the key is not on the form and the request is not refused.
+    """
+    _seed_absence_periodicals()
+    _register_plain_types(library_models.Issue)
+    periodical_filter = _absence_periodical_filter(_ProbeIssueFilter)
+    periodical_filter.get_filters()
+
+    named = {"issues__probe_min": {"exact": "B"}}
+    assert _periodical_names(periodical_filter, named) == ["Open Review"]
+
+
+class _DjangoFilterFormSet(FilterSet):
+    """A filter set whose ``get_form_class`` is django-filter's own form over every filter."""
+
+    @override
+    def get_form_class(self) -> type[forms.Form]:
+        return BaseFilterSet.get_form_class(self)
+
+
+@pytest.mark.django_db
+def test_an_unnamed_copy_on_a_consumer_form_is_never_applied_but_still_validates() -> None:
+    """A consumer form holding every filter validates an unnamed copy as that form does.
+
+    ``get_form_class`` returning django-filter's form puts the required child copy
+    ``shelves__code_required`` on the parent's form, so ``{}`` is refused under that
+    key; the applicator never runs an unnamed copy, but it cannot unbuild the form.
+    """
+    parent = _required_child_branch_filter(_DjangoFilterFormSet, None)
+    library_models.Branch.objects.create(name="North", city="Oslo")
+    _register_plain_types(library_models.Shelf)
+    parent.get_filters()
+
+    with pytest.raises(GraphQLError) as excinfo:
+        parent.apply_sync({}, library_models.Branch.objects.all(), _make_info())
+    extensions = excinfo.value.extensions
+    assert extensions is not None
+    assert extensions["code"] == "FILTER_INVALID"
+    assert extensions["errors"] == {
+        "shelves__code_required": [{"message": "This field is required.", "code": "required"}],
+    }
+
+
+@pytest.mark.django_db
+def test_a_set_with_its_own_form_class_binds_only_the_flat_copies_a_request_names() -> None:
+    """A consumer ``Meta.form`` holds the set's own filters and the flat copies a request names.
+
+    The set defers every copy as any set does, so its ``clean`` reads a named
+    copy's cleaned value and finds no unnamed one (read it with ``.get``).
+    """
+    seen: list[tuple[object, bool]] = []
+
+    class ReadingForm(forms.Form):
+        @override
+        def clean(self) -> dict[str, object]:
+            cleaned: dict[str, object] = self.cleaned_data
+            seen.append((cleaned.get("desks__shelf__code"), "desks__name" in cleaned))
+            return cleaned
+
+    pks = _seed_desk_ring_rows()
+    branch = _desk_ring()["branch"]
+    branch.get_filters()
+    meta = {"model": library_models.Branch, "fields": branch._meta.fields, "form": ReadingForm}
+    own_form = type("OwnFormFilter", (branch,), {"Meta": type("Meta", (), meta)})
+    own_form.get_filters()
+    own = set(own_form._unexpanded_filters())
+    assert _snapshot(own_form).deferred_copies == frozenset(set(own_form.base_filters) - own)
+
+    rows = own_form.apply_sync(
+        {"desks__shelf__code": {"exact": "S-1"}},
+        library_models.Branch.objects.order_by("pk"),
+        _make_info(),
     )
-    assert deferred is omitted
 
-
-class _DunderSuffixedRangeWidget(SuffixedMultiWidget):
-    """A django-filter suffixed widget whose ``_end`` suffix reads the key ``<name>__end``."""
-
-    suffixes = ["start", "_end"]
-
-    def __init__(self) -> None:
-        super().__init__((forms.TextInput, forms.TextInput))
-
-
-@pytest.mark.parametrize(
-    ("widget", "absent"),
-    [
-        pytest.param(RangeWidget, [None, None], id="range-widget"),
-        pytest.param(_DunderSuffixedRangeWidget, None, id="suffix-reading-a-dunder-key"),
-        pytest.param(_DunderSuffixWidget, None, id="multi-widget-reading-a-dunder-key"),
-    ],
-)
-def test_a_multi_widget_reading_a_dunder_key_proves_no_absent_value(
-    widget: type[forms.Widget],
-    absent: list[None] | None,
-) -> None:
-    """A multi-widget is asked for the keys it reads; one past the name opening ``__`` is unproven.
-
-    django-filter's ``SuffixedMultiWidget`` reads ``<name>_<suffix>``, whatever its
-    ``widgets_names``, so a suffix opening with ``_`` reads a key the named-key scan
-    takes for a relation path, as a plain ``MultiWidget``'s ``__`` sub-key does.
-    """
-    proven = sets_module._absent_widget_value(widget, "title")
-
-    if absent is None:
-        assert proven is sets_module._UNPROVEN
-        return
-    assert proven == absent
+    assert list(rows.values_list("pk", flat=True)) == [pks["South"]]
+    assert seen == [("S-1", False)]
 
 
 @pytest.mark.parametrize(
@@ -2465,11 +2200,12 @@ def test_a_multi_widget_reading_a_dunder_key_proves_no_absent_value(
         "meta-form",
     ],
 )
-def test_a_set_reading_its_form_its_own_way_defers_no_flat_copy(seam: str) -> None:
-    """A set that may read a cleaned key it was not sent copies every filter up front.
+def test_a_set_overriding_a_form_reading_seam_defers_every_flat_copy(seam: str) -> None:
+    """A set overriding a seam that reads its form defers every flat copy, as any set does.
 
     An override of a seam that reads ``self.form`` / ``cleaned_data``, or its own
-    ``Meta.form``, may read any flat copy's key, so the set defers none.
+    ``Meta.form``, finds the set's own filters and the flat copies a request
+    names; it reads any other copy's key with ``.get``.
     """
 
     class ReadingForm(forms.Form):
@@ -2497,33 +2233,34 @@ def test_a_set_reading_its_form_its_own_way_defers_no_flat_copy(seam: str) -> No
 
     reading = type("ReadingBranchFilter", (branch,), namespace)
     reading.get_filters()
-    assert _snapshot(reading).deferred_copies == frozenset()
+    own = set(reading._unexpanded_filters())
+    assert _snapshot(reading).deferred_copies == frozenset(set(reading.base_filters) - own)
 
 
 @pytest.mark.django_db
-def test_a_flat_filter_queryset_reading_an_unsent_cleaned_key_finds_it() -> None:
-    """A consumer ``filter_queryset`` reading a flat key the request did not send gets its value."""
+def test_a_flat_filter_queryset_reads_only_the_flat_copies_its_request_names() -> None:
+    """A consumer ``filter_queryset`` finds a named flat copy's cleaned value and no unnamed one."""
     _seed_desk_ring_rows()
     base_branch = _desk_ring()["branch"]
-    seen: list[object] = []
+    seen: list[tuple[object, bool]] = []
 
     class ReadingBranchFilter(base_branch):
         @override
         def filter_queryset(self, queryset: QuerySet[_M]) -> QuerySet[_M]:
             cleaned_data: dict[str, object] = self.form.cleaned_data
-            seen.append(cleaned_data["desks__shelf__code"])
+            seen.append((cleaned_data.get("desks__shelf__code"), "desks__name" in cleaned_data))
             return super().filter_queryset(queryset)
 
     ReadingBranchFilter.get_filters()
     instance = _pipeline_instance(
         ReadingBranchFilter,
-        data={"name": "North"},
+        data={"name": "North", "desks__shelf__code": "N-1"},
         queryset=library_models.Branch.objects.order_by("pk"),
         request=HttpRequest(),
     )
 
     assert list(instance.qs.values_list("name", flat=True)) == ["North"]
-    assert seen == [""]
+    assert seen == [("N-1", False)]
 
 
 @pytest.mark.django_db
@@ -2593,15 +2330,24 @@ def _customizing_issue_filter(edit: str) -> type[FilterSet]:
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("edit", ["required", "checkbox"])
-def test_a_projected_copy_of_a_child_that_edits_its_filters_is_copied_by_every_request(
+@pytest.mark.parametrize(
+    ("edit", "named", "expected"),
+    [
+        ("required", {"issues__title_required": "B"}, ["Open Review"]),
+        ("checkbox", {"issues__open_only": "true"}, ["Closed Review"]),
+    ],
+    ids=["required", "checkbox"],
+)
+def test_a_projected_copy_of_a_child_that_edits_its_filters_acts_only_when_named(
     edit: str,
-    monkeypatch: pytest.MonkeyPatch,
+    named: dict[str, object],
+    expected: list[str],
 ) -> None:
-    """A child set whose ``__init__`` edits a filter keeps its projected copies up front.
+    """A child ``__init__`` edit reaches a parent request only through a copy the request names.
 
-    The projected copy's field is the edited child instance's, which may act on an
-    absent key, so a pipeline-built parent answers as one copying every filter.
+    The projected copy's field is the edited child instance's. A request that
+    does not name it holds no such field, so the edit neither refuses nor
+    constrains it; named, the edited field cleans the value sent.
     """
     issue_filter = _customizing_issue_filter(edit)
 
@@ -2612,35 +2358,24 @@ def test_a_projected_copy_of_a_child_that_edits_its_filters_is_copied_by_every_r
             model = library_models.Periodical
             fields = {"name": ["exact"]}
 
-    closed = library_models.Periodical.objects.create(name="Closed Review")
-    library_models.Issue.objects.create(periodical=closed, number=1, title="A", embargoed=True)
-    open_ = library_models.Periodical.objects.create(name="Open Review")
-    library_models.Issue.objects.create(periodical=open_, number=1, title="B", embargoed=False)
+    _seed_absence_periodicals()
     _register_plain_types(library_models.Issue)
     EditedPeriodicalFilter.get_filters()
-    snapshot = _snapshot(EditedPeriodicalFilter)
     edited = "issues__title_required" if edit == "required" else "issues__open_only"
-    assert edited not in snapshot.deferred_copies
+    assert edited in _snapshot(EditedPeriodicalFilter).deferred_copies
 
-    def answer() -> tuple[bool, list[str]]:
+    def answer(data: dict[str, object]) -> list[str]:
         instance = _pipeline_instance(
             EditedPeriodicalFilter,
-            data={"unrelated": "x"},
-            queryset=library_models.Periodical.objects.order_by("pk"),
+            data=data,
+            queryset=library_models.Periodical.objects.order_by("name"),
             request=HttpRequest(),
         )
-        if not instance.form.is_valid():
-            return False, sorted(instance.form.errors)
-        return True, list(instance.qs.values_list("name", flat=True))
+        assert instance.form.is_valid(), instance.form.errors
+        return list(instance.qs.values_list("name", flat=True))
 
-    deferring = answer()
-    monkeypatch.setattr(
-        EditedPeriodicalFilter,
-        "_expanded_snapshot",
-        dataclasses.replace(snapshot, deferred_copies=frozenset()),
-    )
-    expected = (False, [edited]) if edit == "required" else (True, ["Open Review"])
-    assert deferring == answer() == expected
+    assert answer({"unrelated": "x"}) == ["Closed Review", "Open Review"]
+    assert answer(named) == expected
 
 
 @pytest.mark.django_db
