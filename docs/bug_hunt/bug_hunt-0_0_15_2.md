@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 248 done, 176 to do.
+Progress: 249 done, 175 to do.
 
 ## Done
 
@@ -1135,6 +1135,16 @@ Progress: 248 done, 176 to do.
   eager-evaluation library root pins the raise
 - [x] 53. superseded by 429: a hand-written `@strawberry.field` returning a lazy QuerySet completes off the loop on the
   async executor, and the README async paragraph under `DjangoListField` says so
+- [x] 318. fixed: the cited row (`tests/filters/test_sets.py::test_an_unordered_meta_fields_expands_in_canonical_order[set
+  of lookups in a dict]` under `PYTHONHASHSEED=28`) already passes since `bf370934`; the residual is fixed here. Every
+  row that needs a set iterating out of canonical order now builds it through one shared helper,
+  `tests/_idioms.py::scrambled` (subsets x layouts: the constructor, `dict.fromkeys`, sets grown through padding, and
+  `frozenset` copies of them; fails loudly when none scrambles, and asserts the result really does), with
+  `canonical_order` beside it. The filters (`_CATEGORY_COLUMNS` plus `"id"`, both kinds), orders and utils rows use it,
+  the two `read_set_meta_fields` rows over 4-name pools, so the frozenset rows no longer flake (seed 10332), the orders
+  twin no longer flakes (4124 / 4176 / 18433), and the utils rows fail on every seed with `_sorted_meta_values`
+  unsorted (they passed on 25% / 50%). 0 misses over seeds 0..20000 for every pool used (3.14), 0..4999 on 3.10;
+  `tests/test_idioms.py` pins the helper
 
 ## Outside review of the fixes
 
@@ -1175,19 +1185,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 318. `tests/filters/test_sets.py::test_an_unordered_meta_fields_expands_in_canonical_order[set of lookups in a
-  dict]` fails under `PYTHONHASHSEED=28` ("no set over ('exact', 'icontains', 'istartswith', 'iendswith') iterates out
-  of canonical order"): its `_scrambled` helper cannot build an out-of-order set for every seed, so the row flakes with
-  the hash seed (seen at `feb83d59` and `144a64ee`; the code under test is not involved). Robustness row (test harness).
-  Found verifying 269. Fact-found at `09020e75`: the cited row and seed are already fixed by `bf370934` (padded
-  `_layouts` and `_scrambled` in `tests/filters/test_sets.py`); both observations predate it. Residual, same class: (a)
-  `_layouts` pads only `set`, so a 5-name `frozenset` row fails at `PYTHONHASHSEED=10332`; (b) the unfixed twin
-  `tests/orders/test_factories.py::_out_of_canonical_order_set` fails at seeds 4124 / 4176 / 18433; (c)
-  `tests/utils/test_inputs.py::test_read_set_meta_fields_canonicalizes_sets_without_mutating_source` and
-  `::..._sorts_a_lazy_set_as_the_set_it_stands_for` use 2-element sets and pass on about half the seeds with
-  `_sorted_meta_values` reverted. Proposed: one shared helper (`canonical_order`, `scrambled(kind, members, drop=())`,
-  padded layouts) in `tests/_idioms.py`, both old helpers deleted, `_CATEGORY_COLUMNS` plus `"id"`, the utils rows built
-  over 4-name pools; tick 318 citing `bf370934` and land the residual in the same change
 - [ ] 319. Unprobed cause: a child `GlobalIDFilter` subclass whose own `filter` binds the raw value
   (`qs.filter(title=value)`), reached through a `RelatedFilter`, answers `"plain"` with a matching parent flat
   (`books__gid`) and no row nested (`books: {gid: ...}`), before 269 and after it alike, against README's "the two
