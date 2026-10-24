@@ -40,6 +40,12 @@ declared primitive is a separate ``priceSpan: { range: { start, end } }`` field.
 column with the ``in`` lookup (``priceAmong: { in: [...] }``): the acceptance surface for
 a declared list filter, each element cleaned as ``price: { in }`` cleans its members.
 
+Text-pattern lookups (``iexact`` / ``contains`` / ``startswith`` / ``regex`` / ...) are
+published by a per-field ``"__all__"`` only on a text column (``label``).
+``NullableScalarSpecimenFilter`` declares some explicitly on ``occurred_at`` and
+``unsigned_big``: each such leaf is a ``String`` the backend matches against its text
+rendering of the column, beside the column-typed ``exact``.
+
 ``price_between``, ``occurred_between`` and ``occurred_in_boxes`` on ``ScalarSpecimenFilter``
 are django-filter's own range filters (``RangeFilter`` over ``price``,
 ``DateFromToRangeFilter`` over ``occurred_on``, and the same date filter over a plain
@@ -101,9 +107,11 @@ class ScalarSpecimenFilter(FilterSet):
         model = models.ScalarSpecimen
         # Every converted scalar except ``payload`` (JSONField has no
         # django-filter default). Each ``"__all__"`` expands to that field's
-        # full concrete-lookup set, exercising the lookup-expansion path
-        # across bool / float / Decimal / date / datetime / time / UUID /
-        # BigInt as well as the integer PK.
+        # concrete-lookup set, exercising the lookup-expansion path across
+        # bool / float / Decimal / date / datetime / time / UUID / BigInt as
+        # well as the integer PK. Only the text column ``label`` gets the
+        # text-pattern lookups (``iExact`` / ``contains`` / ``startsWith`` /
+        # ``regex`` / ...); every other column keeps its comparisons.
         fields = {
             "id": "__all__",
             "label": "__all__",
@@ -138,6 +146,18 @@ class NullableScalarSpecimenFilter(FilterSet):
             "occurred_on": "__all__",
             "external_id": "__all__",
             "signed_big": "__all__",
+            # Explicit text-pattern lookups on a datetime and an integer column:
+            # each pattern leaf is a ``String`` matched against the column's text
+            # rendering, beside the column-typed ``exact``.
+            "occurred_at": [
+                "exact",
+                "iexact",
+                "icontains",
+                "startswith",
+                "regex",
+                "iregex",
+            ],
+            "unsigned_big": ["exact", "contains"],
         }
 
 

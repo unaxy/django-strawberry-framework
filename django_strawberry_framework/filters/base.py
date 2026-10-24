@@ -19,6 +19,9 @@ five parity-floor primitives (spec-027 Decision 4):
   Each applies every member of the column's choice enum as a value, sent as an
   `EnumMemberValue` (`BLANK` is `""` on each lookup, a `"null"`-valued member
   matches `"null"`), while raw form data keeps django-filter's handling.
+- `TextPatternFilter`: the generated filter of a text-pattern lookup (`iexact`,
+  `contains`, `startswith`, `regex`, ...) on a non-text column, a `CharFilter`
+  whose leaf is typed `String`.
 - `LazyRelatedClassMixin`: re-exported from the package-root
   `sets_mixins` module (shared with the future order / aggregate sets);
   imported here so `RelatedFilter` and the `filters` public surface keep
@@ -754,6 +757,19 @@ class EnumLookupFilter(_EnumMemberFilterMixin, CharFilter):
     """
 
     field_class: type[CharField] = _EnumCharField
+
+
+class TextPatternFilter(CharFilter):
+    """The generated filter of a text-pattern lookup on a non-text column.
+
+    ``FilterSet.filter_for_lookup`` returns it for ``iexact``, the ``contains`` /
+    ``startswith`` / ``endswith`` families and ``regex`` / ``iregex`` listed on a column
+    whose package default filter is not a ``CharFilter`` (a date, time, number, Boolean or
+    UUID column): Django matches the pattern against the column's text rendering, so the
+    value is cleaned as text, exactly as ``CharFilter`` cleans it. The class is the marker
+    ``filters/inputs.py::_element_annotation`` reads to type the leaf ``String`` rather
+    than the column's scalar or choice enum.
+    """
 
 
 # A range filter takes exactly a lower and an upper bound (django-filter's ``RangeField`` too).

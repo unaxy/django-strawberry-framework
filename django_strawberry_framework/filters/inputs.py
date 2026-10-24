@@ -87,6 +87,7 @@ from .base import (
     RelatedFilter,
     RelationPkFilter,
     RelationPkMultipleFilter,
+    TextPatternFilter,
     TypedFilter,
     _bound_field_name,
     _EnumMemberFilterMixin,
@@ -485,6 +486,12 @@ def _element_annotation(
     to ``str``. Callers that need a different shape for a specific lookup (e.g.
     ``isnull`` is always boolean) handle that before calling this.
 
+    One lookup-driven arm comes first: a generated text-pattern leaf on a
+    non-text column (``FilterSet.filter_for_lookup`` gives it ``TextPatternFilter``)
+    is ``str``, never the column's scalar or choice enum, because the pattern is
+    matched against the column's text rendering. A declared filter or a
+    ``Meta.filter_overrides`` selection keeps the column-driven type.
+
     Known contract limit: a custom ``method=`` filter has no backing
     ``model_field``, so its element type is inferred from the
     ``django-filter`` form field and a CSV/list ``method=`` filter therefore
@@ -492,6 +499,8 @@ def _element_annotation(
     ``int``. To get a typed element on a method filter, back it with a model
     field (``field_name=``) or declare the input annotation explicitly.
     """
+    if truth.is_instance(filter_instance, TextPatternFilter):
+        return str
     if model_field is not None and getattr(model_field, "choices", None):
         type_name = _owner_type_name(owner_definition) or "Filter"
         return _choice_enum_from_filter(filter_instance, type_name, model_field)
