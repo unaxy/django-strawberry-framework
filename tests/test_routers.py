@@ -6671,6 +6671,83 @@ async def test_actor_without_is_authenticated_attribute_degrades_safely_to_unaut
     assert await consumers_module._actor_is_current(consumer) is True
 
 
+def _count_actor_reads(monkeypatch: pytest.MonkeyPatch) -> list[Mapping[str, object]]:
+    """Replace the session read with an authenticated stub; return the scopes it read.
+
+    No database is involved: the decision under test is whether a read happens at
+    all, so the stub answers an authenticated actor and records each call.
+    """
+    reads: list[Mapping[str, object]] = []
+
+    async def counted_refreshed_actor(scope: Mapping[str, object]) -> SimpleNamespace:
+        reads.append(scope)
+        return SimpleNamespace(is_authenticated=True)
+
+    monkeypatch.setattr(consumers_module, "_refreshed_actor", counted_refreshed_actor)
+    return reads
+
+
+@pytest.mark.parametrize(
+    ("age", "expected_reads"),
+    [
+        pytest.param(7.5, 0, id="younger-than-the-window"),
+        pytest.param(8.0, 1, id="exactly-the-window"),
+        pytest.param(8.5, 1, id="older-than-the-window"),
+    ],
+)
+async def test_the_window_authorizes_only_a_revalidation_strictly_younger_than_it(
+    monkeypatch: pytest.MonkeyPatch,
+    age: float,
+    expected_reads: int,
+) -> None:
+    """A cached revalidation is reused only while it is younger than the window.
+
+    The window is the age a successful revalidation may reach and still authorize a
+    checkpoint without a session read; "younger than" is strict, so a timestamp whose
+    age equals the window has expired and the checkpoint reads the session again. A
+    read rewrites the cached timestamp to the current clock. The clock is driven
+    through ``consumers._monotonic``, the module's documented test seam.
+
+    Fakeshop has no ``config/asgi.py`` or WebSocket mount (rungs 1-3). Live HTTP
+    sibling: ``examples/fakeshop/test_query/test_transport_api.py``.
+    """
+    reads = _count_actor_reads(monkeypatch)
+    stamped_at = 1000.0
+    now = stamped_at + age
+    monkeypatch.setattr(consumers_module, "_monotonic", lambda: now)
+    scope: dict[str, object] = {
+        "user": SimpleNamespace(is_authenticated=True),
+        consumers_module._REVALIDATED_AT_SCOPE_KEY: stamped_at,
+    }
+    consumer = _ConsumerState(scope, window=8.0)
+
+    assert await consumers_module._actor_is_current(consumer) is True
+    assert len(reads) == expected_reads
+    expected_stamp = now if expected_reads else stamped_at
+    assert scope[consumers_module._REVALIDATED_AT_SCOPE_KEY] == expected_stamp
+
+
+async def test_the_default_zero_window_never_writes_a_revalidation_timestamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``0.0`` window reads the session at every checkpoint and caches nothing.
+
+    With no window there is no cached revalidation to reuse, so a successful read
+    writes nothing to the scope: the revalidated-at key stays absent after the
+    checkpoint authorizes on a fresh read.
+
+    Fakeshop has no ``config/asgi.py`` or WebSocket mount (rungs 1-3). Live HTTP
+    sibling: ``examples/fakeshop/test_query/test_transport_api.py``.
+    """
+    reads = _count_actor_reads(monkeypatch)
+    scope: dict[str, object] = {"user": SimpleNamespace(is_authenticated=True)}
+    consumer = _ConsumerState(scope, window=0.0)
+
+    assert await consumers_module._actor_is_current(consumer) is True
+    assert len(reads) == 1
+    assert consumers_module._REVALIDATED_AT_SCOPE_KEY not in scope
+
+
 # ---------------------------------------------------------------------------
 # Frame hostility: the message-loop containment.
 #
