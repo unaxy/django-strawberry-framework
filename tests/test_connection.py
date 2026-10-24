@@ -673,25 +673,28 @@ def test_connection_type_for_generates_total_count_for_direct_relay_inheritance(
     assert "totalCount" in sdl
 
 
-# --- Argument absence when neither sidecar is declared -----------------------
+# --- Argument absence when a sidecar is not declared ---------------------------
 # Presence of ``filter:`` / ``orderBy:`` on shipped connections is live
-# (``test_connection_pagination_api.py``). No fakeshop connection omits BOTH
-# sidecars, so the neither-sidecar shape stays here.
+# (``test_connection_pagination_api.py``); the shapes omitting a sidecar stay here.
 
 
-def test_connection_field_omits_args_without_sidecars() -> None:
-    """A type with neither sidecar emits only the four Relay pagination args.
+@pytest.mark.parametrize("orderset", [None, _CategoryOrder], ids=["neither", "orderset-only"])
+def test_connection_field_omits_args_without_sidecars(orderset: type | None) -> None:
+    """A type with no ``filterset_class`` emits no ``filter:``, and none ``orderBy:`` without an orderset.
 
-    No shipped connection omits both sidecars (``GenreType`` declares both;
-    ``IssueType`` declares only ``orderset_class``). Live argument presence is
+    The four Relay pagination args are always there. Live argument presence is
     ``test_connection_pagination_api.py::test_root_connection_arguments_follow_declared_sidecars``.
     """
     schema = _field_schema(
-        _make_sidecar_node_type("NoSidecarNode", filterset=None, orderset=None),
+        _make_sidecar_node_type(
+            f"Sidecar{orderset is not None}Node",
+            filterset=None,
+            orderset=orderset,
+        ),
     )
     sdl = str(schema)
     assert "filter:" not in sdl
-    assert "orderBy:" not in sdl
+    assert ("orderBy:" in sdl) is (orderset is not None)
     # The four Relay pagination args are still present.
     for arg in (
         "before:",

@@ -87,7 +87,6 @@
 "django_strawberry_framework/filters/sets.py::FilterSet.filters" = { reportIncompatibleVariableOverride = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSet.get_fields" = { cast = 3, reportIncompatibleMethodOverride = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSetMetaclass.__new__" = { cast = 1 }
-"django_strawberry_framework/filters/sets.py::_absence_filters_nothing" = { cast = 1 }
 "django_strawberry_framework/filters/sets.py::_admitted_rows" = { cast = 1 }
 "django_strawberry_framework/filters/sets.py::_hop_model" = { cast = 3 }
 "django_strawberry_framework/filters/sets.py::_hop_relation" = { cast = 1 }
@@ -399,9 +398,9 @@
 "tests/filters/test_sets.py::_CrKioskDesk.Meta" = { reportIncompatibleVariableOverride = 1 }
 "tests/filters/test_sets.py::_CrOwnKeyDesk.Meta" = { reportIncompatibleVariableOverride = 1 }
 "tests/filters/test_sets.py::_ModelChoiceInFilter" = { reportUnsafeMultipleInheritance = 1 }
-"tests/filters/test_sets.py::test_a_choice_filter_whose_null_value_is_the_absent_value_runs_its_null_branch" = { cast = 1 }
 "tests/filters/test_sets.py::test_a_deferred_copy_copied_later_is_bound_to_the_instance_model" = { cast = 2 }
-"tests/filters/test_sets.py::test_a_set_reading_its_form_its_own_way_defers_no_flat_copy" = { cast = 2 }
+"tests/filters/test_sets.py::test_a_set_overriding_a_form_reading_seam_defers_every_flat_copy" = { cast = 2 }
+"tests/filters/test_sets.py::test_an_unnamed_flat_copy_reads_no_hop_visibility_under_apply_async.AsyncOnlyIssueType.get_queryset" = { reportIncompatibleMethodOverride = 1 }
 "tests/filters/test_sets.py::test_apply_async_nested_or_branch_with_async_get_queryset_does_not_raise_sync_misuse.ShelfType.get_queryset" = { reportIncompatibleMethodOverride = 1 }
 "tests/filters/test_sets.py::test_dynamic_csv_subclass_with_added_behavior_fails_closed._TwoBaseFirstNotCsv" = { reportIncompatibleVariableOverride = 1 }
 "tests/filters/test_sets.py::test_evaluate_logic_tree_caps_a_non_int_knob_at_the_neutral_default.CategoryFilter" = { reportAssignmentType = 1 }

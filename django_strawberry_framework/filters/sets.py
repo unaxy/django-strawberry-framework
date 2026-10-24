@@ -16,7 +16,6 @@ resolved filter instances, not from a parallel map).
 from __future__ import annotations
 
 import copy
-import inspect
 from collections import OrderedDict
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -35,13 +34,11 @@ from typing import (
 )
 
 import django_filters
-from django import forms
 from django.core.exceptions import FieldDoesNotExist, FieldError
 from django.db import models
 from django.db.models import Exists, Q
 from django.db.models.constants import LOOKUP_SEP
 from django.db.models.fields.related import ManyToManyRel, ManyToOneRel, OneToOneRel
-from django.utils.datastructures import MultiValueDict
 from django_filters import (
     BaseInFilter,
     BaseRangeFilter,
@@ -62,8 +59,6 @@ from django_filters import (
 )
 from django_filters.conf import settings as _df_settings
 from django_filters.exceptions import FieldLookupError
-from django_filters.fields import BaseCSVField
-from django_filters.filters import FilterMethod
 from django_filters.filterset import FilterSetOptions
 from django_filters.utils import get_model_field, resolve_field, try_dbfield
 from graphql import GraphQLError
@@ -155,7 +150,6 @@ from django_strawberry_framework.utils.relations import (
     path_traverses_to_many,
     relation_kind,
 )
-from django_strawberry_framework.utils.typing import object_result
 
 from .base import (
     _GLOBALID_RELATION_PK_ATTR,
@@ -168,18 +162,15 @@ from .base import (
     IntegerRangeFilter,
     ListFilter,
     MembershipInFilter,
-    RangeField,
     RangeFilter,
     RelatedFilter,
     RelationPkFilter,
     RelationPkMultipleFilter,
     _bound_field_name,
-    _ElementField,
-    _EnumMemberFilterMixin,
     _relation_uses_non_pk_to_field,
-    _RelationIdentityListField,
     membership_in_filter_class,
     multi_widget_keys,
+    unkept_form_field,
 )
 from .inputs import (
     LOGIC_OPERATORS,
@@ -210,7 +201,7 @@ if TYPE_CHECKING:
     )
     from typing import TypeAlias
 
-    from django.core.files.uploadedfile import UploadedFile
+    from django import forms
     from django.forms import Field as FormField
     from django.http import HttpRequest
     from typing_extensions import Self, TypeIs
@@ -1161,14 +1152,16 @@ class ExpansionSnapshot:
       expansions are absent.
     - ``deferred_copies`` -- the names of ``filters`` an instance copies only
       when it reads them (``FilterSet.__init__``): every ``RelatedFilter``-expanded
-      copy whose absence from the request filters nothing
-      (``_absence_filters_nothing``, decided once here). Any other copy (a
-      ``required`` one, a checkbox, a consumer ``filter``, a form field cleaning
-      an absent key to a value that filters) would still act on a request that
-      does not name it, so every instance copies it up front, as it
-      does the set's own filters; a set that reads its form its own way
-      (``FilterSet._reads_its_form_its_own_way``) defers none. Only an instance
-      the package's request pipeline builds defers (``_pipeline_built``).
+      copy. A flat copy is a spelling of the request, not a field of the set's
+      form: a request that does not name it neither binds nor runs it, whatever
+      its absence would do (a ``required`` one, a checkbox, a consumer
+      ``filter``, a form field cleaning an absent key to a value that filters).
+      Such a leaf acts only on the form of the set that declares it, at that
+      set's root or inside an active nested branch. Only an instance the
+      package's request pipeline builds defers (``_pipeline_built``).
+    - ``copy_keys`` -- each form-data key a deferred copy's widget reads, mapped to
+      the copies reading it (``_copy_form_keys``), so a request names a copy by
+      exactly the keys its form field binds (``_named_flat_copies``).
 
     The read-only mapping keeps a snapshot HOLDER from rewriting the published
     classification; it is not a claim that the filter objects themselves are frozen.
@@ -1186,145 +1179,57 @@ class ExpansionSnapshot:
 
     filters: Mapping[str, Filter]
     candidates: Mapping[str, CandidateFilterMetadata]
-    deferred_copies: frozenset[str] = frozenset()
+    deferred_copies: frozenset[str]
+    copy_keys: Mapping[str, frozenset[str]]
+
+
+def _widget_keys(filter_instance: Filter, name: str) -> list[str]:
+    """Return the form-data keys the form field of ``filter_instance`` reads under ``name``.
+
+    A multi-widget reads its own keys (``filters/base.py::multi_widget_keys``: ``_0`` /
+    ``_1``, ``_min`` / ``_max``, or any suffix a consumer widget declares, ``__low``
+    included); any other widget reads ``name``. The field is built without writing to
+    the class-level filter (``filters/base.py::unkept_form_field``). A field that cannot
+    be built here (a callable ``queryset`` resolves only with the request) reads ``name``,
+    the key a single-value widget reads.
+    """
+    try:
+        widget = read_attr(unkept_form_field(filter_instance), "widget")
+    except Exception:  # noqa: BLE001 - consumer field code may raise anything; read the bare name
+        return [name]
+    return multi_widget_keys(widget, name) or [name]
+
+
+def _copy_form_keys(
+    filters: Mapping[str, Filter],
+    copies: frozenset[str],
+) -> Mapping[str, frozenset[str]]:
+    """Map each form-data key a copy in ``copies`` reads to the copies reading it (``_widget_keys``)."""
+    readers: dict[str, set[str]] = {}
+    for name in copies:
+        for key in _widget_keys(filters[name], name):
+            readers.setdefault(key, set()).add(name)
+    return MappingProxyType({key: frozenset(names) for key, names in readers.items()})
 
 
 def _named_flat_copies(
     data: Mapping[str, object],
-    deferred: frozenset[str],
+    copy_keys: Mapping[str, frozenset[str]],
     prefix: str | None,
 ) -> list[str]:
-    """Return the deferred copies a request's form data names, by key or by a widget-suffixed key.
+    """Return the deferred copies a request's form data names, by the exact keys their widgets read.
 
-    A form field reads the key ``<prefix>-<name>`` (``<name>`` without a
-    prefix), and a multi-value widget reads ``<name><suffix>`` with a suffix
-    opening on one underscore (``_0`` / ``_1``, ``_min`` / ``_max``, ``_after`` /
-    ``_before``, ``_lookup``), so the part of a key before such an underscore
-    counts too; a ``__`` is a relation separator, never a suffix. A name the data
-    turns out not to carry only adds a form field that cleans to an empty value.
+    A form field reads ``<prefix>-<key>`` (``<key>`` without a prefix) for each key
+    its widget reads (``ExpansionSnapshot.copy_keys``). A key no copy reads names
+    nothing: no prefix of it, before a suffix or a relation separator, is read
+    as a name.
     """
     lead = f"{prefix}-" if prefix else ""
     named: list[str] = []
     for raw in data:
-        if not raw.startswith(lead):
-            continue
-        key = raw[len(lead) :]
-        heads = [
-            key[:end]
-            for end, char in enumerate(key)
-            if char == "_" and key[end - 1 : end] != "_" and key[end + 1 : end + 2] != "_"
-        ]
-        named.extend(head for head in (key, *heads) if head in deferred)
+        if raw.startswith(lead):
+            named.extend(copy_keys.get(raw[len(lead) :], ()))
     return named
-
-
-# The modules whose ``Filter.filter`` implementations skip an empty value
-# (django-filter's ``EMPTY_VALUES`` rule, or the package's ``None`` rule).
-_EMPTY_SKIPPING_FILTER_MODULES: tuple[str, ...] = (
-    "django_filters.",
-    "django_strawberry_framework.",
-)
-
-
-def _absence_filters_nothing(
-    name: str,
-    filter_instance: Filter,
-    absent_by_widget: dict[type[forms.Widget], object],
-) -> bool:
-    """Whether a request that does not name this flat copy would get nothing from copying it.
-
-    Decided once per copy when the expansion is published; a copy for which this
-    is ``False`` is copied by every request, as django-filter copies every filter.
-    The proof describes the filter the request runs (``_runs_as``: the copy
-    itself, or for a projected copy the child filter it runs inside a child
-    instance) and the form field that filter hands the form: the field the
-    filter already built and cached (django-filter's ``Filter.field`` keeps it
-    in ``_field``, and every copy keeps it), else the one its ``field_class``
-    builds from its ``extra``. Absence is a no-op only when every link holds:
-
-    - the filter is not ``required`` (the form would refuse the absent key) and
-      not ``disabled`` (a disabled field cleans to its ``initial``), in its
-      ``extra`` and on a cached field;
-    - its ``filter`` and its ``field`` are django-filter's or the package's (a
-      ``method=`` filter runs through django-filter's ``FilterMethod``);
-    - a cached field is a form field that sets no ``empty_values`` of its own and
-      holds no attribute of its own where its class defines a method (an
-      instance ``clean``, ``to_python`` or ``compress``; ``_shadows_a_method``);
-    - its widget (the cached field's, else the declared one, else its field
-      class's) is Django's, django-filter's or the package's, reports the key
-      omitted from empty data (``Widget.value_omitted_from_data``: a
-      ``CheckboxInput`` reads an absent key as ``False``, a ``SelectMultiple``
-      cannot tell absent from empty) and names no sub-key with a ``__`` suffix,
-      which ``_named_flat_copies`` reads as a relation path; a widget that
-      cannot be built or asked counts as not omitted;
-    - its form field cleans the value that widget reads for an absent key to a
-      value proven from Django's, django-filter's or the package's own field
-      classes (``_absent_cleaned_value``): a consumer field class, or an
-      ``empty_value`` the field returns for absence (the cached field's own,
-      else the one in ``extra``), may clean it to a value that constrains;
-    - a ``ChoiceFilter`` whose ``null_value`` is that cleaned value would run its
-      ``IS NULL`` branch before any empty skip;
-    - its ``filter`` skips that cleaned value (``_filter_skips``), and so does a
-      ``filter`` the filter holds of its own (``_own_filter_skips``: only the
-      ``FilterMethod`` a ``method=`` installs is proven).
-
-    Every other member the proof reads from the filter is read through the
-    instance (``extra``, ``field_class``, ``null_value``, the cached ``_field``);
-    ``field`` is a property, which no instance attribute can replace.
-    """
-    source = _runs_as(filter_instance)
-    if source is None:
-        return False
-    extra = source.extra
-    if extra.get("required") or extra.get("disabled"):
-        return False
-    filter_class = type(source)
-    if not (
-        _defined_in(getattr(filter_class, "filter", None), _EMPTY_SKIPPING_FILTER_MODULES)
-        and _defined_in(_defining_class(filter_class, "field"), _EMPTY_SKIPPING_FILTER_MODULES)
-    ):
-        return False
-    # django-filter's ``Filter.field`` builds the form field once and caches it in ``_field``.
-    cached = (truth.instance_dict(source) or {}).get("_field", _UNPROVEN)
-    if cached is _UNPROVEN:
-        field_class: type[forms.Field] = source.field_class
-        # The widget the copy's form field builds: the declared one, else its field class's.
-        widget = cast(
-            "forms.Widget | type[forms.Widget]",
-            extra.get("widget") or field_class.widget,
-        )
-        built_from: Mapping[str, object] = extra
-    elif (
-        not isinstance(cached, forms.Field)
-        or cached.required
-        or cached.disabled
-        or "empty_values" in (truth.instance_dict(cached) or {})
-        or _shadows_a_method(cached)
-        # django-stubs type a field's ``widget`` as ``Any``; ``Field.__init__`` builds an instance.
-        or not isinstance(cached_widget := object_result(getattr, cached, "widget"), forms.Widget)
-    ):
-        return False
-    else:
-        field_class = type(cached)
-        widget = cached_widget
-        built_from = truth.instance_state(cached)
-    if isinstance(widget, type):
-        if widget not in absent_by_widget:
-            absent_by_widget[widget] = _absent_widget_value(widget, name)
-        raw = absent_by_widget[widget]
-    else:
-        raw = _absent_widget_value(widget, name)
-    if raw is _UNPROVEN:
-        return False
-    absent = _absent_cleaned_value(field_class, built_from, raw)
-    if absent is _UNPROVEN:
-        return False
-    if isinstance(source, ChoiceFilter) and _null_value_is_absent(
-        read_attr(source, "null_value"),
-        absent,
-    ):
-        return False
-    return _filter_skips(filter_class, absent) and _own_filter_skips(source, absent)
 
 
 def _own_filter(filter_instance: Filter) -> object | None:
@@ -1342,250 +1247,6 @@ def _own_filter(filter_instance: Filter) -> object | None:
     override is not one.
     """
     return (truth.instance_dict(filter_instance) or {}).get("filter")
-
-
-def _own_filter_skips(source: Filter, absent: object) -> bool:
-    """Whether the ``filter`` ``source`` holds of its own, if any, applies no constraint for ``absent``.
-
-    ``absent`` is a value the class's ``filter`` skips (``_filter_skips``); the
-    instance ``filter`` (``_own_filter``) replaces the class's. The one proven
-    is the ``FilterMethod`` a ``method=`` installs: django-filter's, which
-    skips every empty value, or the package's empty-list-aware one, which
-    skips only ``None``; it must be bound to ``source`` itself and every class in
-    its MRO must be django-filter's or the package's. Any other instance
-    ``filter`` is unproven. Nothing is called.
-    """
-    own = _own_filter(source)
-    if own is None:
-        return True
-    if not (
-        isinstance(own, FilterMethod)
-        and own.f is source
-        and all(
-            _defined_in(klass, _EMPTY_SKIPPING_FILTER_MODULES)
-            for klass in truth.mro(own)
-            if klass is not object
-        )
-    ):
-        return False
-    return absent is None or _defining_class(type(own), "__call__") is FilterMethod
-
-
-def _runs_as(filter_instance: Filter) -> Filter | None:
-    """Return the class-level filter a request runs for this flat copy, else ``None``.
-
-    A plain copy runs a deep copy of itself. A projected copy runs, inside a
-    child instance, a copy of the filter its child set publishes under the
-    projection's name (``ProjectedChildFilter.field``), which may be projected in
-    turn, one hop deeper (each hop's name is shorter, so the walk ends). ``None``
-    when a child set on the way edits its instances' filters
-    (``FilterSet._customizes_instances``), so what it publishes does not describe
-    what runs, or when it publishes no filter under that name.
-    """
-    source: Filter | None = filter_instance
-    while isinstance(source, ProjectedChildFilter):
-        projection = source._projection
-        if projection.filterset._customizes_instances():
-            return None
-        source = projection.filterset.base_filters.get(projection.name)
-    return source
-
-
-def _shadows_a_method(instance: object) -> bool:
-    """Whether ``instance`` holds an attribute of its own where its class defines a method.
-
-    Such an attribute replaces the method for that instance (an instance
-    ``clean``, ``to_python``, ``compress`` or ``value_from_datadict``), so the
-    class no longer says what the instance runs. Read from the instance's own
-    namespace and the class's raw attributes; nothing is called.
-    """
-    klass = truth.class_of(instance)
-    return any(
-        inspect.isroutine(truth.static_attr(klass, key, None))
-        for key in truth.instance_dict(instance) or {}
-    )
-
-
-# The modules whose widgets read form data the way ``_named_flat_copies`` names it, and
-# whose form field classes clean an absent key as ``_absent_cleaned_value`` states.
-_FORM_DATA_MODULES: tuple[str, ...] = ("django.forms.", *_EMPTY_SKIPPING_FILTER_MODULES)
-
-# What a proof helper returns when it cannot establish a value statically.
-_UNPROVEN: object = object()
-
-
-def _defined_in(member: object, modules: tuple[str, ...]) -> bool:
-    """Whether ``member`` (a function or class) is defined in one of ``modules`` (name prefixes)."""
-    return member is not None and truth.module(member).startswith(modules)
-
-
-def _defining_class(klass: type[object], attribute: str) -> type[object] | None:
-    """Return the first class in ``klass``'s MRO whose own namespace defines ``attribute``."""
-    return next((base for base in truth.mro(klass) if attribute in truth.class_dict(base)), None)
-
-
-def _absent_widget_value(widget: forms.Widget | type[forms.Widget], name: str) -> object:
-    """Return what ``widget`` (built when a class) reads for an absent key; ``_UNPROVEN`` when unread.
-
-    Its data-reading methods must be Django's, django-filter's or the package's,
-    the built widget must hold no attribute of its own in place of a method
-    (``_shadows_a_method``), ``value_omitted_from_data({}, {}, name)`` must be
-    ``True``, and a multi-widget must read no key whose part after ``name`` opens
-    with ``__`` (``filters/base.py::multi_widget_keys``; ``_named_flat_copies`` reads
-    one as a relation path); ``_UNPROVEN`` otherwise, and on a raise.
-    """
-    widget_class = widget if isinstance(widget, type) else type(widget)
-    if not (
-        _defined_in(widget_class.value_from_datadict, _FORM_DATA_MODULES)
-        and _defined_in(widget_class.value_omitted_from_data, _FORM_DATA_MODULES)
-    ):
-        return _UNPROVEN
-    try:
-        built = widget() if isinstance(widget, type) else widget
-        if _shadows_a_method(built):
-            return _UNPROVEN
-        keys = multi_widget_keys(built, name) or []
-        if any(key[len(name) :].startswith("__") for key in keys):
-            return _UNPROVEN
-        no_files: MultiValueDict[str, UploadedFile[bytes] | UploadedFile[str]] = MultiValueDict()
-        if built.value_omitted_from_data({}, no_files, name) is not True:
-            return _UNPROVEN
-        return object_result(built.value_from_datadict, {}, no_files, name)
-    except Exception:  # noqa: BLE001 - consumer widget code may raise anything; fails closed
-        return _UNPROVEN
-
-
-# Form field families, each a subclass of Django's / django-filter's / the package's own,
-# whose ``clean`` returns ``None`` for an absent key's ``None``: each ``to_python`` maps an
-# empty value to ``None`` (``BaseCSVField.clean`` returns it before its element cleaning).
-_NONE_CLEANING_FIELDS: tuple[type[forms.Field], ...] = (
-    BaseCSVField,
-    forms.IntegerField,
-    forms.DateField,
-    forms.TimeField,
-    forms.DateTimeField,
-    forms.DurationField,
-    forms.NullBooleanField,
-    forms.ModelChoiceField,
-    RangeField,
-    _ElementField,
-    _RelationIdentityListField,
-)
-
-
-def _absent_cleaned_value(
-    field_class: type[forms.Field],
-    built_from: Mapping[str, object],
-    raw: object,
-) -> object:
-    """Return what a ``field_class`` form field cleans ``raw`` to, else ``_UNPROVEN``.
-
-    ``raw`` is the value the copy's widget reads for an absent key: ``None``, or one
-    ``None`` per sub-widget of a multi-widget. ``built_from`` is where the field's
-    ``empty_value`` is read: the filter's ``extra`` the field is built from, or a
-    built field's own attributes. Proven statically, running no field
-    code: every class in ``field_class``'s MRO is Django's, django-filter's or the
-    package's (a consumer subclass may override ``clean`` / ``to_python`` /
-    ``validate``, its ``__init__``, or ``empty_values``), and the value then follows
-    from the family the class belongs to:
-
-    - a ``MultiValueField`` folds a value of only ``None`` into ``compress([])``
-      before any sub-field cleans, and every ``compress`` of those modules but the
-      abstract base's returns ``None`` for it;
-    - a ``CharField`` / ``TypedChoiceField`` returns its ``empty_value`` (``""``
-      unless ``built_from`` sets one), a ``TypedMultipleChoiceField`` its ``empty_value``
-      (``[]``), a ``BooleanField`` that is not a ``NullBooleanField`` ``False``, a
-      ``MultipleChoiceField`` ``[]``, any other ``ChoiceField`` ``""``, and each of
-      ``_NONE_CLEANING_FIELDS`` (and ``Field`` itself) ``None``;
-    - any other class (a ``FileField`` cleans absence to its ``initial``, a
-      ``ComboField`` through its sub-fields, a ``ModelMultipleChoiceField`` to a
-      queryset) is unproven, as is a multi-widget value reaching a single-value
-      field (only the package's ``RangeField`` folds its pair to ``None``).
-    """
-    if not all(
-        _defined_in(klass, _FORM_DATA_MODULES)
-        for klass in truth.mro(field_class)
-        if klass is not object
-    ):
-        return _UNPROVEN
-    if issubclass(field_class, forms.MultiValueField):
-        if not (raw is None or (is_list_or_tuple(raw) and all(item is None for item in raw))):
-            return _UNPROVEN
-        if _defining_class(field_class, "compress") is forms.MultiValueField:
-            return _UNPROVEN
-        return None
-    if raw is not None:
-        if issubclass(field_class, RangeField) and raw in RangeField.empty_values:
-            return None
-        return _UNPROVEN
-    # A ``ModelChoiceField`` subclass, but it cleans absence to an empty queryset.
-    if issubclass(field_class, forms.ModelMultipleChoiceField):
-        return _UNPROVEN
-    if issubclass(field_class, _NONE_CLEANING_FIELDS) or field_class is forms.Field:
-        return None
-    if issubclass(field_class, forms.TypedMultipleChoiceField):
-        return built_from.get("empty_value", [])
-    if issubclass(field_class, (forms.CharField, forms.TypedChoiceField)):
-        return built_from.get("empty_value", "")
-    if issubclass(field_class, forms.BooleanField) and not issubclass(
-        field_class,
-        forms.NullBooleanField,
-    ):
-        return False
-    if issubclass(field_class, forms.MultipleChoiceField):
-        return []
-    if issubclass(field_class, forms.ChoiceField):
-        return ""
-    return _UNPROVEN
-
-
-def _null_value_is_absent(null_value: object, absent: object) -> bool:
-    """Whether a ``ChoiceFilter``'s ``null_value`` is ``absent``, the value an absent key cleans to.
-
-    ``ChoiceFilter.filter`` compares the value with ``null_value`` before any
-    empty skip. A ``null_value`` or absent value that is neither ``None`` nor a
-    plain ``str`` counts as matching: comparing it would run its own ``__eq__``.
-    """
-    if null_value is None or absent is None:
-        return null_value is absent
-    if type(null_value) is not str or type(absent) is not str:
-        return True
-    return null_value == absent
-
-
-# The built-in types whose empty instances django-filter's filters skip (``EMPTY_VALUES``).
-_BUILTIN_EMPTY_TYPES: truth.IdentitySet[type[object]] = truth.IdentitySet(
-    (
-        str,
-        list,
-        tuple,
-        dict,
-    ),
-)
-
-
-def _filter_skips(filter_class: type[object], absent: object) -> bool:
-    """Whether ``filter_class``'s ``filter`` applies no constraint for ``absent``.
-
-    Every ``filter`` of django-filter's and of the package's skips ``None``.
-    django-filter's also skip any other empty value (``EMPTY_VALUES``, or a falsy
-    one); the package's need not (an explicit ``[]`` matches nothing on a
-    membership filter), so only ``None`` counts there. An enum-member filter
-    hands every value but its marker to the django-filter ``filter`` after it.
-    Only a built-in empty value counts (``""``, ``[]``, ``()``, ``{}``), so no
-    comparison runs a value's own ``__eq__``.
-    """
-    if absent is None:
-        return True
-    if not truth.is_exact_one_of(absent, _BUILTIN_EMPTY_TYPES) or absent:
-        return False
-    filters = (
-        method
-        for base in truth.mro(filter_class)
-        if (method := truth.class_dict(base).get("filter")) is not None
-        and method is not truth.class_dict(_EnumMemberFilterMixin)["filter"]
-    )
-    return _defined_in(next(filters, None), ("django_filters.",))
 
 
 def _candidate_metadata_for(
@@ -2689,13 +2350,16 @@ class FilterSet(
     _field_type_suffix: str = "FilterInputType"
 
     # The filters this instance has copied, by name (``filters``' storage).
-    # While ``_filters_settled`` is ``False`` it holds the set's own filters, its
-    # copies whose absence acts and the flat copies the data names, in class order,
-    # plus any other copy read since by name (``_filter_named``), and
-    # ``_copy_source`` is the class's ``base_filters`` the rest are copied from.
+    # While ``_filters_settled`` is ``False`` it holds the set's own filters and
+    # the flat copies the data names, in class order, plus any other copy read
+    # since by name (``_filter_named``), and ``_copy_source`` is the class's
+    # ``base_filters`` the rest are copied from.
     _copied_filters: OrderedDict[str, Filter]
     _copy_source: Mapping[str, Filter]
     _filters_settled: bool = True
+    # The flat copies a pipeline-built instance's data does not name: never on
+    # its bound form (``get_form_class``) and never run (``_apply_flat_leaves``).
+    _unnamed_copies: frozenset[str] = frozenset()
 
     def __init__(
         self,
@@ -2715,28 +2379,30 @@ class FilterSet(
         projected leaf runs in) defers; any other construction (a django-filter
         view, DRF's ``DjangoFilterBackend``, a consumer's own call) copies every
         filter as django-filter does, so its form renders every field. On a
-        deferring instance the deep copy covers the set's own filters, the copies
-        whose absence would still act (``ExpansionSnapshot.deferred_copies`` leaves
-        them out) and the deferred copies the data names
-        (``_named_flat_copies``); reading ``filters`` copies the rest, in the
-        class's order, and a package read by name copies only that one
-        (``_filter_named``). A bound form holds only what was copied: an absent
-        deferred copy cleans to an empty value, which filters nothing. A subclass
-        ``__init__`` editing ``self.filters`` reads every filter copied, so its
-        edits land on the copies the request runs.
+        deferring instance the deep copy covers the set's own filters and the
+        flat copies the data names (``_named_flat_copies``); reading ``filters``
+        copies the rest, in the class's order, and a package read by name copies
+        only that one (``_filter_named``). A flat copy the data does not name
+        (``_unnamed_copies``) is not a field of the bound form and applies
+        nothing, whatever its absence would do: a ``required``, disabled,
+        checkbox, ``empty_value``, ``null_value`` or consumer-``filter`` leaf acts
+        only on the form of the set that declares it. A subclass ``__init__``
+        editing ``self.filters`` reads every filter copied, so its edits land on
+        the copies the request runs.
         """
         cls = type(self)
         snapshot = cls._expansion_snapshot()
         pipeline_built = _pipeline_build_var.get()
         _ = _pipeline_build_var.set(False)
-        deferred = frozenset[str]() if snapshot is None else snapshot.deferred_copies
-        if not deferred or not pipeline_built:
+        if snapshot is None or not snapshot.deferred_copies or not pipeline_built:
             # basedpyright: typeshed types ``data`` as a ``dict`` or ``QueryDict``; upstream
             # stores the mapping and its form reads it as one. It rejects a ``Mapping``
             super().__init__(data, queryset, request=request, prefix=prefix)  # pyright: ignore[reportArgumentType]
             return
         source = cls.base_filters
-        named = frozenset(_named_flat_copies(data, deferred, prefix) if data else ())
+        deferred = snapshot.deferred_copies
+        named = frozenset(_named_flat_copies(data, snapshot.copy_keys, prefix) if data else ())
+        self._unnamed_copies = deferred - named
         # ``BaseFilterSet.__init__`` deep-copies ``self.base_filters`` into
         # ``self.filters`` and binds each copy; an instance attribute shadows the
         # class's for that one read.
@@ -2793,12 +2459,19 @@ class FilterSet(
 
     @override
     def get_form_class(self) -> type[forms.Form]:
-        """django-filter's form class; a bound one holds only the filters this instance copied."""
-        if self._filters_settled or not self.is_bound:
+        """django-filter's form class; a bound one holds no flat copy the data does not name.
+
+        A pipeline-built bound instance's form holds the set's own filters and
+        the flat copies its data names, in the class's order, also once a
+        subclass ``__init__`` has read ``self.filters`` (which copies every
+        filter): an unnamed copy (``_unnamed_copies``) is never a field.
+        """
+        if not self.is_bound or (self._filters_settled and not self._unnamed_copies):
             return super().get_form_class()
         copied = self._copied_filters
+        names = copied if self._filters_settled else (n for n in self._copy_source if n in copied)
         fields = OrderedDict(
-            (name, copied[name].field) for name in self._copy_source if name in copied
+            (name, copied[name].field) for name in names if name not in self._unnamed_copies
         )
         return type(f"{truth.kind(self)}Form", (self._meta.form,), fields)
 
@@ -2942,23 +2615,15 @@ class FilterSet(
             ):
                 cls._expanded_filters = all_filters
                 own = cls._unexpanded_filters()
-                absent_by_widget: dict[type[forms.Widget], object] = {}
+                deferred = frozenset(name for name in all_filters if name not in own)
                 cls._expanded_snapshot = ExpansionSnapshot(
                     # The snapshot exposes a READ-ONLY view of the filter map;
                     # the mutable ``all_filters`` is what django-filter needs on
                     # ``base_filters`` / the ``_expanded_filters`` cache.
                     filters=MappingProxyType(all_filters),
                     candidates=MappingProxyType(candidates),
-                    # A set that reads its form its own way may read any cleaned
-                    # key, so it defers nothing (``_reads_its_form_its_own_way``).
-                    deferred_copies=frozenset(
-                        name
-                        for name, filter_instance in all_filters.items()
-                        if name not in own
-                        and _absence_filters_nothing(name, filter_instance, absent_by_widget)
-                    )
-                    if not cls._reads_its_form_its_own_way()
-                    else frozenset(),
+                    deferred_copies=deferred,
+                    copy_keys=_copy_form_keys(all_filters, deferred),
                 )
                 cls.base_filters = all_filters
             return all_filters
@@ -3705,33 +3370,6 @@ class FilterSet(
 
     # The generation seams a consumer may override to change the filters a class generates.
     _GENERATION_SEAMS: ClassVar[tuple[str, ...]] = ("filter_for_field", "filter_for_lookup")
-
-    # The request seams a consumer may override to read ``self.form`` /
-    # ``cleaned_data`` / ``self.filters`` by key (``_reads_its_form_its_own_way``).
-    _FORM_READING_SEAMS: ClassVar[tuple[str, ...]] = (
-        "filter_queryset",
-        "qs",
-        "form",
-        "get_form_class",
-        "errors",
-        "is_valid",
-    )
-
-    @classmethod
-    def _reads_its_form_its_own_way(cls) -> bool:
-        """Whether this class may read a flat copy's cleaned value a request did not name.
-
-        True when it declares its own ``Meta.form`` (whose ``clean`` may read any
-        key) or overrides one of ``_FORM_READING_SEAMS``
-        (``utils/truth.py::overrides`` against ``FilterSet``). Such a class defers
-        no flat copy, so every key its code reads is present as django-filter
-        would make it.
-        """
-        return cls._meta.form is not forms.Form or truth.overrides(
-            cls,
-            FilterSet,
-            *cls._FORM_READING_SEAMS,
-        )
 
     @classmethod
     def _customizes_instances(cls) -> bool:
@@ -5634,7 +5272,9 @@ class FilterSet(
         """Apply flat leaves, mirroring ``BaseFilterSet.filter_queryset`` exactly.
 
         Iterates ``self.form.cleaned_data`` in insertion order (upstream's
-        order). A leaf whose ORM path walks a declared ``RelatedFilter`` hop (into a
+        order), skipping a flat copy the request did not name
+        (``_unnamed_copies``), which a consumer form seam may have put on the
+        form. A leaf whose ORM path walks a declared ``RelatedFilter`` hop (into a
         target column, or onto the relation's key; ``_flat_leaf_walk``) takes the
         branch path FIRST (``_apply_relation_leaf``): it answers over the rows each
         hop's target visibility and explicit ``queryset=`` admit, so it is never
@@ -5719,7 +5359,11 @@ class FilterSet(
         candidates: Mapping[str, CandidateFilterMetadata] = (
             snapshot.candidates if snapshot is not None else {}
         )
-        for name, value in _cleaned_items(self.form):
+        unnamed = self._unnamed_copies
+        named_items = [
+            (name, value) for name, value in _cleaned_items(self.form) if name not in unnamed
+        ]
+        for name, value in named_items:
             candidate = candidates.get(name)
             filter_instance = self._filter_named(name)
             if type(self)._flat_leaf_walk(filter_instance) is not None:

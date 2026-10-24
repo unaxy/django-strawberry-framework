@@ -47,8 +47,8 @@ two-box ``MultiWidget``), each taking ``{ exact: { start, end } }``: the accepta
 for a range input sent under the keys the filter's widget reads (``_min`` / ``_max``,
 ``_after`` / ``_before``, ``_0`` / ``_1``). ``price_in_underscored_boxes`` is django-filter's
 ``RangeFilter`` over a consumer ``SuffixedMultiWidget`` whose suffixes open with ``_``, so
-it reads ``<name>__low`` / ``<name>__high``: keys the flat-copy scan would read as a
-relation path, so its flat ``partner`` copy is copied by every request.
+it reads ``<name>__low`` / ``<name>__high``, past a ``__``: a request names its flat
+``partner`` copy by exactly those keys, so the copy applies the bounds sent.
 """
 
 from __future__ import annotations

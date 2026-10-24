@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 259 done, 168 to do.
+Progress: 260 done, 169 to do.
 
 ## Done
 
@@ -1212,6 +1212,21 @@ Progress: 259 done, 168 to do.
   an empty sequence page now fails live). `tests/test_connection.py::
   test_consumer_resolver_sequence_negative_cursor_raises_graphql_error` is deleted, every mutant it killed failing a
   live row
+- [x] 319. fixed at the root: a flat copy of a child leaf (`books__probe`, from a `RelatedFilter`) is a spelling of
+  the request, never a field of the parent's form. `filters/sets.py::FilterSet.get_filters` defers every copy, a
+  request binds only the copies whose widgets read a key it sends (`ExpansionSnapshot.copy_keys`, exact keys:
+  `__low` / `_min` widget keys included, so `booksProbeMin` never binds `books__probe`), `get_form_class` builds the
+  bound form from the set's own filters and those named copies, and `_apply_flat_leaves` never applies an unnamed
+  one; the static "absence filters nothing" proof (`_absence_filters_nothing` and its helpers) and the form-reading
+  exemption are gone. A leaf whose absence acts (`required`, a checkbox, `empty_value`, `null_value`, a disabled
+  `initial`, a project `filter` that does not skip the empty value) acts only on the form of the set that declares
+  it: its own root, or an active nested branch. So `{}` and unrelated leaves no longer return nothing or
+  `FILTER_INVALID`, `books: {probe: ...}` answers as `booksProbe` does (it ran the leaf twice, once with the absent
+  value), and `or` / `not` arms agree; a nested sibling leaf still runs the child's form. A project form `clean` that
+  reads an unnamed copy uses `.get`, and an unnamed copy on a form of your own is never applied but still validates.
+  Package rows pin the grid, the gate and async paths and the exact naming; fakeshop gains `IssueFilter`
+  (`embargoed`, a `CheckboxInput` `BooleanFilter`) and `PeriodicalFilter` (`issues = RelatedFilter`) with live
+  rows, sync and async. README, the `filterset` glossary term and spec-027 say so. Breaking (pre-1.0)
 
 ## Outside review of the fixes
 
@@ -1252,20 +1267,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 319. Unprobed cause: a child `GlobalIDFilter` subclass whose own `filter` binds the raw value
-  (`qs.filter(title=value)`), reached through a `RelatedFilter`, answers `"plain"` with a matching parent flat
-  (`books__gid`) and no row nested (`books: {gid: ...}`), before 269 and after it alike, against README's "the two
-  spellings agree on every lookup except `isNull: true` and `exclude=True`". Found verifying 269. Fact-found at
-  `09020e75`: reproduces, but the item's cause is wrong: present values reach the child filter identically in both
-  spellings; the divergence is that the nested spelling also runs the parent's flat copy of the child leaf on ABSENCE
-  (`FilterSet.__init__` / `_absence_filters_nothing` keep every flat copy whose absence acts, `_normalize_input` strips
-  the nested branch keys, `_apply_flat_leaves` runs the copy), adding a second EXISTS with the empty value. Population:
-  an unguarded own or class-level `filter`, `CharFilter(empty_value=...)`, `BooleanFilter(widget=CheckboxInput)`,
-  `ChoiceFilter(null_value='')`, `ModelChoiceFilter(null_value=None)`; with `required=True` the nested spelling answers
-  `FILTER_INVALID`. Proposed fix in `filters/sets.py`: record the supplied branches on the stashed instance and skip, in
-  `_apply_flat_leaves`, a `<branch>__...` copy whose branch is active and whose key it does not name; document what an
-  own `filter` receives (raw wire text for a GlobalID; the cleaned empty value on absence); decide whether a nested
-  supply satisfies a `required` copy
 - [ ] 332. `scripts/workspace.py::_remove_flow_dir` removes the marker with `marker.rmdir()` and no handling: a
   non-empty `.dsf-ws` directory (a stray `.DS_Store`) makes `gc` raise a raw `OSError` (Errno 66) after emptying the
   rest of the flow, leaving only the marker, and every rerun fails the same way. Robustness row (nothing in the script
@@ -1429,12 +1430,22 @@ tracker number are recorded there; open remainders and new defects are filed as 
   id` "The row was changed or removed by a concurrent operation; retry." with the row unchanged, against the
   docstring's "an update never writes its key"; reading `model._meta.pk_fields` would drop them. Fakeshop has no
   composite-pk model yet (`docs/builder/TODO.md` item 27). Found fact-finding 404
+- [ ] 503. A nested branch's child form error is keyed by the child's bare leaf name (`books: {probe: ...}` with a
+  `required` sibling answers `FILTER_INVALID` `{"probe": ...}`), so two branches sharing a leaf name report the same
+  key and the wire cannot tell which branch failed; a flat copy's error is keyed `books__probe`. Decide whether a
+  nested error carries its branch path. Found fixing 319
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 504. CHANGELOG entry for item 319 (breaking): a `RelatedFilter`'s flat copy of a child leaf is applied, and is
+  on the parent's form, only when the request names it. A child leaf whose absence acts (`required`, a checkbox,
+  `empty_value`, `null_value`, a disabled `initial`, a project `filter` that does not skip the empty value) no longer
+  constrains or fails every parent request (`{}`, unrelated leaves, the nested spelling, `or` / `not` arms); it acts
+  only at the set that declares it and inside an active nested branch. A project `Meta.form.clean` /
+  `filter_queryset` that reads an unnamed copy's key must use `.get`
 - [ ] 584. CHANGELOG entry for item 429: under `AsyncDjangoGraphQLView` (or `await schema.execute`) a plain sync resolver
   returning a lazy `QuerySet` or `Manager` to a list field answers instead of raising `SynchronousOnlyOperation` (the
   masked "An unexpected error occurred."), and the optimizer builds a sync root's plan in a `sync_to_async` worker;

@@ -4523,6 +4523,144 @@ async def test_flat_relation_leaf_answers_like_its_nested_twin_async(filter_inpu
     assert json_at(payload, "data", "genres", "edges") == []
 
 
+def _seed_absence_acting_periodicals() -> None:
+    """``Closed Review`` holds only embargoed issue ``A``; ``Open Review`` holds open issue ``B``.
+
+    ``IssueType.get_queryset`` hides the embargoed issue from anonymous requests,
+    and ``IssueFilter.embargoed`` is a checkbox, whose absent key reads as ``False``
+    on every form that holds it.
+    """
+    closed = models.Periodical.objects.create(name="Closed Review")
+    models.Issue.objects.create(periodical=closed, number=1, title="A", embargoed=True)
+    open_ = models.Periodical.objects.create(name="Open Review")
+    models.Issue.objects.create(periodical=open_, number=1, title="B", embargoed=False)
+
+
+class _AbsenceActingRow(NamedTuple):
+    """One periodical request, a twin spelling of it, and what each viewer matches."""
+
+    flat: str
+    nested: str
+    anonymous: list[str]
+    staff: list[str]
+    # Staff's nested answer where it differs: the nested branch builds ``IssueFilter``'s
+    # own form, where the unnamed checkbox keeps only open issues.
+    nested_staff: list[str] | None = None
+
+
+_ABSENCE_ACTING_ROWS = {
+    "no-leaf": _AbsenceActingRow(
+        "{}",
+        "{}",
+        ["Closed Review", "Open Review"],
+        ["Closed Review", "Open Review"],
+    ),
+    "own-leaf": _AbsenceActingRow(
+        '{ name: { exact: "Closed Review" } }',
+        '{ name: { exact: "Closed Review" } }',
+        ["Closed Review"],
+        ["Closed Review"],
+    ),
+    "sibling-leaf": _AbsenceActingRow(
+        '{ issuesTitle: { exact: "B" } }',
+        '{ issues: { title: { exact: "B" } } }',
+        ["Open Review"],
+        ["Open Review"],
+    ),
+    "sibling-leaf-on-an-embargoed-issue": _AbsenceActingRow(
+        '{ issuesTitle: { exact: "A" } }',
+        '{ issues: { title: { exact: "A" } } }',
+        [],
+        ["Closed Review"],
+        nested_staff=[],
+    ),
+    "named-checkbox": _AbsenceActingRow(
+        "{ issuesEmbargoed: { exact: true } }",
+        "{ issues: { embargoed: { exact: true } } }",
+        [],
+        ["Closed Review"],
+    ),
+    "inside-logical-or": _AbsenceActingRow(
+        '{ or: [{ issuesTitle: { exact: "B" } }, { name: { exact: "Closed Review" } }] }',
+        '{ or: [{ issues: { title: { exact: "B" } } }, { name: { exact: "Closed Review" } }] }',
+        ["Closed Review", "Open Review"],
+        ["Closed Review", "Open Review"],
+    ),
+}
+
+
+def _periodical_names(filter_input: str, *, staff: bool) -> list[object]:
+    query = (
+        f"query {{ allLibraryPeriodicalsConnection(filter: {filter_input}) "
+        "{ edges { node { name } } } }"
+    )
+    response = _post_graphql_as_staff(query) if staff else _post_graphql(query)
+    assert response.status_code == 200
+    payload = response_json(response)
+    assert "errors" not in payload, payload
+    edges = json_list(payload, "data", "allLibraryPeriodicalsConnection", "edges")
+    return [json_at(edge, "node", "name") for edge in edges]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("staff", [False, True], ids=["anonymous", "staff"])
+@pytest.mark.parametrize("spelling", ["flat", "nested"])
+@pytest.mark.parametrize("shape", sorted(_ABSENCE_ACTING_ROWS))
+def test_a_child_checkbox_leaf_acts_on_a_periodical_request_only_when_named(
+    shape: str,
+    spelling: str,
+    *,
+    staff: bool,
+) -> None:
+    """``PeriodicalFilter`` copies ``IssueFilter.embargoed``, a checkbox, as ``issuesEmbargoed``.
+
+    A checkbox reads an absent key as ``False``, yet a periodical request that does
+    not name the flat copy holds no such field: every periodical answers ``{}``, its
+    own leaf answers by itself, a flat sibling leaf (``issuesTitle``) is its own
+    predicate and a logical arm adds nothing. Named flat or nested, the checkbox
+    filters by the value sent. A nested sibling leaf is the carve-out: the nested
+    branch builds ``IssueFilter``'s own form, where the unnamed checkbox still keeps
+    only open issues, so staff matching the embargoed issue ``A`` get ``Closed Review``
+    flat and nothing nested.
+    """
+    _seed_absence_acting_periodicals()
+    row = _ABSENCE_ACTING_ROWS[shape]
+    filter_input = row.flat if spelling == "flat" else row.nested
+    expected = row.anonymous
+    if staff:
+        expected = (
+            row.nested_staff
+            if spelling == "nested" and row.nested_staff is not None
+            else row.staff
+        )
+
+    assert _periodical_names(filter_input, staff=staff) == expected
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("shape", ["no-leaf", "own-leaf", "sibling-leaf"])
+@pytest.mark.parametrize("spelling", ["flat", "nested"])
+async def test_a_child_checkbox_leaf_acts_on_a_periodical_request_only_when_named_async(
+    shape: str,
+    spelling: str,
+) -> None:
+    """The async apply path leaves an unnamed checkbox copy off the periodical form as well."""
+    closed = await models.Periodical.objects.acreate(name="Closed Review")
+    await models.Issue.objects.acreate(periodical=closed, number=1, title="A", embargoed=True)
+    open_ = await models.Periodical.objects.acreate(name="Open Review")
+    await models.Issue.objects.acreate(periodical=open_, number=1, title="B", embargoed=False)
+    row = _ABSENCE_ACTING_ROWS[shape]
+    filter_input = row.flat if spelling == "flat" else row.nested
+
+    payload = await _post_async_periodicals(
+        f"query {{ periodicals(filter: {filter_input}) {{ edges {{ node {{ name }} }} }} }}",
+    )
+
+    assert "errors" not in payload, payload
+    edges = json_list(payload, "data", "periodicals", "edges")
+    assert [json_at(edge, "node", "name") for edge in edges] == row.anonymous
+
+
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("staff", [False, True], ids=["anonymous", "staff"])
 @pytest.mark.parametrize(
@@ -9194,6 +9332,40 @@ async def _post_async_genres(query: str, *, user: User | None = None) -> JSONObj
     return response_json(result.response)
 
 
+async def _async_periodicals_resolver(
+    _root: object,
+    _info: strawberry.Info[object, object],
+) -> QuerySet[models.Periodical]:
+    """An ``async def`` consumer resolver: a connection shape that applies ``filter:`` asynchronously."""
+    return models.Periodical.objects.order_by("name")
+
+
+async def _post_async_periodicals(query: str) -> JSONObject:
+    """POST ``query`` to a ``periodicals`` connection that applies ``PeriodicalFilter`` asynchronously."""
+    importlib.import_module("config.schema")
+
+    @strawberry.type
+    class Query:
+        periodicals: DjangoConnection[library_schema.PeriodicalType] = DjangoConnectionField(
+            library_schema.PeriodicalType,
+            resolver=_async_periodicals_resolver,
+        )
+
+    _CURRENT["schema"] = DjangoSchema(query=Query, config=strawberry_config())
+    client = AsyncTestClient()
+    try:
+        with override_settings(ROOT_URLCONF=__name__):
+            result = await client.query(
+                query,
+                assert_no_errors=False,
+                url="/graphql-async-test/",
+            )
+    finally:
+        _CURRENT["schema"] = None
+    assert result.response.status_code == 200
+    return response_json(result.response)
+
+
 def _post_holder(
     schema: strawberry.Schema,
     query: str,
@@ -9469,26 +9641,23 @@ class _AbsentChildFilterCase(NamedTuple):
     """One child filter the parent request omits (or names), and the shelves it answers."""
 
     declared: Callable[[], Filter]
-    # ``None`` when the form refuses the request (the copy's field is required).
-    expected: tuple[str, ...] | None
+    expected: tuple[str, ...]
     # The flat copy's form value and its ``booksStatus`` operator bag when the request names it.
     named: tuple[str, str] | None = None
-    # Whether the parent copies the flat copy only when a request names it.
-    deferred: bool = False
 
 
 _ABSENT_CHILD_FILTER_CASES: dict[str, _AbsentChildFilterCase] = {
     "clean-default": _AbsentChildFilterCase(
         lambda: _DefaultBCleanFilter(field_name="title"),
-        ("S-B",),
+        ("S-A", "S-B"),
     ),
     "projected-clean-default": _AbsentChildFilterCase(
         lambda: _DefaultBCleanFilter(field_name="title", method="filter_title"),
-        ("S-B",),
+        ("S-A", "S-B"),
     ),
     "to-python-default": _AbsentChildFilterCase(
         lambda: _DefaultBToPythonFilter(field_name="title"),
-        ("S-B",),
+        ("S-A", "S-B"),
     ),
     "typed-choice-empty-value": _AbsentChildFilterCase(
         lambda: TypedChoiceFilter(
@@ -9496,18 +9665,18 @@ _ABSENT_CHILD_FILTER_CASES: dict[str, _AbsentChildFilterCase] = {
             choices=models.Book.CirculationStatus.choices,
             empty_value=models.Book.CirculationStatus.REPAIR,
         ),
-        ("S-B",),
+        ("S-A", "S-B"),
     ),
     "char-empty-value": _AbsentChildFilterCase(
         lambda: CharFilter(field_name="title", empty_value="B"),
-        ("S-B",),
+        ("S-A", "S-B"),
     ),
     "multi-widget-on-char-field": _AbsentChildFilterCase(
         lambda: CharFilter(
             field_name="title",
             widget=forms.MultiWidget(widgets=(forms.TextInput, forms.TextInput)),
         ),
-        (),
+        ("S-A", "S-B"),
     ),
     "named-clean-default": _AbsentChildFilterCase(
         lambda: _DefaultBCleanFilter(field_name="title"),
@@ -9516,11 +9685,11 @@ _ABSENT_CHILD_FILTER_CASES: dict[str, _AbsentChildFilterCase] = {
     ),
     "init-empty-value": _AbsentChildFilterCase(
         lambda: _InitEmptyValueFilter(field_name="title"),
-        ("S-B",),
+        ("S-A", "S-B"),
     ),
     "projected-init-empty-value": _AbsentChildFilterCase(
         lambda: _InitEmptyValueFilter(field_name="title", method="filter_title"),
-        ("S-B",),
+        ("S-A", "S-B"),
     ),
     "named-init-empty-value": _AbsentChildFilterCase(
         lambda: _InitEmptyValueFilter(field_name="title"),
@@ -9529,19 +9698,19 @@ _ABSENT_CHILD_FILTER_CASES: dict[str, _AbsentChildFilterCase] = {
     ),
     "init-disabled-initial": _AbsentChildFilterCase(
         lambda: _InitDisabledFilter(field_name="title"),
-        ("S-B",),
+        ("S-A", "S-B"),
     ),
     "init-own-clean": _AbsentChildFilterCase(
         lambda: _InitOwnCleanFilter(field_name="title"),
-        ("S-B",),
+        ("S-A", "S-B"),
     ),
     "init-widget-own-reader": _AbsentChildFilterCase(
         lambda: _InitOwnReaderFilter(field_name="title"),
-        ("S-B",),
+        ("S-A", "S-B"),
     ),
     "init-own-filter": _AbsentChildFilterCase(
         lambda: _InitOwnFilterFilter(field_name="title"),
-        ("S-B",),
+        ("S-A", "S-B"),
     ),
     "named-init-own-filter": _AbsentChildFilterCase(
         lambda: _InitOwnFilterFilter(field_name="title"),
@@ -9551,31 +9720,32 @@ _ABSENT_CHILD_FILTER_CASES: dict[str, _AbsentChildFilterCase] = {
     "projected-method-default": _AbsentChildFilterCase(
         lambda: CharFilter(field_name="title", method="filter_title"),
         ("S-A", "S-B"),
-        deferred=True,
     ),
     "init-required": _AbsentChildFilterCase(
         lambda: _InitRequiredFilter(field_name="title"),
-        None,
+        ("S-A", "S-B"),
+    ),
+    "named-init-required": _AbsentChildFilterCase(
+        lambda: _InitRequiredFilter(field_name="title"),
+        ("S-A",),
+        named=("A", '{ exact: "A" }'),
     ),
     "init-checkbox-widget": _AbsentChildFilterCase(
         lambda: _InitCheckboxFilter(field_name="title"),
-        (),
+        ("S-A", "S-B"),
     ),
     "char-default": _AbsentChildFilterCase(
         lambda: CharFilter(field_name="title"),
         ("S-A", "S-B"),
-        deferred=True,
     ),
     "char-built-field-default": _AbsentChildFilterCase(
         lambda: _with_built_field(CharFilter(field_name="title")),
         ("S-A", "S-B"),
-        deferred=True,
     ),
     "named-char-built-field-default": _AbsentChildFilterCase(
         lambda: _with_built_field(CharFilter(field_name="title")),
         ("S-A",),
         named=("A", '{ exact: "A" }'),
-        deferred=True,
     ),
     "typed-choice-default": _AbsentChildFilterCase(
         lambda: TypedChoiceFilter(
@@ -9583,7 +9753,6 @@ _ABSENT_CHILD_FILTER_CASES: dict[str, _AbsentChildFilterCase] = {
             choices=models.Book.CirculationStatus.choices,
         ),
         ("S-A", "S-B"),
-        deferred=True,
     ),
 }
 
@@ -9639,29 +9808,24 @@ def _absent_child_filter_holder(
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("case_id", list(_ABSENT_CHILD_FILTER_CASES))
-def test_library_parent_connection_answers_an_omitted_child_filter_as_a_full_copy_over_http(
+def test_library_parent_connection_applies_an_omitted_child_filter_nowhere_over_http(
     case_id: str,
 ) -> None:
-    """A parent connection answers a child filter it omits exactly as copying every filter does.
+    """A parent connection answers by its own filters when the request omits a child's flat copy.
 
-    The child filter reaches the parent as the flat copy ``books__status``. A
-    request that does not name it gets the rows a filter set copying every
-    filter (django-filter's own constructor) gets: a copy whose form field
-    cleans an absent key to a value that constrains (a consumer field's
-    ``clean`` / ``to_python`` default, a nonempty ``empty_value`` on
-    ``CharFilter`` / ``TypedChoiceFilter`` over the ``circulation_status``
-    choices, a multi-widget reading two keys into a single-value field) still
-    constrains, as does a field the filter's ``__init__`` built and edited (an
-    ``empty_value``, ``disabled`` with an ``initial``, a checkbox widget, a
-    ``clean`` of its own or a widget reading form data its own way), whose
-    cached instance every copy runs; one it made ``required`` refuses the request
-    as the full copy's form does. A ``filter`` the filter's ``__init__`` sets on
-    the instance replaces the class's and acts on the absent key too, while the
-    ``FilterMethod`` a ``method=`` installs keeps a built-in default deferred. A
-    built-in empty default constrains nothing
-    and is copied only when named, a field already built but left as built
-    included. A request that names the copy (``booksStatus``) filters by the
-    value it sends.
+    The child filter reaches the parent as the flat copy ``books__status``, which
+    every request defers. A request that does not name it holds no such field,
+    whatever the copy's absence would do on a form copying every filter
+    (django-filter's own constructor): a form field cleaning an absent key to a
+    value that constrains (a consumer field's ``clean`` / ``to_python`` default,
+    a nonempty ``empty_value`` on ``CharFilter`` / ``TypedChoiceFilter``, a
+    multi-widget reading two keys into a single-value field), a field the
+    filter's ``__init__`` built and edited (an ``empty_value``, ``disabled`` with
+    an ``initial``, ``required``, a checkbox widget, a ``clean`` or widget reader
+    of its own) or a ``filter`` it set on the instance. So the request is never
+    refused and both general shelves answer. A request that names the copy
+    (``booksStatus``) filters by the value it sends, as a filter set copying
+    every filter does.
     """
     case = _ABSENT_CHILD_FILTER_CASES[case_id]
     branch = models.Branch.objects.create(name="Absent", city="Boston")
@@ -9698,34 +9862,24 @@ def test_library_parent_connection_answers_an_omitted_child_filter_as_a_full_cop
             queryset=models.Shelf.objects.order_by("code"),
             request=HttpRequest(),
         )
-        refused = not copying_every_filter.form.is_valid()
-        form_errors = copying_every_filter.form.errors.get_json_data()
-        expected = list(copying_every_filter.qs.values_list("code", flat=True))
+        named_answer = (
+            list(copying_every_filter.qs.values_list("code", flat=True))
+            if case.named is not None
+            else list(case.expected)
+        )
         snapshot = shelf_filter._expansion_snapshot()
     finally:
         registry.clear()
 
     assert response.status_code == 200
     payload = response_json(response)
-    if case.expected is None:
-        assert refused
-        assert form_errors == {
-            "books__status": [{"message": "This field is required.", "code": "required"}],
-        }
-        assert payload["data"] is None
-        assert [
-            json_at(error, "extensions", "errors") for error in json_list(payload, "errors")
-        ] == [form_errors]
-    else:
-        assert not refused
-        assert "errors" not in payload, payload
-        codes = [
-            json_at(edge, "node", "code")
-            for edge in json_list(payload, "data", "shelves", "edges")
-        ]
-        assert codes == expected == list(case.expected)
+    assert "errors" not in payload, payload
+    codes = [
+        json_at(edge, "node", "code") for edge in json_list(payload, "data", "shelves", "edges")
+    ]
+    assert codes == named_answer == list(case.expected)
     assert snapshot is not None
-    assert ("books__status" in snapshot.deferred_copies) is case.deferred
+    assert "books__status" in snapshot.deferred_copies
 
 
 def _absent_grandchild_filter_holder() -> tuple[strawberry.Schema, type[FilterSet]]:
@@ -9809,17 +9963,17 @@ def _absent_grandchild_filter_holder() -> tuple[strawberry.Schema, type[FilterSe
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("named", [False, True], ids=["omitted", "named"])
-def test_library_grandparent_connection_answers_an_omitted_grandchild_filter_as_a_full_copy_over_http(
+def test_library_grandparent_connection_runs_a_grandchild_edit_only_when_named_over_http(
     named: bool,  # noqa: FBT001
 ) -> None:
-    """A copy projected through two child sets runs the field the deeper set's ``__init__`` edits.
+    """A copy projected through two child sets runs the deeper set's edited field only when named.
 
     The branch set's ``shelves__books__status`` runs inside a shelf instance, whose
     ``books__status`` runs inside a book instance whose ``__init__`` makes the
-    field clean an absent key to ``"B"``. The shelf set edits nothing, yet a
-    request that omits the copy still gets the branches a full copy gets (those
-    reaching a book titled ``"B"``), so the copy is never deferred; one that names
-    it (``shelvesBooksStatus``) filters by the value it sends.
+    field clean an absent key to ``"B"``. A request that omits the copy holds no
+    such field, so both Boston branches answer where a filter set copying every
+    filter keeps only the one reaching a book titled ``"B"``; one that names it
+    (``shelvesBooksStatus``) filters by the value it sends, as that set does.
     """
     boston_a = models.Branch.objects.create(name="Absent A", city="Boston")
     boston_b = models.Branch.objects.create(name="Absent B", city="Boston")
@@ -9858,14 +10012,18 @@ def test_library_grandparent_connection_answers_an_omitted_grandchild_filter_as_
 
     assert snapshot is not None
     assert "shelves__books__status" in snapshot.filters
-    assert "shelves__books__status" not in snapshot.deferred_copies
+    assert "shelves__books__status" in snapshot.deferred_copies
     assert response.status_code == 200
     payload = response_json(response)
     assert "errors" not in payload, payload
     names = [
         json_at(edge, "node", "name") for edge in json_list(payload, "data", "branches", "edges")
     ]
-    assert names == expected == (["Absent A"] if named else ["Absent B"])
+    if named:
+        assert names == expected == ["Absent A"]
+    else:
+        assert expected == ["Absent B"]
+        assert names == ["Absent A", "Absent B"]
 
 
 @pytest.mark.django_db

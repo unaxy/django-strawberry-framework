@@ -767,8 +767,8 @@ def test_upstream_range_filter_reads_the_keys_its_widget_reads(
     the rows at or before it, and a range with no bound filters nothing, flat, inside
     ``and`` / ``not`` and through the ``partner`` relation, nested and flat. ``not`` of
     a range that constrains nothing keeps every row. The flat ``partner`` copy of a widget
-    reading a ``__`` key (``priceInUnderscoredBoxes``) is copied by every request, so its
-    bounds apply too.
+    reading a ``__`` key (``priceInUnderscoredBoxes``) is named by exactly those keys, so
+    its bounds apply too.
     """
     _seed_dated_price_tiers()
     query, filter_input, expected = _upstream_range_case(name, shape, context)
