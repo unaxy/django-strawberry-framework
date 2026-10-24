@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 272 done, 180 to do.
+Progress: 273 done, 182 to do.
 
 ## Done
 
@@ -1325,6 +1325,17 @@ Progress: 272 done, 180 to do.
   (`filters/base.py::_backend_storable_int_members`) and matches nothing when none is left, without applying the
   column's own validators. Each declared cell on `ScalarSpecimen.signed_big` / `unsigned_big` answers as the generated
   `range` / `in` does, flat and under `not`. Found verifying 372: rows 507-509
+- [x] 375. Not a defect under AGENTS rule 37 (no wire input reaches it): a declared `RangeFilter` / `ListFilter` whose
+  `field_name` names a relation (`fk`, `fk_id`, a reverse or many-to-many accessor) fails the schema build with a
+  `ConfigurationError` (`filters/inputs.py::_scalar_from_model_field`) for every primary key type, so no GraphQL
+  request carries a bound; a `<relation>__id` path resolves to the target's column, whose `gte` form field cleans it
+  (`FILTER_INVALID` for `NaN` / `Infinity`), and on every shape that builds a target row its `get_queryset` hides
+  answers `[]` as a missing one does, so no existence oracle exists. The pass-through is spec-027's written
+  `RangeFilter` / `ListFilter` rule ("a relation's bound reaches the ORM as sent"), pinned by
+  `tests/filters/test_base.py::test_range_filter_without_a_column_form_field_passes_bounds_through`. Under a
+  consumer's `DjangoFilterBackend` (no schema build) a range on a relation raises `FieldError` for every value, valid
+  ones included, as django-filter's own `RangeFilter` does. Probed over 5 primary key types x 6 relation kinds x 4
+  spellings. Found checking it: rows 510-512
 
 ## Outside review of the fixes
 
@@ -1383,12 +1394,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   row (not this setup)
 - [ ] 349. `workspace.py audit <missing file>` exits by a `FileNotFoundError` traceback instead of a refusal. Robustness
   row
-- [ ] 375. A package `RangeFilter` / `ListFilter` over a relation column passes its bounds / elements to the ORM
-  uncleaned (django-filter's `exact` for a relation is a `ModelChoiceFilter`, whose clean would be an existence oracle
-  past the target's `get_queryset`), so a NaN bound on a Decimal-pk target still raises a masked error; candidate owner:
-  the relation identity column's form field with the matches-nothing semantics of `_coerce_relation_identity`. A range
-  on an FK column fails the schema build (`scalar_for_field`), so the reach is form data / `apply_sync` only: check it
-  under AGENTS rule 37 first
 - [ ] 376. A package `RangeFilter` / `ListFilter` under a plain `django_filters.FilterSet` (no package FilterSet parent,
   e.g. the DRF backend path) cleans nothing; check the reach under AGENTS rule 37 first
 - [ ] 373. `django_filters.LookupChoiceFilter` publishes a bare scalar input, so django-filter's `lookup_required`
@@ -1553,6 +1558,21 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `coerce_field_value_or_none`, which runs the column's own validators, so on an `IntegerField(validators=
   [MinValueValidator(10)])` holding a row 5 written without `full_clean`, `in: [5]` matches nothing while `exact: 5`
   matches it; the declared `ListFilter` keeps the member (`_backend_storable_int_members`). Found verifying 372
+- [ ] 510. A declared `RangeFilter` / `ListFilter` whose `field_name` is `pk` or `<relation>__pk` is published as
+  `String` and reaches the ORM uncleaned: `filters/base.py::_filterset_model_field` reads django-filter's
+  `get_model_field`, which does not resolve the `pk` alias, so on a `DecimalField` or `UUIDField` primary key a
+  `"NaN"` / `"Infinity"` bound or a malformed UUID answers a masked error where the same filter on `id` /
+  `<relation>__id` answers `FILTER_INVALID`, and an integer primary key takes strings. Found checking 375
+- [ ] 511. A generated forward many-to-many `exact` / `in` over a non-Relay target with a `DecimalField` primary key
+  answers a masked error for a `NaN` or `Infinity` key: the bound terminal's `field_name` reads `id`,
+  `filters/base.py::_bound_model_field` reads it against the owner model, finds no relation identity column, and
+  `_coerce_relation_identity` passes the value through; forward FK, reverse FK and reverse many-to-many coerce it to
+  match nothing. Found checking 375
+- [ ] 512. (robustness) A package FilterSet used only under a consumer's `DjangoFilterBackend` never runs the schema
+  build, so a declared `RangeFilter` on a relation answers `FieldError` (500) for every query string, valid bounds
+  included, and a declared `ListFilter` raises `GraphQLError("Invalid filter value: expected a list.")` (500) for
+  every `?name=` value, since its form field has no list widget; check the reach under AGENTS rule 37 first. Found
+  checking 375
 
 ## To do: holes found re-checking the fixes
 
