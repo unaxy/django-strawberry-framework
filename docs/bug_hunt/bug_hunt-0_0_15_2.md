@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 268 done, 171 to do.
+Progress: 269 done, 171 to do.
 
 ## Done
 
@@ -1285,6 +1285,16 @@ Progress: 268 done, 171 to do.
   included), as the connection and list roots already did; a consumer `resolve_nodes` override's rows batch the same
   way, a row with no peers is left alone, and the shallow copy that keeps a shared row free of the routing hint
   stays. The `_state.peers` read and write live in `utils/_queryset_private.py`. Found verifying 353: row 506
+- [x] 503. fixed: a `FILTER_INVALID` error's `errors` keys carry the field's path from the filter root, so a nested
+  `RelatedFilter` branch's leaf is `<declared branch>__<leaf>` (`shelf__branch__name`, the flat copy's own key), an
+  `and` / `or` arm's is `<op>_<index>__<leaf>` with `not` bare (`or_0__title`, `not__title`, upstream's arm token),
+  nesting either way in request order, and a nested form's non-field error is `<path>____all__`; root keys stay
+  bare. One owner spells the segment (`filters/sets.py::_branch_key`, the arm token by
+  `filters/inputs.py::LogicOperatorDescriptor.arm_key`), the path rides where the nesting depth already travels, and
+  the one raise site keys every entry, sync and async alike. Permission denials are unchanged and not a defect: the
+  documented message names the gate, which the nested and flat spellings already answer identically. Live rows pin
+  branches, arms, both nestings, flat copies inside each and a fakeshop `ShelfFilter` form-level refusal, sync and
+  async; the README, spec-027 and the `FilterSet` glossary term say so
 
 ## Outside review of the fixes
 
@@ -1459,10 +1469,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   which `workspace.py prove` points into the `$TMPDIR` flow folder, so the macOS purge can remove the entry between
   the two calls (the window 331 closed in `workspace.py`). Read it once and treat a missing entry as absent. Found
   fact-finding 331
-- [ ] 503. A nested branch's child form error is keyed by the child's bare leaf name (`books: {probe: ...}` with a
-  `required` sibling answers `FILTER_INVALID` `{"probe": ...}`), so two branches sharing a leaf name report the same
-  key and the wire cannot tell which branch failed; a flat copy's error is keyed `books__probe`. Decide whether a
-  nested error carries its branch path. Found fixing 319
 - [ ] 505. (robustness) `scripts/workspace.py`: a copy's manifest is written when the copy syncs and ages with it in
   the temporary directory, so a copy only `run` for 3+ days (no sync) loses its manifest to the macOS purge, or to a
   Linux reboot with its files, and the next run resyncs it, dropping its uncommitted edits, against the `run`
@@ -1498,6 +1504,12 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 590. CHANGELOG entry for item 503 (breaking): `FILTER_INVALID` `extensions.errors` keys carry the field's path
+  from the filter root: a leaf inside a nested `RelatedFilter` branch is `<branch>__<leaf>` (equal to the flat copy's
+  key), a leaf inside an `and` / `or` / `not` arm is `and_<i>__<leaf>` / `or_<i>__<leaf>` / `not__<leaf>`, composing
+  in request order, and a nested non-field error is `<path>____all__`; root-level and flat-copy keys, the message, the
+  code and permission denials are unchanged. A project `apply_sync` / `apply_async` override on a `RelatedFilter`
+  target that spells out the private keywords must accept `_branch_path`
 - [ ] 589. CHANGELOG entry for item 586 (breaking, composite primary keys only): an update input over a model with a
   `CompositePrimaryKey` no longer offers the key's member columns in the model, ModelForm and serializer flavors, so
   re-sending them (even unchanged) is a GraphQL validation error; an update `Meta.fields` naming a member raises the

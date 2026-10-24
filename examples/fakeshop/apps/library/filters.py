@@ -23,6 +23,7 @@ from django.db.models import Model, QuerySet
 from django.http import HttpRequest, QueryDict
 from django_filters import BooleanFilter, CharFilter, ModelChoiceFilter, ModelMultipleChoiceFilter
 from django_filters.filters import BaseInFilter
+from typing_extensions import override
 
 from apps.library import models
 from django_strawberry_framework.filters import FilterSet, ListFilter, RangeFilter, RelatedFilter
@@ -79,6 +80,27 @@ def _unrestricted_branches(_request: HttpRequest | None = None) -> QuerySet[mode
     return models.Branch.objects.exclude(city="restricted")
 
 
+class ShelfFilterForm(forms.Form):
+    """``ShelfFilter``'s form: the home branch is named once, by pk or by name.
+
+    ``home_branch`` and ``home_branch_named`` select the same relation, so a request
+    sending both is ambiguous; ``clean`` refuses it as a non-field error
+    (``"__all__"``, code ``home_branch_named_twice``), which a nested branch reports
+    under its path (``shelf____all__``).
+    """
+
+    @override
+    def clean(self) -> dict[str, object] | None:
+        """Refuse a request naming the home branch both by pk and by name."""
+        cleaned = super().clean()
+        if cleaned and cleaned.get("home_branch") and cleaned.get("home_branch_named"):
+            raise forms.ValidationError(
+                "Name the home branch by id or by name, not both.",
+                code="home_branch_named_twice",
+            )
+        return cleaned
+
+
 class ShelfFilter(FilterSet):
     """Shelf filterset bound to ``ShelfType`` at finalize phase 2.5.
 
@@ -100,6 +122,9 @@ class ShelfFilter(FilterSet):
     the column's choices (``a``, ``0``) is a value like any other. ``condition_among`` and
     ``tier_among`` are the declared ``ListFilter`` (``in``) counterparts, which publish the
     column's enum.
+
+    ``Meta.form`` is ``ShelfFilterForm``, whose ``clean`` refuses a request naming the
+    home branch both by pk and by name.
     """
 
     branch = RelatedFilter("BranchFilter", field_name="branch")
@@ -133,6 +158,7 @@ class ShelfFilter(FilterSet):
 
     class Meta:
         model = models.Shelf
+        form = ShelfFilterForm
         fields = {
             "id": ["exact", "in"],
             "code": ["exact", "icontains"],

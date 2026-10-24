@@ -2117,6 +2117,22 @@ def _reachable_filtersets(filterset: type[FilterSet], scope: _ExpansionScope) ->
     return result
 
 
+def _branch_key(branch: str, name: str) -> str:
+    """Return ``name`` under ``branch``: ``<branch>__<name>``, or ``name`` alone at the root.
+
+    The one spelling of a child filter's name seen from its parent: the key a
+    ``RelatedFilter``'s flat copy of a child filter is published under
+    (``_expand_related_filter``) and the key a nested branch's form error carries
+    (``FilterSet._validate_form_or_raise``), so the nested and the flat spelling of
+    one leaf answer the same key. ``branch`` composes: a two-hop branch's leaf is
+    ``shelf__branch__name`` either way, and a logical arm is a segment of its own
+    (``inputs.py::LogicOperatorDescriptor.arm_key``: ``or_0__title``,
+    ``shelf__not__branch__name``), as django-graphene-filters nests
+    ``{or: {or_0: ...}}``.
+    """
+    return f"{branch}{LOOKUP_SEP}{name}" if branch else name
+
+
 def _expand_related_filter(
     filter_name: str,
     f: RelatedFilter,
@@ -2146,7 +2162,7 @@ def _expand_related_filter(
     target_filters = target_filterset._filters_along(path, scope)
     relation = _bound_field_name(f)
     for child_name, field in target_filters.items():
-        new_name = f"{filter_name}__{child_name}"
+        new_name = _branch_key(filter_name, child_name)
         field_copy = copy.deepcopy(field)
         field_copy.field_name = f"{relation}__{field.field_name}"
         if _owner_bound_child(target_filterset, field):
@@ -2295,6 +2311,16 @@ class FilterSet(
     # attribute is discoverable to static analysis / `__slots__` / typing
     # and the default is explicit on every instance.
     _logic_depth: int = 0
+
+    # The declared ``RelatedFilter`` names and logical arms from the request's root
+    # to this instance, joined as a flat key (``shelf__branch``, ``or_0__shelf``);
+    # ``""`` at the root. Threaded exactly as ``_depth`` is: ``apply_sync`` /
+    # ``apply_async`` hand each active branch's child apply its own path
+    # (``_derive_related_visibility_querysets_*``), ``_build_stashed_instance``
+    # stashes it, and ``_evaluate_logic_tree`` hands each arm's sibling the arm's own
+    # path (``LogicOperatorDescriptor.arm_key``). ``_validate_form_or_raise`` keys the
+    # form's errors under it, so a nested leaf answers the key its flat copy answers.
+    _branch_path: str = ""
 
     # Resolver-``info`` hand-off channel, threaded the same way as
     # `_logic_depth`: set by `apply_sync` / `apply_async` on the top-level
@@ -4227,6 +4253,7 @@ class FilterSet(
         *,
         parent_db: str | None = None,
         _depth: int = 0,
+        _branch_path: str = "",
     ) -> dict[str, models.QuerySet[models.Model]]:
         """Run each active branch's target ``get_queryset(...)`` then recurse.
 
@@ -4259,7 +4286,10 @@ class FilterSet(
         alias (report Defect 3); ``_depth`` is the shared traversal budget --
         the child ``apply_sync`` re-enters at ``_depth + 1`` so a
         self-referential ``RelatedFilter`` is capped with a typed error rather
-        than recursing into a ``RecursionError`` (report Defect 5).
+        than recursing into a ``RecursionError`` (report Defect 5). ``_branch_path``
+        is the path of the set being applied; each child re-enters under its own
+        (``_branch_key``), so its form errors reach the wire under the key the
+        branch's flat copies answer.
         """
         result: dict[str, models.QuerySet[models.Model]] = {}
         for (
@@ -4276,6 +4306,7 @@ class FilterSet(
                 info,
                 run_permissions=False,
                 _depth=_depth + 1,
+                _branch_path=_branch_key(_branch_path, field_name),
             )
         return result
 
@@ -4287,6 +4318,7 @@ class FilterSet(
         *,
         parent_db: str | None = None,
         _depth: int = 0,
+        _branch_path: str = "",
     ) -> dict[str, models.QuerySet[models.Model]]:
         """Async sibling of `_derive_related_visibility_querysets_sync`.
 
@@ -4294,7 +4326,8 @@ class FilterSet(
         same reason the sync twin passes ``run_permissions=False`` (see there):
         the top-level ``_run_permission_checks`` pass owns every nested gate,
         so the derivation must not re-fire them. ``parent_db`` (report Defect 3)
-        and ``_depth`` (report Defect 5) thread exactly as in the sync twin.
+        and ``_depth`` (report Defect 5) thread exactly as in the sync twin, and
+        so does ``_branch_path``.
         """
         result: dict[str, models.QuerySet[models.Model]] = {}
         for (
@@ -4311,6 +4344,7 @@ class FilterSet(
                 info,
                 run_permissions=False,
                 _depth=_depth + 1,
+                _branch_path=_branch_key(_branch_path, field_name),
             )
         return result
 
@@ -4349,6 +4383,7 @@ class FilterSet(
         *,
         parent_db: str | None = None,
         _depth: int = 0,
+        _branch_path: str = "",
         flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]]
         | None = None,
     ) -> dict[int, dict[str, models.QuerySet[models.Model]]]:
@@ -4381,6 +4416,10 @@ class FilterSet(
         visibility of every hop a supplied flat leaf of each arm walks
         (``_derive_flat_hop_visibility_async``), so this one walk of the
         logical arms pre-derives both kinds of relational scoping.
+
+        Each arm is derived under its own ``_branch_path`` (the arm segment
+        ``_evaluate_logic_tree`` composes), so a branch inside an arm, whose form runs
+        here, answers the error key the sync pipeline answers.
         """
         result: dict[int, dict[str, models.QuerySet[models.Model]]] = {}
         if is_inactive_value(input_value, unset_sentinel=UNSET):
@@ -4390,13 +4429,15 @@ class FilterSet(
         # child_input gets its OWN visibility derive plus a recursive walk so
         # deeply-nested branches all carry pre-derived maps before the sync
         # ``_q_for_branch`` ever runs.
-        for _op, children in cls._iter_logic_branches(input_value):
-            for child_input in children:
+        for op, children in cls._iter_logic_branches(input_value):
+            for index, child_input in enumerate(children):
+                arm_path = _branch_key(_branch_path, op.arm_key(index))
                 result[id(child_input)] = await cls._derive_related_visibility_querysets_async(
                     child_input,
                     info,
                     parent_db=parent_db,
                     _depth=_depth,
+                    _branch_path=arm_path,
                 )
                 if flat_hop_visibility is not None:
                     await cls._derive_flat_hop_visibility_async(
@@ -4412,6 +4453,7 @@ class FilterSet(
                     info,
                     parent_db=parent_db,
                     _depth=_depth + 1,
+                    _branch_path=arm_path,
                     flat_hop_visibility=flat_hop_visibility,
                 )
                 result.update(nested)
@@ -4542,6 +4584,13 @@ class FilterSet(
         (``_decodes_before_binding``): the decode refuses text it cannot read as the
         ``GLOBALID_INVALID`` the node-refetch path answers for the same id.
 
+        Every key is the form field's name under the instance's ``_branch_path``
+        (``_branch_key``): the root's keys are its own, a nested branch's are
+        ``<branch>__<field>`` - the key the branch's flat copy of the same leaf
+        answers - and a logical arm's carry the arm (``or_0__<field>``,
+        ``not__<field>``; ``LogicOperatorDescriptor.arm_key``), nesting either way
+        (``shelf__or_0__branch__name``, ``or_0__shelf__branch__name``).
+
         A form that cleans is then held to the database its queryset runs on
         (``_unbindable_temporal_errors``): a temporal value the scalar parse and the
         form accept but that database cannot bind is refused keyed to its form field,
@@ -4571,9 +4620,13 @@ class FilterSet(
                 errors = _unbindable_temporal_errors(filterset_instance)
                 if not errors:
                     return
+        branch = filterset_instance._branch_path
         raise GraphQLError(
             "Invalid filter input",
-            extensions=coded_error_extensions(FILTER_INVALID_ERROR_CODE, errors=errors),
+            extensions=coded_error_extensions(
+                FILTER_INVALID_ERROR_CODE,
+                errors={_branch_key(branch, key): value for key, value in errors.items()},
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -5466,6 +5519,7 @@ class FilterSet(
             request=self.request,
             info=info,
             _depth=depth,
+            _branch_path=self._branch_path,
             _nested_qs_by_branch_id=nested_map,
             _flat_hop_visibility=self._hop_visibility(),
         )
@@ -5483,6 +5537,7 @@ class FilterSet(
         info: object = None,
         *,
         _depth: int = 0,
+        _branch_path: str = "",
         _nested_qs_by_branch_id: dict[int, dict[str, models.QuerySet[models.Model]]] | None = None,
         _flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]]
         | None = None,
@@ -5498,7 +5553,11 @@ class FilterSet(
         visibility maps produced by ``_collect_nested_visibility_querysets_async``
         (None on the sync path); ``_flat_hop_visibility`` is the request-wide hop
         visibility map every sibling's flat relation leaves read
-        (``FilterSet._flat_hop_visibility``).
+        (``FilterSet._flat_hop_visibility``). ``_branch_path`` is the set's path from
+        the request root; each arm's sibling applies under the arm's own path
+        (``_branch_key`` of ``LogicOperatorDescriptor.arm_key``, the index the arm's
+        position in the list sent), as ``_collect_nested_visibility_querysets_async``
+        derives it, so a leaf inside an arm answers one error key sync and async.
 
         Inactive children (``None`` / ``strawberry.UNSET``) inside sequence
         lists -- and an inactive single-element value -- are skipped, matching
@@ -5524,10 +5583,11 @@ class FilterSet(
                     request=request,
                     info=info,
                     _depth=_depth + 1,
+                    _branch_path=_branch_key(_branch_path, op.arm_key(index)),
                     _nested_qs_by_branch_id=_nested_qs_by_branch_id,
                     _flat_hop_visibility=_flat_hop_visibility,
                 )
-                for child_input in children
+                for index, child_input in enumerate(children)
             ]
             q &= op.compose(branch_qs)
 
@@ -5542,6 +5602,7 @@ class FilterSet(
         info: object = None,
         *,
         _depth: int = 0,
+        _branch_path: str = "",
         _nested_qs_by_branch_id: dict[int, dict[str, models.QuerySet[models.Model]]] | None = None,
         _flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]]
         | None = None,
@@ -5584,7 +5645,9 @@ class FilterSet(
         ``filter_queryset`` -> ``_evaluate_logic_tree``) can keep
         consulting the pre-derived map, and so is ``_flat_hop_visibility``, so
         the sibling's flat relation leaves read (and, under ``apply_async``, find
-        pre-derived) the same hop visibility as the top level.
+        pre-derived) the same hop visibility as the top level. ``_branch_path`` (the
+        arm's path) is stashed too, keying the sibling's form errors and its nested
+        branches' under it.
 
         Perf note: constructing the
         sibling ``cls(...)`` per branch triggers django-filter's
@@ -5613,6 +5676,7 @@ class FilterSet(
                     info,
                     parent_db=queryset.db,
                     _depth=_depth,
+                    _branch_path=_branch_path,
                 )
         else:
             child_qs_by_branch = cls._derive_related_visibility_querysets_sync(
@@ -5620,6 +5684,7 @@ class FilterSet(
                 info,
                 parent_db=queryset.db,
                 _depth=_depth,
+                _branch_path=_branch_path,
             )
         if _flat_hop_visibility is None:
             _flat_hop_visibility = {}
@@ -5638,6 +5703,7 @@ class FilterSet(
             info,
             _nested_qs_by_branch_id,
             _flat_hop_visibility,
+            branch_path=_branch_path,
         )
         child_set._logic_depth = _depth
         cls._validate_form_or_raise(child_set)
@@ -5734,13 +5800,17 @@ class FilterSet(
         info: object,
         nested_qs_by_branch_id: dict[int, dict[str, models.QuerySet[models.Model]]] | None,
         flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]] | None,
+        *,
+        branch_path: str = "",
     ) -> Self:
         """Build a filterset over ``constrained`` and stash the per-request state it reads.
 
         ``info`` lands as ``_apply_info``, and the async-only pre-derived
         ``nested_qs_by_branch_id`` and ``flat_hop_visibility`` maps (``None`` on the
         sync path) as ``_nested_qs_by_branch_id`` and ``_flat_hop_visibility``, so
-        ``filter_queryset`` (upstream's one-argument signature) reaches them. The one
+        ``filter_queryset`` (upstream's one-argument signature) reaches them, and
+        ``branch_path`` as ``_branch_path`` so ``_validate_form_or_raise`` keys the
+        form's errors under it. The one
         construction shared by the top-level apply and every nested-branch sibling.
         """
         # basedpyright: typeshed narrows ``request`` to ``HttpRequest``; upstream only stores it,
@@ -5755,6 +5825,7 @@ class FilterSet(
         instance._apply_info = info
         instance._nested_qs_by_branch_id = nested_qs_by_branch_id
         instance._flat_hop_visibility = flat_hop_visibility
+        instance._branch_path = branch_path
         return instance
 
     @classmethod
@@ -5770,6 +5841,7 @@ class FilterSet(
         flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]]
         | None = None,
         run_permissions: bool = True,
+        branch_path: str = "",
     ) -> models.QuerySet[_M]:
         """Build the filterset, then run the perm check + form validate + lazy ``.qs`` read.
 
@@ -5805,6 +5877,7 @@ class FilterSet(
             info,
             nested_qs_by_branch_id,
             flat_hop_visibility,
+            branch_path=branch_path,
         )
         if run_permissions:
             cls._run_permission_checks(input_value, request)
@@ -5820,6 +5893,7 @@ class FilterSet(
         *,
         run_permissions: bool = True,
         _depth: int = 0,
+        _branch_path: str = "",
     ) -> models.QuerySet[_M]:
         """Sync resolver entry point (Decision 8).
 
@@ -5841,7 +5915,9 @@ class FilterSet(
         (report Defect 5). The derivation runs FIRST, so this is the earliest
         point the runaway recursion surfaces. The parent queryset's database
         alias (``queryset.db``) is threaded into the derivation so each child
-        visibility hook sees the parent's shard (report Defect 3).
+        visibility hook sees the parent's shard (report Defect 3). ``_branch_path``
+        is the declared path the derivation re-enters under (``""`` for a consumer
+        call: the root), stashed on the instance so its form errors carry it.
         """
         cls._assert_logic_depth(_depth)
         child_qs_by_branch = cls._derive_related_visibility_querysets_sync(
@@ -5849,6 +5925,7 @@ class FilterSet(
             info,
             parent_db=queryset.db,
             _depth=_depth,
+            _branch_path=_branch_path,
         )
         hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]] = {}
         data, request, constrained = cls._apply_common_prelude(
@@ -5866,6 +5943,7 @@ class FilterSet(
             info,
             flat_hop_visibility=hop_visibility,
             run_permissions=run_permissions,
+            branch_path=_branch_path,
         )
 
     @classmethod
@@ -5877,6 +5955,7 @@ class FilterSet(
         *,
         run_permissions: bool = True,
         _depth: int = 0,
+        _branch_path: str = "",
     ) -> models.QuerySet[_M]:
         """Async sibling of `apply_sync` awaiting every blocking step.
 
@@ -5910,9 +5989,9 @@ class FilterSet(
         filterset's gates fire only once, via the top-level pass (see
         ``_apply_common_finalize`` / ``_derive_related_visibility_querysets_sync``).
 
-        ``_depth`` (related-recursion cap, report Defect 5) and the parent
-        ``queryset.db`` alias (report Defect 3) thread through the top-level
-        derivations and the arm pre-walk exactly as in ``apply_sync``.
+        ``_depth`` (related-recursion cap, report Defect 5), the parent
+        ``queryset.db`` alias (report Defect 3) and ``_branch_path`` thread through
+        the top-level derivations and the arm pre-walk exactly as in ``apply_sync``.
         """
         cls._assert_logic_depth(_depth)
         child_qs_by_branch = await cls._derive_related_visibility_querysets_async(
@@ -5920,6 +5999,7 @@ class FilterSet(
             info,
             parent_db=queryset.db,
             _depth=_depth,
+            _branch_path=_branch_path,
         )
         flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]] = {}
         await cls._derive_flat_hop_visibility_async(
@@ -5933,6 +6013,7 @@ class FilterSet(
             info,
             parent_db=queryset.db,
             _depth=_depth,
+            _branch_path=_branch_path,
             flat_hop_visibility=flat_hop_visibility,
         )
         data, request, constrained = cls._apply_common_prelude(
@@ -5952,6 +6033,7 @@ class FilterSet(
             nested_qs_by_branch_id=nested_qs_by_branch_id,
             flat_hop_visibility=flat_hop_visibility,
             run_permissions=run_permissions,
+            branch_path=_branch_path,
         )
 
     @classmethod
