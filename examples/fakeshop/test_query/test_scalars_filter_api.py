@@ -20,8 +20,11 @@ hold is ``FILTER_INVALID``. ``price_among`` is a declared ``ListFilter`` (``in``
 same column whose elements are cleaned the same way. A temporal value the database the
 query runs on cannot bind (on SQLite an aware datetime whose UTC projection leaves years
 1..9999, an aware time) is ``FILTER_INVALID`` keyed to its form field on each adapter-bound
-leaf, member and bound, under ``not`` and through ``partner``; Django's PostgreSQL
-adapters pass it through, so there the same input filters. django-filter's own range filters
+leaf, member and bound, under ``not`` and through ``partner``; PostgreSQL binds those
+values, so there the same input filters. On PostgreSQL a UTC offset the server refuses
+(16:00 or more either way, or, bound as text as Django's default psycopg cursor binds, a
+fraction of a second) is ``FILTER_INVALID`` the same way, where SQLite projects the
+datetime onto UTC and filters. django-filter's own range filters
 (``priceBetween``, ``occurredBetween`` over ``DateRangeWidget``, ``occurredInBoxes`` over a
 plain ``MultiWidget`` and ``priceInUnderscoredBoxes`` over a consumer widget reading ``__``
 keys) apply every bound they are sent, under the keys each widget reads.
@@ -528,8 +531,8 @@ def test_price_among_element_the_column_cannot_hold_is_filter_invalid(
 _UNBINDABLE = {"message": "Enter a value the database can represent.", "code": "invalid"}
 # Aware values the scalar parse and the form clean accept: a datetime whose UTC projection
 # falls in year 0, one whose projection falls in year 10000, and an aware time. SQLite
-# projects an aware datetime onto UTC and refuses an aware time; Django's PostgreSQL adapters
-# pass all three through.
+# projects an aware datetime onto UTC and refuses an aware time; PostgreSQL binds all three,
+# whose UTC offsets it accepts.
 _BEFORE_YEAR_ONE = "0001-01-01T00:00:00+05:00"
 _PAST_YEAR_9999 = "9999-12-31T23:00:00-05:00"
 _AWARE_TIME = "09:30:00+00:00"
@@ -653,8 +656,8 @@ def test_temporal_value_the_database_cannot_bind_is_filter_invalid(
     datetime whose UTC projection leaves years 1..9999 and an aware time are each
     refused with the package's fixed message, for every member of an ``in`` list and
     every ``range`` bound, flat, under ``not`` and through the ``partner`` relation,
-    nested and flat, never the driver's error. Django's PostgreSQL adapters pass them
-    through, so there the same input filters (``postgresql_labels``). A value the
+    nested and flat, never the driver's error. PostgreSQL binds them (their UTC offsets
+    are ones it accepts), so there the same input filters (``postgresql_labels``). A value the
     database binds filters on both.
     """
     alpha = _seed_specimen("alpha")
@@ -666,6 +669,137 @@ def test_temporal_value_the_database_cannot_bind_is_filter_invalid(
     assert control == {"data": {root: [{"label": label} for label in labels]}}
     if connection.vendor == "postgresql":
         assert payload == {"data": {root: [{"label": label} for label in postgresql_labels]}}
+        return
+    assert payload["data"] is None, payload
+    (error,) = json_list(payload, "errors")
+    assert json_at(error, "extensions") == {
+        "code": "FILTER_INVALID",
+        "errors": {form_key: [_UNBINDABLE]},
+    }
+
+
+# UTC offsets PostgreSQL refuses (``time zone displacement out of range``) though the scalar
+# parse and the form clean accept them: 16:00 or more either way, and, bound as text (Django's
+# default psycopg cursor), an offset carrying a fraction of a second, which only the ``Time``
+# scalar parses. Both datetimes name alpha's instant, which SQLite binds projected onto UTC.
+_ALPHA_AT_PLUS_16 = "2021-06-16T01:30:00+16:00"
+_ALPHA_AT_MINUS_16 = "2021-06-14T17:30:00-16:00"
+_BEFORE_ALPHA_AT_MINUS_23_59 = "2021-06-14T00:00:00-23:59"
+_TIME_AT_PLUS_16 = "09:30:00+16:00"
+_TIME_AT_HALF_SECOND_OFFSET = "09:30:00+01:00:00.500000"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "query",
+        "refused",
+        "form_key",
+        "sqlite_labels",
+    ),
+    [
+        pytest.param(
+            _BY_FILTER,
+            {"occurredAt": {"exact": _ALPHA_AT_PLUS_16}},
+            "occurred_at",
+            ["alpha"],
+            id="exact-plus-16",
+        ),
+        pytest.param(
+            _BY_FILTER,
+            {"occurredAt": {"gt": _BEFORE_ALPHA_AT_MINUS_23_59}},
+            "occurred_at__gt",
+            ["alpha"],
+            id="gt-minus-23-59",
+        ),
+        pytest.param(
+            _BY_FILTER,
+            {"occurredAt": {"in": [_BINDABLE_DATETIME, _ALPHA_AT_MINUS_16]}},
+            "occurred_at__in",
+            ["alpha"],
+            id="in-member",
+        ),
+        pytest.param(
+            _BY_FILTER,
+            {"occurredAt": {"range": [_BEFORE_ALPHA_AT_MINUS_23_59, _BINDABLE_DATETIME]}},
+            "occurred_at__range",
+            ["alpha"],
+            id="range-bound",
+        ),
+        pytest.param(
+            _BY_FILTER,
+            {"not": {"occurredAt": {"exact": _ALPHA_AT_PLUS_16}}},
+            "not__occurred_at",
+            [],
+            id="not",
+        ),
+        pytest.param(
+            _BY_FILTER,
+            {"or": [{"label": {"exact": "beta"}}, {"occurredAt": {"exact": _ALPHA_AT_MINUS_16}}]},
+            "or_1__occurred_at",
+            ["alpha"],
+            id="or-arm",
+        ),
+        pytest.param(
+            _BY_NULLABLE_FILTER,
+            {"partner": {"occurredAt": {"lte": _ALPHA_AT_PLUS_16}}},
+            "partner__occurred_at__lte",
+            ["of-alpha"],
+            id="nested-partner",
+        ),
+        pytest.param(
+            _BY_NULLABLE_FILTER,
+            {"partnerOccurredAt": {"gte": _ALPHA_AT_MINUS_16}},
+            "partner__occurred_at__gte",
+            ["of-alpha"],
+            id="flat-partner",
+        ),
+        pytest.param(
+            _BY_FILTER,
+            {"occurredTime": {"exact": _TIME_AT_PLUS_16}},
+            "occurred_time",
+            None,
+            id="time-plus-16",
+        ),
+        pytest.param(
+            _BY_FILTER,
+            {"occurredTime": {"in": ["09:30:00", _TIME_AT_HALF_SECOND_OFFSET]}},
+            "occurred_time__in",
+            None,
+            id="time-half-second-offset-in-member",
+        ),
+        pytest.param(
+            _BY_NULLABLE_FILTER,
+            {"partnerOccurredTime": {"exact": _TIME_AT_PLUS_16}},
+            "partner__occurred_time",
+            None,
+            id="flat-partner-time-plus-16",
+        ),
+    ],
+)
+def test_utc_offset_postgresql_refuses_is_filter_invalid_there(
+    query: str,
+    refused: dict[str, object],
+    form_key: str,
+    sqlite_labels: list[str] | None,
+) -> None:
+    """A UTC offset PostgreSQL refuses is ``FILTER_INVALID`` keyed to its form field there.
+
+    On PostgreSQL an aware datetime or time whose offset is 16:00 or more either way, or
+    (bound as text, as Django's default psycopg cursor binds) carries a fraction of a
+    second, is refused with the package's fixed message, for every member of an ``in``
+    list and every ``range`` bound, under ``not`` and an ``or`` arm, and through the
+    ``partner`` relation, nested and flat, never the driver's error. SQLite projects the
+    same datetimes onto UTC and filters (``sqlite_labels``); it refuses every aware time
+    (``None``).
+    """
+    alpha = _seed_specimen("alpha")
+    models.NullableScalarSpecimen.objects.create(label="of-alpha", partner=alpha)
+    root = "allScalarSpecimens" if query == _BY_FILTER else "allNullableScalarSpecimens"
+    payload = response_json(post_graphql(query, variables={"filter": refused}))
+
+    if connection.vendor != "postgresql" and sqlite_labels is not None:
+        assert payload == {"data": {root: [{"label": label} for label in sqlite_labels]}}
         return
     assert payload["data"] is None, payload
     (error,) = json_list(payload, "errors")

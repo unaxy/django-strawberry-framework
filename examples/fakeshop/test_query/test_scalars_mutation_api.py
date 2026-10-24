@@ -10,13 +10,16 @@ accept can still be one the database cannot store: on SQLite an aware datetime w
 projection onto the connection's time zone leaves years 1..9999 (a naive one made
 aware under a non-UTC ``TIME_ZONE`` included), any aware datetime under
 ``USE_TZ = False`` and an aware time; on PostgreSQL an aware datetime whose wall clock
-in the session time zone leaves years 1..9999, which it stores but cannot load back.
+in the session time zone leaves years 1..9999, which it stores but cannot load back, and
+an aware datetime or time whose UTC offset the server refuses (16:00 or more either way,
+or, bound as text as Django's default psycopg cursor binds, a fraction of a second).
 Each is the field's ``invalid`` ``FieldError`` ("Enter a value the database can
 represent.") with nothing written, on create and update, sync and async, never the
 masked unexpected error. DRF's own ``overflow`` answer for an aware datetime it cannot
 project onto the current time zone stands, and a value a flavor stores (the
-serializer's naive projection under ``USE_TZ = False``, an aware time on PostgreSQL)
-is written.
+serializer's naive projection under ``USE_TZ = False``, the serializer's projection of
+an aware datetime onto the current time zone, an aware time whose offset PostgreSQL
+accepts, there) is written.
 """
 
 from __future__ import annotations
@@ -188,6 +191,27 @@ _CELLS = {
         _every(_REFUSED, _REFUSED),
         database_zone="Asia/Tokyo",
     ),
+    "datetime-offset-16": _Cell(
+        "occurredAt",
+        "2021-06-15T09:30:00+16:00",
+        {**_every(_STORED, _REFUSED), "serializer": (_STORED, _STORED)},
+    ),
+    "datetime-offset-minus-23-59": _Cell(
+        "occurredAt",
+        "2021-06-15T09:30:00-23:59",
+        {**_every(_STORED, _REFUSED), "serializer": (_STORED, _STORED)},
+    ),
+    "time-offset-16": _Cell("occurredTime", "09:30:00+16:00", _every(_REFUSED, _REFUSED)),
+    "time-offset-half-second": _Cell(
+        "occurredTime",
+        "09:30:00+01:00:00.500000",
+        _every(_REFUSED, _REFUSED),
+    ),
+    "time-offset-whole-seconds": _Cell(
+        "occurredTime",
+        "09:30:00+01:00:30",
+        _every(_REFUSED, _STORED),
+    ),
 }
 
 _GRID = [
@@ -305,9 +329,12 @@ def test_temporal_value_the_database_cannot_store_is_the_field_error(
 
     The refusal is the in-band ``invalid`` ``FieldError`` keyed to the input field, the
     result slot ``null``, nothing created and an updated row's stored values kept, on
-    every flavor, create and update. A value the database stores (``in-range``, the
-    serializer's naive projection under ``USE_TZ = False``, an aware time on PostgreSQL)
-    is written, and DRF's own ``overflow`` answer for an aware datetime it cannot
+    every flavor, create and update. On PostgreSQL a UTC offset of 16:00 or more either
+    way, or a time's offset carrying a fraction of a second, is refused too. A value the
+    database stores (``in-range``, the serializer's naive projection under
+    ``USE_TZ = False``, the serializer's projection of an aware datetime onto the current
+    time zone, which drops any offset, and on PostgreSQL an aware time whose offset it
+    accepts) is written, and DRF's own ``overflow`` answer for an aware datetime it cannot
     project onto the current time zone stands. The connection's own ``TIME_ZONE`` is a
     SQLite / MySQL / Oracle setting, so that cell runs on SQLite only.
     """
@@ -335,7 +362,7 @@ def test_serializer_temporal_refusal_is_keyed_to_the_renamed_input(operation: st
     ``clockTime`` writes ``occurred_time`` (DRF's ``source="occurred_time"``): an aware time
     SQLite cannot store is the ``invalid`` error under ``clockTime``, never under the column
     name, with nothing written, and a naive time sent the same way is stored in the column.
-    PostgreSQL stores the aware time too.
+    PostgreSQL stores the aware time too, its offset being one the server accepts.
     """
     specimen = None if operation == "create" else _seed()
     root, document = _document("serializer", operation)
@@ -374,6 +401,7 @@ urlpatterns = [path("graphql-async/", _async_shipped_graphql_view)]
         pytest.param("model", "before-year-one", id="model"),
         pytest.param("form", "past-year-9999", id="form"),
         pytest.param("serializer", "aware-time", id="serializer"),
+        pytest.param("model", "datetime-offset-16", id="model-utc-offset"),
     ],
 )
 async def test_async_write_holds_the_same_temporal_rule(flavor: str, name: str) -> None:
@@ -381,7 +409,8 @@ async def test_async_write_holds_the_same_temporal_rule(flavor: str, name: str) 
 
     Each flavor's async surface runs the sync write body under ``sync_to_async``, so the
     create over ``/graphql-async/`` is the same field error with nothing written (an
-    aware time stores on PostgreSQL).
+    aware time whose offset PostgreSQL accepts stores there, and a datetime offset of
+    16:00, which SQLite projects onto UTC, stores on SQLite).
     """
     cell = _CELLS[name]
     root, document = _document(flavor, "create")

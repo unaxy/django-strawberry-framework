@@ -1372,14 +1372,25 @@ def _card_with_a_decision() -> str:
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_async_decisions_connection_refuses_an_unbindable_temporal_filter() -> None:
+@pytest.mark.parametrize(
+    ("after", "refused_on"),
+    [
+        pytest.param("0001-01-01T00:00:00+09:00", "sqlite", id="before-year-one"),
+        pytest.param("2000-01-01T00:00:00+16:00", "postgresql", id="utc-offset-16"),
+    ],
+)
+async def test_async_decisions_connection_refuses_an_unbindable_temporal_filter(
+    after: str,
+    refused_on: str,
+) -> None:
     """``decisionsConnection`` under the async ``node`` root holds its filter to the database.
 
     The async view runs the nested connection's ``apply_async``: a ``decidedAt``
-    bound whose UTC projection falls in year 0 is ``FILTER_INVALID`` keyed to its
-    form field on SQLite, never the driver's error, and a bound the database binds
-    returns the card's decision. Django's PostgreSQL adapters pass the bound
-    through, so there it filters.
+    bound the database cannot bind is ``FILTER_INVALID`` keyed to its form field,
+    never the driver's error, and a bound the database binds returns the card's
+    decision. SQLite refuses a bound whose UTC projection falls in year 0, which
+    PostgreSQL stores as an instant and filters on; PostgreSQL refuses a UTC offset of
+    16:00, which SQLite projects onto UTC and filters on.
     """
     card_id = await sync_to_async(_card_with_a_decision)()
     with override_settings(ROOT_URLCONF=__name__):
@@ -1392,7 +1403,7 @@ async def test_async_decisions_connection_refuses_an_unbindable_temporal_filter(
         )
         refused = await client.query(
             _CARD_DECISIONS_AFTER,
-            variables={"id": card_id, "after": "0001-01-01T00:00:00+09:00"},
+            variables={"id": card_id, "after": after},
             assert_no_errors=False,
             url="/graphql-async/",
         )
@@ -1400,7 +1411,7 @@ async def test_async_decisions_connection_refuses_an_unbindable_temporal_filter(
     page = {"node": {"decisionsConnection": {"edges": [{"node": {"question": "Ship now?"}}]}}}
     assert response_json(control.response) == {"data": page}
     payload = response_json(refused.response)
-    if connection.vendor == "postgresql":
+    if connection.vendor != refused_on:
         assert payload == {"data": page}
         return
     assert payload["data"] == {"node": None}, payload

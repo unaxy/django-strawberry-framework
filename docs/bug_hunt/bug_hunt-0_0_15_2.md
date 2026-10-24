@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 274 done, 183 to do.
+Progress: 275 done, 185 to do.
 
 ## Done
 
@@ -1344,6 +1344,16 @@ Progress: 274 done, 183 to do.
   one the parent's class selects without the package `FilterSet`'s own `filter_for_lookup` override (a package
   subclass reads the method behind that override as before, any other set its own `filter_for_lookup`). A package
   parent's generated filters and cleaners are unchanged. Found verifying it: row 514
+- [x] 382. fixed: on PostgreSQL a temporal filter or write value whose UTC offset the server refuses answers the
+  documented envelope (`FILTER_INVALID` "Enter a value the database can represent." on the read side, the field-keyed
+  `FieldError` on the write side, nothing written) instead of the masked error:
+  `utils/errors.py::unbindable_temporal` reads the connection's binding mode without opening it; an aware time is
+  refused at an offset of 16:00 or more, and, when the connection binds on the client (psycopg2, psycopg 3's default),
+  an aware datetime or time also at a sub-second offset; under server-side binding a datetime's offset never refuses
+  it. An `ArrayField` write element is bound as text in either mode, so it is held to the client-side rule through
+  `unstorable_temporal`. A `date` / `year` transform never binds the offset and keeps filtering. Live rows on SQLite and
+  PostgreSQL (filter and the three write flavors, sync and async), package rows per binding mode on a real server;
+  spec-027, spec-036, spec-039, the README and the `FilterSet` and `FieldError` envelope glossary terms say so
 
 ## Outside review of the fixes
 
@@ -1432,9 +1442,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `plans.py::_consumer_owned_paths` (and `_release_select_related_to_prefetches`) never match it and the JOIN still
   serves the row; no fakeshop or `tests/` model has the shape (a library `PatronBadge(patron=OneToOneField(Patron,
   related_name="badge", related_query_name="badges"))` would). Found landing 379/380
-- [ ] 382. PostgreSQL refuses a datetime or time whose UTC offset is +-16:00..+-23:59 (`time zone displacement out of
-  range`), which Python and the Strawberry `DateTime` / `Time` scalars accept: a filter bound or write value with such
-  an offset raises the masked uncoded error on PostgreSQL only
 - [ ] 384. A declared django-filter whose scalar kind differs from its column escapes the unbindable-temporal refusal: a
   `date` value on a `DateTimeField` (`date(1, 1, 1)` under a `TIME_ZONE` east of UTC) and a `datetime` through a
   `DateField` or a `__date` transform (`0001-01-01T00:00+05:00`, `9999-12-31T23:59-05:00`) overflow at evaluation as the
@@ -1583,12 +1590,24 @@ tracker number are recorded there; open remainders and new defects are filed as 
   column's `gte` form field, django-filter's `NullBooleanField`, which reads an unrecognized string (`"yes"`) as
   `None`, so under `DjangoFilterBackend` a junk bound applies no constraint where it should be refused; GraphQL types
   the value `Boolean` and cannot send it. Found verifying 376
+- [ ] 556. (robustness) A PostgreSQL `ArrayField(TimeField)` write whose list holds a naive time before an aware one
+  (`[naive, aware]`) raises psycopg's "cannot calculate the offset of tzinfo 'None' without a date" as the masked error
+  in either binding mode (`[aware, naive]` stores). Found implementing 382
+- [ ] 557. (robustness) With a consumer `OPTIONS["cursor_factory"]` that binds on the server (psycopg's own `Cursor`)
+  and no `server_side_binding`, Django's named cursors (`QuerySet.iterator()`) still bind on the client, while
+  `utils/errors.py::unbindable_temporal` reads the connection as server-side; the package never iterates, so only
+  consumer code iterating such a queryset sees the masked error for a datetime at an offset of 16:00 or more. Found
+  verifying 382
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 555. CHANGELOG entry for item 382: on PostgreSQL a filter or write value that is an aware datetime or time whose
+  UTC offset the server refuses (16:00 or more; a sub-second offset under client-side binding; a datetime under
+  server-side binding never) now answers `FILTER_INVALID` / the field-keyed `FieldError` "Enter a value the database
+  can represent." instead of the masked error
 - [ ] 513. CHANGELOG entry for item 376: a package `RangeFilter`, `ListFilter` or `ArrayFilter` declared on a plain
   `django_filters.FilterSet` (for example under DRF's `DjangoFilterBackend`) cleans each bound or element with its
   column's comparison form field, so a value the column cannot hold is the form's error (a 400 through the backend)

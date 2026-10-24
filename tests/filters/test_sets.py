@@ -7520,7 +7520,8 @@ def _temporal_filter_class() -> type[FilterSet]:
     django-filter's declared filters (a ``DateTimeFilter``, its datetime and time range
     filters, a ``TimeFilter`` and a ``NumberFilter`` whose ``field_name`` carries the
     ``time`` / ``year`` transform or a ``month`` one, a ``DateFilter`` on the datetime
-    column and a ``DateTimeFilter`` on the time column), the package's ``ListFilter`` /
+    column, a ``DateTimeFilter`` over its ``date`` transform and a ``DateTimeFilter`` on
+    the time column), the package's ``ListFilter`` /
     ``RangeFilter``, opted-in ``Meta.fields`` year leaves, a filter with its own
     ``method``, ones over a datetime and a time annotation the queryset adds (the
     datetime one through ``year`` too), one over an annotation whose output field
@@ -7540,6 +7541,10 @@ def _temporal_filter_class() -> type[FilterSet]:
             lookup_expr="gt",
         )
         taken_on = django_filters.DateFilter(field_name="occurred_at")
+        taken_on_day_of = django_filters.DateTimeFilter(
+            field_name="occurred_at",
+            lookup_expr="date",
+        )
         timed_at = django_filters.DateTimeFilter(field_name="occurred_time")
         taken_among = ListFilter(field_name="occurred_at", lookup_expr="in")
         taken_span = RangeFilter(field_name="occurred_at", lookup_expr="range")
@@ -7671,10 +7676,10 @@ def test_temporal_value_the_database_cannot_bind_is_refused_for_every_filter_fam
     ``field_name``, a ``ListFilter`` element, a ``RangeFilter`` bound, and opted-in
     ``year`` / ``iso_year`` leaves on a datetime and a date column (a year outside
     1..9999, ``iso_year`` 9999 whose last day falls in year 10000, a number past what a
-    date can hold, a value that is not a number). Django's PostgreSQL adapters pass the
-    aware datetimes and times through, so they pass there; the year bounds fail on every
-    backend. Package-only:
-    no fakeshop filterset declares these filters or opts into a year leaf.
+    date can hold, a value that is not a number). PostgreSQL binds those aware datetimes
+    and times, whose UTC offsets it accepts, so they pass there; the year bounds fail on
+    every backend. Package-only: no fakeshop filterset declares these filters or opts
+    into a year leaf.
     """
     specimen_filter = _temporal_filter_class()
     filterset = specimen_filter(data=data, queryset=_specimens_stamped())
@@ -7745,8 +7750,8 @@ def test_naive_value_made_aware_east_of_utc_is_held_to_the_projection(
     """A naive value is made aware in ``TIME_ZONE`` first, so its UTC projection is what binds.
 
     Under ``Asia/Tokyo`` (UTC+9) the first instant of year 1, sent naive or computed as a
-    ``year`` bound, projects onto year 0 in UTC: SQLite refuses it, while Django's
-    PostgreSQL adapters pass it through.
+    ``year`` bound, projects onto year 0 in UTC: SQLite refuses it, while PostgreSQL
+    binds the aware instant.
     """
     specimen_filter = _temporal_filter_class()
     with override_settings(TIME_ZONE="Asia/Tokyo"):
@@ -7767,8 +7772,8 @@ def test_aware_datetime_without_time_zone_support_is_refused() -> None:
     """With ``USE_TZ`` false the SQLite, MySQL and Oracle adapters refuse any aware datetime.
 
     The form clean keeps the aware value as sent, so even an instant well inside years
-    1..9999 is refused on the generated leaf; Django's PostgreSQL adapters pass it
-    through, so it passes there.
+    1..9999 is refused on the generated leaf; PostgreSQL binds it (a UTC offset it
+    accepts), so it passes there.
     """
     specimen_filter = _temporal_filter_class()
     with override_settings(USE_TZ=False):
@@ -7799,6 +7804,115 @@ def test_date_column_year_bound_is_not_projected_onto_a_time_zone() -> None:
         filterset = specimen_filter(data={"occurred_on__year": 1}, queryset=_specimens_stamped())
 
         specimen_filter._validate_form_or_raise(filterset)
+
+
+#: UTC offsets PostgreSQL refuses: 16:00 or more either way, and (bound as text, as Django's
+#: default psycopg cursor binds) a fraction of a second.
+_PLUS_SIXTEEN = datetime.timezone(datetime.timedelta(hours=16))
+_MINUS_SIXTEEN = datetime.timezone(datetime.timedelta(hours=-16))
+_HALF_SECOND_OFFSET = datetime.timezone(datetime.timedelta(hours=1, microseconds=500_000))
+_AT_PLUS_SIXTEEN = datetime.datetime(2021, 6, 16, 1, 30, tzinfo=_PLUS_SIXTEEN)
+_AT_MINUS_SIXTEEN = datetime.datetime(2021, 6, 14, 17, 30, tzinfo=_MINUS_SIXTEEN)
+_AT_HALF_SECOND_OFFSET = datetime.datetime(2021, 6, 15, 10, 30, tzinfo=_HALF_SECOND_OFFSET)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("data", "form_key", "refused_on_sqlite"),
+    [
+        pytest.param({"taken_before": _AT_PLUS_SIXTEEN}, "taken_before", False, id="declared"),
+        pytest.param(
+            {"taken_between_after": _AT_MINUS_SIXTEEN},
+            "taken_between",
+            False,
+            id="declared-range-lone-bound",
+        ),
+        pytest.param(
+            {"taken_between_before": _AT_HALF_SECOND_OFFSET},
+            "taken_between",
+            False,
+            id="declared-range-half-second-offset",
+        ),
+        pytest.param(
+            {"clock_time": datetime.time(9, 30, tzinfo=_PLUS_SIXTEEN)},
+            "clock_time",
+            True,
+            id="time-transform",
+        ),
+        pytest.param(
+            {
+                "timed_between_after": datetime.time(1),
+                "timed_between_before": datetime.time(9, 30, tzinfo=_MINUS_SIXTEEN),
+            },
+            "timed_between",
+            True,
+            id="declared-time-range",
+        ),
+        pytest.param(
+            {"taken_among": [_BINDABLE_DATETIME, _AT_PLUS_SIXTEEN]},
+            "taken_among",
+            False,
+            id="list-element",
+        ),
+        pytest.param(
+            {"taken_span_0": _AT_MINUS_SIXTEEN, "taken_span_1": _BINDABLE_DATETIME},
+            "taken_span",
+            False,
+            id="range-bound",
+        ),
+    ],
+)
+def test_utc_offset_postgresql_refuses_is_refused_for_every_filter_family(
+    data: dict[str, object],
+    form_key: str,
+    refused_on_sqlite: bool,  # noqa: FBT001
+) -> None:
+    """A UTC offset PostgreSQL refuses is refused there, keyed to the filter's form field.
+
+    A declared ``DateTimeFilter``, a ``DateTimeFromToRangeFilter`` bound, a ``TimeFilter``
+    over the ``time`` transform, a ``TimeRangeFilter`` bound, a ``ListFilter`` element
+    and a ``RangeFilter`` bound each reach the one rule: an offset of 16:00 or more either
+    way, or one carrying a fraction of a second, is refused on PostgreSQL (bound as text,
+    as Django's default psycopg cursor binds). SQLite projects those datetimes onto UTC
+    and binds them, and refuses every aware time. Package-only: no fakeshop filterset
+    declares these filters.
+    """
+    specimen_filter = _temporal_filter_class()
+    filterset = specimen_filter(data=data, queryset=_specimens_stamped())
+    if not refused_on_sqlite and connection.vendor != "postgresql":
+        specimen_filter._validate_form_or_raise(filterset)
+        return
+    with pytest.raises(GraphQLError) as excinfo:
+        specimen_filter._validate_form_or_raise(filterset)
+    assert excinfo.value.extensions == {
+        "code": "FILTER_INVALID",
+        "errors": {form_key: _UNBINDABLE},
+    }
+
+
+@pytest.mark.django_db
+def test_date_transform_of_a_datetime_binds_any_utc_offset() -> None:
+    """A datetime filtered through the ``date`` transform binds as a date on every backend.
+
+    The transform's ``DateField`` output converts the datetime to its date in the current
+    time zone before the adapter sees it, so an offset PostgreSQL refuses for a datetime
+    filters there too.
+    """
+    specimen = scalar_models.ScalarSpecimen.objects.create(
+        label="alpha",
+        occurred_on=datetime.date(2021, 6, 15),
+        occurred_at=_BINDABLE_DATETIME,
+        occurred_time=datetime.time(9, 30),
+        external_id=uuid.uuid4(),
+    )
+    specimen_filter = _temporal_filter_class()
+    filterset = specimen_filter(
+        data={"taken_on_day_of": _AT_PLUS_SIXTEEN},
+        queryset=scalar_models.ScalarSpecimen.objects.all(),
+    )
+
+    specimen_filter._validate_form_or_raise(filterset)
+    assert list(filterset.qs.values_list("pk", flat=True)) == [specimen.pk]
 
 
 class _RefusingOperations(BaseDatabaseOperations):
