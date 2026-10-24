@@ -41,15 +41,21 @@ from django import forms
 from django.db import models
 from django.db.models import QuerySet
 from django_filters import (
+    AllValuesMultipleFilter,
     BaseInFilter,
     BaseRangeFilter,
+    BooleanFilter,
     CharFilter,
     ChoiceFilter,
     Filter,
+    LookupChoiceFilter,
     NumberFilter,
 )
 from django_filters import RangeFilter as DjangoRangeFilter
 from django_filters.filters import BaseInFilter as DjangoBaseInFilter
+from django_filters.rest_framework import DjangoFilterBackend
+from rest_framework import generics
+from rest_framework.test import APIRequestFactory
 from strawberry import relay
 from strawberry.types.base import get_object_definition
 from strawberry.types.field import StrawberryField
@@ -111,6 +117,7 @@ from tests._generated_inputs import keyword_constructor as _keyword_constructor
 from tests._idioms import (
     ClaimsClass,
     ClassReadRaises,
+    ModelSerializerBase,
     consumer_module,
     consumer_query,
     is_object_list,
@@ -743,6 +750,232 @@ def test_convert_filter_to_input_annotation_does_not_wrap_required() -> None:
     annotation = convert_filter_to_input_annotation(f, models.CharField())
     # Required filters return the scalar without the `| None` wrap.
     assert annotation is str
+
+
+# ---------------------------------------------------------------------------
+# Class-level declarations: refused LookupChoiceFilter, unwritten reads
+# ---------------------------------------------------------------------------
+
+
+class _PriceLookupChoiceFilter(LookupChoiceFilter):
+    """A consumer subclass of ``LookupChoiceFilter``; the refusal keys on the class."""
+
+
+_LOOKUP_CHOICE_DECLARATIONS = [
+    pytest.param(
+        lambda: LookupChoiceFilter(field_name="price", field_class=forms.DecimalField),
+        id="lookups-from-the-column",
+    ),
+    pytest.param(
+        lambda: LookupChoiceFilter(
+            field_name="price",
+            field_class=forms.DecimalField,
+            lookup_choices=[("exact", "Equals"), ("gt", "Greater than")],
+        ),
+        id="declared-lookups",
+    ),
+    pytest.param(
+        lambda: _PriceLookupChoiceFilter(field_name="price", field_class=forms.DecimalField),
+        id="subclass",
+    ),
+]
+
+
+def _price_lookup_set(declared: LookupChoiceFilter) -> type[FilterSet]:
+    """A package ``FilterSet`` over ``ScalarSpecimen`` declaring ``declared`` as ``price``."""
+
+    class PriceLookupSet(FilterSet):
+        price = declared
+
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = []
+
+    return PriceLookupSet
+
+
+def _serve(served: type[FilterSet]) -> type[DjangoType]:
+    """Declare a ``ScalarSpecimen`` ``DjangoType`` whose ``Meta.filterset_class`` is ``served``."""
+
+    class PriceLookupSpecimenType(DjangoType):
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = ("id", "label")
+            filterset_class = served
+
+    return PriceLookupSpecimenType
+
+
+@pytest.mark.parametrize("declare", _LOOKUP_CHOICE_DECLARATIONS)
+def test_lookup_choice_filter_on_a_served_filterset_is_refused_when_the_schema_is_built(
+    declare: Callable[[], LookupChoiceFilter],
+) -> None:
+    """A ``LookupChoiceFilter`` filters by a value and a lookup no GraphQL input carries.
+
+    The schema build refuses it before reading its form field, so the declaration
+    keeps every attribute it had. No fakeshop FilterSet can declare one: its schema
+    would refuse to build.
+    """
+    declared = declare()
+    _ = _serve(_price_lookup_set(declared))
+    state = dict(vars(declared))
+    extra = dict(declared.extra)
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        finalize_django_types()
+
+    assert str(excinfo.value) == (
+        f"PriceLookupSet: {type(declared).__name__} on 'price' filters by a value and a "
+        "lookup read from two form-data keys, and no GraphQL input carries that pair. List "
+        "the lookups in Meta.fields dict form (one input field per lookup), or keep the "
+        "filter on a FilterSet the schema does not serve."
+    )
+    assert (vars(declared), declared.extra) == (state, extra)
+
+
+def _priced_specimen(label: str, price: str) -> None:
+    """Create a ``ScalarSpecimen`` named ``label`` at ``price``."""
+    _ = scalar_models.ScalarSpecimen.objects.create(
+        label=label,
+        price=decimal.Decimal(price),
+        occurred_on=datetime.date(2026, 1, 2),
+        occurred_at=datetime.datetime(2026, 1, 2, 3, 4, 5, tzinfo=datetime.timezone.utc),
+        occurred_time=datetime.time(3, 4, 5),
+        external_id=uuid.uuid4(),
+    )
+
+
+class _SpecimenLabelSerializer(ModelSerializerBase[scalar_models.ScalarSpecimen]):
+    class Meta:
+        model = scalar_models.ScalarSpecimen
+        fields = ("label",)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("declare", _LOOKUP_CHOICE_DECLARATIONS)
+def test_lookup_choice_filter_the_schema_refused_still_filters_under_django_filter(
+    declare: Callable[[], LookupChoiceFilter],
+) -> None:
+    """The refused declaration filters as django-filter documents it, directly and through DRF.
+
+    The same ``FilterSet`` class serves a ``DjangoFilterBackend`` list view after the
+    failed schema build: the refusal wrote nothing the per-request copy carries.
+    """
+    served = _price_lookup_set(declare())
+    _ = _serve(served)
+    with pytest.raises(ConfigurationError):
+        finalize_django_types()
+    _priced_specimen("kept", "10.5")
+    _priced_specimen("other", "99")
+    queryset = scalar_models.ScalarSpecimen.objects.order_by("label")
+
+    class PriceLookupListView(generics.ListAPIView[scalar_models.ScalarSpecimen]):
+        serializer_class = _SpecimenLabelSerializer
+        filter_backends = (DjangoFilterBackend,)
+        filterset_class = served
+        authentication_classes = ()
+        permission_classes = ()
+        pagination_class = None
+
+    direct = served(data={"price": "10.5", "price_lookup": "exact"}, queryset=queryset)
+    request = APIRequestFactory().get("/specimens/?price=10.5&price_lookup=exact")
+    response = PriceLookupListView.as_view(queryset=queryset)(request)
+
+    assert list(direct.qs.values_list("label", flat=True)) == ["kept"]
+    assert (response.status_code, read_attr(response, "data")) == (200, [{"label": "kept"}])
+
+
+def _no_rows(queryset: QuerySet[library_models.Branch], _name: str, _value: object) -> object:
+    """A ``method=`` filter body; the schema build never runs it."""
+    return queryset.none()
+
+
+class _DecimalMethodFilter(Filter):
+    """A consumer ``method=`` filter whose form field cleans a decimal."""
+
+    field_class = forms.DecimalField
+
+
+def _declared_filtersets() -> tuple[type[FilterSet], type[FilterSet]]:
+    """Fresh child and parent sets, so no other test's schema build touched a declaration.
+
+    The child declares every class-level filter whose form field the input converter
+    reads; the parent expands them through ``branch``, a ``method=`` child leaf as a
+    projected copy reading the child's declaration.
+    """
+
+    class DeclaredChildBranchFilter(FilterSet):
+        title = CharFilter(field_name="name", lookup_expr="icontains")
+        tagged = CharFilter(method="filter_tagged")
+        open_on = BooleanFilter(field_name="city", lookup_expr="isnull")
+        city_in = AllValuesMultipleFilter(field_name="city")
+        floor = NumberFilter(method="filter_tagged")
+        price = _DecimalMethodFilter(method="filter_tagged")
+
+        class Meta:
+            model = library_models.Branch
+            fields = []
+
+        def filter_tagged(
+            self,
+            queryset: QuerySet[library_models.Branch],
+            name: str,
+            value: object,
+        ) -> object:
+            """Answer no rows; the schema build never runs it."""
+            return _no_rows(queryset, name, value)
+
+    class DeclaredParentShelfFilter(FilterSet):
+        branch = RelatedFilter(DeclaredChildBranchFilter, field_name="branch")
+
+        class Meta:
+            model = library_models.Shelf
+            fields = []
+
+    return DeclaredChildBranchFilter, DeclaredParentShelfFilter
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "title",
+        "tagged",
+        "open_on",
+        "city_in",
+        "floor",
+        "price",
+    ],
+)
+def test_building_the_schema_writes_nothing_to_a_class_level_declaration(name: str) -> None:
+    """The input converter reads each declaration's form field on a copy of it.
+
+    A declaration is shared by every request and deep-copied into each one, so a form
+    field the build cached on it would ride every copy. Each child declaration is read
+    as the child's own input field and, through ``branch``, as the parent's expanded leaf.
+    """
+    child, parent = _declared_filtersets()
+    declared = child.base_filters[name]
+    state = dict(vars(declared))
+    extra = dict(declared.extra)
+
+    class DeclaredChildBranchType(DjangoType):
+        class Meta:
+            model = library_models.Branch
+            fields = ("id", "name")
+            filterset_class = child
+
+    class DeclaredParentShelfType(DjangoType):
+        class Meta:
+            model = library_models.Shelf
+            fields = ("id", "code")
+            filterset_class = parent
+
+    finalize_django_types()
+
+    assert registry.get(library_models.Branch) is DeclaredChildBranchType
+    assert registry.get(library_models.Shelf) is DeclaredParentShelfType
+    assert "DeclaredParentShelfFilterInputType" in FilterArgumentsFactory.input_object_types
+    assert (vars(declared), declared.extra) == (state, extra)
 
 
 # ---------------------------------------------------------------------------

@@ -32,6 +32,7 @@ from django.db import models
 from django_filters import (
     ChoiceFilter,
     Filter,
+    LookupChoiceFilter,
     ModelChoiceFilter,
     ModelMultipleChoiceFilter,
     TypedChoiceFilter,
@@ -92,6 +93,7 @@ from .base import (
     _bound_field_name,
     _EnumMemberFilterMixin,
     _filterset_model_field,
+    copied_form_field,
     model_choice_identity_column,
     multi_widget_keys,
     relation_identity_column,
@@ -411,6 +413,20 @@ def _model_choice_takes_list(filter_instance: Filter) -> bool:
     return isinstance(filter_instance, (ModelMultipleChoiceFilter, BaseCSVFilter))
 
 
+def _declared_form_field(filter_instance: Filter) -> object:
+    """Return the form field the filter's class builds, ``None`` when it builds none unbound.
+
+    The filter is the class-level declaration every request deep-copies, so the field
+    is read on a copy (``filters/base.py::copied_form_field``) and the declaration keeps
+    nothing. A ``field`` that raises ``AttributeError`` without a bound ``FilterSet``
+    (``AllValuesMultipleFilter`` reads the per-request ``model``) builds none here.
+    """
+    try:
+        return copied_form_field(filter_instance)
+    except AttributeError:
+        return None
+
+
 def _model_choice_identity_annotation(
     filter_instance: Filter,
     model_field: ModelField | None,
@@ -506,7 +522,7 @@ def _element_annotation(
         return _choice_enum_from_filter(filter_instance, type_name, model_field)
     if model_field is not None:
         return _scalar_from_model_field(model_field)
-    form_field = read_attr(filter_instance, "field", None)
+    form_field = _declared_form_field(filter_instance)
     return (
         _scalar_from_form_field(form_field)
         if form_field is not None
@@ -595,7 +611,22 @@ def convert_filter_to_input_annotation(
     GraphQL type names (spec-027 forward path; see ``_build_range_input_class``,
     which also covers the set/field splits that still meet). ``None`` (direct
     converter callers) keeps the unqualified ``<Field>RangeInputType`` name.
+
+    A ``LookupChoiceFilter`` raises ``ConfigurationError`` before anything reads it:
+    it filters by a value and a lookup read from two form-data keys (``<name>`` and
+    ``<name>_lookup``), and no generated input carries that pair. The form field of a
+    filter that reaches a ``field`` read is built on a copy of it (``_declared_form_field``),
+    so building the schema writes nothing to a class-level declaration.
     """
+    if truth.is_instance(filter_instance, LookupChoiceFilter):
+        owner = truth.name(filterset_cls) if filterset_cls is not None else "FilterSet"
+        raise ConfigurationError(
+            f"{owner}: {truth.kind(filter_instance)} on "
+            f"{truth.render(filter_instance.field_name)} filters by a value and a lookup "
+            "read from two form-data keys, and no GraphQL input carries that pair. List "
+            "the lookups in Meta.fields dict form (one input field per lookup), or keep "
+            "the filter on a FilterSet the schema does not serve.",
+        )
     required = bool(dict_of(filter_instance.extra).get("required", False))
 
     def _gid_multi(_filter: Filter) -> object:
@@ -642,7 +673,7 @@ def convert_filter_to_input_annotation(
         # Catch-all scalar branch. ``Filter(method=...)`` filters land
         # here when their ``field_class`` is a recognized form field; an
         # unknown form-field shape raises per spec-027 Decision 4.
-        form_field = read_attr(matched, "field", None)
+        form_field = _declared_form_field(matched)
         method = read_attr(matched, "method", None)
         if method is not None and form_field is None:
             raise ConfigurationError(
