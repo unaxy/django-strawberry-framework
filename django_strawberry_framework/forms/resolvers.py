@@ -219,6 +219,7 @@ from django_strawberry_framework.utils.write_values import (
     decode_provided_fields,
     decode_visible_relation,
     materialize_relation_id_container,
+    unstorable_columns,
 )
 from django_strawberry_framework.write_mixins import backing_model_of
 
@@ -1079,17 +1080,11 @@ def _unstorable_cleaned_fields(
       float column's ``get_prep_value`` ("expected a number but got ''") or the
       ``ValidationError`` of a decimal / date / UUID / boolean column's ``to_python``.
 
-    A text column storing ``""`` is a legitimate clear and is never named.
+    A text column storing ``""`` is a legitimate clear and is never named. The walk and
+    the ``None`` rule are the model flavor's too (``utils/write_values.py::unstorable_columns``);
+    the ``""`` rule is this flavor's, since only a form field cleans to it.
     """
-    instance = form.instance
-    unstorable_fields: list[models.Field[object, object]] = []
-    for field in instance._meta.concrete_fields:
-        if field.name not in form.fields or not field.editable or field.primary_key:
-            continue
-        value = read_attr(instance, field.attname)
-        if (value is None and not field.null) or _is_unstorable_blank(field, value):
-            unstorable_fields.append(field)
-    return unstorable_fields
+    return unstorable_columns(form.instance, form.fields, also=_is_unstorable_blank)
 
 
 def _is_unstorable_blank(field: models.Field[object, object], value: object) -> bool:
@@ -1268,9 +1263,11 @@ def _modelform_save_or_field_errors(
     ``_unstorable_cleaned_fields`` finds such a column on the instance the save was
     attempted on, so the error carries the field, code ``null`` and path the model
     flavor gives the same input (``mutations/resolvers.py::_explicit_null_error`` for
-    a scalar, ``mutations/resolvers.py::_decode_single_relation_id`` for a foreign
-    key), with the column's Django ``error_messages["null"]`` as the message (the form
-    is the message source of truth, so a custom or translated message is sent as is).
+    an explicit ``null`` scalar, ``mutations/resolvers.py::_decode_single_relation_id``
+    for an explicit ``null`` foreign key, ``mutations/resolvers.py::_created_row_integrity_errors``
+    for a column a create omitted), with the column's Django ``error_messages["null"]``
+    as the message (the form is the message source of truth, so a custom or translated
+    message is sent as is).
     The diagnosis reads only the in-memory instance, so no query runs on a connection
     the ``IntegrityError`` left unusable; the shared mapper's envelope then rolls the
     pipeline transaction back (an update's failed save is already contained in

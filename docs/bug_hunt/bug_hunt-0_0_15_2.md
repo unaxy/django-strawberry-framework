@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 265 done, 171 to do.
+Progress: 266 done, 171 to do.
 
 ## Done
 
@@ -1265,6 +1265,13 @@ Progress: 265 done, 171 to do.
   pinned write alias; the serializer cells where DRF itself raises a raw `OverflowError` stay masked (540). A new
   fakeshop scalars write surface and its live rows pin it, with package rows for PostgreSQL and the MySQL / Oracle
   adapters; the README, spec-036, 038, 039 and the `fielderror-envelope` glossary term say so
+- [x] 401. fixed: the model flavor's create answers an input that leaves out a `blank=True, null=False` column with
+  no default (fakeshop `createItemHold` without `itemId`) with that column's field-keyed `null` error (`itemId`, "This
+  field cannot be null.", code `null`), nothing written, as the ModelForm flavor does; the diagnosis reads the
+  in-memory instance after the failed INSERT (`mutations/resolvers.py::_created_row_integrity_errors`), so a
+  consumer `save()` that fills the value still writes, and shares one predicate with the ModelForm
+  (`utils/write_values.py::unstorable_columns`). Live rows pin omitted and `null` on both flavors, sync and async;
+  spec-036, spec-038, the README and the `DjangoMutation` / `fielderror-envelope` glossary terms say so
 
 ## Outside review of the fixes
 
@@ -1428,8 +1435,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 400. Unprobed: a `FilterSet` declaring only `Meta.exclude` (`fields=None`) is treated as `"__all__"` upstream,
   but the package's top-level `"__all__"` narrowing keys on `meta_fields == "__all__"`, so exclude-only may omit `id`
   and handle many-to-many differently from `fields = "__all__"`; probe both against one model and align them
-- [ ] 401. Unprobed: the model flavor of `createItemHold` with `itemId` omitted (not sent `null`) may not answer with
-  the field-keyed `itemId` / `null` envelope the ModelForm flavor gives since `8c0aaf17`
 - [ ] 500. Process provenance in test docstrings and comments outside `tests/utils/test_querysets.py`, the class 324
   restates there: e.g. `tests/utils/test_permissions.py` ("It used to reach it"), `tests/test_permissions.py` ("no
   longer compare ... (the old ...", "no longer trips"), `tests/utils/test_policies.py` ("no longer", "The pre-fix
@@ -1484,6 +1489,9 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 588. CHANGELOG entry for item 401: a model-flavor create that leaves out a `blank=True, null=False` column with
+  no default now answers that column's field-keyed `null` error (code `null`, "This field cannot be null.") instead
+  of the unattributed `__all__` `constraint` error, nothing written; a `save()` that fills the column still writes
 - [ ] 546. CHANGELOG entry for item 381: a write input datetime or time the database cannot store (out of the
   backend's range, an aware time on SQLite, an aware stamp PostgreSQL stores but cannot read back) is now the
   field-keyed `FieldError` "Enter a value the database can represent." code `invalid` in every write flavor, nothing

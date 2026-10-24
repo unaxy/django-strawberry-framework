@@ -20,7 +20,10 @@ mutation resolver is not the utility module for the other write flavors):
 - ``store_decoded`` / ``decoded_into`` / ``scalar_into`` / ``file_into`` /
   ``relation_into`` / ``decode_field_handlers`` - the SCALAR / RELATION / FILE
   store-into-dest vocabulary the write-flavor walks share;
-- ``decode_provided_fields`` - the kind-routed walk over a bound write input.
+- ``decode_provided_fields`` - the kind-routed walk over a bound write input;
+- ``unstorable_columns`` - the save-time diagnosis of an attempted row: the
+  declared columns holding a value the column cannot store (``None`` on a
+  ``null=False`` column), read from the in-memory instance after a failed save.
 """
 
 from __future__ import annotations
@@ -39,6 +42,7 @@ from ._narrowing import (
     is_char_wise,
     is_list,
     list_of,
+    read_attr,
 )
 from .errors import (
     FIELD_ERROR_CODE_INVALID,
@@ -60,7 +64,7 @@ from .querysets import (
 from .typing import strawberry_schema_from_info
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Container
     from typing import TypeAlias
 
     from django.db import models
@@ -708,3 +712,37 @@ def decode_provided_fields(
         if error is not None:
             return error
     return None
+
+
+def unstorable_columns(
+    instance: models.Model,
+    names: Container[str],
+    *,
+    also: Callable[[models.Field[object, object], object], bool] | None = None,
+) -> list[models.Field[object, object]]:
+    """Return the declared columns of ``instance`` holding a value the column cannot store.
+
+    Walks the concrete, editable, non-primary-key columns whose field name is in
+    ``names`` (the columns the write flavor's input declares) and names each one holding
+    ``None`` on a ``null=False`` column, plus each one ``also(field, value)`` accepts, in
+    the model's column order. A ``blank=True`` column skips ``Model.clean_fields`` on an
+    empty value ("the developer is responsible for making sure they have a valid
+    value"), so an omitted or ``null`` value with no default reaches the database's
+    ``NOT NULL`` refusal as an ``IntegrityError`` naming no field. The caller runs this
+    AFTER that failed save, never before it, so a consumer ``save()`` that fills the
+    value in still writes (django-trac 13776 / 20205); the exception is the trigger and
+    this reading the diagnosis.
+
+    Reads only the in-memory ``instance`` the save was attempted on, never the
+    database, so it is safe on a connection the ``IntegrityError`` left unusable. Each
+    column's ``attname`` is read, so a foreign key with no related row reads ``None``
+    instead of raising.
+    """
+    columns: list[models.Field[object, object]] = []
+    for field in instance._meta.concrete_fields:
+        if field.name not in names or not field.editable or field.primary_key:
+            continue
+        value = read_attr(instance, field.attname)
+        if (value is None and not field.null) or (also is not None and also(field, value)):
+            columns.append(field)
+    return columns

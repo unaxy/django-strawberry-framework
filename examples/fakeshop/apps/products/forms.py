@@ -33,7 +33,7 @@ end. These forms cover the spec's Decision-12 live matrix:
   case Django's own validation cannot see).
 * ``ItemHoldModelForm`` - a standard ``ModelForm`` over ``ItemHold`` carrying ``reason`` /
   ``item``. ``item`` is ``blank=True, null=False``, so its ``ModelChoiceField`` is
-  optional and an explicit ``null`` cleans to ``None`` past ``full_clean`` to the
+  optional and an omitted or explicit ``null`` cleans to ``None`` past ``full_clean`` to the
   database's ``NOT NULL`` refusal, which the save must report as the ``itemId`` ``null``
   error the model flavor gives the same input.
 * ``ItemFlagsModelForm`` / ``PrefixedItemFlagsModelForm`` - ``ModelForm`` s over ``Item``
@@ -217,8 +217,8 @@ class ItemHoldModelForm(forms.ModelForm[ItemHold]):
     """``ModelForm`` over ``ItemHold``: an optional form field over a ``null=False`` column.
 
     Declared the standard Django way: ``item``'s ``ModelChoiceField`` is
-    ``required=False`` because the column is ``blank=True``, so an explicit ``null``
-    is a valid form whose save the database refuses.
+    ``required=False`` because the column is ``blank=True``, so an omitted or explicit
+    ``null`` is a valid form whose save the database refuses.
     """
 
     class Meta:

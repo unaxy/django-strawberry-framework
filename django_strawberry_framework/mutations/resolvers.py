@@ -54,6 +54,11 @@ and the load-bearing invariants this module owns:
   documented best-effort fallback: a create INSERTs (``save_new_row``), so a row
   committed under a client-assigned key between the check and the save is that
   envelope, never overwritten.
+- **A null on a ``null=False`` column is the field-keyed ``null`` error**, the
+  explicit ``null`` refused at decode before any write, and on a create an omitted
+  ``blank=True`` column with no default (which ``full_clean`` skips) named after its
+  failed INSERT from the in-memory row (``_created_row_integrity_errors``), so a
+  consumer ``save()`` that fills the value in still writes.
 - **An update UPDATEs** (``save_located_row`` inside
   ``forced_save_or_field_errors``, shared by the model and ``ModelForm``
   flavors): a located row a concurrent transaction deleted after the locate is
@@ -190,6 +195,7 @@ from django_strawberry_framework.utils.write_values import (
     decode_visible_relation_ids,
     decoded_into,
     relation_into,
+    unstorable_columns,
     unstorable_temporal_error,
     unstorable_text_error,
 )
@@ -720,12 +726,13 @@ def _explicit_null_error(
     A provided ``None`` (``UNSET`` is already stripped) on a ``null=False`` column is
     a problem ``full_clean`` does NOT reliably catch: Django's ``clean_fields`` SKIPS a
     ``blank=True`` field whose value is an empty value, and ``None`` is an empty value,
-    so a ``blank=True, null=False`` column (e.g. a ``TextField(blank=True)``) slips past
-    validation and only fails at ``save()`` as a NOT NULL ``IntegrityError`` - surfacing
-    as the generic ``"__all__"`` "A database constraint was violated." with no field
-    attribution, after a write was attempted. Reject it at decode as a field-keyed
-    ``FieldError`` so the client learns WHICH field, before validation or any write. A
-    ``null=True`` column treats ``None`` as a valid clear and is left alone.
+    so a ``blank=True, null=False`` column (e.g. a ``TextField(blank=True)``) passes
+    validation and reaches the database's NOT NULL ``IntegrityError``, which names no
+    field: an update's is the ``"__all__"`` constraint envelope, and a create's is named
+    only after its failed INSERT (``_created_row_integrity_errors``). The explicit
+    ``null`` is rejected here, at decode, as a field-keyed ``FieldError``, before
+    validation and before any write. A ``null=True`` column treats ``None`` as a valid
+    clear and is left alone.
     ``django_field`` is the bind-time column from ``_model_fields_by_attr`` (never a
     live ``get_field``).
     """
@@ -784,11 +791,13 @@ def _decode_single_relation_id(
     returns ``(None, None)`` without a membership query. On a ``null=False`` relation
     the same ``None`` is rejected here as a field-keyed ``null`` ``FieldError``
     (GraphQL name, e.g. ``categoryId``) - mirroring the scalar
-    ``_explicit_null_error`` guard. Django's ``full_clean`` SKIPS a ``blank=True``
-    empty value, so a ``blank=True, null=False`` FK would otherwise slip to a NOT NULL
-    ``IntegrityError`` and the generic ``"__all__"`` constraint envelope with no field
-    attribution. ``relation_field`` is the bind-time Django field from ``extra(spec)``
-    (``null`` lives on the field, not on ``InputFieldSpec``).
+    ``_explicit_null_error`` guard, before validation and before any write. Django's
+    ``full_clean`` SKIPS a ``blank=True`` empty value, so a ``blank=True, null=False``
+    FK reaches the database's NOT NULL ``IntegrityError``, which names no field: an
+    update's is the ``"__all__"`` constraint envelope, and a create's is named only after
+    its failed INSERT (``_created_row_integrity_errors``). ``relation_field`` is the
+    bind-time Django field from ``extra(spec)`` (``null`` lives on the field, not on
+    ``InputFieldSpec``).
     """
     if value is None:
         if getattr(relation_field, "null", False):
@@ -1416,6 +1425,7 @@ def _model_write_step(
             write_error = save_or_field_errors(
                 lambda: save_new_row(target),
                 error_key_map=error_key_map,
+                integrity_errors=lambda: _created_row_integrity_errors(target, error_key_map()),
             )
         else:
             # A direct model UPDATE saves through ``save_located_row``: a located
@@ -1432,6 +1442,32 @@ def _model_write_step(
     if write_error is not None:
         return StepFailure(write_error)
     return target
+
+
+def _created_row_integrity_errors(
+    target: models.Model,
+    error_key_map: ErrorKeyMap,
+) -> list[FieldError]:
+    """Map a create's failed INSERT to the envelope, naming each input column it left null.
+
+    A ``blank=True, null=False`` column the input declares but the client omitted, with
+    no default to fall back on, holds ``None`` on the constructed row: decode never saw a
+    value (``_explicit_null_error`` / ``_decode_single_relation_id`` refuse only an
+    explicit ``null``), and ``full_clean`` skips a ``blank=True`` empty value, so the
+    database's ``NOT NULL`` ``IntegrityError`` is the first refusal. Each such column
+    (``utils/write_values.py::unstorable_columns``, read from the in-memory row the
+    INSERT was attempted on, so no query runs on the failed connection) answers the
+    field-keyed ``null`` error under its published input name, the error the same
+    column's explicit ``null`` gets at decode. The input's columns and their names are
+    the step's error key map (``_model_error_key_map``), keyed by each column's model
+    field name. An ``IntegrityError`` no such column explains is the ``"__all__"``
+    ``constraint`` envelope. Read after the save, never before, so a consumer ``save()``
+    that fills the value in still writes.
+    """
+    columns = unstorable_columns(target, error_key_map)
+    if not columns:
+        return integrity_error_field_errors()
+    return [null_field_error(error_key_map[column.name][0]) for column in columns]
 
 
 # Every table a create's row spans, its multi-table parents included: the
@@ -1870,6 +1906,7 @@ def save_or_field_errors(
     save_callable: Callable[[], object],
     *,
     error_key_map: Callable[[], ErrorKeyMap | None],
+    integrity_errors: Callable[[], list[FieldError]] = integrity_error_field_errors,
 ) -> list[FieldError] | None:
     """Run ``save_callable()``; map a save-time failure to the envelope else ``None``.
 
@@ -1883,8 +1920,10 @@ def save_or_field_errors(
     else:
 
     - a post-validation ``IntegrityError`` (a race, or a constraint validation
-      did not cover) returns the ``"__all__"`` ``integrity_error_field_errors``
-      envelope;
+      did not cover) returns ``integrity_errors()``: the ``"__all__"``
+      ``integrity_error_field_errors`` envelope, unless the caller diagnoses the
+      failure from in-memory state (the model create's
+      ``_created_row_integrity_errors``);
     - a Django ``ValidationError`` raised by consumer save-time code (a
       ``Model.save()`` / ``ModelForm.save()`` override, a signal receiver, a
       ``perform_mutate``) returns ``validation_error_to_field_errors`` keyed
@@ -1907,7 +1946,7 @@ def save_or_field_errors(
     try:
         _ = save_callable()
     except IntegrityError:
-        return integrity_error_field_errors()
+        return integrity_errors()
     except ValidationError as exc:
         return validation_error_to_field_errors(exc, error_key_map())
     return None

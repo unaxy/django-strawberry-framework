@@ -287,10 +287,10 @@ class ItemHold(models.Model):
 
     ``item`` is ``on_delete=PROTECT`` and ``substitute`` is ``on_delete=RESTRICT``,
     so ``deleteItem`` on a held or substituting item is refused by Django's
-    deletion collector. ``item`` is ``blank=True`` with ``null=False``: it may be
-    left out of a submission, but a hold row cannot exist without one, so an
-    explicit ``null`` is a field error rather than a silent skip past
-    ``full_clean`` into a NOT NULL violation.
+    deletion collector. ``item`` is ``blank=True`` with ``null=False`` and no
+    default: the input field is optional, but a hold row cannot exist without one,
+    so an omitted or explicit ``null`` item is the ``itemId`` field error rather
+    than a silent skip past ``full_clean`` into an unattributed NOT NULL violation.
     """
 
     # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.

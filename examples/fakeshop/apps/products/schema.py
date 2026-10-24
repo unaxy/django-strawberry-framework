@@ -776,7 +776,7 @@ class Mutation:
     for the upload and `updateItemWithFileViaForm` for the omit-the-file preserve),
     the `get_form_kwargs`-injects-`user` form (`createStampedItemViaForm`), the
     narrowed-constraint form whose duplicate reaches a write-time `IntegrityError`
-    (`createDefaultCategoryItemViaForm`), the `ItemHold` form whose explicit `null` on
+    (`createDefaultCategoryItemViaForm`), the `ItemHold` form whose omitted or `null` item on
     the `blank=True, null=False` `item` reaches the database's `NOT NULL` refusal
     (`createItemHoldViaForm`), the prefixed forms - `createItemViaPrefixedForm` /
     `updateItemViaPrefixedForm` (a class-level prefix), the `...KwargsPrefixedForm` pair (a
