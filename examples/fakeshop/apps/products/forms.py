@@ -36,6 +36,17 @@ end. These forms cover the spec's Decision-12 live matrix:
   optional and an explicit ``null`` cleans to ``None`` past ``full_clean`` to the
   database's ``NOT NULL`` refusal, which the save must report as the ``itemId`` ``null``
   error the model flavor gives the same input.
+* ``ItemFlagsModelForm`` / ``PrefixedItemFlagsModelForm`` - ``ModelForm`` s over ``Item``
+  carrying ``name`` / ``description`` / ``category`` / ``is_private``, the second with
+  the class-level form prefix ``item``, for the prefixed-form binding: a form prefixed by
+  its class, by a ``get_form_kwargs`` ``prefix=``, or by a ``get_form`` that re-keys the
+  data itself reads the client's values, and an explicit ``null`` the ``null=False``
+  ``is_private`` / ``description`` columns' form fields clean to a value is still that
+  column's ``null`` error.
+* ``PrefixedRequiredFileItemModelForm`` - a ``ModelForm`` over ``Item`` under the form
+  prefix ``item`` whose declared ``attachment`` ``FileField`` is required, so an
+  update's explicit ``attachment: null`` on the prefixed form is the field's ``required``
+  error, never a kept file.
 """
 
 from django import forms
@@ -213,3 +224,48 @@ class ItemHoldModelForm(forms.ModelForm[ItemHold]):
     class Meta:
         model = ItemHold
         fields = ("reason", "item")
+
+
+class ItemFlagsModelForm(forms.ModelForm[Item]):
+    """``ModelForm`` over ``Item`` carrying the ``null=False`` ``is_private`` and ``description``.
+
+    ``is_private``'s ``BooleanField`` reads a bound ``None`` as ``False`` and
+    ``description``'s optional ``CharField`` cleans it to ``""``: both values the column
+    stores, so an explicit ``null`` the form would write as a value the client never sent.
+    Unprefixed; the ``get_form_kwargs`` ``prefix=`` shape binds it under a prefix.
+    """
+
+    class Meta:
+        model = Item
+        fields = (
+            "name",
+            "description",
+            "category",
+            "is_private",
+        )
+
+
+class PrefixedItemFlagsModelForm(ItemFlagsModelForm):
+    """``ItemFlagsModelForm`` under the class-level form prefix ``item``.
+
+    The form reads ``item-<name>`` for every field, as a page that renders two forms
+    side by side posts them.
+    """
+
+    prefix = "item"
+
+
+class PrefixedRequiredFileItemModelForm(forms.ModelForm[Item]):
+    """``ModelForm`` over ``Item`` under the form prefix ``item`` with a required ``attachment``.
+
+    ``Item.attachment`` is ``blank=True``, so its generated form field is optional; the
+    declared ``FileField`` makes it required, the shape whose explicit ``null`` on an update
+    cannot clear the stored file.
+    """
+
+    prefix = "item"
+    attachment = forms.FileField()
+
+    class Meta:
+        model = Item
+        fields = ("name", "category", "attachment")

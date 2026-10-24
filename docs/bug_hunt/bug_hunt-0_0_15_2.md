@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 243 done, 176 to do.
+Progress: 244 done, 176 to do.
 
 ## Done
 
@@ -1109,6 +1109,13 @@ Progress: 243 done, 176 to do.
   ("previously", "used to", "pre-fix", "the old inventory", "before the accessor scan existed", "new guard") are
   restated the same way, each counterfactual checked by running the test's probe with its guard patched out. Comments
   and docstrings only (code digest unchanged)
+- [x] 424. fixed: a `DjangoModelFormMutation` whose form carries a prefix (a class-level `prefix`, a
+  `get_form_kwargs` `prefix=`, or a `get_form` passing the package's data or a copy of it to a prefixed form) is bound
+  under it: the package keys the client's values through the form's `add_prefix`, so the form reads every value sent
+  and the explicit-`null` and required-file checks answer as on an unprefixed form; only renamed form-field keys move,
+  no consumer mapping is mutated, and a mapping already holding a prefixed key is kept as bound. The products
+  prefixed-form live rows and the forms resolver rows pin it; spec-038, the README and the `djangomodelformmutation`
+  glossary term say so
 
 ## Outside review of the fixes
 
@@ -1280,9 +1287,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   input while `ChoiceField.clean` refuses a list, so every create and update through it fails; the mirror of 305 (a
   list-writing field over a single-value column); say whether the form flavor types it by the form field (a scalar) or
   refuses at build. Found verifying 305
-- [ ] 424. `forms/resolvers.py::_coerced_null_fields` reads `form.data` by the unprefixed field name, so a form built
-  with a `prefix` (`get_form` / `get_form_kwargs`) never reaches its explicit-null check and an explicit `null` on
-  such a form is not coerced the way it is on an unprefixed one. Found implementing 305
 - [ ] 381. The write path does not hold a temporal input to the database: a mutation / serializer / form input datetime
   or time the target connection cannot bind (the populations `utils/errors.py::unbindable_temporal` refuses on reads)
   raises at save as the masked uncoded error; probe each write family and reuse the read helper if it reproduces
@@ -1391,6 +1395,12 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 544. CHANGELOG entry for item 424: a `DjangoModelFormMutation` whose form carries a prefix (class-level
+  `prefix`, `get_form_kwargs` `prefix=`, or a `get_form` binding the package's data to a prefixed form) is now bound
+  under it, so the form reads every value the client sent and an explicit `null` or a required-file clear is answered
+  as on an unprefixed form; before, a class-level or `get_form_kwargs` prefix hid every sent value (required fields
+  answered `required`, the rest stored defaults with a success payload) and those two checks never fired on any
+  prefixed form
 - [ ] 581. CHANGELOG entry for item 410: deleting an attribute of a sealed mutation `Meta` snapshot raises a
   `ConfigurationError` that no longer calls the configuration immutable; the existing CHANGELOG bullet saying "the
   sealed authorization record cannot be edited after the schema is built" makes the same absolute claim and may want

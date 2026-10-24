@@ -22,7 +22,10 @@ generated-input identity, NullBoolean UNSET omit (shipped
 ``setCardItemComplete.complete`` is ``required=False``, a weaker claim; the
 Django-default-required omit needs a throwaway form, and a live holder cannot
 declare ``DjangoFormMutation`` after the acceptance finalize), required extra
-field on a partial input, ``to_field_name`` reconstruction (including an M2M member
+field on a partial input, a prefixed form whose ``add_prefix`` the consumer overrides
+or whose ``get_form_kwargs`` binds its own prefixed copy of only ``data`` or only
+``files`` (fakeshop's prefixed forms keep Django's ``add_prefix`` and bind both or
+neither), ``to_field_name`` reconstruction (including an M2M member
 whose ``to_field_name`` value is ``""``), a raw-pk M2M element ``""`` decoded through a
 hiding text-keyed type (no fakeshop text-keyed type hides a row), ImageField
 reconstruction key absence, decode-helper envelopes, optimizer
@@ -59,6 +62,7 @@ from collections.abc import Callable, Generator, Iterator
 from enum import Enum
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, TypeAlias
+from urllib.parse import urlencode
 
 import pytest
 import strawberry
@@ -73,6 +77,7 @@ from django.db import connection, models
 from django.db.models.signals import pre_save
 from django.http import QueryDict
 from django.test.utils import CaptureQueriesContext
+from django.utils.datastructures import MultiValueDict
 from graphql_client import post_lock_rereads
 from strawberry import relay
 from strawberry.types.base import get_object_definition
@@ -3220,6 +3225,236 @@ def test_modelform_update_null_on_form_required_field_keeps_the_required_error()
     }
     item.refresh_from_db()
     assert item.name == "Named"
+
+
+def _dotted_prefix_item_form() -> type[forms.ModelForm[product_models.Item]]:
+    """An item form under the prefix ``item`` whose ``add_prefix`` joins with a dot."""
+
+    class DottedPrefixItemForm(_item_model_form()):
+        prefix = "item"
+
+        @override
+        def add_prefix(self, field_name: str) -> str:
+            return f"{self.prefix}.{field_name}" if self.prefix else field_name
+
+    return DottedPrefixItemForm
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("is_private", "errors", "stored"),
+    [(None, [_NULL_IS_PRIVATE_ERROR], []), (True, [], [True])],
+    ids=["explicit-null", "value"],
+)
+def test_modelform_create_binds_and_reads_through_the_form_add_prefix(
+    is_private: object,
+    errors: list[dict[str, object]],
+    stored: list[bool],
+) -> None:
+    """A consumer ``add_prefix`` override names the key the package binds and reads.
+
+    The data is re-keyed through the form's own ``add_prefix`` (``item.<name>``, never a
+    hand-built ``item-<name>``), so the form reads every value, and the explicit-``null``
+    check reads the bound ``None`` under the same key: ``isPrivate: null`` is the ``null``
+    error, nothing written; a value is stored.
+    """
+    (
+        schema,
+        (
+            CategoryT,
+            _ItemT,
+            _C,
+            _U,
+        ),
+    ) = _build_item_form_schema(form_class=_dotted_prefix_item_form())
+    cat = product_models.Category.objects.create(name=_uniq("Cat"))
+    res = schema.execute_sync(
+        "mutation($d: DottedPrefixItemFormInput!){ createItem(data:$d){ "
+        "node{ id } errors{ field messages codes } } }",
+        variable_values={
+            "d": {
+                "name": "DottedPrefix",
+                "categoryId": global_id_for(CategoryT, saved_pk(cat)),
+                "isPrivate": is_private,
+            },
+        },
+    )
+    assert res.errors is None, res.errors
+    assert _json_at(res.data, "createItem", "errors") == errors
+    written = product_models.Item.objects.filter(name="DottedPrefix")
+    assert list(written.values_list("is_private", flat=True)) == stored
+
+
+def _update_prefixed_media_schema(
+    *,
+    own: str,
+    seen: list[dict[str, object]] | None = None,
+) -> tuple[strawberry.Schema, type[DjangoType]]:
+    """Build ``updateMedia`` over a ``MediaSpecimen`` form under the prefix ``m``.
+
+    The mutation's ``get_form_kwargs`` binds its own ``m-<name>`` keyed copy of the
+    mapping ``own`` names (``"data"`` or ``"files"``) and passes the package's other
+    mapping through, so the package re-keys only that one. ``"multivalue"`` binds the
+    bare data as the immutable ``QueryDict`` a form post arrives as and the bare files as
+    a ``MultiValueDict``, both of which the package re-keys into copies. ``"partial"``
+    binds the data keyed ``m-<name>`` beside a bare ``label`` the form never reads, a
+    mapping its builder keyed, which the package leaves as bound. ``"source"`` adds a
+    bare ``source`` key the form's ``clean()`` reads, which is no form field and so stays
+    as bound. ``"kept-files"`` binds its own bare copy of the files and appends it to
+    ``seen``, so a test can read it after the write.
+    """
+
+    class MediaForm(forms.ModelForm[scalars_models.MediaSpecimen]):
+        prefix = "m"
+
+        class Meta:
+            model = scalars_models.MediaSpecimen
+            fields = ("label", "attachment")
+
+        @override
+        def clean(self) -> dict[str, object] | None:
+            cleaned = super().clean()
+            if own == "source" and self.data.get("source") != "api":
+                raise ValidationError("The source key was not bound as sent.")
+            return cleaned
+
+    class MediaT(DjangoType, relay.Node):
+        class Meta:
+            model = scalars_models.MediaSpecimen
+            fields = ("id", "label")
+            primary = True
+
+    class UpdateMedia(DjangoModelFormMutation):
+        class Meta:
+            form_class = MediaForm
+            operation = "update"
+            permission_classes = [_AllowAll]
+
+        @override
+        def get_form_kwargs(
+            self,
+            info: strawberry.Info[object, object],
+            *,
+            data: dict[str, object],
+            files: dict[str, object],
+            instance: models.Model | None = None,
+        ) -> dict[str, object]:
+            kwargs = super().get_form_kwargs(info, data=data, files=files, instance=instance)
+            if own == "multivalue":
+                kwargs["data"] = QueryDict(urlencode(data))
+                kwargs["files"] = MultiValueDict({name: [value] for name, value in files.items()})
+                return kwargs
+            if own == "source":
+                kwargs["data"] = {**data, "source": "api"}
+                return kwargs
+            if own == "kept-files":
+                kept = dict(files)
+                if seen is not None:
+                    seen.append(kept)
+                kwargs["files"] = kept
+                return kwargs
+            if own == "partial":
+                prefixed = {f"m-{name}": value for name, value in data.items()}
+                kwargs["data"] = {"label": "unprefixed", **prefixed}
+                return kwargs
+            bound = data if own == "data" else files
+            kwargs[own] = {f"m-{name}": value for name, value in bound.items()}
+            return kwargs
+
+    @strawberry.type
+    class Mutation:
+        update_media = DjangoMutationField(UpdateMedia)
+
+    finalize_django_types()
+    return _schema(Mutation), MediaT
+
+
+_STORED_ATTACHMENT = "scalar_media/files/stored.txt"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "own",
+    [
+        "data",
+        "files",
+        "multivalue",
+        "partial",
+        "source",
+    ],
+    ids=[
+        "consumer-data",
+        "consumer-files",
+        "multivalue",
+        "partial",
+        "non-field-key",
+    ],
+)
+@pytest.mark.parametrize(
+    ("change", "errors", "new_label"),
+    [
+        (
+            {"label": "renamed", "attachment": None},
+            [{"field": "attachment", "codes": ["required"]}],
+            None,
+        ),
+        ({"label": "renamed"}, [], "renamed"),
+    ],
+    ids=["explicit-null", "file-omitted"],
+)
+def test_update_under_a_half_rekeyed_prefix_binds_both_mappings(
+    own: str,
+    change: dict[str, object],
+    errors: list[dict[str, object]],
+    new_label: str | None,
+) -> None:
+    """Each of ``data`` / ``files`` is re-keyed on its own, only while it holds no prefixed key.
+
+    A ``get_form_kwargs`` that binds its own prefixed copy of one mapping keeps it as
+    bound, and the package re-keys the other; a bare-keyed immutable ``QueryDict`` and
+    ``MultiValueDict`` are re-keyed into copies, data holding a prefixed key beside a
+    bare one is left as bound, and a key no form field names stays bare beside the
+    re-keyed fields. The form reads both: the explicit
+    ``attachment: null`` on the required file is its ``required`` error, nothing written,
+    and an update omitting the file writes the label and keeps the file.
+    """
+    schema, media_type = _update_prefixed_media_schema(own=own)
+    specimen = _stored_media_specimen()
+    label = specimen.label
+    res = schema.execute_sync(
+        _UPDATE_MEDIA,
+        variable_values={"id": global_id_for(media_type, saved_pk(specimen)), "d": change},
+    )
+    assert res.errors is None, res.errors
+    assert _json_at(res.data, "updateMedia", "errors") == errors
+    specimen.refresh_from_db()
+    assert specimen.label == (new_label or label)
+    assert specimen.attachment.name == _STORED_ATTACHMENT
+
+
+@pytest.mark.django_db
+def test_update_under_a_prefix_never_mutates_the_bound_files_mapping() -> None:
+    """A files ``dict`` the hook binds and keeps a reference to reads unchanged after the write.
+
+    The package re-keys it into a new mapping it binds in its place, so the hook's dict
+    keeps its bare key while the form reads the explicit ``attachment: null`` under the
+    prefix and answers the required file's ``required`` error.
+    """
+    seen: list[dict[str, object]] = []
+    schema, media_type = _update_prefixed_media_schema(own="kept-files", seen=seen)
+    specimen = _stored_media_specimen()
+    res = schema.execute_sync(
+        _UPDATE_MEDIA,
+        variable_values={
+            "id": global_id_for(media_type, saved_pk(specimen)),
+            "d": {"attachment": None},
+        },
+    )
+    assert res.errors is None, res.errors
+    assert _json_at(res.data, "updateMedia", "errors") == [
+        {"field": "attachment", "codes": ["required"]},
+    ]
+    assert seen == [{"attachment": False}]
 
 
 # One unattached column per case below: ``_blank_choice_model`` binds each to its own model class.
