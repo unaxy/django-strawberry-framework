@@ -3111,6 +3111,24 @@ class UpdateInterlibraryLoanViaSerializer(SerializerMutation):
         permission_classes = []
 
 
+class CreateBranchViaShelvesSerializer(SerializerMutation):
+    """Create a ``Branch`` naming its reverse-foreign-key ``shelves`` by raw shelf id."""
+
+    class Meta:
+        serializer_class = serializers.BranchShelvesSerializer
+        operation = "create"
+        permission_classes = []
+
+
+class UpdateBranchViaShelvesSerializer(SerializerMutation):
+    """Update a ``Branch``, attaching the shelves its ``shelves`` list names by raw id."""
+
+    class Meta:
+        serializer_class = serializers.BranchShelvesSerializer
+        operation = "update"
+        permission_classes = []
+
+
 def _branch_city_picks_mutations() -> tuple[
     type[DjangoModelFormMutation],
     type[DjangoModelFormMutation],
@@ -3273,6 +3291,9 @@ class Mutation:
     ``createInterlibraryLoan`` / ``updateInterlibraryLoan`` and their ``ViaForm`` /
     ``ViaSerializer`` siblings write the ``to_field`` key ``lender`` into ``Branch.isil``:
     ``lenderId`` names a branch by raw id, and a branch with no ISIL is the relation error.
+    ``createBranchViaShelvesSerializer`` / ``updateBranchViaShelvesSerializer`` write the
+    reverse foreign key ``Branch.shelves``: ``shelves`` is a list of raw shelf ids, each named
+    shelf re-pointed at the branch, and a shelf hidden from the caller is the relation error.
 
     Default-OFF acceptance flag ``FAKESHOP_TEST_PK_SOURCE_SERIALIZERS`` (read in the class
     body so a project-schema reload under ``override_settings`` re-executes it): when set,
@@ -3435,6 +3456,8 @@ class Mutation:
     update_interlibrary_loan_via_serializer = DjangoMutationField(
         UpdateInterlibraryLoanViaSerializer,
     )
+    create_branch_via_shelves_serializer = DjangoMutationField(CreateBranchViaShelvesSerializer)
+    update_branch_via_shelves_serializer = DjangoMutationField(UpdateBranchViaShelvesSerializer)
     if getattr(settings, "FAKESHOP_TEST_PK_SOURCE_SERIALIZERS", False):
         create_edition_by_key_via_serializer = DjangoMutationField(
             CreateEditionByKeyViaSerializer,

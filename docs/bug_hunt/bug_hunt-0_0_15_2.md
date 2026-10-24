@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 257 done, 169 to do.
+Progress: 258 done, 169 to do.
 
 ## Done
 
@@ -1199,6 +1199,12 @@ Progress: 257 done, 169 to do.
   plugins and settings match `uv run`'s field for field. The docstrings say `SIGINT`'s teardown is allowed to finish
   and `SIGTERM` / `SIGHUP` / `SIGQUIT` end pytest without one; a wrapper a user's own command starts still
   double-delivers. Uv-shaped forwarding stand-in rows pin both tools, and the gate row pins the suite's cwd
+- [x] 404. fixture gap closed for the reverse-FK serializer path (not a defect): fakeshop's library app gains
+  `BranchShelvesSerializer` (`shelves = PrimaryKeyRelatedField(many=True)` over the reverse FK) and
+  `createBranchViaShelvesSerializer` / `updateBranchViaShelvesSerializer`, whose live rows pin the `[Int!]` input, one
+  batched visibility read, attach-only writes and the hidden-shelf `shelves` relation error with no write; the
+  package stand-in `test_many_pk_related_field_over_reverse_fk_column_emits_multi` is deleted, its lines and mutants
+  all covered live. The `CompositePrimaryKey` and `db_column=` gaps are `docs/builder/TODO.md` item 27's
 
 ## Outside review of the fixes
 
@@ -1396,9 +1402,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 403. Neither spec-027 nor the GLOSSARY `FilterSet` entry states the re-readability rule `67e23c5d` enforces: add
   the edge-case row "`Meta.fields` / `filter_fields` / `Meta.exclude` must be re-readable collections; one-shot
   iterators and a bare-string `Meta.exclude` raise `ConfigurationError` at class creation" (GLOSSARY through the DB)
-- [ ] 404. Fakeshop fixture gaps: no `CompositePrimaryKey` model, no `db_column=` rename, and no serializer with
-  `PrimaryKeyRelatedField(many=True)` over a reverse foreign key (a Branch serializer with `shelves` and custom
-  `create` / `update`), so `02711b23` has no live row
 - [ ] 405. `tests/test_connection.py::test_consumer_resolver_sequence_negative_cursor_raises_graphql_error` may be a
   stand-in left behind when the row was promoted to
   `examples/fakeshop/test_query/test_connection_pagination_api.py::test_negative_offset_cursor_on_a_sequence_resolver_is_a_cursor_error`:
@@ -1417,6 +1420,12 @@ tracker number are recorded there; open remainders and new defects are filed as 
   which `workspace.py prove` points into the `$TMPDIR` flow folder, so the macOS purge can remove the entry between
   the two calls (the window 331 closed in `workspace.py`). Read it once and treat a missing entry as absent. Found
   fact-finding 331
+- [ ] 586. A `DjangoMutation(operation="update")` over a model with a `CompositePrimaryKey` offers the key's member
+  columns (e.g. `tenantId`, `code`) in its partial input: `mutations/inputs.py::editable_input_fields` reads row
+  identity from `column.primary_key`, which is false on composite members, so an update naming one answers `field:
+  id` "The row was changed or removed by a concurrent operation; retry." with the row unchanged, against the
+  docstring's "an update never writes its key"; reading `model._meta.pk_fields` would drop them. Fakeshop has no
+  composite-pk model yet (`docs/builder/TODO.md` item 27). Found fact-finding 404
 
 ## To do: holes found re-checking the fixes
 
