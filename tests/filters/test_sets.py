@@ -1707,7 +1707,7 @@ def test_a_required_child_leaf_is_required_only_on_the_form_that_declares_it(
     logic arm answer without it, also once a parent ``__init__`` has read
     ``self.filters`` (which copies every filter). Named flat, the copy filters by
     the value sent. A nested branch builds the child's own form, which refuses
-    the request under the child's own name.
+    the request under the key its flat copy answers (``shelves__code_required``).
     """
     filter_input, expected = _REQUIRED_CHILD_LEAF_REQUESTS[request_id]
     base = _SettlingFilterSet if parent_init == "reads-filters" else FilterSet
@@ -1737,7 +1737,7 @@ def test_a_required_child_leaf_is_required_only_on_the_form_that_declares_it(
     assert extensions is not None
     assert extensions["code"] == "FILTER_INVALID"
     assert extensions["errors"] == {
-        "code_required": [{"message": "This field is required.", "code": "required"}],
+        "shelves__code_required": [{"message": "This field is required.", "code": "required"}],
     }
 
 

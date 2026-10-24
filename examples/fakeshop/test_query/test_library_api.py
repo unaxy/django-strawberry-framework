@@ -2933,7 +2933,7 @@ async def test_library_declared_model_choice_filter_validates_on_the_root_connec
     ]
     _assert_invalid_choice_payload(
         await _post_async_shipped(_ROOT_GENRES_BY_HOME_BRANCH, variables={"pk": restricted_pk}),
-        "home_branch",
+        "books__shelf__home_branch",
     )
 
 
@@ -2941,8 +2941,8 @@ async def test_library_declared_model_choice_filter_validates_on_the_root_connec
 @pytest.mark.parametrize(
     ("query", "form_key"),
     [
-        (_NESTED_BOOKS_BY_HOME_BRANCH, "home_branch"),
-        (_NESTED_BOOKS_BY_HOME_BRANCHES, "home_branches"),
+        (_NESTED_BOOKS_BY_HOME_BRANCH, "shelf__home_branch"),
+        (_NESTED_BOOKS_BY_HOME_BRANCHES, "shelf__home_branches"),
     ],
     ids=["model-choice", "model-multiple-choice"],
 )
@@ -5444,7 +5444,7 @@ _UNSTORABLE_FILTER_ROWS: dict[str, tuple[str, JSONObject, str]] = {
             " } }) { title } }"
         ),
         {"v": f"a{_LONE_SURROGATE}"},
-        "name",
+        "shelf__branch__name",
     ),
     "logic-or": (
         (
@@ -5452,7 +5452,60 @@ _UNSTORABLE_FILTER_ROWS: dict[str, tuple[str, JSONObject, str]] = {
             ' { subtitle: { iContains: "z" } }] }) { title } }'
         ),
         {"v": f"a{_LONE_SURROGATE}"},
-        "title",
+        "or_0__title",
+    ),
+    "logic-or-second-arm": (
+        (
+            'query($v: String) { allLibraryBooks(filter: { or: [{ subtitle: { iContains: "z" } },'
+            " { title: { exact: $v } }] }) { title } }"
+        ),
+        {"v": f"a{_LONE_SURROGATE}"},
+        "or_1__title",
+    ),
+    "logic-and": (
+        "query($v: String) { allLibraryBooks(filter: { and: [{ title: { exact: $v } }] }) { title } }",
+        {"v": f"a{_LONE_SURROGATE}"},
+        "and_0__title",
+    ),
+    "logic-or-inside-or": (
+        (
+            'query($v: String) { allLibraryBooks(filter: { or: [{ or: [{ title: { exact: "ok" } },'
+            " { title: { exact: $v } }] }] }) { title } }"
+        ),
+        {"v": f"a{_LONE_SURROGATE}"},
+        "or_0__or_1__title",
+    ),
+    "branch-inside-or": (
+        (
+            "query($v: String) { allLibraryBooks(filter: { or: [{ shelf: { branch: { name:"
+            " { exact: $v } } } }] }) { title } }"
+        ),
+        {"v": f"a{_LONE_SURROGATE}"},
+        "or_0__shelf__branch__name",
+    ),
+    "or-inside-branch": (
+        (
+            "query($v: String) { allLibraryBooks(filter: { shelf: { or: [{ branch: { name:"
+            " { exact: $v } } }] } }) { title } }"
+        ),
+        {"v": f"a{_LONE_SURROGATE}"},
+        "shelf__or_0__branch__name",
+    ),
+    "flat-copy-inside-branch": (
+        (
+            "query($v: String) { allLibraryBooks(filter: { shelf: { branchName: { exact: $v } }"
+            " }) { title } }"
+        ),
+        {"v": f"a{_LONE_SURROGATE}"},
+        "shelf__branch__name",
+    ),
+    "flat-copy-inside-arm": (
+        (
+            "query($v: String) { allLibraryBooks(filter: { and: [{ shelfBranchName: { exact: $v }"
+            " }] }) { title } }"
+        ),
+        {"v": f"a{_LONE_SURROGATE}"},
+        "and_0__shelf__branch__name",
     ),
     "logic-not": (
         (
@@ -5460,7 +5513,7 @@ _UNSTORABLE_FILTER_ROWS: dict[str, tuple[str, JSONObject, str]] = {
             " title } }"
         ),
         {"v": f"a{_LONE_SURROGATE}"},
-        "title",
+        "not__title",
     ),
     "declared-exclude": (
         (
@@ -5509,9 +5562,13 @@ def test_filter_text_no_database_can_bind_answers_filter_invalid(shape: str) -> 
     value, on every shape the pipeline reaches: a generated lookup on a list or connection
     field, an ``in`` member, a flat related path, a nested ``RelatedFilter`` branch, a
     logical arm, and a declared ``exclude=True``, ``method=`` or model-choice filter.
+
+    The key is the leaf's path from the root: a nested branch's leaf answers the key its
+    flat copy answers (``nested-related-filter`` and ``flat-related-path`` both
+    ``shelf__branch__name``), and a logical arm is a segment of its own, the operator and
+    the arm's position in the list sent (``or_1``; ``not`` bare), nesting either way.
     """
-    north = models.Branch.objects.create(name="North", city="Boston")
-    models.Shelf.objects.create(code="N-1", topic="general", branch=north)
+    _seed_north_shelf()
     query, variables, form_key = _UNSTORABLE_FILTER_ROWS[shape]
 
     response = _post_graphql(query, variables=variables)
@@ -5531,6 +5588,155 @@ def test_filter_text_no_database_can_bind_answers_filter_invalid(shape: str) -> 
                 },
             ],
         },
+    }
+
+
+def _seed_north_shelf() -> None:
+    """Seed one shelf on ``North`` for the unstorable-filter rows."""
+    north = models.Branch.objects.create(name="North", city="Boston")
+    models.Shelf.objects.create(code="N-1", topic="general", branch=north)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("genre_filter", "form_key"),
+    [
+        (
+            '{ or: [{ name: { exact: "SciFi" } }, { books: { title: { exact: $v } } }] }',
+            "or_1__books__title",
+        ),
+        ("{ not: { books: { title: { exact: $v } } } }", "not__books__title"),
+    ],
+    ids=["or-second-arm", "not"],
+)
+async def test_filter_text_no_database_can_bind_in_a_branch_inside_an_arm_async(
+    genre_filter: str,
+    form_key: str,
+) -> None:
+    """Async, a branch inside a logical arm answers the arm's path, as the sync view does.
+
+    ``allLibraryGenresConnection`` declares no ``resolver=``, so under the async view its
+    pipeline is the asynchronous one, which derives each arm's branch before any form
+    runs: the branch's form refuses the value there, keyed under the arm (the operator
+    and the arm's position in the list sent; ``not`` bare) as the synchronous pipeline
+    keys it.
+    """
+    payload = await _post_async_shipped(
+        (
+            f"query($v: String) {{ allLibraryGenresConnection(filter: {genre_filter}) {{"
+            " edges { node { name } } } }"
+        ),
+        variables={"v": f"a{_LONE_SURROGATE}"},
+    )
+
+    assert payload["data"] is None, payload
+    (error,) = json_list(payload, "errors")
+    assert json_at(error, "message") == "Invalid filter input"
+    assert json_object(error, "extensions") == {
+        "code": "FILTER_INVALID",
+        "errors": {
+            form_key: [
+                {
+                    "message": "Text contains invalid Unicode (unpaired surrogate code points).",
+                    "code": "invalid",
+                },
+            ],
+        },
+    }
+
+
+#: ``ShelfFilterForm.clean``'s refusal of a home branch named both by pk and by name.
+_HOME_BRANCH_NAMED_TWICE = [
+    {
+        "message": "Name the home branch by id or by name, not both.",
+        "code": "home_branch_named_twice",
+    },
+]
+
+#: A ``ShelfFilter`` input naming ``North`` both by pk and by name.
+_SHELF_NAMING_NORTH_TWICE = '{ homeBranch: { exact: $pk }, homeBranchNamed: { exact: "North" } }'
+
+
+def _seed_north_branch() -> int:
+    """Seed the ``North`` branch and return its pk."""
+    return saved_pk(models.Branch.objects.create(name="North", city="Boston").pk)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("book_filter", "form_key"),
+    [
+        (f"{{ shelf: {_SHELF_NAMING_NORTH_TWICE} }}", "shelf____all__"),
+        (f"{{ or: [{{ shelf: {_SHELF_NAMING_NORTH_TWICE} }}] }}", "or_0__shelf____all__"),
+    ],
+    ids=["branch", "branch-inside-or"],
+)
+def test_nested_form_non_field_error_is_keyed_under_its_path(
+    book_filter: str,
+    form_key: str,
+) -> None:
+    """A nested branch's form-level ``clean`` error is ``<path>____all__``.
+
+    ``ShelfFilter.Meta.form`` refuses a home branch named by pk and by name in one
+    request as a non-field error; reached through ``BookFilter.shelf`` its ``"__all__"``
+    key carries the branch's path, and inside an arm the arm's too.
+    """
+    north_pk = _seed_north_branch()
+
+    response = _post_graphql(
+        f"query($pk: Int) {{ allLibraryBooks(filter: {book_filter}) {{ title }} }}",
+        variables={"pk": north_pk},
+    )
+
+    assert response.status_code == 200
+    payload = response_json(response)
+    assert payload["data"] is None, payload
+    (error,) = json_list(payload, "errors")
+    assert json_at(error, "message") == "Invalid filter input"
+    assert json_object(error, "extensions") == {
+        "code": "FILTER_INVALID",
+        "errors": {form_key: _HOME_BRANCH_NAMED_TWICE},
+    }
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("genre_filter", "form_key"),
+    [
+        (f"{{ books: {{ shelf: {_SHELF_NAMING_NORTH_TWICE} }} }}", "books__shelf____all__"),
+        (
+            f"{{ or: [{{ books: {{ shelf: {_SHELF_NAMING_NORTH_TWICE} }} }}] }}",
+            "or_0__books__shelf____all__",
+        ),
+    ],
+    ids=["branch", "branch-inside-or"],
+)
+async def test_nested_form_non_field_error_is_keyed_under_its_path_async(
+    genre_filter: str,
+    form_key: str,
+) -> None:
+    """Async, a nested form's non-field error carries its path as the sync pipeline's does.
+
+    ``allLibraryGenresConnection`` runs the asynchronous pipeline, which derives
+    ``GenreFilter.books`` -> ``BookFilter.shelf`` (inside the arm too) before any form
+    runs, so ``ShelfFilter``'s form refuses there.
+    """
+    north_pk = await sync_to_async(_seed_north_branch)()
+
+    payload = await _post_async_shipped(
+        (
+            f"query($pk: Int) {{ allLibraryGenresConnection(filter: {genre_filter}) {{"
+            " edges { node { name } } } }"
+        ),
+        variables={"pk": north_pk},
+    )
+
+    assert payload["data"] is None, payload
+    (error,) = json_list(payload, "errors")
+    assert json_at(error, "message") == "Invalid filter input"
+    assert json_object(error, "extensions") == {
+        "code": "FILTER_INVALID",
+        "errors": {form_key: _HOME_BRANCH_NAMED_TWICE},
     }
 
 
@@ -13824,7 +14030,7 @@ def test_malformed_nested_branch_form_raises_filter_invalid_live() -> None:
     assert error["message"] == "Invalid filter input"
     extensions = json_object(error, "extensions")
     assert extensions["code"] == "FILTER_INVALID"
-    field_errors = json_list(extensions, "errors", "email_must_have_at_sign")
+    field_errors = json_list(extensions, "errors", "and_0__email_must_have_at_sign")
     assert any("missing @" in json_str(entry, "message") for entry in field_errors)
     assert any(json_at(entry, "code") == "missing_at_sign" for entry in field_errors)
 
@@ -16520,9 +16726,9 @@ def test_node_id_holding_a_nul_resolves_to_null_without_a_query_over_http(
 @pytest.mark.parametrize(
     ("edition_filter", "error_key"),
     [
-        ('{ isbn_13: { exact: "978\\u0000" } }', "isbn_13"),
-        ('{ isbn_13: { in: ["978\\u0000"] } }', "isbn_13__in"),
-        ('{ imprint: { iContains: "K\\u0000" } }', "imprint__icontains"),
+        ('{ isbn_13: { exact: "978\\u0000" } }', "edition__isbn_13"),
+        ('{ isbn_13: { in: ["978\\u0000"] } }', "edition__isbn_13__in"),
+        ('{ imprint: { iContains: "K\\u0000" } }', "edition__imprint__icontains"),
     ],
     ids=["exact", "in", "icontains"],
 )

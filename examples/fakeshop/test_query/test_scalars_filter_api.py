@@ -372,13 +372,13 @@ def test_scalars_filter_price_span_bound_the_column_cannot_hold_is_filter_invali
         pytest.param(
             _BY_FILTER,
             {"not": {"priceSpan": {"range": {"start": "NaN"}}}},
-            "price_span",
+            "not__price_span",
             id="not",
         ),
         pytest.param(
             _BY_NULLABLE_FILTER,
             {"partner": {"priceSpan": {"range": {"end": "NaN"}}}},
-            "price_span",
+            "partner__price_span",
             id="nested-partner",
         ),
         pytest.param(
@@ -476,14 +476,14 @@ def test_scalars_filter_price_among_keeps_the_listed_prices(
         pytest.param(
             _BY_FILTER,
             {"not": {"priceAmong": {"in": ["NaN"]}}},
-            "price_among",
+            "not__price_among",
             _NOT_A_NUMBER,
             id="not",
         ),
         pytest.param(
             _BY_NULLABLE_FILTER,
             {"partner": {"priceAmong": {"in": ["NaN"]}}},
-            "price_among",
+            "partner__price_among",
             _NOT_A_NUMBER,
             id="nested-partner",
         ),
@@ -600,7 +600,7 @@ _BINDABLE_DATETIME = _DATETIME.isoformat()
         pytest.param(
             _BY_FILTER,
             {"not": {"occurredAt": {"exact": _BEFORE_YEAR_ONE}}},
-            "occurred_at",
+            "not__occurred_at",
             ["alpha"],
             {"not": {"occurredAt": {"exact": _BINDABLE_DATETIME}}},
             [],
@@ -609,7 +609,7 @@ _BINDABLE_DATETIME = _DATETIME.isoformat()
         pytest.param(
             _BY_NULLABLE_FILTER,
             {"partner": {"occurredAt": {"lte": _PAST_YEAR_9999}}},
-            "occurred_at__lte",
+            "partner__occurred_at__lte",
             ["of-alpha"],
             {"partner": {"occurredAt": {"lte": _BINDABLE_DATETIME}}},
             ["of-alpha"],

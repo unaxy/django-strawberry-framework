@@ -207,6 +207,16 @@ class LogicOperatorDescriptor:
     is_sequence: bool
     compose: Callable[[list[models.Q]], models.Q]
 
+    def arm_key(self, index: int) -> str:
+        """Return the key arm ``index`` of this operator carries in a filter error.
+
+        django-graphene-filters' spelling (``AdvancedFilterSet.TreeFormMixin.errors``):
+        the wire name and the arm's position for a sequence operator (``and_0``,
+        ``or_1``), the wire name alone for ``not``, which takes one arm. A nested
+        branch or leaf inside the arm follows under it (``filters/sets.py::_branch_key``).
+        """
+        return f"{self.wire_name}_{index}" if self.is_sequence else self.wire_name
+
 
 LOGIC_OP_AND = LogicOperatorDescriptor(
     python_attr="and_",
