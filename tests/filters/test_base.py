@@ -15,11 +15,13 @@ delivers a non-list container to ``GlobalIDMultipleChoiceFilter``.
 from __future__ import annotations
 
 import copy
+import datetime
+import uuid
 from collections.abc import Callable, Generator, Iterable, Iterator
 from decimal import Decimal
 from functools import partial
 from types import SimpleNamespace
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 import django_filters
 import pytest
@@ -32,11 +34,14 @@ from django.db import connection as db_connection
 from django.db import models as db_models
 from django.db.models import Model, QuerySet
 from django.db.models.expressions import Combinable
-from django.forms import DecimalField, Form
+from django.forms import CharField, DecimalField, Field, Form
 from django.http import HttpRequest, QueryDict
 from django.test import override_settings
 from django_filters import BaseInFilter, CharFilter
+from django_filters.rest_framework import DjangoFilterBackend
 from graphql import GraphQLError
+from rest_framework import generics
+from rest_framework.test import APIRequestFactory
 from strawberry import relay
 from typing_extensions import Self, override
 
@@ -68,6 +73,7 @@ from django_strawberry_framework.filters.base import (
     _accepted_globalid_type_names,
     _bound_field_name,
     _coerce_int_in_members,
+    _column_form_field,
     _decode_and_validate_global_id,
     _ElementField,
     _filter_schema,
@@ -91,7 +97,7 @@ from django_strawberry_framework.utils._narrowing import (
     require_instance,
 )
 from django_strawberry_framework.utils.typing import object_result
-from tests._idioms import saved_pk
+from tests._idioms import ModelSerializerBase, saved_pk
 from tests._postgres_fields import FakeArrayField
 from tests.filters.fixtures.filtersets import (
     BranchFilter,
@@ -99,6 +105,9 @@ from tests.filters.fixtures.filtersets import (
     BranchFilterByString,
     ShelfFilter,
 )
+
+if TYPE_CHECKING:
+    from django_strawberry_framework.utils.typing import ModelField
 
 _FilterT = TypeVar("_FilterT", bound=Filter)
 
@@ -354,11 +363,10 @@ def test_range_filter_class_level_field_is_built_as_django_filter_builds_it(
         pytest.param(_ScalarRangeSet, "payload_span", id="column-without-a-default-filter"),
         pytest.param(_ScalarRangeSet, "nowhere_span", id="path-naming-no-field"),
         pytest.param(_ScalarRangeSet, "parent_span", id="relation"),
-        pytest.param(_PlainScalarRangeSet, "price_span", id="django-filter-filterset"),
     ],
 )
 def test_range_filter_without_a_column_form_field_passes_bounds_through(
-    filterset_class: type[django_filters.FilterSet],
+    filterset_class: type[FilterSet],
     name: str,
 ) -> None:
     """No column comparison field to read leaves the range field cleaning no bound.
@@ -369,6 +377,379 @@ def test_range_filter_without_a_column_form_field_passes_bounds_through(
     filterset = filterset_class(data={}, queryset=scalar_models.ScalarSpecimen.objects.none())
 
     assert _range_field(filterset.filters[name]).bound_field is None
+
+
+def test_filter_bound_to_no_filterset_has_no_column_form_field() -> None:
+    """A standalone filter, which no ``FilterSet`` stamped as its parent, names no column."""
+    assert _column_form_field(RangeFilter(field_name="price", lookup_expr="range")) is None
+    assert (
+        _column_form_field(ListFilter(field_name="price", lookup_expr="in"), element=True) is None
+    )
+
+
+def test_range_filter_under_a_django_filter_set_gets_the_package_sets_bound_field() -> None:
+    """A django-filter ``FilterSet`` parent hands the range field its column's comparison field.
+
+    It is the field class the package ``FilterSet`` hands the same declaration, so a
+    ``DjangoFilterBackend`` view cleans each bound as the GraphQL input does.
+    """
+    queryset = scalar_models.ScalarSpecimen.objects.none()
+    plain = _range_field(_PlainScalarRangeSet(data={}, queryset=queryset).filters["price_span"])
+    package = _range_field(_ScalarRangeSet(data={}, queryset=queryset).filters["price_span"])
+
+    assert type(plain.bound_field) is type(package.bound_field) is DecimalField
+
+
+def _decimal_as_text_lookup(
+    field: object,
+    upstream: tuple[type[Filter] | None, dict[str, object]],
+) -> tuple[type[Filter] | None, dict[str, object]]:
+    """A project's ``filter_for_lookup`` policy: a decimal column filters as text."""
+    if isinstance(field, db_models.DecimalField):
+        return CharFilter, {}
+    return upstream
+
+
+class _DecimalAsTextFilterSet(django_filters.FilterSet):
+    """A project base whose ``filter_for_lookup`` override filters a decimal column as text."""
+
+    @classmethod
+    @override
+    def filter_for_lookup(
+        cls,
+        field: db_models.Field[object, object],
+        lookup_type: str,
+    ) -> tuple[type[Filter], dict[str, object]]:
+        """Answer ``CharFilter`` for a decimal column, django-filter's pair otherwise."""
+        if isinstance(field, db_models.DecimalField):
+            return CharFilter, {}
+        return super().filter_for_lookup(field, lookup_type)
+
+
+def _package_over_decimal_as_text_set() -> type[FilterSet]:
+    """``class _PackageOverDecimalAsTextSet(FilterSet, _DecimalAsTextFilterSet)``.
+
+    A package set with the project base's override behind the package class, declared
+    through ``type`` because the stubs type the two bases' classmethods apart.
+    """
+    meta = type("Meta", (), {"model": scalar_models.ScalarSpecimen, "fields": {"price": ["gte"]}})
+    declared = type(
+        "_PackageOverDecimalAsTextSet",
+        (FilterSet, _DecimalAsTextFilterSet),
+        {
+            "__module__": __name__,
+            "price_span": RangeFilter(field_name="price", lookup_expr="range"),
+            "price_in": ListFilter(field_name="price", lookup_expr="in"),
+            "Meta": meta,
+        },
+    )
+    assert issubclass(declared, FilterSet)
+    return declared
+
+
+_PackageOverDecimalAsTextSet = _package_over_decimal_as_text_set()
+
+
+class _PlainDecimalAsTextSet(_DecimalAsTextFilterSet):
+    price_span = RangeFilter(field_name="price", lookup_expr="range")
+    price_in = ListFilter(field_name="price", lookup_expr="in")
+
+    class Meta:
+        model = scalar_models.ScalarSpecimen
+        fields = ("label",)
+
+
+class _PackageOwnDecimalAsTextSet(FilterSet):
+    """A package set whose own ``filter_for_lookup`` override sits above the package class."""
+
+    price_span = RangeFilter(field_name="price", lookup_expr="range")
+    price_in = ListFilter(field_name="price", lookup_expr="in")
+
+    class Meta:
+        model = scalar_models.ScalarSpecimen
+        fields = ("label",)
+
+    @classmethod
+    @override
+    def filter_for_lookup(
+        cls,
+        field: ModelField,
+        lookup_type: str,
+    ) -> tuple[type[Filter] | None, dict[str, object]]:
+        """Answer ``CharFilter`` for a decimal column, the package's pair otherwise."""
+        return _decimal_as_text_lookup(field, super().filter_for_lookup(field, lookup_type))
+
+
+@pytest.mark.parametrize(
+    ("filterset_class", "form_field_class"),
+    [
+        pytest.param(
+            _PackageOverDecimalAsTextSet,
+            CharField,
+            id="django-filter-base-behind-package",
+        ),
+        pytest.param(_PlainDecimalAsTextSet, CharField, id="django-filter-sets-own-override"),
+        pytest.param(_PackageOwnDecimalAsTextSet, DecimalField, id="package-subclass-override"),
+    ],
+)
+def test_column_form_field_follows_the_parents_filter_for_lookup_bar_the_package_override(
+    filterset_class: type[django_filters.FilterSet | FilterSet],
+    form_field_class: type[Field],
+) -> None:
+    """The comparison field is the parent's ``filter_for_lookup`` without the package override.
+
+    A django-filter base behind the package class, and a django-filter set's own override,
+    are configuration and choose the bound and element field; a package subclass's own
+    override sits above the package's and is not read, the cleaner reading the class the
+    package override replaces.
+    """
+    filterset = filterset_class(data={}, queryset=scalar_models.ScalarSpecimen.objects.none())
+    element = require_instance(filterset.filters["price_in"].field, _ElementField).element_field
+
+    assert type(_range_field(filterset.filters["price_span"]).bound_field) is form_field_class
+    assert type(element) is form_field_class
+
+
+def test_package_set_over_a_django_filter_base_generates_the_bases_filter() -> None:
+    """A generated leaf follows a django-filter base's override behind the package class."""
+    assert type(_PackageOverDecimalAsTextSet.base_filters["price__gte"]) is CharFilter
+
+
+class _PackageCleanedScalarSet(FilterSet):
+    price_span = RangeFilter(field_name="price", lookup_expr="range")
+    occurred_at_span = RangeFilter(field_name="occurred_at", lookup_expr="range")
+    external_id_span = RangeFilter(field_name="external_id", lookup_expr="range")
+    signed_big_span = RangeFilter(field_name="signed_big", lookup_expr="range")
+    price_in = ListFilter(field_name="price", lookup_expr="in")
+    occurred_at_in = ListFilter(field_name="occurred_at", lookup_expr="in")
+    external_id_in = ListFilter(field_name="external_id", lookup_expr="in")
+    signed_big_in = ListFilter(field_name="signed_big", lookup_expr="in")
+
+    class Meta:
+        model = scalar_models.ScalarSpecimen
+        fields = ("label",)
+
+
+class _PlainCleanedScalarSet(django_filters.FilterSet):
+    price_span = RangeFilter(field_name="price", lookup_expr="range")
+    occurred_at_span = RangeFilter(field_name="occurred_at", lookup_expr="range")
+    external_id_span = RangeFilter(field_name="external_id", lookup_expr="range")
+    signed_big_span = RangeFilter(field_name="signed_big", lookup_expr="range")
+    price_in = ListFilter(field_name="price", lookup_expr="in")
+    occurred_at_in = ListFilter(field_name="occurred_at", lookup_expr="in")
+    external_id_in = ListFilter(field_name="external_id", lookup_expr="in")
+    signed_big_in = ListFilter(field_name="signed_big", lookup_expr="in")
+
+    class Meta:
+        model = scalar_models.ScalarSpecimen
+        fields = ("label",)
+
+
+_CLEANED_SCALAR_SETS = [
+    pytest.param(_PackageCleanedScalarSet, id="package-filterset"),
+    pytest.param(_PlainCleanedScalarSet, id="django-filter-filterset"),
+]
+
+_KEPT_EXTERNAL_ID = uuid.UUID("6f1c2a3e-0b4d-4e5f-8a9b-1c2d3e4f5a6b")
+
+
+def _cleaned_specimen(label: str, *, kept: bool) -> scalar_models.ScalarSpecimen:
+    """Create a specimen whose price, timestamp, id and integer each match only when ``kept``."""
+    return scalar_models.ScalarSpecimen.objects.create(
+        label=label,
+        price=Decimal("10.5") if kept else Decimal(99),
+        occurred_on=datetime.date(2026, 1, 2),
+        occurred_at=datetime.datetime(
+            2026 if kept else 2020,
+            1,
+            2,
+            3,
+            4,
+            5,
+            tzinfo=datetime.timezone.utc,
+        ),
+        occurred_time=datetime.time(3, 4, 5),
+        external_id=_KEPT_EXTERNAL_ID if kept else uuid.uuid4(),
+        signed_big=7 if kept else 900,
+    )
+
+
+@pytest.mark.parametrize("filterset_class", _CLEANED_SCALAR_SETS)
+@pytest.mark.parametrize(
+    ("name", "data", "message"),
+    [
+        pytest.param(
+            "price_span",
+            {"price_span_0": "NaN", "price_span_1": "1"},
+            "Enter a number.",
+            id="decimal-range",
+        ),
+        pytest.param(
+            "occurred_at_span",
+            {"occurred_at_span_0": "2026-01-01 00:00:00", "occurred_at_span_1": "not-a-date"},
+            "Enter a valid date/time.",
+            id="datetime-range",
+        ),
+        pytest.param(
+            "external_id_span",
+            {"external_id_span_0": "not-a-uuid", "external_id_span_1": str(_KEPT_EXTERNAL_ID)},
+            "Enter a valid UUID.",
+            id="uuid-range",
+        ),
+        pytest.param(
+            "signed_big_span",
+            {"signed_big_span_0": "NaN", "signed_big_span_1": "NaN"},
+            "Enter a number.",
+            id="integer-range",
+        ),
+        pytest.param("price_in", {"price_in": ["1", "NaN"]}, "Enter a number.", id="decimal-list"),
+        pytest.param(
+            "occurred_at_in",
+            {"occurred_at_in": ["not-a-date"]},
+            "Enter a valid date/time.",
+            id="datetime-list",
+        ),
+        pytest.param(
+            "external_id_in",
+            {"external_id_in": [str(_KEPT_EXTERNAL_ID), "not-a-uuid"]},
+            "Enter a valid UUID.",
+            id="uuid-list",
+        ),
+        pytest.param(
+            "signed_big_in",
+            {"signed_big_in": ["NaN"]},
+            "Enter a number.",
+            id="integer-list",
+        ),
+    ],
+)
+def test_declared_range_or_list_value_the_column_cannot_hold_is_a_form_error_under_any_filterset(
+    filterset_class: type[django_filters.FilterSet | FilterSet],
+    name: str,
+    data: dict[str, object],
+    message: str,
+) -> None:
+    """A bound or element the column cannot hold is the form's error under either parent.
+
+    A django-filter ``FilterSet`` cleans it as the package ``FilterSet`` does, with the
+    column's ``gte`` form field, so it never reaches the ORM (where a ``NaN`` integer bound
+    raises ``ValueError`` and a bad UUID or datetime ``ValidationError``). Live refusal under
+    the package parent:
+    ``test_scalars_filter_api.py::test_scalars_filter_price_span_bound_the_column_cannot_hold_is_filter_invalid``.
+    """
+    filterset = filterset_class(data=data, queryset=scalar_models.ScalarSpecimen.objects.none())
+
+    assert not filterset.is_valid()
+    assert filterset.errors == {name: [message]}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("filterset_class", _CLEANED_SCALAR_SETS)
+@pytest.mark.parametrize(
+    "data",
+    [
+        pytest.param({"price_span_0": "10", "price_span_1": "11"}, id="decimal-range"),
+        pytest.param(
+            {
+                "occurred_at_span_0": "2026-01-01 00:00:00",
+                "occurred_at_span_1": "2026-12-31 00:00:00",
+            },
+            id="datetime-range",
+        ),
+        pytest.param(
+            {
+                "external_id_span_0": str(_KEPT_EXTERNAL_ID),
+                "external_id_span_1": str(_KEPT_EXTERNAL_ID),
+            },
+            id="uuid-range",
+        ),
+        pytest.param({"signed_big_span_0": "5", "signed_big_span_1": "8"}, id="integer-range"),
+        pytest.param({"price_in": ["10.5"]}, id="decimal-list"),
+        pytest.param({"occurred_at_in": ["2026-01-02 03:04:05"]}, id="datetime-list"),
+        pytest.param({"external_id_in": [str(_KEPT_EXTERNAL_ID)]}, id="uuid-list"),
+        pytest.param({"signed_big_in": ["7"]}, id="integer-list"),
+    ],
+)
+def test_declared_range_or_list_value_the_column_holds_filters_under_any_filterset(
+    filterset_class: type[django_filters.FilterSet | FilterSet],
+    data: dict[str, object],
+) -> None:
+    """A well-formed bound or element filters the rows the same under either parent."""
+    _ = _cleaned_specimen("kept", kept=True)
+    _ = _cleaned_specimen("other", kept=False)
+    queryset = scalar_models.ScalarSpecimen.objects.order_by("label")
+
+    filterset = filterset_class(data=data, queryset=queryset)
+
+    assert filterset.is_valid()
+    assert list(filterset.qs.values_list("label", flat=True)) == ["kept"]
+
+
+class _SpecimenLabelSerializer(ModelSerializerBase[scalar_models.ScalarSpecimen]):
+    class Meta:
+        model = scalar_models.ScalarSpecimen
+        fields = ("label",)
+
+
+class _CleanedSpecimenListView(generics.ListAPIView[scalar_models.ScalarSpecimen]):
+    """A DRF list view filtering through ``DjangoFilterBackend`` with a django-filter set."""
+
+    queryset = scalar_models.ScalarSpecimen.objects.order_by("label")
+    serializer_class = _SpecimenLabelSerializer
+    filter_backends = (DjangoFilterBackend,)
+    filterset_class = _PlainCleanedScalarSet
+    authentication_classes = ()
+    permission_classes = ()
+    pagination_class = None
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("query", "status", "body"),
+    [
+        pytest.param(
+            "price_span_0=NaN&price_span_1=NaN",
+            400,
+            {"price_span": ["Enter a number."]},
+            id="decimal-bound-the-column-cannot-hold",
+        ),
+        pytest.param(
+            "signed_big_span_0=NaN&signed_big_span_1=8",
+            400,
+            {"signed_big_span": ["Enter a number."]},
+            id="integer-bound-the-column-cannot-hold",
+        ),
+        pytest.param(
+            "price_span_0=10&price_span_1=11",
+            200,
+            [{"label": "kept"}],
+            id="decimal-span",
+        ),
+        pytest.param(
+            "signed_big_span_0=5&signed_big_span_1=8",
+            200,
+            [{"label": "kept"}],
+            id="integer-span",
+        ),
+    ],
+)
+def test_declared_range_filter_under_django_filter_backend_answers_a_bad_bound_with_400(
+    query: str,
+    status: int,
+    body: object,
+) -> None:
+    """A range bound the column cannot hold is the backend's 400, a valid span its rows.
+
+    ``DjangoFilterBackend`` turns the invalid form into DRF's ``ValidationError``; the bound
+    never reaches the ORM, where it would raise and answer 500.
+    """
+    _ = _cleaned_specimen("kept", kept=True)
+    _ = _cleaned_specimen("other", kept=False)
+    request = APIRequestFactory().get(f"/specimens/?{query}")
+
+    response = _CleanedSpecimenListView.as_view()(request)
+
+    assert (response.status_code, read_attr(response, "data")) == (status, body)
 
 
 _ONE_SIDED_RANGES = [
@@ -652,7 +1033,8 @@ def test_array_filter_element_the_column_cannot_hold_is_filter_invalid(
 
     An ``ArrayField`` column's element is a value of its ``base_field``, so a non-finite
     decimal is ``FILTER_INVALID`` before ``django.contrib.postgres``'s array lookup hands it
-    to ``base_field.get_prep_value``. Package-only: fakeshop declares no ``ArrayField``.
+    to ``base_field.get_prep_value``; under a django-filter ``FilterSet`` it is that form's
+    error. Package-only: fakeshop declares no ``ArrayField``.
     """
     monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
 
@@ -676,16 +1058,24 @@ def test_array_filter_element_the_column_cannot_hold_is_filter_invalid(
             model = PricedShelf
             fields = ("price",)
 
-    filterset = PricedShelfFilter(
-        data={"priced": ["1.5", "NaN"]},
-        queryset=PricedShelf.objects.none(),
-    )
+    class PlainPricedShelfFilter(django_filters.FilterSet):
+        priced = ArrayFilter(field_name=field_name, lookup_expr=lookup_expr)
+
+        class Meta:
+            model = PricedShelf
+            fields = ("price",)
+
+    data = {"priced": ["1.5", "NaN"]}
+    filterset = PricedShelfFilter(data=data, queryset=PricedShelf.objects.none())
     with pytest.raises(GraphQLError) as excinfo:
         PricedShelfFilter._validate_form_or_raise(filterset)
     assert excinfo.value.extensions == {
         "code": "FILTER_INVALID",
         "errors": {"priced": [{"message": "Enter a number.", "code": "invalid"}]},
     }
+    plain = PlainPricedShelfFilter(data=data, queryset=PricedShelf.objects.none())
+    assert not plain.is_valid()
+    assert plain.errors == {"priced": ["Enter a number."]}
 
 
 # ---------------------------------------------------------------------------

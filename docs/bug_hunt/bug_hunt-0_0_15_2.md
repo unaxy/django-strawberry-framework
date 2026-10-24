@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 273 done, 182 to do.
+Progress: 274 done, 183 to do.
 
 ## Done
 
@@ -1336,6 +1336,14 @@ Progress: 273 done, 182 to do.
   consumer's `DjangoFilterBackend` (no schema build) a range on a relation raises `FieldError` for every value, valid
   ones included, as django-filter's own `RangeFilter` does. Probed over 5 primary key types x 6 relation kinds x 4
   spellings. Found checking it: rows 510-512
+- [x] 376. A package `RangeFilter` / `ListFilter` / `ArrayFilter` declared on a plain `django_filters.FilterSet`
+  (a consumer view with DRF's `DjangoFilterBackend`) cleaned no bound or element: `filters/base.py::_column_form_field`
+  answered a cleaner only under a package `FilterSet` parent, so a query-string bound the column cannot hold
+  (`?price_span_0=NaN`, a malformed UUID or datetime, a NUL on PostgreSQL) reached the ORM and raised (HTTP 500). Any
+  django-filter `FilterSet` parent now cleans, so the backend answers the form error with its 400; the field is the
+  one the parent's class selects without the package `FilterSet`'s own `filter_for_lookup` override (a package
+  subclass reads the method behind that override as before, any other set its own `filter_for_lookup`). A package
+  parent's generated filters and cleaners are unchanged. Found verifying it: row 514
 
 ## Outside review of the fixes
 
@@ -1394,8 +1402,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   row (not this setup)
 - [ ] 349. `workspace.py audit <missing file>` exits by a `FileNotFoundError` traceback instead of a refusal. Robustness
   row
-- [ ] 376. A package `RangeFilter` / `ListFilter` under a plain `django_filters.FilterSet` (no package FilterSet parent,
-  e.g. the DRF backend path) cleans nothing; check the reach under AGENTS rule 37 first
 - [ ] 373. `django_filters.LookupChoiceFilter` publishes a bare scalar input, so django-filter's `lookup_required`
   refuses every request (`FILTER_INVALID` "Select a lookup."); its input needs a value + lookup pair. Feature card, not
   a defect
@@ -1573,12 +1579,20 @@ tracker number are recorded there; open remainders and new defects are filed as 
   included, and a declared `ListFilter` raises `GraphQLError("Invalid filter value: expected a list.")` (500) for
   every `?name=` value, since its form field has no list widget; check the reach under AGENTS rule 37 first. Found
   checking 375
+- [ ] 514. (robustness) A declared `RangeFilter` / `ListFilter` on a `BooleanField` cleans each value with the
+  column's `gte` form field, django-filter's `NullBooleanField`, which reads an unrecognized string (`"yes"`) as
+  `None`, so under `DjangoFilterBackend` a junk bound applies no constraint where it should be refused; GraphQL types
+  the value `Boolean` and cannot send it. Found verifying 376
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 513. CHANGELOG entry for item 376: a package `RangeFilter`, `ListFilter` or `ArrayFilter` declared on a plain
+  `django_filters.FilterSet` (for example under DRF's `DjangoFilterBackend`) cleans each bound or element with its
+  column's comparison form field, so a value the column cannot hold is the form's error (a 400 through the backend)
+  instead of a database error.
 - [ ] 550. CHANGELOG entry for item 423: a `DjangoModelFormMutation` built-in single-value form field (`ChoiceField`,
   `TypedChoiceField`, `CharField`, `IntegerField`, `DecimalField`, ...) over a PostgreSQL `ArrayField` now takes one
   value (a `ChoiceField` over a choice-listing base field takes the element enum) instead of the column's list, which
