@@ -2456,6 +2456,296 @@ def test_filterset_get_fields_excludes_m2m_for_all_fields_shorthand() -> None:
     assert "genres" not in fields
 
 
+class _SweepModel(NamedTuple):
+    """One model the whole-set sweep runs over, and the filter keys ``fields = "__all__"`` yields."""
+
+    model: type[django_models.Model]
+    keys: frozenset[str]
+    pk: str
+    column: str
+    m2m: str | None
+    other_column: str
+
+
+_SWEEP_MODELS: dict[str, _SweepModel] = {
+    # ``archive_genres`` is an ``editable=False`` many-to-many beside the editable ``genres``.
+    "auto-pk-with-m2m": _SweepModel(
+        library_models.Book,
+        frozenset(
+            {
+                "id",
+                "title",
+                "subtitle",
+                "circulation_status",
+                "shelf",
+            },
+        ),
+        "id",
+        "title",
+        "archive_genres",
+        "subtitle",
+    ),
+    "auto-pk-with-two-m2m": _SweepModel(
+        library_models.Printing,
+        frozenset(
+            {
+                "id",
+                "edition",
+                "publisher_2",
+                "licensor",
+                "series",
+                "run_size",
+            },
+        ),
+        "id",
+        "run_size",
+        "co_publishers",
+        "edition",
+    ),
+    "non-auto-pk": _SweepModel(
+        library_models.Edition,
+        frozenset(
+            {
+                "isbn_13",
+                "isbn_10",
+                "imprint",
+                "publisher",
+                "publisher_2",
+            },
+        ),
+        "isbn_13",
+        "imprint",
+        None,
+        "isbn_10",
+    ),
+    "mti-child": _SweepModel(
+        library_models.LendingDesk,
+        frozenset(
+            {
+                "venue_ptr",
+                "name",
+                "opened_on",
+                "window_count",
+                "lead_ticket",
+            },
+        ),
+        "venue_ptr",
+        "name",
+        None,
+        "window_count",
+    ),
+    "no-m2m": _SweepModel(
+        library_models.Branch,
+        frozenset(
+            {
+                "id",
+                "name",
+                "city",
+                "isil",
+            },
+        ),
+        "id",
+        "city",
+        None,
+        "name",
+    ),
+}
+
+
+def _sweep_exclude(spec: _SweepModel, excluded: str) -> list[str]:
+    """Return the ``Meta.exclude`` list one grid row declares."""
+    if excluded == "nothing":
+        return []
+    if excluded == "column":
+        return [spec.column]
+    if excluded == "pk":
+        return [spec.pk]
+    assert spec.m2m is not None
+    return [spec.m2m]
+
+
+_SWEEP_GRID = [
+    pytest.param(model_key, excluded, id=f"{model_key}-exclude-{excluded}")
+    for model_key, spec in _SWEEP_MODELS.items()
+    for excluded in (
+        "nothing",
+        "column",
+        "pk",
+        "m2m",
+    )
+    if excluded != "m2m" or spec.m2m is not None
+]
+
+
+@pytest.mark.parametrize(("model_key", "excluded"), _SWEEP_GRID)
+@pytest.mark.parametrize(
+    "fields",
+    [pytest.param(None, id="exclude-only"), pytest.param("__all__", id="all-fields")],
+)
+def test_filterset_whole_set_sweep_publishes_the_same_keys_for_both_spellings(
+    fields: str | None,
+    model_key: str,
+    excluded: str,
+) -> None:
+    """``Meta.exclude`` alone and ``fields = "__all__"`` with it publish one key set.
+
+    The sweep adds the primary key (an MTI child's parent link included) unless
+    ``Meta.exclude`` names it, never keeps a many-to-many, and drops every excluded name.
+    """
+    spec = _SWEEP_MODELS[model_key]
+    exclude = _sweep_exclude(spec, excluded)
+    meta: dict[str, object] = {"model": spec.model, "exclude": exclude}
+    if fields is not None:
+        meta["fields"] = fields
+    probe = type("SweepProbe", (FilterSet,), {"Meta": type("Meta", (), meta)})
+
+    expected = spec.keys - set(exclude)
+    assert set(probe.get_fields()) == expected
+    assert set(probe.base_filters) == expected
+
+
+@pytest.mark.parametrize("excluded", ["pk-alias", "unknown-name"])
+@pytest.mark.parametrize("model_key", list(_SWEEP_MODELS))
+@pytest.mark.parametrize(
+    "fields",
+    [pytest.param(None, id="exclude-only"), pytest.param("__all__", id="all-fields")],
+)
+def test_filterset_whole_set_sweep_ignores_an_exclude_name_no_field_carries(
+    fields: str | None,
+    model_key: str,
+    excluded: str,
+) -> None:
+    """An exclude naming no model field is ignored, as django-filter ignores it.
+
+    ``"pk"`` is not an alias of the primary key's name, so the sweep still adds the key.
+    """
+    spec = _SWEEP_MODELS[model_key]
+    exclude = ["pk"] if excluded == "pk-alias" else ["no_such_field"]
+    meta: dict[str, object] = {"model": spec.model, "exclude": exclude}
+    if fields is not None:
+        meta["fields"] = fields
+    probe = type("SweepProbe", (FilterSet,), {"Meta": type("Meta", (), meta)})
+
+    assert set(probe.get_fields()) == spec.keys
+
+
+@pytest.mark.parametrize("model_key", list(_SWEEP_MODELS))
+def test_filterset_explicit_field_list_with_exclude_is_not_swept(model_key: str) -> None:
+    """A field list beside ``Meta.exclude`` publishes exactly the listed names it keeps.
+
+    A listed many-to-many stays, no primary key is added, and the excluded name drops out.
+    """
+    spec = _SWEEP_MODELS[model_key]
+    listed = [spec.column, spec.other_column] + ([spec.m2m] if spec.m2m is not None else [])
+    meta = {"model": spec.model, "fields": listed, "exclude": [spec.other_column]}
+    probe = type("ListProbe", (FilterSet,), {"Meta": type("Meta", (), meta)})
+
+    expected = {spec.column} if spec.m2m is None else {spec.column, spec.m2m}
+    assert set(probe.get_fields()) == expected
+
+
+@pytest.mark.parametrize("model_key", list(_SWEEP_MODELS))
+def test_filterset_explicit_field_list_excluding_its_pk_answers_as_django_filter(
+    model_key: str,
+) -> None:
+    """A field list naming the primary key and excluding it publishes the rest, as upstream does."""
+    spec = _SWEEP_MODELS[model_key]
+    meta = {"model": spec.model, "fields": [spec.pk, spec.column], "exclude": [spec.pk]}
+    probe = type("ListProbe", (FilterSet,), {"Meta": type("Meta", (), meta)})
+
+    assert set(probe.get_fields()) == {spec.column}
+
+
+def test_filterset_dict_fields_with_exclude_is_not_swept() -> None:
+    """A dict ``Meta.fields`` beside ``Meta.exclude`` publishes its kept keys and no primary key."""
+
+    class DictProbe(FilterSet):
+        class Meta:
+            model = library_models.Book
+            fields = {"title": ["exact"], "subtitle": ["exact"]}
+            exclude = ("subtitle",)
+
+    assert dict(DictProbe.get_fields()) == {"title": ["exact"]}
+
+
+@pytest.mark.parametrize(
+    "exclude",
+    [
+        pytest.param((), id="exclude-nothing"),
+        pytest.param(("subtitle",), id="exclude-column"),
+        pytest.param(("id",), id="exclude-pk"),
+    ],
+)
+@pytest.mark.parametrize(
+    "fields",
+    [pytest.param(None, id="exclude-only"), pytest.param("__all__", id="all-fields")],
+)
+def test_filterset_whole_set_sweep_under_a_relay_owner_keeps_the_pk_global_id(
+    fields: str | None,
+    exclude: tuple[str, ...],
+) -> None:
+    """Under a Relay owner the swept primary key is the GlobalID filter, unless excluded."""
+
+    class RelayBookType(DjangoType):
+        class Meta:
+            model = library_models.Book
+            interfaces = (strawberry.relay.Node,)
+
+    apply_interfaces(RelayBookType, RelayBookType.__django_strawberry_definition__)
+    meta: dict[str, object] = {"model": library_models.Book, "exclude": exclude}
+    if fields is not None:
+        meta["fields"] = fields
+    probe = type("RelaySweepProbe", (FilterSet,), {"Meta": type("Meta", (), meta)})
+    probe._owner_definition = RelayBookType.__django_strawberry_definition__
+
+    generated = probe.get_filters()
+
+    expected = {
+        "id",
+        "title",
+        "subtitle",
+        "circulation_status",
+        "shelf",
+    } - set(exclude)
+    assert set(generated) == expected
+    if "id" in expected:
+        assert type(generated["id"]) is GlobalIDFilter
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [pytest.param(None, id="exclude-only"), pytest.param("__all__", id="all-fields")],
+)
+def test_related_filter_flattens_a_whole_set_sweep_target_alike_for_both_spellings(
+    fields: str | None,
+) -> None:
+    """A ``RelatedFilter`` into an exclude-only set flattens the ``"__all__"`` keys.
+
+    The target's swept primary key becomes a flat ``books__id`` key and no many-to-many
+    leaf reaches the parent.
+    """
+    meta: dict[str, object] = {"model": library_models.Book, "exclude": ("subtitle",)}
+    if fields is not None:
+        meta["fields"] = fields
+    child = type("SweptBookFilter", (FilterSet,), {"Meta": type("Meta", (), meta)})
+
+    class SweptShelfFilter(FilterSet):
+        books = RelatedFilter(child, field_name="books")
+
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+    assert set(SweptShelfFilter.get_filters()) == {
+        "code",
+        "books",
+        "books__id",
+        "books__title",
+        "books__circulation_status",
+        "books__shelf",
+    }
+
+
 def test_filterset_get_fields_does_not_alter_explicit_dict_meta() -> None:
     class ItemFilter(FilterSet):
         class Meta:
@@ -2616,7 +2906,14 @@ def test_filterset_get_fields_re_readables_still_expand() -> None:
     assert set(FrozenForm.get_fields()) == {"code"}
     assert set(DictForm.get_fields()) == {"code"}
     assert "code" in set(AllForm.get_fields())
-    assert set(ExcludeOnlyForm.get_fields())  # exclude-only implies the rest
+    # Exclude-only is the whole-set sweep minus the exclude: the pk added, ``alt_branches`` (M2M) out.
+    assert set(ExcludeOnlyForm.get_fields()) == {
+        "topic",
+        "condition",
+        "tier",
+        "branch",
+        "id",
+    }
 
 
 def test_filterset_accepts_a_computed_re_readable_collection() -> None:

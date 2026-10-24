@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 276 done, 186 to do.
+Progress: 277 done, 187 to do.
 
 ## Done
 
@@ -1362,6 +1362,14 @@ Progress: 276 done, 186 to do.
   integer range, a decimal the column can hold, read by value not spelling), so a value the backend cannot bind still
   names no row. Fakeshop `signed_big` and `Publisher.house_code` carry validators; live rows pin flat and `not`
   parity, `node` / `nodes`, the GlobalID filter and `createEdition`; spec-032 Decision 5 says so.
+- [x] 400. fixed: a `FilterSet` whose `Meta.exclude` is set and whose `Meta.fields` is not is the whole-set sweep,
+  exactly as `fields = "__all__"` with the same exclude: the primary key is added (a Relay owner's own pk as its
+  GlobalID filter) and every forward many-to-many is removed, where it published django-filter's raw sweep (no auto pk,
+  many-to-many keys included). A primary key named in `Meta.exclude` is never added back by the sweep (auto, non-auto,
+  a multi-table child's parent link), under either spelling. One owner (`filters/sets.py::FilterSet.get_fields`); an
+  explicit field list or dict with `Meta.exclude` is unchanged. The library example gains an exclude-only and a
+  pk-excluding whole-set filterset on secondary types; live rows plus package rows over the shape grid; spec-027, its
+  rationale, the README and the `FilterSet` glossary term say so
 
 ## Outside review of the fixes
 
@@ -1498,9 +1506,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   the masked uncoded error; read it through `utils/truth.py::overrides` (the class-level-override family of 388)
 - [ ] 399. A flat `RelatedFilter` leaf runs `ProjectedChildFilter.filter` twice for one value (robustness: one extra
   EXISTS build per request, same rows)
-- [ ] 400. Unprobed: a `FilterSet` declaring only `Meta.exclude` (`fields=None`) is treated as `"__all__"` upstream,
-  but the package's top-level `"__all__"` narrowing keys on `meta_fields == "__all__"`, so exclude-only may omit `id`
-  and handle many-to-many differently from `fields = "__all__"`; probe both against one model and align them
 - [ ] 500. Process provenance in test docstrings and comments outside `tests/utils/test_querysets.py`, the class 324
   restates there: e.g. `tests/utils/test_permissions.py` ("It used to reach it"), `tests/test_permissions.py` ("no
   longer compare ... (the old ...", "no longer trips"), `tests/utils/test_policies.py` ("no longer", "The pre-fix
@@ -1606,12 +1611,20 @@ tracker number are recorded there; open remainders and new defects are filed as 
   numeric's format (`"1e1000000"`) reach the bind and raise a masked `DataError`: the storage-domain check has no
   precision to hold it to and Django exposes no numeric-format bound; probe the filter `exact` path too. Found
   consulting 509
+- [ ] 558. (robustness) `OrderSet` accepts `Meta.exclude` and ignores it: `fields = "__all__"` with `exclude` (or an
+  explicit list with `exclude`) still orders by the excluded column, and an exclude-only `OrderSet` has no fields and
+  fails at schema build; say whether the order family honours `Meta.exclude` like the filter family or refuses it at
+  class creation. Found fact-finding 400
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 559. CHANGELOG entry for item 400: a `FilterSet` declaring only `Meta.exclude` now publishes the same sweep as
+  `fields = "__all__"`: it gains the primary key filter and loses its forward many-to-many filter keys (declare them in
+  a dict `Meta.fields` or through a `RelatedFilter` instead); and a primary key named in `Meta.exclude` is no longer
+  added back under `fields = "__all__"`
 - [ ] 592. CHANGELOG entry for item 509: a stored row whose value a field validator would refuse (written by
   `objects.create`, `bulk_create`, `QuerySet.update` or before the validator existed) is now found by `node` /
   `nodes`, the GlobalID filter, a generated integer `in` (and its `not`), the raw-pk relation filters and write ids,
