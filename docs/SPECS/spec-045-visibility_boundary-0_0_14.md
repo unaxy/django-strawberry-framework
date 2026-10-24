@@ -154,7 +154,11 @@ project `QuerySet` methods. Nothing leaks through it: the framework calls only
 `.using()` on that object (the write-pipeline pin) and re-seals whatever the
 hook returns, and a project `QuerySet` class is trusted application Python
 (GOAL "Trust boundary"). Attributes a project class sets on an instance outside
-Django's constructor arguments are not carried.
+Django's constructor arguments are not carried. The cascade's OUTPUT is restated
+the same way: `apply_cascade_permissions` seals its source plain and narrows that
+plain rebuild, then returns the narrowed state as the source's own class, so a
+project method chains after the cascade while no consumer `filter` ever runs on
+the cascade predicate.
 
 Reading state without dispatch is not the same as USING it without dispatch, so
 every `QuerySet.__dict__` field the seal carries forward — `_db`, `_hints`,
@@ -204,11 +208,16 @@ class: `test_hook_receives_the_sources_own_queryset_class`,
 `test_prepared_visibility_source_keeps_the_class_only_on_request` there; the
 cascade's source seal staying plain:
 `tests/test_permissions.py::test_root_queryset_filter_override_is_neutralized_by_sealing`;
+the cascade's output restated as the source's class:
+`tests/test_permissions.py::test_cascade_returns_the_sources_queryset_class` and
+`tests/test_permissions.py::test_reentrant_zero_edge_cascade_returns_the_sources_queryset_class`;
 and live
 [`examples/fakeshop/test_query/test_library_api.py`][library-api-tests]
 `test_library_loan_get_queryset_calls_a_project_queryset_method` and
 `test_async_library_loan_get_queryset_calls_a_project_queryset_method` (root
-connection, nested list, nested connection and node refetch).
+connection, nested list, nested connection and node refetch, plus on the sync view
+the root list, whose resolver returns the hook's queryset unsealed; each with the
+method called on the hook's input and on the cascade's return).
 
 ### Decision 2 — Fail-closed prove-then-clone AST trust
 

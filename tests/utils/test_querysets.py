@@ -950,7 +950,8 @@ def test_prepared_visibility_source_keeps_the_class_only_on_request(
     """The source seal is plain unless the caller asks to keep the class.
 
     The cascade relies on the default: it recomposes onto the sealed source, so
-    that seal is a plain ``QuerySet``.
+    that seal is a plain ``QuerySet``, and restates its narrowed result as the
+    source's class afterwards.
     """
     assert type(seal(_ProjectCategoryQuerySet(model=Category))) is expected
 
