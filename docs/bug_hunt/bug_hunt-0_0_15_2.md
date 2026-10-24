@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 239 done, 178 to do.
+Progress: 240 done, 178 to do.
 
 ## Done
 
@@ -1080,6 +1080,13 @@ Progress: 239 done, 178 to do.
   `tests/utils/test_permissions.py::test_invoke_permission_method_rejects_a_non_callable_gate_slot`; a class-creation
   `callable()` check would refuse the shipped `classmethod` gate and a `property` gate and cannot see a slot set after
   creation, and DRF and django-graphene-filters check at call time too
+- [x] 410. not a defect: only a write through `object.__setattr__` / `type.__setattr__` passes the seal, and that is
+  trusted application code (GOAL "Trust boundary"); the sentence promising more is retracted, so
+  `write_mixins.py::_ValidatedMutationMeta.__delattr__`'s message ends "captured once at class creation." (pinned
+  verbatim by `tests/test_write_mixins.py::test_validated_mutation_meta_record_refuses_slot_writes_and_deletes`) and
+  the seal family's docstrings, comments and test prose (`make_meta_validating_metaclass`,
+  `_AuthMutationMetaSnapshot`, the comment above `_SealedAuthHolderMeta`) say the record's or class's own
+  `__setattr__` / `__delattr__` refuse reassignment and deletion, with no release provenance
 
 ## Outside review of the fixes
 
@@ -1358,9 +1365,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `consumers.py::_actor_is_current` (strict `<`)
 - [ ] 408. `rest_framework/resolvers.py::_hook_mapping`'s exact-`str` key gate refuses `StrEnum` keys Python accepts
   (the `str`-subclass family of 224)
-- [ ] 410. `write_mixins.py::_ValidatedMutationMeta.__delattr__` still says the configuration "is immutable", which
-  `object.__setattr__` bypasses; the docstrings were narrowed in `a5e41a20`, the runtime message was left because a
-  test may pin it
 - [ ] 429. Every fakeshop root list served by a plain sync `strawberry.field(resolver=...)` that returns a lazy
   QuerySet (`allLibraryLoans`, `allLibraryBooks`, `allLibraryPatrons`, ...) raises `SynchronousOnlyOperation` on the
   async executor (`asyncio.run(config.schema.schema.execute(...))`, the schema the async view mounts), hook or no
@@ -1378,6 +1382,10 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 581. CHANGELOG entry for item 410: deleting an attribute of a sealed mutation `Meta` snapshot raises a
+  `ConfigurationError` that no longer calls the configuration immutable; the existing CHANGELOG bullet saying "the
+  sealed authorization record cannot be edited after the schema is built" makes the same absolute claim and may want
+  the same narrowing
 - [ ] 430. CHANGELOG entry for item 323: inside a `get_queryset` hook, `apply_cascade_permissions` /
   `aapply_cascade_permissions` now return the queryset's own `QuerySet` class (a fresh instance, same model and row
   type), so project methods chain after the cascade; the permission filter is still applied on a framework-owned plain
