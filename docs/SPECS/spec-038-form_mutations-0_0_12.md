@@ -1445,8 +1445,26 @@ write flavor rides.
    instance=None)` hook (default: `form_class(**self.get_form_kwargs(...))`) is the
    coarser override for full control. This **does not replace** the relation-visibility
    gate (step 3, which runs before the form regardless) — `get_form_kwargs` adds
-   request-scoping on top of, not instead of, the visibility check. The form is built
-   with the `data=` / `files=` split Django requires (a bound form reads
+   request-scoping on top of, not instead of, the visibility check. A prefixed form
+   reads `<prefix>-<field>` (`form.add_prefix`), so it is bound under its prefix (a
+   class-level `prefix`, a `get_form_kwargs` `prefix=`, a `get_form` passing the
+   package's mapping or a copy of it with a prefix). The rule is by content, each of the
+   built form's `data` / `files` on its own: a mapping holding a form field's bare name
+   that `form.add_prefix` renames, and no field's prefixed name, is re-keyed through
+   `form.add_prefix` on the built form, before the package or `is_valid()` reads it; the
+   form's own `__init__` sees the field-keyed mapping
+   (`django_strawberry_framework/forms/resolvers.py::_bind_under_form_prefix`). Only
+   those field names move; any other key (a CSRF token, an extra value a consumer
+   `clean()` reads) stays as bound, as a prefixed Django form leaves it. The bound
+   mapping is never mutated: a re-keyed copy replaces it (a `MultiValueDict`, an
+   immutable `QueryDict` included, as a copy of its own type; a files `dict` as a
+   `MultiValueDict` whose `get` answers each value unchanged). A mapping already holding
+   a prefixed name was keyed by its builder, wholly or partly, and is left alone. Every later read or write of a bound value (the explicit-`null` and
+   required-file checks of step 5, an omitted list field's initial) goes through
+   `form.add_prefix` (`django_strawberry_framework/forms/resolvers.py::_bound_form_value`
+   / `django_strawberry_framework/forms/resolvers.py::_bind_form_values`), so a consumer
+   `add_prefix` override is honoured; `form.errors` stays keyed by field name. The form
+   is built with the `data=` / `files=` split Django requires (a bound form reads
    scalars/relations from `data=` and uploaded files from `files=` — an `UploadedFile`
    in `data=` does **not** validate):
    - **`create`** — `data = provided_data`, `files = provided_files`, then
@@ -1515,7 +1533,8 @@ write flavor rides.
        does not fails the update under full-form validation. Reading the built form rather
        than constructing another honors `get_form` / `get_form_kwargs` overrides and adds no
        query. The initial is bound under `form.add_prefix(<field>)` into a replacement of the
-       bound data: a `MultiValueDict` (a `QueryDict`, immutable or not) is copied and the
+       bound data (`django_strawberry_framework/forms/resolvers.py::_bind_form_values`): a
+       `MultiValueDict` (a `QueryDict`, immutable or not) is copied and the
        initial set with `setlist`, any other mapping merged into a `dict`.
 
      This yields true partial
@@ -1609,7 +1628,8 @@ write flavor rides.
    storable value** ([`forms/resolvers.py`][forms-resolvers]`::_coerced_null_fields`):
    for a form-declared, non-`disabled`, editable non-pk `null=False` column that
    `construct_instance` writes (its `Meta.fields` / `Meta.exclude` keep it) and whose
-   bound `form.data` (what `get_form` bound, after any override) holds `None` (an explicit
+   bound `form.data` (what `get_form` bound, after any override, read under
+   `form.add_prefix(<field>)`) holds `None` (an explicit
    `null`: an update reconstructs an omitted field from a row that stores no `NULL` in
    it), a cleaned value equal to the form field's own cleaning of that `None`, on the
    instance as neither `None` nor a `""` the column cannot store, means the save would
@@ -1811,14 +1831,23 @@ plain `ContactForm`, and `products/schema.py` exposes them via
 
 **The live form surface spans several example apps**, and each earns its place:
 
-- **`products`** — nine form mutations: `createItemViaForm`, `updateItemViaForm`,
+- **`products`** — nineteen form mutations: `createItemViaForm`, `updateItemViaForm`,
   `createItemWithFileViaForm`, `updateItemWithFileViaForm`,
   `createDefaultCategoryItemViaForm`, `createStampedItemViaForm`,
-  `createItemHoldViaForm`, `submitContact`, `submitPing`, over `ItemModelForm` (with a
+  `createItemHoldViaForm`, `submitContact`, `submitPing`, the prefixed-form pairs
+  `createItemViaPrefixedForm` / `updateItemViaPrefixedForm`,
+  `createItemViaKwargsPrefixedForm` / `updateItemViaKwargsPrefixedForm`,
+  `createItemViaCopiedKwargsPrefixedForm` / `updateItemViaCopiedKwargsPrefixedForm` and
+  `createItemViaRekeyedPrefixedForm` / `updateItemViaRekeyedPrefixedForm`, and
+  `updateItemWithRequiredFileViaPrefixedForm` /
+  `updateItemWithRequiredFileViaRekeyedPrefixedForm`, over `ItemModelForm` (with a
   `clean_<field>`), `ItemFileModelForm`, `DefaultCategoryItemModelForm` (the write-time
   `IntegrityError` case), `StampedItemModelForm` (kwarg-requiring, the
   `get_form_kwargs` case), `ItemHoldModelForm` (the explicit-`null` `blank=True,
-  null=False` foreign key), `ContactForm` and `PingForm` (the `DenyAll` default).
+  null=False` foreign key), `ItemFlagsModelForm` / `PrefixedItemFlagsModelForm` and
+  `PrefixedRequiredFileItemModelForm` (a form prefix from the class, from
+  `get_form_kwargs`, or from a re-keying `get_form`), `ContactForm` and `PingForm` (the
+  `DenyAll` default).
 - **`library`** — `CreateShelfViaForm`, `UpdateShelfViaForm`, `UpdateBookViaForm`,
   `UpdateBookAtRepairDeskViaForm`, `UpdatePatronProfileViaForm`,
   `UpdatePatronProfileByGenreNameViaForm`, `CreateBranchWithShelf` and `CreateBranchPair` over
@@ -1955,7 +1984,8 @@ Rationale companion: [Decision 14][rationale-d14].
   whether the column is `null=True` or not. A required form field cannot clear
   (`clean(False, initial)` validates it as `None` and returns the stored file), so
   that `null` is the field's own `required` error, the create's answer to it
-  (`_required_file_clears`), and nothing is written. A create has no stored file, so
+  (`_required_file_clears`, reading `form.files` under `form.add_prefix(<field>)`), and
+  nothing is written. A create has no stored file, so
   its `null` stays `None`.
 - **A `ModelForm` whose `Meta.fields` omits an editable column.** The omitted column
   is simply not an input field — the form's contract governs the write surface
@@ -2114,6 +2144,14 @@ Rationale companion: [Decision 14][rationale-d14].
   `null=True` column, an M2M, a file and a form-required field are never checked
   ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)
   step 5).
+- **A prefixed form.** A form whose prefix comes from its class, a `get_form_kwargs`
+  `prefix=`, or a `get_form` passing the package's mapping or a copy of it with a prefix
+  reads every value the client sent: each bound `data` / `files` mapping holding bare
+  field names and no prefixed one is re-keyed under `form.add_prefix`, and one already
+  holding a prefixed name, keyed by a `get_form` override, is left as bound. The explicit-`null` and required-file checks read the bound value under
+  the same key, so a prefixed form answers every input as the unprefixed one does
+  ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)
+  step 4).
 - **Write-time consumer `ValidationError`.** A `ValidationError` raised by consumer
   save-time code (a `ModelForm.save()` / `Model.save()` override, a model signal
   receiver, a plain-form `perform_mutate`) after `is_valid()` passed returns the
@@ -2214,6 +2252,16 @@ behavior reachable through `/graphql/`, package tests own internals.
   "Enter a list of values." with nothing written through the one that does not, at the
   statements a provided `city` runs
   (`test_library_api.py::test_branch_city_picks_update_binds_an_omitted_city_from_the_form_initial_over_http`).
+  **A prefixed form** — over a class-level prefix (`createItemViaPrefixedForm` /
+  `updateItemViaPrefixedForm`), a `get_form_kwargs` `prefix=` over the package's data
+  (`...KwargsPrefixedForm`) or `dict(data)` copies (`...CopiedKwargsPrefixedForm`) and
+  a re-keying `get_form` (`...RekeyedPrefixedForm`), a create stores every value sent, a
+  one-field update writes it and keeps the rest, and an explicit `description: null` /
+  `isPrivate: null` on create and update is the column-keyed `null` error with nothing
+  written; an explicit `attachment: null` on the required file of
+  `updateItemWithRequiredFileViaPrefixedForm` / `...RekeyedPrefixedForm` is its `required`
+  error with the file kept, and an update omitting it renames the row and keeps the file
+  (`test_products_api.py::test_create_item_via_prefixed_form_explicit_null_is_a_field_error`).
   **Write-time `IntegrityError`** — a valid
   `ModelForm.save()` that hits a constraint the form's validation excluded
   (`createDefaultCategoryItemViaForm`) surfaces the **`FieldError` envelope**, not a
@@ -2369,7 +2417,16 @@ behavior reachable through `/graphql/`, package tests own internals.
     column sent `null` stores `NULL`; an `isPrivate: null` the consumer form resolves (a
     `clean_is_private`, a `get_form_kwargs` override, a `disabled` field, a declared field
     `Meta.fields` / `Meta.exclude` leaves out) writes with empty `errors`
-    (`::test_modelform_null_the_consumer_form_resolves_is_written`);
+    (`::test_modelform_null_the_consumer_form_resolves_is_written`); a consumer
+    `add_prefix` override names the key the package binds and reads
+    (`::test_modelform_create_binds_and_reads_through_the_form_add_prefix`), and a
+    `get_form_kwargs` binding its own prefixed copy of `data` or of `files` (a plain
+    `dict`) keeps it while the package re-keys the other, a bare immutable `QueryDict` and
+    `MultiValueDict` are re-keyed into copies, data holding a prefixed key beside a bare
+    one is left as bound, a `source` key no field names stays bare for the form's
+    `clean()`, and a files `dict` the hook keeps a reference to reads unchanged after the
+    write (`::test_update_under_a_prefix_never_mutates_the_bound_files_mapping`)
+    (`::test_update_under_a_half_rekeyed_prefix_binds_both_mappings`);
     **the `get_form_kwargs` / `get_form` hook** — an override injecting `user` and one
     scoping a `ModelChoiceField.queryset` (input shape unchanged); **partial-update
     reconstruction at the unit tier** — omitted scalar / FK / M2M preserved from the

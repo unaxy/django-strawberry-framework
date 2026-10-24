@@ -23,6 +23,10 @@ wired in ``apps.products.schema`` end to end:
 * a save-time Django ``ValidationError`` from ``Item.save()`` / ``delete()``
   answered by every ``Item`` write mutation (model, form, serializer) with the
   ``name``-keyed ``FieldError`` envelope and nothing written;
+* a prefixed ``ModelForm`` (a class-level ``prefix``, a ``get_form_kwargs``
+  ``prefix=``, a ``get_form`` that re-keys the data itself) binding every value the
+  client sent and answering an explicit ``null`` on ``description`` / ``isPrivate`` /
+  a required ``attachment`` as the unprefixed form does;
 * an ``Item`` update whose located row is deleted after authorization answered
   by every flavor with the in-band ``conflict`` envelope and rolled back, and a
   single-table update saving with ``update_fields=None``.
@@ -620,6 +624,282 @@ def test_update_item_explicit_null_description_is_a_field_error(document: str, r
     assert json_at(result, "errors") == [_NULL_DESCRIPTION_ERROR]
     item.refresh_from_db()
     assert item.description == "stored"
+
+
+#: Each prefixed-form shape: the create root + input, the update root + partial input.
+#: ``class-prefix`` declares ``prefix = "item"`` on the form class, ``kwargs-prefix``
+#: passes ``prefix="item"`` from ``get_form_kwargs``, ``copied-kwargs-prefix`` does so
+#: over ``dict(data)`` / ``dict(files)`` copies, and ``rekeyed-prefix`` is a
+#: ``get_form`` that binds the data keyed ``item-<name>`` itself.
+_PREFIXED_FORM_SHAPES = {
+    "class-prefix": (
+        ("createItemViaPrefixedForm", "PrefixedItemFlagsModelFormInput"),
+        ("updateItemViaPrefixedForm", "PrefixedItemFlagsModelFormPartialInput"),
+    ),
+    "kwargs-prefix": (
+        ("createItemViaKwargsPrefixedForm", "ItemFlagsModelFormInput"),
+        ("updateItemViaKwargsPrefixedForm", "ItemFlagsModelFormPartialInput"),
+    ),
+    "copied-kwargs-prefix": (
+        ("createItemViaCopiedKwargsPrefixedForm", "ItemFlagsModelFormInput"),
+        ("updateItemViaCopiedKwargsPrefixedForm", "ItemFlagsModelFormPartialInput"),
+    ),
+    "rekeyed-prefix": (
+        ("createItemViaRekeyedPrefixedForm", "PrefixedItemFlagsModelFormInput"),
+        ("updateItemViaRekeyedPrefixedForm", "PrefixedItemFlagsModelFormPartialInput"),
+    ),
+}
+_NULL_IS_PRIVATE_ERROR = {
+    "field": "isPrivate",
+    "messages": ["This field cannot be null."],
+    "codes": ["null"],
+}
+
+
+def _create_via_prefixed_form(shape: str) -> tuple[str, str]:
+    root, input_name = _PREFIXED_FORM_SHAPES[shape][0]
+    document = (
+        f"mutation($d: {input_name}!) {{ {root}(data: $d) {{ "
+        "node { name } errors { field messages codes } } }"
+    )
+    return document, root
+
+
+def _update_via_prefixed_form(shape: str) -> tuple[str, str]:
+    root, input_name = _PREFIXED_FORM_SHAPES[shape][1]
+    document = (
+        f"mutation($id: ID!, $d: {input_name}!) {{ {root}(id: $id, data: $d) {{ "
+        "node { name } errors { field messages codes } } }"
+    )
+    return document, root
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("shape", list(_PREFIXED_FORM_SHAPES))
+def test_create_item_via_prefixed_form_binds_every_field(shape: str) -> None:
+    """A create through a prefixed form stores every value the client sent.
+
+    The package binds the input by field name and the form reads ``item-<name>``: the
+    package re-keys bare-keyed data under the form's prefix (a class-level prefix, a
+    ``get_form_kwargs`` ``prefix=`` over the package's data or a copy of it), and a
+    ``get_form`` that re-keys the data itself binds as it does. A form that read none of
+    the values would answer ``required`` on ``name`` / ``categoryId``.
+    """
+    create_users(1)
+    seed_data(1)
+    category = models.Category.objects.earliest("pk")
+    client = _login_with_perm("staff_1", "add_item")
+    document, root = _create_via_prefixed_form(shape)
+
+    data = _graphql_data(
+        document,
+        client=client,
+        variables={
+            "d": {
+                "name": "PrefixedCreate",
+                "description": "described",
+                "categoryId": _global_id("products.category", category.pk),
+                "isPrivate": True,
+            },
+        },
+    )
+    result = json_at(data, root)
+    assert json_at(result, "errors") == [], result
+    assert json_at(result, "node") == {"name": "PrefixedCreate"}
+    item = models.Item.objects.get(name="PrefixedCreate")
+    assert (item.description, item.category_id, item.is_private) == (
+        "described",
+        category.pk,
+        True,
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("shape", list(_PREFIXED_FORM_SHAPES))
+def test_update_item_via_prefixed_form_binds_the_one_field(shape: str) -> None:
+    """An update through a prefixed form writes the one field sent and keeps the rest.
+
+    The reconstructed row values bind under the prefix with the client's ``isPrivate``,
+    so a form without required fields would otherwise read the missing checkbox as
+    ``False`` and answer success over defaults.
+    """
+    create_users(1)
+    seed_data(1)
+    category = models.Category.objects.earliest("pk")
+    item = models.Item.objects.create(
+        name="PrefixedUpdate",
+        description="stored",
+        category=category,
+    )
+    client = _login_with_perm("staff_1", "change_item")
+    document, root = _update_via_prefixed_form(shape)
+
+    data = _graphql_data(
+        document,
+        client=client,
+        variables={"id": _global_id("products.item", item.pk), "d": {"isPrivate": True}},
+    )
+    result = json_at(data, root)
+    assert json_at(result, "errors") == [], result
+    assert json_at(result, "node") == {"name": "PrefixedUpdate"}
+    item.refresh_from_db()
+    assert (
+        item.name,
+        item.description,
+        item.category_id,
+        item.is_private,
+    ) == (
+        "PrefixedUpdate",
+        "stored",
+        category.pk,
+        True,
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("shape", list(_PREFIXED_FORM_SHAPES))
+@pytest.mark.parametrize(
+    ("input_name", "error"),
+    [("description", _NULL_DESCRIPTION_ERROR), ("isPrivate", _NULL_IS_PRIVATE_ERROR)],
+    ids=["description", "is-private"],
+)
+def test_create_item_via_prefixed_form_explicit_null_is_a_field_error(
+    shape: str,
+    input_name: str,
+    error: dict[str, object],
+) -> None:
+    """An explicit ``null`` a prefixed form cleans to a storable value is the ``null`` error.
+
+    The unprefixed answer (``test_create_item_explicit_null_description_is_a_field_error``)
+    holds under the prefix: the pre-write check reads the bound ``None`` under
+    ``item-<name>``, the key the form's widget read it from. ``description`` cleans to
+    ``""`` and ``isPrivate`` to ``False``; neither is written.
+    """
+    create_users(1)
+    seed_data(1)
+    category = models.Category.objects.earliest("pk")
+    client = _login_with_perm("staff_1", "add_item")
+    document, root = _create_via_prefixed_form(shape)
+
+    data = _graphql_data(
+        document,
+        client=client,
+        variables={
+            "d": {
+                "name": "PrefixedNull",
+                "categoryId": _global_id("products.category", category.pk),
+                input_name: None,
+            },
+        },
+    )
+    result = json_at(data, root)
+    assert json_at(result, "node") is None, result
+    assert json_at(result, "errors") == [error]
+    assert not models.Item.objects.filter(name="PrefixedNull").exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("shape", list(_PREFIXED_FORM_SHAPES))
+@pytest.mark.parametrize(
+    ("input_name", "error"),
+    [("description", _NULL_DESCRIPTION_ERROR), ("isPrivate", _NULL_IS_PRIVATE_ERROR)],
+    ids=["description", "is-private"],
+)
+def test_update_item_via_prefixed_form_explicit_null_is_a_field_error(
+    shape: str,
+    input_name: str,
+    error: dict[str, object],
+) -> None:
+    """An explicit ``null`` update through a prefixed form leaves the stored value unchanged."""
+    create_users(1)
+    seed_data(1)
+    category = models.Category.objects.earliest("pk")
+    item = models.Item.objects.create(
+        name="PrefixedKeeps",
+        description="stored",
+        category=category,
+        is_private=True,
+    )
+    client = _login_with_perm("staff_1", "change_item")
+    document, root = _update_via_prefixed_form(shape)
+
+    data = _graphql_data(
+        document,
+        client=client,
+        variables={"id": _global_id("products.item", item.pk), "d": {input_name: None}},
+    )
+    result = json_at(data, root)
+    assert json_at(result, "node") is None, result
+    assert json_at(result, "errors") == [error]
+    item.refresh_from_db()
+    assert (item.description, item.is_private) == ("stored", True)
+
+
+_REQUIRED_FILE_PREFIXED_ROOTS = {
+    "class-prefix": "updateItemWithRequiredFileViaPrefixedForm",
+    "rekeyed-prefix": "updateItemWithRequiredFileViaRekeyedPrefixedForm",
+}
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("shape", list(_REQUIRED_FILE_PREFIXED_ROOTS))
+@pytest.mark.parametrize(
+    ("change", "errors", "name"),
+    [
+        (
+            {"attachment": None},
+            [
+                {
+                    "field": "attachment",
+                    "messages": ["This field is required."],
+                    "codes": ["required"],
+                },
+            ],
+            "RequiredFile",
+        ),
+        ({"name": "RequiredFileRenamed"}, [], "RequiredFileRenamed"),
+    ],
+    ids=["explicit-null", "file-omitted"],
+)
+def test_update_item_with_required_file_via_prefixed_form_keeps_the_file(
+    tmp_path: Path,
+    shape: str,
+    change: dict[str, object],
+    errors: list[dict[str, object]],
+    name: str,
+) -> None:
+    """An update through a prefixed form with a required file never clears the stored file.
+
+    The explicit ``attachment: null`` binds Django's clear sentinel ``False`` under
+    ``item-attachment``; the required ``FileField`` cleans it to the stored file, so the
+    pre-write check reads it under the prefix and answers the field's ``required`` error,
+    nothing written. An update omitting the file renames the row and keeps the file.
+    """
+    create_users(1)
+    seed_data(1)
+    category = models.Category.objects.earliest("pk")
+    item = models.Item.objects.create(name="RequiredFile", category=category)
+    client = _login_with_perm("staff_1", "change_item")
+    root = _REQUIRED_FILE_PREFIXED_ROOTS[shape]
+
+    with override_settings(MEDIA_ROOT=str(tmp_path)):
+        item.attachment.save(
+            "keepme.txt",
+            SimpleUploadedFile("keepme.txt", b"kept bytes", content_type="text/plain"),
+            save=True,
+        )
+        stored_name = item.attachment.name
+        data = _graphql_data(
+            f"mutation($id: ID!, $d: PrefixedRequiredFileItemModelFormPartialInput!) {{ "
+            f"{root}(id: $id, data: $d) {{ node {{ name }} errors {{ field messages codes }} }} }}",
+            client=client,
+            variables={"id": _global_id("products.item", item.pk), "d": change},
+        )
+        result = json_at(data, root)
+        assert json_at(result, "errors") == errors, result
+        item.refresh_from_db()
+        assert item.name == name
+        assert item.attachment.name == stored_name
 
 
 _DELETE_ITEM_WITH_CONNECTION = (

@@ -88,7 +88,14 @@ and the form-specific invariants this module owns:
 
 - **The form is constructed once via the overridable ``get_form`` /
   ``get_form_kwargs`` hooks** (Decision 8 step 4 / Decision 6); ``form.is_valid()``
-  runs once. A failure maps ``form.errors`` onto the ``FieldError`` envelope via
+  runs once. A prefixed form (a class-level ``prefix``, a ``get_form_kwargs``
+  ``prefix=``, a ``get_form`` passing the package's mapping or a copy with a prefix) is
+  bound under its prefix: a bound ``data`` / ``files`` mapping holding bare field names
+  and no prefixed one is re-keyed through ``form.add_prefix``, each mapping on its own,
+  while one already holding a prefixed name is left as bound
+  (``_bind_under_form_prefix``), and every later read or write of the bound values
+  goes through ``form.add_prefix`` (``_bound_form_value`` / ``_bind_form_values``). A
+  failure maps ``form.errors`` onto the ``FieldError`` envelope via
   the reused ``validation_error_to_field_errors(ValidationError(
   form.errors.as_data()), key_map)``: each form field name is re-keyed to the
   GraphQL input field the client sent (``category`` -> ``categoryId``) through
@@ -232,6 +239,7 @@ if TYPE_CHECKING:
 
     _FormT = TypeVar("_FormT", bound=forms.BaseForm)
     _FormT_co = TypeVar("_FormT_co", bound=forms.BaseForm, covariant=True)
+    _ValueT = TypeVar("_ValueT")
 
     class _FormBuilder(Protocol[_FormT_co]):
         """A form mutation instance, as its ``get_form`` construction hook builds a form."""
@@ -878,13 +886,9 @@ def _bind_omitted_list_initials(
     out of ``form_data`` when the input omits it. The form ``get_form`` built reads the
     field's initial (``form.get_initial_for_field``: the ``initial`` a ``ModelForm`` builds
     from the row and the ``initial=`` kwarg, after any ``__init__`` adjustment), which is
-    bound under the field's prefixed name (``form.add_prefix``) before ``is_valid()``: the
-    value the form itself presents for the unchanged field. A name the bound form no longer
-    declares is left out. The bound data is replaced, never mutated: a ``MultiValueDict``
-    (a ``QueryDict`` a ``get_form`` override binds, immutable or not) is copied and each
-    initial set as its list of values (``setlist``), since unpacking it into a ``dict``
-    would bind every other field's raw value list; any other mapping is merged into a
-    ``dict``.
+    bound under the field's prefixed name (``_bind_form_values``) before ``is_valid()``:
+    the value the form itself presents for the unchanged field. A name the bound form no
+    longer declares is left out.
     """
     form_class = require(mutation_cls._mutation_meta.form_class, _is_form_class)
     initials: dict[str, object] = {}
@@ -897,18 +901,121 @@ def _bind_omitted_list_initials(
         bound_field = form.fields.get(name)
         if bound_field is not None:
             initials[name] = form.get_initial_for_field(bound_field, name)
-    if not initials:
-        return
+    if initials:
+        _bind_form_values(form, initials)
+
+
+#: What ``_bound_form_value`` answers for a field the bound form holds no value for.
+_UNBOUND = object()
+
+
+def _bound_form_value(form: forms.BaseForm, name: str, *, files: bool = False) -> object:
+    """Return the value the bound form holds for its field ``name``, else ``_UNBOUND``.
+
+    Read from ``form.files`` when ``files`` is set, else ``form.data``, under
+    ``form.add_prefix(name)``: the key the field's widget reads, so a form prefix and a
+    consumer ``add_prefix`` override are both honoured. A ``MultiValueDict`` (a
+    ``QueryDict`` a ``get_form`` override binds) answers its last value, any other mapping
+    its value.
+    """
+    bound: Mapping[str, object] = form.files if files else form.data
+    key = form.add_prefix(name)
+    return bound.get(key, _UNBOUND)
+
+
+def _bind_form_values(form: forms.BaseForm, values: Mapping[str, object]) -> None:
+    """Bind ``values`` (keyed by field name) into the form's data under ``form.add_prefix``.
+
+    The bound data is replaced, never mutated: a ``MultiValueDict`` (a ``QueryDict`` a
+    ``get_form`` override binds, immutable or not) is copied and each value set as its list
+    of values (``setlist``), since unpacking it into a ``dict`` would bind every other
+    field's raw value list; any other mapping is merged into a ``dict``.
+    """
     bound = form.data
     if isinstance(bound, MultiValueDict):
         merged = bound.copy()
-        for name, value in initials.items():
+        for name, value in values.items():
             listed = truth.is_instance(value, list) or truth.is_instance(value, tuple)
-            values = list_of(value) if listed else [value]
-            merged.setlist(form.add_prefix(name), values)
+            merged.setlist(form.add_prefix(name), list_of(value) if listed else [value])
         form.data = merged
     else:
-        form.data = {**bound, **{form.add_prefix(name): value for name, value in initials.items()}}
+        form.data = {**bound, **{form.add_prefix(name): value for name, value in values.items()}}
+
+
+def _bind_under_form_prefix(form: forms.BaseForm) -> None:
+    """Re-key bare field-keyed ``form.data`` / ``form.files`` under the form's prefix.
+
+    The package binds by bare field name, and a prefixed form reads ``<prefix>-<name>``
+    (``form.add_prefix``), so a form whose prefix comes from the form class, a
+    ``get_form_kwargs`` ``prefix=``, or a ``get_form`` that passes the package's mapping
+    (or a copy of it) with a prefix would read none of the client's values: a required
+    field answers ``required``, an optional one its empty value. The re-key runs on the
+    built form, before the package or ``is_valid()`` reads it; the form's own ``__init__``
+    sees the field-keyed mapping. The rule is by content, each mapping on its own: a
+    mapping holding a form field's bare name that ``form.add_prefix`` renames, and no
+    field's prefixed name, is re-keyed; a mapping already holding a prefixed name was
+    keyed by its builder, wholly or partly, and is left as bound. Only those field names
+    move: any other key (a CSRF token, an extra value a consumer ``clean()`` reads) stays
+    as bound, as a prefixed Django form leaves it. The bound mapping is never mutated: a
+    re-keyed copy replaces it, a ``MultiValueDict`` (a ``QueryDict``, immutable or not)
+    as a copy of its own type keeping each key's value list, other data as a ``dict``, and
+    a files ``dict`` as a ``MultiValueDict`` holding each value as its one entry, so ``get``
+    answers it unchanged. Nothing Django's form ``__init__`` derives from the bound data
+    changes: ``is_bound`` reads only whether either mapping was passed.
+    """
+    renamed = {name: key for name in form.fields if (key := form.add_prefix(name)) != name}
+    if not renamed:
+        return
+    data: Mapping[str, object] = form.data
+    if _holds_bare_field_names(data, renamed):
+        if isinstance(data, MultiValueDict):
+            form.data = _rekeyed_multi_value_dict(data, renamed)
+        else:
+            form.data = {renamed.get(name, name): value for name, value in data.items()}
+    # ``form.files`` is typed as a ``MultiValueDict``; the package and a ``get_form_kwargs``
+    # pass a plain ``dict``, so the bound object is read untyped and narrowed.
+    files = read_attr(form, "files")
+    if not isinstance(files, dict) or not _holds_bare_field_names(form.files, renamed):
+        return
+    if isinstance(files, MultiValueDict):
+        form.files = _rekeyed_multi_value_dict(form.files, renamed)
+        return
+    # A plain ``dict``'s ``copy()`` is a ``dict``: its entries read each value as bound,
+    # never a value list, and the bound mapping is left untouched.
+    form.files = _multi_value_dict_of(form.files.copy(), renamed)
+
+
+def _holds_bare_field_names(bound: Container[object], renamed: Mapping[str, str]) -> bool:
+    """Whether ``bound`` holds a renamed field's bare name and no field's prefixed name."""
+    return any(name in bound for name in renamed) and not any(
+        key in bound for key in renamed.values()
+    )
+
+
+def _multi_value_dict_of(
+    entries: dict[str, _ValueT],
+    renamed: Mapping[str, str],
+) -> MultiValueDict[str, _ValueT]:
+    """Return a ``MultiValueDict`` holding each value of ``entries`` as its one entry, renamed keys moved.
+
+    ``get`` on it answers each value exactly as ``entries`` holds it.
+    """
+    rekeyed: MultiValueDict[str, _ValueT] = MultiValueDict()
+    for name, value in entries.items():
+        rekeyed.setlist(renamed.get(name, name), [value])
+    return rekeyed
+
+
+def _rekeyed_multi_value_dict(
+    bound: MultiValueDict[str, _ValueT],
+    renamed: Mapping[str, str],
+) -> MultiValueDict[str, _ValueT]:
+    """Return a copy of ``bound`` (its own type, mutable) with each renamed field's key moved."""
+    rekeyed = bound.copy()
+    rekeyed.clear()
+    for name in bound:
+        rekeyed.setlist(renamed.get(name, name), bound.getlist(name))
+    return rekeyed
 
 
 def _bound_form_or_field_errors(
@@ -930,6 +1037,7 @@ def _bound_form_or_field_errors(
     """
     form_data, provided_files = decoded
     form = holder.get_form(info, data=form_data, files=provided_files, instance=instance)
+    _bind_under_form_prefix(form)
     if instance is not None:
         _bind_omitted_list_initials(mutation_cls, form, form_data)
     _assert_bound_choice_agreement(mutation_cls, form, form_data)
@@ -983,16 +1091,17 @@ def _is_unstorable_blank(field: models.Field[object, object], value: object) -> 
 def _coerced_null_fields(form: _ModelFormAny) -> list[models.Field[object, object]]:
     """Return the ``null=False`` columns whose explicit ``null`` their form field stored as a value.
 
-    ``form.data`` is what ``get_form`` bound (after any override of the hook). It holds
-    ``None`` under a ``null=False`` column's form field only for an explicit ``null``: an
-    update reconstructs an omitted field from the located row, which never stores ``NULL``
-    there, and an upload is bound through ``files=``, never ``data=``. The column's form
-    field may clean that ``None`` to a value instead of ``None``: ``CheckboxInput`` reads
-    it as ``False``, and the ``CharField`` / ``TypedChoiceField`` of a ``blank=True`` text
-    column clean it to its ``empty_value`` ``""``. ``ModelForm._post_clean`` writes that
-    value onto ``form.instance`` and the save would succeed, storing a value the client
-    never sent. Such a column is named here, from the instance the save would write, so
-    the write never runs.
+    ``form.data`` is what ``get_form`` bound (after any override of the hook), read under
+    the field's prefixed name (``_bound_form_value``). It holds ``None`` under a
+    ``null=False`` column's form field only for an explicit ``null``: an update
+    reconstructs an omitted field from the located row, which never stores ``NULL`` there,
+    and an upload is bound through ``files=``, never ``data=``. The column's form field may
+    clean that ``None`` to a value instead of ``None``: ``CheckboxInput`` reads it as
+    ``False``, and the ``CharField`` / ``TypedChoiceField`` of a ``blank=True`` text column
+    clean it to its ``empty_value`` ``""``. ``ModelForm._post_clean`` writes that value onto
+    ``form.instance`` and the save would succeed, storing a value the client never sent.
+    Such a column is named here, from the instance the save would write, so the write never
+    runs.
 
     Only the form field's own cleaning of the bound ``None`` is named. A different cleaned
     value is the consumer form's (a ``clean_<field>`` / ``clean()`` default) and is
@@ -1007,7 +1116,6 @@ def _coerced_null_fields(form: _ModelFormAny) -> list[models.Field[object, objec
     """
     instance = form.instance
     options = form._meta
-    bound_data: Mapping[str, object] = form.data
     cleaned_data: Mapping[str, object] = form.cleaned_data
     coerced_fields: list[models.Field[object, object]] = []
     for field in instance._meta.concrete_fields:
@@ -1019,7 +1127,7 @@ def _coerced_null_fields(form: _ModelFormAny) -> list[models.Field[object, objec
             continue
         if options.exclude is not None and name in options.exclude:
             continue
-        if name not in bound_data or bound_data[name] is not None:
+        if _bound_form_value(form, name) is not None:
             continue
         value = read_attr(instance, field.attname)
         if value is None or _is_unstorable_blank(field, value):
@@ -1050,15 +1158,14 @@ def _required_file_clears(form: forms.BaseForm) -> dict[str, list[ValidationErro
     A required ``FileField`` cannot clear: ``clean(False, initial)`` validates the
     ``False`` as ``None``, which returns the stored file, so ``is_valid()`` passes and the
     save would report success with the file the client asked to remove. ``form.files`` is
-    what ``get_form`` bound (after any override of the hook); a ``disabled`` field ignores
-    it. The error is the form field's own ``error_messages["required"]``, code
-    ``required``, the answer the same ``null`` gets on a create.
+    what ``get_form`` bound (after any override of the hook), read under the field's
+    prefixed name (``_bound_form_value``); a ``disabled`` field ignores it. The error is
+    the form field's own ``error_messages["required"]``, code ``required``, the answer the
+    same ``null`` gets on a create.
     """
-    bound_files = dict[str, object](form.files.items())
     errors: dict[str, list[ValidationError]] = {}
-    for name, value in bound_files.items():
-        form_field = form.fields.get(name)
-        if value is not False or form_field is None:
+    for name, form_field in form.fields.items():
+        if _bound_form_value(form, name, files=True) is not False:
             continue
         if form_field.required and not form_field.disabled:
             message = form_field.error_messages["required"]
