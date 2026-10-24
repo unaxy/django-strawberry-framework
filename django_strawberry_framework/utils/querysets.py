@@ -90,13 +90,14 @@ import uuid
 import zoneinfo
 from collections.abc import AsyncIterable, Iterable
 from collections.abc import Set as AbstractSet
-from decimal import Decimal
+from decimal import Context as DecimalContext
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, Generic, ParamSpec, TypeGuard, TypeVar, cast, overload
 
 from asgiref.sync import sync_to_async
 from django.core.exceptions import FieldDoesNotExist, FieldError, ValidationError
 from django.core.validators import ProhibitNullCharactersValidator
-from django.db import models, router
+from django.db import connections, models, router
 from django.db.models import Prefetch, sql
 from django.db.models import query as django_query
 from django.db.models.constants import LOOKUP_SEP
@@ -136,6 +137,7 @@ from ._narrowing import (
     is_str,
     iter_of,
     pk_of,
+    read_attr,
     require,
 )
 from ._queryset_private import (
@@ -150,13 +152,14 @@ from ._queryset_private import (
     set_queryset_prefetch_lookups,
     set_queryset_sticky_filter,
 )
+from .errors import unbindable_temporal
 from .relations import (
     is_model_class,
     leading_relation_hops,
     order_column_paths,
     stored_value_column,
 )
-from .typing import MISSING_ATTRIBUTE, is_async_callable
+from .typing import MISSING_ATTRIBUTE, is_async_callable, object_result
 from .write_transaction import (
     current_write_pipeline,
     pin_write_queryset,
@@ -748,23 +751,74 @@ def to_python_value(field: _PythonCoercing, value: object) -> object:
 _PROHIBIT_NULL_CHARACTERS = ProhibitNullCharactersValidator()
 
 
-def coerce_field_value_or_none(field: ModelField | None, value: object) -> object:
-    """Coerce ``value`` through ``field``'s ``to_python`` + ``run_validators``; ``None`` if invalid.
+def lookup_read_alias(model: type[models.Model]) -> str:
+    """Return the database a lookup of ``model``'s rows reads when no queryset is in hand.
+
+    The write pipeline's pinned alias inside ``open_write_pipeline`` (every write
+    flavor's reads go through it), the router's read database for ``model``
+    everywhere else. The alias an identity decode coerces against
+    (``coerce_field_value_or_none``) is this one, so the value is prepared for the
+    connection the lookup binds it on.
+    """
+    pipeline = current_write_pipeline()
+    if pipeline is not None:
+        return pipeline.alias
+    return router.db_for_read(model)
+
+
+def coerce_field_value_or_none(field: ModelField | None, value: object, *, alias: str) -> object:
+    """Coerce ``value`` to what ``field``'s column can hold on ``alias``; ``None`` if it names no row.
 
     The single "raw literal -> Django field value, or nothing" safety wrapper
-    every raw-identity decode runs through. ``to_python`` is a pure type
-    cast that does NOT range-check, so a syntactically-valid but out-of-range
-    literal (e.g. a pk past a backend's signed-64-bit column range) would
-    otherwise reach a ``pk__in`` / ``filter`` call and raise a raw backend
-    ``OverflowError`` (``Python int too large to convert to SQLite INTEGER``);
-    the field's own validators (``integer_field_range`` Min/MaxValueValidators,
-    etc.) reject it here as a ``ValidationError`` instead, and a non-numeric
-    literal fails ``to_python`` itself. Most Django core fields wrap their
-    ``to_python`` failure in ``ValidationError``; ``TypeError`` / ``ValueError``
+    every raw-identity decode runs through: a decoded ``GlobalID`` node id, a raw
+    pk, a relation identity, an integer ``in`` member. A value identifies a stored
+    row when the column can hold it, so the checks are the ones the lookup's bind
+    and the column's storage domain make, never the field's validators: a row a
+    validator would refuse can still be stored (``objects.create``,
+    ``bulk_create``, ``QuerySet.update`` and a migration all skip
+    ``full_clean``), and an identity decode that ran them would miss it.
+
+    ``to_python`` casts the value and refuses a wrong shape. Most Django core
+    fields wrap that failure in ``ValidationError``; ``TypeError`` / ``ValueError``
     cover a field whose ``to_python`` raises one of those directly, and
-    ``OverflowError`` is what ``DurationField.to_python`` raises for a
-    well-formed duration string past ``timedelta``'s range (``int(inf)`` in
+    ``OverflowError`` is what ``DurationField.to_python`` raises for a well-formed
+    duration string past ``timedelta``'s range (``int(inf)`` in
     ``IntegerField.to_python`` raises it too).
+
+    The value is then prepared for the database ``alias`` reads from, as Django's
+    own lookup prepares it (``Field.get_db_prep_value``; a key delegates to the
+    column it references), so a value that backend's adapter refuses (an aware
+    datetime SQLite cannot project to UTC, a malformed address PostgreSQL's
+    ``inet`` adapter rejects) names no row there, and only there. PostgreSQL's
+    server refuses one value its adapters pass, an aware datetime or time whose UTC
+    offset it cannot hold, so ``errors.py::unbindable_temporal`` answers that past
+    the bind. ``alias`` is the database the lookup reads: the filtered queryset's
+    ``db``, or ``lookup_read_alias`` (the pinned write-pipeline alias, else the
+    router's read database for the queried model).
+
+    The prepared value is held to the column's storage domain. An integer stays
+    inside the range ``alias`` stores for the internal type of the column holding
+    the value (``DatabaseOperations.integer_field_range``, the range Django's
+    integer comparison lookups test a bound against before binding it; a
+    ``BigIntegerField``'s for a column that is no ``IntegerField`` yet binds an
+    integer, as a ``DurationField`` binds its microsecond count on a backend
+    without a native interval, so a duration past 64 bits of microseconds names
+    no row there). That column is the one ``relations.py::stored_value_column`` walks
+    a key to, so a one-to-one primary key, a parent link or a ``ForeignKey`` is
+    held to its referenced column's range. A decimal on a ``DecimalField`` with
+    ``max_digits`` is the value of the column it equals, quantized to
+    ``decimal_places`` within ``max_digits``: a value no stored decimal equals
+    (too many integer digits, a finer fraction) names no row, and an in-range
+    value spelled with any number of trailing zeros is the column's value, so its
+    spelling never reaches a backend that would refuse to bind it.
+
+    A value coerced to text holding an embedded NUL (U+0000) identifies no row
+    either, on every backend: no write stores one (Django's all-backend
+    ``ProhibitNullCharactersValidator`` rule, which
+    ``write_values.py::unstorable_text_error`` holds every write to), and
+    PostgreSQL refuses to bind one at all (psycopg raises ``DataError``), so a NUL
+    in a text-keyed id answers the caller's not-found / invalid-id verdict before
+    any query rather than a raw backend error.
 
     Every caller treats ``None`` the same way - "identifies no row": dropped
     from a query, or mapped to a not-found / invalid sentinel - never a raw
@@ -772,32 +826,16 @@ def coerce_field_value_or_none(field: ModelField | None, value: object) -> objec
     Relay type's resolved id field, a related model's pk, an arbitrary filtered
     column) and stays at each call site; only the coercion mechanics are
     single-sourced here. A ``ForeignObjectRel`` or ``None`` field has no column
-    to coerce against, so it identifies no row either. A key (a one-to-one primary
-    key, a multi-table-inheritance parent link, any ``ForeignKey``) carries only
-    the validators declared on it, while its ``to_python`` delegates down the chain
-    to the column storing its value (``relations.py::stored_value_column``): the
-    value runs the key's own validators and then that column's, whose range
-    validators reject an out-of-range id.
-
-    A value coerced to text holding an embedded NUL (U+0000) identifies no row
-    either, on every backend: no write stores one (Django's all-backend
-    ``ProhibitNullCharactersValidator`` rule, which
-    ``write_values.py::unstorable_text_error`` holds every write to), and
-    PostgreSQL refuses to bind one at all (psycopg raises ``DataError``), so a NUL
-    in a text-keyed id (a decoded ``GlobalID`` node id, a raw pk, a relation
-    identity) answers the caller's not-found / invalid-id verdict before any query
-    rather than a raw backend error.
+    to coerce against, so it identifies no row either.
     """
     if not isinstance(field, models.Field):
         return None
-    column = stored_value_column(field)
+    connection = connections[alias]
     try:
         coerced = to_python_value(field, value)
-        field.run_validators(coerced)
-        if column is not field:
-            column.run_validators(coerced)
         if isinstance(coerced, str):
             _PROHIBIT_NULL_CHARACTERS(str.__str__(coerced))
+        bound = object_result(field.get_db_prep_value, coerced, connection, prepared=False)
     except (
         ValidationError,
         TypeError,
@@ -805,7 +843,52 @@ def coerce_field_value_or_none(field: ModelField | None, value: object) -> objec
         OverflowError,
     ):
         return None
+    column = stored_value_column(field)
+    if unbindable_temporal(column, (), coerced, lambda: alias):
+        return None
+    if isinstance(bound, int) and not isinstance(bound, bool):
+        internal_type = (
+            column.get_internal_type()
+            if isinstance(column, models.IntegerField)
+            else "BigIntegerField"
+        )
+        if not _within_integer_range(bound, connection.ops.integer_field_range(internal_type)):
+            return None
+    if isinstance(coerced, Decimal) and isinstance(column, models.DecimalField):
+        return _stored_decimal_or_none(coerced, column)
     return coerced
+
+
+def _stored_decimal_or_none(number: Decimal, column: ModelField) -> Decimal | None:
+    """Return the value ``column`` stores that equals ``number``, or ``None`` when none does.
+
+    ``number`` is quantized to ``decimal_places`` within ``max_digits``: one needing more
+    integer digits than the column holds, or a finer fraction than it keeps, equals no
+    stored value. A column declared without ``max_digits`` (django-stubs types it ``int``,
+    Django accepts ``None``) has no domain to hold the value to, so ``number`` passes.
+    """
+    digits = read_attr(column, "max_digits")
+    if not isinstance(digits, int):
+        return number
+    places = read_attr(column, "decimal_places")
+    try:
+        held = number.quantize(
+            Decimal(1).scaleb(-places if isinstance(places, int) else 0),
+            context=DecimalContext(prec=digits),
+        )
+    except InvalidOperation:
+        return None
+    return held if held == number else None
+
+
+def _within_integer_range(number: int, bounds: tuple[int | None, int | None]) -> bool:
+    """Whether ``number`` lies inside ``bounds``, either end of which a backend may leave open.
+
+    ``None`` at an end is no limit there, as Django's range-aware integer lookups read it
+    (``django.db.models.lookups.IntegerFieldOverflow``).
+    """
+    low, high = bounds
+    return (low is None or number >= low) and (high is None or number <= high)
 
 
 _RELAY_ASYNC_RECOURSE = (

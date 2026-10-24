@@ -18,8 +18,11 @@ import pytest
 import strawberry
 from apps.products.models import Category
 from apps.scalars.models import NullableScalarSpecimen
-from django.db import connection
+from django.apps.registry import Apps
+from django.core.validators import MinValueValidator
+from django.db import connection, models
 from django.db.models import Model
+from django.db.models.expressions import Combinable
 from django.test.utils import CaptureQueriesContext
 from django.utils.functional import SimpleLazyObject
 from strawberry import relay
@@ -728,6 +731,34 @@ def test_coerce_relation_pk_or_none_handles_non_models_and_uncoercible_values() 
     # types the parameter as type[Model]
     assert coerce_relation_pk_or_none(None, 1) is None  # pyright: ignore[reportArgumentType]
     assert coerce_relation_pk_or_none(Category, object()) is None
+
+
+_gated_pk_apps = Apps([])
+
+
+class _GatedPk(Model):
+    """A model whose integer primary key carries a validator refusing ids below 10."""
+
+    code: models.IntegerField[int | Combinable, int] = models.IntegerField(
+        primary_key=True,
+        validators=[MinValueValidator(10)],
+    )
+
+    class Meta:
+        app_label = "products"
+        managed = False
+        apps = _gated_pk_apps
+
+
+def test_coerce_relation_pk_or_none_keeps_a_pk_the_validator_refuses() -> None:
+    """A raw pk the target's validator refuses names the row holding it; the range still drops.
+
+    A row stored without ``full_clean`` can hold ``5``, so the raw relation id still
+    names it; ``2**63`` is past the column's range and names no row. Package-only: no
+    fakeshop raw-pk relation target has a key carrying a validator.
+    """
+    assert coerce_relation_pk_or_none(_GatedPk, "5") == 5
+    assert coerce_relation_pk_or_none(_GatedPk, 2**63) is None
 
 
 def test_decode_provided_fields_tolerates_unmapped_input_fields() -> None:

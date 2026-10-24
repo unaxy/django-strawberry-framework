@@ -78,6 +78,7 @@ from .utils.lazy import unwrap_lazy_object
 from .utils.querysets import (
     base_queryset,
     coerce_field_value_or_none,
+    lookup_read_alias,
     model_for,
     reject_async_in_sync_context,
 )
@@ -185,6 +186,7 @@ def _coerce_pk_or_none(
     resolved_type: type[_RelayDjangoType],
     node_id: object,
     *,
+    alias: str,
     slot: tuple[str, ModelField | None] | None = None,
 ) -> object:
     """Coerce ``node_id`` to the resolution field's Python type; ``None`` if uncoercible.
@@ -195,10 +197,11 @@ def _coerce_pk_or_none(
     ``ValueError: Field 'id' expected a number``. A coercion failure is treated
     as "identifies no row" -> ``null`` (single) / positional ``null`` hole
     (batch), with no query issued, so the no-existence-oracle property is
-    unaffected (Decision 5). The coercion mechanics
-    (``to_python`` then ``run_validators``, out-of-range literals rejected
-    before any query so neither the node lookup nor the relation ``pk__in``
-    visibility query can raise a backend ``OverflowError``) are the shared
+    unaffected (Decision 5). The coercion mechanics (``to_python``, then the bind
+    the lookup makes on the database ``alias`` it reads and the column's storage
+    domain, so neither the node lookup nor the relation ``pk__in`` visibility query
+    can raise a backend error; the field's own validators are not run, so an id
+    they would refuse still resolves a row that holds it) are the shared
     ``utils/querysets.py::coerce_field_value_or_none`` primitive; this function's only job is
     picking WHICH field to coerce against.
 
@@ -222,7 +225,7 @@ def _coerce_pk_or_none(
     field = slot[1] if slot is not None else _node_id_slot(resolved_type)[1]
     if field is None:
         return node_id
-    return coerce_field_value_or_none(field, node_id)
+    return coerce_field_value_or_none(field, node_id, alias=alias)
 
 
 def _check_typed_match(
@@ -388,7 +391,12 @@ def _decode_and_coerce(
     if slot is None:
         slot = _node_id_slot(resolved_type)
         slots[resolved_type] = slot
-    pk = _coerce_pk_or_none(resolved_type, node_id, slot=slot)
+    pk = _coerce_pk_or_none(
+        resolved_type,
+        node_id,
+        alias=lookup_read_alias(model_for(resolved_type)),
+        slot=slot,
+    )
     if pk is None:
         return DecodeResult(GlobalIDDecode.UNCOERCIBLE_PK, None, resolved_type)
     return DecodeResult(GlobalIDDecode.OK, pk, resolved_type)
@@ -723,7 +731,10 @@ def DjangoNodeField(  # noqa: N802  # PascalCase for graphene-django parity - co
         # Everything below runs OUTSIDE the decode try/except so a dispatch-time
         # ``SyncMisuseError`` surfaces as itself (see ``_decode_or_graphql_error``).
         _check_typed_match(pinned, resolved, schema)
-        if _coerce_pk_or_none(resolved, node_id) is None:
+        if (
+            _coerce_pk_or_none(resolved, node_id, alias=lookup_read_alias(model_for(resolved)))
+            is None
+        ):
             # Uncoercible literal -> null with no query issued.
             return None
         # In async context ``resolve_node`` returns a coroutine Strawberry's
@@ -854,7 +865,8 @@ def DjangoNodesField(  # noqa: N802  # PascalCase for graphene-django parity - c
             if slot is None:
                 slot = _node_id_slot(resolved)
                 slots[resolved] = slot
-            if _coerce_pk_or_none(resolved, node_id, slot=slot) is None:
+            alias = lookup_read_alias(model_for(resolved))
+            if _coerce_pk_or_none(resolved, node_id, alias=alias, slot=slot) is None:
                 positions.append(None)
                 continue
             node_ids = groups.setdefault(resolved, [])

@@ -30,6 +30,7 @@ from apps.library import models
 from apps.scalars import models as scalar_models
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator
+from django.db import DEFAULT_DB_ALIAS
 from django.db import connection as db_connection
 from django.db import models as db_models
 from django.db.models import Model, QuerySet
@@ -72,7 +73,6 @@ from django_strawberry_framework.filters.base import (
     RelationPkMultipleFilter,
     _accepted_globalid_type_names,
     _bound_field_name,
-    _coerce_int_in_members,
     _column_form_field,
     _decode_and_validate_global_id,
     _ElementField,
@@ -926,72 +926,145 @@ def test_list_filter_passes_through_none() -> None:
     assert f.filter(sentinel, None) is sentinel
 
 
-class _ValidatedCount(db_models.Model):
-    """An integer column whose own validator refuses values below 10."""
+class _StoredCount(db_models.Model):
+    """A plain integer column."""
 
-    count: db_models.IntegerField[int | Combinable, int] = db_models.IntegerField(
-        validators=[MinValueValidator(10)],
-    )
+    count: db_models.IntegerField[int | Combinable, int] = db_models.IntegerField()
 
     class Meta:
         managed = False
-        app_label = "test_list_filter_validators"
+        app_label = "test_list_filter_members"
 
 
-class _ValidatedCountSet(FilterSet):
+class _StoredCountSet(FilterSet):
     count_among = ListFilter(field_name="count", lookup_expr="in")
     count_outside = ListFilter(field_name="count", lookup_expr="in", exclude=True)
 
     class Meta:
-        model = _ValidatedCount
+        model = _StoredCount
         fields = ("count",)
 
 
 @pytest.fixture
-def validated_counts() -> Generator[QuerySet[_ValidatedCount], None, None]:
-    """A real ``_ValidatedCount`` table holding 5 (below the validator) and 12."""
+def stored_counts() -> Generator[QuerySet[_StoredCount], None, None]:
+    """A real ``_StoredCount`` table holding 5 and 12."""
     with db_connection.schema_editor() as editor:
-        editor.create_model(_ValidatedCount)
+        editor.create_model(_StoredCount)
     try:
-        _ValidatedCount.objects.create(count=5)
-        _ValidatedCount.objects.create(count=12)
-        yield _ValidatedCount.objects.all()
+        _StoredCount.objects.create(count=5)
+        _StoredCount.objects.create(count=12)
+        yield _StoredCount.objects.all()
     finally:
         with db_connection.schema_editor() as editor:
-            editor.delete_model(_ValidatedCount)
+            editor.delete_model(_StoredCount)
 
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize(
     ("name", "members", "counts"),
     [
-        pytest.param("count_among", [5], [5], id="validator-refused-member-matches"),
-        pytest.param("count_outside", [5], [12], id="validator-refused-member-excluded"),
         pytest.param("count_among", ["abc", 12], [12], id="unconvertible-member-dropped"),
         pytest.param("count_among", ["abc"], [], id="every-member-dropped"),
         pytest.param("count_outside", ["abc"], [5, 12], id="every-member-dropped-excluded"),
     ],
 )
-def test_list_filter_integer_in_keeps_members_the_backend_stores(
-    validated_counts: QuerySet[_ValidatedCount],
+def test_list_filter_integer_in_drops_members_the_column_cannot_convert(
+    stored_counts: QuerySet[_StoredCount],
     name: str,
     members: list[object],
     counts: list[int],
 ) -> None:
-    """An integer ``in`` drops only members outside the backend's range, never by validator.
+    """An integer ``in`` drops a member the column's ``to_python`` cannot convert.
 
-    A row holding a value the column's own validators refuse is stored all the same (Django
-    validates on ``full_clean``, never on save), so a member equal to it still matches that
-    row, and its ``exclude`` twin leaves that row out. A member the column's ``to_python``
-    cannot convert identifies no row and is dropped; a list with none left matches nothing,
-    or every row when excluding. Package-only: no fakeshop integer column carries a
-    validator of its own, and the GraphQL input delivers only integers. Live rows for a
-    member past the backend's range:
-    ``test_scalars_api.py::test_filter_specimens_by_declared_bigint_list_drops_out_of_range_members``.
+    Such a member identifies no row and is dropped; a list with none left matches nothing,
+    or every row when excluding. Package-only: the GraphQL input delivers only integers.
+    Live rows for a member past the backend's range:
+    ``test_scalars_api.py::test_filter_specimens_by_declared_bigint_list_drops_out_of_range_members``;
+    for a member the column's validator refuses:
+    ``test_scalars_api.py::test_filter_specimens_match_a_stored_value_the_column_validator_refuses``.
     """
-    bound = _ValidatedCountSet(data={}, queryset=validated_counts).filters[name]
-    result: QuerySet[_ValidatedCount] = bound.filter(validated_counts, members)
+    bound = _StoredCountSet(data={}, queryset=stored_counts).filters[name]
+    result: QuerySet[_StoredCount] = bound.filter(stored_counts, members)
     assert sorted(row.count for row in result) == counts
+
+
+class _GatedKey(db_models.Model):
+    """A target whose integer primary key carries a validator refusing ids below 10."""
+
+    code: db_models.IntegerField[int | Combinable, int] = db_models.IntegerField(
+        primary_key=True,
+        validators=[MinValueValidator(10)],
+    )
+
+    class Meta:
+        managed = False
+        app_label = "test_relation_pk_validators"
+
+
+class _GatedKeyHolder(db_models.Model):
+    """A row keyed to a ``_GatedKey``."""
+
+    key: db_models.ForeignKey[_GatedKey | Combinable, _GatedKey] = db_models.ForeignKey(
+        _GatedKey,
+        on_delete=db_models.CASCADE,
+        related_name="+",
+    )
+
+    class Meta:
+        managed = False
+        app_label = "test_relation_pk_validators"
+
+
+class _GatedKeyHolderSet(FilterSet):
+    key_is = RelationPkFilter(field_name="key", lookup_expr="exact")
+    key_among = RelationPkMultipleFilter(field_name="key", lookup_expr="in")
+
+    class Meta:
+        model = _GatedKeyHolder
+        fields = ()
+
+
+@pytest.fixture
+def gated_key_holders() -> Generator[QuerySet[_GatedKeyHolder], None, None]:
+    """Real tables: keys 5 (below the validator) and 12, one holder on each."""
+    with db_connection.schema_editor() as editor:
+        editor.create_model(_GatedKey)
+        editor.create_model(_GatedKeyHolder)
+    try:
+        for code in (5, 12):
+            _GatedKeyHolder.objects.create(key=_GatedKey.objects.create(code=code))
+        yield _GatedKeyHolder.objects.all()
+    finally:
+        with db_connection.schema_editor() as editor:
+            editor.delete_model(_GatedKeyHolder)
+            editor.delete_model(_GatedKey)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("name", "value", "keys"),
+    [
+        pytest.param("key_is", 5, [5], id="single"),
+        pytest.param("key_among", [5], [5], id="list"),
+        pytest.param("key_among", [5, 12], [5, 12], id="list-mixed"),
+    ],
+)
+def test_relation_pk_filters_match_a_key_the_target_validator_refuses(
+    gated_key_holders: QuerySet[_GatedKeyHolder],
+    name: str,
+    value: object,
+    keys: list[int],
+) -> None:
+    """A raw relation key the target's validator refuses still matches the row holding it.
+
+    The key ``5`` is stored without ``full_clean``; the filter coerces it through the target
+    key column (``filters/base.py::_coerce_relation_identity``) by what the column stores,
+    never its validators. Package-only: no fakeshop relation into a non-Relay target has a
+    key column carrying a validator.
+    """
+    bound = _GatedKeyHolderSet(data={}, queryset=gated_key_holders).filters[name]
+    result: QuerySet[_GatedKeyHolder] = bound.filter(gated_key_holders, value)
+    assert sorted(saved_pk(row.key) for row in result) == keys
 
 
 @pytest.mark.parametrize(
@@ -1863,7 +1936,7 @@ def test_filter_model_strategy_accepts_model_label() -> None:
     owner = _owner("model")
     f = _global_id_filter_with_owner("id", owner)
     encoded = relay.to_base64("library.book", "42")
-    assert _decode_and_validate_global_id(encoded, f) == 42
+    assert _decode_and_validate_global_id(encoded, f, alias=DEFAULT_DB_ALIAS) == 42
 
 
 def test_filter_model_strategy_accepts_predecoded_global_id() -> None:
@@ -1871,7 +1944,14 @@ def test_filter_model_strategy_accepts_predecoded_global_id() -> None:
     owner = _owner("model")
     f = _global_id_filter_with_owner("id", owner)
 
-    assert _decode_and_validate_global_id(relay.GlobalID("library.book", "42"), f) == 42
+    assert (
+        _decode_and_validate_global_id(
+            relay.GlobalID("library.book", "42"),
+            f,
+            alias=DEFAULT_DB_ALIAS,
+        )
+        == 42
+    )
 
 
 def test_filter_model_strategy_rejects_type_name() -> None:
@@ -1880,7 +1960,7 @@ def test_filter_model_strategy_rejects_type_name() -> None:
     f = _global_id_filter_with_owner("id", owner)
     encoded = relay.to_base64("OwnerType", "42")
     with pytest.raises(GraphQLError, match="GlobalID type mismatch"):
-        _decode_and_validate_global_id(encoded, f)
+        _decode_and_validate_global_id(encoded, f, alias=DEFAULT_DB_ALIAS)
 
 
 def test_filter_type_strategy_accepts_graphql_name() -> None:
@@ -1888,18 +1968,36 @@ def test_filter_type_strategy_accepts_graphql_name() -> None:
     owner = _owner("type")
     f = _global_id_filter_with_owner("id", owner)
     encoded = relay.to_base64("OwnerType", "7")
-    assert _decode_and_validate_global_id(encoded, f) == 7
+    assert _decode_and_validate_global_id(encoded, f, alias=DEFAULT_DB_ALIAS) == 7
     # And rejects a model-label payload under `type`.
     with pytest.raises(GraphQLError, match="GlobalID type mismatch"):
-        _decode_and_validate_global_id(relay.to_base64("library.book", "7"), f)
+        _decode_and_validate_global_id(
+            relay.to_base64("library.book", "7"),
+            f,
+            alias=DEFAULT_DB_ALIAS,
+        )
 
 
 def test_filter_type_plus_model_accepts_both() -> None:
     """`type+model` accepts model-label AND type-name inputs."""
     owner = _owner("type+model")
     f = _global_id_filter_with_owner("id", owner)
-    assert _decode_and_validate_global_id(relay.to_base64("library.book", "1"), f) == 1
-    assert _decode_and_validate_global_id(relay.to_base64("OwnerType", "2"), f) == 2
+    assert (
+        _decode_and_validate_global_id(
+            relay.to_base64("library.book", "1"),
+            f,
+            alias=DEFAULT_DB_ALIAS,
+        )
+        == 1
+    )
+    assert (
+        _decode_and_validate_global_id(
+            relay.to_base64("OwnerType", "2"),
+            f,
+            alias=DEFAULT_DB_ALIAS,
+        )
+        == 2
+    )
 
 
 @pytest.mark.parametrize("strategy", ["callable", "custom"])
@@ -1914,7 +2012,7 @@ def test_filter_encode_only_strategy_rejects_fail_closed(strategy: str) -> None:
     f = _global_id_filter_with_owner("id", owner)
     encoded = relay.to_base64("AnythingAtAll", "99")
     with pytest.raises(GraphQLError, match="encode-only") as exc_info:
-        _decode_and_validate_global_id(encoded, f)
+        _decode_and_validate_global_id(encoded, f, alias=DEFAULT_DB_ALIAS)
     assert exc_info.value.extensions == {"code": "GLOBALID_UNVALIDATABLE"}
     assert strategy in str(exc_info.value)
 
@@ -1930,7 +2028,7 @@ def test_filter_known_definition_none_strategy_rejects_fail_closed() -> None:
     f = _global_id_filter_with_owner("id", owner)
     encoded = relay.to_base64("AnythingAtAll", "99")
     with pytest.raises(GraphQLError, match=r"no .*recorded globalid strategy") as exc_info:
-        _decode_and_validate_global_id(encoded, f)
+        _decode_and_validate_global_id(encoded, f, alias=DEFAULT_DB_ALIAS)
     assert exc_info.value.extensions == {"code": "GLOBALID_UNVALIDATABLE"}
 
 
@@ -1947,7 +2045,7 @@ def test_filter_unbound_owner_node_id_only() -> None:
     """No bound owner -> node-id-only fallback (the existing `None`-definition path)."""
     f = _bound(GlobalIDFilter(field_name="id"), None)
     encoded = relay.to_base64("WhateverType", "5")
-    assert _decode_and_validate_global_id(encoded, f) == "5"
+    assert _decode_and_validate_global_id(encoded, f, alias=DEFAULT_DB_ALIAS) == "5"
 
 
 def test_filter_wrong_model_rejected() -> None:
@@ -1956,7 +2054,7 @@ def test_filter_wrong_model_rejected() -> None:
     f = _global_id_filter_with_owner("id", owner)
     encoded = relay.to_base64("other.thing", "42")
     with pytest.raises(GraphQLError, match="GlobalID type mismatch"):
-        _decode_and_validate_global_id(encoded, f)
+        _decode_and_validate_global_id(encoded, f, alias=DEFAULT_DB_ALIAS)
 
 
 def test_filter_non_string_global_id_value_rejected_as_malformed() -> None:
@@ -1969,7 +2067,7 @@ def test_filter_non_string_global_id_value_rejected_as_malformed() -> None:
     """
     f = GlobalIDFilter(field_name="id")
     with pytest.raises(GraphQLError, match="not a valid GlobalID") as exc_info:
-        _decode_and_validate_global_id(42, f)
+        _decode_and_validate_global_id(42, f, alias=DEFAULT_DB_ALIAS)
     assert exc_info.value.extensions == {"code": "GLOBALID_INVALID"}
 
 
@@ -1979,9 +2077,20 @@ def test_related_filter_relation_branch_strategy_aware() -> None:
     owner = _owner()
     f = _global_id_filter_with_owner("genres__id", owner)
     # The target's model label is accepted; the target's type name is rejected.
-    assert _decode_and_validate_global_id(relay.to_base64("library.genre", "3"), f) == 3
+    assert (
+        _decode_and_validate_global_id(
+            relay.to_base64("library.genre", "3"),
+            f,
+            alias=DEFAULT_DB_ALIAS,
+        )
+        == 3
+    )
     with pytest.raises(GraphQLError, match="GlobalID type mismatch"):
-        _decode_and_validate_global_id(relay.to_base64("GenreType", "3"), f)
+        _decode_and_validate_global_id(
+            relay.to_base64("GenreType", "3"),
+            f,
+            alias=DEFAULT_DB_ALIAS,
+        )
 
 
 def test_multi_value_filter_strategy_aware_indexes_rejection(
@@ -2183,10 +2292,7 @@ def test_integer_range_filter_malformed_values_pass_through() -> None:
 
 
 def test_filters_base_edge_cases() -> None:
-    """Edge cases for _coerce_int_in_members and the relation-pk marker helpers."""
-    # Line 376: model_field is None
-    assert _coerce_int_in_members(None, [1, "foo", 3]) == [1, "foo", 3]
-
+    """Edge cases for the relation-pk marker helpers."""
     # _relation_uses_non_pk_to_field: non-relation field or None
     assert _relation_uses_non_pk_to_field(None) is False
     assert _relation_uses_non_pk_to_field(object()) is False

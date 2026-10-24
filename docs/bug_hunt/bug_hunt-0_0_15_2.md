@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 275 done, 185 to do.
+Progress: 276 done, 186 to do.
 
 ## Done
 
@@ -1354,6 +1354,14 @@ Progress: 275 done, 185 to do.
   `unstorable_temporal`. A `date` / `year` transform never binds the offset and keeps filtering. Live rows on SQLite and
   PostgreSQL (filter and the three write flavors, sync and async), package rows per binding mode on a real server;
   spec-027, spec-036, spec-039, the README and the `FilterSet` and `FieldError` envelope glossary terms say so
+- [x] 509. fixed: an identity decode (the generated integer `in` and the declared `ListFilter`, `node` / `nodes`, the
+  GlobalID filter, the raw-pk relation filters, raw-pk and GlobalID write ids) finds a stored row whose value a
+  validator would refuse: `utils/querysets.py::coerce_field_value_or_none` never runs validators; it casts with
+  `to_python`, binds through `Field.get_db_prep_value` on the database the lookup reads (the queryset's `db`, else
+  `lookup_read_alias`), and holds the value to the column's storage domain (PostgreSQL's refused UTC offsets, the
+  integer range, a decimal the column can hold, read by value not spelling), so a value the backend cannot bind still
+  names no row. Fakeshop `signed_big` and `Publisher.house_code` carry validators; live rows pin flat and `not`
+  parity, `node` / `nodes`, the GlobalID filter and `createEdition`; spec-032 Decision 5 says so.
 
 ## Outside review of the fixes
 
@@ -1567,10 +1575,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   covers "the package's or django-filter's". Found verifying 372
 - [ ] 508. A package `RangeFilter` declared without `lookup_expr="range"` applies its default `exact` to the
   two-element list when both bounds are sent, a masked error even for in-range bounds. Found verifying 372
-- [ ] 509. The generated integer `in` (`filters/base.py::IntegerInFilter`) coerces members through
-  `coerce_field_value_or_none`, which runs the column's own validators, so on an `IntegerField(validators=
-  [MinValueValidator(10)])` holding a row 5 written without `full_clean`, `in: [5]` matches nothing while `exact: 5`
-  matches it; the declared `ListFilter` keeps the member (`_backend_storable_int_members`). Found verifying 372
 - [ ] 510. A declared `RangeFilter` / `ListFilter` whose `field_name` is `pk` or `<relation>__pk` is published as
   `String` and reaches the ORM uncleaned: `filters/base.py::_filterset_model_field` reads django-filter's
   `get_model_field`, which does not resolve the `pk` alias, so on a `DecimalField` or `UUIDField` primary key a
@@ -1598,12 +1602,21 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `utils/errors.py::unbindable_temporal` reads the connection as server-side; the package never iterates, so only
   consumer code iterating such a queryset sees the masked error for a datetime at an offset of 16:00 or more. Found
   verifying 382
+- [ ] 591. A `DecimalField` with no `max_digits` (Django 6.1) on PostgreSQL lets an identity or filter value past
+  numeric's format (`"1e1000000"`) reach the bind and raise a masked `DataError`: the storage-domain check has no
+  precision to hold it to and Django exposes no numeric-format bound; probe the filter `exact` path too. Found
+  consulting 509
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 592. CHANGELOG entry for item 509: a stored row whose value a field validator would refuse (written by
+  `objects.create`, `bulk_create`, `QuerySet.update` or before the validator existed) is now found by `node` /
+  `nodes`, the GlobalID filter, a generated integer `in` (and its `not`), the raw-pk relation filters and write ids,
+  where it answered null, an invalid-id error or no match; a decimal id is read by value (`1.500` names `1.50`), and
+  a value the backend cannot bind still names no row.
 - [ ] 555. CHANGELOG entry for item 382: on PostgreSQL a filter or write value that is an aware datetime or time whose
   UTC offset the server refuses (16:00 or more; a sub-second offset under client-side binding; a datetime under
   server-side binding never) now answers `FILTER_INVALID` / the field-keyed `FieldError` "Enter a value the database

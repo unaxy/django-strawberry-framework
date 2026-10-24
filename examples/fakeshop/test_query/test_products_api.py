@@ -2054,8 +2054,9 @@ def test_create_item_wellformed_relation_id_uncoercible_node_id_is_field_error_n
 
 # A syntactically-valid but absurdly large integer ``node_id``: ``to_python`` casts
 # it to a Python int cleanly (no range check), so it would reach the ORM where
-# SQLite's parameter binding raises a raw ``OverflowError``. The pk field's
-# backend range validators reject it at coercion instead -> uncoercible (not found).
+# SQLite's parameter binding raises a raw ``OverflowError``. The coercion holds it to
+# the integer range the database stores for the pk column
+# (``DatabaseOperations.integer_field_range``) -> uncoercible (not found).
 _ABSURD_INTEGER_NODE_ID = "9" * 400
 
 
@@ -2067,11 +2068,13 @@ def test_create_item_relation_id_absurd_huge_pk_is_field_error_no_overflow() -> 
 
     A well-formed ``products.category`` GlobalID whose ``node_id`` is an absurd
     integer (``"9" * 400``) passes decode and the type-check. ``to_python``
-    casts it to a Python int without range-checking, so before the fix it reached
-    the relation visibility ``filter(pk__in=[...])``, where SQLite raises a top-level
-    ``OverflowError`` (500). The shared pk coercer now runs the pk field's backend
-    range validators, so the out-of-range value is uncoercible -> the uniform
-    relation ``FieldError`` on ``categoryId``, no query issued, no row written.
+    casts it to a Python int without range-checking; bound raw in the relation
+    visibility ``filter(pk__in=[...])``, SQLite would raise a top-level
+    ``OverflowError`` (500). The shared pk coercer holds the value to the integer
+    range the database stores for the pk column
+    (``DatabaseOperations.integer_field_range``), so the out-of-range value is
+    uncoercible -> the uniform relation ``FieldError`` on ``categoryId``, no query
+    issued, no row written.
     """
     create_users(1)
     seed_data(1)

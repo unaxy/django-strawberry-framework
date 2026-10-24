@@ -61,6 +61,7 @@ from django_strawberry_framework.utils.querysets import (
     apply_type_visibility_async,
     apply_type_visibility_sync,
     initial_queryset,
+    lookup_read_alias,
     model_for,
 )
 from django_strawberry_framework.utils.relations import has_composite_pk
@@ -405,7 +406,12 @@ def _node_value_or_none(
     # module-top import back would close the load cycle.
     from django_strawberry_framework.relay import _coerce_pk_or_none  # noqa: PLC0415 - import cycle
 
-    return _coerce_pk_or_none(cls, _coerce_node_id(node_id), slot=slot)
+    return _coerce_pk_or_none(
+        cls,
+        _coerce_node_id(node_id),
+        alias=lookup_read_alias(model_for(cls)),
+        slot=slot,
+    )
 
 
 def _raise_if_required(

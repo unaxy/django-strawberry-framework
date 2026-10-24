@@ -7,7 +7,9 @@ visibility and list/connection cost live in
 ``examples/fakeshop/test_query/test_library_api.py``, and
 ``examples/fakeshop/test_query/test_list_field_api.py``. ``coerce_field_value_or_none``
 out-of-range ``__in`` drop is live in
-``examples/fakeshop/test_query/test_scalars_filter_api.py``.
+``examples/fakeshop/test_query/test_scalars_filter_api.py``, and its match of a
+stored value the column's validator refuses in
+``examples/fakeshop/test_query/test_scalars_api.py``.
 
 Visibility-boundary decision references below resolve to
 ``docs/SPECS/spec-045-visibility_boundary-0_0_14.md #"## Architectural decisions"``.
@@ -54,7 +56,15 @@ from django.contrib.admin.models import LogEntry
 from django.contrib.auth.models import AnonymousUser, Group, Permission, User
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
-from django.db import connection, models, router
+from django.db import (
+    DEFAULT_DB_ALIAS,
+    DataError,
+    connection,
+    connections,
+    models,
+    router,
+    transaction,
+)
 from django.db.backends.base.base import BaseDatabaseWrapper
 from django.db.models import (
     F,
@@ -344,25 +354,27 @@ def test_initial_queryset_uses_default_manager() -> None:
 
 
 def test_coerce_field_value_or_none_returns_coerced_value() -> None:
-    """A well-formed literal coerces through ``to_python`` + ``run_validators``."""
-    assert coerce_field_value_or_none(Category._meta.pk, "3") == 3
+    """A well-formed literal coerces through ``to_python``."""
+    assert coerce_field_value_or_none(Category._meta.pk, "3", alias=DEFAULT_DB_ALIAS) == 3
 
 
 def test_coerce_field_value_or_none_drops_non_numeric_literal() -> None:
     """A non-numeric literal fails ``to_python`` (wrapped as ``ValidationError``) -> ``None``."""
-    assert coerce_field_value_or_none(Category._meta.pk, "not-a-number") is None
+    assert (
+        coerce_field_value_or_none(Category._meta.pk, "not-a-number", alias=DEFAULT_DB_ALIAS)
+        is None
+    )
 
 
 def test_coerce_field_value_or_none_drops_out_of_range_literal() -> None:
-    """A syntactically-valid but out-of-range literal fails ``run_validators`` -> ``None``.
+    """A syntactically-valid literal past the column's storage range is ``None``.
 
     ``to_python`` alone would cast ``2**63`` (one past the ``BigAutoField`` pk's
-    signed-64-bit range) to a plain Python ``int`` with no error; only
-    ``run_validators`` catches the range violation, which is the whole point of
-    running both steps rather than ``to_python`` alone (never a raw backend
-    ``OverflowError`` at ``pk__in``).
+    signed-64-bit range) to a plain Python ``int`` with no error; the range the
+    database stores for the column catches it, never a raw backend
+    ``OverflowError`` at ``pk__in``.
     """
-    assert coerce_field_value_or_none(Category._meta.pk, 2**63) is None
+    assert coerce_field_value_or_none(Category._meta.pk, 2**63, alias=DEFAULT_DB_ALIAS) is None
 
 
 @pytest.mark.parametrize("model", [PatronProfile, LendingDesk, SelfServeDesk])
@@ -371,13 +383,14 @@ def test_coerce_field_value_or_none_range_checks_a_relation_valued_pk(
 ) -> None:
     """A one-to-one pk or parent-link chain is held to the range of the column storing it.
 
-    The key's own ``to_python`` delegates down the chain, but the range validators live
-    only on the column the chain ends at: an out-of-range literal identifies no row
-    instead of reaching ``pk__in`` as a backend ``OverflowError``.
+    The key's own ``to_python`` delegates down the chain, and the value is held to the
+    integer range the database stores for the column the chain ends at
+    (``DatabaseOperations.integer_field_range``): an out-of-range literal identifies no
+    row instead of reaching ``pk__in`` as a backend ``OverflowError``.
     """
-    assert coerce_field_value_or_none(model._meta.pk, "7") == 7
-    assert coerce_field_value_or_none(model._meta.pk, 2**63) is None
-    assert coerce_field_value_or_none(model._meta.pk, str(2**70)) is None
+    assert coerce_field_value_or_none(model._meta.pk, "7", alias=DEFAULT_DB_ALIAS) == 7
+    assert coerce_field_value_or_none(model._meta.pk, 2**63, alias=DEFAULT_DB_ALIAS) is None
+    assert coerce_field_value_or_none(model._meta.pk, str(2**70), alias=DEFAULT_DB_ALIAS) is None
 
 
 def _reject_thirteen(value: object) -> None:
@@ -386,11 +399,12 @@ def _reject_thirteen(value: object) -> None:
         raise ValidationError("13 is reserved.")
 
 
-def test_coerce_field_value_or_none_runs_key_and_stored_column_validators() -> None:
-    """A key's declared validators reject, and the column it stores still range-checks.
+def test_coerce_field_value_or_none_skips_validators_and_range_checks_the_stored_column() -> None:
+    """A value a key's validator refuses still coerces; the column it stores still range-checks.
 
-    The key's own ``validators=`` refuse ``13``; ``Patron.id``'s range validators, which
-    the key does not carry, reject ``2**63``.
+    A row holding an id the key's own ``validators=`` refuse (``13``) is stored by any
+    write that skips ``full_clean``, so the id still identifies it. ``Patron.id``'s range,
+    which the key reaches only through the column it stores, refuses ``2**63``.
     """
     key: models.OneToOneField[Patron | Combinable, Patron] = models.OneToOneField(
         Patron,
@@ -398,14 +412,247 @@ def test_coerce_field_value_or_none_runs_key_and_stored_column_validators() -> N
         primary_key=True,
         validators=[_reject_thirteen],
     )
-    assert coerce_field_value_or_none(key, "7") == 7
-    assert coerce_field_value_or_none(key, "13") is None
-    assert coerce_field_value_or_none(key, 2**63) is None
+    assert coerce_field_value_or_none(key, "7", alias=DEFAULT_DB_ALIAS) == 7
+    assert coerce_field_value_or_none(key, "13", alias=DEFAULT_DB_ALIAS) == 13
+    assert coerce_field_value_or_none(key, 2**63, alias=DEFAULT_DB_ALIAS) is None
+
+
+def test_coerce_field_value_or_none_drops_an_infinite_float() -> None:
+    """``int(inf)`` in ``IntegerField.to_python`` is ``OverflowError`` -> ``None``."""
+    assert (
+        coerce_field_value_or_none(Category._meta.pk, float("inf"), alias=DEFAULT_DB_ALIAS) is None
+    )
+
+
+def _narrow_big_auto_range(internal_type: str) -> tuple[int, int]:
+    """A backend storing a ``BigAutoField`` column in ``0..10``."""
+    assert internal_type == "BigAutoField"
+    return (0, 10)
+
+
+def test_coerce_field_value_or_none_reads_the_range_of_the_named_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The integer range is the one the ``alias`` database stores.
+
+    A second alias whose backend stores the pk column in ``0..10`` refuses ``11`` there,
+    while the default database, whose column is signed 64-bit, keeps it.
+    """
+    alias = "narrow_integer_alias"
+    connections.databases[alias] = {**connections.databases["default"], "NAME": ":memory:"}
+    try:
+        monkeypatch.setattr(connections[alias].ops, "integer_field_range", _narrow_big_auto_range)
+        assert coerce_field_value_or_none(Category._meta.pk, 11, alias=DEFAULT_DB_ALIAS) == 11
+        assert coerce_field_value_or_none(Category._meta.pk, 11, alias=alias) is None
+        assert coerce_field_value_or_none(Category._meta.pk, 10, alias=alias) == 10
+    finally:
+        connections[alias].close()
+        del connections[alias]
+        del connections.databases[alias]
 
 
 def test_coerce_field_value_or_none_drops_overflowing_duration() -> None:
     """A duration string past ``timedelta``'s range is Django's ``OverflowError`` -> ``None``."""
-    assert coerce_field_value_or_none(models.DurationField(), "99999999999 00:00:00") is None
+    assert (
+        coerce_field_value_or_none(
+            models.DurationField(),
+            "99999999999 00:00:00",
+            alias=DEFAULT_DB_ALIAS,
+        )
+        is None
+    )
+
+
+def _decimal_column() -> "models.DecimalField[Decimal | Combinable, Decimal]":
+    return models.DecimalField(max_digits=6, decimal_places=2)
+
+
+def _unbounded_decimal_column() -> "models.DecimalField[Decimal | Combinable, Decimal]":
+    return models.DecimalField(max_digits=None, decimal_places=None)
+
+
+def _address_column() -> "models.GenericIPAddressField[str | Combinable, str]":
+    return models.GenericIPAddressField()
+
+
+def _duration_column() -> (
+    "models.DurationField[datetime.timedelta | Combinable, datetime.timedelta]"
+):
+    return models.DurationField()
+
+
+def _datetime_column() -> (
+    "models.DateTimeField[datetime.datetime | Combinable, datetime.datetime]"
+):
+    return models.DateTimeField()
+
+
+@pytest.mark.parametrize(
+    ("raw", "held"),
+    [
+        pytest.param("1.500", "1.50", id="trailing-zero"),
+        pytest.param("1.5" + "0" * 20000, "1.50", id="huge-scale"),
+        pytest.param("1.505", None, id="finer-fraction"),
+        pytest.param("12345678", None, id="too-many-digits"),
+        pytest.param("1e1000000", None, id="huge-exponent"),
+        pytest.param("1e-1000000", None, id="tiny-exponent"),
+    ],
+)
+def test_coerce_field_value_or_none_holds_a_decimal_to_the_column_value(
+    raw: str,
+    held: str | None,
+) -> None:
+    """A decimal is the ``DecimalField(6, 2)`` value it equals, or ``None`` when none does.
+
+    ``1.500`` and ``1.5`` with 20000 trailing zeros are the stored ``1.50``; a finer
+    fraction, more integer digits than the column holds and an exponent past either end
+    equal no stored value, on every backend.
+    """
+    coerced = coerce_field_value_or_none(_decimal_column(), raw, alias=DEFAULT_DB_ALIAS)
+    assert (None if coerced is None else str(coerced)) == held
+
+
+def test_coerce_field_value_or_none_passes_a_decimal_without_precision_through() -> None:
+    """A ``DecimalField`` without ``max_digits`` has no storage domain to hold a value to."""
+    coerced = coerce_field_value_or_none(
+        _unbounded_decimal_column(),
+        "1e1000000",
+        alias=DEFAULT_DB_ALIAS,
+    )
+    assert coerced == Decimal("1e1000000")
+
+
+@pytest.mark.skipif(connection.vendor != "sqlite", reason="SQLite's adapters")
+@pytest.mark.parametrize(
+    ("column", "raw", "held"),
+    [
+        pytest.param(_address_column, "abc", "abc", id="address-bound-as-text"),
+        pytest.param(_duration_column, "999999999 00:00:00", None, id="duration-past-int64-us"),
+        pytest.param(
+            _datetime_column,
+            "0001-01-01T00:00:00+05:00",
+            None,
+            id="datetime-before-year-1",
+        ),
+    ],
+)
+def test_coerce_field_value_or_none_holds_the_bind_sqlite_makes(
+    column: Callable[[], models.Field[object, object]],
+    raw: str,
+    held: str | None,
+) -> None:
+    """A value names a row on SQLite only as SQLite binds and stores it.
+
+    SQLite's adapter binds any text for an address and refuses an aware datetime whose
+    UTC projection precedes year 1. A duration binds as its microsecond count, an
+    integer held to the 64-bit range (``BigIntegerField``'s), which a count past it
+    leaves; PostgreSQL binds a native interval instead, hence the SQLite gate.
+    """
+    coerced = coerce_field_value_or_none(column(), raw, alias=DEFAULT_DB_ALIAS)
+    assert (None if coerced is None else str(coerced)) == held
+
+
+def _refused_raw_decimal(raw: str) -> None:
+    """Bind ``raw`` unheld against the decimal-keyed table: PostgreSQL refuses it."""
+    with pytest.raises(DataError), transaction.atomic():
+        list(_DecimalKeyed.objects.filter(pk__in=[_DecimalKeyed._meta.pk.to_python(raw)]))
+
+
+_decimal_keyed_apps = Apps([])
+
+
+class _DecimalKeyed(models.Model):
+    """A table keyed by a ``DecimalField(6, 2)``."""
+
+    code: "models.DecimalField[Decimal | Combinable, Decimal]" = models.DecimalField(
+        primary_key=True,
+        max_digits=6,
+        decimal_places=2,
+    )
+
+    class Meta:
+        app_label = "products"
+        managed = False
+        apps = _decimal_keyed_apps
+
+
+class _DatetimeKeyed(models.Model):
+    """A table keyed by an aware ``DateTimeField``."""
+
+    stamp: "models.DateTimeField[datetime.datetime | Combinable, datetime.datetime]" = (
+        models.DateTimeField(primary_key=True)
+    )
+
+    class Meta:
+        app_label = "products"
+        managed = False
+        apps = _decimal_keyed_apps
+
+
+@pytest.mark.pg
+@pytest.mark.django_db(transaction=True)
+def test_coerce_field_value_or_none_refuses_an_offset_postgresql_refuses() -> None:
+    """A datetime key whose UTC offset PostgreSQL's server refuses names no row there.
+
+    The adapter passes the aware value through and the server refuses ``+16:00``
+    (``utils/errors.py::unbindable_temporal``): the raw ``to_python`` value raises
+    ``DataError`` in the ``pk__in`` query, the coerced one is ``None``.
+    """
+    raw = "2020-01-01T00:00:00+16:00"
+    with connection.schema_editor() as editor:
+        editor.create_model(_DatetimeKeyed)
+    try:
+        with pytest.raises(DataError), transaction.atomic():
+            list(_DatetimeKeyed.objects.filter(pk__in=[_DatetimeKeyed._meta.pk.to_python(raw)]))
+        assert (
+            coerce_field_value_or_none(_DatetimeKeyed._meta.pk, raw, alias=DEFAULT_DB_ALIAS)
+            is None
+        )
+    finally:
+        with connection.schema_editor() as editor:
+            editor.delete_model(_DatetimeKeyed)
+
+
+@pytest.mark.pg
+def test_coerce_field_value_or_none_refuses_a_malformed_address_on_postgresql() -> None:
+    """PostgreSQL's ``inet`` adapter refuses ``abc``, so it names no row there."""
+    coerced = coerce_field_value_or_none(_address_column(), "abc", alias=DEFAULT_DB_ALIAS)
+    assert coerced is None
+
+
+@pytest.mark.pg
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("raw", "rows"),
+    [
+        pytest.param("1e1000000", [], id="huge-exponent"),
+        pytest.param("1.5" + "0" * 20000, [Decimal("1.50")], id="huge-scale"),
+    ],
+)
+def test_coerce_field_value_or_none_binds_a_decimal_key_on_postgresql(
+    raw: str,
+    rows: list[Decimal],
+) -> None:
+    """A decimal key PostgreSQL cannot bind as spelled filters by the value the column holds.
+
+    The raw ``to_python`` value raises ``DataError`` in the ``pk__in`` query; the coerced
+    one either names no row or is the stored ``1.50``, and the query runs.
+    """
+    with connection.schema_editor() as editor:
+        editor.create_model(_DecimalKeyed)
+    try:
+        _DecimalKeyed.objects.create(code=Decimal("1.50"))
+        _refused_raw_decimal(raw)
+        coerced = coerce_field_value_or_none(_DecimalKeyed._meta.pk, raw, alias=DEFAULT_DB_ALIAS)
+        found = (
+            []
+            if coerced is None
+            else [row.code for row in _DecimalKeyed.objects.filter(pk__in=[coerced])]
+        )
+        assert found == rows
+    finally:
+        with connection.schema_editor() as editor:
+            editor.delete_model(_DecimalKeyed)
 
 
 @pytest.mark.django_db
@@ -5955,10 +6202,10 @@ def test_reject_async_in_sync_context_cancels_future() -> None:
 
 def test_coerce_field_value_or_none_returns_none_for_non_field() -> None:
     """Passing a non-Field object returns None rather than raising an error."""
-    assert coerce_field_value_or_none(None, 42) is None
+    assert coerce_field_value_or_none(None, 42, alias=DEFAULT_DB_ALIAS) is None
     # basedpyright: the string standing in for a field is the hostile input under test;
     # coerce_field_value_or_none types the parameter as ModelField | None
-    assert coerce_field_value_or_none("not_a_field", 42) is None  # pyright: ignore[reportArgumentType]
+    assert coerce_field_value_or_none("not_a_field", 42, alias=DEFAULT_DB_ALIAS) is None  # pyright: ignore[reportArgumentType]
 
 
 def test_query_genuineness_defect_with_clean_combined_branches() -> None:

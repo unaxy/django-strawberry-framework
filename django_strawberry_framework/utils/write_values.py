@@ -57,6 +57,7 @@ from .inputs import FILE, RELATION_MULTI, RELATION_SINGLE, iter_provided_input_f
 from .lazy import unwrap_lazy_object
 from .querysets import (
     coerce_field_value_or_none,
+    lookup_read_alias,
     pks_all_present,
     visible_related_object,
     visible_related_objects,
@@ -184,23 +185,27 @@ def coerce_relation_pk_or_none(related_model: type[models.Model], pk: object) ->
     """Coerce a raw M2M pk through the target's pk field; ``None`` if uncoercible / out of range.
 
     The raw-pk M2M counterpart to ``relay.py::_coerce_pk_or_none`` (which coerces a
-    ``GlobalID`` ``node_id`` through the resolved Strawberry type's id field). A
-    raw-pk relation has no Relay-Node type and so no ``resolve_id_attr`` seam: the
-    existence query filters on ``pk__in`` directly, so coercion is against
+    ``GlobalID`` ``node_id`` through the resolved Strawberry type's id field). A raw-pk
+    relation has no Relay-Node type and so no ``resolve_id_attr`` seam: the existence
+    query filters on ``pk__in`` directly, so coercion is against
     ``related_model._meta.pk`` via the shared
-    ``querysets.py::coerce_field_value_or_none`` primitive (which also range-checks a
-    key-valued pk against the column storing it) - the same
-    ``to_python``-then-``run_validators`` mechanics the GlobalID path uses, so an
-    out-of-range pk (beyond the backend's signed-64-bit column range) is rejected
-    as a ``ValidationError`` here rather than reaching ``pk__in`` and raising a raw
-    backend ``OverflowError`` (``Python int too large to convert to SQLite
-    INTEGER``). An uncoercible / out-of-range pk is treated as "identifies no
-    row" - excluded from the existence query and so absent from the visible set,
-    which makes it the same not-found ``relation_field_error`` as a genuinely
-    missing pk, never a backend crash.
+    ``querysets.py::coerce_field_value_or_none`` primitive - the same mechanics the
+    GlobalID path uses: ``to_python``, then the bind on the database the existence query
+    reads (``querysets.py::lookup_read_alias``) and the storage domain of the column
+    storing it (a key-valued pk included), so an out-of-range pk (beyond the backend's
+    signed-64-bit column range) is answered here rather than reaching ``pk__in`` and
+    raising a raw backend ``OverflowError`` (``Python int too large to convert to SQLite
+    INTEGER``). The pk field's own validators are not run, so a pk they would refuse
+    still names a row that holds it. An uncoercible / out-of-range pk is treated as
+    "identifies no row" - excluded from the existence query and so absent from the
+    visible set, which makes it the same not-found ``relation_field_error`` as a
+    genuinely missing pk, never a backend crash.
     """
-    pk_field = getattr(truth.static_attr(related_model, "_meta"), "pk", None)
-    return coerce_field_value_or_none(pk_field, pk)
+    meta = truth.static_attr(related_model, "_meta")
+    if meta is None:
+        return None
+    pk_field = getattr(meta, "pk", None)
+    return coerce_field_value_or_none(pk_field, pk, alias=lookup_read_alias(related_model))
 
 
 def relation_takes_global_id(related_primary_type: type[DjangoType] | None) -> bool:
