@@ -2012,7 +2012,10 @@ The pipeline steps:
      aware datetime it cannot project onto the current time zone comes first, inside
      `is_valid()`; what it lets through (an aware time, which SQLite, MySQL and Oracle
      refuse; an aware datetime the connection's own `TIME_ZONE` projects out of years
-     1..9999; one PostgreSQL stores but cannot load back) is the field's `invalid`
+     1..9999; one PostgreSQL stores but cannot load back; an aware time whose UTC offset
+     PostgreSQL refuses, DRF projecting a datetime onto the current time zone first; an
+     `ArrayField` element, which psycopg binds as text, held to the text offset rule even
+     under server-side binding) is the field's `invalid`
      `ErrorDetail` `"Enter a value the database can represent."`, flattened like any
      `serializer.errors` entry, with nothing written. A nested serializer's values are
      written by the consumer's `create()` / `update()` and are not read. What DRF itself

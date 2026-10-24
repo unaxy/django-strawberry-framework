@@ -26,7 +26,8 @@ write flavors):
   form validation (``filters/sets.py::FilterSet._validate_form_or_raise``);
 - ``unbindable_temporal`` + ``UNBINDABLE_TEMPORAL_MESSAGE`` - the one rule for a
   temporal value (a datetime, a time, a year bound) the database a query runs on
-  cannot bind, asked of that connection's own operations, and the message it
+  cannot bind, asked of that connection's own operations (and, on PostgreSQL, of
+  the UTC offsets its binding mode sends the server), and the message it
   answers; the filter form validation applies it, and ``unstorable_temporal``
   builds on it for writes;
 - ``unstorable_temporal`` - its write-side answer: a datetime or time a column
@@ -81,6 +82,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
     from typing import TypeAlias
 
+    from django.db.backends.base.base import BaseDatabaseWrapper
     from django.db.backends.base.operations import BaseDatabaseOperations
 
     from .inputs import InputFieldSpec
@@ -739,6 +741,8 @@ def unbindable_temporal(
     lookup_parts: Sequence[str],
     value: object,
     using: Callable[[], str],
+    *,
+    bound_as_text: bool = False,
 ) -> bool:
     """Return whether the database ``using()`` names refuses to bind ``value`` against ``column``.
 
@@ -758,6 +762,16 @@ def unbindable_temporal(
     - a ``time`` against a ``TimeField`` (or a ``DateTimeField``'s ``time``
       transform): ``adapt_timefield_value``, which refuses an aware time on
       SQLite, MySQL and Oracle.
+    - on PostgreSQL, whose adapters pass both through, an aware one whose UTC offset
+      the server refuses (``_postgresql_refuses_offset``): 16:00 or more either way,
+      or one carrying a fraction of a second, when parameters are bound as text
+      (psycopg 2, or psycopg 3 unless the connection binds on the server:
+      ``OPTIONS["server_side_binding"]``, or an ``OPTIONS["cursor_factory"]`` that is
+      not a ``ClientCursor``); bound on
+      the server, a time whose offset is 16:00 or more, and no datetime.
+      ``bound_as_text`` holds the value to the text rule whatever the connection's
+      binding mode: psycopg binds the elements of a list parameter (an ``ArrayField``
+      write) as text even under server-side binding.
     - a year against a ``year`` / ``iso_year`` transform's ``exact`` / ``gt`` /
       ``gte`` / ``lt`` / ``lte``, whose bounds Django computes in Python
       (``year_lookup_bounds_for_date_field`` / ``_datetime_field``) on every
@@ -766,8 +780,7 @@ def unbindable_temporal(
       datetime column's bounds projected onto the connection's time zone), or a
       value ``int`` cannot convert.
 
-    Django's PostgreSQL adapters pass those datetimes and times through, so only
-    the year bounds refuse there. Only the lookups whose value the adapter binds
+    Only the lookups whose value the adapter binds
     (``exact``, ``gt``, ``gte``, ``lt``, ``lte``, ``in``, ``range``) are read, and
     a ``date`` transform's value, a date, always binds. Every scalar of a list or
     of a range (a list or a ``slice``) is read; a ``None`` member binds. Any other
@@ -801,7 +814,8 @@ def unbindable_temporal(
             return False
     elif lookup not in _YEAR_BOUND_LOOKUPS:
         return False
-    operations = connections[using()].ops
+    connection = connections[using()]
+    operations = connection.ops
     try:
         for scalar in _bound_scalars(value):
             if iso_year is not None:
@@ -813,11 +827,64 @@ def unbindable_temporal(
                 _year_bounds(operations, kind, int(scalar), iso_year=iso_year)
             elif kind == "time" and isinstance(scalar, datetime.time):
                 _ = operations.adapt_timefield_value(scalar)
+                if _postgresql_refuses_offset(connection, scalar, bound_as_text=bound_as_text):
+                    return True
             elif kind == "datetime" and isinstance(scalar, datetime.datetime):
                 _ = operations.adapt_datetimefield_value(scalar)
+                if _postgresql_refuses_offset(connection, scalar, bound_as_text=bound_as_text):
+                    return True
     except (OverflowError, ValueError):
         return True
     return False
+
+
+#: The UTC offset magnitude from which PostgreSQL refuses a ``timestamptz`` / ``timetz``
+#: (``time zone displacement out of range``); it accepts up to 15:59:59.
+_POSTGRESQL_OFFSET_LIMIT = datetime.timedelta(hours=16)
+
+
+def _postgresql_refuses_offset(
+    connection: BaseDatabaseWrapper,
+    scalar: datetime.datetime | datetime.time,
+    *,
+    bound_as_text: bool,
+) -> bool:
+    """Whether PostgreSQL refuses aware ``scalar`` for its UTC offset; ``False`` on any other backend.
+
+    Under client-side binding (psycopg 2, and psycopg 3's default ``ClientCursor``) the
+    value reaches the server as text carrying its offset, which PostgreSQL parses: an
+    offset of 16:00 or more either way, or one with a fraction of a second, is refused.
+    Under psycopg 3's server-side binding a ``datetime`` travels as a UTC instant, so
+    no offset refuses it, while a ``time`` still carries its offset (whole seconds), so
+    16:00 or more is refused. ``bound_as_text`` (an ``ArrayField`` element, which psycopg
+    binds as text in either mode) applies the client-side rule without reading the mode.
+    """
+    offset = scalar.utcoffset()
+    if offset is None or connection.vendor != "postgresql":
+        return False
+    out_of_range = abs(offset) >= _POSTGRESQL_OFFSET_LIMIT
+    if not out_of_range and not offset.microseconds:
+        return False
+    if bound_as_text or _binds_client_side(connection):
+        return True
+    return out_of_range and isinstance(scalar, datetime.time)
+
+
+def _binds_client_side(connection: BaseDatabaseWrapper) -> bool:
+    """Whether a PostgreSQL connection's cursors bind parameters into the query text.
+
+    psycopg 2 always does. psycopg 3 does through a ``ClientCursor``, the cursor class
+    Django connects with unless ``OPTIONS["server_side_binding"]`` is ``True`` or
+    ``OPTIONS["cursor_factory"]`` names another (``None`` is psycopg's own ``Cursor``,
+    which binds on the server); read from the parameters Django connects with
+    (``get_connection_params``), so the connection is never opened.
+    """
+    client_cursor = read_attr(read_attr(connection, "Database"), "ClientCursor", None)
+    params: dict[str, object] = connection.get_connection_params()
+    factory = params.get("cursor_factory")
+    return not is_class(client_cursor) or (
+        is_class(factory) and issubclass(factory, client_cursor)
+    )
 
 
 def _bound_scalars(value: object) -> list[object]:
@@ -857,11 +924,12 @@ def unstorable_temporal(column: object, value: object, using: Callable[[], str])
     datetime already made aware under ``USE_TZ``). Two kinds of datetime or time are
     refused:
 
-    - one the backend's own adapter cannot bind, answered by ``unbindable_temporal``
-      for a plain write (SQLite, MySQL and Oracle: an aware datetime whose projection
-      onto the connection's time zone leaves years 1..9999, any aware datetime when
-      ``USE_TZ`` is false, an aware time); the save would raise its
-      ``OverflowError`` / ``ValueError``.
+    - one the backend cannot bind, answered by ``unbindable_temporal`` for a plain
+      write (SQLite, MySQL and Oracle: an aware datetime whose projection onto the
+      connection's time zone leaves years 1..9999, any aware datetime when ``USE_TZ``
+      is false, an aware time; PostgreSQL: an aware datetime or time whose UTC offset
+      the server refuses in the connection's binding mode); the save would raise the
+      adapter's ``OverflowError`` / ``ValueError`` or the server's ``DataError``.
     - an aware datetime on a backend that stores the instant itself
       (``features.supports_timezones``: PostgreSQL), whose wall clock in the session
       time zone (``connection.timezone_name``: ``UTC`` under ``USE_TZ``, else
@@ -871,18 +939,22 @@ def unstorable_temporal(column: object, value: object, using: Callable[[], str])
       intermediate UTC value can overflow where the session's wall clock does not.
 
     An ``ArrayField`` holds every element (at any nesting depth) to the same rule
-    against its ``base_field``; a ``None`` element, like a ``None`` value, stores.
+    against its ``base_field``, except that psycopg binds a list's elements as text
+    in either binding mode, so on PostgreSQL each is held to the client-side offset
+    rule; a ``None`` element, like a ``None`` value, stores.
     A ``date`` always stores. Any other column answers ``False`` without calling
     ``using`` or touching ``django.db.connections``.
     """
     values: list[object] = [value]
+    in_array = False
     while is_class(_ARRAY_FIELD_CLS) and truth.is_instance(column, _ARRAY_FIELD_CLS):
         column = read_attr(column, "base_field")
         values = [element for item in values if is_list_or_tuple(item) for element in item]
+        in_array = True
     if not issubclass(truth.class_of(column), (models.DateTimeField, models.TimeField)):
         return False
     alias = using()
-    if unbindable_temporal(column, (), values, lambda: alias):
+    if unbindable_temporal(column, (), values, lambda: alias, bound_as_text=in_array):
         return True
     connection = connections[alias]
     if not isinstance(column, models.DateTimeField) or not connection.features.supports_timezones:

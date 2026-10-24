@@ -18,18 +18,23 @@ operations, and, on the Postgres tier, the real connection and ``ArrayField``.
 
 import ast
 import datetime
+import uuid
+import warnings
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
+from types import ModuleType
 from typing import TYPE_CHECKING
 
 import pytest
 from apps.library import models as library_models
 from apps.products import models as product_models
+from apps.scalars import models as scalar_models
 from django.core.exceptions import ValidationError
-from django.db import DEFAULT_DB_ALIAS, connections, models
+from django.db import DEFAULT_DB_ALIAS, DataError, connections, models, transaction
 from django.db.backends.base.operations import BaseDatabaseOperations
 from django.db.backends.mysql.operations import DatabaseOperations as MySQLOperations
+from django.db.backends.sqlite3.base import DatabaseWrapper as SQLiteDatabaseWrapper
 from django.db.models import Model
 from django.test import override_settings
 from django.utils.translation import gettext_lazy as _
@@ -59,6 +64,7 @@ from django_strawberry_framework.utils.errors import (
     rekey_error_segment,
     relation_field_error,
     save_time_error_key_map,
+    unbindable_temporal,
     unstorable_temporal,
     validation_error_to_field_errors,
 )
@@ -668,6 +674,9 @@ _PAST_YEAR_9999 = datetime.datetime(
     tzinfo=datetime.timezone(datetime.timedelta(hours=-1)),
 )
 _AWARE_TIME = datetime.time(9, 30, tzinfo=datetime.timezone(datetime.timedelta(hours=2)))
+#: UTC offsets PostgreSQL refuses under client-side binding: 16:00, and a fraction of a second.
+_OFFSET_16 = datetime.timezone(datetime.timedelta(hours=16))
+_OFFSET_HALF_SECOND = datetime.timezone(datetime.timedelta(hours=1, microseconds=500_000))
 
 
 #: Unbound columns, typed as the ``object``-valued fields ``unstorable_temporal`` reads.
@@ -933,6 +942,20 @@ def _real_array_of(base_field: models.Field[object, object]) -> models.Field[obj
             False,
             id="array-in-range",
         ),
+        pytest.param(
+            {},
+            lambda: _real_array_of(models.TimeField()),
+            [datetime.time(9, 30, tzinfo=_OFFSET_16), None],
+            True,
+            id="array-time-offset-16-00",
+        ),
+        pytest.param(
+            {},
+            lambda: _real_array_of(models.DateTimeField()),
+            [datetime.datetime(2021, 6, 15, tzinfo=_OFFSET_HALF_SECOND)],
+            True,
+            id="array-datetime-offset-half-second",
+        ),
     ],
 )
 def test_unstorable_temporal_on_postgresql(
@@ -941,6 +964,348 @@ def test_unstorable_temporal_on_postgresql(
     value: object,
     refused: bool,  # noqa: FBT001
 ) -> None:
-    """The real PostgreSQL connection stores the instant and is held to its session wall clock."""
+    """The real PostgreSQL connection stores the instant and is held to its session wall clock.
+
+    An ``ArrayField`` element is held to the UTC offset rule of the suite's client-side
+    binding too: 16:00 or more, or a fraction of a second, is refused.
+    """
     with override_settings(**settings):
         assert unstorable_temporal(column(), value, lambda: DEFAULT_DB_ALIAS) is refused
+
+
+def _offset(
+    hours: int,
+    minutes: int = 0,
+    seconds: int = 0,
+    microseconds: int = 0,
+) -> datetime.timezone:
+    """A fixed UTC offset; a negative ``hours`` flips the whole offset."""
+    sign = -1 if hours < 0 else 1
+    return datetime.timezone(
+        sign
+        * datetime.timedelta(
+            hours=abs(hours),
+            minutes=minutes,
+            seconds=seconds,
+            microseconds=microseconds,
+        ),
+    )
+
+
+#: Each offset PostgreSQL is asked about, and whether it refuses it under client-side
+#: binding (as text) and under psycopg 3's server-side binding for a ``time`` (a
+#: ``datetime`` bound server-side travels as a UTC instant, which no offset refuses).
+_POSTGRESQL_OFFSETS = {
+    "15-59-59": (_offset(15, 59, 59), False, False),
+    "minus-15-59": (_offset(-15, 59), False, False),
+    "16-00": (_offset(16), True, True),
+    "minus-16-00": (_offset(-16), True, True),
+    "23-59": (_offset(23, 59), True, True),
+    "whole-seconds": (_offset(1, 0, 30), False, False),
+    "half-second": (_offset(1, 0, 0, 500_000), True, False),
+    "minus-15-59-59-999999": (_offset(-15, 59, 59, 999_999), True, False),
+    "naive": (None, False, False),
+}
+
+#: Each temporal leaf the offset reaches: its column, lookup parts and whether its value is a
+#: ``time`` (a ``TimeField``, or a ``DateTimeField``'s ``time`` transform) or a ``datetime``.
+_OFFSET_LEAVES = {
+    "datetime": (_STAMP, ("gt",), False),
+    "time": (_TIME, ("in",), True),
+    "time-transform": (_STAMP, ("time", "exact"), True),
+}
+
+
+def _leaf_value(
+    zone: datetime.tzinfo | None,
+    *,
+    is_time: bool,
+) -> datetime.datetime | datetime.time:
+    if is_time:
+        return datetime.time(12, tzinfo=zone)
+    return datetime.datetime(2021, 6, 15, 12, tzinfo=zone)
+
+
+class _ClientCursor:
+    """psycopg 3's ``ClientCursor``: it binds every parameter into the query text."""
+
+
+class _DjangoClientCursor(_ClientCursor):
+    """Django's default psycopg 3 cursor class, a ``ClientCursor``."""
+
+
+class _ServerBindingCursor:
+    """psycopg 3's ``Cursor``, which binds parameters on the server."""
+
+
+def _driver(**exports: type[object]) -> ModuleType:
+    """A database driver module exporting ``exports``."""
+    module = ModuleType("driver_stand_in")
+    vars(module).update(exports)
+    return module
+
+
+#: Each binding mode a PostgreSQL connection can run in: its driver module and the
+#: ``cursor_factory`` Django connects with (psycopg 2 exports no ``ClientCursor``; a
+#: psycopg 3 ``cursor_factory`` of ``None`` is psycopg's own server-binding ``Cursor``).
+_BINDING_MODES = {
+    "psycopg2": (_driver(), _DjangoClientCursor, True),
+    "psycopg3-client": (_driver(ClientCursor=_ClientCursor), _DjangoClientCursor, True),
+    "psycopg3-server": (_driver(ClientCursor=_ClientCursor), _ServerBindingCursor, False),
+    "psycopg3-default-cursor": (_driver(ClientCursor=_ClientCursor), None, False),
+}
+
+
+@contextmanager
+def _postgresql_stand_in(
+    driver: ModuleType,
+    cursor_factory: type[object] | None,
+) -> Generator[str, None, None]:
+    """Register an alias that reads as PostgreSQL, on ``driver`` and ``cursor_factory``.
+
+    Its adapters pass every datetime and time through, as Django's PostgreSQL adapters do,
+    and it is never opened: the binding mode is read from its connection parameters.
+    """
+    alias = "postgresql_stand_in"
+    wrapper = SQLiteDatabaseWrapper(
+        {"NAME": "stand-in", "OPTIONS": {"cursor_factory": cursor_factory}},
+        alias,
+    )
+    wrapper.vendor = "postgresql"
+    wrapper.Database = driver
+    connections[alias] = wrapper
+    stand_in = connections[alias]
+    stand_in.ops = _StoringOperations(stand_in)
+    try:
+        yield alias
+    finally:
+        del connections[alias]
+
+
+@pytest.mark.parametrize("mode", list(_BINDING_MODES))
+@pytest.mark.parametrize("leaf", list(_OFFSET_LEAVES))
+@pytest.mark.parametrize("offset", list(_POSTGRESQL_OFFSETS))
+def test_unbindable_temporal_holds_a_utc_offset_to_postgresql_binding_mode(
+    mode: str,
+    leaf: str,
+    offset: str,
+) -> None:
+    """A PostgreSQL connection refuses exactly the UTC offsets its binding mode sends it.
+
+    Bound as text (psycopg 2, psycopg 3's ``ClientCursor``) an aware datetime or time is
+    refused for an offset of 16:00 or more either way, or one with a fraction of a
+    second; bound on the server (any other psycopg 3 cursor) a datetime travels as a UTC
+    instant, so no offset refuses it, while a time keeps its whole-second offset, refused
+    from 16:00. Every member of an ``in`` list is read. A stand-in alias carries each
+    mode, so the rule holds on every test tier; the real server's answers are pinned by
+    ``test_unbindable_temporal_answers_what_postgresql_refuses``.
+    """
+    driver, cursor_factory, client_side = _BINDING_MODES[mode]
+    column, lookup_parts, is_time = _OFFSET_LEAVES[leaf]
+    zone, refused_as_text, refused_time_on_server = _POSTGRESQL_OFFSETS[offset]
+    value = _leaf_value(zone, is_time=is_time)
+    bound = [datetime.time(9, 30), value] if lookup_parts == ("in",) else value
+    refused = refused_as_text if client_side else is_time and refused_time_on_server
+    with _postgresql_stand_in(driver, cursor_factory) as alias:
+        assert unbindable_temporal(column, lookup_parts, bound, lambda: alias) is refused
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        pytest.param(_STAMP, _leaf_value(_offset(16), is_time=False), id="datetime-16-00"),
+        pytest.param(
+            _TIME,
+            _leaf_value(_offset(1, 0, 0, 500_000), is_time=True),
+            id="time-half-second",
+        ),
+    ],
+)
+def test_unstorable_temporal_refuses_a_utc_offset_postgresql_refuses(
+    column: models.Field[object, object],
+    value: object,
+) -> None:
+    """A write value whose UTC offset PostgreSQL refuses is unstorable, through the same rule."""
+    driver, cursor_factory, _ = _BINDING_MODES["psycopg3-client"]
+    with _postgresql_stand_in(driver, cursor_factory) as alias:
+        assert unstorable_temporal(column, value, lambda: alias) is True
+
+
+@contextmanager
+def _postgresql_alias(*, server_side_binding: bool) -> Generator[str, None, None]:
+    """A second alias on the test database, connecting with ``server_side_binding``."""
+    alias = "binding_mode"
+    wrapper = connections.create_connection(DEFAULT_DB_ALIAS)
+    settings_dict = connections[DEFAULT_DB_ALIAS].settings_dict
+    wrapper.settings_dict = {
+        **settings_dict,
+        "OPTIONS": {**settings_dict["OPTIONS"], "server_side_binding": server_side_binding},
+    }
+    connections[alias] = wrapper
+    try:
+        yield alias
+    finally:
+        wrapper.close()
+        del connections[alias]
+
+
+def _postgresql_refuses(alias: str, column: str, value: object) -> bool:
+    """Whether the server refuses ``value`` filtering on ``column`` and written into it."""
+    bound = {f"{column}__in": [value]} if column == "occurred_time" else {column: value}
+    try:
+        _ = list(scalar_models.ScalarSpecimen.objects.using(alias).filter(**bound))
+    except DataError:
+        filter_refused = True
+    else:
+        filter_refused = False
+    write_refused = False
+    if column != "occurred_at__time":
+        row = {
+            "label": "offset",
+            "occurred_on": datetime.date(2021, 6, 15),
+            "occurred_at": _IN_RANGE,
+            "occurred_time": datetime.time(9, 30),
+            "external_id": uuid.uuid4(),
+            column: value,
+        }
+        try:
+            with transaction.atomic(using=alias):
+                _ = scalar_models.ScalarSpecimen.objects.using(alias).create(**row)
+                transaction.set_rollback(True, using=alias)
+        except DataError:
+            write_refused = True
+        assert write_refused is filter_refused
+    return filter_refused
+
+
+@pytest.mark.pg
+@pytest.mark.django_db
+@pytest.mark.parametrize("server_side_binding", [False, True], ids=["client-side", "server-side"])
+@pytest.mark.parametrize("leaf", list(_OFFSET_LEAVES))
+@pytest.mark.parametrize("offset", list(_POSTGRESQL_OFFSETS))
+def test_unbindable_temporal_answers_what_postgresql_refuses(
+    server_side_binding: bool,  # noqa: FBT001
+    leaf: str,
+    offset: str,
+) -> None:
+    """The rule refuses exactly the offsets the real server refuses, in each binding mode.
+
+    Each value is filtered on (``exact``, ``in``, a datetime's ``time`` transform) and
+    written over a second alias on the test database, connecting with psycopg 3's
+    ``server_side_binding`` off and on; ``unbindable_temporal`` and ``unstorable_temporal``
+    answer what the server does.
+    """
+    column, lookup_parts, is_time = _OFFSET_LEAVES[leaf]
+    zone, _, _ = _POSTGRESQL_OFFSETS[offset]
+    value = _leaf_value(zone, is_time=is_time)
+    target = {"datetime": "occurred_at", "time": "occurred_time"}.get(leaf, "occurred_at__time")
+    with _postgresql_alias(server_side_binding=server_side_binding) as alias:
+        with warnings.catch_warnings():
+            # A naive datetime under ``USE_TZ`` is made aware in the current time zone.
+            warnings.filterwarnings("ignore", "DateTimeField .* received a naive", RuntimeWarning)
+            refused = _postgresql_refuses(alias, target, value)
+        assert unbindable_temporal(column, lookup_parts, [value], lambda: alias) is refused
+        if leaf != "time-transform":
+            assert unstorable_temporal(column, value, lambda: alias) is refused
+
+
+@pytest.mark.parametrize(
+    ("column", "value", "refused"),
+    [
+        pytest.param(
+            _STAMPS,
+            [_leaf_value(_offset(16), is_time=False)],
+            True,
+            id="datetime-element",
+        ),
+        pytest.param(
+            _TIMES,
+            [_leaf_value(_offset(1, 0, 0, 500_000), is_time=True)],
+            True,
+            id="time-element-half-second",
+        ),
+        pytest.param(_STAMP, _leaf_value(_offset(16), is_time=False), False, id="scalar-datetime"),
+    ],
+)
+def test_unstorable_temporal_holds_array_elements_to_the_text_rule_on_server_side_binding(
+    column: models.Field[object, object],
+    value: object,
+    refused: bool,  # noqa: FBT001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under server-side binding an ``ArrayField`` element is still held to the text rule.
+
+    psycopg binds a list parameter's elements as text whatever the cursor, so a datetime
+    element at +16:00 and a time element whose offset carries a fraction of a second are
+    refused, while the same datetime written to a plain column travels as a UTC instant
+    and stores.
+    """
+    monkeypatch.setattr(errors_module, "_ARRAY_FIELD_CLS", FakeArrayField)
+    driver, cursor_factory, _ = _BINDING_MODES["psycopg3-server"]
+    with _postgresql_stand_in(driver, cursor_factory) as alias:
+        assert unstorable_temporal(column, value, lambda: alias) is refused
+
+
+def _postgresql_refuses_array(
+    alias: str,
+    column: models.Field[object, object],
+    value: object,
+) -> bool:
+    """Whether the server refuses ``value`` written into a temporary column of ``column``'s type."""
+    connection = connections[alias]
+    with transaction.atomic(using=alias), connection.cursor() as cursor:
+        cursor.execute(f"CREATE TEMP TABLE offset_probe (cell {column.db_type(connection)})")
+        try:
+            with transaction.atomic(using=alias):
+                cursor.execute(
+                    "INSERT INTO offset_probe (cell) VALUES (%s)",
+                    [column.get_db_prep_save(value, connection)],
+                )
+        except DataError:
+            refused = True
+        else:
+            refused = False
+        transaction.set_rollback(True, using=alias)
+    return refused
+
+
+@pytest.mark.pg
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("column", "value", "refused"),
+    [
+        pytest.param(
+            lambda: _real_array_of(models.DateTimeField()),
+            [_leaf_value(_offset(16), is_time=False)],
+            True,
+            id="datetime-element",
+        ),
+        pytest.param(
+            lambda: _real_array_of(models.TimeField()),
+            [_leaf_value(_offset(1, 0, 0, 500_000), is_time=True)],
+            True,
+            id="time-element-half-second",
+        ),
+        pytest.param(
+            models.DateTimeField,
+            _leaf_value(_offset(16), is_time=False),
+            False,
+            id="scalar-datetime",
+        ),
+    ],
+)
+def test_unstorable_temporal_answers_postgresql_for_array_elements_on_server_side_binding(
+    column: Callable[[], models.Field[object, object]],
+    value: object,
+    refused: bool,  # noqa: FBT001
+) -> None:
+    """On the real server with ``server_side_binding`` the array elements are refused as text.
+
+    The value is written into a temporary column of the field's type over a second alias
+    connecting with psycopg 3's ``server_side_binding``, the way the ORM binds it
+    (``get_db_prep_save``); the server's answer and ``unstorable_temporal``'s agree.
+    """
+    field = column()
+    with _postgresql_alias(server_side_binding=True) as alias:
+        assert _postgresql_refuses_array(alias, field, value) is refused
+        assert unstorable_temporal(field, value, lambda: alias) is refused

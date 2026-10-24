@@ -4717,8 +4717,13 @@ class FilterSet(
         any aware datetime when ``USE_TZ`` is false; on every backend a ``year`` /
         ``iso_year`` comparison bound whose first or last instant leaves years
         1..9999 (a datetime column's bounds projected the same way on those three; a
-        date column's bounds are dates, never projected). Django's PostgreSQL adapters
-        pass those datetimes and times through, so they pass there.
+        date column's bounds are dates, never projected). On PostgreSQL it is an aware
+        datetime or time whose UTC offset the server refuses: 16:00 or more either
+        way, or one carrying a fraction of a second, when parameters are bound as
+        text (psycopg 2, or psycopg 3 unless the connection binds on the server:
+        ``OPTIONS["server_side_binding"]``, or an ``OPTIONS["cursor_factory"]`` that is
+        not a ``ClientCursor``); bound on the
+        server, a time whose offset is 16:00 or more.
         """
         form = filterset_instance.form
         copies = filterset_instance._copied_filters
