@@ -1301,13 +1301,19 @@ def _stat_key(path: Path) -> tuple[int, int] | None:
 
 
 def _same_entry(destination: Path, source: Path, source_hash: str) -> bool:
-    if not os.path.lexists(destination):
+    # Each read of ``destination`` is its existence check: a copy file the $TMPDIR
+    # purge removes after a separate check reads as not the same, so it is copied.
+    present = _stat_key(destination)
+    if present is None:
         return False
     if source.is_symlink() != destination.is_symlink() or destination.is_dir():
         return False
-    if not source.is_symlink() and os.lstat(destination).st_size != os.lstat(source).st_size:
+    if not source.is_symlink() and present[0] != os.lstat(source).st_size:
         return False
-    return file_hash(destination) == source_hash
+    try:
+        return file_hash(destination) == source_hash
+    except FileNotFoundError:
+        return False
 
 
 def _copy_entry(source: Path, destination: Path, repo_root: Path) -> None:
@@ -1315,7 +1321,7 @@ def _copy_entry(source: Path, destination: Path, repo_root: Path) -> None:
         if destination.is_dir() and not destination.is_symlink():
             shutil.rmtree(destination)
         else:
-            destination.unlink()
+            destination.unlink(missing_ok=True)
     parent = destination.parent
     if os.path.lexists(parent) and not parent.is_dir():
         parent.unlink()
@@ -1358,7 +1364,7 @@ def _remove_unwanted(
             if not prefix and name in preserved:
                 continue
             if relative not in wanted:
-                (here / name).unlink()
+                (here / name).unlink(missing_ok=True)
 
 
 def _prune_empty_dirs(destination: Path, preserved: frozenset[str]) -> None:
@@ -1686,7 +1692,7 @@ def ensure_floor_venv(layout: Layout, holding: Sequence[int] = ()) -> _FloorVenv
     ).hexdigest()
     python = venv / "bin" / "python"
     key_path = venv / FLOOR_KEY_NAME
-    reused = python.exists() and key_path.is_file() and key_path.read_text(encoding="utf-8") == key
+    reused = python.exists() and _read_text_if_present(key_path) == key
     if not reused:
         if venv.is_symlink() or venv.is_file():
             venv.unlink()
@@ -2895,12 +2901,12 @@ def _remove_flow_dir(flow_dir: Path) -> None:
         if entry.is_dir() and not entry.is_symlink():
             shutil.rmtree(entry)
         else:
-            entry.unlink()
+            entry.unlink(missing_ok=True)
     marker = flow_dir / MARKER_NAME
     if marker.is_dir():
         marker.rmdir()
     else:
-        marker.unlink()
+        marker.unlink(missing_ok=True)
     flow_dir.rmdir()
 
 
@@ -2949,11 +2955,13 @@ def gc(layout: Layout) -> list[str]:
             dropped = postgres.drop_matching(layout.db_prefix)
             report.append(f"dropped {len(dropped)} Postgres database(s)")
         if descriptor is not None:
-            size = sum(
-                path.lstat().st_size
+            # A file the $TMPDIR purge removes after its check counts as already gone.
+            present = (
+                _stat_key(path)
                 for path in flow_dir.rglob("*")
                 if path.is_file() and not path.is_symlink()
             )
+            size = sum(facts[0] for facts in present if facts is not None)
             # Each copy goes before its proof state, so no copy outlives the marker of a
             # mutation it may still hold, whichever removal is cut short.
             for copy in _copies(layout):

@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 253 done, 172 to do.
+Progress: 254 done, 172 to do.
 
 ## Done
 
@@ -1167,6 +1167,14 @@ Progress: 253 done, 172 to do.
   contract row says a FilterSet / OrderSet gate whose name matches no gated input is detected; gates are dispatched by
   name at request time, as DRF's `validate_<field>` methods are, so a misspelled one is never called there either.
   A finalize audit of gate names would be a new card, not a fix
+- [x] 331. fixed: `scripts/workspace.py::ensure_floor_venv` decides reuse with one read
+  (`_read_text_if_present(key_path) == key`), so a key the macOS `$TMPDIR` purge removes after the check reads as "no
+  key, rebuild" instead of a `FileNotFoundError` traceback out of `gate`. The same file's other purge-reachable
+  check-then-act windows read a vanished entry as already gone: `gc`'s size sum (`_stat_key`), `_remove_flow_dir`'s
+  file and legacy-marker-file unlinks, `_same_entry` (one `_stat_key` read; a destination gone before its hash reads
+  as not the same, so it is copied), and the `_copy_entry` / `_remove_unwanted` unlinks (`missing_ok`); only a
+  missing entry is absorbed. One row per window (`_run_once_before_reading` / `_run_once_after_checking`), each red
+  with its fix reverted
 
 ## Outside review of the fixes
 
@@ -1227,11 +1235,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   Decide: signal the group leader on the first stop and keep `killpg(SIGKILL)` for the escalation
   (`scripts/_stop_signals.py::signal_group`, `scripts/prove_failability.py::_request_stop`), or qualify the docstring.
   Robustness row (pytest-django recreates a leftover test database)
-- [ ] 331. `scripts/workspace.py::ensure_floor_venv` decides reuse with `python.exists() and key_path.is_file() and
-  key_path.read_text(...) == key`, a check followed by a separate read, the shape item 145 removed from
-  `_read_json_object` / `load_runs`; the macOS `$TMPDIR` purge can unlink the key between the two calls, which raises
-  `FileNotFoundError` out of `gate` instead of reading as "no key, rebuild". Robustness row (a two-statement window):
-  read through `_read_text_if_present`; family of items 143, 145 and 301
 - [ ] 332. `scripts/workspace.py::_remove_flow_dir` removes the marker with `marker.rmdir()` and no handling: a
   non-empty `.dsf-ws` directory (a stray `.DS_Store`) makes `gc` raise a raw `OSError` (Errno 66) after emptying the
   rest of the flow, leaving only the marker, and every rerun fails the same way. Robustness row (nothing in the script
@@ -1397,6 +1400,10 @@ tracker number are recorded there; open remainders and new defects are filed as 
   mode check, the shared-name shape 330 removed from `prove_failability.py`: on a shared Linux `/tmp` (no `TMPDIR`) a
   second user's flows land in, or are refused by, the first user's directory, and a planted symlink is followed. Name
   it per user and claim it as `prove_failability.py::_claim_private_directory` does. Found fact-finding 330
+- [ ] 502. (robustness) `scripts/prove_failability.py::_new_capture` checks then acts on a path under the scratch root,
+  which `workspace.py prove` points into the `$TMPDIR` flow folder, so the macOS purge can remove the entry between
+  the two calls (the window 331 closed in `workspace.py`). Read it once and treat a missing entry as absent. Found
+  fact-finding 331
 
 ## To do: holes found re-checking the fixes
 

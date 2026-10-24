@@ -338,6 +338,45 @@ def test_mirror_replaces_a_file_that_became_a_directory(repo: Path, tmp_path: Pa
     assert (copy / PACKAGE / "core.py" / "inner.py").is_file()
 
 
+@pytest.mark.parametrize("window", ["compare", "replace", "remove"])
+def test_a_copy_file_the_purge_removes_after_its_check_reads_as_already_gone(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    window: str,
+) -> None:
+    copy = tmp_path / "copy"
+    first = workspace.mirror_tree(repo, copy)
+    victim = copy / PACKAGE / "core.py"
+    if window == "compare":
+        _run_once_after_checking(monkeypatch, Path, "is_dir", victim, victim.unlink)
+    elif window == "replace":
+        _write(victim, "CORE = 'dirtied by a probe'\n")
+        _run_once_after_checking(monkeypatch, os.path, "lexists", victim, victim.unlink)
+    else:
+        victim = _write(copy / "extra.py", "leftover\n")
+        real_walk = os.walk
+        pending = [victim.unlink]
+
+        def _walk(
+            top: Path,
+            *,
+            topdown: bool = True,
+        ) -> Iterator[tuple[str, list[str], list[str]]]:
+            for listing in real_walk(top, topdown=topdown):
+                if pending:
+                    pending.pop()()
+                yield listing
+
+        monkeypatch.setattr(os, "walk", _walk)
+
+    second = workspace.mirror_tree(repo, copy)
+
+    assert workspace.tree_digest(second) == workspace.tree_digest(first)
+    assert (copy / PACKAGE / "core.py").read_text(encoding="utf-8") == "CORE = 2\n"
+    assert not (copy / "extra.py").exists()
+
+
 def test_mirror_copies_a_relative_symlink_and_refuses_an_absolute_one_into_the_tree(
     repo: Path,
     tmp_path: Path,
@@ -665,6 +704,27 @@ def _run_once_before_reading(
         return real_read_text(path, encoding=encoding, errors=errors)
 
     monkeypatch.setattr(Path, "read_text", _read_text)
+
+
+def _run_once_after_checking(
+    monkeypatch: pytest.MonkeyPatch,
+    owner: object,
+    check: str,
+    target: Path,
+    action: Callable[[], object],
+) -> None:
+    """Run ``action`` once, right after ``owner.check`` first answers for ``target``."""
+    real_check = object_result(getattr, owner, check)
+    assert callable(real_check)
+    pending = [action]
+
+    def _check(path: Path) -> object:
+        answer = real_check(path)
+        if path == target and pending:
+            pending.pop()()
+        return answer
+
+    monkeypatch.setattr(owner, check, _check)
 
 
 def test_a_manifest_gone_when_the_lease_reads_it_resyncs_the_copy(
@@ -1388,6 +1448,31 @@ def test_gc_removes_a_flow_the_tmpdir_purge_emptied(
     assert not layout.flow_dir.exists()
     assert not layout.base.exists()
     assert not layout.base.parent.exists()
+
+
+@pytest.mark.parametrize("window", ["size", "remove", "marker"])
+def test_gc_reads_a_file_the_purge_removes_after_its_check_as_already_gone(
+    layout: workspace.Layout,
+    monkeypatch: pytest.MonkeyPatch,
+    window: str,
+) -> None:
+    binding = workspace.bind(layout, _address("perf-1"))
+    if window == "size":
+        victim = _write(binding.directory / "file.txt", "x\n")
+        _run_once_after_checking(monkeypatch, Path, "is_file", victim, victim.unlink)
+    elif window == "remove":
+        victim = layout.state_path
+        _run_once_after_checking(monkeypatch, Path, "is_dir", victim, victim.unlink)
+    else:
+        victim = layout.flow_dir / workspace.MARKER_NAME
+        victim.rmdir()
+        _write(victim, "")
+        _run_once_after_checking(monkeypatch, Path, "is_dir", victim, victim.unlink)
+
+    workspace.gc(layout)
+
+    assert not victim.exists()
+    assert not layout.flow_dir.exists()
 
 
 def test_a_purge_that_spares_state_json_keeps_the_flow_releasable_and_listed(
@@ -2777,6 +2862,24 @@ def test_a_failed_floor_build_writes_no_key_so_the_next_gate_rebuilds(
 
     assert again["reused"] is False
     assert len(calls) == 4
+
+
+def test_a_floor_key_gone_when_the_gate_reads_it_rebuilds_the_floor_venv(
+    layout: workspace.Layout,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _gate_copy_inputs(layout)
+    calls = _record_installs(monkeypatch, layout)
+    built = workspace.ensure_floor_venv(layout)
+    key_path = layout.floor_venv / workspace.FLOOR_KEY_NAME
+    _run_once_before_reading(monkeypatch, key_path, key_path.unlink)
+
+    again = workspace.ensure_floor_venv(layout)
+
+    assert again == built
+    assert again["reused"] is False
+    assert len(calls) == 8
+    assert key_path.read_text(encoding="utf-8") == built["key"]
 
 
 def test_summarize_suite_reads_summary_collected_and_coverage() -> None:
