@@ -54,11 +54,13 @@ from __future__ import annotations
 import contextlib
 import copy
 import inspect
+import weakref
 from enum import Enum
 from typing import TYPE_CHECKING, Annotated, Any, NamedTuple, Protocol, TypeVar, cast, overload
 
 import strawberry
 from django.core.exceptions import FieldDoesNotExist
+from django.db import models
 from graphql import GraphQLError
 from strawberry.types import Info
 
@@ -68,6 +70,7 @@ from .registry import register_subsystem_clear
 from .resource_policy import check_deadline
 from .types.relay import _NODE_TYPE_HINT_ATTR, decode_global_id, published_node_type_name
 from .utils import truth
+from .utils._queryset_private import model_row_peers, set_model_row_peers
 from .utils.directives import validated_field_directives
 from .utils.errors import GLOBALID_INVALID_ERROR_CODE, coded_error_extensions
 from .utils.execution_mode import async_execution
@@ -84,7 +87,6 @@ from .utils.write_transaction import current_write_pipeline
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Iterable, Mapping, Sequence, Sized
 
-    from django.db import models
     from strawberry import relay
     from strawberry.schema import Schema
     from typing_extensions import TypeIs
@@ -582,10 +584,13 @@ def _stamp_node_type(resolved_type: type[_RelayDjangoType], node: _NodeT) -> _No
     ``None`` (hidden/missing/uncoercible -> ``null``) passes through. Model
     instances are shallow-copied before stamping so a consumer that reuses
     the same ORM object in another field or request cannot retain a routing
-    hint for the earlier refetch. A consumer ``resolve_node(s)`` override
-    may return a non-model object that rejects attribute writes
-    (``__slots__``); the stamp is best-effort there - such objects fall back
-    to the ``isinstance`` behavior. A Django lazy proxy (a ``resolve_node``
+    hint for the earlier refetch. The copy keeps the row's fetch mode but not
+    its ``FETCH_PEERS`` peers (``ModelState.__getstate__`` drops the weak
+    references), so the ``nodes`` field stamps a whole ``resolve_nodes`` group
+    through ``_stamp_nodes``, which links the copies to each other. A consumer
+    ``resolve_node(s)`` override may return a non-model object that rejects
+    attribute writes (``__slots__``); the stamp is best-effort there - such
+    objects fall back to the ``isinstance`` behavior. A Django lazy proxy (a ``resolve_node``
     override returning ``request.user``) is unwrapped first, so the row it
     stands for is the one copied and stamped, never the shared proxied object.
     """
@@ -600,6 +605,46 @@ def _stamp_node_type(resolved_type: type[_RelayDjangoType], node: _NodeT) -> _No
     with contextlib.suppress(AttributeError):
         setattr(node, _NODE_TYPE_HINT_ATTR, resolved_type)
     return node
+
+
+def _stamp_nodes(resolved_type: type[_RelayDjangoType], rows: Iterable[object]) -> list[object]:
+    """Stamp one ``resolve_nodes`` group's rows, keeping ``FETCH_PEERS`` batching across the copies.
+
+    An iteration under a fetch mode that tracks peers gives every row it yields
+    one shared list of weak references to those rows, so a deferred-field or
+    relation load on one row loads it for all of them in one query
+    (``django/db/models/query.py::ModelIterable.__iter__``); Django sets that
+    list on no other row. ``_stamp_node_type`` stamps a copy, which carries no
+    peers, and the original rows die once stamped. So a copy rejoins its
+    original's peers whenever the original had peers: the copies of rows that
+    shared one peers list get one fresh list of weak references to those
+    copies, in result order. The re-link runs no project code; it restores what
+    the copy lost. A row with no peers list (another fetch mode, a release
+    without fetch modes, a row copied or unpickled since its iteration) and a
+    row the stamp did not copy keep the state they have.
+    """
+    stamped: list[object] = []
+    # Keyed by the identity of each original peers list, which the entry holds alive.
+    peer_groups: dict[int, tuple[object, list[models.Model]]] = {}
+    for row in rows:
+        original = unwrap_lazy_object(row)
+        node = _stamp_node_type(resolved_type, original)
+        stamped.append(node)
+        # Only a copy is re-linked; it and its original are rows of the type's model.
+        if (
+            node is original
+            or not truth.is_instance(original, models.Model)
+            or not truth.is_instance(node, models.Model)
+        ):
+            continue
+        peers = model_row_peers(original)
+        if peers is not None:
+            peer_groups.setdefault(id(peers), (peers, []))[1].append(node)
+    for _, copies in peer_groups.values():
+        shared = [weakref.ref(peer) for peer in copies]
+        for peer in copies:
+            set_model_row_peers(peer, shared)
+    return stamped
 
 
 async def _await_and_stamp(
@@ -837,10 +882,10 @@ def DjangoNodesField(  # noqa: N802  # PascalCase for graphene-django parity - c
                     )
                     if inspect.isawaitable(result):
                         result = await result
-                    per_type[resolved_type] = [
-                        _stamp_node_type(resolved_type, node)
-                        for node in _check_nodes_result(resolved_type, result, node_ids)
-                    ]
+                    per_type[resolved_type] = _stamp_nodes(
+                        resolved_type,
+                        _check_nodes_result(resolved_type, result, node_ids),
+                    )
                 return _interleave(positions, per_type)
 
             return _gather()
@@ -856,10 +901,10 @@ def DjangoNodesField(  # noqa: N802  # PascalCase for graphene-django parity - c
                 context="Relay refetch",
                 recourse=_SYNC_RESOLVER_RECOURSE,
             )
-            per_type[resolved_type] = [
-                _stamp_node_type(resolved_type, node)
-                for node in _check_nodes_result(resolved_type, rows, node_ids)
-            ]
+            per_type[resolved_type] = _stamp_nodes(
+                resolved_type,
+                _check_nodes_result(resolved_type, rows, node_ids),
+            )
         return _interleave(positions, per_type)
 
     # Strawberry reads the resolver's return annotation when the assignment carries none,

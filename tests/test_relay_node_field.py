@@ -22,7 +22,9 @@ import strawberry
 from apps.products import services
 from apps.products.models import Category
 from asgiref.sync import sync_to_async
+from django.db import connection
 from django.db.models import Model, QuerySet
+from django.test.utils import CaptureQueriesContext
 from django.utils.functional import SimpleLazyObject
 from strawberry import relay
 from strawberry.schema_directive import Location as DirectiveLocation
@@ -52,7 +54,14 @@ from django_strawberry_framework.relay import (
 from django_strawberry_framework.types.relay import SyncMisuseError, implements_relay_node
 from django_strawberry_framework.utils import truth as real_truth
 from django_strawberry_framework.utils._narrowing import read_attr
-from tests._idioms import json_at, json_list, saved_pk
+from tests._idioms import (
+    FETCH_MODES,
+    json_at,
+    json_list,
+    pickle_roundtrip,
+    requires_fetch_modes,
+    saved_pk,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -1183,6 +1192,89 @@ def test_nodes_consumer_resolve_nodes_generator_return_accepted() -> None:
     assert result.errors is None
     assert result.data is not None
     assert result.data["categories"] == [{"name": second.name}, {"name": first.name}]
+
+
+def _peer_rows(queryset: QuerySet[Category]) -> list[Category]:
+    """Return ``queryset``'s rows as one ``FETCH_PEERS`` iteration yields them: peers."""
+    return list(queryset)
+
+
+def _unpickled_rows(queryset: QuerySet[Category]) -> list[Category]:
+    """Return ``queryset``'s rows through a pickle round trip, as a cache hands them back.
+
+    ``ModelState.__getstate__`` drops the peers list, so each row keeps ``FETCH_PEERS``
+    but carries ``ModelState``'s class-default ``()`` peers.
+    """
+    return pickle_roundtrip(list(queryset))
+
+
+@requires_fetch_modes
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("mode_name", "rows_of", "name_statements"),
+    [
+        pytest.param("FETCH_PEERS", _peer_rows, 1, id="queryset-rows"),
+        pytest.param("project", _peer_rows, 1, id="project-mode-rows"),
+        pytest.param("FETCH_PEERS", _unpickled_rows, 3, id="unpickled-rows"),
+    ],
+)
+def test_nodes_consumer_resolve_nodes_fetch_peers_rows_stay_peers(
+    mode_name: str,
+    rows_of: Callable[[QuerySet[Category]], list[Category]],
+    name_statements: int,
+) -> None:
+    """A consumer ``resolve_nodes`` override's peer-tracking rows batch their deferred loads.
+
+    The field stamps a copy of each returned row, and a copy carries no peers; each
+    copy rejoins its original's peers, so the first row's deferred ``name`` load
+    fetches every row's in one statement, under Django's ``FETCH_PEERS`` or a
+    project ``FetchPeers`` subclass alike, as plain Django serves those rows. Rows
+    with no peers list (a pickle round trip drops it) stay as they are and each
+    load their own.
+    """
+    services.seed_data(3)
+
+    class CategoryNode(DjangoType):
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+            name = "CategoryNode"
+
+        @classmethod
+        def resolve_nodes(
+            cls,
+            *,
+            info: strawberry.Info,
+            node_ids: Iterable[str],
+            required: bool = False,
+        ) -> list[Category | None]:
+            del info, required  # Strawberry's relay passes these by keyword
+            ids = [str(node_id) for node_id in node_ids]
+            queryset = (
+                Category.objects.filter(pk__in=ids).only("id").fetch_mode(FETCH_MODES[mode_name])
+            )
+            by_id = {str(saved_pk(row)): row for row in rows_of(queryset)}
+            return [by_id.get(node_id) for node_id in ids]
+
+    schema = _schema_with(
+        "categories",
+        list[CategoryNode | None],
+        DjangoNodesField(CategoryNode),
+    )
+    categories = list(Category.objects.order_by("pk")[:3])
+    with CaptureQueriesContext(connection) as captured:
+        result = schema.execute_sync(
+            _CATEGORIES_QUERY,
+            variable_values={
+                "ids": [_gid("products.category", saved_pk(row)) for row in categories],
+            },
+        )
+    assert result.errors is None
+    assert result.data == {"categories": [{"name": row.name} for row in categories]}
+    name_sql = [entry["sql"] for entry in captured.captured_queries if '"name"' in entry["sql"]]
+    assert len(name_sql) == name_statements, name_sql
+    assert len(captured) == 1 + name_statements, captured.captured_queries
 
 
 @pytest.mark.django_db

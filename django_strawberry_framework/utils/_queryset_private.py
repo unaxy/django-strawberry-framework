@@ -1,4 +1,4 @@
-"""Typed reads and writes of the ``QuerySet`` state Django keeps in private attributes.
+"""Typed reads and writes of the ``QuerySet`` and row state Django keeps in private attributes.
 
 The visibility seal, the optimizer and the write pipeline read and rebuild a
 queryset's routing (``_db``, ``_hints``), its projection (``_fields``), its
@@ -18,6 +18,12 @@ is the one state read here too: ``queryset_fetch_mode`` reads it through
 ``truth.instance_state`` and admits only Django's own modes
 (``is_django_fetch_mode``), so the write pipeline's base-manager read carries
 what the seal already validated.
+
+The model-row state Django's queryset iterators set lives here too: the
+``_state.peers`` list of weak references an iteration under a peer-tracking
+fetch mode shares across the rows it yields. A row may come from a consumer
+``resolve_nodes`` override, so the read goes through ``truth.instance_state``
+and dispatches nothing.
 """
 
 from __future__ import annotations
@@ -28,6 +34,7 @@ from . import truth
 from .imports import import_attr_if_importable
 
 if TYPE_CHECKING:
+    import weakref
     from typing import TypeAlias
 
     from django.db import models
@@ -192,6 +199,29 @@ def set_queryset_fetch_mode(
     # django-stubs omits ``QuerySet._fetch_mode``; the base ``object.__setattr__`` writes
     # the instance attribute the type checker cannot see, as ``QuerySet.fetch_mode`` does.
     object.__setattr__(queryset, "_fetch_mode", fetch_mode)
+
+
+def _model_row_state(row: models.Model) -> dict[str, object]:
+    """Return the instance namespace of ``row``'s ``ModelState``, read without dispatch."""
+    return truth.instance_state(truth.instance_state(row)["_state"])
+
+
+def model_row_peers(row: models.Model) -> object | None:
+    """Return the peers list ``row``'s queryset iteration shares across its rows, or ``None``.
+
+    ``None`` for a row whose ``_state.peers`` is ``ModelState``'s class default ``()``:
+    one no peer-tracking iteration yielded, or one copied or unpickled since
+    (``ModelState.__getstate__`` drops the weak references).
+    """
+    return _model_row_state(row).get("peers")
+
+
+def set_model_row_peers(
+    row: models.Model,
+    peers: list[weakref.ReferenceType[models.Model]],
+) -> None:
+    """Set the rows ``row`` batches its deferred and relation loads with under a peer-tracking mode."""
+    row._state.peers = peers
 
 
 def set_queryset_query(queryset: models.QuerySet[models.Model, object], query: Query) -> None:
