@@ -9,7 +9,8 @@ inherited as ignored stays ignored), signalling a command's whole process
 group, and ending the process by the signal that stopped it. What a repeat
 does is each script's own policy: ``workspace.py`` relays it to its command,
 ``prove_failability.py`` escalates to ``SIGKILL``. ``workspace.py`` also keeps
-job control (Ctrl-Z, ``fg``) for a command in a session of its own.
+job control (Ctrl-Z, ``fg``) for a command in a session of its own, a suspend
+that lands before the command's group is known included.
 
 Standard library only, and no Django import, so either script imports it
 before anything else is set up.
@@ -50,7 +51,7 @@ def routed_to(
     handler: Callable[[int, FrameType | None], None],
     *,
     group: Callable[[], int | None] | None = None,
-) -> Generator[None, None, None]:
+) -> Generator[_JobControl | None, None, None]:
     """Route :data:`STOP_SIGNALS` to ``handler`` for one block, then put back what was there.
 
     Only the main thread may call ``signal.signal``. A signal whose
@@ -60,12 +61,16 @@ def routed_to(
 
     ``group`` names the process group of a command in a session of its own,
     or ``None`` while it has none; with it, the block keeps job control for
-    that command (:class:`_JobControl`), under the same ``SIG_IGN`` rule.
+    that command (:class:`_JobControl`), under the same ``SIG_IGN`` rule, and
+    yields the :class:`_JobControl`, whose :meth:`_JobControl.settle` the
+    caller owes once ``group`` names the group. Without it the block yields
+    ``None``.
     """
     routes: dict[int, Callable[[int, FrameType | None], None]] = dict.fromkeys(
         STOP_SIGNALS,
         handler,
     )
+    jobs = None
     if group is not None:
         jobs = _JobControl(group)
         routes.update(dict.fromkeys(JOB_SIGNALS, jobs.suspend))
@@ -76,7 +81,7 @@ def routed_to(
         if signal.getsignal(signum) is not signal.SIG_IGN
     }
     try:
-        yield
+        yield jobs
     finally:
         for signum, restored in previous.items():
             _ = signal.signal(signum, signal.SIG_DFL if restored is None else restored)
@@ -92,12 +97,21 @@ class _JobControl:
     the group as well. This process's own group is not orphaned when a shell
     runs it as a job, so it stops; when it is orphaned the kernel discards
     the stop, and the group is continued at once.
+
+    A suspend that lands while the group is not yet known (the command is
+    being started) waits in ``pending`` instead of stopping this process
+    alone, and :meth:`settle` delivers it once the group is known; a
+    ``SIGCONT`` before then drops it, as it would continue that stop.
     """
 
     def __init__(self, group: Callable[[], int | None]) -> None:
         self.group: Callable[[], int | None] = group
+        self.pending: int | None = None
 
     def suspend(self, signum: int, _frame: FrameType | None) -> None:
+        if self.group() is None:
+            self.pending = signum
+            return
         signal_group_id(self.group(), signal.SIGSTOP)
         _ = signal.signal(signum, signal.SIG_DFL)
         try:
@@ -109,7 +123,14 @@ class _JobControl:
         signal_group_id(self.group(), signal.SIGCONT)
 
     def resume(self, _signum: int, _frame: FrameType | None) -> None:
+        self.pending = None
         signal_group_id(self.group(), signal.SIGCONT)
+
+    def settle(self) -> None:
+        """Deliver the suspend that came before the group was known, if any, now that it is."""
+        pending, self.pending = self.pending, None
+        if pending is not None:
+            self.suspend(pending, None)
 
 
 def signal_group(

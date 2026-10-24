@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 240 done, 178 to do.
+Progress: 241 done, 177 to do.
 
 ## Done
 
@@ -1087,6 +1087,15 @@ Progress: 240 done, 178 to do.
   the seal family's docstrings, comments and test prose (`make_meta_validating_metaclass`,
   `_AuthMutationMetaSnapshot`, the comment above `_SealedAuthHolderMeta`) say the record's or class's own
   `__setattr__` / `__delattr__` refuse reassignment and deletion, with no release provenance
+- [x] 307. fixed: a Ctrl-Z (`SIGTSTP`, `SIGTTIN`, `SIGTTOU`) that lands while `workspace.py` is starting its command
+  waits in `scripts/_stop_signals.py::_JobControl` (`pending`) and `stream` delivers it through `settle()` once the
+  command's group is recorded, so the command stops with the run (it ran on, holding its leases, until `fg`); a
+  `SIGCONT` before then drops it. A reader gone from the output (`| head`, `2>&1 | head`, a closed terminal) no
+  longer turns the run's exit into 120: `_pump` points every one of the sink's fd, 1 and 2 that shares the dead file
+  at `/dev/null` on `EPIPE` / `EIO` only, so `run` and `prove` return the command's own code and a full disk still
+  surfaces. The suspend-before-recorded, continue-before-recorded, shared-fd reader-gone and errno rows pin it, a
+  `gate(layout, ["floor"])` row pins the floor install's lock holding, and the two `SIGCONT` routes were already
+  told apart by their own rows (not a defect)
 
 ## Outside review of the fixes
 
@@ -1127,23 +1136,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 307. Leftovers from 284 / 142 (`ca9273d3`, landed on the implementer's evidence: the FIX-round delta for F1 job
-  control, F2 the late stop, F3 gate's sync holding and F5 the docs had no second verifier pass, by the maintainer's
-  call): a Ctrl-Z landing between `Popen` returning and `_StopRelay.started` stops only the wrapper, and the command
-  runs on until `fg`; `_JobControl.suspend`'s SIGCONT to the group and the SIGCONT route overlap (only the
-  sigcont-ignored row tells them apart); the D10, gate, F2 and F3 mutations are each pinned by one row; F4's optional
-  `dup2` of `/dev/null` onto a dropped output sink's fd (accepted without it: `| head` ends with rc 120 and a complete
-  log). Re-verify the delta and decide each, or close them as robustness rows. Fact-found at `6ea7009e`: (1) the Ctrl-Z
-  race is real (46 of 160 natural-timing trials): `scripts/_stop_signals.py::_JobControl.suspend` signals `group()`,
-  which is None until `workspace.py::_StopRelay.started`, so the wrapper stops alone and the command runs on holding its
-  leases; fix: `suspend` records a pending stop while `group()` is None, a `_JobControl.settle()` delivers it once the
-  group is known, `stream` calls it after `relay.started`; rows over SIGTSTP / SIGTTIN / SIGTTOU on a pty; (2) the
-  SIGCONT overlap is not a defect (each route has its own row; optional orphaned-wrapper row); (3) F4 is real: `| head
-  -c 1` on a 2 MB run exits 120 from the flush `BrokenPipeError` and loses the command's code; fix: on `BrokenPipeError`
-  only, `dup2` `/dev/null` onto the sink's fd, rows asserting return code 0 and empty stderr; (4) the single-row pins
-  are fine except gate's floor-suite `ensure_floor_venv(layout, holding)` wiring, which no row executes: add a
-  `gate(layout, ["floor"])` row with spies. Touches `scripts/workspace.py` and `tests/test_workspace.py` (coordinate
-  with floor work there)
 - [ ] 318. `tests/filters/test_sets.py::test_an_unordered_meta_fields_expands_in_canonical_order[set of lookups in a
   dict]` fails under `PYTHONHASHSEED=28` ("no set over ('exact', 'icontains', 'istartswith', 'iendswith') iterates out
   of canonical order"): its `_scrambled` helper cannot build an out-of-order set for every seed, so the row flakes with

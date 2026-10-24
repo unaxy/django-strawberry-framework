@@ -243,10 +243,14 @@ Guarantees, each one a hand-run failure this encodes away:
 * **Ctrl-Z suspends the command with the run.** ``SIGTSTP`` (and ``SIGTTIN``
   / ``SIGTTOU``) to this script stops the command's whole group with
   ``SIGSTOP``, since the kernel never stops a group in a session of its own
-  on those, then stops this script; ``fg`` (``SIGCONT``) continues both.
+  on those, then stops this script; ``fg`` (``SIGCONT``) continues both. One
+  that lands while the command is being started waits until it has, then
+  stops both.
 
 Exit codes: ``run`` and ``prove`` return the command's own exit code, ``128 + N``
-for a command that died by signal ``N``. A run stopped by signal ``N``, and a
+for a command that died by signal ``N``, a reader gone from the output
+included: a pipe whose reader exited (``| head``) or a closed terminal, on
+stdout, stderr or both. A run stopped by signal ``N``, and a
 ``gate`` so stopped, makes :func:`main` return ``128 + N``, and a ``128 + N``
 for a stop signal ends the process by ``N``. ``125``
 means this script refused before the command ran (bad address, full pool,
@@ -2457,9 +2461,11 @@ def _pump(
 ) -> None:
     """Copy ``source`` to ``sink`` and the log until the command closes it.
 
-    A sink that fails (a closed terminal, a reader gone from a pipe) is
-    dropped and the log keeps every byte, so the command never blocks on a
-    pipe nobody drains.
+    A sink that fails is dropped and the log keeps every byte, so the
+    command never blocks on a pipe nobody drains. A sink whose reader is
+    gone (``EPIPE``: a pipe whose reader exited; ``EIO``: a closed terminal)
+    goes quiet first (:func:`_quiet_dead_sink`), so this process still ends
+    with the command's code; any other failure (a full disk) only drops it.
     """
     echo: BinaryIO | None = sink
     for chunk in iter(lambda: source.read1(1 << 16), b""):
@@ -2467,10 +2473,35 @@ def _pump(
             try:
                 _ = echo.write(chunk)
                 echo.flush()
-            except OSError:
+            except OSError as error:
+                if error.errno in {errno.EPIPE, errno.EIO}:
+                    _quiet_dead_sink(echo)
                 echo = None
         with lock:
             _ = log.write(chunk)
+
+
+def _quiet_dead_sink(sink: BinaryIO) -> None:
+    """Point the sink's descriptor, and stdout or stderr on the same dead file, at ``os.devnull``.
+
+    What the failed write left buffered is flushed again as the process
+    exits, and the run's footer goes to stderr; either failing on the dead
+    file would end the process with ``120`` or a traceback instead of the
+    command's code. Never raises: a descriptor that cannot be read or
+    repointed is left as it is.
+    """
+    with contextlib.suppress(OSError, ValueError):
+        fd = sink.fileno()
+        dead = os.fstat(fd)
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        try:
+            for target in dict.fromkeys((fd, 1, 2)):
+                with contextlib.suppress(OSError):
+                    found = os.fstat(target)
+                    if (found.st_dev, found.st_ino) == (dead.st_dev, dead.st_ino):
+                        _ = os.dup2(devnull, target)
+        finally:
+            os.close(devnull)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2494,7 +2525,8 @@ class _StopRelay:
     until the output is drained, after the command itself has exited too, so
     a stop reaches what it left holding its output (``sleep 60 &``). A stop
     that lands before the command is recorded waits in ``pending`` until it
-    is (:meth:`started`).
+    is (:meth:`started`); a suspend that lands then waits likewise, in the
+    job control (``_stop_signals._JobControl``).
     """
 
     def __init__(self) -> None:
@@ -2542,8 +2574,9 @@ def stream(
     descriptors (the run's leases), so a lease lasts while anything the
     command started with it runs, even past this process. A stop signal is
     relayed to the command's whole process group (:class:`_StopRelay`), and
-    Ctrl-Z suspends that group with this process (``fg`` continues both);
-    this returns once the command has ended and its output is drained. A
+    Ctrl-Z suspends that group with this process (``fg`` continues both),
+    one that lands while the command is being started once it has; this
+    returns once the command has ended and its output is drained. A
     command that died by signal ``N`` reads as exit ``128 + N``. The
     command's pipes are closed on every path, each only once its reader has
     finished; an error out of the run first kills the command's process
@@ -2552,7 +2585,10 @@ def stream(
     require_on_path(command[0], "nothing can run in a copy")
     log_path.parent.mkdir(parents=True, exist_ok=True)
     relay = _StopRelay()
-    with log_path.open("wb") as log, _stop_signals.routed_to(relay, group=relay.group):
+    with (
+        log_path.open("wb") as log,
+        _stop_signals.routed_to(relay, group=relay.group) as jobs,
+    ):
         _ = log.write(header.encode("utf-8"))
         log.flush()
         out_sink, err_sink = sys.stdout.buffer, sys.stderr.buffer
@@ -2588,6 +2624,8 @@ def stream(
             ]
             try:
                 relay.started(process)
+                if jobs is not None:
+                    jobs.settle()
                 for pump in pumps:
                     pump.start()
                 code = process.wait()
