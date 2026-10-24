@@ -36,6 +36,8 @@ fail-loud, shape identity, and throwaway-type id mapping.
 
 from __future__ import annotations
 
+import decimal
+import functools
 import logging
 import re
 import sys
@@ -92,7 +94,7 @@ from django_strawberry_framework.registry import registry
 from django_strawberry_framework.scalars import Upload, strawberry_config
 from django_strawberry_framework.types import converters
 from django_strawberry_framework.types.converters import convert_choices_to_enum
-from django_strawberry_framework.utils._narrowing import enum_value, require
+from django_strawberry_framework.utils._narrowing import enum_value, list_of, require
 from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.inputs import InputFieldSpec
 from django_strawberry_framework.utils.relations import is_model_class
@@ -1364,10 +1366,73 @@ def test_update_build_warns_of_a_list_field_over_a_single_value_column(
     expected = (
         "Form KindForm field 'city' is a MultipleChoiceField over the single-value column "
         "Branch.city, which lists no choices: its input is a list, which the form must turn "
-        "into the stored value (e.g. joined in clean_city). An update omitting the field binds "
-        "the field's initial value, so the form must present the stored value as a list (e.g. "
-        "split into self.initial['city'] in __init__), or that update fails with "
-        '"Enter a list of values.".'
+        "into the column's value (e.g. joined in clean_city). An update omitting the field "
+        "binds the field's initial value, so the form must present the stored value as a list "
+        "(e.g. split into self.initial['city'] in __init__), or that update fails validation."
+    )
+    assert messages == ([expected] if warned else [])
+
+
+@pytest.mark.parametrize(
+    (
+        "operation_kind",
+        "name",
+        "field",
+        "warned",
+    ),
+    [
+        pytest.param(
+            PARTIAL,
+            "tags",
+            lambda: forms.ChoiceField(choices=[("x", "X")]),
+            True,
+            id="update-choice",
+        ),
+        pytest.param(PARTIAL, "tags", forms.CharField, True, id="update-char"),
+        pytest.param(PARTIAL, "counts", forms.IntegerField, True, id="update-integer"),
+        pytest.param(
+            CREATE,
+            "tags",
+            lambda: forms.ChoiceField(choices=[("x", "X")]),
+            False,
+            id="create",
+        ),
+        pytest.param(PARTIAL, "tags", forms.MultipleChoiceField, False, id="list-field"),
+    ],
+)
+def test_update_build_warns_of_a_single_value_field_over_an_array_column(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    operation_kind: str,
+    name: str,
+    field: Callable[[], forms.Field],
+    *,
+    warned: bool,
+) -> None:
+    """An update's build logs one warning per single-value field over an ``ArrayField``.
+
+    An omitted one binds from the form's initial, which a ``ModelForm`` reads off the row as
+    the stored list, which the field refuses unless the form presents one value. A create
+    binds only what its input carries, and a list-reading field reads the stored list.
+    """
+    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
+    declared = field()
+    form_class = _column_form(_PlainArrays, name, declared)
+    with caplog.at_level(logging.WARNING, logger="django_strawberry_framework"):
+        build_form_input_class(form_class, operation_kind=operation_kind)
+    messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "django_strawberry_framework"
+    ]
+    expected = (
+        f"Form KindForm field '{name}' is a {type(declared).__name__} over the list column "
+        f"_PlainArrays.{name}: its input is a single value, which the form must turn into the "
+        f"column's value (e.g. wrapped into a list in clean_{name}). An update omitting the "
+        "field binds the field's initial value, so the form must present the stored value as "
+        f"a single value (e.g. picked from the stored list into self.initial['{name}'] in "
+        "__init__), or that update fails validation or writes a value made from the stored "
+        "list."
     )
     assert messages == ([expected] if warned else [])
 
@@ -1483,12 +1548,6 @@ def _list_enum_of(field: StrawberryField) -> type[Enum]:
             True,
             id="multiple-superset",
         ),
-        pytest.param(
-            lambda: forms.ChoiceField(choices=[("a", "A")]),
-            {"a": "a", "b": "b"},
-            True,
-            id="single-value",
-        ),
     ],
 )
 def test_array_choice_column_narrows_its_elements(
@@ -1501,8 +1560,8 @@ def test_array_choice_column_narrows_its_elements(
     """A ``MultipleChoiceField`` over an ``ArrayField`` narrows the ``base_field``'s values.
 
     Each element is checked against the values the ``base_field`` lists, so a subset publishes
-    ``list[<Input><Field>Enum]`` of the admitted values; a superset, and a single-value
-    ``ChoiceField`` over the array, keep the column's ``list`` of the element's read enum.
+    ``list[<Input><Field>Enum]`` of the admitted values; a superset keeps the column's ``list``
+    of the element's read enum.
     """
     monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
     column = _TaggedBook._meta.get_field("tags")
@@ -1516,6 +1575,226 @@ def test_array_choice_column_narrows_its_elements(
     assert (enum_cls is read_enum) is keeps_read_enum
     if not keeps_read_enum:
         assert enum_cls.__name__ == "TagsFormInputTagsEnum"
+
+
+@pytest.mark.parametrize(
+    ("tags_choices", "members", "keeps_read_enum"),
+    [
+        pytest.param([("a", "A"), ("b", "B")], {"a": "a", "b": "b"}, True, id="every-value"),
+        pytest.param([("a", "A")], {"a": "a"}, False, id="subset"),
+    ],
+)
+@pytest.mark.parametrize(("operation_kind", "optional"), [(CREATE, False), (PARTIAL, True)])
+def test_single_choice_field_over_array_choice_column_takes_one_element(
+    monkeypatch: pytest.MonkeyPatch,
+    tags_choices: list[tuple[str, str]],
+    members: dict[str, object],
+    operation_kind: str,
+    *,
+    keeps_read_enum: bool,
+    optional: bool,
+) -> None:
+    """A single-value ``ChoiceField`` over an ``ArrayField`` publishes one element value.
+
+    The field reads one value, which ``clean_<field>`` turns into the stored list, so its
+    input is the element's read enum (the one the column's list carries), narrowed to the
+    values the form's choices admit as the list case is; never a list.
+    """
+    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
+    column = _TaggedBook._meta.get_field("tags")
+    assert isinstance(column, FakeArrayField)
+    list_form = _column_form(_TaggedBook, "tags", forms.MultipleChoiceField(choices=tags_choices))
+    list_enum = _list_enum_of(
+        _field_map(build_form_input_class(list_form, operation_kind=CREATE)[0])["tags"],
+    )
+    form_class = _column_form(_TaggedBook, "tags", forms.ChoiceField(choices=tags_choices))
+    built, specs = build_form_input_class(form_class, operation_kind=operation_kind)
+    tags = _field_map(built)["tags"]
+    assert _is_optional(tags) is optional
+    element = _inner_type(tags)
+    assert isinstance(element, StrawberryEnumDefinition)
+    enum_cls = element.wrapped_cls
+    assert issubclass(enum_cls, Enum)
+    assert _members(enum_cls) == members
+    assert (enum_cls is list_enum) is keeps_read_enum
+    assert [spec.kind for spec in specs] == [SCALAR]
+
+
+class _PlainArrays(models.Model):
+    """An unmanaged owner of choiceless text and integer array columns."""
+
+    tags = FakeArrayField(models.TextField())
+    counts = FakeArrayField(models.IntegerField())
+
+    class Meta:
+        managed = False
+        app_label = "test_forms_plain_arrays"
+
+
+@pytest.mark.parametrize(
+    ("name", "field", "scalar"),
+    [
+        pytest.param("tags", lambda: forms.ChoiceField(choices=[("x", "X")]), str, id="choice"),
+        pytest.param(
+            "counts",
+            lambda: forms.TypedChoiceField(choices=[(1, "One")], coerce=int),
+            str,
+            id="typed-choice",
+        ),
+        pytest.param("tags", forms.CharField, str, id="char"),
+        pytest.param("counts", forms.IntegerField, int, id="integer"),
+        pytest.param("counts", forms.DecimalField, decimal.Decimal, id="decimal"),
+    ],
+)
+@pytest.mark.parametrize(("operation_kind", "optional"), [(CREATE, False), (PARTIAL, True)])
+def test_single_value_field_over_array_column_is_typed_as_the_form_reads_it(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    field: Callable[[], forms.Field],
+    scalar: object,
+    operation_kind: str,
+    *,
+    optional: bool,
+) -> None:
+    """A form field reading one value over an ``ArrayField`` publishes that value, not a list.
+
+    The column lists no choices and stores a list, while the field reads a single value and
+    ``clean_<field>`` wraps it, so the input types it as the same field off-column
+    (``convert_form_field``): required on create, widened optional on update.
+    """
+    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
+    form_class = _column_form(_PlainArrays, name, field())
+    built, specs = build_form_input_class(form_class, operation_kind=operation_kind)
+    published = _field_map(built)[name]
+    assert _is_optional(published) is optional
+    assert _inner_type(published) is scalar
+    assert [spec.kind for spec in specs] == [SCALAR]
+
+
+class _ListReadingField(forms.Field):
+    """A consumer field no registered scalar class covers, reading a list."""
+
+    @override
+    def to_python(self, value: object) -> object:
+        return list_of(value)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        pytest.param(forms.Field, id="bare-field"),
+        pytest.param(_ListReadingField, id="custom-field"),
+    ],
+)
+@pytest.mark.parametrize(("operation_kind", "optional"), [(CREATE, False), (PARTIAL, True)])
+def test_unregistered_field_over_array_column_keeps_the_column_list(
+    monkeypatch: pytest.MonkeyPatch,
+    field: Callable[[], forms.Field],
+    operation_kind: str,
+    *,
+    optional: bool,
+) -> None:
+    """A bare or consumer ``forms.Field`` over an ``ArrayField`` keeps the column's ``list``.
+
+    No registered scalar class states it reads one value (``form_field_reads_one_value``),
+    so its ``to_python`` may read the column's list, and the column types its input.
+    """
+    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
+    built, _ = build_form_input_class(
+        _column_form(_PlainArrays, "tags", field()),
+        operation_kind=operation_kind,
+    )
+    tags = _field_map(built)["tags"]
+    assert _is_optional(tags) is optional
+    inner = _inner_type(tags)
+    assert isinstance(inner, StrawberryList)
+    assert inner.of_type is str
+
+
+@functools.cache
+def _pg_tags_model() -> type[models.Model]:
+    """Declare the Postgres-tier owner of a real choiceless ``tags`` ``ArrayField``."""
+    from django.contrib.postgres.fields import ArrayField  # noqa: PLC0415 - needs the Postgres driver
+
+    return type(
+        "PgTags",
+        (models.Model,),
+        {
+            "__module__": __name__,
+            "tags": ArrayField(models.TextField()),
+            "Meta": type("Meta", (), {"managed": False, "app_label": "test_forms_pg_tags"}),
+        },
+    )
+
+
+def _pg_tag_list_field() -> forms.Field:
+    """A consumer ``SimpleArrayField`` subclass over text elements."""
+    from django.contrib.postgres.forms import SimpleArrayField  # noqa: PLC0415 - needs the Postgres driver
+
+    class TagListField(SimpleArrayField):
+        pass
+
+    return TagListField(forms.CharField())
+
+
+@pytest.mark.pg
+@pytest.mark.parametrize(
+    ("field", "scalar"),
+    [
+        pytest.param(None, None, id="default-simple-array"),
+        pytest.param(_pg_tag_list_field, None, id="simple-array-subclass"),
+        pytest.param(lambda: forms.MultipleChoiceField(choices=[("x", "X")]), None, id="multiple"),
+        pytest.param(lambda: forms.ChoiceField(choices=[("x", "X")]), str, id="choice"),
+    ],
+)
+def test_form_field_over_a_real_array_column_is_typed_by_the_shape_it_reads(
+    field: Callable[[], forms.Field] | None,
+    scalar: object,
+) -> None:
+    """Over a real ``ArrayField`` a list-reading field keeps the column's list; a scalar one not.
+
+    The default ``ModelForm`` field is the ``SimpleArrayField`` ``ArrayField.formfield``
+    builds, which ``convert_form_field`` types as the ``CharField`` it subclasses; it reads
+    the column's list, so the input stays ``[String!]!``, as for a subclass of it and a
+    ``MultipleChoiceField``. A ``ChoiceField`` reads one value.
+    """
+    model = _pg_tags_model()
+    meta = type("Meta", (), {"model": model, "fields": ("tags",)})
+    body: dict[str, object] = {"Meta": meta} if field is None else {"tags": field(), "Meta": meta}
+    form_class = type("PgTagsForm", (forms.ModelForm,), body)
+    built, _ = build_form_input_class(form_class, operation_kind=CREATE)
+    tags = _field_map(built)["tags"]
+    assert not _is_optional(tags)
+    if scalar is None:
+        assert isinstance(tags.type, StrawberryList)
+        assert tags.type.of_type is str
+    else:
+        assert tags.type is scalar
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        pytest.param(
+            lambda: forms.MultipleChoiceField(choices=[("x", "X")]),
+            id="multiple-choice",
+        ),
+        pytest.param(forms.JSONField, id="json"),
+    ],
+)
+def test_list_reading_field_over_array_column_keeps_the_column_list(
+    monkeypatch: pytest.MonkeyPatch,
+    field: Callable[[], forms.Field],
+) -> None:
+    """A form field reading a list over an ``ArrayField`` keeps the column's ``list`` type."""
+    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
+    built, _ = build_form_input_class(
+        _column_form(_PlainArrays, "tags", field()),
+        operation_kind=CREATE,
+    )
+    tags = _inner_type(_field_map(built)["tags"])
+    assert isinstance(tags, StrawberryList)
+    assert tags.of_type is str
 
 
 @pytest.mark.parametrize(

@@ -10,7 +10,12 @@ Covers ``django_strawberry_framework/forms/converter.py``:
   subclass with no supported ancestor raising ``ConfigurationError`` (the
   load-bearing no-catch-all assertion);
 - the relation / file kind flags (``ModelChoiceField`` / ``ModelMultipleChoiceField``
-  / ``FileField`` / ``ImageField``) the input builder finalizes.
+  / ``FileField`` / ``ImageField``) the input builder finalizes;
+- ``form_field_reads_list``: the list-reading form fields (subclasses included), the
+  PostgreSQL array form fields on the Postgres tier, and those arms off when
+  ``django.contrib.postgres.forms`` cannot import; ``form_field_reads_one_value``: the
+  registered scalar form fields, never a list field, a bare ``forms.Field`` or a consumer
+  field no registered class covers.
 
 The relation id-type (Relay-``GlobalID`` vs raw pk, single + multi) is pinned at
 the input-build site (the converter returns only the ``kind`` for relations), so
@@ -33,6 +38,7 @@ import strawberry
 from django import forms
 from django.db import models
 from strawberry.types.base import StrawberryOptional, get_object_definition
+from typing_extensions import override
 
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.forms.converter import (
@@ -40,11 +46,16 @@ from django_strawberry_framework.forms.converter import (
     RELATION_MULTI,
     RELATION_SINGLE,
     SCALAR,
+    _postgres_form_field_class,
     convert_form_field,
     form_field_kind,
+    form_field_reads_list,
+    form_field_reads_one_value,
     form_field_required,
 )
 from django_strawberry_framework.forms.inputs import build_form_input_class
+from django_strawberry_framework.utils._narrowing import list_of
+from tests._soft_dependency import blocked_modules
 
 
 @pytest.mark.parametrize(
@@ -393,3 +404,81 @@ def test_unsupported_django_form_fields_raise() -> None:
     for field in unsupported_fields:
         with pytest.raises(ConfigurationError, match="Unsupported form field type"):
             convert_form_field(field)
+
+
+class _PickedTags(forms.MultipleChoiceField):
+    """A consumer ``MultipleChoiceField`` subclass."""
+
+
+@pytest.mark.parametrize(
+    ("field", "reads_list"),
+    [
+        pytest.param(forms.MultipleChoiceField(), True, id="multiple-choice"),
+        pytest.param(forms.TypedMultipleChoiceField(), True, id="typed-multiple-choice"),
+        pytest.param(_PickedTags(), True, id="multiple-choice-subclass"),
+        pytest.param(forms.JSONField(), True, id="json"),
+        pytest.param(forms.ChoiceField(), False, id="choice"),
+        pytest.param(forms.TypedChoiceField(coerce=int), False, id="typed-choice"),
+        pytest.param(forms.CharField(), False, id="char"),
+        pytest.param(forms.IntegerField(), False, id="integer"),
+    ],
+)
+def test_form_field_reads_list(field: forms.Field, *, reads_list: bool) -> None:
+    """A multiple-choice or JSON form field reads a list; a single-value field does not."""
+    assert form_field_reads_list(field) is reads_list
+
+
+class _ListReadingField(forms.Field):
+    """A consumer field no registered scalar class covers, reading a list."""
+
+    @override
+    def to_python(self, value: object) -> object:
+        return list_of(value)
+
+
+@pytest.mark.parametrize(
+    ("field", "reads_one_value"),
+    [
+        pytest.param(forms.ChoiceField(), True, id="choice"),
+        pytest.param(forms.TypedChoiceField(coerce=int), True, id="typed-choice"),
+        pytest.param(forms.CharField(), True, id="char"),
+        pytest.param(forms.EmailField(), True, id="char-subclass"),
+        pytest.param(forms.IntegerField(), True, id="integer"),
+        pytest.param(forms.DecimalField(), True, id="decimal"),
+        pytest.param(forms.MultipleChoiceField(), False, id="multiple-choice"),
+        pytest.param(forms.JSONField(), False, id="json"),
+        pytest.param(forms.Field(), False, id="bare-field"),
+        pytest.param(_ListReadingField(), False, id="custom-field"),
+    ],
+)
+def test_form_field_reads_one_value(field: forms.Field, *, reads_one_value: bool) -> None:
+    """A registered scalar form field reads one value; a list field, a bare or custom one not."""
+    assert form_field_reads_one_value(field) is reads_one_value
+
+
+def test_postgres_form_field_class_is_none_without_its_module() -> None:
+    """An unimportable ``django.contrib.postgres.forms`` leaves its array form fields off."""
+    with blocked_modules("django.contrib.postgres.forms"):
+        assert _postgres_form_field_class("SimpleArrayField") is None
+
+
+@pytest.mark.pg
+def test_postgres_array_form_fields_read_a_list() -> None:
+    """``SimpleArrayField``, ``SplitArrayField`` and a subclass read a list.
+
+    ``convert_form_field`` still types the ``SimpleArrayField`` as the ``CharField`` it
+    subclasses: the list-reading fact is ``form_field_reads_list``'s, not its annotation.
+    """
+    from django.contrib.postgres.forms import (  # noqa: PLC0415 - needs the Postgres driver
+        SimpleArrayField,
+        SplitArrayField,
+    )
+
+    class TagList(SimpleArrayField):
+        pass
+
+    simple = SimpleArrayField(forms.CharField())
+    assert form_field_reads_list(simple)
+    assert form_field_reads_list(SplitArrayField(forms.CharField(), size=2))
+    assert form_field_reads_list(TagList(forms.CharField()))
+    assert convert_form_field(simple).annotation is str

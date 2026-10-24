@@ -64,6 +64,7 @@ from django_strawberry_framework.utils.converters import (
     make_kind_converter,
     make_scalar_converter,
 )
+from django_strawberry_framework.utils.imports import import_attr_if_importable
 
 # The four decode kinds the reverse-map record carries. Single-sourced in
 # ``utils/inputs.py`` (one conceptual enum, not a per-flavor
@@ -325,6 +326,71 @@ def convert_form_field(field: forms.Field) -> FormFieldConversion:
     # entry is a ``make_scalar_converter`` callable; each builds a FormFieldConversion.
     conversion = cast("FormFieldConversion | Callable[[forms.Field], FormFieldConversion]", result)
     return cast("FormFieldConversion", finish_field_conversion(conversion, field))
+
+
+def _postgres_form_field_class(name: str) -> type[forms.Field] | None:
+    """Return the ``django.contrib.postgres.forms`` field class ``name``, or ``None``.
+
+    Soft-imported through the shared optional-import owner
+    (``utils/imports.py::import_attr_if_importable``): the module imports a PostgreSQL
+    driver, so it is unavailable (``None``) on an environment without one, where no
+    consumer form can declare the class either.
+    """
+    cls = import_attr_if_importable("django.contrib.postgres.forms", name)
+    return cls if truth.is_subclass(cls, forms.Field) else None
+
+
+# The form field classes that read a list (``form_field_reads_list``), each matched with its
+# subclasses; a PostgreSQL array form field is listed only where its module imports.
+_LIST_READING_FORM_FIELDS: tuple[type[forms.Field], ...] = tuple(
+    cls
+    for cls in (
+        forms.MultipleChoiceField,
+        forms.JSONField,
+        _postgres_form_field_class("SimpleArrayField"),
+        _postgres_form_field_class("SplitArrayField"),
+    )
+    if cls is not None
+)
+
+
+def form_field_reads_list(field: forms.Field) -> bool:
+    """Return whether ``field`` reads a list as its value, the single owner of that fact.
+
+    ``form_field_reads_one_value`` reads it, which ``forms/inputs.py`` asks to tell a form
+    field whose input shape disagrees with an ``ArrayField`` column (one reading a single
+    value) from one that reads the column's list. A ``MultipleChoiceField``
+    (``TypedMultipleChoiceField`` included) reads only a list; a ``JSONField`` reads any
+    JSON value, a list among them; PostgreSQL's ``SimpleArrayField`` (the field
+    ``ArrayField.formfield`` builds) and ``SplitArrayField`` read a list. Each is matched
+    with its subclasses. It is a class list because Django states no class-agnostic "reads a
+    list" fact: ``to_python`` is free to read anything, and ``convert_form_field``'s
+    published annotation is not that fact either (it types a ``SimpleArrayField`` as the
+    ``CharField`` it subclasses, and has no row for a ``SplitArrayField``).
+    """
+    return truth.is_one_of(field, _LIST_READING_FORM_FIELDS)
+
+
+# The registered scalar form-field classes (``_SCALAR_FORM_FIELDS``), as one tuple for
+# ``form_field_reads_one_value``'s subclass match.
+_SCALAR_FORM_FIELD_CLASSES: tuple[type[forms.Field], ...] = tuple(_SCALAR_FORM_FIELDS)
+
+
+def form_field_reads_one_value(field: forms.Field) -> bool:
+    """Return whether ``field`` is a built-in form field reading a single value.
+
+    One of the scalar form-field classes ``convert_form_field`` registers
+    (``_SCALAR_FORM_FIELDS``: a ``CharField``, ``ChoiceField``, ``IntegerField``, ...),
+    subclasses included, that does not read a list (``form_field_reads_list``: a
+    ``SimpleArrayField`` subclasses ``CharField``, a ``JSONField`` reads any JSON value). A
+    bare ``forms.Field`` and a consumer ``forms.Field`` subclass no registered class covers
+    answer ``False``: their ``to_python`` may read anything, a list included, so nothing
+    states they read one value.
+    """
+    return not form_field_reads_list(field) and truth.is_one_of(
+        field,
+        _SCALAR_FORM_FIELD_CLASSES,
+    )
 
 
 def _unsupported_form_field(field: forms.Field) -> ConfigurationError:
