@@ -472,7 +472,7 @@ def test_registry_clear_drains_ledger_and_resets_conflict_state() -> None:
 
 
 def test_auth_permission_holder_snapshot_is_sealed() -> None:
-    """A fixed-surface holder's validated snapshot refuses writes and deletes.
+    """A fixed-surface holder's validated snapshot refuses reassignment and deletion.
 
     The holder's duck-typed snapshot IS the fixed auth surface's per-request
     authorization source (``login`` / ``logout`` / ``current_user`` ride
@@ -501,7 +501,7 @@ def test_auth_permission_holder_snapshot_is_sealed() -> None:
 
 
 def test_auth_permission_holder_head_is_sealed() -> None:
-    """A synthesized holder's ``_mutation_meta`` head is write-once.
+    """A synthesized holder's ``_mutation_meta`` head refuses reassignment and deletion.
 
     The holder rides the write-flavor metaclass guard (``DjangoMutationMetaclass``): a
     ``has_permission`` hook receives the holder, so an unguarded head would let

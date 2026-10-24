@@ -251,8 +251,9 @@ class _AuthMutationMetaSnapshot:
     (``login`` / ``logout`` / ``current_user`` ride ``DjangoMutation.check_permission``
     by call), and a ``has_permission`` hook runs inside the walk with the holder
     class in hand - a mutable slot would let one request's hook rebind the
-    validated set for every later login/logout/me request. Sealed snapshots
-    refuse writes and deletes with ``ConfigurationError``.
+    validated set for every later login/logout/me request. A sealed snapshot's
+    own ``__setattr__`` / ``__delattr__`` refuse reassignment and deletion with
+    ``ConfigurationError``.
     """
 
     __slots__: tuple[str, ...] = ("_sealed", "operation", "permission_classes")
@@ -282,8 +283,8 @@ class _AuthMutationMetaSnapshot:
 
 
 # The metaclass of a synthesized auth permission holder. At runtime it IS
-# ``DjangoMutationMetaclass``, whose class-head seal keeps ``_mutation_meta``
-# write-once; the type-checking-only subclass declares the attributes the
+# ``DjangoMutationMetaclass``, whose class-head seal refuses reassignment of
+# ``_mutation_meta``; the type-checking-only subclass declares the attributes the
 # synthesis stashes on every holder (``_primary_type`` / ``_payload_type_name`` are
 # rebound at bind), so the runtime metaclass body records no annotations.
 if TYPE_CHECKING:

@@ -7,7 +7,7 @@ primitives (``reject_unknown_meta_keys``, ``normalize_meta_field_selection``,
 ``_validate_permission_classes``, ``validate_select_for_update``,
 ``model_backed_permission_and_lock``), including their hostile-input reads; the
 declaration-ledger and ``Meta``-validating metaclass factories; the sealed
-validated snapshot and the write-once ``_mutation_meta`` head; and the shared
+validated snapshot and the sealed ``_mutation_meta`` head; and the shared
 phase-2.5 drain (``bind_write_declarations`` / ``bind_mutation_outputs``).
 
 Class-creation and bind contracts a request cannot express: every row here
@@ -542,12 +542,12 @@ def test_make_declaration_registry_identity_dedup_hostile_eq_safe_containment() 
 
 
 def test_whole_record_swap_and_deletion_on_a_real_mutation_class_are_sealed() -> None:
-    """A mutation class's validated ``_mutation_meta`` head is write-once (0.0.15 hardening).
+    """A mutation class's validated ``_mutation_meta`` head refuses reassignment and deletion.
 
     The metaclass guard (``make_meta_validating_metaclass.__setattr__`` /
-    ``__delattr__``) refuses any post-creation rebind or deletion of
-    ``_mutation_meta``: a ``has_permission`` hook receives the mutation class, so
-    an unguarded head would let one request replace the validated record
+    ``__delattr__``) refuses a post-creation rebind or deletion of
+    ``_mutation_meta`` through those methods: a ``has_permission`` hook receives
+    the mutation class, so an unguarded head would let one request replace the validated record
     wholesale with a hook-chosen namespace (the empty allow-any posture) - the
     persistent cross-request bypass the snapshot's own seal closes at the slot
     level. Creation time is the one honored write, so the guards are unreachable
@@ -580,15 +580,19 @@ def test_validated_mutation_meta_record_refuses_slot_writes_and_deletes() -> Non
 
     Mirrors the head seal at the record level: the record is the per-request
     authorization source (``run_permission_classes`` reads
-    ``type(self)._mutation_meta.permission_classes``), so a sealed record refuses
-    every attribute write and delete for the life of the process. A consumer who
-    needs different authorization declares a new mutation class.
+    ``type(self)._mutation_meta.permission_classes``), so a sealed record's own
+    ``__setattr__`` / ``__delattr__`` refuse attribute reassignment and deletion. A
+    consumer who needs different authorization declares a new mutation class.
     """
     snapshot = _create_item_mutation()._mutation_meta
     with pytest.raises(ConfigurationError, match="sealed"):
         snapshot.permission_classes = ()
-    with pytest.raises(ConfigurationError, match="sealed"):
+    with pytest.raises(ConfigurationError) as excinfo:
         del snapshot.permission_classes
+    assert str(excinfo.value) == (
+        "The validated mutation Meta snapshot is sealed; attributes cannot be deleted. "
+        "Authorization configuration is captured once at class creation."
+    )
     with pytest.raises(ConfigurationError, match="sealed and 'model' cannot be reassigned"):
         snapshot.model = None
     # The validated configuration is untouched by all three attempts.

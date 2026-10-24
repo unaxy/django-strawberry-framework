@@ -588,16 +588,17 @@ def make_meta_validating_metaclass(
     - else runs ``new_class._validate_meta(meta)``, stashes ``_mutation_meta``,
       and calls ``register(new_class)``.
 
-    The produced metaclass also SEALS the class head (0.0.15 authorization
-    hardening): once a concrete subclass's validated snapshot is stashed, any
-    later ``cls._mutation_meta = ...`` write raises ``ConfigurationError``. A
+    The produced metaclass also SEALS the class head: once a concrete
+    subclass's validated snapshot is stashed, a later ``cls._mutation_meta = ...``
+    statement (or ``del``) through the metaclass's own ``__setattr__`` /
+    ``__delattr__`` raises ``ConfigurationError``. A
     ``has_permission`` hook receives the mutation class, so a plain attribute
     statement inside the hook could otherwise replace the validated record
     wholesale (an attacker-chosen namespace holding the empty allow-any posture)
     and authorize every later request - the same persistent cross-request
     bypass class the snapshot's own seal closes. The creation-time write in
-    ``__new__`` is the one honored write; subsequent rebinding (or deletion) is
-    refused. Unrelated class attributes (the bind's ``_primary_type`` /
+    ``__new__`` is the one honored write; ordinary reassignment or deletion
+    afterwards is refused. Unrelated class attributes (the bind's ``_primary_type`` /
     ``_input_class`` / ``_payload_type_name`` outputs) are unaffected.
 
     ``DjangoMutationMetaclass`` and ``DjangoFormMutationMetaclass`` are the two
@@ -643,14 +644,14 @@ def make_meta_validating_metaclass(
 
         @override
         def __setattr__(cls, name: str, value: object) -> None:
-            """Keep the validated ``Meta`` snapshot write-once.
+            """Refuse reassigning the validated ``Meta`` snapshot on a mutation class.
 
             The metaclass stashes ``_mutation_meta`` exactly once at class
-            creation; any post-creation rebind of that head would swap the
+            creation; a post-creation rebind of that head would swap the
             mutation's per-request authorization source for a hook-chosen record
             (the persistent bypass class ``_ValidatedMutationMeta``'s seal closes
-            at the slot level). First write at class creation is the only allowed
-            write; afterwards any attempt raises typed ``ConfigurationError``.
+            at the slot level). The write at class creation is honored; a later
+            assignment through this ``__setattr__`` raises typed ``ConfigurationError``.
             """
             if name == "_mutation_meta" and "_mutation_meta" in truth.class_dict(cls):
                 raise ConfigurationError(
@@ -788,7 +789,8 @@ class _ValidatedMutationMeta:
         # generated input builds RECURSIVELY (an un-named nested field fails loud). ``None`` when
         # no nesting is opted in. The model + form flavors leave it ``None``.
         self.nested_fields: Mapping[str, NestedSerializerConfig] | None = nested_fields
-        # Seal LAST: every validated slot is set; from here on the record is
+        # Seal LAST: every validated slot is set; from here on the record's own
+        # ``__setattr__`` / ``__delattr__`` refuse reassignment and deletion.
         self._sealed = True
 
     @override
@@ -805,7 +807,7 @@ class _ValidatedMutationMeta:
     def __delattr__(self, name: str) -> None:
         raise ConfigurationError(
             "The validated mutation Meta snapshot is sealed; attributes cannot be deleted. "
-            "Authorization configuration is captured once at class creation and is immutable.",
+            "Authorization configuration is captured once at class creation.",
         )
 
 

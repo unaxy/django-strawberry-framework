@@ -654,7 +654,6 @@ def test_require_sync_bool_auth_result_message_is_exact() -> None:
 
 # ---------------------------------------------------------------------------
 # Class-state hostility: the walk reads a SNAPSHOT, never the live list
-# (the 0.0.15 authorization-bypass hardening)
 # ---------------------------------------------------------------------------
 
 
@@ -705,15 +704,15 @@ def test_walk_ignores_mid_request_pollution_of_the_class_permission_list() -> No
             events.append("Denier")
             return False
 
-    # LIST substrate: the hostile hook CAN clear the class's list mid-walk - the
-    # exact pre-fix bypass shape. Over the snapshot the denier still runs and the
-    # deny is honored.
+    # LIST substrate: the hostile hook CAN clear the class's list mid-walk, the
+    # bypass shape the snapshot walk refuses. Over the snapshot the denier still runs
+    # and the deny is honored.
     class ListSubstrateMutation:
         _mutation_meta = SimpleNamespace(permission_classes=[AllowAndPollute, Denier])
 
     assert (
         run_permission_classes(
-            # basedpyright: the pre-fix mutable-list substrate is the input under test and a real
+            # basedpyright: the mutable-list substrate is the input under test and a real
             # mutation seals its snapshot against it; run_permission_classes types the parameter
             # as DjangoMutation | DjangoFormMutation
             ListSubstrateMutation(),  # pyright: ignore[reportArgumentType]
@@ -758,11 +757,10 @@ def test_walk_ignores_mid_request_pollution_of_the_class_permission_list() -> No
 def test_hook_rebinding_the_validated_permission_slot_fails_closed() -> None:
     """A hook reassigning the validated permission set fails the request closed (live tier).
 
-    The snapshot walk survives list pollution (above), but pre-hardening a hook
-    could also REASSIGN the validated ``permission_classes`` slot on the shared
-    ``_ValidatedMutationMeta`` record: the in-flight walk still denied (over the
-    snapshot), but the polluted empty posture PERSISTED on the class and
-    authorized every later request. The sealed record refuses the write with
+    The snapshot walk survives list pollution (above); a hook could also try to
+    REASSIGN the validated ``permission_classes`` slot on the shared
+    ``_ValidatedMutationMeta`` record, which would leave an empty posture on the
+    class that authorizes every later request. The sealed record refuses the write with
     ``ConfigurationError``, so the hostile hook fails the request loudly (a
     top-level error, no row), the validated configuration survives untouched,
     and a second identical anonymous request is still denied.
@@ -779,7 +777,7 @@ def test_hook_rebinding_the_validated_permission_slot_fails_closed() -> None:
             _instance: object = None,
         ) -> bool:
             # The hook's ``mutation`` IS the mutation class; the plain attribute
-            # statement is the pre-fix persistent-bypass shape.
+            # statement is the persistent-bypass shape the seal refuses.
             mutation._mutation_meta.permission_classes = ()
             return True
 
