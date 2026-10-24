@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 263 done, 167 to do.
+Progress: 264 done, 167 to do.
 
 ## Done
 
@@ -1251,6 +1251,11 @@ Progress: 263 done, 167 to do.
   775 reaching (model, operation, field) rows the read and `model_column_write_kind(...) == RELATION_MULTI` agree,
   and routing it through the classifier leaves the printed schema and every generated input byte-identical. The
   forward-M2M optional rule is pinned live by `test_input_shapes_api.py`. No code
+- [x] 403. fixed (docs): spec-027 and spec-028 gain an Edge-cases row each, and the `filterset` and `orderset`
+  glossary terms one sentence each, stating that a one-shot (`iter(...)`, a generator, `map(...)`) or bare-string
+  `Meta.fields` / `filter_fields` / `Meta.exclude` is a `ConfigurationError`: a FilterSet's at class creation, an
+  OrderSet's at the first `get_fields()` expansion (finalize); a `SimpleLazyObject` is judged as the object it stands
+  for and `filter_fields` is reported as `Meta.fields`. No code
 
 ## Outside review of the fixes
 
@@ -1419,9 +1424,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   and handle many-to-many differently from `fields = "__all__"`; probe both against one model and align them
 - [ ] 401. Unprobed: the model flavor of `createItemHold` with `itemId` omitted (not sent `null`) may not answer with
   the field-keyed `itemId` / `null` envelope the ModelForm flavor gives since `8c0aaf17`
-- [ ] 403. Neither spec-027 nor the GLOSSARY `FilterSet` entry states the re-readability rule `67e23c5d` enforces: add
-  the edge-case row "`Meta.fields` / `filter_fields` / `Meta.exclude` must be re-readable collections; one-shot
-  iterators and a bare-string `Meta.exclude` raise `ConfigurationError` at class creation" (GLOSSARY through the DB)
 - [ ] 500. Process provenance in test docstrings and comments outside `tests/utils/test_querysets.py`, the class 324
   restates there: e.g. `tests/utils/test_permissions.py` ("It used to reach it"), `tests/test_permissions.py` ("no
   longer compare ... (the old ...", "no longer trips"), `tests/utils/test_policies.py` ("no longer", "The pre-fix
@@ -1450,6 +1452,10 @@ tracker number are recorded there; open remainders and new defects are filed as 
   the temporary directory, so a copy only `run` for 3+ days (no sync) loses its manifest to the macOS purge, or to a
   Linux reboot with its files, and the next run resyncs it, dropping its uncommitted edits, against the `run`
   docstring's "later runs reuse that copy as it stands, edits included". Found verifying 345
+- [ ] 587. A lazy translation string (`gettext_lazy(...)`) as a FilterSet `Meta.exclude` passes
+  `sets_mixins.py::require_re_readable_field_declaration` (its real class is not `str`) and excludes by substring:
+  `lazy("title")` drops `title`, `lazy("titl")` excludes nothing with no error, against the spec-027 row that a
+  string `Meta.exclude` is refused. Found fact-finding 403
 
 ## To do: holes found re-checking the fixes
 
