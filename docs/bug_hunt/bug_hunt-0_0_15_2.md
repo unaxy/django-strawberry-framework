@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 242 done, 176 to do.
+Progress: 243 done, 176 to do.
 
 ## Done
 
@@ -1103,6 +1103,12 @@ Progress: 242 done, 176 to do.
   (`utils/write_values.py::relation_takes_global_id`), and a consumer override of such a relation must be
   `strawberry.ID` (a `relay.GlobalID` override is refused at finalize). The error-policy, products and library
   live rows pin it; spec-036, 038, 039, 053 and the `input-type-generation` glossary term say so
+- [x] 324. fixed: `tests/utils/test_querysets.py::test_additive_only_subclass_result_is_sealed_to_plain_queryset`
+  states behaviour only: the hook result is rebuilt as a plain `QuerySet` from its validated state, the subclass
+  identity dropped whatever methods the subclass defines, the predicate kept; the same file's other history phrasings
+  ("previously", "used to", "pre-fix", "the old inventory", "before the accessor scan existed", "new guard") are
+  restated the same way, each counterfactual checked by running the test's probe with its guard patched out. Comments
+  and docstrings only (code digest unchanged)
 
 ## Outside review of the fixes
 
@@ -1170,8 +1176,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `_apply_flat_leaves`, a `<branch>__...` copy whose branch is active and whose key it does not name; document what an
   own `filter` receives (raw wire text for a GlobalID; the cleaned empty value on absence); decide whether a nested
   supply satisfies a `required` copy
-- [ ] 324. `tests/utils/test_querysets.py::test_additive_only_subclass_result_is_sealed_to_plain_queryset`'s docstring
-  carries process provenance ("now", "The old contract"); restate it as behaviour
 - [ ] 327. Relay refetch plans nothing: `types/relay.py::_resolve_nodes_default` / `_resolve_node_default` return model
   instances, `optimizer/extension.py::DjangoOptimizerExtension._optimize` passes a non-`QuerySet` through unchanged and
   `relay.py::DjangoNodesField` / `DjangoNodeField` never call `DjangoOptimizerExtension.apply_to`, so every nested
@@ -1375,6 +1379,12 @@ tracker number are recorded there; open remainders and new defects are filed as 
   finalize audits gate names, and names are knowable only after expansion (`types/finalizer.py::_bind_sidecar_sets`'s
   `post_expand_audit` sees them for wired sets; unwired `RelatedFilter` targets never finalize). Found fact-finding
   409
+- [ ] 500. Process provenance in test docstrings and comments outside `tests/utils/test_querysets.py`, the class 324
+  restates there: e.g. `tests/utils/test_permissions.py` ("It used to reach it"), `tests/test_permissions.py` ("no
+  longer compare ... (the old ...", "no longer trips"), `tests/utils/test_policies.py` ("no longer", "The pre-fix
+  resolver"), `tests/mutations/test_resolvers.py` ("pre-fix"), and the "exactly as before" comment beside
+  `utils/querysets.py::_prefetch_relation_target_or_none`; an rg of `tests/` for that vocabulary ("now", "no longer",
+  "used to", "previously", "pre-fix", "old") gives about 120 hits to judge. Restate each as behaviour. Found fixing 324
 
 ## To do: holes found re-checking the fixes
 
