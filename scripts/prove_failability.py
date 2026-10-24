@@ -78,15 +78,15 @@ Deliberate properties, each one a hand-run failure mode this encodes away:
 * **Scratch is per tree and holds what a run observed.** The probe plugin, the
   raw run logs and the pristine copies of proved restores go to
   ``<root>/tree-<digest>`` under ``--scratch-root`` (or the manifest's
-  ``scratch_root``), and to ``failability/tree-<digest>`` under the system
+  ``scratch_root``), and to ``failability-<uid>/tree-<digest>`` under the system
   temporary directory (``TMPDIR``) when no root is given, so workspace copies
   sharing one root stay disjoint and every run against one tree reuses its own
   directory, one run at a time under the lock; a later run against the same
   tree and scratch root overwrites the earlier run's logs and pristine copies.
   The scratch directory may not overlap the state directory. The default
-  ``failability`` directory is created mode ``0700``, and a symlink or another
-  user's directory there refuses the run, since other users may write to the
-  temporary directory.
+  ``failability-<uid>`` directory is per user, named by the numeric uid, and
+  created mode ``0700``; a symlink or another user's directory there refuses
+  the run, since other users may write to the temporary directory.
 * **One run per tree.** Every run, with or without ``--scratch-root``, holds an
   exclusive ``flock`` on the repository root directory it mutates from before
   it resolves its scratch directory until the run ends, so a second concurrent run
@@ -308,8 +308,9 @@ STATE_HOME_ENV = "XDG_STATE_HOME"
 STATE_DIRECTORY_NAME = "prove_failability"
 # The XDG specification's mode for a directory created under the state home.
 STATE_DIRECTORY_MODE = 0o700
-# Without --scratch-root, scratch is ``<system temporary directory>/failability/tree-<digest>``.
-DEFAULT_SCRATCH_DIRECTORY_NAME = "failability"
+# Without --scratch-root, scratch is
+# ``<system temporary directory>/failability-<uid>/tree-<digest>``, one parent per user.
+DEFAULT_SCRATCH_DIRECTORY_PREFIX = "failability"
 TREE_NAMESPACE_PREFIX = "tree-"
 TREE_NAMESPACE_DIGEST_LENGTH = 16
 PRISTINE_DIRECTORY_NAME = "pristine"
@@ -1241,8 +1242,8 @@ def _tree_state_directory() -> Path:
 def _claim_private_directory(directory: Path) -> None:
     """Create ``directory`` with ``STATE_DIRECTORY_MODE`` unless it exists; refuse a foreign one.
 
-    The directory is shared by every run of this user (the default scratch
-    parent under the system temporary directory, the state home's
+    The directory is shared by every run of this user (the per-user default
+    scratch parent under the system temporary directory, the state home's
     ``prove_failability``), so in a temporary directory other users can write
     to it may have been made by someone else first. Only a real directory, not
     a symlink, owned by this user is used; anything else refuses the run before
@@ -1304,17 +1305,18 @@ def _resolve_scratch_root(raw_root: str | None) -> Path:
     """Return this run's scratch directory, refusing any location inside the repository.
 
     It is ``<raw_root>/tree-<digest>`` for the repository root this run mutates,
-    or ``<system temporary directory>/failability/tree-<digest>`` without
+    or ``<system temporary directory>/failability-<uid>/tree-<digest>`` without
     ``raw_root``, so runs against different workspace copies get disjoint
     directories and every run against one tree reuses its own, the tree's lock
     keeping it to one run at a time. It holds the probe plugin, the run logs
     and the pristine copies of proved restores, never a live mutation's state.
-    The default parent must be a real directory owned by this user, as
+    The default parent is per user, so users sharing one temporary directory
+    get disjoint parents, and must be a real directory owned by this user, as
     :func:`_claim_private_directory` checks; an explicit root is the caller's.
     """
     given = _given_scratch_root(raw_root)
     parent = (
-        Path(tempfile.gettempdir()).resolve() / DEFAULT_SCRATCH_DIRECTORY_NAME
+        Path(tempfile.gettempdir()).resolve() / f"{DEFAULT_SCRATCH_DIRECTORY_PREFIX}-{os.getuid()}"
         if given is None
         else given
     )
@@ -3039,8 +3041,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "ACTIVE-MUTATION.json marker sit in the tree's state directory ($XDG_STATE_HOME or "
             "~/.local/state, then prove_failability/tree-<digest>) whatever this is, and a "
             "marker there refuses the run. Default: the system temporary directory's "
-            "failability/tree-<digest>, where failability must be a real directory owned by "
-            "this user"
+            "failability-<uid>/tree-<digest>, one per user, where failability-<uid> must be a "
+            "real directory owned by this user"
         ),
     )
     _ = parser.add_argument(
