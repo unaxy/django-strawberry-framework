@@ -976,8 +976,8 @@ pagination helper).*
 Async queryset completion needs one additional representation boundary.
 [`graphql/execution/execute.py::ExecutionContext.complete_list_value`][graphql-execute]
 checks synchronous `Iterable` before `AsyncIterable`, while Django querysets implement both;
-returning a queryset directly from `AsyncDjangoGraphQLView` would invoke synchronous ORM
-iteration inside the event loop. After the final slice, the async list path wraps a queryset
+left to graphql-core, a queryset returned under `AsyncDjangoGraphQLView` is iterated
+synchronously inside the event loop. After the final slice, the async list path wraps a queryset
 in a package-internal
 [async-only queryset-row adapter][glossary-async-queryset-completion-adapter] whose
 `__aiter__` delegates to Django's safe
@@ -1027,9 +1027,11 @@ execution context for every final queryset, including a plain `def` consumer ret
 `Manager`/`QuerySet` under an async view; it does not change the callable-color rule for
 whether a consumer or visibility hook is awaited.
 
-The safety claim is scoped to FRAMEWORK-OWNED FINAL QUERYSET COMPLETION and is written that
-way everywhere it appears. The adapter removes the one iteration the framework itself hands to
-graphql-core. It cannot stop a plain `def` consumer resolver from calling `list(qs)`,
+The safety claim is scoped to COMPLETING A LAZY QUERYSET and is written that way everywhere it
+appears: the list field's own final queryset, and through Decision 12's list-completion arm any
+`QuerySet` a resolver hands a list field under the asynchronous executor. The adapter removes
+the iteration graphql-core would run on the event loop. It cannot stop a plain `def` consumer
+resolver from calling `list(qs)`,
 `.exists()`, `.count()`, or any other synchronous ORM method while already running on the
 event-loop thread, and the field keeps the callable-color rule for that resolver. A
 synchronous `get_queryset` hook is not on the loop: it runs in a `sync_to_async` worker, so
@@ -1386,9 +1388,9 @@ evaluated exact or rebuilt queryset reaching `_windowed_rows` is sliced by Djang
 `QuerySet.__getitem__`, which answers from the populated cache. Re-querying a project queryset
 class for rows it had already fetched would make `Manager.from_queryset` cost one query per
 parent row more than Django's manager at every relation it is used on, and on the prefetched
-branch of the generated many-side resolver it would hand graphql-core an unevaluated rebuilt
-source that is iterated on the event loop under async, where Django raises
-`SynchronousOnlyOperation`. The rebuild therefore carries the fetched rows forward when the
+branch of the generated many-side resolver it would hand list completion an unevaluated rebuilt
+source, fetched again per parent row and, under async, through one worker hop each. The rebuild
+therefore carries the fetched rows forward when the
 source it rebuilt held them, and drops nothing but the subclass's own methods. A source whose
 query selects an annotation is served the same way: the row converter Django caches on the
 annotation's node at the fetch is a derived cache the rebuilt node recomputes, not state the
@@ -1538,7 +1540,9 @@ test that flag after visibility and delegate to the coordinate-free raw-list win
 synchronous executor that result is returned unchanged. Under the asynchronous executor a final
 queryset is wrapped in Decision 5's async-only completion adapter, including when arguments are
 omitted; that representation change is what keeps graphql-core's completion off the event-loop
-thread, so the async path is not byte-for-byte resolver parity.
+thread, so the async path is not byte-for-byte resolver parity. Decision 12's list-completion
+arm would adapt a bare queryset as well, but only while the `graphql_core` patch is installed,
+so the field adapts its own whatever `APPLY_UPSTREAM_PATCHES` says.
 `examples/fakeshop/test_query/test_list_field_api.py::test_branches_a_null_spelling_reproduces_the_legacy_reference_bytes`
 and
 `examples/fakeshop/test_query/test_list_field_api.py::test_branches_the_shipped_field_matches_the_legacy_reference`
@@ -1614,19 +1618,38 @@ graphql-core's `ExecutionContext.complete_list_value` materializes an `AsyncIter
 recursively completes the list, and returns the recursive completion awaitable without
 awaiting it. The workaround is
 `django_strawberry_framework/_graphql_core_patches.py::apply`, a delegating wrapper that awaits
-that residual value and otherwise preserves upstream behavior; it is separate from
+that residual value; it is separate from
 Strawberry's HTTP-view patch module and has no HTTP-view lifecycle coupling.
 `django_strawberry_framework/apps.py::DjangoStrawberryFrameworkConfig.ready` dispatches it
 beside the other three patch modules, and it self-gates on its own `APPLY_UPSTREAM_PATCHES`
 key, `"graphql_core"` (`django_strawberry_framework/conf.py #"UPSTREAM_PATCH_DEPENDENCIES = frozenset("`),
 so `APPLY_UPSTREAM_PATCHES = {"graphql_core": False}` disables only this dependency boundary.
 
-The retirement sentinel,
-`tests/test_graphql_core_patches.py::test_captured_upstream_still_returns_a_residual_awaitable`,
-calls the captured upstream method on the bug shape and asserts that awaiting it once still
-yields a residual awaitable. When upstream fixes the defect, that sentinel fails and the module
-can be removed without disturbing Strawberry body parsing. See the [rationale][rationale-d12]
-for the rejected shared-gate design.
+The same wrapper owns a second graphql-core behavior, the completion order Decision 5 names.
+Under the asynchronous executor
+(`django_strawberry_framework/utils/execution_mode.py::operation_is_async`, the bound operation
+mode rather than the ambient loop) it hands a Django `QuerySet` result to upstream wrapped in the
+async-only completion adapter, so a queryset any resolver returns to a list field - a plain
+`def` root's, a nested resolver's - is fetched through `QuerySet.__aiter__` off the event loop;
+the synchronous executor and every value that is not a `QuerySet` keep upstream completion.
+Completion iterates through `QuerySet.__aiter__`, which fetches through `_fetch_all` and never
+calls `__iter__`, so a project `QuerySet` subclass's `__iter__` override is not used on the
+asynchronous executor, exactly as on the list field's own async path. That
+is graphql-core 3.3's behavior (async iteration preferred whenever the asynchronous executor
+drives, which Strawberry turns off for its synchronous executor only), backported under the
+`graphql-core<3.3` pin. It moves the row fetch only: a resolver body still runs where the
+executor runs it, so an evaluating plain `def` resolver still raises on the loop. With
+`{"graphql_core": False}` both upstream behaviors return.
+
+Each arm has a retirement sentinel that calls the captured upstream method on its bug shape:
+`tests/test_graphql_core_patches.py::test_captured_upstream_still_returns_a_residual_awaitable`
+asserts that awaiting it once still yields a residual awaitable, and
+`tests/test_graphql_core_patches.py::test_captured_upstream_still_iterates_a_dual_protocol_list_synchronously`
+asserts that, under the asynchronous executor, it still completes a value offering both
+protocols through `__iter__`. When upstream fixes a behavior, its sentinel fails and that arm
+can be removed without disturbing the other or Strawberry body parsing. See the
+[rationale][rationale-d12] for the rejected shared-gate design and for why the arm lives here
+rather than in the optimizer.
 
 ### Decision 13 — configuration authority is schema state; everything per-request is operation state
 
@@ -2612,6 +2635,26 @@ adapter inspection pins the optimized inner queryset's SQL/low/high marks withou
 [thread-local async DB capture][glossary-async-sql-capture-boundary] observes worker-thread
 SQL.
 
+Decision 12's list-completion arm is proven where no list field is involved. Over
+`/graphql-async/` the shipped schema's plain `def` roots answer the sync view's rows in the sync
+view's statements, the async request first so it is the one that builds the plan:
+`examples/fakeshop/test_query/test_scalars_api.py::test_async_plain_scalar_root_answers_as_the_sync_view`
+(a `QuerySet` root bare, filtered and ordered, and a bare `Manager` root),
+`examples/fakeshop/test_query/test_kanban_api.py::test_async_all_cards_answers_as_the_sync_view`,
+and the loan hook grids
+`examples/fakeshop/test_query/test_library_api.py::test_async_library_loan_get_queryset_calls_a_project_queryset_method`
+(the `allLibraryLoans` root list included) and
+`examples/fakeshop/test_query/test_library_api.py::test_async_library_loan_get_queryset_returning_an_annotation_a_clone_fetched_is_served`,
+whose plan under `allLibraryBooks` runs a database-reading hook that
+`django_strawberry_framework/optimizer/extension.py::DjangoOptimizerExtension.resolve` builds
+off the loop.
+`examples/fakeshop/test_query/test_library_api.py::test_async_library_root_evaluating_in_its_body_is_refused_on_the_loop`
+pins the boundary Decision 5 states. The package tier pins what no request isolates: both
+retirement sentinels, the arm's `QuerySet`-only scope
+(`tests/test_graphql_core_patches.py::test_async_completion_adapts_only_a_queryset`), and a
+plain root's plan hop happening only when a plan is built
+(`tests/optimizer/test_extension.py::test_resolve_hops_a_sync_root_under_the_async_executor_only_to_build_a_plan`).
+
 ### Package tier
 
 [`tests/test_list_field.py`][test-list-field] covers construction and exact mechanics a real
@@ -2964,8 +3007,10 @@ Error rows assert the `extensions` fields the rejection carries (`code`, `reason
   `DISTINCT`. The card's three entries - [`ListArgumentError`][glossary-listargumenterror], the
   [list offset order precondition][glossary-list-offset-order-precondition], and the
   [async queryset completion adapter][glossary-async-queryset-completion-adapter] - read
-  shipped (`0.0.15`). The adapter entry scopes its safety claim to framework-owned final
-  queryset completion rather than to async safety generally. The offset-precondition entry
+  shipped (`0.0.15`). The adapter entry scopes its safety claim to completing a lazy queryset
+  (the list field's own and, through Decision 12's list-completion arm, one a resolver returns)
+  rather than to async safety generally, and states that an evaluating resolver is not made
+  safe. The offset-precondition entry
   states that a published `offset` is a runtime precondition rather than a per-field
   capability claim.
 - [`docs/README.md`][docs-readme] - the `DjangoListField` section states the argument surface,

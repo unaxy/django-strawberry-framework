@@ -6424,9 +6424,10 @@ async def test_generic_connection_planning_does_no_sync_db_io_under_async() -> N
     runs the real walker planner inside a running loop (an ``async def`` test)
     with the cache cleared: the planner must complete and attach a windowed
     ``Prefetch`` without touching the database. A full async ``/graphql``
-    execution cannot isolate this - iterating the parent list on the loop thread
-    needs ``DJANGO_ALLOW_ASYNC_UNSAFE``, which would also mask the plan-time
-    lookup - so the planner is driven directly here (package tier).
+    execution cannot observe this: under the asynchronous executor the optimizer
+    builds an unbuilt plan in a ``sync_to_async`` worker, where a plan-time lookup
+    would succeed rather than raise, so the planner is driven directly here
+    (package tier).
     """
     registry.clear()
     try:

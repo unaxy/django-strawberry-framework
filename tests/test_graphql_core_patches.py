@@ -1,4 +1,4 @@
-"""Install-lifecycle tests for the graphql-core ``complete_list_value`` residual-awaitable patch.
+"""Install-lifecycle tests for the graphql-core ``complete_list_value`` patch.
 
 System-under-test: :mod:`django_strawberry_framework._graphql_core_patches`,
 applied at app-load by
@@ -12,9 +12,12 @@ What stays here, and why a live request cannot express it:
   (``graphql_core`` vs ``strawberry``) toggles. A GraphQL document cannot show
   that ``apply()`` was the caller or that a missing capture refused to install.
 - The captured upstream method still yielding a residual awaitable after one
-  ``await``: that is the retirement sentinel (spec-050 Decision 12). With the
-  patch installed a live request sees completed list data, never the residual
-  coroutine.
+  ``await``, and still iterating a value that offers both iteration protocols
+  synchronously: those are the retirement sentinels (spec-050 Decision 12). With
+  the patch installed a live request sees completed list data, never the residual
+  coroutine, and an async request's plain-resolver queryset completes off the loop.
+- The asynchronous executor's arm leaving a non-queryset that offers both protocols
+  to upstream: no fakeshop resolver returns one.
 - ``_captured_upstream_method(None, ...)`` returning ``None`` rather than
   raising: a graphql-core build that omits ``ExecutionContext`` never reaches a
   schema.
@@ -27,11 +30,12 @@ fields are awaitable).
 
 import asyncio
 import inspect
-from collections.abc import AsyncIterator, Awaitable
+from collections.abc import AsyncIterator, Awaitable, Iterator
 from unittest import mock
 
 import pytest
 import pytest_django
+import strawberry
 from graphql.execution.execute import ExecutionContext
 
 from django_strawberry_framework import _graphql_core_patches as patches
@@ -101,6 +105,70 @@ def test_captured_upstream_still_returns_a_residual_awaitable() -> None:
         residual.close()
 
     asyncio.run(inspect_residual())
+
+
+class _BothProtocols:
+    """A non-queryset list value offering both iteration protocols, each naming itself."""
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(["sync"])
+
+    def __aiter__(self) -> AsyncIterator[str]:
+        async def gen() -> AsyncIterator[str]:
+            yield "async"
+
+        return gen()
+
+
+def _both_protocols_schema() -> strawberry.Schema:
+    """A schema whose plain ``def`` root hands a list field a ``_BothProtocols``."""
+
+    def resolve_f() -> _BothProtocols:
+        return _BothProtocols()
+
+    @strawberry.type
+    class Query:
+        f: _BothProtocols = strawberry.field(resolver=resolve_f, graphql_type=list[str])
+
+    return strawberry.Schema(query=Query)
+
+
+def test_captured_upstream_still_iterates_a_dual_protocol_list_synchronously(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The captured upstream method still prefers ``__iter__`` to ``__aiter__``.
+
+    A Django ``QuerySet`` offers both protocols, so this preference is what puts its
+    ORM iteration on the event-loop thread under the asynchronous executor.
+    """
+    monkeypatch.setattr(
+        ExecutionContext,
+        "complete_list_value",
+        patches._original_complete_list_value,
+    )
+    result = asyncio.run(_both_protocols_schema().execute("{ f }"))
+    assert result.errors is None, result.errors
+    assert result.data == {"f": ["sync"]}
+
+
+def test_async_completion_adapts_only_a_queryset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The asynchronous executor's arm leaves a non-queryset offering both protocols to upstream.
+
+    The arm wraps a Django ``QuerySet`` only, so any other value completes through
+    whichever protocol the captured upstream method prefers: the installed patch and
+    the captured method answer the same data.
+    """
+    assert patches._patch_is_installed() is True
+    patched = asyncio.run(_both_protocols_schema().execute("{ f }"))
+    monkeypatch.setattr(
+        ExecutionContext,
+        "complete_list_value",
+        patches._original_complete_list_value,
+    )
+    upstream = asyncio.run(_both_protocols_schema().execute("{ f }"))
+    assert patched.errors is None, patched.errors
+    assert upstream.errors is None, upstream.errors
+    assert patched.data == upstream.data
 
 
 def test_apply_fails_loudly_when_upstream_shape_changes() -> None:

@@ -20,18 +20,15 @@ inside the schema factory so the autouse registry/connection-cache reset keeps
 each test independent.
 """
 
-import os
-import traceback
 from collections.abc import Iterator, Mapping, Sequence
 
 import pytest
 import strawberry
+from asgiref.sync import sync_to_async
 from django.contrib.contenttypes.models import ContentType
-from django.core.exceptions import SynchronousOnlyOperation
 from django.db import connection as db_connection
 from django.db.models import QuerySet
 from django.test.utils import CaptureQueriesContext
-from graphql import GraphQLError
 from graphql_client import json_at, json_list, json_object
 from strawberry import relay
 
@@ -254,71 +251,31 @@ def test_lateral_strategy_generic_connection_degrades_to_windowed() -> None:
     assert [json_at(edge, "node", "tag") for edge in json_list(conn, "edges")] == ["t0", "t1"]
 
 
-_OPTIMIZER_PATH_MARKER = os.sep + "optimizer" + os.sep
-
-
-def _sync_only_optimizer_frames(error: GraphQLError) -> tuple[BaseException, list[str]]:
-    """Return ``(original_error, optimizer_frame_filenames)`` for a GraphQL error.
-
-    The GraphQL layer wraps the raised exception; ``original_error`` is the real
-    ``SynchronousOnlyOperation``. Its traceback filenames tell WHERE the sync
-    boundary was crossed - any frame under ``.../optimizer/...`` means the
-    optimizer's plan build (not Django's own row fetch) performed the ORM work.
-    """
-    original = getattr(error, "original_error", None) or error
-    frames = traceback.extract_tb(original.__traceback__)
-    optimizer_frames = [f.filename for f in frames if _OPTIMIZER_PATH_MARKER in f.filename]
-    return original, optimizer_frames
-
-
 @pytest.mark.django_db(transaction=True)
-async def test_generic_connection_planning_does_no_sync_orm_work_under_async() -> None:
-    """Async ``schema.execute`` of a generic connection plans without touching the DB.
+async def test_generic_connection_serves_a_plain_root_under_async() -> None:
+    """Async ``schema.execute`` of a generic connection under a plain ``def`` root completes.
 
-    Runs the optimizer through the REAL async GraphQL execution path
-    (``await schema.execute``) on the event-loop thread with a cold
-    ``ContentType`` cache. Planning of the generic ``tagsConnection`` happens
-    inside ``DjangoOptimizerExtension._optimize`` on that loop thread; the
-    alias-late design resolves the content-type morph predicate at fetch time
-    (Django's ``GenericRelatedObjectManager``), so planning performs ZERO
-    synchronous ORM work and never raises ``SynchronousOnlyOperation``.
-
-    A full async ``/graphql`` cannot complete here without
-    ``DJANGO_ALLOW_ASYNC_UNSAFE``: iterating the parent ``branches`` list on the
-    loop thread is normal Django async behavior that raises
-    ``SynchronousOnlyOperation`` at row-fetch time, and that flag would ALSO mask
-    the very plan-time DB lookup under test. So the assertion stays at the level
-    that genuinely protects the boundary: the expected async-boundary error must
-    originate from Django's own queryset fetch (``QuerySet._fetch_all`` ->
-    ``execute_sql``), NOT from any optimizer plan-build frame. If the removed
-    plan-time ``ContentType`` lookup were reintroduced, the
-    ``SynchronousOnlyOperation`` would instead be raised from inside the walker /
-    ``nested_planner`` on the loop thread and its traceback would carry an
-    ``.../optimizer/...`` frame - which this test forbids. The package-tier
-    sibling ``tests/optimizer/test_walker.py::``
-    ``test_generic_connection_planning_does_no_sync_db_io_under_async`` drives the
-    planner directly; this is its live acceptance twin.
+    The root resolver returns an unevaluated queryset on the event-loop thread; the
+    optimizer builds the windowed ``tagsConnection`` plan in a worker thread (the
+    plan is not cached yet, so it hops) and the list completes the planned queryset
+    off the loop, with a cold ``ContentType`` cache. That planning itself performs no
+    ORM work is pinned on the walker:
+    ``tests/optimizer/test_walker.py::test_generic_connection_planning_does_no_sync_db_io_under_async``.
     """
+    branch = await sync_to_async(Branch.objects.create)(name="Central")
+    for index in range(3):
+        await sync_to_async(TaggedItem.objects.create)(content_object=branch, tag=f"t{index}")
     schema = _build_schema()
-    # Cold cache: a plan-time ``ContentType.objects.get_for_model`` would have to
-    # hit the DB (sync I/O) during the loop-thread plan build.
     ContentType.objects.clear_cache()
 
     result = await schema.execute(
         "{ branches { tagsConnection(first: 2) { edges { node { tag } } } } }",
     )
 
-    # The only permitted sync-boundary crossing is Django's parent-row fetch,
-    # which raises ``SynchronousOnlyOperation`` at the top-level ``branches``
-    # field (expected flag-free async behavior, not our bug).
-    assert result.errors, "expected the async-boundary error from the parent-row fetch"
-    assert result.errors[0].path == ["branches"]
-    original, optimizer_frames = _sync_only_optimizer_frames(result.errors[0])
-    assert isinstance(original, SynchronousOnlyOperation), original
-    # Planning did no synchronous ORM work: the boundary crossing carries no
-    # optimizer plan-build frame. This is the assertion that bites if the
-    # plan-time content-type lookup returns.
-    assert optimizer_frames == [], optimizer_frames
+    assert result.errors is None, result.errors
+    assert result.data is not None
+    conn = json_object(result.data, "branches", 0, "tagsConnection")
+    assert [json_at(edge, "node", "tag") for edge in json_list(conn, "edges")] == ["t0", "t1"]
 
 
 def _build_proxy_schema() -> strawberry.Schema:

@@ -850,11 +850,16 @@ def is_async_only_iterable(value: object) -> TypeGuard[AsyncIterable[object]]:
 
 
 class _AsyncQuerySetRows:
-    """Async-only completion adapter for a final sliced QuerySet under async execution.
+    """Async-only completion adapter for a QuerySet a list field completes under async execution.
 
     Exposes ONLY ``__aiter__`` (delegating to ``self._queryset.__aiter__()``)
     and deliberately omits ``__iter__`` so graphql-core cannot select synchronous
-    ORM iteration in an event-loop thread.
+    ORM iteration in an event-loop thread. Two owners wrap: ``DjangoListField``'s
+    async pipeline around its final sliced queryset, and the graphql-core list
+    completion patch (``_graphql_core_patches.py::_patched_complete_list_value``)
+    around any QuerySet a resolver hands a list field under the asynchronous
+    executor. It changes where the rows are fetched, never what a resolver body
+    does on the loop.
     """
 
     __slots__: tuple[str, ...] = ("_queryset",)
@@ -935,7 +940,8 @@ async def run_in_one_sync_boundary(
     same worker) and once per optimizer plan build
     (``DjangoOptimizerExtension._optimize_async``,
     ``apply_connection_optimization_async``), so one read resolution may enter it
-    more than once.
+    more than once; the optimizer's hop serves a plain ``def`` root under the
+    asynchronous executor too (``DjangoOptimizerExtension.resolve``).
     A ``sync_to_async`` worker is itself a sync context, so the standing
     ``SyncMisuseError`` guards still fire inside ``fn``.
 

@@ -196,7 +196,7 @@ django_strawberry_framework/    # Public API of django-strawberry-framework, a D
 ├── _boundary_ordering.py         # The marks and the method name the request-body boundary's ordering rests on.
 ├── _cross_web_patches.py         # Defensive patches for upstream ``cross_web`` bugs, applied at app load.
 ├── _django_patches.py            # Defensive patches for upstream Django bugs, applied at app load.
-├── _graphql_core_patches.py      # Defensive patch for graphql-core async-iterable list completion.
+├── _graphql_core_patches.py      # Defensive patches for graphql-core list completion.
 ├── _logger.py                    # The package logger, in a leaf module so the package ``__init__`` imports it like any name.
 ├── _multipart.py                 # GraphQL multipart request wire vocabulary, owned once for both transports.
 ├── _request_body.py              # The one place the package touches Django's private request-body internals.
@@ -334,7 +334,7 @@ django_strawberry_framework/    # Public API of django-strawberry-framework, a D
 ├── _boundary_ordering.py         # The marks and the method name the request-body boundary's ordering rests on.
 ├── _cross_web_patches.py         # Defensive patches for upstream ``cross_web`` bugs, applied at app load.
 ├── _django_patches.py            # Defensive patches for upstream Django bugs, applied at app load.
-├── _graphql_core_patches.py      # Defensive patch for graphql-core async-iterable list completion.
+├── _graphql_core_patches.py      # Defensive patches for graphql-core list completion.
 ├── _logger.py                    # The package logger, in a leaf module so the package ``__init__`` imports it like any name.
 ├── _multipart.py                 # GraphQL multipart request wire vocabulary, owned once for both transports.
 ├── _request_body.py              # The one place the package touches Django's private request-body internals.
@@ -519,7 +519,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_exceptions.py            # Exception hierarchy: inheritance, GraphQL translation, typed-message renders.
 ├── test_execution.py             # Smoke tests proving the shared ``tests/_execution.py`` builder hands out what it promises.
 ├── test_export_dry_review.py     # Repo-tooling tests for the DRY review plan, audit, and check CLI.
-├── test_graphql_core_patches.py  # Install-lifecycle tests for the graphql-core ``complete_list_value`` residual-awaitable patch.
+├── test_graphql_core_patches.py  # Install-lifecycle tests for the graphql-core ``complete_list_value`` patch.
 ├── test_info.py                  # Smoke tests proving the shared ``tests/_info.py`` builders hand out what they promise.
 ├── test_keyset.py                # Package-side keyset-cursor tests: codec, bounds, window shapes, lateral seek.
 ├── test_keyset_connection.py     # Package-side keyset connection tests for cursor state, window fallbacks and planner helpers.
@@ -813,7 +813,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_exceptions.py            # Exception hierarchy: inheritance, GraphQL translation, typed-message renders.
 ├── test_execution.py             # Smoke tests proving the shared ``tests/_execution.py`` builder hands out what it promises.
 ├── test_export_dry_review.py     # Repo-tooling tests for the DRY review plan, audit, and check CLI.
-├── test_graphql_core_patches.py  # Install-lifecycle tests for the graphql-core ``complete_list_value`` residual-awaitable patch.
+├── test_graphql_core_patches.py  # Install-lifecycle tests for the graphql-core ``complete_list_value`` patch.
 ├── test_info.py                  # Smoke tests proving the shared ``tests/_info.py`` builders hand out what they promise.
 ├── test_keyset.py                # Package-side keyset-cursor tests: codec, bounds, window shapes, lateral seek.
 ├── test_keyset_connection.py     # Package-side keyset connection tests for cursor state, window fallbacks and planner helpers.
