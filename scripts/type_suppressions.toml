@@ -280,7 +280,6 @@
 "examples/fakeshop/apps/library/schema.py::PatronProfileType.address_2" = { reportAny = 1 }
 "examples/fakeshop/apps/library/schema.py::PatronProfileType.postal_code" = { reportAny = 1 }
 "examples/fakeshop/apps/library/serializers.py::FieldMap" = { reportExplicitAny = 1 }
-"examples/fakeshop/apps/library/serializers.py::ModelSerializerBase.Meta" = { reportIncompatibleVariableOverride = 1 }
 "examples/fakeshop/apps/library/serializers.py::NoteShelfSerializer.__init__" = { reportArgumentType = 1 }
 "examples/fakeshop/apps/library/serializers.py::ShelfMetadataSerializer.label" = { reportAssignmentType = 1 }
 "examples/fakeshop/apps/library/serializers.py::TargetedShelfSerializer.__init__" = { reportArgumentType = 1 }
@@ -300,6 +299,7 @@
 "examples/fakeshop/apps/products/serializers.py::RenamedRelationItemSerializer.Meta" = { reportIncompatibleVariableOverride = 1 }
 "examples/fakeshop/apps/products/services.py::discover_providers" = { reportAny = 1 }
 "examples/fakeshop/apps/scalars/schema.py::OverriddenScalarSpecimenType.note" = { reportExplicitAny = 1 }
+"examples/fakeshop/drf_serializers.py::ModelSerializerBase.Meta" = { reportIncompatibleVariableOverride = 1 }
 "examples/fakeshop/test_query/test_connection_pagination_api.py::_TenantScopedGenreQuerySet.query" = { reportIncompatibleVariableOverride = 1 }
 "examples/fakeshop/test_query/test_debug_extension_api.py::install_probe_schema.Query.broken_non_null" = { reportReturnType = 1 }
 "examples/fakeshop/test_query/test_debug_toolbar_api.py::_debug_toolbar_cache_state" = { reportUnknownMemberType = 2 }

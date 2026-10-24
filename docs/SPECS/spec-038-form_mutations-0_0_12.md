@@ -1642,7 +1642,15 @@ write flavor rides.
    default) is written, as is a `disabled` field's initial. A `null=True` column stores
    the clear, an M2M empty value clears the relation, a file is bound through `files=`
    (an explicit `null` on an update is the clear sentinel `False`), and a form-required field fails
-   `is_valid()` with its own `required` error first, so none of them is checked. **The
+   `is_valid()` with its own `required` error first, so none of them is checked. **Before
+   the save, the `ModelForm` also refuses a datetime or time the database cannot store**
+   ([`forms/resolvers.py`][forms-resolvers]`::_unstorable_temporal_errors`): Django's
+   `DateTimeField` / `TimeField` form fields range-check nothing past what Python parses,
+   so every concrete column the cleaned data names is read from `form.instance` (the value
+   the save writes) and held to `django_strawberry_framework/utils/errors.py::unstorable_temporal`
+   on the pinned alias, the rule the model flavor's decode applies; a refused column is the
+   form field's `invalid` error `"Enter a value the database can represent."` and nothing
+   is written. **The
    `ModelForm` save also maps the one other failure a valid `ModelForm` reaches on its own**
    ([`forms/resolvers.py`][forms-resolvers]`::_modelform_save_or_field_errors`): over
    a `blank=True, null=False` column the form field is optional, so an explicit `null`

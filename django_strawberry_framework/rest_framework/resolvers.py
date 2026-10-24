@@ -77,7 +77,10 @@ The serializer-specific invariants this module owns:
   **recursive** ``serializer_errors_to_field_errors`` flattener (dotted path
   ``items.0.name``; DRF's ``non_field_errors`` / ``NON_FIELD_ERRORS_KEY`` bucket ->
   the ``"__all__"`` sentinel at every level - NOT the one-level ``036``
-  ``validation_error_to_field_errors``), and returns a null-object payload.
+  ``validation_error_to_field_errors``), and returns a null-object payload. A
+  validated datetime or time the pinned alias cannot store (or, on PostgreSQL, read
+  back) is the field's ``invalid`` error through the same flattener before any write
+  (``_unstorable_temporal_errors``); DRF's own ``overflow`` answer comes first.
 
 - **Write via ``serializer.save()`` inside a nested-``atomic`` savepoint and the
   pinned-alias write phase, in a value-preserving closure** (the closure captures
@@ -145,6 +148,7 @@ from django.db import transaction
 from django.db.models import QuerySet
 from django.db.models.signals import post_save, pre_save
 from rest_framework import serializers
+from rest_framework.exceptions import ErrorDetail
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.settings import api_settings
 
@@ -173,6 +177,7 @@ from django_strawberry_framework.utils.errors import (
     FIELD_ERROR_CODE_INVALID,
     FIELD_ERROR_CODE_TRUNCATED,
     NON_FIELD_ERROR_KEY,
+    UNBINDABLE_TEMPORAL_MESSAGE,
     FieldError,
     build_error_key_map,
     empty_validation_error,
@@ -180,6 +185,7 @@ from django_strawberry_framework.utils.errors import (
     join_error_path,
     rekey_error_segment,
     save_time_error_key_map,
+    unstorable_temporal,
 )
 from django_strawberry_framework.utils.inputs import optional_input_field
 from django_strawberry_framework.utils.permissions import request_from_info
@@ -193,6 +199,7 @@ from django_strawberry_framework.utils.relations import (
     is_forward_many_to_many,
     is_model_class,
     is_single_column_foreign_key,
+    written_model_field,
 )
 from django_strawberry_framework.utils.write_transaction import (
     assert_no_target_drift,
@@ -201,6 +208,7 @@ from django_strawberry_framework.utils.write_transaction import (
     conflict_error,
     make_cross_alias_save_guard,
     pin_write_queryset,
+    pinned_write_alias,
     pipeline_write_phase,
     pks_match,
     require_write_pipeline,
@@ -2664,6 +2672,40 @@ def _serializer_write_step(
         )
 
 
+def _unstorable_temporal_errors(
+    serializer: DRFSerializer,
+    model: type[models.Model],
+) -> dict[str, list[ErrorDetail]]:
+    """Map each field whose validated datetime or time the pinned alias cannot store to its error.
+
+    DRF's ``DateTimeField`` answers its own ``overflow`` error for an aware value it cannot
+    project onto the current time zone, and that answer stands (it runs first, inside
+    ``is_valid()``); what it lets through can still be a value the database refuses: an
+    aware time (SQLite, MySQL and Oracle refuse it at ``save()``), an aware datetime whose
+    projection onto the connection's time zone leaves years 1..9999 though the current
+    zone's does not, or one PostgreSQL stores but cannot load back at the re-fetch. Each
+    writable bound field whose ``source`` is a top-level ``validated_data`` key naming a
+    concrete column of ``model`` (``utils/relations.py::written_model_field``) is held to
+    ``utils/errors.py::unstorable_temporal`` on the pinned alias; a refused one answers
+    the ``invalid`` ``UNBINDABLE_TEMPORAL_MESSAGE`` ``ErrorDetail`` under its field name,
+    the shape ``serializer.errors`` carries, so the flattener keys it to the input the
+    client sent. A nested serializer's values are written by the consumer's own
+    ``create()`` / ``update()`` and are not read here.
+    """
+    validated_data = validated_data_of(serializer)
+    errors: dict[str, list[ErrorDetail]] = {}
+    for name, field in bound_fields(serializer).items():
+        source = field.source or name
+        if field.read_only or not is_mapping(validated_data) or source not in validated_data:
+            continue
+        column = written_model_field(model, source)
+        if unstorable_temporal(column, validated_data[source], pinned_write_alias):
+            errors[name] = [
+                ErrorDetail(UNBINDABLE_TEMPORAL_MESSAGE, code=FIELD_ERROR_CODE_INVALID),
+            ]
+    return errors
+
+
 def _guarded_serializer_write(
     mutation_cls: type[SerializerMutation],
     info: Info[object, object],
@@ -2750,6 +2792,19 @@ def _guarded_serializer_write(
     # nested paths alike): a validator that swapped a visible row for a hidden one
     # after the scoped field lookup is a loud ``ConfigurationError``, never a write.
     relation_keys = _assert_relation_intent(mutation_cls, serializer, ledger)
+    # A datetime or time DRF validated but the pinned alias cannot store (or, on
+    # PostgreSQL, read back) is the field's ``invalid`` error before any write.
+    temporal_errors = _unstorable_temporal_errors(
+        serializer,
+        backing_model_of(mutation_cls._mutation_meta),
+    )
+    if temporal_errors:
+        return StepFailure(
+            serializer_errors_to_field_errors(
+                temporal_errors,
+                build_error_key_map(mutation_cls._input_field_specs),
+            ),
+        )
 
     saved: object = None
 

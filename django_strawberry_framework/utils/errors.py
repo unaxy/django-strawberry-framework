@@ -27,7 +27,12 @@ write flavors):
 - ``unbindable_temporal`` + ``UNBINDABLE_TEMPORAL_MESSAGE`` - the one rule for a
   temporal value (a datetime, a time, a year bound) the database a query runs on
   cannot bind, asked of that connection's own operations, and the message it
-  answers; the filter form validation applies it;
+  answers; the filter form validation applies it, and ``unstorable_temporal``
+  builds on it for writes;
+- ``unstorable_temporal`` - its write-side answer: a datetime or time a column
+  cannot store on the database a write runs on, or (PostgreSQL) can store but not
+  read back, applied by every write flavor before the save
+  (``utils/write_values.py::unstorable_temporal_error`` on the model flavor);
 - ``null_field_error`` / ``empty_validation_error`` - the two shared leaves
   for an explicit null on a non-nullable field and a validation failure
   carrying no details, each one message + code pair;
@@ -45,6 +50,7 @@ flavor depends downward on this module.
 from __future__ import annotations
 
 import datetime
+import zoneinfo
 from decimal import Decimal
 from typing import TYPE_CHECKING, NamedTuple, cast
 
@@ -52,12 +58,14 @@ import strawberry
 from django.core.exceptions import NON_FIELD_ERRORS, ValidationError
 from django.core.validators import ProhibitNullCharactersValidator
 from django.db import connections, models
+from django.utils import timezone
 from django.utils.functional import Promise
 
 from . import truth
 from ._narrowing import (
     dict_items,
     is_char_wise,
+    is_class,
     is_dict,
     is_iterable,
     is_list,
@@ -65,6 +73,7 @@ from ._narrowing import (
     list_iter,
     read_attr,
 )
+from .imports import import_attr_if_importable
 from .lazy import unwrap_lazy_object
 from .relations import written_model_field
 
@@ -110,6 +119,7 @@ __all__ = [
     "relation_field_error",
     "save_time_error_key_map",
     "unbindable_temporal",
+    "unstorable_temporal",
     "unstorable_text",
     "validation_error_to_field_errors",
 ]
@@ -829,3 +839,71 @@ def _year_bounds(
         _ = operations.year_lookup_bounds_for_datetime_field(year, iso_year=iso_year)
     else:
         _ = operations.year_lookup_bounds_for_date_field(year, iso_year=iso_year)
+
+
+#: ``django.contrib.postgres.fields.ArrayField``, soft-imported the way
+#: ``types/converters.py`` resolves it (``None`` without a PostgreSQL driver, where no
+#: column can be one); ``unstorable_temporal`` holds each element to its ``base_field``.
+_ARRAY_FIELD_CLS = import_attr_if_importable("django.contrib.postgres.fields", "ArrayField")
+
+
+def unstorable_temporal(column: object, value: object, using: Callable[[], str]) -> bool:
+    """Return whether the database ``using()`` names cannot store ``value`` in ``column``.
+
+    The write-side answer to ``unbindable_temporal``: ``value`` is what a write flavor
+    is about to store in ``column`` (after its own parse and validation, a naive
+    datetime already made aware under ``USE_TZ``). Two kinds of datetime or time are
+    refused:
+
+    - one the backend's own adapter cannot bind, answered by ``unbindable_temporal``
+      for a plain write (SQLite, MySQL and Oracle: an aware datetime whose projection
+      onto the connection's time zone leaves years 1..9999, any aware datetime when
+      ``USE_TZ`` is false, an aware time); the save would raise its
+      ``OverflowError`` / ``ValueError``.
+    - an aware datetime on a backend that stores the instant itself
+      (``features.supports_timezones``: PostgreSQL), whose wall clock in the session
+      time zone (``connection.timezone_name``: ``UTC`` under ``USE_TZ``, else
+      ``TIME_ZONE``) leaves years 1..9999. PostgreSQL stores it, but the driver cannot
+      load it back as a Python datetime, so the write pipeline's re-fetch of the saved
+      row would raise. The zone's offset is read at the value's own wall clock, so no
+      intermediate UTC value can overflow where the session's wall clock does not.
+
+    An ``ArrayField`` holds every element (at any nesting depth) to the same rule
+    against its ``base_field``; a ``None`` element, like a ``None`` value, stores.
+    A ``date`` always stores. Any other column answers ``False`` without calling
+    ``using`` or touching ``django.db.connections``.
+    """
+    values: list[object] = [value]
+    while is_class(_ARRAY_FIELD_CLS) and truth.is_instance(column, _ARRAY_FIELD_CLS):
+        column = read_attr(column, "base_field")
+        values = [element for item in values if is_list_or_tuple(item) for element in item]
+    if not issubclass(truth.class_of(column), (models.DateTimeField, models.TimeField)):
+        return False
+    alias = using()
+    if unbindable_temporal(column, (), values, lambda: alias):
+        return True
+    connection = connections[alias]
+    if not isinstance(column, models.DateTimeField) or not connection.features.supports_timezones:
+        return False
+    zone = zoneinfo.ZoneInfo(connection.timezone_name)
+    return any(
+        isinstance(element, datetime.datetime)
+        and timezone.is_aware(element)
+        and _session_wall_clock_overflows(element, zone)
+        for element in values
+    )
+
+
+def _session_wall_clock_overflows(value: datetime.datetime, zone: datetime.tzinfo) -> bool:
+    """Whether aware ``value``'s wall clock in ``zone`` leaves years 1..9999.
+
+    The shift is the difference between two aware datetimes sharing ``value``'s wall
+    clock (``zone``'s offset minus ``value``'s), computed as a ``timedelta``, so only the
+    final wall clock can overflow.
+    """
+    wall = value.replace(tzinfo=None)
+    try:
+        _ = wall + (value - wall.replace(tzinfo=zone))
+    except OverflowError:
+        return True
+    return False

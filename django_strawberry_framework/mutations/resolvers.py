@@ -175,6 +175,7 @@ from django_strawberry_framework.utils.write_transaction import (
     not_updated_exceptions,
     open_write_pipeline,
     pin_write_queryset,
+    pinned_write_alias,
     pipeline_alias_guard,
     pipeline_write_phase,
     reject_substituted_row,
@@ -189,6 +190,7 @@ from django_strawberry_framework.utils.write_values import (
     decode_visible_relation_ids,
     decoded_into,
     relation_into,
+    unstorable_temporal_error,
     unstorable_text_error,
 )
 
@@ -654,7 +656,16 @@ def _decode_relations(
         decoded, text_error = decode_scalar_leaf(graphql_name, value)
         if text_error is not None:
             return None, text_error
-        return _make_aware_if_naive(decoded), None
+        stored = _make_aware_if_naive(decoded)
+        temporal_error = unstorable_temporal_error(
+            graphql_name,
+            model_fields[spec.input_attr],
+            stored,
+            pinned_write_alias,
+        )
+        if temporal_error is not None:
+            return None, temporal_error
+        return stored, None
 
     def relation_handler(
         dest: dict[str, object],

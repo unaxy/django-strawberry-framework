@@ -1990,7 +1990,7 @@ The pipeline steps:
    `api_settings.NON_FIELD_ERRORS_KEY` bucket → the `"__all__"` sentinel `036` defines)
    and returns a null-object payload. `serializer.errors` is **not** the flat
    `field → [messages]` dict the `036` `validation_error_to_field_errors` handles — the
-   flattener is spelled out below. Two guards bracket the validation:
+   flattener is spelled out below. Three guards bracket the validation:
    - **A relation-intent ledger.** `_instrument_relation_intent` wraps every (top-level
      and nested) relation field's `run_validation()` after the queryset scoping and
      before `is_valid()`, recording the exact resolved objects — one entry per `many=True`
@@ -2002,6 +2002,23 @@ The pipeline steps:
      pairwise identity, so duplicate and explicit-empty-list set semantics pass through),
      and nested paths alike. A validator may reject a supplied relation but never pop,
      substitute, or inject one.
+   - **A temporal storability check.** After the relation-intent proof,
+     `_unstorable_temporal_errors` holds each writable bound field whose `source` is a
+     top-level `validated_data` key naming a concrete column
+     (`utils/relations.py::written_model_field`) to
+     `django_strawberry_framework/utils/errors.py::unstorable_temporal` on the pinned
+     alias, the rule the model flavor's decode applies. DRF's own `overflow` answer for an
+     aware datetime it cannot project onto the current time zone comes first, inside
+     `is_valid()`; what it lets through (an aware time, which SQLite, MySQL and Oracle
+     refuse; an aware datetime the connection's own `TIME_ZONE` projects out of years
+     1..9999; one PostgreSQL stores but cannot load back) is the field's `invalid`
+     `ErrorDetail` `"Enter a value the database can represent."`, flattened like any
+     `serializer.errors` entry, with nothing written. A nested serializer's values are
+     written by the consumer's `create()` / `update()` and are not read. What DRF itself
+     cannot convert never reaches the check: a naive datetime that leaves years 1..9999
+     once made aware under a non-UTC `TIME_ZONE`, and an aware datetime whose UTC
+     projection leaves them under `USE_TZ = False`, raise a raw `OverflowError` inside
+     `is_valid()` and stay a masked error.
    - **Validator queryset pinning.** `_pin_validator_querysets` walks the serializer's
      validators recursively — per instance, on a copy — and pins each one's queryset to
      the operation's write alias, so a `UniqueTogetherValidator` (or any author validator)
@@ -3739,7 +3756,8 @@ populates it: the DRF flattener passes each leaf `ErrorDetail.code`
 (`rest_framework/resolvers.py::_error_detail_codes`), the Django flat mapper passes each
 `ValidationError.code` (read off `error.error_list`), and framework-generated errors pass a
 code from the `utils/errors.py` `FIELD_ERROR_CODE_*` vocabulary (`invalid` for a bad relation
-id / bad lookup id / text holding a lone surrogate, `null` for an explicit null, `not_found`
+id / bad lookup id / text holding a lone surrogate / a datetime or time the database cannot
+store, `null` for an explicit null, `not_found`
 for a locate miss, `constraint` for the `IntegrityError` fallback, `protected` for a protected delete,
 `conflict` for a located row that vanished before the write (a forced update matching no
 row, the serializer's witnessed re-INSERT, a failed delete, a decode or validation failure
