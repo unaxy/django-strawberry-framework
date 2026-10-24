@@ -15,7 +15,7 @@ delivers a non-list container to ``GlobalIDMultipleChoiceFilter``.
 from __future__ import annotations
 
 import copy
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Generator, Iterable, Iterator
 from decimal import Decimal
 from functools import partial
 from types import SimpleNamespace
@@ -27,6 +27,8 @@ import strawberry
 from apps.library import models
 from apps.scalars import models as scalar_models
 from django.core.exceptions import ValidationError
+from django.core.validators import MinValueValidator
+from django.db import connection as db_connection
 from django.db import models as db_models
 from django.db.models import Model, QuerySet
 from django.db.models.expressions import Combinable
@@ -541,6 +543,74 @@ def test_list_filter_passes_through_none() -> None:
     sentinel = _RecordingQs()
     f = ListFilter(field_name="ids")
     assert f.filter(sentinel, None) is sentinel
+
+
+class _ValidatedCount(db_models.Model):
+    """An integer column whose own validator refuses values below 10."""
+
+    count: db_models.IntegerField[int | Combinable, int] = db_models.IntegerField(
+        validators=[MinValueValidator(10)],
+    )
+
+    class Meta:
+        managed = False
+        app_label = "test_list_filter_validators"
+
+
+class _ValidatedCountSet(FilterSet):
+    count_among = ListFilter(field_name="count", lookup_expr="in")
+    count_outside = ListFilter(field_name="count", lookup_expr="in", exclude=True)
+
+    class Meta:
+        model = _ValidatedCount
+        fields = ("count",)
+
+
+@pytest.fixture
+def validated_counts() -> Generator[QuerySet[_ValidatedCount], None, None]:
+    """A real ``_ValidatedCount`` table holding 5 (below the validator) and 12."""
+    with db_connection.schema_editor() as editor:
+        editor.create_model(_ValidatedCount)
+    try:
+        _ValidatedCount.objects.create(count=5)
+        _ValidatedCount.objects.create(count=12)
+        yield _ValidatedCount.objects.all()
+    finally:
+        with db_connection.schema_editor() as editor:
+            editor.delete_model(_ValidatedCount)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("name", "members", "counts"),
+    [
+        pytest.param("count_among", [5], [5], id="validator-refused-member-matches"),
+        pytest.param("count_outside", [5], [12], id="validator-refused-member-excluded"),
+        pytest.param("count_among", ["abc", 12], [12], id="unconvertible-member-dropped"),
+        pytest.param("count_among", ["abc"], [], id="every-member-dropped"),
+        pytest.param("count_outside", ["abc"], [5, 12], id="every-member-dropped-excluded"),
+    ],
+)
+def test_list_filter_integer_in_keeps_members_the_backend_stores(
+    validated_counts: QuerySet[_ValidatedCount],
+    name: str,
+    members: list[object],
+    counts: list[int],
+) -> None:
+    """An integer ``in`` drops only members outside the backend's range, never by validator.
+
+    A row holding a value the column's own validators refuse is stored all the same (Django
+    validates on ``full_clean``, never on save), so a member equal to it still matches that
+    row, and its ``exclude`` twin leaves that row out. A member the column's ``to_python``
+    cannot convert identifies no row and is dropped; a list with none left matches nothing,
+    or every row when excluding. Package-only: no fakeshop integer column carries a
+    validator of its own, and the GraphQL input delivers only integers. Live rows for a
+    member past the backend's range:
+    ``test_scalars_api.py::test_filter_specimens_by_declared_bigint_list_drops_out_of_range_members``.
+    """
+    bound = _ValidatedCountSet(data={}, queryset=validated_counts).filters[name]
+    result: QuerySet[_ValidatedCount] = bound.filter(validated_counts, members)
+    assert sorted(row.count for row in result) == counts
 
 
 @pytest.mark.parametrize(

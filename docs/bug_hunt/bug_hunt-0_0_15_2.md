@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 271 done, 178 to do.
+Progress: 272 done, 180 to do.
 
 ## Done
 
@@ -1317,6 +1317,14 @@ Progress: 271 done, 178 to do.
   direction, and the predicate and helpers are renamed for the shape disagreement. Package rows on SQLite and a real
   PostgreSQL `ArrayField`; spec-038 Decisions 7 and 8, the README and the `DjangoModelFormMutation` glossary term say
   so
+- [x] 372. fixed: a declared package `RangeFilter(lookup_expr="range")` with both bounds on an integer column applies
+  them as `gte` + `lte` in one `_apply_lookups` call (as `filters/base.py::IntegerRangeFilter` does), so a bound past
+  the column's range widens or matches nothing through Django's range-aware lookups instead of reaching `BETWEEN` as a
+  masked `OverflowError`; other column types keep `BETWEEN`. A declared `ListFilter(lookup_expr="in")` on an integer
+  column drops the members outside the column's integer range on the queryset's database
+  (`filters/base.py::_backend_storable_int_members`) and matches nothing when none is left, without applying the
+  column's own validators. Each declared cell on `ScalarSpecimen.signed_big` / `unsigned_big` answers as the generated
+  `range` / `in` does, flat and under `not`. Found verifying 372: rows 507-509
 
 ## Outside review of the fixes
 
@@ -1375,9 +1383,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   row (not this setup)
 - [ ] 349. `workspace.py audit <missing file>` exits by a `FileNotFoundError` traceback instead of a refusal. Robustness
   row
-- [ ] 372. A declared package `RangeFilter` with both bounds on an integer column passes an out-of-int64 bound to
-  `BETWEEN` and the backend raises a masked `OverflowError` (`range: {start: "0", end: "18446744073709551616"}` on a
-  BigInt column); `filters/base.py::IntegerRangeFilter` decomposes into `gte` + `lte`, the declared primitive does not
 - [ ] 375. A package `RangeFilter` / `ListFilter` over a relation column passes its bounds / elements to the ORM
   uncleaned (django-filter's `exact` for a relation is a `ModelChoiceFilter`, whose clean would be an existence oracle
   past the target's `get_queryset`), so a NaN bound on a Decimal-pk target still raises a masked error; candidate owner:
@@ -1537,6 +1542,17 @@ tracker number are recorded there; open remainders and new defects are filed as 
   whose form sets no initial silently writes a value made from the stored list where that field accepts the list (a
   `CharField` stores its text, `["['x']"]`; a `BooleanField` stores its truthiness, `[True]` over `[False]`) instead of
   refusing; the build warning and the docs say so; say whether the package should refuse it. Found verifying 423
+- [ ] 507. A consumer-declared `django_filters.RangeFilter` or `NumberInFilter` under a package FilterSet on a
+  BigInteger column passes a bound or member past int64 to `BETWEEN` / `IN`, and SQLite raises a masked
+  `OverflowError`: upstream `RangeFilter.filter` sets `lookup_expr="range"` at filter time and its bounds are plain
+  `DecimalField`s, so the package's `RangeFilter` / `ListFilter` fix does not reach it; spec-027's RangeFilter row
+  covers "the package's or django-filter's". Found verifying 372
+- [ ] 508. A package `RangeFilter` declared without `lookup_expr="range"` applies its default `exact` to the
+  two-element list when both bounds are sent, a masked error even for in-range bounds. Found verifying 372
+- [ ] 509. The generated integer `in` (`filters/base.py::IntegerInFilter`) coerces members through
+  `coerce_field_value_or_none`, which runs the column's own validators, so on an `IntegerField(validators=
+  [MinValueValidator(10)])` holding a row 5 written without `full_clean`, `in: [5]` matches nothing while `exact: 5`
+  matches it; the declared `ListFilter` keeps the member (`_backend_storable_int_members`). Found verifying 372
 
 ## To do: holes found re-checking the fixes
 

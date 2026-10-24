@@ -440,6 +440,147 @@ def test_filter_specimens_by_bigint_range_out_of_range_bound_no_overflow() -> No
     assert _labels("signedBig: { range: [] }") == ["keep", "other"]
 
 
+_I64_MAX = 2**63 - 1
+_I64_MIN = -(2**63)
+
+# The three rows the declared ``BigInt`` range / list rows read: one at each end of the
+# unsigned column's range and one in between, so every bound past either end has a row on
+# each side of it.
+_DECLARED_BIGINT_ROWS = {
+    "low": {"signed_big": -5, "unsigned_big": 0},
+    "mid": {"signed_big": 7, "unsigned_big": 7},
+    "top": {"signed_big": _I64_MAX, "unsigned_big": _I64_MAX},
+}
+
+_SPECIMEN_FILTER_QUERY = (
+    "query ($f: ScalarSpecimenFilterInputType) { allScalarSpecimens(filter: $f) { label } }"
+)
+
+
+def _seed_declared_bigint_rows() -> None:
+    for label, columns in _DECLARED_BIGINT_ROWS.items():
+        _seed_specimen(label=label, **columns)
+
+
+def _filtered_labels(filter_input: dict[str, object], *, negate: bool) -> list[str]:
+    response = _post_graphql(
+        _SPECIMEN_FILTER_QUERY,
+        variables={"f": {"not": filter_input} if negate else filter_input},
+    )
+    assert response.status_code == 200
+    body = response_json(response)
+    assert "errors" not in body, body
+    return sorted(json_str(row, "label") for row in json_list(body, "data", "allScalarSpecimens"))
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("negate", [False, True], ids=["flat", "not"])
+@pytest.mark.parametrize(
+    (
+        "column",
+        "start",
+        "end",
+        "expected",
+    ),
+    [
+        pytest.param("signedBig", 0, 10, ["mid"], id="signed-in-range"),
+        pytest.param("signedBig", 0, _I64_MAX, ["mid", "top"], id="signed-end-max"),
+        pytest.param("signedBig", 0, 2**63, ["mid", "top"], id="signed-end-past-max"),
+        pytest.param("signedBig", 0, 2**64, ["mid", "top"], id="signed-end-2**64"),
+        pytest.param("signedBig", 2**63, 2**63 + 5, [], id="signed-start-past-max"),
+        pytest.param("signedBig", 2**64, 2**64, [], id="signed-start-2**64"),
+        pytest.param("signedBig", _I64_MIN, 10, ["low", "mid"], id="signed-start-min"),
+        pytest.param("signedBig", _I64_MIN - 1, 10, ["low", "mid"], id="signed-start-past-min"),
+        pytest.param("signedBig", -(2**64), 10, ["low", "mid"], id="signed-start--2**64"),
+        pytest.param("signedBig", -(2**64), _I64_MIN - 1, [], id="signed-end-past-min"),
+        pytest.param("signedBig", -(2**64), 2**64, ["low", "mid", "top"], id="signed-both"),
+        pytest.param("unsignedBig", 0, 10, ["low", "mid"], id="unsigned-in-range"),
+        pytest.param("unsignedBig", 1, _I64_MAX, ["mid", "top"], id="unsigned-end-max"),
+        pytest.param("unsignedBig", 1, 2**63, ["mid", "top"], id="unsigned-end-past-max"),
+        pytest.param("unsignedBig", 1, 2**64, ["mid", "top"], id="unsigned-end-2**64"),
+        pytest.param("unsignedBig", 2**63, 2**63 + 5, [], id="unsigned-start-past-max"),
+        pytest.param("unsignedBig", _I64_MIN, 10, ["low", "mid"], id="unsigned-start-below-zero"),
+        pytest.param("unsignedBig", -(2**64), 10, ["low", "mid"], id="unsigned-start--2**64"),
+        pytest.param("unsignedBig", -(2**64), -1, [], id="unsigned-end-below-zero"),
+        pytest.param("unsignedBig", -(2**64), 2**64, ["low", "mid", "top"], id="unsigned-both"),
+    ],
+)
+def test_filter_specimens_by_declared_bigint_range_out_of_range_bound_no_overflow(
+    column: str,
+    start: int,
+    end: int,
+    expected: list[str],
+    *,
+    negate: bool,
+) -> None:
+    """A declared ``RangeFilter`` bound past the column's range answers as the generated ``range``.
+
+    ``signedBigSpan`` / ``unsignedBigSpan`` declare ``RangeFilter(lookup_expr="range")`` over
+    the two ``BigInt`` columns. Each bound is cleaned as ``gte`` cleans one, whose cap is
+    ``1e50``, so a bound past the column's 64-bit range reaches the filter. Two bounds over an
+    integer column apply as ``gte`` + ``lte`` in one predicate
+    (``filters/base.py::RangeFilter.filter``): a bound past either end widens or matches
+    nothing, flat and under ``not``, exactly as the generated ``signedBig: { range }``
+    (``IntegerRangeFilter``) answers on the same column, never a masked backend overflow;
+    an in-range range keeps the inclusive ``BETWEEN`` rows.
+    """
+    _seed_declared_bigint_rows()
+    bounds = {"start": str(start), "end": str(end)}
+    declared: dict[str, object] = {f"{column}Span": {"range": bounds}}
+    generated: dict[str, object] = {column: {"range": [str(start), str(end)]}}
+    rows = expected
+    if negate:
+        rows = sorted(set(_DECLARED_BIGINT_ROWS) - set(expected))
+
+    assert _filtered_labels(declared, negate=negate) == rows
+    assert _filtered_labels(generated, negate=negate) == rows
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("negate", [False, True], ids=["flat", "not"])
+@pytest.mark.parametrize(
+    ("column", "members", "expected"),
+    [
+        pytest.param("signedBig", [7], ["mid"], id="signed-in-range"),
+        pytest.param("signedBig", [_I64_MAX, _I64_MIN], ["top"], id="signed-ends"),
+        pytest.param("signedBig", [2**63, 7], ["mid"], id="signed-past-max-mixed"),
+        pytest.param("signedBig", [2**63], [], id="signed-past-max-only"),
+        pytest.param("signedBig", [_I64_MIN - 1, -5], ["low"], id="signed-past-min-mixed"),
+        pytest.param("signedBig", [2**64, -(2**64)], [], id="signed-both-past-only"),
+        pytest.param("unsignedBig", [0, 7], ["low", "mid"], id="unsigned-in-range"),
+        pytest.param("unsignedBig", [2**63, 7], ["mid"], id="unsigned-past-max-mixed"),
+        pytest.param("unsignedBig", [2**64], [], id="unsigned-past-max-only"),
+        pytest.param("unsignedBig", [-1, 0], ["low"], id="unsigned-below-zero-mixed"),
+        pytest.param("unsignedBig", [_I64_MIN - 1, -1], [], id="unsigned-below-zero-only"),
+    ],
+)
+def test_filter_specimens_by_declared_bigint_list_drops_out_of_range_members(
+    column: str,
+    members: list[int],
+    expected: list[str],
+    *,
+    negate: bool,
+) -> None:
+    """A declared ``ListFilter`` element past the column's range answers as the generated ``in``.
+
+    ``signedBigAmong`` / ``unsignedBigAmong`` declare ``ListFilter(lookup_expr="in")`` over
+    the two ``BigInt`` columns. Each element is cleaned as ``gte`` cleans one, so an element
+    past the column's 64-bit range reaches the filter, which drops each element outside the
+    column's integer range on the queryset's database (``filters/base.py::ListFilter.filter``):
+    the kept elements still filter, and a list whose every element drops matches nothing
+    (every row under ``not``), exactly as ``signedBig: { in }`` answers on the same column,
+    never a masked backend overflow.
+    """
+    _seed_declared_bigint_rows()
+    values = [str(member) for member in members]
+    rows = expected
+    if negate:
+        rows = sorted(set(_DECLARED_BIGINT_ROWS) - set(expected))
+
+    assert _filtered_labels({f"{column}Among": {"in": values}}, negate=negate) == rows
+    assert _filtered_labels({column: {"in": values}}, negate=negate) == rows
+
+
 @pytest.mark.django_db
 @override_settings(**_ERROR_POLICY_PASS_THROUGH)
 @pytest.mark.parametrize("field", ["signedBig", "unsignedBig"], ids=["signed", "unsigned"])
