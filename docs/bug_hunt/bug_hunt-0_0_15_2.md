@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 256 done, 170 to do.
+Progress: 257 done, 169 to do.
 
 ## Done
 
@@ -1189,6 +1189,16 @@ Progress: 256 done, 170 to do.
   stamp rewritten only on a read) and that a 0.0 window never writes the revalidation stamp; each row kills a mutant
   the suite let through (a non-DB-store test, `<=`, an unconditional write-back). Package tier: fakeshop has no
   WebSocket mount
+- [x] 329. fixed: no signal-forwarding `uv` sits in the process group a stop is sent to.
+  `scripts/_stop_signals.py::uv_run_launch` resolves the environment `uv run` gives a command once (`uv run ... --
+  env -0`, the same sync) and the command is started directly in it, so `scripts/prove_failability.py`'s scope is
+  pytest itself and `scripts/workspace.py`'s `run` / `prove` and the gate's non-floor suites start their command with
+  no uv between; each process gets each stop once. The second `SIGINT` uv sent about 0.2 s later aborted a pytest
+  teardown still running (a `-n0` scope's finalizer, interrupted 0.07 s in), which now completes; group signalling,
+  the grandchild ending on the first stop and the `SIGKILL` escalation are unchanged, and the env, cwd, `sys.path`,
+  plugins and settings match `uv run`'s field for field. The docstrings say `SIGINT`'s teardown is allowed to finish
+  and `SIGTERM` / `SIGHUP` / `SIGQUIT` end pytest without one; a wrapper a user's own command starts still
+  double-delivers. Uv-shaped forwarding stand-in rows pin both tools, and the gate row pins the suite's cwd
 
 ## Outside review of the fixes
 
@@ -1243,12 +1253,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `_apply_flat_leaves`, a `<branch>__...` copy whose branch is active and whose key it does not name; document what an
   own `filter` receives (raw wire text for a GlobalID; the cleaned empty value on absence); decide whether a nested
   supply satisfies a `required` copy
-- [ ] 329. `scripts/prove_failability.py` forwards the first stop signal to the scope's whole process group, which holds
-  `uv` as well as pytest, so `uv run` hands pytest the Ctrl-C a second time and a `-n 0` scope whose teardown takes
-  longer than about 0.2 s loses it, while the module docstring says the forwarded signal "lets pytest tear down".
-  Decide: signal the group leader on the first stop and keep `killpg(SIGKILL)` for the escalation
-  (`scripts/_stop_signals.py::signal_group`, `scripts/prove_failability.py::_request_stop`), or qualify the docstring.
-  Robustness row (pytest-django recreates a leftover test database)
 - [ ] 332. `scripts/workspace.py::_remove_flow_dir` removes the marker with `marker.rmdir()` and no handling: a
   non-empty `.dsf-ws` directory (a stray `.DS_Store`) makes `gc` raise a raw `OSError` (Errno 66) after emptying the
   rest of the flow, leaving only the marker, and every rerun fails the same way. Robustness row (nothing in the script

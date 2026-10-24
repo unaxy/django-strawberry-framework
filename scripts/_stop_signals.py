@@ -12,6 +12,12 @@ does is each script's own policy: ``workspace.py`` relays it to its command,
 job control (Ctrl-Z, ``fg``) for a command in a session of its own, a suspend
 that lands before the command's group is known included.
 
+Both scripts start their command in the environment ``uv run`` resolves, but
+never under ``uv run`` itself (:func:`uv_run_launch`): uv stays alive as its
+command's parent and forwards every stop signal it gets, so in a group that is
+signalled whole the command would get each stop twice, and pytest abandons a
+teardown that a second ``SIGINT`` interrupts.
+
 Standard library only, and no Django import, so either script imports it
 before anything else is set up.
 """
@@ -20,13 +26,15 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shutil
 import signal
+import subprocess
 import threading
 from typing import TYPE_CHECKING, NoReturn
 
 if TYPE_CHECKING:
-    import subprocess
-    from collections.abc import Callable, Generator
+    from collections.abc import Callable, Generator, Mapping, Sequence
+    from pathlib import Path
     from types import FrameType
 
 # The signals that ask a run to stop: Ctrl-C; ``kill``, a parent's ``terminate()`` or a CI
@@ -40,6 +48,10 @@ STOP_SIGNALS = (
 # A repeat stop inside this many seconds of the last one acted on is that stop delivered twice:
 # ``uv run`` forwards a signal to its child that the child's whole process group already got.
 STOP_REPEAT_GRACE = 1.0
+# What ``uv run`` runs to report the environment it gives a command, separated by NUL bytes. A
+# program, not ``python -c``: an interpreter rewrites ``LC_CTYPE`` in its own environment when
+# the locale it inherits is ``C`` (PEP 538), so it would report a variable uv never set.
+ENVIRONMENT_REPORT = ("env", "-0")
 # The signals that suspend a job: Ctrl-Z; a background job reading from or writing to its
 # terminal. A command in a session of its own is an orphaned process group, which the kernel
 # never stops on these at their default action (POSIX), so a suspend reaches it as ``SIGSTOP``.
@@ -177,3 +189,62 @@ def exit_with(code: int) -> NoReturn:
         _ = signal.signal(code - 128, signal.SIG_DFL)
         os.kill(os.getpid(), code - 128)
     raise SystemExit(code)
+
+
+class LaunchError(Exception):
+    """``uv run`` could not resolve the environment, or the command is not in it."""
+
+
+def uv_run_launch(
+    uv_run: Sequence[str],
+    command: Sequence[str],
+    env: Mapping[str, str] | None = None,
+    cwd: Path | None = None,
+) -> tuple[list[str], dict[str, str]]:
+    """Return ``command`` and its environment as ``uv_run`` would start it, with no uv between.
+
+    ``uv_run`` is ``uv run`` and its options; it runs, in ``cwd`` with
+    ``env`` (default ``os.environ``), :data:`ENVIRONMENT_REPORT` instead of
+    ``command``, which syncs the project's environment as ``uv_run command``
+    would and reports the environment uv hands its command: ``VIRTUAL_ENV``,
+    ``PATH`` with the environment's ``bin`` first, uv's own variables. The
+    command's first word is then looked up on that ``PATH``, as uv looks it
+    up, so the caller starts the very program ``uv_run command`` would have
+    started, with the same ``sys.path``, plugins and settings, as the only
+    process between itself and the command's own children. A word holding a
+    ``/`` is a path and stays as given; a ``.py`` file runs under the
+    environment's ``python``, as uv runs it. A forwarding wrapper the command
+    itself starts (``sh -c "uv run ..."``) is the command's own and still
+    delivers each stop twice.
+
+    Raises:
+        LaunchError: ``uv_run`` failed (the environment could not be synced or
+            found), or the command's program is not on the environment's ``PATH``.
+
+    """
+    completed = subprocess.run(
+        [*uv_run, "--", *ENVIRONMENT_REPORT],
+        env=env,
+        cwd=cwd,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.decode("utf-8", "replace").strip()
+        msg = f"{' '.join(uv_run)} found no environment ({completed.returncode}): {detail}"
+        raise LaunchError(msg)
+    environment: dict[str, str] = {}
+    for entry in completed.stdout.split(b"\0"):
+        if entry:
+            name, _, value = os.fsdecode(entry).partition("=")
+            environment[name] = value
+    program, *arguments = command
+    if program.endswith(".py"):
+        program, arguments = "python", [program, *arguments]
+    if "/" not in program:
+        found = shutil.which(program, path=environment.get("PATH"))
+        if found is None:
+            msg = f"{program} is not on the PATH {' '.join(uv_run)} gives its command"
+            raise LaunchError(msg)
+        program = found
+    return [program, *arguments], environment

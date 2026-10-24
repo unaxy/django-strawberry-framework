@@ -10,8 +10,10 @@ deletes a copy by hand.
 
 Worker commands
     ``run <address> [--cell default|sharded|pg] [--fresh] -- <command...>``
-        Run ``<command>`` inside the address's copy through
-        ``uv run --frozen --group pg``. ``<command>`` is what would follow
+        Run ``<command>`` inside the address's copy as
+        ``uv run --frozen --group pg`` would, in the environment it resolves
+        but with no uv between this script and the command (the stop-signal
+        paragraph below says why). ``<command>`` is what would follow
         ``uv run``: ``pytest <node> --no-cov``,
         ``python scripts/count_queries.py ...``. Paths inside it resolve
         against the copy. The first run of an address binds it to a copy
@@ -231,8 +233,15 @@ Guarantees, each one a hand-run failure this encodes away:
   ``SIGHUP`` and ``SIGQUIT`` to this script (Ctrl-C, ``kill`` or a parent's
   ``terminate()``, a closed terminal, Ctrl-backslash) are relayed to the
   command, which runs in a session of its own, by signalling its whole process
-  group: ``uv``, pytest and every xdist worker get it as a terminal's
-  foreground group would. The run keeps its locks, its log and its output
+  group: pytest, every xdist worker and whatever they started get it once
+  each. The command is started without ``uv run`` around it
+  (``scripts/_stop_signals.py::uv_run_launch``), since uv would sit in that
+  group and hand the command each stop a second time, ``SIGINT`` about 0.2 s
+  later, which aborts a pytest teardown still running; a forwarding wrapper
+  the command itself starts (``sh -c "uv run ..."``) still does. ``SIGINT``
+  starts pytest's teardown, which is allowed to finish; ``SIGTERM``,
+  ``SIGHUP`` and ``SIGQUIT`` end pytest without one, since pytest installs no
+  handler for them. The run keeps its locks, its log and its output
   until the command and what it left holding its output have ended, then
   records the run with ``stopped_by`` and ends by that signal. A repeat
   within ``STOP_REPEAT_GRACE`` (one second) of the last relayed stop is the
@@ -2376,10 +2385,9 @@ class _ProbeResult(TypedDict):
     databases: dict[str, _ProbeDatabase]
 
 
-def probe(directory: Path, env: dict[str, str]) -> _ProbeResult:
-    """Resolve, inside the copy, where the package imports from and each alias's database."""
-    require_on_path("uv", "nothing can run in a copy")
-    command = [
+def uv_run_in(directory: Path) -> list[str]:
+    """Return the ``uv run`` that resolves ``directory``'s environment, ``pg`` group included."""
+    return [
         "uv",
         "run",
         "--directory",
@@ -2388,9 +2396,33 @@ def probe(directory: Path, env: dict[str, str]) -> _ProbeResult:
         "--group",
         "pg",
     ]
+
+
+def uv_launch(
+    directory: Path,
+    command: Sequence[str],
+    env: dict[str, str],
+) -> tuple[list[str], dict[str, str]]:
+    """Return ``command`` and its environment as :func:`uv_run_in` would start them, with no uv between.
+
+    ``uv run`` syncs the copy's environment and reports it
+    (``scripts/_stop_signals.py::uv_run_launch``); the caller then starts the
+    command itself, in ``directory`` as ``uv run --directory`` would, so a
+    relayed stop reaches it once.
+    """
+    require_on_path("uv", "nothing can run in a copy")
+    try:
+        return _stop_signals.uv_run_launch(uv_run_in(directory), command, env, directory)
+    except _stop_signals.LaunchError as error:
+        raise WorkspaceError(str(error)) from error
+
+
+def probe(directory: Path, env: dict[str, str]) -> _ProbeResult:
+    """Resolve, inside the copy, where the package imports from and each alias's database."""
+    require_on_path("uv", "nothing can run in a copy")
     completed = subprocess.run(
         [
-            *command,
+            *uv_run_in(directory),
             "python",
             "-c",
             PROBE,
@@ -2735,6 +2767,7 @@ def _execute_leased(
             raise WorkspaceError("wrong tree: " + "; ".join(faults))
         run_id = new_run_id(layout.flow)
         command = build_command(held.directory, run_id)
+        launch, launch_env = uv_launch(held.directory, command, env)
         log_path = layout.evidence / "logs" / f"{run_id}.log"
         record: _RunRecord = {
             "run_id": run_id,
@@ -2759,20 +2792,12 @@ def _execute_leased(
         _ = sys.stderr.write(header)
         _ = sys.stderr.flush()
         started = time.monotonic()
-        uv_run = [
-            "uv",
-            "run",
-            "--directory",
-            str(held.directory),
-            "--frozen",
-            "--group",
-            "pg",
-        ]
         finished = stream(
-            [*uv_run, "--", *command],
-            env,
+            launch,
+            launch_env,
             log_path,
             header,
+            held.directory,
             holding=held.holding,
         )
         seconds = round(time.monotonic() - started, 2)
@@ -2796,7 +2821,7 @@ def _worker_command(raw: Sequence[str]) -> list[str]:
         msg = "no command given; put it after --"
         raise WorkspaceError(msg)
     if command[0] == "uv":
-        msg = "give the command that follows `uv run`, not `uv ...`; the copy's uv run wraps it"
+        msg = "give the command that follows `uv run`, not `uv ...`; the copy's uv run resolves it"
         raise WorkspaceError(msg)
     return command
 
@@ -3256,29 +3281,20 @@ def gate(layout: Layout, suites: Sequence[str]) -> int:
             "package_digest": manifest["package_digest"],
             "suites": suite_results,
         }
-        uv_run = [
-            "uv",
-            "run",
-            "--directory",
-            str(layout.gate_dir),
-            "--frozen",
-            "--group",
-            "pg",
-        ]
         all_passed = True
         stopped_by: int | None = None
         for suite in suites:
             arguments, cell = GATE_SUITES[suite]
             run_id = new_run_id(layout.flow)
             log_path = layout.evidence / "logs" / f"{run_id}.log"
-            runner: list[str] = [*uv_run, "--"]
-            cwd: Path | None = None
             try:
                 env, database = gate_env(layout, cell)
                 if suite == FLOOR_SUITE:
                     floor = ensure_floor_venv(layout, holding)
                     result["floor"] = floor
-                    runner, cwd = [floor["python"], "-m"], layout.gate_dir
+                    launch = [floor["python"], "-m", *arguments]
+                else:
+                    launch, env = uv_launch(layout.gate_dir, arguments, env)
             except WorkspaceError as error:
                 suite_results[suite] = {
                     "run_id": run_id,
@@ -3294,11 +3310,11 @@ def gate(layout: Layout, suites: Sequence[str]) -> int:
             _ = sys.stderr.write(header)
             started = time.monotonic()
             finished = stream(
-                [*runner, *arguments],
+                launch,
                 env,
                 log_path,
                 header,
-                cwd=cwd,
+                cwd=layout.gate_dir,
                 holding=holding,
             )
             code = finished.code

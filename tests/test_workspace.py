@@ -811,15 +811,17 @@ def test_copy_path_syncs_an_unsynced_copy_and_reuses_a_synced_one(
 
 #: One ``workspace.py`` command in its own process, so it holds its own locks on its own open
 #: file descriptions. It runs the real command line (``main``) against the test's layout; only
-#: what cannot run under test is replaced: ``uv sync``, the provenance probe and the worker's
-#: command, which records the ``*.edit`` files it finds in the copy and then leaves its own.
+#: what cannot run under test is replaced: ``uv sync``, the provenance probe, the environment
+#: ``uv run`` resolves (this process's own) and the worker's command, which records the
+#: ``*.edit`` files it finds in the copy and then leaves its own.
 #: Each step touches ``<name>.<step>`` when reached: ``bound`` once the address is bound,
 #: ``sync`` in ``uv sync``, ``in`` in the command, ``probe`` at a lock tried without waiting or
 #: creating, ``postgres`` and ``state`` at those reads. A step the test names as a pause then
 #: waits until ``<name>.go-<step>`` appears. ``die_in_sync`` kills the process in its sync;
 #: the ``hold`` command only holds the lock at ``path``, stepping ``opened`` each time it opens
 #: that file. ``bin`` puts a folder ahead of ``PATH`` (a stand-in ``uv``); ``real_stream`` and
-#: ``real_sync`` keep the script's own ``stream`` and ``uv sync``, run through that ``uv``.
+#: ``real_sync`` keep the script's own ``stream`` (with the environment ``uv run`` resolves)
+#: and ``uv sync``, run through that ``uv``.
 _ACTOR = """
 import json, os, sys, time
 from pathlib import Path
@@ -874,8 +876,12 @@ def probe(directory, _env):
     }
 
 
+def uv_launch(_directory, command, env):
+    return list(command), env
+
+
 def stream(command, _env, _log_path, _header, cwd=None, holding=()):
-    copy = Path(command[command.index("--directory") + 1])
+    copy = Path(cwd)
     seen = sorted(path.stem for path in copy.glob("*.edit"))
     (copy / f"{name}.edit").write_text(name)
     (sync / f"{name}.json").write_text(json.dumps({"slot": copy.name, "seen": seen}))
@@ -903,6 +909,7 @@ workspace.file_lock = file_lock
 workspace.probe = probe
 if not config.get("real_stream"):
     workspace.stream = stream
+    workspace.uv_launch = uv_launch
 if not config.get("real_sync"):
     workspace._uv_sync = uv_sync
 workspace._free_bytes = lambda _path: workspace.MIN_FREE_BYTES * 2
@@ -3530,13 +3537,23 @@ def _file_id(path: Path) -> tuple[int, int]:
 
 @dataclasses.dataclass(frozen=True)
 class _Started:
-    """A command a run started: its argv, its environment, and the locks held while it ran."""
+    """A command a run started: its argv, its environment, its directory, and the locks held."""
 
     command: list[str]
     env: dict[str, str]
+    cwd: Path | None
     holding: list[tuple[int, int]]
     flow_leased: bool
     copy_locked: bool
+
+
+def _launch_as_given(
+    _directory: Path,
+    command: Sequence[str],
+    env: dict[str, str],
+) -> tuple[list[str], dict[str, str]]:
+    """Stand in for ``workspace.uv_launch``: the command as given, in the environment given."""
+    return list(command), env
 
 
 class _StartedCommands(list[_Started]):
@@ -3556,9 +3573,9 @@ def started(
     """Every command ``main`` starts in this process, in order; none of them runs.
 
     ``Layout.for_flow`` answers under the test's pool for any flow, ``uv sync`` is ``syncs``,
-    the provenance probe reports the copy itself, and ``stream`` records the command with
-    whether the flow's lease and the copy's lock are held while it would run, then reports
-    ``code`` as its exit.
+    the provenance probe reports the copy itself, the environment ``uv run`` resolves is the
+    one given, and ``stream`` records the command with whether the flow's lease and the copy's
+    lock are held while it would run, then reports ``code`` as its exit.
     """
     del syncs
     commands = _StartedCommands()
@@ -3574,25 +3591,27 @@ def started(
         env: dict[str, str],
         _log_path: Path,
         _header: str,
-        _cwd: Path | None = None,
+        cwd: Path | None = None,
         *,
         holding: Sequence[int] = (),
     ) -> workspace.Finished:
-        copy = Path(command[list(command).index("--directory") + 1])
-        owner = for_flow(copy.parent.parent.name)
+        assert cwd is not None
+        owner = for_flow(cwd.parent.parent.name)
         commands.append(
             _Started(
                 list(command),
                 env,
+                cwd,
                 [(os.fstat(fd).st_dev, os.fstat(fd).st_ino) for fd in holding],
                 _flow_is_leased(owner),
-                _lock_is_held(owner.slot_lock(copy.name)),
+                _lock_is_held(owner.slot_lock(cwd.name)),
             ),
         )
         return workspace.Finished(commands.code)
 
     monkeypatch.setattr(workspace.Layout, "for_flow", staticmethod(for_flow))
     monkeypatch.setattr(workspace, "probe", probe)
+    monkeypatch.setattr(workspace, "uv_launch", _launch_as_given)
     monkeypatch.setattr(workspace, "stream", stream)
     return commands
 
@@ -3643,19 +3662,7 @@ def test_prove_runs_the_proof_script_on_its_flows_copy_and_logs_the_run(
         "1",
     ]
     assert code == 3
-    assert [run.command for run in started] == [
-        [
-            "uv",
-            "run",
-            "--directory",
-            str(copy),
-            "--frozen",
-            "--group",
-            "pg",
-            "--",
-            *proof,
-        ],
-    ]
+    assert [(run.command, run.cwd) for run in started] == [(proof, copy)]
     assert (record["address"], record["command"], record["exit"]) == (
         f"{flow}/pkg/a.py/perf-1",
         proof,
@@ -3882,8 +3889,8 @@ STOP_SIGNALS = (
 # Ctrl-Z; a background job reading from or writing to its terminal.
 JOB_SIGNALS = (signal.SIGTSTP, signal.SIGTTIN, signal.SIGTTOU)
 
-# Stands in for ``uv run <command>``: it writes ``<pid> <pgid> <grandchild pid>`` to
-# ``S_READY`` once it has started a grandchild (uv -> pytest -> xdist worker), appends the
+# Stands in for a command a run starts: it writes ``<pid> <pgid> <grandchild pid>`` to
+# ``S_READY`` once it has started a grandchild (pytest -> xdist worker), appends the
 # name of every stop signal it gets to ``<S_READY>.got`` and blocks until
 # ``<S_READY>.release`` exists, then prints ``released`` and exits 0. ``S_ON_STOP=teardown``
 # makes a stop take a second, print ``torn down`` and exit 3, as pytest's teardown does;
@@ -4007,10 +4014,13 @@ for _ in range(20000):
     out.write("x" * 99 + "\\n")
 """
 
-# Stands in for ``uv`` on ``PATH``: ``uv run ... -- <command>`` becomes ``<command>``;
-# ``uv sync`` writes its pid to ``WSTEST_SYNC`` and blocks until ``<WSTEST_SYNC>.release``.
+# Stands in for ``uv`` on ``PATH``: ``uv run ... -- <command>`` appends its arguments to
+# ``<WSTEST_SYNC>.runs``, one JSON list a line, and runs ``<command>`` in the ``--directory``
+# as a child it waits for, then exits with its code; like uv it forwards every stop signal it
+# gets to that child, ``SIGINT`` after 0.2 s and the others at once. ``uv sync`` writes its pid
+# to ``WSTEST_SYNC`` and blocks until ``<WSTEST_SYNC>.release``.
 _UV = """
-import os, sys, time
+import json, os, signal, subprocess, sys, threading, time
 from pathlib import Path
 
 arguments = sys.argv[1:]
@@ -4022,8 +4032,24 @@ if arguments[0] == "sync":
     while not release.exists() and time.monotonic() < deadline:
         time.sleep(0.02)
     sys.exit(0)
+with open(os.environ["WSTEST_SYNC"] + ".runs", "a", encoding="utf-8") as runs:
+    runs.write(json.dumps(arguments) + "\\n")
 command = arguments[arguments.index("--") + 1 :]
-os.execvp(command[0], command)
+child = subprocess.Popen(command, cwd=arguments[arguments.index("--directory") + 1])
+
+
+def forward(signum, _frame):
+    def send():
+        if child.poll() is None:
+            child.send_signal(signum)
+
+    threading.Timer(0.2 if signum == signal.SIGINT else 0.0, send).start()
+
+
+for stop_signal in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT):
+    signal.signal(stop_signal, forward)
+code = child.wait()
+sys.exit(128 - code if code < 0 else code)
 """
 
 
@@ -4878,6 +4904,70 @@ def test_a_stopped_run_keeps_its_leases_until_its_command_ends_then_records_the_
     assert err.rstrip().endswith(f"exit 0 in {record['seconds']}s, stopped by SIGINT")
 
 
+@pytest.mark.parametrize("signum", STOP_SIGNALS, ids=[signum.name for signum in STOP_SIGNALS])
+def test_a_run_starts_its_command_with_no_uv_between_so_a_stop_reaches_it_once(
+    layout: workspace.Layout,
+    actors: _Actors,
+    stand_in_uv: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    signum: signal.Signals,
+) -> None:
+    # ``uv run`` stays the parent of what it runs and forwards every stop it gets, so a
+    # command started under it would get the relayed stop and then uv's copy, SIGINT 0.2 s
+    # later, inside a teardown that takes a second. ``uv run`` only resolves the copy's
+    # environment; the run starts the command itself, which gets one stop and tears down.
+    monkeypatch.setenv("S_ON_STOP", "teardown")
+    command = (
+        "--",
+        sys.executable,
+        "-c",
+        _COMMAND,
+    )
+    actors.start("A", "run", _ADDRESS, *command, bin=str(stand_in_uv), real_stream=True)
+    assert _poll((tmp_path / "ready").exists)
+    process = actors.processes["A"]
+    pid = int((tmp_path / "ready").read_text(encoding="utf-8").split()[0])
+    parent = subprocess.run(
+        [
+            "ps",
+            "-o",
+            "ppid=",
+            "-p",
+            str(pid),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip()
+
+    os.kill(process.pid, signum)
+    code, out, _err = actors.finish("A")
+
+    assert _stops_got(tmp_path) == [signum.name]
+    assert "torn down" in out
+    # ``uv run`` resolved the copy's environment, and the run itself is the command's parent.
+    runs = (tmp_path / "sync-ready.runs").read_text(encoding="utf-8").splitlines()
+    copy = str(layout.slot_dir("slot-1"))
+    assert [json_loads(line) for line in runs] == [
+        [
+            "run",
+            "--directory",
+            copy,
+            "--frozen",
+            "--group",
+            "pg",
+            "--",
+            "env",
+            "-0",
+        ],
+    ]
+    assert parent == str(process.pid)
+    assert code == 128 + signum
+    record = _run_record(layout)
+    assert (record["exit"], record["stopped_by"]) == (3, signum.name)
+
+
 def test_a_killed_run_keeps_its_flow_and_copy_leased_until_its_command_ends(
     layout: workspace.Layout,
     actors: _Actors,
@@ -4959,7 +5049,7 @@ def test_a_stopped_gate_runs_no_later_suite_and_ends_by_the_signal(
 ) -> None:
     for name in ("pyproject.toml", "uv.lock"):
         _ = _write(layout.repo_root / name, f"{name}\n")
-    streamed: list[tuple[list[str], list[tuple[int, int]]]] = []
+    streamed: list[tuple[list[str], Path | None, list[tuple[int, int]]]] = []
 
     def stopped_stream(
         command: list[str],
@@ -4970,11 +5060,13 @@ def test_a_stopped_gate_runs_no_later_suite_and_ends_by_the_signal(
         *,
         holding: tuple[int, ...] = (),
     ) -> workspace.Finished:
-        del cwd
-        streamed.append((command, [(os.fstat(fd).st_dev, os.fstat(fd).st_ino) for fd in holding]))
+        streamed.append(
+            (command, cwd, [(os.fstat(fd).st_dev, os.fstat(fd).st_ino) for fd in holding]),
+        )
         _ = _write(log_path, header)
         return workspace.Finished(128 + signal.SIGINT, signal.SIGINT)
 
+    monkeypatch.setattr(workspace, "uv_launch", _launch_as_given)
     monkeypatch.setattr(workspace, "stream", stopped_stream)
 
     code = workspace.gate(layout, ["lint", "default"])
@@ -4982,8 +5074,10 @@ def test_a_stopped_gate_runs_no_later_suite_and_ends_by_the_signal(
     out = capsys.readouterr().out
     assert code == 128 + signal.SIGINT
     assert syncs == [layout.gate_dir]
-    ((command, holding),) = streamed
+    ((command, cwd, holding),) = streamed
     assert command[-3:] == list(workspace.GATE_SUITES["lint"][0])
+    # The suite runs in the gate's copy of the tree, never the working tree.
+    assert cwd == layout.gate_dir
     # The copy's sync and the suite hold the flow's lease and the gate's lock.
     locks = [layout.flow_dir, layout.flow_dir / "gate.lock"]
     files = [(path.stat().st_dev, path.stat().st_ino) for path in locks]
