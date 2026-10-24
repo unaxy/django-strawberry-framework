@@ -62,7 +62,7 @@ from django_filters import constants as _filter_constants
 from django_filters.conf import settings as _df_settings
 from django_filters.fields import BaseCSVField, ChoiceField
 from django_filters.filters import BaseInFilter, BaseRangeFilter, FilterMethod
-from django_filters.filterset import FilterSetOptions
+from django_filters.filterset import BaseFilterSet, FilterSetOptions
 from django_filters.utils import get_model_field
 from django_filters.widgets import BaseCSVWidget, SuffixedMultiWidget
 from graphql import GraphQLError
@@ -93,6 +93,7 @@ from django_strawberry_framework.types.relay import (
 )
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
+    is_concrete_field,
     is_list_or_tuple,
     is_str,
     list_of,
@@ -148,7 +149,6 @@ if TYPE_CHECKING:
     from django.core.files.uploadedfile import UploadedFile
     from django.forms.boundfield import BoundField
     from django.utils.datastructures import MultiValueDict
-    from django_filters.filterset import BaseFilterSet
     from django_stubs_ext import StrPromise
     from strawberry.schema import Schema
 
@@ -469,9 +469,16 @@ def _column_form_field(filter_instance: Filter, *, element: bool = False) -> Fie
     comparison and not ``exact``: django-filter builds ``exact`` on a choice column as a
     ``ChoiceFilter``, whose ``ChoiceField`` refuses any value off the column's choices,
     while a range bound or a list member compares against the stored values whatever they
-    are. ``None`` for a filter bound to no package ``FilterSet`` (a class-level
-    declaration, a standalone filter), a path naming no model field, a relation, or a
-    column django-filter builds no filter for. A relation's form field is django-filter's
+    are. Any django-filter ``FilterSet`` parent cleans, the package's or django-filter's
+    own (a ``DjangoFilterBackend`` view's), so a value its column cannot hold is that
+    form's error. The filter is the one the parent's class selects without the package
+    ``FilterSet``'s own ``filter_for_lookup`` override: on a package subclass the method
+    that override replaces (a django-filter base or mixin behind it included), on any
+    other django-filter ``FilterSet`` its own ``filter_for_lookup``, a consumer override
+    honoured as its ``FILTER_DEFAULTS`` and ``Meta.filter_overrides`` are. ``None`` for a
+    filter bound to no ``FilterSet`` (a class-level declaration, a standalone filter), a
+    path naming no model field, a relation, or a column django-filter builds no filter
+    for. A relation's form field is django-filter's
     ``ModelChoiceField``, which looks every value up in the target's default manager: a
     key no row holds would answer "Select a valid choice" where one the target's
     ``get_queryset`` hides answers rows, an existence oracle the package's own relation
@@ -481,7 +488,7 @@ def _column_form_field(filter_instance: Filter, *, element: bool = False) -> Fie
     other column's a value of the column itself.
     """
     parent = read_attr(filter_instance, "parent", None)
-    if not isinstance(parent, _filter_set_class()):
+    if not isinstance(parent, BaseFilterSet):
         return None
     model_field = _bound_model_field(filter_instance)
     if model_field is None:
@@ -490,7 +497,13 @@ def _column_form_field(filter_instance: Filter, *, element: bool = False) -> Fie
         model_field = array_element_field(model_field) or model_field
     if model_field.is_relation:
         return None
-    filter_class, params = type(parent)._upstream_filter_for_lookup(model_field, "gte")
+    if isinstance(parent, _filter_set_class()):
+        filter_class, params = type(parent)._upstream_filter_for_lookup(model_field, "gte")
+    else:
+        filter_class, params = type(parent).filter_for_lookup(
+            require(model_field, is_concrete_field),
+            "gte",
+        )
     if filter_class is None:
         return None
     return _built_filter(filter_class, filter_instance.field_name, params).field
@@ -531,12 +544,12 @@ class _ColumnCleanedFilter(TypedFilter):
     """A typed filter whose form field cleans its values as the column's ``gte`` cleans one.
 
     The form field reads its column's comparison form field (``_column_form_field``) only
-    once the filter is bound to a ``FilterSet``: the per-request copy django-filter binds
-    builds its field once and hands it that field (``_hand_column_field``). A class-level
-    declaration has no column to read, so its field is built on each read and nothing is
-    written to the filter (``unkept_form_field``): the declaration is shared by every
-    request, and a field kept on it would ride every per-request deep copy and clean no
-    value.
+    once the filter is bound to a ``FilterSet``, the package's or django-filter's own: the
+    per-request copy django-filter binds builds its field once and hands it that field
+    (``_hand_column_field``). A class-level declaration has no column to read, so its field
+    is built on each read and nothing is written to the filter (``unkept_form_field``): the
+    declaration is shared by every request, and a field kept on it would ride every
+    per-request deep copy and clean no value.
     """
 
     def _hand_column_field(self, _field: Field, /) -> None:
@@ -563,9 +576,10 @@ class _ElementField(Field):
     ``element_field`` is the form field of the column's ``gte`` filter (an
     ``ArrayField``'s ``base_field``'s for an array column), so an element the column cannot
     hold is a form error rather than a value handed to the ORM, a text element is stripped
-    and a naive datetime element made aware. A ``None`` element stays
-    ``None``, and a value that is not a list or tuple, or a field with no
-    ``element_field``, passes through as sent for the filter to judge.
+    and a naive datetime element made aware, under any django-filter ``FilterSet`` parent.
+    A ``None`` element stays ``None``, and a value that is not a list or tuple, or a field
+    with no ``element_field`` (a filter bound to no ``FilterSet``, a relation, a column
+    django-filter builds no filter for), passes through as sent for the filter to judge.
     """
 
     def __init__(
