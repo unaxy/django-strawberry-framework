@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 249 done, 175 to do.
+Progress: 250 done, 175 to do.
 
 ## Done
 
@@ -1145,6 +1145,12 @@ Progress: 249 done, 175 to do.
   twin no longer flakes (4124 / 4176 / 18433), and the utils rows fail on every seed with `_sorted_meta_values`
   unsorted (they passed on 25% / 50%). 0 misses over seeds 0..20000 for every pool used (3.14), 0..4999 on 3.10;
   `tests/test_idioms.py` pins the helper
+- [x] 330. fixed: `scripts/prove_failability.py::_resolve_scratch_root` names the default scratch parent per user,
+  `<system temporary directory>/failability-<uid>` (`DEFAULT_SCRATCH_DIRECTORY_PREFIX` plus `os.getuid()`, as pytest's
+  `pytest-of-<user>`), so a second user on a shared Linux `/tmp` gets a parent of their own instead of a refusal on
+  every default run; the owner / symlink refusal is unchanged and still guards a squatted per-user name, and an
+  explicit `--scratch-root` behaves as before. A two-uid row pins it (it fails through the real refusal with the
+  shared name); the module docstring, the `--scratch-root` help and `docs/builder/BUILD.md` say per user
 
 ## Outside review of the fixes
 
@@ -1205,12 +1211,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   Decide: signal the group leader on the first stop and keep `killpg(SIGKILL)` for the escalation
   (`scripts/_stop_signals.py::signal_group`, `scripts/prove_failability.py::_request_stop`), or qualify the docstring.
   Robustness row (pytest-django recreates a leftover test database)
-- [ ] 330. `scripts/prove_failability.py::_resolve_scratch_root` names the default scratch parent `<system temporary
-  directory>/failability` for every user, and `_claim_private_directory` refuses a directory another user owns, so on a
-  shared Linux `/tmp` the first user to run the tool owns the name and every default run of a second user is refused
-  (only the owner can remove it). macOS's per-user `TMPDIR` is unaffected and an explicit `--scratch-root` always works.
-  Name the parent per user (`failability-<uid>`) or fall back to a private parent when the shared one is foreign; keep
-  the owner / symlink refusal. Check on Linux (read from the code, unprobed)
 - [ ] 331. `scripts/workspace.py::ensure_floor_venv` decides reuse with `python.exists() and key_path.is_file() and
   key_path.read_text(...) == key`, a check followed by a separate read, the shape item 145 removed from
   `_read_json_object` / `load_runs`; the macOS `$TMPDIR` purge can unlink the key between the two calls, which raises
@@ -1389,6 +1389,10 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `SynchronousOnlyOperation` on the async executor: the completion arm adapts only `QuerySet`, though
   `RawQuerySet.__aiter__` is the same `sync_to_async(_fetch_all)` generator and graphql-core 3.3 completes it; no
   contract row names `RawQuerySet`. Found verifying 429
+- [ ] 501. (robustness) `scripts/workspace.py::workspace_base` uses a fixed `$TMPDIR/dsf-ws` with no owner, symlink or
+  mode check, the shared-name shape 330 removed from `prove_failability.py`: on a shared Linux `/tmp` (no `TMPDIR`) a
+  second user's flows land in, or are refused by, the first user's directory, and a planted symlink is followed. Name
+  it per user and claim it as `prove_failability.py::_claim_private_directory` does. Found fact-finding 330
 
 ## To do: holes found re-checking the fixes
 

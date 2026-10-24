@@ -954,7 +954,7 @@ def test_without_a_scratch_root_every_run_against_one_tree_shares_its_temporary_
     # (the lock keeps them one at a time), and another tree gets its own beside it.
     namespace = (
         system_tmp.resolve()
-        / prove_failability.DEFAULT_SCRATCH_DIRECTORY_NAME
+        / f"{prove_failability.DEFAULT_SCRATCH_DIRECTORY_PREFIX}-{os.getuid()}"
         / prove_failability._tree_namespace()
     )
     documents: list[dict[str, object]] = []
@@ -1122,7 +1122,8 @@ def test_a_shared_directory_that_is_not_this_users_own_is_refused_before_anythin
     # in a temporary directory others can write to, someone else may have made them.
     seen = _stub_run(monkeypatch)
     directory = (
-        system_tmp.resolve() / prove_failability.DEFAULT_SCRATCH_DIRECTORY_NAME
+        system_tmp.resolve()
+        / f"{prove_failability.DEFAULT_SCRATCH_DIRECTORY_PREFIX}-{os.getuid()}"
         if shared == "failability"
         else state_home.resolve() / prove_failability.STATE_DIRECTORY_NAME
     )
@@ -1156,6 +1157,41 @@ def test_a_shared_directory_that_is_not_this_users_own_is_refused_before_anythin
     assert f"{directory} is not a directory owned by this user" in error
     assert list(elsewhere.iterdir()) == []
     assert (fake_repo / "package" / "views.py").read_text(encoding="utf-8") == SOURCE
+
+
+@pytest.mark.usefixtures("fake_repo", "state_home")
+def test_users_sharing_one_temporary_directory_get_their_own_default_scratch_parent(
+    system_tmp: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The default parent is named by the numeric uid: a second user's run is not refused
+    # by the directory the first user's run claimed under the same temporary directory.
+    real_lstat = Path.lstat
+    first_uid = os.getuid()
+    second_uid = first_uid + 1
+    first = system_tmp.resolve() / f"failability-{first_uid}"
+    second = system_tmp.resolve() / f"failability-{second_uid}"
+
+    first_scratch = prove_failability._resolve_scratch_root(None)
+    claimed = first_scratch.parent
+
+    # Every directory reads as owned by the second user once it is the caller, except the
+    # parent the first run claimed, which stays the first user's.
+    def lstat_as_second_user(path: Path) -> os.stat_result:
+        status = real_lstat(path)
+        fields = list(status)
+        fields[4] = first_uid if path == claimed else second_uid
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(os, "getuid", lambda: second_uid)
+    monkeypatch.setattr(Path, "lstat", lstat_as_second_user)
+
+    second_scratch = prove_failability._resolve_scratch_root(None)
+
+    assert first_scratch == first / prove_failability._tree_namespace()
+    assert second_scratch == second / prove_failability._tree_namespace()
+    assert first_scratch.is_dir()
+    assert second_scratch.is_dir()
 
 
 def test_a_pristine_copy_that_cannot_move_stays_in_the_state_directory_named_by_the_record(
