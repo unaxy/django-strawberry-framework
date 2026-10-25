@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 290 done, 207 to do.
+Progress: 291 done, 208 to do.
 
 ## Done
 
@@ -1478,6 +1478,8 @@ Progress: 290 done, 207 to do.
   GLOSSARY `DjangoModelFormMutation` term says the same, and the update's schema build logs a warning naming the field
   and the initial it needs (`forms/inputs.py::_advise_shape_disagreement`). The form owns the wrap and its initial, as
   for 541 and 542. Whether the package should refuse such an update instead is Waiting row 623
+- [x] 508. parked into Waiting row 316, which asks the maintainer this same question; 316 now carries the evidence and
+  a third option (two bounds compare as a range, input unchanged), prototyped and verified with no cell narrowed
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1640,8 +1642,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   midnight at save with a `RuntimeWarning`; near year 1 or 9999 that projection can overflow past
   `unstorable_temporal`, which checks only `datetime` / `time` values, and answer the masked error; probe and say
   whether the check covers it. Found verifying 381
-- [ ] 508. A package `RangeFilter` declared without `lookup_expr="range"` applies its default `exact` to the
-  two-element list when both bounds are sent, a masked error even for in-range bounds. Found verifying 372
 - [ ] 510. A declared `RangeFilter` / `ListFilter` whose `field_name` is `pk` or `<relation>__pk` is published as
   `String` and reaches the ORM uncleaned: `filters/base.py::_filterset_model_field` reads django-filter's
   `get_model_field`, which does not resolve the `pk` alias, so on a `DecimalField` or `UUIDField` primary key a
@@ -1771,6 +1771,15 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 621. (robustness) A `get_form` hook binding `QueryDict(urlencode(data))` turns a `SplitDateTimeField`'s datetime
   into text, which `SplitDateTimeWidget.decompress` cannot split: the request answers a top-level `AttributeError` (it
   silently stored NULL before 553's binding). Found verifying 553
+- [ ] 624. A package `RangeFilter` whose `lookup_expr` carries a transform (`date__range`, `date__exact`, `date`)
+  applies a lone bound as `<field_name>__gte` / `__lte` without it: `RangeFilter(field_name="occurred_at",
+  lookup_expr="date__range")` sent `{end: "2021-12-31"}` compares the datetime with midnight and leaves out a
+  2021-12-31 09:30 row that both bounds include; spec-027's RangeFilter row says a lone bound applies as `gte` / `lte`
+  of the declared range. Its bounds are also cleaned by the column's own `gte` field whatever the transform, so a
+  `year` lookup refuses a year as "Enter a valid date/time.". Found verifying 508
+- [ ] 625. (robustness) A package `ListFilter` declared with a lookup other than `in` (the default `exact`, `gte`)
+  hands the list to a scalar lookup: a masked `ValidationError` / `TypeError` over a decimal or number column and
+  silently no rows over text, even for one element. Found fixing 508
 ## To do: holes found re-checking the fixes
 
 
@@ -2007,10 +2016,17 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `tests/test_relay_node_field.py::test_decode_model_global_id_passes_raw_value_for_non_field_node_id`), so a relation
   write naming such a type stores whichever row's pk equals the id's text, while the filter side now refuses that slot
   across a relation (`GLOBALID_UNVALIDATABLE`). Refuse it on writes too, or keep the pass-through? Found landing 290
-- [ ] 316. `filters/base.py::RangeFilter` declared with the default `lookup_expr` (`exact`) raises a raw
-  `ValidationError` for a two-bound range (`price__exact=[a, b]`), while a one-sided range now works through `__gte` /
-  `__lte`; nothing validates the declaration. Default `lookup_expr` to `range` (django-filter's `RangeFilter` ignores
-  the declared lookup), or refuse a non-`range` lookup with `ConfigurationError` at class build?
+- [ ] 316. `filters/base.py::RangeFilter` declared with the default `lookup_expr` (`exact`), the django-filter
+  spelling `RangeFilter(field_name="x")`, publishes the `{start, end}` input under an `exact` key, applies a lone
+  bound as `__gte` / `__lte`, and hands two bounds as one list to the declared lookup: a masked error over a number,
+  decimal, date, datetime or relation-key column and silently wrong rows over text (`exact` none, `gte` all on
+  SQLite); nothing validates the declaration (also filed as 508, with a 3738-cell grid). Options: (a) default
+  `lookup_expr` to `range` (the input key becomes `range`); (b) refuse a non-`range` lookup with `ConfigurationError`
+  at class build; (c) keep the declaration and its input key and compare two bounds as a range whatever the terminal
+  lookup (except a declared `range` or `in`), keeping a transform prefix (`date__exact` -> `date__range`) and 372's
+  integer `gte` + `lte`, as django-filter's `RangeFilter` does: prototyped and verified, 668 two-bound cells change
+  (448 masked errors and 220 wrong answers become the declared-`range` answer), no other cell changes; it would also
+  make 315's "both bounds keep the declared lookup" false
 - [ ] 322. CHANGELOG entry for item 276: a `SerializerMutation` field whose kind disagrees with the model column it
   writes (a relation or file field over a scalar column, anything but a `FileField` over a file column, a relation over
   a scalar primary key's `pk` alias) is refused at schema build with `ConfigurationError` naming both kinds, instead of
