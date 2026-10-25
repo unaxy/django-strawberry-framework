@@ -16869,7 +16869,8 @@ def test_model_create_edition_relates_a_retired_house_code_over_http() -> None:
     that code as ``PublisherType``'s node id; the decode coerces it against what the
     column stores, so the edition is written against the publisher. ``Publisher`` is
     read three times, as for any house code: the node id mapped to the primary key, the
-    relation's visibility check, and the foreign key's own validation in ``full_clean``.
+    relation's visibility check, and the foreign key's own validation in ``full_clean``;
+    where the backend takes row locks, the locked visibility check adds its re-read.
     """
     publisher = models.Publisher.objects.create(name="Retired Press", house_code="RETIRED-9")
 
@@ -16886,7 +16887,7 @@ def test_model_create_edition_relates_a_retired_house_code_over_http() -> None:
 
     assert result == {"createEdition": {"errors": []}}
     reads = sum('FROM "library_publisher"' in q["sql"] for q in captured.captured_queries)
-    assert reads == 3
+    assert reads == 3 + post_lock_rereads(1)
     assert list(models.Edition.objects.values_list("isbn_13", "publisher_id")) == [
         ("9780000000009", publisher.pk),
     ]
@@ -21708,8 +21709,9 @@ def test_library_mutation_refetch_widens_the_child_hook_projection(
     ]
     sql = [entry["sql"] for entry in captured.captured_queries]
     # Savepoints + locate + uniqueness check + UPDATE + the re-fetch's shelf and book
-    # statements: the same eleven with or without the hook.
-    assert len(sql) == 11, sql
+    # statements: the same eleven with or without the hook, plus the locate's re-read
+    # where the backend takes row locks.
+    assert len(sql) == 11 + post_lock_rereads(1), sql
     [book_sql] = [statement for statement in sql if 'FROM "library_book"' in statement]
     assert '"library_book"."subtitle"' in book_sql, book_sql
 
