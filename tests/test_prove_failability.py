@@ -3408,6 +3408,94 @@ def test_patterns_match_globs_and_parametrized_ids_literally(
     assert result.expectation.is_met is True
 
 
+@pytest.mark.parametrize(
+    ("pattern", "node_id", "expected"),
+    [
+        pytest.param(
+            "tests/test_x.py::test_x[*]",
+            "tests/test_x.py::test_x[a-b]",
+            True,
+            id="any-row-matches-a-dashed-id",
+        ),
+        pytest.param(
+            "tests/test_x.py::test_x[*]",
+            "tests/test_x.py::test_x[1]",
+            True,
+            id="any-row-matches-a-numeric-id",
+        ),
+        pytest.param(
+            "tests/test_x.py::test_x[*]",
+            "tests/test_x.py::test_xy[1]",
+            False,
+            id="any-row-skips-another-test",
+        ),
+        pytest.param(
+            "tests/test_x.py::test_x[a-*]",
+            "tests/test_x.py::test_x[a-b]",
+            True,
+            id="id-prefix-matches",
+        ),
+        pytest.param(
+            "tests/test_x.py::test_x[a-*]",
+            "tests/test_x.py::test_x[b-a]",
+            False,
+            id="id-prefix-skips-another-prefix",
+        ),
+        pytest.param(
+            "tests/test_x.py::test_x[a[*]",
+            "tests/test_x.py::test_x[a[b]]",
+            True,
+            id="every-bracket-is-literal",
+        ),
+        pytest.param(
+            "tests/test_x.py::test_[ab]",
+            "tests/test_x.py::test_a",
+            True,
+            id="character-class-still-matches",
+        ),
+    ],
+)
+def test_a_pattern_reads_brackets_literally_or_as_a_character_class(
+    pattern: str,
+    node_id: str,
+    *,
+    expected: bool,
+) -> None:
+    assert prove_failability._pattern_matches(pattern, node_id) is expected
+
+
+@pytest.mark.usefixtures("fake_repo")
+def test_a_glob_over_a_parametrized_id_names_every_row_of_the_test(
+    scratch_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = _run_with_expectation(
+        tmp_path,
+        scratch_root,
+        monkeypatch,
+        ["tests/test_x.py::test_count[*]"],
+        failed=("tests/test_x.py::test_count[a-b]", "tests/test_x.py::test_count[1]"),
+    )
+
+    assert result.expectation is not None
+    assert result.expectation.is_met is True
+
+
+@pytest.mark.usefixtures("fake_repo")
+def test_a_row_isolation_node_id_never_reads_a_parametrized_glob(
+    scratch_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_run(monkeypatch, failed=("tests/test_x.py::test_count[a-b]",))
+    entry = _single_entry(tmp_path, isolates="tests/test_x.py::test_count[*]")
+
+    result = prove_failability.execute_entry(entry, scratch_root)
+
+    assert result.is_expectation_unmet is True
+
+
 @pytest.mark.usefixtures("fake_repo")
 def test_a_declared_row_already_failing_before_the_mutation_is_named_as_such(
     scratch_root: Path,
