@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 289 done, 207 to do.
+Progress: 290 done, 207 to do.
 
 ## Done
 
@@ -1471,6 +1471,13 @@ Progress: 289 done, 207 to do.
   cleaned by the column's `gte` field and held to its `1e50` cap; it now scopes that to the package's class and states
   django-filter's own `RangeField` cleaning. Whether to hold declared django-filter range / `in` classes to the
   backend's integer range is Waiting row 622
+- [x] 554. not a defect: the write is the stated contract. spec-038 Decision 8 binds an omitted shape-disagreeing
+  field from the form's initial (`forms/resolvers.py::_bind_omitted_shape_disagreeing_initials`), so a form presenting
+  one stored element keeps the row and one that does not fails validation or, through a field that accepts the stored
+  list itself (a `CharField` reads its text, a `BooleanField` its truthiness), "writes the value it makes of it"; the
+  GLOSSARY `DjangoModelFormMutation` term says the same, and the update's schema build logs a warning naming the field
+  and the initial it needs (`forms/inputs.py::_advise_shape_disagreement`). The form owns the wrap and its initial, as
+  for 541 and 542. Whether the package should refuse such an update instead is Waiting row 623
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1633,10 +1640,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   midnight at save with a `RuntimeWarning`; near year 1 or 9999 that projection can overflow past
   `unstorable_temporal`, which checks only `datetime` / `time` values, and answer the masked error; probe and say
   whether the check covers it. Found verifying 381
-- [ ] 554. A partial `DjangoModelFormMutation` update that omits a built-in single-value field over an `ArrayField`
-  whose form sets no initial silently writes a value made from the stored list where that field accepts the list (a
-  `CharField` stores its text, `["['x']"]`; a `BooleanField` stores its truthiness, `[True]` over `[False]`) instead of
-  refusing; the build warning and the docs say so; say whether the package should refuse it. Found verifying 423
 - [ ] 508. A package `RangeFilter` declared without `lookup_expr="range"` applies its default `exact` to the
   two-element list when both bounds are sent, a masked error even for in-range bounds. Found verifying 372
 - [ ] 510. A declared `RangeFilter` / `ListFilter` whose `field_name` is `pk` or `<relation>__pk` is published as
@@ -1773,6 +1776,12 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 623. Decide whether a partial `DjangoModelFormMutation` update that omits a built-in single-value field over an
+  `ArrayField`, whose form sets no initial for it, should be refused instead of writing what the field makes of the
+  stored list (`CharField`: its text, `["['x']"]`; `BooleanField`: its truthiness, `[True]` over `[False]`). Today
+  spec-038 Decision 8, the GLOSSARY and the update's build warning state the write, and a form presenting one stored
+  element in `self.initial` keeps the row; a refusal would need the package to tell "the field accepted the stored
+  list" from "the form chose that value", and changes a documented answer. Found fixing 554
 - [ ] 622. Decide whether a declared django-filter range / `in` class (`django_filters.RangeFilter`, a
   `BaseRangeFilter` or `BaseInFilter` over `NumberFilter`) on an integer column is held to the backend's integer
   range. Today it answers as plain django-filter: a two-bound range or a member past int64 on a `BigIntegerField` is a
