@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 284 done, 205 to do.
+Progress: 285 done, 205 to do.
 
 ## Done
 
@@ -1427,6 +1427,13 @@ Progress: 284 done, 205 to do.
   leaves un-wrapped fails inside `is_valid()` with Django's own `JSONDecodeError` / `TypeError`, as the docs now say
   (the form owns the wrap, as upstream). README, GLOSSARY and spec-038 name the `ArrayField` beside the non-text
   choice column; package rows on PostgreSQL
+- [x] 551. not a defect: spec-038 Decision 7 types a model-less form field by its registered class through a
+  `type(field).__mro__` walk, with no row for a PostgreSQL form field, so `SimpleArrayField` (a `CharField` subclass)
+  is `String`, pinned by `tests/forms/test_converter.py::test_postgres_array_form_fields_read_a_list`; no README,
+  GLOSSARY or spec row gives it another type, `form_field_reads_list` is read only for a field over an `ArrayField`
+  column (423), and graphene-django publishes it as `String` too. Every wire value either cleans (delimited text split
+  on the field's `delimiter`, each item cleaned by the base field; an empty or omitted optional value is `[]`) or
+  answers a field-keyed `required` / `item_invalid` error. Whether it should publish the base field's list is row 576
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1592,9 +1599,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 542. (robustness) The serializer twin of 423: a DRF single-value field (`ChoiceField`, ...) over an `ArrayField`
   with no `validate_<field>` turning the value into a list raises the raw `DataError` "malformed array literal" at save
   as the masked error. Found fixing 423
-- [ ] 551. (robustness) A `SimpleArrayField` with no model column behind it (a plain `Form` field or a ModelForm extra
-  field) is published as `String` (`forms/converter.py::convert_form_field` matches it as a `CharField`), though it reads
-  a list as readily as a delimited string; say whether it should publish the base field's list. Found implementing 423
 - [ ] 552. (robustness) A `SplitArrayField` with no model column behind it fails at schema build with
   `ConfigurationError` "Unsupported form field type 'SplitArrayField'": the converter has no row for this
   `django.contrib.postgres` form field. Found implementing 423
@@ -1728,6 +1732,15 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 576. Decide how a PostgreSQL form field with no model column behind it (a plain `Form` field or a `ModelForm`
+  extra field) is published. Today `SimpleArrayField` is `String` by its `CharField` ancestry: the client sends
+  delimited text, cannot send an element holding the delimiter, and JSON text is split on commas, while the same field
+  over an `ArrayField` column takes the column's list and the sibling list readers off-column are lists
+  (`MultipleChoiceField` `[String!]`, `JSONField` `JSON`, the serializer flavor's `ListField` `list[child]`);
+  `SplitArrayField` (552) and the range form fields raise `ConfigurationError` at build, `HStoreField` is `String`.
+  Publishing `SimpleArrayField` as the base field's list changes existing schemas' SDL and needs the element type from
+  `base_field` (nested arrays, element nullability); graphene-django publishes `String` for all of them. Found fixing
+  551
 - [ ] 572. CHANGELOG entry for item 541: on PostgreSQL, a `DjangoModelFormMutation` whose optional single-value form
   field over a `blank=True, null=False` `ArrayField` cleans an empty, `null` or omitted value to `""` now answers that
   column's field-keyed `null` error instead of the masked error (a `null=True` such column answers it too, as a
