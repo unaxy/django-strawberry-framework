@@ -33,7 +33,8 @@ write flavors):
 - ``unstorable_temporal`` - its write-side answer: a datetime or time a column
   cannot store on the database a write runs on, or (PostgreSQL) can store but not
   read back (a date or naive datetime a ``DateTimeField`` column holds read as the
-  datetime Django binds for it), applied by every write flavor before the save
+  datetime Django binds for it), or (psycopg 3) an ``ArrayField`` list the driver
+  cannot dump as a whole, applied by every write flavor before the save
   (``utils/write_values.py::unstorable_temporal_error`` on the model flavor);
 - ``null_field_error`` / ``empty_validation_error`` - the two shared leaves
   for an explicit null on a non-nullable field and a validation failure
@@ -65,6 +66,7 @@ from django.utils.functional import Promise
 
 from . import truth
 from ._narrowing import (
+    call_method,
     dict_items,
     is_char_wise,
     is_class,
@@ -924,8 +926,9 @@ def unstorable_temporal(column: object, value: object, using: Callable[[], str])
     is about to store in ``column``, after its own parse and validation. A
     ``DateTimeField`` value is first read as the datetime Django binds for it at the
     save (``_stored_datetime``): a ``date`` as its midnight and, under ``USE_TZ``, a
-    naive datetime (that midnight included) made aware in the default time zone. Two
-    kinds of datetime or time are then refused:
+    naive datetime (that midnight included) made aware in the default time zone; a
+    datetime a ``TimeField`` column holds is read as its naive ``time()``, as
+    ``TimeField.to_python`` stores it. Two kinds of datetime or time are then refused:
 
     - one the backend cannot bind, answered by ``unbindable_temporal`` for a plain
       write (SQLite, MySQL and Oracle: an aware datetime whose projection onto the
@@ -944,7 +947,10 @@ def unstorable_temporal(column: object, value: object, using: Callable[[], str])
     An ``ArrayField`` holds every element (at any nesting depth) to the same rule
     against its ``base_field``, except that psycopg binds a list's elements as text
     in either binding mode, so on PostgreSQL each is held to the client-side offset
-    rule; a ``None`` element, like a ``None`` value, stores.
+    rule; a ``None`` element, like a ``None`` value, stores. On PostgreSQL through
+    psycopg 3 the list as a whole is then asked of the driver
+    (``_psycopg_refuses_list``), which dumps every element with one dumper and can
+    refuse a list whose elements each store alone (a naive time beside an aware one).
     A ``date`` in a ``DateField`` column always stores. Any other column answers
     ``False`` without calling ``using`` or touching ``django.db.connections``.
     """
@@ -962,7 +968,17 @@ def unstorable_temporal(column: object, value: object, using: Callable[[], str])
         # ``connection.timezone`` is ``None`` exactly when ``USE_TZ`` is off.
         use_tz = connection.timezone is not None
         values = [_stored_datetime(element, use_tz=use_tz) for element in values]
+        stored_type: type[object] = datetime.datetime
+    else:
+        # ``TimeField.to_python`` stores a datetime's naive ``time()``.
+        values = [
+            element.time() if isinstance(element, datetime.datetime) else element
+            for element in values
+        ]
+        stored_type = datetime.time
     if unbindable_temporal(column, (), values, lambda: alias, bound_as_text=in_array):
+        return True
+    if in_array and _psycopg_refuses_list(connection, values, stored_type):
         return True
     if not isinstance(column, models.DateTimeField) or not connection.features.supports_timezones:
         return False
@@ -973,6 +989,54 @@ def unstorable_temporal(column: object, value: object, using: Callable[[], str])
         and _session_wall_clock_overflows(element, zone)
         for element in values
     )
+
+
+def _psycopg_refuses_list(
+    connection: BaseDatabaseWrapper,
+    values: list[object],
+    stored_type: type[object],
+) -> bool:
+    """Whether psycopg 3 refuses to dump ``values``, an ``ArrayField`` write's flattened elements.
+
+    psycopg dumps a list parameter with one element dumper, chosen from a single element
+    of the list, so a list whose elements each bind alone can still be refused: a naive
+    time dumped by the aware-time dumper raises the driver's ``DataError`` ("cannot
+    calculate the offset of tzinfo 'None' without a date") inside the save. The list is
+    asked of the driver itself, as the save will bind it: dumped as text by the driver's
+    ``adapt.Transformer`` over the open connection's adapters (``connection.connection``,
+    only when already connected; the connection is never opened), else the driver
+    module's own ``adapters``. Only the driver's ``DataError`` refuses; any other
+    exception propagates. ``values`` are the elements ``unstorable_temporal`` projected
+    for the column, ``None`` included (a ``DateTimeField`` base's as ``_stored_datetime``
+    reads them, a ``TimeField`` base's datetime as its naive ``time()``), and are asked
+    only when every one is ``None`` or an instance of ``stored_type``, the type the
+    column stores (any other element is converted by the column's ``to_python`` at the
+    save, not dumped as it stands). A connection that is
+    not PostgreSQL, and psycopg 2 (no ``adapters`` / ``adapt.Transformer``), are not
+    asked.
+    """
+    if connection.vendor != "postgresql" or not all(
+        element is None or isinstance(element, stored_type) for element in values
+    ):
+        return False
+    driver = read_attr(connection, "Database")
+    adapt = read_attr(driver, "adapt", None)
+    transformer_cls = read_attr(adapt, "Transformer", None)
+    text_format = read_attr(read_attr(adapt, "PyFormat", None), "TEXT", None)
+    refusal = read_attr(driver, "DataError", None)
+    raw_connection = read_attr(connection, "connection", None)
+    adapters = read_attr(driver if raw_connection is None else raw_connection, "adapters", None)
+    if (
+        adapters is None
+        or not callable(transformer_cls)
+        or not (is_class(refusal) and issubclass(refusal, Exception))
+    ):
+        return False
+    try:
+        _ = call_method(transformer_cls(adapters), "dump_sequence", [values], [text_format])
+    except refusal:
+        return True
+    return False
 
 
 def _stored_datetime(value: object, *, use_tz: bool) -> object:

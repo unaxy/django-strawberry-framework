@@ -1710,7 +1710,9 @@ write flavor rides.
    so every concrete column the cleaned data names is read from `form.instance` (the value
    the save writes; a date an `ArrayField` of datetimes still holds after
    `Model.clean_fields` is read as the midnight Django stores for it) and held to `django_strawberry_framework/utils/errors.py::unstorable_temporal`
-   on the pinned alias, the rule the model flavor's decode applies; a refused column is the
+   on the pinned alias, the rule the model flavor's decode applies (on psycopg 3 an
+   `ArrayField` list is also asked of the driver as a whole, which dumps every element with
+   one dumper and so can refuse a naive time beside an aware one); a refused column is the
    form field's `invalid` error `"Enter a value the database can represent."` and nothing
    is written. **The
    `ModelForm` save also maps the one other failure a valid `ModelForm` reaches on its own**
