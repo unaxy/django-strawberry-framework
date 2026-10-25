@@ -70,12 +70,12 @@ from django_strawberry_framework.mutations.inputs import (
 from django_strawberry_framework.registry import register_subsystem_clear, registry
 from django_strawberry_framework.scalars import Upload
 from django_strawberry_framework.types.converters import (
-    array_element_field,
     build_enum_from_choices,
     choice_column_pairs,
     choice_enum_name,
 )
 from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._array_field import array_element_field
 from django_strawberry_framework.utils._narrowing import (
     dict_of,
     is_str,

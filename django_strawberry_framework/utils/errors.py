@@ -65,6 +65,7 @@ from django.utils import timezone
 from django.utils.functional import Promise
 
 from . import truth
+from ._array_field import array_element_field
 from ._narrowing import (
     call_method,
     dict_items,
@@ -77,7 +78,6 @@ from ._narrowing import (
     list_iter,
     read_attr,
 )
-from .imports import import_attr_if_importable
 from .lazy import unwrap_lazy_object
 from .relations import written_model_field
 
@@ -913,10 +913,18 @@ def _year_bounds(
         _ = operations.year_lookup_bounds_for_date_field(year, iso_year=iso_year)
 
 
-#: ``django.contrib.postgres.fields.ArrayField``, soft-imported the way
-#: ``types/converters.py`` resolves it (``None`` without a PostgreSQL driver, where no
-#: column can be one); ``unstorable_temporal`` holds each element to its ``base_field``.
-_ARRAY_FIELD_CLS = import_attr_if_importable("django.contrib.postgres.fields", "ArrayField")
+def _array_leaf(column: object) -> tuple[object, int]:
+    """Return the column an ``ArrayField``'s innermost elements are stored through, and its depth.
+
+    The depth counts the ``ArrayField`` levels walked, each read through
+    ``utils/_array_field.py::array_element_field``; ``(column, 0)`` for a column that is
+    no ``ArrayField``.
+    """
+    depth = 0
+    while (element := array_element_field(column)) is not None:
+        column = element
+        depth += 1
+    return column, depth
 
 
 def unstorable_temporal(column: object, value: object, using: Callable[[], str]) -> bool:
@@ -954,12 +962,11 @@ def unstorable_temporal(column: object, value: object, using: Callable[[], str])
     A ``date`` in a ``DateField`` column always stores. Any other column answers
     ``False`` without calling ``using`` or touching ``django.db.connections``.
     """
+    column, depth = _array_leaf(column)
     values: list[object] = [value]
-    in_array = False
-    while is_class(_ARRAY_FIELD_CLS) and truth.is_instance(column, _ARRAY_FIELD_CLS):
-        column = read_attr(column, "base_field")
+    for _ in range(depth):
         values = [element for item in values if is_list_or_tuple(item) for element in item]
-        in_array = True
+    in_array = depth > 0
     if not issubclass(truth.class_of(column), (models.DateTimeField, models.TimeField)):
         return False
     alias = using()

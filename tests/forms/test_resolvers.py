@@ -115,7 +115,6 @@ from django_strawberry_framework.mutations.inputs import NON_FIELD_ERROR_KEY, Fi
 from django_strawberry_framework.optimizer.plans import OptimizationPlan
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing.relay import global_id_for
-from django_strawberry_framework.types import converters
 from django_strawberry_framework.utils import widgets as widgets_module
 from django_strawberry_framework.utils._narrowing import (
     dict_of,
@@ -131,7 +130,7 @@ from django_strawberry_framework.utils.typing import call_forwarded, object_resu
 from tests._generated_inputs import keyword_constructor as _keyword_constructor
 from tests._idioms import is_object_dict, is_object_list, saved_pk
 from tests._info import make_info, unread_info
-from tests._postgres_fields import FakeArrayField, FakeSplitArrayWidget
+from tests._postgres_fields import FakeArrayField, FakeSplitArrayWidget, patch_array_field
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -2434,7 +2433,7 @@ class _OneTagForm(forms.ModelForm[_PlainTagged]):
 
 def _update_one_tag(monkeypatch: pytest.MonkeyPatch) -> type[DjangoModelFormMutation]:
     """Declare an update mutation over ``_OneTagForm``, its column read as an ``ArrayField``."""
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
+    patch_array_field(monkeypatch)
 
     class UpdateOneTag(DjangoModelFormMutation):
         class Meta:

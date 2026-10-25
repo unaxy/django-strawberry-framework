@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 300 done, 208 to do.
+Progress: 301 done, 207 to do.
 
 ## Done
 
@@ -1576,6 +1576,15 @@ Progress: 300 done, 208 to do.
   offset of 16:00 or more filters there as the README says. Only consumer code that takes a package-filtered
   queryset and calls `QuerySet.iterator()` under such a cursor factory gets Django's client-bound named cursor and
   the server's refusal, which is that code's own choice of cursor. No code.
+- [x] 543. `utils/errors.py` and `types/converters.py` each soft-imported `django.contrib.postgres`'s `ArrayField`
+  and unwrapped `base_field` their own way, and tests patched each copy separately, so a test patching one left the
+  other unpatched. One private owner, `utils/_array_field.py` (`ARRAY_FIELD_CLS`, `array_element_field`), now serves
+  `types/converters.py`, `utils/errors.py` (`_array_leaf`), `forms/inputs.py`, `rest_framework/serializer_converter.py`
+  and `filters/base.py`, and every test patches it through `tests/_postgres_fields.py::patch_array_field`. No
+  behaviour changes: test verdicts, the schema SDL and a 131,904-cell `unstorable_temporal` grid over nested arrays
+  are identical to the parent. A `tests/utils/test_errors.py` row pins that a non-list item inside an outer array
+  list holds no element. spec-017, spec-019, docs/TREE.md, the kanban tracked-path constants and the type-suppression
+  ledger follow the move
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1727,9 +1736,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   a non-UTC `TIME_ZONE` (`valid_datetime`) and an aware out-of-range one under `USE_TZ=False` (`make_naive`), where
   DRF answers its own `overflow` for the other cells; upstream behaviour, decide whether the flavor maps it. Found
   fixing 381
-- [ ] 543. (robustness) `utils/errors.py` and `types/converters.py::array_element_field` each soft-import
-  `django.contrib.postgres`'s `ArrayField` and unwrap `base_field` their own way; one owner would keep the two
-  in step. Found fixing 381
 - [ ] 591. A `DecimalField` with no `max_digits` (Django 6.1) on PostgreSQL lets an identity or filter value past
   numeric's format (`"1e1000000"`) reach the bind and raise a masked `DataError`: the storage-domain check has no
   precision to hold it to and Django exposes no numeric-format bound; probe the filter `exact` path too. Found
