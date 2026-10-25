@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 280 done, 201 to do.
+Progress: 281 done, 201 to do.
 
 ## Done
 
@@ -1398,6 +1398,10 @@ Progress: 280 done, 201 to do.
   test that asserts it or a guard-removed probe, the 16 non-historical uses rephrased; the item's named sites, the
   rest of their functions and 324's two residual sites restated too, with the `apply_cascade_permissions` glossary
   twin. Code digest unchanged outside the gate row and two renamed tests; START's rule names the gate and its phrases
+- [x] 567. fixed: the flow docs cite each prose rule at its home: no process provenance at START.md "Style the
+  maintainer cares about", `path::Symbol` citations and the test tier at AGENTS.md (`docs/bug_hunt/HUNT.md`
+  step 8, `docs/bug_hunt/worker-2.md` and `docs/dry/worker-2.md` step 7, `docs/dry/DRY.md` Worker-2,
+  `docs/review/REVIEW.md`'s process-provenance grade); no rule is added to AGENTS.md
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1672,13 +1676,18 @@ tracker number are recorded there; open remainders and new defects are filed as 
   fix", refactor words ("relocated", "byte-identical to before", "status-quo behavior", "Pins finding-2"), the
   `test_products_api.py` "History:" sections and about 68 ambiguous sites (origin, "historical" and spec-ordinal
   wording); judge each (dry-0_0_15_3 item 34 covers `examples/`). Found fact-finding 500
-- [ ] 567. `docs/bug_hunt/HUNT.md`, `docs/dry/DRY.md`, their `worker-2.md` and `docs/review/REVIEW.md` cite "AGENTS.md
-  prose rules: no process provenance", but AGENTS.md carries no such rule; it lives only in START.md "Style the
-  maintainer cares about". Point the citations at START or add the rule to AGENTS. Found fact-finding 500
 - [ ] 568. (robustness) The provenance gate reads no f-string or concatenated first statement, no attribute-docstring
   string and no wrap from a trailing comment onto the next full-line comment (none in the corpus carries a phrase
   today), and `scripts/review_inspect.py` keeps its own `PROVENANCE_PATTERNS` list beside the gate's
   `PROVENANCE_PHRASES`. Found verifying 500
+- [ ] 593. AGENTS.md is cited by rule ordinal ("rule N" = its line N) at lines that hold another rule:
+  `docs/review/REVIEW.md` "rule 35" (defect definition, line 37), "rule 23" (one owner per folder, line 24),
+  "rule 22" (bulk-deletion guard, line 23); "rule 27" for `path::Symbol` refs (line 28) in
+  `.pre-commit-config.yaml`, `.github/workflows/django.yml`, `scripts/check_citations.py` and
+  `scripts/review_inspect.py`; `MUSE.md` rules 22 and 34 (lines 23 and 36); three `KANBAN.md` board sites
+  (DB-sourced). Cite each by content, not ordinal. Also `docs/builder/ARTIFACT.md` cites AGENTS for the kept
+  spec-pointer rule that lives in START.md "Style", and `docs/bug_hunt/FIX.md` phase 4 sends "exported
+  surface" to START, which has no such section. Found verifying 567
 ## To do: holes found re-checking the fixes
 
 

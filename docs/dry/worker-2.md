@@ -33,9 +33,10 @@ artifact. Never Worker-1's `worker-memory/`.
    freshness field carries fingerprints, that each structural gate fails its negative control, that
    `## Pending execution` lists every deferred proof as `proof: <command>` and every witness as
    `gate: <command>`, and that coupled findings are marked so neither can be accepted alone.
-7. Check the item-scoped diff against the `AGENTS.md` prose rules: no process provenance,
-   `path::Symbol` citations, tests at the mandated tier; run `uv run ruff format --check` and
-   `uv run ruff check` on the touched paths. A violation or a failure is `revision-needed`.
+7. Check the item-scoped diff against the prose rules: no process provenance (`START.md` "Style
+   the maintainer cares about"), `path::Symbol` citations and tests at the mandated tier (`AGENTS.md`);
+   run `uv run ruff format --check` and `uv run ruff check` on the touched paths. A violation or a
+   failure is `revision-needed`.
    Record any defect you find under `## Defects` marked `(Worker-2)`; do not spend the verdict
    asking Worker-1 to write it.
 8. For the final gate, confirm the bound inputs still match the tree and every pending command

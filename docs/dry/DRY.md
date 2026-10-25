@@ -437,7 +437,8 @@ scoped: the owner, its tests, the ledger rows the item lands.
    Enumeration` member by member, never by sample; challenges equivalence + ownership; confirms
    matrix discharged against the target's REAL surface (claimed inapplicability judged on its
    reason); confirms each negative control refuses; checks the item-scoped diff against
-   [AGENTS.md][agents] prose rules (no process provenance, `path::Symbol` citations, test tier) and
+   prose rules (no process provenance per [START.md][start] "Style the maintainer cares about";
+   `path::Symbol` citations and test tier per [AGENTS.md][agents]) and
    runs `uv run ruff format --check` + `uv run ruff check` on the paths it touched (a failure is
    `revision-needed`); records defects it finds under `## Defects` marked `(Worker-2)`. Zero-edit
    family / folder / project item → searches for a real consolidation before accepting; zero-edit

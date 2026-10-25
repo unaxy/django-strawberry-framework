@@ -323,9 +323,10 @@ receives Worker-1's diagnosis and report AFTER recording its own expectation.
    against the target's real surface, search independently where the trace is shallow.
 7. Confirm severity factors; dispute product semantics → `blocked` for the maintainer, never a regrade by
    fiat.
-8. Check the item-scoped diff against [AGENTS.md][agents] prose rules: no process provenance,
-   `path::Symbol` citations, tests at the mandated tier; run `uv run ruff format --check` and
-   `uv run ruff check` on the touched paths. A violation or a failure is `revision-needed`.
+8. Check the item-scoped diff against the prose rules: no process provenance ([START.md][start]
+   "Style the maintainer cares about"), `path::Symbol` citations and tests at the mandated tier
+   ([AGENTS.md][agents]); run `uv run ruff format --check` and `uv run ruff check` on the touched
+   paths. A violation or a failure is `revision-needed`.
 
 Verdict `verified` w/ the `Verification:` line, or `revision-needed` w/ concrete reproducible
 challenges. Worker-2 never edits the production fix or its tests.
