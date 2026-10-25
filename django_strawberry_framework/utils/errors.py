@@ -32,7 +32,8 @@ write flavors):
   builds on it for writes;
 - ``unstorable_temporal`` - its write-side answer: a datetime or time a column
   cannot store on the database a write runs on, or (PostgreSQL) can store but not
-  read back, applied by every write flavor before the save
+  read back (a date or naive datetime a ``DateTimeField`` column holds read as the
+  datetime Django binds for it), applied by every write flavor before the save
   (``utils/write_values.py::unstorable_temporal_error`` on the model flavor);
 - ``null_field_error`` / ``empty_validation_error`` - the two shared leaves
   for an explicit null on a non-nullable field and a validation failure
@@ -920,9 +921,11 @@ def unstorable_temporal(column: object, value: object, using: Callable[[], str])
     """Return whether the database ``using()`` names cannot store ``value`` in ``column``.
 
     The write-side answer to ``unbindable_temporal``: ``value`` is what a write flavor
-    is about to store in ``column`` (after its own parse and validation, a naive
-    datetime already made aware under ``USE_TZ``). Two kinds of datetime or time are
-    refused:
+    is about to store in ``column``, after its own parse and validation. A
+    ``DateTimeField`` value is first read as the datetime Django binds for it at the
+    save (``_stored_datetime``): a ``date`` as its midnight and, under ``USE_TZ``, a
+    naive datetime (that midnight included) made aware in the default time zone. Two
+    kinds of datetime or time are then refused:
 
     - one the backend cannot bind, answered by ``unbindable_temporal`` for a plain
       write (SQLite, MySQL and Oracle: an aware datetime whose projection onto the
@@ -942,8 +945,8 @@ def unstorable_temporal(column: object, value: object, using: Callable[[], str])
     against its ``base_field``, except that psycopg binds a list's elements as text
     in either binding mode, so on PostgreSQL each is held to the client-side offset
     rule; a ``None`` element, like a ``None`` value, stores.
-    A ``date`` always stores. Any other column answers ``False`` without calling
-    ``using`` or touching ``django.db.connections``.
+    A ``date`` in a ``DateField`` column always stores. Any other column answers
+    ``False`` without calling ``using`` or touching ``django.db.connections``.
     """
     values: list[object] = [value]
     in_array = False
@@ -954,9 +957,13 @@ def unstorable_temporal(column: object, value: object, using: Callable[[], str])
     if not issubclass(truth.class_of(column), (models.DateTimeField, models.TimeField)):
         return False
     alias = using()
+    connection = connections[alias]
+    if isinstance(column, models.DateTimeField):
+        # ``connection.timezone`` is ``None`` exactly when ``USE_TZ`` is off.
+        use_tz = connection.timezone is not None
+        values = [_stored_datetime(element, use_tz=use_tz) for element in values]
     if unbindable_temporal(column, (), values, lambda: alias, bound_as_text=in_array):
         return True
-    connection = connections[alias]
     if not isinstance(column, models.DateTimeField) or not connection.features.supports_timezones:
         return False
     zone = zoneinfo.ZoneInfo(connection.timezone_name)
@@ -966,6 +973,27 @@ def unstorable_temporal(column: object, value: object, using: Callable[[], str])
         and _session_wall_clock_overflows(element, zone)
         for element in values
     )
+
+
+def _stored_datetime(value: object, *, use_tz: bool) -> object:
+    """Return the datetime a ``DateTimeField`` binds for ``value``; any other value unchanged.
+
+    The projection ``DateTimeField.to_python`` and ``get_prep_value`` make at the save:
+    a ``date`` that is not a ``datetime`` becomes its midnight, and under ``USE_TZ``
+    (``use_tz``) a naive datetime, that midnight included, is made aware in the default
+    time zone (``TIME_ZONE``); an aware datetime is bound as it is. Django warns as it
+    makes a naive value aware; this projection is silent, since it only reads what the
+    save will bind. Attaching the ``ZoneInfo`` zone is what ``timezone.make_aware`` does
+    with it.
+    """
+    zone = timezone.get_default_timezone() if use_tz else None
+    if isinstance(value, datetime.datetime):
+        return (
+            value.replace(tzinfo=zone) if zone is not None and timezone.is_naive(value) else value
+        )
+    if isinstance(value, datetime.date):
+        return datetime.datetime(value.year, value.month, value.day, tzinfo=zone)
+    return value
 
 
 def _session_wall_clock_overflows(value: datetime.datetime, zone: datetime.tzinfo) -> bool:

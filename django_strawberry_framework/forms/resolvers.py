@@ -1397,7 +1397,9 @@ def _unstorable_temporal_errors(form: _ModelFormAny) -> dict[str, list[Validatio
     stores but cannot load back at the re-fetch. Every concrete column the cleaned data
     names is read from ``form.instance``, the value the save writes (what
     ``construct_instance`` set, else the column's stored or default value), and held to
-    ``utils/errors.py::unstorable_temporal`` on the write pipeline's pinned alias. A
+    ``utils/errors.py::unstorable_temporal`` on the write pipeline's pinned alias (a date
+    an ``ArrayField`` of datetimes still holds after ``Model.clean_fields`` is read as the
+    midnight Django stores for it). A
     refused column answers the ``invalid`` ``UNBINDABLE_TEMPORAL_MESSAGE`` error under its
     form field name, the form-error shape the envelope maps
     (``_form_errors_to_field_errors``).
