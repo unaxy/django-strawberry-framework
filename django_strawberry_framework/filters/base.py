@@ -52,6 +52,7 @@ from django.forms import (
     TextInput,
     Widget,
 )
+from django.utils.functional import Promise
 from django_filters import (
     CharFilter,
     ChoiceFilter,
@@ -647,6 +648,43 @@ class _ColumnCleanedFilter(TypedFilter):
         return built
 
 
+class _MembershipCSVWidget(BaseCSVWidget):
+    """Read raw form text as comma-separated members, an empty one as omission.
+
+    The raw-form rule of the generated ``in`` (``_MembershipCSVField``) and of
+    ``ListFilter`` / ``ArrayFilter`` (``_ElementField``). Form text (a querystring through
+    ``DjangoFilterBackend``, a ``QueryDict``, a lazy translation string) splits on commas,
+    ``?name=a,b`` reading ``["a", "b"]``. django-filter's ``BaseCSVWidget`` turns
+    the empty string a querystring carries into ``[]``, which these filters read as the
+    empty set; raw form data keeps django-filter's own rule (an empty ``?name=`` applies
+    no constraint) by reading it as ``None``. Any other value (a list or tuple, the shape
+    the GraphQL input layer sends) reaches the field as sent, so only a list or tuple
+    reaches the filter as an explicit ``[]``.
+    """
+
+    # basedpyright: the stub types the CSV widget's return as ``list[str]``; the base already
+    # returns ``None`` for an absent key, this override returns it for an empty one too, and
+    # a value that is not form text as sent
+    @override
+    def value_from_datadict(  # pyright: ignore[reportIncompatibleMethodOverride]
+        self,
+        data: Mapping[str, object],
+        files: Mapping[str, object],
+        name: str,
+    ) -> object:
+        """Return ``None`` for a raw empty string, any non-text value as sent, else split it."""
+        value = data.get(name)
+        if value == "":
+            return None
+        if value is None or isinstance(value, (str, Promise)):
+            return super().value_from_datadict(data, files, name)
+        return value
+
+
+class _MembershipCSVTextInput(_MembershipCSVWidget, TextInput):
+    """``_MembershipCSVWidget`` rendered as a text input, as django-filter's ``CSVWidget`` is."""
+
+
 class _ElementField(Field):
     """Form field of ``ListFilter`` / ``ArrayFilter``: each element is cleaned by ``element_field``.
 
@@ -657,7 +695,14 @@ class _ElementField(Field):
     A ``None`` element stays ``None``, and a value that is not a list or tuple, or a field
     with no ``element_field`` (a filter bound to no ``FilterSet``, a relation, a column
     django-filter builds no filter for), passes through as sent for the filter to judge.
+
+    Raw form data reads as the generated ``in`` reads it (``_MembershipCSVWidget``, rendered
+    as a text input): ``?name=a,b`` is ``["a", "b"]``, an empty ``?name=`` applies no
+    constraint, and a list or tuple passes through, so an explicit ``[]`` keeps its meaning.
+    A consumer ``widget=`` replaces it.
     """
+
+    widget: type[Widget] | Widget = _MembershipCSVTextInput
 
     def __init__(
         self,
@@ -723,7 +768,9 @@ class ArrayFilter(_ElementCleanedFilter):
     Each element is cleaned by the form field of the column's own ``gte`` filter, an
     ``ArrayField`` column's ``base_field``'s (``_ElementField``), so an element the column
     cannot hold is a form error rather than a value handed to the ORM, a text element is
-    stripped and a naive datetime element made aware.
+    stripped and a naive datetime element made aware. Raw form data (``DjangoFilterBackend``,
+    a ``QueryDict``) reads ``?name=a,b`` as ``["a", "b"]`` and an empty ``?name=`` as no
+    constraint (``_MembershipCSVWidget``); only a list or tuple is an explicit ``[]``.
     """
 
     # basedpyright: typeshed declares ``Filter.method`` a plain attribute, not the property it is,
@@ -1067,7 +1114,9 @@ class ListFilter(_ElementCleanedFilter):
     range on the queryset's database: it can identify no row, and bound raw it would
     overflow the backend. A list whose every element drops matches nothing (every row
     when excluding). The column's own validators are not applied, so an element they
-    would refuse still matches a row that holds it.
+    would refuse still matches a row that holds it. Raw form data (``DjangoFilterBackend``,
+    a ``QueryDict``) reads as the generated ``in`` reads it (``_MembershipCSVWidget``):
+    ``?name=a,b`` is ``["a", "b"]`` and an empty ``?name=`` applies no constraint.
     """
 
     # basedpyright: typeshed declares ``Filter.method`` a plain attribute, not the property it is,
@@ -1110,31 +1159,6 @@ class ListFilter(_ElementCleanedFilter):
                 return _match_none_queryset(self, qs)
             return super().filter(qs, kept)
         return super().filter(qs, value)
-
-
-class _MembershipCSVWidget(BaseCSVWidget):
-    """Read a raw-form empty value (``?field__in=``) as omission, a list as itself.
-
-    django-filter's ``BaseCSVWidget`` turns the empty string a querystring carries
-    into ``[]``, which ``MembershipInFilter`` reads as the empty set. Raw form data
-    keeps django-filter's own rule (an empty ``?field__in=`` applies no constraint)
-    by reading it as ``None``; only a real list -- the shape the GraphQL input layer
-    sends -- reaches the filter as an explicit ``[]``.
-    """
-
-    # basedpyright: the stub types the CSV widget's return as ``list[str]``; the base already
-    # returns ``None`` for an absent key, and this override returns it for an empty one too
-    @override
-    def value_from_datadict(  # pyright: ignore[reportIncompatibleMethodOverride]
-        self,
-        data: Mapping[str, object],
-        files: Mapping[str, object],
-        name: str,
-    ) -> list[str] | None:
-        """Return ``None`` for a raw empty string; defer to ``BaseCSVWidget`` otherwise."""
-        if data.get(name) == "":
-            return None
-        return super().value_from_datadict(data, files, name)
 
 
 class _MembershipCSVField(BaseCSVField):
