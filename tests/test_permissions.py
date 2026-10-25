@@ -90,7 +90,7 @@ from django.contrib.auth.models import User
 from django.contrib.contenttypes.fields import GenericForeignKey, GenericRelation
 from django.contrib.contenttypes.models import ContentType
 from django.db import connection as db_connection
-from django.db import models
+from django.db import models, transaction
 from django.db.models import Manager, Prefetch, sql
 from django.db.models.expressions import Combinable
 from django.http import HttpRequest
@@ -1359,8 +1359,11 @@ def test_reentrant_zero_edge_cascade_returns_the_sources_queryset_class() -> Non
 def _restatement_state(queryset: models.QuerySet[_CtParent, object]) -> dict[str, object]:
     """The query and ``QuerySet`` state a restatement must carry, read as plain data."""
     state = truth.instance_state(queryset)
+    # A ``select_for_update()`` query compiles only inside a transaction where the backend locks.
+    with transaction.atomic():
+        sql = str(queryset.query)
     return {
-        "sql": str(queryset.query),
+        "sql": sql,
         "db": queryset_db(queryset),
         "hints": queryset_hints(queryset),
         "for_write": state.get("_for_write"),
