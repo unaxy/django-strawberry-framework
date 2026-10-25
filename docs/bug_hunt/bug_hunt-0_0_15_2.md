@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 285 done, 205 to do.
+Progress: 286 done, 205 to do.
 
 ## Done
 
@@ -1434,6 +1434,13 @@ Progress: 285 done, 205 to do.
   column (423), and graphene-django publishes it as `String` too. Every wire value either cleans (delimited text split
   on the field's `delimiter`, each item cleaned by the base field; an empty or omitted optional value is `[]`) or
   answers a field-keyed `required` / `item_invalid` error. Whether it should publish the base field's list is row 576
+- [x] 542. not a defect: on PostgreSQL only a consumer-declared DRF `ChoiceField` reaches it (every other single-value
+  DRF field over an `ArrayField` is refused at build, row 46); `is_valid()` accepts the choice and the save fails on
+  the scalar the serializer never wrapped (`DataError` on a text array, `ProgrammingError` on an integer one), which
+  plain DRF answers with a 500 and the README answers as a top-level error ("any other exception from that code ... is
+  a top-level error"); no README, GLOSSARY or spec-039 row types the field or promises a field-keyed answer. Whether
+  it should build at all, or carry a documented `validate_<field>` wrap as the form flavor's `clean_<field>` does, is
+  Waiting row 45 (now with the Postgres evidence). The serializer's own empty-value and omitted-create gap is row 577
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1596,9 +1603,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   midnight at save with a `RuntimeWarning`; near year 1 or 9999 that projection can overflow past
   `unstorable_temporal`, which checks only `datetime` / `time` values, and answer the masked error; probe and say
   whether the check covers it. Found verifying 381
-- [ ] 542. (robustness) The serializer twin of 423: a DRF single-value field (`ChoiceField`, ...) over an `ArrayField`
-  with no `validate_<field>` turning the value into a list raises the raw `DataError` "malformed array literal" at save
-  as the masked error. Found fixing 423
 - [ ] 552. (robustness) A `SplitArrayField` with no model column behind it fails at schema build with
   `ConfigurationError` "Unsupported form field type 'SplitArrayField'": the converter has no row for this
   `django.contrib.postgres` form field. Found implementing 423
@@ -1727,6 +1731,16 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 575. (robustness) The build warning for a single-value form field over an `ArrayField`
   (`forms/inputs.py::_advise_shape_disagreement`, "which the form must turn into the column's value") is logged only
   for the update input; a create-only `DjangoModelFormMutation` with the same field logs none. Found fixing 541
+- [ ] 577. A `SerializerMutation` create that leaves out a `blank=True, null=False` column with no default (a
+  `ModelSerializer`'s generated field is `required=False` there) answers the `"__all__"` `constraint` error ("A
+  database constraint was violated.", the `IntegrityError` leaf) where docs/README.md says such a column is "that
+  column's field-keyed `null` error" and the model and `ModelForm` flavors answer it so (measured on an integer, an
+  integer-choice and an `ArrayField` column); a declared `allow_null=True` field over a `null=False` column sending
+  `null` answers the same `"__all__"` error, and an `allow_blank` `ChoiceField`'s `""` over an `ArrayField` a raw
+  `DataError`. The serializer flavor has no save-time diagnosis
+  (`rest_framework/resolvers.py::_guarded_serializer_write` maps only `IntegrityError` and Django `ValidationError`);
+  the GLOSSARY `FieldError` envelope scopes the `null` mapping to the model and `ModelForm` flavors, so README and
+  GLOSSARY disagree. Found fixing 542
 ## To do: holes found re-checking the fixes
 
 
@@ -2084,10 +2098,21 @@ tracker number are recorded there; open remainders and new defects are filed as 
   arm; a declared `ModelMultipleChoiceFilter` `[]` inside `not` now matches every row; raw `?x__in=` is unchanged
 - [ ] 91. CHANGELOG entry for item 43: a serializer `ListField(child=ChoiceField)` publishes a list of the field's generated enum
   (clients send enum names, not strings: `[a]`, `[MEMBER_1]`), and `MultipleChoiceField(allow_blank=True)` accepts `BLANK` as `""`
-- [ ] 45. Postgres: plain `ChoiceField` over an `ArrayField` builds, then the save fails (parked: needs a Postgres run)
-- [ ] 46. Postgres: a declared `ListField(child=<non-choice scalar>)` over an `ArrayField` is refused at build ("Unsupported
-  Django field type 'ArrayField'": the agreement check in `_model_backed_scalar_annotation` calls `scalar_for_field`, which
-  has no `ArrayField` entry); a `ChoiceField` child builds (parked: needs a Postgres run)
+- [ ] 45. Postgres (run fixing 542): a consumer-declared DRF `ChoiceField` over an `ArrayField` builds (the early
+  `_serializer_choice_annotation` branch of `rest_framework/serializer_converter.py::_model_backed_scalar_annotation`)
+  and publishes a single-value enum, while `_reject_read_enum_over_grouped_column` says a `ChoiceField` "writes one
+  value, never the list the array stores"; with no `validate_<field>` returning a list its save fails with the masked
+  error (text column: `DataError` "malformed array literal"; integer column: `ProgrammingError`), as plain DRF answers
+  500, and `allow_blank`'s `BLANK` fails the same way even through a `validate_<field>` wrapping only a non-empty
+  value. No doc states a serializer `validate_<field>` duty (the form flavor's `clean_<field>` duty is documented, 423
+  / 541). Decide: refuse it at build like every other single-value DRF field over an `ArrayField` (46), or keep it and
+  document the `validate_<field>` wrap
+- [ ] 46. Postgres (run fixing 542): a declared DRF `CharField`, `IntegerField`, `BooleanField`, `JSONField` or
+  `ListField(child=<non-choice scalar>)` over an `ArrayField` is refused at build ("Unsupported Django field type
+  'ArrayField'": the agreement check in `_model_backed_scalar_annotation` calls `scalar_for_field`, which has no
+  `ArrayField` entry), a `source=` rename included; a `ChoiceField`, `MultipleChoiceField` or
+  `ListField(child=ChoiceField)` builds (45); decide whether a list-writing `ListField` of a non-choice scalar should
+  build
 - [ ] 47. Postgres: `serializer_choice_field=MultipleChoiceField` over an `ArrayField` is unusable (parked: needs a Postgres run)
 - [ ] 93. CHANGELOG entry for item 44: a ModelForm mutation over a non-text choice column with `blank=True, null=False` answers
   `null` (or an omitted field with no default) with a field-keyed `null` FieldError instead of "An unexpected error occurred."
