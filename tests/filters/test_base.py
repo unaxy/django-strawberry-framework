@@ -929,7 +929,7 @@ def test_list_filter_passes_through_none() -> None:
 class _StoredCount(db_models.Model):
     """A plain integer column."""
 
-    count: db_models.IntegerField[int | Combinable, int] = db_models.IntegerField()
+    count: db_models.IntegerField[float | int | str | Combinable, int] = db_models.IntegerField()
 
     class Meta:
         managed = False
@@ -991,7 +991,7 @@ def test_list_filter_integer_in_drops_members_the_column_cannot_convert(
 class _GatedKey(db_models.Model):
     """A target whose integer primary key carries a validator refusing ids below 10."""
 
-    code: db_models.IntegerField[int | Combinable, int] = db_models.IntegerField(
+    code: db_models.IntegerField[float | int | str | Combinable, int] = db_models.IntegerField(
         primary_key=True,
         validators=[MinValueValidator(10)],
     )

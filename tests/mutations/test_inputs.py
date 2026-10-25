@@ -371,7 +371,7 @@ class _CompositeLine(models.Model):
     """An unmanaged owner of a ``CompositePrimaryKey`` over a foreign key and a text column."""
 
     pk = models.CompositePrimaryKey("category_id", "tag")
-    category: models.ForeignKey[product_models.Category, product_models.Category] = (
+    category: models.ForeignKey[product_models.Category | Combinable, product_models.Category] = (
         models.ForeignKey(product_models.Category, on_delete=models.CASCADE)
     )
     tag: models.TextField[str | Combinable, str] = models.TextField()
