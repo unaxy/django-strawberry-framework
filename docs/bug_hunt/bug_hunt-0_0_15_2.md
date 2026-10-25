@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 282 done, 202 to do.
+Progress: 283 done, 202 to do.
 
 ## Done
 
@@ -1410,6 +1410,14 @@ Progress: 282 done, 202 to do.
   `utils/write_values.py::unstorable_columns`) go through a module-private `if TYPE_CHECKING:` alias with a bare-class
   `else:`, so no package annotation subscripts a Django class without `__class_getitem__`; static types unchanged; red
   on every Python/Django cell, not only the floor
+- [x] 549. not a defect: no README, GLOSSARY, spec or test row promises what a pattern value the backend refuses
+  answers; `FILTER_INVALID` covers a closed list (a value the form field rejects, text the package refuses to store, a
+  temporal value the database cannot bind, an unholdable range or list bound) and spec-027 keeps pattern lookups out
+  of the temporal check, while a `regex` / `iRegex` operand is a plain `CharField` value the form accepts and the
+  backend refuses only when the lazy queryset runs (SQLite: `OperationalError` from Django's Python `re` user
+  function, only when a non-NULL row is scanned; PostgreSQL: `DataError` SQLSTATE 2201B on any table), masked as
+  GOAL's error policy intends. Django, django-filter, DRF `SearchFilter`, graphene-django, django-graphene-filters and
+  strawberry-graphql-django validate no pattern and map no such error. The promise question is row 571
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1572,9 +1580,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   midnight at save with a `RuntimeWarning`; near year 1 or 9999 that projection can overflow past
   `unstorable_temporal`, which checks only `datetime` / `time` values, and answer the masked error; probe and say
   whether the check covers it. Found verifying 381
-- [ ] 549. (robustness) An invalid regular expression (`"("`) sent to any generated or declared `regex` / `iRegex`
-  leaf, a text column's included, answers the masked uncoded error on SQLite and PostgreSQL, sync and async, instead of
-  `FILTER_INVALID` keyed to its field. Found verifying 383
 - [ ] 541. (robustness) A `DjangoModelFormMutation` single-value form field over an `ArrayField` whose form does not
   turn the value into a list (no `clean_<field>`, or a `required=False` field cleaning an empty input to `""` / `None`)
   raises a raw `JSONDecodeError` / `TypeError` from `ArrayField.to_python` / `validate`, or a `DataError` "malformed
@@ -1707,6 +1712,15 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 571. Decide whether a `regex` / `iRegex` filter operand the backend refuses answers `FILTER_INVALID` keyed to
+  its leaf instead of the masked error. Every refused filter value the package codes today is checked before the
+  queryset runs (`FilterSet._validate_form_or_raise`), and only the filter step knows the leaf; after execution the
+  error carries no field (and on SQLite not even its `re.error`). A faithful check has to ask the backend, as
+  `utils/errors.py::unbindable_temporal` does: Python `re.compile` (warnings caught) is exact for SQLite only, and
+  depends on the interpreter; PostgreSQL needs its own probe (`SELECT '' ~ %s`, savepointed inside a transaction),
+  since `re` both refuses valid ARE (`\m`, `\y`, `(?b)`, POSIX classes) and accepts invalid ones (`(?P<n>...)`, atomic
+  groups, `\z`); MySQL and Oracle have no probe measured. Promising it changes SQLite's empty-table or all-NULL `[]`
+  into `FILTER_INVALID`. Upstream answers the raw error everywhere. Found fixing 549
 - [ ] 561. CHANGELOG entry for item 399: a flat filter field walking a `RelatedFilter` hop runs its filter body once
   per supplied value (a consumer `method=` or `filter` override ran twice); a supplied value that constrains nothing
   (`""`) now runs the hop target type's `get_queryset` once per request on `apply_sync` too, as on `apply_async`, so
