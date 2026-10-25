@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 297 done, 210 to do.
+Progress: 298 done, 210 to do.
 
 ## Done
 
@@ -1546,6 +1546,22 @@ Progress: 297 done, 210 to do.
   Boolean `exact` (`filters/sets.py` maps `models.BooleanField` to django-filter's `BooleanFilter`) and
   django-filter's own `BooleanFilter` read `?flag=yes` as no constraint the same way, and spec-027 promises the
   declared filters exactly that column cleaner. GraphQL types the value `Boolean` and cannot send the string. No code.
+- [x] 556. On PostgreSQL through psycopg 3 an `ArrayField(TimeField)` write mixing naive and aware times escaped
+  the temporal storability preflight: psycopg picks one array type for the whole list from its elements (in 3.3.4
+  the last non-`None` one, `types/array.py::BaseListDumper._find_list_element`), so `[naive, aware]` went to the
+  `timetz[]` dumper, whose `DataError` "cannot calculate the offset of tzinfo 'None' without a date" answered a
+  masked top-level error on every write flavor (model, `ModelForm` `SimpleArrayField` / `SplitArrayField`, DRF
+  `ListField`), nothing written, while `[aware, naive]` stores. `utils/errors.py::unstorable_temporal` now also asks
+  the driver about an `ArrayField` list as a whole (`_psycopg_refuses_list`): the flattened list, each element as
+  the column stores it (a `DateTimeField` element through `_stored_datetime`, a datetime in a `TimeField` list as
+  its naive `.time()`), is dumped as text with the open connection's adapters or the driver's, and only when every
+  element is `None` or the column's stored type; the driver's `DataError` is the field's `invalid` `FieldError`
+  "Enter a value the database can represent.", any other exception propagates, psycopg 2 is not asked, and no
+  connection is opened. Restating psycopg's ordering was rejected (it differs across psycopg 3 versions), and so was
+  refusing every mixed list (it would refuse `[aware, naive]`, which stores). Whether PostgreSQL stores
+  `[aware, naive]` into `time[]` is unchanged and unverified on a server. Package rows in
+  `tests/utils/test_errors.py` (a stand-in driver and the real psycopg module); README, spec-036, spec-038,
+  spec-039 and the `fielderror-envelope` glossary term
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1703,9 +1719,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 545. (robustness) `scripts/prove_failability.py::_pattern_matches`: an `expect_failing` glob over a parametrized
   id (`test_x[*]`) never matches, since `fnmatch` reads `[*]` as a character class; only an exact id or a `[[]`
   escape works, and the module docstring offers "node id or glob" without saying so. Found implementing 424
-- [ ] 556. (robustness) A PostgreSQL `ArrayField(TimeField)` write whose list holds a naive time before an aware one
-  (`[naive, aware]`) raises psycopg's "cannot calculate the offset of tzinfo 'None' without a date" as the masked error
-  in either binding mode (`[aware, naive]` stores). Found implementing 382
 - [ ] 557. (robustness) With a consumer `OPTIONS["cursor_factory"]` that binds on the server (psycopg's own `Cursor`)
   and no `server_side_binding`, Django's named cursors (`QuerySet.iterator()`) still bind on the client, while
   `utils/errors.py::unbindable_temporal` reads the connection as server-side; the package never iterates, so only
@@ -1838,6 +1851,9 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 528. CHANGELOG entry for item 556: on PostgreSQL through psycopg 3 an `ArrayField` write whose list psycopg
+  cannot dump as a whole (an `ArrayField(TimeField)` list such as `[naive, aware]`) is the field's `invalid`
+  `FieldError` instead of a masked error, on every write flavor
 - [ ] 526. CHANGELOG entry for item 512: a declared `ListFilter` / `ArrayFilter` under DRF's `DjangoFilterBackend`
   (or any raw form data) reads `?name=a,b` as a list and `?name=` as no constraint, as the generated `in` does,
   where every value answered a 500; the generated `in`'s raw-form widget also passes a tuple through and

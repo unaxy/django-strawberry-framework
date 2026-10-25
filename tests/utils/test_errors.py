@@ -19,12 +19,13 @@ over), and, on the Postgres tier, the real connection and ``ArrayField``.
 
 import ast
 import datetime
+import importlib
 import uuid
 import warnings
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -38,6 +39,7 @@ from django.db.backends.mysql.operations import DatabaseOperations as MySQLOpera
 from django.db.backends.sqlite3.base import DatabaseWrapper as SQLiteDatabaseWrapper
 from django.db.models import Model
 from django.test import override_settings
+from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from typing_extensions import override
 
@@ -1393,6 +1395,224 @@ def test_unstorable_temporal_holds_array_elements_to_the_text_rule_on_server_sid
     monkeypatch.setattr(errors_module, "_ARRAY_FIELD_CLS", FakeArrayField)
     driver, cursor_factory, _ = _BINDING_MODES["psycopg3-server"]
     with _postgresql_stand_in(driver, cursor_factory) as alias:
+        assert unstorable_temporal(column, value, lambda: alias) is refused
+
+
+class _DriverDataError(Exception):
+    """A database driver's ``DataError``."""
+
+
+#: The adapters a stand-in psycopg 3 module exports, and those of an open connection.
+_MODULE_ADAPTERS = object()
+_OPEN_ADAPTERS = object()
+
+#: One recorded list dump: the adapters, the parameters and the formats dumped.
+_Dump = tuple[object, list[object], list[object]]
+
+
+def _psycopg3_driver(outcome: Exception | None, dumps: list[_Dump]) -> ModuleType:
+    """A psycopg 3 module whose ``adapt.Transformer`` records each dump into ``dumps``.
+
+    A dump raises ``outcome`` when one is given, else dumps silently.
+    """
+
+    class Transformer:
+        def __init__(self, adapters: object) -> None:
+            self.adapters = adapters
+
+        def dump_sequence(self, params: list[object], formats: list[object]) -> list[object]:
+            dumps.append((self.adapters, params, formats))
+            if outcome is not None:
+                raise outcome
+            return []
+
+    adapt = ModuleType("adapt_stand_in")
+    vars(adapt).update(Transformer=Transformer, PyFormat=SimpleNamespace(TEXT="text"))
+    driver = _driver(ClientCursor=_ClientCursor, DataError=_DriverDataError)
+    vars(driver).update(adapt=adapt, adapters=_MODULE_ADAPTERS)
+    return driver
+
+
+@pytest.mark.parametrize(
+    ("outcome", "refused"),
+    [
+        pytest.param(_DriverDataError("cannot dump"), True, id="driver-refuses"),
+        pytest.param(None, False, id="driver-dumps"),
+    ],
+)
+def test_unstorable_temporal_asks_psycopg_for_an_array_as_a_whole(
+    outcome: Exception | None,
+    refused: bool,  # noqa: FBT001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On psycopg 3 an ``ArrayField`` list is dumped as text by the driver, and refused on its ``DataError``.
+
+    psycopg dumps a list with one element dumper, so a list whose elements each pass the
+    per-element rule can still be refused; the driver's own answer decides. The list
+    reaches the driver flattened and projected as the save binds it (a date in a
+    ``DateTimeField`` column as its midnight, made aware), ``None`` kept, through the
+    driver module's adapters while the connection is not open.
+    """
+    monkeypatch.setattr(errors_module, "_ARRAY_FIELD_CLS", FakeArrayField)
+    dumps: list[_Dump] = []
+    stamp = datetime.datetime(2021, 6, 15, 12, tzinfo=_UTC)
+    with _postgresql_stand_in(_psycopg3_driver(outcome, dumps), _DjangoClientCursor) as alias:
+        value = [[datetime.date(2021, 6, 15)], [None, stamp]]
+        assert unstorable_temporal(_NESTED_STAMPS, value, lambda: alias) is refused
+    midnight = datetime.datetime(2021, 6, 15, tzinfo=timezone.get_default_timezone())
+    assert dumps == [(_MODULE_ADAPTERS, [[midnight, None, stamp]], ["text"])]
+
+
+def test_unstorable_temporal_dumps_an_array_through_the_open_connection_adapters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An already open psycopg 3 connection's adapters dump the list, not the module's."""
+    monkeypatch.setattr(errors_module, "_ARRAY_FIELD_CLS", FakeArrayField)
+    dumps: list[_Dump] = []
+    with _postgresql_stand_in(_psycopg3_driver(None, dumps), _DjangoClientCursor) as alias:
+        connection = connections[alias]
+        connection.connection = SimpleNamespace(adapters=_OPEN_ADAPTERS)
+        try:
+            assert unstorable_temporal(_TIMES, [_AWARE_TIME], lambda: alias) is False
+        finally:
+            connection.connection = None
+    assert dumps == [(_OPEN_ADAPTERS, [[_AWARE_TIME]], ["text"])]
+
+
+def test_unstorable_temporal_propagates_any_other_driver_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the driver's ``DataError`` refuses a list; anything else it raises propagates."""
+    monkeypatch.setattr(errors_module, "_ARRAY_FIELD_CLS", FakeArrayField)
+    driver = _psycopg3_driver(LookupError("unexpected"), [])
+    with (
+        _postgresql_stand_in(driver, _DjangoClientCursor) as alias,
+        pytest.raises(LookupError, match="unexpected"),
+    ):
+        _ = unstorable_temporal(_TIMES, [_AWARE_TIME], lambda: alias)
+
+
+@pytest.mark.parametrize(
+    (
+        "driver",
+        "vendor",
+        "column",
+        "value",
+    ),
+    [
+        pytest.param(
+            _driver(DataError=_DriverDataError),
+            "postgresql",
+            _TIMES,
+            [datetime.time(9, 30), _AWARE_TIME],
+            id="psycopg2",
+        ),
+        pytest.param(
+            _psycopg3_driver(_DriverDataError("cannot dump"), []),
+            "postgresql",
+            _TIMES,
+            ["09:30", _AWARE_TIME],
+            id="element-the-column-converts",
+        ),
+        pytest.param(
+            _psycopg3_driver(_DriverDataError("cannot dump"), []),
+            "sqlite",
+            _TIMES,
+            [datetime.time(9, 30)],
+            id="not-postgresql",
+        ),
+        pytest.param(
+            _psycopg3_driver(_DriverDataError("cannot dump"), []),
+            "postgresql",
+            _STAMPS,
+            [_IN_RANGE, _AWARE_TIME],
+            id="element-another-column-stores",
+        ),
+    ],
+)
+def test_unstorable_temporal_leaves_an_array_the_driver_is_not_asked_about(
+    driver: ModuleType,
+    vendor: str,
+    column: models.Field[object, object],
+    value: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Psycopg 2, a list holding an element the column converts, and another backend are not dumped.
+
+    psycopg 2 has no ``adapt.Transformer`` to ask. An element that is neither ``None`` nor
+    the type the column stores (a string, or a time in a ``DateTimeField`` array) is
+    converted by the column's ``to_python`` at the save, or refused there, before the
+    driver sees it, so the list as it stands is not what the save binds. A connection
+    that is not PostgreSQL is not asked, whatever its driver module exports.
+    """
+    monkeypatch.setattr(errors_module, "_ARRAY_FIELD_CLS", FakeArrayField)
+    with _postgresql_stand_in(driver, _DjangoClientCursor) as alias:
+        connections[alias].vendor = vendor
+        assert unstorable_temporal(column, value, lambda: alias) is False
+
+
+_NAIVE_TIME = datetime.time(9, 30)
+_LATER_NAIVE_TIME = datetime.time(10)
+_OTHER_AWARE_TIME = datetime.time(11, tzinfo=datetime.timezone(datetime.timedelta(hours=-5)))
+
+
+@pytest.mark.parametrize(
+    ("value", "nested", "refused"),
+    [
+        pytest.param([_NAIVE_TIME, _AWARE_TIME], False, True, id="naive-aware"),
+        pytest.param(
+            [_AWARE_TIME, _NAIVE_TIME, _OTHER_AWARE_TIME],
+            False,
+            True,
+            id="aware-naive-aware",
+        ),
+        pytest.param([None, _NAIVE_TIME, _AWARE_TIME], False, True, id="none-naive-aware"),
+        pytest.param([[_NAIVE_TIME], [_AWARE_TIME]], True, True, id="nested-naive-aware"),
+        pytest.param([_AWARE_TIME, _NAIVE_TIME], False, False, id="aware-naive"),
+        pytest.param(
+            [_NAIVE_TIME, _AWARE_TIME, _LATER_NAIVE_TIME],
+            False,
+            False,
+            id="naive-aware-naive",
+        ),
+        pytest.param([_AWARE_TIME, _OTHER_AWARE_TIME], False, False, id="all-aware"),
+        pytest.param([_NAIVE_TIME, _LATER_NAIVE_TIME], False, False, id="all-naive"),
+        pytest.param(
+            [_NAIVE_TIME, datetime.datetime(2021, 6, 15, 9, 30)],  # noqa: DTZ001 - naive under test
+            False,
+            False,
+            id="time-datetime",
+        ),
+        pytest.param(
+            [datetime.datetime(2021, 6, 15, 9, 30, tzinfo=_UTC), _AWARE_TIME],
+            False,
+            True,
+            id="aware-datetime-aware-time",
+        ),
+        pytest.param([None], False, False, id="none"),
+        pytest.param([], False, False, id="empty"),
+    ],
+)
+def test_unstorable_temporal_refuses_a_time_array_psycopg_cannot_dump(
+    value: list[object],
+    nested: bool,  # noqa: FBT001
+    refused: bool,  # noqa: FBT001
+) -> None:
+    """A time list is refused exactly when psycopg 3 itself cannot dump it.
+
+    psycopg dumps a list with the dumper of one element, so a naive time dumped by the
+    aware-time dumper raises its ``DataError``; each list here stores element by element.
+    A datetime element is read as the naive ``time()`` the column stores for it, so an
+    aware datetime beside an aware time is a naive time beside an aware one.
+    The alias stands in for PostgreSQL on the real driver module, never connected; the
+    list's elements are dumped as text in either binding mode.
+    """
+    pytest.importorskip("psycopg")
+    psycopg = importlib.import_module("psycopg")
+    column = _real_array_of(models.TimeField())
+    if nested:
+        column = _real_array_of(column)
+    with _postgresql_stand_in(psycopg, None) as alias:
         assert unstorable_temporal(column, value, lambda: alias) is refused
 
 

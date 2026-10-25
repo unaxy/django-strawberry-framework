@@ -2015,7 +2015,8 @@ The pipeline steps:
      1..9999; one PostgreSQL stores but cannot load back; an aware time whose UTC offset
      PostgreSQL refuses, DRF projecting a datetime onto the current time zone first; an
      `ArrayField` element, which psycopg binds as text, held to the text offset rule even
-     under server-side binding; a date or naive datetime a `validate_<field>` hook leaves
+     under server-side binding, and on psycopg 3 an `ArrayField` list the driver cannot dump
+     as a whole (one dumper for every element: a naive time beside an aware one); a date or naive datetime a `validate_<field>` hook leaves
      for a `DateTimeField` column, held as the datetime Django stores for it, made aware in
      the default time zone, a date as its midnight) is the field's `invalid`
      `ErrorDetail` `"Enter a value the database can represent."`, flattened like any
