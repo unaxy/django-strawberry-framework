@@ -151,6 +151,7 @@ from django_strawberry_framework.utils.relations import (
     path_traverses_to_many,
     relation_kind,
 )
+from django_strawberry_framework.utils.widgets import multi_widget_keys
 
 from .base import (
     _GLOBALID_RELATION_PK_ATTR,
@@ -172,7 +173,6 @@ from .base import (
     _relation_uses_non_pk_to_field,
     copied_form_field,
     membership_in_filter_class,
-    multi_widget_keys,
     unkept_form_field,
 )
 from .inputs import (
@@ -1279,7 +1279,7 @@ class ExpansionSnapshot:
 def _widget_keys(filter_instance: Filter, name: str) -> list[str]:
     """Return the form-data keys the form field of ``filter_instance`` reads under ``name``.
 
-    A multi-widget reads its own keys (``filters/base.py::multi_widget_keys``: ``_0`` /
+    A multi-widget reads its own keys (``utils/widgets.py::multi_widget_keys``: ``_0`` /
     ``_1``, ``_min`` / ``_max``, or any suffix a consumer widget declares, ``__low``
     included); any other widget reads ``name``. The field is built without writing to
     the class-level filter (``filters/base.py::unkept_form_field``). A field that cannot
@@ -5490,7 +5490,7 @@ class FilterSet(
         """Whether the request's data carries no key the form field of leaf ``name`` reads.
 
         Read as ``_named_flat_copies`` names a copy: the keys the field's widget
-        reads (``filters/base.py::multi_widget_keys``, else the name), under the
+        reads (``utils/widgets.py::multi_widget_keys``, else the name), under the
         form prefix. A leaf with any of them present is supplied, whatever its
         value (``""`` included); one with none is absent, and its value is
         whatever its field cleans an absent key to.

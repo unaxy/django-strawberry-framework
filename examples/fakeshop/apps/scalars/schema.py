@@ -27,11 +27,16 @@ The ``ScalarSpecimen`` create / update mutations write the ``occurred_at`` /
 ``occurred_time`` columns through all three write flavors (``DjangoMutation``,
 ``DjangoModelFormMutation`` over ``forms.ScalarSpecimenTemporalForm``,
 ``SerializerMutation`` over ``serializers.ScalarSpecimenTemporalSerializer``), so a
-datetime or time the database cannot store is refused live on each.
+datetime or time the database cannot store is refused live on each. The ``SplitForm``
+pairs write ``occurred_at`` through ``forms.ScalarSpecimenSplitStampForm``'s
+``SplitDateTimeField``, whose widget reads a date key and a time key: unprefixed, under the
+form's own prefix (``PrefixedSplitForm``), and from a copy a ``get_form`` keys under that
+prefix itself (``RekeyedSplitForm``).
 """
 
 import strawberry
-from django.db.models import Manager, QuerySet
+from django.db.models import Manager, Model, QuerySet
+from django.forms import ModelForm
 from strawberry.types import Info
 from typing_extensions import override
 
@@ -468,6 +473,104 @@ class UpdateScalarSpecimenViaForm(DjangoModelFormMutation):
         permission_classes = []
 
 
+class CreateScalarSpecimenViaSplitForm(DjangoModelFormMutation):
+    """Create a ``ScalarSpecimen`` through ``ScalarSpecimenSplitStampForm`` (a split ``occurredAt``)."""
+
+    class Meta:
+        form_class = forms.ScalarSpecimenSplitStampForm
+        operation = "create"
+        permission_classes = []
+
+
+class UpdateScalarSpecimenViaSplitForm(DjangoModelFormMutation):
+    """Update a ``ScalarSpecimen`` through ``ScalarSpecimenSplitStampForm`` (a split ``occurredAt``)."""
+
+    class Meta:
+        form_class = forms.ScalarSpecimenSplitStampForm
+        operation = "update"
+        permission_classes = []
+
+
+class CreateScalarSpecimenViaPrefixedSplitForm(DjangoModelFormMutation):
+    """Create a ``ScalarSpecimen`` through ``PrefixedScalarSpecimenSplitStampForm`` (prefix ``specimen``)."""
+
+    class Meta:
+        form_class = forms.PrefixedScalarSpecimenSplitStampForm
+        operation = "create"
+        permission_classes = []
+
+
+class UpdateScalarSpecimenViaPrefixedSplitForm(DjangoModelFormMutation):
+    """Update a ``ScalarSpecimen`` through ``PrefixedScalarSpecimenSplitStampForm`` (prefix ``specimen``)."""
+
+    class Meta:
+        form_class = forms.PrefixedScalarSpecimenSplitStampForm
+        operation = "update"
+        permission_classes = []
+
+
+def _keyed_under_specimen_prefix(values: dict[str, object]) -> dict[str, object]:
+    """Key ``values`` as the form prefix ``specimen`` reads a one-key field: ``specimen-<name>``."""
+    return {f"specimen-{name}": value for name, value in values.items()}
+
+
+class CreateScalarSpecimenViaRekeyedSplitForm(DjangoModelFormMutation):
+    """Create a ``ScalarSpecimen`` through the prefixed split form, bound by a re-keying ``get_form``.
+
+    The hook keys every value ``specimen-<name>``, the whole ``occurredAt`` datetime
+    included; the package keeps that mapping as bound and adds the date and time keys the
+    split widget reads beside it.
+    """
+
+    class Meta:
+        form_class = forms.PrefixedScalarSpecimenSplitStampForm
+        operation = "create"
+        permission_classes = []
+
+    @override
+    def get_form(
+        self,
+        info: strawberry.Info[object, object],
+        *,
+        data: dict[str, object],
+        files: dict[str, object],
+        instance: Model | None = None,
+    ) -> ModelForm[models.ScalarSpecimen]:
+        """Bind the data keyed ``specimen-<name>``."""
+        return super().get_form(
+            info,
+            data=_keyed_under_specimen_prefix(data),
+            files=files,
+            instance=instance,
+        )
+
+
+class UpdateScalarSpecimenViaRekeyedSplitForm(DjangoModelFormMutation):
+    """Update a ``ScalarSpecimen`` through the prefixed split form, bound by a re-keying ``get_form``."""
+
+    class Meta:
+        form_class = forms.PrefixedScalarSpecimenSplitStampForm
+        operation = "update"
+        permission_classes = []
+
+    @override
+    def get_form(
+        self,
+        info: strawberry.Info[object, object],
+        *,
+        data: dict[str, object],
+        files: dict[str, object],
+        instance: Model | None = None,
+    ) -> ModelForm[models.ScalarSpecimen]:
+        """Bind the data keyed ``specimen-<name>``."""
+        return super().get_form(
+            info,
+            data=_keyed_under_specimen_prefix(data),
+            files=files,
+            instance=instance,
+        )
+
+
 class CreateScalarSpecimenViaSerializer(SerializerMutation):
     """Create a ``ScalarSpecimen`` through ``ScalarSpecimenTemporalSerializer``."""
 
@@ -491,7 +594,8 @@ class Mutation:
     """Scalars coverage write surface: the live ``Upload`` path (spec-037) and temporal writes.
 
     The ``ScalarSpecimen`` create / update pairs write the temporal columns through each
-    flavor (model, ``ModelForm``, serializer).
+    flavor (model, ``ModelForm``, serializer); the ``SplitForm`` pairs write
+    ``occurredAt`` through a ``SplitDateTimeField``.
     """
 
     create_media_specimen = DjangoMutationField(CreateMediaSpecimen)
@@ -501,6 +605,20 @@ class Mutation:
     update_scalar_specimen = DjangoMutationField(UpdateScalarSpecimen)
     create_scalar_specimen_via_form = DjangoMutationField(CreateScalarSpecimenViaForm)
     update_scalar_specimen_via_form = DjangoMutationField(UpdateScalarSpecimenViaForm)
+    create_scalar_specimen_via_split_form = DjangoMutationField(CreateScalarSpecimenViaSplitForm)
+    update_scalar_specimen_via_split_form = DjangoMutationField(UpdateScalarSpecimenViaSplitForm)
+    create_scalar_specimen_via_prefixed_split_form = DjangoMutationField(
+        CreateScalarSpecimenViaPrefixedSplitForm,
+    )
+    update_scalar_specimen_via_prefixed_split_form = DjangoMutationField(
+        UpdateScalarSpecimenViaPrefixedSplitForm,
+    )
+    create_scalar_specimen_via_rekeyed_split_form = DjangoMutationField(
+        CreateScalarSpecimenViaRekeyedSplitForm,
+    )
+    update_scalar_specimen_via_rekeyed_split_form = DjangoMutationField(
+        UpdateScalarSpecimenViaRekeyedSplitForm,
+    )
     create_scalar_specimen_via_serializer = DjangoMutationField(CreateScalarSpecimenViaSerializer)
     update_scalar_specimen_via_serializer = DjangoMutationField(UpdateScalarSpecimenViaSerializer)
 

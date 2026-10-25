@@ -20,6 +20,11 @@ project onto the current time zone stands, and a value a flavor stores (the
 serializer's naive projection under ``USE_TZ = False``, the serializer's projection of
 an aware datetime onto the current time zone, an aware time whose offset PostgreSQL
 accepts, there) is written.
+
+The ``SplitForm`` pairs write ``occurred_at`` through a ``SplitDateTimeField``, whose
+widget reads a date key and a time key: the datetime sent is stored on create and update
+and kept when omitted, unprefixed, under the form's prefix and beside a ``get_form``'s own
+prefixed copy.
 """
 
 from __future__ import annotations
@@ -426,3 +431,75 @@ async def test_async_write_holds_the_same_temporal_rule(flavor: str, name: str) 
 
     assert payload == _expected(flavor, root, outcome, cell, "written")
     await sync_to_async(_assert_rows)("create", outcome, None, cell)
+
+
+#: The split-stamp form surfaces: create and update root fields and their input types.
+_SPLIT_FORMS = {
+    "unprefixed": (
+        "createScalarSpecimenViaSplitForm",
+        "ScalarSpecimenSplitStampFormInput",
+        "updateScalarSpecimenViaSplitForm",
+        "ScalarSpecimenSplitStampFormPartialInput",
+    ),
+    "prefixed": (
+        "createScalarSpecimenViaPrefixedSplitForm",
+        "PrefixedScalarSpecimenSplitStampFormInput",
+        "updateScalarSpecimenViaPrefixedSplitForm",
+        "PrefixedScalarSpecimenSplitStampFormPartialInput",
+    ),
+    "rekeyed": (
+        "createScalarSpecimenViaRekeyedSplitForm",
+        "PrefixedScalarSpecimenSplitStampFormInput",
+        "updateScalarSpecimenViaRekeyedSplitForm",
+        "PrefixedScalarSpecimenSplitStampFormPartialInput",
+    ),
+}
+
+_SENT_AT = datetime.datetime(2022, 7, 8, 10, 11, 12, tzinfo=datetime.timezone.utc)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("form", list(_SPLIT_FORMS))
+@pytest.mark.parametrize("operation", ["create", "update", "update-omitted"])
+def test_split_datetime_form_field_writes_the_datetime_sent(form: str, operation: str) -> None:
+    """A ``SplitDateTimeField`` over ``occurred_at`` writes the datetime sent, and keeps it when omitted.
+
+    Its ``SplitDateTimeWidget`` reads a date key and a time key, so the package binds the
+    datetime split by the widget's own ``decompress`` under both: unprefixed
+    (``occurred_at_0`` / ``occurred_at_1``), under the form's prefix
+    (``specimen-occurred_at_0`` / ``_1``), and beside the whole value a ``get_form`` keyed
+    ``specimen-occurred_at`` itself. A create and an update naming ``occurredAt`` store it;
+    an update omitting it binds the stored datetime the same way and keeps it.
+    """
+    create_field, create_input, update_field, update_input = _SPLIT_FORMS[form]
+    selection = "{ result { label occurredAt } errors { field messages codes path } }"
+    if operation == "create":
+        root = create_field
+        document = f"mutation Write($data: {create_input}!) {{ {root}(data: $data) {selection} }}"
+        variables: dict[str, object] = {
+            "data": {**_CREATE_DATA, "occurredAt": _SENT_AT.isoformat()},
+        }
+        label, stored_at = "written", _SENT_AT
+    else:
+        specimen = _seed()
+        root = update_field
+        document = (
+            f"mutation Write($id: ID!, $data: {update_input}!) "
+            f"{{ {root}(id: $id, data: $data) {selection} }}"
+        )
+        data: dict[str, object] = {"label": "renamed"}
+        if operation == "update":
+            data["occurredAt"] = _SENT_AT.isoformat()
+        variables = {"id": str(specimen.pk), "data": data}
+        label = "renamed"
+        stored_at = _SENT_AT if operation == "update" else _STORED_AT
+
+    payload = response_json(post_graphql(document, variables=variables))
+
+    assert payload == {
+        "data": {
+            root: {"result": {"label": label, "occurredAt": stored_at.isoformat()}, "errors": []},
+        },
+    }
+    rows = list(models.ScalarSpecimen.objects.values_list("label", "occurred_at"))
+    assert rows == [(label, stored_at)]

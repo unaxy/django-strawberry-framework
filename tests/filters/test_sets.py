@@ -115,7 +115,6 @@ from django_strawberry_framework.filters.base import (
     RelationPkMultipleFilter,
     _GlobalIDMultipleChoiceField,
     membership_in_filter_class,
-    multi_widget_keys,
 )
 from django_strawberry_framework.filters.factories import FilterArgumentsFactory
 from django_strawberry_framework.filters.inputs import (
@@ -165,6 +164,7 @@ from django_strawberry_framework.utils._narrowing import (
 from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.relations import ClassifiedPath, classify_path
 from django_strawberry_framework.utils.typing import object_result
+from django_strawberry_framework.utils.widgets import multi_widget_keys
 from tests._idioms import (
     STR_ENUM,
     STR_SUBCLASS_KINDS,

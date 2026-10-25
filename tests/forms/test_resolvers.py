@@ -51,7 +51,11 @@ key column is refused before validation; fakeshop's one rebuilt relation field
 (``ShelfRelationsForm.branch``) keeps its model and key, so the refusals live here. So
 does the schema-build refusal of a class-level relation field over another model on a
 form bound as declared, which no finalizing fakeshop schema can carry, with the shapes it
-leaves building and writing.
+leaves building and writing. So do the
+fields whose widget reads several form-data keys (PostgreSQL's ``SplitArrayField``, a
+consumer ``MultiValueField``), bound under each key: no fakeshop form declares one, and
+fakeshop runs on SQLite, which has no ``ArrayField``; Django's ``SplitDateTimeField`` is
+live in ``test_scalars_mutation_api.py``.
 """
 
 from __future__ import annotations
@@ -112,6 +116,7 @@ from django_strawberry_framework.optimizer.plans import OptimizationPlan
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.types import converters
+from django_strawberry_framework.utils import widgets as widgets_module
 from django_strawberry_framework.utils._narrowing import (
     dict_of,
     enum_value,
@@ -126,7 +131,7 @@ from django_strawberry_framework.utils.typing import call_forwarded, object_resu
 from tests._generated_inputs import keyword_constructor as _keyword_constructor
 from tests._idioms import is_object_dict, is_object_list, saved_pk
 from tests._info import make_info, unread_info
-from tests._postgres_fields import FakeArrayField
+from tests._postgres_fields import FakeArrayField, FakeSplitArrayWidget
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -5520,3 +5525,919 @@ def test_optional_class_choice_sent_by_a_create_is_refused_at_request() -> None:
     )
     assert [error.message for error in res.errors] == [message]
     assert not library_models.Venue.objects.filter(name=name).exists()
+
+
+# ---------------------------------------------------------------------------
+# A form field whose widget reads other keys than its name (``_bind_under_form_keys``)
+# ---------------------------------------------------------------------------
+
+
+def _keyed_row_model(name: str, **columns: models.Field[object, object]) -> type[models.Model]:
+    """A synthetic unmanaged model: a ``title`` beside ``columns``."""
+    return type(
+        name,
+        (models.Model,),
+        {
+            "__module__": __name__,
+            "title": models.TextField(),
+            "Meta": type("Meta", (), {"app_label": "products", "managed": False}),
+            **columns,
+        },
+    )
+
+
+def _keyed_row_form(
+    model_class: type[models.Model],
+    name: str,
+    form_field: forms.Field,
+    *,
+    prefix: str | None = None,
+    attrs: Mapping[str, object] | None = None,
+) -> type[forms.BaseForm]:
+    """A ``ModelForm`` over ``title`` and the column ``name``, declaring ``form_field`` for it."""
+    return type(
+        "KeyedRowForm",
+        (forms.ModelForm,),
+        {
+            name: form_field,
+            "prefix": prefix,
+            "Meta": type("Meta", (), {"model": model_class, "fields": ("title", name)}),
+            **(attrs or {}),
+        },
+    )
+
+
+def _prefixed_copy(data: dict[str, object]) -> dict[str, object]:
+    """Key ``data`` as the form prefix ``pfx`` reads a one-key field: ``pfx-<name>``."""
+    return {f"pfx-{name}": value for name, value in data.items()}
+
+
+#: The data a ``get_form_kwargs`` hook binds, by the name ``_keyed_row_schema`` takes:
+#: ``multivalue`` a ``MultiValueDict`` holding each value as its one entry; ``doseq`` the
+#: ``QueryDict`` a query string spelling each list as repeated keys parses to (a list per
+#: key, as text); ``prefixed-copy`` the hook's own ``pfx-<name>`` copy (a form prefixed
+#: ``pfx`` keeps it as bound), as a ``dict`` or a ``MultiValueDict``.
+_BOUND_DATA: dict[str, Callable[[dict[str, object]], Mapping[str, object]]] = {
+    "multivalue": lambda data: MultiValueDict({name: [value] for name, value in data.items()}),
+    "doseq": lambda data: QueryDict(urlencode(data, doseq=True)),
+    "prefixed-copy": _prefixed_copy,
+    "prefixed-copy-multivalue": lambda data: MultiValueDict(
+        {name: [value] for name, value in _prefixed_copy(data).items()},
+    ),
+}
+
+
+def _keyed_row_schema(
+    form_class: type[forms.BaseForm],
+    model_class: type[models.Model],
+    *,
+    bind: str = "dict",
+) -> tuple[strawberry.Schema, str, str]:
+    """A non-Relay primary + create / update mutations over ``form_class``, with the input names.
+
+    ``bind`` names the data each mutation's ``get_form_kwargs`` binds (``_BOUND_DATA``):
+    ``"dict"`` the package's own mapping, any other a shape a consumer hook binds.
+    """
+    type(
+        "KeyedRowT",
+        (DjangoType,),
+        {"Meta": type("Meta", (), {"model": model_class, "fields": ("id", "title")})},
+    )
+
+    def get_form_kwargs(
+        self: DjangoModelFormMutation,
+        info: strawberry.Info[object, object],
+        *,
+        data: dict[str, object],
+        files: dict[str, object],
+        instance: models.Model | None = None,
+    ) -> dict[str, object]:
+        kwargs = DjangoModelFormMutation.get_form_kwargs(
+            self,
+            info,
+            data=data,
+            files=files,
+            instance=instance,
+        )
+        kwargs["data"] = _BOUND_DATA[bind](data)
+        return kwargs
+
+    hooks: dict[str, object] = {"get_form_kwargs": get_form_kwargs} if bind != "dict" else {}
+
+    def meta(operation: str) -> type:
+        attrs: dict[str, object] = {
+            "form_class": form_class,
+            "operation": operation,
+            "permission_classes": [],
+        }
+        return type("Meta", (), attrs)
+
+    create = type("CreateRow", (DjangoModelFormMutation,), {"Meta": meta("create"), **hooks})
+    update = type("UpdateRow", (DjangoModelFormMutation,), {"Meta": meta("update"), **hooks})
+
+    @strawberry.type
+    class Mutation:
+        create_row = DjangoMutationField(create)
+        update_row = DjangoMutationField(update)
+
+    finalize_django_types()
+    names = [
+        require_instance(mutation._input_class, type).__name__ for mutation in (create, update)
+    ]
+    return _schema(Mutation), names[0], names[1]
+
+
+def _write_keyed_row(
+    model_class: type[models.Model],
+    form_class: type[forms.BaseForm],
+    *,
+    operation: str,
+    data: dict[str, object],
+    stored: Mapping[str, object] | None,
+    mode: str,
+    bind: str = "dict",
+) -> object:
+    """Run ``operation`` (``create`` or ``update`` over a row holding ``stored``); its payload."""
+    schema, create_input, update_input = _keyed_row_schema(form_class, model_class, bind=bind)
+    selection = "{ result{ title } errors{ field messages codes path } }"
+    if operation == "create":
+        query = f"mutation($d: {create_input}!){{ createRow(data:$d){selection} }}"
+        res = _execute_in_mode(schema, query, {"d": data}, mode=mode)
+        root = "createRow"
+    else:
+        row = model_class._base_manager.create(title="Old", **dict(stored or {}))
+        query = (
+            f"mutation($id: ID!, $d: {update_input}!){{ updateRow(id:$id, data:$d){selection} }}"
+        )
+        res = _execute_in_mode(schema, query, {"id": str(saved_pk(row)), "d": data}, mode=mode)
+        root = "updateRow"
+    assert res.errors is None, res.errors
+    return _json_at(res.data, root)
+
+
+def _array_column_and_field(shape: str) -> tuple[models.Field[object, object], forms.Field]:
+    """The ``ArrayField`` column and the ``SplitArrayField`` (``size`` 3) of ``shape``."""
+    from django.contrib.postgres import fields as postgres_fields  # noqa: PLC0415 - needs the Postgres driver
+    from django.contrib.postgres import forms as postgres_forms  # noqa: PLC0415 - needs the Postgres driver
+
+    shapes: dict[str, Callable[[], tuple[models.Field[object, object], forms.Field]]] = {
+        "text-required-keep-nulls": lambda: (
+            postgres_fields.ArrayField(models.TextField()),
+            postgres_forms.SplitArrayField(forms.CharField(), size=3),
+        ),
+        "text-optional-drop-nulls": lambda: (
+            postgres_fields.ArrayField(models.TextField(), blank=True),
+            postgres_forms.SplitArrayField(
+                forms.CharField(),
+                size=3,
+                required=False,
+                remove_trailing_nulls=True,
+            ),
+        ),
+        "integer-required-drop-nulls": lambda: (
+            postgres_fields.ArrayField(models.IntegerField()),
+            postgres_forms.SplitArrayField(
+                forms.IntegerField(),
+                size=3,
+                remove_trailing_nulls=True,
+            ),
+        ),
+        "integer-nullable-elements": lambda: (
+            postgres_fields.ArrayField(models.IntegerField(null=True, blank=True)),
+            postgres_forms.SplitArrayField(forms.IntegerField(required=False), size=3),
+        ),
+        "text-column-default": lambda: (
+            postgres_fields.ArrayField(models.TextField(), blank=True, default=_default_tags),
+            postgres_forms.SplitArrayField(
+                forms.CharField(),
+                size=3,
+                required=False,
+                remove_trailing_nulls=True,
+            ),
+        ),
+    }
+    return shapes[shape]()
+
+
+def _default_tags() -> list[str]:
+    """The ``text-column-default`` column's default list."""
+    return ["d"]
+
+
+_SPLIT_ARRAY_WRITES = [
+    pytest.param(
+        "text-required-keep-nulls",
+        "create",
+        ["a", "b", "c"],
+        None,
+        id="text-req-create",
+    ),
+    pytest.param(
+        "text-required-keep-nulls",
+        "update",
+        ["d", "e", "f"],
+        ["x", "y", "z"],
+        id="text-req-update",
+    ),
+    pytest.param("text-optional-drop-nulls", "create", ["a", "b"], None, id="text-opt-create"),
+    pytest.param("text-optional-drop-nulls", "create", [], None, id="text-opt-create-empty"),
+    pytest.param("text-optional-drop-nulls", "update", ["a"], ["x", "y"], id="text-opt-update"),
+    pytest.param(
+        "text-optional-drop-nulls",
+        "update",
+        [],
+        ["x", "y"],
+        id="text-opt-update-empty",
+    ),
+    pytest.param("integer-required-drop-nulls", "create", [1, 2], None, id="int-req-create"),
+    pytest.param("integer-required-drop-nulls", "update", [3], [1, 2], id="int-req-update"),
+    pytest.param("integer-nullable-elements", "create", [1, None, 3], None, id="int-null-create"),
+    pytest.param(
+        "integer-nullable-elements",
+        "update",
+        [1, 2, 3],
+        [4, 5, 6],
+        id="int-null-update",
+    ),
+    pytest.param("text-column-default", "create", ["a"], None, id="default-create"),
+    pytest.param("text-column-default", "create", [], None, id="default-create-empty"),
+    pytest.param("text-column-default", "update", ["a"], ["x"], id="default-update"),
+]
+
+
+@pytest.mark.pg
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize("prefix", [None, "pfx"], ids=["unprefixed", "prefixed"])
+@pytest.mark.parametrize(
+    (
+        "shape",
+        "operation",
+        "sent",
+        "stored",
+    ),
+    _SPLIT_ARRAY_WRITES,
+)
+def test_modelform_split_array_field_writes_the_list_sent(
+    shape: str,
+    operation: str,
+    sent: list[object],
+    stored: list[object] | None,
+    prefix: str | None,
+    mode: str,
+) -> None:
+    """A ``SplitArrayField`` reads the list from ``<name>_0`` .. ``<name>_2``, the keys it is bound under.
+
+    Each element is bound under its own key, padded to ``size`` with ``None``, so the
+    field cleans exactly the list sent (Django's ``remove_trailing_nulls`` drops the
+    padding; a required field still answers Django's own ``required`` for a list with no
+    truthy element, which no row here sends) and an empty list is a value, never an
+    omission the column default would fill: the row stores the list sent, created or
+    updated, required or optional, text or integer elements, nullable elements kept, under
+    a form prefix too.
+    """
+    column, form_field = _array_column_and_field(shape)
+    model_class = _keyed_row_model("SplitTagsRow", tags=column)
+    with _blank_choice_table(model_class):
+        payload = _write_keyed_row(
+            model_class,
+            _keyed_row_form(model_class, "tags", form_field, prefix=prefix),
+            operation=operation,
+            data={"title": "New", "tags": sent},
+            stored=None if stored is None else {"tags": stored},
+            mode=mode,
+        )
+        assert payload == {"result": {"title": "New"}, "errors": []}
+        assert list(model_class._base_manager.values_list("title", "tags")) == [("New", sent)]
+
+
+@pytest.mark.pg
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize("prefix", [None, "pfx"], ids=["unprefixed", "prefixed"])
+@pytest.mark.parametrize(
+    ("shape", "stored", "created"),
+    [
+        pytest.param("text-required-keep-nulls", ["x", "y", "z"], None, id="text-req"),
+        pytest.param("text-optional-drop-nulls", ["x"], None, id="text-opt"),
+        pytest.param("integer-required-drop-nulls", [1, 2, 3], None, id="int-req"),
+        pytest.param("integer-nullable-elements", [1, None, 3], None, id="int-null"),
+        pytest.param("text-column-default", ["x", "y"], ["d"], id="default"),
+    ],
+)
+def test_modelform_split_array_field_omitted_keeps_the_stored_list(
+    shape: str,
+    stored: list[object],
+    created: list[object] | None,
+    prefix: str | None,
+    mode: str,
+) -> None:
+    """An update omitting a ``SplitArrayField`` keeps the stored list; a create omitting it, the default.
+
+    The update binds the located row's list under the widget's keys, so the unchanged
+    field validates and is written back as stored. A create omitting the field binds no
+    key, so the widget reports it omitted and the column default fills it.
+    """
+    column, form_field = _array_column_and_field(shape)
+    model_class = _keyed_row_model("SplitTagsRow", tags=column)
+    with _blank_choice_table(model_class):
+        form_class = _keyed_row_form(model_class, "tags", form_field, prefix=prefix)
+        payload = _write_keyed_row(
+            model_class,
+            form_class,
+            operation="update",
+            data={"title": "New"},
+            stored={"tags": stored},
+            mode=mode,
+        )
+        assert payload == {"result": {"title": "New"}, "errors": []}
+        assert list(model_class._base_manager.values_list("title", "tags")) == [("New", stored)]
+        if created is not None:
+            model_class._base_manager.all().delete()
+            registry.clear()
+            payload = _write_keyed_row(
+                model_class,
+                form_class,
+                operation="create",
+                data={"title": "Made"},
+                stored=None,
+                mode=mode,
+            )
+            assert payload == {"result": {"title": "Made"}, "errors": []}
+            rows = list(model_class._base_manager.values_list("title", "tags"))
+            assert rows == [("Made", created)]
+
+
+_TAGS_TOO_LONG_ERROR = {
+    "field": "tags",
+    "messages": ["List contains 4 items, it should contain no more than 3."],
+    "codes": ["max_length"],
+    "path": ["tags"],
+}
+
+
+@pytest.mark.pg
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize(
+    ("operation", "data", "stored"),
+    [
+        pytest.param(
+            "create",
+            {
+                "title": "New",
+                "tags": [
+                    "a",
+                    "b",
+                    "c",
+                    "d",
+                ],
+            },
+            None,
+            id="create",
+        ),
+        pytest.param(
+            "update",
+            {
+                "title": "New",
+                "tags": [
+                    "a",
+                    "b",
+                    "c",
+                    "d",
+                ],
+            },
+            ["x"],
+            id="update-sent",
+        ),
+        pytest.param(
+            "update",
+            {"title": "New"},
+            [
+                "w",
+                "x",
+                "y",
+                "z",
+            ],
+            id="update-reconstructed",
+        ),
+    ],
+)
+def test_modelform_split_array_field_longer_than_size_is_refused(
+    operation: str,
+    data: dict[str, object],
+    stored: list[str] | None,
+    mode: str,
+) -> None:
+    """A list longer than ``size`` is the field's ``max_length`` error; nothing is written.
+
+    The widget reads no key past ``size``, so binding the list would drop its tail and
+    write a shorter one. It is refused before validation with Django's own
+    ``ArrayMaxLengthValidator`` message and code, keyed like every field error, whether
+    the client sent it or an update reconstructed it from the located row.
+    """
+    column, form_field = _array_column_and_field("text-optional-drop-nulls")
+    model_class = _keyed_row_model("SplitTagsRow", tags=column)
+    with _blank_choice_table(model_class):
+        payload = _write_keyed_row(
+            model_class,
+            _keyed_row_form(model_class, "tags", form_field),
+            operation=operation,
+            data=data,
+            stored=None if stored is None else {"tags": stored},
+            mode=mode,
+        )
+        assert payload == {"result": None, "errors": [_TAGS_TOO_LONG_ERROR]}
+        kept = [] if stored is None else [("Old", stored)]
+        assert list(model_class._base_manager.values_list("title", "tags")) == kept
+
+
+@pytest.mark.pg
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize("operation", ["create", "update"])
+def test_modelform_split_array_field_explicit_null_is_the_column_null_error(
+    operation: str,
+    mode: str,
+) -> None:
+    """An explicit ``null`` on a ``null=False`` array column is its ``null`` error, nothing written.
+
+    The optional field cleans the padded ``None`` elements to ``[]``, a value the column
+    stores, so the whole ``None`` bound under the field's prefixed name names the
+    explicit ``null`` (``_coerced_null_fields``).
+    """
+    column, form_field = _array_column_and_field("text-optional-drop-nulls")
+    model_class = _keyed_row_model("SplitTagsRow", tags=column)
+    with _blank_choice_table(model_class):
+        payload = _write_keyed_row(
+            model_class,
+            _keyed_row_form(model_class, "tags", form_field),
+            operation=operation,
+            data={"title": "New", "tags": None},
+            stored={"tags": ["x"]},
+            mode=mode,
+        )
+        assert payload == {"result": None, "errors": [_NULL_TAGS_ERROR]}
+        kept = [] if operation == "create" else [("Old", ["x"])]
+        assert list(model_class._base_manager.values_list("title", "tags")) == kept
+
+
+@pytest.mark.pg
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize(
+    "bind",
+    ["doseq", "prefixed-copy", "prefixed-copy-multivalue"],
+)
+@pytest.mark.parametrize(
+    (
+        "operation",
+        "data",
+        "stored",
+        "result",
+        "rows",
+    ),
+    [
+        pytest.param(
+            "create",
+            {"title": "New", "tags": ["a", "b", "c"]},
+            None,
+            {"title": "New"},
+            [("New", ["a", "b", "c"])],
+            id="create",
+        ),
+        pytest.param(
+            "update",
+            {"title": "New"},
+            ["x", "y"],
+            {"title": "New"},
+            [("New", ["x", "y"])],
+            id="update-omitted",
+        ),
+        pytest.param(
+            "create",
+            {
+                "title": "New",
+                "tags": [
+                    "a",
+                    "b",
+                    "c",
+                    "d",
+                ],
+            },
+            None,
+            None,
+            [],
+            id="create-past-size",
+        ),
+    ],
+)
+def test_modelform_split_array_field_reads_a_hook_bound_mapping(
+    operation: str,
+    data: dict[str, object],
+    stored: list[str] | None,
+    result: dict[str, object] | None,
+    rows: list[tuple[str, list[str]]],
+    bind: str,
+    mode: str,
+) -> None:
+    """A ``SplitArrayField`` reads the whole list a ``get_form_kwargs`` hook binds.
+
+    A ``QueryDict`` spelling the list as repeated keys holds it as its value list, read
+    whole, never as its last element; a hook's own ``pfx-<name>`` copy under a form
+    prefixed ``pfx`` is kept as bound, and the list it holds under ``pfx-tags`` gets its
+    elements beside it under the widget's keys. Each writes the list sent, keeps the
+    stored list on an omitted update, and refuses a list longer than ``size``.
+    """
+    column, form_field = _array_column_and_field("text-optional-drop-nulls")
+    model_class = _keyed_row_model("SplitTagsRow", tags=column)
+    with _blank_choice_table(model_class):
+        prefix = "pfx" if bind.startswith("prefixed") else None
+        payload = _write_keyed_row(
+            model_class,
+            _keyed_row_form(model_class, "tags", form_field, prefix=prefix),
+            operation=operation,
+            data=data,
+            stored=None if stored is None else {"tags": stored},
+            mode=mode,
+            bind=bind,
+        )
+        errors = [] if result is not None else [_TAGS_TOO_LONG_ERROR]
+        assert payload == {"result": result, "errors": errors}
+        assert list(model_class._base_manager.values_list("title", "tags")) == rows
+
+
+@pytest.mark.pg
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize("prefix", [None, "pfx"], ids=["unprefixed", "prefixed"])
+def test_modelform_disabled_split_array_field_keeps_a_stored_list_past_size(
+    prefix: str | None,
+    mode: str,
+) -> None:
+    """A ``disabled`` ``SplitArrayField`` reads its initial: an omitted update keeps a longer stored list.
+
+    Django cleans a disabled field's initial and never its data, so the stored list is
+    bound whole, neither split nor refused, and the update writes it back unchanged.
+    """
+    from django.contrib.postgres import forms as postgres_forms  # noqa: PLC0415 - needs the Postgres driver
+
+    column, _ = _array_column_and_field("text-optional-drop-nulls")
+    form_field = postgres_forms.SplitArrayField(
+        forms.CharField(),
+        size=3,
+        required=False,
+        remove_trailing_nulls=True,
+        disabled=True,
+    )
+    model_class = _keyed_row_model("SplitTagsRow", tags=column)
+    with _blank_choice_table(model_class):
+        payload = _write_keyed_row(
+            model_class,
+            _keyed_row_form(model_class, "tags", form_field, prefix=prefix),
+            operation="update",
+            data={"title": "New"},
+            stored={
+                "tags": [
+                    "w",
+                    "x",
+                    "y",
+                    "z",
+                ],
+            },
+            mode=mode,
+        )
+        assert payload == {"result": {"title": "New"}, "errors": []}
+        rows = list(model_class._base_manager.values_list("title", "tags"))
+        assert rows == [
+            (
+                "New",
+                [
+                    "w",
+                    "x",
+                    "y",
+                    "z",
+                ],
+            ),
+        ]
+
+
+class _PairWidget(forms.MultiWidget):
+    """Two text boxes holding a ``"<left>:<right>"`` value."""
+
+    def __init__(self) -> None:
+        super().__init__((forms.TextInput, forms.TextInput))
+
+    @override
+    def decompress(self, value: object) -> list[object]:
+        """Split ``"<left>:<right>"``; an empty value is two empty boxes."""
+        if isinstance(value, str) and value:
+            return list(value.split(":", 1))
+        return [None, None]
+
+
+class _PairField(forms.MultiValueField):
+    """A ``MultiValueField`` over two required text parts, compressed to ``"<left>:<right>"``."""
+
+    widget = _PairWidget
+
+    def __init__(self) -> None:
+        super().__init__((forms.CharField(), forms.CharField()))
+
+    @override
+    def compress(self, data_list: list[object]) -> str:
+        return ":".join(str(part) for part in data_list)
+
+
+def _text_column() -> models.Field[object, object]:
+    """A fresh ``TextField`` column."""
+    return models.TextField()
+
+
+_MULTI_WIDGET_KINDS: dict[
+    str,
+    tuple[
+        Callable[[], models.Field[object, object]],
+        Callable[[], forms.Field],
+        str,
+        object,
+        object,
+    ],
+] = {
+    "pair": (
+        _text_column,
+        _PairField,
+        "left:right",
+        "left:right",
+        "old:pair",
+    ),
+}
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize(
+    "bind",
+    [
+        "dict",
+        "prefixed",
+        "multivalue",
+        "prefixed-copy",
+    ],
+)
+@pytest.mark.parametrize("operation", ["create", "update", "update-omitted"])
+@pytest.mark.parametrize("kind", list(_MULTI_WIDGET_KINDS))
+def test_modelform_multi_widget_field_writes_the_compressed_value(
+    kind: str,
+    operation: str,
+    bind: str,
+    mode: str,
+) -> None:
+    """A consumer ``MultiValueField`` over a column reads its parts from the ``MultiWidget``'s keys.
+
+    The value is split by the widget's own ``decompress`` (the pair's two halves) and bound
+    under ``<name>_0`` / ``<name>_1``, so the field compresses exactly the value sent; an
+    update omitting it binds the stored value the same way and keeps it. Under a form
+    prefix, from a ``MultiValueDict`` a ``get_form_kwargs`` override binds, and beside the
+    whole value a hook's own prefixed copy holds, the parts land on the keys the form reads.
+    Django's ``SplitDateTimeField`` runs the same rule live
+    (``test_scalars_mutation_api.py::test_split_datetime_form_field_writes_the_datetime_sent``).
+    """
+    column_class, field_class, sent, written, stored = _MULTI_WIDGET_KINDS[kind]
+    model_class = _keyed_row_model("MultiKeyRow", value=column_class())
+    with _blank_choice_table(model_class):
+        form_class = _keyed_row_form(
+            model_class,
+            "value",
+            field_class(),
+            prefix="pfx" if bind.startswith("prefixed") else None,
+        )
+        data: dict[str, object] = {"title": "New"}
+        if operation != "update-omitted":
+            data["value"] = sent
+        payload = _write_keyed_row(
+            model_class,
+            form_class,
+            operation=operation.removesuffix("-omitted"),
+            data=data,
+            stored={"value": stored},
+            mode=mode,
+            bind="dict" if bind == "prefixed" else bind,
+        )
+        assert payload == {"result": {"title": "New"}, "errors": []}
+        expected = stored if operation == "update-omitted" else written
+        assert list(model_class._base_manager.values_list("title", "value")) == [("New", expected)]
+
+
+_JSON_TOO_LONG_ERROR = {
+    "field": "tags",
+    "messages": ["List contains 3 items, it should contain no more than 2."],
+    "codes": ["max_length"],
+    "path": ["tags"],
+}
+
+
+def _split_json_form(
+    model_class: type[models.Model],
+    *,
+    bind: str = "dict",
+    disabled: bool = False,
+) -> type[forms.BaseForm]:
+    """A ``JSONField`` over the ``tags`` JSON column, read through a ``size`` 2 split widget.
+
+    Prefixed ``pfx`` when ``bind`` is a hook's prefixed copy.
+    """
+    field = forms.JSONField(
+        widget=FakeSplitArrayWidget(forms.TextInput(), size=2),
+        disabled=disabled,
+    )
+    prefix = "pfx" if bind.startswith("prefixed") else None
+    return _keyed_row_form(model_class, "tags", field, prefix=prefix)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    "bind",
+    ["dict", "prefixed-copy", "prefixed-copy-multivalue"],
+)
+@pytest.mark.parametrize(("sent", "written"), [([1, 2], [1, 2]), ([1], [1, None])])
+def test_modelform_split_array_widget_binds_each_element_padded_to_size(
+    sent: list[int],
+    written: list[int | None],
+    bind: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each element is bound under ``<name>_<index>``, padded with ``None`` to the widget's ``size``.
+
+    The field reads the padded list the widget's keys hold (a ``JSONField`` keeps the
+    padding, where a ``SplitArrayField`` would drop it under ``remove_trailing_nulls``):
+    from the package's mapping, and from a hook's own prefixed copy, a ``dict`` or a
+    ``MultiValueDict``, whose whole value gets its parts beside it.
+    """
+    monkeypatch.setattr(widgets_module, "_SPLIT_ARRAY_WIDGET", FakeSplitArrayWidget)
+    model_class = _keyed_row_model("SplitJsonRow", tags=models.JSONField())
+    with _blank_choice_table(model_class):
+        payload = _write_keyed_row(
+            model_class,
+            _split_json_form(model_class, bind=bind),
+            operation="create",
+            data={"title": "New", "tags": sent},
+            stored=None,
+            mode="sync",
+            bind=bind,
+        )
+        assert payload == {"result": {"title": "New"}, "errors": []}
+        assert list(model_class._base_manager.values_list("title", "tags")) == [("New", written)]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    "bind",
+    [
+        "dict",
+        "multivalue",
+        "doseq",
+        "prefixed-copy",
+        "prefixed-copy-multivalue",
+    ],
+)
+@pytest.mark.parametrize(
+    ("operation", "data", "stored"),
+    [
+        pytest.param("create", {"title": "New", "tags": [1, 2, 3]}, None, id="create"),
+        pytest.param("update", {"title": "New", "tags": [1, 2, 3]}, [9], id="update-sent"),
+        pytest.param("update", {"title": "New"}, [7, 8, 9], id="update-reconstructed"),
+    ],
+)
+def test_modelform_split_array_widget_value_past_size_is_refused(
+    operation: str,
+    data: dict[str, object],
+    stored: list[int] | None,
+    bind: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A list longer than the widget's ``size`` is the field's ``max_length`` error before validation.
+
+    Sent or reconstructed, from the package's mapping, a ``MultiValueDict`` or a
+    ``doseq`` ``QueryDict`` a ``get_form_kwargs`` override binds (the whole list read, never
+    its last element), or a hook's own prefixed copy; nothing is written.
+    """
+    monkeypatch.setattr(widgets_module, "_SPLIT_ARRAY_WIDGET", FakeSplitArrayWidget)
+    model_class = _keyed_row_model("SplitJsonRow", tags=models.JSONField())
+    with _blank_choice_table(model_class):
+        payload = _write_keyed_row(
+            model_class,
+            _split_json_form(model_class, bind=bind),
+            operation=operation,
+            data=data,
+            stored=None if stored is None else {"tags": stored},
+            mode="sync",
+            bind=bind,
+        )
+        assert payload == {"result": None, "errors": [_JSON_TOO_LONG_ERROR]}
+        kept = [] if stored is None else [("Old", stored)]
+        assert list(model_class._base_manager.values_list("title", "tags")) == kept
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("bind", ["dict", "prefixed", "prefixed-copy"])
+def test_disabled_split_widget_field_keeps_its_stored_value_past_size(
+    bind: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``disabled`` field reads its initial, never the data: bound whole, never split or refused.
+
+    The stored list is longer than the widget's ``size``; Django cleans the disabled
+    field's initial, so the update omitting it keeps the stored list, unprefixed, re-keyed
+    under the form's prefix, and in a hook's own prefixed copy.
+    """
+    monkeypatch.setattr(widgets_module, "_SPLIT_ARRAY_WIDGET", FakeSplitArrayWidget)
+    model_class = _keyed_row_model("SplitJsonRow", tags=models.JSONField())
+    with _blank_choice_table(model_class):
+        payload = _write_keyed_row(
+            model_class,
+            _split_json_form(model_class, bind=bind, disabled=True),
+            operation="update",
+            data={"title": "New"},
+            stored={"tags": [7, 8, 9]},
+            mode="sync",
+            bind="dict" if bind == "prefixed" else bind,
+        )
+        assert payload == {"result": {"title": "New"}, "errors": []}
+        rows = list(model_class._base_manager.values_list("title", "tags"))
+        assert rows == [("New", [7, 8, 9])]
+
+
+def _split_initial_form(model_class: type[models.Model]) -> type[forms.BaseForm]:
+    """A ``MultipleChoiceField`` over a text column, its initial the stored text split on commas."""
+
+    class SplitInitialForm(forms.ModelForm[models.Model]):
+        tags = forms.MultipleChoiceField(
+            choices=[("a", "A"), ("b", "B")],
+            required=False,
+            widget=FakeSplitArrayWidget(forms.TextInput(), size=1),
+        )
+
+        class Meta:
+            model = model_class
+            fields = ("title", "tags")
+
+        @override
+        def get_initial_for_field(self, field: forms.Field, field_name: str) -> object:
+            initial = object_result(super().get_initial_for_field, field, field_name)
+            return str(initial).split(",") if field_name == "tags" else initial
+
+        def clean_tags(self) -> str:
+            return ",".join(str(tag) for tag in list_of(dict_of(self.cleaned_data)["tags"]))
+
+    return SplitInitialForm
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("stored", "errors", "kept"),
+    [
+        pytest.param("a", [], ("New", "a"), id="fits"),
+        pytest.param(
+            "a,b",
+            [
+                {
+                    "field": "tags",
+                    "messages": ["List contains 2 items, it should contain no more than 1."],
+                    "codes": ["max_length"],
+                    "path": ["tags"],
+                },
+            ],
+            ("Old", "a,b"),
+            id="past-size",
+        ),
+    ],
+)
+def test_omitted_initial_binds_under_the_split_widget_keys(
+    stored: str,
+    errors: list[dict[str, object]],
+    kept: tuple[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An omitted field's initial is bound under its widget's keys; one past ``size`` is refused.
+
+    A list field over a text column binds the form's own initial when omitted
+    (``_bind_omitted_shape_disagreeing_initials``): here ``get_initial_for_field`` splits the
+    stored text, and the split list is bound under ``tags_0``, so the unchanged field validates and
+    is written back; an initial longer than the widget's ``size`` is the field's
+    ``max_length`` error, nothing written.
+    """
+    monkeypatch.setattr(widgets_module, "_SPLIT_ARRAY_WIDGET", FakeSplitArrayWidget)
+    model_class = _keyed_row_model("SplitInitialRow", tags=models.TextField())
+    with _blank_choice_table(model_class):
+        payload = _write_keyed_row(
+            model_class,
+            _split_initial_form(model_class),
+            operation="update",
+            data={"title": "New"},
+            stored={"tags": stored},
+            mode="sync",
+        )
+        result = None if errors else {"title": "New"}
+        assert payload == {"result": result, "errors": errors}
+        assert list(model_class._base_manager.values_list("title", "tags")) == [kept]

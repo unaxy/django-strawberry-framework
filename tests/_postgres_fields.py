@@ -10,10 +10,23 @@ exposes the column::
     monkeypatch.setattr(converters, "_HSTORE_FIELD_CLS", FakeHStoreField)
 
 A model hosting either double declares ``class Meta: managed = False``.
+
+``FakeSplitArrayWidget`` stands in for ``django.contrib.postgres.forms.SplitArrayWidget``
+(whose module needs the driver too) once a test points the widget sentinel at it::
+
+    monkeypatch.setattr(widgets, "_SPLIT_ARRAY_WIDGET", FakeSplitArrayWidget)
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from django import forms
 from django.db import models
 from typing_extensions import Never, override
+
+if TYPE_CHECKING:
+    from django.forms.utils import _DataT, _FilesT
 
 
 class FakeArrayField(models.Field[object, object]):
@@ -47,3 +60,40 @@ class FakeArrayField(models.Field[object, object]):
 
 class FakeHStoreField(models.Field[object, object]):
     """An ``HStoreField`` stand-in: a plain column the converter's sentinel names."""
+
+
+class FakeSplitArrayWidget(forms.Widget):
+    """A ``SplitArrayWidget`` stand-in: ``size`` copies of ``widget`` under ``<name>_<index>``.
+
+    Reads and reports omission exactly as Django's widget does, so a form field over it
+    reads the list its keys hold.
+    """
+
+    def __init__(self, widget: forms.Widget, size: int) -> None:
+        super().__init__()
+        self.widget = widget
+        self.size = size
+
+    @override
+    def value_from_datadict(
+        self,
+        data: _DataT,
+        files: _FilesT,
+        name: str,
+    ) -> list[object]:
+        return [
+            self.widget.value_from_datadict(data, files, f"{name}_{index}")
+            for index in range(self.size)
+        ]
+
+    @override
+    def value_omitted_from_data(
+        self,
+        data: _DataT,
+        files: _FilesT,
+        name: str,
+    ) -> bool:
+        return all(
+            self.widget.value_omitted_from_data(data, files, f"{name}_{index}")
+            for index in range(self.size)
+        )
