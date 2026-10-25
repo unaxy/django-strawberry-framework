@@ -1341,11 +1341,11 @@ def test_a_label_that_claims_no_path_or_the_right_one_is_accepted(
     tmp_path: Path,
     label: str,
 ) -> None:
-    # Only DISAGREEMENT is refused, never absence: `AGENTS.md` "Source references in
-    # docs and code comments" also blesses `path #"unique substring"` and a bare symbol,
-    # so a label with no path prefix is a legitimate shape and must not be rejected. A
-    # bare symbol carrying a substring pointer is the trap - `GraphQLView.dispatch` has a
-    # dotted tail that reads like a filename, and refusing it would be a false refusal.
+    # Only DISAGREEMENT is refused, never absence: the AGENTS.md source-refs rule also
+    # blesses `path #"unique substring"` and a bare symbol, so a label with no path prefix
+    # is a legitimate shape and must not be rejected. A bare symbol carrying a substring
+    # pointer is the trap - `GraphQLView.dispatch` has a dotted tail that reads like a
+    # filename, and refusing it would be a false refusal.
     assert prove_failability.load_manifest(_manifest(tmp_path, label=label))[0][0].label == label
 
 

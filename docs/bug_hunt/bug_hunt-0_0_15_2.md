@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 292 done, 208 to do.
+Progress: 293 done, 207 to do.
 
 ## Done
 
@@ -1492,6 +1492,14 @@ Progress: 292 done, 208 to do.
   range was Django's refusal. 375's refusal for a relation named explicitly stands. Live rows on library `ShelfFilter`
   / `PatronProfileFilter` `pk` leaves, package rows for Decimal, UUID, multi-table and composite keys; spec-027 says
   so
+- [x] 593. AGENTS.md is cited by content, not by line ordinal: 32 drifted cites (6 "rule 27" in `django.yml`,
+  `.pre-commit-config.yaml`, `scripts/check_citations.py`, `scripts/review_inspect.py`; 3 in
+  `docs/review/REVIEW.md`; 6 in `MUSE.md`; 17 in 13 KANBAN `CardItem` rows) and the still-correct ones
+  (HUNT.md, FIX.md, FIX-PROMPT.md, spec-048, `tests/test_ci_governance.py`, gated `AGENTS.md #"..."` pinpoints
+  there) now name the rule; `docs/builder/ARTIFACT.md` sends the kept spec-pointer rule to START.md "Style the
+  maintainer cares about"; FIX.md phase 4 sends exported surface to docs/TREE.md and the check-public-types
+  hook; START.md stops calling AGENTS numbered; three stale AGENTS-heading cites in scripts/tests fixed.
+  Closed history left as written
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1729,14 +1737,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   string and no wrap from a trailing comment onto the next full-line comment (none in the corpus carries a phrase
   today), and `scripts/review_inspect.py` keeps its own `PROVENANCE_PATTERNS` list beside the gate's
   `PROVENANCE_PHRASES`. Found verifying 500
-- [ ] 593. AGENTS.md is cited by rule ordinal ("rule N" = its line N) at lines that hold another rule:
-  `docs/review/REVIEW.md` "rule 35" (defect definition, line 37), "rule 23" (one owner per folder, line 24),
-  "rule 22" (bulk-deletion guard, line 23); "rule 27" for `path::Symbol` refs (line 28) in
-  `.pre-commit-config.yaml`, `.github/workflows/django.yml`, `scripts/check_citations.py` and
-  `scripts/review_inspect.py`; `MUSE.md` rules 22 and 34 (lines 23 and 36); three `KANBAN.md` board sites
-  (DB-sourced). Cite each by content, not ordinal. Also `docs/builder/ARTIFACT.md` cites AGENTS for the kept
-  spec-pointer rule that lives in START.md "Style", and `docs/bug_hunt/FIX.md` phase 4 sends "exported
-  surface" to START, which has no such section. Found verifying 567
 - [ ] 569. (robustness) Annotations no runtime evaluation reaches escape
   `tests/base/test_init.py::test_annotations_evaluate_without_django_stubs_ext_patch`: function-local variable
   annotations (`forms/resolvers.py::_coerced_null_fields` `coerced_fields`, `utils/querysets.py` `related_opts`,

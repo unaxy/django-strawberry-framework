@@ -84,7 +84,7 @@ jobs:
         # commits made with hooks skipped.
         run: uv run python scripts/check_truthful_reads.py --check
 
-      - name: Citations resolve (AGENTS.md rule 27 path::Symbol refs)
+      - name: Citations resolve (AGENTS.md source-refs rule, path::Symbol refs)
         # Every `path.py::Symbol` reference in first-party source must name a file
         # that exists and a symbol that file still defines; on the board and in the
         # spec corpus (docs/spec-*.md, docs/SPECS/**/*.md) a cited file that exists

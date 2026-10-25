@@ -146,8 +146,8 @@ Maximum $100/mo 3B tokens per week): different product, different quota.
 ## 2. Launch recipe
 
 Preconditions: the maintainer said "restart"/"launch" AND named the flow(s), the model mode
-(`contributor`) and the effort (`max`). Never launch on inference. Rule 33: no branch work, so the
-target is always the existing worktree.
+(`contributor`) and the effort (`max`). Never launch on inference. AGENTS.md's no-branches
+rule: no branch work, so the target is always the existing worktree.
 
 ```bash
 WT=$HOME/.t3/worktrees/django-strawberry-framework/t3code-1cc21548
@@ -395,8 +395,9 @@ record, do not apply without a maintainer word.
 version list, coordinates but never reviews/implements/approves, captures the cycle baseline that
 worker diffs use, and at the end removes only generated scratch under `docs/shadow/`. `docs/review/`
 is committed source of truth: never bulk-delete or overwrite `rev-*.md`, `REVIEW.md`,
-`review-*.md`, `worker-*.md` (AGENTS.md rule 22). Not yet run under Muse; when it is, the prompt
-must add its ownership (production files it may edit) to the hunt and DRY prompts and vice versa.
+`review-*.md`, `worker-*.md` (AGENTS.md `docs/review/` rule). Not yet run under Muse; when it
+is, the prompt must add its ownership (production files it may edit) to the hunt and DRY
+prompts and vice versa.
 
 ## 6. Concurrency contract between the flows
 
@@ -404,11 +405,12 @@ must add its ownership (production files it may edit) to the hunt and DRY prompt
   `~/projects/django-strawberry-framework` is theirs to never touch. Claude's own
   edits for the maintainer happen in whichever tree the maintainer names (guard deletions on
   2026-09-22 were in the worktree, uncommitted).
-- Nobody reverts. Dirty files at task start are concurrent work (AGENTS.md rule 34). A finding
-  about another flow's hunk is recorded `blocked-on-<flow>` with the exact hunk.
+- Nobody reverts. Dirty files at task start are concurrent work (AGENTS.md concurrent-work
+  rule). A finding about another flow's hunk is recorded `blocked-on-<flow>` with the exact hunk.
 - MIXED files exist (e.g. `tests/utils/test_errors.py`: DRY census + hunt hostile-class tests);
   attribution is by hunk content vs `git show HEAD:<path>`.
-- Only the maintainer commits (rule 32). Worker-0s never `git commit`, never branch (rule 33).
+- Only the maintainer commits (AGENTS.md commit rule). Worker-0s never `git commit`, never branch
+  (AGENTS.md no-branches rule).
 - The 08:45-style "freshness reconciliation" (HEAD moved under a running agent) is Worker-0's
   own job per its flow; the supervisor only tells it the new HEAD in the next prompt.
 
@@ -418,7 +420,8 @@ must add its ownership (production files it may edit) to the hunt and DRY prompt
 - Every launch: verify `run.model.configured`, record the session uuid, arm the check-in loop (§3).
 - Report in the maintainer's format: one paragraph, what each agent is on, disk if it moved.
 - Do not act on the agents' findings in production code unless the maintainer hands you the
-  item (as with the `except BaseException` guard resolution); then report per item, not per file, under the [GOAL.md][goal] trust boundary and rule 35.
+  item (as with the `except BaseException` guard resolution); then report per item, not per
+  file, under the [GOAL.md][goal] trust boundary and the AGENTS.md defect rule.
 - Do not fold the agents' self-written closing audits into evidence (memory: "a hunt record's
   self-written closing audit is not evidence"); the maintainer re-inventories before commit.
 - `pytest` only when the maintainer authorizes it; `FAKESHOP_SHARDED=1` was authorized

@@ -88,9 +88,9 @@ this item like the target's), their tests, the ledger rows the item lands.
   implemented at all. No worker weakens a correctness or authorization boundary to buy a number.
 - **A defect is a defect.** A Mechanics finding that names a broken contract follows HUNT: contract
   row first, a feasible project shape under the supported public API, the wire or configuration
-  input that reaches it ([AGENTS.md][agents] rule 35), evidence a stranger can replay, root-cause
-  fix at the owner, permanent test at the strongest reachable tier in the same change. A contract
-  nobody can cite → `blocked`, the maintainer decides; never a fix.
+  input that reaches it ([AGENTS.md][agents] defect rule), evidence a stranger can replay,
+  root-cause fix at the owner, permanent test at the strongest reachable tier in the same change.
+  A contract nobody can cite → `blocked`, the maintainer decides; never a fix.
 - **Duplication needs one rule.** Consolidate only when sites implement one rule w/ one contract
   and the same reasons to change; count authoritative definitions the way DRY's change challenge
   does, and choose the owner by responsibility (DRY principle 7). Similar-looking code w/ separate
@@ -155,9 +155,9 @@ docstring is the manual. "Shared" = the shared tree; "copy" = through
 
 Two defaults write where the flow must not: `review_inspect.py` and
 `review_changed_python_diffs_against_head.py` write into `docs/shadow/`, whose folders have one
-owner each ([AGENTS.md][agents] rule 23), so both always take `--output-dir <scratch>/...`;
-`check_trailing_commas.py` w/o `--check` auto-fixes, and w/o paths it rewrites the whole repo,
-concurrent work included.
+owner each ([AGENTS.md][agents] `docs/shadow/` rule), so both always take
+`--output-dir <scratch>/...`; `check_trailing_commas.py` w/o `--check` auto-fixes, and w/o paths
+it rewrites the whole repo, concurrent work included.
 
 ## The three axes
 
@@ -740,11 +740,11 @@ Blocked: <condition and the decision the maintainer must make>.
 
 ## Artifacts
 
-Four per file item, all under `docs/review/`, untracked until the maintainer commits them, protected by
-[AGENTS.md][agents] rule 22 from bulk deletion. Names take the source path relative to the
-package, `/` → `__`, `.py` dropped: `optimizer/walker.py` → `rev-optimizer__walker.md` +
-`rev-optimizer__walker.performance.md`, `.mechanics.md`, `.comments.md`. Folder
-pass `rev-<folder>.md`; project pass `rev-project.md`.
+Four per file item, all under `docs/review/`, untracked until the maintainer commits them,
+protected by the [AGENTS.md][agents] `docs/review/` rule from bulk deletion. Names take the source
+path relative to the package, `/` → `__`, `.py` dropped: `optimizer/walker.py` →
+`rev-optimizer__walker.md` + `rev-optimizer__walker.performance.md`, `.mechanics.md`,
+`.comments.md`. Folder pass `rev-<folder>.md`; project pass `rev-project.md`.
 
 Main artifact, written by Worker-0 and Worker-2 only:
 

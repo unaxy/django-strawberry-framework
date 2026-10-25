@@ -1,8 +1,8 @@
 """Resolve every ``path::Symbol`` source reference against the tree it names.
 
-AGENTS.md rule 27 requires source refs in code comments, docstrings and standing
-docs to be symbol paths (``path::QualifiedName``) rather than line numbers, and
-requires a rename to grep-sweep ``::OldName`` in the same change. Nothing enforced
+AGENTS.md's source-refs rule requires source refs in code comments, docstrings and
+standing docs to be symbol paths (``path::QualifiedName``) rather than line numbers,
+and requires a rename to grep-sweep ``::OldName`` in the same change. Nothing enforced
 the second half: a citation whose symbol was renamed or deleted stayed a plausible
 sentence, and the rot was only ever found by hand during a spec reconciliation.
 
@@ -56,7 +56,7 @@ Two corpora, deliberately different strictness:
 * **First-party ``.py`` sources** (``django_strawberry_framework/``, ``tests/``,
   ``examples/``, ``scripts/``) are fail-closed: an unresolvable *file* (or spec
   number) is a violation too, because a bare upstream basename is exactly the
-  ambiguity rule 27 exists to remove -- cite
+  ambiguity the source-refs rule exists to remove -- cite
   ``django_graphene_filters/connection_field.py::x``, not ``connection_field.py::x``.
 * **``KANBAN.md`` and the spec corpus** (the in-flight ``docs/spec-*.md`` and every
   ``docs/SPECS/**/*.md``, ``appx/`` companions included) fail only on real rot -- a
@@ -1279,7 +1279,7 @@ def _report(outcomes: Sequence[Outcome], scope: str, *, as_json: bool) -> int:
     if violations:
         print(
             "\nFix: repoint the citation at the symbol's current home, or delete it. "
-            "AGENTS.md rule 27 -- renaming a symbol means grep-sweeping `::OldName` in "
+            "AGENTS.md source-refs rule -- renaming a symbol means grep-sweeping `::OldName` in "
             "the same change.",
         )
         return 1

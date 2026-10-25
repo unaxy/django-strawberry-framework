@@ -148,7 +148,7 @@ repos:
         require_serial: true
 
       - id: check-citations
-        name: citations resolve (AGENTS.md rule 27 path::Symbol refs)
+        name: citations resolve (AGENTS.md source-refs rule, path::Symbol refs)
         entry: uv run python scripts/check_citations.py --substrings
         language: system
         # Runs last: it resolves citations against the tree the earlier hooks have

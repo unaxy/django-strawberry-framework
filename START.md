@@ -6,7 +6,7 @@ You're in `django-strawberry-framework`. For agents, not users. Read once, then 
 
 ## Reading order
 
-1. [AGENTS.md][agents] — rules. Dense, numbered.
+1. [AGENTS.md][agents] — rules. Dense, unnumbered; cite a rule by its content.
 2. This file — repo, tooling, maintainer.
 3. [docs/README.md][docs-readme] — consumer how-to.
 4. [docs/TREE.md][tree] — module map + ownership.
