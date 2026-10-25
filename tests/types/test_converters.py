@@ -92,7 +92,7 @@ from django_strawberry_framework.types.converters import (
 from django_strawberry_framework.utils._narrowing import enum_value, require
 from django_strawberry_framework.utils.typing import object_result
 from tests._idioms import definition_raises, is_object_dict, is_object_list, resolver_function
-from tests._postgres_fields import FakeArrayField, FakeHStoreField
+from tests._postgres_fields import FakeArrayField, FakeHStoreField, patch_array_field
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -356,7 +356,7 @@ def test_scalar_route_names_each_branch(monkeypatch: pytest.MonkeyPatch) -> None
     keys no map row); a map column carries the matched MRO ancestor, its scalar, and whether
     the choice enum replaces it.
     """
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
+    patch_array_field(monkeypatch)
     monkeypatch.setattr(converters, "_HSTORE_FIELD_CLS", FakeHStoreField)
 
     class CustomTextField(models.TextField[str, str]):
@@ -1591,8 +1591,8 @@ def test_bigint_resolver_returning_bool_raises_via_schema_execution() -> None:
 #
 # Synthetic models live under ``app_label = "test_arrayfield"`` so they do
 # not collide with the prior synthetic apps (``test_bigint``,
-# ``test_choice_enums``). Sentinel-branch tests monkey-patch
-# ``converters._ARRAY_FIELD_CLS = FakeArrayField`` BEFORE declaring the
+# ``test_choice_enums``). Sentinel-branch tests point
+# ``ARRAY_FIELD_CLS`` at ``FakeArrayField`` (``patch_array_field``) BEFORE declaring the
 # ``DjangoType`` (spec-017 Decision 7 #"*before* declaring the `DjangoType`").
 # The introspection helpers (``_introspect_field_type`` /
 # ``_walk_introspected_type``) defined in the BigInt section above are
@@ -1615,7 +1615,7 @@ def test_array_field_of_int_maps_to_list_int_via_fake_sentinel(
     ``FakeArrayField`` owner is the only route on SQLite into the ``ArrayField`` branch of
     ``django_strawberry_framework/types/converters.py::convert_scalar``.
     """
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
+    patch_array_field(monkeypatch)
 
     class ArrayIntOwner(models.Model):
         arr = FakeArrayField(models.IntegerField())
@@ -1662,7 +1662,7 @@ def test_array_field_of_char_maps_to_list_str_via_fake_sentinel(
     ``FakeArrayField`` owner is the only route on SQLite into the ``ArrayField`` branch of
     ``django_strawberry_framework/types/converters.py::convert_scalar``.
     """
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
+    patch_array_field(monkeypatch)
 
     class ArrayCharOwner(models.Model):
         arr = FakeArrayField(models.CharField(max_length=20))
@@ -1707,7 +1707,7 @@ def test_array_field_nullable_inner_via_fake_sentinel(monkeypatch: pytest.Monkey
     ``FakeArrayField`` owner is the only route on SQLite into the ``ArrayField`` branch of
     ``django_strawberry_framework/types/converters.py::convert_scalar``.
     """
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
+    patch_array_field(monkeypatch)
 
     class ArrayNullableInnerOwner(models.Model):
         arr = FakeArrayField(models.IntegerField(null=True))
@@ -1756,7 +1756,7 @@ def test_array_field_outer_nullable_via_fake_sentinel(monkeypatch: pytest.Monkey
     ``FakeArrayField`` owner is the only route on SQLite into the ``ArrayField`` branch of
     ``django_strawberry_framework/types/converters.py::convert_scalar``.
     """
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
+    patch_array_field(monkeypatch)
 
     class ArrayOuterNullableOwner(models.Model):
         arr = FakeArrayField(models.IntegerField(), null=True)
@@ -1801,7 +1801,7 @@ def test_array_field_multidim_rejected_via_fake_sentinel(monkeypatch: pytest.Mon
     owner alone reaches the ``Nested ArrayField`` raise in
     ``django_strawberry_framework/types/converters.py::convert_scalar``.
     """
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
+    patch_array_field(monkeypatch)
 
     class ArrayMultidimOwner(models.Model):
         arr = FakeArrayField(FakeArrayField(models.IntegerField()))
@@ -1828,7 +1828,7 @@ def test_annotation_override_of_arrayfield_with_nested_array_is_allowed(
     ``FakeArrayField`` owner is the only route on SQLite into the ``ArrayField`` branch of
     ``django_strawberry_framework/types/converters.py::convert_scalar``.
     """
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
+    patch_array_field(monkeypatch)
 
     class NestedArrayOverrideOwner(models.Model):
         arr = FakeArrayField(FakeArrayField(models.IntegerField()))
@@ -1859,7 +1859,7 @@ def test_array_field_choices_inner_via_fake_sentinel(monkeypatch: pytest.MonkeyP
     ``FakeArrayField`` owner is the only route on SQLite into the ``ArrayField`` branch of
     ``django_strawberry_framework/types/converters.py::convert_scalar``.
     """
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
+    patch_array_field(monkeypatch)
 
     class ArrayChoicesInnerOwner(models.Model):
         arr = FakeArrayField(
@@ -1904,7 +1904,7 @@ def test_array_field_element_empty_label_gets_no_member_via_fake_sentinel(
     The element enum is built by the same ``_normalize_choice_pairs`` the column enum reads, so the
     ``(None, "Unassessed")`` pair labels the empty option there too.
     """
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
+    patch_array_field(monkeypatch)
 
     class ArrayEmptyLabelOwner(models.Model):
         arr = FakeArrayField(models.CharField(max_length=5, choices=_Condition.choices))
@@ -1938,7 +1938,7 @@ def test_array_field_outer_choices_rejected_via_fake_sentinel(
     owner alone reaches the outer-``choices`` raise in
     ``django_strawberry_framework/types/converters.py::convert_scalar``.
     """
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
+    patch_array_field(monkeypatch)
 
     class ArrayOuterChoicesOwner(models.Model):
         arr = FakeArrayField(
@@ -1969,7 +1969,7 @@ def test_array_field_base_field_unsupported_type_raises(monkeypatch: pytest.Monk
     owner alone reaches the recursive ``Unsupported Django field type`` raise in
     ``django_strawberry_framework/types/converters.py::convert_scalar``.
     """
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
+    patch_array_field(monkeypatch)
 
     class _Weird(models.Field[object, object]):
         pass
@@ -1991,19 +1991,19 @@ def test_array_field_base_field_unsupported_type_raises(monkeypatch: pytest.Monk
 
 
 def test_array_field_sentinel_none_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With ``_ARRAY_FIELD_CLS = None`` the sentinel short-circuits.
+    """With ``ARRAY_FIELD_CLS = None`` the sentinel short-circuits.
 
     The field falls through to the MRO walk's unsupported-field error.
 
-    Pins the short-circuit guard: without ``_ARRAY_FIELD_CLS is not None``,
-    the ``isinstance(field, _ARRAY_FIELD_CLS)`` call would ``TypeError``.
+    Pins the short-circuit guard: with no ``ArrayField`` class, no column is an array,
+    whatever its class.
 
-    A ``FakeArrayField`` column exposed with ``_ARRAY_FIELD_CLS`` unset is unbuildable
+    A ``FakeArrayField`` column exposed with ``ARRAY_FIELD_CLS`` unset is unbuildable
     by design (the package raises), so this unmanaged owner alone reaches the
-    ``_ARRAY_FIELD_CLS is not None`` guard in
-    ``django_strawberry_framework/types/converters.py::convert_scalar``.
+    ``ARRAY_FIELD_CLS is not None`` guard in
+    ``django_strawberry_framework/utils/_array_field.py::array_element_field``.
     """
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", None)
+    patch_array_field(monkeypatch, None)
 
     class ArraySentinelNoneOwner(models.Model):
         arr = FakeArrayField(models.IntegerField())
@@ -2668,7 +2668,7 @@ def test_convert_scalar_force_nullable_on_array_field(monkeypatch: pytest.Monkey
     ``FakeArrayField`` owner is the only route on SQLite into the ``ArrayField`` branch of
     ``django_strawberry_framework/types/converters.py::convert_scalar``.
     """
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
+    patch_array_field(monkeypatch)
 
     class _ArrOwner(models.Model):
         arr = FakeArrayField(models.IntegerField())

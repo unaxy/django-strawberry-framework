@@ -72,7 +72,7 @@ from django_strawberry_framework.utils.errors import (
     validation_error_to_field_errors,
 )
 from django_strawberry_framework.utils.inputs import RELATION_SINGLE, SCALAR, InputFieldSpec
-from tests._postgres_fields import FakeArrayField
+from tests._postgres_fields import FakeArrayField, patch_array_field
 
 if TYPE_CHECKING:
     from django_strawberry_framework.utils.errors import ErrorKeyMap
@@ -745,7 +745,7 @@ def test_unstorable_temporal_leaves_a_non_temporal_column_without_resolving_the_
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A column that stores no datetime or time answers ``False`` before ``using`` is called."""
-    monkeypatch.setattr(errors_module, "_ARRAY_FIELD_CLS", FakeArrayField)
+    patch_array_field(monkeypatch)
 
     assert unstorable_temporal(column, value, _unresolvable_alias) is False
 
@@ -797,6 +797,13 @@ def test_unstorable_temporal_leaves_a_non_temporal_column_without_resolving_the_
             True,
             id="array-element",
         ),
+        pytest.param(
+            {},
+            _NESTED_STAMPS,
+            [_BEFORE_YEAR_ONE, [_IN_RANGE]],
+            False,
+            id="array-non-list-item-dropped",
+        ),
     ],
 )
 def test_unstorable_temporal_holds_a_stored_instant_to_its_session_wall_clock(
@@ -815,9 +822,11 @@ def test_unstorable_temporal_holds_a_stored_instant_to_its_session_wall_clock(
     there leaving years 1..9999 is refused. A naive datetime is first made aware in the
     default time zone (``UTC`` by default, so year 1 stores) and a date first becomes
     that midnight (in ``Asia/Tokyo`` year 1's falls in year 0); an aware time stores.
-    Every element of an ``ArrayField`` is held to the rule, at any depth.
+    Every element of an ``ArrayField`` is held to the rule, at any depth; an item that is
+    no list where a nested array's level expects one holds no element and is dropped, so
+    it is never held to the rule.
     """
-    monkeypatch.setattr(errors_module, "_ARRAY_FIELD_CLS", FakeArrayField)
+    patch_array_field(monkeypatch)
     with (
         override_settings(**settings),
         _stand_in_alias(_StoringOperations, supports_timezones=True) as alias,
@@ -906,7 +915,7 @@ def test_unstorable_temporal_holds_each_array_element_on_the_adapter(
     Held to MySQL's operations, which refuse an aware time and a datetime whose projection
     leaves years 1..9999, so the rows answer the same on every test tier.
     """
-    monkeypatch.setattr(errors_module, "_ARRAY_FIELD_CLS", FakeArrayField)
+    patch_array_field(monkeypatch)
     with _stand_in_alias(MySQLOperations, supports_timezones=False) as alias:
         assert unstorable_temporal(column, value, lambda: alias) is refused
 
@@ -1043,7 +1052,7 @@ def test_unstorable_temporal_holds_a_date_or_naive_datetime_to_the_datetime_djan
     the naive value binds; a ``DateField`` column stores the date itself. Every
     ``ArrayField`` element is projected the same way, at any depth.
     """
-    monkeypatch.setattr(errors_module, "_ARRAY_FIELD_CLS", FakeArrayField)
+    patch_array_field(monkeypatch)
     with override_settings(**settings), _sqlite_alias(database_time_zone) as alias:
         assert unstorable_temporal(column, value, lambda: alias) is refused
 
@@ -1392,7 +1401,7 @@ def test_unstorable_temporal_holds_array_elements_to_the_text_rule_on_server_sid
     refused, while the same datetime written to a plain column travels as a UTC instant
     and stores.
     """
-    monkeypatch.setattr(errors_module, "_ARRAY_FIELD_CLS", FakeArrayField)
+    patch_array_field(monkeypatch)
     driver, cursor_factory, _ = _BINDING_MODES["psycopg3-server"]
     with _postgresql_stand_in(driver, cursor_factory) as alias:
         assert unstorable_temporal(column, value, lambda: alias) is refused
@@ -1453,7 +1462,7 @@ def test_unstorable_temporal_asks_psycopg_for_an_array_as_a_whole(
     ``DateTimeField`` column as its midnight, made aware), ``None`` kept, through the
     driver module's adapters while the connection is not open.
     """
-    monkeypatch.setattr(errors_module, "_ARRAY_FIELD_CLS", FakeArrayField)
+    patch_array_field(monkeypatch)
     dumps: list[_Dump] = []
     stamp = datetime.datetime(2021, 6, 15, 12, tzinfo=_UTC)
     with _postgresql_stand_in(_psycopg3_driver(outcome, dumps), _DjangoClientCursor) as alias:
@@ -1467,7 +1476,7 @@ def test_unstorable_temporal_dumps_an_array_through_the_open_connection_adapters
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An already open psycopg 3 connection's adapters dump the list, not the module's."""
-    monkeypatch.setattr(errors_module, "_ARRAY_FIELD_CLS", FakeArrayField)
+    patch_array_field(monkeypatch)
     dumps: list[_Dump] = []
     with _postgresql_stand_in(_psycopg3_driver(None, dumps), _DjangoClientCursor) as alias:
         connection = connections[alias]
@@ -1483,7 +1492,7 @@ def test_unstorable_temporal_propagates_any_other_driver_exception(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Only the driver's ``DataError`` refuses a list; anything else it raises propagates."""
-    monkeypatch.setattr(errors_module, "_ARRAY_FIELD_CLS", FakeArrayField)
+    patch_array_field(monkeypatch)
     driver = _psycopg3_driver(LookupError("unexpected"), [])
     with (
         _postgresql_stand_in(driver, _DjangoClientCursor) as alias,
@@ -1545,7 +1554,7 @@ def test_unstorable_temporal_leaves_an_array_the_driver_is_not_asked_about(
     driver sees it, so the list as it stands is not what the save binds. A connection
     that is not PostgreSQL is not asked, whatever its driver module exports.
     """
-    monkeypatch.setattr(errors_module, "_ARRAY_FIELD_CLS", FakeArrayField)
+    patch_array_field(monkeypatch)
     with _postgresql_stand_in(driver, _DjangoClientCursor) as alias:
         connections[alias].vendor = vendor
         assert unstorable_temporal(column, value, lambda: alias) is False

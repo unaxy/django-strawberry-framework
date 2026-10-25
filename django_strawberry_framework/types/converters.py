@@ -85,6 +85,7 @@ from django_strawberry_framework.optimizer.field_meta import FieldMeta
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.scalars import BigInt
 from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._array_field import array_element_field
 from django_strawberry_framework.utils._narrowing import (
     is_iterable,
     is_list_or_tuple,
@@ -96,8 +97,8 @@ from django_strawberry_framework.utils.strings import pascal_case
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
-    from django.contrib.postgres.fields import ArrayField, HStoreField
-    from typing_extensions import Never, TypeForm
+    from django.contrib.postgres.fields import HStoreField
+    from typing_extensions import TypeForm
 
     from django_strawberry_framework.utils.typing import (
         ConcreteField,
@@ -333,17 +334,14 @@ _GRAPHQL_RESERVED_ENUM_VALUES = frozenset(
 )
 
 
-# Soft-import the postgres-only field classes through the shared optional-import
-# owner (``utils/imports.py::import_attr_if_importable``) rather than hand-rolling a
-# try/except per field: ``None`` when ``django.contrib.postgres.fields`` is
-# unavailable (package import still succeeds on a dev environment without the
-# postgres driver), and a loud ``AttributeError`` if that module is importable but
-# somehow missing the expected class -- a broken environment that should fail rather
-# than silently degrade. Each cast names the class its by-name lookup returns.
-_ARRAY_FIELD_CLS = cast(
-    "type[ArrayField[Never, object]] | None",
-    import_attr_if_importable("django.contrib.postgres.fields", "ArrayField"),
-)
+# Soft-import ``HStoreField`` through the shared optional-import owner
+# (``utils/imports.py::import_attr_if_importable``): ``None`` when
+# ``django.contrib.postgres.fields`` is unavailable (package import still succeeds on a
+# dev environment without the postgres driver), and a loud ``AttributeError`` if that
+# module is importable but somehow missing the class -- a broken environment that
+# should fail rather than silently degrade. The cast names the class the by-name lookup
+# returns. ``ArrayField`` resolves the same way in its one owner,
+# ``utils/_array_field.py``, which every subsystem's array test reads.
 _HSTORE_FIELD_CLS = cast(
     "type[HStoreField] | None",
     import_attr_if_importable("django.contrib.postgres.fields", "HStoreField"),
@@ -355,19 +353,6 @@ def _field_label(field: object) -> str:
     model = getattr(field, "model", None)
     model_name = truth.name(model) if truth.is_type(model) else "<unbound>"
     return f"{model_name}.{truth.text(getattr(field, 'name', '<unknown>'), '<unknown>')}"
-
-
-def array_element_field(field: object) -> "ConcreteField | None":
-    """Return an ``ArrayField``'s ``base_field``, the column each element is stored through.
-
-    ``None`` for any other column, and for every column when ``django.contrib.postgres``
-    is unavailable. An ``ArrayField`` reads as ``list[<base_field's type>]``
-    (``convert_scalar``), so its element choices live on ``base_field``, never on the
-    array column itself.
-    """
-    if _ARRAY_FIELD_CLS is not None and truth.is_instance(field, _ARRAY_FIELD_CLS):
-        return field.base_field
-    return None
 
 
 def _scalar_map_entry(field: "ModelField") -> "tuple[type[ConcreteField], TypeForm[object]]":

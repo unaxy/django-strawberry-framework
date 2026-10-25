@@ -78,7 +78,6 @@ from django_strawberry_framework.sets_mixins import (
     LazyRelatedClassMixin as LazyRelatedClassMixin,  # noqa: PLC0414 - kept re-export path
 )  # re-exported via filters.__init__
 from django_strawberry_framework.sets_mixins import RelatedSetTargetMixin
-from django_strawberry_framework.types.converters import array_element_field
 from django_strawberry_framework.types.definition import DjangoTypeDefinition, _resolves_id_off_pk
 
 # ``filters -> types`` is the documented safe (acyclic) import direction:
@@ -95,6 +94,7 @@ from django_strawberry_framework.types.relay import (
     published_node_type_name,
 )
 from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._array_field import array_element_field
 from django_strawberry_framework.utils._narrowing import (
     is_concrete_field,
     is_list_or_tuple,
@@ -548,7 +548,7 @@ def _column_form_field(filter_instance: Filter, *, element: bool = False) -> Fie
     ``get_queryset`` hides answers rows, an existence oracle the package's own relation
     keys refuse (``_RelationIdentityListField``), so a relation's values reach the ORM as
     sent. ``element`` reads one element of a list value: an ``ArrayField`` column's element
-    is a value of its ``base_field`` (``types/converters.py::array_element_field``), any
+    is a value of its ``base_field`` (``utils/_array_field.py::array_element_field``), any
     other column's a value of the column itself.
     """
     parent = read_attr(filter_instance, "parent", None)

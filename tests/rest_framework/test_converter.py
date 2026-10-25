@@ -96,12 +96,11 @@ from django_strawberry_framework.rest_framework.serializer_converter import (
     serializer_only_relation_annotation,
 )
 from django_strawberry_framework.scalars import Upload
-from django_strawberry_framework.types import converters
 from django_strawberry_framework.types.converters import convert_choices_to_enum
 from django_strawberry_framework.utils._narrowing import dict_of, enum_value, read_attr
 from django_strawberry_framework.utils.typing import call_forwarded
 from tests._idioms import ModelSerializerBase, bind_unparented
-from tests._postgres_fields import FakeArrayField
+from tests._postgres_fields import FakeArrayField, patch_array_field
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -2471,7 +2470,7 @@ def _array_choice_column(
     blank: bool = False,
 ) -> FakeArrayField:
     """A ``tags`` array column whose ``base_field`` declares ``a`` / ``b``."""
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
+    patch_array_field(monkeypatch)
     element: _Char = models.CharField(max_length=5, choices=[("a", "A"), ("b", "B")], blank=blank)
     column = FakeArrayField(element)
     for field in (column, element):
@@ -2580,7 +2579,7 @@ def test_multiple_choice_over_empty_label_array_base_accepted(
     The field's choices carry ``None`` from ``Choices.__empty__``; the element check leaves it to
     ``allow_null``, and the element enum has no ``_None`` member.
     """
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
+    patch_array_field(monkeypatch)
     element: _Char = models.CharField(max_length=5, choices=_Condition.choices)
     column = FakeArrayField(element)
     for model_field in (column, element):
@@ -2750,7 +2749,7 @@ def test_field_taking_the_read_enum_of_a_grouped_column_refused(
 
 def _grouped_array_choice_column(monkeypatch: pytest.MonkeyPatch) -> FakeArrayField:
     """A ``tags`` array column whose ``base_field`` declares the grouped choices."""
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
+    patch_array_field(monkeypatch)
     element: _Char = models.CharField(max_length=8, choices=_GROUPED_CHOICES)
     column = FakeArrayField(element)
     for model_field in (column, element):

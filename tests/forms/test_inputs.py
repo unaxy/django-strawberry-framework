@@ -99,7 +99,7 @@ from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.inputs import InputFieldSpec
 from django_strawberry_framework.utils.relations import is_model_class
 from tests._idioms import ClassReadRaises, module_binding
-from tests._postgres_fields import FakeArrayField
+from tests._postgres_fields import FakeArrayField, patch_array_field
 from tests._relation_fixtures import RpCompositeParent
 
 if TYPE_CHECKING:
@@ -1415,7 +1415,7 @@ def test_update_build_warns_of_a_single_value_field_over_an_array_column(
     the stored list, which the field refuses unless the form presents one value. A create
     binds only what its input carries, and a list-reading field reads the stored list.
     """
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
+    patch_array_field(monkeypatch)
     declared = field()
     form_class = _column_form(_PlainArrays, name, declared)
     with caplog.at_level(logging.WARNING, logger="django_strawberry_framework"):
@@ -1563,7 +1563,7 @@ def test_array_choice_column_narrows_its_elements(
     ``list[<Input><Field>Enum]`` of the admitted values; a superset keeps the column's ``list``
     of the element's read enum.
     """
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
+    patch_array_field(monkeypatch)
     column = _TaggedBook._meta.get_field("tags")
     assert isinstance(column, FakeArrayField)
     meta = type("Meta", (), {"model": _TaggedBook, "fields": ("tags",)})
@@ -1600,7 +1600,7 @@ def test_single_choice_field_over_array_choice_column_takes_one_element(
     input is the element's read enum (the one the column's list carries), narrowed to the
     values the form's choices admit as the list case is; never a list.
     """
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
+    patch_array_field(monkeypatch)
     column = _TaggedBook._meta.get_field("tags")
     assert isinstance(column, FakeArrayField)
     list_form = _column_form(_TaggedBook, "tags", forms.MultipleChoiceField(choices=tags_choices))
@@ -1662,7 +1662,7 @@ def test_single_value_field_over_array_column_is_typed_as_the_form_reads_it(
     ``clean_<field>`` wraps it, so the input types it as the same field off-column
     (``convert_form_field``): required on create, widened optional on update.
     """
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
+    patch_array_field(monkeypatch)
     form_class = _column_form(_PlainArrays, name, field())
     built, specs = build_form_input_class(form_class, operation_kind=operation_kind)
     published = _field_map(built)[name]
@@ -1699,7 +1699,7 @@ def test_unregistered_field_over_array_column_keeps_the_column_list(
     No registered scalar class states it reads one value (``form_field_reads_one_value``),
     so its ``to_python`` may read the column's list, and the column types its input.
     """
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
+    patch_array_field(monkeypatch)
     built, _ = build_form_input_class(
         _column_form(_PlainArrays, "tags", field()),
         operation_kind=operation_kind,
@@ -1787,7 +1787,7 @@ def test_list_reading_field_over_array_column_keeps_the_column_list(
     field: Callable[[], forms.Field],
 ) -> None:
     """A form field reading a list over an ``ArrayField`` keeps the column's ``list`` type."""
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
+    patch_array_field(monkeypatch)
     built, _ = build_form_input_class(
         _column_form(_PlainArrays, "tags", field()),
         operation_kind=CREATE,

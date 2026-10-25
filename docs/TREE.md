@@ -296,6 +296,7 @@ django_strawberry_framework/    # Public API of django-strawberry-framework, a D
 │   ├── relay.py                  # Internal Relay helpers - interface injection, node resolver defaults, and GlobalID strategies.
 │   └── resolvers.py              # Generated relation and file-field resolvers for finalized ``DjangoType`` classes.
 └── utils/    # Cross-cutting infrastructure shared across django-strawberry-framework subsystems.
+    ├── _array_field.py           # The one owner of the soft-imported ``ArrayField`` class and the read of its element column.
     ├── _narrowing.py             # Narrowing predicates and typed base slots for values whose type is only ``object``.
     ├── _queryset_private.py      # Typed reads and writes of the ``QuerySet`` and row state Django keeps in private attributes.
     ├── canonical.py              # Primitives for canonically reading consumer-controlled containers.
@@ -439,6 +440,7 @@ django_strawberry_framework/    # Public API of django-strawberry-framework, a D
 │   ├── relay.py                  # Internal Relay helpers - interface injection, node resolver defaults, and GlobalID strategies.
 │   └── resolvers.py              # Generated relation and file-field resolvers for finalized ``DjangoType`` classes.
 └── utils/    # Cross-cutting infrastructure shared across django-strawberry-framework subsystems.
+    ├── _array_field.py           # The one owner of the soft-imported ``ArrayField`` class and the read of its element column.
     ├── _narrowing.py             # Narrowing predicates and typed base slots for values whose type is only ``object``.
     ├── _queryset_private.py      # Typed reads and writes of the ``QuerySet`` and row state Django keeps in private attributes.
     ├── canonical.py              # Primitives for canonically reading consumer-controlled containers.

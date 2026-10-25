@@ -3,11 +3,16 @@
 ``FakeArrayField`` and ``FakeHStoreField`` stand in for ``ArrayField`` / ``HStoreField``,
 whose module needs a Postgres driver. Neither subclasses a ``SCALAR_MAP`` class, so a
 column reaches the container arm of ``types/converters.py::scalar_route`` only once the
-test points the converter's sentinel at the double, before declaring the type that
-exposes the column::
+test points the sentinel at the double, before declaring the type that exposes the
+column::
 
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
+    patch_array_field(monkeypatch)
     monkeypatch.setattr(converters, "_HSTORE_FIELD_CLS", FakeHStoreField)
+
+``patch_array_field`` points the one ``ArrayField`` owner
+(``django_strawberry_framework/utils/_array_field.py::ARRAY_FIELD_CLS``) at the double,
+so every reader of ``array_element_field`` (the read converter, the write inputs, the
+filter form fields and the write-side storability rule) sees the same class.
 
 A model hosting either double declares ``class Meta: managed = False``.
 
@@ -25,7 +30,10 @@ from django import forms
 from django.db import models
 from typing_extensions import Never, override
 
+from django_strawberry_framework.utils import _array_field
+
 if TYPE_CHECKING:
+    import pytest
     from django.forms.utils import _DataT, _FilesT
 
 
@@ -56,6 +64,18 @@ class FakeArrayField(models.Field[object, object]):
         super().contribute_to_class(cls, name, private_only=private_only)
         self.base_field.set_attributes_from_name(name)
         self.base_field.model = cls
+
+
+def patch_array_field(
+    monkeypatch: pytest.MonkeyPatch,
+    field_cls: type[models.Field[object, object]] | None = FakeArrayField,
+) -> None:
+    """Point the one ``ArrayField`` owner at ``field_cls`` (``FakeArrayField`` by default).
+
+    ``None`` stands for an environment without ``django.contrib.postgres``, where no
+    column is an ``ArrayField``.
+    """
+    monkeypatch.setattr(_array_field, "ARRAY_FIELD_CLS", field_cls)
 
 
 class FakeHStoreField(models.Field[object, object]):

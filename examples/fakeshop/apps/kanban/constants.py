@@ -101,6 +101,7 @@ TRACKED_FILE_PATHS: tuple[str, ...] = (
     "django_strawberry_framework/types/relay.py",
     "django_strawberry_framework/types/resolvers.py",
     "django_strawberry_framework/utils/__init__.py",
+    "django_strawberry_framework/utils/_array_field.py",
     "django_strawberry_framework/utils/_narrowing.py",
     "django_strawberry_framework/utils/_queryset_private.py",
     "django_strawberry_framework/utils/canonical.py",

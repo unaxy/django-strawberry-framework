@@ -94,7 +94,6 @@ from django_strawberry_framework.filters.factories import FilterArgumentsFactory
 from django_strawberry_framework.filters.inputs import convert_filter_to_input_annotation
 from django_strawberry_framework.orders import OrderSet
 from django_strawberry_framework.registry import registry
-from django_strawberry_framework.types import converters
 from django_strawberry_framework.types.definition import DjangoTypeDefinition
 from django_strawberry_framework.utils._narrowing import (
     call_method,
@@ -104,7 +103,7 @@ from django_strawberry_framework.utils._narrowing import (
 )
 from django_strawberry_framework.utils.typing import object_result
 from tests._idioms import ModelSerializerBase, saved_pk
-from tests._postgres_fields import FakeArrayField
+from tests._postgres_fields import FakeArrayField, patch_array_field
 from tests.filters.fixtures.filtersets import (
     BranchFilter,
     BranchFilterByPath,
@@ -962,7 +961,7 @@ def test_array_filter_reads_raw_form_members(
     Form-level only: an ``ArrayField`` query needs PostgreSQL. Package-only: fakeshop
     declares no ``ArrayField``.
     """
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
+    patch_array_field(monkeypatch)
 
     class RawPricedShelf(db_models.Model):
         prices = FakeArrayField(db_models.DecimalField(max_digits=8, decimal_places=2))
@@ -2447,7 +2446,7 @@ def test_array_filter_element_the_column_cannot_hold_is_filter_invalid(
     to ``base_field.get_prep_value``; under a django-filter ``FilterSet`` it is that form's
     error. Package-only: fakeshop declares no ``ArrayField``.
     """
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
+    patch_array_field(monkeypatch)
 
     class PricedShelf(db_models.Model):
         price: db_models.DecimalField[str | float | Decimal | Combinable, Decimal] = (

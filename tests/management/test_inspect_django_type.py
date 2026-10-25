@@ -49,7 +49,7 @@ from django_strawberry_framework.registry import registry
 from django_strawberry_framework.types import converters
 from django_strawberry_framework.types.base import _is_suppressed_relay_pk
 from tests._idioms import stub_module
-from tests._postgres_fields import FakeArrayField, FakeHStoreField
+from tests._postgres_fields import FakeArrayField, FakeHStoreField, patch_array_field
 from tests.optimizer import _link_models
 
 
@@ -284,7 +284,7 @@ def test_inspect_array_rows_name_the_array_arm_and_each_element_label(
     A choices ``base_field`` reads ``choice enum`` inside the list, and a plain one names
     the ``SCALAR_MAP`` row the element converts through.
     """
-    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
+    patch_array_field(monkeypatch)
 
     class TaggedShelf(models.Model):
         tags = FakeArrayField(models.CharField(max_length=5))

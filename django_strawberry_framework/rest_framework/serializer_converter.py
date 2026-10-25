@@ -83,7 +83,6 @@ from django_strawberry_framework.mutations.inputs import (
 from django_strawberry_framework.registry import register_subsystem_clear, registry
 from django_strawberry_framework.scalars import Upload
 from django_strawberry_framework.types.converters import (
-    array_element_field,
     build_enum_from_choices,
     choice_column_is_grouped,
     choice_column_values,
@@ -92,6 +91,7 @@ from django_strawberry_framework.types.converters import (
     scalar_for_field,
 )
 from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._array_field import array_element_field
 from django_strawberry_framework.utils._narrowing import (
     enum_value,
     is_concrete_field,
@@ -1182,7 +1182,7 @@ def _multiple_choice_element_column(field: DRFField, column: ConcreteField) -> C
     ``MultipleChoiceField.to_internal_value`` returns a list of choice values, and a
     ``ListField(child=ChoiceField)`` validates one per element, so the column
     must store a collection. An ``ArrayField`` stores each element through its ``base_field``
-    (``types/converters.py::array_element_field``), which carries any element choices, so the
+    (``utils/_array_field.py::array_element_field``), which carries any element choices, so the
     element values are checked against the values it lists (groups flattened). A column with
     ``choices`` that is not an array stores one choice value per row (a grouped column
     included): the list is stored as one value (its ``str``), or fails to coerce, and is never a

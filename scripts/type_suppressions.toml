@@ -188,7 +188,6 @@
 "django_strawberry_framework/testing/client.py::_GraphQLTestClientBase._finish_response" = { cast = 1 }
 "django_strawberry_framework/testing/client.py::_GraphQLTestClientBase.request" = { reportArgumentType = 1 }
 "django_strawberry_framework/types/base.py::DjangoType.get_queryset" = { reportAny = 1, reportExplicitAny = 3 }
-"django_strawberry_framework/types/converters.py::_ARRAY_FIELD_CLS" = { cast = 1 }
 "django_strawberry_framework/types/converters.py::_HSTORE_FIELD_CLS" = { cast = 1 }
 "django_strawberry_framework/types/finalizer.py::_audit_globalid_filter_strategies" = { cast = 1 }
 "django_strawberry_framework/types/finalizer.py::_audit_model_label_routing" = { cast = 1 }
@@ -206,6 +205,7 @@
 "django_strawberry_framework/types/resolvers.py::_make_relation_resolver.many_resolver._resolve" = { cast = 1 }
 "django_strawberry_framework/types/resolvers.py::_strictness_for" = { cast = 1 }
 "django_strawberry_framework/types/resolvers.py::_visible_many_rows._resolve" = { cast = 1 }
+"django_strawberry_framework/utils/_array_field.py::ARRAY_FIELD_CLS" = { cast = 1 }
 "django_strawberry_framework/utils/_queryset_private.py::chain_queryset" = { reportAttributeAccessIssue = 1, reportUnknownMemberType = 1, reportUnknownVariableType = 1 }
 "django_strawberry_framework/utils/_queryset_private.py::queryset_db" = { reportAttributeAccessIssue = 1, reportUnknownMemberType = 1, reportUnknownVariableType = 1 }
 "django_strawberry_framework/utils/_queryset_private.py::queryset_fields" = { reportAttributeAccessIssue = 1, reportUnknownMemberType = 1, reportUnknownVariableType = 1 }
