@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 293 done, 207 to do.
+Progress: 294 done, 208 to do.
 
 ## Done
 
@@ -1500,6 +1500,18 @@ Progress: 293 done, 207 to do.
   maintainer cares about"; FIX.md phase 4 sends exported surface to docs/TREE.md and the check-public-types
   hook; START.md stops calling AGENTS numbered; three stale AGENTS-heading cites in scripts/tests fixed.
   Closed history left as written
+- [x] 511. fixed: a raw-key relation filter coerces its key through the column the compared key stores, wherever the
+  leaf runs: a to-many key leaf (forward many-to-many, reverse foreign key, reverse many-to-many) walking a visibility
+  hop (a target type with its own `get_queryset`, or a `RelatedFilter` declared on the relation) compares the target
+  rows' own key column, and `filters/base.py::_raw_identity_column` now reads that column (a plain column, or a
+  relation-valued primary key followed to the column it stores, a one-to-one onto a non-pk `to_field` included), where
+  `_coerce_relation_identity` passed the value through. So a `Decimal` key `NaN` / `Infinity` or an aware datetime the
+  backend cannot hold matches nothing there, as it does on the unhopped leaf, instead of a masked error, and a visible
+  key into a target keyed by a one-to-one onto a non-pk `to_field` matches its rows instead of nothing. Single-valued
+  relation leaves, marked non-pk `to_field` forward keys (still the target's primary key) and the published types are
+  unchanged. The item named forward many-to-many only; every to-many kind behind a hop failed alike. Package rows over
+  Decimal, DateTime and one-to-one-onto-`to_field` keyed targets, scoped and declared, with the unhopped leaf as
+  control
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1662,11 +1674,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   midnight at save with a `RuntimeWarning`; near year 1 or 9999 that projection can overflow past
   `unstorable_temporal`, which checks only `datetime` / `time` values, and answer the masked error; probe and say
   whether the check covers it. Found verifying 381
-- [ ] 511. A generated forward many-to-many `exact` / `in` over a non-Relay target with a `DecimalField` primary key
-  answers a masked error for a `NaN` or `Infinity` key: the bound terminal's `field_name` reads `id`,
-  `filters/base.py::_bound_model_field` reads it against the owner model, finds no relation identity column, and
-  `_coerce_relation_identity` passes the value through; forward FK, reverse FK and reverse many-to-many coerce it to
-  match nothing. Found checking 375
 - [ ] 512. (robustness) A package FilterSet used only under a consumer's `DjangoFilterBackend` never runs the schema
   build, so a declared `RangeFilter` on a relation answers `FieldError` (500) for every query string, valid bounds
   included, and a declared `ListFilter` raises `GraphQLError("Invalid filter value: expected a list.")` (500) for
@@ -1787,11 +1794,21 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 625. (robustness) A package `ListFilter` declared with a lookup other than `in` (the default `exact`, `gte`)
   hands the list to a scalar lookup: a masked `ValidationError` / `TypeError` over a decimal or number column and
   silently no rows over text, even for one element. Found fixing 508
+- [ ] 628. A raw-key many-to-many leaf whose through model keys the target by a non-pk `to_field` is typed by the
+  target's primary key but compares the `to_field` column: `bs: {exact: [1]}` over a through `ForeignKey(B,
+  to_field="code")` matches the row whose `code` is 1, and the primary key of a linked row matches nothing unless it
+  equals that row's `code`; the GLOSSARY "Relation leaves" `to_field` sentence covers forward foreign keys and
+  one-to-ones only. Found fixing 511
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 627. CHANGELOG entry for item 511: a raw-key relation filter on a to-many key (forward many-to-many, reverse
+  foreign key, reverse many-to-many) whose target type has its own `get_queryset`, or that a `RelatedFilter` walks,
+  coerces each key through the target key column: a `Decimal` `NaN` / `Infinity` or an out-of-range aware datetime key
+  now matches nothing instead of a masked error, and a target keyed by a one-to-one onto a non-pk `to_field` matches a
+  visible key's rows instead of nothing
 - [ ] 626. CHANGELOG entry for item 510 (breaking): a declared filter on `pk` or `<relation>__pk` is typed, cleaned
   and range-checked by the column the key stores, as the column's own name is: its leaf moves from `String` to the
   column's scalar, so `pk: {in: ["2"]}` over an integer key is now a GraphQL coercion error, a malformed Decimal or

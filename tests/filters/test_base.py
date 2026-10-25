@@ -1071,6 +1071,493 @@ def test_relation_pk_filters_match_a_key_the_target_validator_refuses(
     assert sorted(saved_pk(row.key) for row in result) == keys
 
 
+class _HopKeyOwner(db_models.Model):
+    """A row reaching each ``_HOP_KEY_PREFIXES`` target by forward many-to-many."""
+
+    name: db_models.TextField[str | Combinable, str] = db_models.TextField()
+    decimal_links: db_models.ManyToManyField[_DecimalHopKey, db_models.Model] = (
+        db_models.ManyToManyField("_DecimalHopKey", related_name="+")
+    )
+    stamp_links: db_models.ManyToManyField[_StampHopKey, db_models.Model] = (
+        db_models.ManyToManyField("_StampHopKey", related_name="+")
+    )
+    parent_decimal_links: db_models.ManyToManyField[_ParentDecimalHopKey, db_models.Model] = (
+        db_models.ManyToManyField("_ParentDecimalHopKey", related_name="+")
+    )
+    parent_text_links: db_models.ManyToManyField[_ParentTextHopKey, db_models.Model] = (
+        db_models.ManyToManyField("_ParentTextHopKey", related_name="+")
+    )
+
+    class Meta:
+        managed = False
+        app_label = "library"
+        db_table = "filters_hop_key_owner"
+
+
+class _DecimalHopKey(db_models.Model):
+    """A decimal-keyed target ``_HopKeyOwner`` reaches by forward M2M, reverse FK and reverse M2M."""
+
+    code: db_models.DecimalField[Decimal | float | int | str | Combinable, Decimal] = (
+        db_models.DecimalField(primary_key=True, max_digits=6, decimal_places=2)
+    )
+    visible: db_models.BooleanField[bool | Combinable, bool] = db_models.BooleanField()
+    owner: db_models.ForeignKey[_HopKeyOwner | Combinable, _HopKeyOwner] = db_models.ForeignKey(
+        _HopKeyOwner,
+        on_delete=db_models.CASCADE,
+        related_name="decimal_rows",
+    )
+    backers: db_models.ManyToManyField[_HopKeyOwner, db_models.Model] = db_models.ManyToManyField(
+        _HopKeyOwner,
+        related_name="decimal_backs",
+    )
+
+    class Meta:
+        managed = False
+        app_label = "library"
+        db_table = "filters_decimal_hop_key"
+
+
+class _StampHopKey(db_models.Model):
+    """A datetime-keyed target ``_HopKeyOwner`` reaches by forward M2M, reverse FK and reverse M2M."""
+
+    code: db_models.DateTimeField[datetime.datetime | str | Combinable, datetime.datetime] = (
+        db_models.DateTimeField(primary_key=True)
+    )
+    visible: db_models.BooleanField[bool | Combinable, bool] = db_models.BooleanField()
+    owner: db_models.ForeignKey[_HopKeyOwner | Combinable, _HopKeyOwner] = db_models.ForeignKey(
+        _HopKeyOwner,
+        on_delete=db_models.CASCADE,
+        related_name="stamp_rows",
+    )
+    backers: db_models.ManyToManyField[_HopKeyOwner, db_models.Model] = db_models.ManyToManyField(
+        _HopKeyOwner,
+        related_name="stamp_backs",
+    )
+
+    class Meta:
+        managed = False
+        app_label = "library"
+        db_table = "filters_stamp_hop_key"
+
+
+class _DecimalKeyParent(db_models.Model):
+    """A row whose unique decimal ``code`` a ``_ParentDecimalHopKey`` primary key references."""
+
+    code: db_models.DecimalField[Decimal | float | int | str | Combinable, Decimal] = (
+        db_models.DecimalField(unique=True, max_digits=6, decimal_places=2)
+    )
+
+    class Meta:
+        managed = False
+        app_label = "library"
+        db_table = "filters_decimal_key_parent"
+
+
+class _ParentDecimalHopKey(db_models.Model):
+    """A target keyed by a one-to-one primary key onto ``_DecimalKeyParent.code``, not its pk."""
+
+    parent: db_models.OneToOneField[_DecimalKeyParent | Combinable, _DecimalKeyParent] = (
+        db_models.OneToOneField(
+            _DecimalKeyParent,
+            on_delete=db_models.CASCADE,
+            to_field="code",
+            primary_key=True,
+            related_name="+",
+        )
+    )
+    visible: db_models.BooleanField[bool | Combinable, bool] = db_models.BooleanField()
+    owner: db_models.ForeignKey[_HopKeyOwner | Combinable, _HopKeyOwner] = db_models.ForeignKey(
+        _HopKeyOwner,
+        on_delete=db_models.CASCADE,
+        related_name="parent_decimal_rows",
+    )
+    backers: db_models.ManyToManyField[_HopKeyOwner, db_models.Model] = db_models.ManyToManyField(
+        _HopKeyOwner,
+        related_name="parent_decimal_backs",
+    )
+
+    class Meta:
+        managed = False
+        app_label = "library"
+        db_table = "filters_parent_decimal_hop_key"
+
+
+class _TextKeyParent(db_models.Model):
+    """A row whose unique text ``slug`` a ``_ParentTextHopKey`` primary key references."""
+
+    slug: db_models.TextField[str | Combinable, str] = db_models.TextField(unique=True)
+
+    class Meta:
+        managed = False
+        app_label = "library"
+        db_table = "filters_text_key_parent"
+
+
+class _ParentTextHopKey(db_models.Model):
+    """A target keyed by a one-to-one primary key onto ``_TextKeyParent.slug``, not its pk."""
+
+    parent: db_models.OneToOneField[_TextKeyParent | Combinable, _TextKeyParent] = (
+        db_models.OneToOneField(
+            _TextKeyParent,
+            on_delete=db_models.CASCADE,
+            to_field="slug",
+            primary_key=True,
+            related_name="+",
+        )
+    )
+    visible: db_models.BooleanField[bool | Combinable, bool] = db_models.BooleanField()
+    owner: db_models.ForeignKey[_HopKeyOwner | Combinable, _HopKeyOwner] = db_models.ForeignKey(
+        _HopKeyOwner,
+        on_delete=db_models.CASCADE,
+        related_name="parent_text_rows",
+    )
+    backers: db_models.ManyToManyField[_HopKeyOwner, db_models.Model] = db_models.ManyToManyField(
+        _HopKeyOwner,
+        related_name="parent_text_backs",
+    )
+
+    class Meta:
+        managed = False
+        app_label = "library"
+        db_table = "filters_parent_text_hop_key"
+
+
+_HOP_KEY_PREFIXES: dict[type[Model], str] = {
+    _DecimalHopKey: "decimal",
+    _StampHopKey: "stamp",
+    _ParentDecimalHopKey: "parent_decimal",
+    _ParentTextHopKey: "parent_text",
+}
+"""Each hop target and the prefix of its owner relations: ``<prefix>_links`` / ``_rows`` / ``_backs``."""
+
+_STAMP_VISIBLE = datetime.datetime(2024, 1, 1, 12, tzinfo=datetime.timezone.utc)
+_STAMP_HIDDEN = datetime.datetime(2024, 1, 2, 12, tzinfo=datetime.timezone.utc)
+
+
+@pytest.fixture
+def hop_key_owners() -> Generator[None, None, None]:
+    """Real tables: ``alpha`` reaches each target's visible row, ``beta`` its hidden one, ``gamma`` none.
+
+    Every to-many kind links the same pairs: ``alpha`` lists the visible row in its forward
+    M2M, owns it by its reverse FK and backs it by its reverse M2M; ``beta`` does all three
+    for the hidden row.
+    """
+    parents: tuple[type[Model], ...] = (_DecimalKeyParent, _TextKeyParent)
+    targets = tuple(_HOP_KEY_PREFIXES)
+    with db_connection.schema_editor() as editor:
+        for model in (_HopKeyOwner, *parents, *targets):
+            editor.create_model(model)
+    try:
+        alpha, beta, _gamma = (
+            _HopKeyOwner.objects.create(name=name) for name in ("alpha", "beta", "gamma")
+        )
+        keyed: list[tuple[str, Model, Model]] = [
+            (
+                "decimal",
+                _DecimalHopKey.objects.create(code=Decimal("1.50"), visible=True, owner=alpha),
+                _DecimalHopKey.objects.create(code=Decimal("2.50"), visible=False, owner=beta),
+            ),
+            (
+                "stamp",
+                _StampHopKey.objects.create(code=_STAMP_VISIBLE, visible=True, owner=alpha),
+                _StampHopKey.objects.create(code=_STAMP_HIDDEN, visible=False, owner=beta),
+            ),
+            (
+                "parent_decimal",
+                _ParentDecimalHopKey.objects.create(
+                    parent=_DecimalKeyParent.objects.create(code=Decimal("1.50")),
+                    visible=True,
+                    owner=alpha,
+                ),
+                _ParentDecimalHopKey.objects.create(
+                    parent=_DecimalKeyParent.objects.create(code=Decimal("2.50")),
+                    visible=False,
+                    owner=beta,
+                ),
+            ),
+            (
+                "parent_text",
+                _ParentTextHopKey.objects.create(
+                    parent=_TextKeyParent.objects.create(slug="visible-slug"),
+                    visible=True,
+                    owner=alpha,
+                ),
+                _ParentTextHopKey.objects.create(
+                    parent=_TextKeyParent.objects.create(slug="hidden-slug"),
+                    visible=False,
+                    owner=beta,
+                ),
+            ),
+        ]
+        for prefix, visible, hidden in keyed:
+            _ = call_method(read_attr(alpha, f"{prefix}_links"), "add", visible)
+            _ = call_method(read_attr(beta, f"{prefix}_links"), "add", hidden)
+            _ = call_method(read_attr(visible, "backers"), "add", alpha)
+            _ = call_method(read_attr(hidden, "backers"), "add", beta)
+        yield
+    finally:
+        with db_connection.schema_editor() as editor:
+            for model in (*reversed(targets), *parents, _HopKeyOwner):
+                editor.delete_model(model)
+
+
+def _hop_key_owner_set(target: type[Model], relation: str, mode: str) -> type[FilterSet]:
+    """Build a ``_HopKeyOwner`` set generating ``exact`` / ``in`` on the to-many key ``relation``.
+
+    ``plain`` registers no type, so the key leaf walks no visibility hop. ``scoped``
+    registers a target type whose ``get_queryset`` hides invisible rows; ``declared``
+    declares a ``RelatedFilter`` on the relation whose ``queryset=`` admits only visible
+    rows. Either makes the leaf walk the hop.
+    """
+    namespace: dict[str, object] = {
+        "Meta": type("Meta", (), {"model": _HopKeyOwner, "fields": {relation: ["exact", "in"]}}),
+    }
+    if mode == "scoped":
+
+        class _ScopedTargetType(DjangoType):
+            class Meta:
+                model = target
+
+            @classmethod
+            @override
+            def get_queryset(
+                cls,
+                queryset: QuerySet[Model],
+                info: object,
+                **kwargs: object,
+            ) -> QuerySet[Model]:
+                return queryset.filter(visible=True)
+
+        assert registry.get(target) is _ScopedTargetType
+    elif mode == "declared":
+        _ = type("_PlainTargetType", (DjangoType,), {"Meta": type("Meta", (), {"model": target})})
+        target_set = _pk_alias_set(target)
+        namespace["hop"] = RelatedFilter(
+            target_set,
+            field_name=relation,
+            queryset=target._default_manager.filter(visible=True),
+        )
+    return type("HopKeyOwnerSet", (FilterSet,), namespace)
+
+
+_HIDDEN = object()
+"""Expectation marker: the hidden row's owner, which only an unhopped leaf sees."""
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("hop_key_owners")
+@pytest.mark.parametrize("mode", ["plain", "scoped", "declared"])
+@pytest.mark.parametrize("lookup", ["exact", "in_"])
+@pytest.mark.parametrize(
+    "kind",
+    [
+        pytest.param("links", id="forward-m2m"),
+        pytest.param("rows", id="reverse-fk"),
+        pytest.param("backs", id="reverse-m2m"),
+    ],
+)
+@pytest.mark.parametrize(
+    (
+        "target",
+        "members",
+        "negated",
+        "expected",
+    ),
+    [
+        pytest.param(_DecimalHopKey, [Decimal("NaN")], False, [], id="decimal-nan"),
+        pytest.param(_DecimalHopKey, [Decimal("Infinity")], False, [], id="decimal-infinity"),
+        pytest.param(_DecimalHopKey, [Decimal("-Infinity")], False, [], id="decimal-neg-infinity"),
+        pytest.param(
+            _DecimalHopKey,
+            [Decimal("NaN")],
+            True,
+            ["alpha", "beta", "gamma"],
+            id="decimal-not-nan",
+        ),
+        pytest.param(
+            _DecimalHopKey,
+            [Decimal("Infinity"), Decimal("1.50")],
+            False,
+            ["alpha"],
+            id="decimal-infinity-beside-visible",
+        ),
+        pytest.param(_DecimalHopKey, [Decimal("1.50")], False, ["alpha"], id="decimal-visible"),
+        pytest.param(_DecimalHopKey, [Decimal("2.50")], False, _HIDDEN, id="decimal-hidden"),
+        pytest.param(_DecimalHopKey, [Decimal("9.99")], False, [], id="decimal-missing"),
+        pytest.param(
+            _StampHopKey,
+            [datetime.datetime(1, 1, 1, tzinfo=datetime.timezone(datetime.timedelta(hours=14)))],
+            False,
+            [],
+            id="stamp-below-range",
+        ),
+        pytest.param(
+            _StampHopKey,
+            [
+                datetime.datetime(
+                    9999,
+                    12,
+                    31,
+                    23,
+                    59,
+                    59,
+                    tzinfo=datetime.timezone(datetime.timedelta(hours=-14)),
+                ),
+            ],
+            False,
+            [],
+            id="stamp-above-range",
+        ),
+        pytest.param(
+            _StampHopKey,
+            [datetime.datetime(1, 1, 1, tzinfo=datetime.timezone(datetime.timedelta(hours=14)))],
+            True,
+            ["alpha", "beta", "gamma"],
+            id="stamp-not-below-range",
+        ),
+        pytest.param(_StampHopKey, [_STAMP_VISIBLE], False, ["alpha"], id="stamp-visible"),
+        pytest.param(_StampHopKey, [_STAMP_HIDDEN], False, _HIDDEN, id="stamp-hidden"),
+        pytest.param(
+            _StampHopKey,
+            [datetime.datetime(2030, 1, 1, tzinfo=datetime.timezone.utc)],
+            False,
+            [],
+            id="stamp-missing",
+        ),
+        pytest.param(
+            _ParentDecimalHopKey,
+            [Decimal("1.50")],
+            False,
+            ["alpha"],
+            id="parent-decimal-visible",
+        ),
+        pytest.param(
+            _ParentDecimalHopKey,
+            [Decimal("2.50")],
+            False,
+            _HIDDEN,
+            id="parent-decimal-hidden",
+        ),
+        pytest.param(
+            _ParentDecimalHopKey,
+            [Decimal("9.99")],
+            False,
+            [],
+            id="parent-decimal-missing",
+        ),
+        pytest.param(
+            _ParentTextHopKey,
+            ["visible-slug"],
+            False,
+            ["alpha"],
+            id="parent-text-visible",
+        ),
+        pytest.param(_ParentTextHopKey, ["hidden-slug"], False, _HIDDEN, id="parent-text-hidden"),
+        pytest.param(_ParentTextHopKey, ["missing-slug"], False, [], id="parent-text-missing"),
+    ],
+)
+def test_to_many_relation_key_coerces_through_the_target_key_across_a_visibility_hop(
+    *,
+    target: type[Model],
+    members: list[object],
+    negated: bool,
+    expected: object,
+    kind: str,
+    lookup: str,
+    mode: str,
+) -> None:
+    """A to-many raw-key leaf answers the same whether or not it walks a visibility hop.
+
+    A forward M2M, reverse FK or reverse M2M key leaf whose path walks a hop (a scoped
+    target type, a declared ``RelatedFilter``) compares the target rows' own key column
+    (``filters/sets.py::FilterSet._leaf_chain``), and coerces every member through that
+    column as the unhopped leaf coerces it through the relation
+    (``filters/base.py::_coerce_relation_identity``): a decimal ``NaN`` / ``Infinity`` or
+    an aware datetime the backend cannot hold names no row, so it matches nothing (every
+    row under ``not``) and drops out beside a key that matches, a missing key and one the
+    hop hides match nothing, a visible key matches its rows. A target keyed by a
+    one-to-one primary key onto a non-pk ``to_field`` (decimal or text) is compared and
+    coerced by the column that key stores, never the parent's primary key. Package-only:
+    no fakeshop to-many relation targets a decimal, datetime or ``to_field``-keyed key,
+    and the GraphQL ``Int`` its integer keys take holds no value their column cannot.
+    The live rows over a hopped integer key (``altBranches`` across
+    ``BranchType.get_queryset``) are
+    ``examples/fakeshop/test_query/test_library_api.py::test_library_relation_key_is_no_existence_oracle_for_hidden_or_missing_rows_over_http``.
+    """
+    prefix = _HOP_KEY_PREFIXES[target]
+    leaf: dict[str, object] = {f"{prefix}_{kind}": {lookup: members}}
+    filter_input = {"not_": leaf} if negated else leaf
+    if expected is _HIDDEN:
+        expected = ["beta"] if mode == "plain" else []
+    rows = _hop_key_owner_set(target, f"{prefix}_{kind}", mode).apply_sync(
+        filter_input,
+        _HopKeyOwner.objects.order_by("name"),
+        SimpleNamespace(context=SimpleNamespace(request=HttpRequest())),
+    )
+    assert list(rows.values_list("name", flat=True)) == expected
+
+
+class _DecimalKeyChild(db_models.Model):
+    """A row keyed to a ``_DecimalKeyParent`` by its unique ``code``, not its primary key."""
+
+    name: db_models.TextField[str | Combinable, str] = db_models.TextField()
+    parent: db_models.ForeignKey[_DecimalKeyParent | Combinable, _DecimalKeyParent] = (
+        db_models.ForeignKey(
+            _DecimalKeyParent,
+            on_delete=db_models.CASCADE,
+            to_field="code",
+            related_name="+",
+        )
+    )
+
+    class Meta:
+        managed = False
+        app_label = "library"
+        db_table = "filters_decimal_key_child"
+
+
+class _DecimalKeyChildSet(FilterSet):
+    class Meta:
+        model = _DecimalKeyChild
+        fields = {"parent": ["exact", "in"]}
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("lookup", "value"),
+    [pytest.param("exact", 1234567, id="exact"), pytest.param("in_", [1234567], id="in")],
+)
+def test_to_field_relation_key_coerces_through_the_target_primary_key(
+    lookup: str,
+    value: object,
+) -> None:
+    """A forward key onto a non-pk ``to_field`` takes the target's primary key, and is coerced by it.
+
+    Generation marks the leaf (``_GLOBALID_RELATION_PK_ATTR``), so it compiles against
+    ``parent__pk`` and its key is coerced through the parent's primary key column
+    (``filters/base.py::_raw_identity_column``), never the ``code`` column the link
+    stores: ``1234567`` is a primary key the ``Decimal(6, 2)`` code cannot hold, and it
+    still matches the child of that parent. Package-only: every fakeshop ``to_field``
+    relation stores a text key, which holds any primary key the ``Int`` leaf carries.
+    """
+    with db_connection.schema_editor() as editor:
+        editor.create_model(_DecimalKeyParent)
+        editor.create_model(_DecimalKeyChild)
+    try:
+        parent = _DecimalKeyParent.objects.create(pk=1234567, code=Decimal("1.50"))
+        _ = _DecimalKeyChild.objects.create(name="kept", parent=parent)
+        rows = _DecimalKeyChildSet.apply_sync(
+            {"parent": {lookup: value}},
+            _DecimalKeyChild.objects.order_by("name"),
+            SimpleNamespace(context=SimpleNamespace(request=HttpRequest())),
+        )
+        assert list(rows.values_list("name", flat=True)) == ["kept"]
+    finally:
+        with db_connection.schema_editor() as editor:
+            editor.delete_model(_DecimalKeyChild)
+            editor.delete_model(_DecimalKeyParent)
+
+
 class _DecimalKeyed(db_models.Model):
     """A row keyed by a decimal column."""
 

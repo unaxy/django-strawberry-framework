@@ -2058,17 +2058,52 @@ def model_choice_identity_column(
     return _model_identity_column(model, filter_instance.extra.get("to_field_name"))
 
 
+def _raw_identity_column(
+    filter_instance: Filter,
+    field: ModelField | None,
+) -> ConcreteField | None:
+    """Return the column a raw relation identity compared on ``field`` is coerced through.
+
+    ``field`` is what ``filter_instance``'s ORM path names (``_bound_model_field``). A
+    key column compares the value it stores, so its identity is the column that value
+    lives in (``stored_value_column``): a plain column, or a forward ``ForeignKey`` /
+    ``OneToOneField`` followed through each link to the column it references (its
+    ``to_field`` included). That covers a single-valued key leaf compared through its
+    own key and the target key column a to-many key leaf walking a visibility hop names
+    on the hop's target rows (``filters/sets.py::FilterSet._leaf_chain``), a
+    relation-valued primary key such as a one-to-one onto a non-pk ``to_field``
+    included. A relation compared as a relation (a reverse relation, a many-to-many, a
+    forward relation carrying the ``_GLOBALID_RELATION_PK_ATTR`` marker, which compiles
+    against ``<relation>__pk``) is the target's primary key
+    (``relation_identity_column``), ``None`` when that target is not a resolved model;
+    an unmarked forward key into an unresolved target raises the ``ValueError`` Django's
+    own query raises for it. ``None`` for a path naming no field.
+    """
+    if field is None:
+        return None
+    if field.is_relation and (
+        not isinstance(field, models.ForeignKey)
+        or getattr(filter_instance, _GLOBALID_RELATION_PK_ATTR, False)
+    ):
+        return relation_identity_column(field)
+    column = stored_value_column(field)
+    return column if isinstance(column, models.Field) else None
+
+
 def _coerce_relation_identity(filter_instance: Filter, value: object, alias: str) -> object:
     """Coerce one raw identity value through the target key column; ``None`` if it names no row.
 
-    A value the column cannot hold (one the queryset's database ``alias`` cannot bind,
-    out of the column's range there, wrong shape) identifies no row, the same verdict
-    ``_identifying_members`` gives an integer ``in`` member; the column's own validators
-    are not run, so a key they would refuse still matches a row that holds it. A filter
-    with no model to walk (``_bound_model_field``) has no column and passes the value
-    through unchanged.
+    The column is the one ``_raw_identity_column`` reads off the filter's ORM path, so a
+    key leaf compared through its relation and one compared on the target's key column
+    across a visibility hop coerce alike. A value the column cannot hold (one the
+    queryset's database ``alias`` cannot bind, out of the column's range there, wrong
+    shape) identifies no row, the same verdict ``_identifying_members`` gives an integer
+    ``in`` member; the column's own validators are not run, so a key they would refuse
+    still matches a row that holds it. A filter whose path names no field
+    (``_bound_model_field``: no model to walk, or nothing on it) has no column and passes
+    the value through unchanged.
     """
-    column = relation_identity_column(_bound_model_field(filter_instance))
+    column = _raw_identity_column(filter_instance, _bound_model_field(filter_instance))
     if column is None:
         return value
     return coerce_field_value_or_none(column, value, alias=alias)
