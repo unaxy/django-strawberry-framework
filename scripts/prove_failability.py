@@ -179,11 +179,15 @@ exactly as above.
   mutation must produce. When present it replaces the row-count grading: the
   verdict is "observed attributable failures == declared set" (every pattern
   matches at least one attributable failing row, every attributable failing
-  row matches some pattern; a pattern matches a node id when it is equal to it
-  or ``fnmatch`` matches it). The weakly-pinned and re-run-floor arithmetic is
-  not applied, so one query-count test failing ``assert 6 == 1`` is a complete
-  proof when it is the row the proof names. ``[]`` is a behaviour-preservation
-  proof: the mutation (usually a revert) must make no row fail.
+  row matches some pattern; a pattern matches a node id when it is equal to it,
+  when ``fnmatch`` matches it, or when ``fnmatch`` matches it with every ``[``
+  read literally, so ``tests/test_x.py::test_x[*]`` names every parametrized
+  row of ``test_x`` and ``test_x[a-*]`` the rows whose id starts ``a-``, while
+  a character class such as ``test_[ab]`` still works). The weakly-pinned and
+  re-run-floor arithmetic is not applied, so one query-count test failing
+  ``assert 6 == 1`` is a complete proof when it is the row the proof names.
+  ``[]`` is a behaviour-preservation proof: the mutation (usually a revert)
+  must make no row fail.
 * ``"isolates": "<node id>"`` declares a row-isolation proof: the mutation
   exists to make exactly one named row fail, and a second failing row would
   falsify it. The verdict is **row isolated** when the attributable failing
@@ -816,10 +820,17 @@ class Expectation:
 def _pattern_matches(pattern: str, node_id: str) -> bool:
     """Return whether an ``expect_failing`` pattern names ``node_id``.
 
-    Equality first: a parametrized id carries ``[...]``, which ``fnmatch`` would
-    read as a character class and fail to match literally.
+    Three ways, in order: equality, since a parametrized id carries ``[...]``,
+    which ``fnmatch`` reads as a character class and so fails to match
+    literally; plain ``fnmatch``, so a character class in the pattern works;
+    and ``fnmatch`` with every ``[`` read literally (``[[]``), so a glob over a
+    parametrized id such as ``test_x[*]`` names every row of ``test_x``.
     """
-    return pattern == node_id or fnmatch.fnmatchcase(node_id, pattern)
+    return (
+        pattern == node_id
+        or fnmatch.fnmatchcase(node_id, pattern)
+        or fnmatch.fnmatchcase(node_id, pattern.replace("[", "[[]"))
+    )
 
 
 @dataclass(frozen=True)

@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 298 done, 210 to do.
+Progress: 299 done, 209 to do.
 
 ## Done
 
@@ -1562,6 +1562,13 @@ Progress: 298 done, 210 to do.
   `[aware, naive]` into `time[]` is unchanged and unverified on a server. Package rows in
   `tests/utils/test_errors.py` (a stand-in driver and the real psycopg module); README, spec-036, spec-038,
   spec-039 and the `fielderror-envelope` glossary term
+- [x] 545. `scripts/prove_failability.py::_pattern_matches` matched an `expect_failing` pattern by equality or plain
+  `fnmatch`, which reads `[*]` as a character class, so a glob over a parametrized id (`test_x[*]`) never matched
+  and the module docstring offered "node id or glob" without saying so. A pattern now also matches when `fnmatch`
+  matches it with every `[` read literally: `test_x[*]` names every parametrized row of `test_x`, `test_x[a-*]` the
+  rows whose id starts `a-`, and equality and plain `fnmatch` stay first, so every pattern that matched still
+  matches (a character class such as `test_[ab]` included; an exhaustive parent-vs-change grid lost no pair).
+  `isolates` stays equality only. Rows in `tests/test_prove_failability.py`; the module and function docstrings
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1716,9 +1723,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 543. (robustness) `utils/errors.py` and `types/converters.py::array_element_field` each soft-import
   `django.contrib.postgres`'s `ArrayField` and unwrap `base_field` their own way; one owner would keep the two
   in step. Found fixing 381
-- [ ] 545. (robustness) `scripts/prove_failability.py::_pattern_matches`: an `expect_failing` glob over a parametrized
-  id (`test_x[*]`) never matches, since `fnmatch` reads `[*]` as a character class; only an exact id or a `[[]`
-  escape works, and the module docstring offers "node id or glob" without saying so. Found implementing 424
 - [ ] 557. (robustness) With a consumer `OPTIONS["cursor_factory"]` that binds on the server (psycopg's own `Cursor`)
   and no `server_side_binding`, Django's named cursors (`QuerySet.iterator()`) still bind on the client, while
   `utils/errors.py::unbindable_temporal` reads the connection as server-side; the package never iterates, so only
