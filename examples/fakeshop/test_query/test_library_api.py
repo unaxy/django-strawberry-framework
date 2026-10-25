@@ -5419,6 +5419,21 @@ _VISIBLE_WORLD_ROWS = {
         [],
         ["on-hidden-set"],
     ),
+    "empty-value-walked-over-absent-and-hidden-rows": _VisibleWorldRow(
+        "allLibraryLoans",
+        "note",
+        '{ bookShelfTopic: { exact: "" } }',
+        ["on-secret", "on-set", "on-hidden-set"],
+        ["on-secret", "on-set", "on-hidden-set"],
+        ("on-hidden-set", "on-secret"),
+    ),
+    "empty-value-projected": _VisibleWorldRow(
+        "allLibraryLoans",
+        "note",
+        '{ patronEmailMustHaveAtSign: { exact: "" } }',
+        ["on-secret", "on-set", "on-hidden-set"],
+        ["on-secret", "on-set", "on-hidden-set"],
+    ),
     "declared-exclude-inside-logical-and": _VisibleWorldRow(
         "allLibraryGenres",
         "name",
@@ -5467,7 +5482,10 @@ def test_walked_leaf_answers_over_the_visible_world_for_anonymous(shape: str) ->
     hidden match keeps no parent.
     A forward or to-many key naming a hidden target matches nothing, and a key
     outside the declaration's explicit ``queryset=`` matches nothing for any
-    viewer. Each answer holds inside ``or`` / ``and`` / ``not`` arms.
+    viewer. Each answer holds inside ``or`` / ``and`` / ``not`` arms. A supplied
+    empty value, walked (``bookShelfTopic``) or projected
+    (``patronEmailMustHaveAtSign``), constrains nothing: every loan matches,
+    including those whose book or shelf the viewer cannot see.
     """
     world = _seed_visible_world()
     row = _VISIBLE_WORLD_ROWS[shape]

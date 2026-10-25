@@ -260,7 +260,7 @@ viewer cannot see.
   `utils/relations.py::leading_relation_hops` reads past them, typed by
   `utils/querysets.py::relation_target_type`) answers as Django's ORM
   would if the rows each hop's target type hides did not exist
-  (`filters/sets.py::FilterSet._apply_active_leaf`): each hop's visible
+  (`filters/sets.py::FilterSet._apply_relation_leaf`): each hop's visible
   rows (`filters/sets.py::FilterSet._hop_visible_rows`: a declared hop's
   type resolved by `filters/sets.py::FilterSet._branch_visibility_seed`
   and keyed `(id(declaration), alias)`, an undeclared hop's scope type
@@ -498,7 +498,7 @@ visibility and permission composition
 [Decision 13](#decision-13--search-honors-filterset-permission-gates)) —
 it takes both from the same single-sited helpers the FilterSet consumes
 (the visible-row restriction behind
-`filters/sets.py::FilterSet._apply_active_leaf`,
+`filters/sets.py::FilterSet._apply_relation_leaf`,
 `utils/querysets.py::apply_type_visibility_sync` / `_async`,
 `utils/permissions.py`), not by routing through `FilterSet.apply_sync`'s
 transactional form machinery, which would couple search to the presence
@@ -785,7 +785,7 @@ hop resolution and visibility):
 - At resolve time, direct paths become ordinary `Q(<path>__icontains=v)`
   predicates. Each arm filters its deepest hop's visible rows by the OR
   of its terminals' `icontains`, then folds the match outward hop by hop
-  exactly as `filters/sets.py::FilterSet._apply_active_leaf` folds a
+  exactly as `filters/sets.py::FilterSet._apply_relation_leaf` folds a
   positive walked leaf: a hop keeps the visible rows of the hop before it
   that reach a matched row (the walked `RelatedFilter(queryset=...)`
   admitted first, `filters/sets.py::_admitted_rows`), through
@@ -1098,7 +1098,7 @@ each hop's target type lets the request see:
   `filters/sets.py::_reaches_related`, the correlated `EXISTS` of
   `optimizer/predicates.py::related_rows_exist(..., via=...)`. The
   outermost hop's test over the live root queryset is the arm's term
-  inside the search OR. This is `FilterSet._apply_active_leaf`'s fold for
+  inside the search OR. This is `FilterSet._apply_relation_leaf`'s fold for
   a positive lookup.
 - **Visible-world semantics.** The filter side answers a walked leaf as
   Django's ORM would if the rows each hop's target type hides (and each
@@ -1593,7 +1593,7 @@ query-object inspection only):
   an unscoped hop reads every row of its model; a multi-relation declared
   hop passes its intermediate models' visible rows as `via=`; for one
   path the search arm's `EXISTS` and the walked flat leaf's
-  (`FilterSet._apply_active_leaf`) compile to the same SQL; a root
+  (`FilterSet._apply_relation_leaf`) compile to the same SQL; a root
   re-entry with a differing resolved type intersects both hooks' rows.
 - Import hygiene (Decision 3): bare `import django_strawberry_framework`
   leaves `filters` / `orders` absent from `sys.modules` with the search

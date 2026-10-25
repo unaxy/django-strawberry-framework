@@ -58,7 +58,7 @@ from django.db import DEFAULT_DB_ALIAS, connection, connections, models, transac
 from django.db import models as dj_models
 from django.db import models as django_models
 from django.db.backends.base.operations import BaseDatabaseOperations
-from django.db.models import Lookup, Q, QuerySet
+from django.db.models import F, Lookup, Q, QuerySet
 from django.db.models.fields.related import ManyToManyRel, ManyToOneRel, OneToOneRel
 from django.forms import ModelChoiceField, ModelMultipleChoiceField
 from django.http import HttpRequest, QueryDict
@@ -115,6 +115,7 @@ from django_strawberry_framework.filters.base import (
     RelationPkMultipleFilter,
     _GlobalIDMultipleChoiceField,
     membership_in_filter_class,
+    multi_widget_keys,
 )
 from django_strawberry_framework.filters.factories import FilterArgumentsFactory
 from django_strawberry_framework.filters.inputs import (
@@ -157,6 +158,7 @@ from django_strawberry_framework.utils._narrowing import (
     class_dict,
     is_dict,
     is_exact_pair,
+    is_list_or_tuple,
     read_attr,
     require,
 )
@@ -14428,8 +14430,8 @@ def test_apply_async_awaits_async_get_queryset_of_every_flat_hop(
     ("filter_input", "derivations", "names"),
     [
         ({"name": "beta"}, {"sync": 0, "async": 0}, ["beta"]),
-        ({"shelves__code": ""}, {"sync": 0, "async": 1}, ["alpha", "beta"]),
-        ({"shelves__code_is": ""}, {"sync": 0, "async": 1}, ["alpha", "beta"]),
+        ({"shelves__code": ""}, {"sync": 1, "async": 1}, ["alpha", "beta"]),
+        ({"shelves__code_is": ""}, {"sync": 1, "async": 1}, ["alpha", "beta"]),
         ({"shelves__code": "match"}, {"sync": 1, "async": 1}, ["alpha"]),
         (
             {"shelves__code": "match", "shelves__topic": "open", "shelves__code_is": "match"},
@@ -14451,7 +14453,7 @@ def test_apply_async_awaits_async_get_queryset_of_every_flat_hop(
         "two-or-arms-one-hop",
     ],
 )
-def test_flat_hop_visibility_runs_once_per_request_and_never_for_an_inactive_leaf(
+def test_flat_hop_visibility_runs_once_per_request_and_never_for_an_unsupplied_leaf(
     filter_input: dict[str, object],
     derivations: dict[str, int],
     names: list[str],
@@ -14459,11 +14461,11 @@ def test_flat_hop_visibility_runs_once_per_request_and_never_for_an_inactive_lea
 ) -> None:
     """A hop's ``get_queryset`` runs once per request however many leaves and arms walk it.
 
-    An inactive leaf (django-filter's empty-value skip returns its input by
-    identity) constrains nothing. On the sync path it runs no ``get_queryset``;
-    ``apply_async`` awaits the hop of every SUPPLIED leaf before the form exists,
-    so a supplied empty value costs one awaited hook (as a present-but-empty
-    nested branch does) and still constrains nothing.
+    A leaf the request does not supply derives nothing. A supplied leaf derives
+    its hops before its filter runs over the visible rows, so a supplied empty
+    value (django-filter's empty-value skip returns its input by identity) costs
+    one hook on either path, as a present-but-empty nested branch does
+    (``apply_async`` awaits it before the form exists), and constrains nothing.
     """
     calls: list[object] = []
 
@@ -14488,6 +14490,1094 @@ def test_flat_hop_visibility_runs_once_per_request_and_never_for_an_inactive_lea
     assert list(qs.values_list("name", flat=True)) == names
     assert len(calls) == derivations[mode]
     assert all(seen is info for seen in calls)
+
+
+def _counting_branch_filters(calls: list[str]) -> type[FilterSet]:
+    """``BranchCounter.shelves -> ShelfCounter``, whose filter bodies record each run in ``calls``.
+
+    ``code_is``, ``code_among`` (``in``) and ``code_span`` (a range) are ``method=``
+    filters, so their flat spellings are owner-bound ``ProjectedChildFilter``
+    copies; ``topic_seen`` is a ``CharFilter`` subclass whose class-level
+    ``filter`` records its run and value, so ``shelves__topic_seen`` is a plain
+    walked copy; a nested ``shelves`` branch runs it with the empty value too, as
+    django-filter runs every filter of a set it builds.
+    ``ShelfCounter.books`` holds ``BookCounter.title_is`` flat as
+    ``books__title_is`` (a projected copy) for a nested ``shelves`` branch to carry.
+    """
+    _register_plain_types(library_models.Shelf, library_models.Book)
+
+    class TopicSeen(CharFilter):
+        @override
+        def filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
+            calls.append(f"topic_seen={value}")
+            return super().filter(qs, value)
+
+    class BookCounter(FilterSet):
+        title_is = CharFilter(field_name="title", method="filter_title_is")
+
+        class Meta:
+            model = library_models.Book
+            fields = {"title": ["exact"]}
+
+        def filter_title_is(
+            self,
+            queryset: QuerySet[library_models.Book],
+            _name: str,
+            value: object,
+        ) -> QuerySet[library_models.Book]:
+            calls.append("title_is")
+            return queryset.filter(title=value)
+
+    class ShelfCounter(FilterSet):
+        books = RelatedFilter(BookCounter, field_name="books")
+        code_is = CharFilter(field_name="code", method="filter_code_is")
+        code_among = ListFilter(field_name="code", lookup_expr="in", method="filter_code_among")
+        code_span = RangeFilter(field_name="code", lookup_expr="range", method="filter_code_span")
+        topic_seen = TopicSeen(field_name="topic")
+
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+        def filter_code_is(
+            self,
+            queryset: QuerySet[library_models.Shelf],
+            _name: str,
+            value: object,
+        ) -> QuerySet[library_models.Shelf]:
+            calls.append("code_is")
+            return queryset.filter(code=value)
+
+        def filter_code_among(
+            self,
+            queryset: QuerySet[library_models.Shelf],
+            _name: str,
+            value: object,
+        ) -> QuerySet[library_models.Shelf]:
+            calls.append("code_among")
+            return queryset.filter(code__in=require(value, is_list_or_tuple))
+
+        def filter_code_span(
+            self,
+            queryset: QuerySet[library_models.Shelf],
+            _name: str,
+            value: object,
+        ) -> QuerySet[library_models.Shelf]:
+            calls.append("code_span")
+            return queryset.filter(code__range=tuple(require(value, is_list_or_tuple)))
+
+    class BranchCounter(FilterSet):
+        shelves = RelatedFilter(ShelfCounter, field_name="shelves")
+
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"]}
+
+    BranchCounter.get_filters()
+    return BranchCounter
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize(
+    ("filter_input", "runs", "names"),
+    [
+        ({"shelves__code_is": "match"}, ["code_is"], ["alpha"]),
+        ({"shelves__topic_seen": "open"}, ["topic_seen=open"], ["alpha"]),
+        (
+            {"shelves__code_is": "match", "shelves__topic_seen": "open"},
+            ["code_is", "topic_seen=open"],
+            ["alpha"],
+        ),
+        (
+            {"shelves__code_is": "match", "shelves": {"code_is": "match"}},
+            ["code_is", "code_is", "topic_seen="],
+            ["alpha"],
+        ),
+        ({"not_": {"shelves__code_is": "match"}}, ["code_is"], ["beta"]),
+        ({"and_": [{"or_": [{"shelves__topic_seen": "open"}]}]}, ["topic_seen=open"], ["alpha"]),
+        ({"shelves__code_among": ["match"]}, ["code_among"], ["alpha"]),
+        ({"shelves__code_span": {"start": "m", "end": "n"}}, ["code_span"], ["alpha"]),
+        ({"shelves": {"books__title_is": "x"}}, ["title_is", "topic_seen="], ["alpha"]),
+        ({"shelves__code_is": ""}, [], ["alpha", "beta"]),
+        ({"shelves__topic_seen": ""}, ["topic_seen="], ["alpha", "beta"]),
+        ({"name": "alpha"}, [], ["alpha"]),
+    ],
+    ids=[
+        "projected",
+        "plain-copy",
+        "two-leaves-one-relation",
+        "flat-beside-nested",
+        "in-not-arm",
+        "in-and-or-arms",
+        "in-value",
+        "range-value",
+        "nested-branch-holding-a-projected-copy",
+        "empty-projected",
+        "empty-plain-copy",
+        "omitted",
+    ],
+)
+def test_flat_leaf_runs_its_filter_body_once_per_supplied_value(
+    filter_input: dict[str, object],
+    runs: list[str],
+    names: list[str],
+    mode: str,
+) -> None:
+    """A flat leaf walking a declared hop runs its child filter's body once, over the visible rows.
+
+    Projected and plain walked copies alike, beside each other and beside a nested
+    branch, inside logic arms, with list and range values: the body runs once per
+    supplied value, the same count its nested twin runs, on the sync and async
+    paths. A body returning its input BY IDENTITY (``""`` on ``topic_seen``)
+    still runs once and constrains nothing; a ``method=`` body is never handed
+    an empty value; an omitted leaf runs nothing.
+    """
+    calls: list[str] = []
+    branch_filter = _counting_branch_filters(calls)
+    alpha = library_models.Branch.objects.create(name="alpha")
+    shelf = library_models.Shelf.objects.create(branch=alpha, code="match", topic="open")
+    library_models.Book.objects.create(shelf=shelf, title="x")
+    beta = library_models.Branch.objects.create(name="beta")
+    library_models.Shelf.objects.create(branch=beta, code="other", topic="closed")
+    info = _make_info()
+    base = library_models.Branch.objects.order_by("name")
+
+    if mode == "sync":
+        qs = branch_filter.apply_sync(filter_input, base, info)
+    else:
+        qs = asyncio.run(branch_filter.apply_async(filter_input, base, info))
+    assert list(qs.values_list("name", flat=True)) == names
+    assert sorted(calls) == runs
+
+
+def _counting_patron_chain(calls: list[str]) -> type[FilterSet]:
+    """``BranchTop`` reaches ``PatronCounter`` through ``shelves``, ``books``, ``loans`` and ``patron``.
+
+    ``PatronCounter.fines_span`` is a ``method=`` range, so
+    ``shelves__books__loans__patron__fines_span`` is a projected copy four hops deep
+    (every set between expands the child's projected copy as one of its own).
+    """
+    _register_plain_types(
+        library_models.Shelf,
+        library_models.Book,
+        library_models.Loan,
+        library_models.Patron,
+    )
+
+    class PatronCounter(FilterSet):
+        fines_span = RangeFilter(
+            field_name="lifetime_fines_cents",
+            lookup_expr="range",
+            method="filter_fines_span",
+        )
+
+        class Meta:
+            model = library_models.Patron
+            fields = {"name": ["exact"]}
+
+        def filter_fines_span(
+            self,
+            queryset: QuerySet[library_models.Patron],
+            _name: str,
+            value: object,
+        ) -> QuerySet[library_models.Patron]:
+            calls.append("fines_span")
+            bounds = tuple(require(value, is_list_or_tuple))
+            return queryset.filter(lifetime_fines_cents__range=bounds)
+
+    class LoanMid(FilterSet):
+        patron = RelatedFilter(PatronCounter, field_name="patron")
+
+        class Meta:
+            model = library_models.Loan
+            fields = {"note": ["exact"]}
+
+    class BookMid(FilterSet):
+        loans = RelatedFilter(LoanMid, field_name="loans")
+
+        class Meta:
+            model = library_models.Book
+            fields = {"title": ["exact"]}
+
+    class ShelfMid(FilterSet):
+        books = RelatedFilter(BookMid, field_name="books")
+
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+    class BranchTop(FilterSet):
+        shelves = RelatedFilter(ShelfMid, field_name="shelves")
+
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"]}
+
+    BranchTop.get_filters()
+    return BranchTop
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize(
+    ("filter_input", "names"),
+    [
+        ({"shelves__books__loans__patron__fines_span": {"start": 5, "end": 9}}, ["alpha"]),
+        (
+            {"shelves": {"books": {"loans": {"patron": {"fines_span": {"start": 5, "end": 9}}}}}},
+            ["alpha"],
+        ),
+    ],
+    ids=["flat", "nested"],
+)
+def test_four_hop_projected_leaf_runs_its_filter_body_once(
+    filter_input: dict[str, object],
+    names: list[str],
+    mode: str,
+) -> None:
+    """A projected range leaf four hops deep runs its body once, as its nested twin does."""
+    calls: list[str] = []
+    branch_filter = _counting_patron_chain(calls)
+    alpha = library_models.Branch.objects.create(name="alpha")
+    shelf = library_models.Shelf.objects.create(branch=alpha, code="a")
+    book = library_models.Book.objects.create(shelf=shelf, title="t")
+    patron = library_models.Patron.objects.create(name="p", lifetime_fines_cents=7)
+    library_models.Loan.objects.create(book=book, patron=patron)
+    library_models.Branch.objects.create(name="beta")
+    info = _make_info()
+    base = library_models.Branch.objects.order_by("name")
+
+    if mode == "sync":
+        qs = branch_filter.apply_sync(filter_input, base, info)
+    else:
+        qs = asyncio.run(branch_filter.apply_async(filter_input, base, info))
+    assert list(qs.values_list("name", flat=True)) == names
+    assert calls == ["fines_span"]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "filter_input",
+    [{"shelves__code_known": "match"}, {"shelves": {"code_known": "match"}}],
+    ids=["flat", "nested"],
+)
+def test_flat_leaf_whose_body_reads_the_database_costs_its_nested_twins_queries(
+    filter_input: dict[str, object],
+) -> None:
+    """A ``method=`` body that reads the database issues its query once, flat as nested.
+
+    ``code_known`` looks the value up before filtering (one query of its own),
+    then the filtered statement runs: two queries for either spelling.
+    """
+    _register_plain_types(library_models.Shelf)
+    lookups: list[object] = []
+
+    class ShelfReader(FilterSet):
+        code_known = CharFilter(field_name="code", method="filter_code_known")
+
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+        def filter_code_known(
+            self,
+            queryset: QuerySet[library_models.Shelf],
+            _name: str,
+            value: object,
+        ) -> QuerySet[library_models.Shelf]:
+            known = list(
+                library_models.Shelf.objects.filter(code=value).values_list("code", flat=True),
+            )
+            lookups.append(value)
+            return queryset.filter(code__in=known)
+
+    class BranchReader(FilterSet):
+        shelves = RelatedFilter(ShelfReader, field_name="shelves")
+
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"]}
+
+    BranchReader.get_filters()
+    _seed_open_and_secret_match_shelves()
+    info = _make_info()
+    base = library_models.Branch.objects.order_by("name")
+
+    with CaptureQueriesContext(connection) as captured:
+        qs = BranchReader.apply_sync(filter_input, base, info)
+        names = list(qs.values_list("name", flat=True))
+    assert names == ["alpha", "beta"]
+    assert lookups == ["match"]
+    assert len(captured.captured_queries) == 2
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("projected", [True, False], ids=["projected", "plain-copy"])
+def test_flat_leaf_through_a_child_placeholder_hop_raises_the_unresolved_branch_error(
+    *,
+    projected: bool,
+) -> None:
+    """A flat leaf walking a child set's ``RelatedFilter(None)`` hop raises, projected or plain.
+
+    ``ShelfChild.branch`` is a placeholder whose target never resolves, and
+    ``branch__name`` walks it. An ``__init__`` override makes the flat
+    ``shelves__branch__name`` an owner-bound ``ProjectedChildFilter``; without it
+    the copy is a plain walked leaf. Both answer the unresolved branch's
+    ``ConfigurationError`` when the leaf's hops are derived.
+    """
+    _register_plain_types(library_models.Shelf)
+
+    class ShelfChild(FilterSet):
+        branch = RelatedFilter(
+            None,
+            field_name="branch",
+            queryset=library_models.Branch.objects.all(),
+        )
+
+        class Meta:
+            model = library_models.Shelf
+            fields = {"branch__name": ["exact"]}
+
+    child: type[FilterSet] = ShelfChild
+    if projected:
+
+        class OwnedShelfChild(ShelfChild):
+            def __init__(
+                self,
+                data: QueryDict | dict[str, object] | None = None,
+                queryset: QuerySet[django_models.Model] | None = None,
+                *,
+                request: HttpRequest | None = None,
+                prefix: str | None = None,
+            ) -> None:
+                super().__init__(data=data, queryset=queryset, request=request, prefix=prefix)
+
+        child = OwnedShelfChild
+
+    class BranchParent(FilterSet):
+        shelves = RelatedFilter(child, field_name="shelves")
+
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"]}
+
+    leaf = BranchParent.get_filters()["shelves__branch__name"]
+    assert isinstance(leaf, ProjectedChildFilter) is projected
+    with pytest.raises(ConfigurationError, match="its target FilterSet could not be resolved"):
+        list(
+            BranchParent.apply_sync(
+                {"shelves__branch__name": "B"},
+                library_models.Branch.objects.all(),
+                _make_info(),
+            ),
+        )
+
+
+class _SkipEmptyCodeFilter(CharFilter):
+    """A consumer ``CharFilter`` whose class ``filter`` skips an empty value."""
+
+    @override
+    def filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
+        if value is None or value == "":
+            return qs
+        return super().filter(qs, value)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("declared", "names", "derivations"),
+    [
+        (CharFilter(field_name="shelves__code", empty_value="match"), ["alpha"], 1),
+        (
+            BooleanFilter(
+                field_name="shelves__topic",
+                lookup_expr="isnull",
+                widget=forms.CheckboxInput,
+            ),
+            ["alpha"],
+            1,
+        ),
+        (CharFilter(field_name="shelves__code"), ["alpha", "beta"], 0),
+        (_SkipEmptyCodeFilter(field_name="shelves__code"), ["alpha", "beta"], 0),
+        (
+            ModelMultipleChoiceFilter(
+                field_name="shelves__books",
+                queryset=library_models.Book.objects.all(),
+            ),
+            ["alpha", "beta"],
+            0,
+        ),
+    ],
+    ids=[
+        "empty-value-field",
+        "checkbox",
+        "empty",
+        "consumer-filter-skipping-empty",
+        "model-multiple-choice",
+    ],
+)
+def test_omitted_walking_leaf_derives_its_hop_only_when_its_filter_constrains(
+    declared: Filter,
+    names: list[str],
+    derivations: int,
+) -> None:
+    """A walking leaf the request omits derives its hop only when its filter constrains the absent value.
+
+    The filter first runs over the unscoped shelves. A field whose
+    ``empty_value`` is ``"match"`` and an unchecked checkbox (``False``: shelves
+    whose topic is set) clean an absent key to a value and constrain as
+    django-filter would; an absent text or model-multiple-choice leaf, and a
+    consumer ``filter`` that skips an empty value (as fakeshop's
+    ``TitleStartsFilter`` does), return their input and derive nothing.
+    """
+    calls: list[object] = []
+
+    def _visible_shelves(
+        _cls: type[DjangoType],
+        queryset: QuerySet[library_models.Shelf],
+        info: object,
+        **_kwargs: object,
+    ) -> QuerySet[library_models.Shelf]:
+        calls.append(info)
+        return queryset.exclude(topic="secret")
+
+    _register_plain_types(library_models.Book)
+    branch_filter = _shelf_and_branch_filters(_visible_shelves)
+    parent = type(
+        "BranchOwnLeaf",
+        (branch_filter,),
+        {
+            "own": declared,
+            "Meta": type(
+                "Meta",
+                (),
+                {"model": library_models.Branch, "fields": {"name": ["exact"]}},
+            ),
+        },
+    )
+    parent.get_filters()
+    _seed_open_and_secret_match_shelves()
+    qs = parent.apply_sync({}, library_models.Branch.objects.order_by("name"), _make_info())
+    assert list(qs.values_list("name", flat=True)) == names
+    assert len(calls) == derivations
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("declared", "data"),
+    [
+        (CharFilter(field_name="shelves__code"), {"own": ""}),
+        (django_filters.RangeFilter(field_name="shelves__code"), {"own_min": "", "own_max": ""}),
+    ],
+    ids=["text", "range-widget-keys"],
+)
+def test_supplied_empty_walking_leaf_derives_its_hop_once(
+    declared: Filter,
+    data: dict[str, object],
+) -> None:
+    """A walking leaf whose data carries a key its widget reads is supplied, even with empty values.
+
+    The range widget reads ``own_min`` / ``own_max``, never ``own``, so the
+    leaf is supplied by those keys: its hop is derived once and the empty
+    value constrains nothing.
+    """
+    calls: list[object] = []
+
+    def _visible_shelves(
+        _cls: type[DjangoType],
+        queryset: QuerySet[library_models.Shelf],
+        info: object,
+        **_kwargs: object,
+    ) -> QuerySet[library_models.Shelf]:
+        calls.append(info)
+        return queryset.exclude(topic="secret")
+
+    branch_filter = _shelf_and_branch_filters(_visible_shelves)
+    parent = type(
+        "BranchOwnLeaf",
+        (branch_filter,),
+        {
+            "own": declared,
+            "Meta": type(
+                "Meta",
+                (),
+                {"model": library_models.Branch, "fields": {"name": ["exact"]}},
+            ),
+        },
+    )
+    parent.get_filters()
+    _seed_open_and_secret_match_shelves()
+    built = parent(
+        data=data,
+        queryset=library_models.Branch.objects.order_by("name"),
+        request=HttpRequest(),
+    )
+    assert list(built.qs.values_list("name", flat=True)) == ["alpha", "beta"]
+    assert len(calls) == 1
+
+
+class _DefaultCodeFilter(CharFilter):
+    """A consumer ``CharFilter`` whose class ``filter`` reads an absent value as ``"match"``."""
+
+    @override
+    def filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
+        return super().filter(qs, value or "match")
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("leaf", "mode"),
+    [
+        ("walked", "sync"),
+        ("walked", "async"),
+        ("walked", "direct"),
+        ("projected", "direct"),
+    ],
+)
+def test_omitted_leaf_whose_filter_class_acts_on_an_empty_value_runs(leaf: str, mode: str) -> None:
+    """A walking leaf whose class overrides ``filter`` runs on an absent value, as django-filter runs it.
+
+    ``_DefaultCodeFilter`` reads an absent value as ``"match"``, so it constrains
+    to branches with a visible ``match`` shelf (``beta``'s is hidden) and derives
+    the hop once. Walked, it is ``BranchOwn.own`` over ``shelves__code``;
+    projected, it is ``shelves__code_default``, the owner-bound copy of
+    ``OwnedShelf.code_default``, which runs only where every copy is on the form
+    (a set built outside the pipeline; the pipeline never runs a copy the
+    request does not name).
+    """
+    calls: list[object] = []
+
+    def _visible_shelves(
+        _cls: type[DjangoType],
+        queryset: QuerySet[library_models.Shelf],
+        info: object,
+        **_kwargs: object,
+    ) -> QuerySet[library_models.Shelf]:
+        calls.append(info)
+        return queryset.exclude(topic="secret")
+
+    type(
+        "ShelfType",
+        (DjangoType,),
+        {
+            "Meta": type("Meta", (), {"model": library_models.Shelf}),
+            "get_queryset": classmethod(_visible_shelves),
+        },
+    )
+
+    class OwnedShelf(FilterSet):
+        code_default = _DefaultCodeFilter(field_name="code")
+
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+        def __init__(
+            self,
+            data: QueryDict | dict[str, object] | None = None,
+            queryset: QuerySet[django_models.Model] | None = None,
+            *,
+            request: HttpRequest | None = None,
+            prefix: str | None = None,
+        ) -> None:
+            super().__init__(data=data, queryset=queryset, request=request, prefix=prefix)
+
+    attrs: dict[str, object] = {
+        "shelves": RelatedFilter(OwnedShelf, field_name="shelves"),
+        "Meta": type("Meta", (), {"model": library_models.Branch, "fields": {"name": ["exact"]}}),
+    }
+    if leaf == "walked":
+        attrs["own"] = _DefaultCodeFilter(field_name="shelves__code")
+    parent = type("BranchOwn", (FilterSet,), attrs)
+    assert issubclass(parent, FilterSet)
+    assert isinstance(parent.get_filters()["shelves__code_default"], ProjectedChildFilter)
+    _seed_open_and_secret_match_shelves()
+    base = library_models.Branch.objects.order_by("name")
+    if mode == "sync":
+        qs = parent.apply_sync({}, base, _make_info())
+    elif mode == "async":
+        qs = asyncio.run(parent.apply_async({}, base, _make_info()))
+    else:
+        qs = parent(data={}, queryset=base, request=HttpRequest()).qs
+    assert list(qs.values_list("name", flat=True)) == ["alpha"]
+    assert len(calls) == 1
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("projected", [True, False], ids=["projected", "plain-copy"])
+def test_absent_leaf_through_a_child_placeholder_hop_raises_when_its_filter_constrains(
+    *,
+    projected: bool,
+) -> None:
+    """An absent leaf over a child set's ``RelatedFilter(None)`` hop that constrains raises, never recursing.
+
+    ``branch_default`` reads an absent value as ``"match"``, so on a set built
+    outside the pipeline (every copy on its form) the absent flat
+    ``shelves__branch_default`` constrains: its filter runs (for a projected copy
+    the child filter over the child's shelves, never the copy's own ``filter``),
+    and deriving the unresolved hop raises the branch's ``ConfigurationError``.
+    """
+    _register_plain_types(library_models.Shelf)
+
+    class ShelfChild(FilterSet):
+        branch = RelatedFilter(
+            None,
+            field_name="branch",
+            queryset=library_models.Branch.objects.all(),
+        )
+        branch_default = _DefaultCodeFilter(field_name="branch__name")
+
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+    child: type[FilterSet] = ShelfChild
+    if projected:
+
+        class OwnedShelfChild(ShelfChild):
+            def __init__(
+                self,
+                data: QueryDict | dict[str, object] | None = None,
+                queryset: QuerySet[django_models.Model] | None = None,
+                *,
+                request: HttpRequest | None = None,
+                prefix: str | None = None,
+            ) -> None:
+                super().__init__(data=data, queryset=queryset, request=request, prefix=prefix)
+
+        child = OwnedShelfChild
+
+    class BranchParent(FilterSet):
+        shelves = RelatedFilter(child, field_name="shelves")
+
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"]}
+
+    leaf = BranchParent.get_filters()["shelves__branch_default"]
+    assert isinstance(leaf, ProjectedChildFilter) is projected
+    built = BranchParent(
+        data={},
+        queryset=library_models.Branch.objects.all(),
+        request=HttpRequest(),
+    )
+    with pytest.raises(ConfigurationError, match="its target FilterSet could not be resolved"):
+        list(built.qs)
+
+
+@pytest.mark.django_db
+def test_absent_leaf_compiling_an_annotated_column_constrains_over_the_visible_rows() -> None:
+    """An absent leaf whose filter compiles a column only the target type annotates is read as constraining.
+
+    ``code_default`` reads an absent value as ``"match"`` over ``label``, which
+    ``ShelfType.get_queryset`` annotates: over the unscoped shelves it raises
+    ``FieldError`` (a compiled lookup), so it constrains and is compiled again
+    over the visible, annotated shelves.
+    """
+
+    def _labelled_shelves(
+        _cls: type[DjangoType],
+        queryset: QuerySet[library_models.Shelf],
+        _info: object,
+        **_kwargs: object,
+    ) -> QuerySet[library_models.Shelf]:
+        return queryset.exclude(topic="secret").annotate(label=F("code"))
+
+    type(
+        "ShelfType",
+        (DjangoType,),
+        {
+            "Meta": type("Meta", (), {"model": library_models.Shelf}),
+            "get_queryset": classmethod(_labelled_shelves),
+        },
+    )
+
+    class ShelfChild(FilterSet):
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+    class BranchLabel(FilterSet):
+        shelves = RelatedFilter(ShelfChild, field_name="shelves")
+        code_default = _DefaultCodeFilter(field_name="shelves__label")
+
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"]}
+
+    BranchLabel.get_filters()
+    _seed_open_and_secret_match_shelves()
+    library_models.Branch.objects.create(name="gamma")
+    qs = BranchLabel.apply_sync({}, library_models.Branch.objects.order_by("name"), _make_info())
+    assert list(qs.values_list("name", flat=True)) == ["alpha"]
+
+
+@pytest.mark.django_db
+def test_projected_leaf_run_by_django_filters_own_loop_answers_over_the_visible_rows() -> None:
+    """A set running django-filter's own loop still answers a projected copy over the visible rows.
+
+    The loop calls the copy's ``filter`` directly, which cannot know whether the
+    request supplied it, so the child filter first runs over the unscoped
+    shelves; ``match`` constrains, so it runs again over the visible ones and
+    ``beta``'s hidden shelf does not match.
+    """
+
+    def _visible_shelves(
+        _cls: type[DjangoType],
+        queryset: QuerySet[library_models.Shelf],
+        _info: object,
+        **_kwargs: object,
+    ) -> QuerySet[library_models.Shelf]:
+        return queryset.exclude(topic="secret")
+
+    branch_filter = _shelf_and_branch_filters(_visible_shelves)
+
+    class UpstreamLoop(branch_filter):
+        @override
+        def filter_queryset(self, queryset: QuerySet[_M]) -> QuerySet[_M]:
+            return BaseFilterSet.filter_queryset(self, queryset)
+
+    UpstreamLoop.get_filters()
+    _seed_open_and_secret_match_shelves()
+    built = UpstreamLoop(
+        data={"shelves__code_is": "match"},
+        queryset=library_models.Branch.objects.order_by("name"),
+        request=HttpRequest(),
+    )
+    assert isinstance(built.filters["shelves__code_is"], ProjectedChildFilter)
+    assert list(built.qs.values_list("name", flat=True)) == ["alpha"]
+
+
+@pytest.mark.django_db
+def test_prefixed_set_reads_a_supplied_projected_leaf_by_its_prefixed_key() -> None:
+    """A directly built set with a form prefix reads ``p-shelves__code_is`` as supplied: one body run.
+
+    Every copy is on the form of a set built outside the pipeline.
+    """
+    calls: list[str] = []
+    branch_filter = _counting_branch_filters(calls)
+    alpha = library_models.Branch.objects.create(name="alpha")
+    library_models.Shelf.objects.create(branch=alpha, code="match", topic="open")
+    library_models.Branch.objects.create(name="beta")
+    built = branch_filter(
+        data={"p-shelves__code_is": "match"},
+        queryset=library_models.Branch.objects.order_by("name"),
+        request=HttpRequest(),
+        prefix="p",
+    )
+    assert list(built.qs.values_list("name", flat=True)) == ["alpha"]
+    # The absent ``topic_seen`` copy runs once over unscoped rows to learn it constrains nothing.
+    assert sorted(calls) == ["code_is", "topic_seen="]
+
+
+@pytest.mark.django_db
+def test_one_bound_range_on_a_projected_method_leaf_is_supplied() -> None:
+    """A range leaf whose data carries only its lower-bound key is supplied: its body runs once."""
+    calls: list[str] = []
+    branch_filter = _counting_branch_filters(calls)
+    alpha = library_models.Branch.objects.create(name="alpha")
+    library_models.Shelf.objects.create(branch=alpha, code="match", topic="open")
+    leaf = branch_filter.get_filters()["shelves__code_span"]
+    keys = multi_widget_keys(read_attr(leaf.field, "widget"), "shelves__code_span")
+    assert keys is not None
+    built = branch_filter(
+        data={keys[0]: "m"},
+        queryset=library_models.Branch.objects.order_by("name"),
+        request=HttpRequest(),
+    )
+    _ = built.qs
+    # The absent ``topic_seen`` copy runs once over unscoped rows to learn it constrains nothing.
+    assert sorted(calls) == ["code_span", "topic_seen="]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("projected", [True, False], ids=["projected", "plain-copy"])
+def test_absent_inactive_leaf_through_a_child_placeholder_hop_keeps_every_row(
+    *,
+    projected: bool,
+) -> None:
+    """An absent leaf over a child set's ``RelatedFilter(None)`` hop that skips its empty value is inactive.
+
+    On a set built outside the pipeline every copy is on the form, so the absent
+    ``shelves__branch__name`` runs its filter once to learn it constrains
+    nothing: no hop is derived, no error is raised and every branch is kept.
+    """
+
+    class ShelfChild(FilterSet):
+        branch = RelatedFilter(
+            None,
+            field_name="branch",
+            queryset=library_models.Branch.objects.all(),
+        )
+
+        class Meta:
+            model = library_models.Shelf
+            fields = {"branch__name": ["exact"]}
+
+    child: type[FilterSet] = ShelfChild
+    if projected:
+
+        class OwnedShelfChild(ShelfChild):
+            def __init__(
+                self,
+                data: QueryDict | dict[str, object] | None = None,
+                queryset: QuerySet[django_models.Model] | None = None,
+                *,
+                request: HttpRequest | None = None,
+                prefix: str | None = None,
+            ) -> None:
+                super().__init__(data=data, queryset=queryset, request=request, prefix=prefix)
+
+        child = OwnedShelfChild
+
+    class BranchParent(FilterSet):
+        shelves = RelatedFilter(child, field_name="shelves")
+
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"]}
+
+    leaf = BranchParent.get_filters()["shelves__branch__name"]
+    assert isinstance(leaf, ProjectedChildFilter) is projected
+    alpha = library_models.Branch.objects.create(name="alpha")
+    library_models.Shelf.objects.create(branch=alpha, code="a")
+    library_models.Branch.objects.create(name="beta")
+    built = BranchParent(
+        data={},
+        queryset=library_models.Branch.objects.order_by("name"),
+        request=HttpRequest(),
+    )
+    assert list(built.qs.values_list("name", flat=True)) == ["alpha", "beta"]
+
+
+@pytest.mark.django_db
+def test_omitted_projected_leaf_of_a_directly_built_set_derives_nothing() -> None:
+    """A set built outside the pipeline holds every projected copy; an omitted one runs nothing."""
+    calls: list[object] = []
+
+    def _visible_shelves(
+        _cls: type[DjangoType],
+        queryset: QuerySet[library_models.Shelf],
+        info: object,
+        **_kwargs: object,
+    ) -> QuerySet[library_models.Shelf]:
+        calls.append(info)
+        return queryset
+
+    branch_filter = _shelf_and_branch_filters(_visible_shelves)
+    assert isinstance(branch_filter.get_filters()["shelves__code_is"], ProjectedChildFilter)
+    _seed_open_and_secret_match_shelves()
+    built = branch_filter(
+        data={"name": "alpha"},
+        queryset=library_models.Branch.objects.order_by("name"),
+        request=HttpRequest(),
+    )
+    assert "shelves__code_is" in built.form.fields
+    assert list(built.qs.values_list("name", flat=True)) == ["alpha"]
+    assert calls == []
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("name", ["on_shelf", "not_on_shelf"], ids=["key", "excluding-key"])
+def test_supplied_empty_forward_key_leaf_derives_its_hop_and_constrains_nothing(name: str) -> None:
+    """A supplied empty value on a forward key over a declared hop derives the hop once, keeps every row.
+
+    ``on_shelf`` compares the book's stored key and ``not_on_shelf`` excludes
+    it, both model-choice filters over ``visible_shelf``: an empty value cleans
+    to ``None``, which the filter skips by returning its input, so nothing is
+    constrained.
+    """
+    calls: list[object] = []
+
+    def _visible_shelves(
+        _cls: type[DjangoType],
+        queryset: QuerySet[library_models.Shelf],
+        info: object,
+        **_kwargs: object,
+    ) -> QuerySet[library_models.Shelf]:
+        calls.append(info)
+        return queryset.exclude(topic="secret")
+
+    type(
+        "ShelfCountingType",
+        (DjangoType,),
+        {
+            "Meta": type("Meta", (), {"model": library_models.Shelf}),
+            "get_queryset": classmethod(_visible_shelves),
+        },
+    )
+
+    class ShelfChild(FilterSet):
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+    class BookParent(FilterSet):
+        visible_shelf = RelatedFilter(ShelfChild, field_name="shelf")
+        on_shelf = ModelChoiceFilter(
+            field_name="shelf",
+            queryset=library_models.Shelf.objects.all(),
+        )
+        not_on_shelf = ModelChoiceFilter(
+            field_name="shelf",
+            queryset=library_models.Shelf.objects.all(),
+            exclude=True,
+        )
+
+        class Meta:
+            model = library_models.Book
+            fields = {"shelf": ["exact"]}
+
+    BookParent.get_filters()
+    open_book = _book("open")
+    secret_book = _book("secret")
+    library_models.Shelf.objects.filter(pk=secret_book.shelf_id).update(topic="secret")
+    built = BookParent(
+        data={name: ""},
+        queryset=library_models.Book.objects.all(),
+        request=HttpRequest(),
+    )
+    assert set(built.qs.values_list("pk", flat=True)) == {
+        saved_pk(open_book),
+        saved_pk(secret_book),
+    }
+    assert len(calls) == 1
+
+
+@pytest.mark.django_db
+def test_supplied_empty_model_multiple_choice_key_derives_its_hop_and_constrains_nothing() -> None:
+    """An empty list on a to-many model-multiple-choice key cleans to an empty queryset and keeps every row.
+
+    The key is re-read as the visible books' own key column (an empty list of
+    keys), which ``MultipleChoiceFilter`` skips by returning its input: the hop
+    is derived once and nothing is constrained.
+    """
+    calls: list[object] = []
+
+    def _visible_books(
+        _cls: type[DjangoType],
+        queryset: QuerySet[library_models.Book],
+        info: object,
+        **_kwargs: object,
+    ) -> QuerySet[library_models.Book]:
+        calls.append(info)
+        return queryset
+
+    type(
+        "BookCountingType",
+        (DjangoType,),
+        {
+            "Meta": type("Meta", (), {"model": library_models.Book}),
+            "get_queryset": classmethod(_visible_books),
+        },
+    )
+
+    class BookChild(FilterSet):
+        class Meta:
+            model = library_models.Book
+            fields = {"title": ["exact"]}
+
+    class GenreKeys(FilterSet):
+        visible_books = RelatedFilter(BookChild, field_name="books")
+        has_any_book = ModelMultipleChoiceFilter(
+            field_name="books",
+            queryset=library_models.Book.objects.all(),
+        )
+
+        class Meta:
+            model = library_models.Genre
+            fields = {"name": ["exact"]}
+
+    GenreKeys.get_filters()
+    genre = library_models.Genre.objects.create(name="solo")
+    built = GenreKeys(
+        data={"has_any_book": []},
+        queryset=library_models.Genre.objects.all(),
+        request=HttpRequest(),
+    )
+    assert set(built.qs.values_list("pk", flat=True)) == {saved_pk(genre)}
+    assert len(calls) == 1
+
+
+@pytest.mark.django_db
+def test_kanban_flat_leaf_runs_its_filter_body_once() -> None:
+    """A kanban flat leaf over a multi-relation branch runs its child body once, as nested."""
+    _register_plain_types(kanban_models.Milestone, kanban_models.TargetVersion)
+    calls: list[str] = []
+
+    class MilestoneCounter(FilterSet):
+        key_is = CharFilter(field_name="key", method="filter_key_is")
+
+        class Meta:
+            model = kanban_models.Milestone
+            fields = {"key": ["exact"]}
+
+        def filter_key_is(
+            self,
+            queryset: QuerySet[kanban_models.Milestone],
+            _name: str,
+            value: object,
+        ) -> QuerySet[kanban_models.Milestone]:
+            calls.append("key_is")
+            return queryset.filter(key=value)
+
+    class CardCounter(FilterSet):
+        milestone = RelatedFilter(MilestoneCounter, field_name="target_version__milestone")
+
+        class Meta:
+            model = kanban_models.Card
+            fields = {"title": ["exact"]}
+
+    CardCounter.get_filters()
+    for filter_input in ({"milestone__key_is": "alpha"}, {"milestone": {"key_is": "alpha"}}):
+        list(CardCounter.apply_sync(filter_input, kanban_models.Card.objects.all(), _make_info()))
+    assert calls == ["key_is", "key_is"]
+
+
+@pytest.mark.django_db
+def test_mti_subclass_child_set_leaf_runs_its_filter_body_once() -> None:
+    """A projected leaf of a ``LendingDesk`` child set under a ``venue`` relation runs its body once."""
+    _register_plain_types(library_models.LendingDesk)
+    calls: list[str] = []
+
+    class DeskCounter(FilterSet):
+        windows_are = NumberFilter(field_name="window_count", method="filter_windows_are")
+
+        class Meta:
+            model = library_models.LendingDesk
+            fields = {"window_count": ["exact"]}
+
+        def filter_windows_are(
+            self,
+            queryset: QuerySet[library_models.LendingDesk],
+            _name: str,
+            value: object,
+        ) -> QuerySet[library_models.LendingDesk]:
+            calls.append("windows_are")
+            return queryset.filter(window_count=value)
+
+    class TicketCounter(FilterSet):
+        desk = RelatedFilter(DeskCounter, field_name="venue")
+
+        class Meta:
+            model = library_models.RepairTicket
+            fields = {"code": ["exact"]}
+
+    TicketCounter.get_filters()
+    desk = library_models.LendingDesk.objects.create(name="desk", window_count=2)
+    ticket = library_models.RepairTicket.objects.create(code="desk", venue=desk)
+    library_models.RepairTicket.objects.create(
+        code="plain",
+        venue=library_models.Venue.objects.create(name="plain"),
+    )
+    got = _applied(
+        TicketCounter,
+        {"desk__windows_are": 2},
+        library_models.RepairTicket.objects.all(),
+    )
+    assert got == {saved_pk(ticket)}
+    assert calls == ["windows_are"]
 
 
 @pytest.mark.django_db
@@ -17065,10 +18155,10 @@ def _desk_ticket_parent() -> type[FilterSet]:
 
 @pytest.mark.django_db
 def test_expanded_leaf_under_an_mti_subclass_child_set_runs_where_its_path_resolves() -> None:
-    """``desk__window_count`` probes and runs over ``LendingDesk`` rows, never the parent's relation.
+    """``desk__window_count`` runs over ``LendingDesk`` rows, never the parent's relation.
 
-    Active it matches only through a visible desk, as its nested twin does;
-    inactive it constrains nothing and runs no ``get_queryset``.
+    Supplied it matches only through a visible desk, as its nested twin does;
+    unsupplied it constrains nothing and runs no ``get_queryset``.
     """
     calls: list[object] = []
 

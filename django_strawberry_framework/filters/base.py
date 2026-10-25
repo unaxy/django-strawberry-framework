@@ -305,7 +305,7 @@ def _match_none_queryset(filter_instance: Filter, qs: models.QuerySet[_M]) -> mo
     empty-value skip (which would silently widen a restrictive predicate to no
     constraint). The excluded empty set is a constraint whose answer is every
     row, never the input BY IDENTITY, which the package reads as "applied no
-    constraint" (``FilterSet._q_for_branch``, ``FilterSet._leaf_applies``):
+    constraint" (``FilterSet._q_for_branch``, ``FilterSet._apply_relation_leaf``):
     ``not`` of it matches no rows.
     """
     return qs.all() if filter_instance.exclude else qs.none()
