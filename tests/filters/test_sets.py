@@ -4452,14 +4452,11 @@ def test_expanded_to_field_leaf_answers_pk_qualified_through_its_branch() -> Non
 # ---------------------------------------------------------------------------
 # A consumer-selected relation filter over a
 # Relay-node target -- chosen via ``Meta.filter_overrides`` OR a shadowed
-# class-level ``FILTER_DEFAULTS`` -- must be honored byte-for-byte. Before the
-# fix, ``filter_for_lookup`` unconditionally replaced ANY Relay-node relation
-# with a package GlobalID primitive and ``filter_for_field`` stamped it
-# ``package_replacement``, DISCARDING the consumer's filter class AND marking the
-# leaf eligible. Now ownership is resolved once (``_generation_origin_for_field``)
-# BEFORE any Relay conversion: only the proven framework default is converted; a
-# consumer selection is returned unchanged, stays ``override_generated``, and
-# never gets a candidate row.
+# class-level ``FILTER_DEFAULTS`` -- must be honored byte-for-byte, never replaced
+# with a package GlobalID primitive stamped ``package_replacement``. Ownership is
+# resolved once (``_generation_origin_for_field``) BEFORE any Relay conversion:
+# only the proven framework default is converted; a consumer selection is returned
+# unchanged, stays ``override_generated``, and never gets a candidate row.
 # ---------------------------------------------------------------------------
 
 

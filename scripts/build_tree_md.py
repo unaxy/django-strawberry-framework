@@ -97,7 +97,7 @@ NO_EXTRA_IGNORED_DIRNAMES: frozenset[str] = frozenset()
 #: Rendered nodes that cannot carry a docstring-derived description.
 #:
 #: Every OTHER rendered file and directory must resolve to a non-empty summary or
-#: the render fails. A silent blank comment is how an undocumented module used to
+#: the render fails. A silent blank comment would let an undocumented module
 #: reach TREE.md unnoticed, so the exemptions are enumerated here rather than
 #: expressed as a bare ``return ""`` in the extractors:
 #:

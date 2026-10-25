@@ -71,7 +71,7 @@ def _is_json_array(value: object) -> TypeIs[list[object]]:
 
 
 class _DryRunRollbackError(Exception):
-    """Internal sentinel used to roll back the transaction in --dry-run mode."""
+    """Internal sentinel that rolls back the transaction in --dry-run mode."""
 
 
 class Command(BaseCommand):

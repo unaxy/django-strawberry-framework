@@ -1316,14 +1316,15 @@ def test_relay_chain_distinct_node_ids_resolve_independently_any_call_order() ->
     """Parent and child ``NodeID`` declarations never shadow each other.
 
     Strawberry's ``Node.resolve_id_attr`` caches its scan on ``cls._id_attr``
-    and reads INHERITED cache values, so before the finalize-time stamp a
+    and reads INHERITED cache values, so without a finalize-time stamp a
     chain where parent and child declare DIFFERENT ``relay.NodeID[...]``
-    columns was call-order-dependent: resolving the parent first cached its
-    attribute where the child's lookup found it, and the child silently
-    emitted ids from - and filtered refetches on - the PARENT's column.
+    columns would be call-order-dependent: resolving the parent first would
+    cache its attribute where the child's lookup finds it, and the child
+    would silently emit ids from - and filter refetches on - the PARENT's
+    column.
     ``_stamp_relay_id_attr`` seeds each class's own ``_id_attr`` before its
     one finalize-time scan, so order cannot matter; the parent-first order
-    asserted here is the one that used to fail.
+    asserted here is the order that exposes a missing stamp.
     """
 
     class ParentNode(DjangoType):
@@ -2410,10 +2411,10 @@ def test_concrete_relay_child_of_concrete_parent_records_own_strategy() -> None:
 def test_concrete_relay_child_with_meta_strategy_finalizes_cleanly() -> None:
     """A child declaring ``Meta.globalid_strategy`` is NOT a both-declared conflict.
 
-    Pre-fix, the parent's inherited framework closure was misclassified a
-    consumer ``resolve_typename`` override and the child's legitimate ``Meta``
-    key tripped the both-declared ``ConfigurationError`` - with nothing for the
-    consumer to remove.
+    The parent's inherited framework closure is not a consumer
+    ``resolve_typename`` override, so the child's legitimate ``Meta`` key does
+    not trip the both-declared ``ConfigurationError`` - which would leave
+    nothing for the consumer to remove.
     """
 
     class ItemNode(DjangoType):
@@ -2486,9 +2487,9 @@ def test_type_strategy_child_shadows_inherited_framework_closure() -> None:
 def test_routing_audit_sees_child_true_recorded_strategy() -> None:
     """A child emitting model-label IDs through inheritance is audit-visible.
 
-    Pre-fix the child was recorded ``custom`` (audit-blind), so a ``type``
-    primary that cannot decode the child's model-label IDs finalized cleanly.
-    The child's true ``model`` recording must trip the routing audit.
+    Recorded ``custom`` (audit-blind), the child would let a ``type`` primary
+    that cannot decode its model-label IDs finalize cleanly. The child's true
+    ``model`` recording must trip the routing audit.
     """
 
     def encoder(_type_cls: type[DjangoType], _model: type[Model], _root: object) -> str:

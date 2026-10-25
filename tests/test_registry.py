@@ -1131,7 +1131,7 @@ def test_mutators_reject_calls_after_mark_finalized(fresh_registry: TypeRegistry
         fresh_registry.unregister(CategoryType)
 
 
-def test_clear_does_not_remove_mutation_from_previously_finalized_classes() -> None:
+def test_clear_does_not_remove_mutation_from_already_finalized_classes() -> None:
     """clear() resets the registry, not already-mutated class objects.
 
     Registry lifecycle: finalize-time class mutation, pending records, and phase failure atomicity.

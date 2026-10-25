@@ -1379,8 +1379,8 @@ class TestAdviseCompositeIndex:
         """A partial flip cannot be served without a sort, so the advisory still warns.
 
         The index ``(parent, title, -id)`` serves neither ``title ASC, id ASC``
-        nor its full reverse ``title DESC, id DESC``; the pre-fix name-only
-        comparison wrongly declared it covered.
+        nor its full reverse ``title DESC, id DESC``, although a name-only
+        comparison would declare it covered.
         """
         caplog.set_level("WARNING", logger=optimizer_logger.name)
         _advise_composite_index(_IdxChildMixed, self._join("parent_id"), ["title", "id"])
@@ -1436,8 +1436,8 @@ class TestAdviseCompositeIndex:
         The effective order ``(Lower("title"), "id")`` is only
         partially understood, so ``_concrete_order_terms`` returns ``None`` and
         the advisory must neither warn nor claim coverage from the ``id`` suffix.
-        Before the fix the expression was dropped and ``(parent_id, id)`` was
-        wrongly recommended as the serving index.
+        Dropping the expression would wrongly recommend ``(parent_id, id)``
+        as the serving index.
         """
         caplog.set_level("WARNING", logger=optimizer_logger.name)
         _advise_composite_index(_IdxChildBare, self._join("parent_id"), [Lower("title"), "id"])
@@ -1462,7 +1462,7 @@ class TestAdviseCompositeIndex:
 
         ``title ASC NULLS FIRST`` is not index-provable, so the order is UNKNOWN
         and the advisory neither warns nor declares ``(parent_id, title, id)``
-        covered - the false-``covered`` result the pre-fix name-only reduction hit.
+        covered - the false-``covered`` result a name-only reduction gives.
         """
         caplog.set_level("WARNING", logger=optimizer_logger.name)
         _advise_composite_index(
@@ -1481,9 +1481,9 @@ class TestAdviseCompositeIndex:
 
         The window makes ``parent_id`` constant per partition, so ordering by
         ``parent_id, title, id`` is effectively ``title, id`` within a partition.
-        The pre-fix code compared against ``(parent_id, parent_id, title, id)``,
-        falsely reported the real index absent, and recommended a duplicated
-        column; stripping the equality term makes the composite index cover it.
+        Comparing against ``(parent_id, parent_id, title, id)`` would falsely
+        report the real index absent and recommend a duplicated column;
+        stripping the equality term makes the composite index cover it.
         """
         caplog.set_level("WARNING", logger=optimizer_logger.name)
         _advise_composite_index(

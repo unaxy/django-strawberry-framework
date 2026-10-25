@@ -46,17 +46,17 @@ transports with ``APPLY_UPSTREAM_PATCHES = {"strawberry": False}`` in effect -
 and the workaround the switch really does own is asserted to be genuinely off in
 the same state, so the ownership split cannot be satisfied by moving everything
 somewhere ungated. Its last rows take the switch off entirely
-(``APPLY_UPSTREAM_PATCHES = False``, both patch modules un-installed) - the state
-in which the sync transport used to answer ``500``. It is now the same controlled
-``400``, and one row reads all four answers across two mounts
-and two patch states so that constancy is attributable to the package view rather
-than to a patch that was quietly still installed. Two further rows move the
-``cross_web`` member of that switch alone, against Strawberry's own mount, which is
-the only place the patch this package ships for that mount still has an observable
-value: one is its standing retirement diagnostic (an undecodable body's ``500``
-becomes a ``400``), the other pins why the patch hands over raw bytes rather than
-decoding defensively (UTF-8-decodable UTF-16 / UTF-32 / UTF-8-BOM bodies are a
-``400`` un-installed and the async adapter's ``200`` installed).
+(``APPLY_UPSTREAM_PATCHES = False``, both patch modules un-installed), where the
+sync transport answers the same controlled ``400``, and one row reads all four
+answers across two mounts and two patch states so that constancy is attributable to
+the package view rather than to a patch that was quietly still installed. Two
+further rows move the ``cross_web`` member of that switch alone, against
+Strawberry's own mount, which is the only place the patch this package ships for
+that mount still has an observable value: one is its standing retirement diagnostic
+(an undecodable body's ``500`` becomes a ``400``), the other pins why the patch
+hands over raw bytes rather than decoding defensively (UTF-8-decodable UTF-16 /
+UTF-32 / UTF-8-BOM bodies are a ``400`` un-installed and the async adapter's
+``200`` installed).
 
 Three of those rows need a body shape neither ``Client`` nor ``AsyncClient`` can
 present, so they drive Django's own ``ASGIHandler`` in-process through
@@ -2196,14 +2196,13 @@ def test_the_sync_wire_contract_holds_with_every_upstream_patch_opted_out(body: 
 
     ``{"strawberry": False}`` leaves the ``cross_web`` half routing the sync
     transport's bytes into ``parse_json``; ``False`` does not, and in that state
-    the two BOM'd multi-byte bodies used to come back as an unhandled ``500``
-    because upstream's adapter decoded them inside a
-    property before the view's ``parse_json`` was reached. The success set was
-    never wider - a ``500`` is not an acceptance - but the *controlled 400* and
-    the "``__cause__`` is the only discriminator" half of Decisions 9 and 10 were
-    both lost, and no row covered the state.
+    upstream's sync adapter would decode the two BOM'd multi-byte bodies inside a
+    property before the view's ``parse_json`` is reached and surface the error as
+    an unhandled ``500``. A ``500`` would
+    not widen the success set, but it would lose the *controlled 400* and the
+    "``__cause__`` is the only discriminator" half of Decisions 9 and 10.
 
-    The package view now owns its body source as well as its parse
+    The package view owns its body source as well as its parse
     (``views.py::_RawBodyRequestAdapter``), so all three shapes are the same
     ``400``, from the same mount, with every shipped patch off. The valid-UTF-8
     control in the same state is what makes the ``400`` the wire contract firing
@@ -2606,9 +2605,9 @@ def test_a_multipart_map_must_be_an_object_not_a_batched_body() -> None:
 
     The general JSON guard permits a list of objects because an HTTP request body
     may be a valid GraphQL batch. Multipart's ``map`` is not a request body: the
-    upload utility consumes it as a mapping and calls ``.items()``. A list of
-    objects therefore used to pass the generic guard, then escape from the
-    utility as ``AttributeError``. This live mount pins that the multipart
+    upload utility consumes it as a mapping and calls ``.items()``, so a list
+    of objects that passed the generic guard would escape from the utility as
+    ``AttributeError``. This live mount pins that the multipart
     wrapper owns the narrower field contract while ordinary batched
     ``operations`` remain Strawberry's concern.
     """
@@ -2646,8 +2645,9 @@ async def test_post_pathologically_nested_body_returns_400_on_the_async_view_too
     """Async transport: a body nested past the parser's C stack -> controlled 400.
 
     Both views inherit the one patched ``BaseView.parse_json``, but the wire
-    answer deserves its own row per transport: pre-fix this escaped as an
-    unhandled ``RecursionError`` -> ``500`` from ``run`` on the event loop.
+    answer deserves its own row per transport: the ``RecursionError`` is
+    translated to a ``400`` here too, never an unhandled ``500`` from
+    ``run`` on the event loop.
     """
     with override_settings(ROOT_URLCONF=__name__):
         response = await _post_bytes(
@@ -2708,17 +2708,16 @@ def test_a_multipart_control_document_that_lost_bytes_to_djangos_decode_is_refus
     field: str,
     raw: bytes,
 ) -> None:
-    """The bodies that used to answer ``200`` now answer ``400``.
+    """A control document Django replacement-decoded answers ``400``.
 
-    An ``operations`` field carrying a malformed UTF-8 byte used to be
-    replacement-decoded by Django into something that parsed and executed -
-    a byte sequence the package calls invalid UTF-8, accepted on one GraphQL body
-    shape. Both control documents are covered, and both directions of the same
-    detector: the malformed byte Django *converts* into U+FFFD, and a literal
-    U+FFFD the client sent as valid UTF-8. They are indistinguishable after
-    Django's decode, which is the honest limit of this contract and the reason it
-    is documented as "must survive Django's decode without a replacement marker"
-    rather than "must be valid UTF-8".
+    Django replacement-decodes an ``operations`` field carrying a malformed UTF-8
+    byte into something that parses - a byte sequence the package calls invalid
+    UTF-8, on one GraphQL body shape. Both control documents are covered, and both
+    directions of the same detector: the malformed byte Django *converts* into
+    U+FFFD, and a literal U+FFFD the client sent as valid UTF-8. They are
+    indistinguishable after Django's decode, which is the honest limit of this
+    contract and the reason it is documented as "must survive Django's decode
+    without a replacement marker" rather than "must be valid UTF-8".
 
     The exact reason is asserted, not just the status: a lossy ``map`` that slipped
     past the check would still answer ``400``, from upstream's own "File(s) missing
@@ -2768,7 +2767,7 @@ _NON_UTF8_FORM_CHARSETS = (
 def test_a_multipart_request_declaring_a_non_utf8_form_encoding_is_refused(charset: str) -> None:
     """An explicit ``charset`` the package will not honour.
 
-    A Latin-1 form declaration used to execute with ``200``, and Django's behaviour is why:
+    Django honours a usable declared form charset:
     ``_set_content_type_params`` copies a usable declared charset onto
     ``request.encoding``, which is the encoding ``MultiPartParser`` then decodes
     every field with. So the declaration is honoured - just not with the UTF-8 the
@@ -3022,9 +3021,9 @@ def test_a_get_carrying_a_stray_multipart_content_type_still_serves_the_query() 
     parsing anything unless the method is ``POST``, so a stale
     ``multipart/form-data`` ``Content-Type`` on a GET - a client reusing a previous
     request's headers - describes a form nothing will decode, and this endpoint
-    reads no body on GET at all. It used to be answered ``400``, which made the
-    mixin's own "**GET.** A no-op" sentence false and refused a query Django would
-    have served from the query string.
+    reads no body on GET at all. A ``400`` here would make the mixin's own
+    "**GET.** A no-op" sentence false and refuse a query Django serves from the
+    query string.
 
     The header is passed as a raw WSGI ``CONTENT_TYPE`` rather than through a body,
     because that is the only way to put a content type on a bodyless GET:
@@ -3438,8 +3437,7 @@ def test_the_chain_applies_boundary_state_derived_during_view_setup() -> None:
     consumer subclasses may derive request-local state there. This mount takes its
     body cap from the resolved route keyword, so a pre-setup boundary sees no cap at
     all: it accepts and stamps the request, then the real instance sets the eight-byte
-    cap but skips it because of that stamp. Before the fix this valid GraphQL document
-    therefore executed and answered ``200``; the ``413`` proves the chain applied the
+    cap but skips it because of that stamp. The ``413`` proves the chain applied the
     setup-derived limit before it claimed the boundary had run.
     """
     seed_data(1)

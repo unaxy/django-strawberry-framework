@@ -3798,9 +3798,9 @@ def test_merged_kwargs_hook_non_string_keys_are_configuration_error() -> None:
 def test_serializer_kwargs_hook_non_string_keys_fail_before_serializer_construction() -> None:
     """End to end: a hostile constructor-hook return is the typed error, never a raw TypeError.
 
-    Pre-fix the non-string key reached ``serializer_class(**kwargs)`` and escaped the whole
-    write step as ``TypeError: keywords must be strings``; the boundary now rejects it before
-    any serializer work.
+    The boundary rejects the non-string key before any serializer work, so it never reaches
+    ``serializer_class(**kwargs)`` to escape the whole write step as
+    ``TypeError: keywords must be strings``.
     """
     category = product_models.Category.objects.create(name="KeyGateCat")
 
@@ -3839,8 +3839,9 @@ def test_serializer_kwargs_hook_non_string_keys_fail_before_serializer_construct
 def test_save_kwargs_hook_non_string_keys_fail_before_save() -> None:
     """End to end: a non-str-keyed save-kwargs return is the typed error before ``save()``.
 
-    The shadow / model-field key checks both pass an unknown integer key, so pre-fix it
-    reached ``serializer.save(**save_kwargs)`` and escaped as a raw ``TypeError``.
+    The shadow / model-field key checks both pass an unknown integer key, so the
+    key-type check is what keeps it from reaching ``serializer.save(**save_kwargs)`` as
+    a raw ``TypeError``.
     """
     category = product_models.Category.objects.create(name="KeyGateSaveCat")
 

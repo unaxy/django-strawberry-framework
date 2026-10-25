@@ -2317,11 +2317,11 @@ def test_holder_materialized_sequence_subclass_is_still_row_bounded() -> None:
     """A materialized source is bounded by this package, not by its own subscript.
 
     ``DjangoListField(resolver=...)`` is a public path: whatever the resolver
-    returns is what the raw-list ceiling is applied to, and applying it used to
-    mean calling that value's ``__getitem__``. A ``list`` subclass overriding
-    the slice therefore decided its own bound, and answered a windowed request
-    with every row it held - past the row ceiling and past the client's own
-    ``limit`` - which is the whole table on the one collection shape Relay
+    returns is what the raw-list ceiling is applied to, so the bound cannot
+    come from that value's own ``__getitem__``. The ``list`` subclass below
+    overrides the slice to return every row it holds; a bound read through it
+    would answer a windowed request past the row ceiling and past the client's
+    own ``limit`` - the whole table on the one collection shape Relay
     pagination does not cover.
     """
 

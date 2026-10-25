@@ -1572,10 +1572,10 @@ class TestReverseOrderBy:
         ``queryset.reverse()`` inverts them - so the window's reversed row number
         must sort them DESCENDING.
 
-        This previously passed the term through UNCHANGED, which left
-        ``_dst_row_number_reversed`` ordered forward on that column: a ``last: N``
-        page then filtered ``rn_reversed <= N`` over a forward numbering and
-        returned the partition's FIRST rows.
+        A term passed through UNCHANGED would leave ``_dst_row_number_reversed``
+        ordered forward on that column, so a ``last: N`` page filtering
+        ``rn_reversed <= N`` over a forward numbering would return the partition's
+        FIRST rows.
         """
         reversed_f = _reverse_order_by([F("name")])[0]
         assert isinstance(reversed_f, OrderBy)

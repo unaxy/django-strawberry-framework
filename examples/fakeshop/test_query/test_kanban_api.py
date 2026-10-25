@@ -596,9 +596,8 @@ def test_deeply_nested_self_referential_dependency_filter_is_capped() -> None:
     The depth cap answers with a typed error, not a raw ``RecursionError`` (report Defect 5).
 
     ``CardFilter.dependencies`` is a real self-referential ``RelatedFilter``, so a
-    client can nest the same branch arbitrarily deep. Before the fix the
-    input-driven visibility derivation recursed once per level and blew the
-    Python stack (a 500). The shared traversal budget now caps it at
+    client can nest the same branch arbitrarily deep. The shared traversal
+    budget caps the input-driven visibility derivation at
     ``_MAX_LOGIC_DEPTH`` and surfaces a catchable ``ConfigurationError``.
 
     The cap is a ``ConfigurationError``, so the spec-048 error policy classifies it

@@ -1823,7 +1823,7 @@ def _plain_data_leaf_defect(value: object, label: str) -> tuple[str, str] | None
 def _lookup_operands_defect(node: object, walk: _GraphWalk, label: str) -> tuple[str, str] | None:
     """Walk an exact genuine Django ``Lookup``'s operands without calling a bound accessor.
 
-    ``Lookup.get_source_expressions`` cannot be used to discover a lookup's children: it
+    ``Lookup.get_source_expressions`` cannot discover a lookup's children: it
     first calls ``self.rhs_is_direct_value()``, whose ``hasattr(self.rhs, "as_sql")`` runs
     an arbitrary consumer RHS object's ``__getattr__`` hook DURING the proof -- while the
     query is still un-cloned and the boundary has not yet decided whether the graph may be
@@ -3291,7 +3291,8 @@ def _sealed_prefetch_related_lookups(
             # them, a cross-table leak the sealed boundary exists to close. The
             # path resolves from the parent's model metadata with no dispatch; an
             # unresolvable path (a generic FK, a traversal Django resolves
-            # differently at fetch) is left untouched here, exactly as before.
+            # differently at fetch) is left untouched here: no target check
+            # runs, and Django resolves it at fetch.
             #
             # Both sides of the comparison are CONCRETE models, because the leak
             # the rule closes is a cross-TABLE one and a proxy shares its

@@ -207,7 +207,7 @@ def _concrete_order_columns(order_by: Sequence[object], model: type[models.Model
     skipped: the window's ``OVER (ORDER BY ...)`` and the queryset ``ORDER BY``
     reference those columns in SQL regardless of the ``.only()`` projection, so a
     skipped column only forgoes loading an attribute a scalar-only selection
-    never reads. Used to keep the scalar-only window projection minimal yet
+    never reads. The result keeps the scalar-only window projection minimal yet
     order-complete (spec-033 Decision 4 scalar-only bullet: the
     "pk/connector/order-only child projection").
     """

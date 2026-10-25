@@ -1256,11 +1256,9 @@ def test_run_active_input_permission_checks_caps_related_recursion() -> None:
 def test_active_permission_targets_excludes_logic_and_related_keys_from_the_leaf_half() -> None:
     """The LEAF half of the single classification pass drops logic and related keys.
 
-    The gate dispatch consumes exactly this half. It used to reach it through a
-    ``active_permission_field_paths`` wrapper in this module that nothing in the
-    package called - ``sets_mixins`` has its own one-line delegate, which is the
-    natural home because it already holds the seven configuration values the
-    wrapper made every caller re-pass.
+    The gate dispatch consumes exactly this half, through ``sets_mixins``' own
+    one-line delegate, which already holds the seven configuration values a
+    caller would otherwise re-pass.
     """
 
     class _Set(ActiveInputPermissionMixin):

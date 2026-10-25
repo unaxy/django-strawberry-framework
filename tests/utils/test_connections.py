@@ -161,8 +161,8 @@ def test_after_with_last_is_unwindowable_not_reverse_with_offset() -> None:
     the reversed row-number window partitions over the WHOLE parent partition, so
     the forward ``_dst_row_number`` the resolver reads its page flags from would
     diverge from the per-parent pipeline whenever the after-remainder is
-    ``<= last`` rows. Pre-fix the helper returned ``reverse=True`` with that
-    non-zero offset (the High); the fix makes it an unwindowable fallback so the
+    ``<= last`` rows. The helper therefore makes it an unwindowable fallback
+    rather than returning ``reverse=True`` with that non-zero offset, so the
     walker leaves the selection unplanned and the per-parent pipeline serves it
     (spec-033 Decision 5).
     """
@@ -214,12 +214,10 @@ def test_inverted_after_before_is_unwindowable_not_a_negative_limit_window() -> 
     """An inverted ``after`` + ``before`` window raises ``UnwindowableConnection``.
 
     When ``before`` resolves at or before ``after``, ``SliceMetadata`` yields
-    ``start > end`` so ``expected`` is NEGATIVE (the range is empty). Pre-fix the
-    helper passed that negative ``expected`` straight through as ``limit``, and
-    the pre-fix ``window_range_plan`` read it as "no upper bound". The windowed
-    prefetch therefore served the forward tail instead of the empty page from the
-    per-parent ``ListConnection``. The fix makes it an unwindowable fallback
-    (spec-033 Decision 5).
+    ``start > end`` so ``expected`` is NEGATIVE (the range is empty). The helper
+    makes it an unwindowable fallback (spec-033 Decision 5) rather than passing
+    that negative ``expected`` through as ``limit``, so the per-parent
+    ``ListConnection`` serves its empty page.
     """
     after_cursor = to_base64("arrayconnection", "3")
     before_cursor = to_base64("arrayconnection", "2")
@@ -229,8 +227,8 @@ def test_inverted_after_before_is_unwindowable_not_a_negative_limit_window() -> 
         after=after_cursor,
         max_results=_MAX,
     )
-    # The trap: a NEGATIVE expected (start 4 > end 2), which the pre-fix path
-    # forwarded as a negative ``limit`` that the pre-fix range planner unbounded.
+    # The trap: a NEGATIVE expected (start 4 > end 2), which must never be
+    # forwarded as a negative ``limit``.
     assert slice_meta.start == 4
     assert slice_meta.expected == -2
 

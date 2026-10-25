@@ -149,7 +149,7 @@ class SaveKwargsShelfSerializer(ModelSerializerBase[Shelf]):
 
 
 class OptionalCodeShelfSerializer(ModelSerializerBase[Shelf]):
-    """Plain ``Shelf`` serializer used to prove mutation ``Meta.optional_fields`` over HTTP.
+    """Plain ``Shelf`` serializer that proves mutation ``Meta.optional_fields`` over HTTP.
 
     ``code`` is required by DRF. One live mutation leaves that strict shape alone while
     another applies mutation-level ``optional_fields = ("code",)`` so GraphQL accepts

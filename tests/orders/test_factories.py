@@ -313,10 +313,10 @@ def test_factory_rejects_related_orders_with_colliding_graphql_names() -> None:
 def test_factory_raises_on_orderset_with_no_orderable_fields() -> None:
     """An ``OrderSet`` whose expansion is empty raises ``ConfigurationError``.
 
-    Pre-fix the factory built a zero-field ``@strawberry.input`` that only blew
-    up later at ``strawberry.Schema(...)`` with a raw ``ValueError`` naming the
-    GENERATED type (``EmptyOrderInputType``) rather than the consumer's class.
-    The guard fails loud at the framework boundary instead.
+    A zero-field ``@strawberry.input`` would only blow up later at
+    ``strawberry.Schema(...)`` with a raw ``ValueError`` naming the GENERATED
+    type (``EmptyOrderInputType``) rather than the consumer's class, so the
+    guard fails loud at the framework boundary instead.
     """
 
     class EmptyOrder(OrderSet):

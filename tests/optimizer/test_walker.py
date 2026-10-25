@@ -700,7 +700,7 @@ def test_plan_projects_digit_boundary_field_under_real_django_name() -> None:
         finalize_django_types()
 
         # Scalar: selected as the schema name ``isbn10`` -> projected as the
-        # real ``isbn_10`` column (pre-fix: dropped, only_fields=("imprint",)).
+        # real ``isbn_10`` column, not dropped from ``only_fields``.
         scalar_plan = plan_optimizations(
             [_sel("imprint"), _sel("isbn10")],
             Edition,
@@ -710,7 +710,7 @@ def test_plan_projects_digit_boundary_field_under_real_django_name() -> None:
         assert "isbn10" not in scalar_plan.only_fields
 
         # Relation: forward FK selected as ``publisher2`` -> select_related on
-        # the real ``publisher_2`` name (pre-fix: unplanned, select_related=()).
+        # the real ``publisher_2`` name, not left unplanned.
         relation_plan = plan_optimizations(
             [_sel("publisher2", selections=[_sel("name")])],
             Edition,
@@ -1535,8 +1535,7 @@ def test_has_custom_id_resolver_fallback_matches_definition_path() -> None:
     the target, ``_has_custom_id_resolver`` delegates to the same
     ``origin_has_custom_id_resolver`` free function the registered path uses.
     A plain consumer ``resolve_id`` counts as custom; the inherited
-    Strawberry Relay default does not (the pre-fix raw ``__dict__`` fallback
-    wrongly flagged the latter).
+    Strawberry Relay default does not.
     """
 
     @_as_definitionless_django_type
@@ -3475,8 +3474,8 @@ def test_plan_projects_digit_boundary_relation_connection_as_windowed_prefetch()
             info=_fake_info(),
             source_type=PublisherNode,
         )
-        # Planned as a batched windowed Prefetch on the real relation accessor
-        # (pre-fix: prefetch_related=() and planned_resolver_keys=() - dropped).
+        # Planned as a batched windowed Prefetch on the real relation accessor,
+        # not dropped from ``prefetch_related`` / ``planned_resolver_keys``.
         prefetch = _prefetch_entry(plan)
         assert prefetch.to_attr == "_dst_printings_2_connection"
         assert prefetch.prefetch_through == "printings_2"
@@ -5787,16 +5786,15 @@ def _shelf_types_with_consumer_books(
 def test_consumer_assigned_relation_left_fully_unplanned() -> None:
     """A consumer-owned relation gets NO prefetch, NO resolver keys, only its link columns.
 
-    The #697-class gap: the walker used to trust the model shape for a
-    relation whose generated resolver the consumer REPLACED
-    (``finalizer.py`` skips attaching one via
-    ``consumer_assigned_relation_fields``) - paying a speculative Prefetch the
-    consumer's resolver may never consume AND recording
-    ``planned_resolver_keys`` for the walked subtree, which silenced the
-    subtree's real N+1 under strictness. The spec-033 Decision 6 fallback discipline
-    applies instead: fully unplanned, strictness-visible. Sibling scalars keep
-    their projection, and the parent row keeps the relation's link columns
-    (``FieldMeta.source_link_attnames``; none for this reverse FK over the pk).
+    The #697-class gap: a walker that trusted the model shape for a relation whose
+    generated resolver the consumer REPLACED (``finalizer.py`` skips attaching one
+    via ``consumer_assigned_relation_fields``) would pay a speculative Prefetch the
+    consumer's resolver may never consume AND record ``planned_resolver_keys`` for
+    the walked subtree, silencing the subtree's real N+1 under strictness. The
+    spec-033 Decision 6 fallback discipline applies instead: fully unplanned,
+    strictness-visible. Sibling scalars keep their projection, and the parent row
+    keeps the relation's link columns (``FieldMeta.source_link_attnames``; none
+    for this reverse FK over the pk).
     """
     registry.clear()
     try:
@@ -6208,10 +6206,10 @@ def test_unsafe_child_queryset_left_unplanned_under_both_strategies(
 ) -> None:
     """Unsafe consumer ``get_queryset`` shapes never reach a fetch strategy.
 
-    A sliced child queryset used to crash INSIDE
-    ``apply_window_pagination`` (Django: "Cannot reorder a query once a
-    slice has been taken") before any fallback, and a ``select_for_update``
-    queryset cannot be represented by either strategy's SQL. The
+    A sliced child queryset would crash INSIDE ``apply_window_pagination``
+    (Django: "Cannot reorder a query once a slice has been taken") before
+    any fallback, and a ``select_for_update`` queryset cannot be
+    represented by either strategy's SQL. The
     shared gate (``nested_fetch.py::unwindowable_child_queryset_reason``)
     runs BEFORE strategy dispatch, so the outcome is the spec-033 Decision 6
     fully-unplanned fallback - no prefetch, no resolver keys, strictness

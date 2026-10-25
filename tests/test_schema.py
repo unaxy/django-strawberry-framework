@@ -1446,11 +1446,10 @@ def test_a_retained_policy_argument_is_not_the_one_the_schema_enforces(
 ) -> None:
     """The caller keeps their object; the schema keeps a duplicate of its values.
 
-    An exact instance used to pass through configuration intake unchanged, so a
-    caller who retained the argument - or who left one in ``settings`` - still
-    held the object every bound was read from, and a frozen dataclass admits
-    ``policy.__dict__[bound] = wider`` by the same route the schema attribute
-    does.
+    Intake copies even an exact instance, so a caller who retained the argument -
+    or who left one in ``settings`` - does not hold the object any bound is read
+    from, although a frozen dataclass admits ``policy.__dict__[bound] = wider``
+    by the same route the schema attribute does.
     """
     [(argument, policy)] = row.items()
     schema = DjangoSchema(query=DummyQuery, **row)

@@ -289,8 +289,8 @@ def _input_field_names(type_name: str) -> set[str]:
 def _input_field_type(type_name: str, field_name: str) -> JSONObject:
     """Return an input object field's TYPE tree (``kind`` / ``name`` / ``ofType``) via introspection.
 
-    Used to assert an input field's GraphQL nullability: a ``NON_NULL`` wrapper (``kind ==
-    "NON_NULL"``, ``ofType`` the scalar) means a non-null ``String!``; a bare scalar (``kind
+    The rows read an input field's GraphQL nullability from it: a ``NON_NULL`` wrapper (``kind
+    == "NON_NULL"``, ``ofType`` the scalar) means a non-null ``String!``; a bare scalar (``kind
     == "SCALAR"``, ``name == "String"``) means a nullable, omittable ``String``. Pins, e.g.,
     that an ``allow_blank=True`` required ``CharField`` is still ``String!`` (allow_blank does
     not change a ``CharField``'s type) and that two hooks differing only in ``allow_null`` emit
@@ -321,9 +321,9 @@ def _mutation_data_input_type_name(field_name: str) -> str:
     """Return the input type name of a mutation field's ``data`` argument via introspection.
 
     A serializer mutation's ``data:`` argument is ``<Input>!`` (a ``NON_NULL`` wrapping the
-    generated input object), so the named type is the wrapper's ``ofType``. Used to compare
-    the descriptor-derived input names of two same-serializer hook mutations without
-    hard-coding the (deliberately opaque) digest-bearing names.
+    generated input object), so the named type is the wrapper's ``ofType``. The rows compare
+    through it the descriptor-derived input names of two same-serializer hook mutations
+    without hard-coding the (deliberately opaque) digest-bearing names.
     """
     response = _post_graphql(
         """
@@ -3659,9 +3659,7 @@ def test_library_genres_filter_by_relay_own_pk_global_id_in_list() -> None:
     ``GlobalIDMultipleChoiceFilter``, its form field
     accepts the submitted list instead of rejecting it against an empty
     ``choices`` set, and each element is decoded + type-validated
-    before the ``id__in`` clause runs. Previously the own-PK branch
-    collapsed every lookup to a single ``GlobalIDFilter`` and ``in`` could
-    not take a list at all.
+    before the ``id__in`` clause runs.
     """
     sci_fi = models.Genre.objects.create(name="SciFi")
     fantasy = models.Genre.objects.create(name="Fantasy")
@@ -3816,9 +3814,9 @@ def test_library_genres_filter_empty_id_scalar_global_id_raises_globalid_invalid
     ``to_base64("library.genre", "")`` decodes to the accepted ``library.genre``
     ``type_name`` with an EMPTY ``node_id``: it clears decode + strategy +
     ``type_name`` validation, but an empty identifier is not a valid resource id.
-    The shared ``base.py::_decode_and_validate_global_id`` boundary now REJECTS it
+    The shared ``base.py::_decode_and_validate_global_id`` boundary REJECTS it
     with the uniform ``GLOBALID_INVALID`` coded error rather than silently
-    no-op'ing to an UNFILTERED query (the pre-fix scalar-widening behavior).
+    no-op'ing to an UNFILTERED query (a scalar widening).
     Live acceptance for the empty-id branch: a package stub cannot be the
     acceptance test for a consumer-visible ``/graphql/`` surface.
     """
@@ -3853,9 +3851,9 @@ def test_library_genres_filter_empty_id_in_list_raises_globalid_invalid_at_index
     Each list element is decoded independently; an empty-``node_id`` element
     raises the same ``GLOBALID_INVALID`` coded error with its list position
     named, rather than being DROPPED -- dropping it would turn the restrictive
-    ``{in: ["type:"]}`` into an unfiltered query (the pre-fix list-widening
-    behavior). Live acceptance for the empty-id branch on the
-    multi-value ``GlobalIDMultipleChoiceFilter``.
+    ``{in: ["type:"]}`` into an unfiltered query (a list widening). Live
+    acceptance for the empty-id branch on the multi-value
+    ``GlobalIDMultipleChoiceFilter``.
     """
     models.Genre.objects.create(name="SciFi")
     empty_gid = str(relay.GlobalID(type_name=models.Genre._meta.label_lower, node_id=""))
@@ -9197,15 +9195,14 @@ def test_genre_connection_total_count_skip_include_no_count() -> None:
 def test_anonymous_inline_fragment_under_connection_field_resolves() -> None:
     """An anonymous inline fragment under a connection field resolves cleanly.
 
-    Regression for the optimizer-folder High. Pre-fix, a query placing an
-    anonymous inline fragment (``... { f }``, ``type_condition=None``) anywhere
-    under a ``DjangoConnectionField`` crashed with ``AttributeError: 'NoneType'
-    object has no attribute 'name'`` - Strawberry's ``convert_selections``
-    (reached via the optimizer's ``apply_to`` AND via ``info.selected_fields``
-    inside Strawberry's own ``ListConnection.resolve_connection`` ->
-    ``should_resolve_list_connection_edges``) reads ``type_condition.name.value``
-    on the missing condition. The package now routes its own conversion through
-    the anonymous-safe ``ast_to_converted_selections`` adapter and primes
+    Strawberry's ``convert_selections`` (reached via the optimizer's ``apply_to``
+    AND via ``info.selected_fields`` inside Strawberry's own
+    ``ListConnection.resolve_connection`` -> ``should_resolve_list_connection_edges``)
+    reads ``type_condition.name.value``, so on an anonymous inline fragment
+    (``... { f }``, ``type_condition=None``) anywhere under a
+    ``DjangoConnectionField`` it raises ``AttributeError: 'NoneType' object has no
+    attribute 'name'``. The package routes its own conversion through the
+    anonymous-safe ``ast_to_converted_selections`` adapter and primes
     ``info.selected_fields`` with it before the connection resolver runs, so both
     shapes - the anonymous fragment directly under the connection field and one
     nested down at the ``node`` level - resolve and return the seeded genre names.
@@ -9297,10 +9294,8 @@ def test_anonymous_inline_fragment_sibling_of_edges_resolves() -> None:
     keeps ``totalCount`` a bare connection child and puts the anonymous fragment at the
     NODE level): here the anonymous fragment (``... { totalCount }``, ``type_condition=
     None``) is a direct connection child sitting BESIDE a plain ``edges { node { name } }``
-    selection, with ``first: 2`` paginating. This is the exact shape the optimizer-folder
-    report flagged: pre-fix the converted-selection plan walk read ``sel.name`` /
-    ``snake_case(sel.name)`` on the anonymous ``InlineFragment`` shell (``name=None``) and
-    crashed with ``AttributeError: 'NoneType' object has no attribute 'name'``.
+    selection, with ``first: 2`` paginating; the anonymous ``InlineFragment`` shell
+    carries ``name=None``.
 
     The package routes its conversion through the anonymous-safe
     ``ast_to_converted_selections`` adapter (``type_condition=None`` instead of
@@ -9335,9 +9330,7 @@ def test_anonymous_inline_fragment_with_directive_around_node_field_resolves() -
 
     Second report shape: ``edges { node { name ... @skip(if: true) { id } } }`` - the
     anonymous inline fragment (``name=None``) wraps a node-level ``id`` under
-    ``@skip(if: true)``. Pre-fix the plan walk crashed reading ``sel.name`` on the
-    anonymous shell; the directive only made the same unguarded name read fire on a
-    skipped subtree. The walker now evaluates ``should_include`` and descends fragments
+    ``@skip(if: true)``. The walker evaluates ``should_include`` and descends fragments
     via ``is_fragment`` before any name read, so the skipped ``id`` is pruned and the
     page resolves to the genre names alone (bounded to ``first: 2``).
     """
@@ -12754,18 +12747,18 @@ def test_plain_list_aliases_nested_same_key_conflict_serves_each_subtree_args() 
 def test_genre_books_connection_after_last_page_info_matches_per_parent() -> None:
     """``booksConnection(after: c, last: N)`` reports the per-parent ``hasPreviousPage``.
 
-    The offset-bearing backward window regression (spec-033 Decision 5): an
-    ``after`` + ``last`` nested connection used to slip into the reversed
-    row-number window with a NON-ZERO offset, returning the right rows but a
-    ``hasPreviousPage`` that diverged from the per-parent pipeline whenever the
-    after-remainder was ``<= last`` rows. The reversed window numbers rows from
-    the partition END but ``_dst_row_number`` (and thus the page flags) stays
-    FORWARD over the whole partition, so for an ``after``-trimmed tail of two
-    rows numbered 4, 5 the fast path read ``hasPreviousPage = (4 > 1) = True``,
-    while the per-parent pipeline slices the last ``N`` of the two-row after-set
-    and reports ``hasPreviousPage = False`` (nothing was trimmed off the front).
+    The offset-bearing backward window (spec-033 Decision 5): an ``after`` +
+    ``last`` nested connection served by the reversed row-number window with a
+    NON-ZERO offset would return the right rows but a ``hasPreviousPage`` that
+    diverges from the per-parent pipeline whenever the after-remainder is
+    ``<= last`` rows. The reversed window numbers rows from the partition END but
+    ``_dst_row_number`` (and thus the page flags) stays FORWARD over the whole
+    partition, so for an ``after``-trimmed tail of two rows numbered 4, 5 that
+    path reads ``hasPreviousPage = (4 > 1) = True``, while the per-parent
+    pipeline slices the last ``N`` of the two-row after-set and reports
+    ``hasPreviousPage = False`` (nothing was trimmed off the front).
 
-    The fix makes ``after`` + ``last`` an unwindowable fallback: the walker leaves
+    ``after`` + ``last`` is therefore an unwindowable fallback: the walker leaves
     the selection unplanned and the shipped per-parent pipeline serves it, so the
     optimizer-on ``/graphql/`` answer matches the optimizer-off truth. NO sidecar
     is supplied so the shape itself - not the sidecar gate - is what routes to the
@@ -14634,7 +14627,7 @@ _UPDATE_BOOK_VIA_FORM = (
 def test_update_book_via_form_partial_update_preserves_m2m_over_http() -> None:
     """A ``title``-only ``updateBookViaForm`` preserves the OMITTED required ``genres`` M2M.
 
-    The live FORM partial-update M2M-preservation case (previously package-only): the
+    The live FORM partial-update M2M-preservation case: the
     bound ``ModelForm`` would fail required-validation on ``genres`` unless the omitted
     M2M is reconstructed from the located row (``_reconstruct_partial_data`` ->
     ``_to_form_key_value``). ``BookType`` is Relay-Node so the update ``id`` is a
@@ -15465,7 +15458,7 @@ def test_named_library_records_hides_restricted_branch_from_anonymous_over_http(
     direct ``Branch.objects`` read would serialize ``city="restricted"`` rows that
     ``BranchType.get_queryset`` hides from non-staff. Routing through the hook keeps the
     visible branch and drops the restricted one for an anonymous caller, while a staff
-    caller (the ``get_queryset`` bypass) still sees it. Fails on the pre-fix direct read.
+    caller (the ``get_queryset`` bypass) still sees it.
     """
     models.Branch.objects.create(name="NamedVisible", city="Boston")
     models.Branch.objects.create(name="NamedRestricted", city="restricted")
@@ -15727,8 +15720,8 @@ def test_serializer_hook_same_serializer_different_targets_distinct_inputs_and_d
     ``createShelfViaHookTargetingPatron`` and ``createShelfViaHookTargetingLoan`` share
     ``TargetedShelfSerializer`` and return the SAME hook field names (``code`` / ``branch`` /
     ``target``) with ``target`` pointed at different models. That the autouse reload imports
-    the composed schema AT ALL proves the materialize ledger no longer collides on one
-    canonical name (pre-fix this raised "... is materialized by two distinct SerializerMutation
+    the composed schema AT ALL proves the materialize ledger does not collide on one canonical
+    name (a collision raises "... is materialized by two distinct SerializerMutation
     input classes"). Introspection proves the two generated input types are DISTINCT (folding
     ``target``'s ``related_model``) yet both expose the divergent ``targetId`` beside ``code`` +
     ``branchId``.
@@ -15980,10 +15973,9 @@ def test_serializer_hooks_differing_only_in_allow_null_bind_distinct_nullability
     agreement guard forbids a schema-only field the runtime does not declare). The EMITTED
     nullability is part of the descriptor identity, so the two generated inputs are DISTINCT
     types: the ``allow_null=False`` half exposes ``note`` as a non-null ``String!``, the
-    ``allow_null=True`` half as a nullable, OMITTABLE ``String``. Before the fix the descriptor
-    recorded the base annotation (NOT the post-widening one), so the two shapes compared EQUAL
-    and the second declaration silently reused the first's cached input class - giving one
-    mutation the other's nullability (the SAME input type name, same SDL nullability for both).
+    ``allow_null=True`` half as a nullable, OMITTABLE ``String``. The descriptor records the
+    post-widening annotation, so neither declaration reuses the other's cached input class:
+    each mutation gets its own input type name and its own SDL nullability.
 
     Both also execute over HTTP: the non-null half must supply ``note`` (a non-null
     ``String!``); the nullable half sends an explicit ``null`` (its ``allow_null=True`` note
@@ -17095,8 +17087,8 @@ def test_serializer_update_injected_field_contract_over_http() -> None:
     declares ``Meta.injected_fields = ("status",)`` with a ``get_serializer_injected_data``
     override. The injected spec is resolved under the update's ``PartialInput`` provisional, so
     its generated enum identity matches the runtime-agreement guard's re-derivation and the
-    update SUCCEEDS with the injected value - previously the agreement guard raised a spurious
-    ``ConfigurationError`` naming mismatched enum identities on EVERY update invocation.
+    update SUCCEEDS with the injected value, with no spurious agreement-guard
+    ``ConfigurationError`` naming mismatched enum identities.
     """
     shelf = _seed_shelf()
     book = models.Book.objects.create(title="BeforeInject", shelf=shelf)
@@ -19894,12 +19886,11 @@ def test_nested_ambiguous_empty_served_from_marker_in_fixed_queries(args: str) -
     """``first: 0`` / overshot ``after:`` serve true counts in TWO queries live.
 
     The marker-row disambiguation (spec-033 Decision 5)
-    live over /graphql/: these shapes historically fell back per-parent
-    (2 + N queries for N parents); the window now keeps each partition's
-    row 1, so every parent's empty page serves the TRUE ``totalCount`` and
-    pipeline-parity ``pageInfo`` from the same single window query. Three
-    parents, still two queries - the N+1 disproof for the previously
-    ambiguous shapes.
+    live over /graphql/: the window keeps each partition's row 1, so every
+    parent's empty page serves the TRUE ``totalCount`` and pipeline-parity
+    ``pageInfo`` from the same single window query rather than a
+    per-parent fallback. Three parents, two queries - the N+1 disproof for
+    these ambiguous shapes.
     """
     shelf = _seed_shelf()
     for index in range(3):

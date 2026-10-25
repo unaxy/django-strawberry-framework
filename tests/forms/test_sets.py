@@ -680,8 +680,8 @@ def test_cached_build_form_input_runs_required_guard_per_declaration() -> None:
     (``guard_required=False``, having overridden ``get_form_kwargs`` / ``get_form``)
     that materializes a narrowed shape FIRST must not poison the cache for a later
     NON-waiving mutation over the same form + effective set: the guard is tied to
-    each declaration, not to whichever class built the shape first. Pre-fix, the
-    second call returned the cached value and silently skipped the guard.
+    each declaration, not to whichever class built the shape first, so the
+    second call does not silently skip the guard by returning the cached value.
     """
 
     class _RequiredExtraForm(forms.ModelForm[product_models.Item]):

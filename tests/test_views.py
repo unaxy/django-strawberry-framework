@@ -1134,10 +1134,10 @@ class _TellWithoutSeekStream(_RecordingStream):
     ``_UndeclaredSeekableStream`` uses it) and ``tell()`` works, so the probe's
     capability fallback accepts it - but there is no ``seek`` to call, so
     nothing the probe does can ever have moved it. That provable intactness is
-    what makes the verdict ``UNMEASURABLE`` rather than ``CORRUPTED``: before
-    the fix the absent method's ``AttributeError`` fell into the
-    restore-or-refuse path, so an under-limit request was refused ``413`` and
-    the operator was told the probe had moved a stream that had no way to move.
+    what makes the verdict ``UNMEASURABLE`` rather than ``CORRUPTED``: were the
+    absent method's ``AttributeError`` to fall into the restore-or-refuse path,
+    an under-limit request would be refused ``413`` and the operator told the
+    probe had moved a stream that had no way to move.
     """
 
     def tell(self) -> int:
@@ -1733,11 +1733,10 @@ def test_a_position_object_whose_numeric_protocol_raises_never_runs_inside_the_g
 ) -> None:
     """No foreign numeric protocol is executed on a probed position, at all.
 
-    The probe used to guard the subtraction alone, and only against ``TypeError``,
-    while the ``remaining <= 0`` comparison ran outside every guard. Both
-    expressions execute code belonging to whatever object the stream handed back,
-    so a position whose ``__sub__`` or ``__le__`` raises anything else turned the
-    body boundary into an unrelated ``500`` - the exact failure mode the rest of
+    Both the subtraction and the ``remaining <= 0`` comparison execute code
+    belonging to whatever object the stream handed back, so a probe that ran them
+    on a position whose ``__sub__`` or ``__le__`` raises would turn the body
+    boundary into an unrelated ``500`` - the exact failure mode the rest of
     this module's totality exists to prevent, reached through arithmetic instead of
     through a method call.
 
@@ -1816,11 +1815,11 @@ def test_a_stream_with_no_seek_method_is_measured_rather_than_refused(
     Believing a missing ``seekable`` declaration - the Python 3.10 spool's
     capability fallback - also admits streams that report positions but have no
     ``seek`` to call, a forward-only body-inspection middleware's wrapper among
-    them. For such a stream the end-seek cannot run at all: its
-    ``AttributeError`` used to fall into the restore-or-``CORRUPTED`` path, so
-    an under-limit request was refused as over-limit and the ``WARNING``
-    claimed the probe had moved a stream that had no way to move. Absence is
-    now decided before any call, so the verdict is "unmeasurable, position
+    them. For such a stream the end-seek cannot run at all: were its
+    ``AttributeError`` to fall into the restore-or-``CORRUPTED`` path, an
+    under-limit request would be refused as over-limit and the ``WARNING``
+    would claim the probe had moved a stream that had no way to move. Absence
+    is decided before any call, so the verdict is "unmeasurable, position
     provably intact" and the bounded read supplies the bound.
 
     Both halves are asserted: the under-limit body reaches Django whole through
@@ -2032,11 +2031,12 @@ def test_a_body_already_cached_by_middleware_is_measured_from_the_cache_and_refu
 
     A consumer middleware that reads ``request.POST`` (or ``request.body``) on the
     way in materializes ``_body`` through ``HttpRequest.body`` - an allocation that
-    has already happened by the time ``run`` is entered and cannot be undone. It
-    used to be Django's own ``CsrfViewMiddleware`` that did this, for every
-    cookie-bearing ``application/x-www-form-urlencoded`` POST; the ``csrf_exempt``
-    / ``csrf_protect`` re-entry moved that read behind the boundary, so what is
-    left on this rung is a read no application-level ordering can precede. The package must still refuse to
+    has already happened by the time ``run`` is entered and cannot be undone.
+    Django's own ``CsrfViewMiddleware`` reads ``request.POST`` for every
+    cookie-bearing ``application/x-www-form-urlencoded`` POST, and the
+    ``csrf_exempt`` / ``csrf_protect`` re-entry runs that read behind the
+    boundary, so what is left on this rung is a read no application-level
+    ordering can precede. The package must still refuse to
     *process* it, measured off the cache rather than by re-reading, which the
     unreadable stream proves: the cache is consulted and the stream is not
     touched. The under-limit direction in the same row is what shows the cached
@@ -2188,10 +2188,10 @@ def test_the_wire_contract_holds_with_the_upstream_patches_opted_out(
 ) -> None:
     """The identical nine rows with ``{"strawberry": False}`` in effect.
 
-    The strict decode used to live inside
-    ``_patched_parse_json``, so a consumer who disabled the package's *upstream
-    bug workarounds* also disabled a permanent security policy and silently got
-    UTF-16 / UTF-32 acceptance back. With the policy on the view, the whole matrix
+    A strict decode inside ``_patched_parse_json`` would let a consumer who
+    disabled the package's *upstream bug workarounds* also disable a permanent
+    security policy and silently get UTF-16 / UTF-32 acceptance back. With the
+    policy on the view, the whole matrix
     - including ``__cause__``, i.e. by which mechanism - is unchanged with the
     patch pair un-installed: the ``UnicodeDecodeError`` rows are the view's own
     decode, and the ``json.JSONDecodeError`` rows are upstream's own ``except``,
@@ -2378,8 +2378,8 @@ def test_both_package_views_resolve_parse_json_to_the_one_shared_mixin_method() 
 #
 # The gate is TWO independent conditions, so each one and
 # each sub-rung of the effective encoding gets its own row that fails on its own.
-# One row used to pin two rungs at once, which means removing either of them cost
-# the suite the same single failure and neither was really pinned:
+# One row pinning two rungs at once would mean removing either of them costs the
+# suite the same single failure, so neither would really be pinned:
 #
 #   * the declared charset            -> ``..._is_refused_even_when_django_would_decode_utf8``
 #     (plus the alias matrix below, and the masking-direction row)

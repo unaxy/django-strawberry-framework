@@ -946,7 +946,7 @@ def _mark_patch_replacement(patched: object, original: object) -> None:
     """Stamp a replacement with its owner and the upstream callable it wraps.
 
     Called at import, before ``apply()`` can install anything, so a reloaded
-    module can recover the genuine upstream method from a previously installed
+    module can recover the genuine upstream method from an already installed
     replacement (:func:`_captured_upstream_method`). A function rather than a
     module-level loop so the marking leaves no loop variables bound in the
     module namespace.

@@ -178,8 +178,7 @@ def test_bare_name_resolves_converter_applied_sdl_name_and_titles_it(
     prefixing converter), not the Python class name, and the table title renders
     that same converter-applied name. Both require threading the schema's
     ``NameConverter`` (supplied by ``--schema``) into bare-name resolution and
-    table rendering - the pre-fix code matched/titled only ``graphql_type_name``,
-    which ignores the converter.
+    table rendering, since ``graphql_type_name`` alone ignores the converter.
     """
 
     class PrefixedNames(NameConverter):

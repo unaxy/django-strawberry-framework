@@ -203,14 +203,14 @@ def test_order_glossary_terms_by_title_desc() -> None:
 def test_anonymous_inline_fragment_under_list_field_resolves() -> None:
     """An anonymous inline fragment (``... { f }``) under a plain list field resolves cleanly.
 
-    Regression for the optimizer-folder High: ``allGlossaryTerms`` is a plain
-    ``DjangoListField`` (not a connection), so it exercises the middleware list
-    path (``DjangoOptimizerExtension.resolve`` -> ``_optimize`` -> ``apply_to``).
-    Pre-fix, ``apply_to`` routed ``info.field_nodes`` through Strawberry's
-    ``convert_selections``, whose ``InlineFragment.from_node`` reads
-    ``type_condition.name.value`` and raised ``AttributeError: 'NoneType' object
-    has no attribute 'name'`` on the anonymous (``type_condition=None``) shape.
-    The package-owned ``ast_to_converted_selections`` adapter builds a
+    ``allGlossaryTerms`` is a plain ``DjangoListField`` (not a connection), so it
+    exercises the middleware list path (``DjangoOptimizerExtension.resolve`` ->
+    ``_optimize`` -> ``apply_to``). Strawberry's ``convert_selections``, whose
+    ``InlineFragment.from_node`` reads ``type_condition.name.value``, raises
+    ``AttributeError: 'NoneType' object has no attribute 'name'`` on the
+    anonymous (``type_condition=None``) shape, so ``apply_to`` converts
+    ``info.field_nodes`` through the package-owned
+    ``ast_to_converted_selections`` adapter, which builds a
     ``type_condition=None`` shell instead, so the query resolves and returns the
     seeded term titles. Mirrors the connection-path pins in
     ``test_library_api.py``; the list path is a distinct entry point so it carries

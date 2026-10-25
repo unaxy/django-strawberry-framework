@@ -766,7 +766,7 @@ def test_reload_preserves_the_installed_patch_teardown(monkeypatch: pytest.Monke
             is not _django_patches._patched_remove_databases_failures
         )
         assert _django_patches._patch_is_installed() is False
-        # The reloaded module retained the previously validated upstream body,
+        # The reloaded module retained the already validated upstream body,
         # so the still-installed generation's read path stays valid.
         assert (
             _django_patches._validated_remove_databases_failures_source

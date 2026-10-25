@@ -1868,7 +1868,7 @@ def test_main_fails_when_the_scope_collected_nothing_at_all(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     # A typo'd scope path or a retired node id exits 5 with no FAILED lines; the
-    # record used to call that a measured 0 and hand it the why-0 slot.
+    # record must not call that a measured 0 and hand it the why-0 slot.
     _stub_run(monkeypatch, failed=(), code=5)
 
     code = prove_failability.main(
@@ -3025,10 +3025,10 @@ def test_an_only_run_labels_its_report_a_partial_record_at_both_ends_and_in_the_
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    # The fail-open this closes: `--only 3 --output` used to emit a block textually
-    # identical to a complete run's, so a record covering one boundary of twenty could
-    # be pasted into a subsection that requires one entry per new boundary, and a
-    # reader of the record - who never sees the command line - had nothing to notice.
+    # The fail-open this guards: a `--only 3 --output` block textually identical to a
+    # complete run's would let a record covering one boundary of twenty be pasted into
+    # a subsection that requires one entry per new boundary, and a reader of the
+    # record - who never sees the command line - would have nothing to notice.
     _four_failing_rows(monkeypatch)
     output = tmp_path / "proofs.md"
 
@@ -4436,7 +4436,7 @@ def test_workspace_accepts_the_copy_and_requires_observed_provenance(
 
 
 @pytest.mark.usefixtures("fake_repo")
-def test_an_original_shape_manifest_reads_and_grades_exactly_as_before(
+def test_an_original_shape_manifest_reads_and_grades_with_the_default_fields(
     scratch_root: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

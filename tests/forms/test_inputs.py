@@ -597,8 +597,8 @@ def test_column_backed_null_boolean_is_optional() -> None:
     model-less one: a ``ModelForm`` field whose backing column resolves still
     routes through the shared ``form_field_required`` helper, so a Django
     ``required=True`` ``NullBooleanField`` over a column widens to ``| None`` +
-    ``UNSET`` rather than compiling a required field (the pre-fix column-backed
-    path used raw ``field.required`` and emitted it required).
+    ``UNSET`` rather than compiling a required field from the raw
+    ``field.required``.
     ``scalars.NullableScalarSpecimen.flag`` is the nullable carrier.
     """
 

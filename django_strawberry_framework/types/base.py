@@ -1551,8 +1551,9 @@ def _validate_optimizer_hints(
             shape-checked by ``_meta_optimizer_hints`` inside
             ``_validate_meta``). Empty dict short-circuits.
         fields: The Meta-filtered list of Django field objects produced
-            by ``_select_fields``. Used to derive the selected relation
-            field names so excluded or scalar fields with hints raise.
+            by ``_select_fields``. The selected relation field names
+            are derived from it, so excluded or scalar fields with
+            hints raise.
         model: The Django model whose ``_meta.get_fields()`` defines the
             valid hint key surface. Threaded from the validated
             ``Meta.model`` so the empty-``fields`` shape (e.g. ``Meta.exclude`` covering every
@@ -2063,8 +2064,8 @@ def _build_annotations(
             ``convert_scalar``) so generated choice enums carry a stable
             name).
         fields: The Meta-filtered list of Django field objects.
-        source_model: The Django model the type wraps. Used to resolve the
-            primary-key name when ``relay.Node`` suppression is active.
+        source_model: The Django model the type wraps. The primary-key name
+            is resolved from it when ``relay.Node`` suppression is active.
         consumer_authored_fields: Names of fields whose annotation /
             ``StrawberryField`` assignment is owned by the consumer. The
             synthesized annotation is skipped for these names so consumer
@@ -2179,7 +2180,7 @@ def _build_annotations(
             # every other column to ``convert_scalar`` unchanged. A
             # ``required_overrides`` (``force_nullable=False``) entry is the
             # opt-in for a stronger non-empty invariant. The ``force_nullable`` tri-state
-            # computed above is threaded through exactly as before; a consumer
+            # computed above is passed through unchanged; a consumer
             # ``attachment: str`` override is already skipped by the
             # ``consumer_authored_fields`` short-circuit above, so it receives
             # no generated object type (spec-037 Decision 3 / Decision 4).
