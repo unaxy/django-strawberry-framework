@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 299 done, 209 to do.
+Progress: 300 done, 208 to do.
 
 ## Done
 
@@ -1569,6 +1569,13 @@ Progress: 299 done, 209 to do.
   rows whose id starts `a-`, and equality and plain `fnmatch` stay first, so every pattern that matched still
   matches (a character class such as `test_[ab]` included; an exhaustive parent-vs-change grid lost no pair).
   `isolates` stays equality only. Rows in `tests/test_prove_failability.py`; the module and function docstrings
+- [x] 557. Not a defect (AGENTS defect rule; GOAL "Trust boundary": application Python is trusted). The package
+  never iterates a queryset with a named cursor (`rg '\.iterator\(|aiterator\(' django_strawberry_framework` finds
+  nothing), so every query it evaluates binds the way `utils/errors.py::unbindable_temporal` reads the connection
+  (server-side under a consumer `OPTIONS["cursor_factory"]` that is not a `ClientCursor`), and a filter value at an
+  offset of 16:00 or more filters there as the README says. Only consumer code that takes a package-filtered
+  queryset and calls `QuerySet.iterator()` under such a cursor factory gets Django's client-bound named cursor and
+  the server's refusal, which is that code's own choice of cursor. No code.
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1723,11 +1730,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 543. (robustness) `utils/errors.py` and `types/converters.py::array_element_field` each soft-import
   `django.contrib.postgres`'s `ArrayField` and unwrap `base_field` their own way; one owner would keep the two
   in step. Found fixing 381
-- [ ] 557. (robustness) With a consumer `OPTIONS["cursor_factory"]` that binds on the server (psycopg's own `Cursor`)
-  and no `server_side_binding`, Django's named cursors (`QuerySet.iterator()`) still bind on the client, while
-  `utils/errors.py::unbindable_temporal` reads the connection as server-side; the package never iterates, so only
-  consumer code iterating such a queryset sees the masked error for a datetime at an offset of 16:00 or more. Found
-  verifying 382
 - [ ] 591. A `DecimalField` with no `max_digits` (Django 6.1) on PostgreSQL lets an identity or filter value past
   numeric's format (`"1e1000000"`) reach the bind and raise a masked `DataError`: the storage-domain check has no
   precision to hold it to and Django exposes no numeric-format bound; probe the filter `exact` path too. Found
