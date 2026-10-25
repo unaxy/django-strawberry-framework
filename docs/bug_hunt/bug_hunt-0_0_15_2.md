@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 288 done, 207 to do.
+Progress: 289 done, 207 to do.
 
 ## Done
 
@@ -1460,6 +1460,17 @@ Progress: 288 done, 207 to do.
   error instead of being truncated. `utils/widgets.py` owns which keys a widget reads for filters and forms
   (`multi_widget_keys` moved there unchanged; Django 5.2.16 to 6.1.2 audited). Live rows through a fakeshop scalars
   split-datetime form, package rows on PostgreSQL; README, GLOSSARY and spec-038 say so
+- [x] 507. not a defect: spec-027's integer-range promise names the package's `RangeFilter` and `ListFilter` (and the
+  generated `IntegerRangeFilter` / `IntegerInFilter`), README keeps a filter you declare yourself on django-filter's
+  own rules, and `FilterSet._apply_flat_leaves` runs a declared django-filter class byte-for-byte, so django-filter's
+  `RangeFilter`, a `BaseRangeFilter` or `BaseInFilter` over `NumberFilter` on a `BigIntegerField` /
+  `PositiveBigIntegerField` column (the only columns whose `BigInt` input carries a value past int64) answers a
+  two-bound range or a member past int64 as Django and plain django-filter answer it: a masked `OverflowError` on
+  SQLite and on PostgreSQL under server-side binding, the right rows under psycopg 3 client-side binding; a lone bound
+  and `exact` / `gt` / `lt` are right everywhere. spec-027's `RangeFilter` row claimed django-filter's bounds are
+  cleaned by the column's `gte` field and held to its `1e50` cap; it now scopes that to the package's class and states
+  django-filter's own `RangeField` cleaning. Whether to hold declared django-filter range / `in` classes to the
+  backend's integer range is Waiting row 622
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1626,11 +1637,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   whose form sets no initial silently writes a value made from the stored list where that field accepts the list (a
   `CharField` stores its text, `["['x']"]`; a `BooleanField` stores its truthiness, `[True]` over `[False]`) instead of
   refusing; the build warning and the docs say so; say whether the package should refuse it. Found verifying 423
-- [ ] 507. A consumer-declared `django_filters.RangeFilter` or `NumberInFilter` under a package FilterSet on a
-  BigInteger column passes a bound or member past int64 to `BETWEEN` / `IN`, and SQLite raises a masked
-  `OverflowError`: upstream `RangeFilter.filter` sets `lookup_expr="range"` at filter time and its bounds are plain
-  `DecimalField`s, so the package's `RangeFilter` / `ListFilter` fix does not reach it; spec-027's RangeFilter row
-  covers "the package's or django-filter's". Found verifying 372
 - [ ] 508. A package `RangeFilter` declared without `lookup_expr="range"` applies its default `exact` to the
   two-element list when both bounds are sent, a masked error even for in-range bounds. Found verifying 372
 - [ ] 510. A declared `RangeFilter` / `ListFilter` whose `field_name` is `pk` or `<relation>__pk` is published as
@@ -1767,6 +1773,16 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 622. Decide whether a declared django-filter range / `in` class (`django_filters.RangeFilter`, a
+  `BaseRangeFilter` or `BaseInFilter` over `NumberFilter`) on an integer column is held to the backend's integer
+  range. Today it answers as plain django-filter: a two-bound range or a member past int64 on a `BigIntegerField` is a
+  masked `OverflowError` on SQLite and under PostgreSQL server-side binding, and the right rows under psycopg 3
+  client-side binding, while the package's `RangeFilter` / `ListFilter` widen, match nothing or drop the member (372).
+  Options: refuse it with `FILTER_INVALID` at the `FilterSet._unbindable_temporal_errors` seam, which already reads
+  every declared filter's cleaned value (backend-independent, so it narrows what PostgreSQL client-side answers
+  today); or document django-filter's behaviour and name the package's `RangeFilter` / `ListFilter` as the remedy.
+  Rewriting the declared filter's own `filter()` call would bypass a consumer subclass and its `exclude` / `distinct`.
+  Found fixing 507
 - [ ] 578. CHANGELOG entry for item 553: a `DjangoModelFormMutation` field whose widget reads several keys is bound
   under them: a `SplitArrayField` over an `ArrayField` and a `SplitDateTimeField` over a `DateTimeField` now write the
   value sent (they answered "This field is required.", or an optional `SplitArrayField` wrote `[]` and an update
