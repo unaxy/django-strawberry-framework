@@ -28,6 +28,8 @@ import pytest
 import strawberry
 from apps.library import models
 from apps.scalars import models as scalar_models
+from django.contrib.contenttypes.fields import GenericForeignKey
+from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator
 from django.db import DEFAULT_DB_ALIAS
@@ -38,6 +40,7 @@ from django.db.models.expressions import Combinable
 from django.forms import CharField, DecimalField, Field, Form
 from django.http import HttpRequest, QueryDict
 from django.test import override_settings
+from django.test.utils import isolate_apps
 from django_filters import BaseInFilter, CharFilter
 from django_filters.rest_framework import DjangoFilterBackend
 from graphql import GraphQLError
@@ -86,6 +89,7 @@ from django_strawberry_framework.filters.base import (
     resolve_globalid_target_definition,
 )
 from django_strawberry_framework.filters.factories import FilterArgumentsFactory
+from django_strawberry_framework.filters.inputs import convert_filter_to_input_annotation
 from django_strawberry_framework.orders import OrderSet
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.types import converters
@@ -1067,6 +1071,620 @@ def test_relation_pk_filters_match_a_key_the_target_validator_refuses(
     assert sorted(saved_pk(row.key) for row in result) == keys
 
 
+class _DecimalKeyed(db_models.Model):
+    """A row keyed by a decimal column."""
+
+    code: db_models.DecimalField[Decimal | float | int | str | Combinable, Decimal] = (
+        db_models.DecimalField(primary_key=True, max_digits=6, decimal_places=2)
+    )
+
+    class Meta:
+        managed = False
+        app_label = "test_pk_alias_columns"
+
+
+class _DecimalKeyedHolder(db_models.Model):
+    """A row keyed to a ``_DecimalKeyed``."""
+
+    owner: db_models.ForeignKey[_DecimalKeyed | Combinable, _DecimalKeyed] = db_models.ForeignKey(
+        _DecimalKeyed,
+        on_delete=db_models.CASCADE,
+        related_name="+",
+    )
+
+    class Meta:
+        managed = False
+        app_label = "test_pk_alias_columns"
+
+
+class _UuidKeyed(db_models.Model):
+    """A row keyed by a UUID column."""
+
+    code: db_models.UUIDField[str | uuid.UUID | Combinable, uuid.UUID] = db_models.UUIDField(
+        primary_key=True,
+    )
+
+    class Meta:
+        managed = False
+        app_label = "test_pk_alias_columns"
+
+
+class _UuidKeyedProfile(db_models.Model):
+    """A row whose primary key is a one-to-one key into a ``_UuidKeyed``."""
+
+    owner: db_models.OneToOneField[_UuidKeyed | Combinable, _UuidKeyed] = db_models.OneToOneField(
+        _UuidKeyed,
+        on_delete=db_models.CASCADE,
+        primary_key=True,
+        related_name="+",
+    )
+    # Key column Django adds beside ``owner``, declared for the type checker.
+    owner_id: uuid.UUID
+
+    class Meta:
+        managed = False
+        app_label = "test_pk_alias_columns"
+
+
+class _CompositeKeyed(db_models.Model):
+    """A row keyed by a composite primary key, which Django names ``pk``."""
+
+    pk: db_models.CompositePrimaryKey = db_models.CompositePrimaryKey("left", "right")
+    left: db_models.IntegerField[float | int | str | Combinable, int] = db_models.IntegerField()
+    right: db_models.IntegerField[float | int | str | Combinable, int] = db_models.IntegerField()
+
+    class Meta:
+        managed = False
+        app_label = "test_pk_alias_columns"
+
+
+def _pk_alias_set(model: type[Model], **filters: django_filters.Filter) -> type[FilterSet]:
+    """Build a ``FilterSet`` over ``model`` declaring ``filters`` and generating nothing."""
+    meta = type("Meta", (), {"model": model, "fields": ()})
+    return type(f"{model.__name__}PkAliasSet", (FilterSet,), {"Meta": meta, **filters})
+
+
+def _declared_leaf_field(model: type[Model], field_name: str) -> ModelField | None:
+    """Resolve a declared ``ListFilter`` over ``field_name`` on a ``FilterSet`` over ``model``."""
+    filterset = _pk_alias_set(model, leaf=ListFilter(field_name=field_name, lookup_expr="in"))
+    return _filterset_model_field(filterset, filterset.base_filters["leaf"])
+
+
+@pytest.mark.parametrize(
+    (
+        "model",
+        "field_name",
+        "owner",
+        "column",
+    ),
+    [
+        pytest.param(models.Shelf, "pk", models.Shelf, "id", id="integer-pk"),
+        pytest.param(models.Shelf, "branch__pk", models.Branch, "id", id="relation-pk"),
+        pytest.param(models.LendingDesk, "pk", models.Venue, "id", id="mti-child-pk"),
+        pytest.param(models.SelfServeDesk, "pk", models.Venue, "id", id="mti-grandchild-pk"),
+        pytest.param(models.PatronProfile, "pk", models.Patron, "id", id="one-to-one-pk"),
+        pytest.param(models.KioskFault, "kiosk__pk", models.Venue, "id", id="relation-mti-pk"),
+        pytest.param(models.Annotation, "profile__pk", models.Patron, "id", id="relation-o2o-pk"),
+        pytest.param(models.PatronProfile, "pk__name", models.Patron, "name", id="mid-path-pk"),
+        pytest.param(
+            models.KioskFault,
+            "kiosk__pk__name",
+            models.Venue,
+            "name",
+            id="mid-path-relation-pk",
+        ),
+        pytest.param(models.Edition, "pk", models.Edition, "isbn_13", id="text-pk"),
+        pytest.param(_DecimalKeyed, "pk", _DecimalKeyed, "code", id="decimal-pk"),
+        pytest.param(_DecimalKeyedHolder, "owner__pk", _DecimalKeyed, "code", id="decimal-rel-pk"),
+        pytest.param(_UuidKeyed, "pk", _UuidKeyed, "code", id="uuid-pk"),
+        pytest.param(_UuidKeyedProfile, "pk", _UuidKeyed, "code", id="uuid-one-to-one-pk"),
+        pytest.param(_CompositeKeyed, "pk", _CompositeKeyed, "pk", id="composite-pk"),
+        pytest.param(models.LendingDesk, "venue_ptr", models.LendingDesk, "venue_ptr", id="link"),
+        pytest.param(models.PatronProfile, "patron", models.PatronProfile, "patron", id="key"),
+    ],
+)
+def test_filterset_model_field_reads_pk_as_the_column_its_key_stores(
+    model: type[Model],
+    field_name: str,
+    owner: type[Model],
+    column: str,
+) -> None:
+    """A path ending on ``pk`` answers the column the key stores; a named relation stays itself.
+
+    Django's ``pk`` alias resolves at any segment, and a relation-valued key (a
+    multi-table-inheritance parent link, at one or two levels, or a one-to-one primary
+    key) is followed to the column it stores, so every consumer types, cleans and
+    range-checks ``pk`` as that column. A composite primary key is itself. A relation
+    named by its own name (``venue_ptr``, ``patron``) is the relation.
+    """
+    assert _declared_leaf_field(model, field_name) is owner._meta.get_field(column)
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "pk__nope",
+        "nope",
+        "branch__nope",
+        "code__pk",
+    ],
+)
+def test_filterset_model_field_is_none_for_a_path_naming_no_field(field_name: str) -> None:
+    """A path naming no field, ``pk`` alias included, is ``None``."""
+    assert _declared_leaf_field(models.Shelf, field_name) is None
+
+
+@isolate_apps("apps.library")
+def test_filterset_model_field_keeps_django_filters_answer_on_a_path_the_walk_refuses() -> None:
+    """A path the package walk refuses keeps django-filter's answer for it.
+
+    A forward ``GenericForeignKey`` is the field itself (the input converter then refuses
+    it at build), and a relation still an unresolved lazy string is django-filter's
+    ``RuntimeError`` naming the app registry, never ``None``.
+    """
+
+    class _Tag(db_models.Model):
+        content_type: db_models.ForeignKey[ContentType | Combinable, ContentType] = (
+            db_models.ForeignKey(ContentType, on_delete=db_models.CASCADE, related_name="+")
+        )
+        object_id: db_models.IntegerField[float | int | str | Combinable, int] = (
+            db_models.IntegerField()
+        )
+        content_object: GenericForeignKey = GenericForeignKey("content_type", "object_id")
+        unresolved: db_models.ForeignKey[Model | Combinable, Model] = db_models.ForeignKey(
+            "library.NoSuchModel",
+            on_delete=db_models.CASCADE,
+            related_name="+",
+        )
+
+        class Meta:
+            app_label = "library"
+
+    assert _declared_leaf_field(_Tag, "content_object") is _Tag._meta.get_field("content_object")
+    with pytest.raises(RuntimeError, match="apps registry not populated"):
+        _ = _declared_leaf_field(_Tag, "unresolved")
+
+
+@pytest.mark.parametrize(
+    ("model", "leaf", "annotation"),
+    [
+        pytest.param(
+            _DecimalKeyed,
+            ListFilter(field_name="pk", lookup_expr="in"),
+            list[Decimal] | None,
+            id="decimal-list",
+        ),
+        pytest.param(
+            _DecimalKeyedHolder,
+            ListFilter(field_name="owner__pk", lookup_expr="in"),
+            list[Decimal] | None,
+            id="decimal-relation-pk-list",
+        ),
+        pytest.param(
+            _UuidKeyed,
+            ListFilter(field_name="pk", lookup_expr="in"),
+            list[uuid.UUID] | None,
+            id="uuid-list",
+        ),
+        pytest.param(
+            _UuidKeyedProfile,
+            ListFilter(field_name="pk", lookup_expr="in"),
+            list[uuid.UUID] | None,
+            id="uuid-one-to-one-pk-list",
+        ),
+        pytest.param(_UuidKeyed, CharFilter(field_name="pk"), uuid.UUID | None, id="uuid-char"),
+        pytest.param(
+            models.Shelf,
+            IntegerInFilter(field_name="pk", lookup_expr="in"),
+            list[int] | None,
+            id="integer-in",
+        ),
+        pytest.param(
+            models.KioskFault,
+            ListFilter(field_name="kiosk__pk", lookup_expr="in"),
+            list[int] | None,
+            id="relation-into-parent-link-pk-list",
+        ),
+    ],
+)
+def test_declared_pk_leaf_is_typed_by_the_column_its_key_stores(
+    model: type[Model],
+    leaf: django_filters.Filter,
+    annotation: object,
+) -> None:
+    """A declared leaf over ``pk`` / ``<relation>__pk`` takes the scalar of the column it names.
+
+    The same scalar a leaf naming that column directly takes (``Decimal``, ``UUID``,
+    ``Int``), never ``String`` or the ``NumberFilter`` form's ``Decimal``. Package-only:
+    fakeshop has no decimal primary key, and its one UUID key (the kanban ``Uuid.id``) is
+    reached only by the board's own filtersets, which declare no filter over it; the integer
+    rows live are in ``test_library_api.py::test_declared_pk_leaf_publishes_the_primary_key_column_scalar``.
+    """
+    filterset = _pk_alias_set(model, leaf=leaf)
+    bound_leaf = filterset.base_filters["leaf"]
+    model_field = _filterset_model_field(filterset, bound_leaf)
+
+    assert (
+        convert_filter_to_input_annotation(bound_leaf, model_field, None, filterset) == annotation
+    )
+
+
+def test_declared_pk_leaf_over_a_composite_primary_key_is_refused_at_build() -> None:
+    """A declared leaf over a composite primary key named ``pk`` is the unsupported-field error."""
+    filterset = _pk_alias_set(_CompositeKeyed, leaf=ListFilter(field_name="pk", lookup_expr="in"))
+    bound_leaf = filterset.base_filters["leaf"]
+    model_field = _filterset_model_field(filterset, bound_leaf)
+
+    with pytest.raises(ConfigurationError, match="Unsupported Django field type"):
+        _ = convert_filter_to_input_annotation(bound_leaf, model_field, None, filterset)
+
+
+@pytest.mark.parametrize(
+    ("model", "data", "message"),
+    [
+        pytest.param(
+            _DecimalKeyed,
+            {"pk_span_0": "NaN", "pk_span_1": "Infinity"},
+            {"pk_span": ["Enter a number."]},
+            id="decimal-range",
+        ),
+        pytest.param(
+            _DecimalKeyed,
+            {"pk_among": ["1.5", "NaN"]},
+            {"pk_among": ["Enter a number."]},
+            id="decimal-list",
+        ),
+        pytest.param(
+            _UuidKeyed,
+            {"pk_span_0": "not-a-uuid", "pk_span_1": ""},
+            {"pk_span": ["Enter a valid UUID."]},
+            id="uuid-range",
+        ),
+        pytest.param(
+            _UuidKeyed,
+            {"pk_among": ["not-a-uuid"]},
+            {"pk_among": ["Enter a valid UUID."]},
+            id="uuid-list",
+        ),
+        pytest.param(
+            _UuidKeyedProfile,
+            {"pk_among": ["not-a-uuid"]},
+            {"pk_among": ["Enter a valid UUID."]},
+            id="uuid-one-to-one-pk-list",
+        ),
+        pytest.param(
+            models.LendingDesk,
+            {"pk_span_0": "abc", "pk_span_1": "2"},
+            {"pk_span": ["Enter a number."]},
+            id="mti-child-pk-range",
+        ),
+        pytest.param(
+            models.PatronProfile,
+            {"pk_among": ["abc"]},
+            {"pk_among": ["Enter a number."]},
+            id="one-to-one-pk-list",
+        ),
+    ],
+)
+def test_declared_pk_value_the_key_column_cannot_hold_is_a_form_error(
+    model: type[Model],
+    data: dict[str, object],
+    message: dict[str, list[str]],
+) -> None:
+    """A ``pk`` bound or element the key column cannot hold is the form's error.
+
+    Each is cleaned by the column's own ``gte`` form field, as a leaf naming the column
+    is, so a non-finite decimal, a malformed UUID or a non-number never reaches the ORM,
+    where it would raise a masked ``ValidationError`` / ``ValueError``.
+    """
+    filterset_class = _pk_alias_set(
+        model,
+        pk_span=RangeFilter(field_name="pk", lookup_expr="range"),
+        pk_among=ListFilter(field_name="pk", lookup_expr="in"),
+    )
+    filterset = filterset_class(data=data, queryset=model._default_manager.none())
+
+    assert not filterset.is_valid()
+    assert filterset.errors == message
+
+
+def _declared_pk_filter(model: type[Model], leaf: django_filters.Filter) -> django_filters.Filter:
+    """Return ``leaf`` bound to a per-request ``FilterSet`` over ``model``."""
+    filterset_class = _pk_alias_set(model, leaf=leaf)
+    return filterset_class(data={}, queryset=model._default_manager.none()).filters["leaf"]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("leaf", "value"),
+    [
+        pytest.param(
+            RangeFilter(field_name="pk", lookup_expr="range"),
+            ["first", 2**70],
+            id="range-past-the-column",
+        ),
+        pytest.param(
+            ListFilter(field_name="pk", lookup_expr="in"),
+            ["first", 2**70],
+            id="list-member-past-the-column",
+        ),
+        pytest.param(
+            IntegerInFilter(field_name="pk", lookup_expr="in"),
+            ["first", 2**70],
+            id="integer-in-member-past-the-column",
+        ),
+        pytest.param(
+            RangeFilter(field_name="branch__pk", lookup_expr="range"),
+            ["branch", 2**70],
+            id="relation-pk-range-past-the-column",
+        ),
+    ],
+)
+def test_declared_integer_pk_value_past_the_column_never_reaches_the_backend(
+    leaf: django_filters.Filter,
+    value: list[object],
+) -> None:
+    """An integer ``pk`` bound or member past the column's range applies the integer rules.
+
+    A two-bound range applies its bounds as ``gte`` + ``lte`` and an ``in`` drops a member
+    no row can hold, as on the ``id`` spelling, so a value past signed 64 bits never binds
+    raw (SQLite's ``OverflowError``). Package-only: GraphQL ``Int`` refuses such a value
+    before the filter runs.
+    """
+    lower_branch = models.Branch.objects.create(name="LowerPastRangeBranch", city="Boston")
+    _ = models.Shelf.objects.create(code="PR-0", branch=lower_branch)
+    branch = models.Branch.objects.create(name="PastRangeBranch", city="Boston")
+    shelf = models.Shelf.objects.create(code="PR-1", branch=branch)
+    named = {"first": saved_pk(shelf), "branch": saved_pk(branch)}
+    queryset = models.Shelf.objects.all()
+
+    bound = _declared_pk_filter(models.Shelf, leaf)
+    result: QuerySet[models.Shelf] = bound.filter(
+        queryset,
+        [named.get(member, member) if isinstance(member, str) else member for member in value],
+    )
+
+    assert [row.code for row in result] == ["PR-1"]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("model", [models.LendingDesk, models.SelfServeDesk])
+def test_declared_two_bound_range_over_an_integer_parent_link_pk_answers_rows(
+    model: type[models.LendingDesk],
+) -> None:
+    """A two-bound range over a multi-table-inheritance child's ``pk`` answers its rows.
+
+    The key is the parent link, which Django has no ``range`` lookup for; it stores
+    ``Venue.id``, an integer column, so the range applies as ``gte`` + ``lte``.
+    Package-only: ``LendingDeskFilter`` / ``SelfServeDeskFilter`` are bound to their types,
+    but no root or nested field publishes a ``filter:`` argument for them
+    (``allLibraryLendingDesks`` / ``allLibrarySelfServeDesks`` take ``offset``, ``limit``
+    and ``orderBy`` only).
+    """
+    extra = {"kiosk_code": "K"} if model is models.SelfServeDesk else {}
+    pks = [saved_pk(model.objects.create(name=name, **extra)) for name in ("D-1", "D-2", "D-3")]
+
+    bound = _declared_pk_filter(model, RangeFilter(field_name="pk", lookup_expr="range"))
+    result: QuerySet[models.LendingDesk] = bound.filter(model.objects.all(), [pks[0], pks[1]])
+
+    assert sorted(desk.name for desk in result) == ["D-1", "D-2"]
+
+
+@pytest.mark.django_db
+def test_declared_two_bound_range_over_a_relation_into_a_parent_link_pk_answers_rows() -> None:
+    """A two-bound range over ``kiosk__pk`` compares the ``Venue.id`` the kiosk key stores.
+
+    ``KioskFault.kiosk`` targets a self-serve desk, whose key is a parent link two links
+    above ``Venue.id``; the range applies as ``gte`` + ``lte`` on the fault's own column.
+    """
+    kiosks = [
+        models.SelfServeDesk.objects.create(name=name, kiosk_code="K") for name in ("A", "B", "C")
+    ]
+    for kiosk in kiosks:
+        _ = models.KioskFault.objects.create(kiosk=kiosk, note=f"fault-{kiosk.name}")
+    pks = [saved_pk(kiosk) for kiosk in kiosks]
+
+    bound = _declared_pk_filter(
+        models.KioskFault,
+        RangeFilter(field_name="kiosk__pk", lookup_expr="range"),
+    )
+    result: QuerySet[models.KioskFault] = bound.filter(
+        models.KioskFault.objects.all(),
+        [pks[1], pks[2]],
+    )
+
+    assert sorted(fault.note for fault in result) == ["fault-B", "fault-C"]
+
+
+@pytest.mark.parametrize(
+    ("model", "leaf"),
+    [
+        pytest.param(
+            models.PatronProfile,
+            RangeFilter(field_name="patron", lookup_expr="range"),
+            id="one-to-one-key-range",
+        ),
+        pytest.param(
+            models.LendingDesk,
+            ListFilter(field_name="venue_ptr", lookup_expr="in"),
+            id="parent-link-list",
+        ),
+        pytest.param(
+            models.KioskFault,
+            RangeFilter(field_name="kiosk", lookup_expr="range"),
+            id="key-into-parent-link-range",
+        ),
+    ],
+)
+def test_declared_range_or_list_naming_a_relation_valued_key_by_name_is_refused_at_build(
+    model: type[Model],
+    leaf: django_filters.Filter,
+) -> None:
+    """A declared range or list naming a relation itself stays the build-time refusal.
+
+    Only a path ending on ``pk`` reads the column a key stores; ``patron``, ``venue_ptr``
+    and ``kiosk`` name the relation, which no input scalar types.
+    """
+    filterset = _pk_alias_set(model, leaf=leaf)
+    bound_leaf = filterset.base_filters["leaf"]
+    model_field = _filterset_model_field(filterset, bound_leaf)
+
+    with pytest.raises(ConfigurationError, match="Unsupported Django field type"):
+        _ = convert_filter_to_input_annotation(bound_leaf, model_field, None, filterset)
+
+
+class _BigKeyed(db_models.Model):
+    """A row keyed by a signed 64-bit column."""
+
+    code: db_models.BigIntegerField[float | int | str | Combinable, int] = (
+        db_models.BigIntegerField(primary_key=True)
+    )
+
+    class Meta:
+        managed = False
+        app_label = "test_pk_alias_columns"
+
+
+class _BigKeyedProfile(db_models.Model):
+    """A row whose primary key is a one-to-one key into a ``_BigKeyed``."""
+
+    owner: db_models.OneToOneField[_BigKeyed | Combinable, _BigKeyed] = db_models.OneToOneField(
+        _BigKeyed,
+        on_delete=db_models.CASCADE,
+        primary_key=True,
+        related_name="+",
+    )
+    label: db_models.TextField[str | Combinable, str] = db_models.TextField()
+
+    class Meta:
+        managed = False
+        app_label = "test_pk_alias_columns"
+
+
+@pytest.fixture
+def big_keyed_profiles() -> Generator[QuerySet[_BigKeyedProfile], None, None]:
+    """Real tables: profiles ``low`` and ``high`` keyed to codes 5 and 12."""
+    with db_connection.schema_editor() as editor:
+        editor.create_model(_BigKeyed)
+        editor.create_model(_BigKeyedProfile)
+    try:
+        for code, label in ((5, "low"), (12, "high")):
+            _ = _BigKeyedProfile.objects.create(
+                owner=_BigKeyed.objects.create(code=code),
+                label=label,
+            )
+        yield _BigKeyedProfile.objects.order_by("label")
+    finally:
+        with db_connection.schema_editor() as editor:
+            editor.delete_model(_BigKeyedProfile)
+            editor.delete_model(_BigKeyed)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("leaf", "value", "labels"),
+    [
+        pytest.param(RangeFilter(lookup_expr="range"), [6, 2**70], ["high"], id="two-bound"),
+        pytest.param(RangeFilter(lookup_expr="range"), [2**70, None], [], id="start-only"),
+        pytest.param(
+            RangeFilter(lookup_expr="range"),
+            [None, 2**70],
+            ["high", "low"],
+            id="end-only",
+        ),
+        pytest.param(RangeFilter(lookup_expr="range"), [-(2**70), 5], ["low"], id="low-start"),
+        pytest.param(ListFilter(lookup_expr="in"), [12, 2**70], ["high"], id="list"),
+        pytest.param(IntegerInFilter(lookup_expr="in"), [5, 2**70], ["low"], id="integer-in"),
+    ],
+)
+def test_declared_pk_bound_past_a_one_to_one_keys_column_answers_what_the_column_answers(
+    big_keyed_profiles: QuerySet[_BigKeyedProfile],
+    leaf: django_filters.Filter,
+    value: list[object],
+    labels: list[str],
+) -> None:
+    """A ``pk`` bound past the 64-bit column a one-to-one key stores answers as the column does.
+
+    The bounds apply to the stored column (``pk__code``), whose integer lookups read a
+    value past its range as widening or matching nothing, never to the relation, whose
+    lookups would bind it raw (SQLite's ``OverflowError``). Each answer equals the same
+    filter declared over the column's own path, ``owner__code``. Package-only: fakeshop has no
+    one-to-one key into a 64-bit primary key.
+    """
+    answers: list[list[str]] = []
+    for field_name in ("pk", "owner__code"):
+        declared = copy.deepcopy(leaf)
+        declared.field_name = field_name
+        bound = _declared_pk_filter(_BigKeyedProfile, declared)
+        result: QuerySet[_BigKeyedProfile] = bound.filter(big_keyed_profiles, value)
+        answers.append([row.label for row in result])
+
+    assert answers == [labels, labels]
+
+
+@pytest.fixture
+def uuid_keyed_profiles() -> Generator[QuerySet[_UuidKeyedProfile], None, None]:
+    """Real tables: profiles keyed to the UUIDs with integer values 1, 2 and 3."""
+    with db_connection.schema_editor() as editor:
+        editor.create_model(_UuidKeyed)
+        editor.create_model(_UuidKeyedProfile)
+    try:
+        for value in (1, 2, 3):
+            _ = _UuidKeyedProfile.objects.create(
+                owner=_UuidKeyed.objects.create(code=uuid.UUID(int=value)),
+            )
+        yield _UuidKeyedProfile.objects.order_by("owner_id")
+    finally:
+        with db_connection.schema_editor() as editor:
+            editor.delete_model(_UuidKeyedProfile)
+            editor.delete_model(_UuidKeyed)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    (
+        "low",
+        "high",
+        "exclude",
+        "kept",
+    ),
+    [
+        pytest.param(1, 2, False, [1, 2], id="lower-pair"),
+        pytest.param(2, 3, False, [2, 3], id="upper-pair"),
+        pytest.param(1, 3, False, [1, 2, 3], id="every-row"),
+        pytest.param(1, 2, True, [3], id="excluded"),
+    ],
+)
+def test_declared_two_bound_range_over_a_uuid_parent_link_pk_ranges_the_stored_column(
+    uuid_keyed_profiles: QuerySet[_UuidKeyedProfile],
+    low: int,
+    high: int,
+    exclude: bool,  # noqa: FBT001 - a parametrized flag
+    kept: list[int],
+) -> None:
+    """A two-bound range over a one-to-one primary key storing a UUID ranges that column.
+
+    The column is not an integer, so the integer ``gte`` + ``lte`` rule does not apply;
+    the ``range`` names the stored column's path (``pk__code``), where Django refuses
+    ``range`` on the relation itself, and ``exclude`` negates it. It answers what the same
+    filter declared over the column's own path, ``owner__code``, answers.
+    """
+    expected = [uuid.UUID(int=value) for value in kept]
+    answers: list[list[uuid.UUID]] = []
+    for field_name in ("pk", "owner__code"):
+        bound = _declared_pk_filter(
+            _UuidKeyedProfile,
+            RangeFilter(field_name=field_name, lookup_expr="range", exclude=exclude),
+        )
+        result: QuerySet[_UuidKeyedProfile] = bound.filter(
+            uuid_keyed_profiles,
+            [uuid.UUID(int=low), uuid.UUID(int=high)],
+        )
+        answers.append([row.owner_id for row in result])
+
+    assert answers == [expected, expected]
+
+
 @pytest.mark.parametrize(
     ("element_field", "value", "cleaned"),
     [
@@ -1413,8 +2031,8 @@ def test_filterset_model_field_returns_none_without_field_name() -> None:
 def test_filterset_model_field_returns_none_for_unknown_field_name() -> None:
     """A typo in ``Filter(field_name=...)`` surfaces as ``None``, not a crash.
 
-    Path resolution is ``django_filters.utils.get_model_field``; an unknown hop
-    returns ``None``.
+    Path resolution is the package's path classifier, which refuses an unknown hop;
+    django-filter's ``get_model_field`` answers that refused path with ``None``.
     """
     f = GlobalIDFilter(field_name="nonexistent_field")
     assert _filterset_model_field(ShelfFilter, f) is None
