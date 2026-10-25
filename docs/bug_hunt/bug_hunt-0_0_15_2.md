@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 286 done, 205 to do.
+Progress: 287 done, 204 to do.
 
 ## Done
 
@@ -1441,6 +1441,12 @@ Progress: 286 done, 205 to do.
   a top-level error"); no README, GLOSSARY or spec-039 row types the field or promises a field-keyed answer. Whether
   it should build at all, or carry a documented `validate_<field>` wrap as the form flavor's `clean_<field>` does, is
   Waiting row 45 (now with the Postgres evidence). The serializer's own empty-value and omitted-create gap is row 577
+- [x] 552. not a defect: the refusal is the converter's written fail-loud contract; spec-038 Decision 7 registers each
+  supported form-field class individually and "requires NOT registering a base-`forms.Field` catch-all", so a field
+  with no registered ancestor raises `ConfigurationError` naming the field and class
+  (`forms/converter.py::_unsupported_form_field`), and `SplitArrayField` subclasses `forms.Field` directly (Django
+  5.2.16 and 6.1.2 alike). graphene-django types it `String` only through the catch-all the package refuses. Whether a
+  column-less PostgreSQL form field should publish a type is Waiting row 576 (facts gathered fixing 551)
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1603,9 +1609,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   midnight at save with a `RuntimeWarning`; near year 1 or 9999 that projection can overflow past
   `unstorable_temporal`, which checks only `datetime` / `time` values, and answer the masked error; probe and say
   whether the check covers it. Found verifying 381
-- [ ] 552. (robustness) A `SplitArrayField` with no model column behind it fails at schema build with
-  `ConfigurationError` "Unsupported form field type 'SplitArrayField'": the converter has no row for this
-  `django.contrib.postgres` form field. Found implementing 423
 - [ ] 553. A `DjangoModelFormMutation` whose form declares a `SplitArrayField` over an `ArrayField` fails every create
   and update with "This field is required.": `SplitArrayWidget` reads `<name>_0` .. `<name>_N` from the form data while
   the package binds the list under `<name>`; probe and say whether the binding should feed the widget's keys. Found
