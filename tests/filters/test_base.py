@@ -1329,7 +1329,7 @@ class _HopKeyOwner(db_models.Model):
 class _DecimalHopKey(db_models.Model):
     """A decimal-keyed target ``_HopKeyOwner`` reaches by forward M2M, reverse FK and reverse M2M."""
 
-    code: db_models.DecimalField[Decimal | float | int | str | Combinable, Decimal] = (
+    code: db_models.DecimalField[str | float | Decimal | Combinable, Decimal] = (
         db_models.DecimalField(primary_key=True, max_digits=6, decimal_places=2)
     )
     visible: db_models.BooleanField[bool | Combinable, bool] = db_models.BooleanField()
@@ -1352,9 +1352,10 @@ class _DecimalHopKey(db_models.Model):
 class _StampHopKey(db_models.Model):
     """A datetime-keyed target ``_HopKeyOwner`` reaches by forward M2M, reverse FK and reverse M2M."""
 
-    code: db_models.DateTimeField[datetime.datetime | str | Combinable, datetime.datetime] = (
-        db_models.DateTimeField(primary_key=True)
-    )
+    code: db_models.DateTimeField[
+        str | datetime.datetime | datetime.date | Combinable,
+        datetime.datetime,
+    ] = db_models.DateTimeField(primary_key=True)
     visible: db_models.BooleanField[bool | Combinable, bool] = db_models.BooleanField()
     owner: db_models.ForeignKey[_HopKeyOwner | Combinable, _HopKeyOwner] = db_models.ForeignKey(
         _HopKeyOwner,
@@ -1375,7 +1376,7 @@ class _StampHopKey(db_models.Model):
 class _DecimalKeyParent(db_models.Model):
     """A row whose unique decimal ``code`` a ``_ParentDecimalHopKey`` primary key references."""
 
-    code: db_models.DecimalField[Decimal | float | int | str | Combinable, Decimal] = (
+    code: db_models.DecimalField[str | float | Decimal | Combinable, Decimal] = (
         db_models.DecimalField(unique=True, max_digits=6, decimal_places=2)
     )
 
@@ -1793,7 +1794,7 @@ def test_to_field_relation_key_coerces_through_the_target_primary_key(
 class _DecimalKeyed(db_models.Model):
     """A row keyed by a decimal column."""
 
-    code: db_models.DecimalField[Decimal | float | int | str | Combinable, Decimal] = (
+    code: db_models.DecimalField[str | float | Decimal | Combinable, Decimal] = (
         db_models.DecimalField(primary_key=True, max_digits=6, decimal_places=2)
     )
 
@@ -1819,7 +1820,7 @@ class _DecimalKeyedHolder(db_models.Model):
 class _UuidKeyed(db_models.Model):
     """A row keyed by a UUID column."""
 
-    code: db_models.UUIDField[str | uuid.UUID | Combinable, uuid.UUID] = db_models.UUIDField(
+    code: db_models.UUIDField[str | uuid.UUID, uuid.UUID] = db_models.UUIDField(
         primary_key=True,
     )
 
@@ -1848,7 +1849,7 @@ class _UuidKeyedProfile(db_models.Model):
 class _CompositeKeyed(db_models.Model):
     """A row keyed by a composite primary key, which Django names ``pk``."""
 
-    pk: db_models.CompositePrimaryKey = db_models.CompositePrimaryKey("left", "right")
+    pk = db_models.CompositePrimaryKey("left", "right")
     left: db_models.IntegerField[float | int | str | Combinable, int] = db_models.IntegerField()
     right: db_models.IntegerField[float | int | str | Combinable, int] = db_models.IntegerField()
 
@@ -1951,7 +1952,7 @@ def test_filterset_model_field_keeps_django_filters_answer_on_a_path_the_walk_re
         )
         content_object: GenericForeignKey = GenericForeignKey("content_type", "object_id")
         unresolved: db_models.ForeignKey[Model | Combinable, Model] = db_models.ForeignKey(
-            "library.NoSuchModel",
+            "unregistered.NoSuchModel",
             on_delete=db_models.CASCADE,
             related_name="+",
         )
