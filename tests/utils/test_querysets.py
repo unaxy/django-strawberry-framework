@@ -24,10 +24,12 @@ import threading
 import uuid
 import zoneinfo
 from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Iterable, Iterator
+from contextlib import contextmanager
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, NoReturn, TypeVar
 
+import django
 import django.db.models.query as django_query
 import pytest
 import pytest_django
@@ -66,6 +68,7 @@ from django.db import (
     transaction,
 )
 from django.db.backends.base.base import BaseDatabaseWrapper
+from django.db.backends.sqlite3.base import DatabaseWrapper as SQLiteDatabaseWrapper
 from django.db.models import (
     F,
     FilteredRelation,
@@ -521,14 +524,117 @@ def test_coerce_field_value_or_none_holds_a_decimal_to_the_column_value(
     assert (None if coerced is None else str(coerced)) == held
 
 
-def test_coerce_field_value_or_none_passes_a_decimal_without_precision_through() -> None:
-    """A ``DecimalField`` without ``max_digits`` has no storage domain to hold a value to."""
-    coerced = coerce_field_value_or_none(
-        _unbounded_decimal_column(),
-        "1e1000000",
-        alias=DEFAULT_DB_ALIAS,
+_PAST_UNCONSTRAINED_NUMERIC = (
+    pytest.param("1e1000000", id="huge-exponent"),
+    pytest.param("-1e1000000", id="negative-huge-exponent"),
+    pytest.param("1e-1000000", id="tiny-exponent"),
+    pytest.param("1E+131072", id="131073-integer-digits"),
+    pytest.param("1E-16384", id="16384-fraction-digits"),
+    pytest.param("9" * 131073, id="131073-nines"),
+    pytest.param("1." + "0" * 16384 + "1", id="16385-fraction-digits"),
+)
+
+_WITHIN_UNCONSTRAINED_NUMERIC = tuple(
+    pytest.param(sign + raw, sign + held, id=sign + name)
+    for sign in ("", "-")
+    for raw, held, name in (
+        ("1E+131071", "1E+131071", "131072-integer-digits"),
+        ("1E-16383", "1E-16383", "16383-fraction-digits"),
+        ("9" * 131072, "9" * 131072, "131072-nines"),
+        ("1.50", "1.50", "written-trailing-zero"),
+        ("1." + "0" * 16383, "1." + "0" * 16383, "16383-trailing-zeros"),
+        ("1.5" + "0" * 20000, "1.5", "trailing-zeros"),
+        ("0E+1000000", "0", "zero-huge-exponent"),
+        ("0E+1073741824", "0", "zero-past-exponent-limit"),
+        ("0E-16384", "0", "zero-tiny-exponent"),
+        (
+            "0.1234567890123456789012345678901234567891",
+            "0.1234567890123456789012345678901234567891",
+            "40-digit-fraction",
+        ),
+        (
+            "0.1234567890123456789012345678901234567891" + "0" * 16344,
+            "0.1234567890123456789012345678901234567891",
+            "40-digit-fraction-trailing-zeros",
+        ),
     )
-    assert coerced == Decimal("1e1000000")
+)
+
+
+@contextmanager
+def _unopened_alias(wrapper: Callable[[str], BaseDatabaseWrapper]) -> Generator[str, None, None]:
+    """Register the never-opened connection ``wrapper`` builds; it must stay unopened."""
+    alias = "unconstrained_numeric_stand_in"
+    connections[alias] = wrapper(alias)
+    try:
+        yield alias
+        assert read_attr(connections[alias], "connection") is None
+    finally:
+        del connections[alias]
+
+
+def _postgresql_wrapper(alias: str) -> BaseDatabaseWrapper:
+    """A never-opened connection that reads as PostgreSQL; the decimal rule reads only the vendor."""
+    wrapper = _sqlite_wrapper(alias)
+    wrapper.vendor = "postgresql"
+    return wrapper
+
+
+def _sqlite_wrapper(alias: str) -> BaseDatabaseWrapper:
+    """A SQLite connection that is never opened."""
+    settings_dict = {**connections.databases[DEFAULT_DB_ALIAS], "NAME": ":memory:"}
+    return SQLiteDatabaseWrapper(settings_dict, alias)
+
+
+@pytest.mark.parametrize("raw", _PAST_UNCONSTRAINED_NUMERIC)
+def test_coerce_field_value_or_none_refuses_a_decimal_past_postgresql_numeric(raw: str) -> None:
+    """A decimal past PostgreSQL's unconstrained ``numeric`` names no row there.
+
+    ``numeric`` with no precision stores up to 131072 digits before the point and 16383
+    after; a value needing more refuses to bind (``numeric_in``: "value overflows numeric
+    format"), so it is ``None`` with no connection opened.
+    """
+    with _unopened_alias(_postgresql_wrapper) as alias:
+        assert coerce_field_value_or_none(_unbounded_decimal_column(), raw, alias=alias) is None
+
+
+@pytest.mark.parametrize(("raw", "held"), _WITHIN_UNCONSTRAINED_NUMERIC)
+def test_coerce_field_value_or_none_keeps_a_decimal_within_postgresql_numeric(
+    raw: str,
+    held: str,
+) -> None:
+    """A decimal within PostgreSQL's unconstrained ``numeric`` is the value it equals.
+
+    A spelling that fits binds as written (``1.50`` stays ``1.50``, a 40-digit fraction
+    stays exact); one past the limits loses its trailing fractional zeros without
+    rounding, so ``1.5`` with 20000 zeros binds as ``1.5`` and such a zero as ``0``. The
+    value is unchanged, so it names the same row.
+    """
+    with _unopened_alias(_postgresql_wrapper) as alias:
+        coerced = coerce_field_value_or_none(_unbounded_decimal_column(), raw, alias=alias)
+    assert coerced == Decimal(raw)
+    assert str(coerced) == held
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        *_PAST_UNCONSTRAINED_NUMERIC,
+        *(pytest.param(case.values[0], id=case.id) for case in _WITHIN_UNCONSTRAINED_NUMERIC),
+    ],
+)
+def test_coerce_field_value_or_none_passes_an_unconstrained_decimal_through_off_postgresql(
+    raw: str,
+) -> None:
+    """Off PostgreSQL a decimal on a ``DecimalField`` without ``max_digits`` binds as given.
+
+    SQLite stores the value it is bound, so every one of the PostgreSQL rows, refused or
+    trimmed there, passes with its spelling intact.
+    """
+    with _unopened_alias(_sqlite_wrapper) as alias:
+        coerced = coerce_field_value_or_none(_unbounded_decimal_column(), raw, alias=alias)
+    assert isinstance(coerced, Decimal)
+    assert str(coerced) == str(Decimal(raw))
 
 
 @pytest.mark.skipif(connection.vendor != "sqlite", reason="SQLite's adapters")
@@ -594,6 +700,64 @@ class _DatetimeKeyed(models.Model):
         app_label = "products"
         managed = False
         apps = _decimal_keyed_apps
+
+
+class _UnconstrainedDecimalKeyed(models.Model):
+    """A table keyed by a ``DecimalField`` without ``max_digits``."""
+
+    code: "models.DecimalField[str | float | Decimal | Combinable, Decimal]" = models.DecimalField(
+        primary_key=True,
+        max_digits=None,
+        decimal_places=None,
+    )
+
+    class Meta:
+        app_label = "products"
+        managed = False
+        apps = _decimal_keyed_apps
+
+
+@pytest.mark.skipif(connection.vendor != "sqlite", reason="SQLite stores the value it is bound")
+@pytest.mark.skipif(
+    django.VERSION < (6, 1),
+    reason="Django below 6.1 cannot read back a DecimalField without decimal_places",
+)
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("raw", "rows"),
+    [
+        pytest.param("1.5" + "0" * 20000, [Decimal("1.5")], id="trailing-zeros"),
+        pytest.param("1e1000000", [], id="huge-exponent"),
+    ],
+)
+def test_coerce_field_value_or_none_finds_an_unconstrained_decimal_key_on_sqlite(
+    raw: str,
+    rows: list[Decimal],
+    django_assert_num_queries: pytest_django.DjangoAssertNumQueries,
+) -> None:
+    """On SQLite an unconstrained decimal key binds as given and the ``pk__in`` query runs.
+
+    The value PostgreSQL would trim or refuse keeps its spelling here, and the one query
+    finds the stored ``1.5`` or no row.
+    """
+    with connection.schema_editor() as editor:
+        editor.create_model(_UnconstrainedDecimalKeyed)
+    try:
+        _UnconstrainedDecimalKeyed.objects.create(code=Decimal("1.5"))
+        coerced = coerce_field_value_or_none(
+            _UnconstrainedDecimalKeyed._meta.pk,
+            raw,
+            alias=DEFAULT_DB_ALIAS,
+        )
+        assert str(coerced) == str(Decimal(raw))
+        with django_assert_num_queries(1):
+            found = [
+                row.code for row in _UnconstrainedDecimalKeyed.objects.filter(pk__in=[coerced])
+            ]
+        assert found == rows
+    finally:
+        with connection.schema_editor() as editor:
+            editor.delete_model(_UnconstrainedDecimalKeyed)
 
 
 @pytest.mark.pg

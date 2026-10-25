@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 301 done, 207 to do.
+Progress: 302 done, 210 to do.
 
 ## Done
 
@@ -1585,6 +1585,18 @@ Progress: 301 done, 207 to do.
   are identical to the parent. A `tests/utils/test_errors.py` row pins that a non-list item inside an outer array
   list holds no element. spec-017, spec-019, docs/TREE.md, the kanban tracked-path constants and the type-suppression
   ledger follow the move
+- [x] 591. Under Django 6.1 a `DecimalField` with no `max_digits` is an unconstrained `numeric` on PostgreSQL, and
+  `utils/querysets.py::_stored_decimal_or_none` passed its value through, so an identity decode (a Relay `node` /
+  `nodes` id, a raw pk, a raw-pk or GlobalID relation filter, a relation write id) carrying `"1e1000000"`,
+  `"1e-1000000"` or `"1E+131072"` bound a value PostgreSQL's `numeric_in` refuses ("value overflows numeric
+  format"), a masked `DataError` where `coerce_field_value_or_none` names no row. On PostgreSQL such a value now binds
+  as written when its spelling fits numeric's format (up to 131072 digits before the point and 16383 after); a
+  spelling past it loses its trailing fractional zeros exactly, without rounding, a zero becomes `0`, and what still
+  does not fit names no row (`None`). Other backends bind the value as given, and bounded columns are unchanged. The
+  generated `"1e1000000"` filter value never reached the bind (django-filter caps a positive value at `1e50`); the
+  negative and tiny spellings that do reach it on any `DecimalField`, and the write flavors, are filed below. The
+  limits are source-derived (`numeric.c`), not checked on a server. Package rows in `tests/utils/test_querysets.py`
+  (a PostgreSQL stand-in alias and SQLite); spec-032 Decision 5 and the `coerce_field_value_or_none` docstring
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1736,10 +1748,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   a non-UTC `TIME_ZONE` (`valid_datetime`) and an aware out-of-range one under `USE_TZ=False` (`make_naive`), where
   DRF answers its own `overflow` for the other cells; upstream behaviour, decide whether the flavor maps it. Found
   fixing 381
-- [ ] 591. A `DecimalField` with no `max_digits` (Django 6.1) on PostgreSQL lets an identity or filter value past
-  numeric's format (`"1e1000000"`) reach the bind and raise a masked `DataError`: the storage-domain check has no
-  precision to hold it to and Django exposes no numeric-format bound; probe the filter `exact` path too. Found
-  consulting 509
 - [ ] 558. (robustness) `OrderSet` accepts `Meta.exclude` and ignores it: `fields = "__all__"` with `exclude` (or an
   explicit list with `exclude`) still orders by the excluded column, and an exclude-only `OrderSet` has no fields and
   fails at schema build; say whether the order family honours `Meta.exclude` like the filter family or refuses it at
@@ -1858,11 +1866,27 @@ tracker number are recorded there; open remainders and new defects are filed as 
   value (`?tag=x` on a ForeignKey to an integer key) answers Django's `ValueError`, a 500, where a column path
   (`tag__pk`) answers the form's 400; the schema build refuses such a declaration, so GraphQL cannot send it. Found
   verifying 512
+- [ ] 529. (robustness) A generated filter value on any `DecimalField`, bounded or not, with a huge negative or tiny
+  exponent (`"-1e1000000"`, `"1e-1000000"`, `"1e-16384"`) reaches the PostgreSQL bind (`exact`, `in`, `range`,
+  comparisons) and answers numeric's "value overflows numeric format" as a masked `DataError`: django-filter's
+  `NumberFilter` caps only a positive value at `1e50`, and nothing holds a filter value to numeric's format. Found
+  verifying 591
+- [ ] 530. (robustness) The three write flavors accept `"1e1000000"` (or `"1e-1000000"`) for a Django 6.1
+  `DecimalField` with no `max_digits` (a serializer through an explicit `serializers.DecimalField(max_digits=None,
+  decimal_places=None)`): PostgreSQL refuses the bind with a masked `DataError`, and SQLite stores it as `Infinity`
+  or `0` without a word. Found verifying 591
+- [ ] 531. (robustness) An unconstrained `DecimalField` key is matched by its spelling where the package compares
+  `str()` (`types/relay.py::_order_nodes` for `nodes`, `utils/querysets.py::stringified_pks_present` for relation
+  write ids): a row PostgreSQL stores as `1.50` misses `nodes(ids: ["…:1.5"])` though `node` finds it, and on
+  SQLite `createOwner(keyId: "2.50")` answers "Invalid id" for the stored `2.5` while the `key` filter finds it.
+  Found verifying 591
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 532. CHANGELOG entry for item 591: on PostgreSQL under Django 6.1, an id or relation filter value for a
+  `DecimalField` with no `max_digits` past numeric's format (`"1e1000000"`) names no row instead of a masked error
 - [ ] 528. CHANGELOG entry for item 556: on PostgreSQL through psycopg 3 an `ArrayField` write whose list psycopg
   cannot dump as a whole (an `ArrayField(TimeField)` list such as `[naive, aware]`) is the field's `invalid`
   `FieldError` instead of a masked error, on every write flavor
