@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 294 done, 208 to do.
+Progress: 295 done, 210 to do.
 
 ## Done
 
@@ -1512,6 +1512,19 @@ Progress: 294 done, 208 to do.
   unchanged. The item named forward many-to-many only; every to-many kind behind a hop failed alike. Package rows over
   Decimal, DateTime and one-to-one-onto-`to_field` keyed targets, scoped and declared, with the unhopped leaf as
   control
+- [x] 547. A `date`, or a naive `datetime`, held by a `DateTimeField` column escaped the temporal storability
+  preflight: `utils/errors.py::unstorable_temporal` let every `date` through and read a naive datetime as already
+  made aware, so a `SerializerMutation` whose serializer `validate_<field>` returns `value.date()` (or a naive wall
+  clock), a `DateField` subclass under `serializer_field_mapping`, and an `ArrayField(DateTimeField)` date element
+  reached `save()`, where Django makes the value aware in the default zone and the adapter's `OverflowError` (year 1
+  under a zone such as `Asia/Tokyo`, year 9999 under a `DATABASES` `TIME_ZONE`) answered the masked error. The shared
+  rule now checks such a value as the datetime Django binds for it (a date as its midnight, made aware in the default
+  zone when the connection runs under `USE_TZ`), so it is the field's `invalid` `FieldError` with nothing written;
+  a date in a `DateField` column and every aware datetime take the same path as before. The item overstated the
+  reach: the `ModelForm` scalar path was already covered (`Model.clean_fields` writes the aware midnight back before
+  the preflight reads the instance), a declared `serializers.DateField` over a `DateTimeField` is a build-time
+  `ConfigurationError`, and the model flavor never carries a date. Package rows in `tests/utils/test_errors.py` and
+  `tests/rest_framework/test_resolvers.py`; README, spec-038, spec-039 and the `fielderror-envelope` glossary term
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1669,11 +1682,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 545. (robustness) `scripts/prove_failability.py::_pattern_matches`: an `expect_failing` glob over a parametrized
   id (`test_x[*]`) never matches, since `fnmatch` reads `[*]` as a character class; only an exact id or a `[[]`
   escape works, and the module docstring offers "node id or glob" without saying so. Found implementing 424
-- [ ] 547. A `DjangoModelFormMutation` or `SerializerMutation` field that cleans to a `date` over a `DateTimeField`
-  column (a `forms.DateField` / DRF `DateField` declared on it) hands the model a date, which Django makes an aware
-  midnight at save with a `RuntimeWarning`; near year 1 or 9999 that projection can overflow past
-  `unstorable_temporal`, which checks only `datetime` / `time` values, and answer the masked error; probe and say
-  whether the check covers it. Found verifying 381
 - [ ] 512. (robustness) A package FilterSet used only under a consumer's `DjangoFilterBackend` never runs the schema
   build, so a declared `RangeFilter` on a relation answers `FieldError` (500) for every query string, valid bounds
   included, and a declared `ListFilter` raises `GraphQLError("Invalid filter value: expected a list.")` (500) for
@@ -1799,11 +1807,24 @@ tracker number are recorded there; open remainders and new defects are filed as 
   to_field="code")` matches the row whose `code` is 1, and the primary key of a linked row matches nothing unless it
   equals that row's `code`; the GLOSSARY "Relation leaves" `to_field` sentence covers forward foreign keys and
   one-to-ones only. Found fixing 511
+- [ ] 523. A `DjangoModelFormMutation` whose form declares `forms.DateField` (or another date-parsing field) over a
+  `TimeField` column passes `forms/inputs.py::require_column_kind_agreement`, which compares write kind only; the
+  wire `Time` reaches the form as a `datetime.time`, `BaseTemporalField.to_python` calls `.strip()` on it, and the
+  `AttributeError` answers the masked error on every value, in both warning modes. Refuse the mismatched temporal
+  field at build, or say why not. Found fact-finding 547
+- [ ] 524. (robustness) A `ModelForm` update that omits a field whose declared form field is lossier than its column
+  (`forms.DateField` over a `DateTimeField`) rebinds the stored value through that field and rewrites the row: a
+  stored `03:04:05` becomes the default-zone midnight, and a stored year-1 value under `Asia/Tokyo` answers an
+  `invalid` `FieldError` keyed to a field the client did not send. Found fact-finding 547
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 525. CHANGELOG entry for item 547: a `date` or naive `datetime` a `DateTimeField` column holds (a serializer
+  `validate_<field>` hook returning `value.date()` or a naive wall clock, an `ArrayField(DateTimeField)` date
+  element) whose default-zone projection the database cannot store is the field's `invalid` `FieldError` instead
+  of a masked error
 - [ ] 627. CHANGELOG entry for item 511: a raw-key relation filter on a to-many key (forward many-to-many, reverse
   foreign key, reverse many-to-many) whose target type has its own `get_queryset`, or that a `RelatedFilter` walks,
   coerces each key through the target key column: a `Decimal` `NaN` / `Infinity` or an out-of-range aware datetime key

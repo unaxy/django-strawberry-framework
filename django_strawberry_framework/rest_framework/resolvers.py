@@ -2683,7 +2683,10 @@ def _unstorable_temporal_errors(
     ``is_valid()``); what it lets through can still be a value the database refuses: an
     aware time (SQLite, MySQL and Oracle refuse it at ``save()``), an aware datetime whose
     projection onto the connection's time zone leaves years 1..9999 though the current
-    zone's does not, or one PostgreSQL stores but cannot load back at the re-fetch. Each
+    zone's does not, one PostgreSQL stores but cannot load back at the re-fetch, or a
+    date or naive datetime a ``validate_<field>`` hook leaves for a ``DateTimeField``
+    column, which Django makes aware in the default time zone (a date as its midnight).
+    Each
     writable bound field whose ``source`` is a top-level ``validated_data`` key naming a
     concrete column of ``model`` (``utils/relations.py::written_model_field``) is held to
     ``utils/errors.py::unstorable_temporal`` on the pinned alias; a refused one answers

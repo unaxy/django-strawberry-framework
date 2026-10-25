@@ -13,7 +13,8 @@ is ``tests/utils/test_error_keys.py``.
 lines no live SQLite request reaches: a stand-in alias whose backend stores aware
 datetimes itself (the PostgreSQL rule), an ``ArrayField`` column (a PostgreSQL-only
 column, stood in for by ``tests/_postgres_fields.py::FakeArrayField``), MySQL's own
-operations, and, on the Postgres tier, the real connection and ``ArrayField``.
+operations, a date a ``DateTimeField`` column holds (no fakeshop write flavor hands one
+over), and, on the Postgres tier, the real connection and ``ArrayField``.
 """
 
 import ast
@@ -673,6 +674,8 @@ _PAST_YEAR_9999 = datetime.datetime(
     23,
     tzinfo=datetime.timezone(datetime.timedelta(hours=-1)),
 )
+#: A naive year-1 midnight, the value Django makes aware in the default time zone.
+_NAIVE_YEAR_ONE = datetime.datetime(1, 1, 1)  # noqa: DTZ001 - the naive value under test
 _AWARE_TIME = datetime.time(9, 30, tzinfo=datetime.timezone(datetime.timedelta(hours=2)))
 #: UTC offsets PostgreSQL refuses under client-side binding: 16:00, and a fraction of a second.
 _OFFSET_16 = datetime.timezone(datetime.timedelta(hours=16))
@@ -765,6 +768,13 @@ def test_unstorable_temporal_leaves_a_non_temporal_column_without_resolving_the_
         ),
         pytest.param({}, _TIME, _AWARE_TIME, False, id="aware-time"),
         pytest.param(
+            {"TIME_ZONE": "Asia/Tokyo"},
+            _STAMP,
+            datetime.date(1, 1, 1),
+            True,
+            id="date-session-wall-clock-before-year-one",
+        ),
+        pytest.param(
             {"USE_TZ": False, "TIME_ZONE": "Asia/Tokyo"},
             _STAMP,
             _BEFORE_YEAR_ONE,
@@ -800,7 +810,9 @@ def test_unstorable_temporal_holds_a_stored_instant_to_its_session_wall_clock(
     it stores the instant itself (``supports_timezones``): the driver then loads it back
     on the session time zone (``UTC`` under ``USE_TZ``, else ``TIME_ZONE``, whose year-1
     offset in ``Asia/Tokyo`` is its local mean time, +09:18:59), so only a wall clock
-    there leaving years 1..9999 is refused. A naive datetime and an aware time store.
+    there leaving years 1..9999 is refused. A naive datetime is first made aware in the
+    default time zone (``UTC`` by default, so year 1 stores) and a date first becomes
+    that midnight (in ``Asia/Tokyo`` year 1's falls in year 0); an aware time stores.
     Every element of an ``ArrayField`` is held to the rule, at any depth.
     """
     monkeypatch.setattr(errors_module, "_ARRAY_FIELD_CLS", FakeArrayField)
@@ -894,6 +906,143 @@ def test_unstorable_temporal_holds_each_array_element_on_the_adapter(
     """
     monkeypatch.setattr(errors_module, "_ARRAY_FIELD_CLS", FakeArrayField)
     with _stand_in_alias(MySQLOperations, supports_timezones=False) as alias:
+        assert unstorable_temporal(column, value, lambda: alias) is refused
+
+
+@contextmanager
+def _sqlite_alias(database_time_zone: str | None) -> Generator[str, None, None]:
+    """Register a never-opened SQLite alias whose ``DATABASES`` ``TIME_ZONE`` is given."""
+    alias = "sqlite_time_zone_stand_in"
+    connections[alias] = SQLiteDatabaseWrapper(
+        {"NAME": "stand-in", "TIME_ZONE": database_time_zone},
+        alias,
+    )
+    try:
+        yield alias
+    finally:
+        del connections[alias]
+
+
+@pytest.mark.parametrize(
+    (
+        "settings",
+        "database_time_zone",
+        "column",
+        "value",
+        "refused",
+    ),
+    [
+        pytest.param(
+            {"TIME_ZONE": "Asia/Tokyo"},
+            None,
+            _STAMP,
+            datetime.date(1, 1, 1),
+            True,
+            id="tokyo-year-one",
+        ),
+        pytest.param(
+            {"TIME_ZONE": "Etc/GMT+12"},
+            "Etc/GMT-14",
+            _STAMP,
+            datetime.date(9999, 12, 31),
+            True,
+            id="database-time-zone-year-9999",
+        ),
+        pytest.param(
+            {"TIME_ZONE": "Etc/GMT+12"},
+            "Etc/GMT-14",
+            _STAMP,
+            datetime.date(2021, 6, 15),
+            False,
+            id="database-time-zone-in-range",
+        ),
+        pytest.param({"TIME_ZONE": "UTC"}, None, _STAMP, datetime.date(1, 1, 1), False, id="utc"),
+        pytest.param(
+            {"TIME_ZONE": "America/Chicago"},
+            None,
+            _STAMP,
+            datetime.date(1, 1, 1),
+            False,
+            id="chicago-year-one",
+        ),
+        pytest.param(
+            {"USE_TZ": False, "TIME_ZONE": "Asia/Tokyo"},
+            None,
+            _STAMP,
+            datetime.date(1, 1, 1),
+            False,
+            id="naive-midnight-without-use-tz",
+        ),
+        pytest.param(
+            {"TIME_ZONE": "Asia/Tokyo"},
+            None,
+            _DATE,
+            datetime.date(1, 1, 1),
+            False,
+            id="date-column",
+        ),
+        pytest.param(
+            {"TIME_ZONE": "Asia/Tokyo"},
+            None,
+            _STAMP,
+            _NAIVE_YEAR_ONE,
+            True,
+            id="naive-datetime-tokyo-year-one",
+        ),
+        pytest.param(
+            {"TIME_ZONE": "UTC"},
+            None,
+            _STAMP,
+            _NAIVE_YEAR_ONE,
+            False,
+            id="naive-datetime-utc",
+        ),
+        pytest.param(
+            {"USE_TZ": False, "TIME_ZONE": "Asia/Tokyo"},
+            None,
+            _STAMP,
+            _NAIVE_YEAR_ONE,
+            False,
+            id="naive-datetime-without-use-tz",
+        ),
+        pytest.param(
+            {"TIME_ZONE": "Asia/Tokyo"},
+            None,
+            _NESTED_STAMPS,
+            [[datetime.date(2021, 6, 15), None], [datetime.date(1, 1, 1)]],
+            True,
+            id="array-element-tokyo-year-one",
+        ),
+        pytest.param(
+            {"TIME_ZONE": "UTC"},
+            None,
+            _NESTED_STAMPS,
+            [[datetime.date(1, 1, 1), None], [datetime.date(9999, 12, 31)]],
+            False,
+            id="array-elements-utc",
+        ),
+    ],
+)
+def test_unstorable_temporal_holds_a_date_or_naive_datetime_to_the_datetime_django_binds(
+    settings: dict[str, object],
+    database_time_zone: str | None,
+    column: models.Field[object, object],
+    value: object,
+    refused: bool,  # noqa: FBT001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A date or naive datetime a ``DateTimeField`` column holds is checked as Django binds it.
+
+    Django binds a date as its midnight and, under ``USE_TZ``, a naive datetime (that
+    midnight included) made aware in the default time zone, which SQLite projects onto
+    the connection's time zone (``UTC``, or the alias's ``DATABASES`` ``TIME_ZONE``).
+    Year 1's midnight in ``Asia/Tokyo`` (local mean time, +09:18:59) falls in year 0;
+    year 9999's last midnight at UTC-12 reaches year 10000 at UTC+14. Without ``USE_TZ``
+    the naive value binds; a ``DateField`` column stores the date itself. Every
+    ``ArrayField`` element is projected the same way, at any depth.
+    """
+    monkeypatch.setattr(errors_module, "_ARRAY_FIELD_CLS", FakeArrayField)
+    with override_settings(**settings), _sqlite_alias(database_time_zone) as alias:
         assert unstorable_temporal(column, value, lambda: alias) is refused
 
 
@@ -1064,11 +1213,12 @@ def _postgresql_stand_in(
     """Register an alias that reads as PostgreSQL, on ``driver`` and ``cursor_factory``.
 
     Its adapters pass every datetime and time through, as Django's PostgreSQL adapters do,
-    and it is never opened: the binding mode is read from its connection parameters.
+    and it is never opened: the binding mode is read from its connection parameters. Its
+    settings carry the ``TIME_ZONE`` key Django's connection handler fills in.
     """
     alias = "postgresql_stand_in"
     wrapper = SQLiteDatabaseWrapper(
-        {"NAME": "stand-in", "OPTIONS": {"cursor_factory": cursor_factory}},
+        {"NAME": "stand-in", "TIME_ZONE": None, "OPTIONS": {"cursor_factory": cursor_factory}},
         alias,
     )
     wrapper.vendor = "postgresql"

@@ -37,6 +37,10 @@ branch is earned LIVE; this file holds the genuinely-unreachable internals:
   the shared safe renderers, so a registered hostile-named class degrades its
   labels instead of escaping the metaclass exception raw; honest labels are pinned
   byte-identical (direct-called: no wire query can declare a hostile class).
+- a ``validate_<field>`` hook that leaves a date for a ``DateTimeField`` column:
+  refused when its default-zone midnight cannot be stored, else stored as that
+  midnight. Django warns on every such store, so the example app declares no such
+  serializer and the schema is built in-process.
 
 **No create/update happy path, envelope, reverse-map, partial-update, visibility,
 write-auth, authorize-before-decode, Upload, request-context, or re-fetch BEHAVIORAL test
@@ -53,6 +57,7 @@ import re
 import sys
 import threading
 import uuid
+import zoneinfo
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import FrozenInstanceError
@@ -66,7 +71,7 @@ from apps.library import models as library_models
 from apps.products import models as product_models
 from apps.products.serializers import RenamedRelationItemSerializer
 from apps.products.services import seed_data
-from apps.scalars.models import NullableScalarSpecimen
+from apps.scalars.models import NullableScalarSpecimen, ScalarSpecimen
 from asgiref.sync import sync_to_async
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -77,6 +82,7 @@ from django.db.models import Model, QuerySet
 from django.db.models.signals import post_save, pre_save
 from django.db.utils import OperationalError
 from django.http import HttpRequest
+from django.test import override_settings
 from django.utils.functional import SimpleLazyObject
 from rest_framework import serializers
 from rest_framework.exceptions import ErrorDetail
@@ -7099,3 +7105,161 @@ def test_agreement_missing_field_honest_labels_are_byte_identical() -> None:
     message = str(exc_info.value)
     assert message.startswith("SerializerMutation HonestMut: the schema exposes field 'ghost'")
     assert "the runtime serializer ShelfSer does not declare it" in message
+
+
+# ===========================================================================
+# A date or naive datetime a serializer validates into a DateTimeField column
+# ===========================================================================
+# A ``validate_<field>`` hook returning ``value.date()`` or a naive datetime makes
+# Django emit a naive-datetime ``RuntimeWarning`` on every store, so the shape stays
+# out of the example app and is driven in-process here.
+
+
+def _day_of(value: datetime.datetime) -> object:
+    """Keep only the validated datetime's date."""
+    return value.date()
+
+
+def _naive_utc_wall_clock(value: datetime.datetime) -> object:
+    """Keep the validated datetime's UTC wall clock, naive."""
+    return value.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+
+
+def _build_day_stamp_schema(keep: Callable[[datetime.datetime], object]) -> DjangoSchema:
+    """A create ``SerializerMutation`` whose ``validate_occurred_at`` returns ``keep(value)``."""
+
+    class SpecimenT(DjangoType):
+        class Meta:
+            model = ScalarSpecimen
+            fields = ("id", "label")
+            primary = True
+
+    class DayStampSerializer(ModelSerializerBase[ScalarSpecimen]):
+        def validate_occurred_at(self, value: datetime.datetime) -> object:
+            return keep(value)
+
+        class Meta:
+            model = ScalarSpecimen
+            fields = (
+                "label",
+                "occurred_on",
+                "occurred_at",
+                "occurred_time",
+                "external_id",
+            )
+
+    class _AllowAll:
+        def has_permission(
+            self,
+            _info: object,
+            _mutation: type[object],
+            _op: str,
+            _data: object,
+            _instance: object = None,
+        ) -> bool:
+            return True
+
+    class WriteDayStamp(SerializerMutation):
+        class Meta:
+            serializer_class = DayStampSerializer
+            operation = "create"
+            permission_classes = [_AllowAll]
+
+    @strawberry.type
+    class Query:
+        @strawberry.field
+        def ping(self) -> int:
+            return 1
+
+    @strawberry.type
+    class Mutation:
+        write_day_stamp = DjangoMutationField(WriteDayStamp)
+
+    finalize_django_types()
+    del SpecimenT
+    return DjangoSchema(query=Query, mutation=Mutation)
+
+
+def _write_day_stamp(
+    occurred_at: str,
+    keep: Callable[[datetime.datetime], object] = _day_of,
+) -> dict[object, object]:
+    """Run the day-stamp create with ``occurred_at`` on the wire; return its payload."""
+    request = HttpRequest()
+    request.user = User(username="u")
+    result = _build_day_stamp_schema(keep).execute_sync(
+        "mutation($d: DayStampSerializerInput!){ writeDayStamp(data:$d){ "
+        "result{ label } errors{ field messages codes } } }",
+        variable_values={
+            "d": {
+                "label": "day",
+                "occurredOn": "2021-06-15",
+                "occurredAt": occurred_at,
+                "occurredTime": "09:30:00",
+                "externalId": str(uuid.uuid4()),
+            },
+        },
+        context_value=SimpleNamespace(request=request),
+    )
+    assert result.errors is None, result.errors
+    assert result.data is not None
+    return json_object(result.data, "writeDayStamp")
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("zone", "keep"),
+    [
+        pytest.param("Asia/Tokyo", _day_of, id="tokyo-date"),
+        pytest.param("Etc/GMT-14", _day_of, id="utc-plus-14-date"),
+        pytest.param("Asia/Tokyo", _naive_utc_wall_clock, id="tokyo-naive-datetime"),
+    ],
+)
+def test_serializer_date_over_a_datetime_column_whose_midnight_overflows_is_refused(
+    zone: str,
+    keep: Callable[[datetime.datetime], object],
+) -> None:
+    """A validated date or naive datetime Django would bind before year 1 is the field's ``invalid``.
+
+    Django stores a date held by a ``DateTimeField`` as its midnight and a naive datetime
+    as it is, each made aware in the default time zone; in a zone ahead of UTC a year-1
+    midnight falls in year 0, which the adapter cannot bind. The refusal is keyed to the
+    input field, nothing is written, and no masked error escapes.
+    """
+    with override_settings(TIME_ZONE=zone):
+        payload = _write_day_stamp("0001-01-01T00:00:00Z", keep)
+
+    assert payload["result"] is None
+    assert payload["errors"] == [
+        {
+            "field": "occurredAt",
+            "messages": ["Enter a value the database can represent."],
+            "codes": ["invalid"],
+        },
+    ]
+    assert not ScalarSpecimen.objects.exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "zone",
+    [pytest.param("UTC", id="utc"), pytest.param("America/Chicago", id="chicago")],
+)
+def test_serializer_date_over_a_datetime_column_stores_its_default_zone_midnight(
+    zone: str,
+) -> None:
+    """A validated date the database can hold stores as its midnight in the default zone.
+
+    Django warns as it makes that midnight at the save; the package reads the same
+    projection silently and lets the write through.
+    """
+    with (
+        override_settings(TIME_ZONE=zone),
+        pytest.warns(RuntimeWarning, match="received a naive datetime"),
+    ):
+        payload = _write_day_stamp("2021-06-15T09:30:00Z")
+
+    assert payload["errors"] == []
+    assert payload["result"] == {"label": "day"}
+    stored = ScalarSpecimen.objects.get(label="day").occurred_at
+    assert stored == datetime.datetime(2021, 6, 15, tzinfo=zoneinfo.ZoneInfo(zone))

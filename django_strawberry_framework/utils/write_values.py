@@ -135,7 +135,9 @@ def unstorable_temporal_error(
     The write decode's envelope for the shared rule
     (``utils/errors.py::unstorable_temporal``): a value the backend's adapter cannot bind
     (an aware datetime whose projection onto the connection's time zone leaves years
-    1..9999, an aware time, any aware datetime under ``USE_TZ = False``) would raise its
+    1..9999, an aware time, any aware datetime under ``USE_TZ = False``; a date or naive
+    datetime a ``DateTimeField`` column holds is read as the datetime Django binds for it)
+    would raise its
     ``OverflowError`` / ``ValueError`` at ``save()``, and an aware datetime PostgreSQL
     stores but cannot load back would raise at the post-write re-fetch; neither is an
     error the save mappers own, so it would escape as a masked top-level error. It is the

@@ -1708,7 +1708,8 @@ write flavor rides.
    ([`forms/resolvers.py`][forms-resolvers]`::_unstorable_temporal_errors`): Django's
    `DateTimeField` / `TimeField` form fields range-check nothing past what Python parses,
    so every concrete column the cleaned data names is read from `form.instance` (the value
-   the save writes) and held to `django_strawberry_framework/utils/errors.py::unstorable_temporal`
+   the save writes; a date an `ArrayField` of datetimes still holds after
+   `Model.clean_fields` is read as the midnight Django stores for it) and held to `django_strawberry_framework/utils/errors.py::unstorable_temporal`
    on the pinned alias, the rule the model flavor's decode applies; a refused column is the
    form field's `invalid` error `"Enter a value the database can represent."` and nothing
    is written. **The

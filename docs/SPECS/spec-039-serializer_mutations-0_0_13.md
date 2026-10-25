@@ -2015,7 +2015,9 @@ The pipeline steps:
      1..9999; one PostgreSQL stores but cannot load back; an aware time whose UTC offset
      PostgreSQL refuses, DRF projecting a datetime onto the current time zone first; an
      `ArrayField` element, which psycopg binds as text, held to the text offset rule even
-     under server-side binding) is the field's `invalid`
+     under server-side binding; a date or naive datetime a `validate_<field>` hook leaves
+     for a `DateTimeField` column, held as the datetime Django stores for it, made aware in
+     the default time zone, a date as its midnight) is the field's `invalid`
      `ErrorDetail` `"Enter a value the database can represent."`, flattened like any
      `serializer.errors` entry, with nothing written. A nested serializer's values are
      written by the consumer's `create()` / `update()` and are not read. What DRF itself
