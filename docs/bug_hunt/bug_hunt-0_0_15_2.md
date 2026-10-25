@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 296 done, 211 to do.
+Progress: 297 done, 210 to do.
 
 ## Done
 
@@ -1539,6 +1539,13 @@ Progress: 296 done, 211 to do.
   `FieldError` (with both bounds), a consumer declaration django-filter's own `RangeFilter` refuses the same way and
   the schema build refuses; a relation path to a column filters with no build. Package rows in
   `tests/filters/test_base.py` (both parents, through a real `DjangoFilterBackend` view and a `QueryDict`); spec-027.
+- [x] 514. Not a defect (AGENTS defect rule: no contract row). A declared `RangeFilter` bound or `ListFilter` element
+  on a `BooleanField` is cleaned by the column's `gte` form field, django-filter's `BooleanFilter` field, Django's
+  `forms.NullBooleanField`, whose documented `to_python` reads any unrecognized string (`"yes"`, `"junk"`, `""`) as
+  `None`. That is the raw-form rule of every Boolean filter under `DjangoFilterBackend`: the package's generated
+  Boolean `exact` (`filters/sets.py` maps `models.BooleanField` to django-filter's `BooleanFilter`) and
+  django-filter's own `BooleanFilter` read `?flag=yes` as no constraint the same way, and spec-027 promises the
+  declared filters exactly that column cleaner. GraphQL types the value `Boolean` and cannot send the string. No code.
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1696,10 +1703,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 545. (robustness) `scripts/prove_failability.py::_pattern_matches`: an `expect_failing` glob over a parametrized
   id (`test_x[*]`) never matches, since `fnmatch` reads `[*]` as a character class; only an exact id or a `[[]`
   escape works, and the module docstring offers "node id or glob" without saying so. Found implementing 424
-- [ ] 514. (robustness) A declared `RangeFilter` / `ListFilter` on a `BooleanField` cleans each value with the
-  column's `gte` form field, django-filter's `NullBooleanField`, which reads an unrecognized string (`"yes"`) as
-  `None`, so under `DjangoFilterBackend` a junk bound applies no constraint where it should be refused; GraphQL types
-  the value `Boolean` and cannot send it. Found verifying 376
 - [ ] 556. (robustness) A PostgreSQL `ArrayField(TimeField)` write whose list holds a naive time before an aware one
   (`[naive, aware]`) raises psycopg's "cannot calculate the offset of tzinfo 'None' without a date" as the masked error
   in either binding mode (`[aware, naive]` stores). Found implementing 382
