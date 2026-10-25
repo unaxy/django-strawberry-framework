@@ -6,7 +6,7 @@ Decision 5). Unlike ``BigInt``, ``Upload`` is NOT registered in
 ``_PACKAGE_SCALAR_MAP``: Strawberry's built-in ``DEFAULT_SCALAR_REGISTRY``
 already owns it, so an ``Upload``-annotated field resolves in any schema.
 
-``BigInt`` is a JSON-safe scalar typically used to map Django's 64-bit
+``BigInt`` is a JSON-safe scalar that typically maps Django's 64-bit
 integer fields (``BigIntegerField``, ``PositiveBigIntegerField``). It is
 technically arbitrary-precision - serialized as a decimal string
 (``int.__repr__`` of the accepted ``int``) so values past GraphQL's signed

@@ -2884,9 +2884,9 @@ def test_filesystem_path_fields_accepts_every_collection_literal(
 def test_the_collection_guard_names_the_key_it_rejected(key: str) -> None:
     """One helper serves four ``Meta`` keys, so its message must name the caller's.
 
-    The message previously said ``Meta.exclude`` whatever key was written, which
-    sends a consumer who mistyped ``filesystem_path_fields`` to look at a key
-    their class does not declare.
+    A message saying ``Meta.exclude`` whatever key was written would send a
+    consumer who mistyped ``filesystem_path_fields`` to look at a key their
+    class does not declare.
     """
     model = _make_path_optin_model()
     with pytest.raises(ConfigurationError, match=f"Meta.{key} must be a non-string"):
@@ -3235,9 +3235,9 @@ class PEP563UnselectedDottedAutoType(DjangoType):
 def test_pep563_auto_relation_annotation_registers_pending_relation() -> None:
     """`items: auto` under PEP 563 still defers through a PendingRelation.
 
-    The misclassification this pins used to register ZERO pending records -
-    the relation was treated as consumer-authored and the finalizer never
-    resolved its target.
+    The misclassification this guards against would register ZERO pending records -
+    the relation treated as consumer-authored and its target never resolved
+    by the finalizer.
     """
 
     class ProbePEP563ItemType(DjangoType):

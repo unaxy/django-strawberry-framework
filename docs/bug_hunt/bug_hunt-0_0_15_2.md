@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 279 done, 196 to do.
+Progress: 280 done, 201 to do.
 
 ## Done
 
@@ -1390,6 +1390,14 @@ Progress: 279 done, 196 to do.
   (`filters/sets.py::FilterSet._apply_relation_leaf`); package rows count body runs, queries and derivations sync and
   async, live empty-value rows pin the identity exit; spec-027 and the `FilterSet` glossary term say so
 
+- [x] 500. fixed: `tests/test_ci_governance.py::test_no_comment_docstring_or_name_carries_a_provenance_phrase` refuses
+  `pre-fix`, `post-fix`, `before the fix`, `after the fix`, `formerly`, `exactly as before`, `used to`, `previously`
+  and `as of 0.0.` in every comment, docstring and def/class name of the sweep corpus (case-insensitive, word-bounded,
+  matched across line wraps; no exclusion, no marker), with a planted row per phrase and per wrap shape; the 137 hits
+  it found (package, four test trees, examples and scripts) state behaviour, each counterfactual checked against the
+  test that asserts it or a guard-removed probe, the 16 non-historical uses rephrased; the item's named sites, the
+  rest of their functions and 324's two residual sites restated too, with the `apply_cascade_permissions` glossary
+  twin. Code digest unchanged outside the gate row and two renamed tests; START's rule names the gate and its phrases
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1520,12 +1528,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 398. A class-level `GlobalIDFilter.filter` override skips the lone-surrogate `FILTER_INVALID` refusal, because
   `filters/sets.py::_decodes_before_binding` reads only the instance's own filter, so a `UnicodeEncodeError` escapes as
   the masked uncoded error; read it through `utils/truth.py::overrides` (the class-level-override family of 388)
-- [ ] 500. Process provenance in test docstrings and comments outside `tests/utils/test_querysets.py`, the class 324
-  restates there: e.g. `tests/utils/test_permissions.py` ("It used to reach it"), `tests/test_permissions.py` ("no
-  longer compare ... (the old ...", "no longer trips"), `tests/utils/test_policies.py` ("no longer", "The pre-fix
-  resolver"), `tests/mutations/test_resolvers.py` ("pre-fix"), and the "exactly as before" comment beside
-  `utils/querysets.py::_prefetch_relation_target_or_none`; an rg of `tests/` for that vocabulary ("now", "no longer",
-  "used to", "previously", "pre-fix", "old") gives about 120 hits to judge. Restate each as behaviour. Found fixing 324
 - [ ] 501. (robustness) `scripts/workspace.py::workspace_base` uses a fixed `$TMPDIR/dsf-ws` with no owner, symlink or
   mode check, the shared-name shape 330 removed from `prove_failability.py`: on a shared Linux `/tmp` (no `TMPDIR`) a
   second user's flows land in, or are refused by, the first user's directory, and a planted symlink is followed. Name
@@ -1655,6 +1657,28 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 562. (robustness) A flat range leaf walking a hop with both bounds null (`{start: null, end: null}`) runs the
   hop target's `get_queryset` on `apply_async` but not on `apply_sync`; same rows. Found verifying 399
 
+- [ ] 563. Package comments and docstrings outside the gated phrases still narrate history: "now", "no longer", "the
+  former", "byte-unchanged", seven `Target release:` module lines and version banners ("shipped 0.0.14"); judge each
+  against START's provenance rule (dry-0_0_15_3 items 31 and 71 cover part of it). Found fact-finding 500
+- [ ] 564. Four consumer-visible error strings carry a release banner that goes stale:
+  `filters/base.py::RelatedFilter.__init__` ("the kwarg was removed in 0.0.7"), `types/base.py::_validate_connection`
+  ("recognized in 0.0.9"), `types/relay.py::decode_global_id` ("encode-only in 0.0.9") and the routers.py "0.0.14
+  deployment" message; restate each with its pinning test. Found fact-finding 500
+- [ ] 565. Optimizer plan labels (B1-B8, O2-O6, G1-G3) label 177 comment and docstring sites, 15 of them in the
+  package (`optimizer/extension.py`, `optimizer/plans.py`, `optimizer/walker.py`, `types/resolvers.py`) and most in
+  `tests/optimizer/test_extension.py` and `test_walker.py`; the clause after each label already states the behaviour,
+  so drop the label. Found fact-finding 500
+- [ ] 566. Test-tree history wording outside the gated phrases: about 118 "now", 25 "old", 21 "no longer", 21 "the
+  fix", refactor words ("relocated", "byte-identical to before", "status-quo behavior", "Pins finding-2"), the
+  `test_products_api.py` "History:" sections and about 68 ambiguous sites (origin, "historical" and spec-ordinal
+  wording); judge each (dry-0_0_15_3 item 34 covers `examples/`). Found fact-finding 500
+- [ ] 567. `docs/bug_hunt/HUNT.md`, `docs/dry/DRY.md`, their `worker-2.md` and `docs/review/REVIEW.md` cite "AGENTS.md
+  prose rules: no process provenance", but AGENTS.md carries no such rule; it lives only in START.md "Style the
+  maintainer cares about". Point the citations at START or add the rule to AGENTS. Found fact-finding 500
+- [ ] 568. (robustness) The provenance gate reads no f-string or concatenated first statement, no attribute-docstring
+  string and no wrap from a trailing comment onto the next full-line comment (none in the corpus carries a phrase
+  today), and `scripts/review_inspect.py` keeps its own `PROVENANCE_PATTERNS` list beside the gate's
+  `PROVENANCE_PHRASES`. Found verifying 500
 ## To do: holes found re-checking the fixes
 
 

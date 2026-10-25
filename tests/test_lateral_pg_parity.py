@@ -600,9 +600,9 @@ def _visibility_schemas() -> tuple[strawberry.Schema, strawberry.Schema]:
     """A ``ShelfType.booksConnection`` whose child type hides repair books.
 
     The anonymous-traffic substrate: ``get_queryset`` applies a single-table
-    plain-column ``exclude`` (the ``BookType`` visibility shape), which used to
-    force the windowed body and now rides the lateral branch as a spliced
-    WHERE. The scope is unconditional so both strategies filter identically.
+    plain-column ``exclude`` (the ``BookType`` visibility shape), which rides
+    the lateral branch as a spliced WHERE rather than forcing the windowed
+    body. The scope is unconditional so both strategies filter identically.
     """
 
     @classmethod

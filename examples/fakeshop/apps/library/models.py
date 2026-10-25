@@ -281,7 +281,7 @@ class ShelfLabel(models.Model):
 
 
 class Genre(models.Model):
-    """A genre used to group books."""
+    """A genre that groups books."""
 
     # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
     pk: int | None

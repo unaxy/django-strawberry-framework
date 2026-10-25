@@ -85,10 +85,8 @@ _BIGINT_STRING_REJECTIONS = {
 
 # Mixed-primitive payload: top-level string, int, list of ints, JSON ``null``
 # (key present, value is ``None``), and a nested dict carrying a bool. Pins
-# the round-trip shape that the migrated package test
-# ``test_json_field_round_trips_dict_via_schema_execution`` formerly covered
-# with ``{"k1": "v1", "k2": 2, "k3": [1, 2, 3], "k4": None}`` - the
-# JSON-internal-``null`` case is the unique one (distinct from the column
+# the round-trip shape of ``{"k1": "v1", "k2": 2, "k3": [1, 2, 3], "k4": None}``
+# - the JSON-internal-``null`` case is the unique one (distinct from the column
 # itself being NULL, which is exercised by
 # ``test_nullable_scalar_specimen_all_null_wire_format_over_http``).
 _JSON_PAYLOAD = {
@@ -1289,7 +1287,7 @@ def test_scalars_optimizer_fk_id_elision_for_self_fk_in_http_query() -> None:
     JOIN - Django already has the FK column (``parent_id``) on the source
     row, so the optimizer plans the query with ``only(..., "parent_id")``
     and synthesizes the stub at resolver time. Distinct from the
-    cross-model FK case; previously unreachable from any HTTP test.
+    cross-model FK case.
     Behavioral half of the migration from
     ``tests/optimizer/test_extension.py::test_optimizer_elides_forward_fk_id_only_selection_plan_shape``;
     the plan-state assertions (``plan.fk_id_elisions``, ``plan.only_fields``,

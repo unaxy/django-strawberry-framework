@@ -82,7 +82,7 @@ def test_generator_directives_are_materialized_once() -> None:
 
 
 def test_non_iterable_raises_configuration_error_chaining_the_typeerror() -> None:
-    """A non-iterable detonated as a raw TypeError inside ``strawberry.field`` pre-fix."""
+    """A non-iterable is a ``ConfigurationError``, not a raw TypeError in ``strawberry.field``."""
     with pytest.raises(ConfigurationError) as exc:
         validated_field_directives("DjangoListField", 42)
     assert str(exc.value) == "DjangoListField directives could not be read (TypeError)."

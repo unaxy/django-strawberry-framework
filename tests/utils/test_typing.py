@@ -517,11 +517,12 @@ def test_is_async_callable_sees_through_an_async_call_metaclass() -> None:
 
     Calling a class dispatches through ``type(target).__call__`` -- the
     metaclass -- not the class body's ``__call__`` (that one is instance-call
-    semantics). The predicate used to hard-return ``False`` for every class, so
-    a metaclass-async class, which yields a coroutine when called, violated the
-    "calling ``value`` yields a coroutine" contract, and such a class passed as
-    a ``globalid_strategy`` encoder slipped past the build-time sync-ness gate
-    (``types/base.py::_validate_globalid_callable``) to fail per request.
+    semantics). A predicate that hard-returned ``False`` for every class would
+    violate the "calling ``value`` yields a coroutine" contract for a
+    metaclass-async class, which yields a coroutine when called, and such a
+    class passed as a ``globalid_strategy`` encoder would slip past the
+    build-time sync-ness gate (``types/base.py::_validate_globalid_callable``)
+    to fail per request.
     Plain classes keep the pinned "instantiation is sync" answer because
     ``type.__call__`` is sync, and a class body's ``__call__`` never answers
     for the class itself.

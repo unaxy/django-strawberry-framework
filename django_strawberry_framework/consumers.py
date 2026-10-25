@@ -212,7 +212,7 @@ transition owns the connection.
 actor lease (``utils/sessions.py::actor_lease``) spans the validation / cache
 decision, the revoked-state transition, AND the actual information-bearing send.
 Releasing it after validation would let one sibling task pass validation, another
-detect revocation and begin closing, and the first then emit its previously
+detect revocation and begin closing, and the first then emit its already
 authorized payload - and, because an ASGI send is asynchronous, it would equally
 let a same-connection ``logout`` run to completion inside the window between
 "authorized" and "written". The lease is deliberately NOT private to this module

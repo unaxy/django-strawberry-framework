@@ -978,7 +978,9 @@ def test_evaluated_source_is_refreshed_before_hook(
 
     Cached rows must never reach (or bypass) the hook: the hook receives a
     fresh unevaluated clone, and the refresh itself composes lazily (the
-    security carve-out from the optimizer's G1 same-instance guarantee).
+    security carve-out from the optimizer's guarantee that a
+    consumer-evaluated root queryset passes through unchanged, spec-035
+    Decision 3).
     """
     seen: dict[str, object] = {}
 
@@ -2472,8 +2474,9 @@ def test_query_chain_shadow_hook_fails_closed_sync() -> None:
 def test_query_shadow_defect_is_name_agnostic() -> None:
     """The no-shadow check rejects any shadowed ``sql.Query`` method, not just ``chain``.
 
-    Proves the fix is structural (spec-045 Decision 2: "do not fix only the
-    literal ``chain`` name") -- a shadowed ``get_compiler`` fails closed identically.
+    The check covers every shadowed ``sql.Query`` method, not only the literal
+    ``chain`` name (spec-045 Decision 2) -- a shadowed ``get_compiler`` fails closed
+    identically.
     """
     source = Category.objects.filter(is_private=False)
     source.query.get_compiler = _noop  # shadow a different Query method

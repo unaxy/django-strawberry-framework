@@ -1558,10 +1558,10 @@ def test_bind_skips_relation_lock_for_non_relay_target() -> None:
 def test_validate_meta_is_the_relocated_classmethod_seam() -> None:
     """The metaclass validates via the ``_validate_meta`` classmethod seam (relocated body).
 
-    The former module-level ``_validate_mutation_meta`` is gone; the validation is
-    now ``DjangoMutation._validate_meta``. A model mutation still validates exactly
-    as before (a representative case re-pinned), and the seam is a classmethod a
-    subclass can override (the form flavor does).
+    The validation is ``DjangoMutation._validate_meta``, with no module-level
+    ``_validate_mutation_meta`` beside it. A model mutation validates through it (a
+    representative case pinned), and the seam is a classmethod a subclass can
+    override (the form flavor does).
     """
     assert not hasattr(mutation_sets, "_validate_mutation_meta")
     assert "_validate_meta" in vars(DjangoMutation)

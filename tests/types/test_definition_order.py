@@ -423,7 +423,7 @@ def test_cross_module_lazy_relation_override_types_the_field_as_the_referenced_c
     names - resolved through the module path, never through this module's
     namespace.
     """
-    # Drop any previously-imported fixture module object so the import below
+    # Drop any already-imported fixture module object so the import below
     # re-executes (and re-registers) under the cleared registry, as
     # ``test_filterset_class_resolves_across_module_boundary`` explains.
     # ``importlib.import_module`` rather than ``from ... import ...``: the
@@ -1517,7 +1517,7 @@ def test_filterset_class_resolves_across_module_boundary() -> None:
     contract that the finalizer's filter-binding pass works across
     module boundaries without ``ImportError``.
     """
-    # Drop any previously-imported fixture module objects so the next
+    # Drop any already-imported fixture module objects so the next
     # import triggers a fresh execution that re-registers under the
     # cleared registry. ``importlib.reload`` would leak the prior
     # module's registered classes against the registry.

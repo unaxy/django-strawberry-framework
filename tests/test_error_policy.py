@@ -811,8 +811,8 @@ class _SneakyError(GraphQLError):
     """A ``GraphQLError`` subclass whose ``original_error`` read raises ``AttributeError``.
 
     The property shadows the instance attribute ``__init__`` sets, so every read
-    raises - exactly the ambiguity a defaulted ``getattr`` cannot resolve, and
-    which it used to answer as absence: the deliberate-delivery branch, with the
+    raises - exactly the ambiguity a defaulted ``getattr`` cannot resolve: it
+    would answer it as absence, taking the deliberate-delivery branch with the
     error's own message left on the wire.
     """
 

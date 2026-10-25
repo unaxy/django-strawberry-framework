@@ -2423,12 +2423,12 @@ def test_the_revalidation_window_rejects_unusable_values(unusable: object) -> No
     surprise.
 
     The two huge-integer rows cover the enormous-window case. An ``int``
-    with no ``float`` image passes every ``isinstance`` check, so the validator
-    used to hand it to ``math.isfinite`` and escape the typed boundary with a raw
-    ``OverflowError``; rendering it into the rejection then raised ``ValueError``
-    from CPython's 4300-digit integer-to-string guard. Both arms are now inside
-    the boundary, and the negative twin is here because its ``value < 0`` check
-    could never run either.
+    with no ``float`` image passes every ``isinstance`` check, so a validator
+    handing it to ``math.isfinite`` would escape the typed boundary with a raw
+    ``OverflowError``, and rendering it into the rejection would raise
+    ``ValueError`` from CPython's 4300-digit integer-to-string guard. Both arms
+    are inside the boundary, and the negative twin pins the ``value < 0`` arm the
+    same way.
 
     Fakeshop has no ``config/asgi.py`` or WebSocket mount (rungs 1-3). Live HTTP
     sibling: ``examples/fakeshop/test_query/test_transport_api.py``.
@@ -3230,9 +3230,9 @@ async def test_duplicate_host_headers_fail_closed_in_djangos_comma_joined_form()
 async def test_an_odd_cased_host_header_still_reaches_the_boundary() -> None:
     """Header-name casing is normalized, not trusted.
 
-    Its own row rather than a tail on the duplicate-header row, which is where it
-    used to live: casing normalization and duplicate reduction are two independent
-    projection items, and one row cannot fail for two reasons and still say which.
+    Its own row rather than a tail on the duplicate-header row: casing
+    normalization and duplicate reduction are two independent projection items,
+    and one row cannot fail for two reasons and still say which.
 
     ASGI specifies lowercase header names, and Django's own adapter normalizes
     anyway. Dropping the normalization here does not raise or mismatch - the header
@@ -4337,9 +4337,9 @@ async def test_revalidation_resolves_its_session_store_outside_the_opt_in_auth_p
     Strict eviction is what makes the row provable rather than incidental: under
     ``--dist loadscope`` a worker that already ran ``tests/auth/`` has those
     modules cached, so a plain ``not in sys.modules`` assertion would pass no
-    matter what the production import does - the exact masking this module used
-    to suffer when it imported ``auth.sessions`` at collection time. Evicting
-    the whole ``django_strawberry_framework.auth`` prefix - with the shared
+    matter what the production import does - the exact masking a
+    collection-time import of ``auth.sessions`` in this module would cause.
+    Evicting the whole ``django_strawberry_framework.auth`` prefix - with the shared
     two-sided restore - means a re-pointed import would have to re-import it,
     which the assertion then sees.
 
@@ -4773,7 +4773,7 @@ async def test_the_connection_lock_stops_a_sibling_payload_escaping_after_revoca
     result and queues at the connection's lease behind it; the session is then revoked
     while ``a`` is still holding. If the lease were released after validation rather
     than after the send, ``b`` could pass validation, ``a`` could observe the
-    revocation and begin closing, and ``b``'s previously authorized payload would
+    revocation and begin closing, and ``b``'s already authorized payload would
     still go out.
 
     "``b`` is queued at the lease" is asserted rather than assumed: the recorded
@@ -6868,13 +6868,12 @@ async def test_a_non_dispatchable_frame_is_refused_and_the_connection_ends(
 ) -> None:
     """A frame the dispatcher cannot shape takes upstream's invalid-message close.
 
-    Every literal below used to kill the message-loop task with a raw
-    ``TypeError`` (``message['type']`` indexing a non-object) or ``KeyError``,
-    leaving the socket open with nothing reading it. Now each is refused with
-    the invalid-message close - upstream's own ``4400`` shape on graphql-
-    transport-ws (its ``except KeyError`` already spent it for some shapes),
-    supplied by the package on the legacy protocol where upstream spends no
-    invalid-message close at all - and the teardown completes, which is what
+    Every literal below is one a dispatcher indexing ``message['type']`` cannot
+    shape (a non-object raises ``TypeError``, a missing key ``KeyError``). Each
+    is refused with the invalid-message close - upstream's own ``4400`` shape on
+    graphql-transport-ws (its ``except KeyError`` already spent it for some
+    shapes), supplied by the package on the legacy protocol where upstream spends
+    no invalid-message close at all - and the teardown completes, which is what
     distinguishes "refused" from the dead-but-open socket the containment
     replaces. ``{}`` rides the transport-ws KeyError arm; on legacy it reaches
     the package's guard through the same refusal.

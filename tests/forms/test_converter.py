@@ -134,8 +134,7 @@ def test_null_boolean_validating_subclass_generates_required_input() -> None:
     The converter preserves the subclass's real requiredness and emits a
     non-null ``bool`` annotation. The generated input therefore rejects omission
     during GraphQL coercion instead of exposing ``Boolean`` while its dataclass
-    constructor still requires ``flag`` (which previously surfaced as a resolver
-    ``TypeError``).
+    constructor still requires ``flag``.
     """
 
     class RequiredNullableBoolean(forms.NullBooleanField):

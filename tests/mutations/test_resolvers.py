@@ -352,8 +352,8 @@ def _item_gid(item_type: type, pk: object) -> str:
 # in ``tests/test_relay_node_field.py`` pins the decode in isolation; these pin a
 # real update / delete CONSUMER of that decoded pk end-to-end, with the decoy row
 # seeded so its pk's string form IS the target row's ``name`` - the exact pk/name
-# confusion the fix guards (the pre-fix value flowed straight into ``get(pk=...)``
-# and hit the wrong row).
+# confusion the mapping guards (an unmapped value passed straight into
+# ``get(pk=...)`` would hit the decoy row).
 # ---------------------------------------------------------------------------
 
 # ``name`` is consumed as the Relay id (``relay.NodeID[str]``), so it surfaces as the
@@ -3162,10 +3162,10 @@ def test_create_omitting_empty_value_default_field_succeeds() -> None:
     """Omitting a ``JSONField(default=dict)`` (blank=False) on create succeeds.
 
     The field is optional in the input (it has a default), so a client may omit it.
-    Before the fix, ``full_clean`` validated the model's own empty default (``{}`` is
-    in Django's ``empty_values``) and rejected it ("This field cannot be blank") -
+    A ``full_clean`` that validated the model's own empty default (``{}`` is in
+    Django's ``empty_values``) would reject it ("This field cannot be blank") -
     stricter than ``Model.objects.create()``, which applies the default unvalidated.
-    Create now excludes unprovided fields from ``full_clean``, so the omission writes
+    Create excludes unprovided fields from ``full_clean``, so the omission writes
     the default cleanly. No shipped ScalarSpecimen mutation: rung 1 would add one to
     the scalars schema; a live holder cannot declare ``DjangoMutation`` after
     finalize.

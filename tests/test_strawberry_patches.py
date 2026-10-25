@@ -54,10 +54,10 @@ non-structural translation, the full install lifecycle, and the
 reimplementer's body pin.
 
 **What is deliberately absent here.** The strict UTF-8 wire contract
-(spec-046 Decision 9) used to live in this module and no longer does: it
-is package *policy* with no upstream lifecycle, so gating it on
-``APPLY_UPSTREAM_PATCHES`` meant a consumer disabling temporary
-bug workarounds silently lost a security contract. It now belongs to
+(spec-046 Decision 9) is not in this module: it is package *policy* with
+no upstream lifecycle, so gating it on ``APPLY_UPSTREAM_PATCHES`` would
+let a consumer disabling temporary bug workarounds silently lose a
+security contract. It belongs to
 ``views.py::_RequestBodyBoundaryMixin.parse_json``, and its rows - the
 nine-shape encoding matrix, the ``__cause__`` attribution, the
 patch-opted-out proof - live in ``tests/test_views.py``. This module's

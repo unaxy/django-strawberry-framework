@@ -169,13 +169,13 @@ def test_a_divergent_one_shot_mapping_resolves_from_one_consumed_pass(
     key: str,
     value: object,
 ) -> None:
-    """The mapping is consumed ONCE: pass 2 can no longer smuggle unknown keys.
+    """The mapping is consumed ONCE: a second pass cannot smuggle unknown keys.
 
-    The pre-fix resolver validated unknown keys over one iteration and then
-    expanded the same mapping again for ``policy_cls(**dict(overrides))``, so a
-    mapping whose second pass yielded ``bogus`` escaped the typed unknown-key
-    rejection as a raw ``TypeError: ErrorPolicy.__init__() got an unexpected
-    keyword argument 'bogus'``. One materialization makes pass 1 authoritative.
+    The resolver validates and constructs from one materialized copy, so a
+    mapping whose second pass yields ``bogus`` resolves from its first pass. A
+    resolver that iterated it again for ``policy_cls(**dict(overrides))`` would
+    let ``bogus`` escape the typed unknown-key rejection as a raw
+    ``TypeError: ErrorPolicy.__init__() got an unexpected keyword argument 'bogus'``.
     """
     policy = resolver(_DivergentMapping([[(key, value)], [("bogus", 1), ("x", 1)]]))
     assert getattr(policy, key) == value

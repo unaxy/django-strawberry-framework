@@ -5760,8 +5760,8 @@ def test_b8_consumer_wins_prefetch_preserves_nested_fk_id_elision() -> None:
     prefetch is an FK-id elision - it reads ``item.category_id`` off the
     already-materialised item row and issues no query. It must therefore
     survive the drop and NOT be reported as an unplanned N+1 under
-    ``strictness="raise"`` (the pre-fix code stripped nested elision keys with
-    the dropped Prefetch, falsely flagging the elided relation).
+    ``strictness="raise"``: the nested elision keys are kept when the Prefetch
+    is dropped, so the elided relation is not flagged.
     """
     services.seed_data(1)
 

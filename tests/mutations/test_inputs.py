@@ -1193,15 +1193,15 @@ def test_type_name_token_boundaries_do_not_collide() -> None:
 def test_type_name_digit_boundary_narrowings_stay_distinct() -> None:
     """``field_2`` / ``field2`` Meta.fields narrowings mint distinct input type names.
 
-    ``pascalize_token`` used to strip every underscore (``field_2`` / ``field2`` both
-    -> ``Field2``), so two legitimate narrowed shapes claimed one GraphQL input type
-    name and the second materialize raised a distinct-shape collision. Retaining
-    underscore-before-digit keeps the tokens injective; the shared builder pins
-    ``strawberry.input(name=)`` so the underscore survives on the wire. This
-    ``DigitBoundary`` stays synthetic because the row builds and materializes both
-    narrowed inputs, which needs the two real columns, and ``field_2`` beside
-    ``field2`` is legal Django but a naming no fakeshop domain model would carry; it
-    alone pins the underscore-before-digit token of
+    A ``pascalize_token`` that stripped every underscore (``field_2`` / ``field2``
+    both -> ``Field2``) would let two legitimate narrowed shapes claim one GraphQL
+    input type name, and the second materialize would raise a distinct-shape
+    collision. Retaining underscore-before-digit keeps the tokens injective; the
+    shared builder pins ``strawberry.input(name=)`` so the underscore survives on
+    the wire. This ``DigitBoundary`` stays synthetic because the row builds and
+    materializes both narrowed inputs, which needs the two real columns, and
+    ``field_2`` beside ``field2`` is legal Django but a naming no fakeshop domain
+    model would carry; it alone pins the underscore-before-digit token of
     ``django_strawberry_framework/utils/inputs.py::pascalize_token`` through a
     materialized schema.
     """
@@ -1962,11 +1962,11 @@ def test_editable_input_fields_normalizes_its_declared_sequences() -> None:
     """A bare string or a duplicate name is rejected here too, not only at the metaclass.
 
     ``editable_input_fields`` is a PUBLIC generator the auth and form adapters
-    call directly, bypassing ``DjangoMutation._validate_meta``. It used to freeze
-    its sequences with a bare ``tuple(...)``, so a bare string reaching it
-    iterated as characters and a duplicate name collapsed silently - both
-    malformed declarations that the same narrowing spine already rejected for
-    the form and serializer flavors.
+    call directly, bypassing ``DjangoMutation._validate_meta``. Freezing its
+    sequences with a bare ``tuple(...)`` would let a bare string reaching it
+    iterate as characters and a duplicate name collapse silently - both malformed
+    declarations that the same narrowing spine rejects for the form and
+    serializer flavors.
     """
     with pytest.raises(ConfigurationError, match="not a bare string"):
         editable_input_fields(product_models.Item, fields="name", operation_kind=PARTIAL)
@@ -1982,13 +1982,13 @@ def test_editable_input_fields_normalizes_its_declared_sequences() -> None:
 def test_build_mutation_input_rejects_bare_string_overrides() -> None:
     """A bare ``str`` / ``bytes`` ``overrides`` fails loud instead of char-splitting.
 
-    ``overrides`` freezes through ``frozenset``, so a bare string used to iterate
-    as CHARACTERS (bytes as byte INTEGERS) - silently matching no input attr, so
-    the caller's override never applied and, while non-empty, the garbage set
-    satisfied the ``not overrides`` half of the empty-input guard. The same
-    iterate-as-characters defect class ``normalize_field_name_sequence`` rejects
-    loudly for ``fields`` / ``exclude`` (the row above), so the set-shaped
-    siblings reject it too.
+    ``overrides`` freezes through ``frozenset``, so an unchecked bare string
+    would iterate as CHARACTERS (bytes as byte INTEGERS) - silently matching no
+    input attr, so the caller's override would never apply and, while non-empty,
+    the garbage set would satisfy the ``not overrides`` half of the empty-input
+    guard. The same iterate-as-characters defect class
+    ``normalize_field_name_sequence`` rejects loudly for ``fields`` / ``exclude``
+    (the row above), so the set-shaped siblings reject it too.
     """
     with pytest.raises(ConfigurationError, match="overrides"):
         build_mutation_input(
@@ -2012,10 +2012,10 @@ def test_mutation_input_field_specs_rejects_bare_string_excluded_attrs() -> None
     """A bare ``str`` / ``bytes`` ``excluded_attrs`` fails loud, keeping the D6 seam honest.
 
     ``excluded_attrs`` records the spec-040 D6 capture attrs; frozen through
-    ``frozenset``, a bare string used to split into characters that matched no
-    attr, silently leaving every spec kind as its column/relation kind (the
-    ``password`` capture seam would simply not fire). Sets of names reject the
-    bare-string shape like every other names-parameter surface.
+    ``frozenset``, an unchecked bare string would split into characters that
+    match no attr, silently leaving every spec kind as its column/relation
+    kind (the ``password`` capture seam would simply not fire). Sets of names
+    reject the bare-string shape like every other names-parameter surface.
     """
 
     @strawberry.input

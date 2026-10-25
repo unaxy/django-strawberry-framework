@@ -257,8 +257,9 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
 # Interpreter-derived nesting depths for the transport depth guards.
 #
 # Three test trees drive the same two guards with a pathologically nested
-# document, and each one used to carry its own hard-coded depth. Both bounds
-# are properties of the RUNNING interpreter, not constants:
+# document, and each takes it from the session fixtures below rather than
+# hard-coding a depth. Both bounds are properties of the RUNNING interpreter,
+# not constants:
 #
 # * ``json.loads``' scanner is bounded by the C stack. ``sys.setrecursionlimit``
 #   does not move it (lowering the limit changes nothing), and the budget varies

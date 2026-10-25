@@ -44,7 +44,7 @@ Row groups, in the order a request meets them:
   name, with the GlobalID twins and the aggregate kept honest beside them;
 - introspection, charged like any other document shape rather than exempted;
 - the collection bounds the fields enforce (raw-list rows, connection page size,
-  and the list sibling that used to bypass the connection cap), together with
+  and the list sibling that cannot bypass the connection cap), together with
   what a bounded many-side relation COSTS when its rows arrive already fetched:
   the fakeshop ``Loan`` model's override-free ``LoanQuerySet.as_manager()`` declaration
   is rebuilt at that seam and, under a prefetching plan, must answer its payload
@@ -3823,10 +3823,10 @@ def test_two_schemas_that_compare_equal_bound_their_own_requests() -> None:
 def test_a_policy_the_deployment_still_holds_cannot_widen_a_later_request() -> None:
     """Configuration intake copies; the object a deployment keeps is not the authority.
 
-    An exact policy instance used to pass through intake unchanged, so the
-    reference a deployment kept - a module-level object, or one a resolver can
-    reach through any import - was the object every bound was read from, and a
-    frozen dataclass admits ``policy.__dict__[bound] = wider``.
+    Intake copies even an exact policy instance, so the reference a deployment
+    keeps - a module-level object, or one a resolver can reach through any
+    import - is not the object any bound is read from, although a frozen
+    dataclass admits ``policy.__dict__[bound] = wider``.
     """
     first = _post("/rp-retained/", "{ rows }")
     _no_rejection(first)
@@ -4355,9 +4355,9 @@ def test_a_relation_manager_cannot_widen_the_raw_list_bound_with_its_own_slice()
 
     The generated ``loans`` resolver hands its source straight to the raw-list
     bound, and that source is whatever the relation manager returned. A manager
-    returning a ``QuerySet`` subclass used to put the ceiling in that subclass's
-    ``__getitem__``, so four related rows came back through a real request under
-    a bound of one.
+    returning a ``QuerySet`` subclass does not put the ceiling in that
+    subclass's ``__getitem__``: four related rows exist, and a real request
+    under a bound of one gets one.
     """
     _seed_hostile_relation()
     with _hostile_relation_manager():

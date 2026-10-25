@@ -1342,12 +1342,12 @@ def test_windowed_last_page_reverses_a_bare_expression_ordering(
 ) -> None:
     """A ``last: N`` window under an EXPRESSION ordering serves the partition's TAIL.
 
-    ``_reverse_order_by`` builds ``_dst_row_number_reversed``; a term with no
-    ``descending`` slot (here ``Lower("title")``) used to pass through unflipped,
-    so the reversed numbering ran FORWARD on that column and ``rn_reversed <= N``
-    returned the partition's FIRST rows. Seeded in the inverse of title order so
-    pk order and ``Lower(title)`` order disagree - otherwise the pk tiebreaker
-    alone would mask the unflipped term.
+    ``_reverse_order_by`` builds ``_dst_row_number_reversed`` and flips a term
+    with no ``descending`` slot (here ``Lower("title")``) too; passed through
+    unflipped, the reversed numbering would run FORWARD on that column and
+    ``rn_reversed <= N`` would return the partition's FIRST rows. Seeded in the
+    inverse of title order so pk order and ``Lower(title)`` order disagree -
+    otherwise the pk tiebreaker alone would mask the unflipped term.
 
     Pinned as an optimizer-on/off wire comparison AND a query-count assertion:
     without the count the test could pass by silently falling back to the
@@ -2556,15 +2556,15 @@ def test_fast_path_count_less_window_serves_cheap_page(
 def test_count_less_window_with_count_observer_falls_back_defensively() -> None:
     """A count-less window whose selection OBSERVES the count returns ``None``.
 
-    The conditional-count drift guard in ``_resolve_from_window``, narrowed by
-    The count-policy overhaul leaves only a ``totalCount``
-    observer (``want_count=True``) on a window that carries no count annotation.
+    The conditional-count drift guard in ``_resolve_from_window`` covers only a
+    ``totalCount`` observer (``want_count=True``) on a window that carries no
+    count annotation.
     Plan-time (``connection_total_count_selected``) and resolve-time (``want_count``)
     share the selection walk, so this is unreachable live until they DRIFT -
     which is exactly when serving a fabricated count must lose to the per-parent
-    fallback. The count-free ``hasNextPage`` shapes that USED to fall back here
-    (bounded forward offset page, unbounded forward, reversed ``last: N``) are
-    now SERVED count-free by the probe or the constant-False ``hasNextPage``
+    fallback. The count-free ``hasNextPage`` shapes (bounded forward offset
+    page, unbounded forward, reversed ``last: N``) do not fall back here: they
+    are SERVED count-free by the probe or the constant-False ``hasNextPage``
     (A1 / A2, covered in the live tier). ``want_count`` is NEVER exempt, so the
     guard still fires here; checked before any edge is built, so a stub ``cls``
     proves the early return.
@@ -2679,13 +2679,12 @@ def _shelves_with_consumer_books_schema(
 def test_consumer_assigned_relation_subtree_n1_visible_under_strictness() -> None:
     """The N+1 under a consumer-owned relation FIRES under strictness ``"raise"``.
 
-    The consumer-assigned relation fix (strawberry-django #697): the walker used
-    to record ``planned_resolver_keys`` for the consumer-owned relation's
-    walked subtree, so the nested ``shelf`` accesses on the consumer
-    resolver's FRESH instances short-circuited ``_check_n1`` and the real
-    per-book lazy loads were SILENT under strictness. With the selection left
-    fully unplanned, strictness sees them - the consumer's documented recourse
-    is an explicit ``OptimizerHint`` (the sibling test).
+    The consumer-assigned relation (strawberry-django #697): the walker records
+    no ``planned_resolver_keys`` for the consumer-owned relation's walked
+    subtree, so the nested ``shelf`` accesses on the consumer resolver's FRESH
+    instances do not short-circuit ``_check_n1``. With the selection left fully
+    unplanned, strictness sees the real per-book lazy loads - the consumer's
+    documented recourse is an explicit ``OptimizerHint`` (the sibling test).
     """
     branch = Branch.objects.create(name="central")
     shelf = Shelf.objects.create(code="A1", branch=branch)

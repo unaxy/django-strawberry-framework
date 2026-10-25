@@ -460,10 +460,9 @@ def test_included_field_selections_materializes_one_shot_iterables() -> None:
     """One-shot iterables are materialized once at entry.
 
     The fast-path probe loop and the rebuild loop both iterate the input
-    collection, so a generator used to be silently exhausted between them:
-    fields before the first fragment, and a fragment's whole body, vanished
-    from the plan without any error (found by the selections bug-hunt probe
-    battery). Strawberry's own converter always builds lists, but a consumer-
+    collection, so an unmaterialized generator would be silently exhausted
+    between them and selections would vanish from the plan without any error.
+    Strawberry's own converter always builds lists, but a consumer-
     crafted SelectionState may present iterators; list / tuple inputs keep
     the identity passthrough.
     """

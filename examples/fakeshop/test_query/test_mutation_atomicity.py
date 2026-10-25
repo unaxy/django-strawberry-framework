@@ -1,9 +1,9 @@
 """Live HTTP acceptance for the mutation transaction that spans response completion.
 
-Pins the mutation-atomicity contract: a ``DjangoMutation`` runs its write inside a
-transaction that used to stand committed once the resolver returned - BEFORE the
-returned payload was *completed* (serialized) - so a completion failure left the
-write committed while the client saw ``data: null`` + a top-level error.
+Pins the mutation-atomicity contract: a ``DjangoMutation``'s write transaction
+does not stand committed once the resolver returns - BEFORE the returned payload
+is *completed* (serialized) - so a completion failure never leaves the write
+committed while the client sees ``data: null`` + a top-level error.
 ``DjangoSchema``'s execution context holds each generated top-level mutation field's
 transaction open THROUGH value completion and rolls it back when completion adds an
 error.

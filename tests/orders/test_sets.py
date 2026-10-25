@@ -1130,12 +1130,12 @@ def test_orderset_expand_meta_fields_reads_the_keys_of_a_lookup_bag_with_a_hosti
 def test_orderset_expand_meta_fields_rejects_non_string_entries_without_model() -> None:
     """Entry-TYPE validation is unconditional: it does not need ``Meta.model``.
 
-    The model-less related-only arm previously skipped entry validation
-    entirely, so a ``None`` / bytes / unhashable entry either landed
-    silently in the expansion (``{None: None}``, ``{b'title': None}``) or
-    escaped as a raw ``TypeError: unhashable type`` from the expansion-dict
-    write. Every entry is a path token regardless of ``Meta.model``, so the
-    entry-type gate fires before the model-guarded path walk.
+    The model-less related-only arm validates entries too, so a ``None`` /
+    bytes / unhashable entry neither lands silently in the expansion
+    (``{None: None}``, ``{b'title': None}``) nor escapes as a raw
+    ``TypeError: unhashable type`` from the expansion-dict write. Every
+    entry is a path token regardless of ``Meta.model``, so the entry-type
+    gate fires before the model-guarded path walk.
     """
 
     class NoModelNoneEntryOrder(OrderSet):
@@ -1269,9 +1269,9 @@ def test_orderset_expand_meta_fields_rejects_one_shot_iterator_fields() -> None:
 
     The expansion re-runs whenever a lazy ``RelatedOrder`` target keeps the
     ``get_fields`` cache gate from writing (the gate refuses while any
-    ``_orderset`` is still a string). A generator ``Meta.fields`` used to
+    ``_orderset`` is still a string). A generator ``Meta.fields`` would
     expand correctly on the FIRST walk and then silently rebuild to an EMPTY
-    field set on every later walk (the iterator was exhausted); the
+    field set on every later walk (the iterator exhausted); the
     re-readable-container gate fails loud at declaration instead.
     """
 

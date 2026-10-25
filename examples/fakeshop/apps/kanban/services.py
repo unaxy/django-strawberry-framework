@@ -853,7 +853,7 @@ def set_card_status(
             )
         elif from_status.key == DONE_STATUS_KEY:
             # Reopen: the card has un-shipped, so incoming ``blocked_by`` edges
-            # it previously resolved become live blocks again. Clearing the
+            # that its done status resolved become live blocks again. Clearing the
             # stamp keeps ``is_blocked`` and ``is_ready`` consistent.
             _ = (
                 _manager(models.CardReference, using)

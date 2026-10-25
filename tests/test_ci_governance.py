@@ -1190,6 +1190,232 @@ def test_the_anchor_sweep_accepts_an_anchor_naming_an_open_spec(tmp_path: Path) 
     assert _stale_staged_anchors([_plant(tmp_path, number, " Slice 1")], cards) == []
 
 
+#: The process-provenance phrases START.md "Style the maintainer cares about" bans
+#: from comments, docstrings and test names, each with the pattern that finds it.
+#: Every one reads as the history of a change in every hit the corpus has held, so
+#: the set carries no exclusion: a sentence that needs the words is rephrased.
+#: Words are joined by any whitespace, so a phrase a docstring wraps across lines,
+#: or a block of full-line comments wraps, still matches; a def or class name is
+#: read with its underscores as spaces.
+PROVENANCE_PHRASES: tuple[tuple[str, str], ...] = (
+    ("pre-fix", r"pre[-\s]+fix"),
+    ("post-fix", r"post[-\s]+fix"),
+    ("before the fix", r"before\s+the\s+fix"),
+    ("after the fix", r"after\s+the\s+fix"),
+    ("formerly", r"formerly"),
+    ("exactly as before", r"exactly\s+as\s+before"),
+    ("used to", r"used\s+to"),
+    ("previously", r"previously"),
+    ("as of 0.0.", r"as\s+of\s+0\.0\."),
+)
+
+
+def _phrase_alternative(index: int, phrase: str, pattern: str) -> str:
+    """Return ``pattern`` as named group ``p<index>`` between word edges.
+
+    No letter, digit, underscore or hyphen may precede the phrase, and no word
+    character may follow it unless the phrase itself ends on punctuation (a
+    version prefix such as ``0.0.`` runs straight into its digits).
+    """
+    tail = r"(?!\w)" if phrase[-1].isalnum() else ""
+    return rf"(?P<p{index}>(?<![\w-]){pattern}{tail})"
+
+
+#: One case-insensitive alternation over ``PROVENANCE_PHRASES``.
+PROVENANCE_PATTERN = re.compile(
+    "|".join(
+        _phrase_alternative(index, phrase, pattern)
+        for index, (phrase, pattern) in enumerate(PROVENANCE_PHRASES)
+    ),
+    re.IGNORECASE,
+)
+
+
+def _prose_segments(source: str) -> list[tuple[int, str, str]]:
+    """Return ``(first line, kind, text)`` for every comment, docstring and def/class name.
+
+    A run of full-line comments on consecutive lines is one segment, joined by
+    newlines, so a phrase the block wraps is still one match; a trailing comment
+    is a segment of its own. Other string literals (error messages, fixture data)
+    are not read.
+    """
+    segments: list[tuple[int, str, str]] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            segments.append((node.lineno, "name", node.name.replace("_", " ")))
+        if isinstance(
+            node,
+            (
+                ast.Module,
+                ast.FunctionDef,
+                ast.AsyncFunctionDef,
+                ast.ClassDef,
+            ),
+        ):
+            first = node.body[0] if node.body else None
+            if (
+                isinstance(first, ast.Expr)
+                and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)
+            ):
+                segments.append((first.lineno, "docstring", first.value.value))
+    block: list[str] = []
+    start = last = 0
+    for token in tokenize.generate_tokens(io.StringIO(source).readline):
+        if token.type != tokenize.COMMENT:
+            continue
+        line = token.start[0]
+        full = not token.line[: token.start[1]].strip()
+        text = token.string.lstrip("#").lstrip(":").strip()
+        if full and block and last and line == last + 1:
+            block.append(text)
+            last = line
+            continue
+        if block:
+            segments.append((start, "comment", "\n".join(block)))
+        block, start, last = [text], line, line if full else 0
+    if block:
+        segments.append((start, "comment", "\n".join(block)))
+    return segments
+
+
+def _provenance_entries_in(paths: Iterable[Path]) -> tuple[list[str], int]:
+    """Return one formatted violation per gated phrase in ``paths``, and the segments read.
+
+    Each violation names the file, the line the phrase starts on, the kind of text
+    it sits in and the phrase. The segment count is what lets the sweep tell a
+    clean corpus from one it could not read.
+    """
+    violations: list[str] = []
+    read = 0
+    for path in paths:
+        display = path.relative_to(REPO_ROOT) if path.is_relative_to(REPO_ROOT) else path
+        for first_line, kind, text in _prose_segments(path.read_text(encoding="utf-8")):
+            read += 1
+            for match in PROVENANCE_PATTERN.finditer(text):
+                phrase = PROVENANCE_PHRASES[int((match.lastgroup or "p0")[1:])][0]
+                line = first_line + text.count("\n", 0, match.start())
+                violations.append(f"{display}:{line}: {kind}: {phrase!r}: {match[0]!r}")
+    return violations, read
+
+
+def test_no_comment_docstring_or_name_carries_a_provenance_phrase() -> None:
+    """No first-party comment, docstring or def/class name narrates a change's history.
+
+    START.md "Style the maintainer cares about": comments, docstrings and test
+    names state the invariant, never how the change came to be. That rule had no
+    gate, and the tree carried the history phrasing widely; this row is the gate
+    for the phrase set ``PROVENANCE_PHRASES`` names, over the corpus the census
+    rows above pin against git. A sentence a phrase lands in is restated as
+    behaviour: a counterfactual becomes a present-tense or conditional statement
+    the enclosing test asserts.
+
+    Deliberate limits. Only those phrases are read; the wider history vocabulary
+    ("now", "no longer", "the fix", plan labels, version banners) needs judgment
+    site by site and is not gated here. String literals other than docstrings are
+    not read, so an error message or a fixture string may quote a phrase.
+    """
+    corpus = _sweep_corpus()
+    violations, read = _provenance_entries_in(corpus)
+    assert REPO_ROOT / CENSUS_MODULE in corpus, "the sweep corpus does not hold this module"
+    assert read, "no comment, docstring or name was read; the sweep read nothing"
+    assert not violations, (
+        "process-provenance phrase(s) in first-party prose:\n"
+        + "\n".join(violations)
+        + "\nRestate each sentence as the behaviour it guards, or rephrase a non-historical "
+        "use (START.md, 'Style the maintainer cares about')."
+    )
+
+
+def _plant_prose(tmp_path: Path, body: str) -> Path:
+    """Write a planted corpus file; the phrase arrives as data so this module holds none."""
+    planted = tmp_path / "planted_prose.py"
+    planted.write_text(body, encoding="utf-8")
+    return planted
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [phrase for phrase, _ in PROVENANCE_PHRASES],
+    ids=[phrase for phrase, _ in PROVENANCE_PHRASES],
+)
+def test_the_provenance_sweep_reports_each_planted_phrase(tmp_path: Path, phrase: str) -> None:
+    """Each gated phrase in a comment is reported with its file, line and phrase."""
+    planted = _plant_prose(
+        tmp_path,
+        f"# a planted corpus\n# the value {phrase} 15 here\nVALUE = 1\n",
+    )
+    violations, read = _provenance_entries_in([planted])
+    assert read == 1, read
+    assert violations == [f"{planted}:2: comment: {phrase!r}: {phrase!r}"], violations
+
+
+#: Planted shapes beyond a one-line comment, each with the line and kind the
+#: report must name: a phrase a docstring wraps, a phrase a full-line comment
+#: block wraps, a def name, a class docstring, a trailing comment, and a phrase
+#: in another case.
+PLANTED_PROSE_SHAPES = [
+    (
+        "docstring-wrap",
+        'def run():\n    """Summary.\n\n    The result is exactly as\n    before.\n    """\n',
+        "4: docstring: 'exactly as before'",
+    ),
+    (
+        "comment-block-wrap",
+        "VALUE = 1\n# the result is exactly\n# as before here\nOTHER = 2\n",
+        "2: comment: 'exactly as before'",
+    ),
+    ("def-name", "def test_used_to_raise():\n    pass\n", "1: name: 'used to'"),
+    (
+        "class-docstring",
+        'class Probe:\n    """Probe.\n\n    It formerly ran.\n    """\n',
+        "4: docstring: 'formerly'",
+    ),
+    ("trailing-comment", "VALUE = 1  # pre-fix value\n", "1: comment: 'pre-fix'"),
+    ("upper-case", "# PREVIOUSLY SET\nVALUE = 1\n", "1: comment: 'previously'"),
+]
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [(body, expected) for _, body, expected in PLANTED_PROSE_SHAPES],
+    ids=[name for name, _, _ in PLANTED_PROSE_SHAPES],
+)
+def test_the_provenance_sweep_reports_a_planted_shape(
+    tmp_path: Path,
+    body: str,
+    expected: str,
+) -> None:
+    """A wrapped phrase, a name and every prose kind are reported at the phrase's line."""
+    planted = _plant_prose(tmp_path, body)
+    violations, _ = _provenance_entries_in([planted])
+    assert len(violations) == 1, violations
+    assert violations[0].startswith(f"{planted}:{expected}: "), violations[0]
+
+
+def test_the_provenance_sweep_reports_nothing_for_a_planted_permitted_form(
+    tmp_path: Path,
+) -> None:
+    """The negative direction: a phrase in a plain string, or inside another word, is not read.
+
+    An error message may quote a phrase; ``reused`` and ``unused`` contain the
+    letters but not the words; a blank line between two comments ends the block,
+    so a phrase split across that break is two halves and no match.
+    """
+    planted = _plant_prose(
+        tmp_path,
+        "MESSAGE = 'the value used to be set'\n"
+        "# the reused token; unused tokens\n"
+        "# are fine and exactly as\n"
+        "\n"
+        "# before is a new block\n"
+        "VALUE = 1\n",
+    )
+    violations, read = _provenance_entries_in([planted])
+    assert read == 2, read
+    assert violations == [], violations
+
+
 def test_channels_floor_constant_matches_the_pyproject_dependency_row() -> None:
     """The one Channels floor the install hints name is the one the project pins.
 

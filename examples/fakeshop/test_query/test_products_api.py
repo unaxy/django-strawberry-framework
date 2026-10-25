@@ -2643,11 +2643,10 @@ def test_products_categories_filter_by_name_denied_for_anonymous() -> None:
 def test_products_categories_name_permission_fires_for_non_exact_lookup() -> None:
     """The gate fires for a NON-``exact`` lookup too (regression guard).
 
-    Before the fix, ``check_<field>_permission`` was dispatched on the
-    lookup-expanded form key, so only ``exact`` (the suffix-free key)
-    triggered it; ``iContains`` slipped past ungated. The gate now keys on
-    the source field, so an anonymous ``name: { iContains: ... }`` filter
-    is rejected exactly like the ``exact`` form.
+    The gate keys on the source field, not on the lookup-expanded form key
+    (of which only ``exact``, the suffix-free key, names the field), so an
+    anonymous ``name: { iContains: ... }`` filter is rejected exactly like
+    the ``exact`` form.
     """
     seed_data(1)
     category = models.Category.objects.earliest("id")
@@ -3497,10 +3496,10 @@ def test_products_categories_items_connection_fixed_query_count() -> None:
 # range (``before`` at or before ``after``) makes ``SliceMetadata`` yield a
 # NEGATIVE ``expected`` (``start > end``). ``utils/connections.py``'s
 # ``derive_connection_window_bounds`` must reject that shape as
-# ``UnwindowableConnection`` (fall back per-parent), or the pre-fix
-# ``window_range_plan`` reads the negative bound as "no upper bound" and serves
-# the forward tail instead of the empty page the per-parent ``ListConnection``
-# serves - an optimizer-on / optimizer-off cursor-parity break.
+# ``UnwindowableConnection`` (fall back per-parent), so the optimizer-on page
+# is the empty page the per-parent ``ListConnection`` serves - optimizer-on /
+# optimizer-off cursor parity. ``window_range_plan`` raises on a negative limit
+# rather than reading it as "no upper bound".
 _ITEMS_CONNECTION_WINDOW_QUERY = """
 query($after: String, $before: String, $first: Int, $last: Int) {
   allCategories {
@@ -3536,11 +3535,10 @@ def test_products_items_connection_inverted_after_before_window_is_empty() -> No
     Regression guard for the negative-``expected`` cursor-parity bug: with
     ``before`` resolving at or before ``after`` the range is empty, so the
     per-parent ``ListConnection`` serves ``edges: []`` with
-    ``hasPreviousPage = start > 0`` and ``hasNextPage = False``. Pre-fix, the
-    windowed fast path treated the negative slice bound as unbounded and returned
-    the two rows past ``after``; the fix makes ``derive_connection_window_bounds``
-    reject the shape as ``UnwindowableConnection`` so the windowed and
-    non-windowed paths agree.
+    ``hasPreviousPage = start > 0`` and ``hasNextPage = False``.
+    ``derive_connection_window_bounds`` rejects the shape as
+    ``UnwindowableConnection``, so the windowed and non-windowed paths agree on
+    the empty page.
 
     Uses one public seeded category and makes its six seeded items visible so the
     window spans a deterministic partition without hand-rolling catalog rows.
@@ -4054,18 +4052,13 @@ def test_post_raw_binary_body_returns_400_not_500() -> None:
 def test_post_utf16_json_body_is_rejected_as_400() -> None:
     """A UTF-16-encoded JSON body (with BOM) -> controlled 400.
 
-    The history is the point of keeping this row. Before the wire contract
-    (spec-046 Decision 9) this request
-    *succeeded*: the cross_web patch handed the raw bytes to ``parse_json`` and
-    ``json.loads`` auto-detected UTF-16 per RFC 8259, so a body that used to
-    500 on the sync view started answering 200 - wider than "400 instead of
-    500", and identical to the async transport.
-
-    The wire contract (spec-046 Decision 9) narrows the success set to UTF-8,
-    so the same bytes are now a 400. Mechanism: ``encode("utf-16")`` prefixes
-    the BOM ``FF FE`` and ``0xFF`` is not a valid UTF-8 start byte, so the
-    strict decode inside ``views.py::_RequestBodyBoundaryMixin.parse_json``
-    raises and is translated before upstream's ``json.loads`` is ever reached.
+    ``json.loads`` auto-detects UTF-16 bytes per RFC 8259 and parses them, so
+    the parser alone would accept this body. The wire contract (spec-046
+    Decision 9) narrows the success set to UTF-8, so the same bytes are a 400.
+    Mechanism: ``encode("utf-16")`` prefixes the BOM ``FF FE`` and ``0xFF`` is
+    not a valid UTF-8 start byte, so the strict decode inside
+    ``views.py::_RequestBodyBoundaryMixin.parse_json`` raises and is translated
+    before upstream's ``json.loads`` is ever reached.
     """
     body = '{"query": "{ __typename }"}'.encode("utf-16")
 
@@ -4133,11 +4126,10 @@ def test_post_utf8_bom_json_body_is_rejected_as_400() -> None:
 def test_post_multibyte_encoded_json_body_is_rejected_as_400(encoding: str) -> None:
     """The remaining UTF-16 / UTF-32 shapes -> controlled 400, completing the encoding set.
 
-    The three rows above carry the history for the encodings that used to
-    succeed; these four complete the "UTF-16 / UTF-32 (BOM and BOM-less)" set
-    the wire contract claims (spec-046 test-plan row 19), which had no UTF-32
-    coverage at any tier before this slice. ``encode("utf-32")`` emits a BOM and
-    fails at the strict decode; the three BOM-less forms decode into
+    The three rows above pin the BOM'd UTF-16, BOM-less UTF-16-LE and BOM'd
+    UTF-8 bodies; these four complete the "UTF-16 / UTF-32 (BOM and BOM-less)"
+    set the wire contract claims (spec-046 test-plan row 19). ``encode("utf-32")``
+    emits a BOM and fails at the strict decode; the three BOM-less forms decode into
     NUL-studded text and fail at upstream's ``json.loads``. Both routes are the
     same status and the same message, which is the contract - one byte sequence,
     one interpretation, no encoding negotiation on the wire.
@@ -4229,8 +4221,8 @@ def test_post_batch_with_non_object_elements_returns_400_not_500(body: bytes) ->
 
     Upstream's batch branch validates enablement / size only, then calls
     `item.get("query")` on every element. With batching enabled that is an
-    unhandled `AttributeError` -> 500; with batching off the same bodies
-    previously 400'd as "Batching is not enabled" *before* `.get`, hiding the
+    unhandled `AttributeError` -> 500; with batching off upstream answers the
+    same bodies 400 "Batching is not enabled" *before* `.get`, which hides the
     hole. The Strawberry patch rejects non-object batch elements at
     `parse_json` so both configurations stay on a controlled 400. A
     well-typed batch array (every element an object) is deliberately
@@ -4251,9 +4243,8 @@ def test_get_query_with_null_param_executes_like_upstream(param: str) -> None:
     `null` is valid per upstream's own contract (`variables` / `extensions`
     "must be an object or null, if provided") and upstream executes the
     request. Pins the patch's `parse_query_params` shield: the scalar-body
-    guard must not intercept the nested GET parses - an unshielded guard
-    regressed this previously-succeeding request to a 400 whose message
-    talked about a "request body" on a bodyless GET.
+    guard must not intercept the nested GET parses, so this request executes
+    with ``200`` and no "request body" message on a bodyless GET.
     """
     client = Client()
 
@@ -4351,9 +4342,9 @@ def test_get_query_with_pathologically_nested_param_returns_400_not_500(
     """GET ``?<param>=<deep>`` -> the shield translates the same escape.
 
     The shield deliberately routes the GET parses around the envelope guard,
-    but it shares gap 1's error channel: a deep param used to escape as an
-    unhandled ``RecursionError`` -> ``500`` precisely because that channel
-    was not installed on the shielded path.
+    but it shares gap 1's error channel, so a deep param's
+    ``RecursionError`` is translated to a ``400`` on the shielded path
+    rather than escaping as a ``500``.
     """
     client = Client()
 

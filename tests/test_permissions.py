@@ -1459,10 +1459,10 @@ def test_hook_values_and_values_list_projections_are_normalized(hook: _Hook) -> 
     """A hook's ``.values(...)`` / ``.values_list(...)`` return is re-projected safely.
 
     The subquery is normalized to ``field.target_field.attname``, so a consumer
-    projection can no longer compare the FK against the wrong column (the old
-    contract passed a ``.values("name")`` straight into ``__in`` - a silent
-    wrong-column narrowing) and a multi-column ``.values()`` no longer raises at
-    evaluation. Both shapes narrow by the hook's FILTER, not its projection.
+    projection cannot compare the FK against the wrong column (a
+    ``.values("name")`` passed straight into ``__in`` would be a silent
+    wrong-column narrowing) and a multi-column ``.values()`` evaluates without
+    raising. Both shapes narrow by the hook's FILTER, not its projection.
     """
     with _tables(_CtTarget, _CtParent):
         parent_type = _register_ct_pair(hook)
@@ -1741,14 +1741,13 @@ def test_hook_manager_return_is_coerced() -> None:
 def test_unpinned_hook_return_is_repinned_to_root_alias() -> None:
     """An UNROUTED hook return is repinned onto the cascade's root alias.
 
-    The shared boundary's alias contract replaces the old reject-on-``.db``
-    check: a hook that builds a fresh queryset (``Model.objects.filter(...)``,
-    ``_db`` unset) no longer trips a cross-database rejection when the root
-    runs on a non-default alias - the result is normalized onto the root
-    alias with ``.using(...)``. Only an EXPLICITLY divergent ``.using(...)``
-    fails closed (the ``"alias"`` row in the rejection battery). Alias-state
-    only - the alias never resolves a connection, so no secondary database
-    (and no table) is needed.
+    Under the shared boundary's alias contract a hook that builds a fresh
+    queryset (``Model.objects.filter(...)``, ``_db`` unset) does not trip a
+    cross-database rejection when the root runs on a non-default alias - the
+    result is normalized onto the root alias with ``.using(...)``. Only an
+    EXPLICITLY divergent ``.using(...)`` fails closed (the ``"alias"`` row in
+    the rejection battery). Alias-state only - the alias never resolves a
+    connection, so no secondary database (and no table) is needed.
     """
     registry.clear()
     parent_type = _register_ct_pair(

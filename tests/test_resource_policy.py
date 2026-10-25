@@ -2905,8 +2905,7 @@ class _WriteProbe:
 
     The ID-scalar fallback in ``_charge_list_family`` exists for exactly this
     schema shape: a mutation the package did not generate carries no
-    ``_input_field_specs`` map, so an id list is classified by its scalar name,
-    exactly as before the spec signal existed.
+    ``_input_field_specs`` map, so an id list is classified by its scalar name.
     """
 
     @strawberry.mutation
@@ -3916,11 +3915,12 @@ class _DriftingPolicy(ResourcePolicy):
 def test_an_explicit_extension_policy_is_read_out_once_when_it_is_accepted() -> None:
     """One operation is bounded by ONE policy, whatever its configuration answers.
 
-    The extension used to return its explicit ``_policy`` raw from every hook:
-    the armed budget got a canonical snapshot, while the pre-parse scan and the
-    post-validation document walk each re-read the consumer object. A policy
-    whose reads are its own code could hand those hooks a different bound than
-    the one the request is actually running under - a one-token budget for the
+    The extension reads an explicit ``_policy`` out once, when it accepts it.
+    If every hook got the raw ``_policy``, the armed budget would get a
+    canonical snapshot while the pre-parse scan and the post-validation
+    document walk each re-read the consumer object, and a policy whose reads
+    are its own code could hand those hooks a different bound than the one the
+    request is actually running under - a one-token budget for the
     snapshot and a million-token budget for the scan that was supposed to
     enforce it.
     """

@@ -1055,11 +1055,11 @@ def test_sanitize_member_name_neutralizes_python_enum_reserved_shapes() -> None:
     schema.
     """
     # Symbol-wrapped tokens collapse to a ``_word_`` sunder shape and must be
-    # neutralised (previously a raw ``ValueError`` from ``Enum(...)``).
+    # neutralised (unsanitized, ``Enum(...)`` raises a raw ``ValueError``).
     assert _sanitize_member_name("-x-") == "MEMBER__x_"
     assert _sanitize_member_name("[a]") == "MEMBER__a_"
     assert _sanitize_member_name("-1-") == "MEMBER__1_"
-    # Recognised sunder directives (previously SILENTLY dropped as members).
+    # Recognised sunder directives (unsanitized, SILENTLY dropped as members).
     assert _sanitize_member_name("_ignore_") == "MEMBER__ignore_"
     assert _sanitize_member_name("_missing_") == "MEMBER__missing_"
     # The special-cased ``mro`` (case-sensitive: only the lowercase form is reserved).
@@ -1263,10 +1263,10 @@ def test_convert_choices_to_enum_with_python_enum_reserved_values_builds_schema(
     assert isinstance(field, models.Field)
     original = field.choices
     field.choices = (
-        ("-x-", "Dash X"),  # -> _x_ sunder shape: previously ValueError at Enum build.
-        ("mro", "Method Resolution Order"),  # previously ValueError at Enum build.
-        ("_ignore_", "Ignore Directive"),  # previously SILENTLY dropped as a member.
-        # Previously SILENTLY installed as a class attribute, not a member.
+        ("-x-", "Dash X"),  # -> _x_ sunder shape: unsanitized, ValueError at Enum build.
+        ("mro", "Method Resolution Order"),  # unsanitized, ValueError at Enum build.
+        ("_ignore_", "Ignore Directive"),  # unsanitized, SILENTLY dropped as a member.
+        # Unsanitized, SILENTLY installed as a class attribute, not a member.
         ("_FixtureTypeStatusEnum__hidden", "Private Namespace"),
         ("active", "Active"),  # plain control value.
     )

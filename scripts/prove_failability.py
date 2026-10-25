@@ -5,10 +5,9 @@ fail". A passing suite is evidence only if it could have failed, so each new
 boundary owes one loop: transiently remove the boundary, observe which test
 rows fail, restore, and prove the restore by byte comparison.
 
-The loop was previously prose in three documents executed by hand, which is
-how a proof gets written from memory and how a revert gets asserted rather than
-proved. Everything this script emits is measured in the same process that made
-the mutation.
+A loop kept as prose and executed by hand is how a proof gets written from
+memory and how a revert gets asserted rather than proved. Everything this
+script emits is measured in the same process that made the mutation.
 
 Deliberate properties, each one a hand-run failure mode this encodes away:
 
@@ -125,8 +124,8 @@ Deliberate properties, each one a hand-run failure mode this encodes away:
   a validity channel and routed through the same machinery as a collection
   error. A baseline that could not run is no reference to difference against.
 * **A narrowed run says so in its own report.** ``--only`` selects a subset, and
-  the emitted block used to be textually identical to a complete run's - so
-  ``--only 3 --output`` produced a record covering one boundary of twenty that
+  a block textually identical to a complete run's would make
+  ``--only 3 --output`` a record covering one boundary of twenty that
   reads as an ``ARTIFACT.md`` ``### Failability proofs`` subsection, which
   requires one entry per new boundary. ``--only`` is not refused ``--output``
   the way ``--no-baseline`` is, because it has a legitimate use the other lacks
@@ -2702,10 +2701,11 @@ def render_report(
     # ``File mutated`` is the target as resolved and written to, and it is a column of
     # its own because the boundary label beside it is free manifest text: an entry
     # labelled `package/views.py::Mixin.method` with `"target": "tests/test_views.py"`
-    # used to render a record whose every file identity was the unchecked label, so a
-    # mutation that landed in a test file read as a removed production boundary. The
-    # label is now refused when it disagrees (see _refuse_label_target_disagreement),
-    # and the value that falsifies it is rendered rather than merely computed.
+    # would otherwise render a record whose every file identity is the unchecked
+    # label, so a mutation that landed in a test file would read as a removed
+    # production boundary. The label is refused when it disagrees (see
+    # _refuse_label_target_disagreement), and the value that falsifies it is rendered
+    # rather than merely computed.
     lines.append(
         "| # | Boundary | File mutated | Mutation applied | Rows failed | Errors | "
         "Scope as run | Restore proof |",

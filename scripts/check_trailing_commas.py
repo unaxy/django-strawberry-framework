@@ -1489,9 +1489,9 @@ def _walk(
     results afterwards; pruning at the directory level never visits them. A
     directory named by ``[tool.ruff] extend-exclude`` is pruned the same way.
 
-    Git-ignored paths are pruned too. A tree-wide run used to descend ``.claude/``
-    and report a layout violation against an agent-memory file no commit can
-    contain -- and under ``--fix`` it did not just report: it WROTE a
+    Git-ignored paths are pruned too. A tree-wide run that descended ``.claude/``
+    would report a layout violation against an agent-memory file no commit can
+    contain -- and under ``--fix`` it would not just report: it would WRITE a
     LINK-DEFINITIONS footer into that file. An ignored path is not repo content,
     so the sweep does not read it. Paths named explicitly on the command line are
     still honoured; only the walk is filtered.
