@@ -366,7 +366,7 @@ of the first foundation card.
     OR'd). Consumers: `filters/sets.py::FilterSet._apply_flat_leaves`
     routes audited framework-generated to-many leaves through both
     (replaying the original `django-filter` invocation inside the root);
-    `filters/sets.py::FilterSet._apply_active_leaf` negates an excluding
+    `filters/sets.py::FilterSet._apply_relation_leaf` negates an excluding
     relation-key leaf that walks no hop before its key over
     `correlated_inner_root` as a bare `~Exists`, without `attach_exists`.
   - **Target-side** — `optimizer/predicates.py::related_rows_exist` builds

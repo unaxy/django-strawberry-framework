@@ -68,7 +68,8 @@
 "django_strawberry_framework/filters/inputs.py::_choice_enum_from_filter" = { cast = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSet.FILTER_DEFAULTS" = { reportIncompatibleVariableOverride = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSet.__init__" = { reportArgumentType = 2 }
-"django_strawberry_framework/filters/sets.py::FilterSet._apply_active_leaf" = { cast = 1 }
+"django_strawberry_framework/filters/sets.py::FilterSet._absent_leaf_applies" = { cast = 1 }
+"django_strawberry_framework/filters/sets.py::FilterSet._apply_relation_leaf" = { cast = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSet._bound_terminal" = { cast = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSet._build_stashed_instance" = { reportArgumentType = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSet._copy_filter" = { cast = 1 }
@@ -76,7 +77,6 @@
 "django_strawberry_framework/filters/sets.py::FilterSet._filter_child_rows" = { cast = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSet._generation_origin_for_field" = { reportArgumentType = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSet._hop_visible_rows" = { cast = 2 }
-"django_strawberry_framework/filters/sets.py::FilterSet._leaf_applies" = { cast = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSet._leaf_chain" = { cast = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSet._null_test_filter_for_relation" = { cast = 2 }
 "django_strawberry_framework/filters/sets.py::FilterSet._reaches_hop" = { cast = 2 }

@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 278 done, 194 to do.
+Progress: 279 done, 196 to do.
 
 ## Done
 
@@ -1379,6 +1379,16 @@ Progress: 278 done, 194 to do.
   nothing to any declaration, and a `LookupChoiceFilter` (or subclass) on a served `FilterSet` is refused with
   `ConfigurationError` at schema build, before its field is read; the declaration still filters under django-filter
   and DRF
+- [x] 399. fixed: a hop-walking flat leaf (an owner-bound projected copy or a plain walked copy) whose value is
+  supplied runs its child filter body once per value, over the hop's visible rows, where it ran twice (an unscoped
+  activity probe whose result was discarded, then the apply), so a consumer `method=` body ran twice and one reading
+  the database cost a query more flat than nested; a result that is its input by identity is inactive and leaves the
+  parent unchanged, the hop chain is derived once, and a supplied-but-inactive leaf (`""`) now derives its hops once
+  on sync as on async. An absent leaf keeps the unscoped probe (an inactive one runs no `get_queryset`), so a consumer
+  filter acting on an omitted value behaves as before. A projected copy through an unresolved `RelatedFilter(None,
+  ...)` hop answers `ConfigurationError` like a plain walked leaf, where it raised `RecursionError`. One owner
+  (`filters/sets.py::FilterSet._apply_relation_leaf`); package rows count body runs, queries and derivations sync and
+  async, live empty-value rows pin the identity exit; spec-027 and the `FilterSet` glossary term say so
 
 ## Outside review of the fixes
 
@@ -1510,8 +1520,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 398. A class-level `GlobalIDFilter.filter` override skips the lone-surrogate `FILTER_INVALID` refusal, because
   `filters/sets.py::_decodes_before_binding` reads only the instance's own filter, so a `UnicodeEncodeError` escapes as
   the masked uncoded error; read it through `utils/truth.py::overrides` (the class-level-override family of 388)
-- [ ] 399. A flat `RelatedFilter` leaf runs `ProjectedChildFilter.filter` twice for one value (robustness: one extra
-  EXISTS build per request, same rows)
 - [ ] 500. Process provenance in test docstrings and comments outside `tests/utils/test_querysets.py`, the class 324
   restates there: e.g. `tests/utils/test_permissions.py` ("It used to reach it"), `tests/test_permissions.py` ("no
   longer compare ... (the old ...", "no longer trips"), `tests/utils/test_policies.py` ("no longer", "The pre-fix
@@ -1641,12 +1649,24 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 520. (robustness) The `LookupChoiceFilter` refusal for a leaf projected through a `RelatedFilter` names the
   internal `ProjectedLookupChoiceFilter` class, the parent set and the `field_name` (`shelf__code_l`), not the
   declared attribute on the child set. Found verifying 373
+- [ ] 560. (robustness) A top-level filter leaf beside an `and` / `or` / `not` arm repeats its predicate inside the
+  arm's `pk IN (SELECT ...)` subquery: `FilterSet.filter_queryset` hands `_evaluate_logic_tree` the flat-narrowed
+  queryset, then ANDs the arm onto it again; same rows, redundant SQL. Found fact-finding 399
+- [ ] 562. (robustness) A flat range leaf walking a hop with both bounds null (`{start: null, end: null}`) runs the
+  hop target's `get_queryset` on `apply_async` but not on `apply_sync`; same rows. Found verifying 399
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 561. CHANGELOG entry for item 399: a flat filter field walking a `RelatedFilter` hop runs its filter body once
+  per supplied value (a consumer `method=` or `filter` override ran twice); a supplied value that constrains nothing
+  (`""`) now runs the hop target type's `get_queryset` once per request on `apply_sync` too, as on `apply_async`, so
+  it raises there what the nested branch and the async path raise (an unregistered hop target or an unresolved
+  `RelatedFilter(None, ...)` hop: `ConfigurationError`; an async-only `get_queryset`: the `RuntimeError` naming
+  `apply_async`); a projected leaf through an unresolved placeholder hop raises `ConfigurationError` instead of
+  `RecursionError`
 - [ ] 521. CHANGELOG entry for item 373: a `django_filters.LookupChoiceFilter` on a `FilterSet` the schema serves is
   refused with `ConfigurationError` when the schema is built (no GraphQL input carries its value plus lookup), and
   building the schema no longer writes a cached form field into any class-level declared filter. GOAL.md (the
