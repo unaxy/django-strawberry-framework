@@ -309,12 +309,15 @@ if TYPE_CHECKING:
     _ModelFormAny: TypeAlias = forms.ModelForm[models.Model]
     _ModelChoiceFieldAny: TypeAlias = forms.ModelChoiceField[models.Model]
     _ModelMultipleChoiceFieldAny: TypeAlias = forms.ModelMultipleChoiceField[models.Model]
+    #: Any model field, its set and get types unread.
+    _FieldAny: TypeAlias = models.Field[object, object]
 else:
-    # None of the three has a ``__class_getitem__`` at runtime (only the
+    # None of the four has a ``__class_getitem__`` at runtime (only the
     # ``django_stubs_ext`` patch adds one): each hint stays the bare class.
     _ModelFormAny = forms.ModelForm
     _ModelChoiceFieldAny = forms.ModelChoiceField
     _ModelMultipleChoiceFieldAny = forms.ModelMultipleChoiceField
+    _FieldAny = models.Field
 
 
 def _is_model_choice_field(field: forms.Field) -> TypeIs[_ModelChoiceFieldAny]:
@@ -1062,7 +1065,7 @@ def _bound_form_or_field_errors(
 
 def _unstorable_cleaned_fields(
     form: _ModelFormAny,
-) -> list[models.Field[object, object]]:
+) -> list[_FieldAny]:
     """Return the form's columns holding a value the column cannot store.
 
     Reads the instance the save was attempted on, never the database, so it is safe
@@ -1091,12 +1094,12 @@ def _unstorable_cleaned_fields(
     return unstorable_columns(form.instance, form.fields, also=_is_unstorable_blank)
 
 
-def _is_unstorable_blank(field: models.Field[object, object], value: object) -> bool:
+def _is_unstorable_blank(field: _FieldAny, value: object) -> bool:
     """Whether ``value`` is the ``""`` a ``blank=True`` column storing no empty string refuses."""
     return field.blank and value == "" and not field.empty_strings_allowed
 
 
-def _coerced_null_fields(form: _ModelFormAny) -> list[models.Field[object, object]]:
+def _coerced_null_fields(form: _ModelFormAny) -> list[_FieldAny]:
     """Return the ``null=False`` columns whose explicit ``null`` their form field stored as a value.
 
     ``form.data`` is what ``get_form`` bound (after any override of the hook), read under
@@ -1210,7 +1213,7 @@ def _required_file_clears(form: forms.BaseForm) -> dict[str, list[ValidationErro
 
 
 def _column_null_errors(
-    fields: list[models.Field[object, object]],
+    fields: list[_FieldAny],
 ) -> dict[str, list[ValidationError]]:
     """Map each column to its Django ``error_messages["null"]`` error, code ``null``.
 

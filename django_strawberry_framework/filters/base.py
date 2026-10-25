@@ -39,6 +39,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple, TypeVar, cast, final
 
 from django.core.exceptions import ValidationError
+from django.core.files.uploadedfile import UploadedFile
 from django.db import models
 from django.db.models.options import Options
 from django.forms import (
@@ -146,7 +147,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
     from typing import TypeAlias
 
-    from django.core.files.uploadedfile import UploadedFile
     from django.forms.boundfield import BoundField
     from django.utils.datastructures import MultiValueDict
     from django_stubs_ext import StrPromise
@@ -181,6 +181,11 @@ if TYPE_CHECKING:
     _FilterSetTarget: TypeAlias = (
         str | type[FilterSet] | Callable[[], type[FilterSet] | None] | None
     )
+    #: Any ``UploadedFile``, binary or text.
+    _UploadedFileAny: TypeAlias = UploadedFile[bytes] | UploadedFile[str]
+else:
+    # ``UploadedFile`` has no ``__class_getitem__`` at runtime: the hint stays the class.
+    _UploadedFileAny = UploadedFile
 
 _M = TypeVar("_M", bound=models.Model)
 
@@ -1818,7 +1823,7 @@ class _AbsentGlobalIDMultipleChoiceWidget(SelectMultiple):
     def value_from_datadict(
         self,
         data: Mapping[str, object],
-        files: MultiValueDict[str, UploadedFile[bytes] | UploadedFile[str]],
+        files: MultiValueDict[str, _UploadedFileAny],
         name: str,
     ) -> object:
         """Return ``None`` for an absent key; defer to ``SelectMultiple`` otherwise."""

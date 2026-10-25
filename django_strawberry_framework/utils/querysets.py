@@ -113,7 +113,9 @@ from django.db.models.expressions import (
 from django.db.models.fields.reverse_related import ForeignObjectRel
 from django.db.models.lookups import Lookup
 from django.db.models.manager import BaseManager
+from django.db.models.options import Options
 from django.db.models.query import (
+    BaseIterable,
     FlatValuesListIterable,
     ModelIterable,
     NamedValuesListIterable,
@@ -171,8 +173,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
     from typing import Literal, Protocol, TypeAlias
 
-    from django.db.models.options import Options
-    from django.db.models.query import BaseIterable
     from typing_extensions import TypeIs
 
     from django_strawberry_framework.filters.sets import FilterSet
@@ -183,6 +183,13 @@ if TYPE_CHECKING:
 
     #: A ``Prefetch`` as the seal rebuilds it: a string lookup over a model-row child.
     _SealedPrefetch: TypeAlias = Prefetch[str, models.QuerySet[models.Model], str]
+    #: Any ``Prefetch``: django-stubs' parameters are covariant, so the string-lookup
+    #: form with its defaults is the universal one.
+    _PrefetchAny: TypeAlias = Prefetch[str]
+    #: Any model's ``Options``.
+    _OptionsAny: TypeAlias = Options[models.Model]
+    #: Any ``QuerySet`` iterable class, its row type unread.
+    _BaseIterableAny: TypeAlias = BaseIterable[object]
     #: A ``Prefetch``'s ``(prefetch_through, prefetch_to, to_attr)`` read as exact text.
     _PrefetchPath: TypeAlias = tuple[str, str, str | None]
     #: A resolver source after ``Manager`` coercion: a ``QuerySet`` flagged ``True``, or
@@ -245,6 +252,11 @@ if TYPE_CHECKING:
             ...
 
 else:
+    # None of ``Prefetch``, ``Options`` and ``BaseIterable`` has a ``__class_getitem__``
+    # at runtime (only the ``django_stubs_ext`` patch adds one): each hint stays the class.
+    _PrefetchAny = Prefetch
+    _OptionsAny = Options
+    _BaseIterableAny = BaseIterable
     is_manager = BaseManager.__instancecheck__
 
 
@@ -469,7 +481,7 @@ class _UnexpandableOrderError(Exception):
 def _names_to_path(
     query: sql.Query,
     names: Sequence[str],
-    opts: Options[models.Model],
+    opts: _OptionsAny,
 ) -> tuple[list[_PathStep], ModelField, tuple[object, ...], Sequence[str]]:
     """Return ``query.names_to_path(names, opts, allow_many=True, fail_on_missing=False)``.
 
@@ -499,15 +511,11 @@ class ResolvedOrderName:
     path: Sequence[_PathStep]
     final_field: ModelField
     lookups: Sequence[str]
-    related_opts: Options[models.Model] | None
+    related_opts: _OptionsAny | None
     substitute: Sequence[str | Combinable] | None
 
 
-def resolve_order_name(
-    query: sql.Query,
-    name: str,
-    opts: Options[models.Model],
-) -> ResolvedOrderName:
+def resolve_order_name(query: sql.Query, name: str, opts: _OptionsAny) -> ResolvedOrderName:
     """Resolve ``name`` (no direction) against ``opts`` the way the compiler resolves an order name.
 
     ``Query.names_to_path`` is the walk ``setup_joins`` runs for
@@ -578,7 +586,7 @@ def _expanded_order_name(
     name: str,
     *,
     descending: bool,
-    opts: Options[models.Model],
+    opts: _OptionsAny,
     prefix: str,
     start: object,
     seen: set[tuple[object, ...]],
@@ -3029,7 +3037,7 @@ _DJANGO_ITERABLE_CLASSES: truth.IdentitySet[type[object]] = truth.IdentitySet(
 )
 
 
-def _is_django_iterable_class(value: object) -> TypeGuard[type[BaseIterable[object]]]:
+def _is_django_iterable_class(value: object) -> TypeGuard[type[_BaseIterableAny]]:
     """Return whether ``value`` IS one of Django's own row-iterable classes."""
     return value in _DJANGO_ITERABLE_CLASSES
 
@@ -4692,10 +4700,10 @@ def _built_queryset(
     query: sql.Query,
     using: str | None,
     hints: object,
-    iterable: type[BaseIterable[object]],
+    iterable: type[_BaseIterableAny],
     fields: tuple[str, ...] | None,
     fetch_mode: object,
-    prefetch_lookups: tuple[str | Prefetch[str], ...],
+    prefetch_lookups: tuple[str | _PrefetchAny, ...],
     sticky_filter: bool,
     for_write: bool,
 ) -> _QuerySetT:

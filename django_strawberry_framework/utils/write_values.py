@@ -32,6 +32,7 @@ from collections.abc import Iterable, Mapping
 from enum import Enum
 from typing import TYPE_CHECKING, cast
 
+from django.db.models.fields import Field
 from strawberry import relay
 
 from django_strawberry_framework.registry import registry
@@ -82,6 +83,11 @@ if TYPE_CHECKING:
     _FieldHandler: TypeAlias = Callable[[InputFieldSpec, object], FieldError | None]
     #: One flavor relation decoder, called with the shared keyword arguments.
     _RelationDecoder: TypeAlias = Callable[..., tuple[object, FieldError | None]]
+    #: Any model field, its set and get types unread.
+    _FieldAny: TypeAlias = Field[object, object]
+else:
+    # ``Field`` has no ``__class_getitem__`` at runtime: the hint stays the class.
+    _FieldAny = Field
 
 
 def unstorable_text_error(field_name: str, value: object) -> FieldError | None:
@@ -723,8 +729,8 @@ def unstorable_columns(
     instance: models.Model,
     names: Container[str],
     *,
-    also: Callable[[models.Field[object, object], object], bool] | None = None,
-) -> list[models.Field[object, object]]:
+    also: Callable[[_FieldAny, object], bool] | None = None,
+) -> list[_FieldAny]:
     """Return the declared columns of ``instance`` holding a value the column cannot store.
 
     Walks the concrete, editable, non-primary-key columns whose field name is in
