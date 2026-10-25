@@ -259,7 +259,7 @@ graded. Each is one of:
 - **duplicates the code** — says what the next line says; delete it;
 - **process provenance** — names a spec (a pointer to a spec Decision is kept, START.md
   "Style"; a bare `(spec-NNN)` is provenance), card, round, worker, review, "fix for", "legacy",
-  "moved from", "now", "no longer" ([AGENTS.md][agents]); delete or rewrite as the present-tense
+  "moved from", "now", "no longer" ([START.md][start] "Style"); delete or rewrite as the present-tense
   rule.
 
 First lines, by kind:
