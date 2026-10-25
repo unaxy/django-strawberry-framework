@@ -15,9 +15,9 @@ the original source text.
 The overview (``<stem>.overview.md``) names every line-bearing row twice: by its
 line number and by its enclosing symbol, ``path::Qualified.Name`` inside a class
 or function and ``path #"<line text>"`` for a module-level line. Those are the
-citation forms AGENTS.md rule 27 requires outside per-cycle scratch, so a row can
-be copied into a review record as it stands. Two heuristic sections follow the
-inventory sections:
+citation forms the AGENTS.md source-refs rule requires outside per-cycle scratch, so
+a row can be copied into a review record as it stands. Two heuristic sections follow
+the inventory sections:
 
 * ``## Performance leads`` lists per-row work (a database-shaped call or an
   ``await`` inside a ``for`` / ``while`` body or a comprehension), the functions

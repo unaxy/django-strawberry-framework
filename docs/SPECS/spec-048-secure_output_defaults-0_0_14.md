@@ -1097,13 +1097,13 @@ constants look like they want a setting.
 
 ## Test plan
 
-Placement follows [`AGENTS.md`][agents] rules 7 and 10 and the
-[live-first coverage mandate][glossary-live-first-coverage-mandate]: anything reachable
-through a real GraphQL query goes to `examples/fakeshop/test_query/` over HTTP via
-[`TestClient`][glossary-testclient]; a [probe URLconf][glossary-probe-urlconf] mounts the
-package view over a narrow probe schema when the aggregate fakeshop schema cannot express
-the case; `tests/` covers only what no request can reach. Every catalog row opens with
-[`seed_data(N)`][glossary-seed_data].
+Placement follows the [`AGENTS.md`][agents] test-placement and test-through-real-usage
+rules and the [live-first coverage mandate][glossary-live-first-coverage-mandate]:
+anything reachable through a real GraphQL query goes to `examples/fakeshop/test_query/`
+over HTTP via [`TestClient`][glossary-testclient]; a [probe URLconf][glossary-probe-urlconf]
+mounts the package view over a narrow probe schema when the aggregate fakeshop schema
+cannot express the case; `tests/` covers only what no request can reach. Every catalog
+row opens with [`seed_data(N)`][glossary-seed_data].
 
 **Live tier — `examples/fakeshop/test_query/test_uploads_api.py`.** The file/image output
 surface has one live home, so the rows live there:

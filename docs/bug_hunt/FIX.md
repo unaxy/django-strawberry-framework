@@ -20,9 +20,9 @@ Each phase finishes completely (every agent it dispatched has reported) before t
 
 1. **Pick.** The first unchecked item in this order: "To do: found along the way", "To do: holes found re-checking
    the fixes", "To do: t3 robustness rows" (one area per item). Skip "Waiting on you" and everything below it.
-   Check `git status` (other sessions work in this tree concurrently) and note `HEAD`. Then gate the item on AGENTS
-   rule 37 and GOAL "Trust boundary" before any agent runs: it must name the contract row it breaks, a feasible
-   project shape under supported public API, and the wire or configuration input that reaches it. Feasible: a
+   Check `git status` (other sessions work in this tree concurrently) and note `HEAD`. Then gate the item on the
+   AGENTS defect rule and GOAL "Trust boundary" before any agent runs: it must name the contract row it breaks, a
+   feasible project shape under supported public API, and the wire or configuration input that reaches it. Feasible: a
    `StrEnum` or `TextChoices` member, a lazy translation string, `SimpleLazyObject`, a project `QuerySet` subclass.
    Not feasible unless a real library or Django feature produces it: a `str` subclass whose `__eq__` or `__hash__`
    lies or raises, a lying `__class__`, a container whose `__iter__` raises. An item that fails the gate goes
@@ -37,12 +37,13 @@ Each phase finishes completely (every agent it dispatched has reported) before t
    nobody thought of, prototype it in its own clone, measure it against the repro grid, and list numbered
    decisions (D1, D2, ...) each with a recommendation. Its census of affected sites passes the same gate.
 4. **Rules check.** The coordinator rereads [AGENTS.md][agents], [START.md][start] and [GOAL.md][goal] and answers
-   every open decision the rules settle (rule 37 / GOAL "Trust boundary" for "is it a defect", the north star and
-   success criterion 7 for "which behaviour", AGENTS rule 5 for "same change or later", START for upstream audits,
-   doc homes, test placement, exported surface).
-   - Not a defect under rule 37: tick it in the tracker with the verdict and the evidence, no code. If it hides a
-     real contract question, file that under "Waiting on you". When a docstring or spec promises to contain an
-     infeasible shape, the fix is retracting that sentence, never hardening code. Next item.
+   every open decision the rules settle (the AGENTS defect rule / GOAL "Trust boundary" for "is it a defect", the
+   north star and success criterion 7 for "which behaviour", the AGENTS root-cause rule for "same change or later",
+   START for upstream audits, doc homes and test placement, [docs/TREE.md][tree] and START's check-public-types hook
+   for exported surface).
+   - Not a defect under the AGENTS defect rule: tick it in the tracker with the verdict and the evidence, no code. If
+     it hides a real contract question, file that under "Waiting on you". When a docstring or spec promises to contain
+     an infeasible shape, the fix is retracting that sentence, never hardening code. Next item.
    - A decision only the maintainer can make (the rules do not settle it and the choice changes a public contract): move the
      item under "Waiting on you" with the question and the evidence. Next item.
 5. **Plan.** Write the plan to the scratchpad (`<id>-plan.md`) and print it in chat: the defect, the decisions with
@@ -87,8 +88,8 @@ Each phase finishes completely (every agent it dispatched has reported) before t
 ## Brief contents
 
 - **Fact-finding rules file:** the item text verbatim, where its evidence may live (the t3 worktree, read-only),
-  the doc and code paths to start from, why it matters under rule 37, "fact finding only, do not fix", the
-  standing rules, the report format.
+  the doc and code paths to start from, why it matters under the AGENTS defect rule, "fact finding only, do not fix",
+  the standing rules, the report format.
 - **Implementer brief:** the clone path; the defects as facts with `path::Symbol`; the starting patch and what it
   is (unreviewed); the decisions as FINAL with their reasons; the STOP rule ("a decision proves wrong against the
   code, a pin moves, or a result that was correct at HEAD changes: stop that part and report with evidence");
@@ -113,6 +114,7 @@ Each phase finishes completely (every agent it dispatched has reported) before t
 <!-- docs/ -->
 [fix-prompt]: FIX-PROMPT.md
 [tracker]: bug_hunt-0_0_15_2.md
+[tree]: ../TREE.md
 
 <!-- docs/SPECS/ -->
 

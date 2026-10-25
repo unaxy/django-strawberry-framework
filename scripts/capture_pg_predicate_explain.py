@@ -97,7 +97,7 @@ CARDIO_EVERY = 12  # row i carries a "cardio" value when i % CARDIO_EVERY == 0.
 REPAIR_EVERY = 10  # book i is in repair (hidden by ``BookType``) when i % REPAIR_EVERY == 0.
 
 # Canonical reference-style link-definition footer required of every standing
-# markdown doc (AGENTS.md "Markdown link convention"; enforced by
+# markdown doc (START.md "Markdown link convention"; enforced by
 # ``scripts/check_trailing_commas.py``'s ``_scaffold_in_canonical_order``): the
 # ``<!-- LINK DEFINITIONS -->`` delimiter followed by the 10 path-based group
 # headers in canonical order, each present even when empty, rendered by the

@@ -1087,8 +1087,8 @@ def _resolve_target(raw_target: object, label: str) -> Path:
 def _claimed_label_path(label: str) -> str | None:
     """Return the path a label's leading segment claims, or ``None`` when it claims none.
 
-    ``AGENTS.md`` "Source references in docs and code comments" gives a label three
-    shapes, two of which lead with a repo-relative path:
+    The AGENTS.md source-refs rule gives a label three shapes, two of which lead with a
+    repo-relative path:
 
     * ``path::QualifiedName`` and ``path::QualifiedName #"unique substring"`` - the
       claim is everything before the first ``::``.

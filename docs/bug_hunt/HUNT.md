@@ -57,7 +57,7 @@ only; this doc is canonical.
   → `blocked`, the maintainer decides; never a fix.
 - **Feasibility gate.** An item is filed or confirmed only when it names the contract row it
   breaks, a feasible project shape under supported public API, and the wire input (document,
-  variables, headers, uploads) or configuration that reaches it ([AGENTS.md][agents] rule 37,
+  variables, headers, uploads) or configuration that reaches it ([AGENTS.md][agents] defect rule,
   [GOAL.md][goal] "Trust boundary"). Configuration is validated at construction, then trusted;
   application Python (resolvers, hooks, project `QuerySet` classes) is trusted, never contained.
   Feasible = what real projects and libraries produce: one-shot generators and iterators,

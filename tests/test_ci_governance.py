@@ -1029,9 +1029,9 @@ def test_no_active_source_uses_a_forbidden_optimizer_extensions_form() -> None:
     )
 
 
-#: A staged-slice anchor (AGENTS.md rule 27): ``TODO(spec-NNN ...)``, bare or with a
-#: slice tail in either case. Group ``number`` is the spec number, which is the
-#: KANBAN card number.
+#: A staged-slice anchor (``AGENTS.md #"staged-but-unbuilt slices get a source-site"``):
+#: ``TODO(spec-NNN ...)``, bare or with a slice tail in either case. Group ``number`` is
+#: the spec number, which is the KANBAN card number.
 STAGED_ANCHOR = re.compile(r"TODO\(spec-(?P<number>\d{3})\b[^)]*\)", re.IGNORECASE)
 
 KANBAN_PATH = REPO_ROOT / "KANBAN.md"
@@ -1108,7 +1108,7 @@ def test_the_board_card_index_lists_every_card_heading() -> None:
 def test_every_staged_todo_anchor_names_an_open_spec() -> None:
     """Every ``TODO(spec-NNN ...)`` in first-party source names a spec whose card is open.
 
-    AGENTS.md rule 27 has the change that ships a staged slice remove its anchor.
+    A staged slice's anchor is ``AGENTS.md #"removed in the change that ships the slice"``.
     Nothing else reads the anchors, so one left behind outlives its spec, or names a
     spec that was renumbered away, and reads as planned work forever. Documentation
     prose quoting the anchor form is outside the corpus: only ``.py`` sources are
