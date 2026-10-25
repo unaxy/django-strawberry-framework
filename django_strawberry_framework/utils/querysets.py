@@ -818,7 +818,13 @@ def coerce_field_value_or_none(field: ModelField | None, value: object, *, alias
     ``decimal_places`` within ``max_digits``: a value no stored decimal equals
     (too many integer digits, a finer fraction) names no row, and an in-range
     value spelled with any number of trailing zeros is the column's value, so its
-    spelling never reaches a backend that would refuse to bind it.
+    spelling never reaches a backend that would refuse to bind it. A decimal on a
+    ``DecimalField`` without ``max_digits`` binds as written when its spelling fits
+    PostgreSQL's unconstrained ``numeric`` (131072 digits before the point, 16383
+    after: PostgreSQL's documented limits, past which ``numeric_in`` refuses the
+    bind); a spelling past them loses its trailing fractional zeros without
+    rounding, and is ``None`` if it still does not fit. Every other backend binds it
+    as given.
 
     A value coerced to text holding an embedded NUL (U+0000) identifies no row
     either, on every backend: no write stores one (Django's all-backend
@@ -863,21 +869,32 @@ def coerce_field_value_or_none(field: ModelField | None, value: object, *, alias
         if not _within_integer_range(bound, connection.ops.integer_field_range(internal_type)):
             return None
     if isinstance(coerced, Decimal) and isinstance(column, models.DecimalField):
-        return _stored_decimal_or_none(coerced, column)
+        return _stored_decimal_or_none(coerced, column, connection.vendor)
     return coerced
 
 
-def _stored_decimal_or_none(number: Decimal, column: ModelField) -> Decimal | None:
+def _stored_decimal_or_none(number: Decimal, column: ModelField, vendor: str) -> Decimal | None:
     """Return the value ``column`` stores that equals ``number``, or ``None`` when none does.
 
     ``number`` is quantized to ``decimal_places`` within ``max_digits``: one needing more
     integer digits than the column holds, or a finer fraction than it keeps, equals no
     stored value. A column declared without ``max_digits`` (django-stubs types it ``int``,
-    Django accepts ``None``) has no domain to hold the value to, so ``number`` passes.
+    Django accepts ``None``) is held to the domain of the backend's unconstrained decimal,
+    read from ``vendor`` (the ``connection.vendor`` of the database the lookup binds on).
+    On PostgreSQL that is ``numeric`` with no precision, which stores up to 131072 digits
+    before the decimal point and up to 16383 after (PostgreSQL's documentation, "Numeric
+    Types"; ``numeric_in`` refuses a value past either as "value overflows numeric
+    format"). It stores the written scale, so ``number`` binds as written when its
+    spelling fits. A spelling past the limits loses its trailing fractional zeros,
+    exactly and without rounding (the same value, so it names the same row; a zero
+    becomes plain ``0``), and the digits left past either limit equal no stored value.
+    Every other backend binds ``number`` as given.
     """
     digits = read_attr(column, "max_digits")
     if not isinstance(digits, int):
-        return number
+        if vendor != "postgresql":
+            return number
+        return _postgresql_numeric_or_none(number)
     places = read_attr(column, "decimal_places")
     try:
         held = number.quantize(
@@ -887,6 +904,43 @@ def _stored_decimal_or_none(number: Decimal, column: ModelField) -> Decimal | No
     except InvalidOperation:
         return None
     return held if held == number else None
+
+
+_POSTGRESQL_NUMERIC_INTEGER_DIGITS = 131072
+"""Digits PostgreSQL's unconstrained ``numeric`` stores before the decimal point."""
+
+_POSTGRESQL_NUMERIC_FRACTION_DIGITS = 16383
+"""Digits PostgreSQL's unconstrained ``numeric`` stores after the decimal point."""
+
+
+def _postgresql_numeric_or_none(number: Decimal) -> Decimal | None:
+    """Return ``number`` as an unconstrained PostgreSQL ``numeric`` binds it, else ``None``.
+
+    The spelling binds as written when it fits; otherwise the trailing fractional zeros
+    go from the coefficient itself, never through ``Decimal.normalize``, whose context
+    precision would round a long coefficient.
+    """
+    if _fits_postgresql_numeric(number):
+        return number
+    sign, coefficient, _ = number.as_tuple()
+    exponent = number.adjusted() - len(coefficient) + 1
+    kept = len(coefficient)
+    while exponent < 0 and kept > 1 and coefficient[kept - 1] == 0:
+        kept -= 1
+        exponent += 1
+    if not any(coefficient[:kept]):
+        return Decimal((sign, (0,), 0))
+    stripped = Decimal((sign, coefficient[:kept], exponent))
+    return stripped if _fits_postgresql_numeric(stripped) else None
+
+
+def _fits_postgresql_numeric(number: Decimal) -> bool:
+    """Whether ``number``'s spelling stays within an unconstrained PostgreSQL ``numeric``."""
+    exponent = number.adjusted() - len(number.as_tuple().digits) + 1
+    return (
+        max(number.adjusted() + 1, 0) <= _POSTGRESQL_NUMERIC_INTEGER_DIGITS
+        and max(-exponent, 0) <= _POSTGRESQL_NUMERIC_FRACTION_DIGITS
+    )
 
 
 def _within_integer_range(number: int, bounds: tuple[int | None, int | None]) -> bool:
