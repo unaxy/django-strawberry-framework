@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 283 done, 202 to do.
+Progress: 284 done, 205 to do.
 
 ## Done
 
@@ -1418,6 +1418,15 @@ Progress: 283 done, 202 to do.
   function, only when a non-NULL row is scanned; PostgreSQL: `DataError` SQLSTATE 2201B on any table), masked as
   GOAL's error policy intends. Django, django-filter, DRF `SearchFilter`, graphene-django, django-graphene-filters and
   strawberry-graphql-django validate no pattern and map no such error. The promise question is row 571
+- [x] 541. fixed: on PostgreSQL a `DjangoModelFormMutation` whose optional single-value form field (`ChoiceField`,
+  `TypedChoiceField`, `CharField`, with no `clean_<field>` or one wrapping only a non-empty value) cleans `""`, an
+  explicit `null` or an omitted create value to `""` over a `blank=True, null=False` `ArrayField` answers that
+  column's field-keyed `null` error with nothing written (create, update, client-assigned-key create, sync and async),
+  since the save-time diagnosis runs on the save's `DataError` (malformed array literal) as on an `IntegrityError` /
+  `ValueError`; a `DataError` no column explains propagates. Not a defect: a non-empty value the consumer's form
+  leaves un-wrapped fails inside `is_valid()` with Django's own `JSONDecodeError` / `TypeError`, as the docs now say
+  (the form owns the wrap, as upstream). README, GLOSSARY and spec-038 name the `ArrayField` beside the non-text
+  choice column; package rows on PostgreSQL
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1580,10 +1589,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   midnight at save with a `RuntimeWarning`; near year 1 or 9999 that projection can overflow past
   `unstorable_temporal`, which checks only `datetime` / `time` values, and answer the masked error; probe and say
   whether the check covers it. Found verifying 381
-- [ ] 541. (robustness) A `DjangoModelFormMutation` single-value form field over an `ArrayField` whose form does not
-  turn the value into a list (no `clean_<field>`, or a `required=False` field cleaning an empty input to `""` / `None`)
-  raises a raw `JSONDecodeError` / `TypeError` from `ArrayField.to_python` / `validate`, or a `DataError` "malformed
-  array literal" at save, as the masked error instead of a field-keyed error. Found fixing 423
 - [ ] 542. (robustness) The serializer twin of 423: a DRF single-value field (`ChoiceField`, ...) over an `ArrayField`
   with no `validate_<field>` turning the value into a list raises the raw `DataError` "malformed array literal" at save
   as the masked error. Found fixing 423
@@ -1707,11 +1712,26 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 570. (robustness) The `django.yml` floor and latest test cells run 40-45 minutes against a 45-minute
   `timeout-minutes`: the floor cell was cancelled at e8975a17, 60cd7102 and 116b57f6 (hiding a red
   `tests/base/test_init.py`) and the latest cell at 81661b96. Found fixing 506
+- [ ] 573. (robustness) A `null=True, blank=True` column a `ModelForm` cleans to `""` it cannot store (a non-text
+  choice column through the `ValueError` trigger, an `ArrayField` through the `DataError` one) answers "This field
+  cannot be null." (code `null`) on a column that takes NULL, since `forms/resolvers.py::_is_unstorable_blank` ignores
+  `null`; say whether it should clear to NULL or answer another error. Found fixing 541
+- [ ] 574. (robustness) A `blank=False` column a `required=False` form field cleans to `""` (Django's
+  `_get_validation_exclusions` leaves it out of `full_clean`) answers the masked error at save (a raw `DataError` on
+  an `ArrayField`, measured); `_is_unstorable_blank` needs `blank=True`, so no column that stores no empty string is
+  named in this shape. Found fixing 541
+- [ ] 575. (robustness) The build warning for a single-value form field over an `ArrayField`
+  (`forms/inputs.py::_advise_shape_disagreement`, "which the form must turn into the column's value") is logged only
+  for the update input; a create-only `DjangoModelFormMutation` with the same field logs none. Found fixing 541
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 572. CHANGELOG entry for item 541: on PostgreSQL, a `DjangoModelFormMutation` whose optional single-value form
+  field over a `blank=True, null=False` `ArrayField` cleans an empty, `null` or omitted value to `""` now answers that
+  column's field-keyed `null` error instead of the masked error (a `null=True` such column answers it too, as a
+  nullable non-text choice column already did)
 - [ ] 571. Decide whether a `regex` / `iRegex` filter operand the backend refuses answers `FILTER_INVALID` keyed to
   its leaf instead of the masked error. Every refused filter value the package codes today is checked before the
   queryset runs (`FilterSet._validate_form_or_raise`), and only the filter step knows the leaf; after execution the
