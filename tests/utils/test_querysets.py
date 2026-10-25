@@ -203,7 +203,16 @@ from tests._idioms import (
 )
 
 if TYPE_CHECKING:
+    from typing import TypeAlias
+
     from django.db.models.expressions import Combinable
+
+    # The field's descriptor types as django-stubs declares them (set type, get type), spelled
+    # out because the checker runs without the django-stubs mypy plugin that would infer them.
+    _AwareStamp: TypeAlias = models.DateTimeField[
+        str | datetime.datetime | datetime.date | Combinable,
+        datetime.datetime,
+    ]
 
 _M = TypeVar("_M", bound=models.Model)
 
@@ -564,7 +573,7 @@ _decimal_keyed_apps = Apps([])
 class _DecimalKeyed(models.Model):
     """A table keyed by a ``DecimalField(6, 2)``."""
 
-    code: "models.DecimalField[Decimal | Combinable, Decimal]" = models.DecimalField(
+    code: "models.DecimalField[str | float | Decimal | Combinable, Decimal]" = models.DecimalField(
         primary_key=True,
         max_digits=6,
         decimal_places=2,
@@ -579,9 +588,7 @@ class _DecimalKeyed(models.Model):
 class _DatetimeKeyed(models.Model):
     """A table keyed by an aware ``DateTimeField``."""
 
-    stamp: "models.DateTimeField[datetime.datetime | Combinable, datetime.datetime]" = (
-        models.DateTimeField(primary_key=True)
-    )
+    stamp: "_AwareStamp" = models.DateTimeField(primary_key=True)
 
     class Meta:
         app_label = "products"

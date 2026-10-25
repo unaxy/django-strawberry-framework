@@ -739,7 +739,7 @@ _gated_pk_apps = Apps([])
 class _GatedPk(Model):
     """A model whose integer primary key carries a validator refusing ids below 10."""
 
-    code: models.IntegerField[int | Combinable, int] = models.IntegerField(
+    code: models.IntegerField[float | int | str | Combinable, int] = models.IntegerField(
         primary_key=True,
         validators=[MinValueValidator(10)],
     )
