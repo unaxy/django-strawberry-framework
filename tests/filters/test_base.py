@@ -21,7 +21,7 @@ from collections.abc import Callable, Generator, Iterable, Iterator
 from decimal import Decimal
 from functools import partial
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, ClassVar, TypeVar
 
 import django_filters
 import pytest
@@ -37,11 +37,13 @@ from django.db import connection as db_connection
 from django.db import models as db_models
 from django.db.models import Model, QuerySet
 from django.db.models.expressions import Combinable
-from django.forms import CharField, DecimalField, Field, Form
+from django.forms import CharField, DecimalField, Field, Form, SelectMultiple
 from django.http import HttpRequest, QueryDict
 from django.test import override_settings
-from django.test.utils import isolate_apps
+from django.test.utils import CaptureQueriesContext, isolate_apps
+from django.utils.translation import gettext_lazy
 from django_filters import BaseInFilter, CharFilter
+from django_filters.filterset import BaseFilterSet
 from django_filters.rest_framework import DjangoFilterBackend
 from graphql import GraphQLError
 from rest_framework import generics
@@ -701,7 +703,7 @@ class _CleanedSpecimenListView(generics.ListAPIView[scalar_models.ScalarSpecimen
     queryset = scalar_models.ScalarSpecimen.objects.order_by("label")
     serializer_class = _SpecimenLabelSerializer
     filter_backends = (DjangoFilterBackend,)
-    filterset_class = _PlainCleanedScalarSet
+    filterset_class: ClassVar[type[BaseFilterSet]] = _PlainCleanedScalarSet
     authentication_classes = ()
     permission_classes = ()
     pagination_class = None
@@ -754,6 +756,237 @@ def test_declared_range_filter_under_django_filter_backend_answers_a_bad_bound_w
     response = _CleanedSpecimenListView.as_view()(request)
 
     assert (response.status_code, read_attr(response, "data")) == (status, body)
+
+
+def _specimen_list_view(
+    filterset_class: type[django_filters.FilterSet | FilterSet],
+) -> Callable[..., object]:
+    """A DRF list view filtering ``ScalarSpecimen`` through ``DjangoFilterBackend``."""
+
+    class SpecimenListView(_CleanedSpecimenListView):
+        pass
+
+    SpecimenListView.filterset_class = filterset_class
+    return SpecimenListView.as_view()
+
+
+def _declared_set(
+    parent: type[django_filters.FilterSet | FilterSet],
+    model: type[Model],
+    **filters: Filter,
+) -> type[BaseFilterSet]:
+    """``class _DeclaredSet(parent)`` over ``model`` declaring ``filters`` and no generated one.
+
+    Declared through ``type`` so one test body runs under either parent.
+    """
+    meta = type("Meta", (), {"model": model, "fields": ()})
+    declared = type("_DeclaredSet", (parent,), {"__module__": __name__, "Meta": meta, **filters})
+    assert issubclass(declared, BaseFilterSet)
+    return declared
+
+
+_RAW_FORM_LIST_ROWS = [
+    pytest.param("signed_big_in=7,900", ["kept", "other"], id="comma-separated-members"),
+    pytest.param("signed_big_in=7", ["kept"], id="one-member"),
+    pytest.param("signed_big_in=", ["kept", "other"], id="empty-is-no-constraint"),
+    pytest.param("", ["kept", "other"], id="absent-is-no-constraint"),
+]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("filterset_class", _CLEANED_SCALAR_SETS)
+@pytest.mark.parametrize(("query", "labels"), _RAW_FORM_LIST_ROWS)
+def test_declared_list_filter_under_django_filter_backend_reads_raw_form_members(
+    filterset_class: type[django_filters.FilterSet | FilterSet],
+    query: str,
+    labels: list[str],
+) -> None:
+    """A raw ``?name=`` reads as the generated ``in`` reads it, under either parent.
+
+    ``?name=a,b`` splits on commas and an empty ``?name=`` applies no constraint
+    (``_MembershipCSVWidget``), so the backend answers the rows in one query instead of a
+    list-shape refusal it cannot map to a response.
+    """
+    _ = _cleaned_specimen("kept", kept=True)
+    _ = _cleaned_specimen("other", kept=False)
+    request = APIRequestFactory().get(f"/specimens/?{query}")
+
+    with CaptureQueriesContext(db_connection) as captured:
+        response = _specimen_list_view(filterset_class)(request)
+
+    assert read_attr(response, "status_code") == 200
+    assert read_attr(response, "data") == [{"label": label} for label in labels]
+    assert len(captured) == 1
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("filterset_class", _CLEANED_SCALAR_SETS)
+def test_declared_list_filter_under_django_filter_backend_answers_a_bad_member_with_400(
+    filterset_class: type[django_filters.FilterSet | FilterSet],
+) -> None:
+    """A raw member the column cannot hold is the form's error, the backend's 400."""
+    _ = _cleaned_specimen("kept", kept=True)
+    request = APIRequestFactory().get("/specimens/?signed_big_in=7,NaN")
+
+    with CaptureQueriesContext(db_connection) as captured:
+        response = _specimen_list_view(filterset_class)(request)
+
+    assert read_attr(response, "status_code") == 400
+    assert read_attr(response, "data") == {"signed_big_in": ["Enter a number."]}
+    assert len(captured) == 0
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("filterset_class", _CLEANED_SCALAR_SETS)
+@pytest.mark.parametrize(("query", "labels"), _RAW_FORM_LIST_ROWS)
+def test_declared_list_filter_reads_a_query_dict_as_raw_form_members(
+    filterset_class: type[django_filters.FilterSet | FilterSet],
+    query: str,
+    labels: list[str],
+) -> None:
+    """``FilterSet(data=QueryDict(...))`` reads a raw list member as the backend does."""
+    _ = _cleaned_specimen("kept", kept=True)
+    _ = _cleaned_specimen("other", kept=False)
+    queryset = scalar_models.ScalarSpecimen.objects.order_by("label")
+
+    filterset = filterset_class(data=QueryDict(query), queryset=queryset)
+
+    assert filterset.is_valid()
+    with CaptureQueriesContext(db_connection) as captured:
+        assert list(filterset.qs.values_list("label", flat=True)) == labels
+    assert len(captured) == 1
+
+
+@pytest.mark.parametrize("filterset_class", _CLEANED_SCALAR_SETS)
+@pytest.mark.parametrize(
+    ("data", "cleaned"),
+    [
+        pytest.param({"signed_big_in": []}, [], id="explicit-empty-list-is-kept"),
+        pytest.param({"signed_big_in": ("7",)}, [7], id="tuple-passes-through"),
+        pytest.param({"signed_big_in": ["7", "900"]}, [7, 900], id="list-passes-through"),
+    ],
+)
+def test_declared_list_filter_takes_a_list_as_sent(
+    filterset_class: type[django_filters.FilterSet | FilterSet],
+    data: dict[str, object],
+    cleaned: list[int],
+) -> None:
+    """A list or tuple (the GraphQL input's shape) reaches the field as sent, ``[]`` included."""
+    filterset = filterset_class(data=data, queryset=scalar_models.ScalarSpecimen.objects.none())
+
+    assert filterset.is_valid()
+    assert filterset.form.cleaned_data["signed_big_in"] == cleaned
+
+
+class _LazyTextMembersSet(FilterSet):
+    label_among = ListFilter(field_name="label", lookup_expr="in")
+
+    class Meta:
+        model = scalar_models.ScalarSpecimen
+        fields = {"label": ["in"]}
+
+
+@pytest.mark.parametrize(
+    "name",
+    [pytest.param("label__in", id="generated-in"), pytest.param("label_among", id="list-filter")],
+)
+def test_lazy_translation_string_reads_as_form_text(name: str) -> None:
+    """A lazy translation string sent whole splits on commas as form text does."""
+    filterset = _LazyTextMembersSet(
+        data={name: gettext_lazy("a,b")},
+        queryset=scalar_models.ScalarSpecimen.objects.none(),
+    )
+
+    assert filterset.is_valid()
+    assert filterset.form.cleaned_data[name] == ["a", "b"]
+
+
+@pytest.mark.parametrize("filterset_class", _CLEANED_SCALAR_SETS)
+def test_declared_list_filter_renders_its_raw_form_members_as_text(
+    filterset_class: type[django_filters.FilterSet | FilterSet],
+) -> None:
+    """The filter form renders (DRF's browsable API renders it), members joined by commas."""
+    queryset = scalar_models.ScalarSpecimen.objects.none()
+
+    bound = str(filterset_class(data=QueryDict("signed_big_in=7,900"), queryset=queryset).form)
+    unbound = str(filterset_class(queryset=queryset).form)
+
+    assert '<input type="text" name="signed_big_in" value="7,900"' in bound
+    assert '<input type="text" name="signed_big_in" id="id_signed_big_in">' in unbound
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("parent", [FilterSet, django_filters.FilterSet])
+def test_declared_list_filter_consumer_widget_replaces_the_raw_form_reading(
+    parent: type[django_filters.FilterSet | FilterSet],
+) -> None:
+    """A consumer ``widget=`` reads the form data its own way: ``SelectMultiple`` repeats a key."""
+    _ = _cleaned_specimen("kept", kept=True)
+    _ = _cleaned_specimen("other", kept=False)
+    filterset_class = _declared_set(
+        parent,
+        scalar_models.ScalarSpecimen,
+        signed_big_in=ListFilter(field_name="signed_big", lookup_expr="in", widget=SelectMultiple),
+    )
+    queryset = scalar_models.ScalarSpecimen.objects.order_by("label")
+
+    filterset = filterset_class(
+        data=QueryDict("signed_big_in=7&signed_big_in=900"),
+        queryset=queryset,
+    )
+
+    assert type(read_attr(filterset.form.fields["signed_big_in"], "widget")) is SelectMultiple
+    assert filterset.is_valid()
+    assert filterset.form.cleaned_data["signed_big_in"] == [7, 900]
+    assert list(filterset.qs.values_list("label", flat=True)) == ["kept", "other"]
+
+
+@pytest.mark.parametrize("parent", [FilterSet, django_filters.FilterSet])
+@pytest.mark.parametrize(
+    ("data", "cleaned"),
+    [
+        pytest.param(QueryDict("priced=1.5,2"), [Decimal("1.5"), Decimal(2)], id="raw-members"),
+        pytest.param(QueryDict("priced="), None, id="raw-empty-is-no-constraint"),
+        pytest.param(QueryDict(""), None, id="absent-is-no-constraint"),
+        pytest.param({"priced": []}, [], id="explicit-empty-list-is-kept"),
+    ],
+)
+def test_array_filter_reads_raw_form_members(
+    monkeypatch: pytest.MonkeyPatch,
+    parent: type[django_filters.FilterSet | FilterSet],
+    data: QueryDict | dict[str, object],
+    cleaned: list[Decimal] | None,
+) -> None:
+    """An ``ArrayFilter`` reads raw form data as ``ListFilter`` does: one shared form field.
+
+    Form-level only: an ``ArrayField`` query needs PostgreSQL. Package-only: fakeshop
+    declares no ``ArrayField``.
+    """
+    monkeypatch.setattr(converters, "_ARRAY_FIELD_CLS", FakeArrayField)
+
+    class RawPricedShelf(db_models.Model):
+        prices = FakeArrayField(db_models.DecimalField(max_digits=8, decimal_places=2))
+
+        class Meta:
+            managed = False
+            app_label = "test_array_filter_raw_form"
+
+    filterset_class = _declared_set(
+        parent,
+        RawPricedShelf,
+        priced=ArrayFilter(field_name="prices", lookup_expr="contains"),
+    )
+
+    filterset = filterset_class(data=data, queryset=RawPricedShelf.objects.none())
+
+    assert filterset.is_valid()
+    assert filterset.form.cleaned_data["priced"] == cleaned
+    refused = filterset_class(
+        data=QueryDict("priced=1.5,NaN"),
+        queryset=RawPricedShelf.objects.none(),
+    )
+    assert not refused.is_valid()
+    assert refused.errors == {"priced": ["Enter a number."]}
 
 
 _ONE_SIDED_RANGES = [

@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 295 done, 210 to do.
+Progress: 296 done, 211 to do.
 
 ## Done
 
@@ -1525,6 +1525,20 @@ Progress: 295 done, 210 to do.
   the preflight reads the instance), a declared `serializers.DateField` over a `DateTimeField` is a build-time
   `ConfigurationError`, and the model flavor never carries a date. Package rows in `tests/utils/test_errors.py` and
   `tests/rest_framework/test_resolvers.py`; README, spec-038, spec-039 and the `fielderror-envelope` glossary term
+- [x] 512. A declared `ListFilter` or `ArrayFilter` read raw form data (a `QueryDict`: DRF's `DjangoFilterBackend`,
+  a django-filter view) through Django's default `TextInput`, so every `?name=` value, valid ones included, reached
+  `ListFilter.filter` as a string and answered `GraphQLError("Invalid filter value: expected a list.")`, a 500,
+  under a package or a plain django-filter `FilterSet` parent. Their form field (`filters/base.py::_ElementField`)
+  now reads raw form data by the generated `in`'s rule (`_MembershipCSVWidget`): `?name=a,b` is the list
+  `["a", "b"]`, `?name=` and an absent key apply no constraint, a list or tuple passes through unchanged (the
+  GraphQL input, so an explicit `[]` keeps its meaning), each element is cleaned by the column's `gte` form field
+  (a junk element is that form's error, a 400 under the backend), and a consumer `widget=` wins. The shared widget
+  now passes a non-text value through and reads a lazy translation string as text. The item's mechanism was wrong:
+  no schema build is involved (the build mutates no filter; the answers are identical before and after it). Its
+  `RangeFilter` half is not a defect: only a `RangeFilter` whose `field_name` is the relation itself raises
+  `FieldError` (with both bounds), a consumer declaration django-filter's own `RangeFilter` refuses the same way and
+  the schema build refuses; a relation path to a column filters with no build. Package rows in
+  `tests/filters/test_base.py` (both parents, through a real `DjangoFilterBackend` view and a `QueryDict`); spec-027.
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1682,11 +1696,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 545. (robustness) `scripts/prove_failability.py::_pattern_matches`: an `expect_failing` glob over a parametrized
   id (`test_x[*]`) never matches, since `fnmatch` reads `[*]` as a character class; only an exact id or a `[[]`
   escape works, and the module docstring offers "node id or glob" without saying so. Found implementing 424
-- [ ] 512. (robustness) A package FilterSet used only under a consumer's `DjangoFilterBackend` never runs the schema
-  build, so a declared `RangeFilter` on a relation answers `FieldError` (500) for every query string, valid bounds
-  included, and a declared `ListFilter` raises `GraphQLError("Invalid filter value: expected a list.")` (500) for
-  every `?name=` value, since its form field has no list widget; check the reach under AGENTS rule 37 first. Found
-  checking 375
 - [ ] 514. (robustness) A declared `RangeFilter` / `ListFilter` on a `BooleanField` cleans each value with the
   column's `gte` form field, django-filter's `NullBooleanField`, which reads an unrecognized string (`"yes"`) as
   `None`, so under `DjangoFilterBackend` a junk bound applies no constraint where it should be refused; GraphQL types
@@ -1816,11 +1825,20 @@ tracker number are recorded there; open remainders and new defects are filed as 
   (`forms.DateField` over a `DateTimeField`) rebinds the stored value through that field and rewrites the row: a
   stored `03:04:05` becomes the default-zone midnight, and a stored year-1 value under `Asia/Tokyo` answers an
   `invalid` `FieldError` keyed to a field the client did not send. Found fact-finding 547
+- [ ] 527. (robustness) A declared `ListFilter` (or `RangeFilter`) whose `field_name` is a relation itself keeps
+  its elements uncleaned ("a relation's elements reach the ORM as sent"), so under `DjangoFilterBackend` a junk raw
+  value (`?tag=x` on a ForeignKey to an integer key) answers Django's `ValueError`, a 500, where a column path
+  (`tag__pk`) answers the form's 400; the schema build refuses such a declaration, so GraphQL cannot send it. Found
+  verifying 512
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 526. CHANGELOG entry for item 512: a declared `ListFilter` / `ArrayFilter` under DRF's `DjangoFilterBackend`
+  (or any raw form data) reads `?name=a,b` as a list and `?name=` as no constraint, as the generated `in` does,
+  where every value answered a 500; the generated `in`'s raw-form widget also passes a tuple through and
+  reads a lazy translation string as text
 - [ ] 525. CHANGELOG entry for item 547: a `date` or naive `datetime` a `DateTimeField` column holds (a serializer
   `validate_<field>` hook returning `value.date()` or a naive wall clock, an `ArrayField(DateTimeField)` date
   element) whose default-zone projection the database cannot store is the field's `invalid` `FieldError` instead
