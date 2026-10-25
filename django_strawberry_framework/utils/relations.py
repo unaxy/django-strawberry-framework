@@ -74,6 +74,7 @@ __all__ = [
     "relation_link",
     "relation_name",
     "stored_value_column",
+    "stored_value_link",
     "validate_lookup_expr",
     "written_model_field",
 ]
@@ -327,6 +328,12 @@ def classify_path(model: type[models.Model], field_path: str) -> ClassifiedPath:
     hot ``path_traverses_to_many`` path, keyed on the hashable,
     definition-time-stable ``(model, field_path)`` pair.
 
+    ``filters/base.py::_filterset_resolved_field`` walks a filter's ``field_name`` with
+    it (cached), so a declared filter over ``pk`` resolves as the ORM resolves it; on a
+    path this classifier refuses that reader keeps django-filter's own walk
+    (``django_filters.utils.get_model_field``), whose answer there (``None``, a forward
+    ``GenericForeignKey``, a lazy-relation ``RuntimeError``) is the one its callers read.
+
     Four other ``_meta`` path walkers share the split-and-``get_field``
     mechanism under different contracts and stay separate:
     ``optimizer/plans.py::_resolve_order_path_field`` answers the terminal
@@ -507,13 +514,15 @@ def _lenient_traverses_to_many(model: type[models.Model], field_path: str) -> bo
 
 @lru_cache(maxsize=2048)
 def _classify_path_cached(model: type[models.Model], field_path: str) -> ClassifiedPath:
-    """Bounded ``lru_cache`` over ``classify_path`` for the hot to-many probe.
+    """Bounded ``lru_cache`` over ``classify_path`` for the hot to-many probe and filter reads.
 
     ``path_traverses_to_many`` is called repeatedly with the same
     definition-time ``(model, field_path)`` pairs during filter/order
-    generation; caching the frozen ``ClassifiedPath`` here avoids re-walking
-    model metadata without forcing a cache onto the public, uncached
-    ``classify_path`` (which must accept unhashable test doubles).
+    generation, and ``filters/base.py::_filterset_resolved_field`` on every request with
+    a filter's ``(model, field_name)``, fixed when its FilterSet is defined; caching the
+    frozen ``ClassifiedPath`` here avoids re-walking model metadata without forcing a
+    cache onto the public, uncached ``classify_path`` (which must accept unhashable test
+    doubles). ``_path_traverses_to_many_cache_clear`` empties it.
     """
     return classify_path(model, field_path)
 
@@ -889,11 +898,30 @@ def stored_value_column(field: ModelField) -> ModelField:
     ``ForeignKey.get_col`` makes to pick a key's output field, so a value typed or
     range-checked against the result is held to the column that stores it. Every
     other field (a plain column, a composite primary key, a reverse relation) is
-    returned as is.
+    returned as is. The column of :func:`stored_value_link`.
     """
+    return stored_value_link(field)[0]
+
+
+@overload
+def stored_value_link(field: ConcreteField) -> tuple[ConcreteField, tuple[str, ...]]: ...
+@overload
+def stored_value_link(field: ModelField) -> tuple[ModelField, tuple[str, ...]]: ...
+def stored_value_link(field: ModelField) -> tuple[ModelField, tuple[str, ...]]:
+    """Return the column ``field`` stores and the target-field names the walk to it crosses.
+
+    The walk :func:`stored_value_column` describes: each ``ForeignKey`` /
+    ``OneToOneField`` link is followed to its ``target_field``, whose name is recorded,
+    until a field that is not a key. Appended to a path ending on ``field``, the names
+    reach the column (``pk`` + ``("id",)`` is ``pk__id``), which Django reads on the
+    key's own column with no join. A field that is not a key walks no link: itself and
+    ``()``.
+    """
+    names: list[str] = []
     while isinstance(field, models.ForeignKey):
         field = field.target_field
-    return field
+        names.append(field.name)
+    return field, tuple(names)
 
 
 def carrier_backed_link(field: object) -> RelationLink | None:

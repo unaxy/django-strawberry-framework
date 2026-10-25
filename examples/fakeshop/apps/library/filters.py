@@ -123,6 +123,11 @@ class ShelfFilter(FilterSet):
     ``tier_among`` are the declared ``ListFilter`` (``in``) counterparts, which publish the
     column's enum.
 
+    ``pk_span`` / ``pk_among`` and ``branch_pk_span`` / ``branch_pk_among`` are a declared
+    ``RangeFilter`` / ``ListFilter`` over Django's ``pk`` alias and ``branch__pk``: each is
+    typed and cleaned by the primary-key column it names, as ``id_span`` and the generated
+    ``id`` ``in`` are.
+
     ``Meta.form`` is ``ShelfFilterForm``, whose ``clean`` refuses a request naming the
     home branch both by pk and by name.
     """
@@ -155,6 +160,11 @@ class ShelfFilter(FilterSet):
     tier_span = RangeFilter(field_name="tier", lookup_expr="range")
     condition_among = ListFilter(field_name="condition", lookup_expr="in")
     tier_among = ListFilter(field_name="tier", lookup_expr="in")
+    pk_span = RangeFilter(field_name="pk", lookup_expr="range")
+    id_span = RangeFilter(field_name="id", lookup_expr="range")
+    pk_among = ListFilter(field_name="pk", lookup_expr="in")
+    branch_pk_span = RangeFilter(field_name="branch__pk", lookup_expr="range")
+    branch_pk_among = ListFilter(field_name="branch__pk", lookup_expr="in")
 
     class Meta:
         model = models.Shelf
@@ -414,10 +424,13 @@ class PatronProfileFilter(FilterSet):
 
     The model's primary key is its one-to-one key, so the declared scalars are
     the profile's own address columns; the patron itself is reached through
-    the ``patron`` related filter.
+    the ``patron`` related filter. ``pk_span`` and ``pk_among`` filter on that key through
+    Django's ``pk`` alias, typed and cleaned by the ``Patron.id`` column it stores.
     """
 
     patron = RelatedFilter("PatronFilter", field_name="patron")
+    pk_span = RangeFilter(field_name="pk", lookup_expr="range")
+    pk_among = ListFilter(field_name="pk", lookup_expr="in")
 
     class Meta:
         model = models.PatronProfile

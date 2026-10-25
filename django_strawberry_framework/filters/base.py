@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, NamedTuple, TypeVar, cast, final
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import UploadedFile
 from django.db import models
+from django.db.models.constants import LOOKUP_SEP
 from django.db.models.options import Options
 from django.forms import (
     CharField,
@@ -70,7 +71,7 @@ from graphql import GraphQLError
 from strawberry import relay
 from typing_extensions import TypedDict, Unpack, override
 
-from django_strawberry_framework.exceptions import ConfigurationError
+from django_strawberry_framework.exceptions import ConfigurationError, PathResolutionError
 from django_strawberry_framework.relay import _coerce_pk_or_none, _node_id_slot
 from django_strawberry_framework.sets_mixins import (
     LazyRelatedClassMixin as LazyRelatedClassMixin,  # noqa: PLC0414 - kept re-export path
@@ -111,10 +112,12 @@ from django_strawberry_framework.utils.errors import (
 from django_strawberry_framework.utils.permissions import set_bound_definition
 from django_strawberry_framework.utils.querysets import base_queryset, coerce_field_value_or_none
 from django_strawberry_framework.utils.relations import (
+    _classify_path_cached,
     is_model_class,
     relation_kind,
     relation_link,
     stored_value_column,
+    stored_value_link,
 )
 from django_strawberry_framework.utils.typing import object_result, strawberry_schema_from_info
 
@@ -428,16 +431,41 @@ def _bound_field_name(filter_instance: Filter) -> str:
     return field_name
 
 
-def _bound_model_field(filter_instance: Filter) -> ModelField | None:
-    """Return the model field a per-request filter's ORM path names on its FilterSet's model.
+def _bound_resolved_field(filter_instance: Filter) -> _ResolvedField | None:
+    """Return the field and column path a per-request filter's ORM path names.
 
     Reads the LIVE ``field_name`` against the filterset django-filter's
     ``BaseFilterSet.__init__`` stamps as ``filter_.parent``, so an expanded leaf whose
     ``field_name`` was rebased under a ``RelatedFilter`` prefix resolves the terminal
-    field (``_filterset_model_field``).
+    field (``_filterset_resolved_field``).
     """
     parent: BaseFilterSet | None = getattr(filter_instance, "parent", None)
-    return _filterset_model_field(parent, filter_instance)
+    return _filterset_resolved_field(parent, filter_instance)
+
+
+def _bound_model_field(filter_instance: Filter) -> ModelField | None:
+    """Return the model field a per-request filter's ORM path names on its FilterSet's model.
+
+    The field of ``_bound_resolved_field``; ``None`` when the path names none.
+    """
+    resolved = _bound_resolved_field(filter_instance)
+    return None if resolved is None else resolved.field
+
+
+class _ResolvedField(NamedTuple):
+    """The model field a filter's ORM path names, and the ORM path that names its column.
+
+    ``path`` is the filter's own ``field_name`` except for a path ending on a
+    relation-valued primary key, where it continues through each key's target field to
+    the column the key stores (``pk__id``, ``kiosk__pk__venue_ptr__id``). Django reads
+    that path on the key's own column, with no join, and applies the column's lookups:
+    an integer column's ``gte`` / ``lte`` read a bound past its range as widening or
+    matching nothing, where the relation's lookups bind it raw. ``field`` is ``None`` for a
+    path naming no field.
+    """
+
+    field: ModelField | None
+    path: str
 
 
 def _filterset_model_field(
@@ -446,19 +474,50 @@ def _filterset_model_field(
 ) -> ModelField | None:
     """Return the model field ``filter_instance``'s ORM path names on ``filterset``'s model.
 
+    The field of ``_filterset_resolved_field``; ``None`` when the path names none.
+    """
+    resolved = _filterset_resolved_field(filterset, filter_instance)
+    return None if resolved is None else resolved.field
+
+
+def _filterset_resolved_field(
+    filterset: type[BaseFilterSet] | BaseFilterSet | None,
+    filter_instance: Filter,
+) -> _ResolvedField | None:
+    """Resolve ``filter_instance``'s ORM path on ``filterset``'s model to a field and column path.
+
     django-filter needs no model: no filterset, or one without a model, has nothing to
     walk and returns ``None``. A bound filter must name its path
-    (``_bound_field_name``); a path naming no field (a typo, a missing hop) is ``None``
-    through ``django_filters.utils.get_model_field``, which raises ``RuntimeError`` on a
-    relation hop that is still an unresolved lazy string: a FilterSet used before
-    Django's app registry is populated, surfaced rather than read as an unknown field.
+    (``_bound_field_name``), walked by the package's path classifier
+    (``utils/relations.py::_classify_path_cached``, the path being fixed when the
+    FilterSet is defined), which reads Django's ``pk`` alias at any segment as that
+    model's primary key, as the ORM does. A path ending on ``pk`` answers the column the
+    key stores, the walk ``utils/relations.py::stored_value_link`` makes: a
+    relation-valued key (a multi-table-inheritance parent link, a one-to-one primary key)
+    is followed through each link's target field to the column, so ``pk`` /
+    ``<relation>__pk`` is typed, cleaned and range-checked exactly as that column's own
+    name is, its path naming the column (``_ResolvedField.path``). A path naming a
+    relation explicitly answers the relation. A path the classifier refuses is answered by
+    ``django_filters.utils.get_model_field``: ``None`` for a path naming no field (a
+    typo, a missing hop), the field itself for a forward ``GenericForeignKey``, and
+    ``RuntimeError`` for a relation hop that is still an unresolved lazy string (a
+    FilterSet used before Django's app registry is populated), surfaced rather than read
+    as an unknown field.
     """
     # django-filter's metaclass stores ``_meta = FilterSetOptions(...)`` on every filterset.
     meta = optional_instance(truth.static_attr(filterset, "_meta", None), FilterSetOptions)
     model: type[models.Model] | None = getattr(meta, "model", None)
     if model is None:
         return None
-    return get_model_field(model, _bound_field_name(filter_instance))
+    field_path = _bound_field_name(filter_instance)
+    try:
+        field: ModelField = _classify_path_cached(model, field_path).terminal
+    except PathResolutionError:
+        return _ResolvedField(get_model_field(model, field_path), field_path)
+    if field_path.rpartition(LOOKUP_SEP)[2] != "pk":
+        return _ResolvedField(field, field_path)
+    column, links = stored_value_link(field)
+    return _ResolvedField(column, LOOKUP_SEP.join((field_path, *links)))
 
 
 def _column_form_field(filter_instance: Filter, *, element: bool = False) -> Field | None:
@@ -941,23 +1000,29 @@ class RangeFilter(_ColumnCleanedFilter):
         (``distinct`` and ``exclude`` honoured). ``[None, None]`` returns ``qs`` unchanged. Two
         bounds of a ``range`` over an integer column apply as ``gte`` + ``lte`` in one
         predicate (``IntegerRangeFilter.filter``), so a bound past the column's range never
-        reaches the backend; any other two-bound range keeps the declared lookup.
+        reaches the backend; any other two-bound range keeps the declared lookup. A lone bound
+        and the ``gte`` + ``lte`` pair name the column the path resolves to
+        (``_ResolvedField.path``), so over a relation-valued primary key they apply the stored
+        column's lookups, never the relation's, which bind a bound past the column raw; a
+        two-bound range over a relation-valued key storing a non-integer column applies
+        ``range`` to the stored column too, which Django refuses on the relation itself.
         """
         if not (is_list_or_tuple(value) and len(value) == _RANGE_BOUNDS):
             return super().filter(qs, value)
         start, end = value
         if start is None and end is None:
             return qs
+        resolved = _bound_resolved_field(self)
+        path = self.field_name if resolved is None else resolved.path
         if end is None:
-            return _apply_lookups(self, qs, {f"{self.field_name}__gte": start})
+            return _apply_lookups(self, qs, {f"{path}__gte": start})
         if start is None:
-            return _apply_lookups(self, qs, {f"{self.field_name}__lte": end})
-        if self.lookup_expr == "range" and isinstance(
-            _bound_model_field(self),
-            models.IntegerField,
-        ):
-            lookups = {f"{self.field_name}__gte": start, f"{self.field_name}__lte": end}
-            return _apply_lookups(self, qs, lookups)
+            return _apply_lookups(self, qs, {f"{path}__lte": end})
+        if self.lookup_expr == "range" and resolved is not None:
+            if isinstance(resolved.field, models.IntegerField):
+                return _apply_lookups(self, qs, {f"{path}__gte": start, f"{path}__lte": end})
+            if path != self.field_name:
+                return _apply_lookups(self, qs, {f"{path}__range": (start, end)})
         return super().filter(qs, value)
 
 

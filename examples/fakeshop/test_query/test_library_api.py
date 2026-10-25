@@ -15,7 +15,7 @@ import logging
 import re
 import string
 import sys
-from collections.abc import AsyncIterator, Callable, Generator, Mapping
+from collections.abc import AsyncIterator, Callable, Generator, Mapping, Sequence
 from typing import TYPE_CHECKING, NamedTuple, TypeAlias, cast
 
 import django
@@ -46,6 +46,7 @@ from django_filters import CharFilter, Filter, TypedChoiceFilter
 from graphql_client import (
     DeleteAfterAuthorization,
     JSONObject,
+    JSONValue,
     RecordCompiledSql,
     json_at,
     json_int,
@@ -22531,6 +22532,354 @@ def test_shelf_range_over_a_choice_column_compares_bounds_off_its_choices(
     assert "errors" not in payload, payload
     shelves = json_list(payload, "data", "allLibraryShelves")
     assert sorted(json_str(shelf, "code") for shelf in shelves) == sorted(codes)
+
+
+_INPUT_FIELD_TYPES = """
+query ($name: String!) {
+  __type(name: $name) {
+    inputFields { name type { kind name ofType { kind name ofType { kind name } } } }
+  }
+}
+"""
+
+
+def _rendered_input_type(type_ref: JSONObject) -> str:
+    """Render an introspected input type reference as its SDL spelling (``[Int!]``)."""
+    kind = json_str(type_ref, "kind")
+    if kind == "NON_NULL":
+        return f"{_rendered_input_type(json_object(type_ref, 'ofType'))}!"
+    if kind == "LIST":
+        return f"[{_rendered_input_type(json_object(type_ref, 'ofType'))}]"
+    return json_str(type_ref, "name")
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("input_type", "field", "sdl"),
+    [
+        pytest.param("ShelfFilterPkRangeInputType", "start", "Int", id="pk-range-start"),
+        pytest.param("ShelfFilterPkRangeInputType", "end", "Int", id="pk-range-end"),
+        pytest.param("ShelfFilterIdRangeInputType", "start", "Int", id="id-range-start"),
+        pytest.param("ShelfFilterPkAmongFilterInputType", "in", "[Int!]", id="pk-list"),
+        pytest.param("ShelfFilterIdFilterInputType", "in", "[Int!]", id="id-list"),
+        pytest.param(
+            "ShelfFilterBranchPkRangeInputType",
+            "start",
+            "Int",
+            id="relation-pk-range-start",
+        ),
+        pytest.param(
+            "ShelfFilterBranchPkAmongFilterInputType",
+            "in",
+            "[Int!]",
+            id="relation-pk-list",
+        ),
+        pytest.param(
+            "PatronProfileFilterPkRangeInputType",
+            "start",
+            "Int",
+            id="relation-valued-pk-range-start",
+        ),
+        pytest.param(
+            "PatronProfileFilterPkAmongFilterInputType",
+            "in",
+            "[Int!]",
+            id="relation-valued-pk-list",
+        ),
+    ],
+)
+def test_declared_pk_leaf_publishes_the_primary_key_column_scalar(
+    input_type: str,
+    field: str,
+    sdl: str,
+) -> None:
+    """A declared range or list over ``pk`` / ``<relation>__pk`` publishes the key column's scalar.
+
+    ``ShelfFilter.pk_span`` / ``pk_among`` over ``Shelf.id``, ``branch_pk_span`` /
+    ``branch_pk_among`` over ``Branch.id`` and ``PatronProfileFilter.pk_span`` /
+    ``pk_among`` over the ``patron`` one-to-one primary key, which stores ``Patron.id``:
+    each is ``Int`` as ``id_span`` and the generated ``id`` ``in`` are, never ``String``.
+    """
+    data = _assert_graphql_success(_INPUT_FIELD_TYPES, variables={"name": input_type})
+
+    fields = {
+        json_str(entry, "name"): _rendered_input_type(json_object(entry, "type"))
+        for entry in json_list(data, "__type", "inputFields")
+    }
+    assert fields[field] == sdl, fields
+
+
+_SHELF_PKS = """
+query ($filter: ShelfFilterInputType) {
+  allLibraryShelves(filter: $filter) { code }
+}
+"""
+
+
+def _bound_keys(template: JSONValue, keys: Mapping[str, int]) -> JSONValue:
+    """Replace each ``"$<name>"`` string in ``template`` with the key ``keys`` holds for it."""
+    if isinstance(template, str):
+        return keys[template[1:]] if template.startswith("$") else template
+    if isinstance(template, Mapping):
+        return {name: _bound_keys(value, keys) for name, value in template.items()}
+    if isinstance(template, Sequence):
+        return [_bound_keys(value, keys) for value in template]
+    return template
+
+
+def _pk_shelves() -> dict[str, int]:
+    """Three shelves over two branches; returns ``shelf0``..``shelf2`` and ``branch0``/``branch1``."""
+    first = models.Branch.objects.create(name="PkBranchA", city="Boston")
+    second = models.Branch.objects.create(name="PkBranchB", city="Boston")
+    shelves = [
+        models.Shelf.objects.create(code=code, branch=branch)
+        for code, branch in (("P-1", first), ("P-2", first), ("P-3", second))
+    ]
+    keys = {f"shelf{index}": saved_pk(shelf.pk) for index, shelf in enumerate(shelves)}
+    return keys | {"branch0": saved_pk(first.pk), "branch1": saved_pk(second.pk)}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("filter_template", "codes"),
+    [
+        pytest.param(
+            {
+                "pkSpan": {"range": {"start": "$shelf0", "end": "$shelf1"}},
+            },
+            ["P-1", "P-2"],
+            id="pk-range",
+        ),
+        pytest.param(
+            {
+                "idSpan": {"range": {"start": "$shelf0", "end": "$shelf1"}},
+            },
+            ["P-1", "P-2"],
+            id="id-range",
+        ),
+        pytest.param(
+            {"pkSpan": {"range": {"start": "$shelf1"}}},
+            ["P-2", "P-3"],
+            id="pk-start-only",
+        ),
+        pytest.param(
+            {"pkAmong": {"in": ["$shelf0", "$shelf2"]}},
+            ["P-1", "P-3"],
+            id="pk-list",
+        ),
+        pytest.param(
+            {"id": {"in": ["$shelf0", "$shelf2"]}},
+            ["P-1", "P-3"],
+            id="id-list",
+        ),
+        pytest.param(
+            {
+                "branchPkSpan": {"range": {"start": "$branch0", "end": "$branch0"}},
+            },
+            ["P-1", "P-2"],
+            id="relation-pk-range",
+        ),
+        pytest.param(
+            {"branchPkAmong": {"in": ["$branch1"]}},
+            ["P-3"],
+            id="relation-pk-list",
+        ),
+        pytest.param(
+            {"not": {"pkAmong": {"in": ["$shelf0"]}}},
+            ["P-2", "P-3"],
+            id="not-pk-list",
+        ),
+    ],
+)
+def test_declared_pk_range_and_list_answer_rows_like_the_id_spelling(
+    filter_template: JSONValue,
+    codes: list[str],
+) -> None:
+    """A declared range or list over ``pk`` / ``<relation>__pk`` answers the rows ``id`` answers.
+
+    The bounds and elements are integers cleaned by the key column, so ``pkSpan`` keeps the
+    shelves ``idSpan`` keeps, ``pkAmong`` the ones the generated ``id`` ``in`` keeps, and
+    ``branchPkSpan`` / ``branchPkAmong`` compare the branch key. Flat and under ``not``.
+    """
+    keys = _pk_shelves()
+
+    payload = response_json(
+        _post_graphql(_SHELF_PKS, variables={"filter": _bound_keys(filter_template, keys)}),
+    )
+
+    assert "errors" not in payload, payload
+    rows = json_list(payload, "data", "allLibraryShelves")
+    assert sorted(json_str(row, "code") for row in rows) == codes
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("pk_filter", "id_filter"),
+    [
+        pytest.param(
+            {"pkSpan": {"range": {"start": "x"}}},
+            {"idSpan": {"range": {"start": "x"}}},
+            id="malformed-bound",
+        ),
+        pytest.param(
+            {"pkSpan": {"range": {"start": 1, "end": 2147483648}}},
+            {"idSpan": {"range": {"start": 1, "end": 2147483648}}},
+            id="past-range-bound",
+        ),
+        pytest.param({"pkAmong": {"in": ["2"]}}, {"id": {"in": ["2"]}}, id="string-element"),
+        pytest.param(
+            {"pkAmong": {"in": [2147483648]}},
+            {"id": {"in": [2147483648]}},
+            id="past-range-element",
+        ),
+    ],
+)
+def test_declared_pk_value_the_key_column_cannot_hold_is_refused_like_id(
+    pk_filter: dict[str, object],
+    id_filter: dict[str, object],
+) -> None:
+    """A ``pk`` bound or element ``Int`` cannot represent is the coercion error ``id`` answers.
+
+    A malformed bound, a string element and a value past ``Int``'s range are refused by
+    GraphQL coercion before any row is read, with the same message the ``id`` spelling
+    gets at its own input path.
+    """
+    _ = _pk_shelves()
+
+    pk_payload = response_json(_post_graphql(_SHELF_PKS, variables={"filter": pk_filter}))
+    id_payload = response_json(_post_graphql(_SHELF_PKS, variables={"filter": id_filter}))
+
+    assert pk_payload.get("data") is None, pk_payload
+    pk_message = json_str(pk_payload, "errors", 0, "message")
+    assert "Int cannot represent" in pk_message, pk_payload
+    id_message = json_str(id_payload, "errors", 0, "message")
+    pk_leaf = f"filter.{next(iter(pk_filter))}."
+    id_leaf = f"filter.{next(iter(id_filter))}."
+    assert pk_leaf in pk_message, pk_message
+    assert pk_message.replace(pk_leaf, id_leaf) == id_message
+
+
+_BOOK_SHELF_PKS = """
+query ($filter: BookFilterInputType) {
+  allLibraryBooks(filter: $filter) { title }
+}
+"""
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("filter_template", "titles"),
+    [
+        pytest.param(
+            {"shelfPkSpan": {"range": {"start": "$shelf1", "end": "$shelf2"}}},
+            ["Second", "Third"],
+            id="flat-range",
+        ),
+        pytest.param(
+            {
+                "shelf": {"pkSpan": {"range": {"start": "$shelf1", "end": "$shelf2"}}},
+            },
+            ["Second", "Third"],
+            id="nested-range",
+        ),
+        pytest.param(
+            {"shelfPkAmong": {"in": ["$shelf0"]}},
+            ["First"],
+            id="flat-list",
+        ),
+        pytest.param(
+            {"shelf": {"pkAmong": {"in": ["$shelf0", "$shelf2"]}}},
+            ["First", "Third"],
+            id="nested-list",
+        ),
+    ],
+)
+def test_declared_pk_leaf_reached_through_a_relation_filters_on_the_related_key(
+    filter_template: JSONValue,
+    titles: list[str],
+) -> None:
+    """``ShelfFilter``'s ``pk`` leaves reached from ``BookFilter`` compare ``shelf__pk``.
+
+    The flat ``shelfPkSpan`` / ``shelfPkAmong`` and the nested ``shelf: {pkSpan / pkAmong}``
+    run the declared filters with their path under the ``shelf`` relation, typed and
+    cleaned by ``Shelf.id``.
+    """
+    keys = _pk_shelves()
+    for index, title in enumerate(("First", "Second", "Third")):
+        models.Book.objects.create(shelf_id=keys[f"shelf{index}"], title=title)
+
+    payload = response_json(
+        _post_graphql(_BOOK_SHELF_PKS, variables={"filter": _bound_keys(filter_template, keys)}),
+    )
+
+    assert "errors" not in payload, payload
+    rows = json_list(payload, "data", "allLibraryBooks")
+    assert sorted(json_str(row, "title") for row in rows) == titles
+
+
+_PROFILE_PKS = """
+query ($filter: PatronProfileFilterInputType) {
+  allLibraryPatronProfilesConnection(filter: $filter) { edges { node { secondary_address } } }
+}
+"""
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("filter_template", "postal_codes"),
+    [
+        pytest.param(
+            {"pkSpan": {"range": {"start": "$patron0", "end": "$patron1"}}},
+            ["02101", "02202"],
+            id="two-bound-range",
+        ),
+        pytest.param(
+            {"pkSpan": {"range": {"start": "$patron1"}}},
+            ["02202", "02303"],
+            id="start-only",
+        ),
+        pytest.param(
+            {"pkSpan": {"range": {"end": "$patron0"}}},
+            ["02101"],
+            id="end-only",
+        ),
+        pytest.param(
+            {"pkAmong": {"in": ["$patron0", "$patron2"]}},
+            ["02101", "02303"],
+            id="list",
+        ),
+        pytest.param(
+            {
+                "not": {"pkSpan": {"range": {"start": "$patron0", "end": "$patron1"}}},
+            },
+            ["02303"],
+            id="not-two-bound-range",
+        ),
+    ],
+)
+def test_declared_pk_range_over_a_one_to_one_primary_key_compares_the_stored_column(
+    filter_template: JSONValue,
+    postal_codes: list[str],
+) -> None:
+    """A declared range or list over a one-to-one primary key compares the ``Patron.id`` it stores.
+
+    ``PatronProfile``'s primary key is the ``patron`` one-to-one key, so ``pkSpan`` with two
+    bounds applies them as ``gte`` + ``lte`` on the integer column (Django has no ``range``
+    lookup for the relation itself), one bound applies alone, and ``pkAmong`` keeps the
+    named profiles.
+    """
+    patrons = [models.Patron.objects.create(name=name) for name in ("Ada", "Bo", "Cy")]
+    for patron, postal_code in zip(patrons, ("02101", "02202", "02303"), strict=True):
+        models.PatronProfile.objects.create(patron=patron, postal_code=postal_code)
+    keys = {f"patron{index}": saved_pk(patron.pk) for index, patron in enumerate(patrons)}
+
+    payload = response_json(
+        _post_graphql(_PROFILE_PKS, variables={"filter": _bound_keys(filter_template, keys)}),
+    )
+
+    assert "errors" not in payload, payload
+    edges = json_list(payload, "data", "allLibraryPatronProfilesConnection", "edges")
+    assert sorted(json_str(edge, "node", "secondary_address") for edge in edges) == postal_codes
 
 
 @pytest.mark.django_db

@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 291 done, 208 to do.
+Progress: 292 done, 208 to do.
 
 ## Done
 
@@ -1480,6 +1480,18 @@ Progress: 291 done, 208 to do.
   for 541 and 542. Whether the package should refuse such an update instead is Waiting row 623
 - [x] 508. parked into Waiting row 316, which asks the maintainer this same question; 316 now carries the evidence and
   a third option (two bounds compare as a range, input unchanged), prototyped and verified with no cell narrowed
+- [x] 510. fixed: a declared filter whose `field_name` is `pk` or `<relation>__pk` reads the column the key stores, as
+  the column's own name does: `filters/base.py::_filterset_resolved_field` resolves the path through the package's own
+  walker (`utils/relations.py::_classify_path_cached`, which reads `pk` at any segment; a path it refuses keeps
+  django-filter's `get_model_field` answer) and follows a relation-valued key (a multi-table parent link, a one-to-one
+  primary key) to its stored column with `utils/relations.py::stored_value_link`. So a `RangeFilter` / `ListFilter` /
+  `IntegerInFilter` / `CharFilter` leaf on `pk` is typed by that column (`Int`, `BigInt`, `Decimal`, `UUID`, where it
+  was `String`), its bounds and elements are cleaned by the column's form field (`FILTER_INVALID` or a coercion error
+  where a malformed value was a masked error), the integer range rules apply, and a `RangeFilter` over a
+  relation-valued key binds every bound on the stored column's path (`pk__id`) with no added join, where a two-bound
+  range was Django's refusal. 375's refusal for a relation named explicitly stands. Live rows on library `ShelfFilter`
+  / `PatronProfileFilter` `pk` leaves, package rows for Decimal, UUID, multi-table and composite keys; spec-027 says
+  so
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1642,11 +1654,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   midnight at save with a `RuntimeWarning`; near year 1 or 9999 that projection can overflow past
   `unstorable_temporal`, which checks only `datetime` / `time` values, and answer the masked error; probe and say
   whether the check covers it. Found verifying 381
-- [ ] 510. A declared `RangeFilter` / `ListFilter` whose `field_name` is `pk` or `<relation>__pk` is published as
-  `String` and reaches the ORM uncleaned: `filters/base.py::_filterset_model_field` reads django-filter's
-  `get_model_field`, which does not resolve the `pk` alias, so on a `DecimalField` or `UUIDField` primary key a
-  `"NaN"` / `"Infinity"` bound or a malformed UUID answers a masked error where the same filter on `id` /
-  `<relation>__id` answers `FILTER_INVALID`, and an integer primary key takes strings. Found checking 375
 - [ ] 511. A generated forward many-to-many `exact` / `in` over a non-Relay target with a `DecimalField` primary key
   answers a masked error for a `NaN` or `Infinity` key: the bound terminal's `field_name` reads `id`,
   `filters/base.py::_bound_model_field` reads it against the owner model, finds no relation identity column, and
@@ -1785,6 +1792,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 626. CHANGELOG entry for item 510 (breaking): a declared filter on `pk` or `<relation>__pk` is typed, cleaned
+  and range-checked by the column the key stores, as the column's own name is: its leaf moves from `String` to the
+  column's scalar, so `pk: {in: ["2"]}` over an integer key is now a GraphQL coercion error, a malformed Decimal or
+  UUID value answers `FILTER_INVALID` or a coercion error instead of the masked error, and a `RangeFilter` over a
+  multi-table parent link or one-to-one primary key compares its stored column
 - [ ] 623. Decide whether a partial `DjangoModelFormMutation` update that omits a built-in single-value field over an
   `ArrayField`, whose form sets no initial for it, should be refused instead of writing what the field makes of the
   stored list (`CharField`: its text, `["['x']"]`; `BooleanField`: its truthiness, `[True]` over `[False]`). Today
