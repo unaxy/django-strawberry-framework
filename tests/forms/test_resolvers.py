@@ -32,9 +32,11 @@ reconstruction key absence, decode-helper envelopes, optimizer
 ``dst_optimizer_plan`` re-fetch plan (spec-035 G2: no projection introduced under a
 mutation), and the save-time rule for a ``blank=True, null=False``
 column the form cleans to a value it cannot store (``None``, foreign key included, or
-``""`` on a non-text choice column) over the shapes fakeshop has no column for: ``""``
-on a non-text choice column (omitted with no default, decimal / date, update ``null``,
-a filling-in model ``save()``, an unrelated consumer ``ValueError``), and ``None``
+``""`` on a column that stores no empty string) over the shapes fakeshop has no column
+for: ``""`` on a non-text choice column (omitted with no default, decimal / date, update
+``null``, a filling-in model ``save()``, an unrelated consumer ``ValueError``), ``""`` on a
+PostgreSQL ``ArrayField`` an optional single-value form field cleans (fakeshop carries no
+``ArrayField``: it runs on SQLite), beside an unrelated ``DataError``, and ``None``
 where fakeshop's live ``createItemHoldViaForm`` does not reach it (a plain integer
 column sent ``null``, omitted or updated to ``null``, a filling-in model ``save()``,
 and an ``ItemHold`` update sending ``itemId: null``, which no fakeshop form offers), and
@@ -71,16 +73,18 @@ from apps.library import models as library_models
 from apps.products import models as product_models
 from apps.products.services import seed_data
 from apps.scalars import models as scalars_models
+from asgiref.sync import async_to_sync
 from django import forms
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.db import connection, models
+from django.db import DataError, connection, models
 from django.db.models.signals import pre_save
 from django.http import QueryDict
 from django.test.utils import CaptureQueriesContext
 from django.utils.datastructures import MultiValueDict
 from graphql_client import post_lock_rereads
 from strawberry import relay
+from strawberry.types import ExecutionResult
 from strawberry.types.base import get_object_definition
 from strawberry.types.enum import StrawberryEnumDefinition
 from typing_extensions import override
@@ -127,6 +131,7 @@ from tests._postgres_fields import FakeArrayField
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
+    from django.contrib.postgres.fields import ArrayField
     from django.db.models.expressions import Combinable
     from django.forms.utils import _FilesT
 
@@ -3254,6 +3259,303 @@ def test_modelform_unrelated_save_value_error_propagates() -> None:
         assert [error.message for error in res.errors] == ["consumer save refused the row"]
         assert res.errors[0].original_error is _CONSUMER_SAVE_ERROR
         assert not FailingPickRow.objects.exists()
+
+
+# ---------------------------------------------------------------------------
+# Save-time ``""`` on a ``blank=True, null=False`` ``ArrayField`` (PostgreSQL ``DataError``)
+# ---------------------------------------------------------------------------
+
+_TAG_CHOICES = [("x", "X"), ("y", "Y")]
+
+_NULL_TAGS_ERROR = {
+    "field": "tags",
+    "messages": ["This field cannot be null."],
+    "codes": ["null"],
+    "path": ["tags"],
+}
+
+
+def _blank_tags_model(*, client_key: bool) -> type[models.Model]:
+    """A synthetic model: a ``title`` and a ``blank=True, null=False`` text ``ArrayField`` ``tags``.
+
+    With ``client_key`` the row is keyed by a client-assigned text ``code``, so a create
+    saves through ``save(commit=False)`` and ``save_new_row``'s INSERT.
+    """
+    from django.contrib.postgres import fields as postgres_fields  # noqa: PLC0415 - needs the Postgres driver
+
+    tags: ArrayField[list[str], list[str]] = postgres_fields.ArrayField(
+        models.TextField(),
+        blank=True,
+    )
+    key: dict[str, models.Field[object, object]] = (
+        {"code": models.TextField(primary_key=True)} if client_key else {}
+    )
+    return type(
+        "BlankTagsRow",
+        (models.Model,),
+        {
+            "__module__": __name__,
+            "title": models.TextField(),
+            "tags": tags,
+            "Meta": type("Meta", (), {"app_label": "products", "managed": False}),
+            **key,
+        },
+    )
+
+
+def _wrap_a_present_tag(form: forms.BaseForm) -> object:
+    """Wrap a non-empty cleaned ``tags`` value into the stored list; leave an empty one as is."""
+    value = dict_of(form.cleaned_data)["tags"]
+    return [value] if value else value
+
+
+def _blank_tags_form(
+    model_class: type[models.Model],
+    kind: str,
+    *,
+    client_key: bool,
+) -> type[forms.BaseForm]:
+    """A ``ModelForm`` declaring an optional single-value ``tags`` field of ``kind``.
+
+    ``char-wrapping`` carries a ``clean_tags`` that wraps only a non-empty value, so an
+    empty value reaches the instance unwrapped as the field's ``empty_value`` ``""``.
+    """
+    form_fields: dict[str, Callable[[], forms.Field]] = {
+        "choice": lambda: forms.ChoiceField(choices=_TAG_CHOICES, required=False),
+        "typed-choice": lambda: forms.TypedChoiceField(choices=_TAG_CHOICES, required=False),
+        "char": lambda: forms.CharField(required=False),
+        "char-wrapping": lambda: forms.CharField(required=False),
+    }
+    fields = ("code", "title", "tags") if client_key else ("title", "tags")
+    attrs: dict[str, object] = {
+        "tags": form_fields[kind](),
+        "Meta": type("Meta", (), {"model": model_class, "fields": fields}),
+    }
+    if kind == "char-wrapping":
+        attrs["clean_tags"] = _wrap_a_present_tag
+    return type("BlankTagsForm", (forms.ModelForm,), attrs)
+
+
+def _blank_tags_schema(
+    form_class: type[forms.BaseForm],
+    model_class: type[models.Model],
+    *,
+    key: str,
+) -> tuple[strawberry.Schema, str, str]:
+    """A non-Relay primary + create / update mutations over ``form_class``, with the input names.
+
+    The primary type over ``model_class`` selects its primary key ``key`` and ``title``.
+    """
+    type(
+        "BlankTagsT",
+        (DjangoType,),
+        {
+            "Meta": type(
+                "Meta",
+                (),
+                {"model": model_class, "fields": (key, "title")},
+            ),
+        },
+    )
+    create = type(
+        "CreateRow",
+        (DjangoModelFormMutation,),
+        {
+            "Meta": type(
+                "Meta",
+                (),
+                {"form_class": form_class, "operation": "create", "permission_classes": []},
+            ),
+        },
+    )
+    update = type(
+        "UpdateRow",
+        (DjangoModelFormMutation,),
+        {
+            "Meta": type(
+                "Meta",
+                (),
+                {"form_class": form_class, "operation": "update", "permission_classes": []},
+            ),
+        },
+    )
+
+    @strawberry.type
+    class Mutation:
+        create_row = DjangoMutationField(create)
+        update_row = DjangoMutationField(update)
+
+    finalize_django_types()
+    assert create._input_class is not None
+    assert update._input_class is not None
+    return _schema(Mutation), create._input_class.__name__, update._input_class.__name__
+
+
+def _execute_in_mode(
+    schema: strawberry.Schema,
+    query: str,
+    variables: dict[str, object],
+    *,
+    mode: str,
+) -> ExecutionResult:
+    """Run ``query`` through the sync pipeline, or the async one under ``async_to_sync``.
+
+    ``async_to_sync`` sends the async pipeline's thread-sensitive body back to this thread,
+    so both modes write on the test's own connection.
+    """
+    if mode == "sync":
+        return schema.execute_sync(query, variable_values=variables)
+    return async_to_sync(schema.execute)(query, variable_values=variables)
+
+
+_BLANK_TAGS_INPUTS = [
+    pytest.param("create", {"title": "New", "tags": ""}, id="create-empty"),
+    pytest.param("create", {"title": "New", "tags": None}, id="create-null"),
+    pytest.param("create", {"title": "New"}, id="create-omitted"),
+    pytest.param(
+        "keyed-create",
+        {"code": "K1", "title": "New", "tags": ""},
+        id="keyed-create-empty",
+    ),
+    pytest.param(
+        "keyed-create",
+        {"code": "K1", "title": "New", "tags": None},
+        id="keyed-create-null",
+    ),
+    pytest.param("keyed-create", {"code": "K1", "title": "New"}, id="keyed-create-omitted"),
+    pytest.param("update", {"tags": ""}, id="update-empty"),
+    pytest.param("update", {"tags": None}, id="update-null"),
+]
+
+
+@pytest.mark.pg
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "choice",
+        "typed-choice",
+        "char",
+        "char-wrapping",
+    ],
+)
+@pytest.mark.parametrize(("operation", "data"), _BLANK_TAGS_INPUTS)
+def test_modelform_blank_array_cleaned_to_empty_string_is_field_keyed_null_error(
+    operation: str,
+    data: dict[str, object],
+    kind: str,
+    mode: str,
+) -> None:
+    """An optional single-value field cleaning ``""`` onto a ``blank=True, null=False`` array is ``null``.
+
+    The form field cleans ``""``, an explicit ``null`` or an omitted create value to its
+    ``empty_value`` ``""``; ``ModelForm._post_clean`` writes it onto the instance and
+    ``Model.clean_fields`` skips the blank column, so PostgreSQL refuses the save with a
+    ``DataError`` (malformed array literal). The ``ModelForm`` save diagnoses the column
+    from the instance it attempted: the envelope is keyed by ``tags`` with Django's
+    ``null`` message and code, on a create, a client-assigned-key create and an update,
+    sync and async. Nothing is written, and the connection still answers the query that
+    reads the table afterwards.
+    """
+    client_key = operation == "keyed-create"
+    model_class = _blank_tags_model(client_key=client_key)
+    with _blank_choice_table(model_class):
+        schema, create_input, update_input = _blank_tags_schema(
+            _blank_tags_form(model_class, kind, client_key=client_key),
+            model_class,
+            key="code" if client_key else "id",
+        )
+        stored: list[tuple[object, object]] = []
+        if operation == "update":
+            row = model_class._base_manager.create(title="Old", tags=["x"])
+            stored = [("Old", ["x"])]
+            query = (
+                f"mutation($id: ID!, $d: {update_input}!){{ updateRow(id:$id, data:$d){{ "
+                "result{ title } errors{ field messages codes path } } }"
+            )
+            res = _execute_in_mode(schema, query, {"id": str(saved_pk(row)), "d": data}, mode=mode)
+            payload = res.data and res.data["updateRow"]
+        else:
+            query = (
+                f"mutation($d: {create_input}!){{ createRow(data:$d){{ "
+                "result{ title } errors{ field messages codes path } } }"
+            )
+            res = _execute_in_mode(schema, query, {"d": data}, mode=mode)
+            payload = res.data and res.data["createRow"]
+        assert res.errors is None, res.errors
+        assert payload == {"result": None, "errors": [_NULL_TAGS_ERROR]}
+        assert list(model_class._base_manager.values_list("title", "tags")) == stored
+
+
+@pytest.mark.pg
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize("operation", ["create", "update"])
+def test_modelform_unrelated_save_data_error_propagates(operation: str, mode: str) -> None:
+    """A ``DataError`` no column explains propagates unchanged; nothing is written.
+
+    The consumer's ``save()`` runs a cast PostgreSQL refuses (a ``DataError`` the
+    database raised) while ``tags`` holds a wrapped list the column stores and
+    ``title`` a text value, so no column explains the failure: the exception is the
+    trigger, never the diagnosis, and the response carries the ``DataError`` itself.
+    """
+    from django.contrib.postgres import fields as postgres_fields  # noqa: PLC0415 - needs the Postgres driver
+
+    class CastingTagsRow(models.Model):
+        title: _Text = models.TextField(blank=True)
+        tags: ArrayField[list[str], list[str]] = postgres_fields.ArrayField(
+            models.TextField(),
+            blank=True,
+        )
+
+        class Meta:
+            app_label = "products"
+            managed = False
+
+        @override
+        def save(self, *args: object, **kwargs: object) -> None:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT %s::integer", ["not a number"])
+            call_forwarded(super().save, args, kwargs)
+
+    class WrappingTagsForm(forms.ModelForm[CastingTagsRow]):
+        tags = forms.CharField(required=False)
+
+        class Meta:
+            model = CastingTagsRow
+            fields = ("title", "tags")
+
+        def clean_tags(self) -> object:
+            return _wrap_a_present_tag(self)
+
+    with _blank_choice_table(CastingTagsRow):
+        schema, create_input, update_input = _blank_tags_schema(
+            WrappingTagsForm,
+            CastingTagsRow,
+            key="id",
+        )
+        if operation == "update":
+            [row] = CastingTagsRow._base_manager.bulk_create(
+                [CastingTagsRow(title="", tags=["y"])],
+            )
+            stored: list[tuple[object, object]] = [("", ["y"])]
+            query = (
+                f"mutation($id: ID!, $d: {update_input}!){{ updateRow(id:$id, data:$d){{ "
+                "result{ title } errors{ field messages codes } } }"
+            )
+            variables: dict[str, object] = {"id": str(saved_pk(row)), "d": {"tags": "x"}}
+        else:
+            stored = []
+            query = (
+                f"mutation($d: {create_input}!){{ createRow(data:$d){{ "
+                "result{ title } errors{ field messages codes } } }"
+            )
+            variables = {"d": {"title": "", "tags": "x"}}
+        res = _execute_in_mode(schema, query, variables, mode=mode)
+        assert res.errors is not None
+        assert [type(error.original_error) for error in res.errors] == [DataError]
+        assert list(CastingTagsRow._base_manager.values_list("title", "tags")) == stored
 
 
 # ---------------------------------------------------------------------------

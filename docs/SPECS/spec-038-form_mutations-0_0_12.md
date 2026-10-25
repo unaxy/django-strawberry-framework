@@ -348,7 +348,7 @@ package-internal; Slice 4 is the live consumer surface.
     `IntegrityError` or a consumer save-time Django `ValidationError` → envelope, a
     located row deleted before the update → `conflict`, no top-level error at write), the
     `ModelForm` save also mapping a `blank=True, null=False` column the form cleaned
-    to a value it cannot store (`None`, or `""` on a non-text choice column) onto that
+    to a value it cannot store (`None`, or `""` on a column that stores no empty string: a non-text choice column, an `ArrayField`) onto that
     column's field-keyed `null` error; **re-fetch**
     the saved object by pk + optimizer-plan (the `ModelForm` flavor); **return** the
     `<Name>Payload` (`node` / `result` for the `ModelForm`, the pinned `ok` + `errors`
@@ -1068,7 +1068,12 @@ column's list, and so do a bare `forms.Field` and a consumer field no registered
 covers, whose `to_python` may read the list. A single-value `ChoiceField` over an `ArrayField` whose `base_field` lists choices is
 typed by that `base_field` (`django_strawberry_framework/forms/inputs.py::_input_typing_column`):
 the element's read enum, the one the column's list carries, narrowed by the form's choices as
-a single-value choice column is. The package never wraps or joins the value itself. An
+a single-value choice column is. The package never wraps or joins the value itself. A
+value the form accepts and leaves un-wrapped reaches Django's list validation inside
+`is_valid()` as a scalar and fails there with Django's own exception (`JSONDecodeError`,
+`TypeError`): a top-level error, masked under the error policy; text that is itself a JSON
+array is read as the list (an empty value cleaned to `""` over a `blank=True, null=False`
+column is that column's `null` error, Decision 8 step 5). An
 update's build logs one `logger.warning` per such field it binds, naming its direction
 (`django_strawberry_framework/forms/inputs.py::_advise_shape_disagreement`): an omitted one
 binds the form's own initial (Decision 8), which must present the stored value in the
@@ -1683,7 +1688,10 @@ write flavor rides.
    `IntegrityError`; on a non-text choice column Django's form field keeps
    `TypedChoiceField(empty_value="")`, and `save()` refuses that `""` with a
    `ValueError` (e.g. an integer / float `get_prep_value`) or `ValidationError` (e.g. a
-   decimal / date / UUID / boolean `to_python`). After that failed save, a form-declared
+   decimal / date / UUID / boolean `to_python`); an optional single-value form field over an
+   `ArrayField` (a `ChoiceField`, `TypedChoiceField` or `CharField` whose `clean_<field>`, if
+   any, wraps only a non-empty value) cleans to its `empty_value` `""` too, which PostgreSQL
+   refuses at the save with a `DataError` (malformed array literal). After that failed save, a form-declared
    editable non-pk column holding `None` on a `null=False` column, or `""` on a column
    that stores no empty string, is reported
    (`django_strawberry_framework/forms/resolvers.py::_unstorable_cleaned_fields`) as the
@@ -1694,9 +1702,9 @@ write flavor rides.
    Django `error_messages["null"]` as the message (the form is the message source of
    truth, so a custom or translated message is sent as is, where the model flavor's
    message is fixed). The check reads only the in-memory instance, so no query runs on a
-   connection the `IntegrityError` left unusable. When no column explains the exception,
-   an `IntegrityError` is the `"__all__"` envelope above, a `ValueError` propagates
-   unchanged and a `ValidationError` is the consumer's own, mapped as above. The check runs on the instance after the
+   connection the `IntegrityError` / `DataError` left unusable. When no column explains the
+   exception, an `IntegrityError` is the `"__all__"` envelope above, a `ValueError` or
+   `DataError` propagates unchanged and a `ValidationError` is the consumer's own, mapped as above. The check runs on the instance after the
    save attempt, never before it, so a model `save()` that fills the blank value in
    (the reason Django keeps the shape) still writes. The returned envelope rolls the
    atomic block back exactly as the `IntegrityError` envelope does.
@@ -2061,7 +2069,11 @@ Rationale companion: [Decision 14][rationale-d14].
   bound and the update is refused field-keyed with nothing written (`invalid_choice` for a
   choice field, `invalid` for a number field), except through a field that accepts the
   stored list itself (a `CharField` binds its text, a `BooleanField` its truthiness), whose
-  value is then written. The default `ModelForm` field
+  value is then written. A value the form accepts and leaves un-wrapped (no `clean_<field>`)
+  reaches Django's list validation inside `is_valid()` as a scalar and fails there with
+  Django's own exception (`JSONDecodeError`, `TypeError`): a top-level error, masked under
+  the error policy; text that is itself a JSON array is read as the list, and an empty
+  value over a `blank=True, null=False` column is that column's `null` error. The default `ModelForm` field
   (`SimpleArrayField`), a `SplitArrayField`, a `MultipleChoiceField`, a `JSONField` and their
   subclasses read the list and keep the column's list type, and a bare `forms.Field` or a
   consumer field no registered class covers keeps the column's type, since nothing states
@@ -2173,11 +2185,12 @@ Rationale companion: [Decision 14][rationale-d14].
 - **Write-time unstorable `blank=True, null=False` column.** A `ModelForm` over a
   `blank=True, null=False` column cleans an explicit `null` (or an omission with no
   column default) to `None` (a foreign key, a plain integer, ...) or, on a choice column
-  of any non-text type (e.g. integer, decimal, date), to `""`, which only `save()` or
-  the database's `NOT NULL` refuses; the
+  of any non-text type (e.g. integer, decimal, date) or through an optional single-value
+  form field over an `ArrayField`, to `""`, which only `save()` or the database (`NOT
+  NULL`, PostgreSQL's malformed array literal) refuses; the
   failure returns the null-object envelope keyed by that column with code `null`,
   nothing written. A consumer `save()` that fills the value in writes; any other
-  `ValueError` out of `save()` propagates and any other `IntegrityError` is the
+  `ValueError` or `DataError` out of `save()` propagates and any other `IntegrityError` is the
   `"__all__"` envelope
   ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)
   step 5).
@@ -2472,8 +2485,14 @@ behavior reachable through `/graphql/`, package tests own internals.
     omitted with no default, decimal and date choice columns sent `null`, an update sent
     `null`, a plain integer column sent `null`, omitted or updated to `null`, and an
     `ItemHold` update sending `itemId: null` each return the column-keyed `null` envelope
-    with nothing written; a model `save()` filling the value in (`""` or `None`) writes; a
-    consumer `save()` `ValueError` with no such column propagates;
+    with nothing written, as does, on PostgreSQL, an optional single-value `ChoiceField`,
+    `TypedChoiceField` or `CharField` (also one whose `clean_tags` wraps only a non-empty
+    value) over a `blank=True, null=False` `ArrayField` sent `""` or `null` on a create, a
+    client-assigned-key create and an update, or omitted on either create, sync and async
+    (`tests/forms/test_resolvers.py::test_modelform_blank_array_cleaned_to_empty_string_is_field_keyed_null_error`);
+    a model `save()` filling the value in (`""` or `None`) writes; a
+    consumer `save()` `ValueError`, or a `DataError` PostgreSQL raises for it, with no such
+    column propagates;
     **explicit `null` coerced to a storable value** — `isPrivate: null` on create and on
     update over a `True` row, and a `blank=True` text choice column sent `null` on create
     and update, each return the column-keyed `null` envelope with nothing written; a
@@ -2683,7 +2702,7 @@ The completion contract.
    save-time mapper** (`forced_save_or_field_errors` on a `ModelForm` update) (no top-level error on a save-time race or a consumer save-time
    `ValidationError`), and
    a `ModelForm` save refused over a `blank=True, null=False` column cleaned to a value
-   it cannot store (`None`, or `""` on a non-text choice column) returns that column's
+   it cannot store (`None`, or `""` on a column that stores no empty string: a non-text choice column, an `ArrayField`) returns that column's
    field-keyed `null` error, as does, before the save, an explicit `null` its own form
    field cleaned to a value such a `null=False` column stores (`False`, `""`);
    the `ModelForm` payload object is re-fetched through the
