@@ -286,9 +286,13 @@ _UNPATCHED_IMPORT = textwrap.dedent(
     from django.contrib.admin import ModelAdmin
     from django.db.models import Prefetch
 
-    assert "django_stubs_ext" not in sys.modules, "django_stubs_ext is imported"
-    for patched in (Prefetch, ModelAdmin):
-        assert not hasattr(patched, "__class_getitem__"), f"{patched.__name__} is patched"
+    def assert_unpatched():
+        assert "django_stubs_ext" not in sys.modules, "django_stubs_ext is imported"
+        for patched in (Prefetch, ModelAdmin):
+            assert not hasattr(patched, "__class_getitem__"), f"{patched.__name__} is patched"
+
+
+    assert_unpatched()
 
     import django_strawberry_framework
 
@@ -305,6 +309,7 @@ _UNPATCHED_IMPORT = textwrap.dedent(
 _ANNOTATION_CHECK = _UNPATCHED_IMPORT + textwrap.dedent(
     """
     import ast
+    import importlib.util
     import inspect
     import typing
 
@@ -327,8 +332,17 @@ _ANNOTATION_CHECK = _UNPATCHED_IMPORT + textwrap.dedent(
             return self
 
 
-    def bound_names(statements):
+    def flat_statements(statements):
         for statement in statements:
+            if isinstance(statement, (ast.If, ast.Try)):
+                yield from flat_statements(statement.body)
+                yield from flat_statements(statement.orelse)
+            else:
+                yield statement
+
+
+    def bound_names(statements):
+        for statement in flat_statements(statements):
             if isinstance(statement, (ast.Import, ast.ImportFrom)):
                 for alias in statement.names:
                     yield (alias.asname or alias.name).split(".")[0]
@@ -337,21 +351,52 @@ _ANNOTATION_CHECK = _UNPATCHED_IMPORT + textwrap.dedent(
             elif isinstance(statement, (ast.Assign, ast.AnnAssign)):
                 targets = getattr(statement, "targets", [getattr(statement, "target", None)])
                 yield from (target.id for target in targets if isinstance(target, ast.Name))
-            elif isinstance(statement, (ast.If, ast.Try)):
-                yield from bound_names(statement.body)
-                yield from bound_names(statement.orelse)
 
 
-    def type_checking_names(module):
+    def type_checking_blocks(module):
         with open(module.__file__, encoding="utf-8") as handle:
             tree = ast.parse(handle.read())
-        return {
-            name
+        return [
+            node.body
             for node in tree.body
             if isinstance(node, ast.If)
             and ast.unparse(node.test) in ("TYPE_CHECKING", "typing.TYPE_CHECKING")
-            for name in bound_names(node.body)
-        }
+        ]
+
+
+    def type_checking_names(module):
+        return {name for body in type_checking_blocks(module) for name in bound_names(body)}
+
+
+    def imported_module(statement, alias, package):
+        if isinstance(statement, ast.Import):
+            return alias.name
+        return importlib.util.resolve_name("." * statement.level + (statement.module or ""), package)
+
+
+    def bind_type_checking_imports(module):
+        package = module.__name__ if hasattr(module, "__path__") else module.__package__
+        for body in type_checking_blocks(module):
+            for statement in flat_statements(body):
+                if not isinstance(statement, (ast.Import, ast.ImportFrom)):
+                    continue
+                for alias in statement.names:
+                    source = imported_module(statement, alias, package)
+                    if source.split(".")[0] == "django_stubs_ext":
+                        continue
+                    single = ast.Module(
+                        body=[type(statement)(**{**vars(statement), "names": [alias]})],
+                        type_ignores=[],
+                    )
+                    namespace = {"__name__": module.__name__, "__package__": package}
+                    try:
+                        exec(compile(ast.fix_missing_locations(single), module.__file__, "exec"), namespace)
+                    except ImportError:
+                        continue
+                    name = (alias.asname or alias.name).split(".")[0]
+                    bound = namespace[name]
+                    if inspect.isclass(bound) or inspect.ismodule(bound):
+                        vars(module).setdefault(name, bound)
 
 
     def defined_in(module, owner):
@@ -375,6 +420,9 @@ _ANNOTATION_CHECK = _UNPATCHED_IMPORT + textwrap.dedent(
                 yield from defined_in(module, member)
 
 
+    for module in modules:
+        bind_type_checking_imports(module)
+    assert_unpatched()
     for module in modules:
         for name in type_checking_names(module):
             vars(module).setdefault(name, TypeCheckingOnly())
@@ -429,9 +477,16 @@ def test_annotations_evaluate_without_django_stubs_ext_patch() -> None:
     ``typing.get_type_hints``; modules and classes through
     ``inspect.get_annotations(eval_str=True)``, which reads a class's own
     annotations instead of walking third-party bases. A name bound only under a
-    module-level ``if TYPE_CHECKING:`` is absent at runtime by design, so it is
-    replaced by a permissive stand-in and evaluation continues past it; any other
-    ``NameError`` fails. Function-local classes are skipped: their annotations
-    close over a scope no module namespace holds.
+    module-level ``if TYPE_CHECKING:`` is absent at runtime by design. Each such
+    import, nested ``if`` and ``try`` branches included, that resolves at runtime
+    (one alias at a time, in the module's package) to a class or a module binds the
+    real object, so ``Options[Model]`` behind a
+    ``TYPE_CHECKING``-only ``Options`` fails exactly as it would once the import
+    moves to runtime; ``django_stubs_ext`` is never imported, and the process is
+    asserted unpatched again after the binding. Every other such name (an import
+    that raises ``ImportError``, a non-class object, an alias or class defined in
+    the block) is replaced by a permissive stand-in and evaluation continues past
+    it; any other ``NameError`` fails. Function-local classes are skipped: their
+    annotations close over a scope no module namespace holds.
     """
     _run_without_django_stubs_ext(_ANNOTATION_CHECK)

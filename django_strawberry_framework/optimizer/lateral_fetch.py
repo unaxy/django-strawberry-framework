@@ -79,6 +79,7 @@ from django.core.exceptions import EmptyResultSet, FullResultSet
 from django.db import connections
 from django.db.models import QuerySet
 from django.db.models.expressions import Col, Window
+from django.db.models.options import Options
 from django.db.models.sql.where import AND, WhereNode
 from django.utils.tree import Node
 from typing_extensions import override
@@ -122,7 +123,6 @@ if TYPE_CHECKING:
 
     from django.db import models
     from django.db.backends.base.base import BaseDatabaseWrapper
-    from django.db.models.options import Options
     from django.db.models.sql.query import Query
     from django.utils.tree import _NodeChildren
 
@@ -139,6 +139,11 @@ if TYPE_CHECKING:
     CompiledSQL: TypeAlias = tuple[str, list[object]]
     #: A field's database-value adapter (``Field.get_db_prep_value`` bound to a connection).
     PrepareValue: TypeAlias = Callable[[ConcreteField, object], object]
+    #: Any model's ``Options``.
+    _OptionsAny: TypeAlias = Options[models.Model]
+else:
+    # ``Options`` has no ``__class_getitem__`` at runtime: the hint stays the class.
+    _OptionsAny = Options
 
 #: The stem prefix for synthesized lateral SQL table aliases and columns.
 #: Single root source of truth for the package-owned lateral SQL namespace.
@@ -1194,7 +1199,7 @@ def _build_lateral_spec(request: NestedConnectionRequest) -> LateralWindowSpec |
 
 def _order_columns(
     order_by: tuple[OrderEntry, ...],
-    child_meta: Options[models.Model],
+    child_meta: _OptionsAny,
 ) -> tuple[tuple[str, bool], ...] | None:
     """Map the deterministic order onto local concrete columns, or ``None``.
 
@@ -1238,7 +1243,7 @@ def _order_columns(
 
 def _select_columns(
     queryset: QuerySet[models.Model],
-    child_meta: Options[models.Model],
+    child_meta: _OptionsAny,
 ) -> tuple[tuple[str, str], ...] | None:
     """Return the loaded ``(attname, column)`` projection in concrete-field order.
 

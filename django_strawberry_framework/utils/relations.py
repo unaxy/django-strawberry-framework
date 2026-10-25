@@ -11,6 +11,7 @@ from django.db import models
 from django.db.models import Field
 from django.db.models.constants import LOOKUP_SEP
 from django.db.models.fields.reverse_related import ForeignObjectRel
+from django.db.models.lookups import Lookup
 
 from django_strawberry_framework.exceptions import (
     ConfigurationError,
@@ -32,12 +33,18 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from django.db.models.expressions import Col
-    from django.db.models.lookups import Lookup, Transform
+    from django.db.models.lookups import Transform
     from django.db.models.options import Options
     from django.db.models.query_utils import PathInfo
     from typing_extensions import TypeIs
 
     from .typing import ConcreteField, ForeignKeyField, ModelField
+
+    #: Any ``Lookup``, its right-hand side unread.
+    _LookupAny: TypeAlias = Lookup[object]
+else:
+    # ``Lookup`` has no ``__class_getitem__`` at runtime: the hint stays the class.
+    _LookupAny = Lookup
 
 __all__ = [
     "MANY_SIDE_RELATION_KINDS",
@@ -393,7 +400,7 @@ def classify_path(model: type[models.Model], field_path: str) -> ClassifiedPath:
     )
 
 
-def validate_lookup_expr(terminal: ModelField, lookup_expr: str) -> type[Lookup[object]]:
+def validate_lookup_expr(terminal: ModelField, lookup_expr: str) -> type[_LookupAny]:
     """Validate a django-filter lookup expression against a classified terminal.
 
     A contract SEPARATE from path classification. ``terminal`` is a

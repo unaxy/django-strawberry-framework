@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 281 done, 201 to do.
+Progress: 282 done, 202 to do.
 
 ## Done
 
@@ -1402,6 +1402,14 @@ Progress: 281 done, 201 to do.
   maintainer cares about", `path::Symbol` citations and the test tier at AGENTS.md (`docs/bug_hunt/HUNT.md`
   step 8, `docs/bug_hunt/worker-2.md` and `docs/dry/worker-2.md` step 7, `docs/dry/DRY.md` Worker-2,
   `docs/review/REVIEW.md`'s process-provenance grade); no rule is added to AGENTS.md
+- [x] 506. fixed: `tests/base/test_init.py::test_annotations_evaluate_without_django_stubs_ext_patch` binds the real
+  object for every `if TYPE_CHECKING:` import that resolves at runtime to a class or module (per alias, nested
+  `if`/`try` branches included, `django_stubs_ext` never bound, the process asserted unpatched after the binding), so
+  a TYPE_CHECKING-only head hides no subscript; the 25 annotations it then finds (the item's five plus 20
+  masked ones: `Options` x16, `BaseIterable` x2, `UploadedFile`, `Lookup`, `Field` x2 in
+  `utils/write_values.py::unstorable_columns`) go through a module-private `if TYPE_CHECKING:` alias with a bare-class
+  `else:`, so no package annotation subscripts a Django class without `__class_getitem__`; static types unchanged; red
+  on every Python/Django cell, not only the floor
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1564,11 +1572,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   midnight at save with a `RuntimeWarning`; near year 1 or 9999 that projection can overflow past
   `unstorable_temporal`, which checks only `datetime` / `time` values, and answer the masked error; probe and say
   whether the check covers it. Found verifying 381
-- [ ] 506. On the Python 3.10 / Django 5.2.16 floor,
-  `tests/base/test_init.py::test_annotations_evaluate_without_django_stubs_ext_patch` fails with `'type' object is not
-  subscriptable` on annotations in `forms/resolvers.py` (`_unstorable_cleaned_fields`, `_is_unstorable_blank`,
-  `_coerced_null_fields`, `_column_null_errors`) and `utils/querysets.py::_built_queryset`; it fails identically at
-  c9bdcd2b and b007a47b. Found verifying 353
 - [ ] 549. (robustness) An invalid regular expression (`"("`) sent to any generated or declared `regex` / `iRegex`
   leaf, a text column's included, answers the masked uncoded error on SQLite and PostgreSQL, sync and async, instead of
   `FILTER_INVALID` keyed to its field. Found verifying 383
@@ -1688,6 +1691,17 @@ tracker number are recorded there; open remainders and new defects are filed as 
   (DB-sourced). Cite each by content, not ordinal. Also `docs/builder/ARTIFACT.md` cites AGENTS for the kept
   spec-pointer rule that lives in START.md "Style", and `docs/bug_hunt/FIX.md` phase 4 sends "exported
   surface" to START, which has no such section. Found verifying 567
+- [ ] 569. (robustness) Annotations no runtime evaluation reaches escape
+  `tests/base/test_init.py::test_annotations_evaluate_without_django_stubs_ext_patch`: function-local variable
+  annotations (`forms/resolvers.py::_coerced_null_fields` `coerced_fields`, `utils/querysets.py` `related_opts`,
+  `utils/relations.py` `meta`, `utils/write_values.py` `columns`) and bodies defined only under `TYPE_CHECKING`
+  (`utils/querysets.py::_PathStep.to_opts`, `utils/lazy.py` `_LAZY_OBJECT`, `_ModelFormConstructionHooks.get_form`)
+  subscript Django classes that lack `__class_getitem__`; harmless while unevaluated, but a static sweep with an
+  audited `__class_getitem__` table (fail closed on an unseen class) would catch the shape in the lint job instead of
+  the 45-minute test cells. Found fixing 506
+- [ ] 570. (robustness) The `django.yml` floor and latest test cells run 40-45 minutes against a 45-minute
+  `timeout-minutes`: the floor cell was cancelled at e8975a17, 60cd7102 and 116b57f6 (hiding a red
+  `tests/base/test_init.py`) and the latest cell at 81661b96. Found fixing 506
 ## To do: holes found re-checking the fixes
 
 

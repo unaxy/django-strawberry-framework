@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, TypeVar, cast
 from django.core.exceptions import FieldDoesNotExist, FieldError
 from django.db import connections, models
 from django.db.models.expressions import Col
+from django.db.models.options import Options
 from django.db.models.sql.query import Query
 from graphql import GraphQLError
 from strawberry import relay
@@ -95,7 +96,6 @@ if TYPE_CHECKING:
 
     from django.contrib.postgres.indexes import BTreeIndex
     from django.db.models import QuerySet
-    from django.db.models.options import Options
     from graphql.type.definition import GraphQLResolveInfo
     from strawberry.types.nodes import Arguments
 
@@ -118,6 +118,11 @@ if TYPE_CHECKING:
         list[str | None],
         list[tuple[str | None, str]],
     ]
+    #: Any model's ``Options``.
+    _OptionsAny: TypeAlias = Options[models.Model]
+else:
+    # ``Options`` has no ``__class_getitem__`` at runtime: the hint stays the class.
+    _OptionsAny = Options
 
 _M = TypeVar("_M", bound=models.Model)
 
@@ -338,10 +343,7 @@ def _window_column(related_model: type[models.Model], ref: str) -> ConcreteField
     return resolved.target
 
 
-def _index_leading_terms(
-    meta: Options[models.Model],
-    index: object,
-) -> list[tuple[str, bool]] | None:
+def _index_leading_terms(meta: _OptionsAny, index: object) -> list[tuple[str, bool]] | None:
     """Return an index's leading ``(attname, descending)`` terms, or ``None`` when uninspectable.
 
     ``Meta.indexes`` entries carry field NAMES (optionally ``-``-prefixed for a
@@ -454,10 +456,7 @@ def _index_serves_window(
     return _terms_serve_order(index_terms[prefix_len:], order_terms)
 
 
-def _plain_field_terms(
-    meta: Options[models.Model],
-    names: Sequence[str],
-) -> list[tuple[str, bool]] | None:
+def _plain_field_terms(meta: _OptionsAny, names: Sequence[str]) -> list[tuple[str, bool]] | None:
     """Map DIRECTIONLESS field names to ascending ``(attname, False)`` terms, or ``None``.
 
     For ``UniqueConstraint`` / ``unique_together`` entries, which carry no
@@ -478,7 +477,7 @@ def _plain_field_terms(
     return terms
 
 
-def _model_index_shapes(meta: Options[models.Model]) -> tuple[list[list[tuple[str, bool]]], bool]:
+def _model_index_shapes(meta: _OptionsAny) -> tuple[list[list[tuple[str, bool]]], bool]:
     """Return ``(inspectable leading-term shapes, saw_uninspectable)`` for a table-owning model.
 
     The coverage inventory built from every PHYSICAL index shape model metadata

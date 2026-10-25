@@ -67,6 +67,7 @@ from django.db.models.lookups import (
     LessThanOrEqual,
     Range,
 )
+from django.db.models.options import Options
 from graphql import GraphQLError
 from strawberry.types import Info
 from typing_extensions import override
@@ -120,9 +121,9 @@ from .utils.typing import is_async_callable, published_argument
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Mapping, Sequence
+    from typing import TypeAlias
 
     from django.db.models.expressions import Expression
-    from django.db.models.options import Options
     from django.db.models.sql.query import Query
     from typing_extensions import Never
 
@@ -130,6 +131,12 @@ if TYPE_CHECKING:
     from .types.definition import DjangoTypeDefinition
     from .utils.querysets import ResolvedOrderName
     from .utils.typing import ModelField
+
+    #: Any model's ``Options``.
+    _OptionsAny: TypeAlias = Options[models.Model]
+else:
+    # ``Options`` has no ``__class_getitem__`` at runtime: the hint stays the class.
+    _OptionsAny = Options
 
 __all__ = ("DjangoListField", "ListArgumentError")
 
@@ -639,7 +646,7 @@ _APPROVED_ORDER_NODES: truth.IdentitySet[type[object]] = truth.IdentitySet(
 )
 
 
-def _resolve_order_field_path(opts: Options[models.Model], path: str) -> ResolvedOrderName | None:
+def _resolve_order_field_path(opts: _OptionsAny, path: str) -> ResolvedOrderName | None:
     """Resolve a field path against ``opts`` as the compiler does, or return None.
 
     ``utils/querysets.py::resolve_order_name`` is the ``Query.names_to_path``
@@ -661,7 +668,7 @@ def _resolve_order_field_path(opts: Options[models.Model], path: str) -> Resolve
 def _is_deterministic_order_field_path(
     query: Query,
     path: str,
-    opts: Options[models.Model],
+    opts: _OptionsAny,
     seen: set[tuple[object, ...]] | None,
     start: object,
     prefix: str,
@@ -752,7 +759,7 @@ def _is_deterministic_order_reference(query: Query, name: str, prefix: str) -> b
 def _is_deterministic_order_name(
     query: Query,
     name: str,
-    opts: Options[models.Model] | None = None,
+    opts: _OptionsAny | None = None,
     seen: set[tuple[object, ...]] | None = None,
     start: object = None,
     prefix: str = "",
@@ -802,7 +809,7 @@ def _is_deterministic_order_name(
 def _is_deterministic_order_term(
     query: Query,
     term: object,
-    opts: Options[models.Model] | None = None,
+    opts: _OptionsAny | None = None,
     seen: set[tuple[object, ...]] | None = None,
     start: object = None,
     prefix: str = "",
@@ -899,7 +906,7 @@ def _is_deterministic_order_term(
 def _is_deterministic_order_value(
     query: Query,
     value: object,
-    opts: Options[models.Model] | None = None,
+    opts: _OptionsAny | None = None,
     seen: set[tuple[object, ...]] | None = None,
     start: object = None,
     prefix: str = "",
@@ -983,7 +990,7 @@ def _is_deterministic_order_lookup_chain(field: ModelField, pieces: Sequence[str
 def _is_deterministic_order_predicate_reference(
     query: Query,
     lookup: str,
-    opts: Options[models.Model] | None,
+    opts: _OptionsAny | None,
     prefix: str,
 ) -> bool:
     """Classify the left-hand side of one ``(lookup, value)`` predicate child.
@@ -1033,7 +1040,7 @@ def _is_deterministic_order_predicate_reference(
 def _is_deterministic_order_condition(
     query: Query,
     condition: models.Q,
-    opts: Options[models.Model] | None = None,
+    opts: _OptionsAny | None = None,
     seen: set[tuple[object, ...]] | None = None,
     start: object = None,
     prefix: str = "",
