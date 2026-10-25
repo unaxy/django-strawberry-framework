@@ -124,6 +124,7 @@ TRACKED_FILE_PATHS: tuple[str, ...] = (
     "django_strawberry_framework/utils/strings.py",
     "django_strawberry_framework/utils/truth.py",
     "django_strawberry_framework/utils/typing.py",
+    "django_strawberry_framework/utils/widgets.py",
     "django_strawberry_framework/utils/write_transaction.py",
     "django_strawberry_framework/utils/write_values.py",
     "django_strawberry_framework/views.py",
@@ -387,6 +388,7 @@ TRACKED_FILE_PATHS: tuple[str, ...] = (
     "tests/utils/test_strings.py",
     "tests/utils/test_truth.py",
     "tests/utils/test_typing.py",
+    "tests/utils/test_widgets.py",
     "tests/utils/test_write_values.py",
 )
 TRACKED_DIRECTORY_PATHS: tuple[str, ...] = (

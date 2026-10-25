@@ -76,6 +76,7 @@ from django_strawberry_framework.utils.strings import (
     graphql_camel_name,
     pascal_case_or_raise,
 )
+from django_strawberry_framework.utils.widgets import multi_widget_keys
 
 from .base import (
     _RANGE_BOUNDS,
@@ -95,7 +96,6 @@ from .base import (
     _filterset_model_field,
     copied_form_field,
     model_choice_identity_column,
-    multi_widget_keys,
     relation_identity_column,
     unkept_form_field,
 )
@@ -959,7 +959,7 @@ def _normalize_range_value(
     """Return the form-data patch of a range filter: its start and end under its widget's keys.
 
     Per spec-027 Decision 4 the two keys are the ones the filter's own range widget
-    reads (``filters/base.py::multi_widget_keys``): ``<name>_0`` / ``<name>_1`` for the
+    reads (``utils/widgets.py::multi_widget_keys``): ``<name>_0`` / ``<name>_1`` for the
     package's ``RangeFilter`` (Django's ``MultiWidget``), ``<name>_min`` / ``<name>_max``
     for django-filter's ``RangeFilter`` (``RangeWidget``), ``<name>_after`` /
     ``<name>_before`` for its date and time families (``DateRangeWidget``), and a
@@ -1022,7 +1022,7 @@ def range_form_keys(filter_instance: Filter, base: str) -> tuple[str, str]:
 
     The widget is the one the filter's form field builds (``filters/base.py::unkept_form_field``,
     which writes nothing to a class-level declaration every request shares), asked for its
-    keys through ``filters/base.py::multi_widget_keys``. A widget that does not read exactly
+    keys through ``utils/widgets.py::multi_widget_keys``. A widget that does not read exactly
     two keys has no slot for a start and an end, so it is a ``ConfigurationError``;
     ``convert_filter_to_input_annotation`` runs this when the schema is built.
     """

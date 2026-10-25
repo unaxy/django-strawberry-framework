@@ -331,7 +331,10 @@ package-internal; Slice 4 is the live consumer surface.
     values under the form's **full declared** field set, overlaid by `provided_data`,
     with `files = provided_files`, then
     `form_class(**get_form_kwargs(info, data=, files=, instance=<row>))` (omitted
-    fields preserved); **validate** via `form.is_valid()` — a failure maps
+    fields preserved); **bind** each value under the keys its widget reads
+    (`form.add_prefix`, a multi-key widget's own keys; a list longer than a
+    `SplitArrayWidget`'s `size` → that field's `max_length` error); **validate** via
+    `form.is_valid()` — a failure maps
     `form.errors` onto the [`FieldError` envelope][glossary-fielderror-envelope] (each
     form field name re-keyed to the GraphQL input field the client sent, the form's
     `NON_FIELD_ERRORS` bucket → the `"__all__"` sentinel `036` defined, via the reused
@@ -1065,7 +1068,11 @@ whether a form field reads a list
 scalar form field, subclasses included, reading no list). So the default `ModelForm` field
 over an `ArrayField` (the `SimpleArrayField` `ArrayField.formfield` builds) keeps the
 column's list, and so do a bare `forms.Field` and a consumer field no registered class
-covers, whose `to_python` may read the list. A single-value `ChoiceField` over an `ArrayField` whose `base_field` lists choices is
+covers, whose `to_python` may read the list. A `SplitArrayField` reads its list from one
+form-data key per index (its `SplitArrayWidget`), so the list is bound one element per key,
+padded to `size` with `None`, and a list longer than `size` is refused
+([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)
+step 4). A single-value `ChoiceField` over an `ArrayField` whose `base_field` lists choices is
 typed by that `base_field` (`django_strawberry_framework/forms/inputs.py::_input_typing_column`):
 the element's read enum, the one the column's list carries, narrowed by the form's choices as
 a single-value choice column is. The package never wraps or joins the value itself. A
@@ -1467,25 +1474,49 @@ write flavor rides.
    instance=None)` hook (default: `form_class(**self.get_form_kwargs(...))`) is the
    coarser override for full control. This **does not replace** the relation-visibility
    gate (step 3, which runs before the form regardless) — `get_form_kwargs` adds
-   request-scoping on top of, not instead of, the visibility check. A prefixed form
-   reads `<prefix>-<field>` (`form.add_prefix`), so it is bound under its prefix (a
-   class-level `prefix`, a `get_form_kwargs` `prefix=`, a `get_form` passing the
-   package's mapping or a copy of it with a prefix). The rule is by content, each of the
-   built form's `data` / `files` on its own: a mapping holding a form field's bare name
-   that `form.add_prefix` renames, and no field's prefixed name, is re-keyed through
-   `form.add_prefix` on the built form, before the package or `is_valid()` reads it; the
-   form's own `__init__` sees the field-keyed mapping
-   (`django_strawberry_framework/forms/resolvers.py::_bind_under_form_prefix`). Only
-   those field names move; any other key (a CSRF token, an extra value a consumer
-   `clean()` reads) stays as bound, as a prefixed Django form leaves it. The bound
-   mapping is never mutated: a re-keyed copy replaces it (a `MultiValueDict`, an
-   immutable `QueryDict` included, as a copy of its own type; a files `dict` as a
-   `MultiValueDict` whose `get` answers each value unchanged). A mapping already holding
-   a prefixed name was keyed by its builder, wholly or partly, and is left alone. Every later read or write of a bound value (the explicit-`null` and
-   required-file checks of step 5, an omitted list field's initial) goes through
-   `form.add_prefix` (`django_strawberry_framework/forms/resolvers.py::_bound_form_value`
-   / `django_strawberry_framework/forms/resolvers.py::_bind_form_values`), so a consumer
-   `add_prefix` override is honoured; `form.errors` stays keyed by field name. The form
+   request-scoping on top of, not instead of, the visibility check. A form reads each
+   field from the keys its widget reads under `form.add_prefix(<field>)`: a prefixed form
+   reads `<prefix>-<field>` (a class-level `prefix`, a `get_form_kwargs` `prefix=`, a
+   `get_form` passing the package's mapping or a copy of it with a prefix), and a widget
+   reading several keys reads its parts under that name's own keys (a `MultiWidget`, such
+   as `SplitDateTimeField`'s, `<field>_0` / `<field>_1` per `widgets_names`; PostgreSQL's
+   `SplitArrayWidget`, `SplitArrayField`'s, `<field>_0` .. `<field>_<size - 1>`), so each
+   value is bound under those keys. The rule is by content, each of the built form's
+   `data` / `files` on its own: a `data` mapping holding a form field's bare name and none
+   of the keys the form reads it under is re-keyed on the built form, before the package
+   or `is_valid()` reads it, through the bound form's own fields: each value whole under
+   `form.add_prefix(<field>)` and its parts under the widget's keys (a `MultiWidget` splits
+   a value that is no list with its own `decompress`, as its `get_context` does; a
+   `SplitArrayWidget` gets one element per index, padded to its `size` with `None`, so an
+   empty list is bound and never read as omitted); a `files` mapping is re-keyed under the
+   prefix alone. The form's own `__init__` sees the field-keyed mapping
+   (`django_strawberry_framework/forms/resolvers.py::_bind_under_form_keys`; the keys a
+   widget reads are `django_strawberry_framework/utils/widgets.py::widget_keys` /
+   `django_strawberry_framework/utils/widgets.py::widget_entries`, the owner the filter
+   side's `multi_widget_keys` lives in). A list longer than a `SplitArrayWidget`'s `size`
+   (sent, reconstructed from the located row, or an omitted field's initial), whose tail
+   the widget would drop, is refused before `is_valid()` as that field's error with
+   Django's own `ArrayMaxLengthValidator` message and code `max_length`, keyed like every
+   field error, nothing written. Only those field names move; any other key (a CSRF token,
+   an extra value a consumer `clean()` reads) stays as bound, as a prefixed Django form
+   leaves it. The bound mapping is never mutated: a re-keyed copy replaces it (a
+   `MultiValueDict`, an immutable `QueryDict` included, as a copy of its own type, each
+   part as its one entry; a files `dict` as a `MultiValueDict` whose `get` answers each
+   value unchanged). A mapping already holding a key the form reads was keyed by its
+   builder, wholly or partly, and is left alone, except that a multi-key widget field
+   whose whole value it holds under `form.add_prefix(<field>)`, with none of the widget's
+   part keys, gets those parts bound beside it (the same split and `size` refusal;
+   `django_strawberry_framework/forms/resolvers.py::_bind_kept_parts`). A `disabled`
+   field reads no data (Django cleans its initial), so it is bound whole, never split nor
+   refused. A `MultiValueDict` holding several values for a field (`setlist`, a `doseq`
+   query string) is read as the list of them, one value as that value. Every later read or write of a bound
+   value (the explicit-`null` and required-file checks of step 5, an omitted list field's
+   initial) goes through the same keys
+   (`django_strawberry_framework/forms/resolvers.py::_bound_form_value` reads the whole
+   value under `form.add_prefix`, so an explicit `null` reads as `None` whatever the
+   widget; `django_strawberry_framework/forms/resolvers.py::_bind_form_values` binds whole
+   and in parts), so a consumer `add_prefix` override is honoured; `form.errors` stays
+   keyed by field name. The form
    is built with the `data=` / `files=` split Django requires (a bound form reads
    scalars/relations from `data=` and uploaded files from `files=` — an `UploadedFile`
    in `data=` does **not** validate):
@@ -1560,10 +1591,12 @@ write flavor rides.
        that accepts the stored list itself, writes the value it makes of it. Reading the
        built form rather
        than constructing another honors `get_form` / `get_form_kwargs` overrides and adds no
-       query. The initial is bound under `form.add_prefix(<field>)` into a replacement of the
-       bound data (`django_strawberry_framework/forms/resolvers.py::_bind_form_values`): a
+       query. The initial is bound under `form.add_prefix(<field>)`, and in parts under the
+       keys a multi-key widget reads, into a replacement of the bound data
+       (`django_strawberry_framework/forms/resolvers.py::_bind_form_values`): a
        `MultiValueDict` (a `QueryDict`, immutable or not) is copied and the
-       initial set with `setlist`, any other mapping merged into a `dict`.
+       initial set with `setlist`, any other mapping merged into a `dict`; an initial longer
+       than a `SplitArrayWidget`'s `size` is the field's `max_length` error.
 
      This yields true partial
      semantics — omitted scalars,
@@ -2051,7 +2084,7 @@ Rationale companion: [Decision 14][rationale-d14].
   the form, the field and the column. An update omitting it binds the form's initial: kept
   when the form splits the stored value into `self.initial`, refused "Enter a list of
   values." with nothing written otherwise. The initial is bound under the form's prefixed
-  name (`form.add_prefix`), and a `QueryDict` a `get_form` override binds is copied and given
+  name (`form.add_prefix`) and the keys the field's widget reads, and a `QueryDict` a `get_form` override binds is copied and given
   the initial as its list of values, every other field keeping its own. A widget that splits a
   comma string on such a field (e.g. `django_filters.widgets.CSVWidget`) takes a list, not a
   `String`: the field types as a list like the same field off-column. A `JSONField` column
@@ -2078,6 +2111,24 @@ Rationale companion: [Decision 14][rationale-d14].
   subclasses read the list and keep the column's list type, and a bare `forms.Field` or a
   consumer field no registered class covers keeps the column's type, since nothing states
   it reads one value.
+- **A form field whose widget reads several keys.** A `SplitArrayField` over an
+  `ArrayField` (required or optional, `remove_trailing_nulls` either way, text or integer
+  elements, a nullable-element column, a column default, a prefixed form) writes exactly
+  the list sent, created or updated (Django's own `required` rule stands: a required one sent a list with no truthy element, `[0]` included, answers "This field is required."): the list is bound one element per
+  `<field>_<index>` key, padded to `size` with `None`, so `[]` is a value (the column
+  default fills only a create omitting the field) and an update omitting it keeps the
+  stored list. A list longer than `size`, sent or reconstructed from the stored row, is
+  the field's `max_length` error with `ArrayMaxLengthValidator`'s message, nothing
+  written; a shorter one keeps Django's own semantics (`remove_trailing_nulls` drops the
+  padding, otherwise each padded `None` is cleaned by the base field). A
+  `SplitDateTimeField` over a `DateTimeField` and a consumer `MultiValueField` over a
+  `MultiWidget` write the value sent, split by the widget's `decompress` into its
+  `<field>_0` / `<field>_1` keys, and keep the stored value when omitted. An explicit
+  `null` is bound whole beside its parts, so the explicit-`null` check answers it as for
+  any field. A field whose widget reads one key binds under that key alone. A list a
+  `get_form_kwargs` hook binds as a `QueryDict` value list, or under its own prefixed copy
+  of the data, is read whole and split the same way; a `disabled` field is bound whole,
+  so an omitted update keeps a stored list longer than `size`.
 - **A declared field of another kind than its column.** A `ModelChoiceField` over a text
   column would store the `str()` of any row its queryset holds, one the target's
   visibility query hides included, and a file field over a text column reads `files`, so
@@ -2211,8 +2262,9 @@ Rationale companion: [Decision 14][rationale-d14].
 - **A prefixed form.** A form whose prefix comes from its class, a `get_form_kwargs`
   `prefix=`, or a `get_form` passing the package's mapping or a copy of it with a prefix
   reads every value the client sent: each bound `data` / `files` mapping holding bare
-  field names and no prefixed one is re-keyed under `form.add_prefix`, and one already
-  holding a prefixed name, keyed by a `get_form` override, is left as bound. The explicit-`null` and required-file checks read the bound value under
+  field names and none of the keys the form reads them under is re-keyed under
+  `form.add_prefix` (and, in `data`, under a multi-key widget's own keys), and one already
+  holding such a key, keyed by a `get_form` override, is left as bound. The explicit-`null` and required-file checks read the bound value under
   the same key, so a prefixed form answers every input as the unprefixed one does
   ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)
   step 4).
@@ -2510,6 +2562,38 @@ behavior reachable through `/graphql/`, package tests own internals.
     `clean()`, and a files `dict` the hook keeps a reference to reads unchanged after the
     write (`::test_update_under_a_prefix_never_mutates_the_bound_files_mapping`)
     (`::test_update_under_a_half_rekeyed_prefix_binds_both_mappings`);
+    **a field whose widget reads several keys** (package-only: fakeshop declares no such
+    form field and runs on SQLite, which has no `ArrayField`) — on PostgreSQL a
+    `SplitArrayField` (text and integer elements, required and optional,
+    `remove_trailing_nulls` both ways, a nullable-element column, a column default,
+    unprefixed and prefixed) writes the list sent on create and update, `[]` included
+    (`::test_modelform_split_array_field_writes_the_list_sent`), keeps the stored list on
+    an update omitting it and the column default on a create omitting it
+    (`::test_modelform_split_array_field_omitted_keeps_the_stored_list`), refuses a list
+    longer than `size`, sent or reconstructed, as `max_length` with nothing written
+    (`::test_modelform_split_array_field_longer_than_size_is_refused`), and answers an
+    explicit `null` with the column's `null` error
+    (`::test_modelform_split_array_field_explicit_null_is_the_column_null_error`), sync
+    and async, reads the whole list a `doseq` `QueryDict` or a hook's own prefixed copy
+    holds (`::test_modelform_split_array_field_reads_a_hook_bound_mapping`), and a
+    `disabled` one keeps a stored list longer than `size`
+    (`::test_modelform_disabled_split_array_field_keeps_a_stored_list_past_size`); live, a
+    `SplitDateTimeField` over `ScalarSpecimen.occurred_at` writes the datetime sent and
+    keeps it when omitted, unprefixed, under the form's prefix and beside a `get_form`'s
+    own prefixed copy
+    (`examples/fakeshop/test_query/test_scalars_mutation_api.py::test_split_datetime_form_field_writes_the_datetime_sent`);
+    a consumer `MultiValueField` over a text column (no fakeshop form declares one) does
+    the same unprefixed, prefixed, from a `MultiValueDict` a `get_form_kwargs` binds and
+    beside a hook's own prefixed copy
+    (`::test_modelform_multi_widget_field_writes_the_compressed_value`); the padding, the
+    refusal (also from a `MultiValueDict`, a `doseq` `QueryDict` and a hook's prefixed
+    copy), a `disabled` field's stored value and an omitted field's initial bound under a
+    split widget's keys run on SQLite through a driver-free `SplitArrayWidget` double
+    (`::test_modelform_split_array_widget_binds_each_element_padded_to_size`,
+    `::test_modelform_split_array_widget_value_past_size_is_refused`,
+    `::test_disabled_split_widget_field_keeps_its_stored_value_past_size`,
+    `::test_omitted_initial_binds_under_the_split_widget_keys`), and the key and entry
+    walk on its own in `tests/utils/test_widgets.py`;
     **the `get_form_kwargs` / `get_form` hook** — an override injecting `user` and one
     scoping a `ModelChoiceField.queryset` (input shape unchanged); **partial-update
     reconstruction at the unit tier** — omitted scalar / FK / M2M preserved from the
@@ -2695,7 +2779,11 @@ The completion contract.
    whose input shape disagrees with its column binds the built form's initial), with
    `files = provided_files`, then `form_class(**get_form_kwargs(…, instance=<located
    row>))` — so omitted scalar / FK / M2M / file values are preserved and
-   `unique_item_per_category` validates on a one-field change. `form.errors` maps
+   `unique_item_per_category` validates on a one-field change. The built form's data is
+   re-keyed under the keys each field's widget reads (`form.add_prefix`, and a
+   `MultiWidget`'s or `SplitArrayWidget`'s own keys, a split list padded to `size`), a list
+   longer than a `SplitArrayWidget`'s `size` being that field's `max_length` error before
+   `is_valid()`. `form.errors` maps
    onto the [`FieldError` envelope][glossary-fielderror-envelope] (each form field keyed
    to its input name, `NON_FIELD_ERRORS` → `"__all__"`, via the reused
    `validation_error_to_field_errors(ValidationError(form.errors.as_data()), key_map)`); **the write is wrapped by the `036` `save_or_field_errors`

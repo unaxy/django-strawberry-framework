@@ -90,13 +90,24 @@ and the form-specific invariants this module owns:
 
 - **The form is constructed once via the overridable ``get_form`` /
   ``get_form_kwargs`` hooks** (Decision 8 step 4 / Decision 6); ``form.is_valid()``
-  runs once. A prefixed form (a class-level ``prefix``, a ``get_form_kwargs``
-  ``prefix=``, a ``get_form`` passing the package's mapping or a copy with a prefix) is
-  bound under its prefix: a bound ``data`` / ``files`` mapping holding bare field names
-  and no prefixed one is re-keyed through ``form.add_prefix``, each mapping on its own,
-  while one already holding a prefixed name is left as bound
-  (``_bind_under_form_prefix``), and every later read or write of the bound values
-  goes through ``form.add_prefix`` (``_bound_form_value`` / ``_bind_form_values``). A
+  runs once. Each value is bound under the keys the bound form reads it from: a prefixed
+  form (a class-level ``prefix``, a ``get_form_kwargs`` ``prefix=``, a ``get_form``
+  passing the package's mapping or a copy with a prefix) reads ``form.add_prefix(name)``,
+  and a field whose widget reads several keys (a ``MultiWidget``, such as
+  ``SplitDateTimeField``'s; PostgreSQL's ``SplitArrayWidget``, ``SplitArrayField``'s)
+  reads its parts under that name's ``<key>_0`` .. keys. A bound ``data`` mapping holding
+  bare field names and none of those keys is re-keyed: each value whole under
+  ``form.add_prefix(name)``, its parts under the widget's keys (a ``MultiWidget`` splits a
+  value with its own ``decompress``; a ``SplitArrayWidget`` gets one element per index,
+  padded to its ``size`` with ``None``); a bound ``files`` mapping is re-keyed under the
+  prefix; one already holding a key the form reads is left as bound
+  (``_bind_under_form_keys``), a multi-key widget field's whole value it holds under
+  ``form.add_prefix(name)`` with none of the widget's part keys still getting its parts
+  beside it (``_bind_kept_parts``). A ``disabled`` field reads no data and is bound
+  whole. A list longer than a ``SplitArrayWidget``'s ``size``, which the widget would
+  truncate, is that field's ``max_length`` error before ``is_valid()``.
+  Every later read or write of the bound values goes through the same keys
+  (``_bound_form_value`` / ``_bind_form_values``). A
   failure maps ``form.errors`` onto the ``FieldError`` envelope via
   the reused ``validation_error_to_field_errors(ValidationError(
   form.errors.as_data()), key_map)``: each form field name is re-keyed to the
@@ -214,6 +225,7 @@ from django_strawberry_framework.utils.relations import (
     is_model_class,
     is_single_column_foreign_key,
 )
+from django_strawberry_framework.utils.widgets import widget_entries, widget_keys
 from django_strawberry_framework.utils.write_transaction import (
     pinned_write_alias,
     pipeline_write_phase,
@@ -231,7 +243,7 @@ from .inputs import choice_key_field, relation_target_model, shape_disagreeing_c
 from .sets import _is_form_class
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Container, Mapping
+    from collections.abc import Callable, Container, Iterable, Mapping
     from typing import Protocol, TypeAlias, TypeVar
 
     from strawberry.types import Info
@@ -901,16 +913,17 @@ def _bind_omitted_shape_disagreeing_initials(
     mutation_cls: _FormMutationClass,
     form: forms.BaseForm,
     form_data: Mapping[str, object],
-) -> None:
+) -> dict[str, list[ValidationError]]:
     """Bind an update's omitted fields that read another shape than their column from the initial.
 
     ``_reconstruct_partial_data`` leaves such a field (``shape_disagreeing_column``)
     out of ``form_data`` when the input omits it. The form ``get_form`` built reads the
     field's initial (``form.get_initial_for_field``: the ``initial`` a ``ModelForm`` builds
     from the row and the ``initial=`` kwarg, after any ``__init__`` adjustment), which is
-    bound under the field's prefixed name (``_bind_form_values``) before ``is_valid()``:
-    the value the form itself presents for the unchanged field. A name the bound form no
-    longer declares is left out.
+    bound under the keys the field's widget reads (``_bind_form_values``) before
+    ``is_valid()``: the value the form itself presents for the unchanged field. A name the
+    bound form no longer declares is left out. Returns the initials that cannot be bound,
+    as ``_bind_form_values`` does.
     """
     form_class = require(mutation_cls._mutation_meta.form_class, _is_form_class)
     initials: dict[str, object] = {}
@@ -920,8 +933,9 @@ def _bind_omitted_shape_disagreeing_initials(
         bound_field = form.fields.get(name)
         if bound_field is not None:
             initials[name] = form.get_initial_for_field(bound_field, name)
-    if initials:
-        _bind_form_values(form, initials)
+    if not initials:
+        return {}
+    return _bind_form_values(form, initials)
 
 
 #: What ``_bound_form_value`` answers for a field the bound form holds no value for.
@@ -932,83 +946,270 @@ def _bound_form_value(form: forms.BaseForm, name: str, *, files: bool = False) -
     """Return the value the bound form holds for its field ``name``, else ``_UNBOUND``.
 
     Read from ``form.files`` when ``files`` is set, else ``form.data``, under
-    ``form.add_prefix(name)``: the key the field's widget reads, so a form prefix and a
-    consumer ``add_prefix`` override are both honoured. A ``MultiValueDict`` (a
-    ``QueryDict`` a ``get_form`` override binds) answers its last value, any other mapping
-    its value.
+    ``form.add_prefix(name)``: the key the package binds the field's whole value under, so
+    a form prefix and a consumer ``add_prefix`` override are both honoured. A widget
+    reading that one key reads the value there; one reading other keys (a ``MultiWidget``,
+    a ``SplitArrayWidget``) reads its parts from them, bound beside the whole value
+    (``_bind_under_form_keys``), so an explicit ``null`` reads as ``None`` here for every
+    widget.
+    A ``MultiValueDict`` (a ``QueryDict`` a ``get_form`` override binds) answers its last
+    value, any other mapping its value.
     """
     bound: Mapping[str, object] = form.files if files else form.data
     key = form.add_prefix(name)
     return bound.get(key, _UNBOUND)
 
 
-def _bind_form_values(form: forms.BaseForm, values: Mapping[str, object]) -> None:
-    """Bind ``values`` (keyed by field name) into the form's data under ``form.add_prefix``.
+def _widget_parts(
+    form: forms.BaseForm,
+    name: str,
+    value: object,
+) -> tuple[str, dict[str, object]] | ValidationError:
+    """Return ``(form.add_prefix(name), parts)``: how the bound form's field ``name`` reads ``value``.
 
-    The bound data is replaced, never mutated: a ``MultiValueDict`` (a ``QueryDict`` a
-    ``get_form`` override binds, immutable or not) is copied and each value set as its list
-    of values (``setlist``), since unpacking it into a ``dict`` would bind every other
-    field's raw value list; any other mapping is merged into a ``dict``.
+    ``parts`` are the form-data entries the field's widget reads ``value`` from under
+    ``form.add_prefix(name)`` (``utils/widgets.py::widget_entries``): that one key for a
+    widget reading one, each part under its own key for a ``MultiWidget`` /
+    ``SplitArrayWidget``. A value the widget cannot read (a list longer than a
+    ``SplitArrayWidget``'s ``size``) answers Django's ``ArrayMaxLengthValidator``
+    ``ValidationError`` instead. A ``disabled`` field reads no data (Django cleans its
+    initial), so its value is bound whole under that one key, never split nor refused.
     """
+    key = form.add_prefix(name)
+    field = form.fields[name]
+    if field.disabled:
+        return key, {key: value}
+    try:
+        return key, widget_entries(read_attr(field, "widget"), key, value)
+    except ValidationError as error:
+        return error
+
+
+def _set_field_entries(
+    bound: MultiValueDict[str, object],
+    key: str,
+    parts: Mapping[str, object],
+    values: list[object],
+) -> None:
+    """Set one field's entries on ``bound``: ``values`` under ``key``, each part as its one entry.
+
+    A widget reading ``key`` alone reads ``values`` there (``get`` its last, ``getlist``
+    all of them); a multi-key widget's part overrides ``key`` when the widget reads it.
+    """
+    bound.setlist(key, values)
+    if list(parts) != [key]:
+        for part_key, part in parts.items():
+            bound.setlist(part_key, [part])
+
+
+def _bind_form_values(
+    form: forms.BaseForm,
+    values: Mapping[str, object],
+) -> dict[str, list[ValidationError]]:
+    """Bind ``values`` (keyed by field name) into the form's data under the keys each widget reads.
+
+    Each value is bound whole under ``form.add_prefix(name)`` (what ``_bound_form_value``
+    reads) and in parts under each key a multi-key widget reads (``_widget_parts``). The
+    bound data is replaced, never mutated: a ``MultiValueDict`` (a ``QueryDict`` a
+    ``get_form`` override binds, immutable or not) is copied and each value set as its list
+    of values (``setlist``), each part as its one entry, since unpacking it into a ``dict``
+    would bind every other field's raw value list; any other mapping is merged into a
+    ``dict``. Returns the error of each value its widget cannot read, keyed by field name;
+    such a value is left unbound.
+    """
+    errors: dict[str, list[ValidationError]] = {}
+    bindings: dict[str, tuple[str, dict[str, object]]] = {}
+    for name, value in values.items():
+        parts = _widget_parts(form, name, value)
+        if isinstance(parts, ValidationError):
+            errors[name] = [parts]
+        else:
+            bindings[name] = parts
     bound = form.data
     if isinstance(bound, MultiValueDict):
         merged = bound.copy()
-        for name, value in values.items():
+        for name, (key, parts) in bindings.items():
+            value = values[name]
             listed = truth.is_instance(value, list) or truth.is_instance(value, tuple)
-            merged.setlist(form.add_prefix(name), list_of(value) if listed else [value])
+            _set_field_entries(merged, key, parts, list_of(value) if listed else [value])
         form.data = merged
     else:
-        form.data = {**bound, **{form.add_prefix(name): value for name, value in values.items()}}
+        merged_data: dict[str, object] = dict(bound)
+        for name, (key, parts) in bindings.items():
+            merged_data.update({key: values[name], **parts})
+        form.data = merged_data
+    return errors
 
 
-def _bind_under_form_prefix(form: forms.BaseForm) -> None:
-    """Re-key bare field-keyed ``form.data`` / ``form.files`` under the form's prefix.
+def _bind_under_form_keys(form: forms.BaseForm) -> dict[str, list[ValidationError]]:
+    """Re-key bare field-keyed ``form.data`` / ``form.files`` under the keys the form reads.
 
-    The package binds by bare field name, and a prefixed form reads ``<prefix>-<name>``
-    (``form.add_prefix``), so a form whose prefix comes from the form class, a
-    ``get_form_kwargs`` ``prefix=``, or a ``get_form`` that passes the package's mapping
-    (or a copy of it) with a prefix would read none of the client's values: a required
-    field answers ``required``, an optional one its empty value. The re-key runs on the
-    built form, before the package or ``is_valid()`` reads it; the form's own ``__init__``
-    sees the field-keyed mapping. The rule is by content, each mapping on its own: a
-    mapping holding a form field's bare name that ``form.add_prefix`` renames, and no
-    field's prefixed name, is re-keyed; a mapping already holding a prefixed name was
-    keyed by its builder, wholly or partly, and is left as bound. Only those field names
-    move: any other key (a CSRF token, an extra value a consumer ``clean()`` reads) stays
-    as bound, as a prefixed Django form leaves it. The bound mapping is never mutated: a
-    re-keyed copy replaces it, a ``MultiValueDict`` (a ``QueryDict``, immutable or not)
-    as a copy of its own type keeping each key's value list, other data as a ``dict``, and
-    a files ``dict`` as a ``MultiValueDict`` holding each value as its one entry, so ``get``
-    answers it unchanged. Nothing Django's form ``__init__`` derives from the bound data
-    changes: ``is_bound`` reads only whether either mapping was passed.
+    The package binds by bare field name, and a form reads a field from the keys its
+    widget reads under ``form.add_prefix(name)``: ``<prefix>-<name>`` for a prefixed form,
+    and for a widget reading several keys (a ``MultiWidget``: ``SplitDateTimeWidget``'s
+    ``<name>_0`` / ``<name>_1``; PostgreSQL's ``SplitArrayWidget``: ``<name>_0`` ..
+    ``<name>_<size - 1>``) each of those keys. A form whose prefix comes from the form
+    class, a ``get_form_kwargs`` ``prefix=``, or a ``get_form`` that passes the package's
+    mapping (or a copy of it) with a prefix, and a field over such a widget, would read
+    none of the client's values: a required field answers ``required``, an optional one
+    its empty value. The re-key runs on the built form, before the package or
+    ``is_valid()`` reads it, through the bound form's own fields; the form's own
+    ``__init__`` sees the field-keyed mapping. The rule is by content, each mapping on
+    its own: a mapping holding a form field's bare name that the form reads under other
+    keys, and none of those keys, is re-keyed; a mapping already holding one was keyed by
+    its builder, wholly or partly, and is left as bound. Only those field names move,
+    each bound whole under ``form.add_prefix`` (what ``_bound_form_value`` reads) and in
+    parts under the keys its widget reads (``_widget_parts``): any other key (a CSRF
+    token, an extra value a consumer ``clean()`` reads) stays as bound, as a prefixed
+    Django form leaves it. The bound mapping is never mutated: a re-keyed copy replaces
+    it, a ``MultiValueDict`` (a ``QueryDict``, immutable or not) as a copy of its own type
+    keeping each moved name's value list under its prefixed name and giving each part its
+    one entry (a moved field's value is its one value, or the list of its several:
+    ``_bound_value``), other data
+    as a ``dict``, and a files ``dict`` as a ``MultiValueDict`` holding each value as its
+    one entry, so ``get`` answers it unchanged; ``form.files`` is re-keyed under the prefix
+    alone. A ``data`` mapping kept as bound still gets the parts of a multi-key widget
+    field whose whole value it holds under ``form.add_prefix(name)`` with none of its part
+    keys (``_bind_kept_parts``). A ``disabled`` field reads no data, so it is bound whole
+    and never split. Nothing Django's form ``__init__`` derives from the bound data changes:
+    ``is_bound`` reads only whether either mapping was passed.
+
+    Returns the errors of each field whose value its widget cannot read (a list longer
+    than a ``SplitArrayWidget``'s ``size``), keyed by field name.
     """
-    renamed = {name: key for name in form.fields if (key := form.add_prefix(name)) != name}
-    if not renamed:
-        return
+    moved = {name: keys for name in form.fields if (keys := _form_keys(form, name))}
+    errors: dict[str, list[ValidationError]] = {}
     data: Mapping[str, object] = form.data
-    if _holds_bare_field_names(data, renamed):
+    if moved and _holds_bare_field_names(data, moved):
         if isinstance(data, MultiValueDict):
-            form.data = _rekeyed_multi_value_dict(data, renamed)
+            form.data = _rekeyed_multi_value_dict(data, moved, form, errors)
         else:
-            form.data = {renamed.get(name, name): value for name, value in data.items()}
+            form.data = _rekeyed_data(data, moved, form, errors)
+    else:
+        _bind_kept_parts(form, errors)
+    renamed = {name: key for name in form.fields if (key := form.add_prefix(name)) != name}
     # ``form.files`` is typed as a ``MultiValueDict``; the package and a ``get_form_kwargs``
     # pass a plain ``dict``, so the bound object is read untyped and narrowed.
     files = read_attr(form, "files")
-    if not isinstance(files, dict) or not _holds_bare_field_names(form.files, renamed):
-        return
+    if (
+        not renamed
+        or not isinstance(files, dict)
+        or not _holds_bare_field_names(
+            form.files,
+            {name: [key] for name, key in renamed.items()},
+        )
+    ):
+        return errors
     if isinstance(files, MultiValueDict):
-        form.files = _rekeyed_multi_value_dict(form.files, renamed)
-        return
+        form.files = _renamed_multi_value_dict(form.files, renamed)
+        return errors
     # A plain ``dict``'s ``copy()`` is a ``dict``: its entries read each value as bound,
     # never a value list, and the bound mapping is left untouched.
     form.files = _multi_value_dict_of(form.files.copy(), renamed)
+    return errors
 
 
-def _holds_bare_field_names(bound: Container[object], renamed: Mapping[str, str]) -> bool:
-    """Whether ``bound`` holds a renamed field's bare name and no field's prefixed name."""
-    return any(name in bound for name in renamed) and not any(
-        key in bound for key in renamed.values()
+def _form_keys(form: forms.BaseForm, name: str) -> list[str]:
+    """Return the keys other than ``name`` the bound form reads its field ``name`` from.
+
+    ``form.add_prefix(name)`` and every key the field's widget reads under it
+    (``_widget_keys``); empty for an unprefixed field whose widget reads its bare name
+    alone.
+    """
+    key = form.add_prefix(name)
+    reads = dict.fromkeys([key, *_widget_keys(form, name)])
+    return [read for read in reads if read != name]
+
+
+def _widget_keys(form: forms.BaseForm, name: str) -> list[str]:
+    """Return the keys the bound form's field ``name`` reads under ``form.add_prefix(name)``.
+
+    Every key its widget reads (``utils/widgets.py::widget_keys``). A ``disabled`` field's
+    keys are listed too; ``_widget_parts`` binds its value whole under the first of them.
+    """
+    return widget_keys(read_attr(form.fields[name], "widget"), form.add_prefix(name))
+
+
+def _bound_value(bound: Mapping[str, object], name: str) -> object:
+    """Return the value ``bound`` holds under ``name``: a ``MultiValueDict``'s values read whole.
+
+    A ``MultiValueDict`` (a ``QueryDict``) holding one value answers it; one holding several
+    (``setlist(name, [...])``, a ``doseq`` query string) answers the list of them, the
+    inverse of ``_bind_form_values``'s ``setlist``. Any other mapping answers its value.
+    """
+    if not isinstance(bound, MultiValueDict):
+        return bound[name]
+    values = list_of(bound.getlist(name))
+    return values[0] if len(values) == 1 else values
+
+
+def _bind_kept_parts(form: forms.BaseForm, errors: dict[str, list[ValidationError]]) -> None:
+    """Bind the parts of each whole value a hook keyed itself under a multi-key widget's keys.
+
+    A mapping kept as bound (``_bind_under_form_keys``) may hold a multi-key widget field's
+    whole value under ``form.add_prefix(name)`` and none of the keys the widget reads its
+    parts from (a ``get_form_kwargs`` binding its own prefixed copy of the package's data):
+    those parts are bound beside it through ``_widget_parts``, so the widget reads the value
+    sent. A field whose widget reads one key, a ``disabled`` field, and one already holding
+    any of its part keys are left as bound. A value the widget cannot read records its
+    error in ``errors`` and binds nothing.
+    """
+    bound: Mapping[str, object] = form.data
+    spread: dict[str, tuple[str, dict[str, object]]] = {}
+    for name in form.fields:
+        key = form.add_prefix(name)
+        part_keys = [read for read in _widget_keys(form, name) if read != key]
+        if not part_keys or key not in bound or any(read in bound for read in part_keys):
+            continue
+        parts = _widget_parts(form, name, _bound_value(bound, key))
+        if isinstance(parts, ValidationError):
+            errors[name] = [parts]
+        else:
+            spread[name] = parts
+    if not spread:
+        return
+    if isinstance(bound, MultiValueDict):
+        merged = bound.copy()
+        for key, parts in spread.values():
+            _set_field_entries(merged, key, parts, list_of(bound.getlist(key)))
+        form.data = merged
+        return
+    merged_data: dict[str, object] = dict(bound)
+    for _key, parts in spread.values():
+        merged_data.update(parts)
+    form.data = merged_data
+
+
+def _holds_bare_field_names(bound: Container[object], moved: Mapping[str, Iterable[str]]) -> bool:
+    """Whether ``bound`` holds a moved field's bare name and none of any field's moved keys."""
+    return any(name in bound for name in moved) and not any(
+        key in bound for keys in moved.values() for key in keys
     )
+
+
+def _rekeyed_data(
+    data: Mapping[str, object],
+    moved: Mapping[str, object],
+    form: forms.BaseForm,
+    errors: dict[str, list[ValidationError]],
+) -> dict[str, object]:
+    """Return ``data`` as a ``dict`` with each moved field bound whole and in parts.
+
+    A moved field's value is bound under ``form.add_prefix(name)`` and its parts under the
+    keys its widget reads (``_widget_parts``); one whose widget cannot read it records its
+    error in ``errors`` and binds nothing.
+    """
+    rekeyed: dict[str, object] = {}
+    for name, value in data.items():
+        if name not in moved:
+            rekeyed[name] = value
+            continue
+        parts = _widget_parts(form, name, value)
+        if isinstance(parts, ValidationError):
+            errors[name] = [parts]
+            continue
+        rekeyed.update({parts[0]: value, **parts[1]})
+    return rekeyed
 
 
 def _multi_value_dict_of(
@@ -1025,7 +1226,7 @@ def _multi_value_dict_of(
     return rekeyed
 
 
-def _rekeyed_multi_value_dict(
+def _renamed_multi_value_dict(
     bound: MultiValueDict[str, _ValueT],
     renamed: Mapping[str, str],
 ) -> MultiValueDict[str, _ValueT]:
@@ -1034,6 +1235,33 @@ def _rekeyed_multi_value_dict(
     rekeyed.clear()
     for name in bound:
         rekeyed.setlist(renamed.get(name, name), bound.getlist(name))
+    return rekeyed
+
+
+def _rekeyed_multi_value_dict(
+    bound: MultiValueDict[str, object],
+    moved: Mapping[str, object],
+    form: forms.BaseForm,
+    errors: dict[str, list[ValidationError]],
+) -> MultiValueDict[str, object]:
+    """Return a copy of ``bound`` (its own type, mutable) with each moved field re-keyed.
+
+    A moved field keeps its value list under ``form.add_prefix(name)`` and gives each part
+    its widget reads from the field's value (``_bound_value``: its one value, or the list
+    of its several) its one entry (``_widget_parts``); one whose widget cannot read it
+    records its error in ``errors`` and binds nothing.
+    """
+    rekeyed = bound.copy()
+    rekeyed.clear()
+    for name in bound:
+        if name not in moved:
+            rekeyed.setlist(name, bound.getlist(name))
+            continue
+        parts = _widget_parts(form, name, _bound_value(bound, name))
+        if isinstance(parts, ValidationError):
+            errors[name] = [parts]
+            continue
+        _set_field_entries(rekeyed, parts[0], parts[1], bound.getlist(name))
     return rekeyed
 
 
@@ -1048,7 +1276,10 @@ def _bound_form_or_field_errors(
     """Construct the bound form and run ``is_valid()`` once (both form flavors).
 
     Returns ``(form, None)`` on success or ``(None, errors)`` on a validation
-    failure, the errors keyed through ``mutation_cls``'s input specs. ``holder``
+    failure, the errors keyed through ``mutation_cls``'s input specs. A value the bound
+    form's widget cannot read (a list longer than a ``SplitArrayWidget``'s ``size``, sent,
+    reconstructed from the located row, or an omitted field's initial) is that field's
+    ``max_length`` error before ``is_valid()`` runs (``_bind_under_form_keys``). ``holder``
     is the ``mutation_cls`` instance whose ``get_form`` hook builds the form. The
     persist hook (``form.save`` vs ``perform_mutate``) stays at the caller so
     ModelForm can return ``form.instance`` while a plain ``Form`` has no instance
@@ -1056,10 +1287,12 @@ def _bound_form_or_field_errors(
     """
     form_data, provided_files = decoded
     form = holder.get_form(info, data=form_data, files=provided_files, instance=instance)
-    _bind_under_form_prefix(form)
+    unbindable = _bind_under_form_keys(form)
     if instance is not None:
-        _bind_omitted_shape_disagreeing_initials(mutation_cls, form, form_data)
+        unbindable |= _bind_omitted_shape_disagreeing_initials(mutation_cls, form, form_data)
     _assert_bound_choice_agreement(mutation_cls, form, form_data)
+    if unbindable:
+        return None, _form_errors_to_field_errors(unbindable, mutation_cls)
     if not form.is_valid():
         return None, _form_errors_to_field_errors(form.errors.as_data(), mutation_cls)
     return form, None

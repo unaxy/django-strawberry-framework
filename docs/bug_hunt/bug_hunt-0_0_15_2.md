@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 287 done, 204 to do.
+Progress: 288 done, 207 to do.
 
 ## Done
 
@@ -1447,6 +1447,19 @@ Progress: 287 done, 204 to do.
   (`forms/converter.py::_unsupported_form_field`), and `SplitArrayField` subclasses `forms.Field` directly (Django
   5.2.16 and 6.1.2 alike). graphene-django types it `String` only through the catch-all the package refuses. Whether a
   column-less PostgreSQL form field should publish a type is Waiting row 576 (facts gathered fixing 551)
+- [x] 553. fixed: a `ModelForm` field over a column whose widget reads other keys than its name is bound under the
+  keys that widget reads, at every place the package puts a value into the form's data (the decoded input, the
+  omitted-update reconstruction, an omitted field's initial, the prefix re-key, and a mapping a `get_form` hook keyed
+  itself, a `QueryDict` holding a list per key included): a `SplitArrayWidget` reads `<key>_0 .. <key>_{size-1}`,
+  padded with `None` so an explicit `[]` is not omitted, and a `MultiWidget` its own suffixes, split by its
+  `decompress` (recursively); the whole value stays under the field's key beside its parts, and a `disabled` field is
+  bound whole. So a `SplitArrayField` over an `ArrayField` writes the list sent (where every write answered "This
+  field is required.", or an optional field reported success writing `[]`, the column default or `[null, ...]`, and an
+  update omitting it erased the stored list), and a `SplitDateTimeField` over a `DateTimeField` writes the datetime
+  sent; a list longer than `size`, sent or reconstructed, is refused with `ArrayMaxLengthValidator`'s `max_length`
+  error instead of being truncated. `utils/widgets.py` owns which keys a widget reads for filters and forms
+  (`multi_widget_keys` moved there unchanged; Django 5.2.16 to 6.1.2 audited). Live rows through a fakeshop scalars
+  split-datetime form, package rows on PostgreSQL; README, GLOSSARY and spec-038 say so
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1609,10 +1622,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   midnight at save with a `RuntimeWarning`; near year 1 or 9999 that projection can overflow past
   `unstorable_temporal`, which checks only `datetime` / `time` values, and answer the masked error; probe and say
   whether the check covers it. Found verifying 381
-- [ ] 553. A `DjangoModelFormMutation` whose form declares a `SplitArrayField` over an `ArrayField` fails every create
-  and update with "This field is required.": `SplitArrayWidget` reads `<name>_0` .. `<name>_N` from the form data while
-  the package binds the list under `<name>`; probe and say whether the binding should feed the widget's keys. Found
-  verifying 423
 - [ ] 554. A partial `DjangoModelFormMutation` update that omits a built-in single-value field over an `ArrayField`
   whose form sets no initial silently writes a value made from the stored list where that field accepts the list (a
   `CharField` stores its text, `["['x']"]`; a `BooleanField` stores its truthiness, `[True]` over `[False]`) instead of
@@ -1744,11 +1753,25 @@ tracker number are recorded there; open remainders and new defects are filed as 
   (`rest_framework/resolvers.py::_guarded_serializer_write` maps only `IntegrityError` and Django `ValidationError`);
   the GLOSSARY `FieldError` envelope scopes the `null` mapping to the model and `ModelForm` flavors, so README and
   GLOSSARY disagree. Found fixing 542
+- [ ] 579. (robustness) A filter whose form field uses a `SplitArrayWidget` is still read under its bare name:
+  `utils/widgets.py::multi_widget_keys` answers `None` for it, so the filter-side key spreading (`filters/inputs.py`,
+  `filters/sets.py` copy keys) treats it as one key while the widget reads `<name>_0 ..`. Found fixing 553
+- [ ] 620. (robustness) On a `null=True` `ArrayField`, a `ModelForm` explicit `null`, or an update omitting the field
+  over a stored NULL, writes `[]` instead of NULL, with the default `SimpleArrayField` and a `SplitArrayField` alike.
+  Found verifying 553
+- [ ] 621. (robustness) A `get_form` hook binding `QueryDict(urlencode(data))` turns a `SplitDateTimeField`'s datetime
+  into text, which `SplitDateTimeWidget.decompress` cannot split: the request answers a top-level `AttributeError` (it
+  silently stored NULL before 553's binding). Found verifying 553
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 578. CHANGELOG entry for item 553: a `DjangoModelFormMutation` field whose widget reads several keys is bound
+  under them: a `SplitArrayField` over an `ArrayField` and a `SplitDateTimeField` over a `DateTimeField` now write the
+  value sent (they answered "This field is required.", or an optional `SplitArrayField` wrote `[]` and an update
+  omitting it erased the stored list); a list longer than a `SplitArrayField`'s `size` answers the field's
+  `max_length` error instead of being truncated
 - [ ] 576. Decide how a PostgreSQL form field with no model column behind it (a plain `Form` field or a `ModelForm`
   extra field) is published. Today `SimpleArrayField` is `String` by its `CharField` ancestry: the client sends
   delimited text, cannot send an element holding the delimiter, and JSON text is split on commas, while the same field

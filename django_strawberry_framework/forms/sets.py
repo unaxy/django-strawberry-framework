@@ -502,10 +502,11 @@ def _default_get_form(
     requiring positional args); the finer ``get_form_kwargs`` override suffices for
     the common "inject a kwarg" case. Single-sourced so the construction path is
     identical for both flavors. ``data`` / ``files`` are keyed by field name; once the form
-    is built under a prefix (a class-level ``prefix``, a ``prefix=`` an override passes),
-    each bound mapping holding bare field names and no prefixed one is re-keyed through
-    ``form.add_prefix``, while one an override keyed itself is left as bound
-    (``forms/resolvers.py::_bind_under_form_prefix``).
+    is built, each bound mapping holding bare field names and none of the keys the form
+    reads them under (``form.add_prefix`` under a prefix, a class-level ``prefix`` or a
+    ``prefix=`` an override passes, and the keys a multi-key widget reads) is re-keyed
+    under them, while one an override keyed itself is left as bound
+    (``forms/resolvers.py::_bind_under_form_keys``).
     Whatever builds it, the form's model-choice fields must
     look a relation key up as the class-level fields ``get_form_fields`` returns do: the
     same model (or a subclass) and the same key column, or the request is a

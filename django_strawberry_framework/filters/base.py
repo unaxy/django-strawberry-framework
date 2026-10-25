@@ -65,7 +65,7 @@ from django_filters.fields import BaseCSVField, ChoiceField
 from django_filters.filters import BaseInFilter, BaseRangeFilter, FilterMethod
 from django_filters.filterset import BaseFilterSet, FilterSetOptions
 from django_filters.utils import get_model_field
-from django_filters.widgets import BaseCSVWidget, SuffixedMultiWidget
+from django_filters.widgets import BaseCSVWidget
 from graphql import GraphQLError
 from strawberry import relay
 from typing_extensions import TypedDict, Unpack, override
@@ -97,7 +97,6 @@ from django_strawberry_framework.utils._narrowing import (
     is_concrete_field,
     is_list_or_tuple,
     is_str,
-    list_of,
     optional_instance,
     read_attr,
     require,
@@ -823,37 +822,12 @@ def validate_range(value: object) -> None:
         )
 
 
-# Audited upstream, every published release from the floor to the latest:
-#
-#   django-filter 21.1 -> 26.2   ``SuffixedMultiWidget`` reads ``suffixed(name, suffix)`` per
-#                                ``suffixes``: ``RangeWidget`` ``min`` / ``max``,
-#                                ``DateRangeWidget`` ``after`` / ``before``
-#   Django 5.2.16 -> 6.1.2       ``MultiWidget`` reads ``name + widgets_names[i]``:
-#                                ``_0`` / ``_1`` for a two-widget sequence
-#
-# A widget is asked for its own keys, never assumed to read one of these pairs, so a
-# consumer ``SuffixedMultiWidget`` with its own ``suffixes`` is read as it reads itself.
-def multi_widget_keys(widget: object, name: str) -> list[str] | None:
-    """Return the form-data keys a multi-widget reads for the field ``name``, in widget order.
-
-    A django-filter ``SuffixedMultiWidget`` (``RangeWidget``, ``DateRangeWidget``, a
-    consumer's) reads ``suffixed(name, suffix)`` for each of its ``suffixes``; any other
-    Django ``MultiWidget`` (the package's ``_RangeWidget`` included) reads ``name`` plus
-    each of its ``widgets_names``. ``None`` for a widget that is not a ``MultiWidget``.
-    """
-    if isinstance(widget, SuffixedMultiWidget):
-        return [widget.suffixed(name, suffix) for suffix in widget.suffixes]
-    if isinstance(widget, MultiWidget):
-        # django-stubs declare no ``widgets_names``; ``MultiWidget.__init__`` sets it.
-        return [f"{name}{suffix}" for suffix in list_of(read_attr(widget, "widgets_names"))]
-    return None
-
-
 class _RangeWidget(MultiWidget):
     """Two-box widget that reads ``<name>_0`` / ``<name>_1``.
 
     Django's ``MultiWidget`` names its two boxes ``_0`` / ``_1``
-    (``multi_widget_keys``), the keys the range normalizer emits for ``RangeFilter``.
+    (``utils/widgets.py::multi_widget_keys``), the keys the range normalizer emits for
+    ``RangeFilter``.
     """
 
     def __init__(self, attrs: dict[str, object] | None = None) -> None:
@@ -871,9 +845,9 @@ class RangeField(Field):
     """`forms.Field` whose default validator is `validate_range`.
 
     The widget reads the ``<name>_0`` / ``<name>_1`` keys the range normalizer
-    emits for it (``multi_widget_keys``). A missing pair arrives as ``[None, None]`` and
-    ``to_python`` collapses it to ``None`` so django-filter skips the
-    constraint instead of compiling ``col BETWEEN NULL AND NULL``.
+    emits for it (``utils/widgets.py::multi_widget_keys``). A missing pair arrives as
+    ``[None, None]`` and ``to_python`` collapses it to ``None`` so django-filter skips
+    the constraint instead of compiling ``col BETWEEN NULL AND NULL``.
 
     ``bound_field`` cleans each bound that is not ``None`` (``RangeFilter`` passes the
     form field of its column's ``gte`` filter), so a bound the column cannot hold is a
