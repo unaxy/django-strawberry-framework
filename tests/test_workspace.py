@@ -2667,7 +2667,10 @@ def _run_lines(job: dict[object, object]) -> list[str]:
 
 
 def _ci_floor_node() -> tuple[dict[object, object], list[str]]:
-    """The push/PR compatibility node of ``django.yml``'s ``test`` job and its ``run:`` lines."""
+    """The push/PR compatibility node of ``django.yml``'s ``test`` job and its ``run:`` lines.
+
+    The node runs as two shard jobs that differ in ``shard`` alone.
+    """
     job = _django_workflow_job("test")
     include = json_at(job, "strategy", "matrix", "include")
     assert isinstance(include, str), include
@@ -2676,7 +2679,8 @@ def _ci_floor_node() -> tuple[dict[object, object], list[str]]:
     floor = [
         node for node in map(json_object, push_nodes) if node.get("compatibility_only") == "1"
     ]
-    assert len(floor) == 1
+    assert [node.pop("shard") for node in floor] == ["library-keyset", "remainder"]
+    assert floor[0] == floor[1]
     return floor[0], _run_lines(job)
 
 
@@ -2812,7 +2816,9 @@ def test_the_floor_gate_suite_installs_and_runs_what_the_ci_floor_cell_does(
     ``--upgrade-package Django``, then strawberry-graphql, then every soft
     dependency in one install, and runs pytest with ``addopts`` that drop
     ``--cov``; the suite does each of those against its own virtualenv and only
-    adds ``-p no:cacheprovider``.
+    adds ``-p no:cacheprovider``. CI splits the run into a ``load`` shard of two
+    live-API modules and a ``loadscope`` shard of the rest; the suite runs the
+    whole selection at once with the ``loadscope`` shard's ``addopts``.
     """
     _node, lines = _ci_floor_node()
     ci_addopts: list[str] = re.findall(r'addopts="(-[^"]*)"', "\n".join(lines))
@@ -2864,13 +2870,16 @@ def test_the_floor_gate_suite_installs_and_runs_what_the_ci_floor_cell_does(
     ]
     arguments, cell = workspace.GATE_SUITES[workspace.FLOOR_SUITE]
     no_cov = [opts for opts in ci_addopts if "--cov" not in opts]
-    assert len(no_cov) == 1
+    assert no_cov == [
+        "-v -n auto --dist load --durations=25",
+        "-v -n auto --dist loadscope --durations=25",
+    ]
     assert arguments == (
         "pytest",
         "-p",
         "no:cacheprovider",
         "-o",
-        f"addopts={no_cov[0]}",
+        f"addopts={no_cov[1]}",
     )
     assert cell == "default"
     assert list(workspace.GATE_SUITES)[:3] == ["lint", "default", "floor"]
