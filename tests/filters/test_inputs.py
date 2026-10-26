@@ -25,7 +25,7 @@ import re
 import typing
 import uuid
 import weakref
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
@@ -128,6 +128,7 @@ from tests._soft_dependency import blocked_modules
 
 if TYPE_CHECKING:
     from django.db.models.expressions import Combinable
+    from django.http import HttpRequest
 
     from django_strawberry_framework.utils.typing import ModelField
 
@@ -878,6 +879,236 @@ def test_lookup_choice_filter_on_a_served_filterset_is_refused_when_the_schema_i
         "filter on a FilterSet the schema does not serve."
     )
     assert (vars(declared), declared.extra) == (state, extra)
+
+
+class _CustomizingFilterSet(FilterSet):
+    """A filter set overriding ``__init__``, so a ``RelatedFilter`` projects each of its filters."""
+
+    def __init__(
+        self,
+        data: Mapping[str, object] | None = None,
+        queryset: QuerySet[models.Model] | None = None,
+        *,
+        request: HttpRequest | None = None,
+        prefix: str | None = None,
+    ) -> None:
+        super().__init__(data, queryset, request=request, prefix=prefix)
+
+
+@dataclass(frozen=True)
+class _LeafRefusalCase:
+    """One schema-build refusal a child set's ``leaf`` reaches, expanded or served directly.
+
+    ``expanded`` is the message's subject for a ``RelatedFilter`` copy of ``leaf`` (projected
+    or rebound) and ``direct`` for ``leaf`` on the set the schema serves, formatted with the
+    sets' names (``child``, ``parent``) and the ``repr`` of the child set's own ``leaf``
+    (``declared``); ``rest`` follows either subject.
+    """
+
+    declare: Callable[[], Filter]
+    expanded: str
+    direct: str
+    rest: str
+
+
+_LEAF_REFUSAL_CASES = {
+    "lookup-choice": _LeafRefusalCase(
+        lambda: LookupChoiceFilter(field_name="code", field_class=forms.CharField),
+        "{child}.leaf: LookupChoiceFilter on 'code' (reached through {parent}.shelf)",
+        "{child}: LookupChoiceFilter on 'code'",
+        " filters by a value and a lookup read from two form-data keys, and no GraphQL input "
+        "carries that pair. List the lookups in Meta.fields dict form (one input field per "
+        "lookup), or keep the filter on a FilterSet the schema does not serve.",
+    ),
+    "relation-pk": _LeafRefusalCase(
+        lambda: RelationPkFilter(field_name="code", lookup_expr="exact"),
+        "RelationPkFilter on {declared} ({child}.leaf, reached through {parent}.shelf) "
+        "names 'code'",
+        "RelationPkFilter on {declared} names 'code'",
+        ", which is not a relation to a model on its FilterSet; name a relation key in "
+        "Meta.fields, or filter the related row's own fields through a RelatedFilter.",
+    ),
+    "model-choice": _LeafRefusalCase(
+        lambda: django_filters.ModelChoiceFilter(field_name="code"),
+        "{child}.leaf: ModelChoiceFilter on 'code' (reached through {parent}.shelf)",
+        "{child}: ModelChoiceFilter on 'code'",
+        " has no model queryset (its queryset is callable or unset) and its field_name names "
+        "no relation on the FilterSet model, so there is no column to type its input from. "
+        "Pass a model queryset, or point field_name at a relation.",
+    ),
+    "choice": _LeafRefusalCase(
+        lambda: ChoiceFilter(field_name="topic", choices=[("a", "A")]),
+        "ChoiceFilter on {declared} ({child}.leaf, reached through {parent}.shelf)",
+        "ChoiceFilter on {declared}",
+        " is backed by no model field declaring `choices`; declare `choices` on the column it "
+        "filters (a `TextChoices` / `IntegerChoices` class), or filter that column through a "
+        "non-choice filter (`CharFilter`, `NumberFilter`, `DateFromToRangeFilter`, its lookups "
+        "in Meta.fields, or `CharFilter(method=...)` for a method filter).",
+    ),
+    "range-widget": _LeafRefusalCase(
+        lambda: DjangoRangeFilter(field_name="tier", widget=forms.TextInput()),
+        "RangeFilter consumes a range input for its 'shelf__tier' input ({child}.leaf, "
+        "reached through {parent}.shelf)",
+        "RangeFilter consumes a range input for its 'tier' input",
+        ", but its form field's widget does not read exactly two form-data keys (None); give "
+        "it a two-widget MultiWidget.",
+    ),
+    "method-without-field": _LeafRefusalCase(
+        lambda: AllValuesMultipleFilter(field_name="topic", method="filter_leaf"),
+        "AllValuesMultipleFilter(method='filter_leaf') on {declared} ({child}.leaf, reached "
+        "through {parent}.shelf)",
+        "AllValuesMultipleFilter(method='filter_leaf') on {declared}",
+        " exposes no form field; put the method on a typed filter primitive "
+        "(`CharFilter(method=...)`, `NumberFilter(method=...)`, `ListFilter(method=...)` for "
+        "a list value, ...) or on a `Filter` subclass declaring `field_class` at class level.",
+    ),
+}
+
+
+def _shelf_leaf_set(declared: Filter, base: type[FilterSet]) -> type[FilterSet]:
+    """A ``Shelf`` set on ``base`` declaring ``declared`` as ``leaf``.
+
+    ``ShelfLeafFilter.filter_leaf`` is the method a ``method=`` leaf names.
+    """
+
+    class ShelfLeafFilter(base):
+        leaf = declared
+
+        def filter_leaf(
+            self,
+            queryset: QuerySet[library_models.Shelf],
+            _name: str,
+            _value: object,
+        ) -> QuerySet[library_models.Shelf]:
+            return queryset
+
+        class Meta:
+            model = library_models.Shelf
+            fields = []
+
+    return ShelfLeafFilter
+
+
+def _book_shelf_set(child: type[FilterSet], base: type[FilterSet]) -> type[FilterSet]:
+    """A ``Book`` set on ``base`` expanding ``child`` through ``shelf``."""
+
+    class BookLeafFilter(base):
+        shelf = RelatedFilter(child, field_name="shelf")
+
+        class Meta:
+            model = library_models.Book
+            fields = []
+
+    return BookLeafFilter
+
+
+def _serve_model(model: type[models.Model], served: type[FilterSet] | None) -> None:
+    """Declare a ``DjangoType`` for ``model`` whose ``Meta.filterset_class`` is ``served``."""
+    meta: dict[str, object] = {"model": model, "fields": ("id",)}
+    if served is not None:
+        meta["filterset_class"] = served
+    _ = type(f"{model.__name__}LeafType", (DjangoType,), {"Meta": type("Meta", (), meta)})
+
+
+def _build_refusal() -> str:
+    """Build the schema and return the ``ConfigurationError`` message it refuses with."""
+    with pytest.raises(ConfigurationError) as excinfo:
+        finalize_django_types()
+    return str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "base",
+    [FilterSet, _CustomizingFilterSet],
+    ids=["plain-child", "child-init"],
+)
+@pytest.mark.parametrize("site", list(_LEAF_REFUSAL_CASES))
+def test_an_expanded_child_leaf_is_refused_under_its_declaration(
+    site: str,
+    base: type[FilterSet],
+) -> None:
+    """A refusal reached through a ``RelatedFilter`` copy names the filter the child set declares.
+
+    The copy is rebound onto the parent (``shelf__code``), or projected as a runtime-built
+    ``Projected<Class>`` when an owner binds the child leaf (its set overrides ``__init__``,
+    or the leaf holds a ``method=``); either way the message names the declared class, its
+    attribute on the child set, its own ``field_name`` and the ``RelatedFilter`` it was
+    reached through, never the copy.
+    """
+    case = _LEAF_REFUSAL_CASES[site]
+    declared = case.declare()
+    child = _shelf_leaf_set(declared, base)
+    parent = _book_shelf_set(child, FilterSet)
+    _serve_model(library_models.Shelf, None)
+    _serve_model(library_models.Book, parent)
+    assert child.get_filters()["leaf"] is declared
+
+    subject = case.expanded.format(
+        child=child.__name__,
+        parent=parent.__name__,
+        declared=repr(declared),
+    )
+    assert _build_refusal() == subject + case.rest
+
+
+@pytest.mark.parametrize("site", list(_LEAF_REFUSAL_CASES))
+def test_a_leaf_on_the_set_it_is_served_from_is_refused_under_its_own_name(site: str) -> None:
+    """A leaf declared on the served set itself is named as every root filter is.
+
+    No ``RelatedFilter`` copied it, so the refusal names its own class, its set and its
+    own ``field_name``, with no attribute or route.
+    """
+    case = _LEAF_REFUSAL_CASES[site]
+    declared = case.declare()
+    child = _shelf_leaf_set(declared, _CustomizingFilterSet)
+    _serve_model(library_models.Shelf, child)
+
+    subject = case.direct.format(child=child.__name__, declared=repr(declared))
+    assert _build_refusal() == subject + case.rest
+
+
+@pytest.mark.parametrize(
+    ("shelf_base", "book_base"),
+    [
+        pytest.param(_CustomizingFilterSet, FilterSet, id="projected-then-projected"),
+        pytest.param(FilterSet, FilterSet, id="rebound-then-rebound"),
+        pytest.param(FilterSet, _CustomizingFilterSet, id="projected-over-a-rebound-copy"),
+    ],
+)
+def test_a_leaf_expanded_across_two_hops_names_every_hop(
+    shelf_base: type[FilterSet],
+    book_base: type[FilterSet],
+) -> None:
+    """A copy expanded again names each ``RelatedFilter`` it was reached through.
+
+    ``LoanLeafFilter.book`` expands ``BookLeafFilter``'s copy ``shelf__leaf`` again; each
+    hop is projected or rebound by its own set, and a projected copy of a rebound copy walks
+    through it. The refusal names ``ShelfLeafFilter.leaf`` and both hops, outermost first.
+    """
+    child = _shelf_leaf_set(
+        LookupChoiceFilter(field_name="code", field_class=forms.CharField),
+        shelf_base,
+    )
+    book_filter = _book_shelf_set(child, book_base)
+
+    class LoanLeafFilter(FilterSet):
+        book = RelatedFilter(book_filter, field_name="book")
+
+        class Meta:
+            model = library_models.Loan
+            fields = []
+
+    _serve_model(library_models.Shelf, None)
+    _serve_model(library_models.Book, None)
+    _serve_model(library_models.Loan, LoanLeafFilter)
+
+    assert _build_refusal() == (
+        f"{child.__name__}.leaf: LookupChoiceFilter on 'code' (reached through "
+        f"LoanLeafFilter.book, then {book_filter.__name__}.shelf) filters by a value and a "
+        "lookup read from two form-data keys, and no GraphQL input carries that pair. List "
+        "the lookups in Meta.fields dict form (one input field per lookup), or keep the "
+        "filter on a FilterSet the schema does not serve."
+    )
 
 
 def _priced_specimen(label: str, price: str) -> None:

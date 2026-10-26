@@ -9506,6 +9506,79 @@ def test_apply_sync_rejects_a_range_value_it_cannot_read_at_every_depth(
     assert str(excinfo.value) == _range_rejection_message(received)
 
 
+_EXPANDED_VALUE_REJECTIONS = [
+    pytest.param(
+        {"patron__fines": [1, 5]},
+        "RangeFilter consumes a range input with only 'start' / 'end' axes for its "
+        "'patron__fines' input, but received list [1, 5]; send a mapping or input object "
+        "with 'start' / 'end' (the GraphQL schema already rejects this shape over the wire).",
+        id="range",
+    ),
+    pytest.param(
+        {"patron__emails": "abc"},
+        "ListFilter consumes a list of values for its 'patron__email' input, but received a "
+        "non-list container (str 'abc') for the list input; send a list (the GraphQL schema "
+        "already rejects this shape over the wire).",
+        id="list",
+    ),
+    pytest.param(
+        {"patron__name": {"exact": {"k": "v"}}},
+        "FilterSet {loan}: filter 'patron__name' received a dict value ({{'k': 'v'}}) but "
+        "CharFilter consumes a single scalar form key. A dict value here would be splatted "
+        "into unknown form-data keys the form silently ignores, dropping the filter. Pass "
+        "the schema value shape for this filter (a scalar, a list, or a range {{start, end}} "
+        "input on a RangeFilter primitive).",
+        id="dict",
+    ),
+]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "base",
+    [FilterSet, _SettlingFilterSet],
+    ids=["plain-child", "child-init"],
+)
+@pytest.mark.parametrize(("leaf_input", "message"), _EXPANDED_VALUE_REJECTIONS)
+def test_apply_sync_names_an_expanded_leaf_by_its_declared_class(
+    leaf_input: dict[str, object],
+    message: str,
+    base: type[FilterSet],
+) -> None:
+    """A hand-built value an expanded copy cannot read names the class the child declares.
+
+    ``patron`` expands each filter of the child set as a copy rebound onto the loan,
+    or, when the child overrides ``__init__``, as a runtime-built ``Projected<Class>``
+    copy; the value error names ``RangeFilter`` / ``ListFilter`` / ``CharFilter``,
+    never the copy's class.
+    """
+
+    class FinesEmailPatronFilter(base):
+        fines = RangeFilter(field_name="lifetime_fines_cents", lookup_expr="range")
+        emails = ListFilter(field_name="email")
+        name = CharFilter(field_name="name")
+
+        class Meta:
+            model = library_models.Patron
+            fields = []
+
+    class FinesEmailLoanFilter(FilterSet):
+        patron = RelatedFilter(FinesEmailPatronFilter, field_name="patron")
+
+        class Meta:
+            model = library_models.Loan
+            fields = []
+
+    _register_plain_types(library_models.Patron)
+    with pytest.raises(ConfigurationError) as excinfo:
+        FinesEmailLoanFilter.apply_sync(
+            leaf_input,
+            library_models.Loan.objects.all(),
+            _make_info(),
+        )
+    assert str(excinfo.value) == message.format(loan=FinesEmailLoanFilter.__qualname__)
+
+
 @pytest.mark.django_db
 def test_apply_async_rejects_a_misspelled_lookup_under_a_range_head() -> None:
     """``apply_async`` reads a hand-built range value through the same guard."""

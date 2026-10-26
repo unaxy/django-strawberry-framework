@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 307 done, 213 to do.
+Progress: 308 done, 213 to do.
 
 ## Done
 
@@ -1646,6 +1646,16 @@ Progress: 307 done, 213 to do.
   refuses the copy. Class-level service objects, string method names, plain functions and shallow-copy widgets
   build and filter as before. spec-027's Decision 6, Error shapes and Layer 4 text follow; package rows in
   `tests/filters/test_finalizer.py`
+- [x] 520. A filter a `RelatedFilter` expansion copies from a child set, rebound or projected as a
+  `ProjectedChildFilter`, is named as the child set declares it in every input-conversion refusal: the declared class
+  (never `Projected<Class>`), its attribute on the child set, and each `RelatedFilter` it was reached through,
+  outermost first (`ShelfFilter.code_l: LookupChoiceFilter on 'code' (reached through BookFilter.shelf)`). One
+  helper owns the answer (`filters/sets.py::_leaf_declaration`); `_expand_related_filter` records each rebound
+  copy's origin in a weakly held side map, so nothing rides the copy's state, deepcopy or pickle. The LookupChoice,
+  raw-pk, model-choice, choice-enum, `method=` and range-widget refusals use it, and the hand-built-value errors
+  (`apply_sync` list / range / dict values) name the declared class. A filter declared on the set that holds it
+  keeps byte-identical messages; filtering results and the fakeshop SDL are unchanged. spec-027's LookupChoiceFilter
+  row states the rule; package rows in `tests/filters/test_inputs.py` and `tests/filters/test_sets.py`
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1801,9 +1811,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   scalar catch-all and publishes `exact: String` while its form field cleans a list, so every non-empty value answers
   `FILTER_INVALID` "Enter a list of values."; probed on a text column only (a `Choices` column not probed). Found
   fact-finding 373
-- [ ] 520. (robustness) The `LookupChoiceFilter` refusal for a leaf projected through a `RelatedFilter` names the
-  internal `ProjectedLookupChoiceFilter` class, the parent set and the `field_name` (`shelf__code_l`), not the
-  declared attribute on the child set. Found verifying 373
 - [ ] 560. (robustness) A top-level filter leaf beside an `and` / `or` / `not` arm repeats its predicate inside the
   arm's `pk IN (SELECT ...)` subquery: `FilterSet.filter_queryset` hands `_evaluate_logic_tree` the flat-narrowed
   queryset, then ANDs the arm onto it again; same rows, redundant SQL. Found fact-finding 399
@@ -1934,6 +1941,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 538. (robustness) A `DateRangeFilter` declared on a `Choices` column builds and types as the column's enum, while
   its own form field accepts only its fixed date-range keys, so every enum member answers `FILTER_INVALID` "Select a
   valid choice"; the same filter on a plain column is refused at schema build. Found verifying 518
+- [ ] 640. (robustness) `filters/sets.py::FilterSet._expansion_origin` answers "which child filter does this flat
+  copy run for" from provenance breadcrumbs plus the form key, and returns `None` for an unstamped child, while
+  `_expansion_record` / `_leaf_declaration` answer the same question from the record `_expand_related_filter` keeps:
+  two owners of one fact. A consumer `get_filters()` override returning fresh copies also leaves rebound copies
+  unrecorded, so their refusals fall back to the parent set and flat `field_name`. Found fixing 520
 ## To do: holes found re-checking the fixes
 
 

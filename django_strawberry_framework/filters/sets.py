@@ -16,6 +16,7 @@ resolved filter instances, not from a parallel map).
 from __future__ import annotations
 
 import copy
+import weakref
 from collections import OrderedDict
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -1525,12 +1526,14 @@ class FilterSetMetaclass(_FilterSetMetaclassBase):
 
 @dataclass(frozen=True)
 class ChildProjection:
-    """Where an owner-bound expanded leaf runs: the child filter set, its filter's name, the branch.
+    """Where an expanded leaf came from: the child filter set, its filter's name, the branch.
 
     ``branch`` is the parent's ``RelatedFilter`` attribute the leaf was expanded
-    from: the declared hop whose target visibility scopes the child rows and
-    whose relation and explicit ``queryset=`` restrict the parent
-    (``FilterSet._projection_hop``).
+    from. For an owner-bound leaf it is where the leaf runs: the declared hop
+    whose target visibility scopes the child rows and whose relation and
+    explicit ``queryset=`` restrict the parent (``FilterSet._projection_hop``).
+    A rebound copy's record (``_record_rebound_origin``) only names its
+    declaration (``_leaf_declaration``).
     """
 
     filterset: type[FilterSet]
@@ -1686,6 +1689,106 @@ def _projection_child_filter(projection: ChildProjection) -> Filter:
     unbound template reads.
     """
     return projection.filterset.get_filters()[projection.name]
+
+
+# Where each rebound expanded copy came from: the copy ``_expand_related_filter``
+# makes of a child filter no owner binds (a projected copy carries its own
+# ``_projection``). Held beside the copy, keyed by its identity and dropped
+# with it, so the copy's state, deepcopy and pickle carry nothing new; every
+# reader holds the class-level copy ``get_filters()`` returned, never a
+# per-request deepcopy of it.
+_REBOUND_ORIGINS: dict[int, tuple[weakref.ReferenceType[Filter], ChildProjection]] = {}
+
+
+def _record_rebound_origin(rebound: Filter, origin: ChildProjection) -> None:
+    """Record that ``rebound`` is the copy of ``origin``'s child filter under its branch."""
+    key = id(rebound)
+
+    def _drop(ref: weakref.ReferenceType[Filter]) -> None:
+        entry = _REBOUND_ORIGINS.get(key)
+        if entry is not None and entry[0] is ref:
+            del _REBOUND_ORIGINS[key]
+
+    _REBOUND_ORIGINS[key] = (weakref.ref(rebound, _drop), origin)
+
+
+def _expansion_record(filter_instance: Filter) -> ChildProjection | None:
+    """Return where an expanded copy came from: its projection, or its recorded rebound origin."""
+    if isinstance(filter_instance, ProjectedChildFilter):
+        return filter_instance._projection
+    entry = _REBOUND_ORIGINS.get(id(filter_instance))
+    if entry is None or entry[0]() is not filter_instance:
+        return None
+    return entry[1]
+
+
+@dataclass(frozen=True)
+class _LeafDeclaration:
+    """The declaration a filter leaf stands for, as an error message names it.
+
+    ``declared`` is the filter the consumer wrote: an expanded copy's child
+    filter on the set that declares it (a ``ProjectedChildFilter`` and a rebound
+    copy alike), any other leaf itself. ``attribute`` (``ShelfFilter.code_l``)
+    names that filter on its set and ``through`` the ``RelatedFilter``
+    attributes the copy was reached across, outermost first
+    (``BookFilter.shelf``); both are empty for a leaf declared on the set that
+    holds it, whose messages read as they do for any root filter.
+    """
+
+    declared: Filter
+    attribute: str | None
+    through: tuple[str, ...]
+
+    @property
+    def kind(self) -> str:
+        """The declared filter's class name, never the runtime-built ``Projected<Class>``."""
+        return truth.kind(self.declared)
+
+    def owner(self, filterset_cls: type[FilterSet] | None) -> str:
+        """Return the message's owner: the declaring set's attribute, else the input's set."""
+        if self.attribute is not None:
+            return self.attribute
+        return truth.name(filterset_cls) if filterset_cls is not None else "FilterSet"
+
+    @property
+    def route(self) -> str:
+        """`` (reached through A.b, then B.c)`` after an owner-led subject; empty unexpanded."""
+        if not self.through:
+            return ""
+        return f" (reached through {', then '.join(self.through)})"
+
+    @property
+    def site(self) -> str:
+        """`` (ShelfFilter.code_l, reached through A.b)`` after an owner-less subject; empty unexpanded."""
+        if self.attribute is None:
+            return ""
+        return f" ({self.attribute}, reached through {', then '.join(self.through)})"
+
+
+def _leaf_declaration(
+    filter_instance: Filter,
+    filterset_cls: type[FilterSet] | None,
+) -> _LeafDeclaration:
+    """Return the declaration ``filter_instance``, a leaf of ``filterset_cls``, stands for.
+
+    An expanded copy, projected or rebound (``_expansion_record``), is followed hop
+    by hop to the child filter it answers for (``_projection_child_filter``, the
+    lookup the visibility and gate walks share), each hop named ``<set>.<branch>``
+    by the set it leaves; the first hop's set is ``filterset_cls``, the bare branch
+    when the caller builds for no set.
+    """
+    through: list[str] = []
+    owner = filterset_cls
+    current = filter_instance
+    attribute: str | None = None
+    while (projection := _expansion_record(current)) is not None:
+        through.append(
+            f"{truth.name(owner)}.{projection.branch}" if owner is not None else projection.branch,
+        )
+        owner = projection.filterset
+        attribute = f"{truth.name(owner)}.{projection.name}"
+        current = _projection_child_filter(projection)
+    return _LeafDeclaration(current, attribute, tuple(through))
 
 
 def _restrict_to_related(
@@ -2270,10 +2373,11 @@ def _expand_related_filter(
         new_name = _branch_key(filter_name, child_name)
         field_copy = copied_declared_filter(field, target_filterset, child_name, via=via)
         field_copy.field_name = f"{relation}__{field.field_name}"
+        origin = ChildProjection(target_filterset, child_name, filter_name)
         if _owner_bound_child(target_filterset, field):
             field_copy.__class__ = _projected_class_for(type(field_copy))  # truth: ok class store
             projected = require_instance(field_copy, ProjectedChildFilter)
-            projected._projection = ChildProjection(target_filterset, child_name, filter_name)
+            projected._projection = origin
             # An instance ``filter`` (``_own_filter``: django-filter's ``method`` setter
             # installs a ``FilterMethod``, the package's list filters theirs the same
             # way, a consumer ``__init__`` any callable) shadows the class's per
@@ -2281,6 +2385,8 @@ def _expand_related_filter(
             # The child's own filter, inside the child instance, keeps its shadow;
             # the projection's class-level ``filter`` runs here.
             _ = truth.instance_state(projected).pop("filter", None)
+        else:
+            _record_rebound_origin(field_copy, origin)
         # Inherit the CHILD leaf's frozen provenance record and APPEND the child
         # filter's name as an expansion breadcrumb, without mutating the child's
         # record (a new frozen record via ``replace``). Origin +
@@ -4201,12 +4307,14 @@ class FilterSet(
         No generated input annotation for a non-range filter accepts an
         object, so a dict here never comes off the wire: it is always a
         malformed programmatic input (the mapping form of ``apply_sync`` /
-        ``filter``), which is why rejecting it cannot break a typed query.
+        ``filter``), which is why rejecting it cannot break a typed query. The
+        filter is named by its declared class (``_leaf_declaration``), never an
+        expanded copy's runtime-built ``Projected<Class>``.
         """
         raise ConfigurationError(
             f"FilterSet {truth.qualname(cls)}: filter {form_key!r} received a dict "
             f"value ({truth.render(lookup_value)}) but "
-            f"{truth.kind(filter_instance)} consumes a single scalar form "
+            f"{_leaf_declaration(filter_instance, cls).kind} consumes a single scalar form "
             "key. A dict value here would be splatted into unknown form-data "
             "keys the form silently ignores, dropping the filter. Pass the "
             "schema value shape for this filter (a scalar, a list, or a range "

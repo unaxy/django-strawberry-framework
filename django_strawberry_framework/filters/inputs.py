@@ -116,7 +116,7 @@ if TYPE_CHECKING:
     from django_strawberry_framework.utils.inputs import SetInputNamespace
     from django_strawberry_framework.utils.typing import ConcreteField, ModelField
 
-    from .sets import FilterSet
+    from .sets import FilterSet, _LeafDeclaration
 
 # Module path the ``strawberry.lazy(...)`` marker references; pinned as a
 # single constant so the factory, ``_build_logic_fields``, and
@@ -380,22 +380,44 @@ def _scalar_from_model_field(model_field: ModelField | None) -> object:
     return scalar_for_field(model_field)
 
 
+def _declaration_of(
+    filter_instance: Filter,
+    filterset_cls: type[FilterSet] | None,
+) -> _LeafDeclaration:
+    """Return the declaration a leaf of ``filterset_cls`` stands for in an error message.
+
+    ``filters/sets.py::_leaf_declaration`` owns the answer: a ``RelatedFilter``
+    expansion's copy, projected or rebound, names the child set's declared filter,
+    its attribute and the ``RelatedFilter`` path, never the runtime-built
+    ``Projected<Class>`` or the parent's flat ``field_name``; a leaf declared on the
+    set that holds it names itself, so its messages read as they do for any root
+    filter.
+    """
+    from .sets import _leaf_declaration  # noqa: PLC0415 - import cycle
+
+    return _leaf_declaration(filter_instance, filterset_cls)
+
+
 def _relation_identity_annotation(
     filter_instance: Filter,
     model_field: ModelField | None,
+    filterset_cls: type[FilterSet] | None = None,
 ) -> object:
     """Type a raw-pk relation leaf from the target's primary-key column.
 
     The scalar comes from ``filters/base.py::relation_identity_column`` through the
     shared ``SCALAR_MAP`` lookup, so the input agrees with how a ``DjangoType`` types
     that key (``Int``, ``UUID``, ``BigInt``, ...). A raw-pk filter whose ``field_name``
-    resolves no relation on its ``FilterSet`` model has no column to type from.
+    resolves no relation on its ``FilterSet`` model has no column to type from; the
+    refusal names the filter as declared (``_declaration_of``).
     """
     column = relation_identity_column(model_field)
     if column is None:
+        declaration = _declaration_of(filter_instance, filterset_cls)
+        declared = declaration.declared
         raise ConfigurationError(
-            f"{truth.kind(filter_instance)} on {truth.render(filter_instance)} names "
-            f"{truth.render(getattr(filter_instance, 'field_name', None))}, which is not a "
+            f"{declaration.kind} on {truth.render(declared)}{declaration.site} names "
+            f"{truth.render(getattr(declared, 'field_name', None))}, which is not a "
             "relation to a model on its FilterSet; name a relation key in Meta.fields, or "
             "filter the related row's own fields through a RelatedFilter.",
         )
@@ -438,16 +460,18 @@ def _model_choice_identity_annotation(
     model's primary key or ``to_field_name`` field, or the ``field_name`` relation's
     target for a callable ``queryset``) through the shared ``SCALAR_MAP`` lookup. The
     filter keeps its own form field, so its ``queryset`` still validates every value.
+    The refusal names the filter as declared (``_declaration_of``).
     """
     column = model_choice_identity_column(filter_instance, model_field)
     if column is None:
-        owner = truth.name(filterset_cls) if filterset_cls is not None else "FilterSet"
+        declaration = _declaration_of(filter_instance, filterset_cls)
         raise ConfigurationError(
-            f"{owner}: {truth.kind(filter_instance)} on "
-            f"{truth.render(getattr(filter_instance, 'field_name', None))} has no model "
-            "queryset (its queryset is callable or unset) and its field_name names no "
-            "relation on the FilterSet model, so there is no column to type its input "
-            "from. Pass a model queryset, or point field_name at a relation.",
+            f"{declaration.owner(filterset_cls)}: {declaration.kind} on "
+            f"{truth.render(getattr(declaration.declared, 'field_name', None))}"
+            f"{declaration.route} has no model queryset (its queryset is callable or unset) "
+            "and its field_name names no relation on the FilterSet model, so there is no "
+            "column to type its input from. Pass a model queryset, or point field_name at a "
+            "relation.",
         )
     return _scalar_from_model_field(column)
 
@@ -456,6 +480,7 @@ def _choice_enum_from_filter(
     filter_instance: Filter,
     type_name: str,
     model_field: ModelField | None,
+    filterset_cls: type[FilterSet] | None = None,
 ) -> type[enum.Enum]:
     """Derive a Strawberry enum from the ``choices`` of the model field a choice filter reads.
 
@@ -463,8 +488,8 @@ def _choice_enum_from_filter(
     ``types/converters.py::convert_choices_to_enum``, so it is shared with any sibling
     ``DjangoType`` reading the same column; the filter's own ``choices`` never feed the enum.
     Per spec-027 Decision 4, a choice filter with no backing field declaring ``choices``
-    raises ``ConfigurationError`` naming the declared filter's class: a ``ChoiceFilter``
-    on a plain column or a ``method=`` path, and django-filter's ``ChoiceFilter``
+    raises ``ConfigurationError`` naming the declared filter (``_declaration_of``): a
+    ``ChoiceFilter`` on a plain column or a ``method=`` path, and django-filter's ``ChoiceFilter``
     subclasses ``AllValuesFilter`` and ``DateRangeFilter``, whose choices are the
     column's distinct values or fixed date-range keys.
 
@@ -476,12 +501,14 @@ def _choice_enum_from_filter(
     from django_strawberry_framework.types.converters import convert_choices_to_enum  # noqa: PLC0415 - import cycle
 
     if model_field is None or not getattr(model_field, "choices", None):
+        declaration = _declaration_of(filter_instance, filterset_cls)
         raise ConfigurationError(
-            f"{truth.kind(filter_instance)} on {truth.render(filter_instance)} is backed by "
-            "no model field declaring `choices`; declare `choices` on the column it filters "
-            "(a `TextChoices` / `IntegerChoices` class), or filter that column through a "
-            "non-choice filter (`CharFilter`, `NumberFilter`, `DateFromToRangeFilter`, its "
-            "lookups in Meta.fields, or `CharFilter(method=...)` for a method filter).",
+            f"{declaration.kind} on {truth.render(declaration.declared)}{declaration.site} "
+            "is backed by no model field declaring `choices`; declare `choices` on the column "
+            "it filters (a `TextChoices` / `IntegerChoices` class), or filter that column "
+            "through a non-choice filter (`CharFilter`, `NumberFilter`, "
+            "`DateFromToRangeFilter`, its lookups in Meta.fields, or `CharFilter(method=...)` "
+            "for a method filter).",
         )
     # Past the guard the field declares truthy ``choices``, which only a concrete
     # ``Field`` carries (a reverse ``ForeignObjectRel`` has no ``choices``).
@@ -492,6 +519,7 @@ def _element_annotation(
     filter_instance: Filter,
     model_field: ModelField | None,
     owner_definition: DjangoTypeDefinition | None,
+    filterset_cls: type[FilterSet] | None = None,
 ) -> object:
     """Single-element Strawberry type with the MODEL FIELD as source of truth.
 
@@ -521,7 +549,7 @@ def _element_annotation(
         return str
     if model_field is not None and getattr(model_field, "choices", None):
         type_name = _owner_type_name(owner_definition) or "Filter"
-        return _choice_enum_from_filter(filter_instance, type_name, model_field)
+        return _choice_enum_from_filter(filter_instance, type_name, model_field, filterset_cls)
     if model_field is not None:
         return _scalar_from_model_field(model_field)
     form_field = _declared_form_field(filter_instance)
@@ -621,13 +649,13 @@ def convert_filter_to_input_annotation(
     so building the schema writes nothing to a class-level declaration.
     """
     if truth.is_instance(filter_instance, LookupChoiceFilter):
-        owner = truth.name(filterset_cls) if filterset_cls is not None else "FilterSet"
+        declaration = _declaration_of(filter_instance, filterset_cls)
         raise ConfigurationError(
-            f"{owner}: {truth.kind(filter_instance)} on "
-            f"{truth.render(filter_instance.field_name)} filters by a value and a lookup "
-            "read from two form-data keys, and no GraphQL input carries that pair. List "
-            "the lookups in Meta.fields dict form (one input field per lookup), or keep "
-            "the filter on a FilterSet the schema does not serve.",
+            f"{declaration.owner(filterset_cls)}: {declaration.kind} on "
+            f"{truth.render(declaration.declared.field_name)}{declaration.route} filters by "
+            "a value and a lookup read from two form-data keys, and no GraphQL input carries "
+            "that pair. List the lookups in Meta.fields dict form (one input field per "
+            "lookup), or keep the filter on a FilterSet the schema does not serve.",
         )
     required = bool(dict_of(filter_instance.extra).get("required", False))
 
@@ -638,10 +666,11 @@ def convert_filter_to_input_annotation(
         return str
 
     def _pk_multi(matched: Filter) -> object:
-        return GenericAlias(list, (_relation_identity_annotation(matched, model_field),))
+        element = _relation_identity_annotation(matched, model_field, filterset_cls)
+        return GenericAlias(list, (element,))
 
     def _pk(matched: Filter) -> object:
-        return _relation_identity_annotation(matched, model_field)
+        return _relation_identity_annotation(matched, model_field, filterset_cls)
 
     def _model_choice(matched: Filter) -> object:
         element = _model_choice_identity_annotation(matched, model_field, filterset_cls)
@@ -653,23 +682,25 @@ def convert_filter_to_input_annotation(
         # subclasses) whose form field consumes a LIST of values, not a
         # scalar. The element type is model-field-driven so a CSV ``in`` over
         # a choice column keeps its enum and a 64-bit column keeps ``BigInt``.
-        return GenericAlias(list, (_element_annotation(matched, model_field, owner_definition),))
+        element = _element_annotation(matched, model_field, owner_definition, filterset_cls)
+        return GenericAlias(list, (element,))
 
     def _range(matched: Filter) -> object:
         # Refuse a widget the patch cannot address when the schema is built, not per request.
-        _ = range_form_keys(matched, matched.field_name or "range")
+        _ = range_form_keys(matched, matched.field_name or "range", filterset_cls)
         inner = _scalar_from_model_field(model_field)
         return _build_range_input_class(matched, inner, filterset_cls)
 
     def _list(matched: Filter) -> object:
-        return GenericAlias(list, (_element_annotation(matched, model_field, owner_definition),))
+        element = _element_annotation(matched, model_field, owner_definition, filterset_cls)
+        return GenericAlias(list, (element,))
 
     def _typed(matched: Filter) -> object:
-        return _element_annotation(matched, model_field, owner_definition)
+        return _element_annotation(matched, model_field, owner_definition, filterset_cls)
 
     def _choice(matched: Filter) -> object:
         type_name = _owner_type_name(owner_definition) or "Filter"
-        return _choice_enum_from_filter(matched, type_name, model_field)
+        return _choice_enum_from_filter(matched, type_name, model_field, filterset_cls)
 
     def _catchall(matched: Filter) -> object:
         # Catch-all scalar branch: a ``method=`` filter is typed from its model column, else
@@ -678,18 +709,19 @@ def convert_filter_to_input_annotation(
         form_field = _declared_form_field(matched)
         method = read_attr(matched, "method", None)
         if method is not None and form_field is None:
+            declaration = _declaration_of(matched, filterset_cls)
             raise ConfigurationError(
-                f"{truth.kind(matched)}(method={truth.render(method)}) on "
-                f"{truth.render(matched)} exposes no form field; put the method on a typed "
-                "filter primitive (`CharFilter(method=...)`, `NumberFilter(method=...)`, "
-                "`ListFilter(method=...)` for a list value, ...) or on a `Filter` subclass "
-                "declaring `field_class` at class level.",
+                f"{declaration.kind}(method={truth.render(method)}) on "
+                f"{truth.render(declaration.declared)}{declaration.site} exposes no form "
+                "field; put the method on a typed filter primitive (`CharFilter(method=...)`, "
+                "`NumberFilter(method=...)`, `ListFilter(method=...)` for a list value, ...) "
+                "or on a `Filter` subclass declaring `field_class` at class level.",
             )
         if getattr(matched, "lookup_expr", None) == "isnull":
             # ``isnull`` is a boolean predicate regardless of the column type;
             # the model field (the column's value type) is irrelevant here.
             return bool
-        return _element_annotation(matched, model_field, owner_definition)
+        return _element_annotation(matched, model_field, owner_definition, filterset_cls)
 
     annotation = convert_with_mro(
         filter_instance,
@@ -841,7 +873,7 @@ def _require_list_container(
     """
     if not is_list_or_tuple(raw_value):
         raise ConfigurationError(
-            f"{truth.kind(filter_instance)} consumes a list of values for its "
+            f"{_declaration_of(filter_instance, None).kind} consumes a list of values for its "
             f"{filter_instance.field_name!r} input, but received a non-list container "
             f"({truth.kind(raw_value)} {truth.render(raw_value)}) for the {shape}; "
             "send a list (the GraphQL schema already rejects this shape over the wire).",
@@ -996,7 +1028,7 @@ def _normalize_range_value(
     items = iter_input_items(raw_value)
     if items is None or any(name not in _RANGE_AXES for name, _ in items):
         raise ConfigurationError(
-            f"{truth.kind(filter_instance)} consumes a range input with only "
+            f"{_declaration_of(filter_instance, None).kind} consumes a range input with only "
             f"'start' / 'end' axes for its {base!r} input, but received "
             f"{truth.kind(raw_value)} {truth.render(raw_value)}; send a mapping or "
             "input object with 'start' / 'end' (the GraphQL schema already rejects this "
@@ -1021,21 +1053,27 @@ def _normalize_range_value(
     return patch
 
 
-def range_form_keys(filter_instance: Filter, base: str) -> tuple[str, str]:
+def range_form_keys(
+    filter_instance: Filter,
+    base: str,
+    filterset_cls: type[FilterSet] | None = None,
+) -> tuple[str, str]:
     """Return the start and end form-data keys a range filter's widget reads for ``base``.
 
     The widget is the one the filter's form field builds (``filters/base.py::unkept_form_field``,
     which writes nothing to a class-level declaration every request shares), asked for its
     keys through ``utils/widgets.py::multi_widget_keys``. A widget that does not read exactly
-    two keys has no slot for a start and an end, so it is a ``ConfigurationError``;
+    two keys has no slot for a start and an end, so it is a ``ConfigurationError`` naming
+    the filter as declared on ``filterset_cls`` (``_declaration_of``);
     ``convert_filter_to_input_annotation`` runs this when the schema is built.
     """
     keys = multi_widget_keys(read_attr(unkept_form_field(filter_instance), "widget"), base)
     if keys is None or len(keys) != _RANGE_BOUNDS:
+        declaration = _declaration_of(filter_instance, filterset_cls)
         raise ConfigurationError(
-            f"{truth.kind(filter_instance)} consumes a range input for its {base!r} "
-            "input, but its form field's widget does not read exactly two form-data keys "
-            f"({truth.render(keys)}); give it a two-widget MultiWidget.",
+            f"{declaration.kind} consumes a range input for its {base!r} "
+            f"input{declaration.site}, but its form field's widget does not read exactly two "
+            f"form-data keys ({truth.render(keys)}); give it a two-widget MultiWidget.",
         )
     return keys[0], keys[1]
 
