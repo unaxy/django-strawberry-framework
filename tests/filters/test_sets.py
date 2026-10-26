@@ -9522,6 +9522,13 @@ _EXPANDED_VALUE_REJECTIONS = [
         id="list",
     ),
     pytest.param(
+        {"patron__picks": "abc"},
+        "MultipleChoiceFilter consumes a list of values for its 'patron__email' input, but "
+        "received a non-list container (str 'abc') for the multiple-choice list; send a list "
+        "(the GraphQL schema already rejects this shape over the wire).",
+        id="multiple-choice",
+    ),
+    pytest.param(
         {"patron__name": {"exact": {"k": "v"}}},
         "FilterSet {loan}: filter 'patron__name' received a dict value ({{'k': 'v'}}) but "
         "CharFilter consumes a single scalar form key. A dict value here would be splatted "
@@ -9549,13 +9556,14 @@ def test_apply_sync_names_an_expanded_leaf_by_its_declared_class(
 
     ``patron`` expands each filter of the child set as a copy rebound onto the loan,
     or, when the child overrides ``__init__``, as a runtime-built ``Projected<Class>``
-    copy; the value error names ``RangeFilter`` / ``ListFilter`` / ``CharFilter``,
-    never the copy's class.
+    copy; the value error names ``RangeFilter`` / ``ListFilter`` /
+    ``MultipleChoiceFilter`` / ``CharFilter``, never the copy's class.
     """
 
     class FinesEmailPatronFilter(base):
         fines = RangeFilter(field_name="lifetime_fines_cents", lookup_expr="range")
         emails = ListFilter(field_name="email")
+        picks = MultipleChoiceFilter(field_name="email", choices=[("a@x.test", "a@x.test")])
         name = CharFilter(field_name="name")
 
         class Meta:

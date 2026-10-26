@@ -35,6 +35,7 @@ from django_filters import (
     LookupChoiceFilter,
     ModelChoiceFilter,
     ModelMultipleChoiceFilter,
+    MultipleChoiceFilter,
     TypedChoiceFilter,
 )
 from django_filters import RangeFilter as _DjangoRangeFilter
@@ -56,7 +57,7 @@ from django_strawberry_framework.utils._narrowing import (
     read_attr,
     require,
 )
-from django_strawberry_framework.utils.converters import MRO_CONTINUE, convert_with_mro
+from django_strawberry_framework.utils.converters import convert_with_mro
 from django_strawberry_framework.utils.input_values import (
     UNSET,
     is_inactive_value,
@@ -570,9 +571,16 @@ def _element_annotation(
 # coerced on the other (spec-053 C3). The consumer model-choice pair sits after
 # the package relation primitives and before ``BaseCSVFilter`` (its ``in``
 # wrapper is both) and ``ChoiceFilter`` (which ``ModelChoiceFilter``
-# subclasses). ``TypedFilter`` is convert-only: List /
-# Array / Range already matched, so normalize returns ``MRO_CONTINUE`` and
-# falls through to ChoiceFilter / the catch-all. Last entry is ``object`` (the
+# subclasses). ``MultipleChoiceFilter`` (with django-filter's
+# ``TypedMultipleChoiceFilter`` / ``AllValuesMultipleFilter``) is last before the
+# catch-all, so every class that is also another kind keeps that kind's arm: a
+# generated ``in`` wrapper around it the CSV arm, the package's GlobalID and
+# consumer model-choice subclasses theirs, and a consumer class pairing it with a
+# range, list, array or choice filter that filter's.
+# A bare ``TypedFilter`` (List / Array / Range already matched) is typed as one
+# element, so normalize hands it the scalar the ChoiceFilter and catch-all arms
+# hand theirs, never the multiple-choice list a class pairing it with
+# ``MultipleChoiceFilter`` would otherwise reach. Last entry is ``object`` (the
 # original ``else``): convert's method-filter / ``isnull`` / scalar arm,
 # normalize's unwrap. A duck-typed non-``Filter`` still reaches that arm, so a
 # malformed filter object is rejected with a typed ``ConfigurationError``.
@@ -587,6 +595,7 @@ _FILTER_INPUT_KIND_TYPES: tuple[type[object] | tuple[type[object], ...], ...] = 
     (ListFilter, ArrayFilter),
     TypedFilter,
     (ChoiceFilter, TypedChoiceFilter),
+    MultipleChoiceFilter,
     object,
 )
 
@@ -606,11 +615,35 @@ def _unexpected_filter_dispatch(obj: object) -> ConfigurationError:
     """Fallthrough factory for the filter-input ``convert_with_mro`` riders.
 
     Last precheck is ``object`` (the original ``else``), so a real dispatch
-    never reaches here. The factory keeps ``convert_with_mro``'s raising
-    contract if a handler returns ``MRO_CONTINUE`` all the way through.
+    never reaches here, and no handler returns ``MRO_CONTINUE``. The factory
+    keeps ``convert_with_mro``'s raising contract all the same.
     """
     return ConfigurationError(
         f"internal: filter input dispatch reached fallthrough for {truth.render(obj)}",
+    )
+
+
+def _refuse_method_without_form_field(
+    filter_instance: Filter,
+    filterset_cls: type[FilterSet] | None,
+) -> None:
+    """Refuse a ``method=`` filter whose class builds no form field on the unbound declaration.
+
+    Nothing can type such a filter's input: ``AllValuesMultipleFilter`` reads the
+    per-request ``model`` to build its field, so unbound it builds none. The refusal
+    names the filter as declared (``_declaration_of``).
+    """
+    form_field = _declared_form_field(filter_instance)
+    method = read_attr(filter_instance, "method", None)
+    if method is None or form_field is not None:
+        return
+    declaration = _declaration_of(filter_instance, filterset_cls)
+    raise ConfigurationError(
+        f"{declaration.kind}(method={truth.render(method)}) on "
+        f"{truth.render(declaration.declared)}{declaration.site} exposes no form "
+        "field; put the method on a typed filter primitive (`CharFilter(method=...)`, "
+        "`NumberFilter(method=...)`, `ListFilter(method=...)` for a list value, ...) "
+        "or on a `Filter` subclass declaring `field_class` at class level.",
     )
 
 
@@ -628,7 +661,10 @@ def convert_filter_to_input_annotation(
     consumer ``ModelChoiceFilter`` / ``ModelMultipleChoiceFilter`` (typed from the
     column its form field cleans), then CSV, then
     Range / List / Array, then bare ``TypedFilter``, then
-    ``ChoiceFilter``, then the ``object`` catch-all (the original ``else``).
+    ``ChoiceFilter``, then a ``MultipleChoiceFilter`` (a list whose element is typed
+    like a ``ListFilter``'s, from the model column, never from
+    ``TypedMultipleChoiceFilter.coerce``), then the ``object`` catch-all (the original
+    ``else``).
     ``method=...`` filters
     that expose no form field raise ``ConfigurationError``.
 
@@ -685,6 +721,13 @@ def convert_filter_to_input_annotation(
         element = _element_annotation(matched, model_field, owner_definition, filterset_cls)
         return GenericAlias(list, (element,))
 
+    def _multiple_choice(matched: Filter) -> object:
+        # The form field (``MultipleChoiceField``) cleans a list; each element is typed
+        # from the model column like a ``ListFilter``'s (spec-027 Decision 4).
+        _refuse_method_without_form_field(matched, filterset_cls)
+        element = _element_annotation(matched, model_field, owner_definition, filterset_cls)
+        return GenericAlias(list, (element,))
+
     def _range(matched: Filter) -> object:
         # Refuse a widget the patch cannot address when the schema is built, not per request.
         _ = range_form_keys(matched, matched.field_name or "range", filterset_cls)
@@ -706,17 +749,7 @@ def convert_filter_to_input_annotation(
         # Catch-all scalar branch: a ``method=`` filter is typed from its model column, else
         # from the form field its class builds; one whose ``field`` builds none on the
         # unbound declaration raises (spec-027 Decision 4).
-        form_field = _declared_form_field(matched)
-        method = read_attr(matched, "method", None)
-        if method is not None and form_field is None:
-            declaration = _declaration_of(matched, filterset_cls)
-            raise ConfigurationError(
-                f"{declaration.kind}(method={truth.render(method)}) on "
-                f"{truth.render(declaration.declared)}{declaration.site} exposes no form "
-                "field; put the method on a typed filter primitive (`CharFilter(method=...)`, "
-                "`NumberFilter(method=...)`, `ListFilter(method=...)` for a list value, ...) "
-                "or on a `Filter` subclass declaring `field_class` at class level.",
-            )
+        _refuse_method_without_form_field(matched, filterset_cls)
         if getattr(matched, "lookup_expr", None) == "isnull":
             # ``isnull`` is a boolean predicate regardless of the column type;
             # the model field (the column's value type) is irrelevant here.
@@ -736,6 +769,7 @@ def convert_filter_to_input_annotation(
             _list,
             _typed,
             _choice,
+            _multiple_choice,
             _catchall,
         ),
         scalar_registry={},
@@ -772,9 +806,9 @@ def normalize_input_value(
       django-filter's ``RangeFilter`` -> ``{<field>_min, <field>_max}``).
 
     Kind order is ``_FILTER_INPUT_KIND_TYPES``, the same table convert
-    walks. ``TypedFilter`` is convert-only: normalize returns
-    ``MRO_CONTINUE`` so ChoiceFilter / the unwrap catch-all can still
-    fire. ``None`` from unwrap (an enum member whose ``.value`` is
+    walks. A bare ``TypedFilter`` is typed as one element, so normalize gives
+    it the scalar shape the ``ChoiceFilter`` and catch-all arms give, as
+    convert does. ``None`` from unwrap (an enum member whose ``.value`` is
     ``None``) is a successful result, not a continue signal.
     """
     # Defensive short-circuit against ``strawberry.UNSET`` reaching the
@@ -814,6 +848,11 @@ def normalize_input_value(
         items = _require_list_container(_filter, raw_value, "CSV membership list")
         return [_unwrap_enum_member(item) for item in items]
 
+    def _multiple_choice(_filter: Filter) -> object:
+        # ``MultipleChoiceField`` cleans a list of choice values.
+        items = _require_list_container(_filter, raw_value, "multiple-choice list")
+        return [_unwrap_enum_member(item) for item in items]
+
     def _range(matched: Filter) -> object:
         return _normalize_range_value(matched, raw_value, field_name=field_name)
 
@@ -821,8 +860,8 @@ def normalize_input_value(
         items = _require_list_container(_filter, raw_value, "list input")
         return [_unwrap_enum_member(item) for item in items]
 
-    def _typed(_filter: Filter) -> object:
-        return MRO_CONTINUE
+    def _typed(matched: Filter) -> object:
+        return _scalar(matched)
 
     def _scalar(matched: Filter) -> object:
         # Shared by the ``ChoiceFilter`` and catch-all arms. A generated choice-column
@@ -845,6 +884,7 @@ def normalize_input_value(
             _list,
             _typed,
             _scalar,
+            _multiple_choice,
             _scalar,
         ),
         scalar_registry={},

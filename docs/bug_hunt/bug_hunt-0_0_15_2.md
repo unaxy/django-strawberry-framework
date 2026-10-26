@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 309 done, 212 to do.
+Progress: 310 done, 213 to do.
 
 ## Done
 
@@ -1666,6 +1666,18 @@ Progress: 309 done, 212 to do.
   Dropping the outer copy instead would lose the flat queryset's shape and is wrong for `not`, whose complement
   is not a subset of the flat rows. Same rows, no contract row; the planner sees a redundant conjunct inside a
   semi-join
+- [x] 515. A declared `MultipleChoiceFilter` / `TypedMultipleChoiceFilter` / `AllValuesMultipleFilter` (or one
+  `Meta.filter_overrides` names) publishes a list typed from its column: `filters/inputs.py` gains a
+  `MultipleChoiceFilter` kind-table row, last before the catch-all so every class another row dispatched (the
+  GlobalID / model / relation-pk multiple filters, the generated `in` / `range` wrappers, a consumer class pairing
+  it with a range, list, array, choice or `TypedFilter` kind) keeps that row. Convert gives
+  `list[<column enum on a choices column, the column scalar otherwise, str with no column>]`, never typed from
+  `coerce`; normalize hands the form a list, each enum member unwrapped, a non-list refused. The catch-all still
+  builds every leaf's form field at schema build, and `AllValuesMultipleFilter(method=)` keeps its refusal. A bare
+  `TypedFilter` normalizes as the scalar it converts to. spec-027 Decision 4 and GLOSSARY "Choice leaves" state the
+  family and that `AllValues*` choices come from the default manager; live rows over a holder schema in
+  `examples/fakeshop/test_query/test_library_api.py`, package rows in `tests/filters/test_inputs.py` and
+  `tests/filters/test_sets.py`
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1817,10 +1829,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   a non-UTC `TIME_ZONE` (`valid_datetime`) and an aware out-of-range one under `USE_TZ=False` (`make_naive`), where
   DRF answers its own `overflow` for the other cells; upstream behaviour, decide whether the flavor maps it. Found
   fixing 381
-- [ ] 515. A declared `MultipleChoiceFilter` / `AllValuesMultipleFilter` / `TypedMultipleChoiceFilter` reaches the
-  scalar catch-all and publishes `exact: String` while its form field cleans a list, so every non-empty value answers
-  `FILTER_INVALID` "Enter a list of values."; probed on a text column only (a `Choices` column not probed). Found
-  fact-finding 373
 - [ ] 562. (robustness) A flat range leaf walking a hop with both bounds null (`{start: null, end: null}`) runs the
   hop target's `get_queryset` on `apply_async` but not on `apply_sync`; same rows. Found verifying 399
 
@@ -1958,6 +1966,18 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 641. `AllValuesFilter` / `AllValuesMultipleFilter` build their choices from the model's unscoped
+  `_default_manager.distinct()` (django-filter's rule), so over a type whose `get_queryset` hides a row a value only
+  that row holds answers no rows while a value no row holds answers `invalid_choice`: an existence oracle, live at
+  the parent on choice columns and, after 515, on text columns through `AllValuesMultipleFilter`; it also runs one
+  DISTINCT per filtered request even when the leaf is unsent. GLOSSARY "Choice leaves" documents it and the
+  consumer remedy. Should the package scope the choices to the bound copy's `parent.queryset` (in
+  `sets.py::FilterSet._copy_filter`, honouring a consumer `field` override; a flat hop leaf needs its hop's
+  visibility), changing what a DRF view over the same `FilterSet` sees, or keep django-filter's rule?
+- [ ] 642. CHANGELOG entry for item 515: a declared `MultipleChoiceFilter` / `TypedMultipleChoiceFilter` /
+  `AllValuesMultipleFilter` publishes `exact: [<column type>!]` (it published a scalar and answered every wire value
+  with `FILTER_INVALID` "Enter a list of values."); `apply_sync` with a non-list for one raises `ConfigurationError`
+  where it answered `FILTER_INVALID`
 - [ ] 594. A model whose `Meta.db_table` is a lazy translation string (`gettext_lazy("products_category")`):
   Django serves `all()`, `order_by()`, `filter()` and both `union()` forms over it, but
   `utils/querysets.py::_seal_or_defect` refuses `filter()` and a baked `union()` ("query alias_refcount has
