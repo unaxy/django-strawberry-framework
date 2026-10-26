@@ -17,6 +17,7 @@ private helpers a request cannot name.
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import datetime
 import decimal
@@ -25,6 +26,7 @@ import re
 import typing
 import uuid
 import weakref
+from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -1140,6 +1142,139 @@ def test_a_leaf_expanded_across_two_hops_names_every_hop(
         "lookup read from two form-data keys, and no GraphQL input carries that pair. List "
         "the lookups in Meta.fields dict form (one input field per lookup), or keep the "
         "filter on a FilterSet the schema does not serve."
+    )
+
+
+def _deep_copying(parent: type[FilterSet], *, rekey: bool) -> type[FilterSet]:
+    """``parent`` under a ``get_filters()`` override returning a deep copy of every filter.
+
+    When ``rekey`` each copy ``shelf__<name>`` is held as ``aliased_<name>`` instead.
+    """
+
+    class DeepCopyingFilter(parent):
+        @classmethod
+        @override
+        def get_filters(cls) -> OrderedDict[str, Filter]:
+            return OrderedDict(
+                (
+                    f"aliased_{name.removeprefix('shelf__')}"
+                    if rekey and name.startswith("shelf__")
+                    else name,
+                    copy.deepcopy(filter_instance),
+                )
+                for name, filter_instance in super().get_filters().items()
+            )
+
+    return DeepCopyingFilter
+
+
+@pytest.mark.parametrize("rekey", [False, True], ids=["deep-copies", "deep-copies-rekeyed"])
+@pytest.mark.parametrize(
+    "base",
+    [FilterSet, _CustomizingFilterSet],
+    ids=["plain-child", "child-init"],
+)
+@pytest.mark.parametrize("site", list(_LEAF_REFUSAL_CASES))
+def test_a_get_filters_override_keeps_an_expanded_leaf_refused_under_its_declaration(
+    site: str,
+    base: type[FilterSet],
+    *,
+    rekey: bool,
+) -> None:
+    """A ``get_filters()`` override deep-copying the copies, under its keys or keys of its own.
+
+    Each copy carries the child filter it stands for, so the refusal still names the
+    declared class, its attribute on the child set and the ``RelatedFilter`` it was
+    reached through, never the parent set and the flat ``field_name``.
+    """
+    case = _LEAF_REFUSAL_CASES[site]
+    declared = case.declare()
+    child = _shelf_leaf_set(declared, base)
+    parent = _deep_copying(_book_shelf_set(child, FilterSet), rekey=rekey)
+    _serve_model(library_models.Shelf, None)
+    _serve_model(library_models.Book, parent)
+    assert ("aliased_leaf" in parent.get_filters()) is rekey
+
+    subject = case.expanded.format(
+        child=child.__name__,
+        parent=parent.__name__,
+        declared=repr(declared),
+    )
+    assert _build_refusal() == subject + case.rest
+
+
+@pytest.mark.parametrize(
+    ("shelf_base", "book_base"),
+    [
+        pytest.param(_CustomizingFilterSet, FilterSet, id="projected-then-projected"),
+        pytest.param(FilterSet, FilterSet, id="rebound-then-rebound"),
+        pytest.param(FilterSet, _CustomizingFilterSet, id="projected-over-a-rebound-copy"),
+    ],
+)
+def test_a_leaf_expanded_across_a_deep_copying_middle_set_names_every_hop(
+    shelf_base: type[FilterSet],
+    book_base: type[FilterSet],
+) -> None:
+    """The middle set's ``get_filters()`` deep-copies its copies; the refusal still names both hops.
+
+    ``LoanLeafFilter.book`` expands the deep copy of ``shelf__leaf`` the middle set
+    returns, which carries the child filter it stands for, so the walk reaches
+    ``ShelfLeafFilter.leaf`` through both ``RelatedFilter`` hops, outermost first.
+    """
+    child = _shelf_leaf_set(
+        LookupChoiceFilter(field_name="code", field_class=forms.CharField),
+        shelf_base,
+    )
+    book_filter = _deep_copying(_book_shelf_set(child, book_base), rekey=False)
+
+    class LoanLeafFilter(FilterSet):
+        book = RelatedFilter(book_filter, field_name="book")
+
+        class Meta:
+            model = library_models.Loan
+            fields = []
+
+    _serve_model(library_models.Shelf, None)
+    _serve_model(library_models.Book, None)
+    _serve_model(library_models.Loan, LoanLeafFilter)
+
+    assert _build_refusal() == (
+        f"{child.__name__}.leaf: LookupChoiceFilter on 'code' (reached through "
+        f"LoanLeafFilter.book, then {book_filter.__name__}.shelf) filters by a value and a "
+        "lookup read from two form-data keys, and no GraphQL input carries that pair. List "
+        "the lookups in Meta.fields dict form (one input field per lookup), or keep the "
+        "filter on a FilterSet the schema does not serve."
+    )
+
+
+def test_a_borrowed_copy_is_refused_as_its_borrowers_own_filter() -> None:
+    """A set declaring another set's rebound copy is refused naming itself and the flat ``field_name``.
+
+    ``Borrower.aliased`` is the object ``BookLeafFilter.get_filters()`` holds as
+    ``shelf__leaf``; ``Borrower`` expands no ``shelf`` branch, so the copy is its own
+    filter there and the refusal names it as every root filter is named.
+    """
+    child = _shelf_leaf_set(
+        LookupChoiceFilter(field_name="code", field_class=forms.CharField),
+        FilterSet,
+    )
+    borrowed = _book_shelf_set(child, FilterSet).get_filters()["shelf__leaf"]
+
+    class Borrower(FilterSet):
+        aliased = borrowed
+
+        class Meta:
+            model = library_models.Book
+            fields = []
+
+    _serve_model(library_models.Shelf, None)
+    _serve_model(library_models.Book, Borrower)
+
+    assert _build_refusal() == (
+        "Borrower: LookupChoiceFilter on 'shelf__code' filters by a value and a lookup read "
+        "from two form-data keys, and no GraphQL input carries that pair. List the lookups in "
+        "Meta.fields dict form (one input field per lookup), or keep the filter on a "
+        "FilterSet the schema does not serve."
     )
 
 

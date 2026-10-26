@@ -1178,9 +1178,9 @@ class FilterLookupTable:
     fires ``check_shelf_home_branch_permission`` and, through the relation walk,
     the child's ``check_home_branch_permission``, as the nested spelling does);
     any other head gates on its filter's ``field_name`` (the ORM path), so
-    ``name`` and ``name__icontains`` share the ``name`` gate. ``source`` is the
-    ``get_filters()`` result the table was built from: the cache is valid only
-    while that object is.
+    ``name`` and ``name__icontains`` share the ``name`` gate
+    (``leaf_gate_path``). ``source`` is the ``get_filters()`` result the table
+    was built from: the cache is valid only while that object is.
     """
 
     source: Mapping[str, Filter]
@@ -1189,12 +1189,42 @@ class FilterLookupTable:
     gate_paths: Mapping[str, str]
 
 
-def _is_expanded_declared_filter(filter_instance: Filter) -> bool:
-    """Whether ``filter_instance`` is a ``RelatedFilter`` expansion of a declared child filter."""
-    from .sets import filter_generation_provenance  # noqa: PLC0415 - import cycle
+def _is_declared_head(filterset_cls: type[FilterSet], name: str, filter_instance: Filter) -> bool:
+    """Whether ``filter_instance``, held as ``name`` on ``filterset_cls``, is a declared head there.
 
-    record = filter_generation_provenance(filter_instance)
-    return record is not None and record.origin == "declared" and bool(record.expanded_from)
+    A filter ``filterset_cls`` declares is one, and so is a ``RelatedFilter``
+    expansion's copy of a child filter that is one on its own set, followed
+    through the record the copy carries (``filters/sets.py::_expansion_record``)
+    to the set declaring it. The child set's declarations answer, never a stamp
+    on the copy, which a set borrowing the same object restamps.
+    """
+    from .sets import _expansion_record, _projection_child_filter  # noqa: PLC0415 - import cycle
+
+    # django-filter's metaclass stores ``declared_filters`` as the name-keyed declared map.
+    declared_filters = require(
+        truth.static_attr(filterset_cls, "declared_filters", {}),
+        is_mapping,
+    )
+    if name in declared_filters:
+        return True
+    record = _expansion_record(filter_instance)
+    return record is not None and _is_declared_head(
+        record.filterset,
+        record.name,
+        _projection_child_filter(record),
+    )
+
+
+def leaf_gate_path(filterset_cls: type[FilterSet], name: str, filter_instance: Filter) -> str:
+    """Return the gate path leaf ``name`` of ``filterset_cls`` fires ``check_<path>_permission`` on.
+
+    The path ``FilterLookupTable.gate_paths`` holds for the leaf's head: a
+    declared head's own name (``_is_declared_head``), else the ``field_name``
+    every lookup of a generated head shares, which its head spells.
+    """
+    if _is_declared_head(filterset_cls, name, filter_instance):
+        return name
+    return _bound_field_name(filter_instance)
 
 
 def _group_filters_by_head(
@@ -1210,11 +1240,6 @@ def _group_filters_by_head(
     ``(head, lookup)`` slot would leave one unreachable from the generated
     input, so that raises. Returns the grouping and the set of declared heads.
     """
-    # django-filter's metaclass stores ``declared_filters`` as the name-keyed declared map.
-    declared_filters = require(
-        truth.static_attr(filterset_cls, "declared_filters", {}),
-        is_mapping,
-    )
     grouped: OrderedDict[str, OrderedDict[str, FormKeyedFilter]] = OrderedDict()
     declared_heads: set[str] = set()
     for filter_name, filter_instance in all_filters.items():
@@ -1226,7 +1251,7 @@ def _group_filters_by_head(
         if "__" in filter_name and truth.is_instance(filter_instance, RelatedFilter):
             continue
         lookup_expr = filter_instance.lookup_expr
-        if filter_name in declared_filters or _is_expanded_declared_filter(filter_instance):
+        if _is_declared_head(filterset_cls, filter_name, filter_instance):
             head, lookup_token = filter_name, lookup_expr
             declared_heads.add(head)
         else:

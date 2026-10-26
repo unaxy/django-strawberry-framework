@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 310 done, 213 to do.
+Progress: 311 done, 217 to do.
 
 ## Done
 
@@ -1678,6 +1678,20 @@ Progress: 310 done, 213 to do.
   family and that `AllValues*` choices come from the default manager; live rows over a holder schema in
   `examples/fakeshop/test_query/test_library_api.py`, package rows in `tests/filters/test_inputs.py` and
   `tests/filters/test_sets.py`
+- [x] 640. A flat field copied from a child set's declared filter fires its nested spelling's gates whatever
+  the `RelatedFilter` attribute is called: `PrintingFilter.in_series = RelatedFilter("SeriesFilter",
+  field_name="series")` let `inSeriesHandle` past `SeriesFilter.check_handle_permission` and
+  `PrintingFilter.check_in_series_permission`, which `inSeries { handle }` fires (the gate path walked the key
+  by declaration `field_name`, so a renamed hop walked nothing). Every expanded copy, rebound or projected,
+  now carries one `filters/sets.py::ChildProjection` (child set, child name, branch) that rides deepcopy and
+  pickle; gates (`FilterSet._leaf_gates`, `_supplied_leaf_gates`), the declared-head test
+  (`filters/inputs.py::_is_declared_head`) and refusal naming (`_leaf_declaration`) all read it, so a
+  `get_filters()` override that deep-copies or re-keys the copies keeps both.
+  `FilterGenerationProvenance.expanded_from`, the weak `_REBOUND_ORIGINS` map and
+  `FilterSet._expansion_origin` are gone. A copy borrowed onto a set that does not expand that branch into
+  that child set is that set's own filter (`ChildProjection.holds_in`). spec-027 states it; live rows in
+  `examples/fakeshop/test_query/test_library_api.py`, package rows in `tests/filters/test_sets.py` and
+  `tests/filters/test_inputs.py`
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1956,16 +1970,33 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 538. (robustness) A `DateRangeFilter` declared on a `Choices` column builds and types as the column's enum, while
   its own form field accepts only its fixed date-range keys, so every enum member answers `FILTER_INVALID` "Select a
   valid choice"; the same filter on a plain column is refused at schema build. Found verifying 518
-- [ ] 640. (robustness) `filters/sets.py::FilterSet._expansion_origin` answers "which child filter does this flat
-  copy run for" from provenance breadcrumbs plus the form key, and returns `None` for an unstamped child, while
-  `_expansion_record` / `_leaf_declaration` answer the same question from the record `_expand_related_filter` keeps:
-  two owners of one fact. A consumer `get_filters()` override returning fresh copies also leaves rebound copies
-  unrecorded, so their refusals fall back to the parent set and flat `field_name`. Found fixing 520
+- [ ] 596. (robustness) A `ProjectedChildFilter` borrowed from another set's `get_filters()` as a class
+  attribute raises `KeyError` on the borrower when supplied (`filters/sets.py::_projection_hop` /
+  `FilterSet._visibility_hops` read `related_filters[branch]` unguarded), and `FilterSetMetaclass` restamps a
+  shared filter object's provenance in place, so the donor's copy changes under it. Found fixing 640
+- [ ] 597. (robustness) A flat expanded copy whose key's first segment equals another `RelatedFilter`'s
+  `field_name` (`real_shelf = RelatedFilter(..., field_name="shelf")` beside an attribute `shelf`) also fires
+  that declaration's gates through the name walk of its gate path: fail-closed, an extra gate its nested twin
+  does not fire. Found fixing 640
+- [ ] 598. (robustness) `filters/inputs.py` hides an expanded child leaf under `HIDE_FLAT_FILTERS` by its
+  key's first segment, so a `get_filters()` override that re-keys the copies leaves them published; and
+  `filters/inputs.py::_is_declared_head` reads the child set's `get_filters()` once per copy, so a child
+  override returning fresh copies costs one deep copy of the child set per copy at schema build. Both could
+  read the copy's `ChildProjection`. Found verifying 640
+- [ ] 599. (robustness) A child set that overrides `get_filters()` to add a filter and also overrides
+  `__init__` (so its flat copies are projected) raises `KeyError` from
+  `filters/sets.py::FilterSet._filter_named` when the parent's flat copy of the added filter is supplied.
+  Found verifying 640
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 595. CHANGELOG entry for item 640: a flat filter field copied from a child set's declared filter through
+  a `RelatedFilter` whose attribute differs from its `field_name` (`inSeriesHandle` over `in_series =
+  RelatedFilter(..., field_name="series")`) now fires the branch gate and the child filter's own gate its
+  nested spelling fires; such a query a denying `check_*_permission` refused only when nested is now refused
+  flat too
 - [ ] 641. `AllValuesFilter` / `AllValuesMultipleFilter` build their choices from the model's unscoped
   `_default_manager.distinct()` (django-filter's rule), so over a type whose `get_queryset` hides a row a value only
   that row holds answers no rows while a value no row holds answers `invalid_choice`: an existence oracle, live at
