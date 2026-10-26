@@ -19,6 +19,10 @@ Covers:
   package was never imported (subprocess test pins the cycle-safe
   contract per spec-027 Decision 9).
 - Unresolved ``RelatedFilter`` propagates as ``ConfigurationError``.
+- A declared filter a deep copy refuses fails the build naming its set and
+  attribute (a served set's by the subpass-1.5 probe, an unserved
+  ``RelatedFilter`` child's by the expansion copy); controls a copy takes
+  build and filter.
 
 Bound filtersets answering live queries live in the fakeshop filter modules
 and ``test_query/``. This file keeps finalize-time binding, orphan
@@ -28,18 +32,23 @@ observe an unbound FilterSet.
 
 from __future__ import annotations
 
+import functools
+import logging
 import sys
+import threading
 from collections import OrderedDict
-from collections.abc import Iterator
-from typing import TYPE_CHECKING, NoReturn
+from collections.abc import Callable, Iterator
+from typing import TYPE_CHECKING, ClassVar, NoReturn
 
 import pytest
 import strawberry
 from apps.library.models import Book, Branch, Genre, LendingDesk, ProxyBranch, Shelf, Venue
-from django.db.models import Model, QuerySet
+from django.core.cache import caches
+from django.db.models import Model, QuerySet, TextField
+from django.forms import TextInput
 from django.http import HttpRequest
 from django.test import override_settings
-from django_filters import Filter
+from django_filters import BooleanFilter, CharFilter, Filter, NumberFilter
 from strawberry import relay
 from typing_extensions import override
 
@@ -58,6 +67,7 @@ from django_strawberry_framework.filters import (
     FilterInput,
     FilterSet,
     GlobalIDFilter,
+    ListFilter,
     RelatedFilter,
     _helper_referenced_filtersets,
     filter_input_type,
@@ -1963,3 +1973,359 @@ def test_finalize_surfaces_the_related_filter_target_gate_identity() -> None:
     assert "_NotAFilterSet" in msg
     assert "is not a FilterSet subclass" in msg
     assert "raised during expansion" not in msg
+
+
+# ---------------------------------------------------------------------------
+# Deep-copy probe of declared filters.
+# ---------------------------------------------------------------------------
+
+
+def _code_is(queryset: QuerySet[Shelf], name: str, value: object) -> QuerySet[Shelf]:
+    """A plain-function ``method=``: shelves whose code is ``value``."""
+    del name
+    return queryset.filter(code=value)
+
+
+class _InstanceLockHolder:
+    """A service holding a lock on the instance, which a deep copy of its bound method copies."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+
+    def code_is(
+        self,
+        queryset: QuerySet[Shelf],
+        name: str,
+        value: object,
+    ) -> QuerySet[Shelf]:
+        return _code_is(queryset, name, value)
+
+
+class _CacheHolder:
+    """A service holding Django's default cache handler on the instance."""
+
+    def __init__(self) -> None:
+        self.cache = caches["default"]
+
+    def code_is(
+        self,
+        queryset: QuerySet[Shelf],
+        name: str,
+        value: object,
+    ) -> QuerySet[Shelf]:
+        return _code_is(queryset, name, value)
+
+
+class _ClassLockHolder:
+    """A service holding its lock on the class, which a deep copy of a bound method shares."""
+
+    lock = threading.Lock()
+
+    def code_is(
+        self,
+        queryset: QuerySet[Shelf],
+        name: str,
+        value: object,
+    ) -> QuerySet[Shelf]:
+        return _code_is(queryset, name, value)
+
+
+class _LoggerHolder:
+    """A service holding a logger, which deep-copies as itself."""
+
+    def __init__(self) -> None:
+        self.log = logging.getLogger(__name__)
+
+    def code_is(
+        self,
+        queryset: QuerySet[Shelf],
+        name: str,
+        value: object,
+    ) -> QuerySet[Shelf]:
+        return _code_is(queryset, name, value)
+
+
+class _LockedInput(TextInput):
+    """A widget holding a lock; Django's ``Widget.__deepcopy__`` copies it shallowly."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lock = threading.Lock()
+
+
+_METHOD_ADVICE = (
+    'Pass method= as the name of a FilterSet method (method="<name>") or as a plain function.'
+)
+_OBJECT_ADVICE = (
+    "Keep the object off the filter: build it inside the filter's method or the FilterSet's "
+    "filter_queryset, or hold it on a class."
+)
+
+
+def _copy_refusal(
+    where: str,
+    kind: str,
+    cause: BaseException | None,
+    *,
+    has_method: bool,
+) -> str:
+    """The deep-copy refusal for filter ``where`` of class ``kind``, its cause as raised."""
+    assert isinstance(cause, TypeError)
+    advice = _METHOD_ADVICE if has_method else _OBJECT_ADVICE
+    return (
+        f"FilterSet {where}: {kind} cannot be deep-copied ({type(cause).__name__}: {cause}); "
+        "django-filter deep-copies every filter for each request, so a filter must hold "
+        f"nothing a deep copy refuses (a lock, a cache handler). {advice}"
+    )
+
+
+def _is_filterset_class(value: object) -> TypeIs[type[FilterSet]]:
+    """Whether ``value`` is a ``FilterSet`` subclass."""
+    return isinstance(value, type) and issubclass(value, FilterSet)
+
+
+def _shelf_filter(declared: Filter, namespace: dict[str, object] | None = None) -> type[FilterSet]:
+    """``ShelfFilter`` over ``Shelf`` declaring ``declared`` as ``code_is``."""
+    meta = type("Meta", (), {"model": Shelf, "fields": {"topic": ["exact"]}})
+    body: dict[str, object] = {"code_is": declared, "Meta": meta, **(namespace or {})}
+    return require(type("ShelfFilter", (FilterSet,), body), _is_filterset_class)
+
+
+def _wire_shelf_type(filterset_cls: type[FilterSet]) -> type[DjangoType]:
+    """A Relay ``ShelfType`` serving ``filterset_cls``."""
+
+    class ShelfType(DjangoType):
+        class Meta:
+            model = Shelf
+            fields = ("id", "code")
+            interfaces = (relay.Node,)
+            filterset_class = filterset_cls
+
+    return ShelfType
+
+
+_REFUSED_DECLARATIONS = [
+    pytest.param(
+        lambda: CharFilter(field_name="code", method=_InstanceLockHolder().code_is),
+        "CharFilter",
+        True,
+        id="char-filter-bound-method-over-instance-lock",
+    ),
+    pytest.param(
+        lambda: NumberFilter(field_name="id", method=_InstanceLockHolder().code_is),
+        "NumberFilter",
+        True,
+        id="number-filter-bound-method-over-instance-lock",
+    ),
+    pytest.param(
+        lambda: BooleanFilter(field_name="code", method=_InstanceLockHolder().code_is),
+        "BooleanFilter",
+        True,
+        id="boolean-filter-bound-method-over-instance-lock",
+    ),
+    pytest.param(
+        lambda: CharFilter(
+            field_name="code",
+            method=functools.partial(_InstanceLockHolder.code_is, _InstanceLockHolder()),
+        ),
+        "CharFilter",
+        True,
+        id="partial-over-instance-lock",
+    ),
+    pytest.param(
+        lambda: CharFilter(field_name="code", help_text=threading.Lock()),
+        "CharFilter",
+        False,
+        id="lock-in-extra",
+    ),
+    pytest.param(
+        lambda: CharFilter(field_name="code", method="filter_code", help_text=threading.Lock()),
+        "CharFilter",
+        False,
+        id="lock-in-extra-beside-a-method-name",
+    ),
+    pytest.param(
+        lambda: ListFilter(field_name="code", method=_InstanceLockHolder().code_is),
+        "ListFilter",
+        True,
+        id="list-filter-bound-method-over-instance-lock",
+    ),
+    pytest.param(
+        lambda: CharFilter(field_name="code", method=_CacheHolder().code_is),
+        "CharFilter",
+        True,
+        id="bound-method-over-cache-handler",
+    ),
+]
+
+
+@pytest.mark.parametrize(("declare", "kind", "has_method"), _REFUSED_DECLARATIONS)
+def test_finalize_refuses_a_declared_filter_a_deep_copy_refuses(
+    declare: Callable[[], Filter],
+    kind: str,
+    *,
+    has_method: bool,
+) -> None:
+    """A served set's declared filter that no deep copy can take fails the build by name.
+
+    django-filter deep-copies every declared filter into each request's
+    ``FilterSet``, so such a filter could serve no request (a ``ListFilter``
+    builds without a copy and would fail every filtered request instead).
+    Subpass 1.5 copies each declared filter once and refuses the first, naming
+    the set, the attribute and the filter's class, the copy's error kept as
+    ``__cause__``.
+    """
+    _ = _wire_shelf_type(_shelf_filter(declare()))
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        finalize_django_types()
+    cause = exc_info.value.__cause__
+    expected = _copy_refusal("ShelfFilter.code_is", kind, cause, has_method=has_method)
+    assert str(exc_info.value) == expected
+
+
+def test_finalize_refuses_a_generated_filter_a_deep_copy_refuses() -> None:
+    """A ``Meta.fields`` filter whose override ``extra`` no copy takes fails by name.
+
+    The probe copies every filter of the set's ``base_filters``, the ones
+    django-filter generates from ``Meta.fields`` included, so a lock an
+    override's ``extra`` puts on the generated ``topic`` filter is refused
+    naming that attribute.
+    """
+    lock = threading.Lock()
+
+    def locked_extra(model_field: object) -> dict[str, object]:
+        del model_field
+        return {"help_text": lock}
+
+    class ShelfFilter(FilterSet):
+        class Meta:
+            model = Shelf
+            fields = {"topic": ["exact"]}
+            filter_overrides: ClassVar[dict[type[object], dict[str, object]]] = {
+                TextField: {"filter_class": CharFilter, "extra": locked_extra},
+            }
+
+    _ = _wire_shelf_type(ShelfFilter)
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        finalize_django_types()
+    cause = exc_info.value.__cause__
+    where = f"{ShelfFilter.__qualname__}.topic"
+    assert str(exc_info.value) == _copy_refusal(where, "CharFilter", cause, has_method=False)
+
+
+def test_finalize_refuses_a_related_child_filter_a_deep_copy_refuses() -> None:
+    """A ``RelatedFilter`` child set no type serves is refused by its expansion copy.
+
+    The child set is reached only through the served set's ``RelatedFilter``,
+    so the probe of served sets never copies its filters; the expansion copy
+    refuses the filter naming the child set, its attribute and the
+    ``RelatedFilter`` it was reached through.
+    """
+    shelf_filter = _shelf_filter(
+        CharFilter(field_name="code", method=_InstanceLockHolder().code_is),
+    )
+
+    class BookFilter(FilterSet):
+        shelf = RelatedFilter(shelf_filter, field_name="shelf")
+
+        class Meta:
+            model = Book
+            fields = {"title": ["exact"]}
+
+    class ShelfType(DjangoType):
+        class Meta:
+            model = Shelf
+            fields = ("id", "code")
+
+    class BookType(DjangoType):
+        class Meta:
+            model = Book
+            fields = ("id", "title")
+            filterset_class = BookFilter
+
+    assert registry.get(Shelf) is ShelfType
+    assert registry.get(Book) is BookType
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        finalize_django_types()
+    cause = exc_info.value.__cause__
+    where = f"ShelfFilter.code_is (reached through RelatedFilter {BookFilter.__qualname__}.shelf)"
+    assert str(exc_info.value) == _copy_refusal(where, "CharFilter", cause, has_method=True)
+
+
+def _filter_code(
+    self: FilterSet,
+    queryset: QuerySet[Shelf],
+    name: str,
+    value: object,
+) -> QuerySet[Shelf]:
+    """A FilterSet method named by ``method="filter_code"``."""
+    del self
+    return _code_is(queryset, name, value)
+
+
+_COPYABLE_DECLARATIONS = [
+    pytest.param(
+        lambda: CharFilter(field_name="code", method=_ClassLockHolder().code_is),
+        {},
+        id="bound-method-over-class-lock",
+    ),
+    pytest.param(
+        lambda: CharFilter(field_name="code", method="filter_code"),
+        {"filter_code": _filter_code},
+        id="method-name-string",
+    ),
+    pytest.param(
+        lambda: CharFilter(field_name="code", method=_code_is),
+        {},
+        id="plain-function",
+    ),
+    pytest.param(
+        lambda: CharFilter(field_name="code", method=_LoggerHolder().code_is),
+        {},
+        id="bound-method-over-logger",
+    ),
+    pytest.param(
+        lambda: CharFilter(field_name="code", widget=_LockedInput()),
+        {},
+        id="widget-with-shallow-deepcopy",
+    ),
+]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("declare", "namespace"), _COPYABLE_DECLARATIONS)
+def test_finalize_keeps_a_declared_filter_a_deep_copy_takes(
+    declare: Callable[[], Filter],
+    namespace: dict[str, object],
+) -> None:
+    """A declared filter every deep copy takes builds and answers a filtered request.
+
+    A lock on the service's class rides a copy of the bound method by
+    reference, a method name or plain function holds nothing, a logger copies
+    as itself and Django's widget copy is shallow: none is refused.
+    """
+    shelf_type = _wire_shelf_type(_shelf_filter(declare(), namespace))
+    finalize_django_types()
+
+    query = strawberry.type(
+        type(
+            "Query",
+            (),
+            {
+                "__annotations__": {"shelves": DjangoConnection[shelf_type]},
+                "shelves": DjangoConnectionField(shelf_type),
+            },
+        ),
+    )
+    branch = Branch.objects.create(name="b")
+    Shelf.objects.create(branch=branch, code="a")
+    Shelf.objects.create(branch=branch, code="b")
+    result = strawberry.Schema(query=query, config=strawberry_config()).execute_sync(
+        '{ shelves(filter: {codeIs: {exact: "a"}}) { edges { node { code } } } }',
+        context_value=HttpRequest(),
+    )
+    assert result.errors is None, result.errors
+    assert result.data == {"shelves": {"edges": [{"node": {"code": "a"}}]}}

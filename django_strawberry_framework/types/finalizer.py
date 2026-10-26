@@ -24,8 +24,8 @@ decoration touches a consumer-facing class:
   the ``<field>_connection`` siblings for eligible many-side relations per
   ``Meta.relation_shapes`` (spec-032 Decision 6) before the sidecar binding
   runs. ``_bind_filtersets`` then runs ordered subpasses (bind owners,
-  expand filtersets, reject orphan ``filter_input_type`` references,
-  materialize input classes) per spec-027 Decision 6
+  probe every filter's deep copy, expand filtersets, reject orphan
+  ``filter_input_type`` references, materialize input classes) per spec-027 Decision 6
   - every subpass MUST complete across all wired types
   before the next subpass starts so cross-filterset references resolve
   against bound owners regardless of registration order. Runs before
@@ -1820,8 +1820,10 @@ class _SidecarBindingSpec(Generic[_SetT]):
     The ordered subpass skeleton (``_bind_sidecar_sets``) is shared
     by FilterSet and OrderSet; this carries the family
     differences. ``expand`` runs Layer-4 expansion for one set;
-    ``post_expand_audit`` is the optional filter-only
-    unregistered-``RelatedFilter``-target walk (``None`` for orders).
+    ``pre_expand_audit`` is the optional filter-only deep-copy probe of
+    every class-level filter and ``post_expand_audit`` the optional
+    filter-only unregistered-``RelatedFilter``-target walk (both ``None``
+    for orders).
     """
 
     read_set: Callable[[DjangoTypeDefinition], _SetT | None]
@@ -1836,6 +1838,7 @@ class _SidecarBindingSpec(Generic[_SetT]):
     materialize: Callable[[str, type[object]], None]
     format_orphans: Callable[[list[_SetT]], str]
     expand: Callable[[_SetT], None]
+    pre_expand_audit: Callable[[list[_SetT]], None] | None
     post_expand_audit: Callable[[list[_SetT]], None] | None
 
 
@@ -1911,6 +1914,9 @@ def _bind_sidecar_sets(spec: _SidecarBindingSpec[_SetT]) -> None:
     owners regardless of registration order.
 
     1. Bind every owner (``spec.bind_owner``) before any expansion runs.
+    1.5. (Optional) ``spec.pre_expand_audit`` -- the filter-only deep-copy
+       probe of every wired set's class-level filters, before any expansion
+       copies one.
     2. Expand every set (``spec.expand``); ``ImportError`` from an unresolved
        lazy related target rewraps as ``ConfigurationError`` naming the
        offending set, ``from exc`` preserving ``__cause__``. Any other
@@ -1938,6 +1944,10 @@ def _bind_sidecar_sets(spec: _SidecarBindingSpec[_SetT]) -> None:
             continue
         spec.bind_owner(set_cls, definition)
         wired.append(set_cls)
+
+    # Subpass 1.5 (filter-only today): every declared filter survives a deep copy.
+    if spec.pre_expand_audit is not None:
+        spec.pre_expand_audit(wired)
 
     # Subpass 2: expand every set; cross-references now resolve.
     for set_cls in wired:
@@ -2037,6 +2047,7 @@ def _bind_ordersets() -> None:
                 meta_key="orderset_class",
             ),
             expand=_expand_orderset,
+            pre_expand_audit=None,
             post_expand_audit=None,
         ),
     )
@@ -2108,6 +2119,27 @@ def _format_globalid_encode_only_filter_error(
     )
 
 
+def _audit_filter_copies(wired: list[type[FilterSet]]) -> None:
+    """Filter-only subpass 1.5: every wired set's class-level filters survive a deep copy.
+
+    django-filter deep-copies every filter of a ``FilterSet`` class into each
+    instance, and the package's input build reads a filter's form field on a
+    copy (``filters/base.py::copied_form_field``), so a filter a deep copy
+    refuses could serve no request. Each filter in the set's ``base_filters``
+    (declared, inherited declarations included, and generated from
+    ``Meta.fields``, a ``Meta.filter_overrides`` ``extra`` included) is copied
+    once here, before expansion copies any, through
+    ``filters/base.py::copied_declared_filter``, which refuses the first one
+    naming its set and attribute. A set reached only as a ``RelatedFilter``
+    target is probed by that expansion copy instead.
+    """
+    from django_strawberry_framework.filters.base import copied_declared_filter  # noqa: PLC0415 - binds only a subsystem the consumer imported
+
+    for filterset_cls in wired:
+        for name, class_filter in filterset_cls.base_filters.items():
+            _ = copied_declared_filter(class_filter, filterset_cls, name)
+
+
 def _audit_filterset_subpass_2_5(wired: list[type[FilterSet]]) -> None:
     """Run every filter-only subpass-2.5 audit in order over the wired filtersets.
 
@@ -2133,6 +2165,11 @@ def _bind_filtersets() -> None:
     ``_bind_filterset_owner``. The strict-equality check
     rejects diverging multi-owner reuse before any subsequent subpass
     runs.
+
+    Subpass 1.5 - deep-copy probe. Copies every wired filterset's
+    class-level filters once (``_audit_filter_copies``) and refuses the first
+    a deep copy refuses, naming the set and attribute, before expansion
+    or any request copies one.
 
     Subpass 2 - expand every filterset. Calls
     ``filterset_cls.get_filters()`` so Layer-4 expansion resolves lazy
@@ -2183,6 +2220,7 @@ def _bind_filtersets() -> None:
                 meta_key="filterset_class",
             ),
             expand=_expand_filterset,
+            pre_expand_audit=_audit_filter_copies,
             post_expand_audit=_audit_filterset_subpass_2_5,
         ),
     )
