@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 304 done, 213 to do.
+Progress: 305 done, 213 to do.
 
 ## Done
 
@@ -1619,6 +1619,13 @@ Progress: 304 done, 213 to do.
   declaration (`AllValuesMultipleFilter(method=...)`); a bare `Filter(method=...)` types as `String`. The message is
   pinned in `tests/filters/test_inputs.py`; live holder rows in `test_library_api.py` prove each advised spelling
   filters, column-backed and not
+- [x] 518. The choice refusal (`filters/inputs.py::_choice_enum_from_filter`) named "ChoiceFilter" for every reacher
+  and advised a `Choices` enum or a `SCALAR_MAP` scalar, neither of which the arm reads. It now names the declared
+  filter's class (`AllValuesFilter`, `DateRangeFilter`, `TypedChoiceFilter`, a consumer subclass) and states the cause
+  that holds for each: no model field declaring `choices` backs it. Its advice is to declare `choices` on the column,
+  or to filter the column through a non-choice filter (`CharFilter`, `NumberFilter`, `DateFromToRangeFilter`, its
+  `Meta.fields` lookups, `CharFilter(method=...)`). No refused or typed shape moved. Pinned by equality in
+  `tests/filters/test_inputs.py`; spec-027's ChoiceFilter row follows
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1776,8 +1783,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   fact-finding 373
 - [ ] 516. A bare `BaseCSVFilter` declared with the `exact` lookup (no `in` / `range`) publishes `[String!]` and
   matches no row for a value a row holds (`["aa"]` and `"aa"` both answer 0 rows). Found fact-finding 373
-- [ ] 518. (robustness) The non-enum choice refusal names "ChoiceFilter" for a `DateRangeFilter` or
-  `AllValuesFilter`, which are not choice filters to the consumer who declared them. Found fact-finding 373
 - [ ] 519. (robustness) A declared filter that cannot be deep-copied (`CharFilter(method=svc.by_code)` where `svc`
   holds a `threading.Lock`) now fails the schema build with a raw `TypeError` from
   `filters/base.py::copied_form_field`; at 6f0575c6 the schema built but every filtered request failed the same way.
@@ -1908,6 +1913,9 @@ tracker number are recorded there; open remainders and new defects are filed as 
   no form field") though its column alone would type it, as the same filter without `method=` is typed: its form field
   reads the per-request `model`, so the unbound copy builds none and the catch-all refuses before the column is
   consulted. Found implementing 517
+- [ ] 538. (robustness) A `DateRangeFilter` declared on a `Choices` column builds and types as the column's enum, while
+  its own form field accepts only its fixed date-range keys, so every enum member answers `FILTER_INVALID` "Select a
+  valid choice"; the same filter on a plain column is refused at schema build. Found verifying 518
 ## To do: holes found re-checking the fixes
 
 

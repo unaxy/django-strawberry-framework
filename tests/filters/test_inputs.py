@@ -41,12 +41,14 @@ from django import forms
 from django.db import models
 from django.db.models import QuerySet
 from django_filters import (
+    AllValuesFilter,
     AllValuesMultipleFilter,
     BaseInFilter,
     BaseRangeFilter,
     BooleanFilter,
     CharFilter,
     ChoiceFilter,
+    DateRangeFilter,
     Filter,
     LookupChoiceFilter,
     NumberFilter,
@@ -740,12 +742,47 @@ def test_convert_filter_to_input_annotation_malformed_filter_diagnostics() -> No
         "`Filter` subclass declaring `field_class` at class level."
     )
 
-    # A model field with no ``choices`` is what drives the ChoiceFilter branch to
-    # its rejection, which is the diagnostic under test.
-    choice_filter = ChoiceFilter()
+
+@pytest.mark.parametrize(
+    ("make_filter", "model_field"),
+    [
+        pytest.param(
+            lambda: ChoiceFilter(field_name="title", choices=[("a", "A")]),
+            library_models.Book._meta.get_field("title"),
+            id="choice-filter-plain-column",
+        ),
+        pytest.param(
+            lambda: AllValuesFilter(field_name="city"),
+            library_models.Branch._meta.get_field("city"),
+            id="all-values-filter-text-column",
+        ),
+        pytest.param(
+            lambda: DateRangeFilter(field_name="created_date"),
+            Item._meta.get_field("created_date"),
+            id="date-range-filter-datetime-column",
+        ),
+    ],
+)
+def test_choice_filter_without_a_choices_column_names_the_declared_class(
+    make_filter: Callable[[], ChoiceFilter],
+    model_field: ModelField,
+) -> None:
+    """A choice filter whose column declares no ``choices`` is refused under its own class name.
+
+    ``AllValuesFilter`` and ``DateRangeFilter`` subclass ``ChoiceFilter``, so they reach the
+    choice-enum refusal; the message names the class the consumer declared and advises the
+    spellings that build for each of them.
+    """
+    choice_filter = make_filter()
     with pytest.raises(ConfigurationError) as exc_info:
-        convert_filter_to_input_annotation(choice_filter, models.CharField())
-    assert str(exc_info.value).startswith(f"ChoiceFilter on {choice_filter!r} is not backed")
+        convert_filter_to_input_annotation(choice_filter, model_field)
+    assert str(exc_info.value) == (
+        f"{type(choice_filter).__name__} on {choice_filter!r} is backed by no model field "
+        "declaring `choices`; declare `choices` on the column it filters (a `TextChoices` / "
+        "`IntegerChoices` class), or filter that column through a non-choice filter "
+        "(`CharFilter`, `NumberFilter`, `DateFromToRangeFilter`, its lookups in Meta.fields, "
+        "or `CharFilter(method=...)` for a method filter)."
+    )
 
 
 def test_convert_filter_to_input_annotation_wraps_nullable() -> None:
