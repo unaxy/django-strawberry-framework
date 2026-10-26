@@ -186,6 +186,11 @@ from typing import TYPE_CHECKING, NamedTuple
 
 import tomli
 
+try:
+    import _git
+except ModuleNotFoundError:  # imported as ``scripts.check_trailing_commas`` (repo root on path)
+    from scripts import _git
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
 
@@ -1433,27 +1438,24 @@ def git_visible_scope() -> tuple[frozenset[str], frozenset[str]] | None:
     ``--cached --others --exclude-standard`` is exactly "tracked, plus untracked
     but not ignored" -- the set of paths a commit can contain. Everything else on
     disk (``.claude/`` agent memory, local scratch, editor state) is ignored for a
-    reason and is not this gate's to read, let alone rewrite.
+    reason and is not this gate's to read, let alone rewrite. Ignored means ignored
+    by the repository's own rules (``.gitignore``, ``.git/info/exclude``, its
+    config), read through ``scripts/_git.py``: the caller's global excludes and
+    XDG ignore file never shape the corpus, so a file only they hide is read and
+    is a gap in ``.gitignore``.
 
     ``None`` when git cannot answer (not a checkout, git absent), which disables
     the filter rather than emptying the corpus: the tree-wide sweep must still
     work from an unpacked sdist.
     """
     try:
-        result = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(REPO_ROOT),
-                "ls-files",
-                "-z",
-                "--cached",
-                "--others",
-                "--exclude-standard",
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
+        result = _git.run_git(
+            REPO_ROOT,
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
         )
     except (OSError, ValueError):
         return None

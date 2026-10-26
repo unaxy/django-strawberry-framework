@@ -201,7 +201,7 @@ CI `lint` job (`django.yml` is authoritative for the order): `ruff check` / `ruf
 | `review_plan.py` `plan`, `resume`, `scope`, `reconcile` | REVIEW plan generator (`--changed` = the release's own committed changes) + inventory reconciler |
 | `census_test_models.py` | counts Django model classes declared under `tests/`, closing over MTI/proxy bases |
 | `capture_pg_predicate_explain.py` | row-preserving-predicate `EXPLAIN` artifact from actually emitted SQL |
-| `_kanban_lib.py`, `_bench_common.py`, `_plan_common.py`, `_markdown_lex.py` | shared plumbing, not entry points; `_markdown_lex.py` = the stdlib-only CommonMark lexer both glossary-link writers share (`build_kanban_md.py`, `check_spec_glossary.py`) |
+| `_kanban_lib.py`, `_bench_common.py`, `_plan_common.py`, `_markdown_lex.py`, `_git.py` | shared plumbing, not entry points; `_markdown_lex.py` = the stdlib-only CommonMark lexer both glossary-link writers share (`build_kanban_md.py`, `check_spec_glossary.py`); `_git.py` = the one git runner every script reads the checkout through (repository config only, caller's `GIT_INDEX_FILE`/`GIT_DIR` and `safe.directory` trust kept, `status` never rewrites the index) |
 
 ## Rendered docs — fix the source
 

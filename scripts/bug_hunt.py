@@ -34,7 +34,6 @@ import argparse
 import contextlib
 import io
 import re
-import subprocess
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -43,9 +42,11 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 if __package__:
+    from scripts import _git as _git_runner
     from scripts import _plan_common
     from scripts import review_historical_package_snapshot_at_commit as snapshot
 else:
+    import _git as _git_runner
     import _plan_common
     import review_historical_package_snapshot_at_commit as snapshot
 
@@ -138,14 +139,11 @@ _SCENARIOS = (
 
 
 def _run_git(args: Sequence[str]) -> str:
-    """Run ``git --no-pager <args>`` and return its stdout."""
-    result = subprocess.run(
-        ["git", "--no-pager", *args],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return result.stdout
+    """Run ``git -C <current directory> --no-pager <args>`` through ``scripts/_git.py``.
+
+    Returns its stdout; a non-zero exit raises ``subprocess.CalledProcessError``.
+    """
+    return _git_runner.run_git(Path.cwd(), *args, check=True).stdout
 
 
 def _head_sha() -> str:
@@ -499,7 +497,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 2
     baseline_paths = _baseline_python_paths(head_sha, package_dir)
-    status_output = _run_git(["status", "--short"])
+    status_output = _plan_common.git_status_short(repo_root)
+    if status_output is None:
+        print(
+            f"`git status --short` failed in {repo_root}; the cycle baseline cannot be recorded.",
+            file=sys.stderr,
+        )
+        return 1
     try:
         _refresh_historical_package_snapshot(
             head_sha,

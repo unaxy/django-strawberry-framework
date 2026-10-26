@@ -271,7 +271,15 @@ def test_worktree_listing_ignores_the_callers_global_ignore_file(
     assert _changes(base) == [("A", "pkg/scratch.local.py", None)]
 
 
-def test_worktree_run_leaves_the_shared_index_untouched(repo: Path, tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "mode",
+    [pytest.param(["--against", "worktree"], id="worktree"), pytest.param(["--list"], id="list")],
+)
+def test_worktree_run_leaves_the_shared_index_untouched(
+    repo: Path,
+    tmp_path: Path,
+    mode: list[str],
+) -> None:
     _write(repo, "pkg/keep.py", BASE_MODULE)
     base = _commit(repo, "base")
     _write(repo, "pkg/new.py", "NEW = 1\n")
@@ -283,8 +291,7 @@ def test_worktree_run_leaves_the_shared_index_untouched(repo: Path, tmp_path: Pa
         diffs.main(
             [
                 base,
-                "--against",
-                "worktree",
+                *mode,
                 "--output-dir",
                 str(tmp_path / "out"),
             ],

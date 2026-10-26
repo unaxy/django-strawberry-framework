@@ -44,6 +44,7 @@ from django_strawberry_framework.utils.imports import (
     STRAWBERRY_FLOOR,
 )
 from django_strawberry_framework.utils.typing import object_result
+from scripts import _git
 
 # The repo-wide Python sweep below borrows this repo's existing definition of the
 # first-party source trees rather than re-listing them, so the two cannot drift
@@ -670,7 +671,9 @@ def _committable_python_files() -> set[str]:
     ``--cached --others --exclude-standard`` is exactly "tracked, plus untracked
     but not ignored". It is an oracle for "first-party source" derived from git
     rather than from the sweep's own tree list, which is what makes the census
-    below a measurement instead of a restatement of the corpus by itself.
+    below a measurement instead of a restatement of the corpus by itself. Read
+    through ``scripts/_git.py``, so "ignored" is the repository's own rules and
+    never the caller's global excludes or XDG ignore file.
 
     Three ways git can fail to answer, and none may reduce the census to nothing.
     A missing ``git`` raises here; a non-zero exit trips the assert below; and an
@@ -680,22 +683,15 @@ def _committable_python_files() -> set[str]:
     reports no error of any kind: it is a coherent-LOOKING answer that happens to
     be wrong, which is the class no return code can catch.
     """
-    completed = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(REPO_ROOT),
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "--",
-            "*.py",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
+    completed = _git.run_git(
+        REPO_ROOT,
+        "ls-files",
+        "-z",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+        "--",
+        "*.py",
     )
     assert completed.returncode == 0, (
         f"git ls-files failed ({completed.returncode}); the corpus census cannot "
@@ -1819,22 +1815,15 @@ def _committable_archive_files() -> list[str]:
     but not ignored), so an ignored scratch file never fails the row and a
     misplaced file fails it before it is staged.
     """
-    completed = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(REPO_ROOT),
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "--",
-            SPEC_ARCHIVE,
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
+    completed = _git.run_git(
+        REPO_ROOT,
+        "ls-files",
+        "-z",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+        "--",
+        SPEC_ARCHIVE,
     )
     assert completed.returncode == 0, (
         f"git ls-files failed ({completed.returncode}): {completed.stderr.strip()}"

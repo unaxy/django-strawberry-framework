@@ -46,7 +46,6 @@ import ast
 import io
 import json
 import re
-import subprocess
 import sys
 import tokenize
 from collections import Counter
@@ -56,9 +55,10 @@ from typing import TYPE_CHECKING, NamedTuple
 import tomli
 
 try:
+    import _git
     import check_citations
 except ModuleNotFoundError:  # imported as a ``scripts`` submodule (repo root on path)
-    from scripts import check_citations
+    from scripts import _git, check_citations
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Sequence
@@ -286,15 +286,14 @@ def ledger_violations(
 
 
 def tracked_python_files() -> list[str]:
-    """Every git-tracked ``.py`` file, repo-relative."""
-    result = subprocess.run(
-        ["git", "ls-files", "*.py"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return result.stdout.split()
+    """Every git-tracked ``.py`` file, repo-relative.
+
+    ``-z`` keeps a name with a non-ASCII byte or a space whole instead of C-quoting or
+    splitting it; ``scripts/_git.py`` keeps ``GIT_INDEX_FILE`` (a hook's index) and drops the
+    caller's global config and stray ``GIT_*`` variables such as ``GIT_LITERAL_PATHSPECS``.
+    """
+    result = _git.run_git(REPO_ROOT, "ls-files", "-z", "--", "*.py", check=True)
+    return [path for path in result.stdout.split("\0") if path]
 
 
 def main(argv: Sequence[str] | None = None) -> int:

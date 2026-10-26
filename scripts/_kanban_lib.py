@@ -34,6 +34,11 @@ from django.db.backends.signals import connection_created
 from django.db.models import Count
 from django.test import Client
 
+try:
+    import _git
+except ModuleNotFoundError:  # imported as ``scripts._kanban_lib`` (repo root on path)
+    from scripts import _git
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Container, Mapping, Sequence
 
@@ -589,19 +594,15 @@ def configure_django() -> None:
 
 
 def run_git(args: Sequence[str], *, error_cls: type[Exception] = GitCommandError) -> str:
-    """Run ``git --no-pager <args>`` and return stdout.
+    """Run ``git -C REPO_ROOT --no-pager <args>`` through ``scripts/_git.py``; return stdout.
 
+    The runner keeps ``GIT_INDEX_FILE``, so a render from a hook or against a private index
+    reads that index, and drops the caller's global config and stray ``GIT_*`` variables.
     ``error_cls`` lets a caller surface failures as its own caller-correctable
     exception type (so a script's ``__main__`` exit-code handling is unchanged).
     """
     try:
-        result = subprocess.run(
-            ["git", "--no-pager", *args],
-            cwd=REPO_ROOT,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        result = _git.run_git(REPO_ROOT, *args, check=True)
     except subprocess.CalledProcessError as error:
         message = _stderr_text(error).strip() or f"git {' '.join(args)} failed."
         raise error_cls(message) from error

@@ -48,7 +48,6 @@ import difflib
 import functools
 import json
 import re
-import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -59,6 +58,10 @@ from django.db import transaction
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Sequence
 
+try:
+    import _git
+except ModuleNotFoundError:  # imported as ``scripts.build_tree_md`` (repo root on path)
+    from scripts import _git
 try:
     from _kanban_lib import (
         REPO_ROOT,
@@ -146,19 +149,13 @@ class TrackedPaths:
 
 
 def _run_git(repo_root: Path, *args: str) -> str | None:
-    """Return the stdout of ``git -C repo_root <args>``, or ``None`` when git cannot answer."""
+    """Return the stdout of ``git -C repo_root <args>``, or ``None`` when git cannot answer.
+
+    Run through ``scripts/_git.py``, which keeps ``GIT_INDEX_FILE``: a render from a hook or
+    against a private index reads that index, never the caller's global config.
+    """
     try:
-        result = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(repo_root),
-                *args,
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        result = _git.run_git(repo_root, *args)
     except (OSError, ValueError):
         return None
     return result.stdout if result.returncode == 0 else None

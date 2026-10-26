@@ -9,12 +9,12 @@ is no live sibling in ``examples/fakeshop/test_query/``.
 """
 
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import pytest
 
-from scripts import bug_hunt
+from scripts import _plan_common, bug_hunt
 from scripts import review_historical_package_snapshot_at_commit as snapshot
 
 
@@ -34,6 +34,13 @@ def _skip_refresh(*_args: object) -> None:
 
 def _accept_commit(_commit: str) -> None:
     return None
+
+
+def _status_listing(listing: str | None) -> Callable[[Path], str | None]:
+    def fake_status(_root: Path) -> str | None:
+        return listing
+
+    return fake_status
 
 
 def test_generator_writes_autonomous_progress_and_preserves_existing_run(
@@ -75,7 +82,6 @@ def test_generator_writes_autonomous_progress_and_preserves_existing_run(
         responses: dict[tuple[str, ...], str] = {
             ("rev-parse", "--show-toplevel"): f"{tmp_path}\n",
             ("rev-parse", "HEAD"): f"{full_sha}\n",
-            ("status", "--short"): " M docs/GLOSSARY.md\n?? notes.md\n",
         }
         return responses[tuple(args)]
 
@@ -85,6 +91,11 @@ def test_generator_writes_autonomous_progress_and_preserves_existing_run(
         refreshes.append((commit, package_dir, target_dir))
 
     monkeypatch.setattr(bug_hunt, "_run_git", fake_run_git)
+    monkeypatch.setattr(
+        _plan_common,
+        "git_status_short",
+        _status_listing(" M docs/GLOSSARY.md\n?? notes.md\n"),
+    )
 
     def fake_snapshot_git(_args: Sequence[str]) -> str:
         return baseline_listing
@@ -187,11 +198,11 @@ def test_empty_dicta_still_renders_the_package_questions_section(
         responses: dict[tuple[str, ...], str] = {
             ("rev-parse", "--show-toplevel"): f"{tmp_path}\n",
             ("rev-parse", "HEAD"): "1234567890abcdef1234567890abcdef12345678\n",
-            ("status", "--short"): "",
         }
         return responses[tuple(args)]
 
     monkeypatch.setattr(bug_hunt, "_run_git", fake_run_git)
+    monkeypatch.setattr(_plan_common, "git_status_short", _status_listing(""))
     monkeypatch.setattr(snapshot, "_run_git", _one_module_listing)
     monkeypatch.setattr(bug_hunt, "_refresh_historical_package_snapshot", _skip_refresh)
 
@@ -529,11 +540,11 @@ def test_target_release_overrides_the_package_version(
         responses: dict[tuple[str, ...], str] = {
             ("rev-parse", "--show-toplevel"): f"{tmp_path}\n",
             ("rev-parse", "HEAD"): "1234567890abcdef1234567890abcdef12345678\n",
-            ("status", "--short"): "",
         }
         return responses[tuple(args)]
 
     monkeypatch.setattr(bug_hunt, "_run_git", fake_run_git)
+    monkeypatch.setattr(_plan_common, "git_status_short", _status_listing(""))
     monkeypatch.setattr(snapshot, "_run_git", _one_module_listing)
     monkeypatch.setattr(bug_hunt, "_refresh_historical_package_snapshot", _skip_refresh)
 
@@ -551,7 +562,6 @@ def test_generator_rejects_invalid_target_release(
         responses: dict[tuple[str, ...], str] = {
             ("rev-parse", "--show-toplevel"): f"{tmp_path}\n",
             ("rev-parse", "HEAD"): "1234567890abcdef1234567890abcdef12345678\n",
-            ("status", "--short"): "",
         }
         return responses[tuple(args)]
 
@@ -561,3 +571,36 @@ def test_generator_rejects_invalid_target_release(
     assert "invalid release '0_0_14'" in capsys.readouterr().err
     assert bug_hunt.main(["--target-release", ""]) == 1
     assert "invalid release ''" in capsys.readouterr().err
+
+
+def test_generator_refuses_when_the_status_baseline_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    package_root = tmp_path / bug_hunt.DEFAULT_PACKAGE_DIR
+    _write(package_root / "__init__.py", '__version__ = "0.0.13"\n')
+    _write(package_root / "module.py", "VALUE = None\n")
+
+    def fake_run_git(args: Sequence[str]) -> str:
+        responses: dict[tuple[str, ...], str] = {
+            ("rev-parse", "--show-toplevel"): f"{tmp_path}\n",
+            ("rev-parse", "HEAD"): "1234567890abcdef1234567890abcdef12345678\n",
+        }
+        return responses[tuple(args)]
+
+    statused: list[Path] = []
+
+    def no_status(root: Path) -> str | None:
+        statused.append(root)
+        return None
+
+    monkeypatch.setattr(bug_hunt, "_run_git", fake_run_git)
+    monkeypatch.setattr(_plan_common, "git_status_short", no_status)
+    monkeypatch.setattr(snapshot, "_run_git", _one_module_listing)
+    monkeypatch.setattr(bug_hunt, "_refresh_historical_package_snapshot", _skip_refresh)
+
+    assert bug_hunt.main([]) == 1
+    assert statused == [tmp_path.resolve()]
+    assert "the cycle baseline cannot be recorded" in capsys.readouterr().err
+    assert not (tmp_path / bug_hunt.BUG_HUNT_DIR / "bug_hunt-0_0_13.md").exists()

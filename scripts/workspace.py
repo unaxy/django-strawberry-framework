@@ -52,8 +52,10 @@ Worker commands
         repository-relative. The caller's global and system git config and the
         XDG global ignore and attributes files are ignored (git 2.32 or later,
         which reads ``GIT_CONFIG_GLOBAL``) and the repository's own config is
-        honoured, so two copies of one change give the same bytes. The last line is ``sha256 <hex>``
-        of the bytes before it. ``--output`` writes it to a file; ``--check``
+        honoured (``scripts/_git.py``; a checkout the caller marked
+        ``safe.directory`` stays readable), so two copies of one change give
+        the same bytes. The last line is ``sha256 <hex>`` of the bytes before
+        it. ``--output`` writes it to a file; ``--check``
         recomputes it and exits 1 unless the file holds exactly those bytes.
 
 Worker-0 commands
@@ -323,10 +325,12 @@ from typing_extensions import NotRequired, override
 
 try:
     import _bench_common
+    import _git as _git_runner
     import _stop_signals
     import prove_failability
 except ModuleNotFoundError:  # imported as ``scripts.workspace`` (repo root on path)
     from scripts import _bench_common, _stop_signals, prove_failability
+    from scripts import _git as _git_runner
 
 if TYPE_CHECKING:
     import io
@@ -606,11 +610,6 @@ def clean_env(base: dict[str, str] | None = None, **extra: str) -> dict[str, str
     return env
 
 
-# The caller's global and system git config, and the XDG config directory (global ignore and
-# attributes files), never reach a result: only the repository's own config does.
-REPOSITORY_CONFIG_ONLY: Mapping[str, str] = MappingProxyType(
-    {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", "XDG_CONFIG_HOME": os.devnull},
-)
 # ``commit-tree`` needs an identity the isolated config no longer supplies.
 SCRATCH_IDENTITY: Mapping[str, str] = MappingProxyType(
     {
@@ -643,10 +642,13 @@ def _git(
     env: Mapping[str, str] | None = None,
     stdin: bytes | None = None,
 ) -> str:
-    """Run ``git -C repo_root args`` under :data:`REPOSITORY_CONFIG_ONLY` and return its stdout.
+    """Run ``git -C repo_root args`` in :func:`clean_env` made repository-only; return its stdout.
 
-    ``env`` adds variables on top (a private ``GIT_INDEX_FILE``, an identity); ``stdin`` feeds
-    the command (``update-index -z --stdin``).
+    The repository-only layer is ``scripts/_git.py::repository_env``: the caller's global and
+    system config and XDG ignore and attributes files never reach a result, a ``status`` never
+    rewrites the index, and the caller's ``safe.directory`` trust is kept. ``env`` adds
+    variables on top (a private ``GIT_INDEX_FILE``, an identity); ``stdin`` feeds the command
+    (``update-index -z --stdin``).
     """
     require_on_path("git", "the shared tree cannot be listed, copied or diffed")
     completed = subprocess.run(
@@ -658,7 +660,7 @@ def _git(
         ],
         capture_output=True,
         input=stdin,
-        env={**clean_env(), **REPOSITORY_CONFIG_ONLY, **(env or {})},
+        env=_git_runner.repository_env(clean_env(), **dict(env or {})),
         check=False,
     )
     if completed.returncode != 0:

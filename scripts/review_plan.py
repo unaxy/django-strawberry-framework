@@ -101,8 +101,10 @@ if TYPE_CHECKING:
     from collections.abc import Container, Iterable, Sequence
 
 try:
+    import _git as _git_runner
     import _plan_common
 except ModuleNotFoundError:  # imported as ``scripts.review_plan`` (repo root on path)
+    from scripts import _git as _git_runner
     from scripts import _plan_common
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -140,21 +142,15 @@ OUTCOMES_HEADING = "## Outcomes"
 
 
 def _git(root: Path, *args: str, stdin: str | None = None) -> str:
-    """Run one git command in ``root`` and return its stdout."""
+    """Run one git command in ``root`` through ``scripts/_git.py`` and return its stdout.
+
+    The answer is the repository's: its own ignore rules, attributes and config decide the
+    untracked listing, the ``status`` baseline and every ``hash-object`` id, never the
+    caller's global or system config, XDG files or stray ``GIT_*`` variables, and a
+    ``status`` never rewrites ``.git/index``.
+    """
     try:
-        result = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(root),
-                "--no-pager",
-                *args,
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            input=stdin,
-        )
+        result = _git_runner.run_git(root, *args, stdin=stdin, check=True)
     except FileNotFoundError as exc:
         raise ValueError("git is not installed") from exc
     except subprocess.CalledProcessError as exc:
@@ -192,7 +188,12 @@ def _tracked_python(root: Path) -> list[str]:
 
 
 def _untracked_python(root: Path) -> list[str]:
-    """Return untracked, non-ignored package ``.py`` paths, repo-relative, sorted."""
+    """Return untracked, non-ignored package ``.py`` paths, repo-relative, sorted.
+
+    Ignored means ignored by the repository's own rules (``.gitignore``,
+    ``.git/info/exclude``, its config); a file only a caller-global rule hides is listed, and
+    is a gap in ``.gitignore``.
+    """
     output = _git(
         root,
         "ls-files",
