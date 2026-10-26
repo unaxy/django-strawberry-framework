@@ -171,6 +171,7 @@ from .base import (
     TextPatternFilter,
     _bound_field_name,
     _relation_uses_non_pk_to_field,
+    copied_declared_filter,
     copied_form_field,
     membership_in_filter_class,
     unkept_form_field,
@@ -2246,10 +2247,13 @@ def _expand_related_filter(
     `expand_related_filter`: each child filter is
     deep-copied onto the parent under ``<filter_name>__<child name>`` with
     ``field_name`` rebound to the relation path, so the target filterset's own
-    instances are never mutated. A child filter whose behavior the child filter
-    set owns (``_owner_bound_child``) is copied as a ``ProjectedChildFilter``
-    instead, since a rebind cannot carry a ``method=``, any other ``filter`` the
-    child filter holds of its own, or a child ``__init__``.
+    instances are never mutated. A child filter a deep copy refuses is refused
+    by name (``filters/base.py::copied_declared_filter``): a child set the
+    schema reaches only through ``f`` is probed nowhere else. A child filter
+    whose behavior the child filter set owns (``_owner_bound_child``) is copied
+    as a ``ProjectedChildFilter`` instead, since a rebind cannot carry a
+    ``method=``, any other ``filter`` the child filter holds of its own, or a
+    child ``__init__``.
     Module-level helper because the expansion has no metaclass state - moving
     it off the metaclass keeps the call site (``get_filters``) free of
     ``cls.__class__.expand_related_filter(cls, ...)`` indirection that obscured
@@ -2261,9 +2265,10 @@ def _expand_related_filter(
         return expanded
     target_filters = target_filterset._filters_along(path, scope)
     relation = _bound_field_name(f)
+    via = f"{truth.qualname(path[-1])}.{filter_name}"
     for child_name, field in target_filters.items():
         new_name = _branch_key(filter_name, child_name)
-        field_copy = copy.deepcopy(field)
+        field_copy = copied_declared_filter(field, target_filterset, child_name, via=via)
         field_copy.field_name = f"{relation}__{field.field_name}"
         if _owner_bound_child(target_filterset, field):
             field_copy.__class__ = _projected_class_for(type(field_copy))  # truth: ok class store

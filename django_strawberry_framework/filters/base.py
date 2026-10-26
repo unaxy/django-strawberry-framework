@@ -603,6 +603,53 @@ def copied_form_field(filter_instance: Filter) -> Field:
     return copy.deepcopy(filter_instance).field
 
 
+def _refuses_deep_copy(value: object) -> bool:
+    """Whether a deep copy of ``value`` raises; ``None`` copies."""
+    try:
+        _ = copy.deepcopy(value)
+    except Exception:  # noqa: BLE001 - any refusal is the answer, never propagated
+        return True
+    return False
+
+
+def copied_declared_filter(
+    filter_instance: Filter,
+    filterset_cls: type[BaseFilterSet],
+    name: str,
+    *,
+    via: str = "",
+) -> Filter:
+    """Return a deep copy of ``filterset_cls``'s filter ``name``, or refuse the filter by name.
+
+    django-filter deep-copies every filter of a ``FilterSet`` class into each instance,
+    so a filter a deep copy refuses (a bound ``method=`` over an object holding a lock
+    or a cache handler, a ``functools.partial`` over one, such a value in ``extra``)
+    can serve no request. The refusal names the set, the attribute and the filter's
+    class and carries the copy's own error as ``__cause__``. A filter whose ``method``
+    itself refuses the copy is told the spellings a copy keeps (a FilterSet method's
+    name, a plain function); any other is told to keep the object off the filter.
+    ``via`` names the ``RelatedFilter`` the filter was reached through, when it was.
+    """
+    try:
+        return copy.deepcopy(filter_instance)
+    except Exception as exc:
+        reached = f" (reached through RelatedFilter {via})" if via else ""
+        advice = (
+            'Pass method= as the name of a FilterSet method (method="<name>") or as a '
+            "plain function."
+            if _refuses_deep_copy(filter_instance.method)
+            else "Keep the object off the filter: build it inside the filter's method or "
+            "the FilterSet's filter_queryset, or hold it on a class."
+        )
+        raise ConfigurationError(
+            f"FilterSet {truth.qualname(filterset_cls)}.{name}{reached}: "
+            f"{truth.kind(filter_instance)} cannot be deep-copied "
+            f"({truth.kind(exc)}: {truth.text(exc)}); django-filter deep-copies every "
+            "filter for each request, so a filter must hold nothing a deep copy refuses "
+            f"(a lock, a cache handler). {advice}",
+        ) from exc
+
+
 def _built_filter(
     filter_class: Callable[..., Filter],
     field_name: str | None,

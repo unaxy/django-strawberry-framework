@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 306 done, 212 to do.
+Progress: 307 done, 212 to do.
 
 ## Done
 
@@ -1635,6 +1635,17 @@ Progress: 306 done, 212 to do.
   meaningful with `in`, with `range`, and with `method=` (the method receives the list), so a class-keyed refusal
   would break working shapes. Build-time refusal of a list-shaped filter over a lookup that cannot consume a list is
   folded into robustness row 625, which now covers the bare CSV family beside `ListFilter`
+- [x] 519. A declared filter a deep copy refuses (a bound `method=` over an object holding a lock or a Django cache
+  handler, a `functools.partial` over one, a lock in `extra` or in a `Meta.filter_overrides` `extra`) is refused at
+  schema build by a `ConfigurationError` naming the set, the attribute and the filter's class, with the copy's error
+  as `__cause__`. A new finalizer subpass 1.5 (`types/finalizer.py::_audit_filter_copies`) copies every served set's
+  `base_filters` through `filters/base.py::copied_declared_filter` before expansion, and `_expand_related_filter`
+  copies a `RelatedFilter` child through the same helper, naming the `RelatedFilter` it was reached through. A
+  `ListFilter(method=...)` of that kind, which built and failed every filtered request on its set with a raw
+  `TypeError`, is now refused at build too. The advice names the `method=` spellings only when the method itself
+  refuses the copy. Class-level service objects, string method names, plain functions and shallow-copy widgets
+  build and filter as before. spec-027's Decision 6, Error shapes and Layer 4 text follow; package rows in
+  `tests/filters/test_finalizer.py`
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1790,10 +1801,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   scalar catch-all and publishes `exact: String` while its form field cleans a list, so every non-empty value answers
   `FILTER_INVALID` "Enter a list of values."; probed on a text column only (a `Choices` column not probed). Found
   fact-finding 373
-- [ ] 519. (robustness) A declared filter that cannot be deep-copied (`CharFilter(method=svc.by_code)` where `svc`
-  holds a `threading.Lock`) now fails the schema build with a raw `TypeError` from
-  `filters/base.py::copied_form_field`; at 6f0575c6 the schema built but every filtered request failed the same way.
-  A `ConfigurationError` naming the filter would read better. Found verifying 373
 - [ ] 520. (robustness) The `LookupChoiceFilter` refusal for a leaf projected through a `RelatedFilter` names the
   internal `ProjectedLookupChoiceFilter` class, the parent set and the `field_name` (`shelf__code_l`), not the
   declared attribute on the child set. Found verifying 373
@@ -1932,6 +1939,10 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 539. CHANGELOG entry for item 519: a served `FilterSet` filter that cannot be deep-copied (a `method=` bound
+  to an object holding a lock or a cache handler, such an object in `extra`) fails the schema build with a
+  `ConfigurationError` naming the set and attribute; a `ListFilter(method=...)` of that kind built and failed every
+  filtered request with a raw `TypeError`
 - [ ] 533. CHANGELOG entry for item 558: an `OrderSet` honours `Meta.exclude` (it was accepted and ignored), so a
   set declaring it publishes fewer `orderBy` keys: a model-backed set of `RelatedOrder` branches only with `exclude`
   now also sweeps the model's columns, and a model-less one with `exclude` raises `ConfigurationError`
