@@ -33,7 +33,7 @@ from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import SynchronousOnlyOperation
 from django.db import connection, transaction
 from django.db.backends.utils import CursorWrapper
-from django.db.models import Model, Prefetch, QuerySet, Value
+from django.db.models import Model, Prefetch, QuerySet, TextField, Value
 from django.db.models.functions import Upper
 from django.db.models.signals import post_init, pre_save
 from django.http import HttpRequest
@@ -42,7 +42,15 @@ from django.test import Client, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import path
 from django.utils.functional import SimpleLazyObject
-from django_filters import CharFilter, Filter, NumberFilter, TypedChoiceFilter
+from django_filters import (
+    AllValuesMultipleFilter,
+    CharFilter,
+    Filter,
+    MultipleChoiceFilter,
+    NumberFilter,
+    TypedChoiceFilter,
+    TypedMultipleChoiceFilter,
+)
 from graphql_client import (
     DeleteAfterAuthorization,
     JSONObject,
@@ -22819,6 +22827,332 @@ def test_declared_pk_leaf_publishes_the_primary_key_column_scalar(
         for entry in json_list(data, "__type", "inputFields")
     }
     assert fields[field] == sdl, fields
+
+
+_HOLDER_CODE_PICKS = (("A-1", "A-1"), ("B-2", "B-2"), ("C-3", "C-3"))
+_HOLDER_CONDITION_PICKS = (("", "Unassessed"), ("good", "Good"), ("worn", "Worn"))
+
+
+def _no_lookup_choices(_field: object) -> dict[str, object]:
+    """``Meta.filter_overrides`` extras: the topics a generated ``MultipleChoiceFilter`` admits."""
+    return {"choices": (("general", "general"), ("rare", "rare"))}
+
+
+def _multiple_choice_holder_schema() -> strawberry.Schema:
+    """Holder schema over ``Shelf`` declaring django-filter's multiple-choice filters.
+
+    ``code*`` read the text column, ``condition*`` the text choice column and
+    ``tier_picks`` the integer choice column: ``MultipleChoiceFilter`` (``conjoined=True``
+    as ``condition_picks_all``), ``TypedMultipleChoiceFilter`` and
+    ``AllValuesMultipleFilter``, whose choices are the column's stored values. The static
+    choices leave ``D-4``, ``damaged`` and the ``UPPER`` tier out. ``Meta.filter_overrides``
+    makes ``topic``'s generated ``exact`` leaf a ``MultipleChoiceFilter``. A holder, so
+    the per-request ``SELECT DISTINCT`` each ``AllValuesMultipleFilter`` form field runs
+    never reaches a shipped request.
+    """
+
+    class HolderPicksShelfFilter(FilterSet):
+        code_picks = MultipleChoiceFilter(field_name="code", choices=_HOLDER_CODE_PICKS)
+        code_picks_typed = TypedMultipleChoiceFilter(
+            field_name="code",
+            choices=_HOLDER_CODE_PICKS,
+            coerce=str,
+        )
+        code_values = AllValuesMultipleFilter(field_name="code")
+        condition_picks = MultipleChoiceFilter(
+            field_name="condition",
+            choices=_HOLDER_CONDITION_PICKS,
+        )
+        condition_picks_all = MultipleChoiceFilter(
+            field_name="condition",
+            choices=_HOLDER_CONDITION_PICKS,
+            conjoined=True,
+        )
+        condition_values = AllValuesMultipleFilter(field_name="condition")
+        tier_picks = TypedMultipleChoiceFilter(
+            field_name="tier",
+            choices=models.Shelf.Tier.choices[:2],
+            coerce=int,
+        )
+
+        class Meta:
+            model = models.Shelf
+            fields = {"topic": ["exact"]}
+            filter_overrides = {
+                TextField: {"filter_class": MultipleChoiceFilter, "extra": _no_lookup_choices},
+            }
+
+    class HolderPicksShelfType(DjangoType):
+        class Meta:
+            model = models.Shelf
+            fields = ("id", "code")
+            filterset_class = HolderPicksShelfFilter
+            name = "HolderPicksShelfType"
+
+    @strawberry.type
+    class Query:
+        def _shelves(
+            self,
+            info: Info,
+            filter: FilterInput[HolderPicksShelfFilter] | None = None,  # noqa: A002
+        ) -> QuerySet[models.Shelf]:
+            queryset = models.Shelf.objects.order_by("code")
+            if filter is not None:
+                queryset = HolderPicksShelfFilter.apply_sync(filter, queryset, info)
+            return queryset
+
+        shelves: QuerySet[models.Shelf] = strawberry.field(
+            resolver=_shelves,
+            graphql_type=list[HolderPicksShelfType],
+        )
+
+    finalize_django_types()
+    return strawberry.Schema(query=Query, config=strawberry_config())
+
+
+def _post_multiple_choice_holder(
+    query: str,
+    variables: Mapping[str, object] | None = None,
+) -> JSONObject:
+    """POST ``query`` to a fresh ``_multiple_choice_holder_schema`` and return the payload."""
+    registry.clear()
+    try:
+        response = _post_holder(_multiple_choice_holder_schema(), query, variables=variables)
+    finally:
+        registry.clear()
+    assert response.status_code == 200
+    return response_json(response)
+
+
+def _seed_picked_shelves() -> dict[str, int]:
+    """Seed four shelves, one per condition, and return each shelf's pk by code."""
+    branch = models.Branch.objects.create(name="PicksBranch", city="Boston")
+    return {
+        code: saved_pk(
+            models.Shelf.objects.create(
+                code=code,
+                condition=condition,
+                tier=tier,
+                topic=topic,
+                branch=branch,
+            ).pk,
+        )
+        for code, condition, tier, topic in (
+            (
+                "A-1",
+                "",
+                1,
+                "general",
+            ),
+            (
+                "B-2",
+                "good",
+                2,
+                "rare",
+            ),
+            (
+                "C-3",
+                "worn",
+                3,
+                "general",
+            ),
+            (
+                "D-4",
+                "damaged",
+                1,
+                "rare",
+            ),
+        )
+    }
+
+
+_PICKED_SHELVES = """
+query ($filter: HolderPicksShelfFilterInputType) {
+  shelves(filter: $filter) { id }
+}
+"""
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("leaf", "sdl"),
+    [
+        pytest.param("codePicks", "[String!]", id="multiple-choice-text"),
+        pytest.param("codePicksTyped", "[String!]", id="typed-multiple-choice-text"),
+        pytest.param("codeValues", "[String!]", id="all-values-multiple-text"),
+        pytest.param(
+            "conditionPicks",
+            "[HolderPicksShelfTypeConditionEnum!]",
+            id="multiple-choice-choices",
+        ),
+        pytest.param(
+            "conditionPicksAll",
+            "[HolderPicksShelfTypeConditionEnum!]",
+            id="multiple-choice-conjoined",
+        ),
+        pytest.param(
+            "conditionValues",
+            "[HolderPicksShelfTypeConditionEnum!]",
+            id="all-values-multiple-choices",
+        ),
+        pytest.param(
+            "tierPicks",
+            "[HolderPicksShelfTypeTierEnum!]",
+            id="typed-multiple-choice-integer-choices",
+        ),
+        pytest.param("topic", "[String!]", id="filter-overrides-exact"),
+    ],
+)
+def test_multiple_choice_filter_publishes_a_list_of_its_column_values_over_http(
+    leaf: str,
+    sdl: str,
+) -> None:
+    """A multiple-choice filter's ``exact`` is a list typed from the column it reads.
+
+    Its form field (``MultipleChoiceField``) cleans a list, so the input is a list: of
+    ``String`` over a text column, of the column's enum over a choice column, never
+    typed from ``TypedMultipleChoiceFilter.coerce``. A ``Meta.filter_overrides``
+    ``MultipleChoiceFilter`` publishes the same shape.
+    """
+    leaf_type = f"HolderPicksShelfFilter{leaf[0].upper()}{leaf[1:]}FilterInputType"
+    payload = _post_multiple_choice_holder(_INPUT_FIELD_TYPES, {"name": leaf_type})
+
+    assert "errors" not in payload, payload
+    fields = {
+        json_str(entry, "name"): _rendered_input_type(json_object(entry, "type"))
+        for entry in json_list(payload, "data", "__type", "inputFields")
+    }
+    assert fields == {"exact": sdl}, fields
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("filter_input", "codes"),
+    [
+        pytest.param({"codePicks": {"exact": ["A-1", "C-3"]}}, ["A-1", "C-3"], id="text"),
+        pytest.param({"codePicksTyped": {"exact": ["B-2"]}}, ["B-2"], id="typed-text"),
+        pytest.param({"codeValues": {"exact": ["D-4", "A-1"]}}, ["A-1", "D-4"], id="all-values"),
+        pytest.param(
+            {"conditionPicks": {"exact": ["good", "BLANK"]}},
+            ["A-1", "B-2"],
+            id="choices",
+        ),
+        pytest.param(
+            {"conditionValues": {"exact": ["damaged"]}},
+            ["D-4"],
+            id="all-values-choices",
+        ),
+        pytest.param({"conditionPicksAll": {"exact": ["good"]}}, ["B-2"], id="conjoined-one"),
+        pytest.param(
+            {"conditionPicksAll": {"exact": ["good", "worn"]}},
+            [],
+            id="conjoined-every-value",
+        ),
+        pytest.param(
+            {"conditionPicks": {"exact": ["good", "worn"]}},
+            ["B-2", "C-3"],
+            id="any-value",
+        ),
+        pytest.param({"tierPicks": {"exact": ["MEMBER_1"]}}, ["A-1", "D-4"], id="typed-integer"),
+        pytest.param({"topic": {"exact": ["rare"]}}, ["B-2", "D-4"], id="filter-overrides"),
+        pytest.param(
+            {"not": {"conditionPicks": {"exact": ["good"]}}},
+            ["A-1", "C-3", "D-4"],
+            id="not",
+        ),
+        pytest.param(
+            {"codePicks": {"exact": []}},
+            [
+                "A-1",
+                "B-2",
+                "C-3",
+                "D-4",
+            ],
+            id="empty",
+        ),
+        pytest.param(
+            {"codePicks": {"exact": None}},
+            [
+                "A-1",
+                "B-2",
+                "C-3",
+                "D-4",
+            ],
+            id="null",
+        ),
+    ],
+)
+def test_multiple_choice_filter_keeps_the_rows_matching_its_list_over_http(
+    filter_input: dict[str, object],
+    codes: list[str],
+) -> None:
+    """A multiple-choice filter keeps the rows holding any listed value; ``[]`` constrains nothing.
+
+    Each enum member is its value (``BLANK`` the stored ``""``, ``MEMBER_1`` the tier
+    ``1``); ``conjoined=True`` keeps only the rows matching every listed value, which on a
+    single-value column is none for two values. An empty list or ``null`` keeps every row,
+    django-filter's empty-value rule.
+    """
+    pks = _seed_picked_shelves()
+
+    payload = _post_multiple_choice_holder(_PICKED_SHELVES, {"filter": filter_input})
+
+    assert "errors" not in payload, payload
+    rows = json_list(payload, "data", "shelves")
+    assert sorted(json_int(row, "id") for row in rows) == sorted(pks[code] for code in codes)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("filter_input", "form_key"),
+    [
+        pytest.param({"codePicks": {"exact": ["A-1", "Z-9"]}}, "code_picks", id="text"),
+        pytest.param({"codePicksTyped": {"exact": ["D-4"]}}, "code_picks_typed", id="typed-text"),
+        pytest.param({"codeValues": {"exact": ["Z-9"]}}, "code_values", id="all-values"),
+        pytest.param(
+            {"conditionPicks": {"exact": ["damaged"]}},
+            "condition_picks",
+            id="choices",
+        ),
+        pytest.param({"tierPicks": {"exact": ["MEMBER_3"]}}, "tier_picks", id="typed-integer"),
+        pytest.param({"topic": {"exact": ["archive"]}}, "topic", id="filter-overrides"),
+    ],
+)
+def test_multiple_choice_filter_refuses_a_value_off_its_choices_over_http(
+    filter_input: dict[str, object],
+    form_key: str,
+) -> None:
+    """A listed value off the filter's own choices is its form field's ``invalid_choice``.
+
+    ``D-4``, ``damaged`` and ``MEMBER_3`` are column values (``damaged`` and ``MEMBER_3``
+    members of the column's enum) the declared choices leave out; ``Z-9`` is no stored
+    code, so ``AllValuesMultipleFilter`` refuses it too.
+    """
+    _seed_picked_shelves()
+
+    payload = _post_multiple_choice_holder(_PICKED_SHELVES, {"filter": filter_input})
+
+    _assert_invalid_choice_payload(payload, form_key)
+
+
+@pytest.mark.django_db
+def test_multiple_choice_filter_refuses_a_name_off_the_column_enum_as_a_graphql_error() -> None:
+    """A name the column's enum lacks fails GraphQL coercion before any filter runs."""
+    _seed_picked_shelves()
+
+    payload = _post_multiple_choice_holder(
+        _PICKED_SHELVES,
+        {"filter": {"conditionPicks": {"exact": ["lost"]}}},
+    )
+
+    assert payload.get("data") is None, payload
+    assert len(json_list(payload, "errors")) == 1, payload
+    error = json_object(payload, "errors", 0)
+    assert "Value 'lost' does not exist in 'HolderPicksShelfTypeConditionEnum' enum" in (
+        json_str(error, "message")
+    ), error
+    # A coercion error carries no ``FILTER_INVALID`` extension: no filter ran.
+    assert "extensions" not in error, error
 
 
 _SHELF_PKS = """

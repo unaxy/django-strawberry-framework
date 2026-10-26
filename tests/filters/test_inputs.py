@@ -665,6 +665,38 @@ def test_convert_filter_to_input_annotation_handles_list_filter() -> None:
     assert annotation == list[int] | None
 
 
+@pytest.mark.parametrize(
+    "make_filter",
+    [
+        pytest.param(
+            lambda: django_filters.MultipleChoiceFilter(
+                method="filter_picks",
+                choices=[("a", "A")],
+            ),
+            id="multiple-choice",
+        ),
+        pytest.param(
+            lambda: django_filters.TypedMultipleChoiceFilter(
+                method="filter_picks",
+                choices=[(1, "One")],
+                coerce=int,
+            ),
+            id="typed-multiple-choice",
+        ),
+    ],
+)
+def test_convert_filter_to_input_annotation_types_a_columnless_multiple_choice_method_filter(
+    make_filter: Callable[[], Filter],
+) -> None:
+    """A multiple-choice ``method=`` filter with no column is a list of its form's ``str``.
+
+    Its ``MultipleChoiceField`` cleans a list, so the input is a list; with no model
+    column the element comes from the form field, never from
+    ``TypedMultipleChoiceFilter.coerce``.
+    """
+    assert convert_filter_to_input_annotation(make_filter(), None) == list[str] | None
+
+
 def test_convert_filter_to_input_annotation_handles_choice_filter_via_converter_pipeline() -> None:
     """`ChoiceFilter` reaches into ``convert_choices_to_enum`` via the model field."""
     # ``Book.circulation_status`` is a TextChoices field on the example model.
@@ -1168,6 +1200,19 @@ def _no_rows(queryset: QuerySet[library_models.Branch], _name: str, _value: obje
     return queryset.none()
 
 
+def _multiple_choice_in_filter() -> Filter:
+    """The ``in`` wrapper ``filter_for_lookup`` builds around a ``MultipleChoiceFilter``.
+
+    django-filter builds it at runtime as ``ConcreteInFilter(BaseInFilter, <filter_class>)``.
+    """
+    in_class: type[Filter] = type(
+        "MultipleChoiceInFilter",
+        (BaseInFilter, django_filters.MultipleChoiceFilter),
+        {},
+    )
+    return in_class(field_name="code", lookup_expr="in")
+
+
 class _DecimalMethodFilter(Filter):
     """A consumer ``method=`` filter whose form field cleans a decimal."""
 
@@ -1254,6 +1299,89 @@ def test_building_the_schema_writes_nothing_to_a_class_level_declaration(name: s
     assert registry.get(library_models.Shelf) is DeclaredParentShelfType
     assert "DeclaredParentShelfFilterInputType" in FilterArgumentsFactory.input_object_types
     assert (vars(declared), declared.extra) == (state, extra)
+
+
+@pytest.mark.parametrize(
+    "filter_class",
+    [CharFilter, NumberFilter, BooleanFilter],
+    ids=["char", "number", "boolean"],
+)
+def test_a_catch_all_leaf_whose_form_field_cannot_be_built_fails_the_schema_build(
+    filter_class: type[Filter],
+) -> None:
+    """The catch-all builds every leaf's form field when the schema is built, method or not.
+
+    ``lookup=`` is no filter keyword, so it rides ``extra`` into the form field class,
+    which refuses it: the build raises then, never on each request through the set.
+    """
+
+    class BadKwargShelfFilter(FilterSet):
+        code_like = filter_class(field_name="code", lookup="icontains")
+
+        class Meta:
+            model = library_models.Shelf
+            fields = []
+
+    class BadKwargShelfType(DjangoType):
+        class Meta:
+            model = library_models.Shelf
+            fields = ("id", "code")
+            filterset_class = BadKwargShelfFilter
+
+    assert registry.get(library_models.Shelf) is BadKwargShelfType
+    with pytest.raises(TypeError, match="lookup"):
+        finalize_django_types()
+
+
+def _bases(*classes: type) -> tuple[type, ...]:
+    """The bases of a class built at runtime, as django-filter builds its ``in`` wrapper."""
+    return classes
+
+
+def _input_shape(annotation: object) -> object:
+    """``annotation`` with a generated range input class read as its axis names."""
+    member = _class_arg(annotation)
+    if get_object_definition(member) is None:
+        return member
+    return sorted(field.python_name for field in _definition_fields(member))
+
+
+@pytest.mark.parametrize(
+    ("parent", "value"),
+    [
+        pytest.param(RangeFilter, {"start": "a", "end": "h"}, id="range"),
+        pytest.param(ChoiceFilter, "good", id="choice"),
+        pytest.param(TypedFilter, "good", id="typed"),
+    ],
+)
+def test_a_consumer_class_pairing_multiple_choice_with_another_kind_keeps_that_kinds_arm(
+    parent: type[Filter],
+    value: object,
+) -> None:
+    """``MultipleChoiceFilter`` is last before the catch-all, so the other kind's arm wins.
+
+    A consumer class with two bases is typed and normalized as its other base is,
+    never as the multiple-choice list.
+    """
+    paired = type(
+        f"{parent.__name__}MultipleChoiceFilter",
+        _bases(parent, django_filters.MultipleChoiceFilter),
+        {},
+    )
+    both = paired(field_name="condition")
+    assert isinstance(both, Filter)
+    assert isinstance(both, django_filters.MultipleChoiceFilter)
+    model_field: ModelField = library_models.Shelf._meta.get_field("condition")
+    single = parent(field_name="condition")
+
+    assert _input_shape(convert_filter_to_input_annotation(both, model_field)) == _input_shape(
+        convert_filter_to_input_annotation(single, model_field),
+    )
+    assert normalize_input_value(both, value, field_name="condition") == normalize_input_value(
+        single,
+        value,
+        field_name="condition",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1610,6 +1738,50 @@ def test_normalize_input_value_rejects_scalar_on_list_filter() -> None:
     )
     with pytest.raises(ConfigurationError, match="non-list container"):
         normalize_input_value(GlobalIDMultipleChoiceFilter(), 42)
+
+
+@pytest.mark.parametrize(
+    ("make_filter", "shape"),
+    [
+        pytest.param(
+            lambda: django_filters.MultipleChoiceFilter(field_name="code"),
+            "multiple-choice list",
+            id="multiple-choice",
+        ),
+        pytest.param(
+            lambda: django_filters.TypedMultipleChoiceFilter(field_name="code"),
+            "multiple-choice list",
+            id="typed-multiple-choice",
+        ),
+        pytest.param(
+            lambda: AllValuesMultipleFilter(field_name="code"),
+            "multiple-choice list",
+            id="all-values-multiple",
+        ),
+        pytest.param(
+            _multiple_choice_in_filter,
+            "CSV membership list",
+            id="in-wrapper",
+        ),
+    ],
+)
+def test_normalize_input_value_rejects_scalar_on_multiple_choice_filter(
+    make_filter: Callable[[], Filter],
+    shape: str,
+) -> None:
+    """A multiple-choice filter refuses a non-list; an ``in`` wrapper around one keeps the CSV arm.
+
+    The form field cleans a list, so a ``str`` would iterate its characters; the guard
+    refuses it naming the arm that read it.
+    """
+    made = make_filter()
+    with pytest.raises(ConfigurationError) as excinfo:
+        normalize_input_value(made, "abc")
+    assert str(excinfo.value) == (
+        f"{type(made).__name__} consumes a list of values for its 'code' input, but received "
+        f"a non-list container (str 'abc') for the {shape}; send a list (the GraphQL schema "
+        "already rejects this shape over the wire)."
+    )
 
 
 def test_normalize_input_value_rejects_dict_on_expanded_range_csv() -> None:
@@ -2200,7 +2372,7 @@ def test_filter_convert_and_normalize_ride_shared_kind_table() -> None:
         assert "convert_with_mro" in fn.__code__.co_names
         assert "_filter_input_prechecks" in fn.__code__.co_names
     assert _FILTER_INPUT_KIND_TYPES[-1] is object
-    assert _FILTER_INPUT_KIND_TYPES[-3] is TypedFilter
+    assert _FILTER_INPUT_KIND_TYPES[-4] is TypedFilter
     with pytest.raises(ValueError, match="argument"):
         _filter_input_prechecks(lambda _f: None)
     exc = _unexpected_filter_dispatch(object())
@@ -2353,7 +2525,7 @@ def test_model_choice_filter_with_no_column_source_names_the_filterset_and_the_f
 
 
 def test_normalize_input_value_typed_filter_unwraps_none_enum_value() -> None:
-    """``TypedFilter`` is convert-only; normalize continues and may return ``None``."""
+    """A bare ``TypedFilter`` normalizes as a scalar, which may be ``None``."""
 
     class Tri(Enum):
         UNKNOWN = None

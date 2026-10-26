@@ -107,8 +107,8 @@ def convert_with_mro(
        checked first (``MultipleChoiceField`` before ``ChoiceField`` -> ``str``;
        DRF ``PrimaryKeyRelatedField`` / ``FileField`` before any scalar). A
        precheck handler may return ``MRO_CONTINUE`` to keep walking (the
-       bare-``forms.Field`` exact-type pattern, and filter normalize skipping
-       convert-only kinds). ``None`` is a real result, not a continue signal.
+       bare-``forms.Field`` exact-type pattern). ``None`` is a real result, not a
+       continue signal.
 
     2. **Scalar registry MRO walk.** ``utils/truth.py::mro_entry`` walks the
        field class's real ``__mro__`` (read from the interpreter, so a consumer
