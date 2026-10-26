@@ -690,7 +690,8 @@ def require_re_readable_field_declaration(
     way: upstream ``get_fields`` answers ``f not in exclude`` once per field, so
     a one-shot exclude is exhausted by the first membership test and every later
     field passes (the excluded column becomes a filter), and a bare string
-    answers that test by substring. The same gate refuses both shapes there.
+    answers that test by substring. The same gate refuses both shapes there,
+    and in the order family's ``Meta.exclude`` (``OrderSet._read_meta_exclude``).
 
     ``subject`` is the family label, ``accepted`` the family's own list of
     legal spellings for the declaration (the filter family's ``Meta.fields``

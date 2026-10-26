@@ -558,12 +558,16 @@ class PublicPatronType(DjangoType):
     and attaching a schema-visible ``description`` is natural. Both surface through
     introspection; renaming a secondary is safe because a non-Relay type carries no
     model-anchored ``GlobalID`` to invalidate.
+
+    ``Meta.orderset_class`` is ``PublicPatronOrder``, whose ``Meta.exclude`` mirrors
+    this type's, so ``orderBy`` offers every column the type exposes and none it hides.
     """
 
     class Meta:
         model = models.Patron
         primary = False
         exclude = ("email", "lifetime_fines_cents")
+        orderset_class = orders.PublicPatronOrder
         name = "PublicPatron"
         description = (
             "A patron projection with PII (email) and financial (lifetime fines) columns removed."
@@ -1591,9 +1595,16 @@ class Query:
             queryset = orders.PatronOrder.apply_sync(order_by, queryset, info)
         return queryset
 
-    def _all_library_public_patrons(self) -> QuerySet[models.Patron]:
-        """Root field for the ``Meta.exclude`` deny-list view (see ``PublicPatronType``)."""
-        return models.Patron.objects.order_by("id")
+    def _all_library_public_patrons(
+        self,
+        info: strawberry.Info,
+        order_by: list[OrderInput[orders.PublicPatronOrder]] | None = None,
+    ) -> QuerySet[models.Patron]:
+        """Return the ``Meta.exclude`` deny-list view (``PublicPatronType``), optionally ordered."""
+        queryset = PublicPatronType.get_queryset(models.Patron.objects.order_by("id"), info)
+        if order_by is not None:
+            queryset = orders.PublicPatronOrder.apply_sync(order_by, queryset, info)
+        return queryset
 
     def _all_library_membership_cards(self) -> QuerySet[models.MembershipCard]:
         """Return every membership card ordered by id."""

@@ -7850,6 +7850,64 @@ def test_library_books_order_by_flat_shorthand_path() -> None:
     )
 
 
+def _seed_patrons_ranked_against_their_names() -> None:
+    """Two patrons whose ``email`` / ``lifetime_fines_cents`` rank opposite to their ``name``."""
+    models.Patron.objects.create(name="Ann", email="z@example.org", lifetime_fines_cents=900)
+    models.Patron.objects.create(name="Bea", email="a@example.org", lifetime_fines_cents=100)
+
+
+@pytest.mark.django_db
+def test_library_public_patron_order_publishes_every_column_its_meta_exclude_keeps() -> None:
+    """``PublicPatronOrder.Meta.exclude`` is the ``"__all__"`` sweep minus the names it lists.
+
+    The exclude-only declaration mirrors ``PublicPatronType.Meta.exclude``: it publishes
+    ``id`` and ``name``, never ``email`` or ``lifetimeFinesCents``, and a kept column orders
+    the public patrons.
+    """
+    _seed_patrons_ranked_against_their_names()
+
+    assert _input_field_names("PublicPatronOrderInputType") == {"id", "name"}
+    _assert_graphql_data(
+        """
+        query {
+          allLibraryPublicPatrons(orderBy: [{ name: DESC }]) {
+            name
+          }
+        }
+        """,
+        {"allLibraryPublicPatrons": [{"name": "Bea"}, {"name": "Ann"}]},
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("excluded", ["email", "lifetimeFinesCents"])
+def test_library_order_by_a_column_public_patron_order_excludes_is_a_validation_error(
+    excluded: str,
+) -> None:
+    """An ``orderBy`` term naming a ``PublicPatronOrder.Meta.exclude`` column fails validation.
+
+    The column is absent from ``PublicPatronOrderInputType``, so no resolver runs and no row
+    is ranked by it.
+    """
+    _seed_patrons_ranked_against_their_names()
+
+    payload = _graphql_payload(
+        f"""
+        query {{
+          allLibraryPublicPatrons(orderBy: [{{ {excluded}: ASC }}]) {{
+            name
+          }}
+        }}
+        """,
+    )
+
+    assert payload.get("data") is None, payload
+    message = json_str(payload, "errors", 0, "message")
+    assert f"Field '{excluded}' is not defined by type 'PublicPatronOrderInputType'." in message, (
+        message
+    )
+
+
 @pytest.mark.django_db
 def test_library_branches_order_empty_list_and_null_direction_no_op() -> None:
     """Spec-028 test plan - combined empty-list + null-direction no-op.

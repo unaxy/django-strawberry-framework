@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 302 done, 210 to do.
+Progress: 303 done, 213 to do.
 
 ## Done
 
@@ -1597,6 +1597,19 @@ Progress: 302 done, 210 to do.
   negative and tiny spellings that do reach it on any `DecimalField`, and the write flavors, are filed below. The
   limits are source-derived (`numeric.c`), not checked on a server. Package rows in `tests/utils/test_querysets.py`
   (a PostgreSQL stand-in alias and SQLite); spec-032 Decision 5 and the `coerce_field_value_or_none` docstring
+- [x] 558. `OrderSet` accepted `Meta.exclude` and read it nowhere, so `fields = "__all__"` with `exclude` still
+  published and ordered by the excluded column (a column the type never returns ranked rows over a real query) and an
+  exclude-only set expanded to nothing and failed at `finalize_django_types()`. The order family now honours
+  `Meta.exclude` as the filter family does (README: `exclude` means what a DRF user thinks; no upstream order surface
+  defines it, `AdvancedOrderSet` ignores it): `orders/sets.py::OrderSet._expand_meta_fields` drops a listed name, the
+  primary key included, from the `"__all__"` sweep or the declared names by exact name; `exclude` with no
+  `Meta.fields` is the sweep minus those names, `RelatedOrder` branches or not, so it needs `Meta.model`; a
+  `RelatedOrder` declared under an excluded name stays; a name matching no field drops nothing; a bare string, a
+  one-shot iterator or a non-string entry raises `ConfigurationError` (`_read_meta_exclude`, the filter family's shape
+  gate). Excluding a `ForeignObject` carrier column keeps the link, which still orders by it. Live rows in
+  `test_library_api.py` over a new fakeshop `PublicPatronOrder` (mirrors `PublicPatronType.Meta.exclude`; the public
+  patrons field takes `orderBy`), package rows in `tests/orders/test_sets.py`; spec-028, README, fakeshop README,
+  GlossaryTerm 474 and 489
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1748,10 +1761,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   a non-UTC `TIME_ZONE` (`valid_datetime`) and an aware out-of-range one under `USE_TZ=False` (`make_naive`), where
   DRF answers its own `overflow` for the other cells; upstream behaviour, decide whether the flavor maps it. Found
   fixing 381
-- [ ] 558. (robustness) `OrderSet` accepts `Meta.exclude` and ignores it: `fields = "__all__"` with `exclude` (or an
-  explicit list with `exclude`) still orders by the excluded column, and an exclude-only `OrderSet` has no fields and
-  fails at schema build; say whether the order family honours `Meta.exclude` like the filter family or refuses it at
-  class creation. Found fact-finding 400
 - [ ] 515. A declared `MultipleChoiceFilter` / `AllValuesMultipleFilter` / `TypedMultipleChoiceFilter` reaches the
   scalar catch-all and publishes `exact: String` while its form field cleans a list, so every non-empty value answers
   `FILTER_INVALID` "Enter a list of values."; probed on a text column only (a `Choices` column not probed). Found
@@ -1880,11 +1889,25 @@ tracker number are recorded there; open remainders and new defects are filed as 
   write ids): a row PostgreSQL stores as `1.50` misses `nodes(ids: ["…:1.5"])` though `node` finds it, and on
   SQLite `createOwner(keyId: "2.50")` answers "Invalid id" for the stored `2.5` while the `key` filter finds it.
   Found verifying 591
+- [ ] 534. (robustness) `OrderSetMetaclass` accepts any `Meta` key (`Meta.bogus`, a misspelt `fiels`) without a
+  word, where `DjangoType` (`types/base.py::_validate_meta`) and the write flavors
+  (`write_mixins.py::reject_unknown_meta_keys`) refuse an unknown key; a typo in an order set's narrowing passes
+  silently. Found fact-finding 558
+- [ ] 535. (robustness) A `Meta.exclude` name that matches no field drops nothing in both set families, so a typo
+  (`exclude = ("emial",)`) leaves the column filterable or orderable where `DjangoType`, the write flavors and DRF
+  refuse an unknown name; a `FilterSet` also accepts a non-string `exclude` entry (`None`, bytes) silently, which an
+  `OrderSet` refuses. Found fixing 558
+- [ ] 536. (robustness) A `FilterSet` with no `Meta.model` and a `Meta.exclude` (with or without a `RelatedFilter`)
+  raises a raw `AttributeError: 'NoneType' object has no attribute '_meta'` from `get_fields` instead of a
+  `ConfigurationError` naming the set. Found verifying 558
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 533. CHANGELOG entry for item 558: an `OrderSet` honours `Meta.exclude` (it was accepted and ignored), so a
+  set declaring it publishes fewer `orderBy` keys: a model-backed set of `RelatedOrder` branches only with `exclude`
+  now also sweeps the model's columns, and a model-less one with `exclude` raises `ConfigurationError`
 - [ ] 532. CHANGELOG entry for item 591: on PostgreSQL under Django 6.1, an id or relation filter value for a
   `DecimalField` with no `max_digits` past numeric's format (`"1e1000000"`) names no row instead of a masked error
 - [ ] 528. CHANGELOG entry for item 556: on PostgreSQL through psycopg 3 an `ArrayField` write whose list psycopg
