@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 307 done, 212 to do.
+Progress: 307 done, 213 to do.
 
 ## Done
 
@@ -1939,6 +1939,14 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 594. A model whose `Meta.db_table` is a lazy translation string (`gettext_lazy("products_category")`):
+  Django serves `all()`, `order_by()`, `filter()` and both `union()` forms over it, but
+  `utils/querysets.py::_seal_or_defect` refuses `filter()` and a baked `union()` ("query alias_refcount has
+  a non-string key") and an unbaked `all().union(all())` ("QuerySet binds a __proxy__ bound value"),
+  while `all()` and `order_by()` seal. Should the seal admit a lazy table name as the exact text it spells,
+  as it admits a `TextChoices` / `StrEnum` member (d1bb1e97), refuse it at schema build, or treat a lazy
+  `db_table` as outside the supported shapes (Django documents a string)? Pinned refused by
+  `tests/utils/test_querysets.py::test_lazy_db_table_combination_rewrite_fails_closed_typed`
 - [ ] 539. CHANGELOG entry for item 519: a served `FilterSet` filter that cannot be deep-copied (a `method=` bound
   to an object holding a lock or a cache handler, such an object in `extra`) fails the schema build with a
   `ConfigurationError` naming the set and attribute; a `ListFilter(method=...)` of that kind built and failed every
