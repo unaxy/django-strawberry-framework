@@ -16,7 +16,6 @@ resolved filter instances, not from a parallel map).
 from __future__ import annotations
 
 import copy
-import weakref
 from collections import OrderedDict
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -188,6 +187,7 @@ from .inputs import (
     _field_specs,
     _RangeFormPatch,
     filter_lookup_table,
+    leaf_gate_path,
     normalize_input_value,
 )
 
@@ -820,17 +820,15 @@ class FilterGenerationProvenance:
       ``override_generated`` leaves, which are ineligible by origin. The STORED
       bit is provenance/audit only: eligibility and the invocation-time distinct
       suppression both read the instance's live ``.distinct``, never this record.
-    - ``expanded_from`` -- expansion breadcrumbs; empty for a non-expanded
-      leaf. ``_expand_related_filter`` copies APPEND the child filter's name and
-      INHERIT the child's ``origin`` + ``framework_added_distinct`` (an expanded
-      copy of a DECLARED child stays ``origin="declared"``). An expanded leaf gets
-      no candidate row (``_candidate_metadata_for``); ``FilterSet._expansion_origin``
-      reads the breadcrumbs to name the child filter a copy answers for.
+
+    A ``RelatedFilter`` expansion's copy carries its child filter's record
+    unchanged (the deep copy holds it), so an expanded copy of a DECLARED child
+    stays ``origin="declared"``; where the copy came from is its own record
+    (``ChildProjection``, read through ``_expansion_record``), not this one.
     """
 
     origin: FilterOrigin
     framework_added_distinct: bool = False
-    expanded_from: tuple[str, ...] = ()
 
 
 def filter_generation_provenance(filter_instance: object) -> FilterGenerationProvenance | None:
@@ -1175,8 +1173,7 @@ class CandidateFilterMetadata:
       never ``None``; a ``PathResolutionError`` while classifying such a leaf is
       a framework/configuration defect and is allowed to RAISE (never caught).
     - ``provenance`` -- the frozen ``FilterGenerationProvenance`` record stamped
-      on the leaf at generation (origin + framework-added-``distinct`` bit +
-      expansion breadcrumbs).
+      on the leaf at generation (origin + framework-added-``distinct`` bit).
     - ``eligible`` -- the LEAF-INTRINSIC half of the verdict: whether THIS leaf's own
       shape admits the row-preserving rewrite. ``True`` requires: a
       framework-generated origin (guaranteed here by construction, since only such
@@ -1355,7 +1352,7 @@ def _candidate_metadata_for(
     (consumer-returned) instances are NEVER fed to the strict classifier, since
     their ``field_name`` may legitimately be an annotation / method-owned
     non-model path and raising there would break a working declaration. ``None``
-    too for a ``RelatedFilter`` expansion (``expanded_from`` breadcrumbs), which
+    too for a ``RelatedFilter`` expansion (``_expansion_record``), which
     answers through its branch and never reads a row
     (``CandidateFilterMetadata``).
 
@@ -1381,7 +1378,7 @@ def _candidate_metadata_for(
     provenance = filter_generation_provenance(filter_instance)
     if provenance is None or provenance.origin not in _FRAMEWORK_GENERATED_ORIGINS:
         return None
-    if provenance.expanded_from:
+    if _expansion_record(filter_instance) is not None:
         return None
     path_plan = classify_path(model, _bound_field_name(filter_instance))
     eligible = (
@@ -1528,17 +1525,50 @@ class FilterSetMetaclass(_FilterSetMetaclassBase):
 class ChildProjection:
     """Where an expanded leaf came from: the child filter set, its filter's name, the branch.
 
+    The one record of which child filter a ``RelatedFilter`` expansion's copy
+    stands for, projected or rebound alike: ``_expand_related_filter`` stamps it
+    on the copy (``_expansion_record`` reads it), so it rides the copy's
+    ``deepcopy`` and ``pickle`` and a ``get_filters()`` override returning
+    fresh copies under keys of its own keeps it. Every question about the copy's
+    child filter reads it: the gates its nested twin fires
+    (``FilterSet._leaf_gates``), the declaration a refusal names
+    (``_leaf_declaration``), whether it is a declared head
+    (``inputs.py::_is_declared_head``), and that it gets no candidate row
+    (``_candidate_metadata_for``).
+
     ``branch`` is the parent's ``RelatedFilter`` attribute the leaf was expanded
     from. For an owner-bound leaf it is where the leaf runs: the declared hop
     whose target visibility scopes the child rows and whose relation and
     explicit ``queryset=`` restrict the parent (``FilterSet._projection_hop``).
-    A rebound copy's record (``_record_rebound_origin``) only names its
-    declaration (``_leaf_declaration``).
     """
 
     filterset: type[FilterSet]
     name: str
     branch: str
+
+    def __deepcopy__(self, _memo: dict[int, object]) -> Self:
+        """Return this record: it is immutable, and django-filter deep-copies every filter per request."""
+        return self
+
+    def holds_in(self, owner: type[FilterSet]) -> bool:
+        """Whether ``owner`` expands the copy: it declares ``branch`` into ``filterset``.
+
+        A copy a consumer moves onto another set (a class attribute borrowed from
+        a ``get_filters()`` result) is that set's own filter there.
+        """
+        declaration = owner.related_filters.get(self.branch)
+        return declaration is not None and declaration.filterset is self.filterset
+
+
+# Private instance-attribute slot an expanded copy's ``ChildProjection`` is
+# stamped under, beside ``_GENERATION_PROVENANCE_ATTR``: in the instance
+# ``__dict__``, so ``deepcopy`` and ``pickle`` carry it.
+_EXPANSION_ATTR = "_dst_expansion"
+
+
+def _expansion_record(filter_instance: object) -> ChildProjection | None:
+    """Return the ``ChildProjection`` an expanded copy carries, ``None`` for any other filter."""
+    return getattr(filter_instance, _EXPANSION_ATTR, None)
 
 
 class ProjectedChildFilter(Filter):
@@ -1587,7 +1617,6 @@ class ProjectedChildFilter(Filter):
     class-level filter's, exactly what the plain copy answered.
     """
 
-    _projection: ChildProjection
     # django-filter's ``BaseFilterSet.__init__`` stamps ``filter_.parent = self`` on every
     # per-request copy (never on the class-level template), so the attribute is absent until
     # bound; only a package ``FilterSet`` expands a ``RelatedFilter``, so the parent is one.
@@ -1607,6 +1636,11 @@ class ProjectedChildFilter(Filter):
         reduces the same way.
         """
         return (_new_projected, (self._projected_from,), truth.instance_state(self))
+
+    @property
+    def _projection(self) -> ChildProjection:
+        """The child filter this copy runs (``_expansion_record``), stamped when it was expanded."""
+        return require_instance(_expansion_record(self), ChildProjection)
 
     def _child(self) -> FilterSet:
         """Return the child filter set instance this leaf runs in, shared per parent instance."""
@@ -1691,37 +1725,6 @@ def _projection_child_filter(projection: ChildProjection) -> Filter:
     return projection.filterset.get_filters()[projection.name]
 
 
-# Where each rebound expanded copy came from: the copy ``_expand_related_filter``
-# makes of a child filter no owner binds (a projected copy carries its own
-# ``_projection``). Held beside the copy, keyed by its identity and dropped
-# with it, so the copy's state, deepcopy and pickle carry nothing new; every
-# reader holds the class-level copy ``get_filters()`` returned, never a
-# per-request deepcopy of it.
-_REBOUND_ORIGINS: dict[int, tuple[weakref.ReferenceType[Filter], ChildProjection]] = {}
-
-
-def _record_rebound_origin(rebound: Filter, origin: ChildProjection) -> None:
-    """Record that ``rebound`` is the copy of ``origin``'s child filter under its branch."""
-    key = id(rebound)
-
-    def _drop(ref: weakref.ReferenceType[Filter]) -> None:
-        entry = _REBOUND_ORIGINS.get(key)
-        if entry is not None and entry[0] is ref:
-            del _REBOUND_ORIGINS[key]
-
-    _REBOUND_ORIGINS[key] = (weakref.ref(rebound, _drop), origin)
-
-
-def _expansion_record(filter_instance: Filter) -> ChildProjection | None:
-    """Return where an expanded copy came from: its projection, or its recorded rebound origin."""
-    if isinstance(filter_instance, ProjectedChildFilter):
-        return filter_instance._projection
-    entry = _REBOUND_ORIGINS.get(id(filter_instance))
-    if entry is None or entry[0]() is not filter_instance:
-        return None
-    return entry[1]
-
-
 @dataclass(frozen=True)
 class _LeafDeclaration:
     """The declaration a filter leaf stands for, as an error message names it.
@@ -1775,13 +1778,16 @@ def _leaf_declaration(
     by hop to the child filter it answers for (``_projection_child_filter``, the
     lookup the visibility and gate walks share), each hop named ``<set>.<branch>``
     by the set it leaves; the first hop's set is ``filterset_cls``, the bare branch
-    when the caller builds for no set.
+    when the caller builds for no set. A copy ``filterset_cls`` does not expand
+    (``ChildProjection.holds_in``) is its own declaration there.
     """
     through: list[str] = []
     owner = filterset_cls
     current = filter_instance
     attribute: str | None = None
-    while (projection := _expansion_record(current)) is not None:
+    while (projection := _expansion_record(current)) is not None and (
+        owner is None or projection.holds_in(owner)
+    ):
         through.append(
             f"{truth.name(owner)}.{projection.branch}" if owner is not None else projection.branch,
         )
@@ -2374,10 +2380,10 @@ def _expand_related_filter(
         field_copy = copied_declared_filter(field, target_filterset, child_name, via=via)
         field_copy.field_name = f"{relation}__{field.field_name}"
         origin = ChildProjection(target_filterset, child_name, filter_name)
+        setattr(field_copy, _EXPANSION_ATTR, origin)
         if _owner_bound_child(target_filterset, field):
             field_copy.__class__ = _projected_class_for(type(field_copy))  # truth: ok class store
             projected = require_instance(field_copy, ProjectedChildFilter)
-            projected._projection = origin
             # An instance ``filter`` (``_own_filter``: django-filter's ``method`` setter
             # installs a ``FilterMethod``, the package's list filters theirs the same
             # way, a consumer ``__init__`` any callable) shadows the class's per
@@ -2385,21 +2391,10 @@ def _expand_related_filter(
             # The child's own filter, inside the child instance, keeps its shadow;
             # the projection's class-level ``filter`` runs here.
             _ = truth.instance_state(projected).pop("filter", None)
-        else:
-            _record_rebound_origin(field_copy, origin)
-        # Inherit the CHILD leaf's frozen provenance record and APPEND the child
-        # filter's name as an expansion breadcrumb, without mutating the child's
-        # record (a new frozen record via ``replace``). Origin +
-        # framework_added_distinct are inherited unchanged, so an expanded copy of
-        # a DECLARED child stays ``origin="declared"`` and an unstamped child
-        # (e.g. a consumer-returned object) yields an unstamped copy -- the
-        # deepcopy carried no record and none is added, so it fails closed.
-        child_record = filter_generation_provenance(field)
-        if child_record is not None:
-            _stamp_generation_provenance(
-                field_copy,
-                replace(child_record, expanded_from=(*child_record.expanded_from, child_name)),
-            )
+        # The deep copy holds the CHILD leaf's frozen provenance record as is, so
+        # an expanded copy of a DECLARED child stays ``origin="declared"`` and an
+        # unstamped child (e.g. a consumer-returned object) yields an unstamped
+        # copy, which fails closed.
         expanded[new_name] = field_copy
     return expanded
 
@@ -5029,27 +5024,25 @@ class FilterSet(
         """Return the gates the nested twin of each supplied leaf's ORM path fires (``_leaf_gates``)."""
         return tuple(
             gate
-            for name, filter_instance in cls._supplied_leaf_filters(input_value)
-            for gate in cls._leaf_gates(name, filter_instance)
+            for _name, filter_instance in cls._supplied_leaf_filters(input_value)
+            for gate in cls._leaf_gates(filter_instance)
         )
 
     @classmethod
-    def _leaf_gates(
-        cls,
-        name: str,
-        filter_instance: Filter,
-    ) -> tuple[tuple[type[object], str], ...]:
-        """Return the gates the nested twin of leaf ``name``'s ORM path fires beyond its gate path's.
+    def _leaf_gates(cls, filter_instance: Filter) -> tuple[tuple[type[object], str], ...]:
+        """Return the gates the nested twin of a leaf's ORM path fires beyond its gate path's.
 
-        The leaf's gate path already fires its own gate and, for a leaf of a
-        child set reached flat, the projection's branch gate and the child
-        filter's own gate (``_fire_flat_relation_path_gates``). What remains is
-        the walk of the filter's own path in the set that declares it, the
-        gates the nested twin's run of that set fires:
+        The leaf's gate path fires its own gate (and, through
+        ``_fire_flat_relation_path_gates``, the hops its spelling walks). What
+        remains is the walk of the filter's own path in the set that declares it,
+        the gates the nested twin's run of that set fires:
 
-        - a ``ProjectedChildFilter``, or an expanded copy of a child filter
-          (``_expansion_origin``), answers for its child filter in the child
-          set, recursively;
+        - an expanded copy (``_expansion_record``) this set expands
+          (``ChildProjection.holds_in``), projected or rebound and under
+          whatever key it is held, fires its branch's gate and then every gate
+          its child filter fires supplied on the child set
+          (``_supplied_leaf_gates``), as ``<branch>: {<child filter>: ...}``
+          does; a copy borrowed from another set is this set's own leaf;
         - any other leaf walking declared hops (``_flat_leaf_walk``) fires
           ``utils/permissions.py::relation_path_gates`` over its ``field_name``:
           each walked branch gate and the last target set's gate for the path
@@ -5059,19 +5052,18 @@ class FilterSet(
           holding a ``filter`` of its own included (``_own_filter``: a
           ``method=``, or a callable stored on the instance).
         """
-        if isinstance(filter_instance, ProjectedChildFilter):
-            projection = filter_instance._projection
+        projection = _expansion_record(filter_instance)
+        if projection is not None and projection.holds_in(cls):
             child_cls = projection.filterset
-            return child_cls._leaf_gates(
-                projection.name,
-                _projection_child_filter(projection),
+            return (
+                (cls, projection.branch),
+                *child_cls._supplied_leaf_gates(
+                    projection.name,
+                    _projection_child_filter(projection),
+                ),
             )
         if cls._flat_leaf_walk(filter_instance) is None:
             return ()
-        origin = cls._expansion_origin(name, filter_instance)
-        if origin is not None:
-            child_cls, child_name = origin
-            return child_cls._leaf_gates(child_name, child_cls.get_filters()[child_name])
         return relation_path_gates(
             cls,
             _bound_field_name(filter_instance),
@@ -5080,29 +5072,34 @@ class FilterSet(
         )
 
     @classmethod
-    def _expansion_origin(
+    def _supplied_leaf_gates(
         cls,
         name: str,
         filter_instance: Filter,
-    ) -> tuple[type[FilterSet], str] | None:
-        """Return the child set and child filter name an expanded copy named ``name`` was made from.
+    ) -> tuple[tuple[type[object], str], ...]:
+        """Return every gate leaf ``name`` of this set fires when an input of this set supplies it.
 
-        ``_expand_related_filter`` names a copy ``<branch>__<child name>`` and
-        appends the child name to its provenance breadcrumb, so the last
-        breadcrumb names the child filter and the rest of ``name`` the branch.
-        ``None`` for a filter that is not such a copy, and for one held under a
-        name no declared branch prefixes (a consumer re-declaring a copy).
+        An expanded copy this set expands (``ChildProjection.holds_in``) fires
+        its branch's and its child filter's (``_leaf_gates``), as its fully
+        nested twin does; any other leaf, a copy borrowed from another set
+        included, fires its gate path's gate (``inputs.py::leaf_gate_path``),
+        the hops that path walks (``utils/permissions.py::relation_path_gates``,
+        what ``_fire_flat_relation_path_gates`` fires) and its own walk's.
         """
-        record = filter_generation_provenance(filter_instance)
-        if record is None or not record.expanded_from:
-            return None
-        child_name = record.expanded_from[-1]
-        branch = name.removesuffix(f"{LOOKUP_SEP}{child_name}")
-        declaration = cls.related_filters.get(branch)
-        child_cls = declaration.filterset if declaration is not None else None
-        if child_cls is None:
-            return None
-        return child_cls, child_name
+        projection = _expansion_record(filter_instance)
+        if projection is not None and projection.holds_in(cls):
+            return cls._leaf_gates(filter_instance)
+        gate_path = leaf_gate_path(cls, name, filter_instance)
+        return (
+            (cls, gate_path),
+            *relation_path_gates(
+                cls,
+                gate_path,
+                related_attr=cls._permission.traversal.related_attr,
+                target_attr=cls._permission.target_attr,
+            ),
+            *cls._leaf_gates(filter_instance),
+        )
 
     @classmethod
     async def _derive_flat_hop_visibility_async(

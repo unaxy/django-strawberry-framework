@@ -23,6 +23,7 @@ import pytest
 import strawberry
 from apps.library import models
 from apps.library import schema as library_schema
+from apps.library.filters import PrintingFilter, SeriesFilter
 from apps.library.filters_genre import GenreFilter
 from apps.products.services import create_users
 from asgiref.sync import sync_to_async
@@ -4334,6 +4335,46 @@ def test_library_series_hop_compares_the_handle_on_the_rows_its_type_reads(
     edges = json_list(data, "allLibraryPrintingsConnection", "edges")
     assert [json_int(edge, "node", "runSize") for edge in edges] == run_sizes
     assert len(captured.captured_queries) == 1
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("spelling", ["flat-handle", "nested-handle"])
+@pytest.mark.parametrize(
+    ("gate_owner", "gate"),
+    [(SeriesFilter, "handle"), (PrintingFilter, "in_series")],
+    ids=["child-gate", "branch-gate"],
+)
+def test_library_series_hop_handle_is_gated_as_its_nested_spelling(
+    monkeypatch: pytest.MonkeyPatch,
+    spelling: str,
+    gate_owner: type[FilterSet],
+    gate: str,
+) -> None:
+    """``inSeriesHandle`` fires the gates ``inSeries: {handle: ...}`` fires.
+
+    ``PrintingFilter.in_series`` hops over ``series`` under an attribute of its
+    own, so the flat copy of ``SeriesFilter.handle`` spells no relation; it
+    still fires the branch's ``check_in_series_permission`` and the child
+    filter's ``check_handle_permission``, and a denying gate refuses either
+    spelling before any row is read.
+    """
+    _series_ids()
+
+    def deny(_self: FilterSet, _request: object) -> bool:
+        return False
+
+    # ``raising=False``: the gates are opt-in hooks neither fixture set declares.
+    monkeypatch.setattr(gate_owner, f"check_{gate}_permission", deny, raising=False)
+    argument = _SERIES_HOP_FILTERS[spelling].replace("VALUE", json.dumps("SER-Night Shade"))
+    with CaptureQueriesContext(connection) as captured:
+        payload = _graphql_payload(
+            "query { " + _HOUSE_ROOTS["printings"].replace("FILTER", argument) + " }",
+        )
+    assert payload["data"] is None, payload
+    assert json_str(payload, "errors", 0, "message") == (
+        f"Not authorized to use {gate} on {gate_owner.__name__}."
+    )
+    assert captured.captured_queries == []
 
 
 @pytest.mark.django_db
