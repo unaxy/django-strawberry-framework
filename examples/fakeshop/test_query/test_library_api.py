@@ -42,7 +42,7 @@ from django.test import Client, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import path
 from django.utils.functional import SimpleLazyObject
-from django_filters import CharFilter, Filter, TypedChoiceFilter
+from django_filters import CharFilter, Filter, NumberFilter, TypedChoiceFilter
 from graphql_client import (
     DeleteAfterAuthorization,
     JSONObject,
@@ -89,6 +89,7 @@ from django_strawberry_framework.filters import (
     FilterInput,
     FilterSet,
     GlobalIDFilter,
+    ListFilter,
     RelatedFilter,
 )
 from django_strawberry_framework.permissions import apply_cascade_permissions
@@ -10460,6 +10461,157 @@ def test_library_parent_connection_applies_an_omitted_child_filter_nowhere_over_
     assert codes == named_answer == list(case.expected)
     assert snapshot is not None
     assert "books__status" in snapshot.deferred_copies
+
+
+class _IntegerMethodFilter(Filter):
+    """A consumer ``Filter`` subclass declaring its ``field_class`` at class level."""
+
+    field_class = forms.IntegerField
+
+
+def _filter_title_among(
+    _filterset: FilterSet,
+    queryset: QuerySet[models.Book],
+    name: str,
+    value: object,
+) -> QuerySet[models.Book]:
+    """A ``method=`` filter for a list value: ``title`` is one of the cleaned values."""
+    return queryset.filter(**{f"{name}__in": value})
+
+
+def _filter_pk(
+    _filterset: FilterSet,
+    queryset: QuerySet[models.Book],
+    _name: str,
+    value: object,
+) -> QuerySet[models.Book]:
+    """A ``method=`` filter under a name that is no column: the primary key is the value."""
+    return queryset.filter(pk=value)
+
+
+class _MethodSpellingCase(NamedTuple):
+    """One ``method=`` spelling the no-form-field refusal advises, and what it answers."""
+
+    declared: Callable[[], Filter]
+    variable_type: str
+    # The variable's value; ``None`` sends the primary key of the book titled ``A``. A filter
+    # declared under a name that is no column is typed from the form field its class builds.
+    value: str | list[str] | None
+    expected: tuple[str, ...]
+
+
+_METHOD_SPELLING_CASES: dict[str, _MethodSpellingCase] = {
+    "typed-primitive-char": _MethodSpellingCase(
+        lambda: CharFilter(field_name="title", method="filter_title"),
+        "String",
+        "A",
+        ("A",),
+    ),
+    "typed-primitive-number": _MethodSpellingCase(
+        lambda: NumberFilter(field_name="pk", method="filter_title"),
+        "Int",
+        None,
+        ("A",),
+    ),
+    "typed-primitive-list": _MethodSpellingCase(
+        lambda: ListFilter(field_name="title", method="filter_title_among"),
+        "[String!]",
+        ["A", "C"],
+        ("A", "C"),
+    ),
+    "typed-primitive-number-no-column": _MethodSpellingCase(
+        lambda: NumberFilter(method="filter_pk"),
+        "Decimal",
+        None,
+        ("A",),
+    ),
+    "filter-subclass-field-class": _MethodSpellingCase(
+        lambda: _IntegerMethodFilter(method="filter_pk"),
+        "Int",
+        None,
+        ("A",),
+    ),
+}
+
+
+def _method_spelling_value(case: _MethodSpellingCase, book: models.Book) -> object:
+    """The case's variable value; ``None`` sends ``book``'s primary key (as text for ``Decimal``)."""
+    if case.value is not None:
+        return case.value
+    pk = pk_of(book)
+    return str(pk) if case.variable_type == "Decimal" else pk
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("case_id", list(_METHOD_SPELLING_CASES))
+def test_library_method_filter_spellings_the_refusal_advises_filter_over_http(
+    case_id: str,
+) -> None:
+    """Each spelling the no-form-field ``method=`` refusal advises serves a typed input.
+
+    A typed filter primitive carrying the method (``CharFilter``, ``NumberFilter``,
+    ``ListFilter`` for a list value) or a ``Filter`` subclass declaring ``field_class``
+    at class level builds its form field unbound, so the schema builds, the variable
+    declared as the case's type is accepted, and the method keeps the books it matches.
+    """
+    case = _METHOD_SPELLING_CASES[case_id]
+    branch = models.Branch.objects.create(name="Spelling", city="Boston")
+    shelf = models.Shelf.objects.create(code="S-M", topic="general", branch=branch)
+    book_a = models.Book.objects.create(title="A", shelf=shelf)
+    models.Book.objects.create(title="B", shelf=shelf)
+    models.Book.objects.create(title="C", shelf=shelf)
+    meta = type("Meta", (), {"model": models.Book, "fields": []})
+    method_filter = type(
+        "MethodSpellingBookFilter",
+        (FilterSet,),
+        {
+            "match": case.declared(),
+            "filter_title": _filter_title,
+            "filter_title_among": _filter_title_among,
+            "filter_pk": _filter_pk,
+            "Meta": meta,
+        },
+    )
+
+    registry.clear()
+    try:
+
+        class HolderMethodSpellingBookType(DjangoType):
+            class Meta:
+                model = models.Book
+                fields = ("id", "title")
+                interfaces = (relay.Node,)
+                filterset_class = method_filter
+                name = "HolderMethodSpellingBookType"
+
+        @strawberry.type
+        class Query:
+            books: DjangoConnection[HolderMethodSpellingBookType] = DjangoConnectionField(
+                HolderMethodSpellingBookType,
+            )
+
+        finalize_django_types()
+        response = _post_holder(
+            DjangoSchema(query=Query, config=strawberry_config()),
+            f"""
+            query ($v: {case.variable_type}) {{
+              books(first: 10, filter: {{ match: {{ exact: $v }} }}) {{
+                edges {{ node {{ title }} }}
+              }}
+            }}
+            """,
+            variables={"v": _method_spelling_value(case, book_a)},
+        )
+    finally:
+        registry.clear()
+
+    assert response.status_code == 200
+    payload = response_json(response)
+    assert "errors" not in payload, payload
+    titles = [
+        json_at(edge, "node", "title") for edge in json_list(payload, "data", "books", "edges")
+    ]
+    assert titles == list(case.expected)
 
 
 def _absent_grandchild_filter_holder() -> tuple[strawberry.Schema, type[FilterSet]]:

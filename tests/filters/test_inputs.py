@@ -684,12 +684,16 @@ def test_convert_filter_to_input_annotation_rejects_non_choices_derived_enum() -
 
 
 def test_convert_filter_to_input_annotation_rejects_unknown_method_filter() -> None:
-    """A `Filter(method=...)` with no exposed form field raises ConfigurationError."""
+    """A ``method=`` filter whose form field cannot be built on a copy raises ConfigurationError.
 
-    # Construct a minimal stub that mimics a `django_filters.Filter` whose
-    # `method` is set but whose `field` is `None` (the unknown-form-shape
-    # case). Mutating `Filter.field` globally would leak the override
-    # across tests, so we build a per-test subclass instead.
+    The real shape is a filter whose ``field`` needs the bound ``FilterSet``, such as
+    ``AllValuesMultipleFilter`` reading the per-request ``model``; unbound, the copy
+    builds no form field, so nothing can type the input. A bare ``Filter(method=...)``
+    is not one: it builds the base ``forms.Field`` and types as ``str``.
+    """
+
+    # A stand-in with ``method`` set and no form field to read, local to this test so no
+    # shared filter class is patched.
     def _passthrough_method(qs: object, _name: str, _value: object) -> object:
         return qs
 
@@ -700,14 +704,8 @@ def test_convert_filter_to_input_annotation_rejects_unknown_method_filter() -> N
         lookup_expr = "exact"
 
     f = _NoFieldFilter()
-    # Patch isinstance check chain by intercepting `__class__`-keyed
-    # converter dispatch is not feasible without bigger plumbing; the
-    # converter walks `isinstance(f, ...)` against the package's
-    # ``ListFilter`` / ``ArrayFilter`` / ``TypedFilter`` / ``ChoiceFilter``,
-    # and falls through to the catch-all branch when none match. Since
-    # `_NoFieldFilter` is not a subclass of any of those, it hits the
-    # catch-all where `method is not None and form_field is None`
-    # raises.
+    # It subclasses none of the filter kinds the converter dispatches on, so it reaches
+    # the catch-all, where a ``method`` with no form field raises.
     with pytest.raises(ConfigurationError):
         # basedpyright: a stand-in filter carrying only the slots the code under test reads;
         # convert_filter_to_input_annotation types the parameter as Filter
@@ -727,8 +725,20 @@ def test_convert_filter_to_input_annotation_malformed_filter_diagnostics() -> No
         # basedpyright: the duck-typed filter with no form field is the malformed input under
         # test; convert_filter_to_input_annotation types the parameter as Filter
         convert_filter_to_input_annotation(NoFieldFilter(), None)  # pyright: ignore[reportArgumentType]
-    assert str(exc_info.value).startswith("Filter(method='filter_custom') on <")
+    assert str(exc_info.value).startswith("NoFieldFilter(method='filter_custom') on <")
     assert "exposes no form field" in str(exc_info.value)
+
+    # ``AllValuesMultipleFilter`` reads the per-request ``model`` to build its field, so
+    # unbound it builds none; the refusal advises the two spellings that build one.
+    unbound = AllValuesMultipleFilter(field_name="city", method="filter_custom")
+    with pytest.raises(ConfigurationError) as exc_info:
+        convert_filter_to_input_annotation(unbound, None)
+    assert str(exc_info.value) == (
+        f"AllValuesMultipleFilter(method='filter_custom') on {unbound!r} exposes no form "
+        "field; put the method on a typed filter primitive (`CharFilter(method=...)`, "
+        "`NumberFilter(method=...)`, `ListFilter(method=...)` for a list value, ...) or on a "
+        "`Filter` subclass declaring `field_class` at class level."
+    )
 
     # A model field with no ``choices`` is what drives the ChoiceFilter branch to
     # its rejection, which is the diagnostic under test.
