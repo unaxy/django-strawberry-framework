@@ -1493,6 +1493,7 @@ def _parent_table(shape: str) -> str:
     return _HOOK_SHAPES[shape][1]._meta.db_table
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 @pytest.mark.parametrize("shape", ["fk", "m2m"])
 @pytest.mark.parametrize(
@@ -1549,6 +1550,7 @@ def test_nested_keyset_window_pages_under_the_hook_order(
         )
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 @pytest.mark.parametrize("shape", ["fk", "m2m"])
 @pytest.mark.parametrize(
@@ -1629,6 +1631,7 @@ def test_hook_ordered_cursor_bytes_match_across_root_window_and_per_parent_paths
     assert len(_table_statements(captured, _child_table(shape))) == 1, captured.captured_queries
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 def test_hook_ordered_nested_total_count_stays_pre_seek_on_page_two() -> None:
     """A counted page 2 under the hook order: rows after the cursor, totals of the whole set."""
@@ -1651,6 +1654,7 @@ def test_hook_ordered_nested_total_count_stays_pre_seek_on_page_two() -> None:
     assert len(_table_statements(captured, "library_issue")) == 1, captured.captured_queries
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 def test_hook_ordered_single_parent_fast_path_pages_on() -> None:
     """One parent: page 1 rides the single-parent fast path, its cursor seeks page 2 right."""
@@ -1679,6 +1683,7 @@ def test_hook_ordered_single_parent_fast_path_pages_on() -> None:
     assert ["OVER (" in first_sql[0], "OVER (" in second_sql[0]] == [False, True]
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 @pytest.mark.parametrize(
     ("optimizer", "strictness"),
@@ -1731,6 +1736,7 @@ _RELATION_HOOK_ORDERS: dict[str, tuple[str, type[Model], tuple[str, ...]]] = {
 }
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 @pytest.mark.parametrize(
     ("optimizer", "strictness"),
@@ -1770,6 +1776,7 @@ def test_relation_name_hook_order_stays_unanchorable_under_a_related_ordering(
     ]
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 @pytest.mark.parametrize("shape", ["fk", "m2m"])
 @pytest.mark.parametrize(
@@ -1798,6 +1805,7 @@ def test_random_hook_order_on_an_offset_relation_is_an_unplanned_access_under_st
     ]
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 @pytest.mark.parametrize("kind", ["garbage", "offset", "tampered"])
 @pytest.mark.parametrize("shape", ["fk", "m2m"])
@@ -1830,6 +1838,7 @@ def test_malformed_cursor_on_a_refused_keyset_relation_is_the_cursor_error_under
     ]
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 @pytest.mark.parametrize("shape", ["fk", "m2m"])
 def test_hook_order_cursor_on_a_refused_keyset_relation_keeps_its_per_parent_page(
@@ -1854,6 +1863,7 @@ def test_hook_order_cursor_on_a_refused_keyset_relation_keeps_its_per_parent_pag
     assert _labels(shape, json_at(page, "A")) == ["2", "1"]
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 @pytest.mark.parametrize("shape", ["fk", "m2m"])
 def test_cursor_of_another_order_is_the_cursor_error_nested(shape: str) -> None:
@@ -1877,6 +1887,7 @@ def test_cursor_of_another_order_is_the_cursor_error_nested(shape: str) -> None:
     ]
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db(transaction=True)
 async def test_async_nested_keyset_window_pages_under_the_hook_order() -> None:
     """The async twin of the first hook-order row: page 2 serves the rest of ``A``."""
@@ -1983,6 +1994,7 @@ def _root_flags(*pages: JSONObject) -> list[list[bool]]:
     ]
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 @pytest.mark.parametrize("hook", list(_REVERSED_ROOT_ORDERS))
 def test_reversed_hook_root_pages_forward_every_row_once(hook: str) -> None:
@@ -2010,6 +2022,7 @@ def test_reversed_hook_root_pages_forward_every_row_once(hook: str) -> None:
     assert [len(first_captured), len(second_captured)] == [1, 1]
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 @pytest.mark.parametrize("hook", list(_REVERSED_ROOT_ORDERS))
 def test_reversed_hook_root_pages_backward_every_row_once(hook: str) -> None:
@@ -2029,6 +2042,7 @@ def test_reversed_hook_root_pages_backward_every_row_once(hook: str) -> None:
     assert [len(tail_captured), len(head_captured)] == [1, 1]
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 def test_reversed_non_unique_hook_order_compiles_the_pk_tiebreak_descending() -> None:
     """``order_by("title").reverse()`` pages under ``title DESC, id DESC`` on both pages.
@@ -2058,6 +2072,7 @@ _REVERSED_NESTED_PAGES: list[
 ]
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 @pytest.mark.parametrize("shape", ["fk", "m2m"])
 @pytest.mark.parametrize(("hook", "a_pages", "b_pages"), _REVERSED_NESTED_PAGES)
@@ -2100,6 +2115,7 @@ def test_reversed_hook_nested_window_pages_under_the_reversed_order(
         ] == [1, 1], captured.captured_queries
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 @pytest.mark.parametrize("shape", ["fk", "m2m"])
 @pytest.mark.parametrize(
@@ -2138,6 +2154,7 @@ def test_reversed_hook_nested_offset_window_matches_the_per_parent_page(
     assert child_statements == [1, 2]
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 def test_order_by_beside_a_reversed_hook_pages_every_row_once() -> None:
     """``orderBy:`` composes with the hook's ``.reverse()`` and its cursors replay.
@@ -2297,6 +2314,7 @@ def _extra_hook_schema(
     )
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 @pytest.mark.parametrize(("spelling", "reverse", "keyset"), _EXTRA_PAGING_CASES)
 def test_extra_hook_root_pages_forward_every_row_once(
@@ -2326,6 +2344,7 @@ def test_extra_hook_root_pages_forward_every_row_once(
     assert [len(first_captured), len(second_captured)] == [1, 1]
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 @pytest.mark.parametrize(("spelling", "reverse", "keyset"), _EXTRA_PAGING_CASES)
 def test_extra_hook_root_pages_backward_every_row_once(
@@ -2360,6 +2379,7 @@ def _random_then_issue_pk_order_sql(pk_ordering: str) -> str:
     return sql[sql.index("ORDER BY") :]
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 @pytest.mark.parametrize(
     ("reverse", "pk_ordering"),
@@ -2398,6 +2418,7 @@ def test_random_extra_hook_order_keeps_the_pk_tiebreaker_at_the_root(
     assert order in captured[0]["sql"], captured[0]["sql"]
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 @pytest.mark.parametrize("shape", ["fk", "m2m"])
 @pytest.mark.parametrize(("spelling", "reverse", "keyset"), _EXTRA_PAGING_CASES)
@@ -2452,6 +2473,7 @@ def _ordered_statements(captured: CaptureQueriesContext, shape: str) -> list[str
     return [sql for sql in _table_statements(captured, _child_table(shape)) if " ORDER BY " in sql]
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 @pytest.mark.parametrize("shape", ["fk", "m2m"])
 @pytest.mark.parametrize("spelling", _RAW_EXTRA_SPELLINGS)
@@ -2517,6 +2539,7 @@ def test_raw_extra_hook_term_compiles_as_django_compiles_it(shape: str, spelling
     ] == [1, 1, 1], (window, last_window)
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 @pytest.mark.parametrize(
     ("optimizer", "strictness"),
@@ -2557,6 +2580,7 @@ def test_unanchorable_extra_hook_order_raises_the_root_keyset_error_nested(
     ] == [(_UNANCHORABLE_ORDER, ["parents", 0, f"{relation}Connection"])]
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("reverse", [False, True], ids=["forward", "reversed"])
 async def test_async_extra_hook_keyset_pages_under_the_extra_order(*, reverse: bool) -> None:
@@ -2661,6 +2685,7 @@ def _reading_list_labels(labels: dict[int, str], page: JSONObject) -> list[str]:
     ]
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 @pytest.mark.parametrize(
     ("cursor_field", "pages"),
@@ -2693,6 +2718,7 @@ def test_bare_reverse_of_a_meta_ordering_pages_every_row_once(
     ] == [True, False]
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 def test_reversed_random_hook_order_serves_every_row_under_a_descending_tiebreak() -> None:
     """``order_by("?").reverse()`` keeps ``"?"`` (it has no direction) and flips the pk.
@@ -2861,6 +2887,7 @@ def _twin_names(desk_page: JSONObject, specimen_page: JSONObject) -> list[list[s
     ]
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 def test_one_relation_name_windowed_twice_keeps_each_windows_cursor_vocabulary() -> None:
     """Both ``childrenConnection`` windows stay batched and mint under their own order.
@@ -2907,6 +2934,7 @@ def test_one_relation_name_windowed_twice_keeps_each_windows_cursor_vocabulary()
         assert statements == [1, 2], captured.captured_queries
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("desks_first", [True, False], ids=["desks-first", "specimens-first"])
 async def test_async_one_relation_name_windowed_twice_keeps_each_windows_cursor_vocabulary(

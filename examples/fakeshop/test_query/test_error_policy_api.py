@@ -44,7 +44,8 @@ The scaffolding is one probe-schema factory over fakeshop's own ``Query`` /
 ``Mutation``, extended with resolvers that raise on demand - a real schema
 carrying deliberate failures, rather than a synthetic one that would not exercise
 the framework's own rejection sites. It is built per request rather than cached
-because the acceptance tier reloads ``config.schema`` before every test.
+because the acceptance tier rebuilds ``config.schema`` whenever a test leaves the
+registry stale.
 
 ``tests/test_error_policy.py`` holds what no request can express: the policy
 object's validation and precedence ladder, the correlation-id format sampled
@@ -225,9 +226,9 @@ class _ProbeSchemaOptions(TypedDict, total=False):
 def _probe_schema(**schema_kwargs: Unpack[_ProbeSchemaOptions]) -> DjangoSchema:
     """Build a probe schema over fakeshop's types, passing ``schema_kwargs`` through.
 
-    Deliberately NOT cached: the acceptance tier's autouse fixture reloads
-    ``config.schema`` before every test, so a cached schema would hold types from
-    a previous test's registry.
+    Deliberately NOT cached: the acceptance tier rebuilds ``config.schema`` whenever
+    a test leaves the registry stale, so a cached schema could hold types from a
+    previous test's registry.
     """
     return DjangoSchema(
         query=_probe_query_type(),

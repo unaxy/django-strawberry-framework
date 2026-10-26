@@ -377,7 +377,7 @@ def test_library_optimizer_plan_cache_is_reused_across_http_requests():
     """
     _seed_library_graph()
     optimizer = sys.modules["config.schema"]._optimizer
-    # The per-test schema rebuild is what makes the counters below absolute.
+    # The conftest empties this plan cache before every test, making the counters absolute.
     assert optimizer.cache_info().size == 0, optimizer.cache_info()
 
     with CaptureQueriesContext(connection) as first_capture:
@@ -395,7 +395,7 @@ def test_library_optimizer_plan_cache_is_reused_across_http_requests():
     assert _library_sql(second_capture) == _library_sql(first_capture)
 ```
 
-What moved: the extension under test is the one `config.urls` serves, reached via `sys.modules["config.schema"]` at call time (the conftest rebuilds that module before every test; a module-level import binds a discarded instance and reads zeros forever, passing). The obvious document (`allLibraryBooks { shelf { code } }`) measured `misses=2, size=0`: `BookType` / `ShelfType` declare `get_queryset`, and a plan w/ a hook in the selection is `cacheable=False`. Throwaway types had no hooks so the package row never met this. SQL-identity clause added: a stale reused plan would change the emitted SQL. Don't copy the stand-in's wiring: a plain `strawberry.Schema` gives `lambda: ext` no per-operation isolation, so every operation shares one extension instance's per-operation state and execution context; `config/schema.py`'s `DjangoSchema` isolates both on the shared instance, which is what makes the singleton factory safe.
+What moved: the extension under test is the one `config.urls` serves, reached via `sys.modules["config.schema"]` at call time (the conftest rebuilds that module whenever a test leaves the registry stale; a module-level import can bind a discarded instance and read zeros forever, passing). The obvious document (`allLibraryBooks { shelf { code } }`) measured `misses=2, size=0`: `BookType` / `ShelfType` declare `get_queryset`, and a plan w/ a hook in the selection is `cacheable=False`. Throwaway types had no hooks so the package row never met this. SQL-identity clause added: a stale reused plan would change the emitted SQL. Don't copy the stand-in's wiring: a plain `strawberry.Schema` gives `lambda: ext` no per-operation isolation, so every operation shares one extension instance's per-operation state and execution context; `config/schema.py`'s `DjangoSchema` isolates both on the shared instance, which is what makes the singleton factory safe.
 
 Failability: `extensions=[lambda: _optimizer]` → fresh instance per request → row fails.
 
@@ -850,7 +850,7 @@ Grouped by where they bite. Each one cost an agent a round trip.
 - `override_settings(ROOT_URLCONF=...)` and `pytest.mark.urls` already clear resolver caches via `setting_changed`. `clear_url_caches()` only when swapping the held schema w/o changing `ROOT_URLCONF`.
 - Function-level `@pytest.mark.urls("config.urls")` reaches the shipped endpoint from inside a holder module.
 - `ConfigurationError` at resolution time → `pytest.raises` around `Client().get`; no status code exists for it.
-- `_isolate_project_schema_for_acceptance_test` raises `"Reloading the project schema shell mutated app registrations"` when a live module declares a `DjangoType` at import; the message names the fixture, not your file.
+- A test that clears the registry and builds only its own types requests `private_registry` (`@pytest.mark.usefixtures("private_registry")`): it starts on an empty registry, and a registry an earlier test left stale is cleared for it instead of rebuilt. Such a test must not read the project schema.
 - `project_schema_override` is for settings read at schema CONSTRUCTION (`Meta` body); `MEDIA_ROOT` / `DEBUG` / `MIDDLEWARE` are read per request and need only `override_settings`.
 
 **Credentials / settings**
@@ -903,8 +903,8 @@ Same discipline every case: package docstring says what it keeps, why no live re
 Single-sited in [`schema_reload.py`][schema-reload], applied by [`conftest.py`][conftest] in three ways:
 
 - **Once per module per worker**: `_reload_project_schema_for_acceptance_tests` clears registry, reloads every `apps.<app>.schema` dependency-safe (`glossary` before `kanban`; `CardGlossaryTermType.term` FKs into glossary), then `config.schema` + `config.urls`.
-- **Before every test**: `_isolate_project_schema_for_acceptance_test` rebuilds only `config.schema` + `config.urls` → fresh Strawberry schema, optimizer, URLconf; finalized types reused. Fingerprints every registry map + app module first; test mutated registration → teardown runs the full rebuild, incl. after assertion failure.
-- **On request**: `project_schema_override` = the full-rebuild callable, for re-finalizing under `override_settings` when the setting is read at schema CONSTRUCTION (a `Meta` body, `FAKESHOP_TEST_LOAN_CONNECTION`); function guard restores default after. Settings read per request (`MEDIA_ROOT`, `DEBUG`, `MIDDLEWARE`, `AUTHENTICATION_BACKENDS`) need only `override_settings`; the per-test rebuild suffices.
+- **Before every test**: `_isolate_project_schema_for_acceptance_test` empties the module-level optimizer's plan cache; schema, URLconf and finalized types are reused. Fingerprints every registry map + app module; test mutated registration → teardown marks the registry stale, incl. after assertion failure, and the next test that reads the project schema runs the full rebuild first (the module fixture runs it on the way out when the module's last test left it stale). `private_registry` tests skip that rebuild.
+- **On request**: `project_schema_override` = the full-rebuild callable, for re-finalizing under `override_settings` when the setting is read at schema CONSTRUCTION (a `Meta` body, `FAKESHOP_TEST_LOAN_CONNECTION`); function guard restores default after. Settings read per request (`MEDIA_ROOT`, `DEBUG`, `MIDDLEWARE`, `AUTHENTICATION_BACKENDS`) need only `override_settings`.
 
 `apps/<app>/tests/` never composes the project schema; a test needing it is a live row here. The project-level `examples/fakeshop/tests/` modules that build the aggregate (`config.urls`, `export_schema`, `inspect_django_type`) call the same `reload_all_project_schemas`: `test_urls.py` and `test_export_schema.py` through the module-scoped `reload_project_schemas` fixture in that tree's `conftest.py`, `test_inspect_django_type.py` through its own per-test fixture and cold-path teardown.
 

@@ -261,7 +261,7 @@ def _production_profile_view(
     to mount the package view with the IDE off, GET queries off, and schema
     introspection disabled through ``AddValidationRules``. This probe IS that
     recipe over the real fakeshop ``Query`` / ``Mutation`` surface, rebuilt per
-    request like every other probe so it tracks the per-test schema reload.
+    request like every other probe so it tracks every project schema rebuild.
     """
     schema = DjangoSchema(
         query=config_schema.Query,
