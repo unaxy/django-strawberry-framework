@@ -73,6 +73,14 @@ from django_strawberry_framework.utils.errors import (
 )
 from django_strawberry_framework.utils.inputs import RELATION_SINGLE, SCALAR, InputFieldSpec
 from tests._postgres_fields import FakeArrayField, patch_array_field
+from tests._postgresql_stand_in import (
+    BINDING_MODES,
+    ClientCursor,
+    DjangoClientCursor,
+    StoringOperations,
+    driver_module,
+    postgresql_stand_in,
+)
 
 if TYPE_CHECKING:
     from django_strawberry_framework.utils.errors import ErrorKeyMap
@@ -697,18 +705,6 @@ _STAMPS: models.Field[object, object] = FakeArrayField(models.DateTimeField())
 _TIMES: models.Field[object, object] = FakeArrayField(models.TimeField())
 
 
-class _StoringOperations(BaseDatabaseOperations):
-    """Operations whose adapters pass aware datetimes and times through, as PostgreSQL's do."""
-
-    @override
-    def adapt_datetimefield_value(self, value: datetime.datetime | None) -> str | None:
-        return None if value is None else value.isoformat()
-
-    @override
-    def adapt_timefield_value(self, value: datetime.datetime | datetime.time | None) -> str | None:
-        return None if value is None else value.isoformat()
-
-
 @contextmanager
 def _stand_in_alias(
     operations: type[BaseDatabaseOperations],
@@ -829,7 +825,7 @@ def test_unstorable_temporal_holds_a_stored_instant_to_its_session_wall_clock(
     patch_array_field(monkeypatch)
     with (
         override_settings(**settings),
-        _stand_in_alias(_StoringOperations, supports_timezones=True) as alias,
+        _stand_in_alias(StoringOperations, supports_timezones=True) as alias,
     ):
         assert unstorable_temporal(column, value, lambda: alias) is refused
 
@@ -864,7 +860,7 @@ def test_unstorable_temporal_holds_a_stored_instant_to_its_session_wall_clock(
             id="mysql-in-range",
         ),
         pytest.param(
-            _StoringOperations,
+            StoringOperations,
             _STAMP,
             _BEFORE_YEAR_ONE,
             False,
@@ -1186,64 +1182,7 @@ def _leaf_value(
     return datetime.datetime(2021, 6, 15, 12, tzinfo=zone)
 
 
-class _ClientCursor:
-    """psycopg 3's ``ClientCursor``: it binds every parameter into the query text."""
-
-
-class _DjangoClientCursor(_ClientCursor):
-    """Django's default psycopg 3 cursor class, a ``ClientCursor``."""
-
-
-class _ServerBindingCursor:
-    """psycopg 3's ``Cursor``, which binds parameters on the server."""
-
-
-def _driver(**exports: type[object]) -> ModuleType:
-    """A database driver module exporting ``exports``."""
-    module = ModuleType("driver_stand_in")
-    vars(module).update(exports)
-    return module
-
-
-#: Each binding mode a PostgreSQL connection can run in: its driver module and the
-#: ``cursor_factory`` Django connects with (psycopg 2 exports no ``ClientCursor``; a
-#: psycopg 3 ``cursor_factory`` of ``None`` is psycopg's own server-binding ``Cursor``).
-_BINDING_MODES = {
-    "psycopg2": (_driver(), _DjangoClientCursor, True),
-    "psycopg3-client": (_driver(ClientCursor=_ClientCursor), _DjangoClientCursor, True),
-    "psycopg3-server": (_driver(ClientCursor=_ClientCursor), _ServerBindingCursor, False),
-    "psycopg3-default-cursor": (_driver(ClientCursor=_ClientCursor), None, False),
-}
-
-
-@contextmanager
-def _postgresql_stand_in(
-    driver: ModuleType,
-    cursor_factory: type[object] | None,
-) -> Generator[str, None, None]:
-    """Register an alias that reads as PostgreSQL, on ``driver`` and ``cursor_factory``.
-
-    Its adapters pass every datetime and time through, as Django's PostgreSQL adapters do,
-    and it is never opened: the binding mode is read from its connection parameters. Its
-    settings carry the ``TIME_ZONE`` key Django's connection handler fills in.
-    """
-    alias = "postgresql_stand_in"
-    wrapper = SQLiteDatabaseWrapper(
-        {"NAME": "stand-in", "TIME_ZONE": None, "OPTIONS": {"cursor_factory": cursor_factory}},
-        alias,
-    )
-    wrapper.vendor = "postgresql"
-    wrapper.Database = driver
-    connections[alias] = wrapper
-    stand_in = connections[alias]
-    stand_in.ops = _StoringOperations(stand_in)
-    try:
-        yield alias
-    finally:
-        del connections[alias]
-
-
-@pytest.mark.parametrize("mode", list(_BINDING_MODES))
+@pytest.mark.parametrize("mode", list(BINDING_MODES))
 @pytest.mark.parametrize("leaf", list(_OFFSET_LEAVES))
 @pytest.mark.parametrize("offset", list(_POSTGRESQL_OFFSETS))
 def test_unbindable_temporal_holds_a_utc_offset_to_postgresql_binding_mode(
@@ -1261,13 +1200,13 @@ def test_unbindable_temporal_holds_a_utc_offset_to_postgresql_binding_mode(
     mode, so the rule holds on every test tier; the real server's answers are pinned by
     ``test_unbindable_temporal_answers_what_postgresql_refuses``.
     """
-    driver, cursor_factory, client_side = _BINDING_MODES[mode]
+    driver, cursor_factory, client_side = BINDING_MODES[mode]
     column, lookup_parts, is_time = _OFFSET_LEAVES[leaf]
     zone, refused_as_text, refused_time_on_server = _POSTGRESQL_OFFSETS[offset]
     value = _leaf_value(zone, is_time=is_time)
     bound = [datetime.time(9, 30), value] if lookup_parts == ("in",) else value
     refused = refused_as_text if client_side else is_time and refused_time_on_server
-    with _postgresql_stand_in(driver, cursor_factory) as alias:
+    with postgresql_stand_in(driver, cursor_factory) as alias:
         assert unbindable_temporal(column, lookup_parts, bound, lambda: alias) is refused
 
 
@@ -1287,8 +1226,8 @@ def test_unstorable_temporal_refuses_a_utc_offset_postgresql_refuses(
     value: object,
 ) -> None:
     """A write value whose UTC offset PostgreSQL refuses is unstorable, through the same rule."""
-    driver, cursor_factory, _ = _BINDING_MODES["psycopg3-client"]
-    with _postgresql_stand_in(driver, cursor_factory) as alias:
+    driver, cursor_factory, _ = BINDING_MODES["psycopg3-client"]
+    with postgresql_stand_in(driver, cursor_factory) as alias:
         assert unstorable_temporal(column, value, lambda: alias) is True
 
 
@@ -1402,8 +1341,8 @@ def test_unstorable_temporal_holds_array_elements_to_the_text_rule_on_server_sid
     and stores.
     """
     patch_array_field(monkeypatch)
-    driver, cursor_factory, _ = _BINDING_MODES["psycopg3-server"]
-    with _postgresql_stand_in(driver, cursor_factory) as alias:
+    driver, cursor_factory, _ = BINDING_MODES["psycopg3-server"]
+    with postgresql_stand_in(driver, cursor_factory) as alias:
         assert unstorable_temporal(column, value, lambda: alias) is refused
 
 
@@ -1437,7 +1376,7 @@ def _psycopg3_driver(outcome: Exception | None, dumps: list[_Dump]) -> ModuleTyp
 
     adapt = ModuleType("adapt_stand_in")
     vars(adapt).update(Transformer=Transformer, PyFormat=SimpleNamespace(TEXT="text"))
-    driver = _driver(ClientCursor=_ClientCursor, DataError=_DriverDataError)
+    driver = driver_module(ClientCursor=ClientCursor, DataError=_DriverDataError)
     vars(driver).update(adapt=adapt, adapters=_MODULE_ADAPTERS)
     return driver
 
@@ -1465,7 +1404,7 @@ def test_unstorable_temporal_asks_psycopg_for_an_array_as_a_whole(
     patch_array_field(monkeypatch)
     dumps: list[_Dump] = []
     stamp = datetime.datetime(2021, 6, 15, 12, tzinfo=_UTC)
-    with _postgresql_stand_in(_psycopg3_driver(outcome, dumps), _DjangoClientCursor) as alias:
+    with postgresql_stand_in(_psycopg3_driver(outcome, dumps), DjangoClientCursor) as alias:
         value = [[datetime.date(2021, 6, 15)], [None, stamp]]
         assert unstorable_temporal(_NESTED_STAMPS, value, lambda: alias) is refused
     midnight = datetime.datetime(2021, 6, 15, tzinfo=timezone.get_default_timezone())
@@ -1478,7 +1417,7 @@ def test_unstorable_temporal_dumps_an_array_through_the_open_connection_adapters
     """An already open psycopg 3 connection's adapters dump the list, not the module's."""
     patch_array_field(monkeypatch)
     dumps: list[_Dump] = []
-    with _postgresql_stand_in(_psycopg3_driver(None, dumps), _DjangoClientCursor) as alias:
+    with postgresql_stand_in(_psycopg3_driver(None, dumps), DjangoClientCursor) as alias:
         connection = connections[alias]
         connection.connection = SimpleNamespace(adapters=_OPEN_ADAPTERS)
         try:
@@ -1495,7 +1434,7 @@ def test_unstorable_temporal_propagates_any_other_driver_exception(
     patch_array_field(monkeypatch)
     driver = _psycopg3_driver(LookupError("unexpected"), [])
     with (
-        _postgresql_stand_in(driver, _DjangoClientCursor) as alias,
+        postgresql_stand_in(driver, DjangoClientCursor) as alias,
         pytest.raises(LookupError, match="unexpected"),
     ):
         _ = unstorable_temporal(_TIMES, [_AWARE_TIME], lambda: alias)
@@ -1510,7 +1449,7 @@ def test_unstorable_temporal_propagates_any_other_driver_exception(
     ),
     [
         pytest.param(
-            _driver(DataError=_DriverDataError),
+            driver_module(DataError=_DriverDataError),
             "postgresql",
             _TIMES,
             [datetime.time(9, 30), _AWARE_TIME],
@@ -1555,7 +1494,7 @@ def test_unstorable_temporal_leaves_an_array_the_driver_is_not_asked_about(
     that is not PostgreSQL is not asked, whatever its driver module exports.
     """
     patch_array_field(monkeypatch)
-    with _postgresql_stand_in(driver, _DjangoClientCursor) as alias:
+    with postgresql_stand_in(driver, DjangoClientCursor) as alias:
         connections[alias].vendor = vendor
         assert unstorable_temporal(column, value, lambda: alias) is False
 
@@ -1621,7 +1560,7 @@ def test_unstorable_temporal_refuses_a_time_array_psycopg_cannot_dump(
     column = _real_array_of(models.TimeField())
     if nested:
         column = _real_array_of(column)
-    with _postgresql_stand_in(psycopg, None) as alias:
+    with postgresql_stand_in(psycopg, None) as alias:
         assert unstorable_temporal(column, value, lambda: alias) is refused
 
 

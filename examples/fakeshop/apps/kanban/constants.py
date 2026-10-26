@@ -204,6 +204,7 @@ TRACKED_FILE_PATHS: tuple[str, ...] = (
     "tests/_idioms.py",
     "tests/_info.py",
     "tests/_postgres_fields.py",
+    "tests/_postgresql_stand_in.py",
     "tests/_relation_fixtures.py",
     "tests/_soft_dependency.py",
     "tests/_subprocess.py",
