@@ -139,12 +139,13 @@ jobs:
           uv run python scripts/build_tree_md.py --check
 
   test:
-    name: Python ${{ matrix.python }} - Django ${{ matrix.django }} - ${{ matrix.database }}${{ matrix.compatibility_only == '1' && ' [compatibility floor]' || '' }}
+    name: Python ${{ matrix.python }} - Django ${{ matrix.django }} - ${{ matrix.database }}${{ matrix.compatibility_only == '1' && ' [compatibility floor]' || '' }} - ${{ matrix.shard }}
     runs-on: ubuntu-latest
     # Inherits the workflow-level `contents: read`. This job used to grant
-    # `contents: write`; the only token consumer is the Coveralls upload, which
-    # authenticates a coverage report and never writes to the repository, so the
-    # write scope was unused authority (spec-049 Decision 3).
+    # `contents: write`; the only token consumer is the Coveralls upload (now in
+    # the `coverage` job), which authenticates a coverage report and never writes
+    # to the repository, so the write scope was unused authority (spec-049
+    # Decision 3).
     timeout-minutes: 45
     strategy:
       # If one version fails, don't stop the others
@@ -156,6 +157,12 @@ jobs:
         # node — the multi-DB contract is gated only at those tiers so push/PR
         # feedback stays fast. Push/PR runs only the minimum-support combo and the latest combo,
         # single-DB only (covers both ends without doubling CI wall-clock).
+        #
+        # Every node runs as two `shard` jobs on separate runners, because one
+        # runner's four workers no longer finish the suite inside the timeout.
+        # `library-keyset` is the two largest live-API modules, which together
+        # take about half the suite's time; `remainder` is everything else. The
+        # run step below maps each shard to its paths.
         #
         # `compatibility_only: "1"` marks the exact-Django-5.2.16 nodes. They
         # prove the ADVERTISED API FLOOR still imports and behaves -- a
@@ -184,29 +191,51 @@ jobs:
         # its pyproject.toml lower bound.
         include: >-
           ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && fromJSON('[
-            {"django": "5.2.16", "python": "3.10", "database": "single DB", "fakeshop_sharded": "0", "strawberry": "0.322.2", "compatibility_only": "1"},
-            {"django": "5.2.16", "python": "3.10", "database": "multi DB", "fakeshop_sharded": "1", "strawberry": "0.322.2", "compatibility_only": "1"},
-            {"django": "5.2.*", "python": "3.11", "database": "single DB", "fakeshop_sharded": "0"},
-            {"django": "5.2.*", "python": "3.11", "database": "multi DB", "fakeshop_sharded": "1"},
-            {"django": "5.2.*", "python": "3.12", "database": "single DB", "fakeshop_sharded": "0"},
-            {"django": "5.2.*", "python": "3.12", "database": "multi DB", "fakeshop_sharded": "1"},
-            {"django": "5.2.*", "python": "3.13", "database": "single DB", "fakeshop_sharded": "0"},
-            {"django": "5.2.*", "python": "3.13", "database": "multi DB", "fakeshop_sharded": "1"},
-            {"django": "6.0.*", "python": "3.12", "database": "single DB", "fakeshop_sharded": "0"},
-            {"django": "6.0.*", "python": "3.12", "database": "multi DB", "fakeshop_sharded": "1"},
-            {"django": "6.0.*", "python": "3.13", "database": "single DB", "fakeshop_sharded": "0"},
-            {"django": "6.0.*", "python": "3.13", "database": "multi DB", "fakeshop_sharded": "1"},
-            {"django": "6.0.*", "python": "3.14", "database": "single DB", "fakeshop_sharded": "0"},
-            {"django": "6.0.*", "python": "3.14", "database": "multi DB", "fakeshop_sharded": "1"},
-            {"django": "6.1.*", "python": "3.12", "database": "single DB", "fakeshop_sharded": "0"},
-            {"django": "6.1.*", "python": "3.12", "database": "multi DB", "fakeshop_sharded": "1"},
-            {"django": "6.1.*", "python": "3.13", "database": "single DB", "fakeshop_sharded": "0"},
-            {"django": "6.1.*", "python": "3.13", "database": "multi DB", "fakeshop_sharded": "1"},
-            {"django": "latest", "python": "3.14", "database": "single DB", "fakeshop_sharded": "0", "coverage": "1"},
-            {"django": "latest", "python": "3.14", "database": "multi DB", "fakeshop_sharded": "1"}
+            {"django": "5.2.16", "python": "3.10", "database": "single DB", "fakeshop_sharded": "0", "strawberry": "0.322.2", "compatibility_only": "1", "shard": "library-keyset"},
+            {"django": "5.2.16", "python": "3.10", "database": "single DB", "fakeshop_sharded": "0", "strawberry": "0.322.2", "compatibility_only": "1", "shard": "remainder"},
+            {"django": "5.2.16", "python": "3.10", "database": "multi DB", "fakeshop_sharded": "1", "strawberry": "0.322.2", "compatibility_only": "1", "shard": "library-keyset"},
+            {"django": "5.2.16", "python": "3.10", "database": "multi DB", "fakeshop_sharded": "1", "strawberry": "0.322.2", "compatibility_only": "1", "shard": "remainder"},
+            {"django": "5.2.*", "python": "3.11", "database": "single DB", "fakeshop_sharded": "0", "shard": "library-keyset"},
+            {"django": "5.2.*", "python": "3.11", "database": "single DB", "fakeshop_sharded": "0", "shard": "remainder"},
+            {"django": "5.2.*", "python": "3.11", "database": "multi DB", "fakeshop_sharded": "1", "shard": "library-keyset"},
+            {"django": "5.2.*", "python": "3.11", "database": "multi DB", "fakeshop_sharded": "1", "shard": "remainder"},
+            {"django": "5.2.*", "python": "3.12", "database": "single DB", "fakeshop_sharded": "0", "shard": "library-keyset"},
+            {"django": "5.2.*", "python": "3.12", "database": "single DB", "fakeshop_sharded": "0", "shard": "remainder"},
+            {"django": "5.2.*", "python": "3.12", "database": "multi DB", "fakeshop_sharded": "1", "shard": "library-keyset"},
+            {"django": "5.2.*", "python": "3.12", "database": "multi DB", "fakeshop_sharded": "1", "shard": "remainder"},
+            {"django": "5.2.*", "python": "3.13", "database": "single DB", "fakeshop_sharded": "0", "shard": "library-keyset"},
+            {"django": "5.2.*", "python": "3.13", "database": "single DB", "fakeshop_sharded": "0", "shard": "remainder"},
+            {"django": "5.2.*", "python": "3.13", "database": "multi DB", "fakeshop_sharded": "1", "shard": "library-keyset"},
+            {"django": "5.2.*", "python": "3.13", "database": "multi DB", "fakeshop_sharded": "1", "shard": "remainder"},
+            {"django": "6.0.*", "python": "3.12", "database": "single DB", "fakeshop_sharded": "0", "shard": "library-keyset"},
+            {"django": "6.0.*", "python": "3.12", "database": "single DB", "fakeshop_sharded": "0", "shard": "remainder"},
+            {"django": "6.0.*", "python": "3.12", "database": "multi DB", "fakeshop_sharded": "1", "shard": "library-keyset"},
+            {"django": "6.0.*", "python": "3.12", "database": "multi DB", "fakeshop_sharded": "1", "shard": "remainder"},
+            {"django": "6.0.*", "python": "3.13", "database": "single DB", "fakeshop_sharded": "0", "shard": "library-keyset"},
+            {"django": "6.0.*", "python": "3.13", "database": "single DB", "fakeshop_sharded": "0", "shard": "remainder"},
+            {"django": "6.0.*", "python": "3.13", "database": "multi DB", "fakeshop_sharded": "1", "shard": "library-keyset"},
+            {"django": "6.0.*", "python": "3.13", "database": "multi DB", "fakeshop_sharded": "1", "shard": "remainder"},
+            {"django": "6.0.*", "python": "3.14", "database": "single DB", "fakeshop_sharded": "0", "shard": "library-keyset"},
+            {"django": "6.0.*", "python": "3.14", "database": "single DB", "fakeshop_sharded": "0", "shard": "remainder"},
+            {"django": "6.0.*", "python": "3.14", "database": "multi DB", "fakeshop_sharded": "1", "shard": "library-keyset"},
+            {"django": "6.0.*", "python": "3.14", "database": "multi DB", "fakeshop_sharded": "1", "shard": "remainder"},
+            {"django": "6.1.*", "python": "3.12", "database": "single DB", "fakeshop_sharded": "0", "shard": "library-keyset"},
+            {"django": "6.1.*", "python": "3.12", "database": "single DB", "fakeshop_sharded": "0", "shard": "remainder"},
+            {"django": "6.1.*", "python": "3.12", "database": "multi DB", "fakeshop_sharded": "1", "shard": "library-keyset"},
+            {"django": "6.1.*", "python": "3.12", "database": "multi DB", "fakeshop_sharded": "1", "shard": "remainder"},
+            {"django": "6.1.*", "python": "3.13", "database": "single DB", "fakeshop_sharded": "0", "shard": "library-keyset"},
+            {"django": "6.1.*", "python": "3.13", "database": "single DB", "fakeshop_sharded": "0", "shard": "remainder"},
+            {"django": "6.1.*", "python": "3.13", "database": "multi DB", "fakeshop_sharded": "1", "shard": "library-keyset"},
+            {"django": "6.1.*", "python": "3.13", "database": "multi DB", "fakeshop_sharded": "1", "shard": "remainder"},
+            {"django": "latest", "python": "3.14", "database": "single DB", "fakeshop_sharded": "0", "coverage": "1", "shard": "library-keyset"},
+            {"django": "latest", "python": "3.14", "database": "single DB", "fakeshop_sharded": "0", "coverage": "1", "shard": "remainder"},
+            {"django": "latest", "python": "3.14", "database": "multi DB", "fakeshop_sharded": "1", "shard": "library-keyset"},
+            {"django": "latest", "python": "3.14", "database": "multi DB", "fakeshop_sharded": "1", "shard": "remainder"}
           ]') || fromJSON('[
-            {"django": "5.2.16", "python": "3.10", "database": "single DB", "fakeshop_sharded": "0", "strawberry": "0.322.2", "compatibility_only": "1"},
-            {"django": "latest", "python": "3.14", "database": "single DB", "fakeshop_sharded": "0", "coverage": "1"}
+            {"django": "5.2.16", "python": "3.10", "database": "single DB", "fakeshop_sharded": "0", "strawberry": "0.322.2", "compatibility_only": "1", "shard": "library-keyset"},
+            {"django": "5.2.16", "python": "3.10", "database": "single DB", "fakeshop_sharded": "0", "strawberry": "0.322.2", "compatibility_only": "1", "shard": "remainder"},
+            {"django": "latest", "python": "3.14", "database": "single DB", "fakeshop_sharded": "0", "coverage": "1", "shard": "library-keyset"},
+            {"django": "latest", "python": "3.14", "database": "single DB", "fakeshop_sharded": "0", "coverage": "1", "shard": "remainder"}
           ]') }}
 
     steps:
@@ -284,28 +313,90 @@ jobs:
           uv pip install "channels[daphne]==4.3.2" "cryptography==44.0.0" "django-debug-toolbar==7.0.0" "djangorestframework==3.17.0"
           uv pip show channels cryptography django-debug-toolbar djangorestframework
 
-      - name: Run Tests (${{ matrix.database }})
-        # The latest single-DB node owns the fail_under=100 coverage gate and
-        # Coveralls upload. Compatibility nodes run the identical test selection
-        # without tracing it again: Coverage.py 7.14 uses its fast sys.monitoring
-        # core on Python 3.14, while Python <=3.13 must use the much slower
-        # sys.settrace core. `-o addopts` replaces pytest.ini's addopts wholesale,
-        # so the compatibility branch drops --cov without --no-cov's warning.
+      - name: Run Tests (${{ matrix.database }}, ${{ matrix.shard }})
+        # The latest single-DB node's two shards trace coverage; the `coverage`
+        # job below combines them and owns the fail_under=100 gate and the
+        # Coveralls upload, so a shard reports nothing and fails under nothing.
+        # Compatibility nodes run the identical test selection without tracing
+        # it again: Coverage.py 7.14 uses its fast sys.monitoring core on Python
+        # 3.14, while Python <=3.13 must use the much slower sys.settrace core.
+        # `-o addopts` replaces pytest.ini's addopts wholesale, so the
+        # compatibility branch drops --cov without --no-cov's warning.
+        #
+        # `library-keyset` spreads single tests across the workers (`load`), as
+        # the Postgres tier does for the live-API modules: each module is too
+        # large for one worker. `remainder` keeps `loadscope`, which the package
+        # tests' global-registry fixtures require.
         env:
           FAKESHOP_SHARDED: ${{ matrix.fakeshop_sharded }}
         run: |
-          if [ "${{ matrix.coverage }}" = "1" ]; then
-            addopts="-v -n auto --dist loadscope --cov --cov-report=term-missing --durations=25"
+          live=examples/fakeshop/test_query
+          if [ "${{ matrix.shard }}" = "library-keyset" ]; then
+            addopts="-v -n auto --dist load --durations=25"
+            targets="$live/test_library_api.py $live/test_keyset_api.py"
           else
             addopts="-v -n auto --dist loadscope --durations=25"
+            targets="--ignore=$live/test_library_api.py --ignore=$live/test_keyset_api.py"
           fi
-          uv run --no-sync pytest -o addopts="$addopts"
+          if [ "${{ matrix.coverage }}" = "1" ]; then
+            addopts="$addopts --cov --cov-report= --cov-fail-under=0"
+          fi
+          uv run --no-sync pytest -o addopts="$addopts" $targets
+
+      - name: Keep the shard's coverage data
+        if: matrix.coverage == '1'
+        run: mv .coverage ".coverage.${{ matrix.shard }}"
+
+      - name: Upload the shard's coverage data
+        if: matrix.coverage == '1'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-${{ matrix.shard }}
+          path: .coverage.${{ matrix.shard }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
+  coverage:
+    # Combines the coverage node's two shards into one report and gates it at
+    # fail_under=100. Every shard runs from the same checkout path on the same
+    # runner image, so the recorded file paths combine as they stand.
+    name: Coverage
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing in this job pushes; the Coveralls upload authenticates with
+          # GITHUB_TOKEN from the step env, not with the checkout credential.
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+          cache-suffix: coverage
+
+      - name: Set up Python 3.14
+        run: uv python install 3.14
+
+      - name: Install dependencies
+        run: uv sync --python 3.14
+
+      - name: Download the shards' coverage data
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: coverage-*
+          merge-multiple: true
+
+      - name: Combine and report
+        run: |
+          uv run --no-sync coverage combine .coverage.library-keyset .coverage.remainder
+          uv run --no-sync coverage report
 
       - name: Upload Coverage to Coveralls
-        # Only upload from the primary matrix node to avoid duplicate builds.
-        if: >-
-          github.ref == 'refs/heads/main' &&
-          matrix.coverage == '1'
+        if: github.ref == 'refs/heads/main'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
