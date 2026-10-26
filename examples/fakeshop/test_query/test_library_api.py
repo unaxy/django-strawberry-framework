@@ -2042,13 +2042,13 @@ def test_library_optimizer_plan_cache_is_reused_across_http_requests() -> None:
     first's exactly.
 
     ``config.schema`` is read from ``sys.modules`` inside the test body: the
-    acceptance conftest rebuilds that module before every test, so a
-    module-import-time reference would be to a discarded instance.
+    acceptance conftest rebuilds that module whenever a test leaves the registry
+    stale, so a module-import-time reference can be to a discarded instance.
     """
     _seed_library_graph()
     optimizer = getattr(sys.modules["config.schema"], "_optimizer", None)
     assert isinstance(optimizer, DjangoOptimizerExtension), optimizer
-    # The per-test schema rebuild is what makes the counters below absolute.
+    # The conftest empties this plan cache before every test, making the counters absolute.
     assert optimizer.cache_info().size == 0, optimizer.cache_info()
 
     with CaptureQueriesContext(connection) as first_capture:

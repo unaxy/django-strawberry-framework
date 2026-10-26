@@ -11,10 +11,14 @@ module's docstring for why a partial reload leaves the combined build raising a
 ``reload_all_project_schemas`` rebuilds the full project schema by reloading every
 contributing app in a dependency-safe order, so the rebuild is complete and
 order-independent. A module-scoped fixture applies that discipline once per worker
-receiving tests from a module. A function-scoped guard then rebuilds only the cheap
-aggregate schema/URL shell for every test and fingerprints the complete registration
-state. If a test changes any app registration or contributing module, teardown runs
-the full rebuild under ambient settings, including after an assertion failure.
+receiving tests from a module. A function-scoped guard then empties the served
+schema's optimizer plan cache for every test and fingerprints the complete
+registration state. If a test changes any app registration or contributing module,
+teardown marks the registry stale, including after an assertion failure, and the next
+test that reads the project schema runs the full rebuild under ambient settings first;
+the module fixture runs it on the way out if the module's last test left it stale. A
+test that requests ``private_registry`` starts on an empty registry it fills with its
+own types, so a stale registry is cleared for it rather than rebuilt.
 
 ``delete_after_authorization`` stands in for a concurrent transaction that deletes an
 update's located row between the locate and the write: it wraps the fakeshop mutation's
@@ -35,17 +39,17 @@ from collections.abc import Callable, Iterator
 import pytest
 from django.core.exceptions import EmptyResultSet
 from django.db.models.sql.compiler import SQLCompiler
-from graphql_client import DeleteAfterAuthorization, RecordCompiledSql
-from schema_reload import (
-    _PROJECT_APP_SCHEMA_MODULES,
-    reload_all_project_schemas,
-    reload_project_schema_shell,
-)
+from graphql_client import DeleteAfterAuthorization, RecordCompiledSql, read_attr
+from schema_reload import _PROJECT_APP_SCHEMA_MODULES, reload_all_project_schemas
 from strawberry.types import Info
 
 from django_strawberry_framework import DjangoMutation
+from django_strawberry_framework.optimizer import DjangoOptimizerExtension
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.utils.write_transaction import pipeline_write_phase
+
+#: Whether a test changed this worker's registrations since the last full rebuild.
+_PROJECT_SCHEMA: dict[str, bool] = {"stale": False}
 
 
 def _registry_registration_identity() -> tuple[object, ...]:
@@ -89,26 +93,55 @@ def reload_all_project_app_schemas() -> Callable[[], None]:
 @pytest.fixture(scope="module", autouse=True)
 def _reload_project_schema_for_acceptance_tests(
     reload_all_project_app_schemas: Callable[[], None],
-) -> None:
-    """Rebuild the full project schema once per module on every assigned worker."""
+) -> Iterator[None]:
+    """Rebuild the full project schema once per module on every assigned worker.
+
+    A registry the module's last test left stale is rebuilt on the way out, so the
+    suites that run after this module start from the full project schema.
+    """
     reload_all_project_app_schemas()
+    _PROJECT_SCHEMA["stale"] = False
+    yield
+    if _PROJECT_SCHEMA["stale"]:
+        reload_all_project_app_schemas()
+        _PROJECT_SCHEMA["stale"] = False
 
 
 @pytest.fixture(autouse=True)
 def _isolate_project_schema_for_acceptance_test(
+    request: pytest.FixtureRequest,
     _reload_project_schema_for_acceptance_tests: None,
     reload_all_project_app_schemas: Callable[[], None],
 ) -> Iterator[None]:
-    """Give each test a fresh shell and fully restore any registration mutation."""
+    """Start each test on the full project schema with an empty plan cache.
+
+    A registry an earlier test left stale is rebuilt first unless this test requests
+    ``private_registry``. ``config/schema.py`` serves one module-level optimizer, so
+    emptying its plan cache makes every test's hit and miss counts absolute. A test
+    that changes any registration leaves the registry stale for the next test.
+    """
+    if _PROJECT_SCHEMA["stale"] and "private_registry" not in request.fixturenames:
+        reload_all_project_app_schemas()
+        _PROJECT_SCHEMA["stale"] = False
+    optimizer = read_attr(sys.modules["config.schema"], "_optimizer")
+    assert isinstance(optimizer, DjangoOptimizerExtension), optimizer
+    optimizer.cache_clear()
     registration_identity = _registry_registration_identity()
-    reload_project_schema_shell()
-    if _registry_registration_identity() != registration_identity:
-        raise AssertionError("Reloading the project schema shell mutated app registrations")
     try:
         yield
     finally:
         if _registry_registration_identity() != registration_identity:
-            reload_all_project_app_schemas()
+            _PROJECT_SCHEMA["stale"] = True
+
+
+@pytest.fixture
+def private_registry(_isolate_project_schema_for_acceptance_test: None) -> None:
+    """Start the test on an empty registry it fills with its own types.
+
+    The test never reads the project schema, so the autouse guard clears a registry an
+    earlier test left stale instead of rebuilding it, and leaves it stale afterward.
+    """
+    registry.clear()
 
 
 @pytest.fixture
