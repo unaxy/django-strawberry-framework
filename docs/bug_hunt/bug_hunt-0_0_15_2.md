@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 308 done, 213 to do.
+Progress: 309 done, 212 to do.
 
 ## Done
 
@@ -1656,6 +1656,16 @@ Progress: 308 done, 213 to do.
   (`apply_sync` list / range / dict values) name the declared class. A filter declared on the set that holds it
   keeps byte-identical messages; filtering results and the fakeshop SDL are unchanged. spec-027's LookupChoiceFilter
   row states the rule; package rows in `tests/filters/test_inputs.py` and `tests/filters/test_sets.py`
+- [x] 560. Not a defect: the repeated predicate is what keeps an arm's meaning. `FilterSet.filter_queryset` builds
+  each `and` / `or` / `not` arm's sibling over the flat-narrowed queryset (`_q_for_branch`, `cls(data=...,
+  queryset=queryset)`), so an arm selects among the rows the flat leaves kept, and composes it onto that same
+  queryset, keeping the annotations, ordering and `distinct()` the flat leaves and consumer methods put on it.
+  Building the arms over the unnarrowed queryset would drop the inner copy only for row-local predicates: a
+  consumer `method=` or `qs` override that is not row-local (a top-N slice, an aggregate over the rows it is given)
+  answers differently, and a `not` arm over a wider base removes rows by what they match outside the flat set.
+  Dropping the outer copy instead would lose the flat queryset's shape and is wrong for `not`, whose complement
+  is not a subset of the flat rows. Same rows, no contract row; the planner sees a redundant conjunct inside a
+  semi-join
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1811,9 +1821,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   scalar catch-all and publishes `exact: String` while its form field cleans a list, so every non-empty value answers
   `FILTER_INVALID` "Enter a list of values."; probed on a text column only (a `Choices` column not probed). Found
   fact-finding 373
-- [ ] 560. (robustness) A top-level filter leaf beside an `and` / `or` / `not` arm repeats its predicate inside the
-  arm's `pk IN (SELECT ...)` subquery: `FilterSet.filter_queryset` hands `_evaluate_logic_tree` the flat-narrowed
-  queryset, then ANDs the arm onto it again; same rows, redundant SQL. Found fact-finding 399
 - [ ] 562. (robustness) A flat range leaf walking a hop with both bounds null (`{start: null, end: null}`) runs the
   hop target's `get_queryset` on `apply_async` but not on `apply_sync`; same rows. Found verifying 399
 
