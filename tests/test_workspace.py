@@ -3518,6 +3518,80 @@ def test_item_diff_keeps_a_force_added_ignored_file(repo: Path) -> None:
     ]
 
 
+# One file under each shape ``is_excluded`` names: a parked ``*-ws`` copy, both excluded
+# prefixes, and both scratch segments.
+EXCLUDED_NAMES = [
+    pytest.param("hunt-ws/notes.py", id="ws-folder"),
+    pytest.param("output/report.txt", id="output"),
+    pytest.param("docs/shadow/current/core.py", id="shadow"),
+    pytest.param(f"{PACKAGE}/temp-tests/test_probe.py", id="temp-tests"),
+    pytest.param("docs/bug_hunt/worker-memory/notes.md", id="worker-memory"),
+]
+
+
+def _unignore_scratch(repo: Path) -> None:
+    """Commit a ``.gitignore`` that leaves every excluded shape visible to git."""
+    _write(repo / ".gitignore", ".python-version\nignored.txt\n")
+    _git(repo, "commit", "-q", "-am", "scratch not ignored")
+
+
+@pytest.mark.parametrize("name", EXCLUDED_NAMES)
+def test_item_diff_leaves_out_an_untracked_file_the_mirror_leaves_out(
+    repo: Path,
+    name: str,
+) -> None:
+    assert workspace.is_excluded(name)
+    _unignore_scratch(repo)
+    _write(repo / name, "scratch\n")
+    _write(repo / PACKAGE / "new.py", "NEW = 1\n")
+    expected = [f"diff --git a/{PACKAGE}/new.py b/{PACKAGE}/new.py"]
+
+    assert _headers(_item_diff(repo, ".")) == expected
+    assert _headers(_item_diff(repo, name.rsplit("/", 1)[0], PACKAGE)) == expected
+
+
+@pytest.mark.parametrize("name", EXCLUDED_NAMES)
+@pytest.mark.parametrize("change", ["edited", "deleted"])
+def test_item_diff_keeps_the_baseline_blob_of_a_tracked_file_the_mirror_leaves_out(
+    repo: Path,
+    name: str,
+    change: str,
+) -> None:
+    _unignore_scratch(repo)
+    _write(repo / name, "tracked scratch\n")
+    _git(repo, "add", "-f", name)
+    _git(repo, "commit", "-q", "-m", "tracked scratch")
+    if change == "deleted":
+        (repo / name).unlink()
+    else:
+        _write(repo / name, "edited scratch\n")
+    _write(repo / PACKAGE / "core.py", "CORE = 3\n")
+
+    assert _headers(_item_diff(repo, ".")) == [
+        f"diff --git a/{PACKAGE}/core.py b/{PACKAGE}/core.py",
+    ]
+
+
+def test_item_diff_since_a_snapshot_agrees_with_it_on_what_the_mirror_leaves_out(
+    repo: Path,
+    tmp_path: Path,
+) -> None:
+    _write(repo / "hunt-ws" / "notes.py", "untracked scratch\n")
+    tracked = f"{PACKAGE}/worker-memory/notes.md"
+    _write(repo / tracked, "tracked scratch\n")
+    _git(repo, "add", tracked)
+    _git(repo, "commit", "-q", "-m", "tracked scratch")
+    _write(repo / tracked, "edited before the snapshot\n")
+
+    sha, _copy = _snapshot_of_a_copy(repo, tmp_path)
+
+    assert _headers(workspace.item_diff(repo, sha, (".",)).decode()) == []
+    _write(repo / PACKAGE / "core.py", "CORE = 3\n")
+    assert _headers(workspace.item_diff(repo, sha, (".",)).decode()) == [
+        f"diff --git a/{PACKAGE}/core.py b/{PACKAGE}/core.py",
+    ]
+
+
 def test_item_diff_leaves_the_shared_index_and_its_stat_data_untouched(repo: Path) -> None:
     _write(repo / PACKAGE / "new.py", "NEW = 1\n")
     os.utime(repo / PACKAGE / "core.py", (1, 1))
@@ -3623,6 +3697,28 @@ def test_content_tree_reads_exactly_the_named_files_from_another_work_tree(
 
     assert _git(repo, "ls-tree", "-r", "--name-only", tree).split() == [f"{PACKAGE}/core.py"]
     assert _git(repo, "show", f"{tree}:{PACKAGE}/core.py") == "CORE = 9\n"
+
+
+def test_content_tree_refreshes_an_explicitly_named_file_it_would_leave_out_by_default(
+    repo: Path,
+) -> None:
+    name = "hunt-ws/notes.py"
+    assert workspace.is_excluded(name)
+    _write(repo / name, "named scratch\n")
+
+    tree = workspace.content_tree(repo, "HEAD", names=[name], excluded=workspace.is_excluded)
+
+    assert _git(repo, "show", f"{tree}:{name}") == "named scratch\n"
+    assert (
+        name
+        not in _git(
+            repo,
+            "ls-tree",
+            "-r",
+            "--name-only",
+            workspace.content_tree(repo, "HEAD", excluded=workspace.is_excluded),
+        ).split()
+    )
 
 
 def test_item_diff_gives_identical_bytes_from_two_clones_of_one_change(tmp_path: Path) -> None:

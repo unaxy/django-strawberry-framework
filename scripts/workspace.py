@@ -48,7 +48,9 @@ Worker commands
         --cached`` never changes a byte (of the index, only whether an ignored
         file is force-added counts), and the shared ``.git/index`` is never
         rewritten. A new file is one the baseline lacks that git tracks or
-        does not ignore; a moved file is found as a rename. Paths are
+        does not ignore; a moved file is found as a rename. A file the mirror
+        leaves out (``is_excluded``: cycle scratch, a parked ``*-ws`` copy)
+        keeps the baseline's blob, so it is never added, edited or deleted. Paths are
         repository-relative. The caller's global and system git config and the
         XDG global ignore and attributes files are ignored (git 2.32 or later,
         which reads ``GIT_CONFIG_GLOBAL``) and the repository's own config is
@@ -725,6 +727,7 @@ def content_index(
     *,
     names: Iterable[str] | None = None,
     work_tree: Path | None = None,
+    excluded: Callable[[str], bool] | None = None,
 ) -> Generator[dict[str, str], None, None]:
     """Yield the environment of a private index: ``base`` overlaid with the working content.
 
@@ -732,12 +735,14 @@ def content_index(
     its stat data nor rewritten, and what the private one holds is a function of ``base`` and
     the files on disk. ``base`` is any tree-ish. ``names`` (default: every ``base`` entry under
     ``pathspecs``, every path when empty, plus every file there that the shared index tracks or
-    git does not ignore, a read-only listing that keeps a force-added ignored file) are
-    refreshed from ``work_tree`` (default ``repo_root``); one that is no longer a file or link
-    there is dropped. A file ``base`` holds that is now a directory, and the reverse, both
-    resolve; a link to a directory stays a link, and a nested repository the shared index
-    tracks stays a gitlink at its checked-out commit. By default, a file a sparse checkout
-    leaves out of the work tree keeps its ``base`` entry.
+    git does not ignore, a read-only listing that keeps a force-added ignored file, less every
+    name ``excluded`` reports) are refreshed from ``work_tree`` (default ``repo_root``); one
+    that is no longer a file or link there is dropped. A default name ``excluded`` reports
+    keeps its ``base`` entry, or stays absent; explicit ``names`` are never filtered. A file
+    ``base`` holds that is now a directory, and the reverse, both resolve; a link to a
+    directory stays a link, and a nested repository the shared index tracks stays a gitlink at
+    its checked-out commit. By default, a file a sparse checkout leaves out of the work tree
+    keeps its ``base`` entry.
     """
     with tempfile.TemporaryDirectory(prefix="dsf-index-") as scratch:
         env = {"GIT_INDEX_FILE": str(Path(scratch) / "index")}
@@ -770,6 +775,8 @@ def content_index(
                 for entry in _null_separated(tagged)
                 if entry.startswith("S ") and not os.path.lexists(root / entry[2:])
             }
+            if excluded is not None:
+                names = {name for name in names if not excluded(name)}
         present: list[str] = []
         gone: list[str] = []
         for name in sorted(names):
@@ -801,32 +808,41 @@ def content_tree(
     *,
     names: Iterable[str] | None = None,
     work_tree: Path | None = None,
+    excluded: Callable[[str], bool] | None = None,
 ) -> str:
     """Return the tree id of ``base`` overlaid with the working content (see :func:`content_index`).
 
     The tree is written to the repository's object store, so it outlives the private index.
     """
-    with content_index(repo_root, base, pathspecs, names=names, work_tree=work_tree) as env:
+    with content_index(
+        repo_root,
+        base,
+        pathspecs,
+        names=names,
+        work_tree=work_tree,
+        excluded=excluded,
+    ) as env:
         return _git(repo_root, "write-tree", env=env).strip()
 
 
 def item_diff(repo_root: Path, baseline: str, paths: Sequence[str]) -> bytes:
     """Return an item's diff since ``baseline`` under ``paths``, ending ``sha256 <hex>``.
 
-    One ``git diff-tree -p --binary`` of the ``baseline`` tree against :func:`content_tree`'s
-    tree of the working content under ``paths``, new files included, in path order. Renames and
-    deletions are found by content, and for every file git does not ignore the diff is
-    independent of the index: neither staging, unstaging nor ``git rm --cached`` moves a byte
-    (only whether an ignored file is force-added counts), and the shared ``.git/index`` is never
-    written. Paths are repository-relative, :func:`_git` keeps the caller's global and system
-    config out, and the flags fix colour, prefixes, rename detection and the external diff and
-    textconv drivers whatever the repository's config says, so two copies of one change give the
-    same bytes.
+    One ``git diff-tree -p --binary`` of the ``baseline`` tree against :func:`content_tree`'s tree
+    of the working content under ``paths``, new files included, in path order. A file the mirror
+    leaves out (:func:`is_excluded`) keeps ``baseline``'s blob, the rule :func:`snapshot_commit`
+    applies, so cycle scratch or a parked copy is never the item's addition, edit or deletion.
+    Renames and deletions are found by content, and for every file git does not ignore the diff is
+    independent of the index: neither staging, unstaging nor ``git rm --cached`` moves a byte (only
+    whether an ignored file is force-added counts), and the shared ``.git/index`` is never written.
+    Paths are repository-relative, :func:`_git` keeps the caller's global and system config out,
+    and the flags fix colour, prefixes, rename detection and the external diff and textconv drivers
+    whatever the repository's config says, so two copies of one change give the same bytes.
     """
     if not paths:
         msg = "diff needs at least one path after --"
         raise WorkspaceError(msg)
-    tree = content_tree(repo_root, baseline, paths)
+    tree = content_tree(repo_root, baseline, paths, excluded=is_excluded)
     text = _git(
         repo_root,
         "diff-tree",
