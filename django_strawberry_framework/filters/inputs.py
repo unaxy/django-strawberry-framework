@@ -457,15 +457,16 @@ def _choice_enum_from_filter(
     type_name: str,
     model_field: ModelField | None,
 ) -> type[enum.Enum]:
-    """Derive a Strawberry enum from a ``ChoiceFilter``'s underlying choice source.
+    """Derive a Strawberry enum from the ``choices`` of the model field a choice filter reads.
 
-    Per spec-027 Decision 4, a ``ChoiceFilter`` whose source is not a
-    Django ``Choices``-derived enum raises ``ConfigurationError``
-    (the consumer is expected to wrap the choices through the existing
-    converter pipeline). When the underlying model field is available
-    the pipeline at ``types/converters.py::convert_choices_to_enum`` is
-    consulted so the GraphQL enum is shared with any sibling
-    ``DjangoType`` reading the same column.
+    The enum comes only from the backing model field's ``choices``, through
+    ``types/converters.py::convert_choices_to_enum``, so it is shared with any sibling
+    ``DjangoType`` reading the same column; the filter's own ``choices`` never feed the enum.
+    Per spec-027 Decision 4, a choice filter with no backing field declaring ``choices``
+    raises ``ConfigurationError`` naming the declared filter's class: a ``ChoiceFilter``
+    on a plain column or a ``method=`` path, and django-filter's ``ChoiceFilter``
+    subclasses ``AllValuesFilter`` and ``DateRangeFilter``, whose choices are the
+    column's distinct values or fixed date-range keys.
 
     ``model_field`` is threaded as a parameter rather than stashed on
     the filter instance - keeps the filter stateless and avoids the
@@ -476,10 +477,11 @@ def _choice_enum_from_filter(
 
     if model_field is None or not getattr(model_field, "choices", None):
         raise ConfigurationError(
-            f"ChoiceFilter on {truth.render(filter_instance)} is not backed by a Django "
-            "`Choices`-derived enum; wrap the choices through "
-            "`django.db.models.TextChoices` / `IntegerChoices` or register a "
-            "custom scalar via `SCALAR_MAP`.",
+            f"{truth.kind(filter_instance)} on {truth.render(filter_instance)} is backed by "
+            "no model field declaring `choices`; declare `choices` on the column it filters "
+            "(a `TextChoices` / `IntegerChoices` class), or filter that column through a "
+            "non-choice filter (`CharFilter`, `NumberFilter`, `DateFromToRangeFilter`, its "
+            "lookups in Meta.fields, or `CharFilter(method=...)` for a method filter).",
         )
     # Past the guard the field declares truthy ``choices``, which only a concrete
     # ``Field`` carries (a reverse ``ForeignObjectRel`` has no ``choices``).
