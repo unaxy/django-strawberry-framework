@@ -2489,6 +2489,71 @@ def test_audit_refuses_a_run_log_line_missing_a_field(
         workspace.audit_record(layout.repo_root, record)
 
 
+def _missing_record(path: Path) -> Path:
+    return path
+
+
+def _directory_record(path: Path) -> Path:
+    path.mkdir()
+    return path
+
+
+def _latin1_record(path: Path) -> Path:
+    _ = path.write_bytes("Proof: caf\u00e9.\n".encode("latin-1"))
+    return path
+
+
+@pytest.mark.parametrize(
+    "make_record",
+    [_missing_record, _directory_record, _latin1_record],
+    ids=["missing", "directory", "not-utf-8"],
+)
+def test_audit_refuses_a_record_it_cannot_read_as_text(
+    tmp_path: Path,
+    make_record: Callable[[Path], Path],
+) -> None:
+    """An unreadable record is a refusal naming the path, never a traceback out of ``main``."""
+    record = make_record(tmp_path / "rev.md")
+
+    with pytest.raises(workspace.WorkspaceError, match=f"^audit {re.escape(str(record))}: "):
+        workspace.audit_record(tmp_path, record)
+
+
+def test_audit_cli_refuses_a_missing_record_on_stderr(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    missing = tmp_path / "rev.md"
+
+    assert workspace.main(["audit", str(missing)]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.err.startswith(f"workspace: audit {missing}: ")
+    assert "Traceback" not in captured.err
+    assert captured.out == ""
+
+
+def test_audit_cli_keeps_the_report_of_records_read_before_an_unreadable_one(
+    layout: workspace.Layout,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+
+    def _layout_base(_root: Path) -> Path:
+        return layout.base
+
+    monkeypatch.setattr(workspace, "workspace_base", _layout_base)
+    readable = _write(tmp_path / "first.md", "No run ids cited here.\n")
+    missing = tmp_path / "second.md"
+
+    assert workspace.main(["audit", str(readable), str(missing)]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == f"{readable}: 0 run id(s) cited\n"
+    assert captured.err.startswith(f"workspace: audit {missing}: ")
+
+
 # --------------------------------------------------------------------------------------------
 # Postgres identity and database matching
 # --------------------------------------------------------------------------------------------

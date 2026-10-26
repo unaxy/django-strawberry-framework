@@ -83,7 +83,8 @@ Worker-0 commands
         it prints the address, cell, exit code and package digest, and whether
         the copy had been edited or the shared tree had moved. An id with no
         log entry, or whose package or database lay outside its copy, fails
-        the audit.
+        the audit. A record that cannot be read as UTF-8 text is a refusal;
+        the records audited before it keep their report lines.
     ``gate <flow> [--suites lint,default,floor,sharded,pg]``
         Run the final gate suites in a gate copy that carries a git index, as
         CI's jobs do: the lint job's commands in its order, the full default
@@ -3276,7 +3277,11 @@ def _is_str_array(value: object) -> TypeIs[list[str]]:
 
 def audit_record(repo_root: Path, record_path: Path) -> tuple[list[str], bool]:
     """Resolve every run id ``record_path`` cites; return report lines and whether all bind."""
-    text = record_path.read_text(encoding="utf-8")
+    try:
+        text = record_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        msg = f"audit {record_path}: {error}"
+        raise WorkspaceError(msg) from error
     cited = list(dict.fromkeys(match.group(0) for match in RUN_ID_PATTERN.finditer(text)))
     lines = [f"{record_path}: {len(cited)} run id(s) cited"]
     base = workspace_base(repo_root)

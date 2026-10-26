@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 314 done, 214 to do.
+Progress: 315 done, 214 to do.
 
 ## Done
 
@@ -1712,6 +1712,10 @@ Progress: 314 done, 214 to do.
   `names` are never filtered). The `diff` manual, START.md's scripts row and the item-diff sentences in HUNT.md,
   DRY.md and REVIEW.md say so. Tests: `tests/test_workspace.py` (untracked and tracked edit/delete rows per excluded
   shape at scope `.` and narrower, snapshot agreement, explicit names refreshed)
+- [x] 349. `scripts/workspace.py::audit_record` turns an unreadable record (missing, a directory, no permission, not
+  UTF-8) into a refusal: `workspace: audit <path>: <reason>` on stderr, exit 1, no traceback; records audited before
+  it keep their report lines. The `audit` manual says so. Tests: `tests/test_workspace.py` (each unreadable shape,
+  the CLI refusal, a readable record before a missing one)
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1751,8 +1755,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 349. `workspace.py audit <missing file>` exits by a `FileNotFoundError` traceback instead of a refusal. Robustness
-  row
 - [ ] 374. `django_filters.NumericRangeFilter` on a non-range column publishes a bare `exact` and silently ignores the
   value (all rows answered). Robustness row: PostgreSQL range columns are unsupported
 - [ ] 377. (robustness) graphql-core 3.2 `ExecutionContext.execute_fields` leaves an already-created async sibling
@@ -1991,6 +1993,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `__init__` (so its flat copies are projected) raises `KeyError` from
   `filters/sets.py::FilterSet._filter_named` when the parent's flat copy of the added filter is supplied.
   Found verifying 640
+- [ ] 643. (robustness) `workspace.py audit` (and every reader of the run log or a state file) exits by a traceback on
+  a corrupt evidence file: `scripts/workspace.py::load_runs` decodes each line with a bare `json.loads` (a torn append
+  after a crash raises `json.JSONDecodeError`), `_read_text_if_present` catches only `FileNotFoundError` (a non-UTF-8
+  run log or one that is a directory escapes), and `_read_json_object` shares the bare decode, while a wrong-shape line
+  is already a `WorkspaceError` in `_logged_run`; found verifying 349
 ## To do: holes found re-checking the fixes
 
 
