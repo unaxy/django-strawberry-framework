@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 305 done, 213 to do.
+Progress: 306 done, 212 to do.
 
 ## Done
 
@@ -1626,6 +1626,15 @@ Progress: 305 done, 213 to do.
   or to filter the column through a non-choice filter (`CharFilter`, `NumberFilter`, `DateFromToRangeFilter`, its
   `Meta.fields` lookups, `CharFilter(method=...)`). No refused or typed shape moved. Pinned by equality in
   `tests/filters/test_inputs.py`; spec-027's ChoiceFilter row follows
+- [x] 516. Not a defect under the AGENTS defect rule: no contract row breaks. spec-027 Decision 4's `BaseCSVFilter`
+  row covers the `in` / `range` lookups django-filter generates from `Meta.fields`; a consumer-declared bare
+  `class CharCSV(BaseCSVFilter, CharFilter)` keeping `exact` is a declaration django-filter itself never makes match.
+  Plain django-filter 26.1 runs the same `title = '[''aa'']'` SQL for `?title=aa` and returns 0 rows, and raises the
+  same `TypeError` for a `NumberFilter` element. The schema publishes the list the declared form field cleans, and a
+  scalar would change nothing, because `BaseCSVWidget` still splits it into a list. The same declaration is
+  meaningful with `in`, with `range`, and with `method=` (the method receives the list), so a class-keyed refusal
+  would break working shapes. Build-time refusal of a list-shaped filter over a lookup that cannot consume a list is
+  folded into robustness row 625, which now covers the bare CSV family beside `ListFilter`
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1781,8 +1790,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   scalar catch-all and publishes `exact: String` while its form field cleans a list, so every non-empty value answers
   `FILTER_INVALID` "Enter a list of values."; probed on a text column only (a `Choices` column not probed). Found
   fact-finding 373
-- [ ] 516. A bare `BaseCSVFilter` declared with the `exact` lookup (no `in` / `range`) publishes `[String!]` and
-  matches no row for a value a row holds (`["aa"]` and `"aa"` both answer 0 rows). Found fact-finding 373
 - [ ] 519. (robustness) A declared filter that cannot be deep-copied (`CharFilter(method=svc.by_code)` where `svc`
   holds a `threading.Lock`) now fails the schema build with a raw `TypeError` from
   `filters/base.py::copied_form_field`; at 6f0575c6 the schema built but every filtered request failed the same way.
@@ -1864,7 +1871,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `year` lookup refuses a year as "Enter a valid date/time.". Found verifying 508
 - [ ] 625. (robustness) A package `ListFilter` declared with a lookup other than `in` (the default `exact`, `gte`)
   hands the list to a scalar lookup: a masked `ValidationError` / `TypeError` over a decimal or number column and
-  silently no rows over text, even for one element. Found fixing 508
+  silently no rows over text, even for one element. A consumer-declared bare `BaseCSVFilter` subclass does the same
+  with `exact` / `iexact` / `icontains` / `startswith` (as plain django-filter does), and with `range` a one-element
+  list raises `IndexError` from `Range.get_rhs_op`. A build-time refusal must allow every list-consuming lookup (`in`,
+  `range`, transforms ending in either, `ArrayField` `contains` / `contained_by` / `overlap`, `has_keys` /
+  `has_any_keys`, a consumer-registered lookup) and every `method=` filter. Found fixing 508; widened triaging 516
 - [ ] 628. A raw-key many-to-many leaf whose through model keys the target by a non-pk `to_field` is typed by the
   target's primary key but compares the `to_field` column: `bs: {exact: [1]}` over a through `ForeignKey(B,
   to_field="code")` matches the row whose `code` is 1, and the primary key of a linked row matches nothing unless it
