@@ -560,6 +560,7 @@ class PublicPatronType(DjangoType):
         exclude = ("email", "lifetime_fines_cents")
         name = "PublicPatron"
         description = "A patron projection with PII (email) and financial columns removed."
+        orderset_class = orders.PublicPatronOrder
 ```
 
 `fields` is the allow-list and [`Meta.exclude`][glossary-metaexclude] is the
@@ -567,6 +568,9 @@ deny-list; a type uses one or the other. Exactly one type per model is
 [`primary`][glossary-metaprimary], and that is the one every relation to `Patron`
 resolves to. [`Meta.name`][glossary-metaname] decouples the GraphQL name from the
 class, and [`Meta.description`][glossary-metadescription] shows up in introspection.
+Each view orders the way it selects: `PatronOrder` lists its columns, while
+`PublicPatronOrder` repeats the type's `exclude`, so `orderBy` on the public field offers
+every column that view shows and none it hides.
 
 The shipped database has no patrons, so add one:
 

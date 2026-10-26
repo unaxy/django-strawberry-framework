@@ -12,7 +12,8 @@ cookbook's cycle-safe ``get_fields`` (the Layer-4 expansion) over
 On top of that skeleton the module carries:
 
 - The ``"__all__"`` expansion via the
-  ``_get_concrete_field_names_for_order`` walk per spec-028.
+  ``_get_concrete_field_names_for_order`` walk per spec-028, narrowed by
+  ``Meta.exclude`` as the filter family narrows it.
 - The order-expression builder (``_resolve_order_expressions``): a term
   ending on a forward ``ForeignObject`` orders by each of its carrier
   columns (``utils/relations.py::order_column_paths``), a to-many term by a
@@ -61,7 +62,11 @@ from django_strawberry_framework.sets_mixins import (
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import is_exact_list, is_exact_pair
 from django_strawberry_framework.utils.input_values import UNSET, SetInputTraversal
-from django_strawberry_framework.utils.inputs import promote_set_meta_fields, read_set_meta_fields
+from django_strawberry_framework.utils.inputs import (
+    plain_set_meta_fields,
+    promote_set_meta_fields,
+    read_set_meta_fields,
+)
 from django_strawberry_framework.utils.permissions import (
     set_bound_type,
     walk_declared_relation_path,
@@ -512,7 +517,9 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
 
         ``Meta.fields = "__all__"`` expands via
         ``_get_concrete_field_names_for_order``
-        (spec-028 Decision 3).
+        (spec-028 Decision 3), narrowed by ``Meta.exclude``
+        (``_expand_meta_fields``); a declared ``RelatedOrder`` is merged after
+        that narrowing, so one declared under an excluded name stays.
         """
 
         def _build() -> OrderedDict[str, RelatedOrder | None]:
@@ -559,7 +566,7 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
 
     @classmethod
     def _expand_meta_fields(cls) -> OrderedDict[str, RelatedOrder | None]:
-        """Expand ``Meta.fields`` into an ``OrderedDict`` keyed by field name.
+        """Expand ``Meta.fields`` minus ``Meta.exclude`` into an ``OrderedDict`` keyed by field name.
 
         Supports list / tuple form (``["title", "subtitle"]``) and the
         ``"__all__"`` shorthand (``_get_concrete_field_names_for_order`` per
@@ -572,6 +579,14 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
         ``utils/canonical.py::canonical_sort_key``); dict-shaped
         declarations iterate their keys (the django-filter lookup-bag shape
         degrades to its field names).
+
+        ``Meta.exclude`` narrows the expansion the way it narrows the filter
+        family's (``filters/sets.py::FilterSet.get_fields``): a name it lists
+        is dropped from the ``"__all__"`` sweep (the primary key included) or
+        from the declared names, by exact name; ``Meta.exclude`` with no
+        ``Meta.fields`` is the ``"__all__"`` sweep minus the excluded names,
+        so it needs ``Meta.model`` too; a name matching no field drops
+        nothing. ``_read_meta_exclude`` owns its shape gate.
 
         Two declaration contracts are enforced at this gate:
 
@@ -599,22 +614,31 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
         # unordered ``set`` / ``frozenset`` canonicalization. No write-back here -- the
         # metaclass owns alias promotion; expansion must not mutate class Meta.
         meta_fields = read_set_meta_fields(meta)
-        if meta_fields is None:
+        excluded = cls._read_meta_exclude(meta)
+        if meta_fields is None and excluded is None:
             return fields
-        if meta_fields == "__all__":
-            # ``_get_concrete_field_names_for_order`` is imported at module
-            # level with the other ``.inputs`` symbols; ``inputs.py`` only
-            # TYPE_CHECKING-imports ``OrderSet``, so the runtime cycle stays
-            # inert without a deferred local import.
+        if meta_fields == "__all__" or meta_fields is None:
+            # ``Meta.exclude`` with no ``Meta.fields`` is the same whole-set
+            # sweep, as in the filter family ("exclude with no fields implies
+            # all other fields"). ``_get_concrete_field_names_for_order`` is
+            # imported at module level with the other ``.inputs`` symbols;
+            # ``inputs.py`` only TYPE_CHECKING-imports ``OrderSet``, so the
+            # runtime cycle stays inert without a deferred local import.
             model = truth.static_attr(meta, "model", None)
             if model is None:
+                declaration = (
+                    "Meta.fields = '__all__'"
+                    if meta_fields is not None
+                    else "Meta.exclude without Meta.fields (the '__all__' sweep minus exclude)"
+                )
                 raise ConfigurationError(
-                    f"{truth.name(cls)}.Meta.fields = '__all__' requires Meta.model "
+                    f"{truth.name(cls)}.{declaration} requires Meta.model "
                     "so the order field names can be derived from "
                     "model._meta.get_fields().",
                 )
             for name in _get_concrete_field_names_for_order(model):
-                fields[name] = None
+                if excluded is None or name not in excluded:
+                    fields[name] = None
             return fields
         # Re-readability is a declaration contract shared with the filter
         # family, so the gate is theirs jointly
@@ -640,13 +664,15 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
             # silent ``{None: None}`` / ``{b'title': None}`` expansion (or a raw
             # ``TypeError: unhashable type`` from the ``fields[...]`` write
             # below) when ``Meta.model`` is absent.
-            if type(field_path) is not str:
+            if not truth.is_exact(field_path, str):
                 cls_label = truth.qualname(cls)
                 raise ConfigurationError(
                     f"OrderSet {cls_label}.Meta.fields entries must be field-name "
                     f"strings; got {truth.kind(field_path)} "
                     f"({truth.render(field_path)}).",
                 )
+            if excluded is not None and field_path in excluded:
+                continue
             if model is not None:
                 try:
                     _classify_declared_path(model, field_path)
@@ -657,6 +683,43 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
                     ) from exc
             fields[field_path] = None
         return fields
+
+    @classmethod
+    def _read_meta_exclude(cls, meta: object) -> frozenset[str] | None:
+        """Return ``Meta.exclude`` as a set of plain field names, or ``None`` when unset.
+
+        Read without mutating class Meta, through the real MRO
+        (``truth.static_attr``), so a subclass inheriting its parent's ``Meta``
+        inherits the exclusion. Every name is read as plain ``str`` text
+        (``utils/inputs.py::plain_set_meta_fields``), as the filter family
+        reads its ``Meta.exclude``. The shape gate is the filter family's
+        (``sets_mixins.py::require_re_readable_field_declaration`` under
+        ``meta_attr="exclude"``): a bare string would exclude by character and
+        a one-shot iterator only on the first of the expansion's re-runs, so
+        both are refused. An entry that is not a field-name string is refused
+        as ``Meta.fields`` entries are, instead of silently matching nothing.
+        """
+        if meta is None:
+            return None
+        exclude = plain_set_meta_fields(truth.static_attr(meta, "exclude", None))
+        if exclude is None:
+            return None
+        names = require_re_readable_field_declaration(
+            cls,
+            exclude,
+            subject="OrderSet",
+            accepted="a re-readable collection of field names",
+            meta_attr="exclude",
+        )
+        excluded: set[str] = set()
+        for name in names:
+            if not truth.is_exact(name, str):
+                raise ConfigurationError(
+                    f"OrderSet {truth.qualname(cls)}.Meta.exclude entries must be field-name "
+                    f"strings; got {truth.kind(name)} ({truth.render(name)}).",
+                )
+            excluded.add(name)
+        return frozenset(excluded)
 
     # ------------------------------------------------------------------
     # Resolver-facing API (spec-028 Decision 8)

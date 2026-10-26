@@ -1,6 +1,6 @@
 """OrderSet declarations for library relation-graph and keyset-cursor acceptance coverage.
 
-Twenty-nine ordersets mirror the relation shape ``apps.library.schema`` exposes
+Thirty ordersets mirror the relation shape ``apps.library.schema`` exposes
 through the live ``/graphql/`` endpoint; ``PeriodicalOrder`` and
 ``IssueOrder`` are the keyset-cursor ``orderBy:`` substrate: a root
 ``orderBy: {title: ASC}`` page over ``IssueOrder`` mints value cursors
@@ -176,6 +176,21 @@ class PatronOrder(OrderSet):
     class Meta:
         model = models.Patron
         fields = ["id", "name"]
+
+
+class PublicPatronOrder(OrderSet):
+    """Patron orderset bound to ``PublicPatronType`` at finalize phase 2.5.
+
+    The order surface of a deny-list type is a deny-list too: ``Meta.exclude``
+    names the columns ``PublicPatronType.Meta.exclude`` drops (``email``, PII, and
+    ``lifetime_fines_cents``, internal financial), so the order set sweeps every
+    other column the type exposes, a Patron column added later included, and no
+    ``orderBy`` term ranks patrons by a column the type hides.
+    """
+
+    class Meta:
+        model = models.Patron
+        exclude = ("email", "lifetime_fines_cents")
 
 
 class PeriodicalOrder(OrderSet):
@@ -442,6 +457,7 @@ __all__ = (
     "PatronProfileOrder",
     "PeriodicalOrder",
     "PrintingOrder",
+    "PublicPatronOrder",
     "PublisherOrder",
     "ReadingListEntryOrder",
     "ReadingListOrder",
