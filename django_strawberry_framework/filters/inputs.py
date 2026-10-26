@@ -670,16 +670,18 @@ def convert_filter_to_input_annotation(
         return _choice_enum_from_filter(matched, type_name, model_field)
 
     def _catchall(matched: Filter) -> object:
-        # Catch-all scalar branch. ``Filter(method=...)`` filters land
-        # here when their ``field_class`` is a recognized form field; an
-        # unknown form-field shape raises per spec-027 Decision 4.
+        # Catch-all scalar branch: a ``method=`` filter is typed from its model column, else
+        # from the form field its class builds; one whose ``field`` builds none on the
+        # unbound declaration raises (spec-027 Decision 4).
         form_field = _declared_form_field(matched)
         method = read_attr(matched, "method", None)
         if method is not None and form_field is None:
             raise ConfigurationError(
-                f"Filter(method={truth.render(method)}) on {truth.render(matched)} exposes no "
-                "form field; declare an explicit `Filter(method=..., field_class=...)` "
-                "or wrap the method on a typed filter primitive.",
+                f"{truth.kind(matched)}(method={truth.render(method)}) on "
+                f"{truth.render(matched)} exposes no form field; put the method on a typed "
+                "filter primitive (`CharFilter(method=...)`, `NumberFilter(method=...)`, "
+                "`ListFilter(method=...)` for a list value, ...) or on a `Filter` subclass "
+                "declaring `field_class` at class level.",
             )
         if getattr(matched, "lookup_expr", None) == "isnull":
             # ``isnull`` is a boolean predicate regardless of the column type;

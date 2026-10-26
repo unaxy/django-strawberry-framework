@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 303 done, 213 to do.
+Progress: 304 done, 213 to do.
 
 ## Done
 
@@ -1610,6 +1610,15 @@ Progress: 303 done, 213 to do.
   `test_library_api.py` over a new fakeshop `PublicPatronOrder` (mirrors `PublicPatronType.Meta.exclude`; the public
   patrons field takes `orderBy`), package rows in `tests/orders/test_sets.py`; spec-028, README, fakeshop README,
   GlossaryTerm 474 and 489
+- [x] 517. The catch-all's `ConfigurationError` for a `method=` filter with no form field
+  (`filters/inputs.py::convert_filter_to_input_annotation`) advised `Filter(method=..., field_class=...)`, a spelling
+  whose `.field` raises `TypeError` at schema build (django-filter forwards `field_class` to the form field). It now
+  names the declared filter's class and advises the spellings that work: a typed primitive (`CharFilter(method=...)`,
+  `NumberFilter(method=...)`, `ListFilter(method=...)` for a list value) or a `Filter` subclass declaring
+  `field_class` at class level. What reaches it is a filter whose form field cannot be built on the unbound
+  declaration (`AllValuesMultipleFilter(method=...)`); a bare `Filter(method=...)` types as `String`. The message is
+  pinned in `tests/filters/test_inputs.py`; live holder rows in `test_library_api.py` prove each advised spelling
+  filters, column-backed and not
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1767,11 +1776,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   fact-finding 373
 - [ ] 516. A bare `BaseCSVFilter` declared with the `exact` lookup (no `in` / `range`) publishes `[String!]` and
   matches no row for a value a row holds (`["aa"]` and `"aa"` both answer 0 rows). Found fact-finding 373
-- [ ] 517. The catch-all's `ConfigurationError` for a `method=` filter with no form field
-  (`filters/inputs.py::convert_filter_to_input_annotation`) advises `Filter(method=..., field_class=...)`, but
-  django-filter's base `Filter` puts `field_class` into `extra`, so that spelling's `.field` raises `TypeError`
-  (unexpected keyword `field_class`); the working spelling is a `Filter` subclass with a class-level `field_class`.
-  Found implementing 373
 - [ ] 518. (robustness) The non-enum choice refusal names "ChoiceFilter" for a `DateRangeFilter` or
   `AllValuesFilter`, which are not choice filters to the consumer who declared them. Found fact-finding 373
 - [ ] 519. (robustness) A declared filter that cannot be deep-copied (`CharFilter(method=svc.by_code)` where `svc`
@@ -1900,6 +1904,10 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 536. (robustness) A `FilterSet` with no `Meta.model` and a `Meta.exclude` (with or without a `RelatedFilter`)
   raises a raw `AttributeError: 'NoneType' object has no attribute '_meta'` from `get_fields` instead of a
   `ConfigurationError` naming the set. Found verifying 558
+- [ ] 537. (robustness) `AllValuesMultipleFilter(field_name=<column>, method=...)` is refused at schema build ("exposes
+  no form field") though its column alone would type it, as the same filter without `method=` is typed: its form field
+  reads the per-request `model`, so the unbound copy builds none and the catch-all refuses before the column is
+  consulted. Found implementing 517
 ## To do: holes found re-checking the fixes
 
 
