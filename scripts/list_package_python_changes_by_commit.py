@@ -28,6 +28,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
+try:
+    import _git
+except ModuleNotFoundError:  # imported as ``scripts.list_package_python_changes_by_commit``
+    from scripts import _git
+
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
@@ -83,15 +88,13 @@ def _stderr_text(error: _StderrOwner) -> str:
 
 
 def run_git(args: Sequence[str], *, cwd: Path | None = None) -> str:
-    """Run ``git --no-pager <args>`` and return stdout."""
+    """Run ``git -C <cwd> --no-pager <args>`` through ``scripts/_git.py`` and return stdout.
+
+    ``cwd`` defaults to the current directory. The history read is the repository's, never
+    shaped by the caller's global config or stray ``GIT_*`` variables.
+    """
     try:
-        result = subprocess.run(
-            ["git", "--no-pager", *args],
-            cwd=cwd,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        result = _git.run_git(Path.cwd() if cwd is None else cwd, *args, check=True)
     except subprocess.CalledProcessError as error:
         stderr = _stderr_text(error).strip()
         message = stderr or f"git {' '.join(args)} failed with exit code {error.returncode}"

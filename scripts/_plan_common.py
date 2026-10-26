@@ -4,8 +4,8 @@
 ``scripts/bug_hunt.py`` each write one release-keyed plan into the tree. The
 release rule and the ``__version__`` read are shared by all three; path display,
 safe atomic writes and the ``## Cycle baseline`` block by the DRY and REVIEW
-planners. Everything is standard library, so a workspace copy that excludes
-``docs/`` still imports it.
+planners. Everything is standard library (``scripts/_git.py`` included), so a
+workspace copy that excludes ``docs/`` still imports it.
 """
 
 from __future__ import annotations
@@ -16,6 +16,11 @@ import re
 import subprocess
 import tempfile
 from pathlib import Path
+
+try:
+    import _git
+except ModuleNotFoundError:  # imported as ``scripts._plan_common`` (repo root on path)
+    from scripts import _git
 
 #: A dotted-digit release such as ``0.0.15``.
 RELEASE_PATTERN = re.compile(r"^\d+(?:\.\d+)+$")
@@ -120,21 +125,14 @@ def package_version(package_root: Path) -> str:
 
 
 def git_status_short(root: Path) -> str | None:
-    """Return ``git status --short`` for ``root``, or ``None`` outside a usable checkout."""
+    """Return ``git status --short`` for ``root``, or ``None`` outside a usable checkout.
+
+    Run through ``scripts/_git.py``: the listing is the repository's (its own ignore rules
+    and config, never the caller's colour, untracked-files or excludes settings), and the
+    run never rewrites ``.git/index``.
+    """
     try:
-        result = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(root),
-                "--no-pager",
-                "status",
-                "--short",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        result = _git.run_git(root, "status", "--short", check=True)
     except (OSError, subprocess.CalledProcessError):
         return None
     return result.stdout

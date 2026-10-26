@@ -35,7 +35,7 @@ class ConstantsRenderError(RuntimeError):
 
 
 def run_git(args: Sequence[str]) -> str:
-    """Run ``git --no-pager <args>`` and return stdout (errors as ConstantsRenderError)."""
+    """Run ``git --no-pager <args>`` through ``_kanban_lib.run_git`` (errors as ConstantsRenderError)."""
     return _run_git(args, error_cls=ConstantsRenderError)
 
 
@@ -51,15 +51,13 @@ def path_root(path: str) -> str | None:
 def tracked_file_paths() -> tuple[str, ...]:
     """Return tracked repo-relative file paths under every tracked root.
 
-    ``-z`` (with ``core.quotePath=false``) keeps a path with a non-ASCII byte,
-    a quote or an embedded newline intact instead of C-quoting or splitting it;
+    ``-z`` keeps a path with a non-ASCII byte, a quote or an embedded newline
+    intact instead of C-quoting or splitting it;
     ``--deduplicate`` collapses the three index stages an unmerged path reports
     during a conflicted merge, which would otherwise triplicate its entry.
     """
     output = run_git(
         [
-            "-c",
-            "core.quotePath=false",
             "ls-files",
             "-z",
             "--deduplicate",

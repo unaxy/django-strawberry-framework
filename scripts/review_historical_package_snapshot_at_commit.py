@@ -63,8 +63,10 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 if __package__:
+    from scripts import _git as _git_runner
     from scripts.review_inspect import main as review_inspect_main
 else:
+    import _git as _git_runner
     from review_inspect import main as review_inspect_main
 
 SHADOW_DIR = Path("docs/shadow/current")
@@ -91,29 +93,23 @@ def normalize_package_dir(repo_root: Path, package_dir: str) -> str:
 
 
 def _run_git(args: Sequence[str]) -> str:
-    """Run ``git --no-pager <args>`` and return its stdout."""
-    result = subprocess.run(
-        ["git", "--no-pager", *args],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return result.stdout
+    """Run ``git -C <current directory> --no-pager <args>`` through ``scripts/_git.py``.
+
+    Returns its stdout; a non-zero exit raises ``subprocess.CalledProcessError``.
+    """
+    return _git_runner.run_git(Path.cwd(), *args, check=True).stdout
 
 
 def _validate_commit(commit: str) -> None:
     """Exit with code 2 if ``commit`` does not resolve to a real commit."""
     try:
-        _ = subprocess.run(
-            [
-                "git",
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                f"{commit}^{{commit}}",
-            ],
+        _ = _git_runner.run_git(
+            Path.cwd(),
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            f"{commit}^{{commit}}",
             check=True,
-            capture_output=True,
         )
     except subprocess.CalledProcessError:
         print(f"Not a valid commit hash: {commit}", file=sys.stderr)
@@ -180,16 +176,7 @@ def _file_at_commit(commit: str, path: str) -> str | None:
     files; the snapshot caller feeds only paths from ``git ls-tree``, so it never
     reaches the ``None`` branch.
     """
-    exists = subprocess.run(
-        [
-            "git",
-            "cat-file",
-            "-e",
-            f"{commit}:{path}",
-        ],
-        capture_output=True,
-        check=False,
-    )
+    exists = _git_runner.run_git(Path.cwd(), "cat-file", "-e", f"{commit}:{path}")
     if exists.returncode != 0:
         return None
     return _run_git(["show", f"{commit}:{path}"])

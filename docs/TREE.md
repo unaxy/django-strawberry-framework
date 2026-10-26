@@ -524,6 +524,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_exceptions.py            # Exception hierarchy: inheritance, GraphQL translation, typed-message renders.
 ├── test_execution.py             # Smoke tests proving the shared ``tests/_execution.py`` builder hands out what it promises.
 ├── test_export_dry_review.py     # Repo-tooling tests for the DRY review plan, audit, and check CLI.
+├── test_git.py                   # Repo-tooling tests for the scripts' one git runner and every site that reads through it.
 ├── test_graphql_core_patches.py  # Install-lifecycle tests for the graphql-core ``complete_list_value`` patch.
 ├── test_idioms.py                # Smoke tests proving the shared ``tests/_idioms.py`` order helpers hand out what they promise.
 ├── test_info.py                  # Smoke tests proving the shared ``tests/_info.py`` builders hand out what they promise.
@@ -822,6 +823,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_exceptions.py            # Exception hierarchy: inheritance, GraphQL translation, typed-message renders.
 ├── test_execution.py             # Smoke tests proving the shared ``tests/_execution.py`` builder hands out what it promises.
 ├── test_export_dry_review.py     # Repo-tooling tests for the DRY review plan, audit, and check CLI.
+├── test_git.py                   # Repo-tooling tests for the scripts' one git runner and every site that reads through it.
 ├── test_graphql_core_patches.py  # Install-lifecycle tests for the graphql-core ``complete_list_value`` patch.
 ├── test_idioms.py                # Smoke tests proving the shared ``tests/_idioms.py`` order helpers hand out what they promise.
 ├── test_info.py                  # Smoke tests proving the shared ``tests/_info.py`` builders hand out what they promise.

@@ -165,6 +165,7 @@ poetry.toml
 # agents/ is the exception: the tracked agentflow subagent definitions.
 .claude/*
 !.claude/agents/
+**/.claude/settings.local.json
 
 # Shared workflow shadow files (static-analysis byproducts)
 # Review/build artifacts, plan files, and worker instructions remain tracked.

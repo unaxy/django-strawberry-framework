@@ -82,6 +82,11 @@ from typing import TYPE_CHECKING, NamedTuple, TypeGuard
 
 from typing_extensions import override
 
+try:
+    import _git
+except ModuleNotFoundError:  # imported as ``scripts.review_inspect`` (repo root on path)
+    from scripts import _git
+
 if TYPE_CHECKING:
     from typing_extensions import TypeIs
 
@@ -884,19 +889,17 @@ def code_digest(source: str) -> str:
 
 
 def _read_digest_source(source: str) -> str:
-    """Return a ``--code-digest`` source's text: a file, else ``<rev>:<path>`` from git."""
+    """Return a ``--code-digest`` source's text: a file, else ``<rev>:<path>`` from git.
+
+    The revision is read in the current directory's repository through ``scripts/_git.py``.
+    """
     path = Path(source)
     if path.is_file():
         return path.read_text(encoding="utf-8")
     if ":" not in source:
         msg = f"{source} is neither a file nor <rev>:<path>"
         raise FileNotFoundError(msg)
-    completed = subprocess.run(
-        ["git", "show", source],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    completed = _git.run_git(Path.cwd(), "show", source)
     if completed.returncode != 0:
         msg = f"git show {source} failed: {completed.stderr.strip()}"
         raise FileNotFoundError(msg)
@@ -2077,13 +2080,20 @@ def _render_census(analysis: _Analysis) -> str:
 
 
 def _blob_id(path: Path) -> tuple[str, str]:
-    """Return ``(blob id, source)`` from ``git hash-object``, else the same sha1 computed here."""
+    """Return ``(blob id, source)`` from ``git hash-object``, else the same sha1 computed here.
+
+    Run through ``scripts/_git.py`` in the repository holding ``path``: its own
+    ``.gitattributes`` filters apply (the id a commit of the file would record), never the
+    caller's ``core.autocrlf`` or XDG attributes file. Outside a repository git hashes the
+    raw bytes, the same id as the fallback.
+    """
+    resolved = path.resolve()
     try:
-        completed = subprocess.run(
-            ["git", "hash-object", str(path)],
-            cwd=path.parent,
-            capture_output=True,
-            text=True,
+        completed = _git.run_git(
+            resolved.parent,
+            "hash-object",
+            "--",
+            str(resolved),
             check=True,
         )
     except (OSError, subprocess.CalledProcessError):

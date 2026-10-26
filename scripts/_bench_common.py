@@ -32,7 +32,6 @@ import json
 import os
 import platform
 import statistics
-import subprocess
 import sys
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
@@ -48,6 +47,11 @@ from django.test.utils import CaptureQueriesContext
 
 import django_strawberry_framework
 from django_strawberry_framework.optimizer.extension import clear_document_key_cache
+
+try:
+    import _git
+except ModuleNotFoundError:  # imported as ``scripts._bench_common`` (repo root on path)
+    from scripts import _git
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Mapping, Sequence
@@ -150,23 +154,13 @@ def git_head(root: Path = REPO_ROOT) -> str:
     A workspace copy made by rsync or ``git archive`` carries no repository,
     and a dirty working tree runs bytes no commit holds, so the sha is
     supplementary; ``package_digest`` and ``instrument_ids`` identify the
-    content a figure measured.
+    content a figure measured. Read through ``scripts/_git.py``, so a checkout the
+    caller marked ``safe.directory`` answers and the caller's global config does not.
     """
     if not (root / ".git").exists():
         return "unavailable"
     try:
-        completed = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(root),
-                "rev-parse",
-                "HEAD",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        completed = _git.run_git(root, "rev-parse", "HEAD")
     except OSError:
         return "unavailable"
     return completed.stdout.strip() or "unavailable"

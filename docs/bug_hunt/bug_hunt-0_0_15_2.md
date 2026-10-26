@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 311 done, 217 to do.
+Progress: 313 done, 215 to do.
 
 ## Done
 
@@ -1692,6 +1692,19 @@ Progress: 311 done, 217 to do.
   that child set is that set's own filter (`ChildProjection.holds_in`). spec-027 states it; live rows in
   `examples/fakeshop/test_query/test_library_api.py`, package rows in `tests/filters/test_sets.py` and
   `tests/filters/test_inputs.py`
+- [x] 346. Every git call in `scripts/` (and `tests/test_ci_governance.py`'s committable listings) runs through one
+  runner, `scripts/_git.py::run_git`, under `scripts/_git.py::repository_env`: only the repository's own config and
+  ignore/attribute files count (`REPOSITORY_CONFIG_ONLY` drops global, system and XDG config and the system
+  attributes file), every `GIT_*` variable except the repository-locating ones is dropped (a hook's or the private-index
+  procedure's `GIT_INDEX_FILE` still reaches the generators), and `GIT_OPTIONAL_LOCKS=0` keeps every `status` from
+  rewriting the shared index. `bug_hunt.py` reuses `_plan_common.git_status_short`, `check_type_suppressions` lists
+  with `-z`, `workspace.py` takes its mapping from the same module, and `.gitignore` gains
+  `**/.claude/settings.local.json` (a file only a caller-global rule hid). Tests: `tests/test_git.py` (hostile caller
+  setups per site, index untouched, private index, trust)
+- [x] 348. The caller's ownership trust is kept under the isolation: `scripts/_git.py::caller_safe_directories` reads
+  `safe.directory` from the caller's protected sources only (system, global, command scope; never `GIT_CONFIG` or
+  repository config) and passes it as command scope, so `workspace.py` and every other script read a checkout the
+  caller marked safe and refuse one the caller did not, exactly as the caller's git does. Fixed with 346
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1731,22 +1744,10 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 346. Git calls outside `scripts/workspace.py` still read the caller's global and system config and the XDG ignore
-  and attributes files, unlike `workspace.py::_git`'s `REPOSITORY_CONFIG_ONLY`:
-  `check_trailing_commas.py::git_visible_scope`, `review_plan.py::_untracked_python` and `::_worktree_blobs`, the
-  `status --short` baselines (`_plan_common.py::git_status_short`, `bug_hunt.py`, `review_plan.py`; a global
-  `status.showUntrackedFiles=no` empties the concurrent-work baseline), `review_inspect.py::_blob_id` (`hash-object`
-  applies a global `core.autocrlf`), `check_type_suppressions.py::tracked_python_files` (`core.quotePath`) and
-  `review_historical_package_snapshot_at_commit.py::_run_git`; the review diff script's `--list` mode
-  (`_dirty_python_files`) also rewrites the shared `.git/index` through `git status`. Robustness row: no caller config
-  in this repo changes a result today. Fix shape: route them through one shared isolated runner
 - [ ] 347. `workspace.py::item_diff` applies no `is_excluded`, so a pre-existing untracked file under `temp-tests/`,
   `worker-memory/` or a `*-ws` folder shows as the item's addition when the diff scope covers it (the `-- .`
   interrupted-diff command in `docs/review/worker-0.md`), and a tracked file `is_excluded` drops from the copy keeps its
   parent blob in `snapshot_commit`'s tree (0 such tracked files today). Robustness row
-- [ ] 348. Under `REPOSITORY_CONFIG_ONLY`, git reads `safe.directory` only from global or system config, so
-  `workspace.py` refuses a checkout owned by another user that the caller's global config had marked safe. Robustness
-  row (not this setup)
 - [ ] 349. `workspace.py audit <missing file>` exits by a `FileNotFoundError` traceback instead of a refusal. Robustness
   row
 - [ ] 374. `django_filters.NumericRangeFilter` on a non-range column publishes a bare `exact` and silently ignores the
