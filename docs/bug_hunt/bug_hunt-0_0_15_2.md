@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 313 done, 215 to do.
+Progress: 314 done, 214 to do.
 
 ## Done
 
@@ -1705,6 +1705,13 @@ Progress: 313 done, 215 to do.
   `safe.directory` from the caller's protected sources only (system, global, command scope; never `GIT_CONFIG` or
   repository config) and passes it as command scope, so `workspace.py` and every other script read a checkout the
   caller marked safe and refuse one the caller did not, exactly as the caller's git does. Fixed with 346
+- [x] 347. `scripts/workspace.py::item_diff` keeps the baseline's blob for every name `is_excluded` reports (cycle
+  scratch, a parked `*-ws` copy, `output/`, `docs/shadow/`), the rule `snapshot_commit` already applies, so a
+  pre-existing untracked file there is never the item's addition and a tracked one's edit or deletion is never the
+  item's; the filter is `content_index`'s keyword-only `excluded`, applied to the default listing only (explicit
+  `names` are never filtered). The `diff` manual, START.md's scripts row and the item-diff sentences in HUNT.md,
+  DRY.md and REVIEW.md say so. Tests: `tests/test_workspace.py` (untracked and tracked edit/delete rows per excluded
+  shape at scope `.` and narrower, snapshot agreement, explicit names refreshed)
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1744,10 +1751,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 347. `workspace.py::item_diff` applies no `is_excluded`, so a pre-existing untracked file under `temp-tests/`,
-  `worker-memory/` or a `*-ws` folder shows as the item's addition when the diff scope covers it (the `-- .`
-  interrupted-diff command in `docs/review/worker-0.md`), and a tracked file `is_excluded` drops from the copy keeps its
-  parent blob in `snapshot_commit`'s tree (0 such tracked files today). Robustness row
 - [ ] 349. `workspace.py audit <missing file>` exits by a `FileNotFoundError` traceback instead of a refusal. Robustness
   row
 - [ ] 374. `django_filters.NumericRangeFilter` on a non-range column publishes a bare `exact` and silently ignores the

@@ -435,7 +435,8 @@ Per item: `uv run python scripts/workspace.py baseline review/<item>` prints `IT
 (a commit of the item's `before` copy as synced, on `HEAD`, untracked files included) and takes
 that copy ("Workspace"); Worker-0 records it + the same listings as `Item baseline:` fields on the
 plan item. Item-scoped diff = `workspace.py diff <item baseline> -- <paths touched>`, every file
-the item added included.
+the item added included (what the workspace copies leave out, such as `*-ws/` folders, `output/`
+and `temp-tests/`, keeps its baseline content).
 
 Each item landing tracked edits or new files appends to `## Owned changes`: path, item, axis,
 symbols changed. A later item may build on a ledgered path. Attribute by content, never by dirty
