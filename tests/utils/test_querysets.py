@@ -92,6 +92,7 @@ from django.http import HttpRequest
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
 from django.utils.safestring import SafeString
+from django.utils.translation import gettext_lazy
 from typing_extensions import Self, override
 
 from django_strawberry_framework import DjangoType
@@ -204,6 +205,7 @@ from tests._idioms import (
     requires_fetch_modes,
     saved_pk,
 )
+from tests._postgresql_stand_in import BINDING_MODES, postgresql_stand_in
 
 if TYPE_CHECKING:
     from typing import TypeAlias
@@ -782,6 +784,57 @@ def test_coerce_field_value_or_none_refuses_an_offset_postgresql_refuses() -> No
     finally:
         with connection.schema_editor() as editor:
             editor.delete_model(_DatetimeKeyed)
+
+
+@pytest.mark.parametrize(
+    ("column", "value", "refused"),
+    [
+        pytest.param(
+            lambda: _DatetimeKeyed._meta.pk,
+            "2020-01-01T00:00:00+16:00",
+            True,
+            id="datetime-16-00",
+        ),
+        pytest.param(
+            lambda: _DatetimeKeyed._meta.pk,
+            "2020-01-01T00:00:00+15:59",
+            False,
+            id="datetime-15-59",
+        ),
+        pytest.param(
+            lambda: ScalarSpecimen._meta.get_field("occurred_time"),
+            datetime.time(12, tzinfo=datetime.timezone(datetime.timedelta(hours=-16))),
+            True,
+            id="time-minus-16-00",
+        ),
+        pytest.param(
+            lambda: ScalarSpecimen._meta.get_field("occurred_time"),
+            datetime.time(12, tzinfo=datetime.timezone(datetime.timedelta(hours=-15))),
+            False,
+            id="time-minus-15-00",
+        ),
+    ],
+)
+def test_coerce_field_value_or_none_holds_a_utc_offset_to_what_postgresql_binds(
+    column: Callable[[], models.Field[object, object] | None],
+    value: object,
+    refused: bool,  # noqa: FBT001
+) -> None:
+    """On an alias reading as PostgreSQL a value whose UTC offset its server refuses is ``None``.
+
+    The alias binds as text (psycopg 3's ``ClientCursor``) and its adapters pass the aware
+    value through, so the offset rule (``utils/errors.py::unbindable_temporal``) answers:
+    an offset of 16:00 or more names no row, one inside it is the coerced value.
+    """
+    driver, cursor_factory, _ = BINDING_MODES["psycopg3-client"]
+    field = column()
+    assert isinstance(field, models.Field)
+    expected = object_result(field.to_python, value)
+    assert isinstance(expected, (datetime.datetime, datetime.time))
+    assert expected.tzinfo is not None
+    with postgresql_stand_in(driver, cursor_factory) as alias:
+        coerced = coerce_field_value_or_none(field, value, alias=alias)
+    assert coerced == (None if refused else expected)
 
 
 @pytest.mark.pg
@@ -8294,6 +8347,18 @@ class _EnumTableCategory(models.Model):
         db_table = _term("str-enum", "CATEGORY_TABLE")
 
 
+class _LazyTableCategory(models.Model):
+    """``Category``'s table named by a lazy translation string in ``Meta.db_table``."""
+
+    name: "models.TextField[str | Combinable, str]" = models.TextField()
+
+    class Meta:
+        app_label = "products"
+        managed = False
+        apps = _member_table_apps
+        db_table = gettext_lazy("products_category")
+
+
 #: The member-named table models by member kind.
 _MEMBER_TABLE_MODELS: dict[str, type[models.Model]] = {
     "text-choices": _ChoicesTableCategory,
@@ -8366,6 +8431,24 @@ def test_member_db_table_combination_seals_to_the_exact_text_it_names(
     assert names == sorted(twin.values_list("name", flat=True))
     assert names == sorted(Category.objects.values_list("name", flat=True))
     assert names
+
+
+def test_lazy_db_table_combination_rewrite_fails_closed_typed() -> None:
+    """A combination over a lazily named table is refused typed, never served as a queryset.
+
+    An unbaked combination holds no table name, so the primary-key rewrite is the first
+    query to bake the lazy ``Meta.db_table`` into a fresh alias map; the lazy name has no
+    framework-owned representation, so reconstructing the rewrite refuses it as an
+    ``untrusted`` bound value.
+    """
+    candidate = _LazyTableCategory.objects.all().union(_LazyTableCategory.objects.all())
+
+    sealed, defect = _seal_or_defect(candidate, _LazyTableCategory, None)
+
+    assert sealed is None
+    assert defect is not None
+    assert defect[0] == "untrusted"
+    assert defect[1].startswith("QuerySet binds a")
 
 
 def _scalar_specimen(label: str, payload: dict[str, object]) -> ScalarSpecimen:
