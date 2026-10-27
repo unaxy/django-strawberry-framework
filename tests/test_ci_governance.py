@@ -1193,6 +1193,9 @@ def test_the_anchor_sweep_accepts_an_anchor_naming_an_open_spec(tmp_path: Path) 
 #: Words are joined by any whitespace, so a phrase a docstring wraps across lines,
 #: or a block of full-line comments wraps, still matches; a def or class name is
 #: read with its underscores as spaces.
+#: ``scripts/review_inspect.py::PROVENANCE_PATTERNS`` is a separate, wider word
+#: list: a lead flag in a report a reviewer reads by hand, where a false positive
+#: costs a glance; here every hit fails CI, so the set holds no false positive.
 PROVENANCE_PHRASES: tuple[tuple[str, str], ...] = (
     ("pre-fix", r"pre[-\s]+fix"),
     ("post-fix", r"post[-\s]+fix"),
@@ -1238,31 +1241,33 @@ PROVENANCE_PATTERN = re.compile(
 def _prose_segments(source: str) -> list[tuple[int, str, str]]:
     """Return ``(first line, kind, text)`` for every comment, docstring and def/class name.
 
-    A run of full-line comments on consecutive lines is one segment, joined by
-    newlines, so a phrase the block wraps is still one match; a trailing comment
-    is a segment of its own. Other string literals (error messages, fixture data)
-    are not read.
+    Every string statement is read as a docstring wherever it sits: the first
+    statement of a module, class or function body, an attribute docstring after
+    an assignment, a later string statement, one inside an ``if`` / ``try`` /
+    ``with`` / loop body. An f-string statement is read as its literal parts
+    joined. A run of full-line comments on consecutive lines is one segment,
+    joined by newlines, so a phrase the block wraps is still one match; a
+    trailing comment is a segment of its own and never joins the full-line
+    comment below it. A string that is not a statement (an error message, an
+    assigned constant, fixture data) is not read.
     """
     segments: list[tuple[int, str, str]] = []
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             segments.append((node.lineno, "name", node.name.replace("_", " ")))
-        if isinstance(
-            node,
-            (
-                ast.Module,
-                ast.FunctionDef,
-                ast.AsyncFunctionDef,
-                ast.ClassDef,
-            ),
-        ):
-            first = node.body[0] if node.body else None
-            if (
-                isinstance(first, ast.Expr)
-                and isinstance(first.value, ast.Constant)
-                and isinstance(first.value.value, str)
-            ):
-                segments.append((first.lineno, "docstring", first.value.value))
+        if not isinstance(node, ast.Expr):
+            continue
+        value = node.value
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            segments.append((node.lineno, "docstring", value.value))
+        elif isinstance(value, ast.JoinedStr):
+            # A replacement field separates the parts, so no phrase matches across it.
+            text = "\x00".join(
+                part.value
+                for part in value.values
+                if isinstance(part, ast.Constant) and isinstance(part.value, str)
+            )
+            segments.append((node.lineno, "docstring", text))
     block: list[str] = []
     start = last = 0
     for token in tokenize.generate_tokens(io.StringIO(source).readline):
@@ -1316,8 +1321,12 @@ def test_no_comment_docstring_or_name_carries_a_provenance_phrase() -> None:
 
     Deliberate limits. Only those phrases are read; the wider history vocabulary
     ("now", "no longer", "the fix", plan labels, version banners) needs judgment
-    site by site and is not gated here. String literals other than docstrings are
-    not read, so an error message or a fixture string may quote a phrase.
+    site by site and is not gated here. Only string statements are read: an error
+    message, an assigned constant or a fixture string may quote a phrase. A
+    statement built with ``+`` is not read (ruff B018 and basedpyright
+    ``reportUnusedExpression`` refuse it), nor is a bytes statement, which is not
+    prose, nor is a t-string statement. A trailing comment is never joined to the full-line comment below it:
+    each is its own segment, so a phrase split across that pair is no match.
     """
     corpus = _sweep_corpus()
     violations, read = _provenance_entries_in(corpus)
@@ -1356,8 +1365,10 @@ def test_the_provenance_sweep_reports_each_planted_phrase(tmp_path: Path, phrase
 
 #: Planted shapes beyond a one-line comment, each with the line and kind the
 #: report must name: a phrase a docstring wraps, a phrase a full-line comment
-#: block wraps, a def name, a class docstring, a trailing comment, and a phrase
-#: in another case.
+#: block wraps, a def name, a class docstring, an attribute docstring after a
+#: class assignment and after a module annotated assignment, a later string
+#: statement in a function body, a string statement in an ``if`` body, an
+#: f-string first statement, a trailing comment, and a phrase in another case.
 PLANTED_PROSE_SHAPES = [
     (
         "docstring-wrap",
@@ -1374,6 +1385,31 @@ PLANTED_PROSE_SHAPES = [
         "class-docstring",
         'class Probe:\n    """Probe.\n\n    It formerly ran.\n    """\n',
         "4: docstring: 'formerly'",
+    ),
+    (
+        "class-attribute-docstring",
+        'class Probe:\n    VALUE = 1\n    """It formerly ran."""\n',
+        "3: docstring: 'formerly'",
+    ),
+    (
+        "module-attribute-docstring",
+        'VALUE: int = 1\n"""Set by the old implementation."""\n',
+        "2: docstring: 'the old implementation'",
+    ),
+    (
+        "later-string-statement",
+        'def run():\n    """Run."""\n    VALUE = 1\n    """It used to run."""\n',
+        "4: docstring: 'used to'",
+    ),
+    (
+        "nested-string-statement",
+        'if VALUE:\n    """The value is set as of 0.0.15."""\n',
+        "2: docstring: 'as of 0.0.'",
+    ),
+    (
+        "f-string-statement",
+        'def run(value):\n    f"""Run {value} as previously set."""\n',
+        "2: docstring: 'previously'",
     ),
     ("trailing-comment", "VALUE = 1  # pre-fix value\n", "1: comment: 'pre-fix'"),
     ("upper-case", "# PREVIOUSLY SET\nVALUE = 1\n", "1: comment: 'previously'"),
@@ -1404,7 +1440,9 @@ def test_the_provenance_sweep_reports_nothing_for_a_planted_permitted_form(
 
     An error message may quote a phrase; ``reused`` and ``unused`` contain the
     letters but not the words; a blank line between two comments ends the block,
-    so a phrase split across that break is two halves and no match.
+    a trailing comment never joins the full-line comment below it, and an
+    f-string's replacement field separates its parts, so a phrase split across
+    any of those breaks is two halves and no match.
     """
     planted = _plant_prose(
         tmp_path,
@@ -1413,10 +1451,12 @@ def test_the_provenance_sweep_reports_nothing_for_a_planted_permitted_form(
         "# are fine and exactly as\n"
         "\n"
         "# before is a new block\n"
-        "VALUE = 1\n",
+        "VALUE = 1  # the value is exactly as\n"
+        "# before here\n"
+        "f'it used {VALUE} to be'\n",
     )
     violations, read = _provenance_entries_in([planted])
-    assert read == 2, read
+    assert read == 5, read
     assert violations == [], violations
 
 

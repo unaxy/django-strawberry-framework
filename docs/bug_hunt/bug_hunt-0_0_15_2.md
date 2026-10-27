@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 328 done, 215 to do.
+Progress: 329 done, 214 to do.
 
 ## Done
 
@@ -1826,6 +1826,13 @@ Progress: 328 done, 215 to do.
   rebuild reordered hand-written lines in 44 of the 188 tracked `.md` files with a `<!-- docs/ -->` group (whole-line
   order puts `[foo-bar]` before `[foo]`); a census of 2186 inserts across those files adds one line each and moves
   none. Tests: `tests/test_check_spec_glossary.py`
+- [x] 568. The provenance gate reads every string statement: a docstring, an attribute docstring after an assignment,
+  a later or nested string statement and an f-string's literal parts (a replacement field splits a phrase); a `+` or
+  bytes statement (refused by ruff B018 and basedpyright `reportUnusedExpression`) and a t-string stay unread, and a
+  trailing comment never joins the full-line comment below it (0 of 66 such pairs is one sentence), all stated in the
+  gate's limits. Five planted rows and the permitted-form row pin it; 20 more segments are read, 0 hits.
+  `scripts/review_inspect.py::PROVENANCE_PATTERNS` stays a separate report-only list (one shared word), each list's
+  comment naming the other; START's provenance bullet names string statements
 
 ## Outside review of the fixes
 
@@ -1957,10 +1964,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   package (`optimizer/extension.py`, `optimizer/plans.py`, `optimizer/walker.py`, `types/resolvers.py`) and most in
   `tests/optimizer/test_extension.py` and `test_walker.py`; the clause after each label already states the behaviour,
   so drop the label. Found fact-finding 500
-- [ ] 568. (robustness) The provenance gate reads no f-string or concatenated first statement, no attribute-docstring
-  string and no wrap from a trailing comment onto the next full-line comment (none in the corpus carries a phrase
-  today), and `scripts/review_inspect.py` keeps its own `PROVENANCE_PATTERNS` list beside the gate's
-  `PROVENANCE_PHRASES`. Found verifying 500
 - [ ] 569. (robustness) Annotations no runtime evaluation reaches escape
   `tests/base/test_init.py::test_annotations_evaluate_without_django_stubs_ext_patch`: function-local variable
   annotations (`forms/resolvers.py::_coerced_null_fields` `coerced_fields`, `utils/querysets.py` `related_opts`,
