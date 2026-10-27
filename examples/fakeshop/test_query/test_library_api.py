@@ -3158,6 +3158,51 @@ def test_library_flat_expanded_method_filter_runs_in_its_own_filterset_over_http
     assert [json_at(entry, "code") for entry in field_errors] == ["missing_at_sign"]
 
 
+#: ``PatronFilter.email_contains``, which its ``get_filters()`` override adds, on the
+#: patron root and under ``LoanFilter.patron`` (flat and nested): the root, the
+#: selected column and the filter, ``VALUE`` standing for the literal.
+_OVERRIDE_ADDED_PATRON_FILTERS = {
+    "standalone": ("allLibraryPatrons", "name", "{ emailContains: { iContains: VALUE } }"),
+    "flat": ("allLibraryLoans", "note", "{ patronEmailContains: { iContains: VALUE } }"),
+    "nested": ("allLibraryLoans", "note", "{ patron: { emailContains: { iContains: VALUE } } }"),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("spelling", list(_OVERRIDE_ADDED_PATRON_FILTERS))
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("EXAMPLE.ORG", {"name": ["p1"], "note": ["alpha"]}),
+        ("p2@", {"name": ["p2"], "note": ["beta"]}),
+        ("nowhere", {"name": [], "note": []}),
+    ],
+    ids=["first", "second", "none"],
+)
+def test_a_filter_a_get_filters_override_adds_filters_on_every_spelling_over_http(
+    spelling: str,
+    value: str,
+    expected: dict[str, list[str]],
+) -> None:
+    """A filter ``PatronFilter.get_filters()`` adds filters on its root, nested and flat.
+
+    ``PatronFilter`` overrides ``__init__`` and sits in the ``LoanFilter`` <->
+    ``PatronFilter`` cycle; the override's ``email_contains`` is one of its filters
+    on its own input, inside ``LoanFilter``'s nested ``patron`` branch and as the
+    flat copy ``patronEmailContains``, which runs inside a ``PatronFilter`` instance.
+    """
+    _seed_one_book_with_two_loans()
+    _ = models.Patron.objects.filter(name="p1").update(email="p1@example.org")
+    root, column, argument = _OVERRIDE_ADDED_PATRON_FILTERS[spelling]
+    argument = argument.replace("VALUE", json.dumps(value))
+    query = f"query {{ {root}(filter: {argument}) {{ {column} }} }}"
+
+    _assert_graphql_data(
+        query,
+        {root: [{column: row} for row in expected[column]]},
+    )
+
+
 @pytest.mark.django_db
 def test_library_flat_leaves_over_a_to_many_relation_stay_independent_over_http() -> None:
     """Each flat leaf is its own predicate; the nested branch needs one child row matching all.
@@ -4824,7 +4869,7 @@ def test_flat_relation_leaf_answers_like_its_nested_twin_for_anonymous(
     a ``PatronFilter`` instance (``PatronFilter`` overrides ``__init__``), whose
     ``loans__book__loans__patron__email`` path walks the declared ``book`` hop.
     The nested twin spells the email match through ``emailMustHaveAtSign``, the one
-    email leaf ``PatronFilter`` publishes.
+    exact email leaf ``PatronFilter`` publishes.
     """
     _seed_flat_twin_visibility_graph()
     row = _FLAT_TWIN_ROWS[shape]
@@ -5012,6 +5057,74 @@ async def test_a_child_checkbox_leaf_acts_on_a_periodical_request_only_when_name
     assert "errors" not in payload, payload
     edges = json_list(payload, "data", "periodicals", "edges")
     assert [json_at(edge, "node", "name") for edge in edges] == row.anonymous
+
+
+def _seed_periodicals_by_issue_title() -> None:
+    """``Morning Post`` holds open issue ``Spring edition``; ``Evening Post`` open ``Autumn edition``."""
+    morning = models.Periodical.objects.create(name="Morning Post")
+    models.Issue.objects.create(periodical=morning, number=1, title="Spring edition")
+    evening = models.Periodical.objects.create(name="Evening Post")
+    models.Issue.objects.create(periodical=evening, number=1, title="Autumn edition")
+
+
+#: ``IssueFilter.title_starts``, the ``method=`` filter its ``get_filters()`` override
+#: adds, under ``PeriodicalFilter.issues``; ``VALUE`` stands for the literal.
+_OVERRIDE_ADDED_ISSUE_FILTERS = {
+    "flat": "{ issuesTitleStarts: { exact: VALUE } }",
+    "nested": "{ issues: { titleStarts: { exact: VALUE } } }",
+}
+
+#: Each value sent and the periodicals whose issue titles start with it.
+_ISSUE_TITLE_STARTS: list[tuple[str, list[str]]] = [
+    ("spring", ["Morning Post"]),
+    ("AUTUMN", ["Evening Post"]),
+    ("Winter", []),
+]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("spelling", list(_OVERRIDE_ADDED_ISSUE_FILTERS))
+@pytest.mark.parametrize(("value", "expected"), _ISSUE_TITLE_STARTS)
+def test_a_method_filter_a_target_get_filters_override_adds_filters_through_a_hop(
+    spelling: str,
+    value: str,
+    expected: list[str],
+) -> None:
+    """``IssueFilter.title_starts`` filters periodicals through ``issues``, flat or nested.
+
+    ``IssueFilter`` declares no ``RelatedFilter``, so ``PeriodicalFilter.issues``
+    copies its published table as it is; the ``method=`` filter its ``get_filters()``
+    override adds runs ``filter_title_starts`` on an ``IssueFilter`` instance under
+    either spelling.
+    """
+    _seed_periodicals_by_issue_title()
+    filter_input = _OVERRIDE_ADDED_ISSUE_FILTERS[spelling].replace("VALUE", json.dumps(value))
+
+    assert _periodical_names(filter_input, staff=False) == expected
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("spelling", list(_OVERRIDE_ADDED_ISSUE_FILTERS))
+@pytest.mark.parametrize(("value", "expected"), _ISSUE_TITLE_STARTS)
+async def test_a_method_filter_a_target_get_filters_override_adds_filters_through_a_hop_async(
+    spelling: str,
+    value: str,
+    expected: list[str],
+) -> None:
+    """The async apply path runs the override-added ``title_starts`` flat or nested as well."""
+    morning = await models.Periodical.objects.acreate(name="Morning Post")
+    await models.Issue.objects.acreate(periodical=morning, number=1, title="Spring edition")
+    evening = await models.Periodical.objects.acreate(name="Evening Post")
+    await models.Issue.objects.acreate(periodical=evening, number=1, title="Autumn edition")
+    filter_input = _OVERRIDE_ADDED_ISSUE_FILTERS[spelling].replace("VALUE", json.dumps(value))
+
+    payload = await _post_async_periodicals(
+        f"query {{ periodicals(filter: {filter_input}) {{ edges {{ node {{ name }} }} }} }}",
+    )
+
+    assert "errors" not in payload, payload
+    edges = json_list(payload, "data", "periodicals", "edges")
+    assert [json_at(edge, "node", "name") for edge in edges] == expected
 
 
 @pytest.mark.django_db(transaction=True)

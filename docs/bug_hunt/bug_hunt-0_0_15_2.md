@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 320 done, 215 to do.
+Progress: 321 done, 216 to do.
 
 ## Done
 
@@ -1757,6 +1757,20 @@ Progress: 320 done, 215 to do.
   marker. All 652 CommonMark 0.31.2 examples mask as the spec renders them (HEAD: 270 of 286 in 4.1-5.3); over the
   repo's `.md` files only the `.claude/agents` front matter's opening `---` moves (now a thematic break). Tests:
   `tests/test_check_spec_glossary.py`
+- [x] 599. A FilterSet's `get_filters()` override is the set's filter table everywhere: its own input and
+  form, a direct `Set(data, queryset)`, the nested branch, the parent's flat copies (rebound or projected) and
+  a cycle member's contribution. `FilterSet.get_filters` published `base_filters` and the expansion snapshot
+  from inside the override's `super()` call, so an added filter was published on the input and filtered
+  nothing (all rows, no error), a child with an `__init__` override raised `KeyError` at schema build, a cycle
+  member's rename or removal raised `KeyError`, and an in-place `del` override raised on its second call. Now
+  `filters/sets.py::FilterSet._publish_filters` runs the override once and publishes its result,
+  `FilterSet._filter_table` is the one read (input lookup table, projections, finalizer audits, `__init__`),
+  cycle contributions pass through the override (`FilterSet._reshape`), `get_filters()` returns a fresh map
+  per call, and the override runs twice at schema build and never per request. A flat copy is deferred by its
+  `ChildProjection` record, not by its name, so a copy under a key the set's own `Meta.fields` also generates
+  is deferred and a filter the override adds is the set's own. spec-027 and docs/README state it; live rows in
+  `examples/fakeshop/test_query/test_library_api.py` (`PatronFilter` and `IssueFilter` overrides), package
+  rows in `tests/filters/test_sets.py`
 
 ## Outside review of the fixes
 
@@ -2006,15 +2020,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `field_name` (`real_shelf = RelatedFilter(..., field_name="shelf")` beside an attribute `shelf`) also fires
   that declaration's gates through the name walk of its gate path: fail-closed, an extra gate its nested twin
   does not fire. Found fixing 640
-- [ ] 598. (robustness) `filters/inputs.py` hides an expanded child leaf under `HIDE_FLAT_FILTERS` by its
-  key's first segment, so a `get_filters()` override that re-keys the copies leaves them published; and
-  `filters/inputs.py::_is_declared_head` reads the child set's `get_filters()` once per copy, so a child
-  override returning fresh copies costs one deep copy of the child set per copy at schema build. Both could
-  read the copy's `ChildProjection`. Found verifying 640
-- [ ] 599. (robustness) A child set that overrides `get_filters()` to add a filter and also overrides
-  `__init__` (so its flat copies are projected) raises `KeyError` from
-  `filters/sets.py::FilterSet._filter_named` when the parent's flat copy of the added filter is supplied.
-  Found verifying 640
 - [ ] 643. (robustness) `workspace.py audit` (and every reader of the run log or a state file) exits by a traceback on
   a corrupt evidence file: `scripts/workspace.py::load_runs` decodes each line with a bare `json.loads` (a torn append
   after a crash raises `json.JSONDecodeError`), `_read_text_if_present` catches only `FileNotFoundError` (a non-UTF-8
@@ -2040,12 +2045,27 @@ tracker number are recorded there; open remainders and new defects are filed as 
   markdown-it) on a type-7 HTML tag line in a lazy position (`> x` / `</pre>` / `TERM here`: lazy paragraph text),
   while cmark-gfm, which renders these docs on GitHub, opens an HTML block there, so a link written after it shows as
   raw text; no repo doc has the shape; found verifying 420
+- [ ] 598. (robustness) `filters/inputs.py` hides an expanded child leaf under `HIDE_FLAT_FILTERS` by its
+  key's first segment, so a `get_filters()` override that re-keys the copies leaves them published; it could
+  read the copy's `ChildProjection`. Found verifying 640
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 600. CHANGELOG entry for item 599: a FilterSet's `get_filters()` override is now its filter table
+  everywhere (own input, direct construction, nested branch, flat copies, cycles): a filter it adds filters
+  where it was published and ignored, a key it renames or removes is gone from every spelling, and a cycle
+  member's override reshapes what it contributes. A parent `Meta.fields` key that a `RelatedFilter` expansion
+  copy also takes is now deferred like every flat copy, so an absent required child filter under that key no
+  longer answers `FILTER_INVALID` on an unrelated request
+- [ ] 601. Decide whether a filter a `get_filters()` override adds (undeclared, so absent from
+  `declared_filters`) gates on its own name (`check_<name>_permission`) like a declared filter, or on its
+  `field_name` as it does now (`filters/inputs.py::leaf_gate_path`; pinned by
+  `tests/filters/test_sets.py::test_a_filter_a_get_filters_override_adds_is_gated_on_its_field_name`): moving
+  a declaration into an override silently swaps `check_extra_permission` for `check_topic_permission`. Found
+  researching 599
 - [ ] 631. Decide what a `DjangoModelFormMutation` answers when a consumer-declared form field cleans `""` (an
   omitted create value, an explicit `null`, or `""` on an `ArrayField`) over a `null=True, blank=True` column that
   stores no empty string. Today `forms/resolvers.py::_is_unstorable_blank` ignores `null`, so the column answers "This

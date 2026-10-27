@@ -17,11 +17,19 @@ filter graph.
 
 from __future__ import annotations
 
+from collections import OrderedDict
+
 from django import forms
 from django.contrib.auth.models import AbstractUser
 from django.db.models import Model, QuerySet
 from django.http import HttpRequest, QueryDict
-from django_filters import BooleanFilter, CharFilter, ModelChoiceFilter, ModelMultipleChoiceFilter
+from django_filters import (
+    BooleanFilter,
+    CharFilter,
+    Filter,
+    ModelChoiceFilter,
+    ModelMultipleChoiceFilter,
+)
 from django_filters.filters import BaseInFilter
 from typing_extensions import override
 
@@ -272,6 +280,12 @@ class PatronFilter(FilterSet):
     ``sets.py::FilterSet`` then translates that into the
     ``GraphQLError("Invalid filter input", extensions={"code":
     "FILTER_INVALID", "errors": ...})`` payload the test asserts on.
+
+    ``email_contains`` shows a ``get_filters()`` override: the filter it adds is
+    one of the set's filters everywhere, on its own input (``emailContains``),
+    nested under ``LoanFilter.patron`` and flat as ``patronEmailContains``, though
+    the set sits in the ``LoanFilter`` <-> ``PatronFilter`` cycle and overrides
+    ``__init__``.
     """
 
     loans = RelatedFilter("LoanFilter", field_name="loans")
@@ -283,6 +297,14 @@ class PatronFilter(FilterSet):
     class Meta:
         model = models.Patron
         fields = {"id": ["exact", "in"], "name": ["exact", "icontains"]}
+
+    @classmethod
+    @override
+    def get_filters(cls) -> OrderedDict[str, Filter]:
+        """Add ``email_contains``, a case-insensitive match on any part of the email."""
+        filters = OrderedDict(super().get_filters())
+        filters["email_contains"] = CharFilter(field_name="email", lookup_expr="icontains")
+        return filters
 
     def __init__(
         self,
@@ -400,6 +422,10 @@ class IssueFilter(FilterSet):
     every request that builds it (at its root, or a nested ``issues`` branch of
     ``PeriodicalFilter``). The flat copy ``issuesEmbargoed`` on the parent is a
     spelling of the request, applied only when the request names it.
+
+    ``title_starts`` shows a ``get_filters()`` override adding a ``method=``
+    filter: it runs on this set, on its own input and under
+    ``PeriodicalFilter.issues``, nested and flat (``issuesTitleStarts``) alike.
     """
 
     embargoed = BooleanFilter(field_name="embargoed", widget=forms.CheckboxInput)
@@ -407,6 +433,23 @@ class IssueFilter(FilterSet):
     class Meta:
         model = models.Issue
         fields = {"title": ["exact"]}
+
+    @classmethod
+    @override
+    def get_filters(cls) -> OrderedDict[str, Filter]:
+        """Add ``title_starts``, which ``filter_title_starts`` applies."""
+        filters = OrderedDict(super().get_filters())
+        filters["title_starts"] = CharFilter(field_name="title", method="filter_title_starts")
+        return filters
+
+    def filter_title_starts(
+        self,
+        queryset: QuerySet[models.Issue],
+        _name: str,
+        value: str,
+    ) -> QuerySet[models.Issue]:
+        """Keep the issues whose title starts with ``value``, ignoring case."""
+        return queryset.filter(title__istartswith=value)
 
 
 class PeriodicalFilter(FilterSet):

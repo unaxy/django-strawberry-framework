@@ -1843,8 +1843,8 @@ class _SidecarBindingSpec(Generic[_SetT]):
 
 
 def _expand_filterset(filterset_cls: type[FilterSet]) -> None:
-    """Layer-4 filterset expansion (resolves lazy ``RelatedFilter`` refs)."""
-    _ = filterset_cls.get_filters()
+    """Layer-4 filterset expansion (resolves lazy ``RelatedFilter`` refs) and publication."""
+    _ = filterset_cls._filter_table()
 
 
 def _expand_orderset(orderset_cls: type[OrderSet]) -> None:
@@ -2083,7 +2083,7 @@ def _audit_globalid_filter_strategies(wired: list[type[FilterSet]]) -> None:
     for filterset_cls in wired:
         # Subpass 1 bound every wired filterset's owner before this audit runs.
         owner = cast("DjangoTypeDefinition", set_bound_definition(filterset_cls))
-        for field_name, filter_instance in (filterset_cls.get_filters() or {}).items():
+        for field_name, filter_instance in filterset_cls._filter_table().items():
             if not isinstance(filter_instance, GlobalIDFilter | GlobalIDMultipleChoiceFilter):
                 continue
             target = resolve_globalid_target_definition(owner, filter_instance.field_name)
@@ -2171,8 +2171,8 @@ def _bind_filtersets() -> None:
     a deep copy refuses, naming the set and attribute, before expansion
     or any request copies one.
 
-    Subpass 2 - expand every filterset. Calls
-    ``filterset_cls.get_filters()`` so Layer-4 expansion resolves lazy
+    Subpass 2 - expand every filterset. Publishes
+    ``filterset_cls._filter_table()`` so Layer-4 expansion resolves lazy
     ``RelatedFilter`` refs and cycle guards apply uniformly. Owner
     binding from subpass 1 is visible to every filterset's owner-aware
     ``filter_for_field`` / ``filter_for_lookup`` overrides regardless
