@@ -203,6 +203,10 @@ HOT_PATH_HEURISTIC = (
     "calls to same-module functions by bare name and to `self.` / `cls.` methods of the "
     "enclosing class; calls through other objects or modules are not followed."
 )
+#: History vocabulary the comments census flags as a lead for a reviewer, never a
+#: finding: wide on purpose, so it flags words such as ``now`` that often read fine.
+#: ``tests/test_ci_governance.py::PROVENANCE_PHRASES`` is the separate, narrower
+#: phrase set the CI gate refuses, where every hit fails and no exclusion exists.
 PROVENANCE_PATTERNS = {
     "spec-": re.compile(r"\bspec-", re.IGNORECASE),
     "card": re.compile(r"\bcards?\b", re.IGNORECASE),
