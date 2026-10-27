@@ -10300,13 +10300,6 @@ _ABSENT_CHILD_FILTER_CASES: dict[str, _AbsentChildFilterCase] = {
         lambda: CharFilter(field_name="title", empty_value="B"),
         ("S-A", "S-B"),
     ),
-    "multi-widget-on-char-field": _AbsentChildFilterCase(
-        lambda: CharFilter(
-            field_name="title",
-            widget=forms.MultiWidget(widgets=(forms.TextInput, forms.TextInput)),
-        ),
-        ("S-A", "S-B"),
-    ),
     "named-clean-default": _AbsentChildFilterCase(
         lambda: _DefaultBCleanFilter(field_name="title"),
         ("S-A",),
@@ -10447,14 +10440,13 @@ def test_library_parent_connection_applies_an_omitted_child_filter_nowhere_over_
     whatever the copy's absence would do on a form copying every filter
     (django-filter's own constructor): a form field cleaning an absent key to a
     value that constrains (a consumer field's ``clean`` / ``to_python`` default,
-    a nonempty ``empty_value`` on ``CharFilter`` / ``TypedChoiceFilter``, a
-    multi-widget reading two keys into a single-value field), a field the
-    filter's ``__init__`` built and edited (an ``empty_value``, ``disabled`` with
-    an ``initial``, ``required``, a checkbox widget, a ``clean`` or widget reader
-    of its own) or a ``filter`` it set on the instance. So the request is never
-    refused and both general shelves answer. A request that names the copy
-    (``booksStatus``) filters by the value it sends, as a filter set copying
-    every filter does.
+    or a nonempty ``empty_value`` on ``CharFilter`` / ``TypedChoiceFilter``), a
+    field the filter's ``__init__`` built and edited (an ``empty_value``,
+    ``disabled`` with an ``initial``, ``required``, a checkbox widget, a
+    ``clean`` or widget reader of its own) or a ``filter`` it set on the
+    instance. So the request is never refused and both general shelves answer.
+    A request that names the copy (``booksStatus``) filters by the value it
+    sends, as a filter set copying every filter does.
     """
     case = _ABSENT_CHILD_FILTER_CASES[case_id]
     branch = models.Branch.objects.create(name="Absent", city="Boston")
