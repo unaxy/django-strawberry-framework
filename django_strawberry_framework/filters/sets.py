@@ -1225,26 +1225,27 @@ class CandidateFilterMetadata:
 
 @dataclass(frozen=True)
 class ExpansionSnapshot:
-    """One immutable snapshot owning BOTH the expanded filters and their metadata.
+    """One immutable snapshot owning BOTH the published filter table and its metadata.
 
-    Published atomically by ``FilterSet.get_filters`` after a SUCCESSFUL
-    expansion build, under the same ``should_cache_expansion`` gate as the
-    expansion cache write -- never as a separate pass that could observe an
-    unexpanded surface. A build failure publishes nothing (no partial snapshot).
+    Published atomically by ``FilterSet._publish_filters`` once the expansion is
+    cached (the same ``should_cache_expansion`` gate), over what
+    ``cls.get_filters()`` makes of it, a consumer override's result included --
+    never as a separate pass that could observe an unexpanded surface. A failure
+    publishes nothing (no partial snapshot).
 
-    - ``filters`` -- a read-only ``MappingProxyType`` VIEW of the completed
-      expanded-filter ``OrderedDict``. The underlying mutable ``OrderedDict`` is
-      the exact object ``get_filters`` returns and is assigned unchanged to
-      ``cls._expanded_filters`` / ``cls.base_filters`` (django-filter mutates
-      ``base_filters`` and needs a real dict there); the snapshot exposes only
-      the read-only view so a snapshot holder cannot mutate the filter half.
+    - ``filters`` -- a read-only ``MappingProxyType`` VIEW of the published
+      table. The underlying mutable ``OrderedDict`` is assigned unchanged to
+      ``cls.base_filters`` (django-filter mutates ``base_filters`` and needs a
+      real dict there); the snapshot exposes only the read-only view so a
+      snapshot holder cannot mutate the filter half.
     - ``candidates`` -- a read-only ``MappingProxyType`` of filter name ->
       ``CandidateFilterMetadata`` for EVERY direct framework-generated leaf. Names
       of declared / override / unstamped leaves and of ``RelatedFilter``
       expansions are absent.
     - ``deferred_copies`` -- the names of ``filters`` an instance copies only
-      when it reads them (``FilterSet.__init__``): every ``RelatedFilter``-expanded
-      copy. A flat copy is a spelling of the request, not a field of the set's
+      when it reads them (``FilterSet.__init__``): every copy of this set's own
+      ``RelatedFilter`` expansion (``_is_flat_copy``), under whatever key the
+      table holds it. A flat copy is a spelling of the request, not a field of the set's
       form: a request that does not name it neither binds nor runs it, whatever
       its absence would do (a ``required`` one, a checkbox, a consumer
       ``filter``, a form field cleaning an absent key to a value that filters).
@@ -1373,7 +1374,7 @@ def _candidate_metadata_for(
 
     This function computes only the leaf-INTRINSIC half. The owning class's
     generation capability and the audited-release check are applied by
-    ``FilterSet.get_filters`` when it freezes ``CandidateFilterMetadata.routable``.
+    ``FilterSet._publish_filters`` when it freezes ``CandidateFilterMetadata.routable``.
     """
     provenance = filter_generation_provenance(filter_instance)
     if provenance is None or provenance.origin not in _FRAMEWORK_GENERATED_ORIGINS:
@@ -1656,7 +1657,7 @@ class ProjectedChildFilter(Filter):
         """
         projection = self._projection
         if getattr(self, "parent", None) is None:
-            return copied_form_field(projection.filterset.base_filters[projection.name])
+            return copied_form_field(_projection_child_filter(projection))
         return self._child()._filter_named(projection.name).field
 
     @override
@@ -1715,14 +1716,26 @@ def _owner_bound_child(child_filterset: type[FilterSet], child_filter: Filter) -
 
 
 def _projection_child_filter(projection: ChildProjection) -> Filter:
-    """Return the child filter a projection answers for from the target set's current filters.
+    """Return the child filter a projection answers for from the target set's published table.
 
-    One body serves the visibility walk (``FilterSet._visibility_hops``) and the gate walk
-    (``FilterSet._leaf_gates``), so both resolve the same child filter. Class-level
-    ``get_filters()`` (fresh expansion), never the possibly-stale ``base_filters`` the
-    unbound template reads.
+    One body serves the unbound projected copy's form field (``ProjectedChildFilter.field``),
+    the visibility walk (``FilterSet._visibility_hops``) and the gate walk
+    (``FilterSet._leaf_gates``), so all three resolve the child filter a child instance copies
+    (``FilterSet._filter_table``).
     """
-    return projection.filterset.get_filters()[projection.name]
+    return projection.filterset._filter_table()[projection.name]
+
+
+def _is_flat_copy(owner: type[FilterSet], filter_instance: Filter) -> bool:
+    """Whether ``filter_instance`` in ``owner``'s table is a ``RelatedFilter`` expansion's copy.
+
+    A copy carries the ``ChildProjection`` its expansion stamped (``_expansion_record``)
+    naming one of ``owner``'s own declarations (``ChildProjection.holds_in``), under
+    whatever key a ``get_filters()`` override holds it; a filter an override adds, and a
+    copy borrowed from another set, is ``owner``'s own.
+    """
+    record = _expansion_record(filter_instance)
+    return record is not None and record.holds_in(owner)
 
 
 @dataclass(frozen=True)
@@ -2121,7 +2134,7 @@ def _filter_paths(filterset: type[FilterSet]) -> Iterator[str]:
     A ``RelatedFilter`` (declared, or copied by an expansion) is a branch, not a
     leaf; ``reject_captured_branches`` reads the declared ones apart.
     """
-    for filter_instance in filterset.get_filters().values():
+    for filter_instance in filterset._filter_table().values():
         if not isinstance(filter_instance, RelatedFilter):
             yield _bound_field_name(filter_instance)
 
@@ -2130,16 +2143,16 @@ def _filter_paths(filterset: type[FilterSet]) -> Iterator[str]:
 class _ExpansionScope:
     """State shared by every expansion one outermost ``get_filters`` build runs.
 
-    ``surfaces`` holds each ``FilterSet._expand_along`` result by the set and the
-    sets on its path (the result depends on nothing else), so a set reached along
-    many paths through the same sets is expanded once; ``reached`` holds each
+    ``surfaces`` holds each inner path's contribution (``FilterSet._filters_along``)
+    by the set and the sets on its path (the result depends on nothing else), so a
+    set reached along many paths through the same sets is expanded once; ``reached`` holds each
     set's ``_reachable_filtersets`` id set; ``limit`` is the flat-filter limit,
     read once per build. Keys are object ids: every class on a key stays alive
     for the scope, and an id never consults a consumer metaclass ``__eq__``.
     """
 
     limit: int
-    surfaces: dict[tuple[int, frozenset[int]], OrderedDict[str, Filter]]
+    surfaces: dict[tuple[int, frozenset[int]], Mapping[str, Filter]]
     reached: dict[int, frozenset[int]]
 
 
@@ -2162,6 +2175,14 @@ def _pipeline_built() -> Generator[None, None, None]:
 
 _expansion_scope_var: ContextVar[_ExpansionScope | None] = ContextVar(
     "_expansion_scope_var",
+    default=None,
+)
+
+# The set whose ``get_filters()`` is running over a given surface, and that surface:
+# its own ``FilterSet.get_filters`` answers it meanwhile (``FilterSet._reshape``), so a
+# consumer override's ``super().get_filters()`` receives it.
+_reshape_var: ContextVar[tuple[type[FilterSet], Mapping[str, Filter]] | None] = ContextVar(
+    "_reshape_var",
     default=None,
 )
 
@@ -2449,13 +2470,17 @@ class FilterSet(
     # class it builds (``sets_mixins.py::collect_related_declarations``, an ``OrderedDict``).
     # Annotation only: the metaclass is the one writer.
     related_filters: ClassVar[dict[str, RelatedFilter]]
+    # django-filter's per-class filter table, every instance's copies' source: its
+    # metaclass stores ``get_filters()`` on every class, and ``_publish_filters``
+    # replaces it with the expanded table. Annotation only.
+    base_filters: OrderedDict[str, Filter]
 
     # Cache for fully-resolved filters per Layer 4 of Decision 3.
     _expanded_filters: ClassVar[OrderedDict[str, Filter] | None] = None
     # The immutable expansion snapshot (``ExpansionSnapshot``) owning the
-    # expanded filters AND the row-preserving-candidate metadata, published
-    # atomically beside ``_expanded_filters`` inside ``get_filters`` under the
-    # same ``should_cache_expansion`` gate. Registered in ``_lifecycle.extra``
+    # published filter table AND the row-preserving-candidate metadata, published
+    # atomically with ``base_filters`` by ``_publish_filters`` once
+    # ``_expanded_filters`` is cached. Registered in ``_lifecycle.extra``
     # (below) so ``registry.clear()`` resets it together with the filter cache;
     # a free-floating slot would survive the clear that deletes
     # ``_expanded_filters`` and pair stale metadata with a rebuilt
@@ -2463,9 +2488,9 @@ class FilterSet(
     # ONLY through ``cls._expansion_snapshot()`` (a class's OWN ``__dict__``) so
     # a subclass never inherits its parent's classification.
     _expanded_snapshot: ClassVar[ExpansionSnapshot | None] = None
-    # Each operator-bag lookup's form key, grouped once per ``get_filters()``
-    # result (``inputs.py::filter_lookup_table``). The table names the
-    # ``get_filters()`` object it was built from and is rebuilt when that
+    # Each operator-bag lookup's form key, grouped once per published filter
+    # table (``inputs.py::filter_lookup_table``). The lookup table names the
+    # ``_filter_table()`` object it was built from and is rebuilt when that
     # object changes, so an inherited or pre-clear table is never read.
     _lookup_table: ClassVar[FilterLookupTable | None] = None
     # Reentry guard around `get_filters`'s build: a call reading this class
@@ -2585,7 +2610,7 @@ class FilterSet(
     # While ``_filters_settled`` is ``False`` it holds the set's own filters and
     # the flat copies the data names, in class order, plus any other copy read
     # since by name (``_filter_named``), and ``_copy_source`` is the class's
-    # ``base_filters`` the rest are copied from.
+    # published table (``ExpansionSnapshot.filters``) the rest are copied from.
     _copied_filters: OrderedDict[str, Filter]
     _copy_source: Mapping[str, Filter]
     _filters_settled: bool = True
@@ -2631,7 +2656,7 @@ class FilterSet(
             # stores the mapping and its form reads it as one. It rejects a ``Mapping``
             super().__init__(data, queryset, request=request, prefix=prefix)  # pyright: ignore[reportArgumentType]
             return
-        source = cls.base_filters
+        source = snapshot.filters
         deferred = snapshot.deferred_copies
         named = frozenset(_named_flat_copies(data, snapshot.copy_keys, prefix) if data else ())
         self._unnamed_copies = deferred - named
@@ -2737,12 +2762,24 @@ class FilterSet(
         thread) returns the same surface, built again and not published
         (``expanded_once``'s ``on_reentry``).
 
+        Each call returns a fresh map, as django-filter's does, so an override
+        editing its ``super().get_filters()`` result edits its own copy. The
+        first call that finds the expansion cached publishes the set's filter
+        table (``_publish_filters``): what ``cls.get_filters()`` makes of it, a
+        consumer override's result included. The package reads the published
+        table (``_filter_table``), never a later call's result. While the
+        package runs ``cls.get_filters()`` over a given surface
+        (``_reshape``), this method answers that surface.
+
         The surface grows with the number of paths, factorially in a dense
         graph of mutually related sets, so the walk stops with a
         ``ConfigurationError`` at the first path whose flat filters pass
         ``MAX_FLAT_FILTERS`` (``_flat_filter_limit``), naming this set, the
         declaration being expanded and the path.
         """
+        reshaping = _reshape_var.get()
+        if reshaping is not None and reshaping[0] is cls:
+            return OrderedDict(reshaping[1])
         # An abstract model has no default manager, which django-filter reads to resolve
         # every generated lookup (and no primary key for ``get_fields`` to add).
         own_model = cls._meta.model
@@ -2764,9 +2801,7 @@ class FilterSet(
 
         def _build_in_scope() -> OrderedDict[str, Filter]:
             all_filters = _surface()
-            model = cls._meta.model
-            candidates: dict[str, CandidateFilterMetadata] = {}
-            if model is not None:
+            if cls._meta.model is not None:
                 # The metaclass stores ``related_filters`` from
                 # ``sets_mixins.py::collect_related_declarations`` (``RelatedFilter`` only).
                 related_filters_val = _own_related_filters(cls)
@@ -2778,9 +2813,9 @@ class FilterSet(
                     target_attr="filterset",
                     reached_paths=_filter_paths,
                 )
-                # Build every target's own expansion too, before publishing this
-                # one: a projected leaf runs in a child filter set instance, which
-                # reads the child's own ``base_filters``, and a target's
+                # Publish every target's own filters too, before this set's: a
+                # projected leaf runs in a child filter set instance, which
+                # copies the child's published filters, and a target's
                 # declaration errors surface here. A target still mid-build is
                 # this expansion's caller and finishes on its own.
                 for declaration in related_filters_val.values():
@@ -2788,45 +2823,7 @@ class FilterSet(
                     if target is not None and not truth.class_dict(target).get(
                         target._lifecycle.guard,
                     ):
-                        _ = target.get_filters()
-                # Build candidate metadata in THIS same expansion pass, over the
-                # fully-expanded surface. Origin is read from the frozen
-                # generation-provenance record stamped on each instance at its
-                # construction site (never rediscovered from the prefixed name
-                # string); ``_candidate_metadata_for`` returns ``None`` -- so no
-                # row is added -- for any non-framework-generated leaf (fail
-                # closed) and for every ``RelatedFilter`` expansion, strictly
-                # classifies the rest, and RAISES on an unresolvable framework
-                # leaf (a genuine framework/configuration defect). A row exists
-                # ONLY for a proven direct framework-generated leaf; an absent
-                # name is a non-candidate at the fail-closed consumption site.
-                #
-                # The routing verdict is FROZEN here, once per build, onto
-                # ``CandidateFilterMetadata.routable`` -- the only thing
-                # ``_apply_flat_leaves`` consults. Two build-wide conjuncts are
-                # computed once:
-                #
-                # * ``cls._is_generation_capable()`` -- this class overrode none of
-                #   the package generation seams (``filter_for_field`` /
-                #   ``filter_for_lookup`` / ``FILTER_DEFAULTS`` / ``__init__``). A
-                #   class that overrode any of them stores every row NON-routable,
-                #   so its filters run django-filter's original outer invocation
-                #   even for a path-eligible leaf. That is the supported-seam
-                #   refusal: the customization keeps working, it just does not
-                #   receive the optimization.
-                # * ``_DJANGO_FILTER_OPTIMIZER_AUDITED`` -- the installed
-                #   ``django-filter`` release is inside the audited optimizer range.
-                #   On an unaudited release NOTHING is routable, so filtering falls
-                #   back wholesale to upstream behavior with identical results.
-                capable = cls._is_generation_capable() and _DJANGO_FILTER_OPTIMIZER_AUDITED
-                for filter_name, filter_instance in all_filters.items():
-                    row = _candidate_metadata_for(model, filter_instance)
-                    if row is None:
-                        continue
-                    candidates[filter_name] = replace(
-                        row,
-                        routable=capable and row.eligible,
-                    )
+                        _ = target._filter_table()
             # TODO(spec-060 Slice 1): Meta.search_fields - wire
             # `construct_search(all_filters)` from
             # `django_strawberry_framework.filters.inputs.LOOKUP_PREFIXES` here.
@@ -2835,42 +2832,122 @@ class FilterSet(
 
             # The two-condition cache-write gate (own `related_filters` +
             # no unresolved string lazy targets) is single-sited in
-            # `sets_mixins.should_cache_expansion`. Publish the
-            # filters AND the candidate metadata as ONE immutable snapshot,
-            # atomically, only after the whole build succeeded: a failure above
-            # (e.g. a strict-classification defect) publishes nothing, so stale
-            # metadata can never pair with a rebuilt ``base_filters``.
+            # `sets_mixins.should_cache_expansion`.
             if should_cache_expansion(
                 cls,
                 related_attr="related_filters",
                 target_slot="_filterset",
             ):
                 cls._expanded_filters = all_filters
-                own = cls._unexpanded_filters()
-                deferred = frozenset(name for name in all_filters if name not in own)
-                cls._expanded_snapshot = ExpansionSnapshot(
-                    # The snapshot exposes a READ-ONLY view of the filter map;
-                    # the mutable ``all_filters`` is what django-filter needs on
-                    # ``base_filters`` / the ``_expanded_filters`` cache.
-                    filters=MappingProxyType(all_filters),
-                    candidates=MappingProxyType(candidates),
-                    deferred_copies=deferred,
-                    copy_keys=_copy_form_keys(all_filters, deferred),
-                )
-                cls.base_filters = all_filters
             return all_filters
 
         # The class-level expansion cache + reentry-guard skeleton is shared with
         # `OrderSet.get_fields` through `sets_mixins.expanded_once`. The
         # expansion itself terminates by its path; `on_reentry` serves a call
         # re-entering a class mid-build the same surface, unpublished.
-        return expanded_once(
+        surface = expanded_once(
             cls,
             cache_attr=cls._lifecycle.cache,
             guard_attr=cls._lifecycle.guard,
             build=_build,
             on_reentry=_surface,
         )
+        # The cached expansion (never a reentrant call's unpublished surface), not
+        # yet published: publish it.
+        if (
+            truth.class_dict(cls).get(cls._lifecycle.cache) is surface
+            and cls._expansion_snapshot() is None
+        ):
+            cls._publish_filters(surface)
+        # A fresh map per call, as django-filter's ``get_filters`` returns: an override
+        # editing what ``super().get_filters()`` returned edits its own copy, never the cache.
+        return OrderedDict(surface)
+
+    @classmethod
+    def _publish_filters(cls, expansion: Mapping[str, Filter]) -> None:
+        """Publish what ``cls.get_filters()`` makes of ``expansion`` as the set's one filter table.
+
+        django-filter's metaclass stores ``get_filters()`` (a consumer override's
+        result) as ``base_filters``; the expansion lands after the class exists, so
+        it publishes here instead, running ``cls.get_filters()`` over it
+        (``_reshape``) so an override's additions, removals and renames are the
+        published table: ``base_filters`` (every instance's copies), the
+        snapshot's candidate rows, flat copies and form keys, and every package
+        read (``_filter_table``).
+        """
+        table = OrderedDict(cls._reshape(expansion))
+        model = cls._meta.model
+        candidates: dict[str, CandidateFilterMetadata] = {}
+        if model is not None:
+            # Candidate metadata over the published table. Origin is read from the
+            # frozen generation-provenance record stamped on each instance at its
+            # construction site (never rediscovered from the prefixed name
+            # string); ``_candidate_metadata_for`` returns ``None`` -- so no
+            # row is added -- for any non-framework-generated leaf (fail
+            # closed) and for every ``RelatedFilter`` expansion, strictly
+            # classifies the rest, and RAISES on an unresolvable framework
+            # leaf (a genuine framework/configuration defect). A row exists
+            # ONLY for a proven direct framework-generated leaf; an absent
+            # name is a non-candidate at the fail-closed consumption site.
+            #
+            # The routing verdict is FROZEN here, once per publication, onto
+            # ``CandidateFilterMetadata.routable`` -- the only thing
+            # ``_apply_flat_leaves`` consults. Two class-wide conjuncts are
+            # computed once:
+            #
+            # * ``cls._is_generation_capable()`` -- this class overrode none of
+            #   the package generation seams (``filter_for_field`` /
+            #   ``filter_for_lookup`` / ``FILTER_DEFAULTS`` / ``__init__``). A
+            #   class that overrode any of them stores every row NON-routable,
+            #   so its filters run django-filter's original outer invocation
+            #   even for a path-eligible leaf. That is the supported-seam
+            #   refusal: the customization keeps working, it just does not
+            #   receive the optimization.
+            # * ``_DJANGO_FILTER_OPTIMIZER_AUDITED`` -- the installed
+            #   ``django-filter`` release is inside the audited optimizer range.
+            #   On an unaudited release NOTHING is routable, so filtering falls
+            #   back wholesale to upstream behavior with identical results.
+            capable = cls._is_generation_capable() and _DJANGO_FILTER_OPTIMIZER_AUDITED
+            for filter_name, filter_instance in table.items():
+                row = _candidate_metadata_for(model, filter_instance)
+                if row is None:
+                    continue
+                candidates[filter_name] = replace(row, routable=capable and row.eligible)
+        # The filters AND their metadata publish as ONE immutable snapshot, only
+        # after the whole table classified: a failure above publishes nothing, so
+        # stale metadata can never pair with a rebuilt ``base_filters``.
+        deferred = frozenset(name for name, f in table.items() if _is_flat_copy(cls, f))
+        cls._expanded_snapshot = ExpansionSnapshot(
+            # The snapshot exposes a READ-ONLY view of the table; the mutable
+            # dict is what django-filter needs on ``base_filters``.
+            filters=MappingProxyType(table),
+            candidates=MappingProxyType(candidates),
+            deferred_copies=deferred,
+            copy_keys=_copy_form_keys(table, deferred),
+        )
+        cls.base_filters = table
+
+    @classmethod
+    def _filter_table(cls) -> Mapping[str, Filter]:
+        """Return the set's published filter table, publishing it first if need be.
+
+        The one table every package read of a set's filters reads: the input
+        builder, a parent's expansion, a projected leaf's child filter, the gate
+        and visibility walks. It is what ``cls.get_filters()`` made of the
+        expansion when the set published (``_publish_filters``), so a consumer
+        override runs at publication, never per read. A set that cannot publish
+        (a read re-entering its build, such as a captured-branch check walking
+        back into it, or a set with no ``Meta.model`` whose ``RelatedFilter``
+        target is still a lazy string) answers its ``get_filters()`` result,
+        unpublished.
+        """
+        snapshot = cls._expansion_snapshot()
+        if snapshot is None:
+            filters = cls.get_filters()
+            snapshot = cls._expansion_snapshot()
+            if snapshot is None:
+                return filters
+        return snapshot.filters
 
     @classmethod
     def _unexpanded_filters(cls) -> OrderedDict[str, Filter]:
@@ -2893,15 +2970,10 @@ class FilterSet(
         last. Each declaration is checked (``_require_relation_path`` /
         ``_require_correlated_target``) and its target's filters along ``path``
         copied on under the declaration's name (``_expand_related_filter``). The
-        result depends on this set and the sets on ``path`` alone, so an inner
-        path's result is kept in ``scope`` for every other path through the same
-        sets; a root (a one-set path) is published by its own build and never
-        re-read here. A path whose flat filters pass ``scope.limit`` raises.
+        result depends on this set and the sets on ``path`` alone; an inner path's
+        result reaches its parent through ``_filters_along``, which keeps it in
+        ``scope``. A path whose flat filters pass ``scope.limit`` raises.
         """
-        key = (id(cls), frozenset(id(visited) for visited in path)) if path[1:] else None
-        kept = None if key is None else scope.surfaces.get(key)
-        if kept is not None:
-            return kept
         filters = cls._unexpanded_filters()
         if cls._meta.model is None:
             return filters
@@ -2928,8 +3000,6 @@ class FilterSet(
                     "DJANGO_STRAWBERRY_FRAMEWORK['MAX_FLAT_FILTERS'], or declare fewer "
                     "RelatedFilter edges in the cycle.",
                 )
-        if key is not None:
-            scope.surfaces[key] = filters
         return filters
 
     @classmethod
@@ -2937,21 +3007,49 @@ class FilterSet(
         cls,
         path: tuple[type[FilterSet], ...],
         scope: _ExpansionScope,
-    ) -> OrderedDict[str, Filter]:
+    ) -> Mapping[str, Filter]:
         """Return the filters this set contributes as the target of the last set on ``path``.
 
         The cycle rule of the flat surface. A set already on ``path`` (by identity)
         contributes its own filters unexpanded (``_unexpanded_filters``), its
         ``RelatedFilter`` heads included, so every path ends one step after it
         returns to a set it passed. A set that reaches no set on ``path`` expands
-        exactly as it does alone, so its own surface (``get_filters``, cached) is
-        copied; any other set expands along ``path`` without caching.
+        exactly as it does alone, so its own published table (``_filter_table``)
+        is copied; any other set expands along ``path`` (``_expand_along``). Either
+        of the last two surfaces passes through the set's ``get_filters()``
+        (``_reshape``), so a consumer override reshapes it as it reshapes the set's
+        own table, and is kept in ``scope`` for every other path reaching the set
+        through the same sets (one entry for every path the set is already on).
         """
-        if truth.is_among(cls, path):
-            return cls._unexpanded_filters()
-        if _reachable_filtersets(cls, scope).isdisjoint(id(visited) for visited in path):
+        on_path = truth.is_among(cls, path)
+        if not on_path and _reachable_filtersets(cls, scope).isdisjoint(
+            id(visited) for visited in path
+        ):
+            return cls._filter_table()
+        along = () if on_path else (*path, cls)
+        key = (id(cls), frozenset(id(visited) for visited in along))
+        kept = scope.surfaces.get(key)
+        if kept is None:
+            surface = cls._unexpanded_filters() if on_path else cls._expand_along(along, scope)
+            kept = scope.surfaces[key] = cls._reshape(surface)
+        return kept
+
+    @classmethod
+    def _reshape(cls, surface: Mapping[str, Filter]) -> OrderedDict[str, Filter]:
+        """Return what ``cls.get_filters()`` makes of ``surface``, a consumer override included.
+
+        This class's own ``get_filters`` answers ``surface`` while the call runs, so an
+        override's ``super().get_filters()`` receives it: the set's published table
+        (``_publish_filters``) and every surface it contributes along a path
+        (``_filters_along``) are the override's result over the package's, as
+        django-filter's metaclass runs the override over the set's unexpanded
+        filters at class creation.
+        """
+        token = _reshape_var.set((cls, surface))
+        try:
             return cls.get_filters()
-        return cls._expand_along((*path, cls), scope)
+        finally:
+            _reshape_var.reset(token)
 
     @classmethod
     def _expansion_snapshot(cls) -> ExpansionSnapshot | None:
@@ -5628,7 +5726,7 @@ class FilterSet(
         whether it constrains anything.
         Otherwise a name is routed through the correlated ``EXISTS`` adapter ONLY
         when its frozen candidate row says so: ``candidate.routable``, the
-        BUILD-TIME verdict computed in ``FilterSet.get_filters`` and published in
+        BUILD-TIME verdict computed in ``FilterSet._publish_filters`` and published in
         the immutable ``ExpansionSnapshot``. That single bit already requires the
         leaf to be an audited generated family on a to-many path with no consumer
         ``method``, the owning class to have overridden none of the package

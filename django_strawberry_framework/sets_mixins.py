@@ -579,9 +579,8 @@ def expanded_once(
       its expansion ends cycles by path, never through this guard. The order
       side passes ``None`` (its expansion never re-enters ``get_fields``).
     - Otherwise set ``guard_attr`` ``True`` on ``cls``, run ``build()`` (which
-      owns the family-specific expansion AND the cache-write decision, including
-      any family side-effect such as ``FilterSet.base_filters``), and clear the
-      guard in a ``finally``.
+      owns the family-specific expansion AND the cache-write decision), and
+      clear the guard in a ``finally``.
 
     Single-threaded contract: ``guard_attr`` is a class-level flag, not a
     thread-local one. Expansion runs during ``finalize_django_types()``

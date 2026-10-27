@@ -120,6 +120,7 @@ from django_strawberry_framework.filters.factories import FilterArgumentsFactory
 from django_strawberry_framework.filters.inputs import (
     _field_specs,
     convert_filter_to_input_annotation,
+    filter_lookup_table,
     normalize_input_value,
 )
 from django_strawberry_framework.filters.sets import (
@@ -621,8 +622,13 @@ def test_filterset_get_filters_caches_after_full_resolution() -> None:
 
     first = BranchFilter.get_filters()
     second = BranchFilter.get_filters()
-    assert first is second
-    assert BranchFilter.__dict__.get("_expanded_filters") is first
+    # A fresh map per call, as django-filter's; the filters themselves are the cached ones.
+    assert first is not second
+    assert first == second == BranchFilter.__dict__.get("_expanded_filters")
+    # The published table is one object every read shares.
+    table = BranchFilter._filter_table()
+    assert table is BranchFilter._filter_table()
+    assert dict(table) == first
 
 
 def test_filterset_get_filters_resets_expansion_guard() -> None:
@@ -1087,6 +1093,499 @@ def test_a_related_filter_target_off_the_path_contributes_its_own_get_filters() 
         "shelves__code",
         "shelves__extra",
     }
+
+
+# ---------------------------------------------------------------------------
+# A get_filters() override is the set's published filter table
+# ---------------------------------------------------------------------------
+
+
+def _without_code(filters: OrderedDict[str, Filter]) -> OrderedDict[str, Filter]:
+    reshaped = OrderedDict(filters)
+    del reshaped["code"]
+    return reshaped
+
+
+def _delete_code_in_place(filters: OrderedDict[str, Filter]) -> OrderedDict[str, Filter]:
+    del filters["code"]
+    return filters
+
+
+def _code_as_kode(filters: OrderedDict[str, Filter]) -> OrderedDict[str, Filter]:
+    return OrderedDict(("kode" if name == "code" else name, f) for name, f in filters.items())
+
+
+def _code_over_topic(filters: OrderedDict[str, Filter]) -> OrderedDict[str, Filter]:
+    reshaped = OrderedDict(filters)
+    reshaped["code"] = CharFilter(field_name="topic", lookup_expr="icontains")
+    return reshaped
+
+
+def _deep_copies(filters: OrderedDict[str, Filter]) -> OrderedDict[str, Filter]:
+    return OrderedDict((name, copy.deepcopy(f)) for name, f in filters.items())
+
+
+def _extra_in_place(filters: OrderedDict[str, Filter]) -> OrderedDict[str, Filter]:
+    filters["extra"] = CharFilter(field_name="topic", lookup_expr="icontains")
+    return filters
+
+
+_Reshape: TypeAlias = Callable[[OrderedDict[str, Filter]], OrderedDict[str, Filter]]
+
+#: Each ``get_filters()`` override over a ``code`` shelf set: what it does to
+#: ``super().get_filters()``, the filter and value that then keep shelf ``S1``
+#: (``None`` when it leaves none to send), and the key it drops.
+_SHELF_OVERRIDES: dict[str, tuple[_Reshape, tuple[str, str] | None, str | None]] = {
+    "remove": (_without_code, None, "code"),
+    "delete-in-place": (_delete_code_in_place, None, "code"),
+    "rename": (_code_as_kode, ("kode", "S1"), "code"),
+    "replace": (_code_over_topic, ("code", "alp"), None),
+    "deep-copies": (_deep_copies, ("code", "S1"), None),
+    "add-in-place": (_extra_in_place, ("extra", "alp"), None),
+}
+_QUERIED_SHELF_OVERRIDES = [name for name, (_, probe, _) in _SHELF_OVERRIDES.items() if probe]
+_DROPPING_SHELF_OVERRIDES = [name for name, (_, _, dropped) in _SHELF_OVERRIDES.items() if dropped]
+
+
+def _overridden_shelf_set(reshape: _Reshape, *, customize: bool) -> type[FilterSet]:
+    """A ``code`` shelf set whose ``get_filters()`` returns ``reshape(super().get_filters())``.
+
+    When ``customize`` it also overrides ``__init__``, so a parent projects its
+    filters (``ProjectedChildFilter``), each running inside an instance of it.
+    """
+
+    class OverriddenShelfFilter(FilterSet):
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+        @classmethod
+        @override
+        def get_filters(cls) -> OrderedDict[str, Filter]:
+            return reshape(super().get_filters())
+
+    if not customize:
+        return OverriddenShelfFilter
+
+    class CustomizedShelfFilter(OverriddenShelfFilter):
+        def __init__(
+            self,
+            data: QueryDict | dict[str, object] | None = None,
+            queryset: QuerySet[django_models.Model] | None = None,
+            *,
+            request: HttpRequest | None = None,
+            prefix: str | None = None,
+        ) -> None:
+            super().__init__(data=data, queryset=queryset, request=request, prefix=prefix)
+
+    return CustomizedShelfFilter
+
+
+def _shelves_parent(child: type[FilterSet]) -> type[FilterSet]:
+    """A branch set expanding ``shelves`` into ``child``."""
+
+    class ShelvesBranchFilter(FilterSet):
+        shelves = RelatedFilter(child, field_name="shelves")
+
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"]}
+
+    return ShelvesBranchFilter
+
+
+def _seed_two_shelved_branches() -> None:
+    """Branch ``B1`` holds shelf ``S1`` (topic ``alpha``); ``B2`` holds ``S2`` (``beta``)."""
+    _register_plain_types(library_models.Shelf, library_models.Branch)
+    first = library_models.Branch.objects.create(name="B1")
+    second = library_models.Branch.objects.create(name="B2")
+    library_models.Shelf.objects.create(branch=first, code="S1", topic="alpha")
+    library_models.Shelf.objects.create(branch=second, code="S2", topic="beta")
+
+
+def _kept_values(filterset: type[FilterSet], filter_input: object, column: str) -> list[object]:
+    """The ``column`` values of the rows ``filterset.apply_sync`` keeps for ``filter_input``."""
+    model = filterset._meta.model
+    assert model is not None
+    rows = filterset.apply_sync(filter_input, model._default_manager.all(), _make_info())
+    return sorted(rows.values_list(column, flat=True))
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("spelling", ["standalone", "flat", "nested"])
+@pytest.mark.parametrize("customize", [False, True], ids=["expanded", "projected"])
+@pytest.mark.parametrize("shape", _QUERIED_SHELF_OVERRIDES)
+def test_a_get_filters_override_is_the_table_every_spelling_applies(
+    shape: str,
+    spelling: str,
+    *,
+    customize: bool,
+) -> None:
+    """What a child set's ``get_filters()`` override returns is what runs, on it and under a parent.
+
+    Renamed, replaced, deep-copied or added in place, the override's filter keeps
+    shelf ``S1`` on the child itself, nested under the parent's ``shelves`` branch
+    and through the parent's flat copy, which runs inside a child instance when
+    the child overrides ``__init__``.
+    """
+    reshape, probe, _dropped = _SHELF_OVERRIDES[shape]
+    assert probe is not None
+    key, value = probe
+    _seed_two_shelved_branches()
+    child = _overridden_shelf_set(reshape, customize=customize)
+    parent = _shelves_parent(child)
+
+    if spelling == "standalone":
+        assert _kept_values(child, {key: value}, "code") == ["S1"]
+    elif spelling == "flat":
+        assert _kept_values(parent, {f"shelves__{key}": value}, "name") == ["B1"]
+    else:
+        assert _kept_values(parent, {"shelves": {key: value}}, "name") == ["B1"]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("customize", [False, True], ids=["expanded", "projected"])
+@pytest.mark.parametrize("shape", _DROPPING_SHELF_OVERRIDES)
+def test_a_key_a_get_filters_override_drops_is_absent_everywhere(
+    shape: str,
+    *,
+    customize: bool,
+) -> None:
+    """A key the override removes or renames is no filter of the set, its parent or an instance.
+
+    Every call returns the same table, an override deleting from what
+    ``super().get_filters()`` returned included.
+    """
+    reshape, _probe, dropped = _SHELF_OVERRIDES[shape]
+    assert dropped is not None
+    child = _overridden_shelf_set(reshape, customize=customize)
+    parent = _shelves_parent(child)
+    flat = f"shelves__{dropped}"
+
+    assert flat not in parent._filter_table()
+    assert flat not in filter_lookup_table(parent).by_input_attr
+    assert dropped not in child._filter_table()
+    assert dropped not in child.base_filters
+    assert dropped not in filter_lookup_table(child).by_input_attr
+    assert list(child.get_filters()) == list(child.get_filters()) == list(child._filter_table())
+    assert dropped not in child(queryset=library_models.Shelf.objects.none()).filters
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("customize", [False, True], ids=["expanded", "projected"])
+@pytest.mark.parametrize("shape", ["rename", "replace", "add-in-place"])
+def test_a_directly_constructed_set_runs_the_filters_its_override_published(
+    shape: str,
+    *,
+    customize: bool,
+) -> None:
+    """``Set(data, queryset).qs``, django-filter's own use, filters by the published table."""
+    reshape, probe, _dropped = _SHELF_OVERRIDES[shape]
+    assert probe is not None
+    key, value = probe
+    _seed_two_shelved_branches()
+    child = _overridden_shelf_set(reshape, customize=customize)
+    _ = _shelves_parent(child)._filter_table()
+
+    filtered = child({key: value}, queryset=library_models.Shelf.objects.all()).qs
+    assert sorted(filtered.values_list("code", flat=True)) == ["S1"]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("customize", [False, True], ids=["expanded", "projected"])
+def test_a_get_filters_override_runs_at_publication_and_never_per_request(
+    *,
+    customize: bool,
+) -> None:
+    """Publishing a set and its parent runs the child's override twice; requests run it never.
+
+    Once for the call that builds the expansion and once over it for the table
+    the set publishes; every later read is the published table.
+    """
+    calls: list[str] = []
+
+    def counted(filters: OrderedDict[str, Filter]) -> OrderedDict[str, Filter]:
+        calls.append("get_filters")
+        return _deep_copies(filters)
+
+    _seed_two_shelved_branches()
+    child = _overridden_shelf_set(counted, customize=customize)
+    parent = _shelves_parent(child)
+    calls.clear()
+
+    _ = parent._filter_table()
+    assert calls == ["get_filters", "get_filters"]
+    calls.clear()
+    for _request in range(3):
+        assert _kept_values(child, {"code": "S1"}, "code") == ["S1"]
+        assert _kept_values(parent, {"shelves__code": "S1"}, "name") == ["B1"]
+        assert _kept_values(parent, {"shelves": {"code": "S1"}}, "name") == ["B1"]
+    assert calls == []
+
+
+def _shelf_branch_cycle(reshape: _Reshape, *, customize: bool) -> tuple[type[FilterSet], ...]:
+    """A shelf set (overriding ``get_filters()``) and a branch set expanding each other.
+
+    Returns ``(shelf set, branch set)``; the branch's ``shelves`` resolves to the
+    shelf set, its ``__init__`` overridden when ``customize``.
+    """
+    resolved: dict[str, type[FilterSet]] = {}
+
+    class CycleBranchFilter(FilterSet):
+        shelves = RelatedFilter(lambda: resolved["shelf"], field_name="shelves")
+
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"]}
+
+    class CycleShelfFilter(FilterSet):
+        branch = RelatedFilter(CycleBranchFilter, field_name="branch")
+
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+        @classmethod
+        @override
+        def get_filters(cls) -> OrderedDict[str, Filter]:
+            return reshape(super().get_filters())
+
+    shelf: type[FilterSet] = CycleShelfFilter
+    if customize:
+
+        class CustomizedCycleShelfFilter(CycleShelfFilter):
+            def __init__(
+                self,
+                data: QueryDict | dict[str, object] | None = None,
+                queryset: QuerySet[django_models.Model] | None = None,
+                *,
+                request: HttpRequest | None = None,
+                prefix: str | None = None,
+            ) -> None:
+                super().__init__(data=data, queryset=queryset, request=request, prefix=prefix)
+
+        shelf = CustomizedCycleShelfFilter
+    resolved["shelf"] = shelf
+    return shelf, CycleBranchFilter
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("customize", [False, True], ids=["expanded", "projected"])
+@pytest.mark.parametrize("shape", ["remove", "rename", "add-in-place"])
+def test_a_get_filters_override_reshapes_what_a_cycle_member_contributes(
+    shape: str,
+    *,
+    customize: bool,
+) -> None:
+    """A set in a ``RelatedFilter`` cycle contributes its override's filters at every lap.
+
+    ``CycleBranchFilter`` copies the shelf set's table under ``shelves``, and the
+    shelf set copies its own filters back under ``branch__shelves`` where the cycle
+    returns to it: both hold the override's keys, never a key it dropped.
+    """
+    reshape, probe, dropped = _SHELF_OVERRIDES[shape]
+    _seed_two_shelved_branches()
+    shelf, branch = _shelf_branch_cycle(reshape, customize=customize)
+
+    shelf_table = shelf._filter_table()
+    branch_table = branch._filter_table()
+    if dropped is not None:
+        assert f"shelves__{dropped}" not in branch_table
+        assert f"branch__shelves__{dropped}" not in shelf_table
+    if probe is not None:
+        key, value = probe
+        assert f"branch__shelves__{key}" in shelf_table
+        assert _kept_values(branch, {f"shelves__{key}": value}, "name") == ["B1"]
+        assert _kept_values(branch, {"shelves": {key: value}}, "name") == ["B1"]
+
+
+def test_a_set_read_while_it_builds_answers_its_unpublished_get_filters() -> None:
+    """A captured-branch check re-entering the set being built reads its ``get_filters()``.
+
+    ``ReachingShelfFilter`` declares ``branch`` beside ``branch__shelves__books``, so
+    its build checks whether ``branch``'s target reaches ``shelves__books``; that walk
+    returns to ``ReachingShelfFilter`` through ``LoopBranchFilter.shelves`` while it is
+    still building, where its filters (its override's ``extra`` included) answer
+    unpublished. No path it reaches starts with ``books``, so the set publishes.
+    """
+    reads_while_building: list[bool] = []
+    resolved: dict[str, type[FilterSet]] = {}
+
+    class BooksTitleFilter(FilterSet):
+        class Meta:
+            model = library_models.Book
+            fields = {"title": ["exact"]}
+
+    class LoopBranchFilter(FilterSet):
+        shelves = RelatedFilter(lambda: resolved["shelf"], field_name="shelves")
+
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"]}
+
+    class ReachingShelfFilter(FilterSet):
+        branch = RelatedFilter(LoopBranchFilter, field_name="branch")
+        branch_books = RelatedFilter(BooksTitleFilter, field_name="branch__shelves__books")
+
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+        @classmethod
+        @override
+        def get_filters(cls) -> OrderedDict[str, Filter]:
+            reads_while_building.append(bool(cls.__dict__.get("_is_expanding_filters")))
+            return _extra_in_place(super().get_filters())
+
+    resolved["shelf"] = ReachingShelfFilter
+    reads_while_building.clear()
+
+    table = ReachingShelfFilter._filter_table()
+
+    assert True in reads_while_building
+    assert ReachingShelfFilter._expansion_snapshot() is not None
+    assert {"code", "extra", "branch__shelves__extra"} <= set(table)
+
+
+@pytest.mark.parametrize("target", ["apps.library.filters.ShelfFilter", "ShelfFilter"])
+@pytest.mark.parametrize("overridden", [False, True], ids=["plain", "overridden"])
+def test_a_set_that_cannot_publish_answers_its_get_filters_on_every_read(
+    target: str,
+    *,
+    overridden: bool,
+) -> None:
+    """A model-less set whose ``RelatedFilter`` target is still a lazy string never publishes.
+
+    Its expansion never resolves the target, so no read caches it; the set's table is
+    its ``get_filters()`` result, a ``get_filters()`` override's ``extra`` included,
+    read after read.
+    """
+
+    class UnpublishableFilter(FilterSet):
+        name = CharFilter(field_name="name")
+        later = RelatedFilter(target, field_name="later")
+
+        @classmethod
+        @override
+        def get_filters(cls) -> OrderedDict[str, Filter]:
+            filters = super().get_filters()
+            return _extra_in_place(filters) if overridden else filters
+
+    expected = ["name", "later", "extra"] if overridden else ["name", "later"]
+    assert list(UnpublishableFilter._filter_table()) == expected
+    assert list(UnpublishableFilter._filter_table()) == expected
+    assert UnpublishableFilter._expansion_snapshot() is None
+
+
+def _required_code(filters: OrderedDict[str, Filter]) -> OrderedDict[str, Filter]:
+    reshaped = OrderedDict(filters)
+    reshaped["must"] = CharFilter(field_name="code", required=True)
+    return reshaped
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("customize", [False, True], ids=["expanded", "projected"])
+def test_a_required_filter_a_get_filters_override_adds_acts_on_its_own_form(
+    *,
+    customize: bool,
+) -> None:
+    """A filter an override adds is the set's own, never a deferred flat copy.
+
+    So a ``required`` one is on every form the set builds: a request that does not
+    name it answers ``FILTER_INVALID`` keyed under it, and one naming it filters.
+    """
+    _seed_two_shelved_branches()
+    child = _overridden_shelf_set(_required_code, customize=customize)
+    _ = _shelves_parent(child)._filter_table()
+
+    assert _kept_values(child, {"must": "S1"}, "code") == ["S1"]
+    with pytest.raises(GraphQLError) as excinfo:
+        _kept_values(child, {"code": "S1"}, "code")
+    extensions = excinfo.value.extensions
+    assert extensions is not None
+    assert extensions["code"] == "FILTER_INVALID"
+    assert extensions["errors"] == {
+        "must": [{"message": "This field is required.", "code": "required"}],
+    }
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("customize", [False, True], ids=["expanded", "projected"])
+def test_a_flat_copy_under_a_parents_own_generated_key_is_deferred(
+    *,
+    customize: bool,
+) -> None:
+    """A ``RelatedFilter`` copy held under a key the parent's ``Meta.fields`` also generates defers.
+
+    ``shelves__code`` is both a generated parent filter and the copy of the child's
+    ``required`` ``code``; the copy takes the key and stays a spelling of the
+    request, so a parent request that does not name it is not refused, and one
+    naming it filters through the child filter.
+    """
+    _seed_two_shelved_branches()
+
+    class RequiredCodeShelfFilter(FilterSet):
+        code = CharFilter(field_name="code", required=True)
+
+        class Meta:
+            model = library_models.Shelf
+            fields = {"topic": ["exact"]}
+
+    child: type[FilterSet] = RequiredCodeShelfFilter
+    if customize:
+
+        class CustomizedRequiredCodeShelfFilter(RequiredCodeShelfFilter):
+            def __init__(
+                self,
+                data: QueryDict | dict[str, object] | None = None,
+                queryset: QuerySet[django_models.Model] | None = None,
+                *,
+                request: HttpRequest | None = None,
+                prefix: str | None = None,
+            ) -> None:
+                super().__init__(data=data, queryset=queryset, request=request, prefix=prefix)
+
+        child = CustomizedRequiredCodeShelfFilter
+
+    class CollidingBranchFilter(FilterSet):
+        shelves = RelatedFilter(child, field_name="shelves")
+
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"], "shelves__code": ["exact"]}
+
+    _ = CollidingBranchFilter._filter_table()
+    snapshot = CollidingBranchFilter._expansion_snapshot()
+    assert snapshot is not None
+    assert "shelves__code" in snapshot.deferred_copies
+    assert _kept_values(CollidingBranchFilter, {"name": "B1"}, "name") == ["B1"]
+    assert _kept_values(CollidingBranchFilter, {"shelves__code": "S2"}, "name") == ["B2"]
+
+
+@pytest.mark.django_db
+def test_a_filter_a_get_filters_override_adds_is_gated_on_its_field_name() -> None:
+    """An added filter no class body declares gates as a generated one: ``check_<field_name>``.
+
+    ``extra`` filters ``topic``, so supplying it fires ``check_topic_permission``,
+    never ``check_extra_permission`` (a declared head's own-name gate).
+    """
+    _register_plain_types(library_models.Shelf)
+
+    class GatedOverriddenShelfFilter(FilterSet):
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+        @classmethod
+        @override
+        def get_filters(cls) -> OrderedDict[str, Filter]:
+            return _extra_in_place(super().get_filters())
+
+        check_extra_permission = _gate("Shelf.extra")
+        check_topic_permission = _gate("Shelf.topic")
+
+    root = library_models.Shelf.objects.all()
+    assert _fired_gates(GatedOverriddenShelfFilter, {"extra": "alp"}, root) == {"Shelf.topic"}
 
 
 # ---------------------------------------------------------------------------
@@ -11139,14 +11638,15 @@ def test_expansion_snapshot_build_failure_publishes_nothing_then_retry_recovers(
             raise PathResolutionError(model, field_path, field_path)
         return real_classify(model, field_path)
 
+    unpublished = BookFilter.base_filters
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(sets_module, "classify_path", flaky_classify)
     try:
         with pytest.raises(PathResolutionError):
             BookFilter.get_filters()
-        # A failed build published neither the filter cache nor the snapshot.
+        # A failed publication published neither the table nor the snapshot.
         assert "_expanded_snapshot" not in BookFilter.__dict__
-        assert "_expanded_filters" not in BookFilter.__dict__
+        assert BookFilter.base_filters is unpublished
         assert BookFilter._expansion_snapshot() is None
     finally:
         monkeypatch.undo()

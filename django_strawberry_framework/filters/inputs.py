@@ -1222,7 +1222,7 @@ def _build_logic_fields(type_name: str) -> list[tuple[str, object, dict[str, obj
     ]
 
 
-# One bag lookup's django-filter form key (its ``get_filters()`` name) and filter.
+# One bag lookup's django-filter form key (its name in the published filter table) and filter.
 FormKeyedFilter = tuple[str, Filter]
 
 
@@ -1230,10 +1230,11 @@ FormKeyedFilter = tuple[str, Filter]
 class FilterLookupTable:
     """Every operator-bag lookup's django-filter form key, decided once per filter set.
 
-    ``heads`` maps ``head -> lookup token -> (form key, filter)`` in
-    ``get_filters()`` order; ``_build_input_fields`` emits one input field per
-    head from it. ``by_input_attr`` maps ``input attr -> lookup attr -> (form
-    key, filter)``, keyed by each head's own spelling and by its flattened
+    ``heads`` maps ``head -> lookup token -> (form key, filter)`` in the
+    published filter table's order (``FilterSet._filter_table``);
+    ``_build_input_fields`` emits one input field per head from it.
+    ``by_input_attr`` maps ``input attr -> lookup attr -> (form key, filter)``,
+    keyed by each head's own spelling and by its flattened
     generated-input attr; ``FilterSet._normalize_input`` reads it. Both views
     hold the same entries, so the generated input and the form data it
     normalizes to cannot disagree. ``gate_paths`` maps the same keys to the
@@ -1243,8 +1244,9 @@ class FilterLookupTable:
     the child's ``check_home_branch_permission``, as the nested spelling does);
     any other head gates on its filter's ``field_name`` (the ORM path), so
     ``name`` and ``name__icontains`` share the ``name`` gate
-    (``leaf_gate_path``). ``source`` is the ``get_filters()`` result the table
-    was built from: the cache is valid only while that object is.
+    (``leaf_gate_path``). ``source`` is the published filter table
+    (``FilterSet._filter_table``) the lookup table was built from: the cache is
+    valid only while that object is.
     """
 
     source: Mapping[str, Filter]
@@ -1295,7 +1297,7 @@ def _group_filters_by_head(
     filterset_cls: type[FilterSet],
     all_filters: Mapping[str, Filter],
 ) -> tuple[OrderedDict[str, OrderedDict[str, FormKeyedFilter]], set[str]]:
-    """Group ``get_filters()`` by input head, keeping each lookup's own form key.
+    """Group a published filter table by input head, keeping each lookup's own form key.
 
     A declared filter, and a ``RelatedFilter`` expansion of a child's declared
     filter, is its own head: its name is its form key even when it ends in its
@@ -1339,13 +1341,13 @@ def _group_filters_by_head(
 
 
 def filter_lookup_table(filterset_cls: type[FilterSet]) -> FilterLookupTable:
-    """Return ``filterset_cls``'s ``FilterLookupTable``, built once per ``get_filters()`` result.
+    """Return ``filterset_cls``'s ``FilterLookupTable``, built once per published filter table.
 
     The flattened generated-input attr of a ``<path>__<field>`` head is an alias
     only when no head is literally spelled that way (a head's own spelling wins);
     two heads sharing one alias raise, since one would be unreachable.
     """
-    all_filters = filterset_cls.get_filters()
+    all_filters = filterset_cls._filter_table()
     cached = filterset_cls._lookup_table
     if cached is not None and cached.source is all_filters:
         return cached
@@ -1393,8 +1395,8 @@ def _build_input_fields(
 ) -> list[tuple[str, object, dict[str, object]]]:
     """Return per-field input triples for a filterset's top-level GraphQL input.
 
-    Emits one entry per head of ``filter_lookup_table`` (the grouped Layer-4
-    ``get_filters()`` expansion): a forward-reference ``Annotated[...]`` for
+    Emits one entry per head of ``filter_lookup_table`` (the grouped published
+    filter table, ``FilterSet._filter_table``): a forward-reference ``Annotated[...]`` for
     ``RelatedFilter`` boundaries OR a per-field operator-bag dataclass for leaf
     paths, one bag attr per lookup the table holds. Populates ``_field_specs``
     for the active-field walk and the permission gates.

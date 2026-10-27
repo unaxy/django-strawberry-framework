@@ -2409,7 +2409,7 @@ class RelatedFilter(RelatedSetTargetMixin, ModelChoiceFilter):
         unregistered-target audit, ``get_queryset``'s fallback, and the
         permission traversal). Without the gate the mis-wiring survives
         declaration, binding, and expansion and first detonates inside a
-        consumer (``target._filters_along(path, scope)`` or ``target.get_filters()``, or
+        consumer (``target._filters_along(path, scope)`` or ``target._filter_table()``, or
         the BFS builder's ``set_input_type_name``) as a raw ``AttributeError``, or -- for an
         OrderSet-shaped target -- silently walks the ORDER family's fields
         through the filter input builder. Mirrors the order twin's
