@@ -5,6 +5,11 @@ One shape per planner rule, each read off the wire and off the SQL the request e
 - Relay id projection when the primary key IS a relation: ``PatronProfile.patron``
   is the one-to-one key, so ``PatronProfileType``'s id has to be built from the
   ``patron_id`` column instead of a lazy load of the related row.
+- Relay id projection when the id is a ``relay.NodeID`` column beside a surrogate
+  ``id``: ``PublisherType``'s id is ``house_code``, read in the statement that loads
+  the publisher row at the root page, through a forward key, and under a
+  prefetched reverse key; ``SeriesType``'s id is an annotation its
+  ``get_queryset`` adds, loaded beside the primary key alone.
 - Digit-boundary names round-tripping to their real Django columns:
   ``Edition.isbn_10`` on a scalar, ``Edition.publisher_2`` on a forward key.
 - Explicitly named fields resolving per published name: ``PatronProfileType``
@@ -118,6 +123,8 @@ from graphql_client import (
     JSONObject,
     assert_graphql_success,
     graphql_payload,
+    is_json_list,
+    is_json_object,
     json_at,
     json_int,
     json_list,
@@ -230,6 +237,122 @@ def test_patron_profile_relay_id_is_built_from_the_relation_primary_key_column()
     assert len(profile_sql) == 1, profile_sql
     assert "patron_id" in profile_sql[0], profile_sql[0]
     assert _sql_touching(captured, "library_patron") == [], captured.captured_queries
+
+
+#: Every position a ``PublisherType`` id reaches the wire from, as (document,
+#: statements, the house codes its ids carry): the root page alone and beside a
+#: scalar, a forward key and a ``<word>_<digit>`` forward key under the editions
+#: list, a printing's forward key under the printings page, and a forward key
+#: under a prefetched reverse key.
+_PUBLISHER_ID_POSITIONS = {
+    "root-page": (
+        "{ allLibraryPublishersConnection { edges { node { id } } } }",
+        1,
+        ["HOUSE-G", "HOUSE-O"],
+    ),
+    "root-page-with-name": (
+        "{ allLibraryPublishersConnection { edges { node { id name } } } }",
+        1,
+        ["HOUSE-G", "HOUSE-O"],
+    ),
+    "edition-publisher": (
+        "{ allLibraryEditions { publisher { id } } }",
+        1,
+        ["HOUSE-G", "HOUSE-O"],
+    ),
+    "edition-publisher2": ("{ allLibraryEditions { publisher2 { id } } }", 1, ["HOUSE-O"]),
+    "printing-publisher2": (
+        "{ allLibraryPrintingsConnection { edges { node { publisher2 { id } } } } }",
+        1,
+        [
+            "HOUSE-G",
+            "HOUSE-G",
+            "HOUSE-G",
+            "HOUSE-O",
+            "HOUSE-O",
+        ],
+    ),
+    "edition-printings-publisher2": (
+        "{ allLibraryEditions { printings { publisher2 { id } } } }",
+        2,
+        [
+            "HOUSE-G",
+            "HOUSE-G",
+            "HOUSE-G",
+            "HOUSE-O",
+            "HOUSE-O",
+        ],
+    ),
+}
+
+
+def _publisher_node_ids(value: object) -> list[str]:
+    """Every ``id`` under ``value``, decoded to its ``PublisherType`` node id."""
+    if is_json_list(value):
+        return [node_id for item in value for node_id in _publisher_node_ids(item)]
+    if not is_json_object(value):
+        return []
+    node_ids: list[str] = []
+    for key, item in value.items():
+        if key == "id":
+            target_type, node_id = decode_global_id(json_str(item))
+            assert target_type is library_schema.PublisherType, target_type
+            node_ids.append(node_id)
+        else:
+            node_ids.extend(_publisher_node_ids(item))
+    return node_ids
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("position", list(_PUBLISHER_ID_POSITIONS))
+def test_publisher_relay_id_reads_its_node_id_column_in_the_statement_that_loads_the_row(
+    position: str,
+) -> None:
+    """A publisher's id is built from the ``house_code`` its own statement loads.
+
+    ``PublisherType`` declares ``house_code: relay.NodeID[str]`` while its model
+    keeps a surrogate ``id`` column that ``Meta.fields`` lists, so the optimizer
+    projects the ``NodeID`` column wherever the publisher row is read - the page,
+    a join, a prefetched child - and no edge refetches it. ``name`` is loaded
+    only where the document selects it.
+    """
+    document, statements, house_codes = _PUBLISHER_ID_POSITIONS[position]
+    _seed_publishing_graph()
+
+    with CaptureQueriesContext(connection) as captured:
+        data = assert_graphql_success(document)
+
+    assert sorted(_publisher_node_ids(data)) == house_codes, data
+    assert len(captured.captured_queries) == statements, captured.captured_queries
+    publisher_sql = _sql_touching(captured, "library_publisher")
+    assert publisher_sql, captured.captured_queries
+    assert all('."house_code"' in sql for sql in publisher_sql), publisher_sql
+    name_selected = " name " in document
+    assert all(('."name"' in sql) is name_selected for sql in publisher_sql), publisher_sql
+
+
+@pytest.mark.django_db
+def test_series_relay_id_read_from_its_annotation_loads_no_further_column() -> None:
+    """An id no column holds is read from the annotation, beside the key alone.
+
+    ``SeriesType``'s ``NodeID`` is ``handle``, which its ``get_queryset``
+    annotates from ``title``: the page loads the primary key and the
+    annotation, and ``title`` appears only inside the annotation.
+    """
+    models.Series.objects.create(title="Masterworks")
+    models.Series.objects.create(title="Classics")
+
+    with CaptureQueriesContext(connection) as captured:
+        data = assert_graphql_success("{ allLibrarySeriesConnection { edges { node { id } } } }")
+
+    edges = json_list(data, "allLibrarySeriesConnection", "edges")
+    assert sorted(decode_global_id(json_str(edge, "node", "id"))[1] for edge in edges) == [
+        "SER-Classics",
+        "SER-Masterworks",
+    ], edges
+    (series_sql,) = _sql_from_table(captured, "library_series")
+    assert len(captured.captured_queries) == 1, captured.captured_queries
+    assert series_sql.count('"library_series"."title"') == 1, series_sql
 
 
 @pytest.mark.django_db

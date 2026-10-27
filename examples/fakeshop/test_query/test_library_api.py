@@ -4377,6 +4377,59 @@ def test_library_pk_slot_globalid_relation_key_compares_the_stored_key_column() 
     assert f"WHERE library_genre.id = {pk_of(genre)}" in statements[1]
 
 
+def _seed_house_codes() -> None:
+    """Two houses and one edition published by the first."""
+    gollancz = models.Publisher.objects.create(name="Gollancz", house_code="HOUSE-G")
+    models.Publisher.objects.create(name="Orbit", house_code="HOUSE-O")
+    models.Edition.objects.create(isbn_13="9780000000001", publisher=gollancz)
+
+
+#: The documents reading a publisher's id over ``/graphql-async/``: the root page
+#: beside ``name`` and a forward key under the editions list.
+_ASYNC_PUBLISHER_ID_DOCUMENTS = {
+    "root-page": "{ allLibraryPublishersConnection { edges { node { id name } } } }",
+    "edition-publisher": "{ allLibraryEditions { publisher { id name } } }",
+}
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("position", list(_ASYNC_PUBLISHER_ID_DOCUMENTS))
+async def test_async_publisher_relay_id_is_read_from_the_loaded_house_code(
+    record_compiled_sql: RecordCompiledSql,
+    position: str,
+) -> None:
+    """Over ``/graphql-async/`` a publisher's id comes from the row the statement loaded.
+
+    ``PublisherType``'s ``NodeID`` is ``house_code``; reading it lazily off a row
+    would be a synchronous query inside the event loop, which Django refuses. The
+    page or the join loads the column, so the response carries every id and the
+    publisher table is read once.
+    """
+    gollancz: JSONObject = {
+        "id": global_id_for(library_schema.PublisherType, "HOUSE-G"),
+        "name": "Gollancz",
+    }
+    orbit: JSONObject = {
+        "id": global_id_for(library_schema.PublisherType, "HOUSE-O"),
+        "name": "Orbit",
+    }
+    expected_by_position: dict[str, JSONObject] = {
+        "root-page": {
+            "allLibraryPublishersConnection": {
+                "edges": [{"node": gollancz}, {"node": orbit}],
+            },
+        },
+        "edition-publisher": {"allLibraryEditions": [{"publisher": gollancz}]},
+    }
+    await sync_to_async(_seed_house_codes)()
+    publisher_sql = record_compiled_sql('"library_publisher"')
+    payload = await _post_async_shipped(_ASYNC_PUBLISHER_ID_DOCUMENTS[position])
+
+    assert payload == {"data": expected_by_position[position]}
+    assert len(publisher_sql) == 1, publisher_sql
+    assert '"house_code"' in publisher_sql[0], publisher_sql
+
+
 def _series_ids() -> dict[str, str]:
     """Seed two series and a printing under each; return each series' emitted id."""
     night = models.Series.objects.create(title="Night Shade")

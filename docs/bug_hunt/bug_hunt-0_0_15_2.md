@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 325 done, 215 to do.
+Progress: 326 done, 217 to do.
 
 ## Done
 
@@ -1802,6 +1802,17 @@ Progress: 325 done, 215 to do.
   two `tests/optimizer/test_walker.py` relay-id rows), and every line it ran is reached by other rows.
   spec-015 and spec-031 cite those rows; docs/TREE.md and the kanban tracked-path constants are regenerated.
   Writing a live pin for a non-pk `NodeID` found 604
+- [x] 604. A Relay `id` selection projects the column the type's id reads, at every page, join and prefetch
+  position: `optimizer/walker.py::_walk_selections` routes `id` on a `relay.Node` type first to
+  `_relay_id_column`, which reads `types/relay.py::_node_id_slot` (a concrete field's attname; an id read by a
+  consumer `resolve_id` or from no concrete column resolves through the field map). It matched the model field
+  literally named `id` first and looked the id column up only among `Meta.fields`, so fakeshop `PublisherType`
+  (`house_code: relay.NodeID[str]`) loaded `id` and refetched `house_code` once per row, and on the async
+  executor that refetch raised `SynchronousOnlyOperation` (field error, data null). spec-015 Decision 7 states
+  the id-column projection; live rows in `examples/fakeshop/test_query/test_library_shapes_api.py` (six
+  positions, the Series annotation control) and `test_library_api.py` (async), package rows in
+  `tests/optimizer/test_walker.py` for a NodeID column outside `Meta.fields`, a reverse-key child, a consumer
+  `resolve_id` and a property NodeID
 
 ## Outside review of the fixes
 
@@ -2068,20 +2079,24 @@ tracker number are recorded there; open remainders and new defects are filed as 
   (42), "test-plan row 19/20" and "gap 1/2" in `test_products_api.py`, "gap 1/2" in
   `tests/test_strawberry_patches.py`, "test #8" in `test_library_api.py`; restate each by the contract it pins. Found
   fixing 566
-- [ ] 604. An id-only page of a Relay type whose `NodeID` is a non-pk column on a model with a surrogate `id`
-  costs one query per edge, against spec-015 Decision 7 (no avoidable lazy load on `resolve_id`): fakeshop
-  `PublisherType` (`house_code: relay.NodeID[str]`, `Meta.fields` lists `id`), an
-  `allLibraryPublishersConnection` page selecting only `id` emits a page statement reading
-  `library_publisher.id` alone, then one `house_code` refetch per edge.
-  `optimizer/walker.py::_walk_selections` matches the `id` selection to the model's own `id` field before it
-  consults the type's id attribute, so the Relay-id branch (only under `django_field is None`) never runs and
-  `only("id")` defers `house_code`. Found fixing 603
+- [ ] 606. (robustness) FK-id elision never fires into a Relay target whose `Meta.fields` omit its primary
+  key: `optimizer/walker.py::_selected_scalar_names` reads the `id` selection as a model field name and
+  misses, so `parent { child { id } }` keeps one JOIN; route it through `_relay_id_column`. No fakeshop Relay
+  type omits its pk. Found researching 604
+- [ ] 607. (robustness) `node(id:)` / `nodes(ids:)` selecting a relation on the node cost one query per node
+  (`nodes` over two `PublisherType` ids with `editions { isbn13 }` = 3 statements): `DjangoNodeField` /
+  `DjangoNodesField` dispatch to `_resolve_node_default` / `_resolve_nodes_default` without an optimizer pass,
+  the seam spec-015 notes as not wired. Found fact-finding 604
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 605. CHANGELOG entry for item 604: a Relay type whose `NodeID` is a non-pk column (`house_code:
+  relay.NodeID[str]`) answers an `id` selection from the row the page, join or prefetch loads (one statement
+  where it cost one more per row), and the async executor no longer fails that `id` with
+  `SynchronousOnlyOperation`
 - [ ] 602. CHANGELOG entry for item 598: with `HIDE_FLAT_FILTERS = True` a filter input hides each
   `RelatedFilter` expansion's flat copy under whatever key a `get_filters()` override holds it, and keeps
   every filter the set holds itself, including a `Meta.fields` path spelled under a `RelatedFilter`'s name
