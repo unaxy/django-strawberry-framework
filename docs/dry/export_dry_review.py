@@ -1570,7 +1570,7 @@ def _run_plan(args: _Args) -> int:
     target_release = args.target_release or _package_version(package_root)
     if not RELEASE_PATTERN.fullmatch(target_release):
         raise ValueError(
-            f"invalid --target-release {target_release!r}; expected dotted digits such as 0.0.14",
+            f"invalid --target-release {target_release!r}; expected dotted digits such as 1.2.3",
         )
     output = _resolve_path(args.output or _default_output(target_release), root)
     if output.exists() and not args.force:

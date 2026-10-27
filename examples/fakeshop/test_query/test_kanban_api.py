@@ -911,7 +911,7 @@ def test_filter_cards_by_number_gt() -> None:
 def test_filter_cards_by_milestone_key() -> None:
     """Filter by the related ``milestone.key``.
 
-    Both cards target version ``0.0.8``, whose milestone is ``alpha``; the
+    Both cards target the same version, whose milestone is ``alpha``; the
     ``milestone`` field is derived from ``target_version`` on save, so both
     resolve to ``alpha`` and match.
     """

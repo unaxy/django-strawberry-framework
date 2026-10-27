@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 331 done, 214 to do.
+Progress: 332 done, 214 to do.
 
 ## Done
 
@@ -1846,6 +1846,16 @@ Progress: 331 done, 214 to do.
   update only; one warning per input build, so a form serving a create and an update logs one of each. Package rows
   in `tests/forms/test_inputs.py` pin the texts and counts; the docstrings, spec-038 and the GLOSSARY
   `DjangoModelFormMutation` body are restated
+- [x] 634. No release number of this package is left in .py source: the seven `Target release:` module lines, the
+  "shipped / since 0.0.N" banners, the release-history narration in `mutations/sets.py`, the "0.0.9 model-label
+  default", "(hunt 0.0.15)" and the format examples in scripts are restated as behaviour, and release-carrying card ids
+  in prose (the `needs TODO-BETA-...` labels included) name their spec or the card's topic. A new gate,
+  `tests/test_ci_governance.py::test_no_comment_docstring_name_or_package_string_carries_a_release_of_this_package`,
+  refuses a release of the current series (pattern built from `__version__`) or a release-carrying card id in every
+  comment, string statement and name of the sweep corpus and in every package string but `__version__`; upstream
+  ranges, IPs and test data pass. 90 sites to 0; the `types/finalizer.py` strictness paragraph, false at HEAD, now
+  states the rule (spec-033 Decision 8). Maintainer request. The road-to-1.0.0 vocabulary of `scripts/_kanban_lib.py`
+  is refused once `__version__` reaches 1.0
 
 ## Outside review of the fixes
 
@@ -1966,8 +1976,7 @@ tracker number are recorded there; open remainders and new defects are filed as 
   hop target's `get_queryset` on `apply_async` but not on `apply_sync`; same rows. Found verifying 399
 
 - [ ] 563. Package comments and docstrings outside the gated phrases still narrate history: "now", "no longer", "the
-  former", "byte-unchanged", seven `Target release:` module lines and version banners ("shipped 0.0.14"); judge each
-  against START's provenance rule (dry-0_0_15_3 items 31 and 71 cover part of it; 566 restated the
+  former", "byte-unchanged" (634 removed every release number and gates it); judge each against START's provenance rule (dry-0_0_15_3 items 31 and 71 cover part of it; 566 restated the
   `(hardened)`, `(hardening)` and `historically` sites in `schema.py` and `rest_framework/`). Found fact-finding 500
 - [ ] 565. Optimizer plan labels (B1-B8, O2-O6, G1-G3) label 177 comment and docstring sites, 15 of them in the
   package (`optimizer/extension.py`, `optimizer/plans.py`, `optimizer/walker.py`, `types/resolvers.py`) and most in

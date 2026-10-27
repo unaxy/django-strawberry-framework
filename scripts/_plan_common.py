@@ -22,7 +22,7 @@ try:
 except ModuleNotFoundError:  # imported as ``scripts._plan_common`` (repo root on path)
     from scripts import _git
 
-#: A dotted-digit release such as ``0.0.15``.
+#: A dotted-digit release such as ``1.2.3``.
 RELEASE_PATTERN = re.compile(r"^\d+(?:\.\d+)+$")
 #: The package's single ``__version__`` literal, either quote style, optional comment.
 VERSION_PATTERN = re.compile(

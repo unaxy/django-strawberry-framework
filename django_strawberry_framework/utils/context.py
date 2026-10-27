@@ -1,7 +1,6 @@
 """Shape-agnostic read / write / delete helpers for Strawberry's ``info.context``.
 
 Spec: ``docs/SPECS/spec-047-resource_policy-0_0_14.md``.
-Target release: ``0.0.14``.
 
 ``info.context`` can take several shapes:
 

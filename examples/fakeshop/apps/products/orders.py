@@ -1,7 +1,7 @@
 """OrderSet declarations for the fakeshop products app.
 
 Ported from the ``django-graphene-filters`` cookbook recipe to the
-``django-strawberry-framework`` ordering API (``DONE-028-0.0.8``):
+``django-strawberry-framework`` ordering API (spec-028):
 
 * ``OrderSet`` (not the cookbook's ``AdvancedOrderSet``), imported from
   ``django_strawberry_framework.orders``;

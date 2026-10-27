@@ -56,7 +56,7 @@ e42952a5 (items 36-37), fa4182a9 (item 31), ee1a2367 (item 38) and 1cf08608 (ite
   `examples/fakeshop/test_query/`
 - [x] 27. `TD002`, `TD004`, `TD005` (TODO author, colon, description): the six `TODO(BACKLOG ...)` /
   `TODO(unscheduled ...)` anchors now carry their whole head and `):` on the first line with the description after
-  it, and the card-id notes in `examples/fakeshop/apps/products/schema.py` sit on their own `# needs TODO-BETA-...:`
+  it, and the card notes in `examples/fakeshop/apps/products/schema.py` sit on their own `# needs <spec or card>:`
   line above the commented-out code they gate
 - [x] 28. The small real-signal codes (about 340 sites), fixed at the root: composite asserts split (`PT018`),
   side-effect fixtures moved to `@pytest.mark.usefixtures` or renamed where the test reads the value (`PT019`),

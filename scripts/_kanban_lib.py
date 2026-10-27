@@ -1199,10 +1199,9 @@ def release_version(milestones: list[MilestoneRow]) -> tuple[int, ...]:
     """Return the road-to-release target version, derived from Milestone rows.
 
     The release boundary is the highest ``versionCeiling`` across the milestone
-    lookup table (``alpha`` ceils at ``0.1.0``, ``beta`` at ``1.0.0``), so the
-    ``1.0.0`` cut is read from the DB rather than frozen in a script constant -
-    re-versioning a milestone reshapes the progress board on the next build with
-    no code edit. Raises when no milestone carries a ceiling (the metric would
+    lookup table, so the release cut is read from the DB rather than frozen in a
+    script constant - re-versioning a milestone reshapes the progress board on the
+    next build with no code edit. Raises when no milestone carries a ceiling (the metric would
     otherwise silently compare against ``(0,)`` and count everything as shipped).
     """
     ceilings = [

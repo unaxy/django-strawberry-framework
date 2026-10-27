@@ -73,7 +73,7 @@ finalize_django_types()
 _optimizer = DjangoOptimizerExtension()
 # ``DjangoSchema`` (not plain ``strawberry.Schema``): the schema carries generated
 # mutations, whose write transactions must span GraphQL response completion
-# (mutation atomicity, shipped 0.0.14) - the write pipeline refuses to run under a plain Schema.
+# (mutation atomicity) - the write pipeline refuses to run under a plain Schema.
 schema = DjangoSchema(
     query=Query,
     mutation=Mutation,

@@ -410,7 +410,7 @@ def run_write_pipeline_sync(
     # before the object-slot tail (``slot is None``); every read below sits on one of
     # those model-backed paths, so each is cast to its non-``None`` type there.
 
-    # The managed-transaction gate + the pinned write alias (mutation atomicity, shipped 0.0.14): the
+    # The managed-transaction gate + the pinned write alias (mutation atomicity): the
     # completion-spanning ``DjangoSchema`` transaction must already be open on the
     # router's ONE write alias - a plain ``strawberry.Schema`` execution fails
     # HERE, before any database work. Every query below (locate, relation
@@ -590,7 +590,7 @@ def error_payload_builder(
 ) -> Callable[[list[FieldError]], object]:
     """Build the roll-back-then-envelope closure every write error path returns through.
 
-    The single error-envelope constructor (centralized for mutation atomicity, shipped 0.0.14):
+    The single error-envelope constructor (centralized for mutation atomicity):
     a ``FieldError`` envelope means the mutation did NOT succeed, so nothing it
     wrote may persist. A flavor ``write_step`` whose write made a partial change
     and THEN raised a validation error - the custom ``serializer.save()`` that
@@ -1170,7 +1170,7 @@ def refetch_optimized(
     ``edges { node }`` navigator - so the walker plans ``select_related`` /
     ``prefetch_related`` for the actual response shape.
 
-    ``alias`` pins the re-fetch to the pipeline's write alias (mutation atomicity, shipped 0.0.14): the row
+    ``alias`` pins the re-fetch to the pipeline's write alias (mutation atomicity): the row
     was just written inside the transaction on that alias, so reading it anywhere
     else would miss the uncommitted write.
     """

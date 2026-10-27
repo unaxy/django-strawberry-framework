@@ -9,7 +9,7 @@ Each rendered module's tree comment is the FIRST non-empty physical line of its
 module docstring (a folder row reads its ``__init__.py``). That line must be
 present, be exactly one sentence, end with ``.`` (never ``!`` or ``?``), and
 carry no ``e.g. `` / ``i.e. `` (a dot followed by a space reads as a sentence
-break; interior dots such as ``Meta.cursor_field`` or ``0.0.14`` are fine). A
+break; interior dots such as ``Meta.cursor_field`` or ``1.2.3`` are fine). A
 summary wrapped onto a second physical line therefore fails the render.
 
 The trees render the files git tracks (``git ls-files --cached``: every
@@ -117,7 +117,7 @@ TEMPLATE_DIRNAME = "templates"
 #: A sentence terminator followed by whitespace, i.e. prose continuing into a
 #: SECOND sentence. Counting raw ``.`` characters cannot express this rule: a
 #: correct one-line summary routinely carries interior periods in module paths
-#: (``utils/write_transaction.py``), versions (``0.0.14``), phase names
+#: (``utils/write_transaction.py``), versions (``1.2.3``), phase names
 #: (``phase-2.5``) and attribute references (``Meta.cursor_field``). Those are
 #: never followed by whitespace, so this pattern accepts them and still rejects
 #: a genuine run-on summary.

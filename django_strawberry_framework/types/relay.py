@@ -216,8 +216,8 @@ def _check_composite_pk_for_relay_node(type_cls: type[_RelayDjangoType]) -> None
     """Raise ``ConfigurationError`` when a Relay-declared type has a composite pk.
 
     Decision 2 (spec-015 #"Composite primary keys (Django 5.2+) are explicitly out of scope"):
-    combining ``relay.Node`` with a composite-primary-key model is explicitly out of scope for
-    ``0.0.5``. Detection is
+    combining ``relay.Node`` with a composite-primary-key model is explicitly out of scope.
+    Detection is
     ``django_strawberry_framework/utils/relations.py::has_composite_pk``
     (Django's ``Options.is_composite_pk``), the same read the FK-id-elision
     eligibility test uses.
@@ -485,8 +485,8 @@ def _apply_nodes_filter(
 
 
 # Keep the GlobalID strategy helpers in this Relay foundation module; do not
-# create a parallel public module for 0.0.9 (spec-031 Decision 11). The public
-# testing helpers belong to the sibling Full Relay card.
+# create a parallel public module (spec-031 Decision 11). The public
+# testing helpers live in ``testing/relay.py``.
 
 
 def _validated_globalid_setting() -> GlobalIDStrategy | None:

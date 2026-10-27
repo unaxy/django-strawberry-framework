@@ -2,7 +2,7 @@
 
 ``TargetVersion.number`` stays canonical (the display string); the structured
 triple is backfilled from it and kept in sync by ``TargetVersion.save()``.
-Ordering switches to the numeric triple so ``0.0.9`` sorts before ``0.0.16``
+Ordering switches to the numeric triple so ``1.2.9`` sorts before ``1.2.16``
 (a lexicographic sort of ``number`` gets this wrong at patch >= 10).
 """
 

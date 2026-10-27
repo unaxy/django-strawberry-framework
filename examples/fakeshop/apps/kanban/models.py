@@ -345,7 +345,7 @@ class TargetVersion(TimeStampedModel):
     number: _Text = models.TextField(unique=True)
     # Structured ``X.Y.Z`` components kept consistent with ``number`` in
     # ``save()``. ``number`` stays canonical (the display string); the triple
-    # exists so ordering is numeric (0.0.9 < 0.0.16, which a lexicographic sort
+    # exists so ordering is numeric (1.2.9 < 1.2.16, which a lexicographic sort
     # of ``number`` gets wrong at patch >= 10).
     major: _PositiveInt = models.PositiveIntegerField(default=0)
     minor: _PositiveInt = models.PositiveIntegerField(default=0)
@@ -597,7 +597,7 @@ class Card(TimeStampedModel):
 
     @property
     def card_id(self) -> str:
-        """Canonical card id (e.g. ``WIP-ALPHA-030-0.0.9``) without the title.
+        """Canonical card id (e.g. ``WIP-ALPHA-030-<release>``) without the title.
 
         Derived, never stored. Exposed as the ``cardId`` GraphQL field and read
         by the KANBAN.md / KANBAN.html exporters, so the id format lives in one

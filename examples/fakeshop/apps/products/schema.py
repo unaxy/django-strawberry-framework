@@ -14,13 +14,13 @@ The module also exposes a `Mutation` type (spec-036): the
 defaults apply - `DjangoModelPermission` write authorization and the post-write
 optimizer re-fetch, which under a mutation introduces no column projection.
 
-The eventual `1.0.0` shape - Relay-node types with the cookbook-shaped
+The eventual shape - Relay-node types with the cookbook-shaped
 filter / order / aggregate / fields / search / permissions surface, a
 1-to-1 port of the `django-graphene-filters` cookbook recipe - is
-tracked in `KANBAN.md` under the Layer-3 cards (`DONE-027-0.0.8`
-filters, `DONE-028-0.0.8` orders, `DONE-030-0.0.9` `DjangoConnectionField`,
-`DONE-034-0.0.10` permissions, `TODO-BETA-059-0.1.1` fieldsets,
-`TODO-BETA-060-0.1.2` search, `TODO-BETA-062-0.1.3` aggregates). The
+tracked in `KANBAN.md` under the Layer-3 cards (spec-027
+filters, spec-028 orders, spec-030 `DjangoConnectionField`,
+spec-034 permissions, spec-059 fieldsets,
+spec-060 search, the aggregates card). The
 shipped `filterset_class` + `orderset_class` + permissions surface is wired below;
 each `*Type` class still carries commented-out future-shape Meta keys
 and methods - uncomment each line as the corresponding card ships.
@@ -34,9 +34,9 @@ present `filters.py` / `orders.py` modules; `aggregate_class` /
 # Future imports (uncomment as Layer-3 subsystems ship):
 #
 # ruff: disable[ERA001]
-# needs TODO-BETA-062-0.1.3 (aggregates):
+# needs the aggregates card:
 # from apps.products import aggregates
-# needs TODO-BETA-059-0.1.1:
+# needs spec-059:
 # from apps.products import fields as fieldsets
 # ruff: enable[ERA001]
 
@@ -80,7 +80,7 @@ class CategoryType(DjangoType):
             "updated_date",
         )
         interfaces = (relay.Node,)
-        # Explicit ``"both"`` opt-in for ``items`` only (0.0.14: the default is
+        # Explicit ``"both"`` opt-in for ``items`` only (the default is
         # ``"connection"``). ``properties`` deliberately stays on the default, so
         # this one type covers both shapes live: ``items`` proves the bounded
         # opt-in raw list, ``properties`` proves the connection-only default -
@@ -91,11 +91,11 @@ class CategoryType(DjangoType):
         orderset_class = orders.CategoryOrder
         # Future Layer-3 additions - uncomment each as the relevant card ships:
         # ruff: disable[ERA001]
-        # needs TODO-BETA-060-0.1.2:
+        # needs spec-060:
         # search_fields = ("name", "description")
-        # needs TODO-BETA-062-0.1.3 + aggregates.py:
+        # needs the aggregates card + aggregates.py:
         # aggregate_class = aggregates.CategoryAggregate
-        # needs TODO-BETA-059-0.1.1 + fields.py:
+        # needs spec-059 + fields.py:
         # fields_class = fieldsets.CategoryFieldSet
         # ruff: enable[ERA001]
 
@@ -141,11 +141,11 @@ class ItemType(DjangoType):
         orderset_class = orders.ItemOrder
         # Future Layer-3 additions - uncomment each as the relevant card ships:
         # ruff: disable[ERA001]
-        # needs TODO-BETA-060-0.1.2:
+        # needs spec-060:
         # search_fields = ("name", "description", "category__name", "category__description")
-        # needs TODO-BETA-062-0.1.3 + aggregates.py:
+        # needs the aggregates card + aggregates.py:
         # aggregate_class = aggregates.ItemAggregate
-        # needs TODO-BETA-059-0.1.1 + fields.py:
+        # needs spec-059 + fields.py:
         # fields_class = fieldsets.ItemFieldSet
         # ruff: enable[ERA001]
 
@@ -191,11 +191,11 @@ class PropertyType(DjangoType):
         orderset_class = orders.PropertyOrder
         # Future Layer-3 additions - uncomment each as the relevant card ships:
         # ruff: disable[ERA001]
-        # needs TODO-BETA-060-0.1.2:
+        # needs spec-060:
         # search_fields = ("name", "description", "category__name", "category__description")
-        # needs TODO-BETA-062-0.1.3 + aggregates.py:
+        # needs the aggregates card + aggregates.py:
         # aggregate_class = aggregates.PropertyAggregate
-        # needs TODO-BETA-059-0.1.1 + fields.py:
+        # needs spec-059 + fields.py:
         # fields_class = fieldsets.PropertyFieldSet
         # ruff: enable[ERA001]
 
@@ -229,7 +229,7 @@ class EntryType(DjangoType):
             "id",
             "value",
             # Future: drop this entry to exercise field-level permission gating
-            # (TODO-BETA-059-0.1.1 FieldSet read gates).
+            # (spec-059 FieldSet read gates).
             "description",
             "property",
             "item",
@@ -242,11 +242,11 @@ class EntryType(DjangoType):
         orderset_class = orders.EntryOrder
         # Future Layer-3 additions - uncomment each as the relevant card ships:
         # ruff: disable[ERA001]
-        # needs TODO-BETA-060-0.1.2:
+        # needs spec-060:
         # search_fields = ("value", "property__name", "item__name")
-        # needs TODO-BETA-062-0.1.3 + aggregates.py:
+        # needs the aggregates card + aggregates.py:
         # aggregate_class = aggregates.EntryAggregate
-        # needs TODO-BETA-059-0.1.1 + fields.py:
+        # needs spec-059 + fields.py:
         # fields_class = fieldsets.EntryFieldSet
         # ruff: enable[ERA001]
 
@@ -311,7 +311,7 @@ class Query:
     siblings (`itemsConnection`, `entriesConnection`, ...) already exist live
     and plan through windowed `Prefetch`es.
 
-    Still deferred to `TODO-BETA-066-0.1.5` (the fakeshop-activation card): the
+    Still deferred to the fakeshop-activation card: the
     root `node(id:)` / `nodes(ids:)` Relay entry points and any `Meta.connection`
     (`totalCount`) opt-ins. This conversion intentionally adds neither.
     """

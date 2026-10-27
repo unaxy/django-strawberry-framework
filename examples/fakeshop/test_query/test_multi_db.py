@@ -1083,7 +1083,7 @@ def test_row_preserving_relational_leaf_predicate_executes_on_shard_b_alias() ->
 
 
 # ---------------------------------------------------------------------------
-# Mutation atomicity (shipped 0.0.14): write-alias pinning for generated mutations (live sharded HTTP)
+# Mutation atomicity: write-alias pinning for generated mutations (live sharded HTTP)
 # ---------------------------------------------------------------------------
 #
 # The write tests drive the PROJECT schema (config.schema - the real products

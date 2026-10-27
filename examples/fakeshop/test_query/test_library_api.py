@@ -2299,7 +2299,7 @@ def test_library_relay_node_global_id_round_trips() -> None:
     genres = json_list(payload, "data", "allLibraryGenres")
     assert len(genres) == 1
     type_name, node_id = _decode_global_id(json_str(genres, 0, "id"))
-    # Under the 0.0.9 model-label default the GlobalID carries the Django model
+    # Under the model-label default the GlobalID carries the Django model
     # label (``library.genre``), not the GraphQL type name ``GenreType``.
     assert type_name == models.Genre._meta.label_lower
     assert node_id == str(genre.pk)
@@ -3845,7 +3845,7 @@ def test_library_genres_filter_by_relay_own_pk_global_id_in_rejects_wrong_type()
 
     Each list element is type-validated against the ``library.genre`` model
     label; a ``library.book`` (``BookType``) GlobalID must raise rather than
-    silently decode to a bare node id. Under the 0.0.9 model-label default the
+    silently decode to a bare node id. Under the model-label default the
     wrong-model payload is the model label ``library.book``, not ``BookType``.
     """
     genre = models.Genre.objects.create(name="SciFi")
@@ -6551,7 +6551,7 @@ def test_relay_global_id_filter_rejects_wrong_type_name() -> None:
     assert "errors" in wrong_payload, wrong_payload
     assert wrong_payload["data"] is None, wrong_payload
     message = json_str(wrong_payload, "errors", 0, "message")
-    # Under the 0.0.9 model-label default the mismatch message reports the model
+    # Under the model-label default the mismatch message reports the model
     # labels (``library.genre`` expected, ``library.loan`` received), not the
     # GraphQL type names.
     assert "GlobalID type mismatch" in message
@@ -8605,7 +8605,7 @@ def test_genre_connection_full_round_trip() -> None:
     names_one = [json_at(edge, "node", "name") for edge in json_list(conn_one, "edges")]
     assert names_one == ["Alpha", "Banana"]
     # ``node.id`` is a decodable model-label GlobalID (``library.genre``), not
-    # the raw pk, under the 0.0.9 model-label default.
+    # the raw pk, under the model-label default.
     for edge in json_list(conn_one, "edges"):
         type_name, node_id = _decode_global_id(json_str(edge, "node", "id"))
         assert type_name == models.Genre._meta.label_lower
