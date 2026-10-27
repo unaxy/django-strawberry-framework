@@ -546,6 +546,87 @@ def test_auto_link_writes_the_first_open_mention(
         assert (written, skipped, after) == ([term], [], expected)
 
 
+DEF = f"[{REF_ID}]: GLOSSARY.md#{ANCHOR}\n"
+
+
+def _slot(
+    row_id: str,
+    docs: str,
+    written_docs: str,
+    *,
+    term: str = TERM,
+    anchor: str = ANCHOR,
+) -> object:
+    """One def-placement row: the ``docs/`` group before and after linking ``term``."""
+    return pytest.param(docs, written_docs, term, anchor, id=row_id)
+
+
+@pytest.mark.parametrize(
+    (
+        "docs",
+        "written_docs",
+        "term",
+        "anchor",
+    ),
+    [
+        _slot("empty-group", "", DEF),
+        _slot("start", "[glossary-z]: z.md\n", DEF + "[glossary-z]: z.md\n"),
+        _slot(
+            "middle",
+            "[glossary-a]: a.md\n[glossary-z]: z.md\n",
+            "[glossary-a]: a.md\n" + DEF + "[glossary-z]: z.md\n",
+        ),
+        _slot("end", "[glossary-a]: a.md\n", "[glossary-a]: a.md\n" + DEF),
+        # Label order, which whole-line order breaks: ``-`` sorts before ``]``.
+        _slot(
+            "label-sorted-group",
+            "[glossary-a]: a.md\n[glossary-a-b]: ab.md\n[glossary-z]: z.md\n[glossary-z-b]: zb.md\n",
+            "[glossary-a]: a.md\n[glossary-a-b]: ab.md\n"
+            + DEF
+            + "[glossary-z]: z.md\n[glossary-z-b]: zb.md\n",
+        ),
+        _slot(
+            "label-extending-the-new-label",
+            f"[{REF_ID}-x]: x.md\n",
+            f"{DEF}[{REF_ID}-x]: x.md\n",
+        ),
+        _slot(
+            "new-label-extending-a-label",
+            "[glossary-foo]: f.md\n[glossary-z]: z.md\n",
+            "[glossary-foo]: f.md\n[glossary-foo-bar]: GLOSSARY.md#foo-bar\n[glossary-z]: z.md\n",
+            term="Foo Bar",
+            anchor="foo-bar",
+        ),
+        # Codepoint order: an upper-case label sorts before every lower-case one.
+        _slot("upper-case-label", "[glossary-Z]: z.md\n", "[glossary-Z]: z.md\n" + DEF),
+        _slot(
+            "unsorted-group",
+            "[glossary-b]: b.md\n[glossary-z]: z.md\n[glossary-a]: a.md\n",
+            "[glossary-b]: b.md\n" + DEF + "[glossary-z]: z.md\n[glossary-a]: a.md\n",
+        ),
+        _slot("existing-def", f"[glossary-z]: z.md\n{DEF}", f"[glossary-z]: z.md\n{DEF}"),
+    ],
+)
+def test_auto_link_slots_the_def_without_moving_other_lines(
+    tmp_path: Path,
+    docs: str,
+    written_docs: str,
+    term: str,
+    anchor: str,
+) -> None:
+    """The new def lands before the first later label; every existing line keeps its order."""
+    spec = tmp_path / "spec-999-example-0_0_9.md"
+    glossary = tmp_path / "GLOSSARY.md"
+    _ = glossary.write_text(f"## {term}\n\nBody.\n", encoding="utf-8")
+    _ = spec.write_text(_spec(f"Use {term} here.\n", docs), encoding="utf-8")
+
+    written, skipped = check_spec_glossary.auto_link_terms(spec, glossary, [(term, anchor)])
+
+    after = spec.read_text(encoding="utf-8")
+    linked = f"Use [{term}][glossary-{anchor}] here.\n"
+    assert (written, skipped, after) == ([term], [], _spec(linked, written_docs))
+
+
 @pytest.mark.parametrize(
     "text",
     [
