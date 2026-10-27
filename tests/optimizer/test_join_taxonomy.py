@@ -347,11 +347,15 @@ def test_classifier_generic_target_field_lookup_error_propagates() -> None:
         classify_relation_join(_as_field(generic))
 
 
-def test_classifier_through_model_field_lookup_error_propagates() -> None:
-    """A resolvable through model whose ``get_field`` raises lets that error through."""
+def test_classifier_through_model_field_lookup_error_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resolvable through model whose ``get_field`` raises lets that error through.
 
-    class BrokenThrough:
-        _meta = _BrokenMeta()
+    The through slot must hold a model class, so a real one stands in with its
+    ``_meta.get_field`` replaced by a refusing lookup.
+    """
+    monkeypatch.setattr(Patron._meta, "get_field", _BrokenMeta().get_field)
 
     class BrokenM2M:
         name = "tags"
@@ -360,7 +364,7 @@ def test_classifier_through_model_field_lookup_error_propagates() -> None:
         one_to_one = False
         auto_created = False
         related_model = None
-        remote_field = SimpleNamespace(attname=None, name="tags", through=BrokenThrough)
+        remote_field = SimpleNamespace(attname=None, name="tags", through=Patron)
         through = None
 
         def m2m_field_name(self) -> str:

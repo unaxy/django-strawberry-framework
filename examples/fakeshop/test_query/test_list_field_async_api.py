@@ -2060,7 +2060,12 @@ class _CastToRandomText(models.TextField[str, str]):
 
 
 class _RandomPlaceholderInteger(models.IntegerField[int, int]):
-    """A project field whose placeholder adds a random value to every literal it holds."""
+    """A project field whose placeholder adds a random value to every literal it holds.
+
+    Django 5.2 compiles a literal through ``get_placeholder``; 6.1 deprecates that
+    hook for ``get_placeholder_sql``, and defining both keeps either release from
+    warning.
+    """
 
     def get_placeholder(
         self,
@@ -2069,6 +2074,14 @@ class _RandomPlaceholderInteger(models.IntegerField[int, int]):
         _connection: BaseDatabaseWrapper,
     ) -> str:
         return "(RANDOM() + %s)"
+
+    def get_placeholder_sql(
+        self,
+        value: object,
+        _compiler: SQLCompiler,
+        _connection: BaseDatabaseWrapper,
+    ) -> tuple[str, list[object]]:
+        return "(RANDOM() + %s)", [value]
 
 
 #: A readable date the ``__year`` rows apply Django's own transforms to; ``Branch``
@@ -2480,9 +2493,9 @@ _GUARD_ACCEPTED_ORDERINGS: tuple[
     ),
     (
         "whole-annotation-name-over-its-head",
-        lambda qs: qs.annotate(a=Random(), a__b=Lower("name")).order_by("a__b", "name"),
+        lambda qs: qs.alias(a=Random()).annotate(a__b=Lower("name")).order_by("a__b", "name"),
         (),
-        "ORDER BY",
+        "LOWER(",
     ),
     (
         "f-whole-annotation-name-over-its-head",
@@ -2640,7 +2653,7 @@ async def test_async_offset_reads_an_empty_string_by_what_the_backend_compiles(
     empty_is_null: bool,
     served: bool,
 ) -> None:
-    """``isil=""`` is a project ``isnull`` where the backend reads ``""`` as null, on this coloring too.
+    """``isil__lower=""`` is a project ``isnull`` where ``""`` reads as null, on this coloring too.
 
     The feature is patched on the backend's class: the async pipeline runs its
     ORM work on an executor thread holding a different connection object.
@@ -2655,8 +2668,8 @@ async def test_async_offset_reads_an_empty_string_by_what_the_backend_compiles(
     payload, branch_sql = await _branch_offset_page_under(
         monkeypatch,
         record_compiled_sql,
-        lambda qs: qs.order_by(_branch_case(models.Q(isil="")), "name"),
-        ((models.TextField, _VolatileIsNull, "isnull"),),
+        lambda qs: qs.order_by(_branch_case(models.Q(isil__lower="")), "name"),
+        ((models.TextField, Lower, None), (Lower, _VolatileIsNull, "isnull")),
     )
 
     if not served:
@@ -2762,9 +2775,14 @@ async def test_async_holder_branches_a_nested_evaluated_queryset_is_read_again_p
 
     @strawberry.type
     class _HolderQuery:
-        @strawberry.field
-        def holders(self) -> list[_BranchHolder]:
+        def _holders(self) -> list[_BranchHolder]:
             return [_BranchHolder() for _ in range(parents)]
+
+        # A local holder class is out of reach of the deferred annotation.
+        holders: list[_BranchHolder] = strawberry.field(
+            resolver=_holders,
+            graphql_type=list[_BranchHolder],
+        )
 
     branch_sql = record_compiled_sql("library_branch")
     payload = await _post_async(
@@ -2808,10 +2826,15 @@ async def test_async_holder_shelves_a_warm_prefetch_returned_by_a_resolver_is_re
 
     @strawberry.type
     class _PrefetchQuery:
-        @strawberry.field
-        async def holders(self) -> list[_PrefetchedBranchHolder]:
+        async def _holders(self) -> list[_PrefetchedBranchHolder]:
             branches = library_models.Branch.objects.order_by("name").prefetch_related("shelves")
             return [_PrefetchedBranchHolder(branch=branch) async for branch in branches[:parents]]
+
+        # A local holder class is out of reach of the deferred annotation.
+        holders: list[_PrefetchedBranchHolder] = strawberry.field(
+            resolver=_holders,
+            graphql_type=list[_PrefetchedBranchHolder],
+        )
 
     shelf_sql = record_compiled_sql("library_shelf")
     payload = await _post_async(

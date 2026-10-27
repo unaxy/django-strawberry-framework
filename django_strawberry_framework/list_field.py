@@ -1057,10 +1057,12 @@ def _order_node_state_is_stock(term: object) -> bool:
     mapping ``Func`` merges into its template, so ``Lower("name",
     template="RANDOM()")`` is an exact ``Lower`` that compiles to ``RANDOM()``.
     The state is read from the instance namespace, which dispatches nothing,
-    and every slot must be absent, with one exception: the operator a
-    ``CombinedExpression`` or ``WhereNode`` always stores, which must be one of
-    Django's own (``_COMBINED_ORDER_CONNECTORS``, ``_WHERE_ORDER_CONNECTORS``).
-    ``extra`` must be empty.
+    and every slot must be absent or restate the text the class itself
+    defines, as ``Subquery`` (so the framework's ``VisibleRowExists``) always
+    stores its ``template``. The operator a ``CombinedExpression`` or
+    ``WhereNode`` always stores has no class value and must be one of Django's
+    own (``_COMBINED_ORDER_CONNECTORS``, ``_WHERE_ORDER_CONNECTORS``). ``extra``
+    must be empty.
 
     ``Value`` and ``Cast`` also call a hook on their output field
     (``_FIELD_HOOK_ORDER_NODES``), so such a node is read only when that field
@@ -1075,7 +1077,11 @@ def _order_node_state_is_stock(term: object) -> bool:
         if attr not in state:
             continue
         connector = state[attr]
-        if attr != "connector" or type(connector) is not str:
+        if type(connector) is not str:
+            return False
+        if connector == truth.mro_attr(type(term), attr):
+            continue
+        if attr != "connector":
             return False
         if type(term) is CombinedExpression:
             connectors = _COMBINED_ORDER_CONNECTORS
