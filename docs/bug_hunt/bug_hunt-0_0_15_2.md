@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 317 done, 216 to do.
+Progress: 318 done, 215 to do.
 
 ## Done
 
@@ -1734,6 +1734,12 @@ Progress: 317 done, 216 to do.
   `relocated`, `this card` and `the old <noun>` have behaviour uses and stay ungated), with the package and example
   sites they caught restated and START.md's bullet listing the set. Executable code unchanged (code digest per file).
   Out of scope, filed: 629, 630
+- [x] 570. Fixed by the shard split (`d0073edf`): every `django.yml` test cell runs as two jobs on separate runners
+  (`library-keyset`: `test_library_api.py` + `test_keyset_api.py`, `--dist load`; `remainder`: the rest, `--dist
+  loadscope`) and a `coverage` job combines the latest cell's two traces and owns the gate; the 45-minute
+  `timeout-minutes` is unchanged. Measured on the three push runs since (`40301105850`, `40339630011`,
+  `40405314085`): the slowest shard job took 17 minutes (floor `remainder`), the rest 8 to 14; none was cancelled.
+  Trimming the suite itself stays the maintainer's call
 
 ## Outside review of the fixes
 
@@ -1889,9 +1895,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   subscript Django classes that lack `__class_getitem__`; harmless while unevaluated, but a static sweep with an
   audited `__class_getitem__` table (fail closed on an unseen class) would catch the shape in the lint job instead of
   the 45-minute test cells. Found fixing 506
-- [ ] 570. (robustness) The `django.yml` floor and latest test cells run 40-45 minutes against a 45-minute
-  `timeout-minutes`: the floor cell was cancelled at e8975a17, 60cd7102 and 116b57f6 (hiding a red
-  `tests/base/test_init.py`) and the latest cell at 81661b96. Found fixing 506
 - [ ] 573. (robustness) A `null=True, blank=True` column a `ModelForm` cleans to `""` it cannot store (a non-text
   choice column through the `ValueError` trigger, an `ArrayField` through the `DataError` one) answers "This field
   cannot be null." (code `null`) on a column that takes NULL, since `forms/resolvers.py::_is_unstorable_blank` ignores
