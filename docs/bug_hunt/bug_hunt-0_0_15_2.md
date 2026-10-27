@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 319 done, 215 to do.
+Progress: 320 done, 215 to do.
 
 ## Done
 
@@ -1749,6 +1749,14 @@ Progress: 319 done, 215 to do.
   answer the field-keyed "This field cannot be null." (code `null`), nothing written. A client reaches it only by an
   omitted create value or an explicit `null` (plus `""` on an `ArrayField`), since every other input is typed by the
   column. Which answer a nullable column should give is row 631
+- [x] 420. `scripts/_markdown_lex.py::block_regions` reads each line's containers as CommonMark appendix A does: one
+  stack of block quotes and list items opened in any order (a quote inside a list item, a list inside a quote inside
+  a list), matched outermost first, with lazy continuation and a fence or HTML block ending when its container closes;
+  a link reference definition is read when its paragraph closes (4.7: label, destination and title each on its own
+  line, a title spanning lines), so neither shape can take a term link. A CRLF line's `\r` ends a list or heading
+  marker. All 652 CommonMark 0.31.2 examples mask as the spec renders them (HEAD: 270 of 286 in 4.1-5.3); over the
+  repo's `.md` files only the `.claude/agents` front matter's opening `---` moves (now a thematic break). Tests:
+  `tests/test_check_spec_glossary.py`
 
 ## Outside review of the fixes
 
@@ -1789,10 +1797,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 420. (robustness) `scripts/_markdown_lex.py::block_regions` does not mask a block quote nested inside a list
-  item (`- > ```` then `  > code`: markers are read only at the line start) nor a link-reference-definition title
-  split across two lines (`[foo]: /url "a` / `Zeta b"`), so `check_spec_glossary.py --auto-link` can write a link into
-  either; both were unmasked before 302 too, no spec or doc has either shape; found verifying 302
 - [ ] 421. `scripts/build_kanban_md.py::TERM_BOUNDARY_AFTER` refuses a term followed by `.`, `:`, `/` or `-` even at
   the end of a sentence (`... a DjangoType.`), so the board leaves 7 first mentions unlinked (a
   `PROSE_TERM_BOUNDARY_AFTER`-style after-boundary renders 182 glossary links against 175, 50 lines differ); 302 kept
@@ -2032,6 +2036,10 @@ tracker number are recorded there; open remainders and new defects are filed as 
   "Before:", "Deleted this sweep"), "Gotchas the sweep surfaced" and "Second sweep: promotable rows spotted, not yet
   moved", the last an unhomed work queue; restate the teaching as present practice and home each queued row on a card.
   Found fixing 566
+- [ ] 646. (robustness) `scripts/_markdown_lex.py::block_regions` follows the CommonMark spec (and commonmark.js /
+  markdown-it) on a type-7 HTML tag line in a lazy position (`> x` / `</pre>` / `TERM here`: lazy paragraph text),
+  while cmark-gfm, which renders these docs on GitHub, opens an HTML block there, so a link written after it shows as
+  raw text; no repo doc has the shape; found verifying 420
 
 ## To do: holes found re-checking the fixes
 
