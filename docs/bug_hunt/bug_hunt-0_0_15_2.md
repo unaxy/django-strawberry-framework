@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 323 done, 215 to do.
+Progress: 324 done, 215 to do.
 
 ## Done
 
@@ -1788,6 +1788,13 @@ Progress: 323 done, 215 to do.
   (lazy paragraph text); only cmark-gfm opens an HTML block there. No repo markdown file has the shape
   (measured verifying 420), so no feasible project input reaches the difference. Lexing to cmark-gfm's reading
   instead would be a new card
+- [x] 630. `examples/fakeshop/test_query/README.md` states its teaching as present practice: each worked
+  example keeps its lesson in present tense and cites the live row it describes by `path::Symbol` (no copied
+  test bodies, which had drifted from the rows); the Before / What moved narration, the deleted-test list and
+  the eleven citations of package rows that no longer exist are gone; "Gotchas the sweep surfaced" is
+  "Gotchas" without the bullets stated elsewhere in the file; the "Second sweep" section is deleted, its queue
+  empty with every row moved or kept by design, so no row needed a card. The one leftover package row it named
+  is filed as 603
 
 ## Outside review of the fixes
 
@@ -2054,10 +2061,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
   (42), "test-plan row 19/20" and "gap 1/2" in `test_products_api.py`, "gap 1/2" in
   `tests/test_strawberry_patches.py`, "test #8" in `test_library_api.py`; restate each by the contract it pins. Found
   fixing 566
-- [ ] 630. `examples/fakeshop/test_query/README.md` narrates history in its "Worked examples" ("What moved:",
-  "Before:", "Deleted this sweep"), "Gotchas the sweep surfaced" and "Second sweep: promotable rows spotted, not yet
-  moved", the last an unhomed work queue; restate the teaching as present practice and home each queued row on a card.
-  Found fixing 566
+- [ ] 603. A package row the test-writing manual named as a promotion leftover still stands beside its live
+  twin: `tests/optimizer/test_relay_id_projection.py::test_relay_id_with_custom_pk_attname_avoids_lazy_load`
+  and `test_library_shapes_api.py::test_patron_profile_relay_id_is_built_from_the_relation_primary_key_column`
+  (the package row also asserts `plan.only_fields` and the GlobalID parts). Decide by a failability proof:
+  delete or trim what the live row already pins, keep what has no wire shape. Found fixing 630
 
 ## To do: holes found re-checking the fixes
 

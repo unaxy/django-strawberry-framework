@@ -9,7 +9,7 @@ For agents. Binding. [AGENTS.md][agents] = law, one line each; this = long form 
 1. [The rule](#the-rule)
 2. [Where a test goes](#where-a-test-goes)
 3. [Anatomy of a live test](#anatomy-of-a-live-test)
-4. [Before / after: promoting a shortcut test](#before--after-promoting-a-shortcut-test)
+4. [Promoting a shortcut test](#promoting-a-shortcut-test)
 5. [Breaking a test up](#breaking-a-test-up)
 6. [Shipped schema can't reach the subject](#shipped-schema-cant-reach-the-subject)
 7. [Worked examples](#worked-examples)
@@ -39,7 +39,7 @@ Speed never justifies skipping a rung. `pytest.ini` parallel default = the speed
 
 Two corollaries, enforced:
 
-- **Live-first, both verdicts, and the must-not.** Any `django_strawberry_framework/` line a real fakeshop query reaches MUST be covered from this dir. Acceptance ≠ rejection: a plan can pin rejection live and leave acceptance package-only; rejection row covers nothing about acceptance. Check which VERDICT each live row proves. Claim = a behaviour is SCOPED (write-only exemption, an ordering, a one-surface opt-in) → row also owes the adjacent case that must NOT get it; positive alone proves the mechanism, not the boundary ([example 4](#4-the-must-not-only-a-real-session-can-phrase-isprivate-refetch)).
+- **Live-first, both verdicts, and the must-not.** Any `django_strawberry_framework/` line a real fakeshop query reaches MUST be covered from this dir. Acceptance ≠ rejection: a plan can pin rejection live and leave acceptance package-only; rejection row covers nothing about acceptance. Check which VERDICT each live row proves. Claim = a behaviour is SCOPED (write-only exemption, an ordering, a one-surface opt-in) → row also owes the adjacent case that must NOT get it; positive alone proves the mechanism, not the boundary ([the `isPrivate` refetch](#the-must-not-only-a-real-session-can-phrase-isprivate-refetch)).
 - **Promotion deletes the stand-in.** Package copy goes in the same change, after the live row is shown to fail w/ boundary removed ([Prove the test can fail](#prove-the-test-can-fail)). Two tests, one claim = debt, not safety.
 
 Coverage = package only, `fail_under = 100`; live tests here are how it gets there. Example apps run every suite, never count. Don't add them to the gate.
@@ -51,7 +51,7 @@ Four trees, one `pytest.ini`. Locally, run targeted selections only; the full su
 | Tree | SUT | Style | Package? |
 |---|---|---|---|
 | `examples/fakeshop/test_query/` | any package line a real query reaches | live `/graphql/` HTTP via [`graphql_client.py`][graphql-client] | no |
-| `examples/fakeshop/apps/<app>/tests/` | one app's models/admin/services/commands | in-process: model methods, admin, services, `call_command`. NOT `execute_sync` on the composed schema; a query that reaches the claim → `test_query/` ([example 9](#9-wrong-tree-over-the-real-schema-composition-introspection)) | yes, `apps.<app>.tests` |
+| `examples/fakeshop/apps/<app>/tests/` | one app's models/admin/services/commands | in-process: model methods, admin, services, `call_command`. NOT `execute_sync` on the composed schema; a query that reaches the claim → `test_query/` ([composition introspection](#wrong-tree-over-the-real-schema-composition-introspection)) | yes, `apps.<app>.tests` |
 | `examples/fakeshop/tests/` | project/config only: urls, settings guard, schema export, project commands | in-process `Client`, `call_command` | no, never add `__init__.py` |
 | `tests/` | package + repo tooling | in-process; throwaway `DjangoType`s; fakeshop models OK as fixtures | mirrors package layout |
 
@@ -129,12 +129,12 @@ def test_staff_book_list_keeps_repair_rows():
 - **Viewer** = `django.test.Client`. Anonymous default. `force_login` a seeded user: `create_users` gives `staff_N` (`is_staff`), `regular_N`, `view_<model>_N` per products model, all `TEST_USER_PASSWORD`. Model-perm check → grant codename to a NON-superuser in-test; superuser short-circuits, proves nothing.
 - **Request** via [`graphql_client.py`][graphql-client]. `assert_graphql_data` = 200 + no `errors` + exact `data`. `assert_graphql_success` → `data`. `graphql_payload` → whole envelope (rows about `errors`). `post_graphql` → raw `HttpResponse` (headers, status). JSON path routes through package [`TestClient`][glossary-testclient], so live rows exercise the consumer client too.
 - **Payload** exact wherever data allows. Faker-seeded products → derive expected from the equivalent ORM query, never pin names.
-- **SQL** = the instrument for optimizer / visibility / pagination claims. Filter `captured_queries` to the table under test, on `FROM "<table>"` when the selection touches a relation (M2M through-tables share the parent's prefix: `"library_book" in sql` also matches `library_book_genres`), assert count, then fragment (`LIMIT 2 OFFSET 1`, `EXISTS`, no `COUNT(`, no `DISTINCT`). Never assert bare total count; session / auth / content-type queries ride along the moment a viewer logs in. Plan-object attributes each translate to exactly one SQL fact (`select_related` → `JOIN`, `Prefetch` → second query on the target table, `only_fields` attname → column in root `SELECT`); an attribute w/ no translation was never a contract ([example 2](#2-sql-beats-the-plan-object-the-hint-pair)).
+- **SQL** = the instrument for optimizer / visibility / pagination claims. Filter `captured_queries` to the table under test, on `FROM "<table>"` when the selection touches a relation (M2M through-tables share the parent's prefix: `"library_book" in sql` also matches `library_book_genres`), assert count, then fragment (`LIMIT 2 OFFSET 1`, `EXISTS`, no `COUNT(`, no `DISTINCT`). Never assert bare total count; session / auth / content-type queries ride along the moment a viewer logs in. Plan-object attributes each translate to exactly one SQL fact (`select_related` → `JOIN`, `Prefetch` → second query on the target table, `only_fields` attname → column in root `SELECT`); an attribute w/ no translation was never a contract ([the hint pair](#sql-beats-the-plan-object-the-hint-pair)).
 - **Identifiers minted, never pinned.** GlobalIDs via [`global_id_for`][testing-relay] over the real type; cursors from a prior `endCursor`. Package-owned encodings, may change.
 
-## Before / after: promoting a shortcut test
+## Promoting a shortcut test
 
-Shortcut shape, condensed from the throwaway-type idiom in [`tests/test_connection.py`][tests-connection]. Claim: "connection w/o `total_count` opt-in exposes no `totalCount`":
+A shortcut row, condensed from the throwaway-type idiom in [`tests/test_connection.py`][tests-connection]. Claim: "connection w/o `total_count` opt-in exposes no `totalCount`":
 
 ```python
 def _make_node_type(name, *, total_count):
@@ -162,7 +162,7 @@ def test_total_count_absent_unless_opted_in():
 
 Passes. Proves ~nothing a consumer cares about: type not shipped, schema not fakeshop's, no view, no visibility hook, "not in SDL string" says nothing about whether a `COUNT` ran.
 
-Same claim as it lives in [`test_library_api.py`][test-library-api]:
+The same claim as a live row, condensed from [`test_library_api.py`][test-library-api]`::test_genre_connection_total_count_omitted_no_count` (read the row for its exact assertions):
 
 ```python
 @pytest.mark.django_db
@@ -191,17 +191,17 @@ def test_genre_connection_total_count_omitted_no_count():
     assert not any("COUNT(" in query["sql"].upper() for query in captured.captured_queries)
 ```
 
-What moved:
+What the live row proves that the shortcut can't:
 
-1. **Type = shipped `GenreType`** ([`apps/library/schema.py`][lib-schema], `connection = {"total_count": True}`). Proves selection gating on a type that opted in = the consumer contract; throwaway proved a weaker SDL fact about a type nobody ships.
+1. **Type = shipped `GenreType`** ([`apps/library/schema.py`][lib-schema], `connection = {"total_count": True}`). Proves selection gating on a type that opted in = the consumer contract; a throwaway proves a weaker SDL fact about a type nobody ships.
 2. **Schema = composed project schema**, reloaded by [`conftest.py`][conftest] autouse fixtures. Every app registered → a relation target that raises at finalize in prod raises here.
-3. **Request crossed the view.** Middleware, optimizer extension, user on request. Resolver reading `info.context.request` exercised, not skipped.
+3. **Request crosses the view.** Middleware, optimizer extension, user on request. A resolver reading `info.context.request` is exercised, not skipped.
 4. **Assertion = wire + DB**, not a schema string. `"totalCount" not in conn` = what client sees; no `COUNT(` = what DB saw.
 5. **Rows real.** Three genres, page of two, actionable `hasNextPage`.
 
-What stayed: package tier keeps `test_connection_type_for_returns_concrete_subclass_without_opt_in` — generated connection is a concrete subclass, not the `DjangoConnection[T]` alias. Construction-time identity, no wire shape. Its docstring names this dir as home of the consumer round-trips. Package file says what it does NOT carry; live file says nothing about the package tier (consumer never sees it).
+The package tier keeps what has no wire shape: `tests/test_connection.py::test_connection_type_for_returns_concrete_subclass_without_opt_in` pins that the generated connection is a concrete subclass, not the `DjangoConnection[T]` alias. Construction-time identity. Its docstring names this dir as home of the consumer round-trips. Package file says what it does NOT carry; live file says nothing about the package tier (consumer never sees it).
 
-Promote → delete shortcut same change, then sweep what the shortcut alone kept alive: helpers, module constants, builder kwargs whose only caller was the deleted row (ruff sees unused imports, not an orphaned `def`; grep each name, count `1` = definition-only), the module docstring's bullets, and prose citations: `grep -rn -F '<name>' docs/ KANBAN.md` (bare name, not `::name`; prose rarely qualifies) plus `strings examples/fakeshop/db.sqlite3 | grep -F '<name>'` for a board row the next render would surface (a hit there may be freelist residue; confirm through the kanban app). The citation gate reads `.py` + `KANBAN.md` only. Run the live row w/ boundary removed first ([`prove_failability.py`][prove-failability]). Live row doesn't fail → one of two things, opposite fixes: the row isn't covering the claim yet (add assertions), OR the docstring you inherited names a boundary neither row pins (find the real one, rewrite the claim). Check the second first; a promoted docstring carries its author's belief, not a measurement ([example 7](#7-the-stand-ins-docstring-lied-corrupt-image)). Also: a green run can mean the MUTATION was absorbed (unreachable guard, a root the optimizer never plans, fail-open `fields=[]`); the script's `WEAKLY PINNED` verdict points at the test, check the mutation first.
+Promote → delete shortcut same change, then sweep what the shortcut alone kept alive: helpers, module constants, builder kwargs whose only caller was the deleted row (ruff sees unused imports, not an orphaned `def`; grep each name, count `1` = definition-only), the module docstring's bullets, and prose citations: `grep -rn -F '<name>' docs/ KANBAN.md` (bare name, not `::name`; prose rarely qualifies) plus `strings examples/fakeshop/db.sqlite3 | grep -F '<name>'` for a board row the next render would surface (a hit there may be freelist residue; confirm through the kanban app). The citation gate reads `.py`, `KANBAN.md` and the specs; other `docs/` prose is ungated. Run the live row w/ boundary removed first ([`prove_failability.py`][prove-failability]). Live row doesn't fail → one of two things, opposite fixes: the row isn't covering the claim yet (add assertions), OR the docstring you inherited names a boundary neither row pins (find the real one, rewrite the claim). Check the second first; a promoted docstring carries its author's belief, not a measurement ([corrupt image](#a-stand-ins-docstring-can-name-the-wrong-boundary-corrupt-image)). Also: a green run can mean the MUTATION was absorbed (unreachable guard, a root the optimizer never plans, fail-open `fields=[]`); the script's `WEAKLY PINNED` verdict points at the test, check the mutation first.
 
 ## Breaking a test up
 
@@ -209,7 +209,7 @@ Shortcut tests carry several claims under one name. Split along claims BEFORE mo
 
 One claim per row. `test_title_filters` looping three lookups = one node id: failure in #2 hides #3; failability counts the loop as ONE row however many boundaries it crosses.
 
-Before:
+Looped:
 
 ```python
 @pytest.mark.django_db
@@ -227,7 +227,7 @@ def test_title_filters():
         assert [b["title"] for b in data["allLibraryBooks"]] == expected
 ```
 
-After:
+Split, one node id per claim:
 
 ```python
 @pytest.mark.django_db
@@ -303,143 +303,31 @@ def _post(
 
 Request still crosses the full HTTP pipeline. `override_settings(ROOT_URLCONF=...)` / `pytest.mark.urls` already clear resolver caches (Django's `setting_changed` receiver, both directions); call `clear_url_caches()` yourself only when the holder swaps its held schema WITHOUT changing `ROOT_URLCONF`. The reference impls below still call it inside their `override_settings` brackets; redundant, harmless, don't copy it into new mounts. What every holder mount DOES owe: resolve the schema at request time (`from config.schema import schema` INSIDE the view function, or the `_CURRENT` dict above). A schema captured at import is the pre-reload one and fails in a LATER module on the same worker, not yours. Holder types declared inside test body / fixture depending on the module reload, never at import; registry clear between modules would strand them (the autouse guard raises "Reloading the project schema shell mutated app registrations", naming the fixture, not your file). Mount path is the module's choice (`/graphql-test/`, `/graphql/` in own URLconf, `cap-misconfigured/`); function-level `@pytest.mark.urls("config.urls")` reaches the shipped endpoint from inside a holder module. Async mounts spelled longhand must carry `@_carrying_the_packages_csrf_mark(AsyncDjangoGraphQLView)` themselves. Reference impls: [`test_list_field_api.py`][test-list-field-api], [`test_products_visibility_api.py`][test-products-visibility-api], [`test_transport_api.py`][test-transport-api].
 
-All three exhausted → `tests/`, and the docstring names the rung BY NUMBER, states the specific fakeshop change that would reach it, and why that change is unacceptable. "No shipped type declares this" disposes of rungs 1–2 and says nothing about rung 3; several package rows justified themselves that way and were promotable the same day.
+All three exhausted → `tests/`, and the docstring names the rung BY NUMBER, states the specific fakeshop change that would reach it, and why that change is unacceptable. "No shipped type declares this" disposes of rungs 1–2 and says nothing about rung 3; a package row resting on that sentence alone may be promotable through a holder mount.
 
 ## Worked examples
 
-One promotion sweep, real rows. Each example = the package row as it stood (since deleted) → the live row that replaced it → what moved. Ordered by the lesson, widest range first; shapes already shown once get a line, not a block. Every live row here was proven to fail w/ its boundary removed before the stand-in went.
+Real live rows, one lesson each, widest range first. Each names the live row that pins it; read the row for its exact assertions. Where the failability boundary is not obvious, the example names the mutation that fails the row.
 
-### 1. Wiring vs class: the plan cache
+### Wiring vs class: the plan cache
 
-Package row proved the CLASS caches; fakeshop's whole `extensions=[lambda: _optimizer]` wiring in `config/schema.py` exists so the cache survives across REQUESTS, and nothing proved that.
+A package row w/ its own extension instance proves the CLASS caches. Fakeshop's `extensions=[lambda: _optimizer]` wiring in `config/schema.py` exists so the cache survives across REQUESTS; only a live row over two requests proves that: [`test_library_api.py`][test-library-api]`::test_library_optimizer_plan_cache_is_reused_across_http_requests`.
 
-Before (`tests/optimizer/test_extension.py::test_cache_hit_on_repeated_query`):
-
-```python
-@pytest.mark.django_db
-def test_cache_hit_on_repeated_query(django_assert_num_queries):
-    """B1: executing the same query twice produces a cache hit on the second call."""
-    services.seed_data(1)
-
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name", "category")
-
-    ext = DjangoOptimizerExtension()
-
-    @strawberry.type
-    class Query:
-        @strawberry.field(graphql_type=list[ItemType])
-        def all_items(self) -> QuerySet[Item]:
-            return Item.objects.all()
-
-    finalize_django_types()
-    schema = strawberry.Schema(query=Query, extensions=[lambda: ext])
-    query = "{ allItems { name category { name } } }"
-
-    schema.execute_sync(query)
-    assert ext.cache_info().misses == 1
-    schema.execute_sync(query)
-    assert ext.cache_info().hits == 1
-    assert ext.cache_info().size == 1
-```
-
-After ([`test_library_api.py`][test-library-api]`::test_library_optimizer_plan_cache_is_reused_across_http_requests`):
-
-```python
-_PLAN_CACHE_DOCUMENT = """
-query {
-  allLibraryMembershipCards {
-    barcode
-    patron { name }
-  }
-}
-"""
-
-
-@pytest.mark.django_db
-def test_library_optimizer_plan_cache_is_reused_across_http_requests():
-    """The shipped optimizer plans one document once and reuses that plan next request.
-
-    ``config/schema.py`` holds a single module-level ``DjangoOptimizerExtension``
-    and hands the schema a ``lambda: _optimizer`` factory, so the instance-bound
-    plan cache outlives a request. Two identical documents over ``/graphql/``
-    therefore record a miss then a hit against ONE cache entry. A per-request
-    extension would report two misses; a reused plan that had gone stale would
-    change the emitted SQL, so the second request's library SQL must match the
-    first's exactly.
-    """
-    _seed_library_graph()
-    optimizer = sys.modules["config.schema"]._optimizer
-    # The conftest empties this plan cache before every test, making the counters absolute.
-    assert optimizer.cache_info().size == 0, optimizer.cache_info()
-
-    with CaptureQueriesContext(connection) as first_capture:
-        first = _post_graphql(_PLAN_CACHE_DOCUMENT)
-    assert optimizer.cache_info().misses == 1
-    assert optimizer.cache_info().hits == 0
-
-    with CaptureQueriesContext(connection) as second_capture:
-        second = _post_graphql(_PLAN_CACHE_DOCUMENT)
-    assert optimizer.cache_info().hits == 1
-    assert optimizer.cache_info().misses == 1
-    assert optimizer.cache_info().size == 1
-
-    assert second.json()["data"] == first.json()["data"]
-    assert _library_sql(second_capture) == _library_sql(first_capture)
-```
-
-What moved: the extension under test is the one `config.urls` serves, reached via `sys.modules["config.schema"]` at call time (the conftest rebuilds that module whenever a test leaves the registry stale; a module-level import can bind a discarded instance and read zeros forever, passing). The obvious document (`allLibraryBooks { shelf { code } }`) measured `misses=2, size=0`: `BookType` / `ShelfType` declare `get_queryset`, and a plan w/ a hook in the selection is `cacheable=False`. Throwaway types had no hooks so the package row never met this. SQL-identity clause added: a stale reused plan would change the emitted SQL. Don't copy the stand-in's wiring: a plain `strawberry.Schema` gives `lambda: ext` no per-operation isolation, so every operation shares one extension instance's per-operation state and execution context; `config/schema.py`'s `DjangoSchema` isolates both on the shared instance, which is what makes the singleton factory safe.
+- **Read the served instance at call time.** The extension under test is the one `config.urls` serves, reached via `sys.modules["config.schema"]._optimizer` inside the test (the conftest rebuilds that module whenever a test leaves the registry stale; a module-level import can bind a discarded instance and read zeros forever, passing). Absolute `misses == 1` holds only because the conftest empties the plan cache before every test; the row's comment says so.
+- **Hooks make a plan uncacheable.** A plan w/ any `get_queryset` hook in the selection is `cacheable=False`: `allLibraryBooks { shelf { code } }` measures `misses=2, size=0` because `BookType` / `ShelfType` declare `get_queryset`. Cache rows need hook-free types (`allLibraryMembershipCards`). Throwaway types have no hooks, so a package row never meets this.
+- **SQL identity.** The second request's library SQL must equal the first's: a stale reused plan would change the emitted SQL.
+- **Don't build the row on a plain `strawberry.Schema`.** It gives `lambda: ext` no per-operation isolation, so every operation shares one extension instance's per-operation state and execution context; `config/schema.py`'s `DjangoSchema` isolates both on the shared instance, which is what makes the singleton factory safe.
 
 Failability: `extensions=[lambda: _optimizer]` → fresh instance per request → row fails.
 
-### 2. SQL beats the plan object: the hint pair
+### SQL beats the plan object: the hint pair
 
-`LoanType.Meta.optimizer_hints = {"book": OptimizerHint.prefetch_related(), "patron": OptimizerHint(skip=True)}` ships in [`apps/library/schema.py`][lib-schema]. Two package rows redeclared the same hints on a throwaway `ItemType` and read `ctx.dst_optimizer_plan`.
+`LoanType.Meta.optimizer_hints = {"book": OptimizerHint.prefetch_related(), "patron": OptimizerHint(skip=True)}` ships in [`apps/library/schema.py`][lib-schema]. [`test_library_api.py`][test-library-api]`::test_library_optimizer_hints_are_observable_over_http` reads both hints from the SQL alone, never from `ctx.dst_optimizer_plan`:
 
-Before (`tests/optimizer/test_extension.py::test_optimizer_hint_force_prefetch`, trimmed):
+- **Prefetch half.** `allLibraryLoans { book { title } }`: root query on `library_loan` w/o `JOIN`, `book_id` kept in its `SELECT` (the forced prefetch needs the FK column), then ONE batched query on `library_book`.
+- **SKIP half.** `library_patron` absent from the root SQL AND one patron query per row: lazy load, not a batched prefetch. That is the live spelling of "not planned".
 
-```python
-class ItemType(DjangoType):
-    class Meta:
-        model = Item
-        fields = ("id", "name", "category")
-        optimizer_hints = {"category": OptimizerHint.prefetch_related()}
-
-
-...
-ctx = SimpleNamespace()
-result = schema.execute_sync("{ allItems { name category { name } } }", context_value=ctx)
-plan = ctx.dst_optimizer_plan
-assert [lookup.prefetch_to for lookup in plan.prefetch_related] == ["category"]
-assert "category" not in plan.select_related
-assert "category_id" in plan.only_fields
-```
-
-After ([`test_library_api.py`][test-library-api]`::test_library_optimizer_hints_are_observable_over_http`, prefetch half):
-
-```python
-    with CaptureQueriesContext(connection) as captured_prefetch:
-        prefetch_response = _post_graphql("query { allLibraryLoans { book { title } } }")
-    ...
-    # Two loan rows, two queries: the root read plus ONE batched book fetch.
-    assert len(captured_prefetch) == 2
-    assert "JOIN" not in captured_prefetch[0]["sql"]
-    assert "library_loan" in captured_prefetch[0]["sql"]
-    # The forced prefetch needs the FK column, so the root projection keeps it.
-    assert "book_id" in captured_prefetch[0]["sql"]
-    assert "library_book" in captured_prefetch[1]["sql"]
-```
-
-SKIP half: `library_patron` absent from the root SQL AND a patron query per row (index 1 and 2), i.e. lazy load, not a batched prefetch. That is the live spelling of "not planned".
-
-What moved: every plan attribute became the SQL fact it implies. `prefetch_to == ["category"]` → second query against the target table; `"category" not in select_related` → no `JOIN` in root; `"category_id" in only_fields` → `book_id` in root SELECT. Translation table:
+Every plan attribute translates to the SQL fact it implies:
 
 | Plan attribute | Wire / SQL fact |
 |---|---|
@@ -451,412 +339,115 @@ What moved: every plan attribute became the SQL fact it implies. `prefetch_to ==
 
 An attribute w/ no translation was never a contract; drop it, don't promote it.
 
-Failability: delete the `optimizer_hints` line on `LoanType` → row fails. Deleting the walker's elision guard for a hooked target changed NOTHING: `plan_relation` downgrades to `Prefetch` first, so that guard is unreachable on this path. The package row was pinning a dead guard.
-
-### 3. Two green tests, contradictory contracts: the optimizer-less `1 + N`
-
-`tests/test_relay_connection.py::test_synthesized_connection_per_parent_query_cost` asserted `1 + N` queries for a nested connection ("pre-033 posture"); `test_library_api.py::test_nested_books_connection_fixed_query_count` asserts the count is independent of N. Both green because `_schema_with_root` built a bare `strawberry.Schema` w/o the optimizer. An optimizer-less consumer is a real configuration, so the claim belongs on a holder mount WITHOUT the extension.
-
-Before:
-
-```python
-@pytest.mark.django_db
-def test_synthesized_connection_per_parent_query_cost(django_assert_num_queries):
-    """Each parent row pays its own window query - the documented cost contract.
-
-    Relation-seeded connections run per-parent (no
-    cross-parent batching in the pre-``033`` posture), so ...
-    """
-    services.seed_data(2)
-    _make_type("ItemType", Item, ("id", "name", "category"))
-    category_type = _make_type("CategoryType", Category, ("id", "name", "items"))
-
-    schema = _schema_with_root(category_type)
-    parent_count = Category.objects.count()
-    with django_assert_num_queries(1 + parent_count):
-        result = schema.execute_sync(
-            "{ objs { itemsConnection(first: 2) { edges { node { name } } } } }",
-        )
-```
-
-After ([`test_products_visibility_api.py`][test-products-visibility-api]):
-
-```python
-def _nested_connection_item_queries(parent_count: int) -> list[str]:
-    """Post ``_NESTED_CONNECTION_QUERY`` at ``parent_count`` parents; return the item SQL.
-
-    The holder schema installs NO ``DjangoOptimizerExtension``, so the nested
-    connection runs off the relation manager rather than a planned window.
-    """
-    parent_pks = list(
-        Category.objects.order_by("pk").values_list("pk", flat=True)[:parent_count],
-    )
-    assert len(parent_pks) == parent_count
-
-    from apps.products.schema import CategoryType
-
-    @strawberry.type
-    class Query:
-        @strawberry.field(graphql_type=list[CategoryType])
-        def categories(self) -> list[Category]:
-            return list(Category.objects.filter(pk__in=parent_pks).order_by("pk"))
-
-    with CaptureQueriesContext(connection) as captured:
-        payload = _post_visibility_query(strawberry.Schema(query=Query), _NESTED_CONNECTION_QUERY)
-    assert payload.get("errors") is None, payload
-    assert len(payload["data"]["categories"]) == parent_count
-    return [entry["sql"] for entry in captured.captured_queries if "products_item" in entry["sql"]]
-
-
-def test_nested_connection_costs_one_query_per_parent_without_the_optimizer(db: None) -> None:
-    """With no optimizer installed a nested connection costs one window query per parent.
-
-    ... measured at two cardinalities so a fixed count cannot satisfy it, and so a
-    regression toward per-EDGE loading (which would overshoot N) is visible.
-    """
-    services.seed_data(1)
-
-    assert len(_nested_connection_item_queries(2)) == 2
-    assert len(_nested_connection_item_queries(5)) == 5
-```
-
-What moved: shipped `CategoryType` (imported inside the helper, after the reload), real HTTP through the file's existing holder, two cardinalities so `N` is load-bearing, SQL filtered to `products_item` so session reads don't count. Docstring states the contract; provenance gone. `seed_data(1)` gives 25 categories, hence the pk slice; taking them all pays 26 queries per cardinality.
-
-Failability first attempt measured 0 rows: installing the optimizer on the holder changed nothing because the root returned a `list`, which the optimizer cannot plan. Mutation had to return a queryset too. Read a green run as "mutation absorbed" before "row weak".
-
-### 4. The must-not only a real session can phrase: `isPrivate` refetch
-
-Before (`tests/mutations/test_resolvers.py::test_refetch_skips_visibility_filter_after_authorized_write`, trimmed): a `_hide_private` classmethod, `CategoryT`, `ItemT` built via `type(...)`, `CreateItem(DjangoMutation)` w/ `permission_classes = [_AllowAll]`, `finalize_django_types()`, `execute_sync` of `createItem(data: {isPrivate: true})`, one assert: `node.name == "Hidden"`. Forty lines of declaration; "the caller" a fiction, so the must-not could not be phrased.
-
-After ([`test_products_api.py`][test-products-api]):
-
-```python
-@pytest.mark.django_db(transaction=True)
-def test_create_item_private_row_is_refetched_for_its_author_but_stays_hidden_from_reads():
-    """A permitted caller writing a row their own reads hide still gets it back in the payload.
-
-    `ItemType.get_queryset` hides `is_private` rows from a non-staff viewer, and
-    `view_item_1` (granted `add_item`) is exactly such a viewer. The post-write
-    re-fetch is by pk WITHOUT the visibility filter, so the payload `node` carries the
-    row the caller just wrote. The must-not is the same caller's `allItems` read in
-    the same session, which does NOT list it: the write-time re-fetch is an exemption
-    for the actor's own write, never a hole in the read-side visibility rule.
-    """
-    create_users(1)
-    seed_data(1)
-    category = models.Category.objects.first()
-    client = _login_with_perm("view_item_1", "add_item")
-
-    data = _graphql_data(
-        _CREATE_ITEM,
-        client=client,
-        variables={
-            "d": {
-                "name": "PrivateLiveWidget",
-                "categoryId": _global_id("products.category", category.pk),
-                "isPrivate": True,
-            },
-        },
-    )
-    result = data["createItem"]
-    assert result["errors"] == []
-    assert result["node"] == {"name": "PrivateLiveWidget", "category": {"name": category.name}}
-    assert models.Item.objects.get(name="PrivateLiveWidget").is_private is True
-
-    # The same caller's read does not see it: the re-fetch exemption is write-only.
-    read = _graphql_data("{ allItems { edges { node { name } } } }", client=client)
-    names = [edge["node"]["name"] for edge in read["allItems"]["edges"]]
-    assert names, read
-    assert "PrivateLiveWidget" not in names
-```
-
-What moved: shipped `ItemType.get_queryset` IS the hook the package row fabricated. The second half turns "re-fetch skips the filter" from a mechanism note into a security claim: exemption scoped to the write, provable only w/ a session that then reads. `allItems` is a connection (`edges { node }`); a verbatim `{ allItems { name } }` from the package row does not parse.
-
-### 5. Settings override reaches a "misconfigured deployment": sessionless `login`
-
-Before (`tests/auth/test_mutations.py::test_sessionless_login_raises_the_configuration_error_naming_both_middlewares`): throwaway `_login_logout_schema()`, `RequestFactory().post()` w/o `SessionMiddleware`, `request.user = AnonymousUser()`, `execute_sync`. The module's "one declaration per process" exemption did not cover it: the throwaway passed no `permission_classes`, i.e. the `AllowAny` default fakeshop ships.
-
-After ([`test_auth_api.py`][test-auth-api]):
-
-```python
-_SESSIONLESS_PASS_THROUGH = {
-    "DEBUG": True,
-    "MIDDLEWARE": [
-        entry
-        for entry in middleware()
-        if not any(
-            dropped in entry
-            for dropped in (
-                "debug_toolbar",
-                "sessions.middleware",
-                "auth.middleware",
-                "messages.middleware",
-            )
-        )
-    ],
-}
-
-
-@pytest.mark.django_db
-def test_sessionless_login_refuses_with_the_error_naming_both_middleware_stacks():
-    """A deployment with no session stack gets the package's actionable refusal, not an ``AttributeError``."""
-    create_users(1)
-
-    with override_settings(**_SESSIONLESS_PASS_THROUGH):
-        response = _post_graphql(
-            _LOGIN, client=Client(), variables={"u": "staff_1", "p": TEST_USER_PASSWORD}
-        )
-
-    payload = response.json()
-    assert payload["data"] is None
-    message = payload["errors"][0]["message"]
-    assert "SessionMiddleware" in message
-    assert "AuthMiddlewareStack" in message
-```
-
-What moved: rung 2 via settings, real `/graphql/`. THREE middlewares dropped, not one: `AuthenticationMiddleware` and `MessageMiddleware` each `assert hasattr(request, "session")` and die inside Django before the view. Works because `require_session` runs before `authorize_or_raise`, so the missing `request.user` never matters. `Client()` constructed INSIDE the override: `ClientHandler` caches its middleware chain on first request. Pass-through needed to read the message. Logout twin identical.
-
-Same file, same sweep: `login(username: 123, ...)` validation rejection (`test_non_string_login_username_fails_validation_before_the_resolver`, plus `{ me { username } }` still null on that client); backend `PermissionDenied` envelope byte-identical to wrong-password (`test_backend_raising_permission_denied_returns_the_same_envelope`), driven by a module-level `PermissionDeniedBackend` named via `AUTHENTICATION_BACKENDS=["test_auth_api.PermissionDeniedBackend", ...]`. `test_query/` is on `pythonpath`, so a live module's class is a valid settings string. Capture the CONTROL envelope (wrong password) before entering the backend override, else the comparison is vacuous.
-
-### 6. Synthetic model buys nothing: storage degradation
-
-Before (`tests/types/test_resolvers.py::test_per_subfield_guard_isolates_storage_failure`, trimmed): `_make_asset_model()` created via `schema_editor.create_model`, throwaway `_asset_type(model, filesystem_path_fields=("attachment",))`, `transaction=True`, `delete_model` in `finally`, THREE `execute_sync` calls selecting `path` / `url` / `name` one at a time.
-
-After ([`test_uploads_api.py`][test-uploads-api]):
-
-```python
-@pytest.mark.django_db
-def test_storage_without_absolute_paths_nulls_only_the_path_subfield_over_http(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A backend that cannot produce a path nulls ``path`` alone; ``name`` / ``url`` resolve.
-
-    All three are selected in one request, so a guard that sat on the parent
-    would show up as ``attachment: null`` rather than a null ``path``.
-    """
-    with override_settings(MEDIA_ROOT=str(tmp_path)):
-        specimen = models.MediaSpecimen(label="unpathable")
-        specimen.attachment.save("doc.txt", ContentFile(b"hello bytes"), save=False)
-        specimen.save()
-
-        def _no_absolute_path(self: FileSystemStorage, name: str) -> NoReturn:
-            raise NotImplementedError("This backend doesn't support absolute paths.")
-
-        monkeypatch.setattr(FileSystemStorage, "path", _no_absolute_path)
-
-        res = TestClient().query("{ allMediaSpecimensWithPath { attachment { name path url } } }")
-        attachment = res.data["allMediaSpecimensWithPath"][0]["attachment"]
-
-    assert attachment["path"] is None
-    assert attachment["name"].endswith("doc.txt")
-    assert attachment["url"].endswith("doc.txt")
-```
-
-What moved: shipped `MediaSpecimenWithPathType` already declares the `filesystem_path_fields` opt-in a consumer would; the fixture gap the package row worked around did not exist, so the synthetic model, DDL bracket and `transaction=True` all vanish. The three-request isolation argument inverted: ONE request selecting all subfields is the stronger instrument, because a parent-level guard is then directly observable. Seed BEFORE monkeypatching storage (`_save` calls `self.path`). Siblings promoted the same way: vanished file → `size` null (`os.remove(specimen.attachment.path)`), `SuspiciousFileOperation` propagates (pass-through to see it), plus a mixed row (populated file beside empty image) added before deleting the duplicate trio.
-
-### 7. The stand-in's docstring lied: corrupt image
-
-`test_corrupt_image_degrades_width_and_height_to_null` said `_safe_file_attr` degraded the dimensions. Django's `get_image_dimensions` returns `(None, None)` for unparseable bytes w/o raising; the guard never fires. Caught by failability: the promoted row survived removal of the boundary its docstring named. Real boundary = the nullability `DjangoImageType` declares on `width` / `height`; live row now says that, plus a second row pins the whole field-type map by introspection (`test_file_output_objects_publish_nullable_subfields_over_http`). Rule: verify the stand-in's claim against the code BEFORE copying it into the live row. Read which rows did NOT fail under each mutation; the silence is the finding.
-
-### 8. The error policy masks validation errors too: `BigInt` literals
-
-Before: `tests/types/test_converters.py` rejected `bool` / float literals for `BigInt` through a throwaway schema. Shipped `ScalarSpecimen.signed_big` / `unsigned_big` are filterable.
-
-After ([`test_scalars_api.py`][test-scalars-api]):
-
-```python
-@pytest.mark.django_db
-@override_settings(**_ERROR_POLICY_PASS_THROUGH)
-@pytest.mark.parametrize("field", ["signedBig", "unsignedBig"], ids=["signed", "unsigned"])
-@pytest.mark.parametrize(
-    ("literal", "reason"),
-    [("true", "BigInt does not accept boolean values"), ("1.9", "BigInt cannot parse float")],
-    ids=["bool", "float"],
-)
-def test_filter_specimens_by_bigint_exact_rejects_non_integer_literal(
-    field: str,
-    literal: str,
-    reason: str,
-) -> None:
-    ...
-    assert body["data"] is None, body
-    assert reason in body["errors"][0]["message"], body
-```
-
-First attempt asserted `"data" not in body` and `"BigInt" in message`, got `{'data': None, 'errors': [{'message': 'An unexpected error occurred.', 'extensions': {'correlationId': ...}}]}`. Two assumptions wrong: Strawberry emits `data: null`, not absent; graphql-core's `ValuesOfCorrectTypeRule` calls `parse_value`, so the scalar's `ValueError` becomes the validation error's `original_error` and the policy masks it. Must-not row: `exact: "9007199254740993"` selects exactly the seeded row. Decorator order: `override_settings` outside `parametrize`, inside `django_db`.
-
-### 9. Wrong tree over the real schema: composition introspection
-
-`apps/products/tests/test_schema.py` ran three queries against the REAL composed schema through `execute_sync`, w/ a 26-line conftest + module-scoped fixture whose only job was rebuilding the schema w/o HTTP (rung 4 while rung 1 was one import away). `apps/library/tests/test_schema.py::test_project_schema_includes_library_types` same shape.
-
-Before:
-
-```python
-def test_project_schema_includes_products_types(project_schema):
-    """The composed project schema exposes the products app's DjangoTypes."""
-    result = project_schema.execute_sync(
-        'query { __type(name: "ItemType") { name fields { name } } }',
-    )
-    assert result.errors is None
-    assert {"name", "category", "entries"} <= {f["name"] for f in result.data["__type"]["fields"]}
-```
-
-After ([`test_schema_composition_api.py`][test-schema-composition-api]):
-
-```python
-@pytest.mark.django_db
-@pytest.mark.parametrize(
-    ("type_name", "expected_fields"),
-    [
-        ("ItemType", {"name", "category", "entries"}),
-        ("CategoryType", {"name", "description", "items"}),
-        ("BookType", {"title", "shelf", "genres"}),
-    ],
-    ids=["products-item", "products-category", "library-book"],
-)
-def test_the_composed_schema_publishes_each_apps_types(
-    type_name: str,
-    expected_fields: set[str],
-) -> None:
-    """One type per contributing app is on the shipped endpoint, with its relation fields.
-
-    A type that never registered introspects as ``null`` here rather than failing
-    the request, which is exactly why the absence has to be asserted rather than
-    inferred from a green suite.
-    """
-    data = assert_graphql_success(_TYPE_FIELDS_QUERY, variables={"name": type_name})
-
-    published = data["__type"]
-    assert published is not None, type_name
-    assert published["name"] == type_name
-    assert expected_fields <= {field["name"] for field in published["fields"]}
-```
-
-What moved: the schema is the one `config.urls` serves; the bespoke conftest and fixture were deleted outright. `assert published is not None` is the clause the in-process row could not teach: `__type` on a missing name returns `null`, so an unregistered app reads as a passing row unless absence is asserted. Deleting both files changed the tracked set → kanban constants regenerate at commit; three archived specs name the deleted rows (docs prose is outside the citation gate).
-
-### 10. Exception as the observable: misconfigured cap on GET
-
-Before (`tests/test_views.py`): `view._enforce_request_body_limit(RequestFactory().get("/graphql/"))` on a hand-built instance, `pytest.raises(ConfigurationError)`. The docstring claim ("a bad value cannot hide behind a bodyless request") is deployment-observable; only the harness wasn't.
-
-After ([`test_transport_api.py`][test-transport-api], new `cap-misconfigured/` mount w/ `max_request_body_bytes=0` on the file's holder):
-
-```python
-    with override_settings(ROOT_URLCONF=__name__):
-        client = Client()
-        with pytest.raises(ConfigurationError, match="positive int"):
-            client.get("/cap-misconfigured/")
-        with pytest.raises(ConfigurationError, match="positive int"):
-            _post_bytes(client, json.dumps({"query": _TYPENAME}), path="/cap-misconfigured/")
-```
-
-What moved: `ConfigurationError` is not an `HTTPException`, upstream `dispatch` does not translate it, `django.test.Client` re-raises it → the live observable is a raised exception, not a status. Works identically on `AsyncClient`. This is RESOLUTION-time validation (per request), so the "construction-time stays package-side" exemption did not apply. Hand-spelled async mounts must carry `@_carrying_the_packages_csrf_mark(AsyncDjangoGraphQLView)` themselves or the CSRF exemption silently drops.
-
-### 11. The manual's own before/after, finished: `totalCount` opt-in
-
-`tests/test_connection.py::test_total_count_present_only_when_opted_in` asserted `"totalCount" in str(schema)` / `not in` on two throwaway types, plus `"A connection to a list of items." in str(bare_schema)`. [Before / after](#before--after-promoting-a-shortcut-test) above covers selection gating on an opted-in type; the ABSENT half on a bare type had no live row.
-
-After ([`test_connection_pagination_api.py`][test-connection-pagination-api]):
-
-```python
-    not_opted = graphql_payload("{ allItems(first: 1) { totalCount } }")
-    assert any("Cannot query field 'totalCount'" in e["message"] for e in not_opted["errors"])
-    assert not_opted.get("data") is None
-
-    opted = assert_graphql_success(
-        "{ allLibraryGenresConnection(first: 1) { edges { node { name } } totalCount } }",
-    )
-    assert len(opted["allLibraryGenresConnection"]["edges"]) == 1
-    assert opted["allLibraryGenresConnection"]["totalCount"] == 2
-```
-
-`totalCount == 2` beside a one-edge page proves the count is of the whole set, not the window; stronger than `== 0`. The SDL-description clause became its own live row via `__type(name: "ItemTypeConnection") { description }`: generated connection names come from `graphql_type_name`, and only the NON-opted shape keeps the inherited description. `graphql_payload` for the error half, `assert_graphql_success` for the other; one row, because the claim is the contrast.
-
-### 12. The name said two, the body had one: two to-many `orderBy` terms
-
-`tests/orders/test_sets.py::test_orderset_apply_sync_annotates_multiple_to_many_orders` declared throwaway `OrderSet`s, called `apply_sync` directly w/ a fabricated `_make_info()`, and asserted `any(isinstance(agg, Min) for agg in qs.query.annotations.values())`. Its body had ONE to-many term plus a scalar. Shipped `BookOrder` declares `genres` and `loans`, so the live row ([`test_library_api.py`][test-library-api]`::test_library_books_order_by_two_to_many_terms_each_get_their_own_aggregate`) is the first place two to-many terms are exercised:
-
-```python
-    titles = [row["title"] for row in data["data"]["allLibraryBooks"]]
-    # genre-min ASC primary (Alpha, Alpha, Beta), loan-min ASC tiebreaker inside the Alpha group.
-    assert titles == ["Second", "First", "Third"]
-    assert len(titles) == len(set(titles))
-    book_queries = [e["sql"] for e in captured.captured_queries if "library_book" in e["sql"]]
-    assert len(book_queries) == 1, book_queries
-    assert book_queries[0].count("MIN(") == 2, book_queries[0]
-    assert "DISTINCT" not in book_queries[0].upper(), book_queries[0]
-```
-
-Seed makes both terms load-bearing (genre alone can't separate two titles; loan alone gives a different order). `"library_book" in sql` also matches the through-table `library_book_genres`; only safe here because the selection touches no relation. Selecting `genres` → filter on `FROM "library_book"`.
-
-### 13. Direct call to a patch vs a real GET
-
-`tests/test_strawberry_patches.py::test_patched_parse_query_params_parses_object_params` called `patches._patched_parse_query_params(BaseView(), {...})`. Fakeshop's `/graphql/` accepts GET, so ([`test_products_api.py`][test-products-api]):
-
-```python
-    response = Client().get("/graphql/", {"query": "{ __typename }", "variables": '{"n": 1}'})
-    assert response.status_code == 200
-    assert response.json()["data"] == {"__typename": "Query"}
-```
-
-Malformed twin: `variables='{not json'` → 400 w/ upstream's parse message. Patch-lifecycle rows (apply idempotence, signature drift) stay package-side; they have no wire shape.
-
-### 14. Shorter promotions, one line each
-
-Same procedure; listed so the shapes are known:
-
-- **Form stale-field revalidation** → `updateItemViaForm` on a row named `REJECTED_ITEM_NAME`, partial update omitting `name`. Field key alone (`["name"]`) can't distinguish "reconstructed then revalidated" from "never bound"; assert the message `["This name is not allowed."]` too, else the boundary mutation leaves the row green.
-- **Not-found before any auth signal** → anonymous `updateItem` on a private Item: no top-level error, one `FieldError` on `id`. The permitted-caller arm already existed; this is the anonymous arm, and the ordering claim.
-- **Auth before relation decode** → anonymous `createItemViaForm` w/ a private Category's GlobalID: top-level "Not authorized", `data is None`, no in-band `categoryId` error. Mirrors the serializer twin that was already live.
-- **Explicit `null` FK on a form update** → the form's own `required` error, keyed `categoryId` (the input field the client sent, not the form field `category`); the message and the `required` code are what separate it from a decode "invalid id" on the same key. **Omitted required form field** → coercion error, `data is None`, no row.
-- **Dangling non-null FK** → `allItems` as staff after a raw-cursor delete under `connection.constraint_checks_disabled()`; message is graphql-core's `Cannot return null for non-nullable field ItemType.category.`, never a descriptor `AttributeError`. Pass-through required: completion errors are masked too. Keep children-before-parents cleanup in `finally`; teardown's `PRAGMA foreign_key_check` runs before rollback. `override_settings` INSIDE the constraint bracket so the PRAGMA is restored last.
-- **Relation-seeded `pageInfo` / `last`+`before`** → `allLibraryGenres { booksConnection(...) }`. Root-pipeline twins existed; the per-parent relation-manager pipeline is a different code path, so not redundant. `first: 0` sibling WAS redundant once the live pin gained the missing `endCursor is None` clause.
-- **`nodes(ids:)` hidden arm** → fold a `repair` Book into the existing mixed-batch row: same document anonymous → positional `null`; via `_post_graphql_as_staff` → resolves. Proves the null is visibility, not absence, in two lines.
-- **Relay id-only projection** → staff `allCategories(first: 5) { edges { node { id } } }`: one `products_category` query, each id equals `global_id_for(CategoryType, pk)`.
-- **Cascading-hook target blocks elision** → anonymous `allItems { ... category { id } }`: one `products_item` query, no `JOIN`, two total. Failability boundary = `walker.py::plan_relation`'s downgrade, not the elision guard (see 2).
-- **Async multibyte body** → new `AsyncClient` row on `/async-graphql/`; the variable must be USED (`allItems(first: $value)`) or validation reports "never used" before coercion echoes the value. Spell the literal `"café_über"`: ASCII-only `.py` is enforced by the `source-layout` hook, not ruff.
-- **List-field introspection** → two more `ofType` levels asserted on the shipped `allLibraryBranchesViaListField` row; needs one more nesting level IN THE DOCUMENT or the new asserts read `None`.
-
-### 15. Deleting duplicates
-
-Read the named live sibling, not its name. Every verdict the package row asserts must be there; missing clause → add it to the live row first (two-assert extension), then delete. Grep the asserted VALUE, not just the row name: a shared leaf (`FieldError` envelope, a codec) is usually re-asserted once per consuming flavour's package file (`tests/utils/test_errors.py` + `tests/mutations/test_resolvers.py` carried the same constraint-envelope claim). Sweep orphans the deletion strands: helpers, module constants, builder kwargs whose only caller was the deleted row (`_build_item_schema(with_entries_connection=...)`, `_DELETE_WITH_CONNECTION`, `_make_asset_model` + four friends). Ruff sees unused imports, not an orphaned `def`; grep each name, count `1` = definition-only. Make the module docstring truthful (drop bullets that named deleted rows; "X is pinned live" + a kept duplicate of X is a contradiction). Grep `docs/` for `::name`; the citation gate reads `.py` + `KANBAN.md` only.
-
-Deleted this sweep, w/ the sibling that covered them: `tests/test_error_policy.py` opt-out + value-completion rows (→ `/ep-off/`, `/ep/` mounts in [`test_error_policy_api.py`][test-error-policy-api]); `tests/extensions/test_debug.py` empty-lists + fresh-per-operation rows; `tests/test_schema.py` four `execute_*` rows (success half everywhere; error half pinned exactly by the policy rows); `tests/test_schema.py::test_get_extensions_sync_and_async` (cardinality anti-pattern; install-position row pins both policies by name); `::test_get_extensions_with_custom_factory_dedup` (→ `/ep-factory/` row in [`test_error_policy_api.py`][test-error-policy-api]; package identity stays in `test_a_callable_policy_entry_cannot_become_the_masking_authority`); `::test_a_factory_configured_bound_is_the_one_a_request_is_held_to` (→ `/rp-entry-rows/` in [`test_resource_policy_api.py`][test-resource-policy-api]); `::test_a_resolver_cannot_disarm_enforcement_by_emptying_the_extension_list` and `::test_a_resolver_cannot_nominate_a_wider_policy_by_replacing_the_extension_list` (→ `/rp-authority/` widen / nominate); `::test_a_retained_policy_argument_cannot_widen_a_later_request` (→ `/rp-retained/`); `tests/test_relay_node_field.py` typed node / mismatch / duplicates / empty (zero-query clause folded into `test_nodes_duplicates_and_empty_live`); `tests/test_relay_node_field.py` model-label / hidden / missing / malformed (3 ids) / uncoercible single+hole / typed `DjangoNodesField` resolve+mismatch / per-table query-count pair / malformed mid-batch / async `node`+`nodes` / hostile-seal trio / cascade node+batch (→ [`test_library_api.py`][test-library-api]); `tests/test_connection.py` negative / over-cap / malformed-cursor / first+last-through-schema (keep the classmethod-direct `test_first_and_last_raises_graphql_error`); `tests/test_strawberry_patches.py` two `parse_json` rows after folding `b"3.14"`, `b"false"`, `b'["not", "objects"]'` into the live parametrize lists, then the null-param / scalar-param / deep-body / deep-param rows (live twins in [`test_products_api.py`][test-products-api]); eight `tests/mutations/test_resolvers.py` rows, two `tests/mutations/test_permissions.py` rows, nine `tests/forms/test_resolvers.py` rows, one `tests/auth/test_queries.py` row, one `tests/auth/test_mutations.py` row (its non-redundant `PermissionDenied` arm went live, see 5); `tests/types/test_resolvers.py` file/image trio + many-side visibility row; `tests/test_scalars.py` two `strawberry_config` round-trips, serializer/parser happy-path stand-ins, the GraphQL-expressible string-rejection family, and `test_upload_field_resolves_under_strawberry_config_schema` (→ [`test_scalars_api.py`][test-scalars-api] / [`test_uploads_api.py`][test-uploads-api]); `tests/test_list_field.py` non-nullable-outer row; `tests/test_permissions.py` nested-cascade row; `tests/test_relay_connection.py` `first_zero`; `examples/fakeshop/apps/kanban/tests/test_mutations.py` whole module, 11 rows (→ [`test_kanban_mutations_api.py`][test-kanban-mutations-api], which folds every clause the in-process rows owned: `card.transitions…exists()`, `item.is_complete`, `attempt.outcome_id is None`, `attempt.ended_at`, `Decision(card__isnull=True)`, and `__all__` on an unknown lookup).
-
-Kept, on purpose: `tests/types/test_resolvers.py::test_runtime_path_from_info_strips_list_indexes_and_keeps_aliases` has no wire shape (optimizer path tuple). Reverse-O2O custom visibility is live in [`test_products_visibility_api.py`][test-products-visibility-api], both the planned path (a `QuerySet` root under the optimizer, one hook-scoped `Prefetch`) and the unplanned one (per-patron re-check).
-
-### 16. Trim, don't delete, when one clause survives
-
-`tests/extensions/test_debug.py::test_acknowledged_factory_publishes_the_payload_and_logs_no_warning` → payload half live; kept ONLY no-warning + coordinator-restore, renamed to what it now asserts (`..._restores_the_cursor_bracket_and_logs_no_warning`). `tests/test_relay_node_field.py::test_o1_make_relation_resolver_*` (next sweep): keep the `resolver.__name__` clause, drop the rest. Renaming a trimmed row is mandatory: a name asserting a payload the row no longer reads is a lie on the failure line.
-
-### Gotchas the sweep surfaced
-
-Grouped by where they bite. Each one cost an agent a round trip.
-
-**Error policy**
-
-- Masks exactly the errors whose `original_error` is a real exception: resolver exceptions, custom-scalar VALIDATION errors (`parse_value` runs inside `ValuesOfCorrectTypeRule`), graphql-core's own non-null COMPLETION messages. NOT masked (`original_error is None`): parse / syntax errors, structural validation (`Cannot query field 'totalCount'`, "never used"); those reach the wire verbatim w/o any override. Rule: asserting WHICH message → pass-through only when the error carries an exception; asserting THAT an error happened → never.
-- Validation failure → `{"data": null, "errors": [...]}`; `data` is `None`, never absent.
+Failability: delete the `optimizer_hints` line on `LoanType` → row fails. Deleting the walker's elision guard for a hooked target changes NOTHING: `django_strawberry_framework/optimizer/walker.py::plan_relation` downgrades to `Prefetch` first, so that guard is unreachable on this path. A row whose only failing mutation is that guard pins a dead guard.
+
+### Optimizer-less is a configuration: one query per parent
+
+Under the shipped optimizer a nested connection's query count is independent of N ([`test_library_api.py`][test-library-api]`::test_nested_books_connection_fixed_query_count`). An optimizer-less consumer is a real configuration in which the same nested connection costs one window query per parent. Both claims hold, each of its own configuration; a `1 + N` row on a bare `strawberry.Schema` that never names the missing extension reads as contradicting the fixed-count row. The optimizer-less claim lives on a holder mount WITHOUT the extension: [`test_products_visibility_api.py`][test-products-visibility-api]`::test_nested_connection_costs_one_query_per_parent_without_the_optimizer`.
+
+- Shipped `CategoryType`, imported inside the helper (after the reload), real HTTP through the file's holder mount.
+- Two cardinalities, so `N` is load-bearing: a fixed count can't satisfy both, and per-EDGE loading would overshoot N.
+- SQL filtered to `products_item`, so session reads don't count.
+- `seed_data(1)` seeds more categories than either cardinality; the helper slices exactly N parents by pk.
+
+Failability: installing the optimizer on the holder changes nothing while the root returns a `list`, which the optimizer cannot plan; the mutation has to return a queryset too. Read a green run as "mutation absorbed" before "row weak".
+
+### The must-not only a real session can phrase: `isPrivate` refetch
+
+Shipped `ItemType.get_queryset` hides `is_private` rows from a non-staff viewer. A throwaway schema w/ a fabricated hook and an allow-all permission has no caller who can then read, so the must-not cannot be phrased. [`test_products_api.py`][test-products-api]`::test_create_item_private_row_is_refetched_for_its_author_but_stays_hidden_from_reads`: a non-staff caller granted `add_item` writes `isPrivate: true` and gets the row back in the payload `node` (the post-write re-fetch is by pk WITHOUT the visibility filter); the same caller's `allItems` read in the same session does NOT list it. The second half turns "re-fetch skips the filter" from a mechanism note into a security claim: the exemption is scoped to the actor's own write, never a hole in the read-side rule. `allItems` is a connection (`edges { node }`); `{ allItems { name } }` does not parse.
+
+### Settings override reaches a misconfigured deployment: sessionless `login`
+
+A sessionless refusal on fakeshop's `AllowAny` `login` is consumer-reachable, so the "one declaration per process" exemption (which covers only permission-gated variants) does not apply. Rung 2 via settings, real `/graphql/`: [`test_auth_api.py`][test-auth-api]`::test_sessionless_login_refuses_with_the_error_naming_both_middleware_stacks` and its logout twin `test_sessionless_logout_refuses_with_the_error_naming_both_middleware_stacks`.
+
+- THREE middlewares dropped, not one: `AuthenticationMiddleware` and `MessageMiddleware` each `assert hasattr(request, "session")` and die inside Django before the view. Works because `require_session` runs before `authorize_or_raise`, so the missing `request.user` never matters.
+- `Client()` constructed INSIDE the override: `ClientHandler` caches its middleware chain on first request.
+- Pass-through needed to read the message.
+
+Same file: `test_non_string_login_username_fails_validation_before_the_resolver` (`login(username: 123, ...)` rejected at validation, `{ me { username } }` still null on that client); `test_backend_raising_permission_denied_returns_the_same_envelope` (backend `PermissionDenied` envelope byte-identical to wrong-password), driven by the module-level `PermissionDeniedBackend` named via `AUTHENTICATION_BACKENDS=["test_auth_api.PermissionDeniedBackend", ...]`. `test_query/` is on `pythonpath`, so a live module's class is a valid settings string. Capture the CONTROL envelope (wrong password) before entering the backend override, else the comparison is vacuous.
+
+### A synthetic model buys nothing: storage degradation
+
+Shipped `MediaSpecimenWithPathType` declares the `filesystem_path_fields` opt-in a consumer would, so storage-degradation rows need no synthetic model, DDL bracket or `transaction=True`: [`test_uploads_api.py`][test-uploads-api]`::test_storage_without_absolute_paths_nulls_only_the_path_subfield_over_http`.
+
+- ONE request selecting `name` / `path` / `url` together is stronger than one request per subfield: a guard sitting on the parent is then directly observable (`attachment: null` instead of a null `path`).
+- Seed BEFORE monkeypatching storage (`_save` calls `self.path`).
+
+Same shape: `test_vanished_file_resolves_size_to_null_over_http` (`Path(specimen.attachment.path).unlink()` → `size` null), `test_suspicious_file_operation_is_reported_not_nulled_over_http` (pass-through to see it), `test_empty_image_beside_populated_file_resolves_only_the_image_to_null_over_http` (the mixed row).
+
+### A stand-in's docstring can name the wrong boundary: corrupt image
+
+Django's `get_image_dimensions` returns `(None, None)` for unparseable bytes w/o raising, so `django_strawberry_framework/types/converters.py::_safe_file_attr` never fires for a corrupt image. The real boundary = the nullability `DjangoImageType` declares on `width` / `height`. A row whose docstring names `_safe_file_attr` survives removal of that guard; failability is what exposes it. Live rows: [`test_uploads_api.py`][test-uploads-api]`::test_corrupt_image_resolves_width_and_height_to_null_over_http`, plus `test_file_output_objects_publish_nullable_subfields_over_http` pinning the whole field-type map by introspection. Rule: verify a stand-in's claim against the code BEFORE copying it into the live row. Read which rows did NOT fail under each mutation; the silence is the finding.
+
+### The error policy masks validation errors too: `BigInt` literals
+
+Shipped `ScalarSpecimen.signed_big` / `unsigned_big` are filterable, so `BigInt` literal rejection is live: [`test_scalars_api.py`][test-scalars-api]`::test_filter_specimens_by_bigint_exact_rejects_non_integer_literal` (bool / float literals, both fields).
+
+- Strawberry emits `data: null`, not absent.
+- graphql-core's `ValuesOfCorrectTypeRule` calls `parse_value`, so the scalar's `ValueError` becomes the validation error's `original_error`, and the production policy masks it to `An unexpected error occurred.` w/ a `correlationId`. Asserting the reason needs the pass-through override.
+- Must-not row: `test_filter_specimens_by_bigint_exact_accepts_decimal_string_literal` (`exact: "9007199254740993"` selects exactly the seeded row).
+- Decorator order: `override_settings` outside `parametrize`, inside `django_db`.
+
+### Wrong tree over the real schema: composition introspection
+
+An `apps/<app>/tests/` module running queries against the REAL composed schema through `execute_sync`, w/ a conftest whose only job is rebuilding the schema w/o HTTP, is rung 4 while rung 1 is one import away. [`test_schema_composition_api.py`][test-schema-composition-api]`::test_the_composed_schema_publishes_each_apps_types` asks the schema `config.urls` serves, one type per contributing app. `assert published is not None` is the clause an in-process row never teaches: `__type` on a missing name returns `null`, so an unregistered app reads as a passing row unless presence is asserted. Moving a test module changes the tracked set ([Test code style](#test-code-style)).
+
+### Exception as the observable: misconfigured cap on GET
+
+"A bad cap cannot hide behind a bodyless request" is deployment-observable: [`test_transport_api.py`][test-transport-api]`::test_a_misconfigured_mount_fails_loud_on_every_request_including_get`, a `cap-misconfigured/` mount w/ `max_request_body_bytes=0` on the file's holder, `pytest.raises(ConfigurationError, match="positive int")` around both a GET and a POST. `ConfigurationError` is not an `HTTPException`, upstream `dispatch` does not translate it, `django.test.Client` re-raises it → the live observable is a raised exception, not a status. Works identically on `AsyncClient`. This is RESOLUTION-time validation (per request), so the "construction-time stays package-side" exemption does not apply.
+
+### The claim is the contrast: `totalCount` opt-in
+
+[Promoting a shortcut test](#promoting-a-shortcut-test) covers selection gating on an opted-in type. The ABSENT half on a bare type is [`test_connection_pagination_api.py`][test-connection-pagination-api]`::test_total_count_is_a_field_only_on_the_connection_that_opted_in`: `allItems(first: 1) { totalCount }` fails validation w/ `Cannot query field 'totalCount'` and `data is None`; `allLibraryGenresConnection(first: 1)` returns one edge and `totalCount == 2`, which proves the count is of the whole set, not the window (stronger than `== 0`). `graphql_payload` for the error half, `assert_graphql_success` for the other; one row, because the claim is the contrast. The SDL-description clause is its own row (`test_the_non_opted_connection_type_keeps_the_inherited_sdl_description`, `__type(name: "ItemTypeConnection") { description }`): generated connection names come from `graphql_type_name`, and only the NON-opted shape keeps the inherited description.
+
+### Every term the name claims: two to-many `orderBy` terms
+
+A row named for two to-many terms must exercise two; read the body against the name before promoting it. Shipped `BookOrder` declares `genres` and `loans`, so [`test_library_api.py`][test-library-api]`::test_library_books_order_by_two_to_many_terms_each_get_their_own_aggregate` drives both over the wire: exact title order, ONE `library_book` query, two `MIN(`, no `DISTINCT`. Seed makes both terms load-bearing (genre alone can't separate two titles; loan alone gives a different order). `"library_book" in sql` also matches the through-table `library_book_genres`; only safe here because the selection touches no relation. Selecting `genres` → filter on `FROM "library_book"`.
+
+### Direct call to a patch vs a real GET
+
+Fakeshop's `/graphql/` accepts GET, so the package's query-param parsing patch (`django_strawberry_framework/_strawberry_patches.py::_patched_parse_query_params`) is observable through a real GET, not a direct call on a bare `BaseView()`: [`test_products_api.py`][test-products-api]`::test_get_query_with_object_variables_executes_like_upstream`. Malformed twin: `test_get_query_with_malformed_variables_param_is_the_upstream_parse_400` (`variables='{not json'` → 400 w/ upstream's parse message). Patch-lifecycle rows (apply idempotence, signature drift) stay package-side; they have no wire shape.
+
+### Shorter lessons, one line each
+
+Same procedure; listed so the shapes are known. Rows in [`test_products_api.py`][test-products-api] unless named otherwise:
+
+- **Form stale-field revalidation** → `test_update_item_via_form_revalidates_an_untouched_stale_name`: `updateItemViaForm` on a row named `REJECTED_ITEM_NAME`, partial update omitting `name`. Field key alone (`["name"]`) can't distinguish "reconstructed then revalidated" from "never bound"; assert the message `["This name is not allowed."]` too, else the boundary mutation leaves the row green.
+- **Not-found before any auth signal** → `test_update_item_anonymous_on_hidden_private_row_is_not_found_before_any_auth_signal`: anonymous `updateItem` on a private Item: no top-level error, one `FieldError` on `id`. The anonymous arm beside the permitted-caller one; the claim is the ordering.
+- **Auth before relation decode** → `test_create_item_via_form_authorize_before_decode_anonymous_gets_auth_denial`: anonymous `createItemViaForm` w/ a private Category's GlobalID: top-level "Not authorized", `data is None`, no in-band `categoryId` error. Serializer twin: `test_create_item_via_serializer_authorize_before_decode_unpermitted_gets_auth_denial`.
+- **Explicit `null` FK on a form update** → `test_update_item_via_form_explicit_null_category_id_is_the_form_required_error`: the form's own `required` error, keyed `categoryId` (the input field the client sent, not the form field `category`); the message and the `required` code are what separate it from a decode "invalid id" on the same key. **Omitted required form field** → `test_create_item_via_form_omitted_required_name_is_a_coercion_error_no_write`: coercion error, `data is None`, no row.
+- **Dangling non-null FK** → `test_all_items_dangling_forward_fk_is_the_non_null_completion_error_only`: `allItems` as staff after a raw-cursor delete under `connection.constraint_checks_disabled()`; message is graphql-core's `Cannot return null for non-nullable field ItemType.category.`, never a descriptor `AttributeError`. Pass-through required: completion errors are masked too. Keep children-before-parents cleanup in `finally`; teardown's `PRAGMA foreign_key_check` runs before rollback. `override_settings` INSIDE the constraint bracket so the PRAGMA is restored last.
+- **Relation-seeded `pageInfo` / `last`+`before`** → [`test_library_api.py`][test-library-api]`::test_genre_books_connection_page_info_four_fields` and `::test_genre_books_connection_backward_pagination_last_before` on `allLibraryGenres { booksConnection(...) }`. The root-pipeline twins (`test_page_info_four_fields`, `test_backward_pagination_last_before`) don't make them redundant: the per-parent relation-manager pipeline is a different code path.
+- **`nodes(ids:)` hidden arm** → [`test_library_api.py`][test-library-api]`::test_nodes_batch_mixed_types_order_and_null`: a `repair` Book in the mixed batch; same document anonymous → positional `null`, via `_post_graphql_as_staff` → resolves. Proves the null is visibility, not absence, in two lines.
+- **Relay id-only projection** → [`test_products_visibility_api.py`][test-products-visibility-api]`::test_relay_id_only_connection_page_costs_one_query_and_emits_decodable_ids`: staff `allCategories(first: 5) { edges { node { id } } }`: one `products_category` query, each id equals `global_id_for(CategoryType, pk)`.
+- **Cascading-hook target blocks elision** → [`test_products_visibility_api.py`][test-products-visibility-api]`::test_cascading_target_hook_blocks_fk_id_elision_over_http`. Failability boundary = `django_strawberry_framework/optimizer/walker.py::plan_relation`'s downgrade, not the elision guard ([the hint pair](#sql-beats-the-plan-object-the-hint-pair)).
+- **Async multibyte body** → [`test_transport_api.py`][test-transport-api]`::test_the_async_package_view_parses_a_multibyte_utf8_body_unchanged` on `/async-graphql/`; the variable must be USED (`allItems(first: $value)`) or validation reports "never used" before coercion echoes the value. Spell the multibyte literal w/ `\u` escapes: ASCII-only `.py` is enforced by the `source-layout` hook, not ruff.
+- **List-field introspection** → [`test_list_field_api.py`][test-list-field-api]`::test_shipped_branches_introspection_return_types` on the shipped `allLibraryBranchesViaListField`: every `ofType` level asserted needs its nesting level IN THE DOCUMENT, or the assert reads `None`.
+
+### Deleting duplicates
+
+Read the named live sibling, not its name. Every verdict the package row asserts must be there; missing clause → add it to the live row first (two-assert extension), then delete. Grep the asserted VALUE, not just the row name: a shared leaf (`FieldError` envelope, a codec) is usually re-asserted once per consuming flavour's package file. Sweep orphans the deletion strands: helpers, module constants, builder kwargs whose only caller was the deleted row. Ruff sees unused imports, not an orphaned `def`; grep each name, count `1` = definition-only. Make the module docstring truthful (drop bullets that named deleted rows; "X is pinned live" + a kept duplicate of X is a contradiction). Grep `docs/` for `::name`; the citation gate reads `.py`, `KANBAN.md` and the specs; other `docs/` prose is ungated.
+
+### Trim, don't delete, when one clause survives
+
+A multi-claim package row whose other clauses are live keeps only the surviving clause and is renamed to what it now asserts: `tests/extensions/test_debug.py::test_acknowledged_factory_restores_the_cursor_bracket_and_logs_no_warning` keeps no-warning + coordinator-restore; the payload half is live. Renaming a trimmed row is mandatory: a name asserting a payload the row no longer reads is a lie on the failure line.
+
+### Gotchas
+
+Grouped by where they bite.
 
 **Optimizer / SQL**
 
-- A plan w/ any `get_queryset` hook in the selection is `cacheable=False`; live cache rows need hook-free types (`allLibraryMembershipCards`), and the shipped instance via `sys.modules["config.schema"]._optimizer` at call time. Absolute `misses == 1` works only because the acceptance conftest rebuilds per test; say so in the docstring.
+- A plan w/ any `get_queryset` hook in the selection is `cacheable=False`; live cache rows need hook-free types (`allLibraryMembershipCards`), and the shipped instance via `sys.modules["config.schema"]._optimizer` at call time. Absolute `misses == 1` works only because the acceptance conftest empties the plan cache per test; say so in the docstring.
 - Filter captured SQL on `FROM "<table>"` when the selection touches a relation; M2M through-tables share the parent's prefix. Never assert a bare total once a viewer is logged in; session + auth reads ride along.
 - Failability mutations get absorbed: a `list`-returning root the optimizer can't plan either way; a guard unreachable behind an earlier downgrade; `model_to_dict(fields=[])` (empty = no filter, fail-open). Mutate at the level you mean to pin: deleting a `Meta` line proves the hint is load-bearing, not that the walker's dispatch is.
 
-**Holder mounts / URLconf**
+**Registry**
 
-- Import `config.schema` INSIDE the view function. A schema captured at import is the pre-reload one; it fails in a LATER module on the same worker (`LazyType KeyError` / `DuplicatedTypeName`), not in yours.
-- `override_settings(ROOT_URLCONF=...)` and `pytest.mark.urls` already clear resolver caches via `setting_changed`. `clear_url_caches()` only when swapping the held schema w/o changing `ROOT_URLCONF`.
-- Function-level `@pytest.mark.urls("config.urls")` reaches the shipped endpoint from inside a holder module.
-- `ConfigurationError` at resolution time → `pytest.raises` around `Client().get`; no status code exists for it.
 - A test that clears the registry and builds only its own types requests `private_registry` (`@pytest.mark.usefixtures("private_registry")`): it starts on an empty registry, and a registry an earlier test left stale is cleared for it instead of rebuilt. Such a test must not read the project schema.
-- `project_schema_override` is for settings read at schema CONSTRUCTION (`Meta` body); `MEDIA_ROOT` / `DEBUG` / `MIDDLEWARE` are read per request and need only `override_settings`.
 
-**Credentials / settings**
+**Settings**
 
-- `_login_with_perm(...)` does NOT seed (`User.objects.get` raises w/o a prior `create_users(N)`); `_staff_client()` seeds itself. Read the helper before assuming.
-- `Client()` inside the `MIDDLEWARE` override; capture control envelopes BEFORE an `AUTHENTICATION_BACKENDS` override; sessionless = drop sessions + auth + messages middleware.
 - `monkeypatch.setattr` unwinds at teardown, `override_settings` at block exit; put every assertion depending on both inside the `with`.
 
 **Shapes**
@@ -874,20 +465,13 @@ Grouped by where they bite. Each one cost an agent a round trip.
 - Prove restore by hash (sha256 / `filecmp`), not by "tests pass again".
 - Each entry runs the scope twice (baseline + mutated); six entries over two live files ≈ 90s. Don't narrow scope to one node id to save time; the recorded row set is the artifact.
 
-### Second sweep: promotable rows spotted, not yet moved
-
-Work queue, not doctrine: delete a row here when it moves; empty list → delete the heading. Each row was verified by reading and has a live surface today. Same procedure as above.
-
-Fixture gaps: none open. The protected-delete gap is closed: `products.ItemHold` carries a `PROTECT` and a `RESTRICT` reference to `Item`, and `test_products_api.py::test_delete_item_refused_by_a_hold_returns_the_protected_envelope` is the live row. The custom-pk gap is closed: `PatronProfile` carries a relation primary key and `test_library_shapes_api.py::test_patron_profile_relay_id_is_built_from_the_relation_primary_key_column` is the live row for the shape `tests/optimizer/test_relay_id_projection.py::test_relay_id_with_custom_pk_attname_avoids_lazy_load` stands in for. The mixed-case gap is closed: `Distributor` / `Consignment` carry a mixed-case scalar (`displayName`), forward key (`distributorRef`) and reverse `related_name` (`consignmentItems`), and the `test_library_shapes_api.py` rows `test_distributor_mixed_case_scalar_projects_its_own_column`, `test_consignment_mixed_case_forward_key_joins_its_target_in_one_statement` and `test_distributor_mixed_case_reverse_relation_loads_through_one_prefetch` replaced the two unmanaged-model rows `tests/optimizer/test_extension.py` carried for the shape.
-
-
 ## What legitimately stays package-side
 
 Claims w/ no wire shape. Accepted categories + the file showing the docstring discipline:
 
 - **Absence proofs.** Package view imports w/o `channels` = claim about what isn't there; request can't make it. [`tests/test_views.py`][tests-views]; its docstring lists every request-shaped sibling living in [`test_transport_api.py`][test-transport-api].
-- **Internal state a response can't show.** Wire `413` identical whether body cap cost one `seek` or a full allocation. Bound only assertable from inside → measurement rows stay in [`tests/test_views.py`][tests-views]; every status code / reason string live.
-- **Class-creation-time validation.** `Meta` raising `ConfigurationError` at class creation never reaches a schema. Registry lifecycle, finalizer ordering, duplicate-name rejection, concrete-subclass identity in [`tests/test_connection.py`][tests-connection]. NOT resolution-time configuration: a `ConfigurationError` raised per request (`max_request_body_bytes=0`) is live, as `pytest.raises` around `Client().get` ([example 10](#10-exception-as-the-observable-misconfigured-cap-on-get)).
+- **Internal state a response can't show.** Wire `413` identical whether body cap cost one `seek` or a full allocation. Bound only assertable from inside → measurement rows stay in [`tests/test_views.py`][tests-views]; every status code / reason string live. Same for the optimizer's runtime path tuple (`tests/types/test_resolvers.py::test_runtime_path_from_info_strips_list_indexes_and_keeps_aliases`).
+- **Class-creation-time validation.** `Meta` raising `ConfigurationError` at class creation never reaches a schema. Registry lifecycle, finalizer ordering, duplicate-name rejection, concrete-subclass identity in [`tests/test_connection.py`][tests-connection]. NOT resolution-time configuration: a `ConfigurationError` raised per request (`max_request_body_bytes=0`) is live, as `pytest.raises` around `Client().get` ([misconfigured cap on GET](#exception-as-the-observable-misconfigured-cap-on-get)).
 - **One-declaration-per-process.** `login` / `logout` / `register` declared once per process → permission-gated variant can't coexist w/ fakeshop's `AllowAny` default in one composed schema. [`tests/auth/test_mutations.py`][tests-auth-mutations] pins gated denial strings on isolated throwaway schemas; [`test_auth_api.py`][test-auth-api] owns every consumer-reachable behaviour.
 - **Invisible-by-design matrices.** Nine rejected encodings share one status + message on purpose; per-encoding `__cause__` visible only package-side.
 - **Soft-dep absence.** `cryptography`, `channels`, `django-debug-toolbar`, `djangorestframework` simulated absent via [`tests/_soft_dependency.py`][tests-soft-dep] (`sys.modules[name] = None`). Never patch `builtins.__import__`; guards use `importlib.import_module`, patched import silently passes.
@@ -938,7 +522,7 @@ Passing suite = evidence only if it could have failed. Every new boundary owes o
 - **Never paper over**: no `pragma: no cover`, no test-only fix, no follow-up card. Line a real fakeshop query can't reach = smell in prod code (too-clever branch, wrong abstraction). Fix the abstraction. `pragma: no cover` only for branches the runner structurally cannot execute.
 - **Statement coverage can't see fail-open expressions.** `max(x, 0)`, `getattr(obj, name, default)`, `x or fallback`, broad `except` read covered once the happy path runs. Find by reading; BUILD.md "Fail-open shapes" lists them.
 - **Two outcomes are not verdicts.** GREEN after the mutation = the mutation did not remove the boundary (reachable through another surface, absorbed by an earlier branch, itself fail-open) → re-aim; says nothing about the row. Collection ERROR = the mutation broke the build, not the claim → invalid count. Smallest mutation that changes one published fact: `Meta.name` rename to unpublish a type; one scalar dropped from `Meta.fields` that no `FilterSet` / `OrderSet` / `relation_shapes` entry names; one operand in package source; always a different VALID statement, never nothing.
-- **Read the failing node-id list, not the count.** Diff it against the rows you expected to fail; a healthy count can hide the one row that survived. The survivor's docstring is naming a boundary it doesn't pin ([example 7](#7-the-stand-ins-docstring-lied-corrupt-image)).
+- **Read the failing node-id list, not the count.** Diff it against the rows you expected to fail; a healthy count can hide the one row that survived. The survivor's docstring is naming a boundary it doesn't pin ([corrupt image](#a-stand-ins-docstring-can-name-the-wrong-boundary-corrupt-image)).
 - **Guarded twice in series = no single-site mutation fails it.** A plan-time refusal plus a fetch-time fail-closed arm each hide the other's removal; `prove_failability.py` (one contiguous anchor per entry) can't express the conjunction. Record the pair by hand (both sites, one restore loop, hash-verified), name both sites in the live row's docstring, and KEEP the package unit row for the half w/ no independent wire shape; it is not a stand-in (`tests/optimizer/test_single_parent_fetch.py::test_spec_rejects_a_keyset_seek`).
 - **Concurrently dirty tree.** The script snapshots a file at entry start and restores it at entry end; a concurrent edit to that file inside the window is silently reverted. `git status` the files you will mutate first; loop only over files nobody else is editing, or coordinate.
 
