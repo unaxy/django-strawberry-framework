@@ -58,6 +58,7 @@ from django_filters import (
 from django_filters import RangeFilter as DjangoRangeFilter
 from django_filters.filters import BaseInFilter as DjangoBaseInFilter
 from django_filters.rest_framework import DjangoFilterBackend
+from django_filters.widgets import RangeWidget
 from rest_framework import generics
 from rest_framework.test import APIRequestFactory
 from strawberry import relay
@@ -915,6 +916,174 @@ def test_lookup_choice_filter_on_a_served_filterset_is_refused_when_the_schema_i
     assert (vars(declared), declared.extra) == (state, extra)
 
 
+# ---------------------------------------------------------------------------
+# Refused one-value filters whose widget reads other form-data keys
+# ---------------------------------------------------------------------------
+
+
+class _PairField(forms.MultiValueField):
+    """A consumer ``MultiValueField`` over two text parts, read through a two-widget ``MultiWidget``."""
+
+    widget = forms.MultiWidget(widgets=[forms.TextInput(), forms.TextInput()])
+
+    def __init__(self, *, label: str | None = None, required: bool = False) -> None:
+        super().__init__(
+            fields=[forms.CharField(), forms.CharField()],
+            label=label,
+            required=required,
+        )
+
+    @override
+    def compress(self, data_list: list[object]) -> object:
+        return data_list
+
+
+class _PairFilter(Filter):
+    """A consumer ``Filter`` whose ``field_class`` is a ``MultiValueField``."""
+
+    field_class = _PairField
+
+
+_NUMERIC_RANGE_KEYS = "<name>_min, <name>_max"
+_NUMERIC_RANGE_NOTE = (
+    " A NumericRangeFilter filters a PostgreSQL range column, which the schema does not publish."
+)
+
+_OTHER_KEY_WIDGET_DECLARATIONS = [
+    pytest.param(
+        lambda: django_filters.NumericRangeFilter(field_name="price"),
+        _NUMERIC_RANGE_KEYS,
+        _NUMERIC_RANGE_NOTE,
+        id="numeric-range",
+    ),
+    pytest.param(
+        lambda: django_filters.NumericRangeFilter(field_name="price", lookup_expr="range"),
+        _NUMERIC_RANGE_KEYS,
+        _NUMERIC_RANGE_NOTE,
+        id="numeric-range-range-lookup",
+    ),
+    pytest.param(
+        lambda: django_filters.NumericRangeFilter(field_name="price", lookup_expr="contains"),
+        _NUMERIC_RANGE_KEYS,
+        _NUMERIC_RANGE_NOTE,
+        id="numeric-range-contains-lookup",
+    ),
+    pytest.param(
+        lambda: django_filters.NumericRangeFilter(field_name="price", method="filter_value"),
+        _NUMERIC_RANGE_KEYS,
+        _NUMERIC_RANGE_NOTE,
+        id="numeric-range-method",
+    ),
+    pytest.param(
+        lambda: _PairFilter(field_name="label"),
+        "<name>_0, <name>_1",
+        "",
+        id="multi-value-field",
+    ),
+    pytest.param(
+        lambda: CharFilter(field_name="label", widget=RangeWidget()),
+        "<name>_min, <name>_max",
+        "",
+        id="char-suffixed-multi-widget",
+    ),
+    pytest.param(
+        lambda: CharFilter(
+            field_name="label",
+            widget=forms.MultiWidget(widgets=[forms.TextInput(), forms.TextInput()]),
+        ),
+        "<name>_0, <name>_1",
+        "",
+        id="char-multi-widget",
+    ),
+    pytest.param(
+        lambda: django_filters.ModelChoiceFilter(
+            field_name="label",
+            # basedpyright: types-django-filter types ``queryset`` as a ``QuerySet``;
+            # ``ModelChoiceField`` takes a ``Manager`` as one
+            queryset=scalar_models.ScalarSpecimen.objects,  # pyright: ignore[reportArgumentType]
+            widget=forms.MultiWidget(widgets=[forms.Select(), forms.Select()]),
+        ),
+        "<name>_0, <name>_1",
+        "",
+        id="model-choice-manager-multi-widget",
+    ),
+]
+
+
+def _specimen_set(declared: Filter) -> type[FilterSet]:
+    """A package ``FilterSet`` over ``ScalarSpecimen`` declaring ``declared`` as ``value``."""
+
+    class SpecimenValueSet(FilterSet):
+        value = declared
+
+        def filter_value(
+            self,
+            queryset: QuerySet[scalar_models.ScalarSpecimen],
+            _name: str,
+            _value: object,
+        ) -> QuerySet[scalar_models.ScalarSpecimen]:
+            return queryset
+
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = []
+
+    return SpecimenValueSet
+
+
+@pytest.mark.parametrize(("declare", "keys", "note"), _OTHER_KEY_WIDGET_DECLARATIONS)
+def test_a_one_value_filter_whose_widget_reads_other_keys_is_refused_when_the_schema_is_built(
+    declare: Callable[[], Filter],
+    keys: str,
+    note: str,
+) -> None:
+    """A filter published as one value whose widget never reads that value's key refuses.
+
+    The value is written under the filter's own form-data key and the widget reads only its
+    own keys, so the filter would answer every request with every row. No fakeshop FilterSet
+    can declare one: its schema would refuse to build.
+    """
+    declared = declare()
+    _serve_model(scalar_models.ScalarSpecimen, _specimen_set(declared))
+
+    assert _build_refusal() == (
+        f"SpecimenValueSet: {type(declared).__name__} on {declared.field_name!r} publishes one "
+        "value under its form-data key <name>, but its form field's widget reads "
+        f"{keys}, so the value would never be read. Declare a RangeFilter (the package's or "
+        "django-filter's) for a two-bound range, or give the filter a form field whose widget "
+        f"reads one key.{note}"
+    )
+
+
+def test_a_model_choice_filter_with_a_request_scoped_queryset_builds_without_calling_it() -> None:
+    """The widget check never builds a form field whose ``queryset`` waits for the request.
+
+    The callable raises when called, so the schema building proves nothing called it.
+    """
+
+    def _no_request_yet(_request: HttpRequest | None) -> QuerySet[library_models.Shelf]:
+        raise AssertionError
+
+    declared = django_filters.ModelChoiceFilter(
+        field_name="shelf",
+        # basedpyright: types-django-filter types ``queryset`` as a ``QuerySet``;
+        # ``QuerySetRequestMixin.get_queryset`` calls a callable one with the request
+        queryset=_no_request_yet,  # pyright: ignore[reportArgumentType]
+    )
+
+    class BookShelfChoiceSet(FilterSet):
+        shelf = declared
+
+        class Meta:
+            model = library_models.Book
+            fields = []
+
+    _serve_model(library_models.Book, BookShelfChoiceSet)
+
+    finalize_django_types()
+    assert "shelf" in filter_lookup_table(BookShelfChoiceSet).by_input_attr
+
+
 class _CustomizingFilterSet(FilterSet):
     """A filter set overriding ``__init__``, so a ``RelatedFilter`` projects each of its filters."""
 
@@ -986,6 +1155,16 @@ _LEAF_REFUSAL_CASES = {
         "RangeFilter consumes a range input for its 'tier' input",
         ", but its form field's widget does not read exactly two form-data keys (None); give "
         "it a two-widget MultiWidget.",
+    ),
+    "other-key-widget": _LeafRefusalCase(
+        lambda: django_filters.NumericRangeFilter(field_name="tier"),
+        "{child}.leaf: NumericRangeFilter on 'tier' (reached through {parent}.shelf)",
+        "{child}: NumericRangeFilter on 'tier'",
+        " publishes one value under its form-data key <name>, but its form field's widget "
+        "reads <name>_min, <name>_max, so the value would never be read. Declare a "
+        "RangeFilter (the package's or django-filter's) for a two-bound range, or give the "
+        "filter a form field whose widget reads one key. A NumericRangeFilter filters a "
+        "PostgreSQL range column, which the schema does not publish.",
     ),
     "method-without-field": _LeafRefusalCase(
         lambda: AllValuesMultipleFilter(field_name="topic", method="filter_leaf"),

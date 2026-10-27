@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 315 done, 214 to do.
+Progress: 316 done, 214 to do.
 
 ## Done
 
@@ -1716,6 +1716,13 @@ Progress: 315 done, 214 to do.
   UTF-8) into a refusal: `workspace: audit <path>: <reason>` on stderr, exit 1, no traceback; records audited before
   it keep their report lines. The `audit` manual says so. Tests: `tests/test_workspace.py` (each unreadable shape,
   the CLI refusal, a readable record before a missing one)
+- [x] 374. A one-value filter whose form field's widget reads other form-data keys (`django_filters.NumericRangeFilter`,
+  any lookup or `method=`; a consumer `Filter` over a `MultiValueField`; a `CharFilter`, `ModelChoiceFilter` or
+  `DateTimeFilter` given a `MultiWidget`) is refused when the schema is built, naming the declaration, the keys its
+  widget reads and the `RangeFilter` remedy (`filters/inputs.py::_refuse_widget_reading_other_keys`, every arm but the
+  range arm); it used to publish one scalar under `<name>`, which the widget never read, so every send answered every
+  row. Routing it as a range was not taken: upstream rewrites a lone bound to a text `startswith` / `endswith`, and
+  PostgreSQL range columns stay unsupported. spec-027 row. Tests: `tests/filters/test_inputs.py`
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1755,8 +1762,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 374. `django_filters.NumericRangeFilter` on a non-range column publishes a bare `exact` and silently ignores the
-  value (all rows answered). Robustness row: PostgreSQL range columns are unsupported
 - [ ] 377. (robustness) graphql-core 3.2 `ExecutionContext.execute_fields` leaves an already-created async sibling
   field's awaitable un-awaited when a later sync field raises on a non-null position, so Python warns "coroutine never
   awaited" (`filterwarnings = error` turns it into a session error in a failing run); upstream behaviour, but an async
@@ -2003,6 +2008,9 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 644. CHANGELOG entry for item 374: a declared `django_filters.NumericRangeFilter`, or any one-value filter whose
+  widget reads other form-data keys (a `MultiWidget` on a `CharFilter`, a consumer `Filter` over a `MultiValueField`),
+  now fails the schema build with a `ConfigurationError` instead of publishing an input whose value was ignored
 - [ ] 595. CHANGELOG entry for item 640: a flat filter field copied from a child set's declared filter through
   a `RelatedFilter` whose attribute differs from its `field_name` (`inSeriesHandle` over `in_series =
   RelatedFilter(..., field_name="series")`) now fires the branch gate and the child filter's own gate its
