@@ -613,7 +613,6 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 │   ├── test_plans.py             # OptimizationPlan tests for lifecycle, ORM reconciliation, paths, ordering, and window pagination.
 │   ├── test_predicates.py        # Executable ORM tests for the correlated-EXISTS predicate primitive.
 │   ├── test_relation_link_execution.py  # Optimizer execution over relations whose link is not a plain pk ``ForeignKey``.
-│   ├── test_relay_id_projection.py  # Optimizer tests for Relay GlobalID projection when the pk attname is not ``id``.
 │   ├── test_selections.py        # Tests for the selection-traversal substrate (``optimizer/selections.py``).
 │   ├── test_single_parent_fetch.py  # Tests for the single-parent window fast path (``optimizer/single_parent_fetch.py``).
 │   └── test_walker.py            # Selection-walker tests for GraphQL selection to ORM OptimizationPlan conversion.
@@ -917,7 +916,6 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 │   ├── test_plans.py             # OptimizationPlan tests for lifecycle, ORM reconciliation, paths, ordering, and window pagination.
 │   ├── test_predicates.py        # Executable ORM tests for the correlated-EXISTS predicate primitive.
 │   ├── test_relation_link_execution.py  # Optimizer execution over relations whose link is not a plain pk ``ForeignKey``.
-│   ├── test_relay_id_projection.py  # Optimizer tests for Relay GlobalID projection when the pk attname is not ``id``.
 │   ├── test_selections.py        # Tests for the selection-traversal substrate (``optimizer/selections.py``).
 │   ├── test_single_parent_fetch.py  # Tests for the single-parent window fast path (``optimizer/single_parent_fetch.py``).
 │   └── test_walker.py            # Selection-walker tests for GraphQL selection to ORM OptimizationPlan conversion.
