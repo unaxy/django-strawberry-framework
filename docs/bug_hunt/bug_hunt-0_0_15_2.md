@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 326 done, 217 to do.
+Progress: 327 done, 216 to do.
 
 ## Done
 
@@ -1813,6 +1813,13 @@ Progress: 326 done, 217 to do.
   positions, the Series annotation control) and `test_library_api.py` (async), package rows in
   `tests/optimizer/test_walker.py` for a NodeID column outside `Meta.fields`, a reverse-key child, a consumer
   `resolve_id` and a property NodeID
+- [x] 421. The board and the spec auto-linker share one `scripts/_markdown_lex.py` after-boundary,
+  `TERM_BOUNDARY_AFTER`: a `.`, `:`, `/` or `-` run after a term bars the link only when an identifier character
+  follows the run, so a term ending a sentence or clause is linked (`... a DjangoType.`) and one opening a path or
+  compound is not (`Meta.fields.get`, `DjangoType-style`, `Term.5`). The strict variant and the `PROSE_` name are gone.
+  `KANBAN.md` re-rendered: 182 glossary links against 175 (7 first mentions newly linked, 10 links moved to the true
+  first mention, 0 links on a non-mention); `KANBAN.html` is unchanged (it embeds stored glossary rows). Tests:
+  `tests/test_build_kanban_md.py`
 
 ## Outside review of the fixes
 
@@ -1853,11 +1860,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 421. `scripts/build_kanban_md.py::TERM_BOUNDARY_AFTER` refuses a term followed by `.`, `:`, `/` or `-` even at
-  the end of a sentence (`... a DjangoType.`), so the board leaves 7 first mentions unlinked (a
-  `PROSE_TERM_BOUNDARY_AFTER`-style after-boundary renders 182 glossary links against 175, 50 lines differ); 302 kept
-  KANBAN's constants verbatim so the board stayed byte-identical; settle whether the board takes the spec boundary;
-  found fact-finding 302
 - [ ] 422. (robustness) `_insert_glossary_ref_def` re-sorts the whole `<!-- docs/ -->` definition group with
   `sorted()` on every insert, reordering hand-written lines (the spec-034 half of this row, its stale
   `Meta.relation_shapes` row and definition, is fixed by 256); found fact-finding 302
