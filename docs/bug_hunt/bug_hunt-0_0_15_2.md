@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 322 done, 216 to do.
+Progress: 323 done, 215 to do.
 
 ## Done
 
@@ -1782,6 +1782,12 @@ Progress: 322 done, 216 to do.
   (`PatronFilter.borrowed_title`) and a mixed head (`PrintingFilter` `edition__imprint` istartswith); live
   rows in `examples/fakeshop/test_query/test_library_api.py` replace the pin that hid `bookLoansPatronEmail`;
   a package row in `tests/filters/test_inputs.py` pins a borrowed copy
+- [x] 646. Not a defect under the AGENTS defect rule: `scripts/_markdown_lex.py` states its contract as
+  CommonMark (its module docstring cites CommonMark 4.1-4.7 for `block_regions`), and on a type-7 HTML tag
+  line in a lazy continuation position it does what the CommonMark spec, commonmark.js and markdown-it do
+  (lazy paragraph text); only cmark-gfm opens an HTML block there. No repo markdown file has the shape
+  (measured verifying 420), so no feasible project input reaches the difference. Lexing to cmark-gfm's reading
+  instead would be a new card
 
 ## Outside review of the fixes
 
@@ -2052,10 +2058,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   "Before:", "Deleted this sweep"), "Gotchas the sweep surfaced" and "Second sweep: promotable rows spotted, not yet
   moved", the last an unhomed work queue; restate the teaching as present practice and home each queued row on a card.
   Found fixing 566
-- [ ] 646. (robustness) `scripts/_markdown_lex.py::block_regions` follows the CommonMark spec (and commonmark.js /
-  markdown-it) on a type-7 HTML tag line in a lazy position (`> x` / `</pre>` / `TERM here`: lazy paragraph text),
-  while cmark-gfm, which renders these docs on GitHub, opens an HTML block there, so a link written after it shows as
-  raw text; no repo doc has the shape; found verifying 420
 
 ## To do: holes found re-checking the fixes
 
