@@ -17,6 +17,7 @@ filter graph.
 
 from __future__ import annotations
 
+import copy
 from collections import OrderedDict
 
 from django import forms
@@ -285,7 +286,11 @@ class PatronFilter(FilterSet):
     one of the set's filters everywhere, on its own input (``emailContains``),
     nested under ``LoanFilter.patron`` and flat as ``patronEmailContains``, though
     the set sits in the ``LoanFilter`` <-> ``PatronFilter`` cycle and overrides
-    ``__init__``.
+    ``__init__``. The same override also publishes the flat copy of
+    ``BookFilter.title``'s ``icontains`` reached through ``loans`` then ``book``
+    under a second key, ``borrowed_title``: still a copy of that child filter, so
+    ``HIDE_FLAT_FILTERS`` hides it with ``loansBookTitle``, leaving
+    ``loans: { book: { title: { iContains } } }``.
     """
 
     loans = RelatedFilter("LoanFilter", field_name="loans")
@@ -301,9 +306,13 @@ class PatronFilter(FilterSet):
     @classmethod
     @override
     def get_filters(cls) -> OrderedDict[str, Filter]:
-        """Add ``email_contains``, a case-insensitive match on any part of the email."""
+        """Add ``email_contains`` and ``borrowed_title``, a second key for a borrowed-title copy."""
         filters = OrderedDict(super().get_filters())
         filters["email_contains"] = CharFilter(field_name="email", lookup_expr="icontains")
+        # Absent where the set contributes unexpanded inside its ``LoanFilter`` cycle.
+        borrowed_title = filters.get("loans__book__title__icontains")
+        if borrowed_title is not None:
+            filters["borrowed_title"] = copy.deepcopy(borrowed_title)
         return filters
 
     def __init__(
@@ -381,7 +390,10 @@ class PrintingFilter(FilterSet):
     ``SeriesType`` id, whose handle no column holds, and refuses it.
     ``in_series`` hops into ``SeriesFilter``, which compares the handle on the
     series rows ``SeriesType.get_queryset`` annotates, flat (``inSeriesId``,
-    ``inSeriesHandle``) and nested alike.
+    ``inSeriesHandle``) and nested alike. ``edition__imprint`` adds the set's own
+    ``istartswith`` to the ``editionImprint`` head beside the ``exact`` and
+    ``icontains`` copies ``edition`` expands from ``EditionFilter.imprint``, so
+    ``HIDE_FLAT_FILTERS`` keeps that head with ``iStartsWith`` alone.
     """
 
     edition = RelatedFilter("EditionFilter", field_name="edition")
@@ -396,6 +408,7 @@ class PrintingFilter(FilterSet):
             "licensor": ["exact", "in"],
             "co_publishers": ["exact", "in"],
             "edition__printings__co_publishers": ["exact", "in"],
+            "edition__imprint": ["istartswith"],
             "series": ["exact", "in"],
         }
 

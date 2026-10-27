@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 321 done, 216 to do.
+Progress: 322 done, 216 to do.
 
 ## Done
 
@@ -1771,6 +1771,17 @@ Progress: 321 done, 216 to do.
   is deferred and a filter the override adds is the set's own. spec-027 and docs/README state it; live rows in
   `examples/fakeshop/test_query/test_library_api.py` (`PatronFilter` and `IssueFilter` overrides), package
   rows in `tests/filters/test_sets.py`
+- [x] 598. `HIDE_FLAT_FILTERS` hides each flat copy of a `RelatedFilter` expansion, under whatever key a
+  `get_filters()` override holds it, and never a filter the set holds itself.
+  `filters/inputs.py::_build_input_fields` decided by the key's first segment, so a re-keyed copy stayed
+  published and a set's own filter spelled under a relation's name was hidden: fakeshop `PrintingFilter`
+  `edition__printings__co_publishers` had no nested twin and was unreachable, against spec-027's "Nothing
+  becomes unreachable". The skip now asks `filters/sets.py::_is_flat_copy` per lookup, so a head mixing an own
+  lookup with copies keeps only its own; the lookup table and gates do not depend on the setting. spec-027,
+  docs/README and GLOSSARY (`RelatedFilter`) state it; the library example adds a re-keyed alias
+  (`PatronFilter.borrowed_title`) and a mixed head (`PrintingFilter` `edition__imprint` istartswith); live
+  rows in `examples/fakeshop/test_query/test_library_api.py` replace the pin that hid `bookLoansPatronEmail`;
+  a package row in `tests/filters/test_inputs.py` pins a borrowed copy
 
 ## Outside review of the fixes
 
@@ -2045,15 +2056,17 @@ tracker number are recorded there; open remainders and new defects are filed as 
   markdown-it) on a type-7 HTML tag line in a lazy position (`> x` / `</pre>` / `TERM here`: lazy paragraph text),
   while cmark-gfm, which renders these docs on GitHub, opens an HTML block there, so a link written after it shows as
   raw text; no repo doc has the shape; found verifying 420
-- [ ] 598. (robustness) `filters/inputs.py` hides an expanded child leaf under `HIDE_FLAT_FILTERS` by its
-  key's first segment, so a `get_filters()` override that re-keys the copies leaves them published; it could
-  read the copy's `ChildProjection`. Found verifying 640
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 602. CHANGELOG entry for item 598: with `HIDE_FLAT_FILTERS = True` a filter input hides each
+  `RelatedFilter` expansion's flat copy under whatever key a `get_filters()` override holds it, and keeps
+  every filter the set holds itself, including a `Meta.fields` path spelled under a `RelatedFilter`'s name
+  (now published; it had been hidden and, with no nested twin, unreachable); a head mixing the set's own
+  lookup with copies keeps only its own lookups
 - [ ] 600. CHANGELOG entry for item 599: a FilterSet's `get_filters()` override is now its filter table
   everywhere (own input, direct construction, nested branch, flat copies, cycles): a filter it adds filters
   where it was published and ignored, a key it renames or removes is gone from every spelling, and a cycle

@@ -1410,45 +1410,51 @@ def _build_input_fields(
     lookup_table = filter_lookup_table(filterset_cls)
 
     # ``HIDE_FLAT_FILTERS`` (default ``False``, the default of
-    # ``django-graphene-filters``'s key of the same name) controls whether the
-    # flat relational traversal fields (``categoryName``, deep
-    # ``entriesPropertyCategoryName``, ...) are emitted. When hidden, the
-    # relation is filtered only through its nested ``RelatedFilter`` branch
+    # ``django-graphene-filters``'s key of the same name) controls whether a
+    # ``RelatedFilter`` expansion's flat copies (``categoryName``, deep
+    # ``entriesPropertyCategoryName``, ...) are emitted. When hidden, those
+    # filters are reached only through their nested ``RelatedFilter`` branch
     # (``category: { name: { ... } }``) -- the strawberry-django shape. When
     # shown, BOTH the flat and nested shapes appear, a surface this package
     # adds: upstream never publishes the expanded copies (its ``filter`` input
     # renders a ``RelatedFilter`` as a reference to the target's input, and its
-    # flat connection arguments, the ones its key hides, drop every expanded
-    # child through the ``is_expanded_child`` test in
+    # flat connection arguments, the ones its key hides, drop every key under a
+    # ``RelatedFilter``'s name through the ``is_expanded_child`` test in
     # ``django_graphene_filters/connection_field.py::_get_trimmed_filterset_class``).
-    # Because this package emits a single Strawberry input type here, the same
-    # ``is_expanded_child`` rule is just a skip in this loop, so the hidden
-    # operator-bag classes are never built in the first place. The key is read
-    # through its ``conf.py`` named reader; truthiness coercion is this
+    # A copy is named by the record its expansion stamped, never by its key
+    # (``_visible_entries``), so a copy a ``get_filters()`` override re-keys is
+    # hidden and the set's own filter spelled under a branch's name is not; the
+    # hidden operator-bag lookups are never built in the first place. The key is
+    # read through its ``conf.py`` named reader; truthiness coercion is this
     # consumer's own semantics (the reader stays thin).
     hide_flat_filters = bool(hide_flat_filters_setting())
+    from .sets import _is_flat_copy  # noqa: PLC0415 - import cycle
 
     def _visible_entries() -> Iterator[tuple[str, Mapping[str, FormKeyedFilter]]]:
-        """Yield the grouped entries minus the ``HIDE_FLAT_FILTERS`` expanded children.
+        """Yield the grouped entries minus the ``HIDE_FLAT_FILTERS`` expanded copies.
 
-        A flat relational traversal path (``category__name``,
-        ``entries__property__category__name``) is an "expanded child" of a
-        declared ``RelatedFilter`` - its first path segment names the relation.
-        Such paths are reachable through the nested branch already; hide them
-        when ``HIDE_FLAT_FILTERS`` is set -- the ``is_expanded_child`` skip
-        upstream applies to its flat connection arguments unconditionally inside
-        ``django_graphene_filters/connection_field.py::_get_trimmed_filterset_class``.
-        This pre-filter stays filter-family semantics, BEFORE the shared
-        emission scaffold.
+        An expanded copy is a lookup ``filters/sets.py::_is_flat_copy`` names:
+        it carries the ``ChildProjection`` of a ``RelatedFilter`` this set
+        declares, under whatever key the set's filter table holds it, so its
+        nested twin answers it through that branch. When ``HIDE_FLAT_FILTERS``
+        is set, each copy leaves its head's operator bag, and a head left with
+        no lookup is not emitted; every other lookup (the set's own filter,
+        a ``Meta.fields`` traversal under a ``RelatedFilter``'s name included)
+        stays, so nothing the set filters on becomes unreachable. This
+        pre-filter stays filter-family semantics, BEFORE the shared emission
+        scaffold.
         """
+        if not hide_flat_filters:
+            yield from lookup_table.heads.items()
+            return
         for top_name, lookup_bag in lookup_table.heads.items():
-            if (
-                hide_flat_filters
-                and "__" in top_name
-                and top_name.split("__", 1)[0] in related_filters
-            ):
-                continue
-            yield top_name, lookup_bag
+            own_lookups = {
+                token: entry
+                for token, entry in lookup_bag.items()
+                if not _is_flat_copy(filterset_cls, entry[1])
+            }
+            if own_lookups:
+                yield top_name, own_lookups
 
     def _related_target_of(
         top_name: str,
