@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 316 done, 214 to do.
+Progress: 316 done, 215 to do.
 
 ## Done
 
@@ -1762,10 +1762,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 377. (robustness) graphql-core 3.2 `ExecutionContext.execute_fields` leaves an already-created async sibling
-  field's awaitable un-awaited when a later sync field raises on a non-null position, so Python warns "coroutine never
-  awaited" (`filterwarnings = error` turns it into a session error in a failing run); upstream behaviour, but an async
-  many-side resolver could avoid building a coroutine that may never run
 - [ ] 420. (robustness) `scripts/_markdown_lex.py::block_regions` does not mask a block quote nested inside a list
   item (`- > ```` then `  > code`: markers are read only at the line start) nor a link-reference-definition title
   split across two lines (`[foo]: /url "a` / `Zeta b"`), so `check_spec_glossary.py --auto-link` can write a link into
@@ -2003,11 +1999,35 @@ tracker number are recorded there; open remainders and new defects are filed as 
   after a crash raises `json.JSONDecodeError`), `_read_text_if_present` catches only `FileNotFoundError` (a non-UTF-8
   run log or one that is a directory escapes), and `_read_json_object` shares the bare decode, while a wrong-shape line
   is already a `WorkspaceError` in `_logged_run`; found verifying 349
+- [ ] 645. (robustness, needs a live repro) On graphql-core 3.2 an async sibling that is still running when another
+  async field's non-null error resolves the parent's `gather` keeps running, and its error is appended to the live
+  `ExecutionResult.errors` list after the response is built (measured on a plain schema: one error right after
+  `await execute(...)`, two after draining the loop). Check whether such a late error reaches the wire past
+  `MaskErrors` / `Schema._process_errors`, or runs ORM work after the operation's atomic and leases closed, through the
+  fakeshop async view; found consulting on 377
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 377. Decide whether the package supersedes graphql-core 3.2's `ExecutionContext.execute_fields` and
+  `complete_list_value` bodies in `django_strawberry_framework/_graphql_core_patches.py` so every awaitable an operation
+  created settles inside it before an error propagates. Today a sync field raising on a non-null position after an
+  async sibling drops the sibling's coroutine unstarted ("coroutine ... was never awaited" at GC for graphql-core's
+  `execute_field.<locals>.await_result` plus the resolver's own: the package's `many_resolver._resolve`,
+  `list_field.py::_execute_queryset_pipeline_async`, `connection.py::_pipeline_async`, or strawberry's
+  `_async_resolver` for any consumer `async def` field); the same holds for a `[T!]!` item. Identical bodies across
+  3.2.0-3.2.13; graphql-core 3.3 settles them in the background (`settle_in_background`). A package-side lazy
+  awaitable removes only the package's coroutine (graphql-core's `await_result` still warns); `close()` cannot reach
+  the inner coroutine. Recommended shape (prototyped on 3.2.8): settle before re-raising (`gather(...,
+  return_exceptions=True)` then raise the first error in declaration order), also at both `gather` sites, with
+  audited-body pins and retirement sentinels like the existing `complete_list_value` arm; data and error paths
+  measured identical for nullable, non-null, root and list parents. Costs: about 90 lines of upstream body
+  superseded; the failure path now runs the sibling work instead of failing fast; under `execute_sync` a consumer
+  `async def` field beside a raising non-null field answers strawberry's "failed to complete synchronously" instead
+  of `data: null`; 3.3's background settle loses the in-operation guarantee unless its `async_work_finished` hook is
+  wired. Not taken: 3.3-style background settle (late errors would land after `MaskErrors` and after the operation's
+  atomic and leases closed). No contract row: the response is identical, so this is a robustness question of scope
 - [ ] 644. CHANGELOG entry for item 374: a declared `django_filters.NumericRangeFilter`, or any one-value filter whose
   widget reads other form-data keys (a `MultiWidget` on a `CharFilter`, a consumer `Filter` over a `MultiValueField`),
   now fails the schema build with a `ConfigurationError` instead of publishing an input whose value was ignored
