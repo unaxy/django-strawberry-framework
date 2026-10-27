@@ -2302,6 +2302,8 @@ def test_extra_field_shadowing_reverse_relation_stays_scalar() -> None:
             model = Category
             fields = ("name", "items")
 
+    assert _model_column_for(CategoryForm, "items") is None
+
     cre, specs = build_form_input_class(CategoryForm, operation_kind=CREATE)
     items_spec = next(s for s in specs if s.target_name == "items")
     assert items_spec.input_attr == "items"
@@ -2508,20 +2510,22 @@ def test_basis_diagnostic_keeps_list_repr_for_benign_names() -> None:
 
 
 def test_resolve_target_column_reverse_m2m_and_non_concrete_fallback() -> None:
+    """Neither a reverse relation nor a model field without a column backs a form field.
+
+    The non-relation must be a real model ``Field`` to reach the column arm: a
+    ``CompositePrimaryKey`` is one, and Django gives it no column of its own.
+    """
+
     class FakeReverseM2M:
         is_relation = True
         many_to_many = True
         auto_created = True
 
-    class FakeNonConcreteField:
-        is_relation = False
-        column = None
-
     def _get_field(name: str) -> object:
         if name == "reverse_m2m":
             return FakeReverseM2M()
         if name == "non_concrete":
-            return FakeNonConcreteField()
+            return RpCompositeParent._meta.get_field("pk")
         raise FieldDoesNotExist
 
     fake_model = SimpleNamespace(_meta=SimpleNamespace(get_field=_get_field))
