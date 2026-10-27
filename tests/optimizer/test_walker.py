@@ -372,60 +372,139 @@ def test_record_prefetch_path_keys_ignores_an_empty_key_set() -> None:
     assert plan.prefetch_path_resolver_keys == {}
 
 
-def test_plan_relay_id_projects_real_pk_attname_when_not_id(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Regression: custom-pk Relay projection (the model pk attname is not ``"id"``).
+#: Relay types whose id column ``Meta.fields`` does not name, as (model, fields,
+#: ``NodeID`` attribute, the column an ``{ id }`` page projects): a ``NodeID``
+#: column beside a listed surrogate ``id``, a ``NodeID`` column with no ``id``
+#: listed, and a primary key no listed field names.
+_RELAY_ID_COLUMN_SHAPES = {
+    "node-id-column-outside-fields": (
+        Publisher,
+        ("id", "name"),
+        "house_code",
+        ("house_code",),
+    ),
+    "node-id-column-and-no-id-outside-fields": (
+        Publisher,
+        ("name",),
+        "house_code",
+        ("house_code",),
+    ),
+    "primary-key-outside-fields": (
+        Publisher,
+        ("name",),
+        None,
+        ("id",),
+    ),
+}
 
-    When a Relay-declared ``DjangoType`` is backed by a model whose pk
-    attname is not ``"id"``, ``snake_case("id")`` does not match the
-    field-map's real key. The walker must resolve the configured
-    ``id_attr`` (via ``type_cls.resolve_id_attr()``) and project that
-    column into ``only()`` so ``_resolve_id_default`` reads the loaded
-    value from ``root.__dict__`` instead of falling back to ``getattr``
-    and triggering a lazy load (spec-015 Decision 7).
 
-    Simulates the custom-pk shape without adding a new fakeshop model:
-    monkey-patches ``Category._meta.pk.attname`` and the registered
-    definition field map to drop the ``"id"`` key while keeping
-    ``"name"`` as the stand-in pk projection.
+@pytest.mark.parametrize("shape", list(_RELAY_ID_COLUMN_SHAPES))
+def test_plan_relay_id_projects_the_id_column_meta_fields_does_not_name(shape: str) -> None:
+    """An ``id`` selection projects the model column its GlobalID reads, listed or not.
+
+    The column comes from the model (``relay.py::_node_id_slot``), never from the
+    type's field map, so ``_resolve_id_default`` finds it loaded on every row.
     """
+    model, fields, node_id_attr, expected = _RELAY_ID_COLUMN_SHAPES[shape]
     registry.clear()
     try:
-
-        class CategoryNode(DjangoType):
-            class Meta:
-                model = Category
-                fields = ("id", "name")
-                interfaces = (relay.Node,)
-
+        namespace = (
+            {"__annotations__": {node_id_attr: relay.NodeID[str]}} if node_id_attr else None
+        )
+        make_django_type("RelayIdColumnType", model, fields, namespace_extra=namespace)
         finalize_django_types()
-        definition = registry.get_definition(CategoryNode)
-        assert definition is not None
-        fake_field_map = {k: v for k, v in definition.field_map.items() if k != "id"}
-        monkeypatch.setattr(definition, "field_map", fake_field_map)
-        monkeypatch.setattr(Category._meta.pk, "attname", "name")
-
-        plan = plan_optimizations([_sel("id")], Category)
-
-        assert "name" in plan.only_fields
-        assert "id" not in plan.only_fields
+        plan = plan_optimizations([_sel("id")], model)
     finally:
         registry.clear()
 
+    assert plan.only_fields == expected
+
+
+def test_plan_relay_id_of_a_reverse_key_child_projects_its_node_id_column() -> None:
+    """A to-many child page of a ``NodeID`` type loads that column in the prefetch.
+
+    ``Publisher.printings_2`` lists printings whose ``NodeID`` is ``run_size``,
+    a column the type's ``Meta.fields`` leaves out: the child queryset projects
+    it beside the key that attaches each printing to its publisher.
+    """
+    registry.clear()
+    try:
+        make_django_type(
+            "RunSizePrintingType",
+            Printing,
+            ("id",),
+            namespace_extra={"__annotations__": {"run_size": relay.NodeID[str]}},
+        )
+        make_django_type(
+            "PrintingsPublisherType",
+            Publisher,
+            ("id", "printings_2"),
+            meta_extra={"relation_shapes": {"printings_2": "list"}},
+        )
+        finalize_django_types()
+        plan = plan_optimizations([_sel("printings2", selections=[_sel("id")])], Publisher)
+    finally:
+        registry.clear()
+
+    (lookup,) = plan.prefetch_related
+    assert isinstance(lookup, Prefetch)
+    assert lookup.queryset is not None
+    loaded, deferred = lookup.queryset.query.deferred_loading
+    assert deferred is False
+    assert loaded == frozenset({"run_size", "publisher_2_id"})
+
+
+def _publisher_name_node_id(_cls: type[object], root: Publisher, *, info: object) -> str:
+    """A consumer ``resolve_id`` reading ``name``, a column the id slot does not name."""
+    del info
+    return f"N-{root.name}"
+
+
+def _publisher_slug(publisher: Publisher) -> str:
+    """A model property a ``NodeID`` can name; it reads ``name``."""
+    return f"P-{publisher.name}"
+
+
+@pytest.mark.parametrize("shape", ["consumer-resolve-id", "property-node-id"])
+def test_plan_relay_id_no_column_holds_resolves_through_the_field_map(
+    shape: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An id read from no column plans what the field map plans for ``id``.
+
+    A consumer ``resolve_id`` reads whatever its body reads, and a ``NodeID``
+    naming a model property reads the property, so neither names a column to
+    project. With ``id`` outside ``Meta.fields`` the field map plans nothing:
+    the row loads whole and the id resolves from it with no further query.
+    """
+    if shape == "consumer-resolve-id":
+        namespace: dict[str, object] = {"resolve_id": classmethod(_publisher_name_node_id)}
+    else:
+        monkeypatch.setattr(
+            Publisher,
+            "slug",
+            property(_publisher_slug),
+            raising=False,
+        )
+        namespace = {"__annotations__": {"slug": relay.NodeID[str]}}
+    registry.clear()
+    try:
+        make_django_type("NoColumnIdType", Publisher, ("name",), namespace_extra=namespace)
+        finalize_django_types()
+        plan = plan_optimizations([_sel("id")], Publisher)
+    finally:
+        registry.clear()
+
+    assert plan.only_fields == ()
+
 
 def test_plan_relay_id_projects_attname_when_pk_is_relation() -> None:
-    """Regression: walker ``id_attr in field_map`` mismatch when the pk is a relation.
+    """A primary key that is a one-to-one key projects its ``attname`` column.
 
-    ``apps/library/models.py::PatronProfile`` is keyed by its own
-    ``OneToOneField`` to the patron it extends, so the pk's ``name`` and
-    ``attname`` differ: ``name="patron"`` vs. ``attname="patron_id"``. The
-    walker's projection branch resolves ``id_attr`` to the attname
-    (``"patron_id"``), but ``field_map`` is keyed by the field's ``name``
-    (``"patron"``). A naive ``id_attr in field_map`` check would skip
-    projection and leave the lazy-load N+1 the projection exists to
-    prevent. The walker must scan the ``FieldMeta`` values by both
-    ``name`` and ``attname``.
+    ``apps/library/models.py::PatronProfile`` is keyed by its ``OneToOneField``
+    to the patron it extends: the field's ``name`` is ``patron`` and its column
+    ``patron_id``. The id projection names the column, the key
+    ``_resolve_id_default`` reads from the row.
     """
     registry.clear()
     try:
@@ -448,12 +527,6 @@ def test_plan_relay_id_projects_attname_when_pk_is_relation() -> None:
         finalize_django_types()
         plan = plan_optimizations([_sel("id")], PatronProfile)
 
-        # ``id_attr`` resolves to ``"patron_id"`` (the pk's attname). The
-        # walker must locate the matching ``FieldMeta`` via its
-        # ``attname`` (the ``"patron"`` FieldMeta has ``name="patron"``,
-        # ``attname="patron_id"``) and project ``"patron_id"`` so Django's
-        # ``.only("patron_id")`` loads the key column without dragging in
-        # the related ``Patron`` row.
         assert "patron_id" in plan.only_fields
     finally:
         registry.clear()
@@ -1460,7 +1533,7 @@ def test_plan_does_not_elide_when_target_type_has_custom_id_resolver() -> None:
     boolean through ``has_custom_id_resolver_for``, so the walker's elision
     guard cannot tell them apart and either one pins the branch. The stored key
     column does not carry the house code, so an ``{ id }``-only child selection
-    keeps its join.
+    keeps its join, and the join loads ``house_code``, the column the id reads.
     """
     registry.clear()
     try:
@@ -1491,7 +1564,7 @@ def test_plan_does_not_elide_when_target_type_has_custom_id_resolver() -> None:
 
     assert plan.select_related == ("publisher",)
     assert plan.fk_id_elisions == ()
-    assert plan.only_fields == ("publisher_id", "publisher__id")
+    assert plan.only_fields == ("publisher_id", "publisher__house_code")
 
 
 def test_plan_uses_definition_custom_id_resolver_cache(monkeypatch: pytest.MonkeyPatch) -> None:

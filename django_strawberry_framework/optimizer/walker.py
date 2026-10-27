@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, NamedTuple, cast
 from django.db import models
 from django.db.models import Prefetch
 from graphql import OperationType
-from strawberry import relay
 from strawberry.schema.config import StrawberryConfig
 from strawberry.schema.schema_converter import GraphQLCoreConverter
 from strawberry.types.field import StrawberryField
@@ -16,6 +15,7 @@ from strawberry.utils.str_converters import to_camel_case
 
 from django_strawberry_framework.exceptions import ConfigurationError, OptimizerError
 from django_strawberry_framework.registry import register_subsystem_clear, registry
+from django_strawberry_framework.types.relay import implements_relay_node
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     get_item,
@@ -89,6 +89,7 @@ if TYPE_CHECKING:
 
     from django_strawberry_framework.types.base import DjangoType
     from django_strawberry_framework.types.definition import DjangoTypeDefinition
+    from django_strawberry_framework.types.relay import _RelayDjangoType
 
     from .selections import ConvertedSelection, FieldSelection
 
@@ -742,6 +743,34 @@ def _resolver_identities_for(
     return runtime_paths, resolver_identities
 
 
+def _relay_id_column(node_type: type[_RelayDjangoType]) -> str | None:
+    """Return the column a Relay type's GlobalID is read from, for ``only()``.
+
+    ``types/relay.py::_resolve_id_default`` reads ``resolve_id_attr()`` off the
+    row's instance namespace and loads it lazily on a miss, so a row that did
+    not load that column pays one query per row for its id (spec-015
+    Decision 7). ``relay.py::_node_id_slot`` names the model field behind the
+    id; a concrete one is projected by ``attname`` (a forward key named by its
+    ``attname``, or a primary key that is a one-to-one key, projects its key
+    column). ``None`` when the id is not read from a column: a consumer
+    ``resolve_id`` anywhere in the type's MRO, or an id attribute no concrete
+    model field holds (a property, an attribute ``get_queryset`` annotates).
+    """
+    # Lazy imports: ``relay`` imports ``list_field``, whose ``types`` import
+    # loads this walker; ``types.definition`` pulls in ``optimizer.field_meta``.
+    from django_strawberry_framework.relay import _node_id_slot  # noqa: PLC0415 - import cycle
+    from django_strawberry_framework.types.definition import (  # noqa: PLC0415 - import cycle
+        _class_has_custom_id_resolver,
+    )
+
+    if any(_class_has_custom_id_resolver(cls, "resolve_id") for cls in truth.mro(node_type)):
+        return None
+    _id_attr, field = _node_id_slot(node_type)
+    if truth.is_instance(field, models.Field) and field.concrete:
+        return field.attname
+    return None
+
+
 def _walk_selections(
     selections: Iterable[ConvertedSelection],
     model: type[models.Model],
@@ -789,6 +818,15 @@ def _walk_selections(
         getattr(definition, "relation_connections", None) or {}
     )
     for sel in merged:
+        # On a ``relay.Node`` type the ``id`` selection is the GlobalID, never a
+        # model field named ``id``: when the id is read from a column it projects
+        # that column whatever the field map holds (spec-015 Decision 7); an id
+        # no column holds resolves through the field map like any selection.
+        if sel.name == "id" and type_cls is not None and implements_relay_node(type_cls):
+            id_column = _relay_id_column(type_cls)
+            if id_column is not None:
+                append_unique(plan.only_fields, f"{prefix}{id_column}")
+                continue
         # Resolve the selection name through the ONE consolidated resolver
         # (fast-path exact reversal, memoized forward name maps on a miss). It
         # recognizes a synthesized nested connection BEFORE the field namespace
@@ -825,63 +863,11 @@ def _walk_selections(
                 model=model,
             )
             continue
-        if resolved is not None:
-            _kind, django_name, django_field = resolved
-        else:
-            # Neither namespace matched: keep the reversed name so the Relay
-            # custom-pk ``id`` branch below can still fire, and leave the field
-            # unresolved for the unknown-name handling.
-            django_name, django_field = snake_case(sel.name), None
-        if django_field is None:
-            # Decision 7 ("no avoidable lazy loads on ``resolve_id``"):
-            # when a Relay-declared ``DjangoType`` uses a custom pk
-            # attname (e.g. ``uuid = UUIDField(primary_key=True)``),
-            # ``snake_case("id") == "id"`` does not match the field-map
-            # key (``"uuid"``). Resolve the configured ``id_attr`` and
-            # project that real column so ``_resolve_id_default`` reads
-            # the loaded value from ``root.__dict__`` instead of falling
-            # back to ``getattr`` and triggering an N+1 lazy load.
-            #
-            # The verification scans the ``FieldMeta`` values by both
-            # ``name`` and ``attname`` rather than ``id_attr in
-            # field_map``: ``field_map`` is keyed by the Django field's
-            # ``name``, but ``model._meta.pk.attname`` carries the
-            # column ``attname`` which differs for relation primary
-            # keys (e.g. ``OneToOneField(primary_key=True)`` named
-            # ``user`` has ``name="user"`` but ``attname="user_id"``).
-            # A naive ``in`` check would skip projection on those shapes
-            # and reintroduce the lazy-load. Django's ``.only(attname)``
-            # accepts the FK column directly, which avoids dragging the
-            # related row in along with it.
-            # Widened so the ``relay.Node`` narrowing is not intersected with
-            # ``DjangoType``, which the checkers treat as disjoint under ``TypeIs``.
-            node_cls: type[object] | None = type_cls
-            if django_name == "id" and truth.is_subclass(node_cls, relay.Node):
-                id_attr = node_cls.resolve_id_attr()
-                if id_attr == "pk":
-                    id_attr = model._meta.pk.attname
-                db_field = next(
-                    (f for f in field_map.values() if id_attr in (f.name, f.attname)),
-                    None,
-                )
-                if db_field is not None:
-                    # Project via ``attname`` so a consumer-declared
-                    # ``NodeID`` targeting the relation's ``name`` (e.g.
-                    # ``user`` on ``OneToOneField(primary_key=True)``)
-                    # still lands on the FK column ``user_id`` instead of
-                    # the relation name, which would drag the related row
-                    # back via ``.only("user")``.
-                    column = db_field.attname or id_attr
-                    append_unique(
-                        plan.only_fields,
-                        f"{prefix}{column}",
-                    )
+        if resolved is None or resolved[2] is None:
+            # Neither namespace matched: an unknown name plans nothing.
             continue
+        django_name, django_field = resolved[1], resolved[2]
         if not django_field.is_relation:
-            # Scalar projection. When ``django_name == "id"`` and the
-            # type is a Relay-declared ``DjangoType``, this is the
-            # default-pk path (the model's pk attname IS ``"id"``); the
-            # custom-pk path is handled above.
             append_unique(
                 plan.only_fields,
                 f"{prefix}{django_name}",

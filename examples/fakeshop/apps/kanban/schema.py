@@ -361,7 +361,7 @@ class CardType(DjangoType):
     # ``{"dependencies": ...}`` hint raises ConfigurationError at class-build time;
     # (2) even if it were reachable, the walker resolves no ``django_field`` for a
     # property and skips it before the hint dispatch
-    # (``optimizer/walker.py::_walk_selections #"snake_case(sel.name), None"``), and
+    # (``optimizer/walker.py::_walk_selections #"an unknown name plans nothing"``), and
     # a property never reads Django's prefetch cache.
     # Prefetching ``outgoing_references__target_card`` / ``incoming_references__
     # source_card`` (the two hops the properties traverse) would require rewriting
