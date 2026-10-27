@@ -127,7 +127,7 @@ class ShelfSerializer(ModelSerializerBase[Shelf]):
 
 
 class SaveKwargsShelfSerializer(ModelSerializerBase[Shelf]):
-    """A ``Shelf`` serializer whose ``create()`` consumes a NON-model save kwarg (hardening).
+    """A ``Shelf`` serializer whose ``create()`` consumes a NON-model save kwarg.
 
     Save kwargs may only carry non-model custom arguments (model-field injection goes
     through ``Meta.injected_fields``), so the DRF-native ``serializer.save(stamp=...)``
@@ -629,7 +629,7 @@ class StatusStampBookSerializer(ModelSerializerBase[Book]):
 
 
 class BookGenresSerializer(ModelSerializerBase[Book]):
-    """A ``Book`` serializer exposing the ``genres`` M2M for the update list-relation matrix (hardening).
+    """A ``Book`` serializer exposing the ``genres`` M2M for the update list-relation matrix.
 
     Backs the live proofs that a serializer UPDATE's list relation follows the
     replace-on-provide / clear-on-empty / unchanged-on-omit contract: DRF's own

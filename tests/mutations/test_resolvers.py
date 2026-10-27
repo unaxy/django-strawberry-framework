@@ -3307,7 +3307,7 @@ def test_create_nul_in_a_json_value_is_field_error_before_save(
 
 
 # ---------------------------------------------------------------------------
-# Scalar field named ``<x>_id`` regression (spec-036)
+# Scalar field named ``<x>_id`` (spec-036)
 #
 # ``library.TaggedItem`` has a *scalar* ``object_id`` (a ``PositiveIntegerField``,
 # emitted by the input generator) AND a ``GenericForeignKey`` ``content_object``.
@@ -3347,9 +3347,9 @@ def test_partial_update_validates_scalar_field_named_id_suffix() -> None:
 
     ``TaggedItem.object_id`` is a scalar ``PositiveIntegerField``. A partial update
     providing an invalid value (``-5``) must surface as a ``FieldError`` from
-    ``full_clean`` keyed to the ``objectId`` input the client sent - NOT skipped from validation (which the
-    old ``_id`` suffix-strip caused: ``object_id`` was mangled to ``object``, read
-    as unprovided, excluded from ``full_clean``, and the invalid value slipped to
+    ``full_clean`` keyed to the ``objectId`` input the client sent - NOT skipped from validation (which an
+    ``_id`` suffix-strip would cause: ``object_id`` mangled to ``object``, read
+    as unprovided, excluded from ``full_clean``, and the invalid value slipping to
     the DB as a mis-labeled ``IntegrityError`` / ``"__all__"`` envelope). No
     shipped ``TaggedItemType``: rung 1 would add one to the library schema; a live
     holder cannot declare ``DjangoMutation`` after finalize.
@@ -3449,8 +3449,8 @@ def test_validation_error_to_field_errors_non_dict_uses_all_key() -> None:
     """A non-dict ``ValidationError`` (``.messages``, no ``.error_dict``) maps under the sentinel.
 
     ``full_clean()`` always raises with an ``error_dict`` (the keyed path), so this
-    ``.messages`` fallback serves a bare ``ValidationError`` - the shape the ``0.0.12``
-    form / ``0.0.13`` serializer flavors and a model ``clean()`` raising a plain
+    ``.messages`` fallback serves a bare ``ValidationError`` - the shape the form /
+    serializer flavors and a model ``clean()`` raising a plain
     message produce. It is the documented single-source mapper, exercised directly as
     it is unreachable through the current ``full_clean`` path.
     """
@@ -3477,7 +3477,7 @@ def test_validation_error_to_field_errors_preserves_django_codes_and_path() -> N
 
 
 def test_validation_error_to_field_errors_non_dict_root_has_empty_path() -> None:
-    """A non-dict (model-wide) Django ``ValidationError`` keys ``"__all__"`` with an EMPTY path (#13)."""
+    """A non-dict (model-wide) Django ``ValidationError`` keys ``"__all__"`` with an EMPTY path."""
     (fe,) = validation_error_to_field_errors(
         DjangoValidationError("Whole-object problem.", code="invalid"),
     )
@@ -3487,7 +3487,7 @@ def test_validation_error_to_field_errors_non_dict_root_has_empty_path() -> None
 
 
 # ---------------------------------------------------------------------------
-# Row locking on the update/delete locate (spec-039, expanded in 0.0.14)
+# Row locking on the update/delete locate (spec-039)
 # ---------------------------------------------------------------------------
 
 

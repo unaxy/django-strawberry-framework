@@ -1,4 +1,4 @@
-"""Shared auth-test helpers hoisted out of the individual test modules.
+"""Shared auth-test helpers the individual test modules import.
 
 Plain (non-fixture) helpers the auth test modules share: the bounded event-loop
 barrier ``_drain_until`` and the session-carrying request builder

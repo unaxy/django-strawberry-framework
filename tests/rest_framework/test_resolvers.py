@@ -1653,11 +1653,11 @@ def test_relation_decode_async_get_queryset_from_sync_raises_sync_misuse() -> No
 
 @pytest.mark.django_db(transaction=True)
 async def test_async_entry_rejects_data_rewriting_hook_too() -> None:
-    """The hardened reserved-kwarg checks fire through the ASYNC entry point as well.
+    """The reserved-kwarg checks fire through the ASYNC entry point as well.
 
     The async surface runs the SAME sync body under one ``sync_to_async`` worker, so a
     ``get_serializer_kwargs`` override rewriting ``data`` is the same ``ConfigurationError``
-    there - the hardening cannot be dodged by choosing the async resolver.
+    there - the checks cannot be dodged by choosing the async resolver.
     """
 
     class CategoryT(DjangoType, relay.Node):
@@ -1773,7 +1773,7 @@ def test_flattener_root_non_field_error_has_empty_path() -> None:
 
 
 def test_flattener_nested_non_field_error_keeps_all_sentinel_segment() -> None:
-    """A NESTED non-field error keeps the ``"__all__"`` sentinel as its final path segment (#13)."""
+    """A NESTED non-field error keeps the ``"__all__"`` sentinel as its final path segment."""
     drf_key = serializer_resolvers._DRF_NON_FIELD_KEY
     errors = {"items": [{drf_key: [ErrorDetail("Cross-field.", code="invalid")]}]}
     (fe,) = serializer_resolvers.serializer_errors_to_field_errors(errors, {})
@@ -1789,7 +1789,7 @@ def test_flattener_plain_string_leaf_has_no_codes() -> None:
 
 
 def test_flattener_bare_error_detail_preserves_code() -> None:
-    """A bare DRF ``ErrorDetail`` leaf still preserves its single code (#4)."""
+    """A bare DRF ``ErrorDetail`` leaf still preserves its single code."""
     flat = serializer_resolvers.serializer_errors_to_field_errors(
         {"name": ErrorDetail("Invalid.", code="invalid")},
         {},
@@ -1845,7 +1845,7 @@ def _shelf_model_serializer() -> ModelSerializerBase[library_models.Shelf]:
 
 
 def test_agreement_guard_raises_when_runtime_lacks_schema_field() -> None:
-    """A schema field the runtime serializer does not declare fails loud (#1)."""
+    """A schema field the runtime serializer does not declare fails loud."""
     fake = _agreement_specs(input_attr="ghost", graphql_name="ghost", target_name="ghost")
     with pytest.raises(ConfigurationError, match="does not declare it"):
         serializer_resolvers._assert_schema_runtime_agreement(
@@ -1855,7 +1855,7 @@ def test_agreement_guard_raises_when_runtime_lacks_schema_field() -> None:
 
 
 def test_agreement_guard_raises_when_runtime_field_read_only() -> None:
-    """A schema field the runtime declares read_only fails loud (the value would be ignored) (#1)."""
+    """A schema field the runtime declares read_only fails loud (the value would be ignored)."""
 
     class ROSer(ModelSerializerBase[library_models.Shelf]):
         code = serializers.CharField(read_only=True)
@@ -1872,7 +1872,7 @@ def test_agreement_guard_raises_when_runtime_field_read_only() -> None:
 
 
 def test_agreement_guard_raises_on_source_mismatch() -> None:
-    """A runtime field binding a different source than the schema recorded fails loud (#1)."""
+    """A runtime field binding a different source than the schema recorded fails loud."""
     # Schema recorded source "topic"; runtime "code" binds source "code".
     fake = _agreement_specs(source="topic")
     with pytest.raises(ConfigurationError, match="binds source"):
@@ -1883,7 +1883,7 @@ def test_agreement_guard_raises_on_source_mismatch() -> None:
 
 
 def test_agreement_guard_raises_on_relation_wrong_model() -> None:
-    """A runtime relation over a DIFFERENT model than the schema recorded fails loud (#1)."""
+    """A runtime relation over a DIFFERENT model than the schema recorded fails loud."""
     fake = _agreement_specs(
         input_attr="branch_id",
         graphql_name="branchId",
@@ -1931,7 +1931,7 @@ def test_agreement_guard_rejects_a_relation_queryset_that_is_no_row_source() -> 
 
 
 def test_agreement_guard_raises_when_scalar_became_relation() -> None:
-    """A schema scalar that is a relation at runtime fails loud (the kind moved) (#1)."""
+    """A schema scalar that is a relation at runtime fails loud (the kind moved)."""
     # Schema types "branch" as a SCALAR, but the runtime serializer declares it a relation.
     fake = _agreement_specs(target_name="branch", input_attr="branch", graphql_name="branch")
     with pytest.raises(ConfigurationError, match="scalar in the schema but a relation"):
@@ -1942,7 +1942,7 @@ def test_agreement_guard_raises_when_scalar_became_relation() -> None:
 
 
 def test_agreement_guard_raises_when_file_became_scalar() -> None:
-    """A schema file input that is scalar at runtime fails loud (the kind moved) (#1)."""
+    """A schema file input that is scalar at runtime fails loud (the kind moved)."""
 
     class FileDriftSer(serializers.Serializer[object]):
         upload = serializers.CharField()
@@ -1961,7 +1961,7 @@ def test_agreement_guard_raises_when_file_became_scalar() -> None:
 
 
 def test_agreement_guard_raises_when_relation_shape_wrong() -> None:
-    """A schema relation the runtime declares as a scalar fails loud (#1)."""
+    """A schema relation the runtime declares as a scalar fails loud."""
     fake = _agreement_specs(
         target_name="code",
         input_attr="code_id",
@@ -2112,7 +2112,7 @@ def test_agreement_guard_wraps_an_unresolvable_runtime_field() -> None:
 
 
 def test_agreement_guard_passes_when_schema_and_runtime_agree() -> None:
-    """The happy path: matching scalar + relation specs pass (no raise) (#1)."""
+    """The happy path: matching scalar + relation specs pass (no raise)."""
     fake = type(
         "OkMut",
         (),
@@ -2581,7 +2581,7 @@ def _hookable_injected_mut(
 
 
 def test_injected_data_hook_missing_declared_key_raises() -> None:
-    """``get_serializer_injected_data`` omitting a declared injected field fails loud (hardened)."""
+    """``get_serializer_injected_data`` omitting a declared injected field fails loud."""
     fake = _hookable_injected_mut(("topic",), {})
     with pytest.raises(ConfigurationError, match="EXACTLY the declared injected fields"):
         serializer_resolvers._injected_serializer_data(
@@ -2593,7 +2593,7 @@ def test_injected_data_hook_missing_declared_key_raises() -> None:
 
 
 def test_injected_data_hook_undeclared_extra_key_raises() -> None:
-    """``get_serializer_injected_data`` returning an UNDECLARED key fails loud (hardened)."""
+    """``get_serializer_injected_data`` returning an UNDECLARED key fails loud."""
     fake = _hookable_injected_mut(None, {"topic": "smuggle"})
     with pytest.raises(ConfigurationError, match="EXACTLY the declared injected fields"):
         serializer_resolvers._injected_serializer_data(
@@ -2645,7 +2645,7 @@ def test_injected_data_hook_cannot_mutate_nested_client_containers() -> None:
             **_kwargs: object,
         ) -> object:
             # A nested list is a tuple and a nested dict a MappingProxyType: the
-            # in-place mutations a mutable clone merely ISOLATED are now
+            # in-place mutations a mutable clone would merely ISOLATE are
             # structurally impossible.
             # A frozen nested list is a tuple: no in-place ``append`` exists to call.
             assert not hasattr(data["genre_ids"], "append")
@@ -2676,7 +2676,7 @@ def test_relation_queryset_scope_pins_unregistered_raw_pk_relation_without_visib
     """A relation target without a registered primary gets NO visibility filter but IS still pinned.
 
     A raw-pk relation has no visibility contract to AND on, but DRF's own ``is_valid()``
-    lookup must still run inside the transaction on the write alias (the hardening pass), so
+    lookup must still run inside the transaction on the write alias, so
     the author's queryset is alias-pinned rather than left untouched.
     """
 
@@ -2910,7 +2910,7 @@ def test_relation_queryset_scope_cross_alias_author_queryset_fails_closed() -> N
 
 
 def test_relation_queryset_scope_handles_many_related_field() -> None:
-    """Many relation fields scope their child relation queryset through target visibility (#3)."""
+    """Many relation fields scope their child relation queryset through target visibility."""
 
     class BranchT(DjangoType):
         class Meta:
@@ -3149,11 +3149,11 @@ def test_save_kwargs_not_shadowing_validated_key_is_allowed() -> None:
 
 
 def test_save_kwargs_shadowing_renamed_defaulted_and_hidden_keys_raises() -> None:
-    """The check covers renamed (``source=``), defaulted, and ``HiddenField`` keys (hardened).
+    """The check covers renamed (``source=``), defaulted, and ``HiddenField`` keys.
 
     ``validated_data`` is keyed by resolved ``source`` and includes keys the CLIENT never sent
     (a serializer default, a ``HiddenField``); comparing against the ACTUAL validated keys
-    catches every collision the old input-spec reconstruction missed.
+    catches every collision a reconstruction from the input specs would miss.
     """
 
     class RenamedSer(serializers.Serializer[object]):
@@ -3321,7 +3321,7 @@ def test_save_kwargs_hook_non_mapping_return_is_configuration_error() -> None:
 
 
 # ===========================================================================
-# Framework-owned serializer kwargs + saved-result validation (hardening)
+# Framework-owned serializer kwargs + saved-result validation
 # ===========================================================================
 
 
@@ -3922,8 +3922,8 @@ def test_merged_kwargs_hook_explicit_none_instance_on_update_is_configuration_er
 def test_merged_kwargs_deep_data_passthrough_never_recurses() -> None:
     """A pass-through hook over a deeper-than-recursion-limit payload must not crash.
 
-    The old deep ``!=`` comparison of two independently cloned structures re-introduced
-    the ``RecursionError`` the iterative clone had removed; the identity check is O(1).
+    A deep ``!=`` comparison of two independently cloned structures would raise the
+    ``RecursionError`` the iterative clone avoids; the identity check is O(1).
     """
 
     def hook(
@@ -4039,9 +4039,9 @@ def test_frozen_hook_view_freezes_the_full_value_algebra_and_fails_closed_on_opa
     """The freeze covers tuples/sets/bytearray and rejects opaque mutable leaves.
 
     A tuple / set is a mutable-reachable container (a tuple can carry a mutable member; a
-    ``set`` itself is mutable), and a ``bytearray`` is a mutable scalar - all were passed to
-    hooks BY REFERENCE before, so a hook could mutate them and thereby mutate the authoritative
-    ``provided_data``. They are now rendered immutable; a leaf with no immutable rendering fails
+    ``set`` itself is mutable), and a ``bytearray`` is a mutable scalar - passed to hooks BY
+    REFERENCE, any of them would let a hook mutate the authoritative ``provided_data``. They
+    are rendered immutable; a leaf with no immutable rendering fails
     closed instead of being aliased under a false promise of immutability.
     """
     # A tuple carrying a mutable dict member: the tuple becomes a tuple, the dict a proxy.
@@ -5253,7 +5253,7 @@ def test_relation_queryset_scope_composes_with_author_queryset() -> None:
 
     A serializer author's own ``PrimaryKeyRelatedField(queryset=...)`` restriction is the base
     contract; visibility is an ADDITIONAL constraint. A visible-but-author-DISALLOWED row must
-    still be rejected (the earlier reassignment erased the author's queryset and admitted it).
+    still be rejected (replacing the author's queryset would admit it).
     """
 
     class BranchT(DjangoType):
@@ -5517,7 +5517,7 @@ def test_decode_nested_single_error_short_circuits() -> None:
 
 
 # ===========================================================================
-# The relation-intent ledger + post-save attestation (the hardening pass)
+# The relation-intent ledger + post-save attestation
 # ===========================================================================
 
 
@@ -6019,7 +6019,7 @@ def test_supplied_m2m_duplicates_and_explicit_empty_list_pass_attestation() -> N
 
 
 # ===========================================================================
-# Phase separation, savepoint, target drift, canonical pks (the hardening pass)
+# Phase separation, savepoint, target drift, canonical pks
 # ===========================================================================
 
 
@@ -7060,7 +7060,7 @@ def test_serializer_decode_step_returns_field_errors_on_decode_failure() -> None
 
 
 def test_hook_mapping_honest_label_is_byte_identical() -> None:
-    """The honest hook-mapping message renders the exact historic text."""
+    """The honest hook-mapping message renders its exact text."""
     honest = type("HonestM", (), {})
     with pytest.raises(ConfigurationError) as exc_info:
         serializer_resolvers._hook_mapping(

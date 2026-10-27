@@ -308,7 +308,7 @@ def test_query_capture_uses_the_forced_debug_cursor_not_debug_query_logging(
     that posture, so every row in the payload was produced by the extension's own
     ``force_debug_cursor`` bracket.
 
-    The mechanism's DEBUG-independence is NOT the extension's gate. Since
+    The mechanism's DEBUG-independence is NOT the extension's gate. Under
     spec-048 Decision 5 the extension fails closed under ``settings.DEBUG``
     false unless the deployment acknowledges the disclosure - which is exactly
     why this scenario has to spell the acknowledgement to see a payload at all.
@@ -579,7 +579,7 @@ def test_off_by_default_publishes_no_debug_key(install_probe_schema: _InstallPro
     Distinct from the spec-048 gate's withheld payload: there the extension IS
     listed and refuses; here it was never installed, so nothing runs at all.
 
-    Asserted on the envelope keys: byte-identity with an earlier release's
+    Asserted on the envelope keys: byte-identity with any fixed
     response is deliberately NOT this scenario's contract, because a Strawberry
     floor raise changes the response independently of the debug extension.
     """

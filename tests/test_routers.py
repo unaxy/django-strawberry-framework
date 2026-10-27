@@ -31,7 +31,7 @@ spec-046 Decision 2):
   builder submodule set to a ``None`` sentinel, pinning the split actionable error
   shapes.
 
-Transport ownership after spec-046: the router no longer serves GraphQL over
+Transport ownership (spec-046): the router serves no GraphQL over
 HTTP, so ``HttpCommunicator`` here proves *delegation* - every HTTP path reaches
 the supplied Django ASGI application untouched. The request contract, the
 schema pass-through with extensions intact, and the authenticated-session round
@@ -809,11 +809,11 @@ def _ws_communicator(
     """Build a handshake-ready ``WebsocketCommunicator`` for the WS branch.
 
     An optional ``cookie`` rides the handshake headers, which is how a real
-    session reaches ``AuthMiddlewareStack`` now that the HTTP branch no longer
-    carries one. Separate from ``_open_ws`` because the pre-``connection_init``
+    session reaches ``AuthMiddlewareStack``; the HTTP branch carries
+    none. Separate from ``_open_ws`` because the pre-``connection_init``
     row must drive the socket without the init/ack exchange.
 
-    Both a ``Host`` and an ``Origin`` header are supplied, because the branch now
+    Both a ``Host`` and an ``Origin`` header are supplied, because the branch
     carries two independent handshake checks (spec-046 Decision 19) and
     ``WebsocketCommunicator`` synthesizes neither header nor a ``scope["server"]``.
     ``testserver`` satisfies both: pytest-django's test environment appends it to
@@ -1608,7 +1608,7 @@ def test_construction_rejects_an_omitted_or_unusable_django_application() -> Non
     binding, naming the parameter. Explicit ``None`` (what an asgi.py written for
     the removed consumer-served HTTP mode still passes) and any non-callable get
     the prose instead, naming all
-    three facts Error shapes requires: the security reason the old mode was
+    three facts Error shapes requires: the security reason that mode is
     unsafe, that the mode is REMOVED rather than flagged, and both halves of the
     two-place repair. The message substrings are
     deliberately RE-TYPED rather than imported from the module: asserting the
@@ -1746,12 +1746,11 @@ def test_the_declared_router_constructor_matches_the_runtime_one() -> None:
 def test_websocket_branch_wraps_origin_validator_outside_the_auth_stack() -> None:
     """``AllowedHostsOriginValidator`` OUTSIDE ``AuthMiddlewareStack`` on WS only.
 
-    Both original assertions are preserved verbatim (the origin validator sits
-    outside the auth stack; the ``"http"`` value is no ``OriginValidator``); the
-    walk gains ONE outer layer, the package's own Host validator (spec-046
-    Decision 19, Decision 13 #"gains an outer layer"). Nothing is weakened: the
-    origin validator's position relative to the auth stack is still what the
-    middle unwrap asserts.
+    The origin validator sits outside the auth stack, and the ``"http"`` value
+    is no ``OriginValidator``; the walk crosses ONE outer layer, the package's own
+    Host validator (spec-046 Decision 19, Decision 13 #"gains an outer layer"). The
+    middle unwrap asserts the origin validator's position relative to the auth
+    stack.
 
     Fakeshop has no ``config/asgi.py`` or WebSocket mount (rungs 1-3). Live HTTP
     sibling: ``examples/fakeshop/test_query/test_transport_api.py``.
@@ -1768,7 +1767,7 @@ def test_websocket_branch_wraps_origin_validator_outside_the_auth_stack() -> Non
 
 
 def test_custom_websocket_url_pattern_reaches_only_the_websocket_re_path() -> None:
-    """Spec-046 row 11, structural half: the pattern is WebSocket-only now.
+    """Spec-046 row 11, structural half: the pattern is WebSocket-only.
 
     ``websocket_url_pattern=`` governs one branch; the HTTP value stays the
     identical supplied object, because HTTP path matching belongs entirely to
@@ -2129,10 +2128,9 @@ def test_a_factory_returning_a_non_application_fails_at_construction(
 ) -> None:
     """The factory's RESULT is validated before mounting.
 
-    Before this row the router mounted whatever the factory handed back, so a
-    ``None`` or a scalar became a URL route callback and the first matching
-    handshake failed deep inside Channels' routing with no mention of the seam.
-    The rejection now happens at construction and names both the factory and the
+    Mounted unvalidated, a ``None`` or a scalar would become a URL route callback
+    and the first matching handshake would fail deep inside Channels' routing with
+    no mention of the seam. The rejection happens at construction and names both the factory and the
     received value, which are the two things a migrant needs.
 
     The last row is a value whose ``repr`` cannot be rendered at all: CPython
@@ -2605,9 +2603,8 @@ def test_the_two_new_websocket_keywords_are_keyword_only() -> None:
 async def test_http_branch_delegates_every_path_to_the_supplied_application() -> None:
     """Spec-046 Decision 13: HTTP is delegation, for GraphQL paths too.
 
-    The merge of the old GraphQL-round-trip and non-GraphQL-fallback tests. Both
-    a well-formed GraphQL POST at ``/graphql`` and an unrelated ``/admin/login/``
-    GET reach the supplied application, which records each path and answers its
+    Both a well-formed GraphQL POST at ``/graphql`` and an unrelated
+    ``/admin/login/`` GET reach the supplied application, which records each path and answers its
     own ``418``. No package route intercepts either - which is the whole content
     of Decision 2 on the HTTP side.
 
@@ -3038,13 +3035,13 @@ async def test_the_websocket_host_and_origin_checks_are_independent(
     *,
     expected_connected: bool,
 ) -> None:
-    """The direction the shipped suite never supplied.
+    """An allowed ``Origin`` never stands in for an allowed ``Host``.
 
-    An allowed ``Origin`` with a hostile ``Host`` is the row that was missing, and
-    it is the row that failed before spec-046 Decision 19: ``OriginValidator`` loops the
-    scope headers for ``b"origin"`` and never looks at ``Host``, so the handshake
-    connected. Its converse (allowed ``Host``, hostile or missing ``Origin``) and
-    the both-allowed control are here too, so neither check can be shown to be
+    An allowed ``Origin`` with a hostile ``Host`` is the row ``OriginValidator``
+    alone cannot refuse (spec-046 Decision 19): it loops the scope headers for
+    ``b"origin"`` and never looks at ``Host``, so the handshake would connect. Its
+    converse (allowed ``Host``, hostile or missing ``Origin``) and the both-allowed control are
+    here too, so neither check can be shown to be
     doing the other's work - passing one has never substituted for passing the
     other.
 
@@ -3894,7 +3891,7 @@ def test_degraded_partial_install_raises_the_split_actionable_errors(
 # ---------------------------------------------------------------------------
 # Channels-present: the package request contract over WebSocket
 #
-# The HTTP colour of the request-adapter contract is gone with the transport
+# The request-adapter contract has no HTTP colour
 # (spec-046 Decision 2 - "the Channels request adapter is now a WebSocket-only
 # shape"). ``ChannelsRequestAdapter.__getattr__``'s delegated read and
 # ``_channels_scope``'s ``consumer.scope`` HTTP duck shape stay covered at the
@@ -3932,8 +3929,8 @@ async def test_authenticated_session_round_trip_reaches_the_resolver() -> None:
     since ``AuthMiddlewareStack`` resolves the user on the event loop's executor
     thread); the resolver then sees the AUTHENTICATED user, not ``AnonymousUser``
     - what actually earns the "session user on the scope" claim.
-    The mint itself now lives at module level (``_make_user_and_session``), where
-    the revalidation rows share it; the assertions are unchanged.
+    The mint lives at module level (``_make_user_and_session``), where the
+    revalidation rows share it.
 
     Fakeshop has no ``config/asgi.py`` or WebSocket mount (rungs 1-3). Live HTTP
     sibling: ``examples/fakeshop/test_query/test_transport_api.py``.
@@ -4328,11 +4325,11 @@ async def test_a_subscribe_before_connection_init_is_closed_by_upstream_without_
 async def test_revalidation_resolves_its_session_store_outside_the_opt_in_auth_package() -> None:
     """The revalidation does not import the auth subsystem.
 
-    ``auth/__init__.py`` eagerly imports ``.mutations`` and ``.queries``, so the
-    old ``from .auth.sessions import session_store_class`` made the FIRST
+    ``auth/__init__.py`` eagerly imports ``.mutations`` and ``.queries``, so reading
+    ``session_store_class`` from ``.auth.sessions`` would make the FIRST
     authenticated operation on ANY socket import and register the whole opt-in
     GraphQL auth surface on the event loop - to read one settings string. The
-    resolver now lives in ``utils/sessions.py``.
+    resolver lives in ``utils/sessions.py``.
 
     Strict eviction is what makes the row provable rather than incidental: under
     ``--dist loadscope`` a worker that already ran ``tests/auth/`` has those
@@ -6167,7 +6164,7 @@ class _UnrenderableFrame:
 async def test_a_streamed_value_the_policy_cannot_mask_reaches_the_transport_unchanged() -> None:
     """The masking shape gate passes an unmaskable frame through by IDENTITY.
 
-    The seam now covers ``schema.stream``, which yields more shapes than a
+    The seam covers ``schema.stream``, which yields more shapes than a
     subscription's events, and the failure this row exists to catch is a masking pass
     that "succeeds" on one of them. ``mask_execution_result`` fails CLOSED on a result
     whose errors it cannot read - by design - and its degraded value is an
@@ -6754,20 +6751,20 @@ async def test_the_default_zero_window_never_writes_a_revalidation_timestamp(
 # The exception-containment invariant has a THIRD half beside the two
 # revalidation checkpoints: no client-supplied FRAME may kill the connection
 # task. Both handlers' dispatch loops are upstream's own and carry no
-# containment, so before ``_contain_message_loop_failure`` a frame the
+# containment, so without ``_contain_message_loop_failure`` a frame the
 # dispatcher cannot shape - a JSON scalar or array instead of an object, an
 # unhashable operation id, a missing or non-mapping payload, a document nested
-# past the parser's stack budget - raised a raw TypeError/KeyError/RecursionError
-# out of the loop, killed the message-loop task, and left the socket OPEN with
+# past the parser's stack budget - would raise a raw TypeError/KeyError/RecursionError
+# out of the loop, kill the message-loop task, and leave the socket OPEN with
 # nothing reading it: a client-controlled dead connection, never closed, never
 # reclaimed.
 #
 # The rows below drive the LIVE router on BOTH subprotocols, and every one
-# asserts the two halves the defect had: the hostile frame is REFUSED with
+# asserts both halves of the containment: the hostile frame is REFUSED with
 # upstream's own invalid-message close, and the connection ENDS PROPERLY (the
 # close is actually written and the application task exits cleanly - the
 # teardown assertion is what distinguishes "refused" from "dead-but-open",
-# which was the bug).
+# the failure the containment prevents).
 #
 # Every live row here is a FRAME-SHAPE escape, which is why they all expect
 # ``4400``. The containment is general but its close is not: an escape that is
@@ -6944,10 +6941,10 @@ async def test_a_non_mapping_payload_is_refused_and_the_connection_ends_properly
 async def test_a_missing_payload_is_refused_per_protocol(subprotocol: str) -> None:
     """A missing payload field refuses the connection on BOTH protocols.
 
-    Before the containment the two protocols disagreed here: transport-ws's own
-    ``except KeyError`` turned a missing payload into its 4400 refusal, while the
-    legacy loop crashed with a raw ``KeyError('payload')`` and went silent. The
-    refusal is now the same shape on both.
+    Uncontained, the two protocols disagree here: transport-ws's own
+    ``except KeyError`` turns a missing payload into its 4400 refusal, while the
+    legacy loop would crash with a raw ``KeyError('payload')`` and go silent. The
+    containment gives the refusal the same shape on both.
 
     Fakeshop has no ``config/asgi.py`` or WebSocket mount (rungs 1-3). Live HTTP
     sibling: ``examples/fakeshop/test_query/test_transport_api.py``.

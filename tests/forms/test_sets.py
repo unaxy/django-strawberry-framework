@@ -96,9 +96,9 @@ from tests._info import unread_info
 
 @pytest.fixture(autouse=True)
 def _isolate_registry() -> Iterator[None]:
-    """Reset the registry (now co-clearing the form-input ledger + the plain-form registry).
+    """Reset the registry (co-clearing the form-input ledger + the plain-form registry).
 
-    ``registry.clear()`` is wired this slice to co-clear
+    ``registry.clear()`` co-clears
     ``clear_form_input_namespace`` (the form-input + form-payload globals ledger)
     and ``clear_form_mutation_registry`` (the plain-form declaration registry), so
     a single ``registry.clear()`` resets every form-side ledger (and the mutation
@@ -464,7 +464,7 @@ def test_modelform_unknown_meta_key_raises() -> None:
 
 
 def test_plain_form_model_key_is_unknown() -> None:
-    """``model`` is NOT an allowed plain-form key (it dropped from the form allowed set)."""
+    """``model`` is NOT an allowed plain-form key (the form allowed set omits it)."""
     form_cls = _contact_form()
     with pytest.raises(ConfigurationError, match="unknown keys"):
 

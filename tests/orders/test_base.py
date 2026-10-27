@@ -126,12 +126,12 @@ def test_related_order_imports_lazy_mixin_from_sets_mixins_not_filters_base() ->
 
 
 def test_meta_orderset_class_is_in_allowed_meta_keys() -> None:
-    """``"orderset_class"`` is now in ``ALLOWED_META_KEYS`` (spec-028)."""
+    """``"orderset_class"`` is in ``ALLOWED_META_KEYS`` (spec-028)."""
     assert "orderset_class" in ALLOWED_META_KEYS
 
 
 def test_meta_orderset_class_is_not_in_deferred_meta_keys() -> None:
-    """``"orderset_class"`` has been promoted out of ``DEFERRED_META_KEYS``."""
+    """``"orderset_class"`` is not in ``DEFERRED_META_KEYS``."""
     assert "orderset_class" not in DEFERRED_META_KEYS
 
 

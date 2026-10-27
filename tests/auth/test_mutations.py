@@ -1840,8 +1840,8 @@ def test_exclusion_seam_captures_password_and_preserves_the_provided_marker() ->
     assert "email" in exclude.checks
 
 
-def test_model_decode_step_without_exclusion_keeps_the_historical_three_tuple() -> None:
-    """The default no-exclusion call is byte-compatible with the model flavor."""
+def test_model_decode_step_without_exclusion_returns_a_three_tuple() -> None:
+    """The default no-exclusion call returns the model flavor's three-tuple."""
 
     @strawberry.input
     class ProbeInput:

@@ -3445,11 +3445,11 @@ def _query_marks(queryset: models.QuerySet[models.Model, object]) -> tuple[str, 
 def _legacy_reference_resolver(
     source_factory: Callable[[], models.QuerySet[library_models.Branch]],
 ) -> Callable[[strawberry.Info[object, object]], models.QuerySet[models.Model]]:
-    """The pre-card list pipeline, composed from shipped public primitives only.
+    """The reference list pipeline, composed from shipped public primitives only.
 
     Visibility through ``apply_type_visibility_sync`` and ONE ``bounded_rows`` call
-    with no client window - exactly what a no-argument list resolution did before
-    the argument surface existed. A test oracle, never a second pagination
+    with no client window - exactly a no-argument list resolution without the
+    argument surface. A test oracle, never a second pagination
     implementation: it records the final queryset's SQL and marks before returning.
     """
 
@@ -3466,7 +3466,7 @@ def _legacy_reference_resolver(
 def _build_current_parity_schema(
     source_factory: Callable[[], models.QuerySet[library_models.Branch]],
 ) -> DjangoSchema:
-    """The card's field, published under the GraphQL name ``branches``."""
+    """The shipped ``DjangoListField``, published under the GraphQL name ``branches``."""
 
     @strawberry.type
     class _CurrentParityQuery:
@@ -3486,14 +3486,14 @@ def _build_current_parity_schema(
 def _build_legacy_parity_schema(
     source_factory: Callable[[], models.QuerySet[library_models.Branch]],
 ) -> DjangoSchema:
-    """The pre-card reference resolver, published under the SAME GraphQL name.
+    """The reference resolver, published under the SAME GraphQL name.
 
     Two schemas rather than two fields in one: the response-byte claim is about
     a request envelope that cannot tell the two apart, and a differently named
     field would make the bytes differ for a reason that has nothing to do with
     the pipeline. Both parity schemas carry the optimizer extension the project
     schema carries, because column planning is what the SQL comparison would
-    otherwise trip over - and the pre-card pipeline shipped with it too.
+    otherwise trip over - and the reference pipeline runs with it too.
     """
 
     @strawberry.type
@@ -3585,7 +3585,7 @@ def _parity_run(
     return response, branch_sql, counters["visibility"]
 
 
-#: The reference envelope's own spelling, and the one the card promises is the
+#: The reference envelope's own spelling, and the one the argument surface promises is the
 #: same request. Each is compared against the SAME legacy reference, so each
 #: owns a node rather than sharing one that stops at the first divergence.
 _PARITY_OMITTED = "{ branches { id name } }"
@@ -3614,10 +3614,10 @@ class _RowsParityOracle(_ParityOracle):
 def _legacy_branch_oracle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[dict[str, int], DjangoSchema, _RowsParityOracle]:
-    """Seed the rows, run the pre-card reference, and hand back its every claim.
+    """Seed the rows, run the reference pipeline, and hand back its every claim.
 
     The oracle is a test-local legacy schema publishing the same ``branches``
-    field name, composed from the shipped primitives the old pipeline used, so
+    field name, composed from the shipped primitives the reference pipeline uses, so
     the same request envelope reaches both and the raw response BYTES can be
     compared. Built inside each node: a reference shared across nodes would make
     one row's failure another row's fixture error.
@@ -3664,7 +3664,7 @@ def test_branches_a_null_spelling_reproduces_the_legacy_reference_bytes(
     query: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Omitted and all-null arguments reproduce the PRE-CARD pipeline, not merely each other.
+    """Omitted and all-null arguments reproduce the REFERENCE pipeline, not merely each other.
 
     The all-null form is compared against the legacy OMITTED response because
     that is precisely the claim: the two spellings are the same request. Behind
@@ -3724,7 +3724,7 @@ def _combined_branch_oracle(
     monkeypatch: pytest.MonkeyPatch,
     client: Client,
 ) -> tuple[dict[str, int], DjangoSchema, _ParityOracle]:
-    """Run the pre-card reference over a union source and hand back its every claim.
+    """Run the reference pipeline over a union source and hand back its every claim.
 
     Both schemas publish the same ``branches`` field name over the same source
     factory, so the oracle is the legacy response's RAW BYTES - the two rows,
@@ -3782,7 +3782,7 @@ def test_holder_branches_a_combined_legacy_spelling_matches_the_reference(
     query: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The combined-source legacy branch is held to the pre-card oracle, not to "no new error"."""
+    """The combined-source legacy branch is held to the reference oracle, not to "no new error"."""
     client = _staff_client()
     counters, current_schema, oracle = _combined_branch_oracle(monkeypatch, client)
 

@@ -155,7 +155,7 @@ class _MarkerExtension(SchemaExtension):
     """A consumer extension that records itself when its operation begins.
 
     What the membership rows ask is which extensions RUN the next operation, and
-    a consumer extension is the honest subject for that question now that
+    a consumer extension is the honest subject for that question, since
     neither enforcement authority is an entry. The mark is the observation.
     """
 

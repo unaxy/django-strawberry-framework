@@ -500,8 +500,8 @@ def test_filter_cards_by_own_pk_relay_id_isnull_coerces_boolean() -> None:
     ``GlobalIDFilter``, which typed ``isNull`` as ``String`` so
     ``id: { isNull: true }`` failed coercion ("String cannot represent a non
     string value: true"). A PK is never null: ``isNull: false`` matches every
-    card and ``isNull: true`` matches none. (Ordering / pattern lookups are now
-    dropped from a Relay PK's surface rather than emitted as corrupt strings.)
+    card and ``isNull: true`` matches none. (A Relay PK's surface carries no
+    ordering / pattern lookups.)
     """
     _seed_board()
     _assert_graphql_data(
@@ -522,7 +522,7 @@ def test_filter_cards_by_own_pk_relay_id_isnull_coerces_boolean() -> None:
 def test_filter_non_relay_card_items_by_plain_integer_id_exact() -> None:
     """Non-Relay int PK ``id: { exact: <int> }`` accepts an Int.
 
-    Companion to the ``id: { in: [...] }`` case: the scalar catch-all now uses
+    Companion to the ``id: { in: [...] }`` case: the scalar catch-all uses
     the ``AutoField`` model field (-> ``Int``) as the source of truth instead
     of django-filter's ``NumberFilter`` form field (a ``DecimalField`` ->
     ``Decimal``). Filtering by a plain integer returns the matching item.
@@ -1530,7 +1530,7 @@ def test_kanban_card_order_input_type_exposes_only_column_backed_all_fields() ->
             field_type = json_object(field_type, "ofType")
         assert field_type["name"] == "Ordering"
 
-    # ``milestone`` is now a derived property (no column), so it is absent from
+    # ``milestone`` is a derived property (no column), so it is absent from
     # the order-input surface alongside the reverse/M2M/property fields.
     assert {
         "milestone",

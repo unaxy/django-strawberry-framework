@@ -243,8 +243,8 @@ def test_meta_interfaces_end_to_end_accepted_in_validate_meta() -> None:
     """End-to-end ``class Meta: interfaces = (relay.Node,)`` flows through ``_validate_meta``.
 
     ``"interfaces"`` sits in ``ALLOWED_META_KEYS`` rather than
-    ``DEFERRED_META_KEYS``, so the deferred-key check no longer
-    short-circuits the validator. This test pins that the full
+    ``DEFERRED_META_KEYS``, so the deferred-key check does not
+    short-circuit the validator. This test pins that the full
     ``__init_subclass__`` path accepts the declaration and stores the
     normalized tuple on ``DjangoTypeDefinition``.
     """
@@ -524,9 +524,9 @@ def test_extended_node_interface_subclass_suppresses_id_annotation() -> None:
 def test_non_relay_type_keeps_id_int() -> None:
     """Without ``relay.Node`` declared, the synthesized ``id: int`` is preserved.
 
-    Regression guard for the suppression branch: a future drift that
-    accidentally strips ``id`` for non-Relay types must surface here. The
-    ``interfaces=()`` default is the ``0.0.4``-identical path.
+    Guards the suppression branch: a drift that strips ``id`` for non-Relay
+    types must surface here. The ``interfaces=()`` default keeps the plain
+    synthesized ``id: int``.
     """
     fields = tuple(Category._meta.get_fields())
 
@@ -689,9 +689,9 @@ def test_resolve_node_accepts_strawberry_positional_call_shape() -> None:
 
     Pins the bound signature of the ``resolve_node`` default: Strawberry's
     Relay machinery passes ``node_id`` positionally and ``info`` as a
-    keyword. With the corrected signature ``(cls, node_id, *, info,
-    required=False)`` this call shape lands correctly; with the previous
-    ``(cls, info, node_id, ...)`` shape Python raised ``TypeError: got
+    keyword. With the signature ``(cls, node_id, *, info,
+    required=False)`` this call shape lands correctly; a
+    ``(cls, info, node_id, ...)`` shape would make Python raise ``TypeError: got
     multiple values for argument 'info'``.
     """
     services.seed_data(1)
@@ -1594,8 +1594,8 @@ def test_model_for_returns_registered_model() -> None:
     Pins the single-source-of-truth contract for the
     ``cls.__django_strawberry_definition__.model`` lookup that
     ``install_is_type_of``, ``_check_composite_pk_for_relay_node``,
-    ``_order_nodes``, and ``initial_queryset`` all share now that the helper
-    lives in ``utils/querysets.py``. A divergence between the helper and the
+    ``_order_nodes``, and ``initial_queryset`` all share through the helper in
+    ``utils/querysets.py``. A divergence between the helper and the
     direct attribute read would surface here.
     """
 
@@ -1779,9 +1779,9 @@ def test_direct_relay_node_inheritance_injects_resolvers_and_suppresses_id() -> 
     Direct ``relay.Node`` inheritance must not bypass Relay finalization: Phase 2.5
     must run the composite-pk gate and the four ``resolve_*`` defaults
     for every class whose resolved MRO includes ``relay.Node``, not only
-    for classes with a non-empty ``Meta.interfaces`` tuple. Without this
-    fix the consumer's class still inherits ``relay.Node``'s defaults
-    (which call into Strawberry's GlobalID encoder) but never receives
+    for classes with a non-empty ``Meta.interfaces`` tuple. Otherwise the
+    consumer's class would inherit ``relay.Node``'s defaults
+    (which call into Strawberry's GlobalID encoder) but never receive
     the framework's ``get_queryset``-aware overrides.
     """
     services.seed_data(1)
@@ -1956,7 +1956,7 @@ def test_globalid_model_strategy_emits_model_label() -> None:
 
 
 def test_globalid_type_strategy_emits_graphql_type_name() -> None:
-    """``type`` reproduces the pre-0.0.9 payload byte-identically (framework installs nothing)."""
+    """``type`` emits Strawberry's own type-name payload (framework installs nothing)."""
     node_default = relay.Node.resolve_typename.__func__
 
     class CategoryNode(DjangoType):
@@ -1970,7 +1970,7 @@ def test_globalid_type_strategy_emits_graphql_type_name() -> None:
     assert _definition_of(CategoryNode).effective_globalid_strategy == "type"
     # No closure was installed: ``resolve_typename`` is still Strawberry's
     # default (returns ``info.path.typename`` == the GraphQL type name), so the
-    # emitted slot is byte-identical to pre-0.0.9.
+    # emitted slot is Strawberry's own.
     assert implements_relay_node(CategoryNode)
     assert CategoryNode.resolve_typename.__func__ is node_default
     assert _definition_of(CategoryNode).graphql_type_name == "CategoryNode"
@@ -2252,8 +2252,8 @@ def test_model_label_secondary_collapse_warns_and_routes_to_primary(
     secondary's emitted ID decodes to the primary type.
 
     This pins the spec-031 Decision 8 / KANBAN DoD claim that multiple-DjangoType
-    behavior is *pinned*: model-label IDs route through the primary. Under the
-    pre-``0.0.9`` type-name default these two types had distinct, self-routing
+    behavior is *pinned*: model-label IDs route through the primary. Under a
+    type-name strategy these two types would have distinct, self-routing
     IDs; the model-label default collapses the secondary onto the primary, and the
     finalizer surfaces that silently-lossy config as a warning naming the
     offending secondary, the primary, and the ``type`` opt-out.
@@ -2902,7 +2902,7 @@ def test_setting_read_and_validated_once_per_finalize(
     ``types/relay.py`` binds it) and
     ``types/base.py::_validate_globalid_strategy`` (the two collaborators of
     ``_validated_globalid_setting``), installed AFTER the type bodies run so only
-    the finalization pass is measured. The prior read-per-defaulted-type design
+    the finalization pass is measured. A read per defaulted type
     would score N of each.
     """
     settings.DJANGO_STRAWBERRY_FRAMEWORK = {"RELAY_GLOBALID_STRATEGY": "type"}
@@ -3144,9 +3144,9 @@ def test_type_plus_model_decodes_both() -> None:
             globalid_strategy = "type+model"
 
     finalize_django_types()
-    # New model-anchored ID (what ``type+model`` now emits).
+    # The model-anchored ID ``type+model`` emits.
     assert decode_global_id(relay.GlobalID("products.category", "1")) == (CategoryNode, "1")
-    # Old type-anchored ID (still decodes during the transitional window).
+    # The type-anchored ID decodes too (the transitional window).
     assert decode_global_id(relay.GlobalID("CategoryNode", "1")) == (CategoryNode, "1")
 
 

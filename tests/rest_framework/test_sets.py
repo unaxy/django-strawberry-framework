@@ -21,7 +21,7 @@ Covers ``django_strawberry_framework/rest_framework/sets.py``:
   reset via ``register_subsystem_clear``, not a per-pass clear);
 - the ``build_input`` create-required guard (the guard fires through ``build_input``
   at finalize when a required writable field is narrowed away on create; a
-  ``get_serializer_kwargs`` override no longer waives it - ``Meta.injected_fields``
+  ``get_serializer_kwargs`` override does not waive it - ``Meta.injected_fields``
   is the only subtraction; and - the load-bearing per-declaration property - an
   injecting declaration that materializes a narrowed shape FIRST does NOT poison
   the per-shape build cache for a later non-injecting declaration over the same
@@ -31,7 +31,7 @@ Covers ``django_strawberry_framework/rest_framework/sets.py``:
   grouped column binds whether the column is read as ``str`` or not at all, an auto-generated
   one is refused (it would take the read enum), and a declared value the column does not list
   is refused over a grouped or a flat column whatever reads it;
-- the model-flavor seam defaults unchanged (the base is unregressed).
+- the model-flavor seam defaults (the model base keeps its allowed keys and binds).
 
 System-under-test is the base / validation / bind, run against the products
 ``Item`` / ``Category`` FK fixtures + package-local ``ModelSerializer`` fixtures.
@@ -136,7 +136,7 @@ if TYPE_CHECKING:
 def _isolate_registry() -> Iterator[None]:
     """Reset the registry (co-clearing the serializer-input ledger via the seam).
 
-    ``registry.clear()`` is wired this slice to iterate the
+    ``registry.clear()`` iterates the
     ``register_subsystem_clear`` list, which includes the serializer input ledger,
     plus the serializer shape-cache reset. The products ``DjangoType``s register on
     import, so the clear is needed before/after.
@@ -376,7 +376,7 @@ def test_optional_fields_bare_string_rejected_at_class_creation() -> None:
 
 
 def test_unknown_meta_key_raises() -> None:
-    """A stray ``Meta`` key raises the promoted typo guard."""
+    """A stray ``Meta`` key raises the typo guard."""
     serializer_cls = _item_serializer()
     with pytest.raises(ConfigurationError, match="unknown keys"):
 
@@ -389,7 +389,7 @@ def test_unknown_meta_key_raises() -> None:
 
 
 def test_model_key_is_unknown() -> None:
-    """``model`` is NOT an allowed serializer key (it dropped from the serializer allowed set)."""
+    """``model`` is NOT an allowed serializer key (the serializer allowed set omits it)."""
     serializer_cls = _item_serializer()
     with pytest.raises(ConfigurationError, match="unknown keys"):
 
@@ -869,8 +869,8 @@ def test_declared_choice_value_the_column_does_not_list_fails_finalize(
     )
 
 
-def test_get_serializer_kwargs_override_no_longer_waives_create_required_guard() -> None:
-    """Overriding ``get_serializer_kwargs`` does NOT waive the create-required guard (hardened).
+def test_get_serializer_kwargs_override_does_not_waive_create_required_guard() -> None:
+    """Overriding ``get_serializer_kwargs`` does NOT waive the create-required guard.
 
     A waiver keyed on the override would let a constructor hook silently own required-field
     coverage. The same narrowed shape that raises without an override still raises WITH one;
@@ -961,7 +961,7 @@ def test_build_input_runs_required_guard_per_declaration() -> None:
 
 
 def test_meta_injected_field_still_in_input_raises_at_class_creation() -> None:
-    """An injected field still present in the generated GraphQL input fails loud (hardened).
+    """An injected field still present in the generated GraphQL input fails loud.
 
     An injected field is server-supplied by definition; leaving it in the input would make
     the client's value and the hook's value compete for one serializer key, so the overlap
@@ -1227,7 +1227,7 @@ def _dup_source_serializer() -> type[ModelSerializerBase[product_models.Item]]:
 
 
 def test_duplicate_source_across_input_and_injected_raises_at_class_creation() -> None:
-    """A client input field and an injected field binding ONE source fail loud (hardened).
+    """A client input field and an injected field binding ONE source fail loud.
 
     The name-disjointness check cannot see a ``source=`` alias: two differently-named
     fields feeding the same model attribute make DRF's ``to_internal_value``
@@ -1774,8 +1774,7 @@ def _input_fields(input_cls: type) -> dict[str, StrawberryField]:
 def test_serializer_meta_optional_fields_is_not_the_public_api() -> None:
     """``optional_fields`` on the SERIALIZER's own ``Meta`` is IGNORED at bind.
 
-    The masking the original implementation relied on: the spec documents
-    ``optional_fields`` on the MUTATION's ``Meta``, so a serializer-level key must have
+    The spec documents ``optional_fields`` on the MUTATION's ``Meta``, so a serializer-level key must have
     NO effect on the generated input.
     """
     _declare_products_primaries()
@@ -2272,15 +2271,13 @@ def test_input_field_name_check_reads_the_base_str_slot() -> None:
 
 # NOTE: the same-serializer hook-shape collision (two mutations over one serializer whose
 # hooks return the same field names with different relation targets must finalize to
-# DISTINCT descriptor-derived names, not collide on the canonical one) is now earned LIVE
+# DISTINCT descriptor-derived names, not collide on the canonical one) is earned LIVE
 # over ``/graphql/`` per the ``test_query`` live-first rule, by
 # ``examples/fakeshop/test_query/test_library_api.py``
 # ``::test_serializer_hook_same_serializer_different_targets_distinct_inputs_and_decode_over_http``
 # (``TargetedShelfSerializer`` + two hooks pointing a shared WRITE-ONLY ``target`` at
-# different models, which also pins the differentiating runtime relation decode). The former
-# package-only finalize-level ``test_hook_varied_relation_targets_bind_to_distinct_input_names``
-# was retired with that promotion; the surgical pure-function name derivation it leaned on
-# stays unit-tested by
+# different models, which also pins the differentiating runtime relation decode). The
+# pure-function name derivation it leans on is unit-tested by
 # ``tests/rest_framework/test_inputs.py::test_descriptor_name_distinguishes_relation_target_model``.
 
 
@@ -2315,9 +2312,9 @@ def test_subclass_redefining_serializer_validates_against_child_serializer() -> 
             operation = "create"
 
     # The subclass redefines serializer_class to ItemSer and names ``category`` - an
-    # ItemSer field that is NOT a CategorySer field. Under the inherited-snapshot bug the
-    # default hook would read the parent (Category) field set and reject ``category`` as
-    # unknown at THIS class's creation; the fix validates against the child serializer.
+    # ItemSer field that is NOT a CategorySer field. Validated against the inherited snapshot,
+    # the default hook would read the parent (Category) field set and reject ``category`` as
+    # unknown at THIS class's creation; validation runs against the child serializer.
     class CreateItemViaSubclass(CreateCategory):
         # basedpyright: DjangoMutation's metaclass reads only the class body's own ``Meta``; the
         # child declares a fresh one, never a subclass of the parent's
@@ -2354,14 +2351,14 @@ def test_default_schema_hook_uses_frozen_serializer_snapshot() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Base unregressed (the model flavor seam defaults unchanged)
+# Model-flavor base (the model flavor seam defaults)
 # ---------------------------------------------------------------------------
 
 
-def test_model_flavor_base_unregressed() -> None:
-    """A model-flavor ``DjangoMutation`` still validates + binds; the allowed-key set is unchanged."""
-    # The model allowed-key set gained only the shared ``select_for_update``
-    # (0.0.14 concurrency hardening); no serializer-only keys leaked in.
+def test_model_flavor_base_keeps_its_allowed_keys_and_binds() -> None:
+    """A model-flavor ``DjangoMutation`` validates + binds over its own allowed-key set."""
+    # The model allowed-key set holds the shared ``select_for_update`` (row locking)
+    # and no serializer-only key.
     assert (
         frozenset(
             {
@@ -2387,15 +2384,15 @@ def test_model_flavor_base_unregressed() -> None:
 
     # The model flavor still accepts "delete" (the broader _VALID_OPERATIONS set).
     assert DeleteItem._mutation_meta.operation == "delete"
-    assert DeleteItem._mutation_meta.serializer_class is None  # net-new slot left None
+    assert DeleteItem._mutation_meta.serializer_class is None  # the serializer slot stays None
     finalize_django_types()
     assert registry.is_finalized() is True
 
 
-def test_deferred_and_allowed_meta_keys_unchanged() -> None:
-    """``types/base.py``'s ``DEFERRED_META_KEYS`` / ``ALLOWED_META_KEYS`` are untouched (Decision 6)."""
+def test_djangotype_meta_key_sets_carry_no_serializer_mutation_key() -> None:
+    """``types/base.py``'s ``ALLOWED_META_KEYS`` carries no serializer-mutation key (Decision 6)."""
     # A serializer-mutation Meta is its OWN validation namespace; the DjangoType
-    # Meta sets are not extended by this slice.
+    # Meta sets carry none of its keys.
     assert "serializer_class" not in types_base.ALLOWED_META_KEYS
     assert "operation" not in types_base.ALLOWED_META_KEYS
 
@@ -2406,7 +2403,7 @@ def test_deferred_and_allowed_meta_keys_unchanged() -> None:
 
 
 def test_nondeterministic_schema_hook_raises_at_bind() -> None:
-    """A ``get_serializer_for_schema()`` that DRIFTS between class validation and bind fails loud (#10)."""
+    """A ``get_serializer_for_schema()`` that DRIFTS between class validation and bind fails loud."""
     _declare_products_primaries()
     serializer_cls = _item_serializer()
     drift = {"drop": False}
@@ -3056,10 +3053,10 @@ def test_narrowed_away_writable_nested_not_fingerprinted() -> None:
 def test_unopted_writable_nested_reports_opt_in_error_not_materialization() -> None:
     """An UNOPTED writable nested child that raises from ``get_fields()`` reports the opt-in error.
 
-    The prior fingerprint descended into EVERY writable nested serializer, so an unopted,
-    context-sensitive child raised a misleading "opted in via Meta.nested_fields..."
+    A fingerprint that descended into EVERY writable nested serializer would make an unopted,
+    context-sensitive child raise a misleading "opted in via Meta.nested_fields..."
     materialization error at class validation - shadowing the canonical opt-in error. The
-    fingerprint is now gated on ``Meta.nested_fields`` (the opt-in tree): an unopted nested field
+    fingerprint is gated on ``Meta.nested_fields`` (the opt-in tree): an unopted nested field
     is a shallow marker, so class creation succeeds and the phase-2.5 bind's field walk raises the
     canonical opt-in error instead.
     """

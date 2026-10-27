@@ -86,8 +86,8 @@ def _png_bytes() -> bytes:
 
 
 def _introspect_type(name: str, selection: str) -> JSONObject:
-    # ``assert_no_errors=True`` (the TestClient default) replaces the old
-    # hand-rolled "errors" not-in-body assertion.
+    # ``assert_no_errors=True`` (the TestClient default) asserts the body
+    # carries no "errors".
     res = TestClient().query(f'query {{ __type(name: "{name}") {{ {selection} }} }}')
     assert res.response.status_code == 200
     assert res.data is not None

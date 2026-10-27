@@ -175,7 +175,7 @@ def _make_non_relay_target() -> tuple[type[library_models.Branch], type[DjangoTy
 
 
 def test_inputs_module_path_and_kind_constants() -> None:
-    """The hoisted constants match the expected module path and create-shaped kinds."""
+    """The module constants match the expected module path and create-shaped kinds."""
     assert INPUTS_MODULE_PATH == "django_strawberry_framework.forms.inputs"
     assert frozenset({CREATE, FORM}) == CREATE_SHAPED_KINDS
 

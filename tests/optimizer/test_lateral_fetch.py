@@ -186,8 +186,7 @@ def test_lateral_spec_rejects_engaged_probe_with_count() -> None:
     ``LateralWindowSpec`` that engages the count-free probe while also annotating
     the count raises ``OptimizerError``, so the raw-SQL backend cannot develop a
     different fetch-mode contract. Built by flipping ``with_total_count`` on a
-    real count-free probe spec (a bad request can no longer reach the spec - the
-    request guards first).
+    real count-free probe spec.
     """
     probe_spec = _build_lateral_spec(
         _shelf_books_request(with_total_count=False, next_page_probe=True),
@@ -292,7 +291,7 @@ def test_spec_carries_single_table_visibility_where(child_queryset: models.Query
     """A DIRECT_FK single-table plain-column scope rides the spec.
 
     The common anonymous-traffic shape: a target-type ``get_queryset``
-    ``exclude``/``filter`` on a base column no longer downgrades - it is cloned
+    ``exclude``/``filter`` on a base column does not downgrade - it is cloned
     onto ``visibility_where`` for fetch-time compilation and splicing. The clone
     is independent of the request queryset (a later mutation cannot reach it).
     """

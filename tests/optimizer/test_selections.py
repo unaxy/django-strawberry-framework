@@ -579,7 +579,7 @@ def _info_with_converter(converter: object) -> SimpleNamespace:
 
 
 def test_connection_field_names_default_converter_is_camel_case() -> None:
-    """Strawberry's default converter yields the historical camelCase vocabulary."""
+    """Strawberry's default converter yields the camelCase vocabulary."""
     names = connection_field_names(_info_with_converter(NameConverter()))
     assert names == DEFAULT_CONNECTION_FIELD_NAMES
     assert (names.page_info, names.total_count, names.has_next_page) == (
@@ -592,10 +592,10 @@ def test_connection_field_names_default_converter_is_camel_case() -> None:
 def test_connection_field_names_follow_auto_camel_case_disabled() -> None:
     """``auto_camel_case=False`` renders the snake_case field names, and we match those.
 
-    The defect this pins: matching the camelCase literals made both count
-    observers report "not selected" on such a schema, so the planner chose
-    ``FetchMode.NONE`` - ``hasNextPage`` resolved ``False`` on a page that had a
-    next page, and ``totalCount`` raised for an attribute the resolver never set.
+    Matching the camelCase literals would make both count observers report "not
+    selected" on such a schema, so the planner would choose ``FetchMode.NONE`` -
+    ``hasNextPage`` would resolve ``False`` on a page that has a next page, and
+    ``totalCount`` would raise for an attribute the resolver never set.
     """
     names = connection_field_names(_info_with_converter(NameConverter(auto_camel_case=False)))
     assert (names.edges, names.node) == ("edges", "node")

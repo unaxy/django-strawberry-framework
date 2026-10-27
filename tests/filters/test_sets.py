@@ -3640,8 +3640,8 @@ def test_generated_forward_fk_in_is_multiple_choice_over_fk_to_pk() -> None:
 
     The generated ``shelf__in`` leaf must be ``GlobalIDMultipleChoiceFilter`` with a
     ``list[str]`` input annotation, while the sibling ``shelf`` (exact) leaf stays the
-    scalar ``GlobalIDFilter`` -- proving the cardinality-selected non-``in`` shape is
-    byte-identical and only the lookup-aware ``in`` shape changed.
+    scalar ``GlobalIDFilter`` -- proving only the lookup-aware ``in`` shape is a list and
+    the cardinality-selected non-``in`` shape stays scalar.
     """
 
     class ShelfType(DjangoType):
@@ -4769,11 +4769,11 @@ def test_filter_for_field_keeps_generated_to_one_path_non_distinct() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Row-preserving relational predicates: raw-ORM oracle + cut-over correctness.
+# Row-preserving relational predicates: raw-ORM oracle + row-preserving correctness.
 #
 # The first test is the PERMANENT raw-ORM oracle documenting the JOIN + global
 # ``DISTINCT`` fan-out the row-preserving applicator avoids; the tests that
-# follow assert the post-cut-over row-preserving behavior (correlated EXISTS,
+# follow assert the row-preserving behavior (correlated EXISTS,
 # no framework-added ``DISTINCT``).
 # ---------------------------------------------------------------------------
 
@@ -5165,8 +5165,10 @@ def test_restrictive_empty_in_composes_as_exists_over_none() -> None:
 
 
 @pytest.mark.django_db
-def test_pre_snapshot_filterset_degrades_to_old_behavior(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A filterset with no expansion snapshot runs every leaf's original outer invocation.
+def test_pre_snapshot_filterset_runs_every_leaf_on_the_outer_queryset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A filterset with no expansion snapshot runs every leaf's plain outer invocation.
 
     The traversal ``genres__name__icontains`` walks no declared hop, so only its
     candidate row could route it. With the fail-closed pre-snapshot state forced
@@ -5209,7 +5211,7 @@ def test_not_branch_over_to_many_related_branch_is_row_preserving() -> None:
     Branch negation composes through the outer ``Q(pk__in=...)`` (``_q_for_branch``),
     never pushed inside a child queryset. A genre-name ``not`` branch over the
     reverse-M2M ``books`` relation returns exactly the genres NOT matching, each
-    once (row-preserving), which the cut-over must not disturb.
+    once (row-preserving), which the row-preserving applicator must not disturb.
     """
     branch = library_models.Branch.objects.create(name="Not Branch")
     shelf = library_models.Shelf.objects.create(branch=branch, code="NOT-1")
@@ -5382,11 +5384,11 @@ def test_qs_and_apply_sync_and_async_over_eligible_candidate() -> None:
     assert list(async_qs.values_list("pk", flat=True)) == [saved_pk(cardio)]
 
 
-# Row-preserving relational-predicate cut-over cases:
-# ``test_medtrics_ordered_sequence_baseline_freezes_fanout`` stays as the
+# Row-preserving relational-predicate cases:
+# ``test_medtrics_ordered_sequence_baseline_freezes_fanout`` is the
 # permanent raw-ORM fan-out oracle,
 # ``test_generated_deep_to_many_path_correctness_is_row_preserving`` and
-# ``test_flattened_related_filter_leaf_is_row_preserving`` now assert the
+# ``test_flattened_related_filter_leaf_is_row_preserving`` assert the
 # row-preserving production behavior against the permanent test-local oracle.
 #
 # ---------------------------------------------------------------------------
@@ -5405,7 +5407,7 @@ def test_qs_and_apply_sync_and_async_over_eligible_candidate() -> None:
 # Cases already proven by the row-preserving tests
 # (``test_generated_deep_to_many_path_correctness_is_row_preserving``,
 # ``test_flattened_related_filter_leaf_is_row_preserving``) and the adapter
-# tests are NOT re-added: forward M2M single-parent equivalence, the
+# tests are not repeated here: forward M2M single-parent equivalence, the
 # expanded-vs-root classification EXECUTION equivalence (matrix row 13, covered
 # by ``test_flattened_related_filter_leaf_is_row_preserving`` which compares the
 # expanded ``BookFilter`` ``genres__name`` leaf against its direct-invocation
@@ -5706,7 +5708,7 @@ def test_nullable_intermediate_to_one_hop_is_row_preserving() -> None:
 
 @pytest.mark.django_db
 def test_to_field_reverse_to_many_children_is_row_preserving() -> None:
-    """Matrix row 7 (``to_field`` FK-to-non-pk hop), now executable.
+    """Matrix row 7 (``to_field`` FK-to-non-pk hop) executes.
 
     ``Genre`` root over its reverse to-many ``favoring_profiles__postal_code`` --
     the hop whose join binds on the non-pk ``name`` column
@@ -6086,7 +6088,7 @@ def test_global_id_list_over_flat_relay_m2m_is_row_preserving() -> None:
 def test_untouched_surfaces_attach_no_reserved_alias() -> None:
     """Matrix row 12 (untouched surfaces): declared / method / custom / overrides.
 
-    Each ineligible surface must run today's unchanged path: no reserved
+    Each ineligible surface must run without the predicate rewrite: no reserved
     ``_dst_predicate_`` alias attaches, and the correct row is still returned. A
     ``distinct=True`` DECLARED filter keeps its own outer ``distinct``.
     """
@@ -7519,7 +7521,7 @@ def test_apply_sync_passes_constrained_queryset_to_filterset_instance() -> None:
     ) -> None:
         # Record the `queryset` kwarg every consumer-`FilterSet` subclass
         # receives during this call. The active `shelves` branch's
-        # visibility scoping now constructs the child `ShelfFilter` first
+        # visibility scoping constructs the child `ShelfFilter` first
         # (its `apply_sync` runs during `_derive_related_visibility_*`),
         # so the calls list interleaves child + parent constructions; the
         # test selects the parent (Branch-model) call by queryset model
@@ -7569,10 +7571,10 @@ def test_apply_sync_passes_constrained_queryset_to_filterset_instance() -> None:
 # Apply pipeline - filter_queryset tree-form logic
 #
 # The scalar ``and``/``or`` union/intersection contracts and the nested
-# malformed-subbranch validation contract moved to the live library API suite
-# (``examples/fakeshop/test_query/test_library_api.py``) under the live-first
+# malformed-subbranch validation contract are pinned in
+# ``examples/fakeshop/test_query/test_library_api.py`` under the live-first
 # coverage mandate: those behaviors are reachable through the real
-# ``BranchFilter``/``PatronFilter`` over ``/graphql/``, where the replacements
+# ``BranchFilter``/``PatronFilter`` over ``/graphql/``, where the live tests
 # also prove GraphQL input coercion, root visibility, and the HTTP error/data
 # envelope.
 # ---------------------------------------------------------------------------
@@ -8697,12 +8699,12 @@ def test_resolve_relation_target_type_returns_none_without_related_model() -> No
 def test_resolve_relation_target_type_registry_fallback_prefers_declared_primary() -> None:
     """The registry fallback resolves the declared primary when two types share a model.
 
-    Pins the consolidation contract relied upon at
+    Pins the contract relied upon at
     ``django_strawberry_framework/filters/sets.py``
     ``FilterSet._resolve_relation_target_type`` - the fallback is
-    ``target_type = registry.get(related_model)``, NOT the historical
+    ``target_type = registry.get(related_model)``, NOT a
     ``registry.primary_for(related_model) or registry.get(related_model)``
-    chain. The collapse is safe only because ``registry.get`` itself
+    chain. The single call is safe only because ``registry.get`` itself
     honors ``_primaries`` as its first return state; this test pins
     that end-to-end so a future change that breaks the primary-first
     rule in ``registry.get`` surfaces here before the Relay-aware
@@ -8740,8 +8742,8 @@ def test_target_type_for_related_filter_registry_fallback_prefers_declared_prima
     Twin of
     ``test_resolve_relation_target_type_registry_fallback_prefers_declared_primary``
     for ``FilterSet._target_type_for_related_filter``: with no bound child
-    owner the method resolves via ``registry.get(child_model)`` - NOT the
-    historical ``registry.primary_for(child_model) or registry.get(child_model)``
+    owner the method resolves via ``registry.get(child_model)`` - NOT a
+    ``registry.primary_for(child_model) or registry.get(child_model)``
     chain - so a shared-target primary wins here exactly as it does for every
     other plain-``get`` consumer.
     """
@@ -9658,7 +9660,7 @@ def test_derive_related_visibility_querysets_async_raises_for_unregistered_targe
 def test_iter_visibility_steps_yields_pre_await_tuple_for_active_branches() -> None:
     """``_iter_visibility_steps`` yields the shared pre-await state both derive methods consume.
 
-    Pins the consolidation: both
+    Pins the shared path: both
     ``_derive_related_visibility_querysets_sync`` and
     ``_derive_related_visibility_querysets_async`` route through the
     single ``_iter_visibility_steps`` classmethod, so the helper's
@@ -9737,13 +9739,13 @@ def test_apply_async_nested_or_branch_with_async_get_queryset_does_not_raise_syn
     ``apply_async`` pre-derives nested visibility, so a nested ``or_`` branch never
     reaches the sync derivation.
 
-    Before the Medium-#2 fix, ``_q_for_branch`` called
-    ``_derive_related_visibility_querysets_sync`` unconditionally, which
-    invokes ``apply_type_visibility_sync`` on the target type. A target whose
+    A ``_q_for_branch`` that called
+    ``_derive_related_visibility_querysets_sync`` unconditionally would
+    invoke ``apply_type_visibility_sync`` on the target type. A target whose
     ``get_queryset`` is ``async def`` returns a coroutine that
     ``apply_type_visibility_sync`` flags as ``SyncMisuseError``. The pre-walk
     in ``apply_async`` (``_collect_nested_visibility_querysets_async``)
-    now awaits every nested branch's visibility BEFORE the ``.qs`` read,
+    awaits every nested branch's visibility BEFORE the ``.qs`` read,
     and ``_q_for_branch`` consults the stash keyed by ``id(child_input)``
     instead of re-deriving sync.
     """
@@ -9810,9 +9812,9 @@ def test_apply_async_runs_permission_checks_off_event_loop_thread() -> None:
 
     Asserts the permission method observed a thread ident DIFFERENT from
     the event-loop thread ident -- which is what
-    ``sync_to_async(thread_sensitive=True)`` guarantees. Before the
-    Medium-#1 fix, ``_run_permission_checks`` ran inline on the event-loop
-    thread, so the two ident reads would have matched.
+    ``sync_to_async(thread_sensitive=True)`` guarantees. Run inline on the
+    event-loop thread, ``_run_permission_checks`` would make the two ident
+    reads match.
     """
     captured: dict[str, int] = {}
 
@@ -9962,7 +9964,7 @@ def test_lookups_for_field_returns_concrete_lookups_and_excludes_transforms() ->
 
 
 # ---------------------------------------------------------------------
-# Consolidation pins: ``FilterSet._iter_input_items``
+# Shared-walker pins: ``FilterSet._iter_input_items``
 # ---------------------------------------------------------------------
 #
 # Two sites (``_normalize_input``, ``_operator_bag_items``) route through a
@@ -10602,7 +10604,7 @@ def test_generation_provenance_declared_for_consumer_declared_filter() -> None:
 def test_generation_provenance_override_generated_for_meta_filter_overrides() -> None:
     """A leaf produced through ``Meta.filter_overrides`` is ``override_generated``.
 
-    The override must GENUINELY diverge from the package policy: ownership is now a
+    The override must GENUINELY diverge from the package policy: ownership is a
     normalized VALUE comparison, so a ``filter_overrides`` entry
     byte-equal to the package default (same ``filter_class``, no ``extra``) is
     framework-equivalent -- the generated filter would be identical to the package's own.
@@ -11222,7 +11224,7 @@ def test_expansion_snapshot_none_before_build_is_the_fail_closed_hook() -> None:
     # No ``get_filters`` build has cached a snapshot yet: the accessor is None,
     # so a filterset instantiated before its lazy targets resolve presents the
     # unexpanded surface and every flat name is absent from the (absent)
-    # mapping -- the adapter degrades to today's behavior.
+    # mapping -- the adapter runs every leaf's plain outer invocation.
     assert ShelfFilter._expansion_snapshot() is None
     assert BranchFilter._expansion_snapshot() is None
     instance = BranchFilter(
@@ -12150,8 +12152,8 @@ def test_routed_leaf_preserves_prefanned_multiplicity() -> None:
 # An ``extra``-only class-level ``FILTER_DEFAULTS`` shadow is
 # consumer-owned. A shadow that keeps the standard filter class but supplies its
 # own ``extra`` factory (restricted queryset, non-default ``to_field_name``, ...)
-# is a documented django-filter customization; whole-entry ownership now honors it
-# instead of discarding it under Relay conversion.
+# is a documented django-filter customization; whole-entry ownership honors it
+# rather than discarding it under Relay conversion.
 # ======================================================================
 
 
@@ -13441,7 +13443,7 @@ def test_exact_match_keeps_registered_subclass_and_base_distinct(
 ) -> None:
     """A registered subclass and its registered base resolve to their OWN profiles.
 
-    The retired "MRO most-specific" premise is gone: each is an exact registry key, so
+    No "MRO most-specific" lookup applies: each is an exact registry key, so
     ``_family_profile_for`` returns each one's own (distinct) profile by exact type.
     """
     assert issubclass(specific, base)

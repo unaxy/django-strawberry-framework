@@ -194,8 +194,8 @@ def test_after_with_first_stays_a_windowed_forward_offset() -> None:
     """``after`` + ``first`` keeps a windowed forward offset window (not unwindowable).
 
     The companion to the ``after`` + ``last`` rejection: a forward offset window
-    is fully expressible by ``SliceMetadata`` (``limit = expected``), so the fix
-    must NOT reject it - only the backward (``last``) offset shape is unwindowable.
+    is fully expressible by ``SliceMetadata`` (``limit = expected``), so the
+    rejection must NOT reach it - only the backward (``last``) offset shape is unwindowable.
     """
     after_cursor = to_base64("arrayconnection", "2")
     bounds = derive_connection_window_bounds(
@@ -847,8 +847,8 @@ def test_fetch_bounds_are_none_for_an_unbounded_window() -> None:
 def test_probe_composes_with_marker_but_never_with_count() -> None:
     """Probe and marker COMPOSE on the offset page; probe XOR count holds.
 
-    The whole design now rests on ``next_page_probe`` XOR ``with_total_count``
-    (the marker is a co-resident on the offset page, no longer a mutually-exclusive
+    The whole design rests on ``next_page_probe`` XOR ``with_total_count``
+    (the marker is a co-resident on the offset page, not a mutually-exclusive
     sibling): enforced across the window-shape input space, not merely asserted.
     On the plain first page the probe engages ALONE (no marker); on the bounded
     forward offset page it engages WITH the marker.

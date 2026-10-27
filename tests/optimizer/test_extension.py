@@ -2321,7 +2321,7 @@ def test_cache_key_variable_name_collection_memoized_for_nested_fallbacks(
     Decision 7: nested fallback connections call ``_build_cache_key`` once per
     parent row, so the full-operation cache-relevant-variable walk must be
     memoized per ``id(operation)`` within one ``on_execute`` lifecycle. Wrap the
-    unified collector (``_collect_cache_relevant_var_names`` -- which now folds
+    unified collector (``_collect_cache_relevant_var_names`` -- which folds
     both the directive and nested-pagination families into one traversal) with a
     call counter and assert repeated ``_build_cache_key`` calls on the SAME
     operation walk it only once - including one call made after the
@@ -3652,7 +3652,7 @@ def test_plan_stashed_on_dict_context() -> None:
 
 
 def test_stash_on_dict_subclass_writes_mapping_before_attributes() -> None:
-    """rev-optimizer__context: dict-like contexts must use the mapping branch."""
+    """Dict-like contexts must use the mapping branch."""
 
     class AttributeBackedDict(dict[str, object]):
         attributes: dict[str, object]
@@ -3741,8 +3741,7 @@ def test_plan_stashed_on_object_context_unit() -> None:
 def test_stash_on_read_only_mapping_is_silent() -> None:
     """B5: a read-only ``MappingProxyType`` context must not abort the resolver chain.
 
-    Pins the Medium fix from rev-optimizer__extension.md: ``setattr`` on a
-    ``MappingProxyType`` raises ``TypeError`` (not ``AttributeError``), and
+    ``setattr`` on a ``MappingProxyType`` raises ``TypeError`` (not ``AttributeError``), and
     ``__setitem__`` then raises ``TypeError`` again. Both must be swallowed
     so the optimizer's introspection-stash failure never crashes the
     request.
@@ -3774,7 +3773,7 @@ def test_stash_falls_back_to_setitem_on_typeerror() -> None:
 
 
 def test_stash_on_immutable_dict_subclass_is_silent() -> None:
-    """rev-optimizer__context: ``AttributeError`` from a frozen ``dict`` subclass is silently skipped.
+    """``AttributeError`` from a frozen ``dict`` subclass is silently skipped.
 
     Django's ``QueryDict`` is a ``dict`` subclass that raises
     ``AttributeError("This QueryDict instance is immutable")`` from
@@ -3799,7 +3798,7 @@ def test_stash_on_immutable_dict_subclass_is_silent() -> None:
 
 
 def test_stash_does_not_swallow_unexpected_exceptions_from_setitem() -> None:
-    """rev-optimizer__context: keep the mapping-write ``except`` narrow.
+    """The mapping-write ``except`` stays narrow.
 
     Read-only mapping failures are intentionally limited to ``TypeError``
     and ``AttributeError``. A guarded mapping that raises a different
@@ -5134,18 +5133,18 @@ def test_model_for_type_reverse_lookup_works_for_secondary_type() -> None:
 
 
 # ---------------------------------------------------------------------------
-# ``apply_connection_optimization`` helper extraction (no-regression)
+# ``apply_connection_optimization`` and the shared ``apply_to`` core
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.django_db
-def test_optimizer_helper_extraction_no_regression(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Extracting ``apply_to`` from ``_optimize`` leaves the middleware path identical.
+def test_optimize_delegates_to_the_shared_apply_to_core(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The middleware path builds and applies its plan through the shared ``apply_to`` core.
 
-    Per spec-030 Decision 11 the plan-build-and-apply tail was extracted into
+    Per spec-030 Decision 11 the plan-build-and-apply tail lives in
     ``DjangoOptimizerExtension.apply_to`` (shared with the connection field's
-    ``apply_connection_optimization``). The existing B1-B8 suite in this module
-    is the broad regression guard; this focused test pins that a non-connection
+    ``apply_connection_optimization``). The B1-B8 suite in this module
+    is the broad guard; this focused test pins that a non-connection
     root field still has its plan built and applied (``select_related`` lands)
     and that ``_optimize`` delegates to ``apply_to``.
     """
@@ -5194,8 +5193,8 @@ def test_optimizer_helper_extraction_no_regression(monkeypatch: pytest.MonkeyPat
     result = schema.execute_sync("{ allItems { category { name } } }", context_value=ctx)
 
     assert result.errors is None
-    # The plan was built and applied (the forward FK is select_related-ed) - the
-    # middleware behavior is unchanged by the extraction.
+    # The plan was built and applied on the middleware path (the forward FK is
+    # select_related-ed).
     assert _stashed_plan(ctx).select_related == ("category",)
     # ``_optimize`` delegated to ``apply_to`` with the resolved (origin, model),
     # NOT inferred inside the helper.

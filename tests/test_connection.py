@@ -340,8 +340,8 @@ def test_connection_type_for_returns_concrete_subclass_without_opt_in() -> None:
 
     Never the ``DjangoConnection[T]`` generic alias: a generic alias handed to
     the schema loses the ``resolve_connection`` override (and with it the
-    ``first`` + ``last`` guard) at Strawberry's generic specialization - the
-    bug spec-032 uncovered. The non-opted path must be a concrete
+    ``first`` + ``last`` guard) at Strawberry's generic specialization
+    (spec-032). The non-opted path must be a concrete
     class too, just with no ``total_count`` members.
     """
     node_type = _make_node_type("BareNode", total_count=None)
@@ -829,13 +829,13 @@ def test_consumer_resolver_countless_iterable_paginates_without_total_count(
 ) -> None:
     """A count-less non-queryset source paginates with ``totalCount`` NOT selected.
 
-    Regression pin for the eager ``.count`` read in ``_attach_count_sync``: the
-    helper passed ``value=nodes.count`` even when the count was NOT requested,
-    and the attribute access itself is eager - so a generator / set / one-shot
-    iterator (shapes the consumer-resolver contract admits) raised a raw
+    ``_attach_count_sync`` must not read ``.count`` eagerly: passing
+    ``value=nodes.count`` when the count is NOT requested is itself an eager
+    attribute access, so a generator / set / one-shot iterator (shapes the
+    consumer-resolver contract admits) would raise a raw
     ``AttributeError: 'set' object has no attribute 'count'`` on every page
-    without ``totalCount``. The read is now gated on ``want_count`` exactly
-    like the async helper's ``acount()`` call already was.
+    without ``totalCount``. The read is gated on ``want_count`` exactly
+    like the async helper's ``acount()`` call.
     """
     services.seed_data(3)
     rows = list(Category.objects.all())
@@ -1447,8 +1447,8 @@ async def test_connection_async_resolver_resolving_to_residual_awaitable_fails_c
     once; a value that is STILL awaitable after that await is a nested async
     resolver whose inner awaitable would otherwise pass the non-queryset sidecar
     guard and skip ``get_queryset`` entirely. This is the connection twin of the
-    list field's ``reject_residual_async_source`` guard - the bug it closes
-    survived precisely because only the list helper had a unit test. Exercised at
+    list field's ``reject_residual_async_source`` guard, which the list helper's
+    own unit test pins. Exercised at
     a real ``DjangoConnectionField`` with NO sidecar input (the bypass shape),
     so the residual-awaitable guard, not the sidecar guard, is what rejects it.
     """
@@ -2351,19 +2351,16 @@ async def test_async_consumer_edge_prefix_pages_and_refuses_a_stock_cursor() -> 
     assert isinstance(foreign.errors[0].original_error, PaginationArgumentError)
 
 
-# spec-033 Slices 1-2 (DONE-033-0.0.9): root-connection no-regression fence. The
-# shipped root-connection planning pins here (edges { node } extraction ->
-# select_related / Prefetch on the pre-slice queryset) stayed GREEN UNMODIFIED
-# through the helper consolidation (Decision 9) and the fast-path addition
-# (Decision 5), which touch only the NESTED half. No new tests are required
-# here; this marker records the fence (DoD item 12, "no root-connection
-# regression").
+# spec-033 Slices 1-2 (DONE-033-0.0.9): the root-connection fence. The
+# root-connection planning pins here (edges { node } extraction ->
+# select_related / Prefetch on the pre-slice queryset) hold the ROOT half; the
+# shared helper (Decision 9) and the fast path (Decision 5) touch only the
+# NESTED half (DoD item 12, "no root-connection regression").
 
 
 # =============================================================================
-# Connection <-> cascade composition pin (spec-034). No connection.py source change
-# is involved: the pipeline already applies get_queryset (where the cascade lives)
-# before filter / order / slice (Decision 12).
+# Connection <-> cascade composition pin (spec-034). The connection pipeline applies
+# get_queryset (where the cascade lives) before filter / order / slice (Decision 12).
 # =============================================================================
 
 

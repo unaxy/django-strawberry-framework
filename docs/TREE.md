@@ -557,7 +557,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_workspace.py             # Repo-tooling tests for the agentflow workspace tool's copies, pool, evidence and cleanup.
 ├── test_write_mixins.py          # Pins for the write-flavor substrate shared by every ``Mutation`` family.
 ├── auth/    # Package-internal tests for the opt-in auth subsystem.
-│   ├── _helpers.py               # Shared auth-test helpers hoisted out of the individual test modules.
+│   ├── _helpers.py               # Shared auth-test helpers the individual test modules import.
 │   ├── conftest.py               # Shared fixtures for the auth test modules.
 │   ├── test_mutations.py         # Auth mutation tests for declaration and bind lifecycles, operations, registration, and permissions.
 │   ├── test_queries.py           # Current-user query tests for alias binding, permission gates, and sync/async resolution.
@@ -857,7 +857,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_write_mixins.py          # Pins for the write-flavor substrate shared by every ``Mutation`` family.
 ├── aggregates/    # planned by TODO-BETA-062-0.1.3 - Mirrored package tests for the aggregates subsystem.
 ├── auth/    # Package-internal tests for the opt-in auth subsystem.
-│   ├── _helpers.py               # Shared auth-test helpers hoisted out of the individual test modules.
+│   ├── _helpers.py               # Shared auth-test helpers the individual test modules import.
 │   ├── conftest.py               # Shared fixtures for the auth test modules.
 │   ├── test_mutations.py         # Auth mutation tests for declaration and bind lifecycles, operations, registration, and permissions.
 │   ├── test_queries.py           # Current-user query tests for alias binding, permission gates, and sync/async resolution.

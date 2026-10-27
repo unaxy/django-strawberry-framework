@@ -80,7 +80,7 @@ pytestmark = pytest.mark.usefixtures("isolate_global_registry")
 
 
 def test_inputs_module_path_constant() -> None:
-    """The hoisted constant matches the actual dotted path of ``inputs.py``."""
+    """The module constant matches the actual dotted path of ``inputs.py``."""
     assert INPUTS_MODULE_PATH == "django_strawberry_framework.orders.inputs"
 
 
@@ -1093,9 +1093,9 @@ def test_ensure_field_specs_derives_the_unset_sentinel_from_the_family_declarati
     ``orderset_cls._input_traversal()`` -- the same derived grammar the
     normalizer and the permission walkers consume -- so a consumer subclass
     overriding ``_permission.traversal.unset_sentinel`` gets ONE classification
-    everywhere. With the old hardcoded gate, a ``UNSET``-valued field was
-    invisible to warm-up, so specs were never built and the normalizer
-    silently discarded the field while its permission gate still fired.
+    everywhere. With a hardcoded gate, a ``UNSET``-valued field would be
+    invisible to warm-up, so specs would never be built and the normalizer
+    would silently discard the field while its permission gate still fired.
     """
     clear_order_input_namespace()
     marker = object()

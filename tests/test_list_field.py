@@ -2614,10 +2614,10 @@ async def test_a_list_field_refuses_a_synchronous_operation_inside_an_event_loop
 
     ``execute_sync`` under a running loop holds the operation with the
     synchronous executor while the ambient loop says otherwise. A field that
-    read the loop there built the async pipeline's coroutine, handed it to the
-    executor that cancels top-level awaitables, and answered with Strawberry's
+    read the loop there would build the async pipeline's coroutine, hand it to the
+    executor that cancels top-level awaitables, and answer with Strawberry's
     generic "failed to complete synchronously" while the inner coroutines went
-    unawaited. The field now refuses at the call that caused it, with the two
+    unawaited. The field refuses at the call that caused it, with the two
     recourses that actually work.
 
     Both halves are asserted: the public contract, and that nothing awaitable

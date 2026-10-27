@@ -1411,7 +1411,7 @@ def test_mutation_authorizes_a_session_stored_on_its_own_alias() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Serializer-flavor write-alias pinning (the DRF hardening pass)
+# Serializer-flavor write-alias pinning
 # ---------------------------------------------------------------------------
 #
 # The serializer twin of the model-flavor pinning tests above: the SERIALIZER

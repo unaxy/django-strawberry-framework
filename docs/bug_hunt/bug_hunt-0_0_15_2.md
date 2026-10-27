@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 316 done, 215 to do.
+Progress: 317 done, 216 to do.
 
 ## Done
 
@@ -1723,6 +1723,18 @@ Progress: 316 done, 215 to do.
   range arm); it used to publish one scalar under `<name>`, which the widget never read, so every send answered every
   row. Routing it as a range was not taken: upstream rewrites a lone bound to a text `startswith` / `endswith`, and
   PostgreSQL range columns stay unsupported. spec-027 row. Tests: `tests/filters/test_inputs.py`
+- [x] 566. The four test trees state behaviour where they narrated history: about 300 comment, docstring and name
+  sites ("now X instead of Y", "the old / previous implementation", "the fix", "(hardened)", "hoisted", "relocated",
+  "this slice", "Pins finding-2", review-doc and severity attributions, "(#N)" review tags, version banners) restate
+  what the enclosing test asserts, counterfactuals the test does not assert becoming positive statements; 16 test and
+  helper names renamed with their spec, DONE-plan and suppression-ledger citers. The provenance gate
+  `tests/test_ci_governance.py::test_no_comment_docstring_or_name_carries_a_provenance_phrase` also refuses `the
+  hardening pass`, `(hardened)`, `(hardening)`, `pre-0.0.`, `the old implementation`, `the previous implementation`,
+  `task report` and `finding-` (17 phrases; `historically`, `this slice`, `the original implementation`, `hoisted`,
+  `relocated`, `this card` and `the old <noun>` have behaviour uses and stay ungated), with the package and example
+  sites they caught restated and START.md's bullet listing the set. Executable code unchanged (code digest per file).
+  Out of scope, filed: 629, 630
+
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1855,7 +1867,8 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 - [ ] 563. Package comments and docstrings outside the gated phrases still narrate history: "now", "no longer", "the
   former", "byte-unchanged", seven `Target release:` module lines and version banners ("shipped 0.0.14"); judge each
-  against START's provenance rule (dry-0_0_15_3 items 31 and 71 cover part of it). Found fact-finding 500
+  against START's provenance rule (dry-0_0_15_3 items 31 and 71 cover part of it; 566 restated the
+  `(hardened)`, `(hardening)` and `historically` sites in `schema.py` and `rest_framework/`). Found fact-finding 500
 - [ ] 564. Four consumer-visible error strings carry a release banner that goes stale:
   `filters/base.py::RelatedFilter.__init__` ("the kwarg was removed in 0.0.7"), `types/base.py::_validate_connection`
   ("recognized in 0.0.9"), `types/relay.py::decode_global_id` ("encode-only in 0.0.9") and the routers.py "0.0.14
@@ -1864,10 +1877,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   package (`optimizer/extension.py`, `optimizer/plans.py`, `optimizer/walker.py`, `types/resolvers.py`) and most in
   `tests/optimizer/test_extension.py` and `test_walker.py`; the clause after each label already states the behaviour,
   so drop the label. Found fact-finding 500
-- [ ] 566. Test-tree history wording outside the gated phrases: about 118 "now", 25 "old", 21 "no longer", 21 "the
-  fix", refactor words ("relocated", "byte-identical to before", "status-quo behavior", "Pins finding-2"), the
-  `test_products_api.py` "History:" sections and about 68 ambiguous sites (origin, "historical" and spec-ordinal
-  wording); judge each (dry-0_0_15_3 item 34 covers `examples/`). Found fact-finding 500
 - [ ] 568. (robustness) The provenance gate reads no f-string or concatenated first statement, no attribute-docstring
   string and no wrap from a trailing comment onto the next full-line comment (none in the corpus carries a phrase
   today), and `scripts/review_inspect.py` keeps its own `PROVENANCE_PATTERNS` list beside the gate's
@@ -2005,6 +2014,17 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `await execute(...)`, two after draining the loop). Check whether such a late error reaches the wire past
   `MaskErrors` / `Schema._process_errors`, or runs ORM work after the operation's atomic and leases closed, through the
   fakeshop async view; found consulting on 377
+- [ ] 629. Test prose cites spec and test-plan rows by ordinal, against START's "Cite contract by CONTENT, never
+  ordinal": "Matrix row N" in `tests/filters/test_sets.py` (15), "Spec-046 row N" / "Test plan rows N-M" in
+  `tests/test_routers.py` (19), "Row N" / "Test plan rows" in `examples/fakeshop/test_query/test_transport_api.py`
+  (42), "test-plan row 19/20" and "gap 1/2" in `test_products_api.py`, "gap 1/2" in
+  `tests/test_strawberry_patches.py`, "test #8" in `test_library_api.py`; restate each by the contract it pins. Found
+  fixing 566
+- [ ] 630. `examples/fakeshop/test_query/README.md` narrates history in its "Worked examples" ("What moved:",
+  "Before:", "Deleted this sweep"), "Gotchas the sweep surfaced" and "Second sweep: promotable rows spotted, not yet
+  moved", the last an unhomed work queue; restate the teaching as present practice and home each queued row on a card.
+  Found fixing 566
+
 ## To do: holes found re-checking the fixes
 
 

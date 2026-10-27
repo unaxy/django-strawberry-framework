@@ -538,7 +538,7 @@ Rationale companion — this Decision's justification and its four rejected alte
 
 ### Decision 7 — `Meta.orderset_class` promotion gate
 
-`Meta.orderset_class` is in `ALLOWED_META_KEYS` (out of [`DEFERRED_META_KEYS`][base]) because the subsystem applies it end-to-end: the class hierarchy (Slices 1 + 2) and the finalizer-phase-2.5 binding (Slice 3) exist, and `tests/types/test_base.py::test_meta_orderset_class_is_promoted_to_allowed_meta_keys` pins the promotion. Same gate as [`Meta.interfaces`][glossary-metainterfaces] and [`Meta.filterset_class`][glossary-metafilterset_class] — a deferred `Meta` key is accepted only when its subsystem applies it end-to-end.
+`Meta.orderset_class` is in `ALLOWED_META_KEYS` (out of [`DEFERRED_META_KEYS`][base]) because the subsystem applies it end-to-end: the class hierarchy (Slices 1 + 2) and the finalizer-phase-2.5 binding (Slice 3) exist, and `tests/types/test_base.py::test_meta_orderset_class_is_allowed_not_deferred` pins the promotion. Same gate as [`Meta.interfaces`][glossary-metainterfaces] and [`Meta.filterset_class`][glossary-metafilterset_class] — a deferred `Meta` key is accepted only when its subsystem applies it end-to-end.
 
 Rationale companion — this Decision's justification and its two rejected alternatives: [Decision 7][rationale-d7].
 
@@ -811,7 +811,7 @@ In-process tests that construct a `DjangoType` with BOTH `Meta.filterset_class` 
 
 ### `tests/types/test_base.py`
 
-`test_meta_orderset_class_is_promoted_to_allowed_meta_keys` asserts `"orderset_class" not in DEFERRED_META_KEYS` AND `"orderset_class" in ALLOWED_META_KEYS`, pinning [Decision 7](#decision-7--metaorderset_class-promotion-gate).
+`test_meta_orderset_class_is_allowed_not_deferred` asserts `"orderset_class" not in DEFERRED_META_KEYS` AND `"orderset_class" in ALLOWED_META_KEYS`, pinning [Decision 7](#decision-7--metaorderset_class-promotion-gate).
 
 ### `examples/fakeshop/test_query/test_library_api.py`
 

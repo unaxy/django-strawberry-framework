@@ -106,32 +106,32 @@ def test_optimizer_subpackage_reexports_top_level_logger() -> None:
 def test_public_api_surface_is_pinned() -> None:
     # Pin ``__all__`` so silent surface widening (e.g., accidental
     # re-export of an internal name) shows up at test time. New public
-    # names only land when a future spec adds them; a version bump alone
+    # names only land when a spec adds them; a version bump alone
     # does not imply public-surface widening.
-    # The four-symbol mutation surface (spec-036) is complete: ``FieldError``,
+    # The four-symbol mutation surface (spec-036): ``FieldError``,
     # ``DjangoMutation`` + ``DjangoModelPermission``, and ``DjangoMutationField``.
     # spec-037 adds the three file/upload symbols: ``Upload`` (the
     # re-exported Strawberry scalar) plus ``DjangoFileType`` / ``DjangoImageType``
     # (the structured read-output objects). spec-038 adds two form-mutation
-    # symbols (``DjangoFormMutation`` / ``DjangoModelFormMutation``). spec-040 (the
-    # auth-mutations card) owns the ``0.0.13`` cut (Decision 12) jointly with the
-    # spec-039 serializer flavor; the auth surface adds NO package-root exports
-    # (submodule-only per Decision 3). The mutation-atomicity card adds the two
+    # symbols (``DjangoFormMutation`` / ``DjangoModelFormMutation``). The spec-039
+    # serializer flavor adds no ``__all__`` name (its DRF-soft names resolve lazily
+    # outside ``__all__``, spec-039 Decision 12), and the spec-040 auth surface adds
+    # NO package-root exports (submodule-only per spec-040 Decision 3). Mutation
+    # atomicity adds the two
     # schema symbols: ``DjangoSchema`` (the
     # REQUIRED schema class for generated mutations - its execution context holds
     # each mutation's transaction open through response completion) and
     # ``DjangoMutationExecutionContext`` (the subclassing seam for consumers with
-    # their own execution context). The resource-policy card (spec-047) adds
+    # their own execution context). The resource policy (spec-047) adds
     # ``DEFAULT_RESOURCE_POLICY`` / ``RESOURCE_LIMIT_ERROR_CODE`` /
     # ``ResourceLimitExceeded`` / ``ResourcePolicy`` /
-    # ``DjangoResourcePolicyExtension``. The secure-output card (spec-048) adds the
+    # ``DjangoResourcePolicyExtension``. The secure output (spec-048) adds the
     # two opt-in file/image output objects (``DjangoFilePathType`` /
     # ``DjangoImagePathType``, spec-048 Decision 1) and the three
     # production-error-policy symbols (``DEFAULT_ERROR_POLICY`` /
-    # ``ErrorPolicy`` / ``DjangoErrorPolicyExtension``, Decision 7). All of these
-    # cards shipped in ``0.0.14``; the ``0.0.15`` version cut adds
-    # ``ListArgumentError`` (spec-050) and ``PaginationArgumentError`` (the
-    # connection pagination rejection) to this public surface.
+    # ``ErrorPolicy`` / ``DjangoErrorPolicyExtension``, Decision 7). The list-field
+    # arguments add ``ListArgumentError`` (spec-050), and the connection pagination
+    # rejection adds ``PaginationArgumentError``.
     assert django_strawberry_framework.__all__ == (
         "DEFAULT_ERROR_POLICY",
         "DEFAULT_RESOURCE_POLICY",

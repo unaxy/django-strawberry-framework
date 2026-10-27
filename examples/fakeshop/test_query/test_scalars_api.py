@@ -209,9 +209,9 @@ def test_scalar_specimen_bigint_zero_serializes_as_string() -> None:
 def test_filter_specimens_by_bigint_in_accepts_64bit_values() -> None:
     """A ``BigIntegerField`` ``in`` lookup uses the ``BigInt`` scalar.
 
-    Regression for the generated CSV (``BaseInFilter``) element collapsing to
-    ``Int`` (32-bit), which rejected the 64-bit values a ``BigIntegerField``
-    holds. The element type now mirrors ``SCALAR_MAP`` (``BigIntegerField`` ->
+    The generated CSV (``BaseInFilter``) element must not collapse to
+    ``Int`` (32-bit), which rejects the 64-bit values a ``BigIntegerField``
+    holds. The element type mirrors ``SCALAR_MAP`` (``BigIntegerField`` ->
     ``BigInt``), so a value past 2**31 coerces instead of erroring.
     """
     _seed_specimen(label="big", signed_big=_SIGNED_BIG)
@@ -236,10 +236,10 @@ def test_filter_specimens_by_bigint_in_drops_past_64bit_members_no_overflow() ->
     """A past-signed-64-bit ``in`` member is dropped, never a raw backend ``OverflowError``.
 
     A scalar ``__in`` lookup binds each element directly, so a value past the column's
-    signed-64-bit range (``2**63``) reached the backend as a raw ``Python int too large
+    signed-64-bit range (``2**63``) would reach the backend as a raw ``Python int too large
     to convert to SQLite INTEGER`` top-level error - unlike a scalar ``exact``, which
     Django's range-aware integer lookups resolve to an empty match before binding.
-    ``filters/base.py::IntegerInFilter`` now drops the out-of-range member (it can
+    ``filters/base.py::IntegerInFilter`` drops the out-of-range member (it can
     identify no row), so the in-range member still filters; a NON-empty list whose
     members ALL drop matches NOTHING (``qs.none()``), not every row (the second leg).
     """
@@ -389,10 +389,10 @@ def test_filter_specimens_by_bigint_range_out_of_range_bound_no_overflow() -> No
     The ``range`` counterpart of
     ``test_filter_specimens_by_bigint_in_drops_past_64bit_members_no_overflow``.
     A scalar ``__range`` lookup binds BOTH bounds directly (``WHERE col BETWEEN a
-    AND b``), so a bound past the column's signed-64-bit range reached the backend
+    AND b``), so a bound past the column's signed-64-bit range would reach the backend
     as a raw ``Python int too large to convert to SQLite INTEGER`` top-level error -
-    the same defect the element-binding ``__in`` had before ``IntegerInFilter``.
-    ``filters/base.py::IntegerRangeFilter`` now decomposes the range into Django's
+    the same defect an element-binding ``__in`` has without ``IntegerInFilter``.
+    ``filters/base.py::IntegerRangeFilter`` decomposes the range into Django's
     range-aware ``gte`` / ``lte`` lookups, which resolve an out-of-range bound
     (widen to no constraint / match nothing) BEFORE binding, so the query succeeds:
 
@@ -1288,12 +1288,11 @@ def test_scalars_optimizer_fk_id_elision_for_self_fk_in_http_query() -> None:
     row, so the optimizer plans the query with ``only(..., "parent_id")``
     and synthesizes the stub at resolver time. Distinct from the
     cross-model FK case.
-    Behavioral half of the migration from
+    Behavioral half of
     ``tests/optimizer/test_extension.py::test_optimizer_elides_forward_fk_id_only_selection_plan_shape``;
     the plan-state assertions (``plan.fk_id_elisions``, ``plan.only_fields``,
-    ``ctx.dst_optimizer_fk_id_elisions``) stay package-internal in the same
-    test, slimmed of the now-redundant query-count and data-correctness
-    assertions.
+    ``ctx.dst_optimizer_fk_id_elisions``) stay package-internal in that test,
+    which leaves the query-count and data-correctness assertions to this row.
     """
     root = _seed_specimen(label="root")
     child = _seed_specimen(label="child", parent=root)

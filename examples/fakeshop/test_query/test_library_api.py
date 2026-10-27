@@ -2110,8 +2110,8 @@ def test_library_relation_override_shapes_http_response_data() -> None:
     }
     # The consumer override OWNS the relation (the strawberry-django #697
     # bug class): the walker leaves ``shelves``
-    # fully unplanned, so the historical speculative prefetch (a query the
-    # override's ``order_by("-code")`` re-query never consumed) is GONE.
+    # fully unplanned, so no speculative prefetch (a query the override's
+    # ``order_by("-code")`` re-query would never consume) runs.
     # The observable baseline is root query + one override manager query
     # per Branch row - and nothing else.
     assert len(captured) == 3
@@ -3424,10 +3424,10 @@ def test_library_books_filter_by_choice_enum() -> None:
 def test_library_books_filter_by_choice_enum_in() -> None:
     """A choice column's ``in`` lookup keeps its enum element type.
 
-    Regression for the CSV (``BaseInFilter``) branch collapsing a choice
-    column's ``in`` element to ``String`` -- so ``{ in: [available] }`` failed
-    coercion ("String cannot represent ... available") while ``exact``
-    correctly used the enum. The element type now comes from the model field,
+    The CSV (``BaseInFilter``) branch must not collapse a choice column's ``in``
+    element to ``String`` -- that makes ``{ in: [available] }`` fail coercion
+    ("String cannot represent ... available") while ``exact`` uses the enum.
+    The element type comes from the model field,
     so the shared ``BookTypeCirculationStatusEnum`` is reused.
     """
     branch = models.Branch.objects.create(name="Branch", city="Boston")
@@ -6382,7 +6382,7 @@ def test_relay_global_id_filter_multihop_leaf_validates_against_the_terminal_mod
     message = json_str(rejected_payload, "errors", 0, "message")
     assert "GlobalID type mismatch" in message
     # ``library.book`` expected (the terminal), ``library.genre`` received (the
-    # head). Pre-walk these two were swapped.
+    # head), in that order.
     assert models.Book._meta.label_lower in message
     assert models.Genre._meta.label_lower in message
 
@@ -8623,7 +8623,7 @@ def test_genre_connection_flat_leaf_total_count_is_row_preserving() -> None:
     ``books__title__icontains`` expansion, public because ``HIDE_FLAT_FILTERS``
     defaults False) is still a ``distinct=False`` leaf, and its declared ``books``
     hop compiles to a row-preserving restriction subquery. A single genre linked to TWO
-    books whose titles both match the term is now reported ONCE: the connection reports
+    books whose titles both match the term is reported ONCE: the connection reports
     ``totalCount == 1`` and a single edge for the one genre.
     """
     branch = models.Branch.objects.create(name="Cardio Central", city="Boston")
@@ -8690,7 +8690,7 @@ def test_genre_connection_expanded_origin_pagination_is_row_preserving() -> None
 
     Two genres each match the public flat ``booksTitle`` leaf (the flattened
     reverse-M2M ``books__title__icontains`` expansion) through TWO matching books
-    apiece. Pre-cut-over each genre would fan out to two rows, inflating
+    apiece. A JOIN would fan each genre out to two rows, inflating
     ``totalCount`` to 4 and duplicating edges. The ``books`` hop's restriction
     subquery collapses the membership to a per-parent membership test:
     ``first: 1`` returns one edge with ``hasNextPage: true`` and a pre-slice
@@ -9472,11 +9472,10 @@ def test_anonymous_inline_fragment_with_directive_around_node_field_resolves() -
 def test_typed_inline_fragment_under_connection_field_still_resolves() -> None:
     """A typed inline fragment (``... on T {}``) under a connection field stays working.
 
-    Regression guard paired with the anonymous-fragment fix: the typed form
-    carries a ``type_condition`` AST node, so Strawberry's converter never
-    crashed on it. The package-owned ``ast_to_converted_selections`` adapter must
-    keep the typed path resolving identically (``type_condition`` set to the
-    condition's name), not just the anonymous path.
+    The typed twin of the anonymous-fragment row: the typed form carries a
+    ``type_condition`` AST node, which Strawberry's converter handles. The
+    package-owned ``ast_to_converted_selections`` adapter must keep the typed path resolving
+    identically (``type_condition`` set to the condition's name), not just the anonymous path.
     """
     _seed_genres("Alpha", "Beta", "Gamma")
 
@@ -9834,7 +9833,7 @@ def test_genre_connection_last_zero_serves_the_first_zero_page(*, after: bool) -
 # test_query README rule. Every test rides the autouse
 # _reload_project_schema_for_acceptance_tests fixture; seeding is inline
 # Model.objects.create (library rule - no services.py); nested-connection
-# assertions are BEHAVIOR only, never SQL shape (pre-033 posture). Book ids
+# assertions are BEHAVIOR only, never SQL shape. Book ids
 # are minted via testing.relay.global_id_for over IN-TEST-BODY class imports
 # (the file-header reload invariant). The spec-named
 # test_genres_connection_cursor_round_trip / test_genres_connection_total_count
@@ -11995,10 +11994,10 @@ def test_genres_connection_alias_merge_total_count_sibling_keeps_has_next() -> N
 def test_genre_books_connection_divergent_aliases_batched_per_key() -> None:
     """Divergent aliases are batched: one window query PER ALIAS, never per-parent.
 
-    The idea-#2 win over the live HTTP stack (the graph-node model: one batched
-    children query per response key). ``a: booksConnection(first: 2)`` +
-    ``b: booksConnection(first: 9)`` was the historical whole-relation
-    per-parent fallback; now each response key gets its own windowed prefetch
+    The live HTTP proof of the graph-node model: one batched children query per
+    response key. ``a: booksConnection(first: 2)`` +
+    ``b: booksConnection(first: 9)`` take no whole-relation per-parent
+    fallback; each response key gets its own windowed prefetch
     (``_dst_books$a_connection`` / ``_dst_books$b_connection``) and the
     resolver routes by ``info.path.key``. Pinned: the ABSOLUTE 3-query cost at
     the seeded 2 parent genres (root genres + one window per alias, never one
@@ -12504,7 +12503,7 @@ def test_genre_books_connection_last_with_empty_cursor_is_the_planned_tail(curso
 def test_genre_books_connection_offset_page_probe_composes_marker_count_free() -> None:
     """The bounded offset page serves ``hasNextPage`` from the composed probe.
 
-    ``after:`` offset with ``first: N`` + ``hasNextPage`` (no ``totalCount``) now
+    ``after:`` offset with ``first: N`` + ``hasNextPage`` (no ``totalCount``)
     overfetches ONE sentinel row composed with the marker, so ``hasNextPage`` is
     the sentinel's presence - NO ``Count(1) OVER`` scan. Pinned both boundary
     directions (a sentinel exists -> True; the partition ends exactly at
@@ -12574,7 +12573,7 @@ def test_genre_books_connection_offset_overshoot_served_count_free_no_fallback()
     Both the ``hasNextPage``-only shape and the edges-only shape (the Gap-6b hole):
     the marker proves ``total <= offset``, so ``hasNextPage`` is False and the
     edges are empty - served directly, count-free, in the fixed two-query cost
-    (a per-parent fallback would be an N+1 regression vs today).
+    (a per-parent fallback would be an N+1).
     """
     _seed_genre_books("Aurora", "Binti", "Circe")
     overshoot = _array_cursor(9)  # far past the 3-book partition.
@@ -12930,13 +12929,13 @@ def test_divergent_aliases_nested_same_key_conflict_serves_each_subtree_args() -
 
 @pytest.mark.django_db
 def test_identical_aliases_nested_same_key_conflict_serves_each_subtree_args() -> None:
-    """The nested same-key conflict under IDENTICAL-args aliases (pre-existing bug).
+    """The nested same-key conflict under IDENTICAL-args aliases.
 
     Same-argument outer aliases share ONE merged window (spec-033 Decision 6),
     so their union-merged children hit the same conflict: ``a``'s subtree
     selects ``genresConnection(first: 1)`` and ``b``'s ``(first: 2)`` under
-    one response key. This shape returned wrong data even before the
-    per-key conflict gates existed (first-payload-wins); the gate now routes the nested
+    one response key. Without the per-key conflict gate this shape returns wrong
+    data (first-payload-wins); the gate routes the nested
     level per-parent while the outer keeps its shared window.
     """
     _seed_two_genres_three_shared_books()
@@ -12970,7 +12969,7 @@ def test_identical_aliases_nested_same_key_conflict_serves_each_subtree_args() -
 
 @pytest.mark.django_db
 def test_plain_list_aliases_nested_same_key_conflict_serves_each_subtree_args() -> None:
-    """The nested same-key conflict under merged plain LIST aliases (pre-existing bug).
+    """The nested same-key conflict under merged plain LIST aliases.
 
     ``a: books`` + ``b: books`` (no arguments) merge into one prefetched list;
     their subtrees carry ``genresConnection`` with different ``first`` values
@@ -13542,7 +13541,7 @@ def test_nested_books_connection_has_next_page_without_edges() -> None:
     # One root genres-connection query + one windowed prefetch; no per-parent COUNT
     # and no per-parent fallback despite ``edges`` being absent.
     assert len(captured) == 2
-    # The probe shape it now describes: the window is count-free (the sentinel
+    # The probe shape: the window is count-free (the sentinel
     # answers ``hasNextPage``), so it carries no ``_dst_total_count`` / COUNT.
     window_sql = captured[1]["sql"]
     assert "_dst_total_count" not in window_sql
@@ -14525,10 +14524,10 @@ def test_b8_consumer_descendant_prefetch_stays_flat_over_http() -> None:
 
     The live twin of ``test_b8_consumer_descendant_prefetch_does_not_raise``: the
     consumer descendant prefetch overlaps the optimizer's Genre -> books -> loans
-    plan, which historically raised "'books' lookup was already seen with a
-    different queryset". Over HTTP the operation must return the full nested graph
-    AND stay flat -- one query each for genres, the books M2M, and the loans FK
-    reverse -- never a per-book loans query.
+    plan; Django raises "'books' lookup was already seen with a different
+    queryset" for one lookup prefetched through two querysets. Over HTTP the
+    operation must return the full nested graph AND stay flat -- one query each for genres, the
+    books M2M, and the loans FK reverse -- never a per-book loans query.
     """
     _seed_genre_book_loan_graph()
 
@@ -17286,7 +17285,7 @@ def test_serializer_error_envelope_carries_codes_and_path_over_http() -> None:
     (err,) = json_list(result, "errors")
     assert json_at(err, "field") == "label"
     assert json_at(err, "path") == ["label"]
-    assert "max_length" in json_list(err, "codes")  # the DRF ErrorDetail.code is preserved (#4).
+    assert "max_length" in json_list(err, "codes")  # the DRF ErrorDetail.code is preserved.
     assert not models.Shelf.objects.filter(code="CodesShelf").exists()
 
     # A framework relation-decode error: a nonexistent branch pk -> code "invalid", path=["branchId"].
@@ -17312,7 +17311,7 @@ def test_serializer_injected_field_contract_over_http() -> None:
     ("topic",)`` with a ``get_serializer_kwargs`` override that supplies ``topic`` into the
     serializer data. The create-required guard SUBTRACTS the declared injected field (so the
     narrowing binds), and the write succeeds with the injected ``topic`` - the auditable,
-    per-field replacement for the old blanket waiver.
+    per-field injection path.
     """
     branch = models.Branch.objects.create(name="InjectBranch", city="Boston")
 
@@ -17875,7 +17874,7 @@ def test_serializer_save_kwargs_rejects_renamed_source_shadow_over_http() -> Non
     payload = response_json(response)
     assert payload["data"] is None
     assert json_at(payload, "errors", 0, "path") == ["createShelfWithRenamedSaveKwargsCollision"]
-    # The hardened check compares against the ACTUAL validated_data keys (the resolved
+    # The check compares against the ACTUAL validated_data keys (the resolved
     # `source="code"` key), not a reconstruction from the input specs.
     assert "['code']" in json_str(payload, "errors", 0, "message")
     assert "validated_data" in json_str(payload, "errors", 0, "message")
@@ -17949,7 +17948,7 @@ def test_serializer_update_provided_genres_list_replaces_complete_set_over_http(
 
 @pytest.mark.django_db
 def test_serializer_update_omitted_genres_leaves_relation_unchanged_over_http() -> None:
-    """An OMITTED list relation on a serializer update leaves the stored set untouched (hardening).
+    """An OMITTED list relation on a serializer update leaves the stored set untouched.
 
     The partial-update contract: updating only ``title`` (no ``genres`` key in the input)
     must not clear or rewrite the M2M - ``partial=True`` means unsent fields keep their
@@ -18160,7 +18159,7 @@ def test_serializer_update_invalid_or_hidden_genre_preserves_prior_set_over_http
 @pytest.mark.django_db
 @override_settings(**_ERROR_POLICY_PASS_THROUGH)
 def test_serializer_update_substituted_instance_is_rejected_without_writes_over_http() -> None:
-    """A hook substituting the located instance is a top-level error and NEITHER row is written (hardening).
+    """A hook substituting the located instance is a top-level error and NEITHER row is written.
 
     ``UpdateBookSubstitutingInstance.get_serializer_kwargs`` returns a DIFFERENT ``Book``
     than the located, authorized row - the "row A's authorization writes row B" bypass.
@@ -19916,8 +19915,8 @@ def test_golden_sdl_products_serializer_input() -> None:
 # refactor that moves the window annotation after prefetch filtering) the
 # predicate would add a SECOND through-table join instead - cartesian row
 # duplication that inflates ``_dst_row_number`` partitions and
-# ``_dst_total_count``. The prior live tests could not catch that: their data
-# shapes attach each child to exactly one parent, so a duplicate join has
+# ``_dst_total_count``. Data shapes that attach each child to exactly one
+# parent cannot catch that: a duplicate join there has
 # fan-out x1 and produces correct-looking pages. These two tests seed
 # OVERLAP-shaped graphs (children shared across parents, both M2M directions)
 # and pin the per-parent pages, the counts, the fixed query count, and the

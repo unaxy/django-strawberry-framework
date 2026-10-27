@@ -438,8 +438,7 @@ def test_reverse_m2m_parity_joins_the_through_table_once() -> None:
     lateral_sql = captured[1]["sql"]
     # The duplicate-join tripwire, lateral edition: each lateral branch scans
     # the through table exactly once (as FROM, joining the child) - a second
-    # join would re-inflate the row numbers the way the historical M2M
-    # prefetch duplication did.
+    # join would inflate the row numbers with duplicated M2M rows.
     assert (
         'FROM "library_book_genres" AS "__dst_through"'
         ' INNER JOIN "library_book" AS "__dst_child"' in lateral_sql
@@ -479,12 +478,12 @@ def test_depth_two_forward_m2m_parity() -> None:
 def test_divergent_alias_parity_one_lateral_per_response_key() -> None:
     """Divergent aliases ride the lateral backend too: one lateral query per key.
 
-    The idea-#2 per-response-key scheme is strategy-independent - the walker
+    The per-response-key scheme is strategy-independent - the walker
     hands one ``NestedConnectionRequest`` per key, so the lateral strategy
     plans one ``CROSS JOIN LATERAL`` query per alias (3 queries total: roots +
     2 laterals) with byte parity against the windowed strategy. Neither alias
     observes ``totalCount``, so BOTH per-key windows engage the count-free n+1
-    probe (idea-#1 interplay) - the executed SQL carries no count aggregate.
+    probe - the executed SQL carries no count aggregate.
     """
     _seed_library()
     query = (
@@ -658,7 +657,7 @@ def _seed_visibility() -> None:
 
 
 def test_visibility_scope_takes_the_lateral_path_with_parity() -> None:
-    """A single-table ``get_queryset`` scope now takes the lateral path.
+    """A single-table ``get_queryset`` scope takes the lateral path.
 
     Anonymous traffic over a visibility-scoped connection
     executes ``CROSS JOIN LATERAL`` (not the windowed downgrade), the scope's
@@ -825,8 +824,8 @@ def _request_varying_visibility_schema() -> tuple[
 def test_request_varying_visibility_is_not_cached_across_callers() -> None:
     """Two callers of ONE extension get their OWN visibility WHERE, never a replay.
 
-    The security-critical composition the earlier unconditional tests could not
-    pin: a custom ``get_queryset`` marks the plan non-cacheable, so the anonymous
+    The security-critical composition an unconditional scope cannot
+    exercise: a custom ``get_queryset`` marks the plan non-cacheable, so the anonymous
     caller's restrictive predicate must never survive in the plan cache and be
     replayed for a staff caller (or the reverse). Both callers execute real
     lateral SQL through the SAME extension instance; the anonymous branch carries

@@ -1322,7 +1322,7 @@ def guard_create_required_serializer_fields(
     both ``Meta.fields`` and ``Meta.exclude``. ``read_only`` / ``HiddenField``
     fields are exempt (already dropped, never required input).
 
-    **The explicit injection contract (hardened).** ``injected_fields``
+    **The explicit injection contract.** ``injected_fields``
     names the fields a ``get_serializer_injected_data`` override supplies
     (``Meta.injected_fields``); they are SUBTRACTED from the dropped-required set, so a
     required field a narrowing drops but that is DECLARED injected does not raise, while a

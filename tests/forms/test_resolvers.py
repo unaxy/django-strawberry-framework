@@ -568,10 +568,10 @@ def test_relation_visibility_relay_multi_hidden_rejected() -> None:
 def test_null_boolean_field_omitted_in_mutation_uses_unset_default() -> None:
     """Omitting a ``NullBooleanField`` in the input succeeds at RUNTIME (the UNSET default).
 
-    The motivating regression this commit fixes: baking ``bool | None`` while
-    leaving the input field required produced SDL that let GraphQL validation
-    accept the omit, then Strawberry raised ``TypeError: missing 1 required
-    keyword-only argument`` when constructing the input object. With the field
+    Baking ``bool | None`` while leaving the input field required would produce
+    SDL that lets GraphQL validation accept the omit, then Strawberry would raise
+    ``TypeError: missing 1 required keyword-only argument`` when constructing the
+    input object. With the field
     widened to ``| None`` + ``UNSET`` the omit reaches the bound form as an
     absent value, and ``NullBooleanField`` resolves it to ``None``. A pure-SDL
     test cannot catch this - only executing the mutation with the field omitted.
@@ -1261,10 +1261,10 @@ def test_required_extra_field_omitted_on_update_is_coercion_error() -> None:
     Omitting it is a GraphQL coercion error BEFORE the resolver.
 
     The partial input keeps a required non-model extra field required (it
-    is not a model-backed field forced optional). Now that a required generated
+    is not a model-backed field forced optional). Because a required generated
     field carries NO class default, an omitted required field is rejected at
     variable coercion rather than silently arriving as ``None`` at the resolver and
-    surfacing as an in-band ``FieldError`` (which masked the missing-input error).
+    surfacing as an in-band ``FieldError`` (which would mask the missing-input error).
     """
 
     class ConfirmForm(forms.ModelForm[product_models.Item]):
@@ -1611,9 +1611,9 @@ def test_perform_mutate_override_runs_only_on_success() -> None:
 
 @pytest.mark.django_db
 def test_plain_form_rejects_write_sql_outside_the_write_phase() -> None:
-    """A plain-form ``clean_*`` write on the pinned alias fails closed (0.0.14 phase hardening).
+    """A plain-form ``clean_*`` write on the pinned alias fails closed (write-phase guard).
 
-    The model-less body now rides ``pipeline_alias_guard`` + ``pipeline_write_phase``
+    The model-less body rides ``pipeline_alias_guard`` + ``pipeline_write_phase``
     like every other write flavor: validation is database-read-only, so an ORM
     create inside ``clean_message`` raises ``ConfigurationError`` rather than
     committing a side effect before ``perform_mutate``.
@@ -1818,7 +1818,7 @@ def test_modelform_refetch_keeps_select_related_and_introduces_no_projection() -
 
 
 # ---------------------------------------------------------------------------
-# ``spec-038-form_mutations-0_0_12`` hardening
+# ``spec-038-form_mutations-0_0_12`` edge contracts
 # ---------------------------------------------------------------------------
 
 
@@ -1958,8 +1958,8 @@ def test_visible_related_object_no_primary_uses_default_manager() -> None:
 
     A relation whose related model has no primary ``DjangoType`` carries no
     visibility contract, so existence is checked against the default manager.
-    Driven directly (the autouse fixture leaves the registry empty). The helper was
-    promoted to ``utils/querysets.py`` in spec-039 so the form +
+    Driven directly (the autouse fixture leaves the registry empty). The helper
+    lives in ``utils/querysets.py`` so the form +
     serializer relation decoders share one object-returning visibility query.
     """
     genre = library_models.Genre.objects.create(name=_uniq("G"))

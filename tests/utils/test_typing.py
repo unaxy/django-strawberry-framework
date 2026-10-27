@@ -107,8 +107,8 @@ def test_unwrap_return_type_handles_bare_typing_list() -> None:
     """``typing.List`` (no parameter) returns ``Any``.
 
     ``get_origin(typing.List) is list`` so the list branch fires, but
-    ``get_args(typing.List)`` returns ``()``. The earlier shape indexed
-    ``get_args(rt)[0]`` and ``IndexError``'d here; the fix returns ``Any``
+    ``get_args(typing.List)`` returns ``()``. Indexing ``get_args(rt)[0]``
+    would ``IndexError`` here; the helper returns ``Any``
     as the "unknown element type" sentinel.
     """
     # basedpyright: the bare deprecated ``typing.List`` alias is the input under test; ``list``

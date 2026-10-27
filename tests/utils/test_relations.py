@@ -515,7 +515,7 @@ def test_classify_path_unique_reverse_fk_is_row_preserving() -> None:
     assert plan.terminal is _UrUniqueChild._meta.get_field("note")
     assert path_traverses_to_many(_UrParent, "unique_children__note") is False
     assert path_traverses_to_many(_UrParent, "unique_children") is False
-    assert _legacy_traverses_to_many(_UrParent, "unique_children__note") is True
+    assert _segment_walk_traverses_to_many(_UrParent, "unique_children__note") is True
 
 
 def test_classify_path_plain_reverse_fk_beside_unique_is_first_many() -> None:
@@ -837,16 +837,15 @@ def test_lookup_validation_error_labels_unnamed_terminal_by_type() -> None:
 
 
 # ---------------------------------------------------------------------------
-# path_traverses_to_many: byte-identical compatibility with the legacy walk.
+# path_traverses_to_many: identical answers to the segment-walk oracle.
 # ---------------------------------------------------------------------------
 
 
-def _legacy_traverses_to_many(model: type[Model], field_path: str) -> bool:
-    """The pre-refactor lenient walk, frozen here as the compatibility oracle.
+def _segment_walk_traverses_to_many(model: type[Model], field_path: str) -> bool:
+    """The segment-by-segment walk, kept here as the compatibility oracle.
 
-    Copied verbatim from ``git show HEAD:.../utils/relations.py`` and used ONLY
-    to prove the ``classify_path``-based reimplementation returns byte-identical
-    booleans across the hostile-path matrix below.
+    Used ONLY to prove the ``classify_path``-based ``path_traverses_to_many``
+    returns identical booleans across the hostile-path matrix below.
     """
     current: object = model
     for segment in field_path.split("__"):
@@ -865,8 +864,7 @@ def _legacy_traverses_to_many(model: type[Model], field_path: str) -> bool:
     return False
 
 
-# Frozen expected answers empirically collected from the legacy implementation
-# executed via ``git show HEAD:...`` in a scratch shell (see task report).
+# Frozen expected answers: what the segment walk returns for each path.
 _TRAVERSES_MATRIX = [
     # valid to-one / scalar -> False
     (Book, "title", False),
@@ -900,7 +898,7 @@ _TRAVERSES_MATRIX = [
     # forward GenericForeignKey -> False (related_model is None)
     (TaggedItem, "content_object", False),
     (TaggedItem, "content_object__x", False),
-    # many-then-garbage -> True (legacy short-circuits at the many hop)
+    # many-then-garbage -> True (the segment walk short-circuits at the many hop)
     (Book, "genres__nonexistent", True),
     (Book, "loans__nonexistent__x", True),
     (Book, "genres__name__icontains", True),
@@ -909,23 +907,23 @@ _TRAVERSES_MATRIX = [
 
 
 @pytest.mark.parametrize(("model", "path", "expected"), _TRAVERSES_MATRIX)
-def test_path_traverses_to_many_matches_legacy(
+def test_path_traverses_to_many_matches_the_segment_walk(
     model: type[Model],
     path: str,
     *,
     expected: bool,
 ) -> None:
-    """The reimplementation returns the frozen legacy answer for every path."""
+    """``path_traverses_to_many`` returns the frozen segment-walk answer for every path."""
     assert path_traverses_to_many(model, path) is expected
-    # And it agrees with the legacy walk executed live in-process.
-    assert path_traverses_to_many(model, path) is _legacy_traverses_to_many(model, path)
+    # And it agrees with the segment walk executed live in-process.
+    assert path_traverses_to_many(model, path) is _segment_walk_traverses_to_many(model, path)
 
 
 def test_path_traverses_to_many_many_then_garbage_uses_lenient_fallback() -> None:
     """A many-then-garbage path exercises the ``PathResolutionError`` fallback.
 
     ``classify_path`` raises on the garbage tail; the lenient fallback recovers
-    the legacy ``True`` (the first hop is a forward M2M) instead of ``False``.
+    the segment walk's ``True`` (the first hop is a forward M2M) instead of ``False``.
     """
     with pytest.raises(PathResolutionError):
         classify_path(Book, "genres__nonexistent")
