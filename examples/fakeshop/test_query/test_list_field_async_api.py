@@ -22,6 +22,8 @@ No case sets ``DJANGO_ALLOW_ASYNC_UNSAFE``. All tests carry
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import datetime
 import functools
 import inspect
 import json
@@ -38,11 +40,12 @@ from apps.library.orders import BranchOrder
 from apps.products import services
 from asgiref.sync import sync_to_async
 from django.contrib.auth.models import AbstractUser, Permission, User
-from django.db import models
+from django.db import connection, models
 from django.db.backends.base.base import BaseDatabaseWrapper
-from django.db.models.expressions import Combinable, Func, OrderBy, RawSQL
-from django.db.models.functions import Lower, Random
-from django.db.models.lookups import Transform
+from django.db.models.expressions import Combinable, CombinedExpression, Func, OrderBy, RawSQL
+from django.db.models.functions import Cast, Coalesce, Length, Lower, Random
+from django.db.models.lookups import Exact, GreaterThan, IsNull, Lookup, Transform
+from django.db.models.query_utils import RegisterLookupMixin
 from django.db.models.sql.compiler import SQLCompiler
 from django.http import HttpRequest, HttpResponse, HttpResponseBase
 from django.test import AsyncClient, override_settings
@@ -58,6 +61,7 @@ from graphql_client import (
     json_object,
     json_str,
     middleware_without_debug_toolbar,
+    read_attr,
     response_json,
 )
 from strategy_schemas import make_django_type
@@ -2001,6 +2005,823 @@ async def test_async_offset_rejects_a_raw_sql_order(
     assert json_at(err, "extensions", "reason") == "order_required"
     assert json_at(err, "extensions", "argument") == "offset"
     assert branch_sql == [], branch_sql
+
+
+_BranchOrdering: TypeAlias = Callable[
+    [models.QuerySet[library_models.Branch]],
+    models.QuerySet[library_models.Branch],
+]
+#: ``(target, lookup class, registered name or None for the class's own)``: the project
+#: classes a row registers with ``register_lookup`` for the length of its request.
+_LookupRegistration: TypeAlias = tuple[
+    type[RegisterLookupMixin],
+    type[Lookup | Transform],
+    str | None,
+]
+
+
+class _Shuffle(Transform):
+    """A project transform compiling to a random value, whatever it is applied to."""
+
+    lookup_name = "shuffle"
+    template = "RANDOM()"
+
+
+class _VolatileGreaterThan(GreaterThan):
+    """A project ``gt`` whose comparison is a coin toss."""
+
+    @override
+    def as_sql(self, compiler: SQLCompiler, connection: BaseDatabaseWrapper) -> _AsSqlType:
+        return "RANDOM() > 0.5", ()
+
+
+class _VolatileIsNull(IsNull):
+    """A project ``isnull`` whose test is a coin toss."""
+
+    @override
+    def as_sql(self, compiler: SQLCompiler, connection: BaseDatabaseWrapper) -> _AsSqlType:
+        return "RANDOM() > 0.5", ()
+
+
+class _VolatileExact(Exact):
+    """A project ``exact`` whose comparison is a coin toss."""
+
+    @override
+    def as_sql(self, compiler: SQLCompiler, connection: BaseDatabaseWrapper) -> _AsSqlType:
+        return "RANDOM() > 0.5", ()
+
+
+class _CastToRandomText(models.TextField[str, str]):
+    """A project field whose cast type smuggles a random value into ``CAST``."""
+
+    @override
+    def cast_db_type(self, connection: BaseDatabaseWrapper) -> str:
+        return "TEXT) || RANDOM() || (''"
+
+
+class _RandomPlaceholderInteger(models.IntegerField[int, int]):
+    """A project field whose placeholder adds a random value to every literal it holds."""
+
+    def get_placeholder(
+        self,
+        _value: object,
+        _compiler: SQLCompiler,
+        _connection: BaseDatabaseWrapper,
+    ) -> str:
+        return "(RANDOM() + %s)"
+
+
+#: A readable date the ``__year`` rows apply Django's own transforms to; ``Branch``
+#: has no date column, and a literal reads the same in every row.
+_STAMP = models.Value(datetime.date(2020, 1, 1))
+
+
+def _branch_case(condition: models.Q, then: object = None) -> models.Case:
+    """A conditional sort over ``condition``, picking ``then`` (or 0) when it holds."""
+    return models.Case(
+        models.When(condition, then=models.Value(0) if then is None else then),
+        default=models.Value(1),
+    )
+
+
+def _bare_condition() -> models.Q:
+    """A ``Q`` whose only child is a conditional expression rather than a ``(lookup, value)``."""
+    return models.Q(
+        models.ExpressionWrapper(models.Q(city="Boston"), output_field=models.BooleanField()),
+    )
+
+
+def _random_connector() -> CombinedExpression:
+    """An exact ``CombinedExpression`` whose operator text carries a random value."""
+    return CombinedExpression(
+        models.Value(1),
+        "+ RANDOM() +",
+        models.Value(2),
+        output_field=models.FloatField(),
+    )
+
+
+async def _branch_offset_page_under(
+    monkeypatch: pytest.MonkeyPatch,
+    record_compiled_sql: RecordCompiledSql,
+    ordering: _BranchOrdering,
+    registrations: tuple[_LookupRegistration, ...] = (),
+    *,
+    extra_settings: Mapping[str, object] | None = None,
+) -> tuple[JSONObject, list[str]]:
+    """Post the active-order offset page with ``apply_async`` returning ``ordering(queryset)``."""
+
+    async def _apply(
+        _cls: type[BranchOrder],
+        _order_input: object,
+        queryset: models.QuerySet[library_models.Branch],
+        _info: object,
+        **_kwargs: object,
+    ) -> models.QuerySet[library_models.Branch]:
+        return ordering(queryset)
+
+    monkeypatch.setattr(BranchOrder, "apply_async", classmethod(_apply))
+    branch_sql = record_compiled_sql("library_branch")
+    with contextlib.ExitStack() as stack:
+        for target, lookup_class, lookup_name in registrations:
+            stack.enter_context(register_lookup(target, lookup_class, lookup_name=lookup_name))
+        payload = await _post_async(
+            _offset_guard_schema(),
+            _ASYNC_OFFSET_WITH_ACTIVE_ORDER,
+            extra_settings=extra_settings,
+        )
+    return payload, branch_sql
+
+
+#: The orderings the offset guard must refuse with ``order_required``: each compiles to
+#: SQL this package cannot certify, so a positive offset over it pages a shuffle.
+#: ``(id, ordering, registrations)``.
+_GUARD_REFUSED_ORDERINGS: tuple[
+    tuple[str, _BranchOrdering, tuple[_LookupRegistration, ...]],
+    ...,
+] = (
+    (
+        "string-transform-after-an-annotation",
+        lambda qs: qs.annotate(sort_key=Lower("name")).order_by("sort_key__shuffle", "name"),
+        ((models.TextField, _Shuffle, None),),
+    ),
+    (
+        "string-approved-transform-after-an-annotation",
+        lambda qs: qs.annotate(stamp=_STAMP).order_by("stamp__year", "name"),
+        (),
+    ),
+    (
+        "f-transform-after-an-annotation",
+        lambda qs: qs.alias(sort_key=Lower("name")).order_by(
+            models.F("sort_key__shuffle"),
+            "name",
+        ),
+        ((models.TextField, _Shuffle, None),),
+    ),
+    (
+        "f-transform-after-a-column",
+        lambda qs: qs.order_by(models.F("name__shuffle"), "name"),
+        ((models.TextField, _Shuffle, None),),
+    ),
+    (
+        "f-transform-read-on-the-annotation-not-its-field",
+        lambda qs: qs.alias(sort_key=Lower("name")).order_by(models.F("sort_key__lower"), "name"),
+        ((models.TextField, Lower, None), (Lower, _Shuffle, "lower")),
+    ),
+    (
+        "predicate-value-f-transform",
+        lambda qs: qs.alias(sort_key=Lower("name")).order_by(
+            _branch_case(models.Q(name=models.F("sort_key__shuffle"))),
+            "name",
+        ),
+        ((models.TextField, _Shuffle, None),),
+    ),
+    (
+        "lookup-read-on-the-annotation-not-its-field",
+        lambda qs: qs.alias(k=Lower("name")).order_by(_branch_case(models.Q(k__gt="m")), "name"),
+        ((Lower, _VolatileGreaterThan, "gt"),),
+    ),
+    (
+        "exact-none-compiles-isnull",
+        lambda qs: qs.order_by(_branch_case(models.Q(isil=None)), "name"),
+        ((models.TextField, _VolatileIsNull, "isnull"),),
+    ),
+    (
+        "exact-none-compiles-the-transformed-isnull",
+        lambda qs: qs.order_by(_branch_case(models.Q(isil__lower=None)), "name"),
+        ((models.TextField, Lower, None), (Lower, _VolatileIsNull, "isnull")),
+    ),
+    (
+        "bare-condition-implicit-exact",
+        lambda qs: qs.order_by(_branch_case(_bare_condition()), "name"),
+        ((models.BooleanField, _VolatileExact, "exact"),),
+    ),
+    (
+        "annotated-predicate-over-a-random-alias",
+        lambda qs: (
+            qs.alias(r=Random())
+            .annotate(k=_branch_case(models.Q(r__gt=0.5)))
+            .order_by("k", "name")
+        ),
+        (),
+    ),
+    (
+        "annotated-negated-predicate-over-a-random-alias",
+        lambda qs: (
+            qs.alias(r=Random())
+            .annotate(k=_branch_case(~models.Q(r__gt=0.5)))
+            .order_by("k", "name")
+        ),
+        (),
+    ),
+    (
+        "annotated-predicate-over-raw-sql",
+        lambda qs: qs.annotate(k=_branch_case(models.Q(name=RawSQL("RANDOM()", [])))).order_by(
+            "k",
+            "name",
+        ),
+        (),
+    ),
+    (
+        "annotated-unlisted-lookup",
+        lambda qs: qs.annotate(k=_branch_case(models.Q(name__iexact="bravo"))).order_by(
+            "k",
+            "name",
+        ),
+        (),
+    ),
+    (
+        "direct-unlisted-lookup",
+        lambda qs: qs.order_by(_branch_case(models.Q(name__iexact="bravo")), "name"),
+        (),
+    ),
+    (
+        "annotated-aggregate-filter-over-raw-sql",
+        lambda qs: qs.annotate(
+            k=models.Count("shelves", filter=models.Q(shelves__code=RawSQL("RANDOM()", []))),
+        ).order_by("k", "name"),
+        (),
+    ),
+    (
+        "function-template-override",
+        lambda qs: qs.order_by(Lower("name", template="RANDOM()"), "name"),
+        (),
+    ),
+    (
+        "annotated-function-template-override",
+        lambda qs: qs.annotate(k=Lower("name", template="RANDOM()")).order_by("k", "name"),
+        (),
+    ),
+    (
+        "coalesce-template-override",
+        lambda qs: qs.order_by(Coalesce("name", "city", template="RANDOM()"), "name"),
+        (),
+    ),
+    (
+        "annotated-coalesce-template-override",
+        lambda qs: qs.annotate(k=Coalesce("name", "city", template="RANDOM()")).order_by(
+            "k",
+            "name",
+        ),
+        (),
+    ),
+    (
+        "annotated-aggregate-template-override",
+        lambda qs: qs.annotate(k=models.Count("*", template="RANDOM()")).order_by("k", "name"),
+        (),
+    ),
+    ("operator-override", lambda qs: qs.order_by(_random_connector(), "name"), ()),
+    (
+        "annotated-operator-override",
+        lambda qs: qs.annotate(k=_random_connector()).order_by("k", "name"),
+        (),
+    ),
+    (
+        "cast-to-a-project-field",
+        lambda qs: qs.order_by(Cast("name", output_field=_CastToRandomText()), "name"),
+        (),
+    ),
+    (
+        "annotated-cast-to-a-project-field",
+        lambda qs: qs.annotate(k=Cast("name", output_field=_CastToRandomText())).order_by(
+            "k",
+            "name",
+        ),
+        (),
+    ),
+    (
+        "value-of-a-project-field",
+        lambda qs: qs.order_by(
+            models.Value(1, output_field=_RandomPlaceholderInteger()),
+            "name",
+        ),
+        (),
+    ),
+    (
+        "annotated-value-of-a-project-field",
+        lambda qs: qs.annotate(
+            k=models.Value(1, output_field=_RandomPlaceholderInteger()),
+        ).order_by("k", "name"),
+        (),
+    ),
+)
+
+
+#: The annotated twins of the project-class rows above. ``annotate`` resolves the
+#: project class into the query graph, so the post-``OrderSet`` seal refuses the
+#: queryset as untrusted before the offset guard reads it. ``(id, ordering,
+#: registrations)``.
+_SEAL_REFUSED_ORDERINGS: tuple[
+    tuple[str, _BranchOrdering, tuple[_LookupRegistration, ...]],
+    ...,
+] = (
+    (
+        "annotated-f-transform-after-an-annotation",
+        lambda qs: (
+            qs.alias(sort_key=Lower("name"))
+            .annotate(k=models.F("sort_key__shuffle"))
+            .order_by("k", "name")
+        ),
+        ((models.TextField, _Shuffle, None),),
+    ),
+    (
+        "annotated-predicate-value-f-transform",
+        lambda qs: (
+            qs.alias(sort_key=Lower("name"))
+            .annotate(k=_branch_case(models.Q(name=models.F("sort_key__shuffle"))))
+            .order_by("k", "name")
+        ),
+        ((models.TextField, _Shuffle, None),),
+    ),
+    (
+        "annotated-lookup-on-the-annotation",
+        lambda qs: (
+            qs.alias(k=Lower("name"))
+            .annotate(o=_branch_case(models.Q(k__gt="m")))
+            .order_by("o", "name")
+        ),
+        ((Lower, _VolatileGreaterThan, "gt"),),
+    ),
+    (
+        "annotated-exact-none-compiles-isnull",
+        lambda qs: qs.annotate(o=_branch_case(models.Q(isil=None))).order_by("o", "name"),
+        ((models.TextField, _VolatileIsNull, "isnull"),),
+    ),
+    (
+        "annotated-bare-condition-implicit-exact",
+        lambda qs: qs.annotate(o=_branch_case(_bare_condition())).order_by("o", "name"),
+        ((models.BooleanField, _VolatileExact, "exact"),),
+    ),
+)
+
+
+#: The orderings the offset guard must certify: each is the readable twin of a
+#: refusal above, or the form a resolved annotation takes of a direct spelling the
+#: guard accepts. ``(id, ordering, registrations, fragment the ORDER BY must hold)``.
+_GUARD_ACCEPTED_ORDERINGS: tuple[
+    tuple[str, _BranchOrdering, tuple[_LookupRegistration, ...], str],
+    ...,
+] = (
+    (
+        "direct-conditional",
+        lambda qs: qs.order_by(_branch_case(models.Q(city="Boston")), "name"),
+        (),
+        "CASE WHEN",
+    ),
+    (
+        "annotated-conditional",
+        lambda qs: qs.annotate(k=_branch_case(models.Q(city="Boston"))).order_by("k", "name"),
+        (),
+        "CASE WHEN",
+    ),
+    (
+        "direct-negated-conditional",
+        lambda qs: qs.order_by(_branch_case(~models.Q(city="Boston")), "name"),
+        (),
+        "NOT (",
+    ),
+    (
+        "annotated-negated-conditional",
+        lambda qs: qs.annotate(k=_branch_case(~models.Q(city="Boston"))).order_by("k", "name"),
+        (),
+        "NOT (",
+    ),
+    (
+        "annotated-filtered-aggregate",
+        lambda qs: qs.annotate(
+            k=models.Count("shelves", filter=models.Q(shelves__code="Alpha-1")),
+        ).order_by("k", "name"),
+        (),
+        "COUNT(",
+    ),
+    (
+        "direct-year-predicate",
+        lambda qs: qs.alias(stamp=_STAMP).order_by(
+            _branch_case(models.Q(stamp__year=2020)),
+            "name",
+        ),
+        (),
+        "CASE WHEN",
+    ),
+    (
+        "annotated-year-predicate",
+        lambda qs: (
+            qs.alias(stamp=_STAMP)
+            .annotate(k=_branch_case(models.Q(stamp__year=2020)))
+            .order_by("k", "name")
+        ),
+        (),
+        "CASE WHEN",
+    ),
+    (
+        "direct-expression-list",
+        lambda qs: qs.order_by(_branch_case(models.Q(name__in=[Lower("name"), "x"])), "name"),
+        (),
+        " IN (",
+    ),
+    (
+        "annotated-expression-list",
+        lambda qs: qs.annotate(k=_branch_case(models.Q(name__in=[Lower("name"), "x"]))).order_by(
+            "k",
+            "name",
+        ),
+        (),
+        " IN (",
+    ),
+    (
+        "direct-predicate-value-f-transform",
+        lambda qs: qs.alias(stamp=_STAMP).order_by(
+            _branch_case(models.Q(id__gt=models.F("stamp__year"))),
+            "name",
+        ),
+        (),
+        "CASE WHEN",
+    ),
+    (
+        "annotated-predicate-value-f-transform",
+        lambda qs: (
+            qs.alias(stamp=_STAMP)
+            .annotate(k=_branch_case(models.Q(id__gt=models.F("stamp__year"))))
+            .order_by("k", "name")
+        ),
+        (),
+        "CASE WHEN",
+    ),
+    (
+        "direct-result-f-transform",
+        lambda qs: qs.alias(stamp=_STAMP).order_by(
+            _branch_case(models.Q(city="Boston"), then=models.F("stamp__year")),
+            "name",
+        ),
+        (),
+        "CASE WHEN",
+    ),
+    (
+        "annotated-result-f-transform",
+        lambda qs: (
+            qs.alias(stamp=_STAMP)
+            .annotate(k=_branch_case(models.Q(city="Boston"), then=models.F("stamp__year")))
+            .order_by("k", "name")
+        ),
+        (),
+        "CASE WHEN",
+    ),
+    (
+        "direct-f-transform",
+        lambda qs: qs.alias(stamp=_STAMP).order_by(models.F("stamp__year"), "name"),
+        (),
+        "ORDER BY",
+    ),
+    (
+        "annotated-f-transform",
+        lambda qs: qs.alias(stamp=_STAMP, year=models.F("stamp__year")).order_by("year", "name"),
+        (),
+        "ORDER BY",
+    ),
+    (
+        "whole-annotation-name-over-its-head",
+        lambda qs: qs.annotate(a=Random(), a__b=Lower("name")).order_by("a__b", "name"),
+        (),
+        "ORDER BY",
+    ),
+    (
+        "f-whole-annotation-name-over-its-head",
+        lambda qs: qs.alias(a=Random(), a__b=Lower("name")).order_by(
+            models.F("a__b"),
+            "name",
+        ),
+        (),
+        "LOWER(",
+    ),
+    (
+        "direct-f-approved-column-transform",
+        lambda qs: qs.order_by(models.F("name__lower"), "name"),
+        ((models.TextField, Lower, None),),
+        "LOWER(",
+    ),
+    (
+        "annotated-f-approved-column-transform",
+        lambda qs: qs.alias(k=models.F("name__lower")).order_by("k", "name"),
+        ((models.TextField, Lower, None),),
+        "LOWER(",
+    ),
+    (
+        "stock-operator",
+        lambda qs: qs.order_by(
+            models.ExpressionWrapper(Length("name") + 1, output_field=models.IntegerField()),
+            "name",
+        ),
+        (),
+        "LENGTH(",
+    ),
+    (
+        "annotated-stock-operator",
+        lambda qs: qs.annotate(
+            k=models.ExpressionWrapper(Length("name") + 1, output_field=models.IntegerField()),
+        ).order_by("k", "name"),
+        (),
+        "LENGTH(",
+    ),
+    (
+        "exact-none-over-the-stock-isnull",
+        lambda qs: qs.order_by(_branch_case(models.Q(isil=None)), "name"),
+        (),
+        "IS NULL",
+    ),
+)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("ordering", "registrations"),
+    [row[1:] for row in _GUARD_REFUSED_ORDERINGS],
+    ids=[row[0] for row in _GUARD_REFUSED_ORDERINGS],
+)
+async def test_async_offset_refuses_an_order_compiling_to_sql_it_cannot_read(
+    monkeypatch: pytest.MonkeyPatch,
+    record_compiled_sql: RecordCompiledSql,
+    ordering: _BranchOrdering,
+    registrations: tuple[_LookupRegistration, ...],
+) -> None:
+    """The async coloring certifies the SQL Django compiles, as the sync one does.
+
+    Both pipelines hand the sealed queryset to one guard, so every spelling that
+    hides a random value - after an alias or a column, in the operand's own
+    registry, in the ``isnull`` a ``None`` compiles to, in a resolved
+    annotation, or in an approved node's own template, operator or output field
+    - refuses the window here too, before any branch statement.
+    """
+    await _seed_three_branches_async()
+
+    payload, branch_sql = await _branch_offset_page_under(
+        monkeypatch,
+        record_compiled_sql,
+        ordering,
+        registrations,
+    )
+
+    err = json_object(payload, "errors", 0)
+    assert json_at(err, "extensions", "reason") == "order_required"
+    assert json_at(err, "extensions", "argument") == "offset"
+    assert branch_sql == [], branch_sql
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("ordering", "registrations"),
+    [row[1:] for row in _SEAL_REFUSED_ORDERINGS],
+    ids=[row[0] for row in _SEAL_REFUSED_ORDERINGS],
+)
+async def test_async_offset_annotated_project_sql_is_refused_by_the_seal_first(
+    monkeypatch: pytest.MonkeyPatch,
+    record_compiled_sql: RecordCompiledSql,
+    ordering: _BranchOrdering,
+    registrations: tuple[_LookupRegistration, ...],
+) -> None:
+    """``annotate`` resolves the project class into the graph, so the async seal names it first."""
+    await _seed_three_branches_async()
+
+    payload, branch_sql = await _branch_offset_page_under(
+        monkeypatch,
+        record_compiled_sql,
+        ordering,
+        registrations,
+        extra_settings=_ERROR_POLICY_PASS_THROUGH,
+    )
+
+    assert payload["data"] is None
+    message = json_str(payload, "errors", 0, "message")
+    assert message.startswith(_BRANCH_ORDER_ASYNC_SHAPE_PREFIX + "untrusted defect"), message
+    assert branch_sql == [], branch_sql
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("ordering", "registrations", "fragment"),
+    [row[1:] for row in _GUARD_ACCEPTED_ORDERINGS],
+    ids=[row[0] for row in _GUARD_ACCEPTED_ORDERINGS],
+)
+async def test_async_offset_certifies_an_order_whatever_spelling_resolves_it(
+    monkeypatch: pytest.MonkeyPatch,
+    record_compiled_sql: RecordCompiledSql,
+    ordering: _BranchOrdering,
+    registrations: tuple[_LookupRegistration, ...],
+    fragment: str,
+) -> None:
+    """A readable order pages on this coloring whether written directly or held by an annotation."""
+    await _seed_three_branches_async()
+
+    payload, branch_sql = await _branch_offset_page_under(
+        monkeypatch,
+        record_compiled_sql,
+        ordering,
+        registrations,
+    )
+
+    assert "errors" not in payload, payload
+    assert json_at(payload, "data", "branches") == [{"name": "Bravo"}]
+    assert len(branch_sql) == 1, branch_sql
+    statement = branch_sql[0].upper()
+    assert "OFFSET 1" in statement, statement
+    assert fragment in statement, statement
+    assert _RANDOM_ORDER_SQL not in statement, statement
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("empty_is_null", "served"),
+    [(True, False), (False, True)],
+    ids=["backend-reads-empty-as-null", "backend-reads-empty-as-text"],
+)
+async def test_async_offset_reads_an_empty_string_by_what_the_backend_compiles(
+    monkeypatch: pytest.MonkeyPatch,
+    record_compiled_sql: RecordCompiledSql,
+    *,
+    empty_is_null: bool,
+    served: bool,
+) -> None:
+    """``isil=""`` is a project ``isnull`` where the backend reads ``""`` as null, on this coloring too.
+
+    The feature is patched on the backend's class: the async pipeline runs its
+    ORM work on an executor thread holding a different connection object.
+    """
+    await _seed_three_branches_async()
+    monkeypatch.setattr(
+        type(connection.features),
+        "interprets_empty_strings_as_nulls",
+        empty_is_null,
+    )
+
+    payload, branch_sql = await _branch_offset_page_under(
+        monkeypatch,
+        record_compiled_sql,
+        lambda qs: qs.order_by(_branch_case(models.Q(isil="")), "name"),
+        ((models.TextField, _VolatileIsNull, "isnull"),),
+    )
+
+    if not served:
+        err = json_object(payload, "errors", 0)
+        assert json_at(err, "extensions", "reason") == "order_required"
+        assert json_at(err, "extensions", "argument") == "offset"
+        assert branch_sql == [], branch_sql
+        return
+    assert "errors" not in payload, payload
+    assert json_at(payload, "data", "branches") == [{"name": "Bravo"}]
+    assert len(branch_sql) == 1, branch_sql
+    assert _RANDOM_ORDER_SQL not in branch_sql[0].upper(), branch_sql
+
+
+async def _evaluated_branches_async() -> models.QuerySet[library_models.Branch]:
+    """A branch queryset whose rows were fetched before it is returned."""
+    rows = library_models.Branch.objects.all()
+    # Iterating fills the result cache the visibility seal is about to drop.
+    _fetched = [row async for row in rows]
+    return rows
+
+
+async def _resolve_evaluated(
+    _root: object,
+    _info: strawberry.Info[object, object],
+) -> models.QuerySet[library_models.Branch]:
+    return await _evaluated_branches_async()
+
+
+async def _resolve_materialized(
+    _root: object,
+    _info: strawberry.Info[object, object],
+) -> list[library_models.Branch]:
+    return [row async for row in library_models.Branch.objects.all()]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("resolver", "limit", "statements"),
+    [(_resolve_evaluated, 2, 2), (_resolve_materialized, 2, 1), (_resolve_evaluated, 0, 1)],
+    ids=["evaluated-queryset", "materialized-list", "evaluated-queryset-zero-width"],
+)
+async def test_async_holder_branches_an_evaluated_resolver_queryset_is_read_again(
+    record_compiled_sql: RecordCompiledSql,
+    resolver: _ListResolver,
+    limit: int,
+    statements: int,
+) -> None:
+    """The async seal drops a returned queryset's cache too, so a window reads it again.
+
+    The counts are this fixture's: a plain queryset with nothing prefetched. A
+    list is windowed from the rows it holds, and a zero-width window issues no
+    row query of its own.
+    """
+    await _seed_three_branches_async()
+
+    @strawberry.type
+    class _EvaluatedQuery:
+        branches: list[library_schema.BranchType] = DjangoListField(
+            library_schema.BranchType,
+            resolver=resolver,
+        )
+
+    branch_sql = record_compiled_sql("library_branch")
+    payload = await _post_async(
+        DjangoSchema(query=_EvaluatedQuery, config=strawberry_config()),
+        f"{{ branches(limit: {limit}) {{ name }} }}",
+    )
+
+    assert "errors" not in payload, payload
+    assert len(json_list(payload, "data", "branches")) == min(limit, 3)
+    assert len(branch_sql) == statements, branch_sql
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("parents", [1, 2])
+@pytest.mark.parametrize(
+    ("field", "per_parent"),
+    [("branches", 2), ("materialized", 1)],
+    ids=["evaluated-queryset", "materialized-list"],
+)
+async def test_async_holder_branches_a_nested_evaluated_queryset_is_read_again_per_parent(
+    record_compiled_sql: RecordCompiledSql,
+    parents: int,
+    field: str,
+    per_parent: int,
+) -> None:
+    """The re-read is per resolution, so a nested field pays it once per parent row."""
+    await _seed_three_branches_async()
+
+    @strawberry.type
+    class _BranchHolder:
+        """A plain parent whose list fields resolve once per holder."""
+
+        branches: list[library_schema.BranchType] = DjangoListField(
+            library_schema.BranchType,
+            resolver=_resolve_evaluated,
+        )
+        materialized: list[library_schema.BranchType] = DjangoListField(
+            library_schema.BranchType,
+            resolver=_resolve_materialized,
+        )
+
+    @strawberry.type
+    class _HolderQuery:
+        @strawberry.field
+        def holders(self) -> list[_BranchHolder]:
+            return [_BranchHolder() for _ in range(parents)]
+
+    branch_sql = record_compiled_sql("library_branch")
+    payload = await _post_async(
+        DjangoSchema(query=_HolderQuery, config=strawberry_config()),
+        f"{{ holders {{ {field}(limit: 2) {{ name }} }} }}",
+    )
+
+    assert "errors" not in payload, payload
+    assert len(branch_sql) == per_parent * parents, branch_sql
+
+
+def _prefetched_shelves(
+    root: object,
+    _info: strawberry.Info[object, object],
+) -> models.QuerySet[library_models.Shelf]:
+    """Hand back the holder's branch's shelves, which the parent query prefetched."""
+    branch = read_attr(root, "branch")
+    assert isinstance(branch, library_models.Branch)
+    return branch.shelves.all()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("parents", [1, 2])
+async def test_async_holder_shelves_a_warm_prefetch_returned_by_a_resolver_is_read_again_per_parent(
+    record_compiled_sql: RecordCompiledSql,
+    parents: int,
+) -> None:
+    """``root.<relation>.all()`` from a warm prefetch is a cached queryset the async seal rebuilds."""
+    await _seed_three_shelves_async()
+
+    @strawberry.type
+    class _PrefetchedBranchHolder:
+        """A plain parent holding a branch whose shelves were prefetched."""
+
+        branch: strawberry.Private[library_models.Branch]
+
+        shelves: list[library_schema.ShelfType] = DjangoListField(
+            library_schema.ShelfType,
+            resolver=_prefetched_shelves,
+        )
+
+    @strawberry.type
+    class _PrefetchQuery:
+        @strawberry.field
+        async def holders(self) -> list[_PrefetchedBranchHolder]:
+            branches = library_models.Branch.objects.order_by("name").prefetch_related("shelves")
+            return [_PrefetchedBranchHolder(branch=branch) async for branch in branches[:parents]]
+
+    shelf_sql = record_compiled_sql("library_shelf")
+    payload = await _post_async(
+        DjangoSchema(query=_PrefetchQuery, config=strawberry_config()),
+        "{ holders { shelves(limit: 2) { code } } }",
+    )
+
+    assert "errors" not in payload, payload
+    # One prefetch for the parents, then one window read per parent.
+    assert len(shelf_sql) == 1 + parents, shelf_sql
 
 
 # ---------------------------------------------------------------------------

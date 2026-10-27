@@ -14,14 +14,16 @@ from typing import TYPE_CHECKING, Literal, TypeVar, cast, get_args
 
 import strawberry
 from django.core.exceptions import FieldError
-from django.db import models
-from django.db.models import sql
+from django.db import DEFAULT_DB_ALIAS, connections, models
+from django.db.models import aggregates, sql
 from django.db.models.constants import LOOKUP_SEP
 from django.db.models.expressions import (
     BaseExpression,
     Case,
     Col,
+    Combinable,
     CombinedExpression,
+    ExpressionList,
     ExpressionWrapper,
     OrderBy,
     Star,
@@ -65,8 +67,14 @@ from django.db.models.lookups import (
     LessThan,
     LessThanOrEqual,
     Range,
+    YearExact,
+    YearGt,
+    YearGte,
+    YearLt,
+    YearLte,
 )
 from django.db.models.options import Options
+from django.db.models.sql.where import AND, OR, XOR, WhereNode
 from graphql import GraphQLError
 from strawberry.types import Info
 from typing_extensions import override
@@ -86,6 +94,7 @@ from .types import DjangoType
 from .types.base import _is_relay_shaped
 from .utils import truth
 from .utils._narrowing import (
+    is_exact_dict,
     is_list_or_tuple,
     is_set_or_frozenset,
     is_str,
@@ -100,8 +109,10 @@ from .utils.errors import coded_error_extensions
 from .utils.execution_mode import async_execution, operation_is_async
 from .utils.input_values import UNSET
 from .utils.querysets import (
+    _SQL_TEMPLATE_ATTRS,
     ORDER_FROM_MODEL_DEFAULT,
     VisibleRowExists,
+    _type_is_genuinely_django,
     apply_orderset_async,
     apply_orderset_sync,
     apply_type_visibility_async,
@@ -557,16 +568,33 @@ _READABLE_ORDER_LEAVES: truth.IdentitySet[type[object]] = truth.IdentitySet(
     ),
 )
 
+
+def _aggregate_filter_classes() -> tuple[type[object], ...]:
+    """Return Django's ``AggregateFilter``, or nothing on a release without it.
+
+    Django 6.0 wraps an aggregate's ``filter=`` predicate in
+    ``django/db/models/aggregates.py::AggregateFilter``, whose SQL is the
+    ``FILTER (WHERE ...)`` punctuation around that predicate. Below 6.0 the class
+    does not exist and the predicate sits directly among the aggregate's sources.
+    """
+    aggregate_filter = read_attr(aggregates, "AggregateFilter", None)
+    return (aggregate_filter,) if truth.is_type(aggregate_filter) else ()
+
+
 #: Expressions whose own SQL is punctuation around their sources - the branches of
 #: a ``CASE``, an operator between two operands, a wrapper that only supplies an
-#: output field, the direction marker on a term. A node listed here orders by
-#: whatever its sources order by and by nothing else, so it is read through.
+#: output field, the direction marker on a term, the commas of an expression list
+#: an ``__in`` compares against, and the ``FILTER (WHERE ...)`` around an
+#: aggregate's predicate. A node listed here orders by whatever its sources order
+#: by and by nothing else, so it is read through.
 _TRANSPARENT_ORDER_EXPRESSIONS: tuple[type[object], ...] = (
     Case,
     CombinedExpression,
+    ExpressionList,
     ExpressionWrapper,
     OrderBy,
     When,
+    *_aggregate_filter_classes(),
 )
 
 #: Database functions whose SQL is a deterministic function of their arguments:
@@ -592,8 +620,11 @@ _APPROVED_ORDER_FUNCTIONS: tuple[type[object], ...] = (
 #: aggregate a consumer ordering may annotate.
 _APPROVED_ORDER_AGGREGATES: tuple[type[object], ...] = (models.Count, models.Max, models.Min)
 
-#: Transforms a predicate's left-hand side may apply before its lookup, under the
-#: same purity rule and the same exact-type match.
+#: Transforms under the same purity rule and the same exact-type match: the ones a
+#: predicate's left-hand side or an ``F`` reference may apply after the name it
+#: resolves, and the nodes those spellings resolve into. A resolved annotation
+#: holds ``F("stamp__year")`` as ``ExtractYear(...)``, so a transform is read
+#: through like a pure function wherever it sits.
 _APPROVED_ORDER_TRANSFORMS: truth.IdentitySet[type[object]] = truth.IdentitySet(
     (
         ExtractDay,
@@ -636,14 +667,50 @@ _APPROVED_ORDER_LOOKUPS: truth.IdentitySet[type[object]] = truth.IdentitySet(
         RelatedIsNull,
         RelatedLessThan,
         RelatedLessThanOrEqual,
+        YearExact,
+        YearGt,
+        YearGte,
+        YearLt,
+        YearLte,
     ),
 )
 
 #: Every node read THROUGH to its sources. A term whose type is absent from this
 #: union and from ``_READABLE_ORDER_LEAVES`` is refused, whatever it holds.
 _APPROVED_ORDER_NODES: truth.IdentitySet[type[object]] = truth.IdentitySet(
-    (*_TRANSPARENT_ORDER_EXPRESSIONS, *_APPROVED_ORDER_FUNCTIONS, *_APPROVED_ORDER_AGGREGATES),
+    (
+        *_TRANSPARENT_ORDER_EXPRESSIONS,
+        *_APPROVED_ORDER_FUNCTIONS,
+        *_APPROVED_ORDER_AGGREGATES,
+        *_APPROVED_ORDER_TRANSFORMS,
+    ),
 )
+
+#: The operators ``CombinedExpression.as_sql`` writes between its two operands,
+#: which are Django's own ``Combinable`` constants. The connector is instance
+#: state, so a node of the approved class can still carry any text there.
+_COMBINED_ORDER_CONNECTORS: tuple[str, ...] = (
+    Combinable.ADD,
+    Combinable.SUB,
+    Combinable.MUL,
+    Combinable.DIV,
+    Combinable.POW,
+    Combinable.MOD,
+    Combinable.BITAND,
+    Combinable.BITOR,
+    Combinable.BITLEFTSHIFT,
+    Combinable.BITRIGHTSHIFT,
+    Combinable.BITXOR,
+)
+
+#: The connectors ``WhereNode.as_sql`` writes between a predicate's children.
+_WHERE_ORDER_CONNECTORS: tuple[str, ...] = (AND, OR, XOR)
+
+#: Approved nodes whose SQL calls a hook on their own output field:
+#: ``Value.as_sql`` asks it for a placeholder and ``Cast.as_sql`` for the type it
+#: casts to. Either hook emits SQL, so such a node is read only over one of
+#: Django's own field classes.
+_FIELD_HOOK_ORDER_NODES: truth.IdentitySet[type[object]] = truth.IdentitySet((models.Value, Cast))
 
 
 def _resolve_order_field_path(opts: _OptionsAny, path: str) -> ResolvedOrderName | None:
@@ -735,6 +802,17 @@ def _is_deterministic_order_reference(query: Query, name: str, prefix: str) -> b
     the foreign key column exactly as ``"branch_id"`` does, whatever the branch
     model declares.
 
+    Whatever follows the annotation or the field path is a transform
+    ``resolve_ref`` applies to it, and each one is SQL wrapped around the
+    reference. Those pieces are read as the approved transforms
+    (``_approved_order_transform_chain``), started from the operand Django
+    starts from: the annotation expression itself, or the column
+    ``resolve_ref`` takes from the trimmed join target. A resolved annotation
+    holds ``F("stamp__year")`` as the ``ExtractYear`` node it became, so this
+    is also the only reading under which a reference gets the same verdict
+    ordered directly and held by an annotation. ``F("sort_key__shuffle")`` is
+    refused because a project transform is not an approved one.
+
     ``prefix`` carries the relation path an expansion lifted this reference out
     of, because ``find_ordering_name`` rewrites such an expression through
     ``prefix_references`` before the outer query resolves it. The annotation and
@@ -746,14 +824,29 @@ def _is_deterministic_order_reference(query: Query, name: str, prefix: str) -> b
     """
     referenced = f"{prefix}{name}"
     annotation = query.annotations.get(referenced)
-    if annotation is None:
-        annotation = query.annotations.get(referenced.split(LOOKUP_SEP, maxsplit=1)[0])
     if annotation is not None:
         return _is_deterministic_order_term(query, annotation)
+    head, *transforms = referenced.split(LOOKUP_SEP)
+    annotation = query.annotations.get(head)
+    if annotation is not None:
+        return _is_deterministic_order_term(query, annotation) and (
+            _approved_order_transform_chain(annotation, transforms) is not None
+        )
     if referenced in query.extra:
         return False
     resolved = _resolve_order_field_path(query.get_meta(), referenced)
-    return resolved is not None and not resolved.lookups
+    if resolved is None:
+        return False
+    if not resolved.lookups:
+        return True
+    # ``resolve_ref`` takes the column from the trimmed join target, whose ``get_col``
+    # reads through a foreign key to the key it targets; a reverse relation has no
+    # column of its own here and is refused.
+    final_field = resolved.final_field
+    if not isinstance(final_field, models.Field):
+        return False
+    column = final_field.get_col("")
+    return _approved_order_transform_chain(column, resolved.lookups) is not None
 
 
 def _is_deterministic_order_name(
@@ -772,7 +865,9 @@ def _is_deterministic_order_name(
     ``FieldError``. Every other name is looked up as an annotation (the whole
     name first, then the head of a transform chain), then as an ``extra`` key,
     and only then as a field path, so the name that survives to the field path
-    is the only one that could order by a column.
+    is the only one that could order by a column. This package reads no
+    transform in a string order name: a name whose head alone names an
+    annotation is refused, exactly as a field path with pieces left over is.
 
     Raw SQL reached through ``extra`` is opaque, which is not the same as
     deterministic. Those strings are passed through verbatim and this package
@@ -794,10 +889,10 @@ def _is_deterministic_order_name(
     col = name.removeprefix("-")
     if opts is None:
         annotation = query.annotations.get(col)
-        if annotation is None:
-            annotation = query.annotations.get(col.split(LOOKUP_SEP)[0])
         if annotation is not None:
             return _is_deterministic_order_term(query, annotation)
+        if col.split(LOOKUP_SEP, maxsplit=1)[0] in query.annotations:
+            return False
         if col in query.extra:
             return False
         if "." in name and name in query.extra_order_by:
@@ -848,13 +943,29 @@ def _is_deterministic_order_term(
     (``_TRANSPARENT_ORDER_EXPRESSIONS``), a pure database function
     (``_APPROVED_ORDER_FUNCTIONS``), an approved aggregate
     (``_APPROVED_ORDER_AGGREGATES``: ``Min`` / ``Max`` the shipped surface emits,
-    ``Count`` a consumer ordering may annotate), an ``F`` reference, or a ``Q``
+    ``Count`` a consumer ordering may annotate), an approved transform
+    (``_APPROVED_ORDER_TRANSFORMS``), an ``F`` reference, or a ``Q``
     predicate. Each of those is then certified only if every source expression
     it holds is, so an approved wrapper launders nothing:
     ``Coalesce(Random(), Random())`` is refused through its children. A readable
     leaf (``_READABLE_ORDER_LEAVES``) carries all of its own SQL and is named
     outright: a column reference, the ``*`` of a row count, a literal value, and
     the framework's own ``VisibleRowExists`` visibility test.
+
+    The class is not the whole of a node's SQL, so every approved node and leaf
+    must also carry its class's own SQL (``_order_node_state_is_stock``): an
+    instance can still hold a template, a function name, an operator or an
+    output field whose hooks emit SQL of their own.
+
+    A predicate arrives in two forms. Ordered directly, a ``Case`` holds the
+    ``Q`` it was written with, read by ``_is_deterministic_order_condition``.
+    Held by an annotation, it holds what Django resolved that ``Q`` into: a
+    ``WhereNode`` of lookups, and an aggregate's ``filter=`` the same tree
+    (wrapped in ``AggregateFilter`` from Django 6.0). That form is read against
+    the same sets: a ``WhereNode`` is punctuation over its children, and a
+    lookup of an approved class is certified when both of its sides are. The
+    resolved lookup is already the class Django chose, its value-dependent
+    rewrites included, so nothing is re-derived for it.
 
     Every match is by EXACT type, the two reference forms included. A subclass
     of an approved class is a different ``as_sql`` and is refused, which is the
@@ -871,9 +982,10 @@ def _is_deterministic_order_term(
     that carries that method is therefore classified as the expression Django
     will resolve it to rather than as the field path it spells. Everything
     unlisted is refused too -
-    ``Random()``, a bare or custom ``Func``, a ``Transform``, an unlisted
-    ``Aggregate``, a ``Window``, a ``RawSQL`` fragment, the inner ``Query`` a
-    ``Subquery`` wraps - because a term this package cannot read is one it must
+    ``Random()``, a bare or custom ``Func``, an unlisted ``Transform`` or
+    lookup, an unlisted ``Aggregate``, a ``Window``, a ``RawSQL`` fragment, the
+    inner ``Query`` a ``Subquery`` wraps, a ``NothingNode`` or ``ExtraWhere``
+    predicate child - because a term this package cannot read is one it must
     not certify as repeatable across the two queries an offset window spans.
     """
     if hasattr(term, "resolve_expression"):
@@ -885,7 +997,40 @@ def _is_deterministic_order_term(
         if type(term) is models.Q:
             return _is_deterministic_order_condition(query, term, opts, seen, start, prefix)
         if truth.is_exact_one_of(term, _READABLE_ORDER_LEAVES):
-            return True
+            return _order_node_state_is_stock(term)
+        if type(term) is WhereNode:
+            children = truth.instance_state(term).get("children")
+            return (
+                is_list_or_tuple(children)
+                and _order_node_state_is_stock(term)
+                and all(
+                    _is_deterministic_order_term(query, child, opts, seen, start, prefix)
+                    for child in children
+                )
+            )
+        if truth.is_exact_one_of(term, _APPROVED_ORDER_LOOKUPS):
+            # Both operands are read from the instance state, as the seal reads them:
+            # ``Lookup.get_source_expressions`` omits a direct right-hand side.
+            operands = truth.instance_state(term)
+            return (
+                _order_node_state_is_stock(term)
+                and _is_deterministic_order_term(
+                    query,
+                    operands.get("lhs"),
+                    opts,
+                    seen,
+                    start,
+                    prefix,
+                )
+                and _is_deterministic_order_value(
+                    query,
+                    operands.get("rhs"),
+                    opts,
+                    seen,
+                    start,
+                    prefix,
+                )
+            )
         # Every approved node is a ``BaseExpression`` subclass, so the instance test only
         # states for the reader of ``get_source_expressions`` what the membership proved.
         if not truth.is_exact_one_of(term, _APPROVED_ORDER_NODES) or not isinstance(
@@ -893,7 +1038,7 @@ def _is_deterministic_order_term(
             BaseExpression,
         ):
             return False
-        return all(
+        return _order_node_state_is_stock(term) and all(
             _is_deterministic_order_term(query, source, opts, seen, start, prefix)
             for source in list_of(term.get_source_expressions())
             if source is not None
@@ -901,6 +1046,52 @@ def _is_deterministic_order_term(
     if isinstance(term, str):
         return _is_deterministic_order_name(query, term, opts, seen, start, prefix)
     return False
+
+
+def _order_node_state_is_stock(term: object) -> bool:
+    """Return whether an approved node carries only the SQL its class supplies.
+
+    Approving a class approves the ``as_sql`` it defines, and that method
+    formats instance state into the statement. The seal admits text in every
+    such slot (``utils/querysets.py::_SQL_TEMPLATE_ATTRS``) and in the ``extra``
+    mapping ``Func`` merges into its template, so ``Lower("name",
+    template="RANDOM()")`` is an exact ``Lower`` that compiles to ``RANDOM()``.
+    The state is read from the instance namespace, which dispatches nothing,
+    and every slot must be absent, with one exception: the operator a
+    ``CombinedExpression`` or ``WhereNode`` always stores, which must be one of
+    Django's own (``_COMBINED_ORDER_CONNECTORS``, ``_WHERE_ORDER_CONNECTORS``).
+    ``extra`` must be empty.
+
+    ``Value`` and ``Cast`` also call a hook on their output field
+    (``_FIELD_HOOK_ORDER_NODES``), so such a node is read only when that field
+    is one of Django's own classes. Django infers a ``Value``'s field from the
+    Python type, and gives an ``__in`` list's literal the compared field's
+    class: a project field's ``get_placeholder`` is SQL Django will compile,
+    and is refused like any other. A column's field is the model's own and is
+    not constrained, because no hook of it reaches the order SQL.
+    """
+    state = truth.instance_state(term)
+    for attr in _SQL_TEMPLATE_ATTRS:
+        if attr not in state:
+            continue
+        connector = state[attr]
+        if attr != "connector" or type(connector) is not str:
+            return False
+        if type(term) is CombinedExpression:
+            connectors = _COMBINED_ORDER_CONNECTORS
+        elif type(term) is WhereNode:
+            connectors = _WHERE_ORDER_CONNECTORS
+        else:
+            return False
+        if connector not in connectors:
+            return False
+    extra = state.get("extra")
+    if extra is not None and (not is_exact_dict(extra) or extra):
+        return False
+    if truth.is_exact_one_of(term, _FIELD_HOOK_ORDER_NODES):
+        output_field = state.get("output_field")
+        return output_field is None or _type_is_genuinely_django(type(output_field))
+    return True
 
 
 def _is_deterministic_order_value(
@@ -937,20 +1128,78 @@ def _approved_order_transform(lhs: Expression, name: str) -> Expression | None:
     """Apply one approved transform to ``lhs``, or return None when it is not one.
 
     Mirrors ``django/db/models/sql/query.py::Query.try_transform``: the name is
-    looked up on the left-hand side's output field and applied to it, so the
-    next piece is read against what this one produces. A name the field does not
-    register is no transform at all, and a transform outside
+    looked up on the left-hand side itself and applied to it, so the next piece
+    is read against what this one produces. A ``Transform`` operand reads its
+    own class's registrations before its output field's, so asking the output
+    field alone would miss a transform registered on ``Lower``. A name the
+    operand does not register is no transform at all, and a transform outside
     ``_APPROVED_ORDER_TRANSFORMS`` - a project's own, registered on a built-in
     field, emitting whatever its ``as_sql`` says - is refused for the same reason
     an unapproved function is.
     """
-    transform = lhs.output_field.get_transform(name)
+    transform = lhs.get_transform(name)
     if transform is None or transform not in _APPROVED_ORDER_TRANSFORMS:
         return None
     return transform(lhs)
 
 
-def _is_deterministic_order_lookup_chain(field: ModelField, pieces: Sequence[str]) -> bool:
+def _approved_order_transform_chain(lhs: Expression, names: Sequence[str]) -> Expression | None:
+    """Apply every name as an approved transform in turn, or return None at the first that is not."""
+    operand: Expression | None = lhs
+    for name in names:
+        if operand is None:
+            return None
+        operand = _approved_order_transform(operand, name)
+    return operand
+
+
+def _effective_order_lookups(
+    operand: Expression,
+    name: str,
+    lookup: type[object],
+    value: object,
+) -> tuple[object, ...]:
+    """Return every lookup class ``Query.build_lookup`` may compile for ``name`` over ``value``.
+
+    ``django/db/models/sql/query.py::Query.build_lookup`` rewrites an ``exact``
+    or ``iexact`` comparison against ``None`` - and, on a backend that
+    interprets empty strings as nulls, against ``""`` - into the operand's own
+    ``isnull`` lookup, so the class that compiles is chosen by the value, not by
+    the name. The test runs on the PREPARED right-hand side, after the operand's
+    output field has prepared the value. Django's own field classes prepare
+    ``None`` to ``None`` and text to itself, so over one of them the rewrite is
+    predicted exactly; over a project field, or for a ``str`` subclass whose
+    ``==`` this package does not run, either class may compile, so both are
+    returned and both must be approved. ``can_use_none_as_rhs`` is read only on
+    Django's own lookup classes: a project class is refused anyway, and its
+    instances could set the flag themselves. An expression on the right is never
+    rewritten.
+    """
+    if name not in ("exact", "iexact") or hasattr(value, "resolve_expression"):
+        return (lookup,)
+    if not _type_is_genuinely_django(lookup) or read_attr(lookup, "can_use_none_as_rhs", False):
+        return (lookup,)
+    isnull = operand.get_lookup("isnull")
+    output_field = read_attr(operand, "output_field", None)
+    if not _type_is_genuinely_django(type(output_field)):
+        return (lookup, isnull)
+    if value is None:
+        return (isnull,)
+    if (
+        not is_str(value)
+        or not connections[DEFAULT_DB_ALIAS].features.interprets_empty_strings_as_nulls
+    ):
+        return (lookup,)
+    if type(value) is not str:
+        return (lookup, isnull)
+    return (isnull,) if value == "" else (lookup,)
+
+
+def _is_deterministic_order_lookup_chain(
+    reference: Expression | ModelField,
+    pieces: Sequence[str],
+    value: object,
+) -> bool:
     """Classify the transforms and the final lookup a predicate applies to a reference.
 
     ``django/db/models/sql/query.py::Query.build_lookup`` reads every piece but
@@ -962,34 +1211,51 @@ def _is_deterministic_order_lookup_chain(field: ModelField, pieces: Sequence[str
     project transform, and the statement orders by whatever that transform
     emits.
 
+    ``reference`` is what Django builds the chain on - the annotation
+    expression itself, or the field a column compares through, read through a
+    stand-in ``Value`` carrying it - because every transform and lookup is
+    looked up on the operand, whose own class registry comes before its output
+    field's. The final lookup
+    is the one ``_effective_order_lookups`` says ``value`` selects, so a
+    comparison with ``None`` is read as the ``isnull`` it compiles to, on the
+    operand the fallback leaves.
+
     Each piece is therefore matched by EXACT type against the approved transform
     and lookup sets, and anything unresolvable or unlisted is refused. A
     reference with no trailing pieces is compared with Django's implicit
     ``exact``, which is approved, so an ordinary equality predicate needs no
     spelling of its own.
     """
-    # ``Value`` stores its ``output_field`` verbatim, so a reverse relation's registered
-    # lookups are read through it too; the stubs narrow the parameter to ``Field``.
-    # basedpyright: same stub narrowing; it rejects a ``ForeignObjectRel`` as ``output_field``.
-    lhs: Expression | None
-    lhs = models.Value(None, output_field=field)  # pyright: ignore[reportArgumentType]
+    if isinstance(reference, BaseExpression):
+        lhs: Expression = reference
+    else:
+        # ``Value`` stores its ``output_field`` verbatim, so a reverse relation's registered
+        # lookups are read through it too; the stubs narrow the parameter to ``Field``.
+        # basedpyright: same stub narrowing; it rejects a ``ForeignObjectRel`` as ``output_field``.
+        lhs = models.Value(None, output_field=reference)  # pyright: ignore[reportArgumentType]
     *transforms, final = tuple(pieces) or ("exact",)
-    for name in transforms:
-        lhs = _approved_order_transform(lhs, name)
-        if lhs is None:
-            return False
-    lookup = lhs.output_field.get_lookup(final)
-    if lookup is not None:
-        return lookup in _APPROVED_ORDER_LOOKUPS
-    lhs = _approved_order_transform(lhs, final)
-    if lhs is None:
+    operand = _approved_order_transform_chain(lhs, transforms)
+    if operand is None:
         return False
-    return lhs.output_field.get_lookup("exact") in _APPROVED_ORDER_LOOKUPS
+    lookup = operand.get_lookup(final)
+    if lookup is None:
+        operand = _approved_order_transform(operand, final)
+        if operand is None:
+            return False
+        final = "exact"
+        lookup = operand.get_lookup(final)
+        if lookup is None:
+            return False
+    return all(
+        candidate is not None and candidate in _APPROVED_ORDER_LOOKUPS
+        for candidate in _effective_order_lookups(operand, final, lookup, value)
+    )
 
 
 def _is_deterministic_order_predicate_reference(
     query: Query,
     lookup: str,
+    value: object,
     opts: _OptionsAny | None,
     prefix: str,
 ) -> bool:
@@ -1015,10 +1281,12 @@ def _is_deterministic_order_predicate_reference(
 
     Resolving the reference is only half of the side. Whatever pieces follow it
     are transforms and a lookup that wrap it in more SQL, so they are classified
-    too, against the resolved field or the annotation's output field - the same
-    approved-form boundary, applied to the chain rather than to a node. A head
-    that resolves under a transform nobody approved is refused exactly as the
-    head itself would be.
+    too, built on the operand Django builds them on: the annotation expression
+    itself, or a stand-in for the column carrying the field
+    ``Query.build_filter`` compares through - the same approved-form boundary,
+    applied to the chain rather than to a node. ``value`` decides which lookup
+    an ``exact`` compiles to. A head that resolves under a transform nobody
+    approved is refused exactly as the head itself would be.
     """
     pieces = lookup.split(LOOKUP_SEP)
     for count in range(1, len(pieces) + 1):
@@ -1026,7 +1294,7 @@ def _is_deterministic_order_predicate_reference(
         annotation = query.annotations.get(referenced)
         if annotation is not None:
             return _is_deterministic_order_term(query, annotation) and (
-                _is_deterministic_order_lookup_chain(annotation.output_field, pieces[count:])
+                _is_deterministic_order_lookup_chain(annotation, pieces[count:], value)
             )
         if referenced in query.extra:
             return False
@@ -1034,7 +1302,29 @@ def _is_deterministic_order_predicate_reference(
     resolved = _resolve_order_field_path(target, lookup)
     if resolved is None:
         return False
-    return _is_deterministic_order_lookup_chain(resolved.final_field, resolved.lookups)
+    return _is_deterministic_order_lookup_chain(resolved.final_field, resolved.lookups, value)
+
+
+def _is_deterministic_order_implicit_exact(condition: object) -> bool:
+    """Classify the ``exact`` Django wraps a bare conditional expression in.
+
+    ``django/db/models/sql/query.py::Query.build_filter`` compiles a ``Q`` child
+    that is an expression rather than a ``(lookup, value)`` pair as itself
+    unless it resolves to a lookup, and otherwise as
+    ``build_lookup(["exact"], condition, True)`` - a comparison with ``True``
+    through whatever ``exact`` the condition's output field registers. That
+    lookup is SQL around the condition, so it is read against the approved set
+    like any other; a lookup child of an approved class is compiled as written.
+    """
+    if truth.is_exact_one_of(condition, _APPROVED_ORDER_LOOKUPS):
+        return True
+    if not isinstance(condition, BaseExpression):
+        return False
+    try:
+        lookup = condition.get_lookup("exact")
+    except FieldError:
+        return False
+    return lookup is not None and lookup in _APPROVED_ORDER_LOOKUPS
 
 
 def _is_deterministic_order_condition(
@@ -1055,11 +1345,15 @@ def _is_deterministic_order_condition(
     only the value certifies a predicate that compares unreadable SQL to a
     literal, which orders the rows by that SQL just as ordering on it directly
     would - so the whole comparison is read, each side by its own rule, and the
-    value is read for the SQL it carries at any depth a lookup can hold one.
+    value is read for the SQL it carries at any depth a lookup can hold one. A
+    child written as a bare conditional expression is read as a value and for
+    the implicit ``exact`` Django compiles it under.
     """
     for child in condition.children:
         if not is_tuple(child):
             if not _is_deterministic_order_value(query, child, opts, seen, start, prefix):
+                return False
+            if type(child) is not models.Q and not _is_deterministic_order_implicit_exact(child):
                 return False
             continue
         lookup, value = child
@@ -1067,6 +1361,7 @@ def _is_deterministic_order_condition(
         if not is_str(lookup) or not _is_deterministic_order_predicate_reference(
             query,
             lookup,
+            value,
             opts,
             prefix,
         ):
