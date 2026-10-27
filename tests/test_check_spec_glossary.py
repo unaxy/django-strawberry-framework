@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from scripts import check_spec_glossary
+from scripts._markdown_lex import mask_blocks
 
 GLOSSARY = "## `DjangoType`\n\nBody.\n\n## Relay Node integration\n\nBody.\n"
 SPEC = (
@@ -220,6 +221,97 @@ def _row(
             "Body.\n",
             docs=f"[src]: ../django_strawberry_framework/{TERM}.py\n",
         ),
+        # Containers nest in any order: a line's block-quote and list markers are matched
+        # against the open containers, then open new ones.
+        _row("fence-in-blockquote-in-list-item", f"- > ```\n  > {TERM}\n  > ```\n"),
+        _row("indented-code-in-blockquote-in-list-item", f"- > para\n\n  >     {TERM}()\n"),
+        _row("fence-in-list-item-in-blockquote-in-list-item", f"- > - ```\n  >   {TERM}\n"),
+        _row("fence-in-blockquote-in-list-item-in-blockquote", f"> - > ```\n>   > {TERM}\n"),
+        _row(
+            "indented-code-in-blockquote-in-list-item-in-blockquote",
+            f"> - > para\n>\n>   >     {TERM}()\n",
+        ),
+        _row(
+            "nested-blockquote-fence-closed-by-blockquote-end",
+            f"- > ```\n  > {TERM}\n  {TERM} here.\n",
+            f"- > ```\n  > {TERM}\n  {LINK} here.\n",
+        ),
+        _row(
+            "nested-blockquote-fence-closed-by-list-item-end",
+            f"- > ```\n  > {TERM}\n\nUse {TERM} here.\n",
+            f"- > ```\n  > {TERM}\n\nUse {LINK} here.\n",
+        ),
+        _row(
+            "nested-list-item-fence-closed-by-list-item-end",
+            f"- > - ```\n  >   {TERM}\n  > {TERM} here.\n",
+            f"- > - ```\n  >   {TERM}\n  > {LINK} here.\n",
+        ),
+        _row(
+            "nested-blockquote-fence-closed-by-outer-list-item-end",
+            f"> - > ```\n>   > {TERM}\n> {TERM} here.\n",
+            f"> - > ```\n>   > {TERM}\n> {LINK} here.\n",
+        ),
+        _row("thematic-break-is-no-list-item", f"* * *\n    {TERM}()\n"),
+        _row(
+            "lazy-continuation-in-blockquote-indented",
+            f"> Use a\n        {TERM} here.\n",
+            f"> Use a\n        {LINK} here.\n",
+        ),
+        _row("definition-title-on-lazy-line", f'> [ext]: /x\n"{TERM}"\n'),
+        _row("blank-line-closes-empty-list-item", f"-\n\n     {TERM}()\n"),
+        # A link reference definition spans every line it reaches.
+        _row(
+            "definition-title-split-across-lines",
+            "Body.\n",
+            ext=f'[ext]: https://example.com/x "a\n{TERM} b"\n',
+        ),
+        _row(
+            "definition-single-quoted-title-split",
+            "Body.\n",
+            ext=f"[ext]: https://example.com/x 'a\n{TERM} b'\n",
+        ),
+        _row(
+            "definition-parenthesized-title-split",
+            "Body.\n",
+            ext=f"[ext]: https://example.com/x (a\n{TERM} b)\n",
+        ),
+        _row(
+            "definition-title-next-line-split",
+            "Body.\n",
+            ext=f'[ext]: https://example.com/x\n"a\n{TERM} b"\n',
+        ),
+        _row("definition-destination-next-line", "Body.\n", ext=f"[ext]:\n{TERM}\n"),
+        _row("definition-label-split", "Body.\n", ext=f"[ext\nlabel]:\n{TERM}\n"),
+        _row(
+            "definition-in-list-item-title-split",
+            f"- [ext]: https://example.com/x\n  'a\n  {TERM}'\n",
+        ),
+        _row(
+            "definition-split-title-then-prose",
+            f'[ext]: /x "a\n{TERM}"\n{TERM} here.\n',
+            f'[ext]: /x "a\n{TERM}"\n{LINK} here.\n',
+        ),
+        _row(
+            "definition-unclosed-title-line-is-prose",
+            f'[a]: /x "b\n{TERM}"\n[c]: /y\n"{TERM} d\n',
+            f'[a]: /x "b\n{TERM}"\n[c]: /y\n"{LINK} d\n',
+        ),
+        _row(
+            "definition-then-indented-line-is-prose",
+            f"[ext]: /x\n    {TERM} here.\n",
+            f"[ext]: /x\n    {LINK} here.\n",
+        ),
+        _row(
+            "trailing-text-after-title-is-no-definition",
+            f'[ext]: /x "a" {TERM}\n',
+            f'[ext]: /x "a" {LINK}\n',
+        ),
+        _row(
+            "trailing-text-after-destination-is-no-definition",
+            f"[ext]: some {TERM} words\n",
+            f"[ext]: some {LINK} words\n",
+        ),
+        _row("blank-label-is-no-definition", f"[ ]: {TERM}\n", f"[ ]: {LINK}\n"),
         # The term boundary.
         _row("identifier-suffix", f"Use {TERM}Extra here.\n"),
         _row("identifier-prefix", f"Use My{TERM} here.\n"),
@@ -454,6 +546,22 @@ def test_auto_link_writes_the_first_open_mention(
         assert (written, skipped, after) == ([term], [], expected)
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(f"-\r\n      {TERM}()\r\n", id="empty-list-item-then-indented-code"),
+        pytest.param(f"#\r\n    {TERM}()\r\n", id="empty-atx-heading-then-indented-code"),
+    ],
+)
+def test_a_crlf_line_end_ends_a_block_marker(text: str) -> None:
+    """The carriage return a CRLF line keeps ends a list or heading marker as a line end does.
+
+    The CLI reads a spec with universal newlines, so only a direct caller hands the lexer a
+    carriage return.
+    """
+    assert TERM not in mask_blocks(text)
+
+
 def _check(tmp_path: Path, body: str, *, auto_link: bool = False) -> int:
     """Run the CLI on a one-term spec carrying ``body`` and the ``djangolistfield`` def."""
     spec = tmp_path / "spec-999-example-0_0_9.md"
@@ -496,6 +604,16 @@ def _check(tmp_path: Path, body: str, *, auto_link: bool = False) -> int:
             id="inline-in-code-span",
         ),
         pytest.param(f"```\n{LINK}\n```\n", False, id="reference-in-fence"),
+        pytest.param(
+            f"- > ```\n  > {LINK}\n  > ```\n",
+            False,
+            id="reference-in-nested-blockquote-fence",
+        ),
+        pytest.param(
+            f"[ext]: /x 'a\n{LINK}'\n",
+            False,
+            id="reference-in-split-definition-title",
+        ),
         pytest.param(f"para\n\n    {LINK}\n", False, id="reference-in-indented-code"),
         pytest.param(f"<!--\n{LINK}\n-->\n", False, id="reference-in-html-comment"),
         pytest.param(f'Use <a title="{LINK}">x</a> here.\n', False, id="reference-in-raw-html"),
