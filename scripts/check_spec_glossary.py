@@ -52,16 +52,17 @@ listed as missing a link, the script finds the first non-code,
 non-link, non-heading mention, wraps it as a **reference-style**
 ``[term][glossary-<anchor>]`` link, and inserts the matching
 ``[glossary-<anchor>]: <path>/GLOSSARY.md#<anchor>`` def under the
-``<!-- docs/ -->`` group in the spec's link-definitions block
-(alphabetically sorted within the group). A mention is one the
-``scripts/_markdown_lex.py`` lexer leaves open: outside a heading, a
-link reference definition, fenced or indented code and an HTML block;
-not overlapping an existing link of any shape, an autolink, raw HTML, a
-bare URL or a ``#"..."`` pinpoint; not cutting a code span, a backtick
-run or an escape; and a standalone token (no identifier, ``.``, ``:``,
-``/`` or ``-`` character before it, no identifier character after it,
-nor a ``.``, ``:``, ``/`` or ``-`` run leading into one). A mention that
-fails any of these is passed over for the next one. The backtick-wrapped
+``<!-- docs/ -->`` group in the spec's link-definitions block (at its
+label's alphabetical place; the group's other lines keep their order). A
+mention is one the ``scripts/_markdown_lex.py`` lexer leaves open:
+outside a heading, a link reference definition, fenced or indented code
+and an HTML block; not overlapping an existing link of any shape, an
+autolink, raw HTML, a bare URL or a ``#"..."`` pinpoint; not cutting a
+code span, a backtick run or an escape; and a standalone token (no
+identifier, ``.``, ``:``, ``/`` or ``-`` character before it, no
+identifier character after it, nor a ``.``, ``:``, ``/`` or ``-`` run
+leading into one). A mention that fails any of these is passed over for
+the next one. The backtick-wrapped
 form is preferred when the spec already says e.g. ``Meta.fields`` in
 inline code - the rewrite becomes ``[`Meta.fields`][glossary-metafields]``
 with the inline-code backticks preserved inside the link label. The run
@@ -284,6 +285,12 @@ def _insert_glossary_ref_def(text: str, ref_id: str, target: str) -> str | None:
     materialize a link-definitions block from scratch; that is the
     initial-conversion script's job, not the glossary checker's).
 
+    The new line goes before the group's first def whose label (the text
+    between the leading ``[`` and the first ``]``) sorts after ``ref_id``
+    by codepoint, or at the group's end when none does. Every existing
+    line keeps its order and bytes: the writer never re-sorts lines it
+    did not write, so a hand-ordered group stays as its author left it.
+
     Idempotent - if a def for ``ref_id`` already exists anywhere in the
     file, the input text is returned unchanged.
     """
@@ -299,10 +306,12 @@ def _insert_glossary_ref_def(text: str, ref_id: str, target: str) -> str | None:
     end_idx = header_idx + 1
     while end_idx < len(lines) and lines[end_idx].startswith("["):
         end_idx += 1
-    existing = lines[header_idx + 1 : end_idx]
-    new_defs = sorted([*existing, f"[{ref_id}]: {target}"])
+    insert_idx = next(
+        (i for i in range(header_idx + 1, end_idx) if lines[i][1:].partition("]")[0] > ref_id),
+        end_idx,
+    )
     return "\n".join(
-        [*lines[: header_idx + 1], *new_defs, *lines[end_idx:]],
+        [*lines[:insert_idx], f"[{ref_id}]: {target}", *lines[insert_idx:]],
     )
 
 
@@ -323,8 +332,9 @@ def auto_link_terms(
        the link label.
     3. A term with no open mention in either form is skipped.
     4. Insert ``[ref_id]: ref_target`` under the ``<!-- docs/ -->``
-       group in the spec's link-definitions block (alphabetically
-       sorted within the group). If the def already exists, no-op.
+       group in the spec's link-definitions block, at its label's
+       alphabetical place without moving the group's other lines. If the
+       def already exists, no-op.
 
     The spec file is re-read between terms so each replacement sees a
     freshly lexed text (cheap for spec-sized files, avoids the

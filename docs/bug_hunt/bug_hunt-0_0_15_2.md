@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 327 done, 216 to do.
+Progress: 328 done, 215 to do.
 
 ## Done
 
@@ -1820,6 +1820,12 @@ Progress: 327 done, 216 to do.
   `KANBAN.md` re-rendered: 182 glossary links against 175 (7 first mentions newly linked, 10 links moved to the true
   first mention, 0 links on a non-mention); `KANBAN.html` is unchanged (it embeds stored glossary rows). Tests:
   `tests/test_build_kanban_md.py`
+- [x] 422. (robustness) `scripts/check_spec_glossary.py::_insert_glossary_ref_def` slots the new
+  `[glossary-<anchor>]: ...` def before the group's first def whose label sorts after it (codepoint), else at the
+  group's end, and never re-sorts the rest: every existing line keeps its order and bytes. The whole-line `sorted()`
+  rebuild reordered hand-written lines in 44 of the 188 tracked `.md` files with a `<!-- docs/ -->` group (whole-line
+  order puts `[foo-bar]` before `[foo]`); a census of 2186 inserts across those files adds one line each and moves
+  none. Tests: `tests/test_check_spec_glossary.py`
 
 ## Outside review of the fixes
 
@@ -1860,9 +1866,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 422. (robustness) `_insert_glossary_ref_def` re-sorts the whole `<!-- docs/ -->` definition group with
-  `sorted()` on every insert, reordering hand-written lines (the spec-034 half of this row, its stale
-  `Meta.relation_shapes` row and definition, is fixed by 256); found fact-finding 302
 - [ ] 460. `optimizer/walker.py::_scoped_hint_prefetch` accepts an `OptimizerHint.prefetch(Prefetch("branch",
   queryset=Branch.objects.all()))` seed over a proxy target's concrete model and serves `Branch` rows to
   `ProxyBranchType` ("Expected value of type 'ProxyBranchType'"; `BranchNote.branch` onto a hooked proxy type); the
