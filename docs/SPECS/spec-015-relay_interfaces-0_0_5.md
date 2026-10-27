@@ -71,8 +71,9 @@ Each top-level item maps to one of the five steps in the "Implementation plan" s
     - [ ] `test_consumer_resolve_nodes_wins`
     - [ ] `test_node_id_annotation_overrides_default_id_attr`
     - [ ] `test_non_relay_interface_works`
-  - [ ] Optimizer / projection tests (`tests/optimizer/test_relay_id_projection.py`, Decision 7)
-    - [ ] `test_relay_id_with_custom_pk_attname_avoids_lazy_load`
+  - [ ] Optimizer / projection tests (Decision 7)
+    - [ ] Relation-keyed custom-pk id page, live in `examples/fakeshop/test_query/test_library_shapes_api.py::test_patron_profile_relay_id_is_built_from_the_relation_primary_key_column`
+    - [ ] Custom-pk `only()` projection in `tests/optimizer/test_walker.py` (`::test_plan_relay_id_projects_attname_when_pk_is_relation`, `::test_plan_relay_id_projects_real_pk_attname_when_not_id`)
     - [ ] Lazy-load-free `{ id name }` under `strictness="raise"` and `resolve_id` reading the loaded pk, both live in `examples/fakeshop/test_query/test_products_visibility_api.py` (`::test_relay_id_and_name_selection_is_clean_under_strictness_raise_over_http`, `::test_relay_id_only_connection_page_costs_one_query_and_emits_decodable_ids`)
     - [ ] Relation traversal across Relay-declared targets, pinned live in `examples/fakeshop/test_query/test_products_api.py`
   - [ ] Schema-construction coverage, live in `examples/fakeshop/test_query/test_library_api.py`
@@ -465,10 +466,12 @@ Two assertions, both earned over live `/graphql/` HTTP against the `library` app
 
 - `examples/fakeshop/test_query/test_library_api.py::test_relay_genre_type_emits_node_interface_and_global_id_live` — introspection shows the `Node` interface on the Relay-declared `GenreType`, and its `id` renders as the GlobalID scalar.
 - `examples/fakeshop/test_query/test_library_api.py::test_mixed_relay_and_non_relay_no_interface_bleed_live` — a schema mixing Relay `GenreType` and non-Relay `ShelfType` introspects cleanly: `Node` lands on the Relay type only, and the plain type's `id` is not the GlobalID scalar.
-### `tests/optimizer/test_relay_id_projection.py`
+### Decision 7 projection coverage
 These pin Decision 7's projection invariants:
 
-- `test_relay_id_with_custom_pk_attname_avoids_lazy_load` — a Relay type whose pk attname is not `id` (`apps/library/models.py::PatronProfile`, keyed by its one-to-one `patron_id`) answers `{ id postalCode }` in one query, so the `only()` projection carries the concrete pk attname.
+- `examples/fakeshop/test_query/test_library_shapes_api.py::test_patron_profile_relay_id_is_built_from_the_relation_primary_key_column` — a Relay type whose pk attname is not `id` (`apps/library/models.py::PatronProfile`, keyed by its one-to-one `patron_id`) answers an id-only page in one `library_patronprofile` statement carrying `patron_id`, never reads `library_patron`, and each emitted id equals `global_id_for` over the shipped `PatronProfileType` and the patron's key.
+- `tests/optimizer/test_walker.py::test_plan_relay_id_projects_attname_when_pk_is_relation` — the walker matches the relation pk by its `attname`, so the plan's `only_fields` carries `patron_id`.
+- `tests/optimizer/test_walker.py::test_plan_relay_id_projects_real_pk_attname_when_not_id` — for a pk attname other than `id` the plan's `only_fields` carries that attname and not `id`.
 - `examples/fakeshop/test_query/test_products_visibility_api.py::test_relay_id_and_name_selection_is_clean_under_strictness_raise_over_http` — selecting `{ categories { id name } }` on the shipped `CategoryType` completes without error under `strictness="raise"`, so Relay `id` never lazy-loads the pk.
 - `examples/fakeshop/test_query/test_products_visibility_api.py::test_relay_id_only_connection_page_costs_one_query_and_emits_decodable_ids` — an id-only page costs one query and every emitted GlobalID decodes, so `resolve_id` read the loaded primary-key value.
 
@@ -503,7 +506,7 @@ The slice is complete when all of the following are true:
 3. Declaring `interfaces = (relay.Node,)` produces a working Relay-Node GraphQL type with `id: GlobalID!`, the four injected `resolve_*` methods, the `is_type_of` virtual subclass behavior, and consumer override support per Decision 6. The single-interface forms `interfaces = relay.Node` and `interfaces = (relay.Node)` normalize to the same stored tuple.
 4. A Relay-shaped type over a composite-pk model raises `ConfigurationError` at finalization with a message that names the model and proposes a remediation path, unless the type declares an explicit `id: relay.NodeID[...]` annotation on a column other than `pk` — the first remediation the message proposes, which the gate honors (Decision 2).
 5. Optimizer invariants in Decision 7 hold: `only()` includes the pk attname when Relay `id` is selected, `resolve_id` does not trigger an avoidable lazy load, and a target type's Relay declaration does not change how relations to it are planned.
-6. Tests in `tests/types/test_relay_interfaces.py`, plus the rows in `tests/optimizer/test_relay_id_projection.py`, `tests/test_registry.py`, `examples/fakeshop/test_query/test_library_api.py`, and `examples/fakeshop/test_query/test_products_api.py` listed in the Test plan all pass.
+6. Tests in `tests/types/test_relay_interfaces.py`, plus the rows in `tests/optimizer/test_walker.py`, `tests/test_registry.py`, `examples/fakeshop/test_query/test_library_api.py`, `examples/fakeshop/test_query/test_library_shapes_api.py`, and `examples/fakeshop/test_query/test_products_api.py` listed in the Test plan all pass.
 7. Package coverage stays at 100% (`pyproject.toml [tool.coverage.report] fail_under = 100`).
 8. `docs/GLOSSARY.md`, `docs/README.md`, `KANBAN.md`, and `CHANGELOG.md` carry the shipped state per the "Doc updates" section.
 9. `KANBAN.md` carries this work as the Done card `DONE-015-0.0.5` describing the shipped scope.

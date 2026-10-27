@@ -266,7 +266,6 @@ TRACKED_FILE_PATHS: tuple[str, ...] = (
     "tests/optimizer/test_plans.py",
     "tests/optimizer/test_predicates.py",
     "tests/optimizer/test_relation_link_execution.py",
-    "tests/optimizer/test_relay_id_projection.py",
     "tests/optimizer/test_selections.py",
     "tests/optimizer/test_single_parent_fetch.py",
     "tests/optimizer/test_walker.py",

@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 324 done, 215 to do.
+Progress: 325 done, 215 to do.
 
 ## Done
 
@@ -1795,6 +1795,13 @@ Progress: 324 done, 215 to do.
   "Gotchas" without the bullets stated elsewhere in the file; the "Second sweep" section is deleted, its queue
   empty with every row moved or kept by design, so no row needed a card. The one leftover package row it named
   is filed as 603
+- [x] 603. The package stand-in `tests/optimizer/test_relay_id_projection.py` is deleted: a mutation table
+  over the walker's Relay-id projection, `_resolve_id_default`, the id-attr stamp and `encode_typename` found
+  no mutant only it killed (one statement, no lazy load and the node id are pinned by the live
+  `test_library_shapes_api.py` twin, the GlobalID type name by four live rows, the `only()` projection by the
+  two `tests/optimizer/test_walker.py` relay-id rows), and every line it ran is reached by other rows.
+  spec-015 and spec-031 cite those rows; docs/TREE.md and the kanban tracked-path constants are regenerated.
+  Writing a live pin for a non-pk `NodeID` found 604
 
 ## Outside review of the fixes
 
@@ -2061,11 +2068,14 @@ tracker number are recorded there; open remainders and new defects are filed as 
   (42), "test-plan row 19/20" and "gap 1/2" in `test_products_api.py`, "gap 1/2" in
   `tests/test_strawberry_patches.py`, "test #8" in `test_library_api.py`; restate each by the contract it pins. Found
   fixing 566
-- [ ] 603. A package row the test-writing manual named as a promotion leftover still stands beside its live
-  twin: `tests/optimizer/test_relay_id_projection.py::test_relay_id_with_custom_pk_attname_avoids_lazy_load`
-  and `test_library_shapes_api.py::test_patron_profile_relay_id_is_built_from_the_relation_primary_key_column`
-  (the package row also asserts `plan.only_fields` and the GlobalID parts). Decide by a failability proof:
-  delete or trim what the live row already pins, keep what has no wire shape. Found fixing 630
+- [ ] 604. An id-only page of a Relay type whose `NodeID` is a non-pk column on a model with a surrogate `id`
+  costs one query per edge, against spec-015 Decision 7 (no avoidable lazy load on `resolve_id`): fakeshop
+  `PublisherType` (`house_code: relay.NodeID[str]`, `Meta.fields` lists `id`), an
+  `allLibraryPublishersConnection` page selecting only `id` emits a page statement reading
+  `library_publisher.id` alone, then one `house_code` refetch per edge.
+  `optimizer/walker.py::_walk_selections` matches the `id` selection to the model's own `id` field before it
+  consults the type's id attribute, so the Relay-id branch (only under `django_field is None`) never runs and
+  `only("id")` defers `house_code`. Found fixing 603
 
 ## To do: holes found re-checking the fixes
 
