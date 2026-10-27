@@ -84,7 +84,7 @@ from pathlib import Path
 
 try:
     from _markdown_lex import (
-        PROSE_TERM_BOUNDARY_AFTER,
+        TERM_BOUNDARY_AFTER,
         TERM_BOUNDARY_BEFORE,
         _protected_regions,
         first_open_match,
@@ -92,7 +92,7 @@ try:
     )
 except ModuleNotFoundError:  # imported as ``scripts.check_spec_glossary`` (repo root on path)
     from scripts._markdown_lex import (
-        PROSE_TERM_BOUNDARY_AFTER,
+        TERM_BOUNDARY_AFTER,
         TERM_BOUNDARY_BEFORE,
         _protected_regions,
         first_open_match,
@@ -252,13 +252,13 @@ def first_mention(text: str, term: str) -> tuple[int, int] | None:
 
     The backtick-wrapped form ``\`term\``` first, then the plain form; for each form the
     first match in the block-masked text that ``first_open_match`` leaves open, bounded
-    by ``TERM_BOUNDARY_BEFORE`` and ``PROSE_TERM_BOUNDARY_AFTER``. A plain mention inside
+    by ``TERM_BOUNDARY_BEFORE`` and ``TERM_BOUNDARY_AFTER``. A plain mention inside
     a code span cuts it, so the plain form never lands in code.
     """
     body = mask_blocks(text)
     regions = _protected_regions(body)
     for form in (f"`{term}`", term):
-        pattern = re.compile(TERM_BOUNDARY_BEFORE + re.escape(form) + PROSE_TERM_BOUNDARY_AFTER)
+        pattern = re.compile(TERM_BOUNDARY_BEFORE + re.escape(form) + TERM_BOUNDARY_AFTER)
         match = first_open_match(pattern, body, regions)
         if match is not None:
             return match.span()

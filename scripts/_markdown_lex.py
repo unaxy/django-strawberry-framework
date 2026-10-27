@@ -15,7 +15,7 @@ Stdlib only, so ``check_spec_glossary.py`` (which must not import Django) and
 
 ``first_open_match`` is the search a writer runs over the lexed text: the first match that
 overlaps no opaque region and cuts no atom, retried past every mention a region holds. The
-term boundaries pair a standalone-token rule before the term with one of two rules after it.
+term boundaries pair a standalone-token rule before the term with a prose rule after it.
 """
 
 from __future__ import annotations
@@ -23,15 +23,14 @@ from __future__ import annotations
 import re
 from typing import NamedTuple
 
-# A glossary term is inlined only as a standalone token: not glued to an identifier
-# character, a dotted/``::``-qualified path, or a path separator on either side.
-TERM_BOUNDARY_BEFORE = r"(?<![A-Za-z0-9_.:/\-])"
-TERM_BOUNDARY_AFTER = r"(?![A-Za-z0-9_.:/\-])"
-# The prose variant of ``TERM_BOUNDARY_AFTER``: a ``.``, ``:``, ``/`` or ``-`` run after the
-# term bars it only when an identifier character follows the run, so a term may end a
-# sentence or open a clause (``... via Meta.fields.``) but never starts a longer path
+# A glossary term is inlined only as a standalone token. Before it: no identifier
+# character, ``.``, ``:``, ``/`` or ``-``, so it never ends a dotted/``::``-qualified path or
+# a hyphen compound. After it: no identifier character, and a ``.``, ``:``, ``/`` or ``-``
+# run only when no identifier character follows the run, so a term may end a sentence or
+# open a clause (``... via Meta.fields.``) but never starts a longer path
 # (``Meta.fields.get``, ``DjangoType-style``).
-PROSE_TERM_BOUNDARY_AFTER = r"(?![A-Za-z0-9_])(?![.:/\-]+[A-Za-z0-9_])"
+TERM_BOUNDARY_BEFORE = r"(?<![A-Za-z0-9_.:/\-])"
+TERM_BOUNDARY_AFTER = r"(?![A-Za-z0-9_])(?![.:/\-]+[A-Za-z0-9_])"
 # Regions a term match may not overlap at all: a ``#"substring"`` citation pinpoint (it
 # must stay byte-exact), any balanced ``[...]`` group with its trailing
 # ``(destination "title")`` or ``[label]`` (an existing link of any shape keeps its text),

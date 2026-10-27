@@ -500,7 +500,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_bench_common.py          # Script tests for the measurement plumbing the bench scripts share.
 ├── test_bug_hunt.py              # Repo-tooling tests for the bug-hunt progress generator and its snapshot helper.
 ├── test_build_kanban_html.py     # Tests for KANBAN version-tuple parsing, placeholder resolvability, and truncation.
-├── test_build_kanban_md.py       # Tests for KANBAN markdown glossary inlining around existing links.
+├── test_build_kanban_md.py       # Tests for KANBAN markdown glossary inlining: existing links and the term boundary.
 ├── test_build_tree_md.py         # Tests for TREE renderer planned descriptions, replacements, and source discovery.
 ├── test_census_test_models.py    # Script tests for the test-model census's name resolution.
 ├── test_check_all_spec_glossaries.py  # Script tests for the every-spec glossary gate in ``scripts/check_all_spec_glossaries.py``.
@@ -798,7 +798,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_bench_common.py          # Script tests for the measurement plumbing the bench scripts share.
 ├── test_bug_hunt.py              # Repo-tooling tests for the bug-hunt progress generator and its snapshot helper.
 ├── test_build_kanban_html.py     # Tests for KANBAN version-tuple parsing, placeholder resolvability, and truncation.
-├── test_build_kanban_md.py       # Tests for KANBAN markdown glossary inlining around existing links.
+├── test_build_kanban_md.py       # Tests for KANBAN markdown glossary inlining: existing links and the term boundary.
 ├── test_build_tree_md.py         # Tests for TREE renderer planned descriptions, replacements, and source discovery.
 ├── test_census_test_models.py    # Script tests for the test-model census's name resolution.
 ├── test_check_all_spec_glossaries.py  # Script tests for the every-spec glossary gate in ``scripts/check_all_spec_glossaries.py``.

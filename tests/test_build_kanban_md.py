@@ -1,4 +1,4 @@
-"""Tests for KANBAN markdown glossary inlining around existing links.
+"""Tests for KANBAN markdown glossary inlining: existing links and the term boundary.
 
 Repo tooling: these rows pin ``scripts/build_kanban_md.py::GlossaryInliner``,
 which runs at render time against an in-process glossary snapshot. A live
@@ -347,6 +347,91 @@ def test_inliner_leaves_existing_links_intact(text: str, expected: str) -> None:
     """A term inside a bracket group, link, code span, autolink, raw HTML or bare URL stays put.
 
     A plain mention is linked, including the next one after a mention a construct holds.
+    """
+    inliner = GlossaryInliner([{"title": "`DjangoListField`", "anchor": "djangolistfield"}])
+    assert inliner.inline(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        pytest.param(
+            "Ship DjangoListField.",
+            f"Ship {BARE_LINKED}.",
+            id="sentence-final-period",
+        ),
+        pytest.param(
+            "Ship `DjangoListField`.",
+            f"Ship {LINKED}.",
+            id="sentence-final-code-span",
+        ),
+        pytest.param(
+            "Ship DjangoListField: the list field.",
+            f"Ship {BARE_LINKED}: the list field.",
+            id="clause-colon",
+        ),
+        pytest.param(
+            "Ship DjangoListField, then the rest.",
+            f"Ship {BARE_LINKED}, then the rest.",
+            id="clause-comma",
+        ),
+        pytest.param(
+            "Call DjangoListField.get then DjangoListField now.",
+            f"Call DjangoListField.get then {BARE_LINKED} now.",
+            id="dotted-continuation",
+        ),
+        pytest.param(
+            "A DjangoListField-style field then DjangoListField now.",
+            f"A DjangoListField-style field then {BARE_LINKED} now.",
+            id="hyphen-compound",
+        ),
+        pytest.param(
+            "See DjangoListField/x then DjangoListField now.",
+            f"See DjangoListField/x then {BARE_LINKED} now.",
+            id="path-continuation",
+        ),
+        pytest.param(
+            "Ship DjangoListFieldSet then DjangoListField now.",
+            f"Ship DjangoListFieldSet then {BARE_LINKED} now.",
+            id="identifier-suffix",
+        ),
+        pytest.param(
+            "Ship DjangoListField_x then DjangoListField now.",
+            f"Ship DjangoListField_x then {BARE_LINKED} now.",
+            id="underscore-suffix",
+        ),
+        pytest.param(
+            "Ship DjangoListField-2 then DjangoListField now.",
+            f"Ship DjangoListField-2 then {BARE_LINKED} now.",
+            id="hyphen-then-digit",
+        ),
+        pytest.param(
+            "Ship DjangoListField.5 then DjangoListField now.",
+            f"Ship DjangoListField.5 then {BARE_LINKED} now.",
+            id="period-then-digit",
+        ),
+        pytest.param(
+            "Ship DjangoListField._x then DjangoListField now.",
+            f"Ship DjangoListField._x then {BARE_LINKED} now.",
+            id="period-then-underscore",
+        ),
+        pytest.param(
+            "Ship DjangoListField--next then DjangoListField now.",
+            f"Ship DjangoListField--next then {BARE_LINKED} now.",
+            id="punctuation-run-then-word",
+        ),
+        pytest.param(
+            "Ship DjangoListField. Then DjangoListField again.",
+            f"Ship {BARE_LINKED}. Then DjangoListField again.",
+            id="sentence-final-first-mention-takes-the-link",
+        ),
+    ],
+)
+def test_inliner_links_a_term_at_a_prose_boundary(text: str, expected: str) -> None:
+    """A term followed by punctuation that ends its token is linked; one opening a path is not.
+
+    A ``.``, ``:``, ``/`` or ``-`` run after the term bars the link only when an identifier
+    character follows the run, so the first mention ending a sentence or clause takes the link.
     """
     inliner = GlossaryInliner([{"title": "`DjangoListField`", "anchor": "djangolistfield"}])
     assert inliner.inline(text) == expected
