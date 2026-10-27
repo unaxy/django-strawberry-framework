@@ -7,8 +7,9 @@ cases, `FieldSpec` source-path mapping, and the `filter_input_type`
 consumer helper (Decision 11).
 
 ``HIDE_FLAT_FILTERS`` wire shape lives in
-``test_library_api.py`` / ``test_products_api.py``. Scoped ``RangeFilter``
-type names live in ``test_scalars_filter_api.py``. Relay-relation
+``test_library_api.py`` / ``test_products_api.py``; the copy a ``get_filters()``
+override borrows from another set, which no fakeshop set holds, is pinned here.
+Scoped ``RangeFilter`` type names live in ``test_scalars_filter_api.py``. Relay-relation
 ``isNull`` Boolean vs GlobalID-list ``exact`` lives in
 ``test_library_api.py``. This file keeps converter dispatch, namespace
 lifecycle, and digit-boundary type-name injectivity -- construction and
@@ -42,6 +43,7 @@ from apps.scalars import models as scalar_models
 from django import forms
 from django.db import models
 from django.db.models import QuerySet
+from django.test import override_settings
 from django_filters import (
     AllValuesFilter,
     AllValuesMultipleFilter,
@@ -632,6 +634,60 @@ def test_expanded_declared_child_filter_is_its_own_head() -> None:
     # generated ``branch__name`` gates on the ORM path it is named after.
     assert table.gate_paths["branch_title"] == "branch__title"
     assert table.gate_paths["branch__name"] == "branch__name"
+
+
+@pytest.mark.parametrize(
+    ("declares_branch", "published"),
+    [pytest.param(False, True, id="borrowed"), pytest.param(True, False, id="expanded")],
+)
+def test_hide_flat_filters_hides_a_copy_only_where_the_set_expands_its_branch(
+    *,
+    declares_branch: bool,
+    published: bool,
+) -> None:
+    """``HIDE_FLAT_FILTERS`` hides a copy only on a set declaring its branch into its child set.
+
+    ``BorrowingBranchFilter.get_filters`` holds a deep copy of ``SourceBranchFilter``'s
+    ``shelves__code`` as ``borrowed_code``. Without a ``shelves`` branch into
+    ``ChildShelfFilter`` that copy is the set's own filter and stays published; on a set
+    that declares that branch it is the expansion's copy, hidden with ``shelves__code``.
+    """
+
+    class ChildShelfFilter(FilterSet):
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+    class SourceBranchFilter(FilterSet):
+        shelves = RelatedFilter(ChildShelfFilter, field_name="shelves")
+
+        class Meta:
+            model = library_models.Branch
+            fields = []
+
+    class BorrowingBranchFilter(FilterSet):
+        if declares_branch:
+            shelves = RelatedFilter(ChildShelfFilter, field_name="shelves")
+
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"]}
+
+        @classmethod
+        @override
+        def get_filters(cls) -> OrderedDict[str, Filter]:
+            filters = OrderedDict(super().get_filters())
+            filters["borrowed_code"] = copy.deepcopy(
+                SourceBranchFilter.get_filters()["shelves__code"],
+            )
+            return filters
+
+    with override_settings(DJANGO_STRAWBERRY_FRAMEWORK={"HIDE_FLAT_FILTERS": True}):
+        triples = _build_input_fields(BorrowingBranchFilter)
+    names = {python_attr for python_attr, _annotation, _kwargs in triples}
+    assert "name" in names
+    assert "shelves_code" not in names
+    assert ("borrowed_code" in names) is published
 
 
 # ---------------------------------------------------------------------------

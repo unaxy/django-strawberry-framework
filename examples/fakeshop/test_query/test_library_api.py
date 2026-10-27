@@ -2414,26 +2414,126 @@ def test_hide_flat_filters_changes_library_filter_input_shape_over_http(
         assert "shelvesCode" not in hidden
 
 
-def test_hide_flat_filters_hides_deep_relatedfilter_flat_on_loan_input(
-    project_schema_override: Callable[[], None],
-) -> None:
-    """``HIDE_FLAT_FILTERS=True`` hides a multi-hop flat leaf of a RelatedFilter.
+# Per input type: the fields ``HIDE_FLAT_FILTERS`` keeps (the branches and the set's own
+# filters, a ``Meta.fields`` traversal under a ``RelatedFilter``'s name included) and the
+# flat copies it hides, whatever key the set holds them under.
+_HIDE_FLAT_FILTERS_SURFACES = {
+    "LoanFilterInputType": (
+        {
+            "book",
+            "patron",
+            "note",
+            "bookLoansPatronEmail",
+        },
+        {"bookTitle", "patronName", "patronEmailContains"},
+    ),
+    "PrintingFilterInputType": (
+        {
+            "edition",
+            "inSeries",
+            "coPublishers",
+            "editionPrintingsCoPublishers",
+            "editionImprint",
+        },
+        {"inSeriesId", "inSeriesHandle"},
+    ),
+    "PatronFilterInputType": (
+        {"loans", "name", "emailContains"},
+        {"loansNote", "loansBookTitle", "borrowedTitle"},
+    ),
+}
 
-    ``LoanFilter.book`` is a ``RelatedFilter``; ``book__loans__patron__email``
-    (``bookLoansPatronEmail``) is an expanded child at depth greater than one
-    hop. The nested ``book`` branch stays; the flat spelling disappears.
+
+@pytest.mark.parametrize("input_type", list(_HIDE_FLAT_FILTERS_SURFACES))
+def test_hide_flat_filters_hides_each_flat_copy_and_keeps_the_sets_own_filters(
+    project_schema_override: Callable[[], None],
+    input_type: str,
+) -> None:
+    """``HIDE_FLAT_FILTERS=True`` hides a filter by what it is, never by its key.
+
+    A ``RelatedFilter`` expansion's copy is hidden under any key: its own path
+    (``bookTitle``), one under a renamed branch (``inSeriesHandle``) or a second key a
+    ``get_filters()`` override adds (``PatronFilter.borrowed_title``). A filter the
+    set declares itself stays, a ``Meta.fields`` traversal spelled under a
+    ``RelatedFilter``'s name included (``LoanFilter.book__loans__patron__email``,
+    ``PrintingFilter.edition__printings__co_publishers``, which no nested branch
+    reaches, and ``PrintingFilter.edition__imprint``'s own ``istartswith``).
     """
+    kept, hidden = _HIDE_FLAT_FILTERS_SURFACES[input_type]
     with override_settings(DJANGO_STRAWBERRY_FRAMEWORK={"HIDE_FLAT_FILTERS": False}):
         project_schema_override()
-        shown = _input_field_names("LoanFilterInputType")
-        assert "book" in shown
-        assert "bookLoansPatronEmail" in shown
+        assert kept | hidden <= _input_field_names(input_type)
 
     with override_settings(DJANGO_STRAWBERRY_FRAMEWORK={"HIDE_FLAT_FILTERS": True}):
         project_schema_override()
-        hidden = _input_field_names("LoanFilterInputType")
-        assert "book" in hidden
-        assert "bookLoansPatronEmail" not in hidden
+        names = _input_field_names(input_type)
+    assert kept <= names
+    assert not hidden & names
+
+
+def test_hide_flat_filters_keeps_only_the_sets_own_lookups_on_a_mixed_head(
+    project_schema_override: Callable[[], None],
+) -> None:
+    """A head holding flat copies and the set's own lookup keeps only the own one when hidden.
+
+    ``PrintingFilter.edition`` expands ``EditionFilter.imprint`` (``exact``, ``icontains``)
+    flat as ``editionImprint``, and the set's own ``Meta.fields`` adds ``istartswith``, a
+    lookup ``EditionFilter`` does not expose, under the same head.
+    """
+    bag = "PrintingFilterEditionImprintFilterInputType"
+    with override_settings(DJANGO_STRAWBERRY_FRAMEWORK={"HIDE_FLAT_FILTERS": False}):
+        project_schema_override()
+        assert _input_field_names(bag) == {"exact", "iContains", "iStartsWith"}
+
+    with override_settings(DJANGO_STRAWBERRY_FRAMEWORK={"HIDE_FLAT_FILTERS": True}):
+        project_schema_override()
+        assert _input_field_names(bag) == {"iStartsWith"}
+
+
+_HIDE_FLAT_FILTERS_QUERIES = {
+    "own-traversal": (
+        'allLibraryLoans(filter: { bookLoansPatronEmail: { iContains: "p2@" } }) { note }',
+        {"allLibraryLoans": [{"note": "alpha"}, {"note": "beta"}]},
+    ),
+    "rekeyed-copy-nested": (
+        'allLibraryPatrons(filter: { loans: { book: { title: { iContains: "two" } } } }) { name }',
+        {"allLibraryPatrons": [{"name": "p1"}, {"name": "p2"}]},
+    ),
+    "mixed-head-own-lookup": (
+        (
+            'allLibraryPrintingsConnection(filter: { editionImprint: { iStartsWith: "a" } }) '
+            "{ edges { node { runSize } } }"
+        ),
+        {"allLibraryPrintingsConnection": {"edges": [{"node": {"runSize": 200}}]}},
+    ),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("hide", [False, True], ids=["shown", "hidden"])
+@pytest.mark.parametrize("case", list(_HIDE_FLAT_FILTERS_QUERIES))
+def test_hide_flat_filters_leaves_every_filter_reachable_over_http(
+    project_schema_override: Callable[[], None],
+    case: str,
+    *,
+    hide: bool,
+) -> None:
+    """Every filter answers the same rows whether ``HIDE_FLAT_FILTERS`` is set or not.
+
+    ``LoanFilter``'s own ``book__loans__patron__email`` traversal stays flat, and so does
+    ``PrintingFilter``'s own ``edition__imprint__istartswith`` beside the hidden copies
+    of its head; ``PatronFilter.borrowed_title``, a copy hidden flat, answers through
+    its nested twin. A third book's only loan, by ``p1``, matches neither loan filter,
+    and the edition imprinted ``B`` fails ``iStartsWith: "a"``.
+    """
+    _seed_one_book_with_two_loans()
+    other = models.Book.objects.create(title="Other", shelf=models.Shelf.objects.get())
+    _ = models.Loan.objects.create(book=other, patron=models.Patron.objects.get(name="p1"))
+    _seed_unstorable_holder_rows()
+    selection, expected = _HIDE_FLAT_FILTERS_QUERIES[case]
+    with override_settings(DJANGO_STRAWBERRY_FRAMEWORK={"HIDE_FLAT_FILTERS": hide}):
+        project_schema_override()
+        _assert_graphql_data(f"query {{ {selection} }}", expected)
 
 
 @pytest.mark.django_db

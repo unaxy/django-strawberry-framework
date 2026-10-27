@@ -541,13 +541,13 @@ testing_endpoint_setting.__test__ = False  # pyright: ignore[reportFunctionMembe
 
 
 def hide_flat_filters_setting() -> object:
-    """Whether generated filter inputs hide the flat relational traversal fields.
+    """Whether generated filter inputs hide a ``RelatedFilter`` expansion's flat copies.
 
     Reads ``DJANGO_STRAWBERRY_FRAMEWORK["HIDE_FLAT_FILTERS"]``, defaulting to
     ``False`` when the key (or the whole settings dict) is absent. Consumed by
     ``filters/inputs.py::_build_input_fields`` at input-class build time,
-    which owns the truthiness coercion and the skip semantics (hidden flat
-    paths remain reachable through their nested ``RelatedFilter`` branch).
+    which owns the truthiness coercion and the skip semantics (a hidden copy
+    stays reachable through its nested ``RelatedFilter`` branch).
     """
     return getattr(settings, HIDE_FLAT_FILTERS_KEY, False)
 
