@@ -1080,11 +1080,12 @@ value the form accepts and leaves un-wrapped reaches Django's list validation in
 `is_valid()` as a scalar and fails there with Django's own exception (`JSONDecodeError`,
 `TypeError`): a top-level error, masked under the error policy; text that is itself a JSON
 array is read as the list (an empty value cleaned to `""` over a `blank=True, null=False`
-column is that column's `null` error, Decision 8 step 5). An
-update's build logs one `logger.warning` per such field it binds, naming its direction
-(`django_strawberry_framework/forms/inputs.py::_advise_shape_disagreement`): an omitted one
-binds the form's own initial (Decision 8), which must present the stored value in the
-field's shape. A `JSONField` column keeps `JSON`. A field admitting no non-empty value the column lists is a
+column is that column's `null` error, Decision 8 step 5). A
+create's and an update's build each log one `logger.warning` per such field it binds, naming
+its direction and what the form must do to turn the input into the column's value
+(`django_strawberry_framework/forms/inputs.py::_advise_shape_disagreement`); an update's also
+names the initial: an omitted one binds the form's own initial (Decision 8), which must
+present the stored value in the field's shape. A `JSONField` column keeps `JSON`. A field admitting no non-empty value the column lists is a
 `ConfigurationError` (its input could carry at most the empty value, so no non-empty value
 passes the form). The input is built once, at schema
 build, from the field basis, so callable choices (re-evaluated on every read) and choices
@@ -2083,8 +2084,9 @@ Rationale companion: [Decision 14][rationale-d14].
 - **A `MultipleChoiceField` over a single-value column without choices.** A
   `MultipleChoiceField` (or `TypedMultipleChoiceField`) over `Branch.city`, a `TextField`
   listing no choices, joined in `clean_city`: the input types it `[String!]!` on create and
-  `[String!]` on update (the field off-column), and an update's build logs a warning naming
-  the form, the field and the column. An update omitting it binds the form's initial: kept
+  `[String!]` on update (the field off-column), and a create's and an update's build each log
+  a warning naming the form, the field and the column. An update omitting it binds the form's
+  initial (named in the update's warning): kept
   when the form splits the stored value into `self.initial`, refused "Enter a list of
   values." with nothing written otherwise. The initial is bound under the form's prefixed
   name (`form.add_prefix`) and the keys the field's widget reads, and a `QueryDict` a `get_form` override binds is copied and given
@@ -2096,8 +2098,9 @@ Rationale companion: [Decision 14][rationale-d14].
   `TypedChoiceField`, `CharField`, `IntegerField` or `DecimalField` (any of the converter's
   registered scalar form fields) over an `ArrayField` (e.g. "pick one tag", wrapped into a
   one-element list in `clean_tags`) is typed as the same field off-column, a required scalar
-  on create and an optional one on update, never the column's list, and an update's build
-  logs a warning naming the list column. A `ChoiceField` over an `ArrayField` whose
+  on create and an optional one on update, never the column's list, and a create's and an
+  update's build each log a warning naming the list column. A `ChoiceField` over an
+  `ArrayField` whose
   `base_field` lists choices takes the element's read enum, or the generated enum of the
   element values its choices admit. A create and an update naming the field store the list
   `clean_<field>` makes; an omitted one binds the form's initial (its `__init__` or
@@ -2450,13 +2453,15 @@ behavior reachable through `/graphql/`, package tests own internals.
     single-value choice column are refused, while a `TypedMultipleChoiceField` over a text
     column without choices is typed `list[str]` (optional on update), a
     `MultipleChoiceField` over a `JSONField` keeps `JSON`, and an update build, an
-    excluding one included, warns once of the text column and a create or a `JSONField`
-    column not at all; a `ChoiceField` / `TypedChoiceField` / `CharField` / `IntegerField` /
+    excluding one included, and a create build binding the field each warn once of the text
+    column (the update's naming the initial), a create excluding it or a `JSONField` column
+    not at all, and a form serving two creates and an update once per input it builds; a
+    `ChoiceField` / `TypedChoiceField` / `CharField` / `IntegerField` /
     `DecimalField` over an `ArrayField` is typed by the field's scalar (optional on update), a
     `ChoiceField` over a `base_field` listing choices by the element enum (narrowed by a
     subset), a `MultipleChoiceField`, a `JSONField`, a bare `forms.Field` and a consumer
-    `forms.Field` subclass keep the column's list, and an update build warns of the list
-    column and a create or a list-reading field not at all (`tests/forms/test_inputs.py`;
+    `forms.Field` subclass keep the column's list, and a create build and an update build
+    each warn of the list column and a list-reading field not at all (`tests/forms/test_inputs.py`;
     `form_field_reads_list` and `form_field_reads_one_value` in
     `tests/forms/test_converter.py`);
     on the Postgres tier the default `ModelForm` `SimpleArrayField`, a subclass of it and a
@@ -2698,7 +2703,8 @@ The completion contract.
    admits, and a field whose input shape disagrees with its column, a `MultipleChoiceField`
    over a single-value column without choices or a built-in single-value field over an
    `ArrayField`,
-   is typed as the same field off-column, with an update-build warning) with a **fail-loud
+   is typed as the same field off-column, with a create- and update-build warning) with a
+   **fail-loud
    dispatch — no base-`forms.Field` catch-all**: a bare `forms.Field` → `str` (exact
    special case), a known subclass maps via MRO, but a custom `forms.Field` subclass
    hits the **raising** default → [`ConfigurationError`][glossary-configurationerror]

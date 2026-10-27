@@ -89,6 +89,10 @@ from django_strawberry_framework.forms.inputs import (
     require_readable_choice_keys,
     resolve_effective_form_fields,
 )
+from django_strawberry_framework.forms.sets import (
+    _cached_build_form_input,
+    clear_form_shape_build_cache,
+)
 from django_strawberry_framework.mutations.inputs import CREATE, PARTIAL
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.scalars import Upload, strawberry_config
@@ -1315,126 +1319,187 @@ def test_multiple_choice_field_over_json_column_keeps_the_column_type() -> None:
     assert _field_map(built)["payload"].type == _field_map(json_built)["payload"].type
 
 
-@pytest.mark.parametrize(
-    (
-        "model",
-        "name",
-        "operation_kind",
-        "fields",
-        "warned",
-    ),
-    [
-        pytest.param(Branch, "city", PARTIAL, None, True, id="update"),
-        pytest.param(Branch, "city", PARTIAL, ("name",), True, id="update-excluding-it"),
-        pytest.param(Branch, "city", CREATE, None, False, id="create"),
-        pytest.param(
-            scalar_models.NullableScalarSpecimen,
-            "payload",
-            PARTIAL,
-            None,
-            False,
-            id="json-column",
-        ),
-    ],
-)
-def test_update_build_warns_of_a_list_field_over_a_single_value_column(
+def _shape_warnings(
     caplog: pytest.LogCaptureFixture,
-    model: type[models.Model],
-    name: str,
-    operation_kind: str,
-    fields: tuple[str, ...] | None,
-    *,
-    warned: bool,
-) -> None:
-    """An update's build logs one warning per list-writing field over a single-value column.
-
-    The update binds every declared field, one its input leaves out included, and binds an
-    omitted one from the form's initial, which the field refuses unless the form presents
-    the stored value as a list. A create binds only what its input carries, and a
-    ``JSONField`` stores the list itself, so neither warns.
-    """
-    extra = ("name",) if model is Branch else ()
-    picks = forms.MultipleChoiceField(choices=_CITY_PICKS, required=False)
-    form_class = _column_form(model, name, picks, fields=extra)
+    form_class: FormClass,
+    operation_kinds: tuple[str, ...],
+    fields: tuple[str, ...] | None = None,
+) -> list[str]:
+    """The package's log messages from building ``form_class``'s input once per operation kind."""
     with caplog.at_level(logging.WARNING, logger="django_strawberry_framework"):
-        build_form_input_class(form_class, operation_kind=operation_kind, fields=fields)
-    messages = [
+        for operation_kind in operation_kinds:
+            build_form_input_class(form_class, operation_kind=operation_kind, fields=fields)
+    return [
         record.getMessage()
         for record in caplog.records
         if record.name == "django_strawberry_framework"
     ]
-    expected = (
-        "Form KindForm field 'city' is a MultipleChoiceField over the single-value column "
-        "Branch.city, which lists no choices: its input is a list, which the form must turn "
-        "into the column's value (e.g. joined in clean_city). An update omitting the field "
-        "binds the field's initial value, so the form must present the stored value as a list "
-        "(e.g. split into self.initial['city'] in __init__), or that update fails validation."
-    )
-    assert messages == ([expected] if warned else [])
+
+
+_CITY_WRITE_ADVICE = (
+    "Form KindForm field 'city' is a MultipleChoiceField over the single-value column "
+    "Branch.city, which lists no choices: its input is a list, which the form must turn "
+    "into the column's value (e.g. joined in clean_city)."
+)
+_CITY_INITIAL_ADVICE = (
+    " An update omitting the field binds the field's initial value, so the form must present "
+    "the stored value as a list (e.g. split into self.initial['city'] in __init__), or that "
+    "update fails validation."
+)
 
 
 @pytest.mark.parametrize(
     (
-        "operation_kind",
+        "model",
+        "name",
+        "operation_kinds",
+        "fields",
+        "warned",
+    ),
+    [
+        pytest.param(Branch, "city", (PARTIAL,), None, (PARTIAL,), id="update"),
+        pytest.param(Branch, "city", (PARTIAL,), ("name",), (PARTIAL,), id="update-excluding-it"),
+        pytest.param(Branch, "city", (CREATE,), None, (CREATE,), id="create"),
+        pytest.param(Branch, "city", (CREATE,), ("name",), (), id="create-excluding-it"),
+        pytest.param(
+            Branch,
+            "city",
+            (CREATE, PARTIAL),
+            None,
+            (CREATE, PARTIAL),
+            id="create-and-update",
+        ),
+        pytest.param(
+            scalar_models.NullableScalarSpecimen,
+            "payload",
+            (CREATE, PARTIAL),
+            None,
+            (),
+            id="json-column",
+        ),
+    ],
+)
+def test_create_and_update_builds_warn_of_a_list_field_over_a_single_value_column(
+    caplog: pytest.LogCaptureFixture,
+    model: type[models.Model],
+    name: str,
+    operation_kinds: tuple[str, ...],
+    fields: tuple[str, ...] | None,
+    warned: tuple[str, ...],
+) -> None:
+    """Each build logs one warning per list-writing field it binds over a single-value column.
+
+    The warning says the form must join the list into the column's value. A create binds
+    only what its input carries; an update binds every declared field, one its input leaves
+    out included, from the form's initial when omitted, so its warning also says the form
+    must present the stored value as a list. A ``JSONField`` stores the list itself.
+    """
+    extra = ("name",) if model is Branch else ()
+    picks = forms.MultipleChoiceField(choices=_CITY_PICKS, required=False)
+    form_class = _column_form(model, name, picks, fields=extra)
+    expected = [
+        _CITY_WRITE_ADVICE + (_CITY_INITIAL_ADVICE if kind == PARTIAL else "") for kind in warned
+    ]
+    assert _shape_warnings(caplog, form_class, operation_kinds, fields) == expected
+
+
+@pytest.mark.parametrize(
+    (
+        "operation_kinds",
         "name",
         "field",
         "warned",
     ),
     [
         pytest.param(
-            PARTIAL,
+            (PARTIAL,),
             "tags",
             lambda: forms.ChoiceField(choices=[("x", "X")]),
-            True,
+            (PARTIAL,),
             id="update-choice",
         ),
-        pytest.param(PARTIAL, "tags", forms.CharField, True, id="update-char"),
-        pytest.param(PARTIAL, "counts", forms.IntegerField, True, id="update-integer"),
+        pytest.param((PARTIAL,), "tags", forms.CharField, (PARTIAL,), id="update-char"),
+        pytest.param((PARTIAL,), "counts", forms.IntegerField, (PARTIAL,), id="update-integer"),
         pytest.param(
-            CREATE,
+            (CREATE,),
             "tags",
             lambda: forms.ChoiceField(choices=[("x", "X")]),
-            False,
-            id="create",
+            (CREATE,),
+            id="create-choice",
         ),
-        pytest.param(PARTIAL, "tags", forms.MultipleChoiceField, False, id="list-field"),
+        pytest.param((CREATE,), "tags", forms.CharField, (CREATE,), id="create-char"),
+        pytest.param((CREATE,), "counts", forms.IntegerField, (CREATE,), id="create-integer"),
+        pytest.param(
+            (CREATE, PARTIAL),
+            "tags",
+            forms.CharField,
+            (CREATE, PARTIAL),
+            id="create-and-update",
+        ),
+        pytest.param((CREATE, PARTIAL), "tags", forms.MultipleChoiceField, (), id="list-field"),
     ],
 )
-def test_update_build_warns_of_a_single_value_field_over_an_array_column(
+def test_create_and_update_builds_warn_of_a_single_value_field_over_an_array_column(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
-    operation_kind: str,
+    operation_kinds: tuple[str, ...],
     name: str,
     field: Callable[[], forms.Field],
-    *,
-    warned: bool,
+    warned: tuple[str, ...],
 ) -> None:
-    """An update's build logs one warning per single-value field over an ``ArrayField``.
+    """Each build logs one warning per single-value field it binds over an ``ArrayField``.
 
-    An omitted one binds from the form's initial, which a ``ModelForm`` reads off the row as
-    the stored list, which the field refuses unless the form presents one value. A create
-    binds only what its input carries, and a list-reading field reads the stored list.
+    The warning says the form must wrap the one value into the column's list. An update's
+    also says the form must present one stored element as the initial an omitted field
+    binds, which a ``ModelForm`` reads off the row as the stored list. A list-reading field
+    reads the stored list.
     """
     patch_array_field(monkeypatch)
     declared = field()
     form_class = _column_form(_PlainArrays, name, declared)
+    write_advice = (
+        f"Form KindForm field '{name}' is a {type(declared).__name__} over the list column "
+        f"_PlainArrays.{name}: its input is a single value, which the form must turn into the "
+        f"column's value (e.g. wrapped into a list in clean_{name})."
+    )
+    initial_advice = (
+        " An update omitting the field binds the field's initial value, so the form must "
+        "present the stored value as a single value (e.g. picked from the stored list into "
+        f"self.initial['{name}'] in __init__), or that update fails validation or writes a "
+        "value made from the stored list."
+    )
+    expected = [write_advice + (initial_advice if kind == PARTIAL else "") for kind in warned]
+    assert _shape_warnings(caplog, form_class, operation_kinds) == expected
+
+
+def test_form_serving_two_creates_and_an_update_warns_once_per_input_it_builds(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Two creates over one shape share one built input and one warning; the update has its own.
+
+    The per-shape build cache (``forms/sets.py::_cached_build_form_input``) builds a shape
+    once, so a form serving two create mutations and an update logs one create warning and
+    one update warning.
+    """
+    picks = forms.MultipleChoiceField(choices=_CITY_PICKS, required=False)
+    form_class = _column_form(Branch, "city", picks, fields=("name",))
+    clear_form_shape_build_cache()
     with caplog.at_level(logging.WARNING, logger="django_strawberry_framework"):
-        build_form_input_class(form_class, operation_kind=operation_kind)
+        for operation_kind in (CREATE, CREATE, PARTIAL):
+            _cached_build_form_input(
+                form_class,
+                operation_kind=operation_kind,
+                fields=None,
+                exclude=None,
+                guard_required=operation_kind == CREATE,
+                binds_class_fields=True,
+            )
     messages = [
         record.getMessage()
         for record in caplog.records
         if record.name == "django_strawberry_framework"
     ]
-    expected = (
-        f"Form KindForm field '{name}' is a {type(declared).__name__} over the list column "
-        f"_PlainArrays.{name}: its input is a single value, which the form must turn into the "
-        f"column's value (e.g. wrapped into a list in clean_{name}). An update omitting the "
-        "field binds the field's initial value, so the form must present the stored value as "
-        f"a single value (e.g. picked from the stored list into self.initial['{name}'] in "
-        "__init__), or that update fails validation or writes a value made from the stored "
-        "list."
-    )
-    assert messages == ([expected] if warned else [])
+    assert messages == [_CITY_WRITE_ADVICE, _CITY_WRITE_ADVICE + _CITY_INITIAL_ADVICE]
 
 
 def test_choice_field_whose_valid_value_raises_propagates_its_exception() -> None:

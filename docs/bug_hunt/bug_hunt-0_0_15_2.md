@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 330 done, 214 to do.
+Progress: 331 done, 214 to do.
 
 ## Done
 
@@ -1840,6 +1840,12 @@ Progress: 330 done, 214 to do.
   rejection, and the router hint keeps its migration prose without the number. The first three are pinned exactly;
   the docstrings, spec-046 "Error shapes" and the GLOSSARY `Meta.connection` body are restated; dry-0_0_15_3 item 28
   is ticked
+- [x] 575. A create's build advises like an update's: `forms/inputs.py::build_form_input_class` runs
+  `_advise_shape_disagreement` for every input it builds, over the fields that input binds, with the first clause
+  (the form must turn the input into the column's value) for both and the omitted-field initial advice for the
+  update only; one warning per input build, so a form serving a create and an update logs one of each. Package rows
+  in `tests/forms/test_inputs.py` pin the texts and counts; the docstrings, spec-038 and the GLOSSARY
+  `DjangoModelFormMutation` body are restated
 
 ## Outside review of the fixes
 
@@ -1979,9 +1985,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `_get_validation_exclusions` leaves it out of `full_clean`) answers the masked error at save (a raw `DataError` on
   an `ArrayField`, measured); `_is_unstorable_blank` needs `blank=True`, so no column that stores no empty string is
   named in this shape. Found fixing 541
-- [ ] 575. (robustness) The build warning for a single-value form field over an `ArrayField`
-  (`forms/inputs.py::_advise_shape_disagreement`, "which the form must turn into the column's value") is logged only
-  for the update input; a create-only `DjangoModelFormMutation` with the same field logs none. Found fixing 541
 - [ ] 577. A `SerializerMutation` create that leaves out a `blank=True, null=False` column with no default (a
   `ModelSerializer`'s generated field is `required=False` there) answers the `"__all__"` `constraint` error ("A
   database constraint was violated.", the `IntegrityError` leaf) where docs/README.md says such a column is "that
@@ -2104,6 +2107,9 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 633. CHANGELOG entry for item 575: a `DjangoModelFormMutation` create whose form binds a single-value field
+  over an `ArrayField` (or a `MultipleChoiceField` over a single-value column) logs the shape warning at schema
+  build, as an update does, without the update's advice on the omitted field's initial value
 - [ ] 632. CHANGELOG entry for item 564: four error messages drop their release number. The `RelatedFilter`
   `lookups=` error names the target FilterSet's `Meta.fields`; `Meta.connection`'s unknown-sub-key error and the
   router's missing-`django_application` hint keep their text without it; `decode_global_id`'s refusal names the

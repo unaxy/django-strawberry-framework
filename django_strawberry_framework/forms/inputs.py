@@ -935,15 +935,19 @@ def shape_disagreeing_column(
 def _advise_shape_disagreement(
     form_class: FormClass,
     form_fields: Mapping[str, forms.Field] | None,
+    *,
+    is_update: bool,
 ) -> None:
-    """Log one warning per field an update binds whose input shape disagrees with its column.
+    """Log one warning per field the build binds whose input shape disagrees with its column.
 
-    An update binds every declared field and an omitted one from the form's initial
+    The build cannot see the value a bound form's ``clean_<field>`` returns, so it advises
+    instead of refusing. Each warning names the direction (a scalar input over a list
+    column, or a list input over a single-value column) and what the form must do to turn
+    the input into the column's value. An update's also names the initial: an update binds
+    every declared field and an omitted one from the form's initial
     (``forms/resolvers.py::_bind_omitted_shape_disagreeing_initials``), which a ``ModelForm``
     reads off the row: the stored value, in the column's shape, which the field refuses
-    unless the form presents it in the field's. The build cannot see a bound form's
-    initial, so it advises instead of refusing. The warning names the direction: a scalar
-    input over a list column, or a list input over a single-value column.
+    unless the form presents it in the field's.
     """
     for name, field in _form_field_basis(form_class, form_fields).items():
         column = shape_disagreeing_column(form_class, name, field)
@@ -959,11 +963,11 @@ def _advise_shape_disagreement(
             value_words = "a single value"
             write_hint, initial_hint = "wrapped into a list", "picked from the stored list into"
             failure = "fails validation or writes a value made from the stored list"
-        logger.warning(
+        message = (
             "Form %s field %r is a %s over the %s: its input is %s, which the form "
-            "must turn into the column's value (e.g. %s in clean_%s). An update omitting the "
-            "field binds the field's initial value, so the form must present the stored "
-            "value as %s (e.g. %s self.initial[%r] in __init__), or that update %s.",
+            "must turn into the column's value (e.g. %s in clean_%s)."
+        )
+        args: tuple[object, ...] = (
             truth.name(form_class),
             name,
             truth.kind(field),
@@ -971,11 +975,20 @@ def _advise_shape_disagreement(
             value_words,
             write_hint,
             name,
-            value_words,
-            initial_hint,
-            name,
-            failure,
         )
+        if is_update:
+            message += (
+                " An update omitting the field binds the field's initial value, so the form "
+                "must present the stored value as %s (e.g. %s self.initial[%r] in __init__), "
+                "or that update %s."
+            )
+            args += (
+                value_words,
+                initial_hint,
+                name,
+                failure,
+            )
+        logger.warning(message, *args)
 
 
 def _form_choice_narrowing(
@@ -1303,8 +1316,9 @@ def build_form_input_class(
     Before any field is built, every field the operation binds (every declared field for
     an update, the input's own for a create) must agree with its backing column's kind
     (``require_column_kind_agreement``) and read a relation key that names one row
-    (``require_readable_choice_keys``). An update's build also logs a warning for each
-    field it binds whose input shape disagrees with its column (``_advise_shape_disagreement``).
+    (``require_readable_choice_keys``). The build then logs a warning for each field it binds
+    whose input shape disagrees with its column (``_advise_shape_disagreement``); an update's
+    also names the initial its omitted field binds. A plain form has no column to disagree with.
     """
     if operation_kind not in CREATE_SHAPED_KINDS | {PARTIAL}:
         raise ConfigurationError(
@@ -1323,8 +1337,7 @@ def build_form_input_class(
     bound_fields = form_fields if operation_kind == PARTIAL else effective
     require_column_kind_agreement(form_class, bound_fields)
     require_readable_choice_keys(form_class, bound_fields)
-    if operation_kind == PARTIAL:
-        _advise_shape_disagreement(form_class, bound_fields)
+    _advise_shape_disagreement(form_class, bound_fields, is_update=operation_kind == PARTIAL)
     # The un-narrowed shape of the same operation: the canonical-name comparison basis,
     # so an update input that drops only the row identity keeps the canonical name.
     full_field_names = tuple(
