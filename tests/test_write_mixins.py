@@ -165,7 +165,7 @@ def test_write_flavor_meta_vocabulary_composition() -> None:
 
 
 def test_make_declaration_registry_dedupes_and_rejects_post_finalize() -> None:
-    """The refactored declaration-registry quad behaves as the hand-written one did.
+    """The factory-built declaration registry dedupes and rejects post-finalize.
 
     The ``make_declaration_registry`` factory single-sources the dedup / clear /
     post-finalize reject; a fresh registry over a disjoint list still dedupes by

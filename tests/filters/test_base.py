@@ -2528,8 +2528,8 @@ def test_global_id_multiple_choice_filter_decodes_every_element(
     encoded_two = relay.to_base64("BookType", "2")
     # Spy on the upstream ``MultipleChoiceFilter.filter`` via the bound
     # parent class. ``monkeypatch`` auto-restores on teardown (xdist-safe
-    # and exception-safe) instead of the prior manual try/finally that
-    # wrote through to the upstream class.
+    # and exception-safe), where a manual try/finally would write through
+    # to the upstream class.
     monkeypatch.setattr(GlobalIDMultipleChoiceFilter.__mro__[1], "filter", spy)
     f = GlobalIDMultipleChoiceFilter(field_name="id")
     f.filter(_RecordingQs(), [encoded_one, encoded_two])
@@ -2875,7 +2875,7 @@ def test_global_id_multiple_choice_filter_non_pk_to_field_union_by_pk() -> None:
 
 
 def test_global_id_filter_fk_to_pk_predicate_is_byte_identical() -> None:
-    """Without the marker, the predicate is the unchanged ``{field__lookup: node_id}``."""
+    """Without the marker, the predicate is the plain ``{field__lookup: node_id}``."""
     qs = _RecordingQs()
 
     encoded = relay.to_base64("ShelfType", "7")
@@ -3302,7 +3302,7 @@ def test_filter_model_strategy_rejects_type_name() -> None:
 
 
 def test_filter_type_strategy_accepts_graphql_name() -> None:
-    """`type` preserves the pre-0.0.9 `graphql_type_name` acceptance."""
+    """`type` accepts the `graphql_type_name` payload."""
     owner = _owner("type")
     f = _global_id_filter_with_owner("id", owner)
     encoded = relay.to_base64("OwnerType", "7")

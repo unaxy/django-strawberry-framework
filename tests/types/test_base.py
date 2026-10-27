@@ -760,8 +760,8 @@ def test_meta_fields_and_exclude_mutually_exclusive() -> None:
 def test_meta_fields_and_exclude_mutually_exclusive_via_inheritance() -> None:
     """A ``fields`` value inherited from a parent ``Meta`` still trips the guard.
 
-    Pins the ``getattr(meta, ..., None) is not None`` semantics: an earlier
-    shape that gated on ``meta.__dict__`` membership would miss this case and
+    Pins the ``getattr(meta, ..., None) is not None`` semantics: a gate on
+    ``meta.__dict__`` membership would miss this case and
     silently let both directives coexist, with confusing field-selection
     semantics downstream. The child only declares ``exclude``; ``fields``
     comes in from the base class.
@@ -805,13 +805,13 @@ def test_definition_fields_class_slot_is_reserved_but_unpopulated() -> None:
     assert definition.fields_class is None
 
 
-def test_meta_filterset_class_is_promoted_to_allowed_meta_keys() -> None:
+def test_meta_filterset_class_is_allowed_not_deferred() -> None:
     """``Meta.filterset_class`` ships per spec-027 Decision 7 (promotion gate)."""
     assert "filterset_class" in ALLOWED_META_KEYS
     assert "filterset_class" not in DEFERRED_META_KEYS
 
 
-def test_meta_orderset_class_is_promoted_to_allowed_meta_keys() -> None:
+def test_meta_orderset_class_is_allowed_not_deferred() -> None:
     """``Meta.orderset_class`` ships in spec-028 (Decision-7 promotion gate)."""
     assert "orderset_class" in ALLOWED_META_KEYS
     assert "orderset_class" not in DEFERRED_META_KEYS
@@ -1132,10 +1132,10 @@ def test_relation_shapes_on_consumer_assigned_relation_raises() -> None:
 def test_interfaces_is_shipped_not_deferred() -> None:
     """``interfaces`` is a shipped Meta key (in ``ALLOWED_META_KEYS``), not deferred.
 
-    Guards against the prior regression where ``test_meta_rejects_each_deferred_key``
-    silently included ``"interfaces"`` and passed for the wrong reason - the
+    Keeps ``"interfaces"`` out of ``test_meta_rejects_each_deferred_key``, where it
+    would pass for the wrong reason - the
     ``_validate_interfaces`` shape error happens to contain the substring
-    ``"interfaces"``, so the deferred-key ``match=`` regex was satisfied by a
+    ``"interfaces"``, so the deferred-key ``match=`` regex would be satisfied by a
     shape-validation message rather than a deferred-key message. The
     ``_validate_interfaces`` spec-015 Decision 4 validator is the full shipped contract.
     """
@@ -1431,12 +1431,12 @@ def test_meta_globalid_strategy_callable_wrong_arity_raises() -> None:
                 globalid_strategy = encode
 
 
-def test_meta_globalid_strategy_callable_old_four_arg_signature_rejected() -> None:
-    """The pre-1.0 4-arg ``(type_cls, model, root, info)`` encoder is now rejected.
+def test_meta_globalid_strategy_callable_four_arg_signature_rejected() -> None:
+    """A 4-arg ``(type_cls, model, root, info)`` encoder is rejected.
 
-    ``info`` was dropped from the callable-encoder contract; a callable that still
-    requires the old fourth positional cannot bind the 3-arg probe, so it fails
-    loud at type creation naming the new ``(type_cls, model, root)`` shape rather
+    The callable-encoder contract takes no ``info``; a callable that requires a
+    fourth positional cannot bind the 3-arg probe, so it fails
+    loud at type creation naming the ``(type_cls, model, root)`` shape rather
     than raising an opaque ``TypeError`` at the first encode.
     """
 
@@ -1569,8 +1569,7 @@ def test_meta_globalid_strategy_absent_leaves_definition_none() -> None:
 def test_resolve_globalid_strategy_precedence(settings: pytest_django.Settings) -> None:
     """``_resolve_globalid_strategy`` is pure precedence: Meta -> snapshot -> ``"model"``.
 
-    The resolver no longer reads or validates the setting - it takes the
-    pre-validated snapshot as an argument. ``_validated_globalid_setting`` owns
+    The resolver takes the pre-validated snapshot as an argument. ``_validated_globalid_setting`` owns
     the read + validation, including the unknown-setting failure whose message
     names ``RELAY_GLOBALID_STRATEGY`` (the setting framing, distinct from the
     type-named ``Meta`` framing).
@@ -1695,10 +1694,10 @@ def test_meta_optimizer_hints_for_selected_scalar_field_raises() -> None:
 def test_meta_optimizer_hints_with_empty_field_selection_raises_configuration_error() -> None:
     """``optimizer_hints`` on an exclude-all selection raises ``ConfigurationError``, not ``IndexError``.
 
-    Earlier shapes inferred the model from ``fields[0].model``; when
-    ``Meta.exclude`` covered every concrete + relation field the resulting
-    empty ``fields`` tuple ``IndexError``'d before the consumer could see a
-    typed error. The fix threads ``meta.model`` through explicitly so the
+    Inferring the model from ``fields[0].model`` would ``IndexError`` when
+    ``Meta.exclude`` covers every concrete + relation field (an empty
+    ``fields`` tuple), before the consumer could see a typed error.
+    ``meta.model`` is threaded through explicitly so the
     selected-relation gate fires with a normal ``ConfigurationError``.
     """
     with pytest.raises(ConfigurationError, match="optimizer_hints names unknown fields"):

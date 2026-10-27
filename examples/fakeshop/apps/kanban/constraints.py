@@ -1,7 +1,7 @@
 """Custom DB expression that keeps the UUIDModel one-hot constraint flat in migrations.
 
 ``UUIDModel`` enforces "exactly one of N one-to-one link fields is non-null" via a
-``CheckConstraint`` whose condition is, historically,
+``CheckConstraint`` whose condition, written directly, is
 ``reduce(operator.add, [Case(When(<field>__isnull=False, then=1), default=0) ...]) == 1``.
 Django's migration serializer renders that *evaluated* left-associative ``+`` chain as
 one ``CombinedExpression`` per term -- an N-deep nesting tower that is regenerated in

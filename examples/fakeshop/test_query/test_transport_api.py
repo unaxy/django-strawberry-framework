@@ -1,8 +1,8 @@
 """Live ``/graphql/`` transport-boundary acceptance tests.
 
 The HTTP-boundary tier: every proof that Django's real request lifecycle
-executes on the package's GraphQL HTTP route now that ``routers.py`` no longer
-serves HTTP at all (Decision 2). Fakeshop mounts
+executes on the package's GraphQL HTTP route; ``routers.py`` serves no HTTP at
+all (Decision 2). Fakeshop mounts
 ``django_strawberry_framework.views.DjangoGraphQLView`` at ``/graphql/``
 (Decision 6), so these are proofs about the shipped package view rather than
 about a package reimplementation of Django's boundary.
@@ -1356,12 +1356,11 @@ async def test_the_async_package_view_enforces_the_same_utf8_wire_contract() -> 
     The sync half of this contract runs over ``/graphql/`` in
     ``test_products_api.py``. The async half is the stronger attribution, and is
     why it is worth a row of its own: ``_cross_web_patches`` patches only the
-    **sync** request adapter, so the async transport's bytes were never touched
-    by the package before this slice - and, being raw bytes, ``json.loads``
-    auto-detected them and a UTF-16 body silently *succeeded* with nothing
-    pinning it. Both 400s here are therefore attributable to
-    ``views.py::_RequestBodyBoundaryMixin.parse_json``'s strict decode having
-    replaced the raw-bytes path, which is the but-for cause of each even though
+    **sync** request adapter, so no package patch touches the async transport's
+    bytes - and, left as raw bytes, ``json.loads`` would auto-detect them and a
+    UTF-16 body would silently *succeed*. Both 400s here are therefore attributable to
+    ``views.py::_RequestBodyBoundaryMixin.parse_json``'s strict decode standing in
+    the raw-bytes path, which is the but-for cause of each even though
     only the UTF-16 body fails *at* the decode (the BOM'd UTF-8 body decodes and
     is then refused by upstream's ``json.loads``, whose ``__cause__`` is a
     ``json.JSONDecodeError`` - the per-mechanism split is pinned in
@@ -1693,13 +1692,13 @@ def test_post_not_json_body_is_upstreams_malformed_json_400() -> None:
 def test_a_multipart_request_over_the_declared_cap_is_refused() -> None:
     """Row 14: multipart gets the declared-size gate (Decision 7 step 3).
 
-    The declared gate is the whole of this card's multipart contract: per-file
-    count, per-file size, and aggregate size are a later card's. What the view must
+    The declared gate is the whole of the view's multipart contract: per-file
+    count, per-file size, and aggregate size lie outside it. What the view must
     NOT do is read ``request.body`` to measure a multipart payload - that would
     defeat Django's streaming upload handlers and break the ``Upload``-scalar
     path - so the un-broken direction of this row is earned by
     ``test_uploads_api.py``'s multipart mutations continuing to pass against
-    fakeshop's default mount, which now carries the 1 MiB default cap.
+    fakeshop's default mount, which carries the 1 MiB default cap.
     """
     seed_data(1)
 
@@ -2086,14 +2085,13 @@ def _strawberry_patch_opted_out() -> Generator[None, None, None]:
 @pytest.mark.parametrize("body", _NON_UTF8_BODIES)
 @pytest.mark.django_db
 def test_the_utf8_wire_contract_survives_the_upstream_patch_kill_switch(body: bytes) -> None:
-    """The finding, over the wire: a non-UTF-8 body still 400s with the patch opted out.
+    """Over the wire, a non-UTF-8 body still 400s with the patch opted out.
 
-    Before this change the strict decode lived inside
-    ``_strawberry_patches.py::_patched_parse_json``, so a consumer who disabled
-    the package's workarounds for *upstream bugs* also disabled a permanent
-    package security policy and silently got UTF-16 / UTF-32 acceptance back. A
-    permanent security contract must not share a temporary patch's lifecycle, so
-    the decode now lives on the mounted view.
+    A strict decode inside ``_strawberry_patches.py::_patched_parse_json`` would
+    let a consumer who disabled the package's workarounds for *upstream bugs* also
+    disable a permanent package security policy and silently get UTF-16 / UTF-32
+    acceptance. A permanent security contract must not share a temporary patch's
+    lifecycle, so the decode lives on the mounted view.
 
     The valid-UTF-8 control in the same opted-out state is what makes the
     rejection attributable: it shows the mount still serves real GraphQL while the
@@ -2150,7 +2148,7 @@ def _every_upstream_patch_opted_out() -> Generator[None, None, None]:
     The sibling helper simulates ``{"strawberry": False}`` and deliberately leaves
     the ``cross_web`` half installed. This one takes both halves out, which is a
     materially different state: with ``cross_web`` un-installed, upstream's sync
-    ``DjangoHTTPRequestAdapter.body`` decodes inside its own *property* again, so a
+    ``DjangoHTTPRequestAdapter.body`` decodes inside its own *property*, so a
     property - not ``parse_json`` - is where an undecodable body raises. That is
     why the package view mounts its own request adapter
     (``views.py::_RawBodyRequestAdapter``): the wire contract has to hold on a
@@ -2237,10 +2235,10 @@ def test_only_the_package_mount_answers_the_same_way_in_both_patch_states() -> N
       ``UnicodeDecodeError`` no ``except HTTPException`` can reach. This IS the
       upstream defect, and observing it here is what proves the simulation really
       un-installed the ``cross_web`` half.
-    * upstream mount, patches ON -> ``200``. Not a typo and not a regression: with
-      the strict decode moved to the package view, ``_patched_parse_json`` no
-      longer narrows encodings, so ``json.loads`` applies RFC 8259 auto-detection
-      to the raw bytes and *accepts* the UTF-16 document. A consumer who
+    * upstream mount, patches ON -> ``200``. Not a typo: with the strict decode on
+      the package view, ``_patched_parse_json`` narrows no encodings, so
+      ``json.loads`` applies RFC 8259 auto-detection to the raw bytes and *accepts* the UTF-16
+      document. A consumer who
       deliberately mounts Strawberry's own view keeps Strawberry's own semantics -
       the deliberate scope of the ownership split (spec-046 Decision 9), pinned
       at the patch tier by
@@ -2281,8 +2279,8 @@ def _cross_web_patch_opted_out() -> Generator[None, None, None]:
     ``cross_web`` half out and deliberately leaves the Strawberry half installed,
     which is the only state that isolates what ``_cross_web_patches.py`` itself
     buys - upstream's sync ``DjangoHTTPRequestAdapter.body`` decoding inside its own
-    *property* again, with the widened ``except`` still waiting in ``parse_json``
-    for bytes that no longer arrive.
+    *property*, with the widened ``except`` still waiting in ``parse_json``
+    for bytes that never arrive there.
 
     Setting the switch alone would prove nothing (the patch installs from
     ``AppConfig.ready()``, long before any test runs), so upstream's property is
@@ -3054,15 +3052,14 @@ def test_a_get_carrying_a_stray_multipart_content_type_still_serves_the_query() 
 def test_an_over_cap_multipart_request_is_refused_before_djangos_parser_runs() -> None:
     """The ``413`` precedes ``MultiPartParser`` and every upload handler.
 
-    The defect this closes is an ordering one, not a status one.
+    The contract is an ordering one, not a status one.
     ``CsrfViewMiddleware.process_view`` reads
     ``request.POST.get("csrfmiddlewaretoken", "")`` for **every** cookie-bearing
     POST - even one that will authenticate with the ``X-CSRFToken`` header - and it
-    runs before the view, so on a multipart request Django had already parsed the
-    form and invoked the project's upload handlers by the time the package's
-    declared-size gate could refuse it. The old row could not see that: it used a
-    plain ``Client``, whose CSRF checks are disabled, so the middleware exited
-    before touching ``request.POST``.
+    runs before the view, so on a multipart request Django would already have parsed
+    the form and invoked the project's upload handlers by the time a gate inside
+    the view could refuse it. A plain ``Client`` cannot see that: its CSRF checks
+    are disabled, so the middleware exits before touching ``request.POST``.
 
     Here CSRF is enforced for real, with a valid cookie/header token, so
     ``process_view`` genuinely wants the form - and the upload sentinel stays
@@ -3323,7 +3320,7 @@ def _without_the_global_csrf_middleware() -> override_settings:
 def test_the_endpoint_stays_csrf_protected_with_the_global_middleware_removed() -> None:
     """The invariant the re-entry buys: protection that does not depend on ``MIDDLEWARE``.
 
-    This is the row that distinguishes the fix from a bypass in the one direction
+    This is the row that distinguishes the re-entry from a bypass in the one direction
     nothing else can. With ``CsrfViewMiddleware`` deleted from the project entirely,
     a consumer who mounts the package view still cannot post to it without a valid
     token, because the continuation inside ``run`` is package-owned, unconditional,

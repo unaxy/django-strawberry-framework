@@ -144,15 +144,14 @@ def test_build_strawberry_input_class_emits_name_alias_and_description() -> None
 def test_builder_pins_names_so_digit_boundary_fields_do_not_silently_collide() -> None:
     """A ``field_2`` / ``field2`` pair survives as two distinct GraphQL input fields.
 
-    Regression for the silent collision caused by leaving an identity ``name=``
-    alias to Strawberry's converter.
+    Leaving an identity ``name=`` alias to Strawberry's converter collides silently.
     ``graphql_camel_name`` keeps ``field_2`` and ``field2`` distinct (the injective
     camel-name convention), and the emit collision guard compares those values, so
-    it does NOT reject the pair. But when the alias was emitted only on divergence,
-    ``field_2`` (equal to its own camel-name) carried no ``name=``, so Strawberry's
-    ``NameConverter`` collapsed it to ``field2`` -- overwriting the sibling ``field2``
+    it does NOT reject the pair. But with the alias emitted only on divergence,
+    ``field_2`` (equal to its own camel-name) would carry no ``name=``, so Strawberry's
+    ``NameConverter`` would collapse it to ``field2`` -- overwriting the sibling ``field2``
     and dropping one consumer-declared field from the public schema with no error.
-    The shared builder now pins every field's package-derived name, so both survive.
+    The shared builder pins every field's package-derived name, so both survive.
     """
 
     # stand-in set class; only ``__qualname__`` is read (error path).
@@ -417,7 +416,7 @@ def test_safe_import_returns_none_for_missing_attribute_on_importable_module() -
 
 
 # ---------------------------------------------------------------------------
-# spec-039 promotions: InputFieldSpec / make_input_namespace / make_shape_build_cache
+# spec-039 shared input primitives: InputFieldSpec / make_input_namespace / make_shape_build_cache
 # ---------------------------------------------------------------------------
 
 

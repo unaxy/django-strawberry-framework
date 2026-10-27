@@ -265,7 +265,7 @@ def _item_serializer() -> type[ModelSerializerBase[product_models.Item]]:
 
 
 def test_inputs_module_path_constant() -> None:
-    """The hoisted constant matches the actual dotted path of ``rest_framework/inputs.py``."""
+    """The module constant matches the actual dotted path of ``rest_framework/inputs.py``."""
     assert SERIALIZER_INPUTS_MODULE_PATH == "django_strawberry_framework.rest_framework.inputs"
 
 
@@ -777,16 +777,15 @@ def test_descriptor_name_distinguishes_relation_target_model() -> None:
 
 
 # NOTE: the unsupported-default-field recovery (``_default_full_shape_identity`` swallowing
-# a WALK-time ``ConfigurationError``, not only a discovery-time one) is now earned LIVE over
+# a WALK-time ``ConfigurationError``, not only a discovery-time one) is earned LIVE over
 # ``/graphql/`` per the ``test_query`` live-first rule, by
 # ``examples/fakeshop/test_query/test_library_api.py``
 # ``::test_create_shelf_via_hook_narrowed_serializer_recovers_unsupported_default_field``
 # (an unsupported ``SlugRelatedField(many=True)`` default field a schema hook narrows away).
 # The companion discovery-error -> None branch is earned live by the same suite's
-# ``::test_create_shelf_via_schema_hook_serializer_executes_over_http``. The former
-# package-only ``test_unsupported_default_field_does_not_reject_supported_hook_map`` was
-# retired with that promotion (the converter's non-PK relation rejects stay covered by
-# ``test_converter.py``); the pure-function name derivation stays unit-tested above by
+# ``::test_create_shelf_via_schema_hook_serializer_executes_over_http``. The converter's
+# non-PK relation rejects are covered by ``test_converter.py``; the pure-function name
+# derivation is unit-tested above by
 # ``test_descriptor_name_distinguishes_relation_target_model``.
 
 
@@ -824,7 +823,7 @@ def test_descriptor_is_its_own_cache_key() -> None:
 
 
 def test_dedupe_serializer_input_shape_is_sole_cache_protocol() -> None:
-    """Top-level and nested builds share one post-build get-or-store (folder DRY).
+    """Top-level and nested builds share one post-build get-or-store.
 
     ``dedupe_serializer_input_shape`` is the sole serializer caller of
     ``get_or_store_shape_build`` on ``_serializer_shape_build_cache``:
@@ -885,7 +884,7 @@ def test_read_only_field_dropped_before_create_guard() -> None:
     fields and is not tripped by the (already-dropped) read-only one. Explicitly EXCLUDING a
     read-only field is a different path that raises (see
     ``test_excluding_read_only_field_raises_non_writable``); this test pins only the default
-    drop, which the prior name (``..._exclusion_does_not_trip_guard``) misdescribed.
+    drop.
     """
 
     class S(serializers.Serializer[object]):
@@ -904,8 +903,7 @@ def test_excluding_read_only_field_raises_non_writable() -> None:
     so naming a ``read_only`` field in ``exclude`` is an unknown-or-non-writable error: the
     field is simply not in the set the narrowing is checked against. (A read-only field is
     never an input field, so neither selecting nor excluding it is meaningful - both arms fail
-    loud, matching the ``fields`` arm; the resolver docstring no longer calls the exclude a
-    no-op.)
+    loud, matching the ``fields`` arm.)
     """
 
     class S(serializers.Serializer[object]):
@@ -1503,7 +1501,7 @@ def test_scalar_reverse_map_is_identity() -> None:
 
 
 def test_multiple_schema_time_problems_aggregate_into_one_error() -> None:
-    """Several bad fields surface in ONE ConfigurationError (not one-fix-rerun-per-field) (#5)."""
+    """Several bad fields surface in ONE ConfigurationError (not one-fix-rerun-per-field)."""
     _register_products_types()
 
     class CustomField(serializers.Field[object, object, object, object]):
@@ -1538,7 +1536,7 @@ def test_multiple_schema_time_problems_aggregate_into_one_error() -> None:
 
 
 def test_single_schema_time_problem_raises_verbatim() -> None:
-    """A SINGLE problem is raised verbatim (no aggregate header), preserving the precise message (#5)."""
+    """A SINGLE problem is raised verbatim (no aggregate header), preserving the precise message."""
     _register_products_types()
 
     class OneBadSer(ModelSerializerBase[product_models.Item]):
@@ -1558,7 +1556,7 @@ def test_single_schema_time_problem_raises_verbatim() -> None:
 
 
 def test_generated_input_field_carries_drf_metadata_description() -> None:
-    """A built input field carries the DRF ``help_text`` + constraint description (#9)."""
+    """A built input field carries the DRF ``help_text`` + constraint description."""
 
     class DescribedSer(serializers.Serializer[object]):
         # basedpyright: drf-stubs read this as an assignment to ``Field.label``; DRF's
@@ -2224,10 +2222,10 @@ def test_fingerprint_skips_read_only_nested_serializer() -> None:
 def test_fingerprint_unopted_nested_raising_child_is_shallow_not_materialized() -> None:
     """An UNOPTED nested field is NOT descended into - a raising ``get_fields()`` is never read.
 
-    The prior behavior descended into every writable nested serializer, so an unopted,
-    context-sensitive child raised a misleading "opted in via Meta.nested_fields..."
+    A fingerprint that descended into every writable nested serializer would make an unopted,
+    context-sensitive child raise a misleading "opted in via Meta.nested_fields..."
     materialization error at class validation - shadowing the canonical opt-in error the field
-    walk raises. The fingerprint now records a shallow marker for an unopted nested field without
+    walk raises. The fingerprint records a shallow marker for an unopted nested field without
     reading its ``.fields``; the field walk (``build_serializer_input_class``) is what raises the
     opt-in error.
     """

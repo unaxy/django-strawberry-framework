@@ -241,7 +241,7 @@ def _cascade_only(
 
 
 # =============================================================================
-# Cascade foundation (per spec-034 Decision 5 / 9 / 10), hardened: recursive
+# Cascade foundation (per spec-034 Decision 5 / 9 / 10): recursive
 # graphs fail closed with a path-rich error; traversal state is immutable and
 # token-reset on every root, edge, and nested application.
 # =============================================================================
@@ -262,13 +262,13 @@ def test_mutual_cycle_fails_closed_with_path() -> None:
     ``apps/library/models.py::Venue.lead_ticket`` and
     ``apps/library/models.py::RepairTicket.venue`` close a foreign-key cycle.
     The shipped ``RepairTicketType`` does not cascade back, so the cycle is only
-    re-entered by the test-local pair below where both hooks cascade. The
-    previous contract returned the re-entered queryset un-narrowed, which skipped
-    the re-entered type's OUTGOING visibility edges: the ``RepairTicket``
-    subquery's ``venue``-edge constraint would bind ``Venue`` rows WITHOUT the
+    re-entered by the test-local pair below where both hooks cascade.
+    Returning the re-entered queryset un-narrowed would skip the re-entered
+    type's OUTGOING visibility edges: the ``RepairTicket`` subquery's ``venue``-edge constraint
+    would bind ``Venue`` rows WITHOUT the
     venue's own ``lead_ticket``-edge cascade, so a ticket whose venue is led by a
-    hidden ticket stayed visible through the nested walk - a leak shape. The
-    hardened contract fails closed instead: re-entry into an active type raises
+    hidden ticket would stay visible through the nested walk - a leak shape. The
+    contract fails closed instead: re-entry into an active type raises
     ``ConfigurationError`` carrying the full edge path, before any SQL runs, and
     every token reset fires so the traversal state is clean after the raise.
     """
@@ -935,11 +935,11 @@ def test_identity_hook_targets_compose_default_manager(
 ) -> None:
     """A registered identity-hook target STILL composes its ``_default_manager``.
 
-    The previous ``has_custom_get_queryset() is False`` skip silently bypassed a
+    A ``has_custom_get_queryset() is False`` skip would silently bypass a
     registered type whose filtered ``_default_manager`` IS its visibility policy
     (the ``VisibleBranch`` proxy, whose row-level effect is
     ``test_library_inheritance_api.py::test_signage_on_a_city_less_branch_is_hidden_by_the_proxy_default_manager``).
-    Every registered target now contributes a subquery - and the subqueries
+    Every registered target contributes a subquery - and the subqueries
     still compile into the caller's single ``SELECT``, so identity composition
     adds zero query round-trips. The four root products types declare custom
     ``get_queryset`` hooks, so no live products request carries two
@@ -1704,9 +1704,9 @@ def test_hook_return_rejections_fail_closed(hook: _Hook, match: str) -> None:
     raise fires before any SQL, so no tables are needed. The shape /
     concrete-table / explicit-alias rejections come from the SHARED visibility
     boundary (``utils/querysets.py``), rendered through the cascade's per-edge
-    error seam, so the path-rich prose asserted here survives the move; the
-    SQL-composability rejections stay cascade-local. A ``Manager`` return is no
-    longer in this battery - the boundary coerces it
+    error seam, which carries the path-rich prose asserted here; the
+    SQL-composability rejections are cascade-local. A ``Manager`` return is outside
+    this battery - the boundary coerces it
     (``test_hook_manager_return_is_coerced``). The combined / grouped /
     extra-shadow shapes are the ones where re-projecting to the target column
     would change SEMANTICS, not just the selected column: a combinator is walked
@@ -1731,8 +1731,8 @@ def test_hook_manager_return_is_coerced() -> None:
 
     The shared visibility boundary's canonical-Manager contract (the
     get_queryset-visibility-boundary decision): a hook returning
-    ``Model.objects`` composes exactly like ``Model.objects.all()`` - the
-    prior contract rejected it. Pure composition, so no tables are needed.
+    ``Model.objects`` composes exactly like ``Model.objects.all()``. Pure
+    composition, so no tables are needed.
     """
     registry.clear()
     parent_type = _register_ct_pair(lambda _cls, _qs, _info: _CtTarget.objects)
@@ -1944,7 +1944,7 @@ def test_annotation_alias_shadow_cannot_bypass_visibility() -> None:
         assert _cascade_state.get() is None
 
         # Proof the rejection is load-bearing: the shape the guard blocks, fed
-        # through the old ``.values(attname)`` re-projection by hand, selects
+        # through a ``.values(attname)`` re-projection by hand, selects
         # ONLY the injected constant (the hidden target's pk) -- so exactly the
         # attack row survives, and the row pointing at the visible target is
         # collateral damage. The bypass is real, not theoretical.
@@ -2577,8 +2577,8 @@ def test_self_referential_cascading_hook_fails_closed() -> None:
     ``apps/scalars/models.py::ScalarSpecimen.parent`` points back at its own
     model. The walk invokes the target type's hook (the same type), which
     re-enters the cascade while active - the path-rich cycle error raises
-    instead of the old silent depth-1 break (which skipped the parent's OWN
-    parent-edge constraint: a chain whose grandparent was hidden stayed
+    rather than a silent depth-1 break (which would skip the parent's OWN
+    parent-edge constraint: a chain whose grandparent is hidden would stay
     visible).
     """
     node_type = _make_type(

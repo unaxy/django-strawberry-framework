@@ -194,7 +194,7 @@ def test_composite_pk_correlation_executes_on_composite_fixture() -> None:
 
     The ``RpCompositeParent`` fixture (``CompositePrimaryKey("tenant_id",
     "code")``) supplies the DB-backed composite table the fakeshop apps lack, so
-    execution is no longer deferred. Django compiles the sole
+    the correlation executes here. Django compiles the sole
     ``pk=OuterRef("pk")`` correlation to a tuple comparison over both member
     columns: the structural pin below shows the lhs is a ``ColPairs`` over the
     composite pk's member fields, and the execution below shows a parent with two

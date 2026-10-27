@@ -2543,7 +2543,7 @@ class CreateShelfWithSaveKwargs(SerializerMutation):
 
 
 class CreateShelfWithModelFieldSaveKwargs(SerializerMutation):
-    """A DELIBERATELY-misconfigured create whose save kwarg names a MODEL field (hardening).
+    """A DELIBERATELY-misconfigured create whose save kwarg names a MODEL field.
 
     ``topic`` is a ``Shelf`` column: a save kwarg would write it with no validation and no
     visibility check - the unaudited injection channel ``Meta.injected_fields`` exists to

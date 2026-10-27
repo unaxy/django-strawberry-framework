@@ -2,10 +2,10 @@
 
 The mutation-atomicity commit-gap fix. A generated mutation's write pipeline runs inside
 ``transaction.atomic()``, but graphql-core *completes* (serializes) the returned
-payload only after the resolver returns - historically after that transaction had
-already committed. A completion failure (a non-nullable field resolving ``null``,
-a corrupt scalar) therefore surfaced as ``data: null`` + a top-level error while
-the write stayed committed: the client is told the mutation failed, the database
+payload only after the resolver returns - after a transaction scoped to the resolver
+has already committed. A completion failure (a non-nullable field resolving ``null``,
+a corrupt scalar) would therefore surface as ``data: null`` + a top-level error while
+the write stays committed: the client is told the mutation failed, the database
 says it succeeded.
 
 ``DjangoMutationExecutionContext`` closes the gap at the only layer that sees

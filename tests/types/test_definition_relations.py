@@ -565,12 +565,12 @@ def test_has_custom_id_resolver_for_allows_pk_node_id() -> None:
 def test_related_target_for_resolves_to_primary_when_two_types_share_target_model() -> None:
     """Two ``DjangoType``s registered for the same target model: the primary wins.
 
-    Pins the consolidation contract relied upon at
+    Pins the contract relied upon at
     ``django_strawberry_framework/types/definition.py``
     ``DjangoTypeDefinition.related_target_for`` - the call site is
-    ``target_type = registry.get(target_model)``, NOT the historical
+    ``target_type = registry.get(target_model)``, NOT a
     ``registry.primary_for(target_model) or registry.get(target_model)``
-    chain. The collapse is safe only because ``registry.get`` itself
+    chain. The single call is safe only because ``registry.get`` itself
     honors ``_primaries`` as its first return state; this test pins
     that end-to-end so a future change that breaks the primary-first
     rule in ``registry.get`` surfaces here before the spec-027 Decision 4

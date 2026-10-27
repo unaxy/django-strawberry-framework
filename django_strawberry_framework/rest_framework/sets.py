@@ -834,7 +834,7 @@ class SerializerMutation(DjangoMutation):
                 field_map=field_map,
             ),
         )
-        # The create-required guard (hardened): ``Meta.injected_fields`` is
+        # The create-required guard: ``Meta.injected_fields`` is
         # the ONLY sanctioned path for narrowing away a required create field. The guard ALWAYS
         # runs, subtracting only the declared injected fields (a dropped required field NOT
         # declared injected raises), and the resolver builds the injection itself from
@@ -930,7 +930,7 @@ class SerializerMutation(DjangoMutation):
         data: Mapping[str, object],
         hook_context: SerializerHookContext,
     ) -> dict[str, object]:
-        """Supply the ``Meta.injected_fields`` values merged into the serializer data (hardening).
+        """Supply the ``Meta.injected_fields`` values merged into the serializer data.
 
         The SANCTIONED injection seam: the resolver builds the final serializer data as
         decoded client data + THIS hook's return, and the returned keys must EXACTLY match

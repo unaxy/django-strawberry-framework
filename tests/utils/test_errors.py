@@ -231,7 +231,7 @@ def test_join_error_path_variations(prefix: str, segment: str, expected: str) ->
 
 
 # -------------------------------------------------------------------------
-# The error-code vocabulary: public wire contract (bug-hunt batch 13 pins)
+# The error-code vocabulary: public wire contract
 # -------------------------------------------------------------------------
 
 

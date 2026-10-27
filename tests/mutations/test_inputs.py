@@ -197,7 +197,7 @@ def _inner_type(field: StrawberryField) -> StrawberryType | type:
 
 
 def test_inputs_module_path_constant() -> None:
-    """The hoisted constant matches the actual dotted path of ``inputs.py``."""
+    """The module constant matches the actual dotted path of ``inputs.py``."""
     assert INPUTS_MODULE_PATH == "django_strawberry_framework.mutations.inputs"
 
 
@@ -1067,12 +1067,12 @@ def test_digit_boundary_columns_do_not_silently_collide_in_generated_input() -> 
 
     ``field_2`` and ``field2`` produce DISTINCT ``graphql_camel_name`` values
     (``field_2`` vs ``field2``), so the generated-input collision guard -- which
-    compares ``graphql_camel_name`` -- does NOT reject the pair. But when the
-    ``name=`` alias was pinned only on divergence, ``field_2`` (equal to its own
-    camel-name) carried no alias, so Strawberry's ``NameConverter`` re-derived it
-    to ``field2`` via ``to_camel_case`` and silently overwrote the sibling
+    compares ``graphql_camel_name`` -- does NOT reject the pair. But with the
+    ``name=`` alias pinned only on divergence, ``field_2`` (equal to its own
+    camel-name) would carry no alias, so Strawberry's ``NameConverter`` would re-derive
+    it to ``field2`` via ``to_camel_case`` and silently overwrite the sibling
     ``field2`` -- dropping one consumer-declared column from the generated
-    ``<Model>Input`` SDL with no error. The shared generated-input builder now
+    ``<Model>Input`` SDL with no error. The shared generated-input builder
     pins every package-derived wire name, so both survive. ``DigitBoundary`` stays
     synthetic: ``field_2`` beside ``field2`` is legal Django but a naming no fakeshop
     domain model would carry, and it alone pins the always-set wire alias in
@@ -1288,7 +1288,7 @@ def test_type_name_other_legal_boundaries_do_not_collide() -> None:
 
 
 def test_build_empty_field_set_raises_configuration_error() -> None:
-    """An empty effective field set fails loud as ``ConfigurationError`` (bug 6).
+    """An empty effective field set fails loud as ``ConfigurationError``.
 
     ``Meta.fields = ()`` (or an ``exclude`` covering every editable column) would
     build an empty ``@strawberry.input``, which Strawberry rejects only at

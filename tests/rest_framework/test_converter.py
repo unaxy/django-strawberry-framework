@@ -1191,7 +1191,7 @@ def test_field_whose_kind_matches_its_column_builds(
     kind: str,
     annotation: object,
 ) -> None:
-    """A file field over a file column and a scalar over a scalar column build as before."""
+    """A file field over a file column and a scalar over a scalar column both build."""
     _register_products_types()
     field = bound_fields(_relation_field_serializer(product_models.Item, "probe", make_field())())[
         "probe"
@@ -1203,7 +1203,7 @@ def test_field_whose_kind_matches_its_column_builds(
 
 
 def test_pk_relation_over_a_relation_column_passes_the_kind_check() -> None:
-    """A ``PrimaryKeyRelatedField`` over a foreign key builds its relation input as before."""
+    """A ``PrimaryKeyRelatedField`` over a foreign key builds its relation input."""
     _register_products_types()
     field = bound_fields(
         _relation_field_serializer(product_models.Item, "cat", _pk_relation(source="category"))(),
@@ -1677,7 +1677,7 @@ def test_hstore_field_maps_to_json_via_mro() -> None:
 
 
 def test_model_field_maps_via_wrapped_model_field() -> None:
-    """``ModelField`` resolves its scalar through the wrapped Django ``model_field`` (#7)."""
+    """``ModelField`` resolves its scalar through the wrapped Django ``model_field``."""
     field = serializers.ModelField(model_field=_concrete_field(product_models.Item, "name"))
     conversion = convert_serializer_field(bind_unparented(field, "nm"))
     assert conversion.annotation is str
@@ -3005,7 +3005,7 @@ def test_auto_generated_model_field_is_not_conflict_checked() -> None:
 
 
 def test_serializer_field_description_combines_help_text_and_constraints() -> None:
-    """``help_text`` heads the description; a constraint summary is appended (#9)."""
+    """``help_text`` heads the description; a constraint summary is appended."""
     field = bind_unparented(
         serializers.CharField(help_text="The item name.", min_length=2, max_length=20),
         "name",
@@ -3023,7 +3023,7 @@ def test_serializer_field_description_none_without_metadata() -> None:
 
 
 def test_serializer_field_description_notes_numeric_bounds_and_allow_blank() -> None:
-    """Numeric bounds + ``allow_blank`` are summarized even without help text (#9)."""
+    """Numeric bounds + ``allow_blank`` are summarized even without help text."""
     numeric = serializer_field_description(
         bind_unparented(serializers.IntegerField(min_value=0, max_value=9), "n"),
     )
@@ -3035,7 +3035,7 @@ def test_serializer_field_description_notes_numeric_bounds_and_allow_blank() -> 
 
 
 def test_serializer_field_description_notes_allow_empty_false() -> None:
-    """``allow_empty=False`` is included in the SDL metadata summary (#9)."""
+    """``allow_empty=False`` is included in the SDL metadata summary."""
     field = bind_unparented(
         serializers.ListField(child=serializers.CharField(), allow_empty=False),
         "tags",

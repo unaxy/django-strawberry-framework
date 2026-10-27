@@ -3005,12 +3005,12 @@ async def test_async_a_nested_synchronous_operation_refuses_a_list_field() -> No
     disagree, and it is reachable over real HTTP: an async operation runs a
     resolver that starts a synchronous operation of its own, which the async
     view's loop is still running under. A list field that read the loop there
-    built the async pipeline's coroutine and handed it to the executor that
-    cancels top-level awaitables, so the client got Strawberry's generic
+    would build the async pipeline's coroutine and hand it to the executor that
+    cancels top-level awaitables, so the client would get Strawberry's generic
     "failed to complete synchronously" while the inner coroutines went
     unawaited.
 
-    The field now refuses at the call that caused it, and the refusal is what
+    The field refuses at the call that caused it, and the refusal is what
     reaches the wire: a typed sync-misuse message naming both recourses. The
     sibling row on the same schema is the control - the same field under the
     async executor still answers with rows.

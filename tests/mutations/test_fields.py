@@ -429,12 +429,12 @@ def test_generalized_target_accepts_modelform_and_plain_form_family() -> None:
     assert DjangoMutationField(Submit) is not None
 
 
-def test_model_flavor_dispatch_unchanged() -> None:
-    """A ``DjangoMutation`` target still names ``mutations.inputs`` for ``data:`` + routes the model pipeline.
+def test_model_flavor_names_mutations_inputs_and_model_arguments() -> None:
+    """A ``DjangoMutation`` target names ``mutations.inputs`` for ``data:`` + routes the model pipeline.
 
-    The no-regression pin: the generalized ``data:`` lazy-ref consults the model
-    base's ``input_module_path`` default (``mutations.inputs``), the synthesized
-    signature is unchanged per operation, and the seam dispatch
+    The generalized ``data:`` lazy-ref consults the model base's
+    ``input_module_path`` default (``mutations.inputs``), the synthesized
+    signature is the model one per operation, and the seam dispatch
     (``resolve_sync`` / ``resolve_async``) delegates to the model pipeline.
     """
     _declare_item_primaries()
@@ -450,7 +450,7 @@ def test_model_flavor_dispatch_unchanged() -> None:
     schema = DjangoSchema(query=_Query, mutation=Mutation)
 
     # The model ``data:`` input materializes in ``mutations.inputs`` (NOT
-    # ``forms.inputs``); the field args are the unchanged per-operation shape.
+    # ``forms.inputs``); the field args are the per-operation shape.
     inputs_module = sys.modules[INPUTS_MODULE_PATH]
     assert hasattr(inputs_module, "ItemInput")
     assert _field_arg_map(schema, "createItem") == {"data": "ItemInput!"}
@@ -466,8 +466,8 @@ def test_model_flavor_dispatch_unchanged() -> None:
 def test_django_mutation_field_generalizes_to_serializer_mutation() -> None:
     """`DjangoMutationField` accepts a `SerializerMutation` and routes its resolver seam (Decision 5).
 
-    The spec-038-generalized factory was written "for the 0.0.13 serializer flavor";
-    this VERIFIES the generalization holds with NO `mutations/fields.py` edit: a create
+    The spec-038-generalized factory serves the serializer flavor through the same
+    `mutations/fields.py` path: a create
     `SerializerMutation` over the products `ItemSerializer`, wrapped with
     `DjangoMutationField`, finalizes and exposes the `data: ItemSerializerInput!`
     argument (the lazy ref resolves the serializer-derived input in
@@ -537,7 +537,7 @@ def test_mutation_field_metadata_passthrough() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Hostile directives containment (hunt 0.0.15)
+# Hostile directives containment
 # ---------------------------------------------------------------------------
 
 

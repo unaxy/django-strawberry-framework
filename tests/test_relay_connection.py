@@ -2,7 +2,7 @@
 
 Covers the ``Meta.relation_shapes`` Phase-2.5 synthesis surface
 (``docs/SPECS/spec-032-full_relay-0_0_9.md`` Decisions 6/7; Decision 11 pins the
-card-named two-file split). The ``Meta``-key *validation* tests sit with the
+two-file split). The ``Meta``-key *validation* tests sit with the
 other Meta validation in ``tests/types/test_base.py``. These stay package-side
 because they assert what a live query cannot: finalization
 ``ConfigurationError``s never appear in the example schema (explicit
@@ -117,7 +117,7 @@ pytestmark = pytest.mark.usefixtures("isolate_global_registry")
 
 
 # The shared declaration core (``examples/fakeshop/strategy_schemas.py``)
-# already matches this module's historical signature exactly.
+# matches the signature this module calls ``_make_type`` with exactly.
 _make_type = make_django_type
 
 
@@ -779,8 +779,8 @@ def _genres_filterable_book_schema(*, strictness: str = "raise") -> strawberry.S
         meta_extra={"filterset_class": _BookFilter},
     )
     # ``"both"``: this fixture's tests select the raw ``books`` list sibling
-    # ALONGSIDE ``booksConnection``, which the ``"connection"`` default no
-    # longer emits together.
+    # ALONGSIDE ``booksConnection``, which the ``"connection"`` default does
+    # not emit together.
     genre_type = _make_type(
         "GenreType",
         Genre,
@@ -973,8 +973,8 @@ def test_divergent_aliases_one_window_query_per_alias(
 ) -> None:
     """Divergent aliases cost parents + ONE window query per alias.
 
-    ``a: booksConnection(first: 2)`` + ``b: booksConnection(first: 5)`` was the
-    historical whole-relation fallback (O(parents x aliases) per-parent
+    ``a: booksConnection(first: 2)`` + ``b: booksConnection(first: 5)`` take no
+    whole-relation fallback (O(parents x aliases) per-parent
     queries); the per-response-key scheme plans one window per key and the
     resolver routes each alias to its ``_dst_books$<key>_connection`` attr via
     ``info.path.key`` - so the cost is ONE window PER ALIAS on top of the parent
@@ -1450,12 +1450,12 @@ def test_nested_window_count_observers_follow_a_non_camel_case_schema(
 def test_fast_path_non_pk_ordering_applies_explicit_deterministic_order_by() -> None:
     """A non-pk-ordered child: the windowed prefetch's outer ORDER BY carries the pk tiebreaker.
 
-    The shipped parity tests order ``Book`` by pk, where DB-natural (rowid) order
+    The pk-ordered parity tests order ``Book`` by pk, where DB-natural (rowid) order
     coincides with the window order and cannot expose a missing
     ``queryset.order_by``. Even here, where the child orders by a non-pk
     ``Meta.ordering`` (``title``), SQLite's window sort emits rows in title order
     and Django propagates ``Meta.ordering`` to the outer query on its own - so a
-    wire comparison cannot catch the bug on SQLite. What the fix uniquely adds is
+    wire comparison cannot catch a missing order on SQLite. What this row uniquely pins is
     the **deterministic order** applied to the queryset: the outer ORDER BY gains
     the pk tiebreaker (``ORDER BY <title>, <pk>``) instead of the single
     ``Meta.ordering`` column, which is what keeps fast-path cursors stable across
@@ -1843,8 +1843,8 @@ def test_fast_path_ambiguous_empty_served_from_marker_row(
     """``first: 0`` (``limit == 0``) and overshot ``after:`` (``offset > 0``) serve from markers.
 
     The marker-row disambiguation (spec-033 Decision 5):
-    these shapes historically fell back per-parent (the empty window was
-    ambiguous); the window now keeps each partition's row 1, so the empty page
+    an empty window alone is ambiguous for these shapes, so the window keeps
+    each partition's row 1, and the empty page
     is served with the TRUE ``totalCount`` / ``pageInfo`` - byte-identical to
     the pipeline - in the fixed two-query cost with NO per-parent fallback.
     """
@@ -1966,7 +1966,7 @@ def test_fast_path_zero_children_parent_serves_under_ambiguous_shapes(
 
     The marker contract's serve side (spec-033 Decision 5): with markers
     planned, an EMPTY window under
-    ``first: 0`` / overshot ``after:`` now PROVES the parent has no children
+    ``first: 0`` / overshot ``after:`` PROVES the parent has no children
     (a parent with children would have kept its row 1), so the fast path
     serves ``totalCount 0`` in the fixed two-query cost. Byte parity with the
     pipeline pins the flag arithmetic - notably ``hasPreviousPage`` is True
@@ -2097,11 +2097,10 @@ def test_fallback_when_annotations_missing() -> None:
 def test_outer_total_count_predicate_ignores_nested_total_count() -> None:
     """A nested connection's ``totalCount`` does not fire the OUTER connection's count.
 
-    Re-affirmation (spec-033 Edge cases: the outer-``totalCount`` direct-children-scoped
-    rule) now that nested ``totalCount`` is a
-    fast-path read: a two-level selection of the nested ``totalCount`` must not
-    make the root connection's ``_total_count_requested`` predicate fire (no
-    spurious outer COUNT, no outer non-queryset guard raise). The root here is a
+    Per spec-033 Edge cases (the outer-``totalCount`` direct-children-scoped
+    rule), with nested ``totalCount`` a fast-path read: a two-level selection of
+    the nested ``totalCount`` must not make the root connection's ``_total_count_requested``
+    predicate fire (no spurious outer COUNT, no outer non-queryset guard raise). The root here is a
     ``DjangoConnectionField`` (its own ``totalCount`` opt-in) whose ``totalCount``
     is NOT selected - only the nested one is.
     """
@@ -2591,7 +2590,7 @@ def test_count_less_window_with_count_observer_falls_back_defensively() -> None:
 
     # Marker-only page (offset > 0, page empty) with ``totalCount`` requested but
     # no count annotation: still drift - the empty-page count is observed and
-    # cannot be inferred. (The SAME shape count-FREE is now SERVED, not dropped -
+    # cannot be inferred. (The SAME shape count-FREE is SERVED, not dropped -
     # see the live edges-only / unbounded overshoot pins.)
     marker_only = _WindowedConnectionRows(
         rows=_window_rows(1),

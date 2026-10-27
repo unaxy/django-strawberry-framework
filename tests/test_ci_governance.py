@@ -414,8 +414,8 @@ def _forbidden_optimizer_entries(source: str, label: str) -> list[tuple[int, str
     can feed it literal snippets - the controls are what pin the classifier, and
     a path-only signature would make them impossible to write.
 
-    Two rules, matched on FORM rather than on a literal spelling (the spelling is
-    what let this regression back in: a grep for ``lambda: DjangoOptimizerExtension()``
+    Two rules, matched on FORM rather than on a literal spelling (a spelling
+    match is blind to variants: a grep for ``lambda: DjangoOptimizerExtension()``
     misses every ``strictness=`` / ``nested_connection_strategy=`` variant):
 
     1. any ``lambda`` whose body constructs the optimizer;
@@ -1203,6 +1203,14 @@ PROVENANCE_PHRASES: tuple[tuple[str, str], ...] = (
     ("used to", r"used\s+to"),
     ("previously", r"previously"),
     ("as of 0.0.", r"as\s+of\s+0\.0\."),
+    ("the hardening pass", r"the\s+hardening\s+pass"),
+    ("(hardened)", r"\(hardened\)"),
+    ("(hardening)", r"\(hardening\)"),
+    ("pre-0.0.", r"pre-0\.0\."),
+    ("the old implementation", r"the\s+old\s+implementation"),
+    ("the previous implementation", r"the\s+previous\s+implementation"),
+    ("task report", r"task\s+report"),
+    ("finding-", r"finding-"),
 )
 
 

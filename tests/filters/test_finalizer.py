@@ -1829,7 +1829,7 @@ def test_phase_2_5_configuration_error_from_get_filters_propagates_unwrapped() -
 
 
 # ---------------------------------------------------------------------------
-# Build-time encode-only GlobalID-filter audit (spec-031 fail-closed hardening).
+# Build-time encode-only GlobalID-filter audit (spec-031 fail-closed).
 # ---------------------------------------------------------------------------
 
 

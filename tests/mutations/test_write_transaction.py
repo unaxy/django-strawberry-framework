@@ -1851,7 +1851,7 @@ def test_forced_update_integrity_error_race_maps_to_the_constraint_envelope() ->
 
 
 # ---------------------------------------------------------------------------
-# The phased alias guard + canonical pk equality + target-state drift (hardening)
+# The phased alias guard + canonical pk equality + target-state drift
 # ---------------------------------------------------------------------------
 
 
@@ -2496,8 +2496,8 @@ def test_field_fingerprint_orders_by_a_guarded_key_not_a_bare_repr() -> None:
         def __repr__(self) -> str:
             return "SAME"
 
-    # A constant repr no longer makes two distinct members interchangeable: the
-    # ordering key falls through to type and object identity, which are total.
+    # Under a constant repr the ordering key falls through to type and object
+    # identity, which are total, so two calls over the same members agree.
     first, second = _ConstantRepr(1), _ConstantRepr(2)
     assert _field_fingerprint({first: "x", second: "y"}) == _field_fingerprint(
         {first: "x", second: "y"},

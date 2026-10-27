@@ -410,9 +410,8 @@ class TestEquality:
 class TestInvalidStatesRejected:
     """``__post_init__`` rejects states the walker would silently misread.
 
-    Pins the Medium fix from ``rev-optimizer__hints.md``: combining flags
-    beyond the four directives and the empty no-op form lets the walker's
-    priority order silently swallow the lower-priority directive. Each
+    Combining flags beyond the four directives, or the empty no-op form, would
+    let the walker's priority order silently swallow the lower-priority directive. Each
     rejected state raises ``ConfigurationError`` at construction time.
     """
 

@@ -31,7 +31,7 @@ What stays here:
   reason on the wire, GET + a lying ``Content-Length`` answering ``200``, the
   parse / execution witnesses, the ASGI fragment shapes) is live in
   ``examples/fakeshop/test_query/test_transport_api.py``;
-- the strict UTF-8 wire contract, now that the package view owns it
+- the strict UTF-8 wire contract the package view owns
   (spec-046 Decision 9): the per-encoding ``__cause__`` matrix, which is
   invisible over the wire because all nine rejected shapes carry the identical
   status and message by design.
@@ -183,7 +183,7 @@ def _view_initkwargs_of(view: Callable[..., object]) -> dict[str, object]:
 
 
 def test_views_module_imports_with_channels_absent() -> None:
-    """The HTTP half of the card needs no ``channels`` - the documented asymmetry.
+    """The HTTP view module needs no ``channels`` - the documented asymmetry.
 
     ``routers.py`` raises its install hint the moment a consumer reaches for the
     router symbol; ``views.py`` must not, because a WSGI-only project adopts the
@@ -884,7 +884,7 @@ class _UndeclaredSeekableStream(_RecordingStream):
     Reproducing that shape keeps the floor's behavior asserted from whichever
     interpreter runs the suite: the probe must fall back to ``tell()`` rather than
     give up, or the ASGI no-read guarantee silently evaporates at the exact
-    version this card protects. ``read`` is inherited from the recorder and would
+    supported floor. ``read`` is inherited from the recorder and would
     register if it ran.
     """
 
@@ -1011,10 +1011,9 @@ class _CapabilityQueryRaisingStream(_UndeclaredSeekableStream):
 
     A wrapper that answers the capability question with an error rather than a
     boolean, which is a shape a consumer middleware or a custom ASGI server can
-    present and which the previous implementation called unguarded, turning the
-    request into an unrelated ``500``. Nothing has been moved when this raises, so
-    the safe classification is "unmeasurable, position intact" and the bounded
-    read is both available and correct.
+    present, and which an unguarded call would turn into an unrelated ``500``.
+    Nothing has been moved when this raises, so the safe classification is "unmeasurable,
+    position intact" and the bounded read is both available and correct.
     """
 
     def seekable(self) -> NoReturn:
@@ -1302,14 +1301,14 @@ def test_a_seekable_over_limit_body_is_refused_without_ever_being_read(
 ) -> None:
     """The rejecting operation itself is bounded, not just the verdict.
 
-    The old implementation ended in ``len(request.body) > limit``, and
+    A check spelled ``len(request.body) > limit`` is not:
     ``HttpRequest.body`` performs an unbounded ``self.read()`` that copies the
     entire spooled request into one ``bytes`` value *before* the comparison can
     reject it. Django 6.0 shrinks that window with a seekable-stream size check of
     its own; the oldest supported Django (the ``Django>=5.2.16`` floor) has
     none, so with an absent
     ``Content-Length``, an understated one, or
-    ``DATA_UPLOAD_MAX_MEMORY_SIZE = None`` the package performed an
+    ``DATA_UPLOAD_MAX_MEMORY_SIZE = None`` such a check performs an
     attacker-sized allocation before enforcing its own smaller ceiling.
 
     The stream here is the production ``SpooledTemporaryFile`` with ``read``
@@ -1374,7 +1373,7 @@ def test_an_undeclared_seekable_stream_is_still_size_probed_rather_than_read(
 
     ``SpooledTemporaryFile`` gained ``seekable()`` only in 3.11, so a probe that
     required the method would quietly drop the ASGI spool onto the read branch at
-    the exact interpreter floor this card supports - passing on the development
+    the exact interpreter floor the package supports - passing on the development
     stack and losing the guarantee where it matters most. The stand-in reproduces
     that shape (no ``seekable``, working ``seek`` / ``tell``) and records reads, so
     an empty ``requested`` list is direct evidence the fallback probe ran.
@@ -1488,10 +1487,10 @@ def test_a_stream_that_probes_as_empty_is_read_rather_than_believed(
     ``HttpRequest.body`` with **no package bound at all**, whose only ceiling at
     the oldest supported Django (the ``5.2.16`` floor) is the ``CONTENT_LENGTH``
     the cap exists precisely not
-    to trust. The old ``max(end - position, 0)`` produced exactly that answer for
-    a stream that reports a position but cannot take one.
+    to trust. A clamp such as ``max(end - position, 0)`` produces exactly that answer
+    for a stream that reports a position but cannot take one.
 
-    Verifying a zero costs one ``read`` call, so the fix verifies it, and this row
+    Verifying a zero costs one ``read`` call, so the probe verifies it, and this row
     asserts the verification is itself bounded rather than merely non-empty: the
     4096-byte body is refused after ``limit + 1`` bytes, with bytes demonstrably
     still unread and nothing materialized. A status-only assertion would pass
@@ -1578,16 +1577,16 @@ def test_a_stream_reporting_a_position_past_its_end_is_refused_rather_than_read(
 ) -> None:
     """The other incoherent direction: an unverifiable restore fails CLOSED.
 
-    ``max(end - position, 0)`` clamped a negative measurement - a ``tell()`` that
-    over-reports - to "no bytes remaining, allowed", so a full body reached
-    ``HttpRequest.body`` unbounded. The pair is judged rather than clamped now, and
+    ``max(end - position, 0)`` would clamp a negative measurement - a ``tell()`` that
+    over-reports - to "no bytes remaining, allowed", so a full body would reach
+    ``HttpRequest.body`` unbounded. The pair is judged rather than clamped, and
     the verdict is the third probe outcome rather than the second:
     the position this stream reports is a lie, so the restore lands somewhere the
     stream did not start, the verifying ``tell()`` says so, and the request is
     refused with the package's own ``413``.
 
-    Falling through to a bounded read instead - which is what the two-state version
-    did - meant reading from an offset past the body's end and handing Strawberry
+    Falling through to a bounded read instead - what a two-outcome probe would do -
+    means reading from an offset past the body's end and handing Strawberry
     an **empty** body the client never sent, then answering ``400`` at the parse.
     Both outcomes are safe, but only one of them is honest about what happened, and
     "the package could not measure this body" is a body-limit rejection rather than
@@ -1698,8 +1697,8 @@ def test_a_probe_that_fails_without_moving_the_stream_falls_back_to_the_bounded_
     provably where the request started, so the bounded read is licensed and
     supplies the bound.
 
-    The old implementation called ``seekable()`` and both ``seek``s unguarded, so
-    each of these streams turned a request into an unhandled ``500``. The bound is
+    Called unguarded, ``seekable()`` and both ``seek``s would turn each of these
+    streams into an unhandled ``500``. The bound is
     asserted rather than just the status: exactly
     ``limit + 1`` bytes are read, bytes are demonstrably left unread, and nothing
     is materialized.
@@ -1877,10 +1876,9 @@ def test_a_genuinely_empty_body_is_allowed_by_one_bounded_read(view_class: _View
     ``read``, sized at the ``limit + 1`` ceiling every bounded read uses, and a
     body Django still serves as ``b""``.
 
-    The ``requested`` list is also what makes this row fail against the clamping
-    version, where the probe's zero was believed and no read happened at all - so
-    the control is a statement about the new code path rather than a restatement
-    of the old behavior.
+    The ``requested`` list is also what makes this row fail against a clamping
+    probe, whose zero would be believed with no read at all - so the control
+    asserts the verifying code path, not an outcome a clamping probe also reaches.
     """
     view = _capped_view(_PROBE_CAP, view_class=view_class)
     stream = _UndeclaredSeekableStream(b"")
@@ -1985,12 +1983,12 @@ def test_a_non_bytes_chunk_cannot_stall_or_run_protocols_inside_the_bounded_read
     """A foreign read result is rejected before its truth or length protocol runs.
 
     ``request.read`` delegates directly to the installed stream and does not
-    enforce a return type. The old loop trusted that result twice: ``if not
-    chunk`` executed its truth protocol, and ``len(chunk)`` decided whether the
-    byte counter advanced. A stream returning one truthy object whose length was
-    zero therefore left ``read_so_far`` unchanged and retried forever if the
-    stream kept returning it. This stand-in raises on a second read so the
-    regression fails finitely, while the protocol counters prove the boundary
+    enforce a return type. A loop that trusted that result would run it twice: ``if
+    not chunk`` executes its truth protocol, and ``len(chunk)`` decides whether the
+    byte counter advances. A stream returning one truthy object whose length is
+    zero would then leave ``read_so_far`` unchanged and retry forever if the
+    stream kept returning it. This stand-in raises on a second read so that
+    failure is finite, while the protocol counters prove the boundary
     rejected the object before running either piece of foreign code.
 
     The rejection is the bounded-read branch's existing fail-closed ``413`` and
@@ -2066,7 +2064,7 @@ def test_the_cap_defers_on_a_stream_some_other_component_already_consumed() -> N
     downstream can process the request either - there is no bypass to close here.
     What the cap must not do is measure by calling ``request.body`` and surface
     another component's error as a body-limit rejection, which is precisely what
-    the previous ``len(request.body)`` implementation did. The second half asserts
+    measuring through ``len(request.body)`` does. The second half asserts
     the honest outcome is still reached by whoever asks for the body.
     """
     view = _capped_view(_PROBE_CAP)
@@ -2150,7 +2148,7 @@ def test_the_package_view_rejects_every_non_utf8_wire_shape(
     body: bytes,
     cause: type[Exception],
 ) -> None:
-    """The wire matrix, now owned by the view: every non-UTF-8 shape 400s, and why.
+    """The wire matrix the view owns: every non-UTF-8 shape 400s, and why.
 
     The executable form of spec-046 Decision 9's measured-behavior table and of
     Decision 10 reason (a). Status and message are identical across all nine rows
@@ -2897,8 +2895,8 @@ def _wrapper_copying_only_csrf_exempt(
 ) -> Callable[..., HttpResponseBase] | Callable[..., Coroutine[object, object, HttpResponseBase]]:
     """A hand-written wrapper of the shape ``as_view``'s docstring names as live.
 
-    It forwards the call and copies ``csrf_exempt`` - the one mark a callback
-    carried before the ordering moved into the chain - plus Django's ``view_class``
+    It forwards the call and copies ``csrf_exempt`` - the one mark a view-local CSRF
+    exemption puts on a callback - plus Django's ``view_class``
     / ``view_initkwargs`` bookkeeping, and knows nothing about
     ``_BOUNDARY_MARKER``. Anyone who wrote a wrapper against the shipped surface
     wrote this shape, and the repository itself contains a leaner member of the
@@ -3265,14 +3263,14 @@ async def test_the_projects_own_csrf_middleware_runs_when_the_chain_supplies_the
     *,
     is_async: bool,
 ) -> None:
-    """The defect this closes: a project's CSRF class must not be replaced here.
+    """A project's CSRF class is never replaced here.
 
-    Before the ordering moved into the chain, the package view marked its callback
-    exempt and re-entered CSRF through ``csrf_protect``, which is built from
-    Django's STOCK ``CsrfViewMiddleware``. A deployment whose ``MIDDLEWARE`` names a
-    subclass - stronger token binding, a tenant check, failure logging - therefore
-    had that subclass silently skipped on the GraphQL endpoint and the base
-    implementation run in its place. No view-local decorator can fix that, because
+    A view that marked its callback exempt and re-entered CSRF through
+    ``csrf_protect`` would run Django's STOCK ``CsrfViewMiddleware``, which
+    ``csrf_protect`` is built from. A deployment whose ``MIDDLEWARE`` names a
+    subclass - stronger token binding, a tenant check, failure logging - would
+    have that subclass silently skipped on the GraphQL endpoint and the base
+    implementation run in its place. No view-local decorator can avoid that, because
     the configured class is a property of the chain.
 
     With the middleware installed the exemption withdraws itself, so the subclass

@@ -241,7 +241,7 @@ def test_string_helpers_reject_a_value_that_is_not_really_a_string(
 
 
 def test_snake_case_preserves_lru_cache_controls() -> None:
-    """The normalization boundary keeps the historical cache-control surface and public name."""
+    """The normalization boundary keeps the ``lru_cache`` cache-control surface and public name."""
     assert snake_case.__name__ == "snake_case"
     assert snake_case.__qualname__ == "snake_case"
     snake_case.cache_clear()

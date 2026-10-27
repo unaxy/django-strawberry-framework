@@ -1450,7 +1450,7 @@ def test_convert_scalar_binary_field_raises_unsupported() -> None:
     """``BinaryField`` is intentionally absent from ``SCALAR_MAP``.
 
     Same reasoning as ``DurationField``: Strawberry has no first-party
-    ``bytes`` scalar so the prior mapping crashed at schema build. The
+    ``bytes`` scalar, so a ``bytes`` mapping would crash at schema build. The
     documented extension hook is
     ``SCALAR_MAP[BinaryField] = strawberry.scalars.Base64``.
 
@@ -2397,7 +2397,7 @@ def test_consumer_authored_relation_annotation_override_survives_always_defer() 
     points at ``AdminItemType`` must win over the primary-resolution path.
     Pins that the ``consumer_authored_fields`` short-circuit still skips
     relation synthesis for consumer-authored fields even though the
-    auto-synthesized path is now always-defer.
+    auto-synthesized path is always-defer.
     """
 
     class AdminItemType(DjangoType):
@@ -2616,8 +2616,8 @@ def test_convert_scalar_force_nullable_none_honors_field_null() -> None:
 
     Regression guard for Decision 7's "the ``None`` default is identical to
     today's behavior" contract, checked in both column directions and against
-    the no-kwarg call so the new keyword-only parameter cannot drift the
-    existing default.
+    the no-kwarg call so the keyword-only parameter cannot drift the
+    default.
     """
     non_null = _text_field(null=False)
     nullable = _text_field(null=True)

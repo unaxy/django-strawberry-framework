@@ -6,10 +6,10 @@ wired in ``apps.products.schema`` end to end:
 * optimizer SQL-shape contracts that are reachable through the real
   products GraphQL API;
 * the per-field ``check_name_permission`` gate on ``CategoryFilter`` (a
-  ``DONE-027-0.0.8`` filter permission hook) -- including the regression
-  guard that the gate now fires for NON-``exact`` lookups (``iContains``),
+  ``DONE-027-0.0.8`` filter permission hook) -- including that the
+  gate fires for NON-``exact`` lookups (``iContains``),
   not just ``exact``;
-* own-PK Relay ``GlobalID`` filtering (``id: { in: [...] }``) now that the
+* own-PK Relay ``GlobalID`` filtering (``id: { in: [...] }``), since the
   products types declare ``interfaces = (relay.Node,)``;
 * ``RelatedFilter`` traversal (``Item.category``) via the nested
   GlobalID input;
@@ -2179,7 +2179,7 @@ def test_g2_mutation_response_keeps_relation_with_bounded_query_count() -> None:
     #                                                         transaction - mutation atomicity,
     #                                                         shipped 0.0.14)
     #   SAVEPOINT + RELEASE                               = 2 (the pipeline's inner
-    #                                                         atomic, now nested)
+    #                                                         atomic, nested)
     #   session + auth_user + user_perms + group_perms    = 4 (authorized-caller
     #                                                         machinery)
     #   relation-id visibility decode: products_category  = 1 (the
@@ -2250,7 +2250,7 @@ def test_globalid_filter_round_trip() -> None:
 
     Take the model-label ``id`` the products API just emitted for one item and
     feed it back verbatim as ``filter: { id: { exact: "<that id>" } }``; the
-    strategy-aware filter ([Decision 13]) accepts the model-label payload it now
+    strategy-aware filter ([Decision 13]) accepts the model-label payload it
     emits and returns exactly that one row. Uses the API-emitted id (not a
     reconstructed one) so the test proves true emit -> filter symmetry.
 
@@ -2323,14 +2323,14 @@ def test_type_strategy_opt_out_reproduces_type_name(
 
 @pytest.mark.django_db
 def test_products_optimizer_merges_duplicate_root_field_nodes_over_http() -> None:
-    """Re-pinned through the connection wrapper: duplicate-root-field merge holds.
+    """Through the connection wrapper: duplicate-root-field merge holds.
 
     The two `allItems` connection selections still merge into one node set (each
     `node` carries both `name` and `category { name }`) issuing exactly ONE
     `allItems` slice query, and NO COUNT runs (products declare no
     `Meta.connection`). Under the activated cascade hooks (spec-034) the
-    forward FK `item.category` no longer plans `select_related` - `CategoryType`
-    now defines a custom `get_queryset`, so the optimizer downgrades it to a
+    forward FK `item.category` plans no `select_related` - `CategoryType`
+    defines a custom `get_queryset`, so the optimizer downgrades it to a
     windowed `Prefetch` (the shipped `get_queryset` -> `Prefetch` rule). The
     merged shape is therefore a deterministic 2 products queries - one `allItems`
     slice + one `category` prefetch, no inter-products JOIN - and an unmerged
@@ -2382,12 +2382,12 @@ def test_products_optimizer_merges_duplicate_root_field_nodes_over_http() -> Non
 
 @pytest.mark.django_db
 def test_products_optimizer_prefetches_nested_reverse_fk_depth_2_over_http() -> None:
-    """Re-pinned through the connection wrapper: depth-2 reverse-FK prefetch holds.
+    """Through the connection wrapper: depth-2 reverse-FK prefetch holds.
 
     `allCategories` is a connection (one planned categories slice query), and
     `items` / `entries` stay LIST relations (`{ name }`, not `itemsConnection`)
-    - the depth-2 reverse-FK prefetch chain the test pins is structurally
-    unchanged: 1 categories slice + 1 `items` prefetch + 1 `entries` prefetch =
+    - the depth-2 reverse-FK prefetch chain the test pins is
+    exactly 1 categories slice + 1 `items` prefetch + 1 `entries` prefetch =
     3 queries, no COUNT. The activated cascade hooks (spec-034) do NOT
     add per-row queries - their `__in` subqueries compile inline (Decision 7) -
     so the count stays a fixed 3.
@@ -2459,16 +2459,15 @@ def test_products_optimizer_prefetches_nested_reverse_fk_depth_2_over_http() -> 
 # rows, capped at 100) and the reverse-FK depth-2 pin's under-cap precondition.
 # The forward-FK depth-2 pin below runs anonymously under the activated cascade
 # (spec-034): the cascade narrows the visible entry set well under the
-# cap, so that pin no longer exercises the cap boundary.
+# cap, so that pin does not exercise the cap boundary.
 _RELAY_MAX_RESULTS = 100
 
 
 @pytest.mark.django_db
 def test_products_optimizer_selects_nested_forward_fk_depth_2_over_http() -> None:
-    """Re-pinned for the activated cascade: depth-2 forward-FK plans a Prefetch chain.
+    """Under the activated cascade: depth-2 forward-FK plans a Prefetch chain.
 
-    Before spec-034 this query planned a single `select_related(
-    "item__category")` JOIN. With the cascade hooks active, `ItemType` and
+    With the cascade hooks active, `ItemType` and
     `CategoryType` both define a custom `get_queryset`, so the optimizer
     downgrades each forward FK in the `item -> category` chain to a windowed
     `Prefetch` (the shipped `get_queryset` -> `Prefetch` rule). The traversal is
@@ -2682,9 +2681,9 @@ def test_products_items_flat_category_name_permission_fires_for_anonymous() -> N
     ``ItemFilter`` exposes both the nested ``category`` branch and a generated
     flat traversal leaf ``categoryName`` (source path ``category__name``) that
     constrain the same column. Both must be equally gated: spelling the predicate
-    flat must not bypass ``CategoryFilter.check_name_permission``. Before the flat-
-    leaf gating fix this returned rows anonymously (a silent authorization
-    bypass); it is now denied identically to the nested form.
+    flat must not bypass ``CategoryFilter.check_name_permission``. Ungated, the
+    flat leaf would return rows anonymously (a silent authorization bypass); it
+    is denied identically to the nested form.
     """
     seed_data(1)
     category = models.Category.objects.earliest("id")
@@ -2725,7 +2724,7 @@ def test_products_items_deep_flat_category_name_permission_fires_for_anonymous()
 
 @pytest.mark.django_db
 def test_products_items_flat_category_name_as_staff() -> None:
-    """A staff user clears the flat-twin gate too - the fix denies, it does not over-block.
+    """A staff user clears the flat-twin gate too - the gate denies, it does not over-block.
 
     Permission-equivalence cuts both ways: once the target gate is satisfied
     (staff), the flat ``categoryName`` filter runs and returns exactly the items
@@ -3047,12 +3046,11 @@ def test_products_categories_filter_by_relay_own_pk_global_id_in() -> None:
     every row created by ``seed_data``: the ``in`` filter must consume the
     whole decoded id list in ONE predicate without assuming that a database
     sequence begins at a fixed value.
-    Regression pin for the first-Postgres-run find: per-element delegation
-    applied ``pk__in="26"`` and Django iterated the STRING, exploding the
-    clause to ``IN ('2','6')`` - correct by accident for the single-digit
-    pks a fresh-per-test SQLite database hands out, broken the moment a
-    Postgres sequence (which never rewinds across rolled-back tests)
-    passed 9.
+    Per-element delegation that applied ``pk__in="26"`` would have Django
+    iterate the STRING, exploding the clause to ``IN ('2','6')`` - correct by
+    accident for the single-digit pks a fresh-per-test SQLite database hands
+    out, broken once a Postgres sequence (which never rewinds across
+    rolled-back tests) passes 9.
     """
     seed_data(1)
     highest_pk = models.Category.objects.order_by("-pk").values_list("pk", flat=True).first()
@@ -3532,8 +3530,8 @@ def _items_connection_page(category_name: str, variables: dict[str, object]) -> 
 def test_products_items_connection_inverted_after_before_window_is_empty() -> None:
     """An inverted ``after`` + ``before`` nested window serves the empty page.
 
-    Regression guard for the negative-``expected`` cursor-parity bug: with
-    ``before`` resolving at or before ``after`` the range is empty, so the
+    With ``before`` resolving at or before ``after`` the range is empty (a
+    negative ``expected`` count), so the
     per-parent ``ListConnection`` serves ``edges: []`` with
     ``hasPreviousPage = start > 0`` and ``hasNextPage = False``.
     ``derive_connection_window_bounds`` rejects the shape as
@@ -3576,7 +3574,7 @@ def test_products_items_connection_inverted_after_before_window_is_empty() -> No
     assert json_at(inverted_last, "pageInfo", "hasPreviousPage") is True
 
     # A NON-inverted ``before``-capped window still windows correctly (guards the
-    # fix against over-rejecting): ``after`` index 1, ``before`` index 4 -> the
+    # rejection against over-reaching): ``after`` index 1, ``before`` index 4 -> the
     # middle rows (indices 2, 3), overfetch reports a further next page.
     middle = _items_connection_page(
         category.name,
@@ -3628,9 +3626,9 @@ def test_products_items_connection_negative_cursor_is_a_cursor_error(
 
 # =============================================================================
 # Live cascade-permission HTTP coverage (spec-034). The four products
-# get_queryset hooks are now active in apps/products/schema.py. Real permission
-# users only - every test's FIRST line is `create_users(1)` (per AGENTS.md / card
-# DoD: never mock info.context.user). Exercises the 2-deep
+# get_queryset hooks are active in apps/products/schema.py. Real permission
+# users only - every test's FIRST line is `create_users(1)` (per AGENTS.md:
+# never mock info.context.user). Exercises the 2-deep
 # Entry -> Item -> Category / Entry -> Property -> Category chain.
 #
 # Each test seeds the private/public split it needs as a dedicated ORM chain
@@ -4071,11 +4069,11 @@ def test_post_utf16_json_body_is_rejected_as_400() -> None:
 def test_post_utf16_le_json_body_is_rejected_as_400() -> None:
     """BOM-less UTF-16-LE JSON -> controlled 400, by a different mechanism than its sibling.
 
-    History: ``encode("utf-16-le")`` carries no BOM, so the interleaved NULs
-    are valid UTF-8. Upstream's eager ``.decode()`` therefore *succeeded* into
-    a NUL-studded ``str`` that ``json.loads`` rejected (400) while the raw
-    bytes parsed - which is why this row existed as a 200 alongside the BOM'd
-    sibling, whose ``UnicodeDecodeError`` never covered this gap.
+    Mechanism: ``encode("utf-16-le")`` carries no BOM, so the interleaved NULs
+    are valid UTF-8. An eager ``.decode()`` therefore *succeeds* into a
+    NUL-studded ``str`` that ``json.loads`` rejects (400), while the raw bytes
+    would parse - and the BOM'd sibling's ``UnicodeDecodeError`` never covers
+    this shape.
 
     Under the wire contract the body still decodes cleanly, and upstream's own
     ``json.loads`` then refuses the NUL-studded ``str``. So this 400 comes from
@@ -4095,9 +4093,9 @@ def test_post_utf16_le_json_body_is_rejected_as_400() -> None:
 def test_post_utf8_bom_json_body_is_rejected_as_400() -> None:
     """UTF-8 JSON with a leading BOM -> controlled 400; the BOM is deliberately not stripped.
 
-    History: ``json.loads`` accepts BOM'd *bytes* but rejects a ``str`` that
-    still starts with U+FEFF, so returning raw bytes made this body succeed on
-    the sync transport exactly as on async.
+    Mechanism: ``json.loads`` accepts BOM'd *bytes* but rejects a ``str`` that
+    still starts with U+FEFF, so handing it raw bytes would make this body
+    succeed on the sync transport exactly as on async.
 
     spec-046 Decision 10 chose rejection: the package neither strips the BOM
     nor decodes with ``utf-8-sig``, because accept-and-strip re-creates the
@@ -4473,7 +4471,7 @@ def test_create_item_via_form_surrogate_in_constraint_name_is_field_error_no_cra
     the bound `ItemModelForm` would otherwise carry the unstorable `name` into the
     `unique_item_per_category` `validate_constraints()` DB lookup and raise a raw
     `UnicodeEncodeError` (an unmapped `ValueError`) that escapes the envelope as a
-    top-level error. The form decoder now applies the same pre-construction
+    top-level error. The form decoder applies the same pre-construction
     storability guard the model path does, so the response is the in-band
     `{ node: null, errors: [...] }` envelope keyed to `name`.
     """
@@ -6619,14 +6617,14 @@ def test_g2_serializer_mutation_response_keeps_relation_with_bounded_query_count
     # Bounded count = 17, DERIVED from a real run (BUILD.md forbids guessing it;
     # the serializer flavor differs from the model flavor by composition - no
     # `full_clean`, instead DRF's `is_valid()` runs the FK re-fetch + the unique
-    # validator - plus the hardening pass's save savepoint and post-save FK
+    # validator - plus the serializer save's savepoint and post-save FK
     # attestation). Per-query breakdown:
     #   BEGIN + COMMIT                                       = 2 (the DjangoSchema
     #                                                            completion-spanning
     #                                                            transaction - mutation atomicity,
     #                                                            shipped 0.0.14)
     #   SAVEPOINT + RELEASE                                  = 2 (the pipeline's inner
-    #                                                            atomic, now nested)
+    #                                                            atomic, nested)
     #   session + auth_user + user_perms + group_perms       = 4 (authorized-caller
     #                                                            machinery)
     #   relation-id visibility decode: products_category     = 1 (the resolver
@@ -6637,7 +6635,7 @@ def test_g2_serializer_mutation_response_keeps_relation_with_bounded_query_count
     #                                                            DRF validates the pk)
     #   is_valid(): UniqueTogetherValidator                  = 1 (SELECT 1 EXISTS on
     #                                                            products_item)
-    #   save SAVEPOINT + RELEASE                             = 2 (the hardening pass's
+    #   save SAVEPOINT + RELEASE                             = 2 (the
     #                                                            savepoint around
     #                                                            serializer save,
     #                                                            rolled back before a

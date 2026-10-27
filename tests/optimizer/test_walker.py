@@ -423,8 +423,8 @@ def test_plan_relay_id_projects_attname_when_pk_is_relation() -> None:
     walker's projection branch resolves ``id_attr`` to the attname
     (``"patron_id"``), but ``field_map`` is keyed by the field's ``name``
     (``"patron"``). A naive ``id_attr in field_map`` check would skip
-    projection and re-introduce the lazy-load N+1 the fix was meant to
-    close. The walker must scan the ``FieldMeta`` values by both
+    projection and leave the lazy-load N+1 the projection exists to
+    prevent. The walker must scan the ``FieldMeta`` values by both
     ``name`` and ``attname``.
     """
     registry.clear()
@@ -670,11 +670,11 @@ def test_plan_projects_digit_boundary_field_under_real_django_name() -> None:
     the schema as ``isbn10`` and its second publishing house ``publisher_2`` as
     ``publisher2``. ``snake_case`` cannot recover the dropped underscore
     (``snake_case("isbn10") == "isbn10"``), so a lookup by the reversed selection
-    name misses the real ``"isbn_10"`` field-map key. Before the walker's
-    forward-resolution fallback the scalar was silently dropped from
-    ``.only(...)`` (a per-row deferred-load N+1) and the relation was left
+    name misses the real ``"isbn_10"`` field-map key. Without the walker's
+    forward-resolution fallback the scalar would be silently dropped from
+    ``.only(...)`` (a per-row deferred-load N+1) and the relation left
     entirely unplanned (a per-parent N+1) - exactly the failures the optimizer
-    exists to prevent. The walker now resolves the selection name forward against
+    exists to prevent. The walker resolves the selection name forward against
     the real field names and projects / plans the REAL Django name.
     """
     registry.clear()
@@ -1067,7 +1067,7 @@ def test_fragment_spread_from_multiple_sites_does_not_double_prefetch() -> None:
     # Each fragment spread triggers a separate recursive _walk_selections
     # call, so we get two entries for "items". This is the O2 behavior;
     # O4 may refine deduplication when nested Prefetch objects land.
-    # For now, assert that the relation *is* in the plan and the count
+    # Assert that the relation *is* in the plan and the count
     # is at most 2 (one per spread).
     assert [prefetch.prefetch_to for prefetch in _prefetches(plan.prefetch_related)] == ["items"]
 
@@ -1153,9 +1153,9 @@ def test_merge_runtime_prefixes_adopts_then_unions_connection_prefixes() -> None
 def test_merge_aliased_selections_preserves_per_response_key_arguments() -> None:
     """Aliased selections preserve each occurrence's ``arguments`` under its response key.
 
-    Re-pinned for spec-033 Decision 6: the merge keeps the first occurrence's
-    ``arguments`` as the merged selection's primary value (the pre-033
-    first-args-win contract) AND records every occurrence's payload in
+    Per spec-033 Decision 6: the merge keeps the first occurrence's
+    ``arguments`` as the merged selection's primary value (first args win) AND
+    records every occurrence's payload in
     ``_optimizer_response_key_arguments`` so a synthesized connection sibling's
     divergent pagination/sidecar arguments stay detectable
     (``_aliased_arguments_diverge``).
@@ -1418,14 +1418,13 @@ def test_plan_elides_forward_fk_when_target_pk_is_not_named_id() -> None:
 def test_plan_elides_forward_fk_when_target_pk_is_digit_boundary_name() -> None:
     """B2: FK-id elision resolves a ``<word>_<digit>`` target pk via forward matching.
 
-    Site 3 of the digit-boundary reconciliation: ``_selected_scalar_names``
-    reversed each pk selection with ``snake_case`` and missed a digit-boundary pk
+    Reversing each pk selection with ``snake_case`` misses a digit-boundary pk
     field-map key (``apps/library/models.py::Edition``'s pk ``isbn_13`` is
     exposed as ``isbn13``, and ``snake_case("isbn13") == "isbn13"`` misses the
-    real ``"isbn_13"`` key). The miss made the helper return ``None`` (elision
-    unsafe), so the walker fell back to a redundant ``select_related`` JOIN
-    loading the whole related row rather than eliding to the source FK column.
-    The helper now forward-resolves the real ``isbn_13`` name through the same
+    real ``"isbn_13"`` key). That miss would make ``_selected_scalar_names`` return
+    ``None`` (elision unsafe), so the walker would fall back to a redundant
+    ``select_related`` JOIN loading the whole related row rather than eliding to
+    the source FK column. The helper forward-resolves the real ``isbn_13`` name through the same
     primitive as the main walk, so an ``{ isbn13 }``-only child selection elides
     the JOIN.
     """
@@ -1531,7 +1530,7 @@ def test_plan_uses_definition_custom_id_resolver_cache(monkeypatch: pytest.Monke
 def test_has_custom_id_resolver_fallback_matches_definition_path() -> None:
     """The definition-less fallback uses the same shared helper, so it agrees.
 
-    Pins finding-2 (drift): when no ``DjangoTypeDefinition`` is registered for
+    Drift guard: when no ``DjangoTypeDefinition`` is registered for
     the target, ``_has_custom_id_resolver`` delegates to the same
     ``origin_has_custom_id_resolver`` free function the registered path uses.
     A plain consumer ``resolve_id`` counts as custom; the inherited
@@ -3421,20 +3420,20 @@ def test_nested_connection_planned_as_windowed_prefetch() -> None:
 def test_plan_projects_digit_boundary_relation_connection_as_windowed_prefetch() -> None:
     """A ``<word>_<digit>`` many-relation's connection survives the lossy round-trip.
 
-    Gap 2a of the digit-boundary reconciliation. A publisher reaches the press
+    A publisher reaches the press
     runs it commissioned through ``apps/library/models.py::Printing.publisher_2``
     (``related_name="printings_2"``), and Strawberry renders the synthesized
     ``printings_2_connection`` sibling as ``printings2Connection``
-    (``to_camel_case`` drops the ``_`` before the digit). The walker reversed the
-    selection with ``snake_case`` -> ``"printings2_connection"``, which misses
+    (``to_camel_case`` drops the ``_`` before the digit). Reversing the selection
+    with ``snake_case`` gives ``"printings2_connection"``, which misses
     the ``"printings_2_connection"`` ``relation_connections`` slot key.
     ``_field_by_graphql_name`` cannot rescue it either: the connection GraphQL
     name carries a ``Connection`` suffix the underlying relation name lacks
     (``to_camel_case("printings_2") == "printings2" != "printings2Connection"``).
-    Before the consolidated forward resolver the nested connection was dropped
-    from the plan entirely - no windowed ``Prefetch``, no
-    ``planned_resolver_keys`` entry - so every parent ran its own connection
-    query (a per-parent N+1). The walker now forward-matches the synthesized slot
+    Without the forward resolver the nested connection would drop from the
+    plan entirely - no windowed ``Prefetch``, no
+    ``planned_resolver_keys`` entry - so every parent would run its own connection
+    query (a per-parent N+1). The walker forward-matches the synthesized slot
     key and plans the batched window.
     """
     registry.clear()
@@ -3638,8 +3637,8 @@ def test_nested_connection_first_page_total_count_keeps_count_and_skips_probe() 
 def test_nested_connection_offset_window_count_free_unless_total_selected() -> None:
     """An ``after``-offset window is count-free unless ``totalCount`` is selected.
 
-    The old policy shape-forced ``_dst_total_count`` on every ``offset > 0``
-    window. The fetch-mode policy drops that: an offset page composes the count-free hasNextPage
+    The fetch-mode policy forces no ``_dst_total_count`` onto an ``offset > 0``
+    window by its shape: an offset page composes the count-free hasNextPage
     probe with the abs-first marker. The single ``WindowRangePlan.fetch_mode``
     decision resolves an edges-only / hasNextPage-only offset page to ``PROBED``
     (``with_total_count=False``), so it carries NO ``_dst_total_count``
@@ -3698,8 +3697,8 @@ def test_window_slice_from_first_after_literals() -> None:
     (``convert_value`` returns ``IntValueNode.value``, a string); the walker
     coerces it so the window actually bounds to ``offset + first`` rather than
     silently leaving the page uncapped at ``relay_max_results``. The bound is
-    asserted, not just annotation presence (the gap that hid the literal-string
-    over-cap bug).
+    asserted, not just annotation presence, so an uncoerced literal string
+    leaving the page over the cap fails this row.
     """
     registry.clear()
     try:
@@ -4042,9 +4041,9 @@ def test_scalar_only_pageinfo_and_total_count_are_window_planned() -> None:
 def test_scalar_only_window_projects_pk_connector_and_order_columns() -> None:
     """A scalar-only window applies a minimal ``.only()`` instead of fetching full rows.
 
-    Regression for the scalar-only over-fetch: ``pageInfo``/``totalCount``-only
-    selections unwrap to ``[]`` node children, so historically no ``.only()`` was
-    applied and the window fetched every model column. The page needs only the
+    ``pageInfo``/``totalCount``-only selections unwrap to ``[]`` node children,
+    so without a scalar-only rule no ``.only()`` would apply and the window would
+    fetch every model column. The page needs only the
     target pk, the relation connector column (here the reverse-FK ``shelf_id``),
     and the concrete ordering columns (spec-033 Decision 4 / Decision 6 scalar-only contract).
     """
@@ -4103,7 +4102,7 @@ def test_scalar_only_generic_window_projects_content_type_column() -> None:
 def test_windowed_prefetch_queryset_carries_deterministic_order() -> None:
     """The generated ``Prefetch.queryset`` applies the deterministic ORDER BY.
 
-    Regression for the windowed-ordering bug: the window expression alone orders
+    The window expression alone orders
     only the row-number VALUES, so the queryset's own ``ORDER BY`` must carry the
     same deterministic tuple or the prefetched rows arrive in DB-natural order and
     the fast path diverges from the pipeline (spec-033 Decision 4, cursor-parity).
@@ -4316,12 +4315,11 @@ def _prefetch_by_to_attr(plan: OptimizationPlan) -> dict[str, Prefetch[str, Quer
 def test_divergent_aliases_plan_one_window_per_response_key() -> None:
     """Divergent aliased pagination args plan ONE window PER RESPONSE KEY.
 
-    The idea-#2 inversion of the historical spec-033 Decision 6 fallback: Django
-    accepts multiple ``Prefetch`` objects on one relation with distinct
+    Django accepts multiple ``Prefetch`` objects on one relation with distinct
     ``to_attr``s, so ``a: books(first:2)`` + ``b: books(first:5)`` become two
     batched window queries (O(aliases)) instead of O(parents x aliases)
     per-parent fallbacks - each window carrying ITS key's page bound, both
-    response keys recorded as planned, and the legacy shared ``to_attr``
+    response keys recorded as planned, and the relation-level shared ``to_attr``
     absent (nothing would read it).
     """
     registry.clear()
@@ -5744,7 +5742,7 @@ def test_mutation_id_only_relation_still_records_elision() -> None:
 # stay unconditional, and connection-wrapped sibling fragments narrow at the
 # node walk.
 
-# Helper-move (spec-033 Decision 9) no-regression lives in test_extension.py (unmodified).
+# The spec-033 Decision 9 shared-helper parity row lives in test_extension.py.
 
 
 # ---------------------------------------------------------------------------

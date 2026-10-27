@@ -2019,10 +2019,9 @@ def test_the_table_prints_the_scope_as_a_runnable_command_not_a_bare_path(
 def test_every_captured_field_of_a_run_outcome_is_load_bearing_in_the_record() -> None:
     """No field of the observation type may be captured and then read by nothing.
 
-    This pins the recurring class rather than one instance of it. ``return_code``
-    was captured from this script's first version and consumed by nothing, which
-    is how a pytest exit 5 came to be recorded as a measured zero; the same shape
-    would recur the next time a field is added to the captured observation and
+    This pins the recurring class rather than one instance of it. A
+    ``return_code`` captured and consumed by nothing records a pytest exit 5 as a
+    measured zero; the same shape would recur the next time a field is added to the captured observation and
     the record is not taught to read it. Varying one field at a time and
     requiring the rendered record to change is the cheapest mechanical statement
     of "every claim in the record is backed by an observation, and every

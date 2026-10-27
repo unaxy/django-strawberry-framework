@@ -345,9 +345,9 @@ def test_upstream_patches_enabled_rejects_non_bool_non_mapping_value(
 ) -> None:
     """A non-bool/non-mapping top-level value fails loud.
 
-    Closes the old ``bool()`` coercion's silent wrong-shape acceptance: a
-    ``"false"`` string was truthy and ENABLED the patches; ``0``/``1``
-    silently coerced. An explicit ``None`` is a per-key value, not the
+    A ``bool()`` coercion would silently accept wrong shapes: a
+    ``"false"`` string is truthy and would ENABLE the patches; ``0``/``1``
+    would silently coerce. An explicit ``None`` is a per-key value, not the
     missing-key case, so it is rejected like any other wrong shape.
     """
     settings.DJANGO_STRAWBERRY_FRAMEWORK = {"APPLY_UPSTREAM_PATCHES": value}

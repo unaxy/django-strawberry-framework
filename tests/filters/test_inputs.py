@@ -1993,9 +1993,9 @@ def test_normalize_input_value_csv_range_filter_accepts_element_list() -> None:
 def test_normalize_input_value_global_id_list() -> None:
     """GlobalID OBJECTS keep their ``type_name`` (wire form), not bare node_ids.
 
-    Pre-decoding to a bare ``node_id`` here stripped the type *before*
+    Pre-decoding to a bare ``node_id`` here would strip the type *before*
     the bound filter could validate it, so a wrong-type GlobalID object
-    passed silently. The normalizer now
+    would pass silently. The normalizer
     re-encodes objects to the base64 wire string so
     ``GlobalIDMultipleChoiceFilter.filter`` runs the type-name check;
     the value still round-trips to the original ``(type_name, node_id)``.
@@ -3058,7 +3058,7 @@ def test_filterset_is_collectable_after_finalize_and_registry_clear() -> None:
 
 
 def test_build_range_input_class_name_unqualified_without_filterset() -> None:
-    """No owning filterset -> the historical ``<Field>RangeInputType`` name is preserved.
+    """No owning filterset -> the unqualified ``<Field>RangeInputType`` name (``PriceRangeInputType``).
 
     Live scoping of owned names:
     ``examples/fakeshop/test_query/test_scalars_filter_api.py::test_range_input_types_are_scoped_per_filterset``.

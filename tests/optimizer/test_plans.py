@@ -950,7 +950,7 @@ class TestApplyWindowPagination:
         """``offset > 0`` / ``limit == 0`` windows keep each partition's row 1.
 
         The marker-row disambiguation (spec-033 Decision 5):
-        the historically-ambiguous empty shapes OR the range filter with
+        the otherwise-ambiguous empty shapes OR the range filter with
         ``row_number == 1`` so an empty prefetch list proves zero children and
         a marker-only list carries the real count. The SQL shape pin: the
         row-number predicate appears with BOTH the range bound and the
@@ -1025,7 +1025,7 @@ class TestApplyWindowPagination:
     def test_next_page_probe_composes_with_marker_on_the_offset_page(self) -> None:
         """The bounded forward offset page overfetches the sentinel AND markers.
 
-        ``next_page_probe`` now engages on the offset page too, composing with the
+        ``next_page_probe`` engages on the offset page too, composing with the
         marker: the range bound becomes ``<= offset + limit + 1`` (the n+1 sentinel
         via ``fetch_upper_bound``) OR'd with the ``= 1`` marker alternative, and no
         count is annotated. This is load-bearing - the offset page
@@ -1121,7 +1121,7 @@ class TestApplyWindowPagination:
         assert WINDOW_ROW_NUMBER in annotations
         assert WINDOW_TOTAL_COUNT in annotations
         # The reversed window MUST be bounded to ``limit`` rows (annotation alone
-        # over-fetches every child row - the spec-033 last-only over-fetch bug).
+        # over-fetches every child row).
         sql = str(qs.query).upper()
         assert WINDOW_ROW_NUMBER_REVERSED.upper() in sql
         assert "<= 2" in sql
@@ -1193,8 +1193,8 @@ class TestOrderEntryHasExplicitNulls:
         assert order_entry_has_explicit_nulls(F("title").desc(nulls_last=True)) is True
 
 
-class TestDeterministicOrderHoistParity:
-    """The hoisted order rule answers identically to the previous connection.py code."""
+class TestDeterministicOrder:
+    """The deterministic order rule has one source, which ``connection.py`` re-exports."""
 
     def test_ends_in_unique_column_string_refs(self) -> None:
         """String order refs: pk / attname / unique field are unique; non-unique are not."""

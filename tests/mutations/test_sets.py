@@ -235,9 +235,9 @@ def test_meta_duplicate_exclude_raises() -> None:
 def test_meta_unknown_fields_raises_at_class_creation() -> None:
     """An unknown ``Meta.fields`` name raises at class creation (not finalize).
 
-    ``editable_input_fields`` already rejected unknown names, but only when the
-    bind / generator walked the set - so a typo'd create/update ``Meta.fields``
-    registered cleanly and failed later. The model ``_validate_meta`` now runs
+    ``editable_input_fields`` rejects unknown names, but only when the bind /
+    generator walks the set - so on its own a typo'd create/update ``Meta.fields``
+    would register cleanly and fail later. The model ``_validate_meta`` runs
     that walk at class creation (form-flavor parity).
     """
     with pytest.raises(ConfigurationError, match="non-editable or unknown field"):
@@ -683,7 +683,7 @@ def test_resolve_model_seam_lets_subclass_supply_model_without_meta_model() -> N
         @classmethod
         @override
         def _resolve_model(cls, meta: type[object]) -> type[Model] | None:
-            # The 0.0.12 / 0.0.13 flavors derive the model from form_class /
+            # The form and serializer flavors derive the model from form_class /
             # serializer_class; emulate that here with a stand-in source.
             return getattr(meta, "_model_source", None)
 
@@ -838,10 +838,10 @@ def test_bind_is_retry_idempotent_after_fixable_later_phase_failure(
     ``finalize_django_types()`` documents recover-in-place: fix the offending
     cause and call again, no ``registry.clear()`` required. But phase 2.5 binds
     mutations (materializing ``ItemInput`` into the ledger) BEFORE the later phases
-    that can fail. The prior bind cleared only ``_shape_build_cache``, leaving the
-    ledger populated with run-1's class object, so run-2 rebuilt a fresh
+    that can fail. A bind that cleared only ``_shape_build_cache`` would leave the
+    ledger populated with run-1's class object, so run-2 would rebuild a fresh
     ``ItemInput`` and hit a spurious distinct-class collision in
-    ``materialize_generated_input_class`` - masking the original, now-fixed error.
+    ``materialize_generated_input_class`` - masking the original, fixed error.
     Resetting the materialization ledgers in ``finalize_django_types`` before the
     bind sequence makes the rerun clean.
     """
@@ -1433,7 +1433,7 @@ def test_mutation_meta_key_rejected_on_django_type_meta() -> None:
 
     Proves the two ``Meta`` namespaces are disjoint: ``operation`` is a mutation
     key, not a ``DjangoType`` key, so the ``DjangoType`` typo guard rejects it -
-    confirming this slice added no key to ``ALLOWED_META_KEYS`` (Decision 12).
+    confirming ``ALLOWED_META_KEYS`` carries no mutation key (Decision 12).
     """
     with pytest.raises(ConfigurationError, match="Unknown Meta keys"):
 
@@ -1445,8 +1445,8 @@ def test_mutation_meta_key_rejected_on_django_type_meta() -> None:
                 operation = "create"
 
 
-def test_deferred_and_allowed_meta_keys_unchanged() -> None:
-    """The ``DjangoType`` Meta-key sets gained no mutation key (byte-unchanged contract)."""
+def test_djangotype_meta_key_sets_carry_no_mutation_key() -> None:
+    """The ``DjangoType`` Meta-key sets carry no mutation key."""
     for mutation_key in (
         "operation",
         "input_class",
@@ -1547,16 +1547,15 @@ def test_bind_skips_relation_lock_for_non_relay_target() -> None:
 
 
 # ---------------------------------------------------------------------------
-# No-model-flavor-regression: the new seams default to today's model behavior
-# (spec-038 / DoD item 6). The 036-surface generalization relocated the
-# validation body into ``_validate_meta`` and added ``build_input`` /
-# ``input_type_name`` / ``input_module_path`` / ``resolve_*`` seams; these pin
-# that the MODEL flavor's behavior is byte-identical to before.
+# Model-flavor seam defaults: the seams default to the model behavior
+# (spec-038 / DoD item 6). Validation lives in ``_validate_meta`` beside the
+# ``build_input`` / ``input_type_name`` / ``input_module_path`` / ``resolve_*``
+# seams; these pin the MODEL flavor's behavior through each seam.
 # ---------------------------------------------------------------------------
 
 
-def test_validate_meta_is_the_relocated_classmethod_seam() -> None:
-    """The metaclass validates via the ``_validate_meta`` classmethod seam (relocated body).
+def test_validate_meta_is_the_classmethod_validation_seam() -> None:
+    """The metaclass validates via the ``_validate_meta`` classmethod seam.
 
     The validation is ``DjangoMutation._validate_meta``, with no module-level
     ``_validate_mutation_meta`` beside it. A model mutation validates through it (a
@@ -1571,19 +1570,19 @@ def test_validate_meta_is_the_relocated_classmethod_seam() -> None:
             model = product_models.Item
             operation = "create"
 
-    # The relocated body produces the same validated snapshot as before.
+    # The seam produces the validated snapshot.
     assert CreateItem._mutation_meta.model is product_models.Item
     assert CreateItem._mutation_meta.operation == "create"
-    # The net-new form_class slot is None on the model flavor (no regression).
+    # The form_class slot is None on the model flavor.
     assert CreateItem._mutation_meta.form_class is None
 
 
-def test_model_flavor_input_seams_produce_today_defaults() -> None:
+def test_model_flavor_input_seams_produce_model_defaults() -> None:
     """``build_input`` / ``input_type_name`` / ``input_module_path`` default to model behavior.
 
     The seams exist and, on a plain ``DjangoMutation``, produce the model-column
     input materialized in ``mutations.inputs`` under the canonical ``<Model>Input``
-    name - the exact 036 behavior, just reached through the overridable seam.
+    name, reached through the overridable seam.
     """
     _declare_products_primaries()
 
@@ -1649,8 +1648,8 @@ def test_model_flavor_resolve_seams_delegate_to_resolver_entry_points() -> None:
     """``resolve_sync`` / ``resolve_async`` default to the model resolver entry points.
 
     The seams delegate to ``mutations/resolvers.py::resolve_mutation_sync`` /
-    ``resolve_mutation_async`` (today's model dispatch), so the model resolver path
-    is unchanged now that ``fields.py::_resolve`` calls them.
+    ``resolve_mutation_async`` (the model dispatch); ``fields.py::_resolve`` calls
+    them, so the model resolver path runs through the seams.
     """
     assert "resolve_sync" in vars(DjangoMutation)
     assert "resolve_async" in vars(DjangoMutation)

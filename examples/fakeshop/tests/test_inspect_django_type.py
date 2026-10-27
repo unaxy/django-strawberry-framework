@@ -93,7 +93,7 @@ def test_inspect_by_registered_name() -> None:
     call_command("inspect_django_type", "BookType", stdout=out)
     text = out.getvalue()
     assert "BookType" in text
-    # Relay-Node pk (BookType declares ``interfaces = (relay.Node,)`` since
+    # Relay-Node pk (BookType declares ``interfaces = (relay.Node,)``,
     # spec-032): the interface-supplied GlobalID!, not a plain Int!.
     assert "id" in text
     assert "GlobalID!" in text

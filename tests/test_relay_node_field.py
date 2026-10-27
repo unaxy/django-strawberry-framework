@@ -448,7 +448,7 @@ def test_node_custom_node_id_attr_uncoercible_returns_null() -> None:
 
     ``created_date`` is a ``DateTimeField``; an id its ``to_python`` rejects
     coerces to ``None`` -> ``null`` with no query issued (the default-pk
-    uncoercible path's contract, now keyed on the real resolution field), and
+    uncoercible path's contract, keyed on the real resolution field), and
     no Django ``ValidationError`` leaks to the client.
     """
     services.seed_data(1)

@@ -597,7 +597,7 @@ Rationale companion — this Decision's justification and its four rejected alte
 
 ### Decision 7 — `Meta.filterset_class` promotion gate
 
-`Meta.filterset_class` is in `ALLOWED_META_KEYS` (out of [`DEFERRED_META_KEYS`][base]) because the subsystem applies it end-to-end: the class hierarchy (Slices 1 + 2) and the finalizer-phase-2.5 binding (Slice 3) exist, and the validator-acceptance test (`tests/types/test_base.py::test_meta_filterset_class_is_promoted_to_allowed_meta_keys`) pins the promotion. Same gate as [`Meta.interfaces`][glossary-metainterfaces] — a deferred `Meta` key is accepted only when its subsystem applies it end-to-end.
+`Meta.filterset_class` is in `ALLOWED_META_KEYS` (out of [`DEFERRED_META_KEYS`][base]) because the subsystem applies it end-to-end: the class hierarchy (Slices 1 + 2) and the finalizer-phase-2.5 binding (Slice 3) exist, and the validator-acceptance test (`tests/types/test_base.py::test_meta_filterset_class_is_allowed_not_deferred`) pins the promotion. Same gate as [`Meta.interfaces`][glossary-metainterfaces] — a deferred `Meta` key is accepted only when its subsystem applies it end-to-end.
 
 Rationale companion — this Decision's justification and its two rejected alternatives: [Decision 7][rationale-d7].
 
@@ -837,7 +837,7 @@ System-under-test is `django_strawberry_framework` itself. Four modules mirror t
 
 ### `tests/types/test_base.py`
 
-`test_meta_filterset_class_is_promoted_to_allowed_meta_keys` asserts `"filterset_class" not in DEFERRED_META_KEYS` AND `"filterset_class" in ALLOWED_META_KEYS`, pinning [Decision 7](#decision-7--metafilterset_class-promotion-gate).
+`test_meta_filterset_class_is_allowed_not_deferred` asserts `"filterset_class" not in DEFERRED_META_KEYS` AND `"filterset_class" in ALLOWED_META_KEYS`, pinning [Decision 7](#decision-7--metafilterset_class-promotion-gate).
 
 ### `tests/types/test_definition_order.py`
 

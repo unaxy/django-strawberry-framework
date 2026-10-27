@@ -494,7 +494,7 @@
 "tests/optimizer/test_nested_index_advisory.py::_IdxMtiGrandchild.Meta" = { reportIncompatibleVariableOverride = 1 }
 "tests/optimizer/test_nested_index_advisory.py::_IdxMtiNote.Meta" = { reportIncompatibleVariableOverride = 1 }
 "tests/optimizer/test_nested_index_advisory.py::_IdxMtiTag.Meta" = { reportIncompatibleVariableOverride = 1 }
-"tests/optimizer/test_plans.py::TestDeterministicOrderHoistParity.test_ends_in_unique_column_defensive_for_non_model" = { reportArgumentType = 2 }
+"tests/optimizer/test_plans.py::TestDeterministicOrder.test_ends_in_unique_column_defensive_for_non_model" = { reportArgumentType = 2 }
 "tests/optimizer/test_plans.py::TestLookupPaths.test_ignores_unknown_prefetch_like_entries" = { reportArgumentType = 1 }
 "tests/optimizer/test_plans.py::TestReverseOrderBy.test_unreversible_term_raises_instead_of_serving_the_wrong_end" = { reportArgumentType = 1 }
 "tests/optimizer/test_selections.py::_as_strawberry_info" = { reportReturnType = 1 }
