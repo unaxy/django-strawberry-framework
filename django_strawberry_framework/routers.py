@@ -144,7 +144,7 @@ _STRAWBERRY_CHANNELS_BROKEN_HINT = (
 # Python's own ``TypeError``, deliberately, so a required parameter fails as one.
 _MISSING_DJANGO_APPLICATION_HINT = (
     "DjangoGraphQLProtocolRouter requires a usable Django ASGI application for its `http` "
-    "branch. A 0.0.14 deployment that passed `django_application=None` (or omitted it) "
+    "branch. A deployment that passed `django_application=None` (or omitted it) "
     "served GraphQL over HTTP through a Channels consumer, OUTSIDE Django's middleware "
     "stack: no ALLOWED_HOSTS host check, no CSRF protection, and no security headers on "
     "the one route that accepts session credentials. That mode is REMOVED, not flagged. "
@@ -574,8 +574,8 @@ def _build_router_class_uncached() -> type[ProtocolTypeRouter]:
             websocket_revalidation_window: float = _DEFAULT_REVALIDATION_WINDOW,
         ) -> None:
             # One guard for both failure shapes Error shapes gives one message:
-            # ``callable(None)`` is already False, so the migrant who carried
-            # ``django_application=None`` over from 0.0.14 lands on the prose
+            # ``callable(None)`` is already False, so a caller passing
+            # ``django_application=None`` lands on the prose
             # here rather than on a bare ``TypeError``.
             _require_django_application(django_application)
 

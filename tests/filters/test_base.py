@@ -3026,15 +3026,18 @@ def test_related_filter_explicit_queryset_ledger_defaults_false_when_absent() ->
 
 
 def test_related_filter_rejects_lookups_kwarg() -> None:
-    """The cookbook-port `lookups=` kwarg is dropped; nothing read it.
+    """`lookups=` is refused with `TypeError` naming where lookups are declared.
 
-    Pinning: passing `lookups=` to `RelatedFilter.__init__` must raise
-    `TypeError` (unexpected keyword argument). Equivalent shape would be to
-    confirm `"lookups"` is absent from `inspect.signature(RelatedFilter)`,
-    but the runtime call is the consumer-facing contract.
+    A related branch exposes the target filter set's own lookups, so nothing
+    reads the kwarg; django-filter would otherwise absorb it into `extra`
+    and ignore it.
     """
-    with pytest.raises(TypeError):
+    with pytest.raises(TypeError) as exc_info:
         RelatedFilter("ShelfFilter", lookups=["exact", "in"])
+    assert str(exc_info.value) == (
+        "`RelatedFilter` does not accept `lookups=`; declare the lookups on the "
+        "target FilterSet's `Meta.fields`."
+    )
 
 
 def test_related_filter_filterset_setter_substitutes_target() -> None:

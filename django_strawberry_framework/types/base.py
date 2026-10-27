@@ -254,8 +254,8 @@ def _validate_connection(
 ) -> dict[str, bool] | None:
     """Validate ``Meta.connection`` shape AND the Relay-Node requirement (spec-030 Decision 8).
 
-    ``None``-short-circuits when unset; otherwise shape-checks the dict (for
-    ``0.0.9`` the only recognized sub-key is ``{"total_count": bool}`` - unknown
+    ``None``-short-circuits when unset; otherwise shape-checks the dict (the
+    only recognized sub-key is ``{"total_count": bool}`` - unknown
     sub-keys and non-dict / non-bool values raise) and then enforces that the
     owning type is Relay-Node-shaped (a connection is only meaningful over a
     Relay-Node type). Returns the normalized dict, stored on
@@ -284,7 +284,7 @@ def _validate_connection(
         raise ConfigurationError(
             f"{model_name}.Meta.connection has unknown sub-keys: "
             f"[{', '.join(unknown_labels)}]. "
-            "Only 'total_count' is recognized in 0.0.9.",
+            "Only 'total_count' is recognized.",
         )
     # The returned options are built from the checks: the one recognized key, under its
     # own exact name, holding the bool it was proven to be.

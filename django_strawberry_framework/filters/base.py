@@ -2342,17 +2342,17 @@ class RelatedFilter(RelatedSetTargetMixin, ModelChoiceFilter):
         """Bind the target `filterset` and record explicit-queryset intent.
 
         Rejects `lookups=` with `TypeError` before delegating to
-        `ModelChoiceFilter.__init__`. The kwarg was a verbatim port of
-        an upstream cookbook artifact with no readers in this package
-        and was removed in 0.0.7; the explicit guard runs ahead of
-        `super().__init__` because `django_filters.Filter.__init__`
+        `ModelChoiceFilter.__init__`: the lookups a related branch exposes
+        are the target filter set's own (its `Meta.fields` and declared
+        filters), so nothing reads the kwarg. The explicit guard runs ahead
+        of `super().__init__` because `django_filters.Filter.__init__`
         silently absorbs unknown kwargs into `self.extra`, which would
-        otherwise mask the dead-state shape under a different name.
+        otherwise accept the kwarg and ignore it.
         """
         if "lookups" in kwargs:
             raise TypeError(
-                "`RelatedFilter` does not accept `lookups=`; the kwarg was "
-                "removed in 0.0.7 because it had no readers.",
+                "`RelatedFilter` does not accept `lookups=`; declare the lookups on the "
+                "target FilterSet's `Meta.fields`.",
             )
         self._has_explicit_queryset: bool = kwargs.get("queryset") is not None
         # basedpyright: the kwargs are forwarded verbatim and ``ModelChoiceFilter.__init__`` owns

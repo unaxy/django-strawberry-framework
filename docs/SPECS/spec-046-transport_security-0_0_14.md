@@ -657,7 +657,7 @@ DJANGO_STRAWBERRY_FRAMEWORK = {
   binding, naming the missing parameter. Deliberate: a required parameter should fail as
   a required parameter.
 - **`django_application=None` or a non-callable** — [`ConfigurationError`][glossary-configurationerror]
-  at construction, naming the security reason and the fix: that a `0.0.14` deployment
+  at construction, naming the security reason and the fix: that a deployment
   which passed `None` (or omitted it) was serving GraphQL HTTP outside Django's
   middleware, that the mode is removed, and that the repair is
   `get_asgi_application()` plus the `urlpatterns` entry. The explicit-`None` branch
