@@ -251,7 +251,7 @@ def test_meta_connection_unknown_keys_are_typed_for_mixed_keys() -> None:
         _validate_connection(Category, {1: True, "bogus": False}, relay_shaped=False)
     assert str(exc_info.value) == (
         "Category.Meta.connection has unknown sub-keys: ['bogus', 1]. "
-        "Only 'total_count' is recognized in 0.0.9."
+        "Only 'total_count' is recognized."
     )
 
 

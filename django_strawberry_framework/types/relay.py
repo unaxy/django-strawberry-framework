@@ -1028,9 +1028,11 @@ def decode_global_id(
       payload is permitted iff ``_accepts_model_label_decode`` (``model`` /
       ``type+model``); a type-name payload iff ``_accepts_type_name_decode``
       (``type`` / ``type+model``). ``callable`` / ``custom`` are in neither
-      membership (encode-only in ``0.0.9``), and an absent (``None``) strategy
-      (a non-Relay-Node ``DjangoType`` or a mid-state type) is rejected - so a
-      crafted ID cannot resolve to a type that cannot be a Node.
+      membership (encode-only: no decode path exists), and an absent (``None``)
+      strategy (a non-Relay-Node ``DjangoType`` or a mid-state type) is rejected -
+      so a crafted ID cannot resolve to a type that cannot be a Node. The
+      rejection names the cause: an encode-only strategy, or the one payload
+      shape a ``model`` / ``type`` strategy decodes.
 
     Returns ``(target_type, node_id)`` where ``target_type`` is the resolved
     ``DjangoType`` class (``definition.origin``) and ``node_id`` is the parsed id
@@ -1109,10 +1111,16 @@ def decode_global_id(
         else _accepts_type_name_decode(strategy)
     )
     if not permitted:
+        # The strategy decodes the other payload shape, or (in neither membership) none.
+        if _accepts_model_label_decode(strategy):
+            reason = "decodes only a model-label payload"
+        elif _accepts_type_name_decode(strategy):
+            reason = "decodes only a type-name payload"
+        else:
+            reason = "is encode-only (no decode path exists)"
         raise ConfigurationError(
             f"decode_global_id: {type_name!r} ({'model-label' if is_model_label else 'type-name'} "
-            f"payload) is not decodable under the candidate's {strategy!r} strategy "
-            "(callable / custom strategies are encode-only in 0.0.9).",
+            f"payload) is not decodable: the candidate's {strategy!r} strategy {reason}.",
         )
 
     # A recorded strategy is only ever stamped on a Relay-Node-shaped type

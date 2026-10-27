@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 329 done, 214 to do.
+Progress: 330 done, 214 to do.
 
 ## Done
 
@@ -1833,6 +1833,13 @@ Progress: 329 done, 214 to do.
   gate's limits. Five planted rows and the permitted-form row pin it; 20 more segments are read, 0 hits.
   `scripts/review_inspect.py::PROVENANCE_PATTERNS` stays a separate report-only list (one shared word), each list's
   comment naming the other; START's provenance bullet names string statements
+- [x] 564. The four error strings state the invariant without a release: the `RelatedFilter` `lookups=` TypeError
+  names the remedy (the target FilterSet's `Meta.fields`), `Meta.connection`'s unknown-sub-key error reads "Only
+  'total_count' is recognized.", `decode_global_id` gives the rejecting strategy's own reason (it decodes only a
+  model-label or only a type-name payload, or is encode-only) where it appended the callable / custom note to every
+  rejection, and the router hint keeps its migration prose without the number. The first three are pinned exactly;
+  the docstrings, spec-046 "Error shapes" and the GLOSSARY `Meta.connection` body are restated; dry-0_0_15_3 item 28
+  is ticked
 
 ## Outside review of the fixes
 
@@ -1956,10 +1963,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   former", "byte-unchanged", seven `Target release:` module lines and version banners ("shipped 0.0.14"); judge each
   against START's provenance rule (dry-0_0_15_3 items 31 and 71 cover part of it; 566 restated the
   `(hardened)`, `(hardening)` and `historically` sites in `schema.py` and `rest_framework/`). Found fact-finding 500
-- [ ] 564. Four consumer-visible error strings carry a release banner that goes stale:
-  `filters/base.py::RelatedFilter.__init__` ("the kwarg was removed in 0.0.7"), `types/base.py::_validate_connection`
-  ("recognized in 0.0.9"), `types/relay.py::decode_global_id` ("encode-only in 0.0.9") and the routers.py "0.0.14
-  deployment" message; restate each with its pinning test. Found fact-finding 500
 - [ ] 565. Optimizer plan labels (B1-B8, O2-O6, G1-G3) label 177 comment and docstring sites, 15 of them in the
   package (`optimizer/extension.py`, `optimizer/plans.py`, `optimizer/walker.py`, `types/resolvers.py`) and most in
   `tests/optimizer/test_extension.py` and `test_walker.py`; the clause after each label already states the behaviour,
@@ -2101,6 +2104,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 632. CHANGELOG entry for item 564: four error messages drop their release number. The `RelatedFilter`
+  `lookups=` error names the target FilterSet's `Meta.fields`; `Meta.connection`'s unknown-sub-key error and the
+  router's missing-`django_application` hint keep their text without it; `decode_global_id`'s refusal names the
+  candidate strategy's own reason (it decodes only a model-label or only a type-name payload, or is encode-only)
+  instead of a callable / custom note on every rejection
 - [ ] 605. CHANGELOG entry for item 604: a Relay type whose `NodeID` is a non-pk column (`house_code:
   relay.NodeID[str]`) answers an `id` selection from the row the page, join or prefetch loads (one statement
   where it cost one more per row), and the async executor no longer fails that `id` with

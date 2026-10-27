@@ -3151,7 +3151,7 @@ def test_type_plus_model_decodes_both() -> None:
 
 
 def test_decode_model_strategy_rejects_type_name_id() -> None:
-    """A type-name payload for a ``model``-strategy type raises (Step-2 direction 1)."""
+    """A type-name payload for a ``model``-strategy type raises, naming the shape it decodes."""
 
     class CategoryNode(DjangoType):
         class Meta:
@@ -3163,12 +3163,16 @@ def test_decode_model_strategy_rejects_type_name_id() -> None:
     assert registry.get(Category) is CategoryNode
 
     finalize_django_types()
-    with pytest.raises(ConfigurationError, match="not decodable"):
+    with pytest.raises(ConfigurationError) as exc_info:
         decode_global_id(relay.GlobalID("CategoryNode", "1"))
+    assert str(exc_info.value) == (
+        "decode_global_id: 'CategoryNode' (type-name payload) is not decodable: the "
+        "candidate's 'model' strategy decodes only a model-label payload."
+    )
 
 
 def test_decode_type_strategy_rejects_model_label_id() -> None:
-    """A model-label payload for a ``type``-strategy type raises (Step-2 direction 2)."""
+    """A model-label payload for a ``type``-strategy type raises, naming the shape it decodes."""
 
     class CategoryNode(DjangoType):
         class Meta:
@@ -3180,12 +3184,16 @@ def test_decode_type_strategy_rejects_model_label_id() -> None:
     assert registry.get(Category) is CategoryNode
 
     finalize_django_types()
-    with pytest.raises(ConfigurationError, match="not decodable"):
+    with pytest.raises(ConfigurationError) as exc_info:
         decode_global_id(relay.GlobalID("products.category", "1"))
+    assert str(exc_info.value) == (
+        "decode_global_id: 'products.category' (model-label payload) is not decodable: the "
+        "candidate's 'type' strategy decodes only a type-name payload."
+    )
 
 
 def test_decode_callable_strategy_has_no_decode_path() -> None:
-    """A payload resolving to a ``callable``-strategy type raises (encode-only)."""
+    """A payload resolving to a ``callable``-strategy type raises, naming it encode-only."""
 
     def encoder(_type_cls: type[DjangoType], model: type[Model], _root: object) -> str:
         return model._meta.label_lower
@@ -3200,12 +3208,16 @@ def test_decode_callable_strategy_has_no_decode_path() -> None:
     finalize_django_types()
     assert _definition_of(CategoryNode).effective_globalid_strategy == "callable"
     # The callable emits a model label here, but ``callable`` decodes nothing.
-    with pytest.raises(ConfigurationError, match="not decodable"):
+    with pytest.raises(ConfigurationError) as exc_info:
         decode_global_id(relay.GlobalID("products.category", "1"))
+    assert str(exc_info.value) == (
+        "decode_global_id: 'products.category' (model-label payload) is not decodable: the "
+        "candidate's 'callable' strategy is encode-only (no decode path exists)."
+    )
 
 
 def test_decode_custom_override_type_has_no_decode_path() -> None:
-    """A payload resolving to a ``custom`` (consumer override) type raises (encode-only)."""
+    """A ``custom`` (consumer override) type's payload raises, naming it encode-only."""
 
     class CategoryNode(DjangoType):
         class Meta:
@@ -3219,8 +3231,12 @@ def test_decode_custom_override_type_has_no_decode_path() -> None:
 
     finalize_django_types()
     assert _definition_of(CategoryNode).effective_globalid_strategy == "custom"
-    with pytest.raises(ConfigurationError, match="not decodable"):
+    with pytest.raises(ConfigurationError) as exc_info:
         decode_global_id(relay.GlobalID("products.category", "1"))
+    assert str(exc_info.value) == (
+        "decode_global_id: 'products.category' (model-label payload) is not decodable: the "
+        "candidate's 'custom' strategy is encode-only (no decode path exists)."
+    )
 
 
 def test_decode_non_node_graphql_name_raises() -> None:
