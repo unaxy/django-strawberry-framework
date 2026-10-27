@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 318 done, 215 to do.
+Progress: 319 done, 215 to do.
 
 ## Done
 
@@ -1740,6 +1740,15 @@ Progress: 318 done, 215 to do.
   `timeout-minutes` is unchanged. Measured on the three push runs since (`40301105850`, `40339630011`,
   `40405314085`): the slowest shard job took 17 minutes (floor `remainder`), the rest 8 to 14; none was cancelled.
   Trimming the suite itself stays the maintainer's call
+- [x] 573. not a defect: no contract row covers it. README, the GLOSSARY `DjangoModelFormMutation` and `FieldError`
+  terms and spec-038 Decision 8 scope the save-time `null` answer to a `blank=True, null=False` column, and nothing
+  pins a `null=True` one. The shape needs a consumer-declared form field cleaning `""` (`ChoiceField`,
+  `TypedChoiceField(empty_value="")`, `CharField`) over a nullable non-text column, since Django's own form field
+  cleans `""` to `None` there (`empty_value=None`), and plain Django's `save()` raises on it (graphene-django
+  likewise). Measured on SQLite and PostgreSQL, sync and async: those 30 cells plus 3 PostgreSQL `ArrayField` cells
+  answer the field-keyed "This field cannot be null." (code `null`), nothing written. A client reaches it only by an
+  omitted create value or an explicit `null` (plus `""` on an `ArrayField`), since every other input is typed by the
+  column. Which answer a nullable column should give is row 631
 
 ## Outside review of the fixes
 
@@ -1895,10 +1904,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   subscript Django classes that lack `__class_getitem__`; harmless while unevaluated, but a static sweep with an
   audited `__class_getitem__` table (fail closed on an unseen class) would catch the shape in the lint job instead of
   the 45-minute test cells. Found fixing 506
-- [ ] 573. (robustness) A `null=True, blank=True` column a `ModelForm` cleans to `""` it cannot store (a non-text
-  choice column through the `ValueError` trigger, an `ArrayField` through the `DataError` one) answers "This field
-  cannot be null." (code `null`) on a column that takes NULL, since `forms/resolvers.py::_is_unstorable_blank` ignores
-  `null`; say whether it should clear to NULL or answer another error. Found fixing 541
 - [ ] 574. (robustness) A `blank=False` column a `required=False` form field cleans to `""` (Django's
   `_get_validation_exclusions` leaves it out of `full_clean`) answers the masked error at save (a raw `DataError` on
   an `ArrayField`, measured); `_is_unstorable_blank` needs `blank=True`, so no column that stores no empty string is
@@ -2033,6 +2038,21 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 631. Decide what a `DjangoModelFormMutation` answers when a consumer-declared form field cleans `""` (an
+  omitted create value, an explicit `null`, or `""` on an `ArrayField`) over a `null=True, blank=True` column that
+  stores no empty string. Today `forms/resolvers.py::_is_unstorable_blank` ignores `null`, so the column answers "This
+  field cannot be null." (code `null`), false on a column that takes NULL, while the model flavor and DRF store NULL
+  for the same client input. Options:
+  - (a) write NULL. This overrides the form's cleaned value ("the form is the input source of truth") and needs a
+    savepointed retry after a PostgreSQL `DataError`.
+  - (b) a truthful field-keyed `invalid` error: the column's own `to_python("")` message (integer, float, decimal,
+    date, UUID) and a package message where it has none (`ArrayField`).
+  - (c) keep it and say so in README / GLOSSARY / spec-038, with `null=True` twins of
+    `tests/forms/test_resolvers.py::test_modelform_blank_choice_save_failure_is_field_keyed_null_error` and the
+    `ArrayField` row pinning it.
+  - (d) narrow the predicate to `not field.null`. This leaves a masked `ValueError` / `DataError`, or an `__all__`
+    `invalid`, depending on the column kind.
+  Row 572's parenthetical follows the answer. Found fixing 573
 - [ ] 377. Decide whether the package supersedes graphql-core 3.2's `ExecutionContext.execute_fields` and
   `complete_list_value` bodies in `django_strawberry_framework/_graphql_core_patches.py` so every awaitable an operation
   created settles inside it before an error propagates. Today a sync field raising on a non-null position after an
