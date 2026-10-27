@@ -1242,8 +1242,10 @@ statement, and the seal admits text in every such slot, so `Lower("name", templa
 is an exact `Lower` compiling to `RANDOM()`. Every approved node and readable leaf must therefore
 carry only what its class supplies
 (`django_strawberry_framework/list_field.py::_order_node_state_is_stock`): no template,
-function, joiner or `sql` slot on the instance, an empty `extra`, and an operator - the one slot
-a `CombinedExpression` or `WhereNode` always stores - that is one of Django's own. `Value` and
+function, joiner or `sql` slot on the instance unless it restates the class's own text (a
+`Subquery`, so the framework's `VisibleRowExists`, always stores its `template`), an empty
+`extra`, and an operator - the one slot a `CombinedExpression` or `WhereNode` always stores,
+with no class value - that is one of Django's own. `Value` and
 `Cast` call a hook on their output field (a placeholder, a cast type), so either is read only
 over one of Django's own field classes; a column's field is the model's and is not constrained,
 because none of its hooks reaches the order SQL.
@@ -2233,7 +2235,7 @@ Where each part of the surface lives, keyed to the slice checklist:
 - The predicate's chain is looked up on its real operand, so a project `gt` registered on
   `Lower` is refused under an alias holding `Lower("name")`, and its lookup is the one the
   value selects: `isil=None` is the `isnull` it compiles to, `isil__lower=None` the transformed
-  operand's `isnull`, and `isil=""` the same on a backend that reads empty strings as null. A
+  operand's `isnull`, and `isil__lower=""` the same on a backend that reads empty strings as null. A
   bare conditional `Q` child is read under the implicit `exact` Django compiles it with.
 - A predicate an annotation holds is read in its resolved form: an annotated `Case` over a
   column predicate, its negation, a `__year` comparison, an `__in` holding an expression, and
@@ -2584,7 +2586,7 @@ which are functions in `test_list_field_async_api.py`, or given with their modul
     plus an annotated filtered `Count`, the whole-name alias `"a__b"` beside a random `a`, and
     `isil=None` over Django's own `isnull`.
     `test_shipped_branches_offset_reads_an_empty_string_by_what_the_backend_compiles` refuses
-    `isil=""` under a project `isnull` where the backend reads `""` as null and serves it where
+    `isil__lower=""` under a project `isnull` where the backend reads `""` as null and serves it where
     it does not. Each has its `test_async_offset_` twin.
 
     The evaluated-source re-query, on holder schemas in both colours:
