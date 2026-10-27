@@ -385,8 +385,10 @@
 "tests/filters/test_base.py::test_resolve_globalid_target_definition_multihop" = { reportArgumentType = 1 }
 "tests/filters/test_finalizer.py::test_finalize_surfaces_the_related_filter_target_gate_identity.BrokenFilter" = { reportArgumentType = 1 }
 "tests/filters/test_inputs.py::_EqRangeFilter.__hash__" = { reportAssignmentType = 1 }
+"tests/filters/test_inputs.py::_OTHER_KEY_WIDGET_DECLARATIONS" = { reportArgumentType = 1 }
 "tests/filters/test_inputs.py::_filter_input_call_form" = { reportArgumentType = 1 }
 "tests/filters/test_inputs.py::_filter_input_subscript_form" = { reportInvalidTypeArguments = 1 }
+"tests/filters/test_inputs.py::test_a_model_choice_filter_with_a_request_scoped_queryset_builds_without_calling_it" = { reportArgumentType = 1 }
 "tests/filters/test_inputs.py::test_convert_filter_to_input_annotation_malformed_filter_diagnostics" = { reportArgumentType = 1 }
 "tests/filters/test_inputs.py::test_convert_filter_to_input_annotation_rejects_unknown_method_filter" = { reportArgumentType = 1 }
 "tests/filters/test_inputs.py::test_element_annotation_fallback_branches_when_model_field_is_none.NoFieldTypedFilter.field" = { reportIncompatibleMethodOverride = 1 }

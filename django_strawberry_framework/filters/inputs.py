@@ -36,10 +36,11 @@ from django_filters import (
     ModelChoiceFilter,
     ModelMultipleChoiceFilter,
     MultipleChoiceFilter,
+    NumericRangeFilter,
     TypedChoiceFilter,
 )
 from django_filters import RangeFilter as _DjangoRangeFilter
-from django_filters.filters import BaseCSVFilter
+from django_filters.filters import BaseCSVFilter, QuerySetRequestMixin
 from strawberry import relay
 
 from django_strawberry_framework.conf import hide_flat_filters_setting
@@ -77,7 +78,7 @@ from django_strawberry_framework.utils.strings import (
     graphql_camel_name,
     pascal_case_or_raise,
 )
-from django_strawberry_framework.utils.widgets import multi_widget_keys
+from django_strawberry_framework.utils.widgets import multi_widget_keys, widget_keys
 
 from .base import (
     _RANGE_BOUNDS,
@@ -647,6 +648,56 @@ def _refuse_method_without_form_field(
     )
 
 
+#: The filter's form-data key as a refusal spells it, and every key its widget derives from it.
+_FORM_KEY = "<name>"
+
+
+def _refuse_widget_reading_other_keys(
+    filter_instance: Filter,
+    filterset_cls: type[FilterSet] | None,
+) -> None:
+    """Refuse a one-value filter whose form field's widget reads keys other than its own name.
+
+    Every arm but the range arm publishes one value and writes it under the filter's one
+    form-data key (``filters/sets.py::FilterSet._normalize_input``); a widget reading other
+    keys (``utils/widgets.py::widget_keys``: a ``MultiWidget`` such as django-filter's
+    ``RangeWidget`` on a ``NumericRangeFilter``'s ``RangeField``, a consumer
+    ``MultiValueField``'s, a ``SplitArrayWidget``) never reads that value, so the filter
+    would answer every request with every row. The refusal names the filter as declared
+    (``_declaration_of``). A filter whose form field builds nothing unbound
+    (``_declared_form_field``) is not read here, nor a model-choice filter (django-filter's
+    ``QuerySetRequestMixin``) whose ``queryset`` is callable or unset, as
+    ``filters/base.py::model_choice_identity_column`` reads it: a callable one is called
+    with the request, which the schema build has none of, and an unset one builds no field
+    (the model-choice arm names that refusal).
+    """
+    if truth.is_instance(filter_instance, QuerySetRequestMixin):
+        queryset = read_attr(filter_instance, "queryset", None)
+        if queryset is None or callable(queryset):
+            return
+    form_field = _declared_form_field(filter_instance)
+    if form_field is None:
+        return
+    keys = widget_keys(read_attr(form_field, "widget"), _FORM_KEY)
+    if keys == [_FORM_KEY]:
+        return
+    declaration = _declaration_of(filter_instance, filterset_cls)
+    numeric_range = (
+        " A NumericRangeFilter filters a PostgreSQL range column, which the schema does not "
+        "publish."
+        if truth.is_instance(declaration.declared, NumericRangeFilter)
+        else ""
+    )
+    raise ConfigurationError(
+        f"{declaration.owner(filterset_cls)}: {declaration.kind} on "
+        f"{truth.render(declaration.declared.field_name)}{declaration.route} publishes one "
+        f"value under its form-data key {_FORM_KEY}, but its form field's widget reads "
+        f"{', '.join(keys)}, so the value would never be read. Declare a RangeFilter (the "
+        "package's or django-filter's) for a two-bound range, or give the filter a form field "
+        f"whose widget reads one key.{numeric_range}",
+    )
+
+
 def convert_filter_to_input_annotation(
     filter_instance: Filter,
     model_field: ModelField | None,
@@ -683,6 +734,12 @@ def convert_filter_to_input_annotation(
     ``<name>_lookup``), and no generated input carries that pair. The form field of a
     filter that reaches a ``field`` read is built on a copy of it (``_declared_form_field``),
     so building the schema writes nothing to a class-level declaration.
+
+    Every arm but the range arm publishes one value under the filter's one form-data key,
+    so a filter on any of them whose form field's widget reads other keys (a
+    ``NumericRangeFilter``, a ``MultiWidget`` / ``MultiValueField`` filter) raises
+    ``ConfigurationError`` (``_refuse_widget_reading_other_keys``); the range arm asks the
+    widget for its two keys (``range_form_keys``).
     """
     if truth.is_instance(filter_instance, LookupChoiceFilter):
         declaration = _declaration_of(filter_instance, filterset_cls)
@@ -756,21 +813,28 @@ def convert_filter_to_input_annotation(
             return bool
         return _element_annotation(matched, model_field, owner_definition, filterset_cls)
 
+    def _one_key(handler: Callable[[Filter], object]) -> Callable[[Filter], object]:
+        def _checked(matched: Filter) -> object:
+            _refuse_widget_reading_other_keys(matched, filterset_cls)
+            return handler(matched)
+
+        return _checked
+
     annotation = convert_with_mro(
         filter_instance,
         isinstance_prechecks=_filter_input_prechecks(
-            _gid_multi,
-            _gid,
-            _pk_multi,
-            _pk,
-            _model_choice,
-            _csv,
+            _one_key(_gid_multi),
+            _one_key(_gid),
+            _one_key(_pk_multi),
+            _one_key(_pk),
+            _one_key(_model_choice),
+            _one_key(_csv),
             _range,
-            _list,
-            _typed,
-            _choice,
-            _multiple_choice,
-            _catchall,
+            _one_key(_list),
+            _one_key(_typed),
+            _one_key(_choice),
+            _one_key(_multiple_choice),
+            _one_key(_catchall),
         ),
         scalar_registry={},
         fallthrough_error_factory=_unexpected_filter_dispatch,
