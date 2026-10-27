@@ -612,7 +612,7 @@ def test_weak_password_register_envelope_keys_to_password_not_all() -> None:
 # re-raises through the list-form wrapper, whose constructor flattens dict-form
 # entries into scalar leaves, so the register write step's ``error_list`` /
 # ``leaf.code`` walk still sees only scalar leaves - pinned here so the manual
-# walk's reliance on that upstream normalization is explicit (hunt 0.0.15).
+# walk's reliance on that upstream normalization is explicit.
 class DictFormPasswordValidator:
     """A password validator that fails with Django's dict-form ``ValidationError``."""
 

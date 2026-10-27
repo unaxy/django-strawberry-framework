@@ -6,7 +6,7 @@ wired in ``apps.products.schema`` end to end:
 * optimizer SQL-shape contracts that are reachable through the real
   products GraphQL API;
 * the per-field ``check_name_permission`` gate on ``CategoryFilter`` (a
-  ``DONE-027-0.0.8`` filter permission hook) -- including that the
+  spec-027 filter permission hook) -- including that the
   gate fires for NON-``exact`` lookups (``iContains``),
   not just ``exact``;
 * own-PK Relay ``GlobalID`` filtering (``id: { in: [...] }``), since the
@@ -2176,8 +2176,7 @@ def test_g2_mutation_response_keeps_relation_with_bounded_query_count() -> None:
     # Bounded count = 14, derived from a real run (stable across runs):
     #   BEGIN + COMMIT                                    = 2 (the DjangoSchema
     #                                                         completion-spanning
-    #                                                         transaction - mutation atomicity,
-    #                                                         shipped 0.0.14)
+    #                                                         transaction - mutation atomicity)
     #   SAVEPOINT + RELEASE                               = 2 (the pipeline's inner
     #                                                         atomic, nested)
     #   session + auth_user + user_perms + group_perms    = 4 (authorized-caller
@@ -2217,7 +2216,7 @@ def test_g2_mutation_response_keeps_relation_with_bounded_query_count() -> None:
 def test_emitted_globalid_is_model_anchored() -> None:
     """An emitted ``node { id }`` decodes to the Django model label, not the type name.
 
-    Under the ``0.0.9`` model-label default, ``ItemType``'s ``GlobalID``
+    Under the model-label default, ``ItemType``'s ``GlobalID``
     carries ``products.item:<pk>`` (``models.Item._meta.label_lower``), not the
     GraphQL type name ``ItemType``. Decode the API-emitted ``id`` via
     ``relay.GlobalID.from_id`` and assert the model-label payload.
@@ -2246,7 +2245,7 @@ def test_emitted_globalid_is_model_anchored() -> None:
 
 @pytest.mark.django_db
 def test_globalid_filter_round_trip() -> None:
-    """THE headline ``0.0.9`` workflow: feed an emitted GlobalID straight back as a filter.
+    """THE headline GlobalID workflow: feed an emitted GlobalID straight back as a filter.
 
     Take the model-label ``id`` the products API just emitted for one item and
     feed it back verbatim as ``filter: { id: { exact: "<that id>" } }``; the
@@ -3233,7 +3232,7 @@ def test_products_items_filter_by_related_category_global_id() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Ordering (DONE-028-0.0.8) - wired in ``apps.products.schema`` via the
+# Ordering (spec-028) - wired in ``apps.products.schema`` via the
 # ``orderset_class`` Meta key and the ``order_input_type(...)`` resolver
 # arguments. Expectations compare against the equivalent ORM ``order_by`` so
 # the GraphQL ``ORDER BY`` and the expected sequence share one DB collation
@@ -3399,7 +3398,7 @@ def test_products_items_filter_and_order_compose() -> None:
 # DoD item 10). The reverse-FK windowed nested-connection shape the M2M-only
 # library graph cannot express live: ``Category.items`` synthesizes an
 # ``itemsConnection`` (both ``CategoryType`` and ``ItemType`` are
-# Relay-Node-shaped, so the ``DONE-032-0.0.9`` synthesis covers it), and the
+# Relay-Node-shaped, so the spec-032 synthesis covers it), and the
 # optimizer plans it as a single windowed ``Prefetch``. The raw ``items``
 # list stands beside it only because ``CategoryType.Meta`` carries an
 # explicit ``{"items": "both"}`` opt-in; the package default drops it.
@@ -3621,7 +3620,7 @@ def test_products_items_connection_negative_cursor_is_a_cursor_error(
 
 # The products conversion (spec-033) deliberately adds NO Meta.connection opt-in on the four
 # products types (no totalCount; minimal cookbook-mirror conversion) and NO root
-# node(id:) / nodes(ids:) entry points (those stay TODO-BETA-066-0.1.5).
+# node(id:) / nodes(ids:) entry points (those stay with the fakeshop-activation card).
 
 
 # =============================================================================
@@ -6621,8 +6620,7 @@ def test_g2_serializer_mutation_response_keeps_relation_with_bounded_query_count
     # attestation). Per-query breakdown:
     #   BEGIN + COMMIT                                       = 2 (the DjangoSchema
     #                                                            completion-spanning
-    #                                                            transaction - mutation atomicity,
-    #                                                            shipped 0.0.14)
+    #                                                            transaction - mutation atomicity)
     #   SAVEPOINT + RELEASE                                  = 2 (the pipeline's inner
     #                                                            atomic, nested)
     #   session + auth_user + user_perms + group_perms       = 4 (authorized-caller

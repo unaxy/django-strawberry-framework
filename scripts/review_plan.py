@@ -6,8 +6,8 @@ pure git plus filesystem: nothing is imported from the package and no Django
 settings are loaded.
 
 ``plan``
-    Write ``docs/review/review-<release>.md`` (``0.0.15`` becomes
-    ``review-0_0_15.md``; the release is read from the package
+    Write ``docs/review/review-<release>.md`` (``1.2.3`` becomes
+    ``review-1_2_3.md``; the release is read from the package
     ``__version__`` unless ``--target-release`` names it). The inventory is
     ``git ls-files 'django_strawberry_framework/*.py'`` minus every
     ``__init__.py``: one file item per module, one folder integration item per
@@ -770,7 +770,7 @@ def _validated_release(value: str) -> str:
     """Return ``value`` when it is a dotted-digit release, else fail."""
     if not RELEASE_PATTERN.fullmatch(value):
         raise ValueError(
-            f"invalid --target-release {value!r}; expected dotted digits such as 0.0.15",
+            f"invalid --target-release {value!r}; expected dotted digits such as 1.2.3",
         )
     return value
 

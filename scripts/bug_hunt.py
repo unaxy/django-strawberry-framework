@@ -465,7 +465,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     if not RELEASE_PATTERN.fullmatch(release):
         print(
-            f"invalid release {release!r}; expected dotted digits such as 0.0.14",
+            f"invalid release {release!r}; expected dotted digits such as 1.2.3",
             file=sys.stderr,
         )
         return 1

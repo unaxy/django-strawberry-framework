@@ -2,7 +2,6 @@
 
 Spec: ``docs/SPECS/spec-020-list_field-0_0_7.md``.
 Extension spec: ``docs/SPECS/spec-050-list_field_arguments-0_0_15.md``.
-Target release: ``0.0.7``.
 """
 
 from __future__ import annotations

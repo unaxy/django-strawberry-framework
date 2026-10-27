@@ -2351,7 +2351,7 @@ async def test_async_consumer_edge_prefix_pages_and_refuses_a_stock_cursor() -> 
     assert isinstance(foreign.errors[0].original_error, PaginationArgumentError)
 
 
-# spec-033 Slices 1-2 (DONE-033-0.0.9): the root-connection fence. The
+# spec-033 Slices 1-2: the root-connection fence. The
 # root-connection planning pins here (edges { node } extraction ->
 # select_related / Prefetch on the pre-slice queryset) hold the ROOT half; the
 # shared helper (Decision 9) and the fast path (Decision 5) touch only the

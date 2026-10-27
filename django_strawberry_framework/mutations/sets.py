@@ -404,8 +404,8 @@ class DjangoMutation(_ModelResolverSeamsBase, metaclass=DjangoMutationMetaclass)
     def _resolve_model(cls, meta: type[object]) -> type[models.Model] | None:
         """Resolve the mutation's Django model from ``Meta`` (the model-resolution seam).
 
-        In 0.0.11 the only source is ``Meta.model``. This is the overridable hook
-        the 0.0.12 form flavor (``Meta.form_class._meta.model``) and the 0.0.13
+        The model flavor's source is ``Meta.model``. This is the overridable hook
+        the form flavor (``Meta.form_class._meta.model``) and the
         serializer flavor (``Meta.serializer_class.Meta.model``) replace so they
         supply the model WITHOUT a literal ``Meta.model``, without re-opening the
         base validation (spec-036 Decision 5). A subclass overrides this
@@ -418,9 +418,8 @@ class DjangoMutation(_ModelResolverSeamsBase, metaclass=DjangoMutationMetaclass)
         """Validate a concrete mutation's nested ``Meta`` at class creation (spec-036 Decision 5).
 
         The overridable validation seam the metaclass invokes
-        (``DjangoMutationMetaclass.__new__``). This default is the **model flavor**
-        (the 0.0.11 body relocated verbatim from the former module-level
-        ``_validate_mutation_meta``); the spec-038 form flavors override it with
+        (``DjangoMutationMetaclass.__new__``). This default is the **model flavor**;
+        the spec-038 form flavors override it with
         their own matrix (``forms/sets.py``). The validation matrix (raising
         ``ConfigurationError`` naming the offending key, all at class-creation):
 
@@ -428,8 +427,8 @@ class DjangoMutation(_ModelResolverSeamsBase, metaclass=DjangoMutationMetaclass)
           ``_ALLOWED_MUTATION_META_KEYS`` (own keys only, no MRO walk), mirroring
           ``types/base.py::_validate_meta``.
         - **no resolvable model** - ``cls._resolve_model(meta)`` returns ``None``
-          (in 0.0.11 a missing ``Meta.model``; the seam lets the 0.0.12 / 0.0.13
-          flavors supply it differently).
+          (for the model flavor a missing ``Meta.model``; the seam lets the form
+          and serializer flavors supply it differently).
         - **resolved model is not a Django model class** - a string name, a model
           instance, or any non-``models.Model`` type (mirrors
           ``types/base.py::_validate_meta``; without this the bind crashes with a

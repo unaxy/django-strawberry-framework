@@ -447,9 +447,8 @@ def _warn_model_label_secondary_collapse(
     distinct identity and ``get_queryset`` visibility scope silently collapse into
     the primary's. This is legal (spec-031 Decision 8: a model-anchored ID cannot
     distinguish secondaries by design), but it is the most likely accidental
-    config now that ``model`` is the default - and a regression for a multi-type
-    model that, under the pre-``0.0.9`` type-name default, gave each type a
-    distinct, correctly-routed ``GlobalID``.
+    config under the ``model`` default - a multi-type model under the ``type``
+    strategy gives each type a distinct, correctly-routed ``GlobalID``.
 
     The hard-error sibling ``_audit_model_label_routing`` has already rejected the
     inverse (a model-label emitter under a primary that CANNOT decode model
@@ -627,7 +626,7 @@ def _synthesize_relation_connections() -> None:
       the generated list annotation and the Phase-2 list resolver before Phase 3
       freezes the annotation set, so the SDL never carries the list form.
     - ``"both"`` - keep the generated ``list[T]`` field AND add the connection
-      sibling. An explicit opt-in since ``0.0.14``: a list sibling beside a
+      sibling. An explicit opt-in: a list sibling beside a
       connection is a bypass of the connection's page cap, so it is a shape a
       schema author asks for rather than one they receive.
     - ``"list"`` - synthesize nothing.
@@ -656,10 +655,9 @@ def _synthesize_relation_connections() -> None:
     to Strawberry's own schema-build duplicate-field error - a documented
     constraint (spec-032 Edge cases), not a gap this guard can close.
 
-    Pre-``033`` strictness posture (spec-032 Decision 12 / Non-goals): the
-    synthesized resolver consults NO ``DST_OPTIMIZER_*`` sentinels and
-    derives an empty optimizer plan; wiring strictness/planning into the
-    connection pipeline is ``DONE-033-0.0.9``'s scope.
+    Strictness (spec-033 Decision 8): the synthesized resolver consults the
+    optimizer sentinels before its per-parent fallback pipeline
+    (``connection.py::_build_relation_connection_resolver``).
     """
     # Function-local plain imports: cycle-safe cross-module reads (the
     # ``_node_fields_declared`` precedent in ``finalize_django_types``). A

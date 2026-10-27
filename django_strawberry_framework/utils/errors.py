@@ -157,8 +157,8 @@ class FieldError:
     its validator-side name (the model, form or serializer field name), since
     there is no input field to report; when an input renames a field onto such a
     name, two errors can share one key. Defined here (spec-036 Decision 7) as the ONE
-    envelope member type: the form-based (0.0.12) and DRF-serializer / auth
-    (0.0.13) flavors return this same class rather than a per-flavor mirror,
+    envelope member type: the form-based and DRF-serializer / auth
+    flavors return this same class rather than a per-flavor mirror,
     so a client's error branch is written once. The type is ADDITIVE, not
     frozen - a member may be added (``codes`` / ``path`` below were), never
     removed or retyped. Mirrors graphene-django's ``ErrorType``.

@@ -218,7 +218,7 @@ def install_probe_schema(
         finalize_django_types()
         # DjangoSchema: the probe mounts the generated products write surface,
         # whose pipeline requires the completion-spanning transaction
-        # (mutation atomicity, shipped 0.0.14).
+        # (mutation atomicity).
         _current["schema"] = DjangoSchema(
             query=Query,
             mutation=Mutation,

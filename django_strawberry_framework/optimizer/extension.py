@@ -219,7 +219,7 @@ def _matched_strictness(strictness: object) -> str | None:
 # those resolved values into windowed prefetch querysets, so two requests differing
 # only in a nested ``first: $n`` value need distinct cached plans -- spec-033 Decision 7).
 # Single source of truth for the four argument names; a future ``search:``
-# extension (``0.1.2``) would extend the family here, not re-spell it inline.
+# extension (spec-060) would extend the family here, not re-spell it inline.
 _PAGINATION_ARG_NAMES = frozenset(
     {
         "first",

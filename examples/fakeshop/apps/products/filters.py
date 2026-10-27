@@ -26,8 +26,8 @@ each model's own ``id`` is a Relay GlobalID over the wire -- so the ``id``
 ``GlobalIDMultipleChoiceFilter`` conversion across the PK's lookups.
 
 ``check_<field>_permission(self, request)`` is the filter subsystem's
-(``DONE-027-0.0.8``) per-field permission gate; the permissions subsystem
-(``DONE-034-0.0.10``) composes with it unchanged (its Decision 11 keeps the
+(spec-027) per-field permission gate; the permissions subsystem
+(spec-034) composes with it unchanged (its Decision 11 keeps the
 filter/order gates as-is). The queryset-scoping
 ``check_<field>_permission(self, queryset, request)`` variant below is a
 separate, currently-unscheduled extension (no owning card) and stays commented.
@@ -79,7 +79,7 @@ class ItemFilter(FilterSet):
 
     # TODO(unscheduled - queryset-scoping filter permission; see KANBAN.md): The queryset-scoping
     #   permission variant below is NOT part of the shipped permissions subsystem -
-    #   ``DONE-034-0.0.10`` ships cascade row-visibility and keeps the filter gates unchanged (its
+    #   spec-034 ships cascade row-visibility and keeps the filter gates unchanged (its
     #   Decision 11), so this variant has no owning card yet. Uncomment in the change that lands
     #   the hook contract and drop the ERA001 fence around it.
     # ruff: disable[ERA001]

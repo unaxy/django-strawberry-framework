@@ -37,6 +37,7 @@ import pytest
 import tomli
 import yaml
 
+import django_strawberry_framework
 from django_strawberry_framework.utils.imports import (
     CHANNELS_FLOOR,
     DEBUG_TOOLBAR_FLOOR,
@@ -1458,6 +1459,282 @@ def test_the_provenance_sweep_reports_nothing_for_a_planted_permitted_form(
     violations, read = _provenance_entries_in([planted])
     assert read == 5, read
     assert violations == [], violations
+
+
+#: The package directory whose non-statement strings the release sweep also reads.
+PACKAGE_ROOT = REPO_ROOT / "django_strawberry_framework"
+
+#: The release the package tracks; the sweep refuses it and every earlier one.
+PACKAGE_VERSION = django_strawberry_framework.__version__
+
+
+def _release_pattern(version: str, separator: str) -> re.Pattern[str]:
+    """Return the pattern for every release of this package up to ``version``'s series.
+
+    ``version`` is ``major.minor.patch``. A release is any earlier major with any
+    minor, or ``major`` with a minor up to ``minor``, and any patch, written with
+    ``separator`` between the parts. No digit, and no separator after a digit,
+    may sit on either side, so an IP address, a four-part version or a longer
+    number is no match, and a sentence-final dot still ends one.
+    """
+    major, minor = (int(part) for part in version.split(".")[:2])
+    sep = re.escape(separator)
+    series = [rf"{major}{sep}(?:{'|'.join(str(n) for n in range(minor + 1))})"]
+    if major:
+        series.insert(0, rf"(?:{'|'.join(str(n) for n in range(major))}){sep}\d+")
+    return re.compile(
+        rf"(?<!\d)(?<!\d{sep})(?:{'|'.join(series)}){sep}\d+(?!{sep}?\d)",
+    )
+
+
+#: A release of this package in prose or in a string, derived from ``__version__``.
+RELEASE_PATTERN = _release_pattern(PACKAGE_VERSION, ".")
+
+#: A release of this package in a def or class name, spelled with underscores.
+RELEASE_NAME_PATTERN = _release_pattern(PACKAGE_VERSION, "_")
+
+#: A board card id carrying a release, past or planned (``<STATE>-<PHASE>-<NNN>-<release>``).
+CARD_ID_PATTERN = re.compile(r"\b(?:DONE|WIP|TODO)-(?:[A-Z]+-)?\d+-\d+\.\d+\.\d+\b")
+
+#: What prose and strings are read for: a card id, which carries its release, is
+#: reported once as the card id.
+PROSE_RELEASE_PATTERN = re.compile(f"{CARD_ID_PATTERN.pattern}|{RELEASE_PATTERN.pattern}")
+
+
+def _runtime_strings(source: str, *, version_file: bool) -> list[tuple[int, str]]:
+    """Return ``(line, text)`` for every ``str`` constant that is not a string statement.
+
+    These are a module's runtime messages, assigned constants and arguments; an
+    f-string contributes each literal part. A string statement is skipped (the
+    prose sweep reads it), and in ``version_file`` so is the value assigned to
+    ``__version__``, the one place the release is tracked.
+    """
+    tree = ast.parse(source)
+    skipped: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Expr) and isinstance(node.value, (ast.Constant, ast.JoinedStr)):
+            skipped.update(id(part) for part in ast.walk(node.value))
+        if (
+            version_file
+            and isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "__version__"
+                for target in node.targets
+            )
+        ):
+            skipped.add(id(node.value))
+    return [
+        (node.lineno, node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and id(node) not in skipped
+    ]
+
+
+def _release_entries_in(
+    paths: Iterable[Path],
+    package_root: Path = PACKAGE_ROOT,
+) -> tuple[list[str], int]:
+    """Return one formatted violation per release or release-carrying card id, and the texts read.
+
+    Every file contributes its comments, string statements and def/class names
+    (``_prose_segments``); a file under ``package_root`` also contributes its
+    runtime strings (``_runtime_strings``). Each violation names the file, the
+    line, the kind of text and the match.
+    """
+    violations: list[str] = []
+    read = 0
+    for path in paths:
+        display = path.relative_to(REPO_ROOT) if path.is_relative_to(REPO_ROOT) else path
+        source = path.read_text(encoding="utf-8")
+        texts = [
+            (first_line, kind, text.replace(" ", "_") if kind == "name" else text)
+            for first_line, kind, text in _prose_segments(source)
+        ]
+        if path.is_relative_to(package_root):
+            version_file = path == package_root / "__init__.py"
+            texts.extend(
+                (line, "string", text)
+                for line, text in _runtime_strings(source, version_file=version_file)
+            )
+        for first_line, kind, text in texts:
+            read += 1
+            pattern = RELEASE_NAME_PATTERN if kind == "name" else PROSE_RELEASE_PATTERN
+            for match in pattern.finditer(text):
+                line = first_line + text.count("\n", 0, match.start())
+                violations.append(f"{display}:{line}: {kind}: {match[0]!r}")
+    return violations, read
+
+
+def test_no_comment_docstring_name_or_package_string_carries_a_release_of_this_package() -> None:
+    """No first-party prose, and no package string, names a release of this package.
+
+    START.md "Style the maintainer cares about": code states the behaviour, never
+    the release that brought it; the release is tracked in ``__version__``, the
+    changelog and the board. This row reads every comment, string statement and
+    def/class name of the sweep corpus, plus every other ``str`` constant in
+    ``django_strawberry_framework/`` (runtime messages), and refuses:
+
+    - a release of this package: any earlier major, or the current major up to
+      the current minor, with any patch (``RELEASE_PATTERN``, derived from
+      ``__version__`` so each new series widens it without an edit);
+    - a board card id carrying a release, past or planned (``CARD_ID_PATTERN``);
+    - a release spelled with underscores in a def or class name.
+
+    The one exclusion is the value assigned to ``__version__`` in
+    ``django_strawberry_framework/__init__.py``. A site is restated as the
+    behaviour it describes; a card id becomes its spec (``spec-NNN``) or its
+    topic in words.
+
+    Deliberate limits. A non-statement string outside the package (test data,
+    fixtures, a script's argument example) is not read, so release-handling
+    tests keep their inputs. A planned release of a later series than the current
+    one is not a match unless it sits in a card id. The underscore spelling is
+    read only in def/class names, so a cited ``spec-NNN-<topic>-<release>.md``
+    path in prose stays. A release split by a line wrap is no match.
+    """
+    corpus = _sweep_corpus()
+    violations, read = _release_entries_in(corpus)
+    assert REPO_ROOT / CENSUS_MODULE in corpus, "the sweep corpus does not hold this module"
+    assert PACKAGE_ROOT / "__init__.py" in corpus, "the sweep corpus does not hold the package"
+    assert read, "no comment, docstring, name or string was read; the sweep read nothing"
+    assert not violations, (
+        "release(s) of this package in first-party code:\n"
+        + "\n".join(violations)
+        + "\nRestate each site as the behaviour it describes; name a card by its spec or "
+        "its topic (START.md, 'Style the maintainer cares about')."
+    )
+
+
+def _plant_package(tmp_path: Path, name: str, body: str) -> tuple[Path, Path]:
+    """Write a planted package module under ``tmp_path``; return it and the package root."""
+    root = tmp_path / "django_strawberry_framework"
+    root.mkdir(exist_ok=True)
+    planted = root / name
+    planted.write_text(body, encoding="utf-8")
+    return planted, root
+
+
+#: One planted shape per refused form: the file it sits in (``package`` or
+#: ``other``), its body, and the line, kind and match the report must name.
+PLANTED_RELEASE_SHAPES = [
+    (
+        "comment",
+        "other",
+        "VALUE = 1\n# the default since 0.0.9\n",
+        "2: comment: '0.0.9'",
+    ),
+    (
+        "docstring",
+        "other",
+        'def run():\n    """Run.\n\n    Shipped in 0.0.9.\n    """\n',
+        "4: docstring: '0.0.9'",
+    ),
+    (
+        "sentence-final",
+        "other",
+        "# The default is 0.0.9.\n",
+        "1: comment: '0.0.9'",
+    ),
+    (
+        "package-message",
+        "package",
+        "MESSAGE = 'refused since 0.0.9'\n",
+        "1: string: '0.0.9'",
+    ),
+    (
+        "package-f-string",
+        "package",
+        "def run(value):\n    raise ValueError(f'{value} refused since 0.0.9')\n",
+        "2: string: '0.0.9'",
+    ),
+    (
+        "card-id",
+        "other",
+        "# the scope of DONE-033-0.0.9\n",
+        "1: comment: 'DONE-033-0.0.9'",
+    ),
+    (
+        "planned-card-id",
+        "package",
+        "MESSAGE = 'see TODO-BETA-059-9.0.1'\n",
+        "1: string: 'TODO-BETA-059-9.0.1'",
+    ),
+    (
+        "name",
+        "other",
+        "def test_the_0_0_9_default():\n    pass\n",
+        "1: name: '0_0_9'",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("where", "body", "expected"),
+    [(where, body, expected) for _, where, body, expected in PLANTED_RELEASE_SHAPES],
+    ids=[name for name, _, _, _ in PLANTED_RELEASE_SHAPES],
+)
+def test_the_release_sweep_reports_a_planted_shape(
+    tmp_path: Path,
+    where: str,
+    body: str,
+    expected: str,
+) -> None:
+    """Each refused form is reported at its line, with its kind and match."""
+    if where == "package":
+        planted, root = _plant_package(tmp_path, "planted.py", body)
+    else:
+        planted, root = _plant_prose(tmp_path, body), tmp_path / "django_strawberry_framework"
+    violations, _ = _release_entries_in([planted], root)
+    assert violations == [f"{planted}:{expected}"], violations
+
+
+def test_the_release_sweep_reports_nothing_for_a_planted_permitted_form(tmp_path: Path) -> None:
+    """The negative direction: the forms the gate leaves alone are not reported.
+
+    An upstream release range, an IP address, a spec file path spelled with
+    underscores in prose, a later series, a four-part version, a test-data string
+    outside the package, and the ``__version__`` value in the package's
+    ``__init__.py``.
+    """
+    other = _plant_prose(
+        tmp_path,
+        "# strawberry-graphql 0.322.2 - 0.327.7 and cross-web 0.7.0 are audited\n"
+        "# the server listens on 127.0.0.1 and 10.0.0.1\n"
+        "# see docs/SPECS/spec-032-full_relay-0_0_9.md\n"
+        "# a later series 9.0.1; a four-part version 0.0.8.4\n"
+        "FIXTURE = '0.0.8'\n",
+    )
+    version_file, root = _plant_package(
+        tmp_path,
+        "__init__.py",
+        f'"""The package."""\n\n__version__ = {PACKAGE_VERSION!r}\n',
+    )
+    violations, read = _release_entries_in([other, version_file], root)
+    assert read == 2, read
+    assert violations == [], violations
+
+
+def test_the_release_pattern_widens_with_the_version() -> None:
+    """Each later series widens the pattern: every earlier major and minor stays refused."""
+    pattern = _release_pattern("2.1.0", ".")
+    assert [
+        text
+        for text in (
+            "0.9.3",
+            "1.4.0",
+            "2.0.7",
+            "2.1.12",
+        )
+        if pattern.search(text)
+    ] == [
+        "0.9.3",
+        "1.4.0",
+        "2.0.7",
+        "2.1.12",
+    ]
+    assert [text for text in ("2.2.0", "3.0.0", "12.1.0") if pattern.search(text)] == []
 
 
 def test_channels_floor_constant_matches_the_pyproject_dependency_row() -> None:

@@ -547,7 +547,7 @@ def convert_serializer_field(
 
     ``is_input`` is the graphene-django ``convert_serializer_field(field,
     is_input=...)`` parity parameter - **accepted-and-ignored** (spec-039
-    Decision 7): for 0.0.13 the converter only ever runs on the input
+    Decision 7): the converter only ever runs on the input
     side, so there is deliberately NO ``if not is_input:`` branch (a dead branch
     would gate-fail ``fail_under=100``). It is threaded so a future read-side
     caller does not have to widen the signature.
