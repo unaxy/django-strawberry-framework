@@ -87,9 +87,16 @@ Release: [`django_strawberry_framework.__version__`][package-init] reads `"0.0.1
         annotate, readable leaves (a column, the `*` of a row count, a literal, and the
         framework's own visibility test), the `F` and `Q` reference forms, and the approved
         transforms and lookups a predicate applies - and refuses every other node, subclasses
-        of approved ones included. Which arm a term takes is decided by `resolve_expression`,
-        the way the compiler decides it, so a name that is an expression is classified as
-        one. A string name ending on a relation expands where the compiler expands it,
+        of approved ones included, and an approved node whose instance carries its own
+        template, operator, `extra` or SQL-emitting output field. Which arm a term takes is
+        decided by `resolve_expression`, the way the compiler decides it, so a name that is an
+        expression is classified as one. A string name refuses any piece after an annotation
+        head, while an `F` reads its trailing pieces as approved transforms on the operand
+        `resolve_ref` builds them on. A predicate's chain is looked up on its real operand and
+        its lookup is the one the value selects (`exact` against `None` compiles `isnull`), and
+        a predicate an annotation holds resolved - a `WhereNode` of lookups, an aggregate's
+        `filter=` - is read against the same sets, so one ordering gets one verdict written
+        directly or held by an annotation. A string name ending on a relation expands where the compiler expands it,
         decided on the field `Query.names_to_path` ends on, so a many-to-many or generic
         relation name always expands.
   - [ ] Sync and async paths run visibility, then `OrderSet`, then the offset/order guard,
@@ -133,6 +140,11 @@ Release: [`django_strawberry_framework.__version__`][package-init] reads `"0.0.1
         exact queryset's is, and a deferred-filter state Django never writes refused with the
         typed error at both tiers. The dynamic manager stays migration-safe through Django's
         `use_in_migrations=False` default.
+  - [ ] A queryset or manager a `DjangoListField` resolver returns passes the visibility seal
+        before the raw-list seam, which drops its result cache, so an evaluated return is
+        executed again by a positive-width window - once per resolution, so once per parent
+        row when nested - while a list return and a zero-width window issue no further row
+        query; pinned live in both colours.
   - [ ] `tests/test_connection.py::test_the_optimizer_plans_a_relation_without_reading_the_target_class`
         swaps the target's definition attribute for a decoy over a different model after a
         real `DjangoSchema` with the optimizer is built, parametrized over hook flavour and
@@ -1139,7 +1151,11 @@ path, and it compiles an expression from that expression's whole source tree. Th
 form therefore sits one indirection away from what the ordering collection holds whenever it
 arrives as an annotation alias, an `F` naming one, or a `Random()` nested inside a
 composition, and a classifier reading the term as written certifies all three as ordinary
-column orders. Only a name that survives every resolution step orders by a column.
+column orders. Only a name that survives every resolution step orders by a column. This package
+reads no transform in a string order name: a name whose head alone names an annotation
+(`"sort_key__shuffle"` over `sort_key`) is refused whatever the transform, exactly as a field
+path with a piece left over is, while a whole name that is itself an annotation alias (`"a__b"`)
+is that alias, because the compiler tries the whole name first.
 
 A STRING name surviving to a field path is still not a column when that path ends on a
 relation whose model declares `Meta.ordering`.
@@ -1184,7 +1200,15 @@ the QUERY's own meta, which yields a column and never a related model's `Meta.or
 `Meta.ordering = (F("branch").asc(),)` orders by the foreign key column whatever the branch
 model declares, while the string `("branch",)` orders by the branch's own default, and a
 classifier reading the two the same way inverts one of them. The annotation and `extra` steps
-still apply to a reference, so an `F` naming a `Random()` annotation is refused. A reference the
+still apply to a reference, so an `F` naming a `Random()` annotation is refused. Whatever follows
+the annotation or the field path in an `F` is a transform `resolve_ref` applies, and each piece
+is read against the approved transform set below, looked up on the operand the way
+`Query.try_transform` looks it up: the annotation expression itself, whose own class registry
+comes before its output field's, or the column `resolve_ref` takes from the trimmed join target.
+`F("sort_key__shuffle")` is refused for its project transform and `F("stamp__year")` is
+certified. An annotation stores the `F` resolved, as the `ExtractYear` node it became, which is
+why a reference must read its transforms rather than refuse them: the same ordering then gets
+the same verdict ordered directly and held by an annotation. A reference the
 compiler lifts out of an expanded ordering is rewritten through `prefix_references` and
 resolved against the outer query under the relation path that reached it, so an `F("name")` in
 the branch's ordering reached through `("branch",)` is the outer query's `F("branch__name")`
@@ -1198,12 +1222,13 @@ certify a one-class project expression spelling `RANDOM()` over a column. A node
 through only when it is a form this package names, and only if every source expression it
 holds is certified too - an approved wrapper launders nothing, so `Coalesce(Random(),
 Random())` is refused through its children. The named forms are: the transparent compositions
-`Case`, `When`, `CombinedExpression`, `ExpressionWrapper` and `OrderBy`, whose own SQL is
-punctuation around their sources; the pure database functions `Cast`, `Coalesce`, `Concat`,
-`ConcatPair`, `Length`, `Lower` and `Upper`, each a deterministic function of its arguments;
-the aggregates `Min` and `Max`, which an `OrderSet` annotates for a to-many path, and `Count`,
-the row-count aggregate a consumer ordering may annotate; an `F` reference; and a `Q`
-predicate. The readable leaves
+`Case`, `When`, `CombinedExpression`, `ExpressionList`, `ExpressionWrapper` and `OrderBy`, and
+from Django 6.0 `AggregateFilter`, whose own SQL is punctuation around their sources; the pure
+database functions `Cast`, `Coalesce`, `Concat`, `ConcatPair`, `Length`, `Lower` and `Upper`,
+each a deterministic function of its arguments; the approved transforms below, which a
+resolved annotation holds as nodes; the aggregates `Min` and `Max`, which an `OrderSet`
+annotates for a to-many path, and `Count`, the row-count aggregate a consumer ordering may
+annotate; an `F` reference; and a `Q` predicate. The readable leaves
 (`django_strawberry_framework/list_field.py::_READABLE_ORDER_LEAVES`) carry all of their own
 SQL and are named outright: a column reference, the `*` of a row count, a literal value, and
 the framework's own visibility test
@@ -1211,6 +1236,17 @@ the framework's own visibility test
 under its own exact type; it decides only whether an `OrderSet` term reads its column or
 `NULL`, and its rows are a target type's `get_queryset`, which the guard already trusts for the
 parent rows.
+
+An approved class is not the whole of a node's SQL. Its `as_sql` formats instance state into the
+statement, and the seal admits text in every such slot, so `Lower("name", template="RANDOM()")`
+is an exact `Lower` compiling to `RANDOM()`. Every approved node and readable leaf must therefore
+carry only what its class supplies
+(`django_strawberry_framework/list_field.py::_order_node_state_is_stock`): no template,
+function, joiner or `sql` slot on the instance, an empty `extra`, and an operator - the one slot
+a `CombinedExpression` or `WhereNode` always stores - that is one of Django's own. `Value` and
+`Cast` call a hook on their output field (a placeholder, a cast type), so either is read only
+over one of Django's own field classes; a column's field is the model's and is not constrained,
+because none of its hooks reaches the order SQL.
 
 Every match is by EXACT type, the two reference forms included. A subclass of an approved
 class is a different `as_sql` under an approved name and is refused, which is the difference
@@ -1223,7 +1259,7 @@ the way `_order_by_pairs` decides it: a term carrying `resolve_expression` is an
 is read as one, and only a term without it is read as a string name - so a `str` subclass
 carrying that method is classified as the expression Django resolves it to, never as the field
 path it spells. Everything unlisted is refused: `Random()`, a bare or custom `Func` naming a
-database function, a `Transform`, an aggregate outside the three, a `Window`, a `RawSQL`
+database function, an unlisted `Transform` or lookup, an aggregate outside the three, a `Window`, a `RawSQL`
 fragment, and every `Subquery` other than `VisibleRowExists`, whose inner `Query` the classifier
 does not read. A term it cannot read is one it must not certify as repeatable across the two
 queries an offset window spans. A classifier built instead as a list of known volatile classes
@@ -1235,7 +1271,8 @@ Raw SQL reached through `extra` - a name that is a key in `query.extra`, or the 
 the compiler hands through as `RawSQL` - is unreadable for the same reason: those strings are
 passed through verbatim and reading SQL is the thing this package does not do. An `extra`
 ordering naming a real field is an ordinary column order and satisfies the guard, as does a
-conditional order whose predicate and results are themselves certified forms.
+conditional order whose predicate and results are themselves certified forms, ordered directly
+or held by an annotation.
 A predicate is read on BOTH sides of every comparison, and on the value side to the depth a
 lookup can carry SQL. The lookup string names what is compared, and that reference is compiled
 into the statement exactly as the value it is compared against is, so a `Case` picking its
@@ -1250,7 +1287,10 @@ column order and is not expanded into its related model's default (a reference i
 ordering term), and a head naming neither is refused. The pieces that FOLLOW the reference are
 classified too, because a transform wraps it in a function call and the lookup is the operator
 around the comparison: `code__jitter__gt` resolves a column and then orders the rows by
-whatever `jitter` emits. Each is matched by exact type the same way a node is - a transform
+whatever `jitter` emits. Each is looked up on the operand Django builds the chain on - the
+annotation expression itself, or the column a field path compares through - so a lookup
+registered on `Lower` is read even where the output field registers Django's own, and each is
+matched by exact type the same way a node is - a transform
 against the approved transform set (`Length`, `Lower`, `Upper`, `ExtractDay`, `ExtractMonth`,
 `ExtractYear`, `TruncDate`, `TruncMonth` and `TruncYear`) and the final lookup against the
 approved lookup set (Django's comparison, membership and null tests, including the integer- and
@@ -1260,6 +1300,26 @@ trailing pieces is compared under Django's implicit `exact`. On the value side a
 sequence holds its operands one bracket deeper - `name__in` a list, `created__range` a pair -
 and the container itself resolves as no expression at all, so a predicate read only at its top
 level would report a fragment boxed inside one as a comparison against literals.
+The lookup that compiles is chosen by the value as well as the name.
+[`Query.build_lookup`][django-query] turns `exact` or `iexact` against `None` - and, on a backend
+that reads empty strings as null, against `""` - into the operand's own `isnull`, read on the
+operand the transform fallback leaves, so the classifier certifies that `isnull`
+(`django_strawberry_framework/list_field.py::_effective_order_lookups`); over a project field,
+whose value preparation it cannot predict, both classes must be approved. A `Q` child written as
+a bare conditional expression rather than a `(lookup, value)` pair is compiled under an implicit
+`exact` against `True` through the condition's own output field, and that `exact` is read too.
+A predicate an annotation holds arrives resolved: Django stores `When.condition` and an
+aggregate's `filter=` as a `WhereNode` of lookups (inside `AggregateFilter` from Django 6.0),
+already carrying the lookup classes it chose, value-dependent rewrites included. That form is
+read against the same sets - a `WhereNode` is punctuation over its children under one of
+Django's connectors, and a lookup of an approved class is certified when both of its sides are -
+so `annotate(k=Case(When(city="Boston", ...))).order_by("k")` and an annotated filtered `Count`
+are certified exactly as the direct spelling is, and an empty-result marker, an `extra`
+fragment or a bare raw fragment among the children is refused. One ordering therefore gets one
+verdict written directly or held by an annotation, with one exception: an annotation resolves a
+consumer-defined class into the query graph at once, so the post-sidecar seal refuses it as
+untrusted before the guard reads it, where the direct spelling, resolved only at compile time,
+reaches the guard and is refused there.
 The shared post-apply seal rejects consumer-defined expression classes as untrusted query
 state. For approved forms over readable leaves that pass the seal, volatility in what the
 database makes of them is the schema author's responsibility under Decision 7's
@@ -1377,9 +1437,10 @@ fetched, so that read is Django's own slot on an object the package owns rather 
 attribute lookup the subclass answers. *Derivation and rejected alternatives: see the
 [rationale][rationale-d8].*
 
-Evaluation state travels with the source. A queryset that reaches the seam already evaluated - a
-warm prefetch cache, a manager result a caller iterated before handing it over - is windowed from
-the rows it holds, with no further query, for the exact type and for a rebuilt subclass alike.
+Evaluation state travels with the source wherever no visibility seal stands in front of the
+seam. A source that reaches the raw-list seam already evaluated - the generated many-side
+resolver's warm prefetch cache, or a materialized value - is windowed from the rows it holds,
+with no further query, for the exact type and for a rebuilt subclass alike.
 The rows are read from the instance dictionary through
 `django_strawberry_framework/utils/truth.py::instance_state`, the read the sealer takes, never
 through attribute access. The generated many-side resolver hands that fetched `list` itself to
@@ -1408,7 +1469,15 @@ other than the query about to run. A visibility seal ADMITS an evaluated source 
 or injected row crosses the boundary and a consumer that evaluates inside the hook pays one
 extra query - a cost, not a broken seal. That hook's contract is shared with the Relay node,
 connection and relation surfaces, so holding it to the stricter rule here would make one hook's
-verdict depend on which field called it.
+verdict depend on which field called it. For a `DjangoListField` that cost is the ordinary case:
+a queryset or manager its resolver returns passes `get_queryset` and that visibility seal before
+the raw-list seam, so an evaluated return - one the resolver iterated, a `keep_class` project
+subclass, or a `root.<relation>.all()` handed back from a warm prefetch - reaches the seam with
+its cache dropped. A positive-width window therefore executes it again: one more row query per
+resolution, so one per parent row when the field is nested, plus whatever `prefetch_related`
+work it carries. A list return is windowed from the rows it holds, and a zero-width window
+(`limit: 0`) or a `.none()` source issues no row query. Only the generated many-side resolver
+windows a prefetch cache without a query.
 
 The lower-level window arithmetic is shape-complete and unit-pinned, but it does not widen the
 list field's order precondition, and the two tiers are kept apart: positive-offset arithmetic
@@ -2119,6 +2188,12 @@ Where each part of the surface lives, keyed to the slice checklist:
   over a randomly ordered branch while the string `"branch"` does not. The annotation and
   `extra` steps still apply to it, so an `F` naming a random annotation is still refused, and a
   reference lifted out of an expansion is read at the prefixed name the outer query resolves.
+- A piece after an annotation head is a transform. In a STRING name it is refused whatever it
+  is (`"sort_key__shuffle"`, `"stamp__year"`); in an `F` it is read as an approved transform on
+  the annotation expression or on the trimmed column, so `F("sort_key__shuffle")` and
+  `F("name__shuffle")` are refused while `F("stamp__year")` and a registered `F("name__lower")`
+  are served, a transform registered on `Lower` itself included. A whole name that is an alias
+  (`"a__b"`) is that alias even beside an `a` annotation.
 - A term resolving into `query.extra` - a select alias, or the dotted form handed through as
   `RawSQL` - is opaque rather than deterministic and cannot back an offset window. An
   `extra` ordering naming a real field is unaffected.
@@ -2127,7 +2202,10 @@ Where each part of the surface lives, keyed to the slice checklist:
   `ExpressionWrapper`, `OrderBy`), a pure Django function (`Cast`, `Coalesce`, `Concat`,
   `ConcatPair`, `Length`, `Lower`, `Upper`), an approved aggregate (`Count`, `Max`, `Min`), or
   a readable leaf (a column, the `*` of a row count, a literal `Value`, and the framework's own
-  `VisibleRowExists` visibility test), each matched by exact type. A `RawSQL` fragment, a bare
+  `VisibleRowExists` visibility test), each matched by exact type and each carrying only the
+  SQL its class supplies: a template, function or operator override, a non-empty `extra`, or
+  a `Value` / `Cast` over a project field whose placeholder or cast type emits SQL is refused
+  on an approved class. A `RawSQL` fragment, a bare
   `Func` naming a database function, and the inner query a `Subquery` wraps are each refused
   as unreadable rather than accepted for matching no known random class; so are a project
   `Func`, a `Transform`, a `Window`, any other aggregate, and any SUBCLASS of an approved
@@ -2152,6 +2230,20 @@ Where each part of the surface lives, keyed to the slice checklist:
   (`stamp__year__gt`) satisfies the guard. A fragment inside a sequence a lookup takes - the
   list `name__in` takes, the pair a `__range` takes - is refused, while a sequence of ordinary
   literals is as readable as one literal and satisfies the guard.
+- The predicate's chain is looked up on its real operand, so a project `gt` registered on
+  `Lower` is refused under an alias holding `Lower("name")`, and its lookup is the one the
+  value selects: `isil=None` is the `isnull` it compiles to, `isil__lower=None` the transformed
+  operand's `isnull`, and `isil=""` the same on a backend that reads empty strings as null. A
+  bare conditional `Q` child is read under the implicit `exact` Django compiles it with.
+- A predicate an annotation holds is read in its resolved form: an annotated `Case` over a
+  column predicate, its negation, a `__year` comparison, an `__in` holding an expression, and
+  an annotated filtered `Count` are each served as their direct spellings are, while a
+  resolved predicate over a random alias, a raw fragment or an unlisted lookup such as
+  `iexact` is refused. A project class resolved into an annotation is refused by the
+  post-sidecar seal as untrusted before the guard runs.
+- A `DjangoListField` resolver returning an evaluated queryset has its cache dropped by the
+  visibility seal, so a positive-width window reads it again, once per resolution and so once
+  per parent row when nested; a list return and a zero-width window do not.
 - Reversing a stable model default remains stable; `standard_ordering=False` changes direction
   and does not by itself disable the fallback.
 - A consumer queryset's private `.order_by(...)` does not substitute for the public order
@@ -2454,7 +2546,8 @@ which are functions in `test_list_field_async_api.py`, or given with their modul
     Resolution and readability, on the same field and override surface: an annotation alias
     over `Random()` (`test_shipped_branches_offset_rejects_an_annotated_random_order`), an `F`
     naming that alias (`..._rejects_an_f_reference_to_a_random_annotation`), the alias under a
-    leading `-` or a lookup suffix (`..._rejects_a_desc_or_lookup_random_alias`), an `extra`
+    leading `-` and a string name carrying a piece after it, refused as a trailing piece
+    (`..._rejects_a_desc_or_lookup_random_alias`), an `extra`
     select alias and the dotted `extra` form (`..._rejects_an_extra_select_ordering`,
     `..._rejects_a_dotted_extra_order`), a `Random()` nested in a composition
     (`..._rejects_a_composed_random_order`), a `RawSQL` fragment
@@ -2471,6 +2564,39 @@ which are functions in `test_list_field_async_api.py`, or given with their modul
     (`test_async_offset_rejects_an_annotated_random_order`,
     `test_async_offset_rejects_an_extra_select_ordering`,
     `test_async_offset_rejects_a_raw_sql_order`).
+
+    Spelling-independence, on the same field and override surface, each table row its own node
+    id in both colours: `test_shipped_branches_offset_refuses_an_order_compiling_to_sql_it_cannot_read`
+    refuses, with no row SQL, a transform after an annotation alias in a string and in an `F`,
+    an approved transform in a string, a project transform after a column in an `F`, a
+    transform or lookup registered on the annotation's own class, a predicate value carrying a
+    project transform, `exact` against `None` compiling a project `isnull` (on the column and
+    on a transformed operand), a bare conditional child under a project `exact`, an annotated
+    predicate over a random alias (plain and negated), a raw fragment or an `iexact`, an
+    annotated filtered `Count` over a raw fragment, and approved nodes carrying a template,
+    operator, cast type or placeholder override, each direct and annotated where Django allows
+    both. `test_shipped_branches_offset_annotated_project_sql_is_refused_by_the_seal_first`
+    pins the annotated twins of the project-class rows at the seal's untrusted defect, and
+    `test_shipped_branches_offset_certifies_an_order_whatever_spelling_resolves_it` serves,
+    each written directly and held by an annotation, a conditional, its negation, a `__year`
+    predicate, an `__in` holding an expression, an `F` transform as a predicate value, as a
+    `When` result and as the term itself, a stock operator and a registered column transform,
+    plus an annotated filtered `Count`, the whole-name alias `"a__b"` beside a random `a`, and
+    `isil=None` over Django's own `isnull`.
+    `test_shipped_branches_offset_reads_an_empty_string_by_what_the_backend_compiles` refuses
+    `isil=""` under a project `isnull` where the backend reads `""` as null and serves it where
+    it does not. Each has its `test_async_offset_` twin.
+
+    The evaluated-source re-query, on holder schemas in both colours:
+    `test_holder_branches_an_evaluated_resolver_queryset_is_read_again` counts two branch
+    statements for an evaluated queryset return, one for a list return and one for the
+    evaluated return under `limit: 0`;
+    `test_holder_branches_a_nested_evaluated_queryset_is_read_again_per_parent` counts two per
+    parent against one per parent for the list twin at one and two parents; and
+    `test_holder_shelves_a_warm_prefetch_returned_by_a_resolver_is_read_again_per_parent`
+    counts one prefetch plus one shelf read per parent for `root.branch.shelves.all()`. Each
+    has its `test_async_holder_` twin, and each count is that fixture's - a plain queryset with
+    nothing else prefetched.
 
     Relation expansion, on a holder schema over a type whose model owns a foreign key, in both
     colours, with both `Meta.ordering` values supplied for the request: a parent ordering by the
@@ -2729,7 +2855,14 @@ sync or async HTTP request cannot isolate:
   head naming neither an annotation nor a field refused
   (`test_order_predicate_classifier_refuses_an_unresolvable_reference`), and a transform chain
   whose verdict follows the annotation it names, in both directions
-  (`test_order_predicate_classifier_reads_the_annotation_under_a_transform_chain`);
+  (`test_order_predicate_classifier_reads_the_annotation_under_a_transform_chain`); the
+  resolved-predicate shapes no wire request builds - a `WhereNode` under a connector override,
+  a subclass of an approved lookup, a `NothingNode`, an `ExtraWhere` and a bare `RawSQL`
+  child, each refused beside an approved lookup under `AND` and `OR` served
+  (`test_order_term_classifier_reads_a_resolved_predicate_by_its_children`) - and the
+  value-dependent lookup: `exact` against `None` reads `isnull`, a lookup taking `None` and a
+  non-`exact` name are not rewritten, a project lookup is read as written, and a project field
+  returns both classes (`test_effective_order_lookups_mirror_the_value_dependent_rewrite`);
 - the normalized record's independent fields - `any_argument_supplied` selecting argument mode,
   the window fields, `order_by_supplied` driving `queryset_required` for an empty list - and
   its immutability and the policy-free omitted path (`test_list_field_record_independence`,
@@ -3172,7 +3305,13 @@ Error rows assert the `extensions` fields the rejection carries (`code`, `reason
       approved forms over readable leaves still backs the window. A term is read as a string
       name only when it carries no `resolve_expression`, which is the order the compiler
       dispatches in. A predicate's trailing transforms and its final lookup are matched against
-      approved sets the same way. A STRING term naming a relation is judged by the related
+      approved sets the same way, looked up on the real operand, with the lookup the value
+      selects (`exact` against `None` is the `isnull` it compiles to). An approved node carrying
+      its own template, operator, `extra` or SQL-emitting output field is refused. A string name
+      refuses any piece after an annotation head; an `F` reads its trailing pieces as approved
+      transforms. A predicate an annotation holds is read in its resolved form, so a
+      conditional or filtered aggregate is certified whether written directly or annotated,
+      and a project class an annotation resolves is refused by the seal first. A STRING term naming a relation is judged by the related
       model's own `Meta.ordering`, which the compiler expands it into and which the term as
       written never shows, so a random default one or more relations away disqualifies the
       request while the foreign key column named directly does not; a many-to-many or generic
@@ -3207,12 +3346,16 @@ Error rows assert the `extensions` fields the rejection carries (`code`, `reason
       relation cache before reading the rows it holds. Proven live on both transports with a
       relation manager returning a `QuerySet` subclass over a `DjangoListField` root: the
       response carries `max_list_rows` rows, not the relation's.
-- [ ] A source that arrives evaluated is windowed from the rows it holds with no further
-      query, exact queryset and rebuilt subclass alike, through `bounded_rows` and
+- [ ] A source that reaches the raw-list seam evaluated is windowed from the rows it holds with
+      no further query, exact queryset and rebuilt subclass alike, through `bounded_rows` and
       `bounded_rows_async`; the fakeshop `Loan` model's override-free
       `LoanQuerySet.as_manager()` declaration returns the expected rows at an ABSOLUTE two-query prefetch cost at two
       parent cardinalities, and returns those same rows on the async transport (Decision 8).
       The declared manager sets no `use_in_migrations`, so no library migration carries it.
+      A queryset a `DjangoListField` resolver returns crosses the visibility seal first, which
+      drops its cache, so an evaluated return costs one more row query per positive-width
+      resolution, per parent row when nested, pinned live in both colours against a list return
+      and a zero-width window.
 - [ ] Visibility runs before order; order runs before one combined slice; order permission
       failures occur before slicing.
 - [ ] Public `OrderSet.apply_*` results are mechanically validated as unevaluated, unsliced,
@@ -3227,8 +3370,8 @@ Error rows assert the `extensions` fields the rejection carries (`code`, `reason
       never silently ignore `orderBy`.
 - [ ] No pk tiebreaker and no `DISTINCT` are injected; to-many ordering keeps the `Min` /
       `Max` aggregate behavior.
-- [ ] Unevaluated querysets retain SQL `LIMIT/OFFSET`, and a source that arrives evaluated is
-      windowed from the rows it holds instead (Decision 8); sequences, iterables, and
+- [ ] Unevaluated querysets retain SQL `LIMIT/OFFSET`, and a source that reaches the raw-list
+      seam evaluated is windowed from the rows it holds instead (Decision 8); sequences, iterables, and
       async-only iterables are bounded without over-consuming beyond the accepted window.
       Leak-free early-exit cleanup is promised for ASYNC-ONLY sources on every exit that
       abandons the source, argument rejection and deadline rejection alike, through one shared

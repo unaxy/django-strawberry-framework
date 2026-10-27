@@ -67,8 +67,12 @@ from asgiref.sync import sync_to_async
 from django.db import models
 from django.db.backends.base.base import BaseDatabaseWrapper
 from django.db.models import QuerySet, Value
+from django.db.models.expressions import Expression, RawSQL
+from django.db.models.fields.json import JSONExact
 from django.db.models.functions import Lower, Now, Random, RowNumber
+from django.db.models.lookups import Exact, GreaterThan, IsNull
 from django.db.models.sql.compiler import SQLCompiler
+from django.db.models.sql.where import AND, OR, ExtraWhere, NothingNode, WhereNode
 from django.test import RequestFactory
 from graphql import (
     GraphQLError,
@@ -98,6 +102,7 @@ from django_strawberry_framework.exceptions import (
 )
 from django_strawberry_framework.list_field import (
     _build_non_queryset_rejection_error,
+    _effective_order_lookups,
     _execute_queryset_pipeline_sync,
     _field_label,
     _handle_non_queryset_rejections_async,
@@ -1945,6 +1950,162 @@ def test_order_term_classifier_admits_only_named_forms(term: object, *, expected
     query = library_models.Shelf.objects.all().query
 
     assert _is_deterministic_order_term(query, term) is expected
+
+
+class _SubclassedExact(Exact):
+    """A subclass of an approved lookup: an approved name over a different ``as_sql``."""
+
+    @override
+    def as_sql(
+        self,
+        compiler: SQLCompiler,
+        connection: BaseDatabaseWrapper,
+    ) -> tuple[str, tuple[str | int, ...]]:
+        return "RANDOM() > 0.5", ()
+
+
+def _branch_name_column() -> Expression:
+    """The ``Branch.name`` column, as a resolved predicate holds it."""
+    field = library_models.Branch._meta.get_field("name")
+    assert isinstance(field, models.TextField)
+    return field.get_col("library_branch")
+
+
+@pytest.mark.parametrize(
+    ("children", "connector", "expected"),
+    [
+        (lambda: [Exact(_branch_name_column(), "Bravo")], AND, True),
+        (lambda: [Exact(_branch_name_column(), "Bravo")], OR, True),
+        (lambda: [Exact(_branch_name_column(), "Bravo")], "AND RANDOM() > 0.5 AND", False),
+        (lambda: [_SubclassedExact(_branch_name_column(), "Bravo")], AND, False),
+        (lambda: [NothingNode()], AND, False),
+        (lambda: [ExtraWhere(["RANDOM() > 0.5"], [])], AND, False),
+        (lambda: [RawSQL("RANDOM() > 0.5", [])], AND, False),
+    ],
+    ids=[
+        "approved-lookup",
+        "stock-connector",
+        "connector-override",
+        "subclass-of-approved-lookup",
+        "nothing-node",
+        "extra-where",
+        "bare-raw-sql",
+    ],
+)
+def test_order_term_classifier_reads_a_resolved_predicate_by_its_children(
+    children: Callable[[], list[object]],
+    connector: str,
+    *,
+    expected: bool,
+) -> None:
+    """A resolved predicate is certified only when its operator and every child are.
+
+    These are the ``WhereNode`` shapes an annotation cannot be made to hold over
+    the wire: Django resolves a written ``Q`` into its own lookups, and the seal
+    refuses a project lookup before the guard runs. Read directly, a
+    ``WhereNode`` is punctuation over its children, a subclass of an approved
+    lookup is a different ``as_sql`` and is refused, and an empty-result marker,
+    an ``extra`` fragment or a bare raw fragment carries SQL this package cannot
+    read. The connector is instance state written between the children, so only
+    Django's own are read as punctuation.
+    """
+    query = library_models.Branch.objects.all().query
+    node = WhereNode(connector=connector)
+    for child in children():
+        node.add(child, connector)
+
+    assert _is_deterministic_order_term(query, node) is expected
+
+
+class _ProjectTextField(models.TextField[object, object]):
+    """A project field whose value preparation this package cannot predict."""
+
+
+#: ``(id, operand output field, lookup name, lookup class, value, effective classes)``.
+_EFFECTIVE_LOOKUP_ROWS: tuple[
+    tuple[str, models.Field[object, object], str, type[object], object, tuple[object, ...]],
+    ...,
+] = (
+    (
+        "exact-none-compiles-isnull",
+        models.TextField(),
+        "exact",
+        Exact,
+        None,
+        (IsNull,),
+    ),
+    (
+        "exact-value-compiles-exact",
+        models.TextField(),
+        "exact",
+        Exact,
+        "Bravo",
+        (Exact,),
+    ),
+    (
+        "only-exact-is-rewritten",
+        models.TextField(),
+        "gt",
+        GreaterThan,
+        None,
+        (GreaterThan,),
+    ),
+    (
+        "lookup-taking-none-is-not-rewritten",
+        models.JSONField(),
+        "exact",
+        JSONExact,
+        None,
+        (JSONExact,),
+    ),
+    (
+        "project-lookup-is-read-as-written",
+        models.TextField(),
+        "exact",
+        _SubclassedExact,
+        None,
+        (_SubclassedExact,),
+    ),
+    (
+        "project-field-may-prepare-either",
+        _ProjectTextField(),
+        "exact",
+        Exact,
+        None,
+        (Exact, IsNull),
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    (
+        "output_field",
+        "name",
+        "lookup",
+        "value",
+        "expected",
+    ),
+    [row[1:] for row in _EFFECTIVE_LOOKUP_ROWS],
+    ids=[row[0] for row in _EFFECTIVE_LOOKUP_ROWS],
+)
+def test_effective_order_lookups_mirror_the_value_dependent_rewrite(
+    output_field: models.Field[object, object],
+    name: str,
+    lookup: type[object],
+    value: object,
+    expected: tuple[object, ...],
+) -> None:
+    """``Query.build_lookup`` turns ``exact`` against ``None`` into the operand's ``isnull``.
+
+    A lookup class that takes ``None`` as a value (``JSONExact``) keeps it, a
+    project class is read as written because it is refused regardless, and over
+    a project field the prepared value is unknown, so both classes are returned
+    for the guard to certify. The ``""`` arm needs a backend that reads empty
+    strings as null and is pinned live (``test_query/test_list_field_api.py``).
+    """
+    operand = Value(None, output_field=output_field)
+
+    assert _effective_order_lookups(operand, name, lookup, value) == expected
 
 
 def test_order_predicate_classifier_refuses_an_unresolvable_reference(

@@ -5,7 +5,7 @@ build-plan leftovers, and CI and test gaps. Each one is verified, fixed at the r
 commit that lands it. The bug-hunt findings stay in `docs/bug_hunt/bug_hunt-0_0_15_2.md`; only their beta triage is
 recorded here.
 
-Progress: 20 to do.
+Progress: 21 to do.
 
 Every item below was re-verified at HEAD on 2026-10-22 by one research agent per item; each "Research" sub-bullet is
 that pass's finding and recommended landing.
@@ -163,6 +163,12 @@ From the full entries, 2026-10-21. Item numbers are that file's.
     `CONTRIBUTING.md` and `MUSE.md`. Read-only `.` checks in CI stay. Decide how far the sweep goes
   - Overlaps the KANBAN "Before a release" checklist (BoardDoc 11), whose repo-wide `ruff check --fix .` and
     `ruff format .` lines a touched-path rule rewrites
+
+- [ ] 32. An exact `QuerySet` carrying a foreign `_result_cache` escapes the raw-list ceiling. Only in-process
+  application Python can write that slot, so the wire-input condition fails; this is a robustness row, not a
+  wire-reachable defect. Decide: accept it as robustness, or bound an evaluated exact queryset by its cache length
+  - Source: `git show 2bb10794:docs/builder/DONE/build-050-list_field_arguments-0_0_15.md` (Deferred work catalog),
+    dropped from that catalog by `9a97127c` without a new home
 
 <!-- LINK DEFINITIONS -->
 

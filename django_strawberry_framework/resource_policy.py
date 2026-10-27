@@ -1224,10 +1224,13 @@ def bounded_rows(
 
     An unevaluated ``QuerySet`` is bounded by SLICING, so it carries the bound
     into SQL as ``LIMIT`` and is never evaluated unbounded; a value whose rows
-    are already fetched - a materialized sequence, a consumer resolver's return,
-    Django's prefetch cache, or a queryset the consumer evaluated - is windowed
-    in Python from the rows it holds, which cannot un-fetch them but does stop
-    the response from serializing them and costs no second query.
+    are already fetched when it reaches this call - a materialized sequence, a
+    consumer resolver's list return, or the prefetch cache a generated relation
+    resolver hands over - is windowed in Python from the rows it holds, which
+    cannot un-fetch them but does stop the response from serializing them and
+    costs no second query. A queryset a ``DjangoListField`` resolver returns is
+    not such a value even when the resolver evaluated it: the visibility seal in
+    front of the window drops its result cache, so its window is a query.
     Which operation does the truncating follows from what the value IS, never
     from whether a subscript happened to answer: an exact ``list``, ``tuple``,
     ``str``, ``bytes``, ``bytearray`` or ``QuerySet`` is sliced, and every

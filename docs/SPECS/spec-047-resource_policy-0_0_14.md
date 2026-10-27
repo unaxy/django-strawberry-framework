@@ -767,11 +767,15 @@ coordinates are checked against.
 
 - **The bound is applied by SLICING**, so a `QuerySet` that has not been evaluated carries it
   into SQL as a `LIMIT` (and as an `OFFSET` when a skip coordinate is supplied) and is never
-  evaluated unbounded. A queryset that arrives already evaluated (a warm prefetch cache, a
-  manager result a resolver iterated before returning it) is windowed from the rows it holds,
-  with no further query, and any other value that is already materialized (a consumer
+  evaluated unbounded. A queryset that reaches the bound already evaluated (the warm prefetch
+  cache a generated many-side relation resolver hands over) is windowed from the rows it
+  holds, with no further query, and any other value that is already materialized (a consumer
   resolver's list return) is truncated in Python. Neither can un-fetch those rows; both stop
-  the response from serializing them.
+  the response from serializing them. A queryset or manager a `DjangoListField` resolver
+  returns does not reach the bound evaluated, even when the resolver iterated it: the
+  visibility seal in front of the bound drops its result cache (spec-045 Decision 3), so a
+  positive-width window executes it again, once per resolution and so once per parent row
+  when nested.
 - **What truncates follows from what the value IS**, never from whether a subscript
   happened to answer. An exact `list`, `tuple`, `str`, `bytes`, `bytearray` or `QuerySet`
   is sliced; every other shape (a subclass of one of the sequence types, a mapping, a bare
