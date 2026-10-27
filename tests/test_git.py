@@ -8,10 +8,11 @@ attributes files or stray ``GIT_*`` variables would change it and for a caller
 with none; a ``status`` leaves ``.git/index`` untouched; ``GIT_INDEX_FILE``
 reaches the generators that read a hook's or a private index; and the
 caller's ``safe.directory`` trust is kept, never widened. The caller's setup
-lives under a private ``HOME`` and XDG config directory, so the session
-running the tests never leaks in. A live ``/graphql/`` request has no wire
-shape for git listings, so none of these rows can move. There is no live
-sibling in ``examples/fakeshop/test_query/``.
+lives under a private ``HOME`` and XDG config directory with the system config
+switched off, so neither the session nor the machine running the tests leaks
+in. A live ``/graphql/`` request has no wire shape for git listings, so none
+of these rows can move. There is no live sibling in
+``examples/fakeshop/test_query/``.
 """
 
 import os
@@ -113,10 +114,16 @@ def _callers_home(home: Path, files: dict[str, str], monkeypatch: pytest.MonkeyP
 
 @pytest.fixture
 def bare_caller(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A caller with no git setup of its own and no stray ``GIT_*`` variable."""
+    """A caller with no git setup of its own, no system config and no stray ``GIT_*`` variable.
+
+    The machine's system config is the caller's protected scope too, so a runner image whose
+    ``/etc/gitconfig`` trusts every checkout (``safe.directory = *``) would hand that trust on;
+    ``GIT_CONFIG_NOSYSTEM`` switches it off for the trust read as it does for git itself.
+    """
     for name in list(os.environ):
         if name.startswith("GIT_"):
             monkeypatch.delenv(name)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     _callers_home(tmp_path / "bare-home", {}, monkeypatch)
 
 
