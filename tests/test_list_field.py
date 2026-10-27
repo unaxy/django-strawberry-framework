@@ -64,12 +64,12 @@ from apps.library import models as library_models
 from apps.products import services
 from apps.products.models import Category, Item
 from asgiref.sync import sync_to_async
-from django.db import models
+from django.db import connection, models
 from django.db.backends.base.base import BaseDatabaseWrapper
-from django.db.models import QuerySet, Value
+from django.db.models import BooleanField, Case, ExpressionWrapper, F, Q, QuerySet, Value, When
 from django.db.models.expressions import Expression, RawSQL
 from django.db.models.fields.json import JSONExact
-from django.db.models.functions import Lower, Now, Random, RowNumber
+from django.db.models.functions import Coalesce, Lower, Now, Random, RowNumber
 from django.db.models.lookups import Exact, GreaterThan, IsNull
 from django.db.models.sql.compiler import SQLCompiler
 from django.db.models.sql.where import AND, OR, ExtraWhere, NothingNode, WhereNode
@@ -107,6 +107,7 @@ from django_strawberry_framework.list_field import (
     _field_label,
     _handle_non_queryset_rejections_async,
     _has_deterministic_ordering,
+    _is_deterministic_order_implicit_exact,
     _is_deterministic_order_term,
     _is_model_default_ordering_active,
     _ListArguments,
@@ -2101,11 +2102,114 @@ def test_effective_order_lookups_mirror_the_value_dependent_rewrite(
     project class is read as written because it is refused regardless, and over
     a project field the prepared value is unknown, so both classes are returned
     for the guard to certify. The ``""`` arm needs a backend that reads empty
-    strings as null and is pinned live (``test_query/test_list_field_api.py``).
+    strings as null and is pinned below and live
+    (``test_query/test_list_field_api.py``).
     """
     operand = Value(None, output_field=output_field)
 
     assert _effective_order_lookups(operand, name, lookup, value) == expected
+
+
+class _ProjectText(str):
+    """A ``str`` subclass, whose equality with ``""`` its own methods decide."""
+
+    __slots__ = ()
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("", (IsNull,)), ("Bravo", (Exact,)), (_ProjectText(""), (Exact, IsNull))],
+    ids=["empty-string", "text", "str-subclass"],
+)
+def test_effective_order_lookups_read_an_empty_string_as_the_backend_does(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+    expected: tuple[object, ...],
+) -> None:
+    """On a backend reading ``""`` as null, only an exact ``""`` is known to compile ``isnull``.
+
+    A ``str`` subclass may compare equal to ``""`` or not by its own code, so
+    both classes are returned for the guard to certify.
+    """
+    monkeypatch.setattr(type(connection.features), "interprets_empty_strings_as_nulls", True)
+    operand = Value(None, output_field=models.TextField())
+
+    assert _effective_order_lookups(operand, "exact", Exact, value) == expected
+
+
+def _lower_name_with(**state: object) -> Lower:
+    """``Lower`` over the branch name, with ``state`` written into its instance namespace."""
+    node = Lower(_branch_name_column())
+    vars(node).update(state)
+    return node
+
+
+@pytest.mark.parametrize(
+    ("term", "expected"),
+    [
+        (lambda: _lower_name_with(function="LOWER"), True),
+        (lambda: _lower_name_with(function="RANDOM"), False),
+        (lambda: _lower_name_with(template=1), False),
+        (lambda: _lower_name_with(connector="+"), False),
+        (lambda: F("r"), False),
+        (lambda: F("nowhere"), False),
+        (lambda: F("shelves__lower"), False),
+        (lambda: Case(When(Q(name__lower__exact="x"), then=Value(1)), default=Value(0)), False),
+    ],
+    ids=[
+        "slot-restating-its-class",
+        "slot-overriding-its-class",
+        "slot-holding-no-text",
+        "connector-on-a-function",
+        "f-naming-an-extra-select",
+        "f-naming-nothing",
+        "f-transforming-a-reverse-relation",
+        "predicate-transform-not-registered",
+    ],
+)
+def test_order_term_classifier_refuses_what_it_cannot_read_by_construction(
+    term: Callable[[], object],
+    *,
+    expected: bool,
+) -> None:
+    """Shapes the wire cannot build, each refused where the SQL is not the approved class's.
+
+    A node's instance slot is its class's text only when it restates it; an
+    ``F`` naming an ``extra`` select, no field at all, or a transform over a
+    reverse relation has no column ``resolve_ref`` could read; and a predicate piece naming no
+    registered transform resolves to nothing Django would compile.
+    """
+    query = library_models.Branch.objects.extra(select={"r": "1"}).query
+
+    assert _is_deterministic_order_term(query, term()) is expected
+
+
+@pytest.mark.parametrize(
+    ("condition", "expected"),
+    [
+        (lambda: Exact(_branch_name_column(), "Bravo"), True),
+        (lambda: ExpressionWrapper(Q(city="Boston"), output_field=BooleanField()), True),
+        (lambda: F("name"), False),
+        (lambda: Coalesce(Value(1), Value("a")), False),
+    ],
+    ids=[
+        "approved-lookup",
+        "boolean-expression",
+        "unresolved-reference",
+        "mixed-output-types",
+    ],
+)
+def test_implicit_exact_reads_the_lookup_a_bare_condition_compiles_with(
+    condition: Callable[[], object],
+    *,
+    expected: bool,
+) -> None:
+    """A bare conditional child is its own lookup, or the ``exact`` its output field registers.
+
+    A child that is no expression, or whose output field cannot be resolved,
+    has no ``exact`` this package can name.
+    """
+    assert _is_deterministic_order_implicit_exact(condition()) is expected
 
 
 def test_order_predicate_classifier_refuses_an_unresolvable_reference(

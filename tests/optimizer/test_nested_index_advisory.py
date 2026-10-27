@@ -833,10 +833,16 @@ class TestIndexLeadingTerms:
         assert _index_leading_terms(_meta(_IdxChildComposite), index) is None
 
     def test_reverse_relation_name_returns_none(self) -> None:
-        """A name resolving to a reverse relation is no index column -> ``None``, not covered."""
-        index = models.Index(fields=["composite"], name="idx_reverse_relation")
-        assert _index_leading_terms(_meta(_IdxParent), index) is None
-        assert _plain_field_terms(_meta(_IdxParent), ["composite"]) is None
+        """A name resolving to a reverse relation is no index column -> ``None``, not covered.
+
+        ``Branch`` is an installed model, so ``get_field("shelves")`` returns the
+        reverse ``ManyToOneRel``; on this module's unregistered models Django builds
+        no reverse relation and the name would only fail to resolve.
+        """
+        assert not Branch._meta.get_field("shelves").concrete
+        index = models.Index(fields=["shelves"], name="idx_reverse_relation")
+        assert _index_leading_terms(_meta(Branch), index) is None
+        assert _plain_field_terms(_meta(Branch), ["shelves"]) is None
 
     def test_btree_index_is_inspectable(self) -> None:
         """PostgreSQL ``BTreeIndex`` is an ordinary ordered B-tree -> terms, like ``models.Index``."""

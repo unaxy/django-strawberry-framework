@@ -1151,11 +1151,12 @@ def _approved_order_transform(lhs: Expression, name: str) -> Expression | None:
 
 def _approved_order_transform_chain(lhs: Expression, names: Sequence[str]) -> Expression | None:
     """Apply every name as an approved transform in turn, or return None at the first that is not."""
-    operand: Expression | None = lhs
+    operand = lhs
     for name in names:
-        if operand is None:
+        transformed = _approved_order_transform(operand, name)
+        if transformed is None:
             return None
-        operand = _approved_order_transform(operand, name)
+        operand = transformed
     return operand
 
 
@@ -1250,9 +1251,7 @@ def _is_deterministic_order_lookup_chain(
             return False
         final = "exact"
         lookup = operand.get_lookup(final)
-        if lookup is None:
-            return False
-    return all(
+    return lookup is not None and all(
         candidate is not None and candidate in _APPROVED_ORDER_LOOKUPS
         for candidate in _effective_order_lookups(operand, final, lookup, value)
     )
