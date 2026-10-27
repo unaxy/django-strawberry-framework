@@ -56,6 +56,7 @@ from unittest import mock
 
 import pytest
 import strawberry
+from asgiref.sync import markcoroutinefunction
 from cross_web import (
     AsyncDjangoHTTPRequestAdapter,
     DjangoHTTPRequestAdapter,
@@ -3592,6 +3593,28 @@ async def test_the_async_chain_resets_the_ordering_mark_around_the_downstream_ca
     response = middleware(RequestFactory().get("/graphql/"))
     assert inspect.isawaitable(response)
     with pytest.raises(RuntimeError, match="downstream chain"):
+        await response
+
+    assert bool(_CSRF_ORDERING_EXEMPTION) is True
+
+
+async def test_the_async_chain_refuses_a_downstream_answer_it_cannot_await() -> None:
+    """An async chain awaits its downstream answer, so a non-awaitable one is a ``TypeError``.
+
+    The middleware marks itself a coroutine function only over a coroutine
+    ``get_response``; a marked callable that answers a plain response breaks that
+    contract, and the mark is still reset afterwards.
+    """
+
+    def downstream(_request: HttpRequest) -> HttpResponse:
+        return HttpResponse()
+
+    middleware = GraphQLRequestBodyBoundaryMiddleware(markcoroutinefunction(downstream))
+
+    assert is_marked_coroutine_function(middleware) is True
+    response = middleware(RequestFactory().get("/graphql/"))
+    assert inspect.isawaitable(response)
+    with pytest.raises(TypeError, match="must return an awaitable"):
         await response
 
     assert bool(_CSRF_ORDERING_EXEMPTION) is True

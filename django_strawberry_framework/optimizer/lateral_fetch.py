@@ -703,13 +703,14 @@ def _recognize_lateral_fetch(
     if parent_ids is None:
         return None
     visibility_where_sql: CompiledSQL | None = None
-    if spec.keyset_seek is not None:
+    seek = spec.keyset_seek
+    if seek is not None:
         # The planned count-free keyset body carries the seek in its base
         # WHERE (the windowed-fallback correctness floor); the fetch-time
         # tree must contain EXACTLY that seek - structurally verified
         # against the spec - and nothing else. Any other residue means a
         # consumer/Django mutation: fall back to the windowed body.
-        if not _keyset_seek_quals_match(unrecognized, spec):
+        if not _keyset_seek_quals_match(unrecognized, spec, seek):
             return None
     elif spec.visibility_where is not None:
         # The planned windowed body carries the same single-table scope in its
@@ -827,8 +828,14 @@ def window_predicate_signature(query: Query) -> WindowSignature | None:
     return tuple(sorted(signatures, key=repr))
 
 
-def _keyset_seek_quals_match(nodes: _NodeChildren, spec: LateralWindowSpec) -> bool:
+def _keyset_seek_quals_match(
+    nodes: _NodeChildren,
+    spec: LateralWindowSpec,
+    seek: KeysetSeek,
+) -> bool:
     """Whether ``nodes`` are exactly the planned keyset seek's WHERE residue.
+
+    ``seek`` is the spec's ``keyset_seek``, read by the caller that found it set.
 
     ``keyset.keyset_seek_q`` builds a deterministic tree - the redundant
     leading bound plus the OR-expansion - which Django's same-connector
@@ -839,8 +846,6 @@ def _keyset_seek_quals_match(nodes: _NodeChildren, spec: LateralWindowSpec) -> b
     silently drops a filter that is NOT the seek (which would return wrong
     rows) and never double-applies one that is.
     """
-    # Reached only for a spec that carries a seek.
-    seek = cast("KeysetSeek", spec.keyset_seek)
     plan = seek.plan()
     column_names = [column.field.column for column in seek.columns]
     match nodes:

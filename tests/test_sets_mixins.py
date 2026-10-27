@@ -295,7 +295,7 @@ def test_related_set_target_mixin() -> None:
     class _AlternativeStub:
         pass
 
-    class _RelatedItem(RelatedSetTargetMixin):
+    class _RelatedItem(RelatedSetTargetMixin[object]):
         _target_attr = "_target"
         _owner_attr = "bound_owner"
         # The slot ``_bind_owner`` fills under ``_owner_attr``; a bare annotation creates no
@@ -306,8 +306,10 @@ def test_related_set_target_mixin() -> None:
             self._target = target
 
         @override
-        def _validate_target(self, resolved: object) -> None:
+        def _validate_target(self, resolved: object) -> type[object]:
             """Permissive gate -- this test pins the bind/lazy machinery, not the gate."""
+            assert isinstance(resolved, type)
+            return resolved
 
     class _OwnerOne(OrderSet):
         pass
@@ -342,7 +344,7 @@ def test_related_set_target_mixin_hook_is_abstract_without_a_family_validator() 
     first resolved read instead of silently accepting any target.
     """
 
-    class _Hookless(RelatedSetTargetMixin):
+    class _Hookless(RelatedSetTargetMixin[object]):
         _target_attr = "_target"
         _owner_attr = "bound_owner"
 
@@ -367,7 +369,7 @@ def test_related_set_target_mixin_gates_resolved_targets_at_the_seam() -> None:
 
     validated: list[object] = []
 
-    class _FutureFamily(RelatedSetTargetMixin):
+    class _FutureFamily(RelatedSetTargetMixin[_FamilyTarget]):
         _target_attr = "_target"
         _owner_attr = "bound_owner"
 
@@ -375,10 +377,11 @@ def test_related_set_target_mixin_gates_resolved_targets_at_the_seam() -> None:
             self._target = target
 
         @override
-        def _validate_target(self, resolved: object) -> None:
+        def _validate_target(self, resolved: object) -> type[_FamilyTarget]:
             validated.append(resolved)
             if not (isinstance(resolved, type) and issubclass(resolved, _FamilyTarget)):
                 raise ConfigurationError(f"not a _FamilyTarget subclass: {resolved!r}")
+            return resolved
 
     class _Hostile:
         pass
@@ -414,7 +417,7 @@ def test_resolved_target_validates_each_distinct_value_once() -> None:
 
     validations: list[object] = []
 
-    class _MemoCounting(RelatedSetTargetMixin):
+    class _MemoCounting(RelatedSetTargetMixin[object]):
         _target_attr = "_target"
         _owner_attr = "bound_owner"
 
@@ -422,10 +425,12 @@ def test_resolved_target_validates_each_distinct_value_once() -> None:
             self._target = target
 
         @override
-        def _validate_target(self, resolved: object) -> None:
+        def _validate_target(self, resolved: object) -> type[object]:
             validations.append(resolved)
             if resolved is _MemoHostile:
                 raise ConfigurationError("memo hostile")
+            assert isinstance(resolved, type)
+            return resolved
 
     item = _MemoCounting(_MemoTarget)
     assert item._resolved_target() is _MemoTarget
@@ -477,7 +482,7 @@ def test_collect_related_declarations() -> None:
     already-collected shipped sets.
     """
 
-    class _Decl(RelatedSetTargetMixin):
+    class _Decl(RelatedSetTargetMixin[object]):
         _target_attr = "_t"
         _owner_attr = "_o"
 
@@ -663,7 +668,7 @@ def test_collect_related_declarations_diamond_tombstone() -> None:
     Diamond MRO at metaclass collect time. No GraphQL spelling.
     """
 
-    class _Decl(RelatedSetTargetMixin):
+    class _Decl(RelatedSetTargetMixin[object]):
         _target_attr = "_t"
         _owner_attr = "_o"
 
@@ -697,7 +702,7 @@ def test_collect_related_declarations_diamond_tombstone() -> None:
 def test_collect_related_declarations_base_declarations_precedence() -> None:
     """A non-related entry in ``base_declarations_attr`` shadows a related declaration."""
 
-    class _Decl(RelatedSetTargetMixin):
+    class _Decl(RelatedSetTargetMixin[object]):
         _target_attr = "_t"
         _owner_attr = "_o"
 

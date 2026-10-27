@@ -163,6 +163,16 @@ def test_cursor_columns_for_missing_column_raises_field_does_not_exist() -> None
         cursor_columns_for(Issue, ("nope",))
 
 
+def test_cursor_columns_for_reverse_relation_is_no_column() -> None:
+    """A reverse relation name resolves to no model ``Field``: a ``TypeError``, never a column.
+
+    ``validate_cursor_field_columns`` refuses such an entry at finalization, so the
+    resolution after it holds only columns.
+    """
+    with pytest.raises(TypeError, match="expected the type the source guarantees"):
+        cursor_columns_for(Periodical, ("issues",))
+
+
 # ---------------------------------------------------------------------------
 # validate_cursor_field_columns (the finalization column contract)
 # ---------------------------------------------------------------------------
@@ -921,6 +931,12 @@ def _as_seek_nodes(*nodes: object) -> "_NodeChildren":
     return list(nodes)  # pyright: ignore[reportReturnType]
 
 
+def _seek_quals_match(nodes: "_NodeChildren", spec: "LateralWindowSpec") -> bool:
+    """Run the structural matcher against ``spec``'s own planned seek."""
+    assert spec.keyset_seek is not None
+    return _keyset_seek_quals_match(nodes, spec, spec.keyset_seek)
+
+
 def test_lateral_seek_quals_match_rejects_shape_drift() -> None:
     """The structural matcher's mismatch arms, driven directly."""
     lateral_queryset = _plan_lateral(_issue_lateral_request(_issue_seek(), next_page_probe=True))
@@ -930,19 +946,19 @@ def test_lateral_seek_quals_match_rejects_shape_drift() -> None:
     ]
     assert len(seek_nodes) == 2
     lead, expansion = seek_nodes
-    assert _keyset_seek_quals_match([lead, expansion], spec)
+    assert _seek_quals_match([lead, expansion], spec)
     assert isinstance(lead, Lookup)
     assert isinstance(expansion, WhereNode)
     # Wrong count.
-    assert not _keyset_seek_quals_match([lead], spec)
+    assert not _seek_quals_match([lead], spec)
     # Swapped order (lead is not the comparison chain).
-    assert not _keyset_seek_quals_match([expansion, lead], spec)
+    assert not _seek_quals_match([expansion, lead], spec)
     # Wrong values: a seek for a DIFFERENT cursor.
     other_spec = replace(spec, keyset_seek=_issue_seek(values=(9, 9)))
-    assert not _keyset_seek_quals_match([lead, expansion], other_spec)
+    assert not _seek_quals_match([lead, expansion], other_spec)
     # A flipped-direction seek is not the planned one.
     flipped_spec = replace(spec, keyset_seek=_issue_seek(flip=True))
-    assert not _keyset_seek_quals_match([lead, expansion], flipped_spec)
+    assert not _seek_quals_match([lead, expansion], flipped_spec)
 
     # Missing/wrong-table lookup targets.
     targetless_lead = SimpleNamespace(
@@ -950,7 +966,7 @@ def test_lateral_seek_quals_match_rejects_shape_drift() -> None:
         lhs=SimpleNamespace(target=None),
         rhs=read_attr(lead, "rhs"),
     )
-    assert not _keyset_seek_quals_match(_as_seek_nodes(targetless_lead, expansion), spec)
+    assert not _seek_quals_match(_as_seek_nodes(targetless_lead, expansion), spec)
     foreign_target = SimpleNamespace(
         column=spec.order_columns[0][0],
         model=SimpleNamespace(_meta=SimpleNamespace(db_table="foreign_table")),
@@ -960,7 +976,7 @@ def test_lateral_seek_quals_match_rejects_shape_drift() -> None:
         lhs=SimpleNamespace(target=foreign_target),
         rhs=read_attr(lead, "rhs"),
     )
-    assert not _keyset_seek_quals_match(_as_seek_nodes(foreign_lead, expansion), spec)
+    assert not _seek_quals_match(_as_seek_nodes(foreign_lead, expansion), spec)
 
     # Single-column cursors take the scalar expansion branch.
     single_seek = _issue_seek(values=(5,), order=("pk",))
@@ -970,19 +986,19 @@ def test_lateral_seek_quals_match_rejects_shape_drift() -> None:
     single_nodes = [
         child for child in single_queryset.query.where.children if not _is_window_qual(child)
     ]
-    assert _keyset_seek_quals_match(single_nodes, single_spec)
+    assert _seek_quals_match(single_nodes, single_spec)
 
     arms = list(expansion.children)
     bad_lookup = SimpleNamespace(lookup_name="wrong")
     invalid_expansion = SimpleNamespace(children=None, negated=False, connector="OR")
-    assert not _keyset_seek_quals_match(_as_seek_nodes(lead, invalid_expansion), spec)
+    assert not _seek_quals_match(_as_seek_nodes(lead, invalid_expansion), spec)
 
     bad_first_arm = SimpleNamespace(
         children=[bad_lookup, arms[1]],
         negated=False,
         connector="OR",
     )
-    assert not _keyset_seek_quals_match(_as_seek_nodes(lead, bad_first_arm), spec)
+    assert not _seek_quals_match(_as_seek_nodes(lead, bad_first_arm), spec)
 
     malformed_second_arm = SimpleNamespace(children=None, negated=False, connector="AND")
     malformed_expansion = SimpleNamespace(
@@ -990,7 +1006,7 @@ def test_lateral_seek_quals_match_rejects_shape_drift() -> None:
         negated=False,
         connector="OR",
     )
-    assert not _keyset_seek_quals_match(_as_seek_nodes(lead, malformed_expansion), spec)
+    assert not _seek_quals_match(_as_seek_nodes(lead, malformed_expansion), spec)
 
     assert isinstance(arms[1], WhereNode)
     second_children = list(arms[1].children)
@@ -1004,7 +1020,7 @@ def test_lateral_seek_quals_match_rejects_shape_drift() -> None:
         negated=False,
         connector="OR",
     )
-    assert not _keyset_seek_quals_match(_as_seek_nodes(lead, bad_equal_expansion), spec)
+    assert not _seek_quals_match(_as_seek_nodes(lead, bad_equal_expansion), spec)
 
     bad_cmp_arm = SimpleNamespace(
         children=[second_children[0], bad_lookup],
@@ -1016,4 +1032,4 @@ def test_lateral_seek_quals_match_rejects_shape_drift() -> None:
         negated=False,
         connector="OR",
     )
-    assert not _keyset_seek_quals_match(_as_seek_nodes(lead, bad_cmp_expansion), spec)
+    assert not _seek_quals_match(_as_seek_nodes(lead, bad_cmp_expansion), spec)

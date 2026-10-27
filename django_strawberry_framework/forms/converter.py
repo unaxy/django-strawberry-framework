@@ -50,7 +50,6 @@ import datetime
 import decimal
 import uuid
 from collections.abc import Callable
-from typing import cast
 
 import strawberry
 from django import forms
@@ -59,6 +58,7 @@ from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils.converters import (
     MRO_CONTINUE,
+    MroContinue,
     convert_with_mro,
     finish_field_conversion,
     make_kind_converter,
@@ -236,7 +236,7 @@ _SCALAR_FORM_FIELDS: dict[type[forms.Field], FormFieldConverter] = {
 }
 
 
-def _bare_form_field(field: forms.Field) -> FormFieldConversion | object:
+def _bare_form_field(field: forms.Field) -> FormFieldConversion | MroContinue:
     """Exact-type ``forms.Field`` -> ``str``; any subclass continues the MRO walk.
 
     NOT a catch-all: an ``isinstance`` match that always returned a conversion
@@ -322,10 +322,7 @@ def convert_form_field(field: forms.Field) -> FormFieldConversion:
         scalar_registry=_SCALAR_FORM_FIELDS,
         fallthrough_error_factory=_unsupported_form_field,
     )
-    # Every precheck handler above returns a finished conversion and every registry
-    # entry is a ``make_scalar_converter`` callable; each builds a FormFieldConversion.
-    conversion = cast("FormFieldConversion | Callable[[forms.Field], FormFieldConversion]", result)
-    return cast("FormFieldConversion", finish_field_conversion(conversion, field))
+    return finish_field_conversion(result, field)
 
 
 def _postgres_form_field_class(name: str) -> type[forms.Field] | None:

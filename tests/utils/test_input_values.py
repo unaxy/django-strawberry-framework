@@ -82,7 +82,7 @@ def test_iter_active_fields_classifies_and_skips_inactive() -> None:
     class _Set(FilterSet):
         shelf = related_obj
 
-    specs: dict[tuple[type[FilterSet], str], GeneratedInputFieldSpec] = {
+    specs: dict[tuple[type[object], str], GeneratedInputFieldSpec] = {
         (_Set, "title"): GeneratedInputFieldSpec("title", "title", "title"),
         (_Set, "shelf"): GeneratedInputFieldSpec("shelf", "shelf", "shelf"),
     }

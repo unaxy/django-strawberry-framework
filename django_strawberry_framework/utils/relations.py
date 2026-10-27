@@ -354,13 +354,14 @@ def classify_path(model: type[models.Model], field_path: str) -> ClassifiedPath:
     segments = field_path.split(LOOKUP_SEP)
     current = model
     hops: list[RelationPathHop] = []
-    terminal: object = None
+    resolved: list[ModelField] = []
     last_index = len(segments) - 1
     for index, segment in enumerate(segments):
         try:
             field = _resolve_segment_field(current, segment)
         except FieldDoesNotExist:
             raise PathResolutionError(current, field_path, segment) from None
+        resolved.append(field)
         try:
             is_relation = relation_bool(field, "is_relation")
         except ConfigurationError:
@@ -386,11 +387,7 @@ def classify_path(model: type[models.Model], field_path: str) -> ClassifiedPath:
                 ),
             )
             current = target_model
-            if index == last_index:
-                terminal = field
-        elif index == last_index:
-            terminal = field
-        else:
+        elif index != last_index:
             raise PathResolutionError(current, field_path, segment)
     first_many_index = next(
         (i for i, hop in enumerate(hops) if hop.many_side),
@@ -400,8 +397,8 @@ def classify_path(model: type[models.Model], field_path: str) -> ClassifiedPath:
         model=model,
         path=field_path,
         hops=tuple(hops),
-        # The final segment assigned its ``_resolve_segment_field`` result here or raised.
-        terminal=cast("ModelField", terminal),
+        # Every segment resolved or raised, so the last resolved field is the final segment's.
+        terminal=resolved[-1],
         first_many_index=first_many_index,
         relation_chain=tuple(hop.segment for hop in hops),
     )
@@ -824,8 +821,9 @@ def m2m_through_model(field: object) -> type[models.Model] | None:
     through: object = getattr(field, "through", None)
     if through is None:
         through = getattr(getattr(field, "remote_field", None), "through", None)
-    # A relation's ``through`` slot holds the join-table model class.
-    return cast("type[models.Model] | None", through)
+    # A relation's ``through`` slot holds the join-table model class once the app registry
+    # resolved it; anything else (an unresolved ``"app.Model"`` string) is a ``TypeError``.
+    return None if through is None else require(through, is_model_class)
 
 
 def _is_foreign_key(value: object) -> TypeIs[ForeignKeyField]:
@@ -960,8 +958,9 @@ def non_pk_forward_link(field: object) -> RelationLink | None:
     link = relation_link(field)
     if not link.carriers:
         return None
-    # A forward single-valued relation with link pairs names a resolved model.
-    related = cast("type[models.Model]", getattr(field, "related_model", None))
+    # A forward single-valued relation with link pairs names a resolved model; an
+    # unresolved ``"app.Model"`` string is a ``TypeError``.
+    related = require(read_attr(field, "related_model", None), is_model_class)
     return None if link.targets == (related._meta.pk,) else link
 
 

@@ -159,12 +159,11 @@ def test_builder_pins_names_so_digit_boundary_fields_do_not_silently_collide() -
         pass
 
     entries = [("field_2", object()), ("field2", object())]
-    field_specs: dict[tuple[type[_ProbeSet], str], GeneratedInputFieldSpec] = {}
+    field_specs: dict[tuple[type[object], str], GeneratedInputFieldSpec] = {}
     triples = emit_set_input_field_triples(
         _ProbeSet,
         entries,
-        related_target_of=lambda _t, _e: (False, None),
-        related_source_path_of=lambda t, _e: t,
+        related_of=lambda _t, _e: None,
         leaf_of=lambda _t, _pa, _e: (int | None, _t),
         input_type_name_for=lambda cls: cls.__name__,
         module_path=__name__,
@@ -503,7 +502,7 @@ def test_make_set_input_namespace_returns_heavy_ledger_field_specs_materialize_c
     """
     module_path = __name__
     module = sys.modules[module_path]
-    namespace: SetInputNamespace[ClassBasedTypeNameMixin] = make_set_input_namespace(
+    namespace: SetInputNamespace = make_set_input_namespace(
         module_path,
         "ProbeSet",
         factory_module="django_strawberry_framework.not_a_real_factory_module",
@@ -1199,8 +1198,7 @@ def test_generated_input_arguments_factory_tolerates_none_or_missing_related_att
         _related_attr = "related_probes"
         _related_target_attr = "target"
         input_object_types = {}
-        _collision_registry_attr = "_probe_registry"
-        _probe_registry: ClassVar[dict[str, type[ClassBasedTypeNameMixin]]] = {}
+        _collision_registry: dict[str, type[ClassBasedTypeNameMixin]] = {}
 
         @override
         def _build_input_triples(
@@ -1254,13 +1252,12 @@ def test_emit_rejects_graphql_name_collision_across_distinct_python_attrs() -> N
     class _ProbeSet(ClassBasedTypeNameMixin):
         __qualname__ = "_ProbeSet"
 
-    field_specs: dict[tuple[type[_ProbeSet], str], GeneratedInputFieldSpec] = {}
+    field_specs: dict[tuple[type[object], str], GeneratedInputFieldSpec] = {}
     with pytest.raises(ConfigurationError, match="GraphQL input field name 'fooBar'"):
         emit_set_input_field_triples(
             _ProbeSet,
             [("foo_bar", object()), ("fooBar", object())],
-            related_target_of=lambda _t, _e: (False, None),
-            related_source_path_of=lambda t, _e: t,
+            related_of=lambda _t, _e: None,
             leaf_of=lambda _t, _pa, _e: (int | None, _t),
             input_type_name_for=lambda cls: cls.__name__,
             module_path=__name__,
@@ -1279,8 +1276,7 @@ def test_emit_rejects_flatten_collision_between_traversal_and_declared_member() 
         emit_set_input_field_triples(
             _ProbeSet,
             [("a_b", object()), ("a__b", object())],
-            related_target_of=lambda _t, _e: (False, None),
-            related_source_path_of=lambda t, _e: t,
+            related_of=lambda _t, _e: None,
             leaf_of=lambda _t, _pa, _e: (int | None, _t),
             input_type_name_for=lambda cls: cls.__name__,
             module_path=__name__,
@@ -1311,8 +1307,7 @@ def test_emit_stages_field_specs_atomically_across_a_clean_walk_then_collision()
         return emit_set_input_field_triples(
             _ProbeSet,
             entries,
-            related_target_of=lambda _t, _e: (False, None),
-            related_source_path_of=lambda t, _e: t,
+            related_of=lambda _t, _e: None,
             leaf_of=lambda _t, _pa, _e: (int | None, _t),
             input_type_name_for=_class_name,
             module_path=__name__,

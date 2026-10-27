@@ -2700,9 +2700,10 @@ class FilterSet(
         copied = copy.deepcopy(original)
         # ``BaseFilterSet.__init__`` stamps ``model`` and ``parent`` on every copy as instance
         # attributes its stubs do not declare, so they are written into the instance dict
-        # (``queryset`` is never ``None`` on an instance: the same ``__init__`` defaults it).
+        # (``queryset`` is never ``None`` on an instance: the same ``__init__`` defaults it, and
+        # anything else is a ``TypeError``).
         truth.instance_state(copied).update(
-            model=cast("models.QuerySet[models.Model]", self.queryset).model,
+            model=require(self.queryset, is_queryset).model,
             parent=self,
         )
         return copied

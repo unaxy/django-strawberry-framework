@@ -58,10 +58,12 @@ from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     is_abstract_set,
     is_awaitable,
+    is_iterable,
     is_mapping,
     is_set_or_frozenset,
     is_str,
     read_attr,
+    require,
 )
 from django_strawberry_framework.utils.execution_mode import operation_is_async
 from django_strawberry_framework.utils.private_state import PrivateAuthority
@@ -468,7 +470,8 @@ def _freeze_variable_value(value: object, active_containers: set[int]) -> "Froze
                     for key, item in mapping.items()
                 ),
             )
-        members = cast("Iterable[object]", value)
+        # A ``collections.abc.Set`` or a ``list`` / ``tuple`` subclass is iterable.
+        members = require(value, is_iterable)
         if value_is_set:
             return (
                 "set",

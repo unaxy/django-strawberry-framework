@@ -77,7 +77,7 @@ CSRF check refused it.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from asgiref.sync import markcoroutinefunction
 from cross_web import HTTPException
@@ -96,7 +96,7 @@ from django_strawberry_framework._boundary_ordering import (
 from django_strawberry_framework.conf import django_setting
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import is_str, list_of, require
+from django_strawberry_framework.utils._narrowing import is_awaitable, is_str, list_of, require
 from django_strawberry_framework.utils.typing import is_marked_coroutine_function, object_result
 
 if TYPE_CHECKING:
@@ -195,7 +195,13 @@ class GraphQLRequestBodyBoundaryMiddleware:
         try:
             # An async chain: ``__init__`` marked this instance a coroutine function
             # only when ``get_response`` is one, and only such an instance reaches here.
-            return await cast("Awaitable[HttpResponseBase]", self.get_response(request))
+            response = self.get_response(request)
+            if not is_awaitable(response):
+                raise TypeError(
+                    "an async middleware chain's get_response must return an awaitable, "
+                    f"got {truth.kind(response)}",
+                )
+            return await response
         finally:
             _boundary_middleware_request.reset(token)
 

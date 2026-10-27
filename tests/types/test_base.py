@@ -29,7 +29,7 @@ import itertools
 import sys
 import types
 from collections.abc import Callable, Collection, Mapping, Sequence
-from typing import NoReturn
+from typing import Annotated, NoReturn
 
 import pytest
 import pytest_django
@@ -46,6 +46,7 @@ from strawberry.types import get_object_definition
 from strawberry.types.auto import StrawberryAuto
 from typing_extensions import override
 
+import django_strawberry_framework
 import django_strawberry_framework.types.base as base_mod
 from django_strawberry_framework import DjangoType, finalize_django_types
 from django_strawberry_framework.exceptions import ConfigurationError
@@ -56,6 +57,7 @@ from django_strawberry_framework.types import converters
 from django_strawberry_framework.types.base import (
     ALLOWED_META_KEYS,
     DEFERRED_META_KEYS,
+    _is_auto_annotation,
     _meta_optimizer_hints,
     _select_fields,
     _validate_connection,
@@ -3314,6 +3316,39 @@ def test_auto_string_spelling_accepted_without_future_import() -> None:
     assert StringAutoType.__annotations__["name"] is str
     finalize_django_types()
     assert get_object_definition(StringAutoType) is not None
+
+
+def test_package_auto_and_strawberry_auto_both_resolve_as_auto() -> None:
+    """The package re-exports its own ``auto``; Strawberry's spelling stays the marker too.
+
+    The package's alias annotates ``object`` (so a consumer's ``name: auto`` spells no
+    ``Any``), which Strawberry's ``StrawberryAuto`` check does not accept; the package
+    recognizes both, and a type declared with either infers the model field.
+    """
+    assert django_strawberry_framework.auto is not strawberry.auto
+    assert _is_auto_annotation(django_strawberry_framework.auto)
+    strawberry_auto: object = strawberry.auto
+    assert _is_auto_annotation(strawberry_auto)
+    # Metadata beside the marker that is not the marker never reads as auto.
+    assert not _is_auto_annotation(Annotated[object, "auto"])
+
+    class PackageAutoType(DjangoType):
+        name: django_strawberry_framework.auto
+
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+
+    class StrawberryAutoType(DjangoType):
+        name: strawberry.auto
+
+        class Meta:
+            model = Item
+            fields = ("id", "name")
+
+    assert PackageAutoType.__annotations__["name"] is str
+    assert StrawberryAutoType.__annotations__["name"] is str
+    finalize_django_types()
 
 
 def test_non_string_annotation_keys_raise_configuration_error() -> None:

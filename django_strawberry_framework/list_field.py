@@ -93,6 +93,7 @@ from .utils._narrowing import (
     is_tuple,
     list_of,
     read_attr,
+    require_instance,
 )
 from .utils.connections import is_supplied
 from .utils.directives import validated_field_directives
@@ -1187,10 +1188,9 @@ def _resolver_root_and_info(
             info = kwargs["info"]
         except KeyError as exc:
             raise TypeError("DjangoListField resolver requires info.") from exc
-    # Trusted, not checked: Strawberry binds its own ``Info`` to the resolver
-    # parameter annotated ``Info`` - here the synthesized keyword-only ``info``
-    # (``strawberry/schema/schema_converter.py`` #"kwargs[info_parameter.name] = info").
-    return root, cast("Info[object, object]", info)
+    # Strawberry binds its own ``Info`` to the resolver parameter annotated ``Info`` (here
+    # the synthesized keyword-only ``info``); any other value is a ``TypeError``.
+    return root, require_instance(info, Info)
 
 
 def _argument_record(

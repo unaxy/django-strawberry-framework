@@ -49,6 +49,7 @@ from django_strawberry_framework.write_mixins import (
     DeclarationRegistry,
     _validate_permission_classes,
     _ValidatedMutationMeta,
+    backing_model_of,
     bind_mutation_outputs,
     bind_write_declarations,
     make_declaration_registry,
@@ -373,6 +374,22 @@ def test_bind_mutation_outputs_stashes_model_less_payload_and_slots() -> None:
     assert BindOutputsProbe._input_class is input_cls
     assert BindOutputsProbe._payload_type_name == "BindOutputsProbePayload"
     assert "BindOutputsProbePayload" in _materialized_names
+
+
+def test_backing_model_of_refuses_a_model_less_snapshot() -> None:
+    """Only a model-backed snapshot names a model; the plain form flavor's is a ``TypeError``."""
+
+    class ProbeForm(forms.Form):
+        name = forms.CharField()
+
+    class ModelLessProbe(DjangoFormMutation):
+        class Meta:
+            form_class = ProbeForm
+            permission_classes = []
+
+    assert ModelLessProbe._mutation_meta.model is None
+    with pytest.raises(TypeError, match="expected the type the source guarantees"):
+        _ = backing_model_of(ModelLessProbe._mutation_meta)
 
 
 def test_model_and_plain_form_binds_ride_bind_mutation_outputs() -> None:

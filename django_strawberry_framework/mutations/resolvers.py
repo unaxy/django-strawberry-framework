@@ -804,7 +804,7 @@ def _decode_single_relation_id(
         if getattr(relation_field, "null", False):
             return None, None
         return None, null_field_error(graphql_name)
-    keys, error = decode_visible_relation_ids(
+    decoded = decode_visible_relation_ids(
         [value],
         graphql_name=graphql_name,
         related_model=related_model,
@@ -813,10 +813,9 @@ def _decode_single_relation_id(
         key_attname=key_attname,
         single=True,
     )
-    if error is not None:
-        return None, error
-    # The shared decoder answers ``keys`` exactly when it reports no error.
-    return cast("list[object]", keys)[0], None
+    if decoded[1] is not None:
+        return None, decoded[1]
+    return decoded[0][0], None
 
 
 def _decode_relation_id_list(
@@ -845,7 +844,7 @@ def _decode_relation_id_list(
     del relation_field  # M2M nullability is the list contract, not the field's ``null``.
     if value is None:
         return [], _relation_null_error(graphql_name)
-    keys, error = decode_visible_relation_ids(
+    decoded = decode_visible_relation_ids(
         value,
         graphql_name=graphql_name,
         related_model=related_model,
@@ -853,10 +852,9 @@ def _decode_relation_id_list(
         async_recourse=_MUTATION_ASYNC_RECOURSE,
         key_attname=key_attname,
     )
-    if error is not None:
-        return [], error
-    # The shared decoder answers ``keys`` exactly when it reports no error.
-    return cast("list[object]", keys), None
+    if decoded[1] is not None:
+        return [], decoded[1]
+    return decoded[0], None
 
 
 def _relation_null_error(field_name: str) -> FieldError:

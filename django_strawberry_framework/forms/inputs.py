@@ -78,6 +78,7 @@ from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._array_field import array_element_field
 from django_strawberry_framework.utils._narrowing import (
     dict_of,
+    is_concrete_field,
     is_str,
     list_of,
     read_attr,
@@ -552,14 +553,16 @@ def _model_column_for(form_class: FormClass, name: str) -> ConcreteField | None:
         column = model._meta.get_field(name)
     except FieldDoesNotExist:
         return None
+    # A reverse relation (``ForeignObjectRel``) is no model ``Field``; of the rest, the arms
+    # below let through only a forward concrete / forward M2M column.
+    if not is_concrete_field(column):
+        return None
     if getattr(column, "is_relation", False):
         if not (is_forward_many_to_many(column) or is_forward_concrete_relation(column)):
             return None
     elif getattr(column, "column", None) is None:
         return None
-    # The arms above let through only a forward concrete / forward M2M column,
-    # read off the dynamically-resolved ``_meta.model``.
-    return cast("ConcreteField", column)
+    return column
 
 
 def relation_target_model(

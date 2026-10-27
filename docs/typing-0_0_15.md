@@ -8,12 +8,12 @@ Locked rules and the budget: `scripts/check_type_suppressions.py` (pre-commit an
 `# pyright: ignore[...]` naming any rule `pyproject.toml` marks `# Locked` (the 63 rules on everywhere with no
 suppression left), every file-level `# pyright:` directive, and any per-site count off the generated ledger
 `scripts/type_suppressions.toml`: each site (`path::QualifiedName`) holds its `typing.cast` calls and its ignore
-comments per unlocked rule (239 casts in all), every count may only fall, and a suppression cannot move to new code by
+comments per unlocked rule (199 casts in all), every count may only fall, and a suppression cannot move to new code by
 giving one up elsewhere. A rule whose last ignore is cleared leaves the ledger and gains the marker.
 
 Progress: 28 done, 6 closed (survey verdicts), 3 open (one waits on upstream, one is the cast sweep's second
-phase, one is a behavior change outside typing). Ignore comments: 708 lines (1897 at the start of 0.0.15's ignore
-sweep); `typing.cast` calls: 239 (432 at the start of the cast work).
+phase, one is a behavior change outside typing). Ignore comments: 717 lines (1897 at the start of 0.0.15's ignore
+sweep); `typing.cast` calls: 199 (432 at the start of the cast work).
 
 ## Pre-commit (`uvx pre-commit run --all-files`, 4ce779e1, clean clone)
 
@@ -236,6 +236,17 @@ Survey verdicts recorded so nothing is re-tried blind:
   attributes (each is an attribute of the built class, so writes through it become errors), and the `bound_*` slots
   absent until the bind, the `__weakref__` slots and the `consumers.py` shape classes keep about 14 ignores for nothing
   the checker proves
+- `Any` survey (the `reportAny` / `reportExplicitAny` lines outside tests/), taken: the package owns `auto` as
+  `Annotated[object, StrawberryAuto()]` (7 ignores). Not taken: the resolver call form for a resolver-less
+  `@strawberry.field(graphql_type=...)` (type-checks, 3 lines, but the examples would stop mirroring the decorator
+  form `docs/README.md` teaches). Kept, measured: `utils/typing.py`'s `ConcreteField` / `ForeignKeyField` (django-stubs'
+  `_ST` is contravariant: `Never` 6 errors, `object` 31), the DRF, `FieldMap` and `ModelForm` aliases (invariant stub
+  TypeVars: 348, 2 and 81 errors), `scripts/_kanban_lib.py::_JSONRow` (5), `DjangoType.get_queryset`'s queryset
+  (108), `_ConnectionT` (37), `is_marked_coroutine_function` (3), `AsyncDjangoGraphQLView.run` and
+  `operation_state.py`'s two returns (no single honest type), a resolver-less `strawberry.field(...)` (declared
+  `-> Any` upstream). The package root's `__getattr__ -> Any` waits on spec-059:
+  `examples/fakeshop/apps/products/fields.py` derives from the planned `AdvancedFieldSet`, which reaches it only through that `Any`, and an `object` return trips
+  the locked `reportUntypedBaseClass`
 - Trust-boundary guards that read the guarded value through `utils/_narrowing.py` (`read_attr`, `list_of`) instead of
   an annotated read plus a `reportUnnecessaryIsInstance` ignore: kept (no parameter widened; the value is typed
   `object`, the guard stays live, and `read_attr` is `getattr`, `list_of` is `list` at run time)
@@ -250,14 +261,27 @@ Survey verdicts recorded so nothing is re-tried blind:
   `reportIncompatibleVariableOverride` by 4
 - [ ] 37. Cast sweep, phase 2: the fixes phase 1 left because each writes a new raise or branch (with its test),
   changes a public annotation, changes behavior for an input accepted today, or sits on a per-row path that needs a
-  benchmark. The largest groups: the generic `RelationHop` split (`utils/relations.py`, about 14 casts across
-  `filters/sets.py` and `utils/permissions.py`), the `mutations/resolvers.py` write pipeline (8, its statement order
-  is a security invariant), raising readers for slots filled at bind (`write_mixins.py::backing_model_of`, the
-  serializer-class reads, about 7), `types/finalizer.py`'s registry reads (8), `utils/querysets.py::_reconstructed_value`
-  (5, hot), a generic `convert_with_mro` (3) and a generic `RelatedSetTargetMixin` (2). Three upstream-only groups:
-  types-django-filter (`FilterSetMetaclass.__new__` returning `Self`, `get_fields`, `FilterSetOptions.fields`),
+  benchmark. First pass done (package casts 191 to 153): generic `RelatedSetTargetMixin` and `convert_with_mro`
+  (`MroContinue` is the sentinel's public name), `decode_visible_relation_ids` typed as a value-or-defect pair,
+  `DecodeResult` as `DecodeOk | DecodeRefusal`, a generic `is_supplied` TypeGuard (a TypeIs would narrow the False
+  branch of an `object` argument to `Never`), `is_concrete_field` folds, and single raises through `require` /
+  `require_instance` with their tests. Left, largest groups first: the `RelationHop` split
+  (`utils/permissions.py`, about 14 casts across `filters/sets.py`, `orders/sets.py` and `utils/permissions.py`), the
+  `mutations/resolvers.py` write pipeline (10, its statement order is a security invariant), bind-slot readers
+  (`_model_fields_by_attr`, `_primary_type`, the serializer-class reads, about 11), `types/finalizer.py`'s registry
+  reads (8), the per-row reads (`utils/querysets.py::_reconstructed_value` 5, the `types/resolvers.py` optimizer
+  stash reads, `types/relay.py::_resolve_id_default`; each needs a micro-benchmark first) and the security-path
+  singles (`consumers.py`, `auth/sessions.py`, `utils/permissions.py::run_active_input_permission_checks`, which must
+  fail closed, `extensions/resource_policy.py`). Not taken in the first pass: `optimizer/selections.py`'s
+  `is_fragment` (its `hasattr` check matches no class claim), `bind_auth_mutations`'s ledger (holders and the
+  register rider share one metaclass), the walker's hook-type reads (threading the type through four callers on the
+  visibility path), `ends_in_unique_column` / `TypeRegistry.unregister` (the check solves to `Unknown` type
+  arguments), `testing/client.py::_finish_response` (a TypedDict member has no runtime check),
+  `strawberry_schema_from_info` / `schema_config_from_info` (tests pass namespace stand-ins), `payload_cls_for` (the
+  keyword constructor has no runtime check). Upstream-only (re-verified against the lock): types-django-filter
+  (`FilterSetMetaclass.__new__` returning `Self`, `get_fields`, `FilterSetOptions.fields`, `Filter.filter`),
   django-stubs (`Options.concrete_model` optional, `QuerySet(hints=)`, `Window(order_by=)`), Strawberry
-  (`SliceMetadata.from_arguments` reading `info` only without `max_results`)
+  (`SliceMetadata.from_arguments` reading `info` only without `max_results`, `Edge.node`, `Info._raw_info`)
 - [ ] 35. Behavior, not typing (item 6's open question): on the prefetch path a `get_queryset` hook reads the planning
   resolver's `info.field_name` / `selected_fields`; run by the relation's own resolver it reads the relation's. The
   optimizer should not change what a hook observes: build a per-relation raw info, as strawberry_django's
@@ -304,8 +328,8 @@ Checked against django-stubs 6.1.2 and master. Happy to send a PR if this is wel
 
 ## Ignore breakdown
 
-Lines carrying a `# pyright: ignore[...]` comment: 708 (774 rule hits): tests 524, package 125, examples 56,
-scripts 3. By rule and by file are measured at 708 lines; by cause at 881.
+Lines carrying a `# pyright: ignore[...]` comment: 717 (785 rule hits): tests 534, package 125, examples 55,
+scripts 3. By rule and by file are measured at 717 lines; by cause at 881.
 
 ### By cause
 
@@ -328,46 +352,40 @@ another rule evaluates to Unknown.
 
 | Rule | Hits | Package | Tests | Examples | Scripts | Root |
 | --- | --- | --- | --- | --- | --- | --- |
-| `reportArgumentType` | 273 | 24 | 237 | 12 | 0 | 0 |
+| `reportArgumentType` | 279 | 24 | 243 | 12 | 0 | 0 |
 | `reportAttributeAccessIssue` | 113 | 25 | 87 | 1 | 0 | 0 |
 | `reportIncompatibleVariableOverride` | 68 | 6 | 55 | 7 | 0 | 0 |
-| `reportIncompatibleMethodOverride` | 59 | 7 | 47 | 5 | 0 | 0 |
-| `reportAny` | 39 | 10 | 14 | 15 | 0 | 0 |
-| `reportExplicitAny` | 35 | 26 | 6 | 2 | 1 | 0 |
+| `reportIncompatibleMethodOverride` | 60 | 7 | 48 | 5 | 0 | 0 |
+| `reportAny` | 40 | 10 | 15 | 15 | 0 | 0 |
 | `reportUnknownMemberType` | 32 | 26 | 4 | 2 | 0 | 0 |
 | `reportAssignmentType` | 28 | 0 | 25 | 1 | 2 | 0 |
+| `reportExplicitAny` | 28 | 26 | 0 | 1 | 1 | 0 |
 | `reportReturnType` | 23 | 1 | 21 | 1 | 0 | 0 |
 | `reportUnknownVariableType` | 20 | 18 | 2 | 0 | 0 | 0 |
+| `reportCallIssue` | 14 | 1 | 12 | 1 | 0 | 0 |
 | `reportUnknownArgumentType` | 14 | 5 | 2 | 7 | 0 | 0 |
 | `reportUnsafeMultipleInheritance` | 12 | 6 | 4 | 2 | 0 | 0 |
-| `reportCallIssue` | 11 | 1 | 9 | 1 | 0 | 0 |
 | `reportIndexIssue` | 10 | 0 | 10 | 0 | 0 | 0 |
 | `reportGeneralTypeIssues` | 5 | 0 | 5 | 0 | 0 | 0 |
 | `reportInvalidTypeArguments` | 5 | 1 | 4 | 0 | 0 | 0 |
 | `reportPropertyTypeMismatch` | 5 | 5 | 0 | 0 | 0 | 0 |
 | `reportUndefinedVariable` | 5 | 0 | 5 | 0 | 0 | 0 |
 | `reportFunctionMemberAccess` | 4 | 4 | 0 | 0 | 0 | 0 |
+| `reportUnusedVariable` | 4 | 0 | 4 | 0 | 0 | 0 |
 | `reportMissingSuperCall` | 3 | 2 | 1 | 0 | 0 | 0 |
 | `reportOptionalMemberAccess` | 3 | 3 | 0 | 0 | 0 | 0 |
+| `reportUntypedFunctionDecorator` | 3 | 2 | 1 | 0 | 0 | 0 |
 | `reportDeprecated` | 2 | 1 | 1 | 0 | 0 | 0 |
 | `reportUnnecessaryIsInstance` | 2 | 2 | 0 | 0 | 0 | 0 |
-| `reportUntypedFunctionDecorator` | 2 | 2 | 0 | 0 | 0 | 0 |
 | `reportIncompatibleUnannotatedOverride` | 1 | 1 | 0 | 0 | 0 | 0 |
+| `reportRedeclaration` | 1 | 0 | 1 | 0 | 0 | 0 |
+| `reportUnusedCallResult` | 1 | 0 | 1 | 0 | 0 | 0 |
 
 ### Most ignores per file
 
 | File | Lines |
 | --- | --- |
-| `tests/utils/test_querysets.py` | 51 |
-| `tests/test_resource_policy.py` | 20 |
-| `tests/filters/test_sets.py` | 17 |
-| `tests/optimizer/test_hints.py` | 17 |
-| `tests/rest_framework/test_resolvers.py` | 17 |
-| `tests/test_list_field.py` | 16 |
-| `tests/types/test_relay_interfaces.py` | 16 |
-| `django_strawberry_framework/utils/_queryset_private.py` | 15 |
-| `django_strawberry_framework/filters/sets.py` | 14 |
-| `tests/filters/test_inputs.py` | 14 |
+
 
 <!-- LINK DEFINITIONS -->
 

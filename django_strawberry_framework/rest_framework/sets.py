@@ -417,14 +417,13 @@ def _assert_schema_source_ownership(
     )
     if not nested_fields:
         return
-    validate_nested_config_keys(
+    nested_serializers = validate_nested_config_keys(
         serializer_class,
         {k: v for k, v in field_map.items() if k in supplied_fields},
         nested_fields,
     )
     for field_name, config in nested_fields.items():
-        # ``validate_nested_config_keys`` just required every key to name a nested serializer.
-        nested_field = cast("DRFBaseSerializer", field_map[field_name])
+        nested_field = nested_serializers[field_name]
         child_serializer, _many = nested_serializer_child(nested_field)
         child_class = type(child_serializer)
         guard_nested_recursion(child_class, nested_path, field_name)

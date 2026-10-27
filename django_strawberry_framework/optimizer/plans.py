@@ -71,6 +71,7 @@ from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     is_concrete_field,
     is_dict,
+    is_exact_pair,
     is_str,
     list_of,
     read_attr,
@@ -1574,10 +1575,10 @@ def _is_random_term(term: object, query: Query) -> bool:
 
 def _is_random_condition_child(child: object, query: Query) -> bool:
     """Classify one child of a ``When`` condition for ``_is_random_term``."""
-    if isinstance(child, tuple):
-        lookup, value = cast("tuple[str, object]", child)
+    if is_exact_pair(child):
+        lookup, value = child
         # A string value is a literal: a condition reads a reference only through ``F``.
-        return _is_random_alias(lookup, query) or (
+        return (is_str(lookup) and _is_random_alias(lookup, query)) or (
             not isinstance(value, str) and _is_random_term(value, query)
         )
     return _is_random_term(child, query)

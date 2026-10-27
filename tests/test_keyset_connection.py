@@ -72,6 +72,7 @@ from django_strawberry_framework.connection import (
     _keyset_connection_context,
     _keyset_order_state,
     _resolve_from_window,
+    _resolve_keyset_connection,
     _WindowedConnectionRows,
 )
 from django_strawberry_framework.keyset import (
@@ -152,6 +153,39 @@ def test_keyset_connection_context_is_none_for_offset_types() -> None:
     assert _keyset_connection_context(connection_type) is None
     # The negative result is cached too (the ``False`` sentinel round-trip).
     assert _keyset_connection_context(connection_type) is None
+
+
+def test_keyset_connection_context_refuses_a_slot_holding_no_cursor_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The generated slot holds a ``CursorState`` or ``False``; anything else is a ``TypeError``."""
+    issue_type = _make_issue_type("PlantedKeysetNode")
+    finalize_django_types()
+    connection_type = _issue_connection_of(issue_type)
+    monkeypatch.setattr(connection_type, "_dst_keyset_state", "not a cursor state")
+    with pytest.raises(TypeError, match="expected an instance of"):
+        _keyset_connection_context(connection_type)
+
+
+@pytest.mark.django_db
+def test_keyset_slicer_refuses_a_page_with_no_int_bound() -> None:
+    """A page reaching the keyset slicer without an ``int`` bound is a ``TypeError``.
+
+    ``page_arguments`` bounds every page with an ``int`` before the slicer runs.
+    """
+    issue_type = _make_issue_type("UnboundedKeysetNode")
+    state = _issue_state(issue_type)
+    assert state is not None
+    connection_type = _issue_connection_of(issue_type)
+    info = make_info(field_name="issues", selections="{ edges }")
+    with pytest.raises(TypeError, match="expected an instance of"):
+        _resolve_keyset_connection(
+            connection_type,
+            Issue.objects.all(),
+            info=info,
+            want_count=False,
+            state=state,
+        )
 
 
 def test_keyset_connection_context_resolves_without_connection_opt_in() -> None:

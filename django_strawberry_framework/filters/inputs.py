@@ -24,7 +24,7 @@ import uuid
 from collections import OrderedDict
 from dataclasses import dataclass
 from types import GenericAlias, MappingProxyType
-from typing import TYPE_CHECKING, Annotated, cast
+from typing import TYPE_CHECKING, Annotated
 
 import strawberry
 from django import forms
@@ -52,6 +52,7 @@ from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     dict_of,
     enum_value,
+    is_concrete_field,
     is_list_or_tuple,
     is_mapping,
     optional_annotation,
@@ -116,7 +117,7 @@ if TYPE_CHECKING:
 
     from django_strawberry_framework.types.definition import DjangoTypeDefinition
     from django_strawberry_framework.utils.inputs import SetInputNamespace
-    from django_strawberry_framework.utils.typing import ConcreteField, ModelField
+    from django_strawberry_framework.utils.typing import ModelField
 
     from .sets import FilterSet, _LeafDeclaration
 
@@ -272,8 +273,8 @@ LOGIC_OPERATORS_BY_PYTHON_ATTR: Mapping[str, LogicOperatorDescriptor] = MappingP
 # ``filters.inputs.__dict__``, per the parked-globals lifecycle stated on
 # ``utils/inputs.py::make_input_namespace``.
 _materialized_names: dict[str, type[object]]
-_field_specs: dict[tuple[type[FilterSet], str], FieldSpec]
-_namespace: SetInputNamespace[FilterSet] = make_set_input_namespace(
+_field_specs: dict[tuple[type[object], str], FieldSpec]
+_namespace: SetInputNamespace = make_set_input_namespace(
     INPUTS_MODULE_PATH,
     "FilterSet",
     factory_module="django_strawberry_framework.filters.factories",
@@ -502,7 +503,8 @@ def _choice_enum_from_filter(
     # Local import to avoid a top-level cycle through ``types.converters``.
     from django_strawberry_framework.types.converters import convert_choices_to_enum  # noqa: PLC0415 - import cycle
 
-    if model_field is None or not getattr(model_field, "choices", None):
+    # A reverse ``ForeignObjectRel`` declares no ``choices``, so it fails the same guard.
+    if not is_concrete_field(model_field) or not getattr(model_field, "choices", None):
         declaration = _declaration_of(filter_instance, filterset_cls)
         raise ConfigurationError(
             f"{declaration.kind} on {truth.render(declaration.declared)}{declaration.site} "
@@ -512,9 +514,7 @@ def _choice_enum_from_filter(
             "`DateFromToRangeFilter`, its lookups in Meta.fields, or `CharFilter(method=...)` "
             "for a method filter).",
         )
-    # Past the guard the field declares truthy ``choices``, which only a concrete
-    # ``Field`` carries (a reverse ``ForeignObjectRel`` has no ``choices``).
-    return convert_choices_to_enum(cast("ConcreteField", model_field), type_name)
+    return convert_choices_to_enum(model_field, type_name)
 
 
 def _element_annotation(
@@ -1456,14 +1456,14 @@ def _build_input_fields(
             if own_lookups:
                 yield top_name, own_lookups
 
-    def _related_target_of(
+    def _related_of(
         top_name: str,
         _lookup_bag: Mapping[str, FormKeyedFilter],
-    ) -> tuple[bool, type[FilterSet] | None]:
+    ) -> tuple[type[FilterSet] | None, str] | None:
         rel_filter = related_filters.get(top_name)
         if rel_filter is None:
-            return False, None
-        return True, rel_filter.filterset
+            return None
+        return rel_filter.filterset, top_name
 
     def _leaf_of(
         top_name: str,
@@ -1503,8 +1503,7 @@ def _build_input_fields(
     return emit_set_input_field_triples(
         filterset_cls,
         _visible_entries(),
-        related_target_of=_related_target_of,
-        related_source_path_of=lambda top_name, _lookup_bag: top_name,
+        related_of=_related_of,
         leaf_of=_leaf_of,
         input_type_name_for=_input_type_name_for,
         module_path=INPUTS_MODULE_PATH,

@@ -120,6 +120,19 @@ def test_validation_error_params_mismatch_propagates_like_django(payload: Valida
         validation_error_to_field_errors(payload)
 
 
+def test_validation_error_leaves_must_be_validation_errors() -> None:
+    """Django stores every leaf as a ``ValidationError``; a planted leaf or map is a ``TypeError``."""
+    planted_leaf = ValidationError("value")
+    # Message-shaped, so ``messages`` renders it; it is still not a ``ValidationError``.
+    vars(planted_leaf)["error_list"] = [SimpleNamespace(message="value", params=None, code="x")]
+    with pytest.raises(TypeError, match="expected an instance of"):
+        validation_error_to_field_errors(planted_leaf)
+    planted_map = ValidationError({"name": ["required"]})
+    vars(planted_map)["error_dict"] = [("name", [])]
+    with pytest.raises(TypeError, match="expected the type the source guarantees"):
+        validation_error_to_field_errors(planted_map)
+
+
 def test_relation_field_error_message_is_pinned() -> None:
     leaf = relation_field_error("categoryId")
     assert leaf.field == "categoryId"

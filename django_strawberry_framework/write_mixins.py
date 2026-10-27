@@ -42,6 +42,7 @@ from .utils import truth
 from .utils._narrowing import list_of, optional_instance, read_attr, require
 from .utils.imports import import_attr
 from .utils.inputs import get_or_store_shape_build, normalize_field_name_sequence
+from .utils.relations import is_model_class
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
@@ -332,9 +333,9 @@ def backing_model_of(meta: _ValidatedMutationMeta) -> type[models.Model]:
     (``DjangoFormMutation``) has none. Every model-backed flavor
     (``DjangoMutation``, ``DjangoModelFormMutation``, ``SerializerMutation``) gates
     it through ``require_model_class`` at class creation, so on their snapshots it
-    is always a model class.
+    is always a model class; a model-less snapshot here is a ``TypeError``.
     """
-    return cast("type[models.Model]", meta.model)
+    return require(meta.model, is_model_class)
 
 
 def own_backing_class(cls: type[object], key: str) -> object:

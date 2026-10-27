@@ -32,7 +32,12 @@ from django_strawberry_framework.keyset import (
     decode_keyset_cursor,
 )
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import is_str, list_of, require
+from django_strawberry_framework.utils._narrowing import (
+    is_concrete_field,
+    is_str,
+    list_of,
+    require,
+)
 from django_strawberry_framework.utils.connections import (
     ConnectionWindowBounds,
     FetchMode,
@@ -390,9 +395,12 @@ def _index_leading_terms(meta: _OptionsAny, index: object) -> list[tuple[str, bo
         saw_descending = saw_descending or descending
         bare = name[1:] if descending else name
         try:
-            # Django's model checks admit only concrete local fields in ``Meta.indexes``.
-            field = cast("ConcreteField", meta.get_field(bare))
+            field = meta.get_field(bare)
         except FieldDoesNotExist:
+            return None
+        # Django's model checks admit only concrete local fields in ``Meta.indexes``; a name
+        # resolving to a reverse relation cannot be proven an index column.
+        if not is_concrete_field(field):
             return None
         terms.append((field.attname, descending))
     if saw_descending and not _every_backend_supports_index_column_ordering():
@@ -469,9 +477,12 @@ def _plain_field_terms(meta: _OptionsAny, names: Sequence[str]) -> list[tuple[st
     terms: list[tuple[str, bool]] = []
     for name in names:
         try:
-            # Django's model checks admit only concrete local fields in unique sets.
-            field = cast("ConcreteField", meta.get_field(name))
+            field = meta.get_field(name)
         except FieldDoesNotExist:
+            return None
+        # Django's model checks admit only concrete local fields in unique sets; a name
+        # resolving to a reverse relation cannot be proven a unique column.
+        if not is_concrete_field(field):
             return None
         terms.append((field.attname, False))
     return terms
