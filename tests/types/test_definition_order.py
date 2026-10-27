@@ -878,8 +878,7 @@ def test_auto_annotation_synthesizes_model_inferred_scalar_type() -> None:
     """``name: auto`` keeps the field selected but infers its type from the model."""
 
     class CategoryType(DjangoType):
-        # basedpyright: strawberry.auto is Annotated[Any, StrawberryAuto()]; DjangoType infers the type
-        name: auto  # pyright: ignore[reportExplicitAny]
+        name: auto
 
         class Meta:
             model = Category
@@ -896,8 +895,7 @@ def test_auto_annotation_is_not_a_consumer_override() -> None:
     """An ``auto`` field routes back into synthesis, not the consumer-authored union."""
 
     class CategoryType(DjangoType):
-        # basedpyright: strawberry.auto is Annotated[Any, StrawberryAuto()]; DjangoType infers the type
-        name: auto  # pyright: ignore[reportExplicitAny]
+        name: auto
 
         class Meta:
             model = Category
@@ -912,8 +910,7 @@ def test_auto_annotation_emits_synthesized_annotation() -> None:
     """Unlike a real override, an ``auto`` field IS present in the synthesized dict."""
 
     class CategoryType(DjangoType):
-        # basedpyright: strawberry.auto is Annotated[Any, StrawberryAuto()]; DjangoType infers the type
-        name: auto  # pyright: ignore[reportExplicitAny]
+        name: auto
 
         class Meta:
             model = Category
@@ -934,8 +931,7 @@ def test_auto_annotation_on_relation_field_synthesizes_relation() -> None:
     """``items: auto`` defers the reverse-FK relation to finalization like bare selection."""
 
     class CategoryType(DjangoType):
-        # basedpyright: strawberry.auto is Annotated[Any, StrawberryAuto()]; DjangoType infers the type
-        items: auto  # pyright: ignore[reportExplicitAny]
+        items: auto
 
         class Meta:
             model = Category
@@ -961,8 +957,7 @@ def test_auto_annotation_on_unselected_field_raises() -> None:
 
         @definition_raises
         class CategoryType(DjangoType):
-            # basedpyright: strawberry.auto is Annotated[Any, StrawberryAuto()]; DjangoType infers the type
-            description: auto  # pyright: ignore[reportExplicitAny]
+            description: auto
 
             class Meta:
                 model = Category
@@ -979,8 +974,7 @@ def test_auto_annotation_combined_with_assigned_field_raises() -> None:
 
         @definition_raises
         class CategoryType(DjangoType):
-            # basedpyright: strawberry.auto is Annotated[Any, StrawberryAuto()]; DjangoType infers the type
-            description: auto = strawberry.field(resolver=_zero)  # pyright: ignore[reportExplicitAny]
+            description: auto = strawberry.field(resolver=_zero)
 
             class Meta:
                 model = Category

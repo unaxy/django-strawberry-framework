@@ -44,6 +44,7 @@ from django_strawberry_framework.management.commands.inspect_django_type import 
     _render_annotation,
     _scalar_name,
     _sdl_type_name,
+    _strawberry_field_type,
 )
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.types import converters
@@ -267,6 +268,23 @@ def test_unfinalized_type_raises_command_error(monkeypatch: pytest.MonkeyPatch) 
     _make_test_module(monkeypatch, ConcreteType=ConcreteType)
     with pytest.raises(CommandError, match=r"finalize_django_types\(\) has not run"):
         call_command("inspect_django_type", "test_module.ConcreteType")
+
+
+def test_strawberry_field_type_refuses_an_unfinalized_type() -> None:
+    """Finalization attaches the Strawberry definition the field read needs; before it, a ``TypeError``.
+
+    ``handle`` refuses an unfinalized type first, so the command never reaches this read.
+    """
+
+    class UnfinalizedType(DjangoType):
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+
+    definition = UnfinalizedType.__django_strawberry_definition__
+    assert definition.finalized is False
+    with pytest.raises(TypeError, match="does not have a StrawberryObjectDefinition"):
+        _strawberry_field_type(definition, "name")
 
 
 def _inspect_text(type_name: str) -> str:

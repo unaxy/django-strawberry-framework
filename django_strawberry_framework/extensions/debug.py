@@ -98,7 +98,7 @@ import threading
 import traceback
 from contextlib import ExitStack
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, NamedTuple, TypedDict, cast
+from typing import TYPE_CHECKING, ClassVar, NamedTuple, TypedDict
 
 from django.core.exceptions import ImproperlyConfigured
 from django.db import connections
@@ -327,8 +327,10 @@ def _serialize_exception(exception: BaseException) -> _DebugExceptionRow:
     }
 
 
-def _terminal_original_error(error: GraphQLError) -> BaseException:
-    """Walk nested ``GraphQLError.original_error`` links to the terminal exception.
+def _terminal_original_error(original: Exception) -> BaseException:
+    """Walk nested ``GraphQLError.original_error`` links from ``original`` to the terminal exception.
+
+    ``original`` is a result error's ``original_error``: the walk starts on it.
 
     The walk is doubly bounded: an identity set terminates malformed cycles
     and ``_MAX_ORIGINAL_ERROR_HOPS`` bounds a long acyclic chain (an identity
@@ -339,9 +341,7 @@ def _terminal_original_error(error: GraphQLError) -> BaseException:
     graphql-core uses that exact shape when a resolver explicitly raises
     ``GraphQLError``.
     """
-    # ``cast``, not a narrowing: the one caller skips every error whose
-    # ``original_error`` is ``None``, so the walk always starts on an exception.
-    candidate = cast("Exception", error.original_error)
+    candidate = original
     seen_identities = {id(candidate)}
     for _ in range(_MAX_ORIGINAL_ERROR_HOPS):
         if not isinstance(candidate, GraphQLError):
@@ -370,14 +370,14 @@ def _collect_exceptions(execution_result: object) -> "list[_DebugExceptionRow]":
     errors = read_attr(execution_result, "errors", None)
     if errors is None:
         return []
-    bearers: list[GraphQLError] = []
+    originals: list[Exception] = []
     for error in list_of(errors):
         if not isinstance(error, GraphQLError) or error.original_error is None:
             continue
-        bearers.append(error)
-        if len(bearers) >= _MAX_EXCEPTION_ROWS:
+        originals.append(error.original_error)
+        if len(originals) >= _MAX_EXCEPTION_ROWS:
             break
-    return [_serialize_exception(_terminal_original_error(error)) for error in bearers]
+    return [_serialize_exception(_terminal_original_error(original)) for original in originals]
 
 
 def _query_log_entries_since(

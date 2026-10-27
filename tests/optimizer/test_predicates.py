@@ -22,6 +22,7 @@ from django_strawberry_framework.optimizer.predicates import (
     attach_exists,
     correlated_inner_root,
     related_rows_exist,
+    visible_value,
 )
 from django_strawberry_framework.utils._narrowing import list_of, read_attr
 from tests._idioms import saved_pk
@@ -282,3 +283,9 @@ def test_related_rows_exist_rejects_a_segment_without_link_columns() -> None:
     """A ``GenericForeignKey`` names no link columns, so nothing could correlate it: it raises."""
     with pytest.raises(ConfigurationError, match="segment 'content_object' is not a relation"):
         related_rows_exist(TaggedItem, "content_object", Branch.objects.all(), using="default")
+
+
+def test_visible_value_needs_a_test_to_guard_the_value() -> None:
+    """``visible_value`` nests one ``CASE`` per test; an empty sequence guards nothing."""
+    with pytest.raises(ValueError, match="not enough values to unpack"):
+        visible_value("name", [])

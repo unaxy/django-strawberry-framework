@@ -29,7 +29,7 @@ callable that still needs ``field``).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, final
 
 from typing_extensions import override
 
@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "MRO_CONTINUE",
+    "MroContinue",
     "convert_with_mro",
     "finish_field_conversion",
     "make_kind_converter",
@@ -48,13 +49,17 @@ __all__ = [
 ]
 
 
-class _MroContinue:
+@final
+class MroContinue:
     """Sentinel: a precheck matched, but ``convert_with_mro`` should keep walking.
 
     ``None`` is a successful conversion (filter ``normalize_input_value`` may
     unwrap an enum member whose ``.value`` is ``None``). The bare-``forms.Field``
     exact-type precheck returns this sentinel for subclasses so the scalar
-    registry can still run.
+    registry can still run. ``MRO_CONTINUE`` is the one instance; a precheck
+    handler that can continue names this class in its return type, and the walk
+    tells the sentinel apart by its exact type, so a returned value is never
+    asked its ``__class__``.
     """
 
     __slots__: tuple[str, ...] = ()
@@ -64,7 +69,7 @@ class _MroContinue:
         return "MRO_CONTINUE"
 
 
-MRO_CONTINUE = _MroContinue()
+MRO_CONTINUE = MroContinue()
 
 
 class _RequiredFlagField(Protocol):
@@ -77,6 +82,8 @@ class _RequiredFlagField(Protocol):
 _FieldT = TypeVar("_FieldT")
 _FlagFieldT = TypeVar("_FlagFieldT", bound=_RequiredFlagField)
 _ConversionT = TypeVar("_ConversionT", bound=FieldConversionBase)
+_ResultT = TypeVar("_ResultT")
+_EntryT = TypeVar("_EntryT")
 
 
 def convert_with_mro(
@@ -85,11 +92,11 @@ def convert_with_mro(
     isinstance_prechecks: Sequence[
         # basedpyright: each handler takes the class its paired isinstance narrows to; Callable
         # parameters are contravariant, so no common spelling admits them all
-        tuple[type[object] | tuple[type[object], ...], Callable[[Any], object]]  # pyright: ignore[reportExplicitAny]
+        tuple[type[object] | tuple[type[object], ...], Callable[[Any], _ResultT | MroContinue]]  # pyright: ignore[reportExplicitAny]
     ],
-    scalar_registry: Mapping[type[_FieldT], object],
+    scalar_registry: Mapping[type[_FieldT], _EntryT],
     fallthrough_error_factory: Callable[[_FieldT], Exception],
-) -> object:
+) -> _ResultT | _EntryT:
     """Dispatch ``field`` to a conversion via ordered prechecks, an MRO walk, then a raise.
 
     The flavor-agnostic body of ``forms/converter.py::convert_form_field``,
@@ -133,7 +140,7 @@ def convert_with_mro(
     for types, handler in isinstance_prechecks:
         if isinstance(field, types):
             result = handler(field)
-            if result is not MRO_CONTINUE:
+            if type(result) is not MroContinue:
                 return result
     entry = truth.mro_entry(scalar_registry, truth.class_of(field))
     if entry is not None:
@@ -184,9 +191,9 @@ def make_scalar_converter(
 
 
 def finish_field_conversion(
-    result: FieldConversionBase | Callable[[_FieldT], FieldConversionBase],
+    result: _ConversionT | Callable[[_FieldT], _ConversionT],
     field: _FieldT,
-) -> FieldConversionBase:
+) -> _ConversionT:
     """Turn a ``convert_with_mro`` result into a ``FieldConversionBase`` instance.
 
     Precheck handlers return a finished conversion; scalar-table entries are

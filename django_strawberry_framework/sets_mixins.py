@@ -49,7 +49,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, TypeGuard, TypeVar, cast
+from typing import TYPE_CHECKING, ClassVar, Generic, TypeGuard, TypeVar, cast
 
 from django.db.models.constants import LOOKUP_SEP
 from django.utils.module_loading import import_string
@@ -86,7 +86,8 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T")
 _FamilyT = TypeVar("_FamilyT")
-_D = TypeVar("_D", bound="RelatedSetTargetMixin")
+_SetT_co = TypeVar("_SetT_co", covariant=True)
+_D = TypeVar("_D", bound="RelatedSetTargetMixin[object]")
 
 
 class ClassBasedTypeNameMixin:
@@ -195,7 +196,7 @@ class LazyRelatedClassMixin:
         return class_ref
 
 
-class RelatedSetTargetMixin(LazyRelatedClassMixin):
+class RelatedSetTargetMixin(LazyRelatedClassMixin, Generic[_SetT_co]):
     """Idempotent owner-bind + lazy target-class resolution for a related-set declaration.
 
     The machinery shared by ``RelatedFilter`` / ``RelatedOrder``: an idempotent ``bind_*`` that records
@@ -216,7 +217,8 @@ class RelatedSetTargetMixin(LazyRelatedClassMixin):
       (``"bound_filterset"`` / ``"bound_orderset"``).
 
     Plus one family-supplied hook: ``_validate_target`` is the resolved-target
-    TYPE gate (raise ``ConfigurationError`` for anything outside the family).
+    TYPE gate (raise ``ConfigurationError`` for anything outside the family, return
+    the set class it proved, so the mixin is generic over that class).
     Firing it inside ``_resolved_target`` -- not inline in each family's
     property getter -- means every distinct value is family-checked
     at the one seam all of them share (the Layer-5 BFS enqueue in
@@ -236,14 +238,14 @@ class RelatedSetTargetMixin(LazyRelatedClassMixin):
     _target_attr: str
     _owner_attr: str
     # The last resolved target the family gate accepted (set per instance, read by identity).
-    _validated_target_memo: object
+    _validated_target_memo: type[_SetT_co] | None = None
 
     def _bind_owner(self, owner: FilterSetMetaclass | OrderSetMetaclass) -> None:
         """Bind the owning set once; a second (possibly divergent) bind is a no-op."""
         if not hasattr(self, self._owner_attr):
             setattr(self, self._owner_attr, owner)
 
-    def _resolved_target(self) -> object:
+    def _resolved_target(self) -> type[_SetT_co] | None:
         """Resolve the (possibly-lazy) target class and re-store it, validating each distinct value once.
 
         The family gate (``_validate_target``) fires here, AFTER the re-store:
@@ -253,27 +255,29 @@ class RelatedSetTargetMixin(LazyRelatedClassMixin):
         failures are never memoized.
         """
         current = read_attr(self, self._target_attr)
-        if current is not None and current is read_attr(self, "_validated_target_memo", None):
-            return current
+        memo = self._validated_target_memo
+        if memo is not None and current is memo:
+            return memo
         # ``_bind_owner`` is the one writer of the owner slot, and it stores a set class.
         owner: type[object] | None = getattr(self, self._owner_attr, None)
         resolved = self.resolve_lazy_class(current, owner)
         setattr(self, self._target_attr, resolved)
-        if resolved is not None:
+        if resolved is None:
             # ``None`` is the shared skip-silently placeholder (the branch is
             # skipped at input emission and BFS enqueue) -- it never reaches
             # the family gate.
-            self._validate_target(resolved)
-            self._validated_target_memo = resolved
-        return resolved
+            return None
+        validated = self._validate_target(resolved)
+        self._validated_target_memo = validated
+        return validated
 
-    def _validate_target(self, _resolved: object, /) -> None:
-        """Family hook: reject a resolved target outside the family.
+    def _validate_target(self, _resolved: object, /) -> type[_SetT_co]:
+        """Family hook: return a resolved target as the family's set class, or reject it.
 
         Called with every non-``None`` RESOLVED target -- strings / callables
         have already been through ``resolve_lazy_class``. Families override
-        this with their ``issubclass`` check and declaration-naming
-        ``ConfigurationError``; the base raises so a hookless subclass (a
+        this with their ``issubclass`` check (returning the class it proved) and
+        declaration-naming ``ConfigurationError``; the base raises so a hookless subclass (a
         future set family that forgot the gate) fails loud at first resolved
         read instead of accepting any target.
         """
@@ -410,7 +414,7 @@ def collect_related_declarations(
 
 def _reject_shared_relations(
     new_class: FilterSetMetaclass | OrderSetMetaclass,
-    collected: Mapping[str, RelatedSetTargetMixin],
+    collected: Mapping[str, RelatedSetTargetMixin[object]],
 ) -> None:
     """Raise when two collected declarations name the same relation.
 

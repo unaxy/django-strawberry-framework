@@ -135,7 +135,7 @@ if TYPE_CHECKING:
     #: each caller states it by annotating the result with this alias.
     SetInputNamespace: TypeAlias = tuple[
         dict[str, type[object]],
-        dict[tuple[type[_FactorySetT], str], "GeneratedInputFieldSpec"],
+        dict[tuple[type[object], str], "GeneratedInputFieldSpec"],
         MaterializeFn,
         Callable[[], None],
     ]
@@ -223,12 +223,11 @@ def emit_set_input_field_triples(
     set_cls: type[_FactorySetT],
     entries: Iterable[tuple[str, _EntryT]],
     *,
-    related_target_of: Callable[[str, _EntryT], tuple[bool, type[_FactorySetT] | None]],
-    related_source_path_of: Callable[[str, _EntryT], str],
+    related_of: Callable[[str, _EntryT], tuple[type[_FactorySetT] | None, str] | None],
     leaf_of: Callable[[str, str, _EntryT], tuple[object, str]],
     input_type_name_for: Callable[[type[_FactorySetT]], str],
     module_path: str,
-    field_specs: dict[tuple[type[_FactorySetT], str], GeneratedInputFieldSpec],
+    field_specs: dict[tuple[type[object], str], GeneratedInputFieldSpec],
 ) -> list[tuple[str, object, dict[str, object]]]:
     """Emit the per-field input triples + ``FieldSpec`` rows for one set class.
 
@@ -237,11 +236,12 @@ def emit_set_input_field_triples(
     (``flatten_lookup_path``) + camel-cased GraphQL name + the
     ``optional_field_kwargs`` shape, then branch:
 
-    - **related** (``related_target_of`` says so): a ``Related*(None, ...)``
-      placeholder target skips silently; otherwise emit the lazy forward-ref
+    - **related** (``related_of`` answers its ``(target, source path)`` pair, ``None``
+      for a leaf): a ``Related*(None, ...)`` placeholder target skips silently;
+      otherwise emit the lazy forward-ref
       ``Annotated[<target input name>, strawberry.lazy(module_path)] | None``
-      and record ``related_source_path_of``'s path (``top_name`` for filters;
-      ``field_name or top_name`` for orders).
+      and record the source path (``top_name`` for filters; ``field_name or
+      top_name`` for orders).
     - **leaf**: ``leaf_of`` owns the family's leaf semantics (the filter side's
       operator-bag class build + lookup-table gate path; the order side's fixed
       ``Ordering | None``) and returns the final
@@ -286,13 +286,14 @@ def emit_set_input_field_triples(
     # clean. Writing them as each field is emitted left the family's
     # ``field_specs`` table half-populated when a later member collided - a
     # schema build that failed loud but not cleanly.
-    staged_specs: list[tuple[tuple[type[_FactorySetT], str], GeneratedInputFieldSpec]] = []
+    staged_specs: list[tuple[tuple[type[object], str], GeneratedInputFieldSpec]] = []
     for top_name, entry in entries:
         python_attr = flatten_lookup_path(top_name)
         graphql_name = graphql_camel_name(python_attr)
         field_kwargs = optional_field_kwargs(python_attr, graphql_name)
-        is_related, target = related_target_of(top_name, entry)
-        if is_related:
+        related = related_of(top_name, entry)
+        if related is not None:
+            target, django_source_path = related
             if target is None:
                 # ``Related*(None, ...)`` placeholder - skip silently.
                 continue
@@ -300,7 +301,6 @@ def emit_set_input_field_triples(
             # A runtime-built annotation: the object ``Annotated[...]`` builds from a
             # runtime name has no static type either checker models.
             annotation = optional_annotation(Annotated[target_name, strawberry.lazy(module_path)])
-            django_source_path = related_source_path_of(top_name, entry)
         else:
             annotation, django_source_path = leaf_of(top_name, python_attr, entry)
         # Reject the silent-overwrite collision BEFORE it reaches the input
@@ -528,7 +528,7 @@ def make_set_input_namespace(
     collision_registry_attr: str,
     set_module: str,
     set_class_name: str,
-) -> SetInputNamespace[_FactorySetT]:
+) -> SetInputNamespace:
     """Return the set-family ``(ledger, field_specs, materialize_fn, clear_fn)`` quartet.
 
     The heavy spec-027 / spec-028 Decision 9 sibling of ``make_input_namespace``.
@@ -553,7 +553,7 @@ def make_set_input_namespace(
     composing ``make_input_namespace`` and swapping in the heavy clear.
     """
     ledger, materialize_fn, _light_clear = make_input_namespace(module_path, family_label)
-    field_specs: dict[tuple[type[_FactorySetT], str], GeneratedInputFieldSpec] = {}
+    field_specs: dict[tuple[type[object], str], GeneratedInputFieldSpec] = {}
 
     def clear_fn() -> None:
         clear_generated_input_namespace(
@@ -1921,11 +1921,11 @@ class GeneratedInputArgumentsFactory(Generic[_FactorySetT]):
       class. A fresh dict per family (filter and order builds must never share
       a namespace); the base declares it annotation-only so a family that
       forgets to redefine it fails loud at first use rather than sharing.
-    - the collision registry named by ``_collision_registry_attr`` -- a fresh
-      dict per family. Kept spec-named (``_type_filterset_registry`` /
-      ``_type_orderset_registry``) so ``registry.clear()`` and the test suite
-      address it directly; the base reaches it through the
-      ``_collision_registry`` property.
+    - ``_collision_registry`` -- the family's collision registry, a fresh dict
+      per family. Each family binds it to its spec-named class attribute
+      (``_type_filterset_registry`` / ``_type_orderset_registry``, the one dict
+      under two names) so ``registry.clear()`` and the test suite address it
+      directly; both clear it in place, never rebind it.
     - ``_factory_label`` / ``_family_label`` / ``_rename_noun`` -- collision
       error wording so the message still names ``FilterArgumentsFactory`` /
       ``FilterSet`` / ``filterset`` vs the order equivalents.
@@ -1945,7 +1945,7 @@ class GeneratedInputArgumentsFactory(Generic[_FactorySetT]):
     # dicts. No default here, so a forgetful subclass AttributeErrors loudly
     # instead of silently sharing the base's namespace.
     input_object_types: ClassVar[dict[str, type[object]]]
-    _collision_registry_attr: ClassVar[str]
+    _collision_registry: dict[str, type[_FactorySetT]]
     _factory_label: ClassVar[str]
     _family_label: ClassVar[str]
     _rename_noun: ClassVar[str]
@@ -1974,15 +1974,6 @@ class GeneratedInputArgumentsFactory(Generic[_FactorySetT]):
         """Store the root set class and its class-derived input type name."""
         self.set_class: type[_FactorySetT] = set_class
         self.input_type_name: str = set_input_type_name(set_class)
-
-    @property
-    def _collision_registry(self) -> dict[str, type[_FactorySetT]]:
-        """The family collision registry, addressed through its spec-named attr."""
-        # Each family factory declares the registry this attr names as a fresh dict.
-        return cast(
-            "dict[str, type[_FactorySetT]]",
-            getattr(type(self), self._collision_registry_attr),
-        )
 
     @property
     def arguments(self) -> type[object]:

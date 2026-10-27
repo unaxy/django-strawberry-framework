@@ -90,7 +90,7 @@ import binascii
 from dataclasses import dataclass
 from functools import cache, lru_cache
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from django.conf import settings
 from django.core import signing
@@ -103,7 +103,7 @@ from strawberry.relay.utils import from_base64, to_base64
 
 from .exceptions import ConfigurationError
 from .utils import truth
-from .utils._narrowing import is_concrete_field, is_dict, is_list, list_of, read_attr
+from .utils._narrowing import is_concrete_field, is_dict, is_list, list_of, read_attr, require
 from .utils.connections import PaginationArgumentError
 from .utils.imports import require_optional_module
 from .utils.relations import _resolve_segment_field
@@ -115,7 +115,7 @@ if TYPE_CHECKING:
     from cryptography.hazmat.primitives.ciphers.aead import AESSIV
 
     from .types.definition import DjangoTypeDefinition
-    from .utils.typing import ConcreteField, ModelField
+    from .utils.typing import ConcreteField
 
 #: The keyset cursor namespace, package-owned (upstream strawberry uses
 #: ``arrayconnection``; strawberry-graphql-django uses ``orderedcursor`` -
@@ -255,15 +255,15 @@ def validate_cursor_field_references(
     return tuple(parsed)
 
 
-def _resolve_cursor_field_column(model: type[models.Model], name: str) -> ModelField:
-    """Resolve one cursor column name through the shared segment-field rule.
+def _resolve_cursor_field_column(model: type[models.Model], name: str) -> ConcreteField:
+    """Resolve one validated cursor column name to its model ``Field``.
 
     The ``pk`` alias and the ``FieldDoesNotExist`` vocabulary are owned by
-    ``utils/relations.py::_resolve_segment_field``; a reverse-relation name
-    resolves to its ``ForeignObjectRel``, which ``validate_cursor_field_columns``
-    rejects.
+    ``utils/relations.py::_resolve_segment_field``. ``validate_cursor_field_columns``
+    rejected every entry naming a reverse relation (its ``ForeignObjectRel``) at
+    finalization, so one here is a ``TypeError``.
     """
-    return _resolve_segment_field(model, name)
+    return require(_resolve_segment_field(model, name), is_concrete_field)
 
 
 def cursor_columns_for(
@@ -279,8 +279,7 @@ def cursor_columns_for(
     columns: list[CursorColumn] = []
     for order_ref in order_refs:
         name, descending = split_order_ref(order_ref)
-        # A validated entry is a local concrete column, never a reverse relation.
-        field = cast("ConcreteField", _resolve_cursor_field_column(model, name))
+        field = _resolve_cursor_field_column(model, name)
         columns.append(
             CursorColumn(
                 order_ref=order_ref,
@@ -362,7 +361,7 @@ def validate_cursor_field_columns(
     resolved_columns: list[ConcreteField] = []
     for order_ref, (name, _descending) in zip(cursor_field, parsed, strict=True):
         try:
-            field = _resolve_cursor_field_column(model, name)
+            field = _resolve_segment_field(model, name)
         except FieldDoesNotExist:
             raise ConfigurationError(
                 f"{lead} entry {truth.render(order_ref)} does not resolve to a field on {truth.name(model)}.",

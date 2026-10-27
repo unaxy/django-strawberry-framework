@@ -50,6 +50,7 @@ from typing import (
     ClassVar,
     Literal,
     NamedTuple,
+    TypeAlias,
     TypeVar,
 )
 
@@ -71,7 +72,7 @@ from django_strawberry_framework.registry import registry
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import dict_of, list_of
 from django_strawberry_framework.utils.relations import is_single_column_foreign_key
-from django_strawberry_framework.utils.typing import is_async_callable
+from django_strawberry_framework.utils.typing import is_async_callable, object_result
 
 from .converters import _field_output_type_for, convert_field_output
 from .definition import _GRAPHQL_NAME_RE, DjangoTypeDefinition
@@ -611,11 +612,20 @@ def _meta_attr(meta: object, key: str, default: object = None) -> object:
     return value
 
 
+# ``strawberry.auto`` is ``Annotated[Any, StrawberryAuto()]``; this alias carries the same
+# marker over ``object`` so a consumer's ``name: auto`` does not spell ``Any``. The package
+# root re-exports it; ``_is_auto_annotation`` recognizes it beside Strawberry's own.
+#: Strawberry's one ``StrawberryAuto`` instance (its metaclass makes the class a singleton).
+_AUTO_MARKER = object_result(StrawberryAuto)
+auto: TypeAlias = Annotated[object, _AUTO_MARKER]  # noqa: PYI042 - the consumer spelling is ``auto``
+
+
 def _is_auto_annotation(annotation: object) -> bool:
     """Return True for the ``field: auto`` declare-but-infer marker, every spelling.
 
-    Recognized: the ``StrawberryAuto`` instance, the string ``"auto"``, and the
-    string ``"strawberry.auto"``.
+    Recognized: the ``StrawberryAuto`` instance, ``strawberry.auto``, the package's
+    own ``auto`` (``Annotated[object, StrawberryAuto()]``), the string ``"auto"``, and
+    the string ``"strawberry.auto"``.
 
     The instance form is what a plain consumer module stores in
     ``cls.__annotations__``. Under ``from __future__ import annotations``
@@ -639,6 +649,13 @@ def _is_auto_annotation(annotation: object) -> bool:
     # own ``StrawberryAuto`` metaclass ``__instancecheck__`` recognizes that
     # alias, so the protocol check stays ``isinstance``.
     if isinstance(annotation, StrawberryAuto):
+        return True
+    # The package's ``auto`` annotates ``object``, which Strawberry's check does not
+    # accept; its marker is matched by identity, so no metadata ``__eq__`` runs.
+    if typing.get_origin(annotation) is Annotated and truth.is_among(
+        _AUTO_MARKER,
+        typing.get_args(annotation)[1:],
+    ):
         return True
     return truth.is_instance(annotation, str) and truth.text(annotation) in (
         "auto",

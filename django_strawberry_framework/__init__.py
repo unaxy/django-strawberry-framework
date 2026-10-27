@@ -3,10 +3,6 @@
 from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
-# `auto` is re-exported so consumers can write `from django_strawberry_framework import auto`
-# without importing strawberry directly; this is part of the DRF-shaped public surface.
-from strawberry import auto
-
 # The package logger comes first among the package's own imports (isort sorts ``._logger``
 # ahead of every subpackage), since subpackages read it as
 # ``from django_strawberry_framework import logger``.
@@ -46,6 +42,7 @@ from .schema import (
     DjangoSchema,
 )
 from .types import DjangoType, SyncMisuseError, finalize_django_types
+from .types.base import auto
 from .types.converters import (
     DjangoFilePathType,
     DjangoFileType,

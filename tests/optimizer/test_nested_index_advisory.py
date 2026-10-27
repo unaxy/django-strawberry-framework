@@ -115,6 +115,7 @@ from django_strawberry_framework.optimizer.nested_planner import (
     _concrete_order_terms,
     _index_coverage,
     _index_leading_terms,
+    _plain_field_terms,
     clear_index_advisory_dedup,
 )
 from django_strawberry_framework.optimizer.plans import OptimizationPlan
@@ -830,6 +831,12 @@ class TestIndexLeadingTerms:
         """A field name that no longer resolves degrades to ``None``, not raise."""
         index = models.Index(fields=["nope"], name="idx_missing_field")
         assert _index_leading_terms(_meta(_IdxChildComposite), index) is None
+
+    def test_reverse_relation_name_returns_none(self) -> None:
+        """A name resolving to a reverse relation is no index column -> ``None``, not covered."""
+        index = models.Index(fields=["composite"], name="idx_reverse_relation")
+        assert _index_leading_terms(_meta(_IdxParent), index) is None
+        assert _plain_field_terms(_meta(_IdxParent), ["composite"]) is None
 
     def test_btree_index_is_inspectable(self) -> None:
         """PostgreSQL ``BTreeIndex`` is an ordinary ordered B-tree -> terms, like ``models.Index``."""

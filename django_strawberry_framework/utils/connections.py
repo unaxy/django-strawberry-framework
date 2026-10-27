@@ -53,7 +53,7 @@ import re
 import sys
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Protocol, TypeGuard, TypeVar, cast
 
 from graphql import GraphQLError
 from strawberry.relay.utils import SliceMetadata, from_base64, to_base64
@@ -69,12 +69,14 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
     from strawberry import Info
+    from strawberry.types.unset import UnsetType
 
     from .typing import EitherInfo
 
 _FirstT = TypeVar("_FirstT")
 _LastT = TypeVar("_LastT")
 _RowT = TypeVar("_RowT")
+_SuppliedT = TypeVar("_SuppliedT")
 
 # The connection sidecar argument names, in BOTH vocabularies the shared
 # readers below see. ``CONNECTION_ORDER_KWARG`` is the PYTHON kwarg name (the
@@ -182,7 +184,7 @@ def connection_sidecar_inputs_from_kwargs(
     return kwargs.get(CONNECTION_FILTER_KWARG), order_by_input
 
 
-def is_supplied(value: object) -> bool:
+def is_supplied(value: _SuppliedT | UnsetType | None) -> TypeGuard[_SuppliedT]:
     """Return whether a connection argument was actually supplied by the client.
 
     The connection surfaces' spelling of the package's ONE active-input rule,
@@ -191,7 +193,8 @@ def is_supplied(value: object) -> bool:
 
     The rule lives in ``input_values.py``, which takes the sentinel as an
     argument; this passes ``input_values.UNSET``, Strawberry's ``UNSET`` typed
-    ``UnsetType``.
+    ``UnsetType``. A ``True`` answer narrows the value to its declared type minus
+    ``UnsetType`` / ``None``; a ``False`` answer narrows nothing.
     """
     return not is_inactive_value(value, unset_sentinel=UNSET)
 

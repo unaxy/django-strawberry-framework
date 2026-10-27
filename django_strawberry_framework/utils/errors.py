@@ -55,7 +55,7 @@ from __future__ import annotations
 import datetime
 import zoneinfo
 from decimal import Decimal
-from typing import TYPE_CHECKING, NamedTuple, cast
+from typing import TYPE_CHECKING, NamedTuple
 
 import strawberry
 from django.core.exceptions import NON_FIELD_ERRORS, ValidationError
@@ -76,7 +76,10 @@ from ._narrowing import (
     is_list,
     is_list_or_tuple,
     list_iter,
+    list_of,
     read_attr,
+    require,
+    require_instance,
 )
 from .lazy import unwrap_lazy_object
 from .relations import written_model_field
@@ -310,7 +313,10 @@ def _leaf_codes(error: ValidationError) -> list[object]:
     code is dropped.
     """
     # ``ValidationError.__init__`` stores every non-dict error's leaves as ``error_list``.
-    leaves = cast("Iterable[ValidationError]", truth.static_attr(error, "error_list", ()))
+    leaves = [
+        require_instance(leaf, ValidationError)
+        for leaf in list_of(truth.static_attr(error, "error_list", ()))
+    ]
     return [leaf.code for leaf in leaves if leaf.code]
 
 
@@ -539,13 +545,13 @@ def validation_error_to_field_errors(
     nested path to re-key.
     """
     # ``ValidationError.__init__`` stores a dict-form error's per-field leaf lists here.
-    error_dict = cast(
-        "dict[str, list[ValidationError]] | None",
-        truth.static_attr(exc, "error_dict"),
-    )
+    error_dict = truth.static_attr(exc, "error_dict")
     if error_dict is not None:
         errors: list[FieldError] = []
-        for field_name, field_errors in error_dict.items():
+        for field_name, field_leaves in require(error_dict, is_dict).items():
+            field_errors = [
+                require_instance(error, ValidationError) for error in list_of(field_leaves)
+            ]
             normalized_name = truth.text(field_name)
             # The sentinel check runs before the re-key (a ``NON_FIELD_ERRORS`` bucket
             # is never re-keyed), and an unmapped name keeps its validator-side name.

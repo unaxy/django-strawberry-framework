@@ -34,7 +34,7 @@ families import it without a cycle -- same contract as ``utils/permissions.py``
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final
 
 from strawberry.types.unset import UnsetType
 
@@ -48,17 +48,11 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
     from typing import TypeAlias
 
-    from django_strawberry_framework.filters.sets import FilterSet
-    from django_strawberry_framework.orders.sets import OrderSet
-
     from .inputs import GeneratedInputFieldSpec
 
-    #: A set family's field-spec map, keyed by ``(set class, python attr)``. Mapping
-    #: keys are invariant, so each family's own map is its own member.
-    FieldSpecMap: TypeAlias = (
-        Mapping[tuple[type[FilterSet], str], GeneratedInputFieldSpec]
-        | Mapping[tuple[type[OrderSet], str], GeneratedInputFieldSpec]
-    )
+    #: A set family's field-spec map, keyed by ``(set class, python attr)``. Declared over
+    #: ``type[object]`` keys: any class is a sound identity probe.
+    FieldSpecMap: TypeAlias = Mapping[tuple[type[object], str], GeneratedInputFieldSpec]
     #: One active related branch: ``(field_name, related_obj, child_input)``. The
     #: declaration is read reflectively off the set class, so it is ``object`` here.
     RelatedBranch: TypeAlias = tuple[str, object, object]
@@ -349,12 +343,7 @@ def iter_active_fields(
     for python_attr, raw_value in items:
         if is_inactive_value(raw_value, unset_sentinel=unset_sentinel):
             continue
-        # Every class is a valid probe: an identity lookup by a wider key is sound, so
-        # the family's map is read through its class-keyed view.
-        spec = cast(
-            "Mapping[tuple[type[object], str], GeneratedInputFieldSpec]",
-            config.field_specs,
-        ).get((set_cls, python_attr))
+        spec = config.field_specs.get((set_cls, python_attr))
         if python_attr in config.logic_keys:
             yield ActiveField(python_attr, raw_value, spec, LOGIC)
         elif python_attr in related:

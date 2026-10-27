@@ -1722,17 +1722,18 @@ def validate_nested_config_keys(
     serializer_class: type[DRFSerializer],
     effective: dict[str, DRFField],
     nested_configs: Mapping[str, NestedSerializerConfig] | None,
-) -> None:
+) -> dict[str, DRFBaseSerializer]:
     """Fail loud if a ``nested_fields`` key does not name an effective NESTED serializer field.
 
     Runs at EVERY nesting level (so a typo in a deeper ``NestedSerializerConfig.nested_fields``
     fails loud, not silently ignored): each key must be in the effective input set (not narrowed
     away by ``fields`` / ``exclude``) AND be a nested ``Serializer`` / ``ListSerializer`` field -
     configuring nesting for a scalar / relation field, an excluded field, or a typo is a
-    configuration error.
+    configuration error. Returns each key's nested serializer field, the map the check proved.
     """
+    nested: dict[str, DRFBaseSerializer] = {}
     if not nested_configs:
-        return
+        return nested
     _ = require_nested_fields_mapping(truth.name(serializer_class), nested_configs)
     for name, config in nested_configs.items():
         _ = require_nested_serializer_config(truth.name(serializer_class), name, config)
@@ -1749,6 +1750,8 @@ def validate_nested_config_keys(
                 f"{name!r}, but it is a {truth.name(type(field))}, not a nested serializer. "
                 "nested_fields is only for nested Serializer / ListSerializer fields.",
             )
+        nested[name] = field
+    return nested
 
 
 def _default_full_shape_identity(
@@ -1875,7 +1878,7 @@ def build_serializer_input_class(
     )
     # fail loud NOW (at every nesting level) if a ``nested_fields`` key does not name
     # an effective nested serializer field - a typo / excluded / non-nested key is a config error.
-    validate_nested_config_keys(serializer_class, effective, nested_configs)
+    _ = validate_nested_config_keys(serializer_class, effective, nested_configs)
     effective_optional: frozenset[str] = resolve_optional_fields(
         serializer_class,
         optional_fields,

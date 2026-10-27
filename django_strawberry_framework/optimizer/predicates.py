@@ -475,12 +475,14 @@ def visible_value(field_path: str, tests: Sequence[VisibleRowExists]) -> Case:
     """Return ``field_path``'s value where every test holds and ``NULL`` where any fails.
 
     One ``CASE WHEN`` per test, nested so each condition is a ``VisibleRowExists``
-    itself rather than a composed predicate. ``tests`` must be non-empty.
+    itself rather than a composed predicate. ``tests`` must be non-empty (an empty
+    sequence is the ``ValueError`` of unpacking it).
     """
-    value: Case | F = F(field_path)
-    for test in reversed(tests):
+    *outer, innermost = tests
+    value = Case(When(innermost, then=F(field_path)))
+    for test in reversed(outer):
         value = Case(When(test, then=value))
-    return cast("Case", value)
+    return value
 
 
 def visible_value_path(expression: object) -> str | None:

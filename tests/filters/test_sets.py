@@ -1913,6 +1913,20 @@ def test_a_request_copies_the_sets_own_filters_and_the_flat_copies_its_data_name
     assert instance.filters is filters
 
 
+def test_a_filter_copy_refuses_an_instance_whose_queryset_was_unset() -> None:
+    """``__init__`` always defaults ``queryset``; an instance stripped of it copies no filter."""
+    branch = _desk_ring()["branch"]
+    branch.get_filters()
+    instance = _pipeline_instance(
+        branch,
+        data={"name": "North"},
+        queryset=library_models.Branch.objects.all(),
+    )
+    instance.queryset = None
+    with pytest.raises(TypeError, match="expected the type the source guarantees"):
+        instance._filter_named("desks__shelf__branch__city")
+
+
 def test_a_flat_copy_read_by_name_is_copied_alone_and_kept() -> None:
     """A package read by name copies that one deferred filter; reading ``filters`` keeps it."""
     branch = _desk_ring()["branch"]

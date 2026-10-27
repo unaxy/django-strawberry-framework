@@ -236,11 +236,10 @@ def _keyset_connection_context(cls: type[_ConnectionT]) -> CursorState | None:
     this module carries no slot and resolves as offset-mode.
     """
     # ``_generate_connection_class`` writes the state, or ``False`` for offset mode.
-    state = cast(
-        "CursorState | Literal[False] | None",
-        truth.class_dict(cls).get("_dst_keyset_state"),
-    )
-    return state or None
+    state = truth.class_dict(cls).get("_dst_keyset_state")
+    if state is None or state is False:
+        return None
+    return require_instance(state, CursorState)
 
 
 def _set_total_count(
@@ -1128,18 +1127,16 @@ def _resolve_keyset_connection(
     after_supplied = is_supplied(after)
     before_supplied = is_supplied(before)
     if after_supplied:
-        # ``after_supplied`` proved a client cursor string.
         cursor = decode_keyset_cursor(
-            cast("str", after),
+            after,
             columns,
             fingerprint=fingerprint,
             argument="after",
         )
         queryset = queryset.filter(KeysetSeek(columns=columns, cursor=cursor).q())
     if before_supplied:
-        # ``before_supplied`` proved a client cursor string.
         cursor = decode_keyset_cursor(
-            cast("str", before),
+            before,
             columns,
             fingerprint=fingerprint,
             argument="before",
@@ -1156,7 +1153,7 @@ def _resolve_keyset_connection(
     backward = is_backward_shape(first, last)
     # ``_consume_fallback``'s ``page_arguments`` bounds every page with an ``int``:
     # ``last`` on a backward page, ``first`` on every other.
-    page_size = cast("int", last if backward else first)
+    page_size = require_instance(last if backward else first, int)
     fetch_queryset = queryset.reverse() if backward else queryset
     # The keyset page ALWAYS probes: ``hasNextPage`` here is data-driven off the
     # overfetched sentinel, so the increment is unconditional rather than gated

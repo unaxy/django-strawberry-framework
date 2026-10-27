@@ -24,7 +24,7 @@ spec-028 Decision 8.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from typing_extensions import override
 
@@ -57,7 +57,7 @@ def _order_set_class() -> type[OrderSet]:
     return OrderSet
 
 
-class RelatedOrder(RelatedSetTargetMixin):
+class RelatedOrder(RelatedSetTargetMixin["OrderSet"]):
     """Target another ``OrderSet`` to enable nested-relation ordering.
 
     Collapsed port of ``django_graphene_filters/orders.py::BaseRelatedOrder``
@@ -115,7 +115,7 @@ class RelatedOrder(RelatedSetTargetMixin):
         self._bind_owner(orderset)
 
     @override
-    def _validate_target(self, resolved: object) -> None:
+    def _validate_target(self, resolved: object) -> type[OrderSet]:
         """Enforce the ``RelatedSetTargetMixin`` family gate: target must be an ``OrderSet``.
 
         Fired by ``sets_mixins.py::RelatedSetTargetMixin._resolved_target`` on
@@ -146,6 +146,7 @@ class RelatedOrder(RelatedSetTargetMixin):
                 "a FilterSet or unrelated class cannot order a relation branch. "
                 "Declare the branch with an OrderSet or remove it.",
             )
+        return resolved
 
     @property
     def orderset(self) -> type[OrderSet] | None:
@@ -160,8 +161,7 @@ class RelatedOrder(RelatedSetTargetMixin):
         must be ``None`` (the skip-silently placeholder) or an ``OrderSet``
         subclass.
         """
-        # ``_validate_target`` rejected every non-``None`` resolution outside the family.
-        return cast("type[OrderSet] | None", self._resolved_target())
+        return self._resolved_target()
 
     # basedpyright: the setter takes a lazy target (a class, an import path, or a factory)
     # that the getter resolves to the class on read

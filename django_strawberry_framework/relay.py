@@ -56,7 +56,17 @@ import copy
 import inspect
 import weakref
 from enum import Enum
-from typing import TYPE_CHECKING, Annotated, Any, NamedTuple, Protocol, TypeVar, cast, overload
+from typing import (
+    TYPE_CHECKING,
+    Annotated,
+    Any,
+    Literal,
+    NamedTuple,
+    Protocol,
+    TypeVar,
+    cast,
+    overload,
+)
 
 import strawberry
 from django.core.exceptions import FieldDoesNotExist
@@ -280,19 +290,37 @@ class GlobalIDDecode(Enum):
     UNCOERCIBLE_PK = "uncoercible_pk"  # right model, but node_id is not a valid pk literal.
 
 
-class DecodeResult(NamedTuple):
-    """The structured result of ``decode_model_global_id``.
+class DecodeOk(NamedTuple):
+    """The ``GlobalIDDecode.OK`` result of ``decode_model_global_id``.
 
-    ``pk`` is the resolved real primary-key value ONLY when ``status is
-    GlobalIDDecode.OK`` (``None`` otherwise) - the actual ``model._meta.pk`` value,
-    mapped from the decoded NodeID attr where those diverge
-    (``_resolve_real_pk``); ``resolved_type`` is the decoded ``DjangoType`` when decode itself
-    succeeded (``None`` when ``DECODE_FAILED``).
+    ``pk`` is the resolved real primary-key value - the actual ``model._meta.pk``
+    value, mapped from the decoded NodeID attr where those diverge
+    (``_resolve_real_pk``); ``resolved_type`` is the decoded ``DjangoType``.
     """
 
-    status: GlobalIDDecode
+    status: Literal[GlobalIDDecode.OK]
     pk: object
+    resolved_type: type[_RelayDjangoType]
+
+
+class DecodeRefusal(NamedTuple):
+    """A refused result of ``decode_model_global_id``: every status but ``OK``.
+
+    ``pk`` is ``None``; ``resolved_type`` is the decoded ``DjangoType`` when decode
+    itself succeeded (``None`` when ``DECODE_FAILED``).
+    """
+
+    status: Literal[
+        GlobalIDDecode.DECODE_FAILED,
+        GlobalIDDecode.WRONG_MODEL,
+        GlobalIDDecode.UNCOERCIBLE_PK,
+    ]
+    pk: None
     resolved_type: type[_RelayDjangoType] | None
+
+
+#: The structured result of ``decode_model_global_id``, told apart by ``status``.
+DecodeResult = DecodeOk | DecodeRefusal
 
 
 def _real_pk_source(resolved_type: type[_RelayDjangoType]) -> models.QuerySet[models.Model]:
@@ -384,9 +412,9 @@ def _decode_and_coerce(
     try:
         resolved_type, node_id = decode_global_id(value, schema=schema)
     except Exception:  # noqa: BLE001 - consumer code may raise anything
-        return DecodeResult(GlobalIDDecode.DECODE_FAILED, None, None)
+        return DecodeRefusal(GlobalIDDecode.DECODE_FAILED, None, None)
     if model_for(resolved_type) is not expected_model:
-        return DecodeResult(GlobalIDDecode.WRONG_MODEL, None, resolved_type)
+        return DecodeRefusal(GlobalIDDecode.WRONG_MODEL, None, resolved_type)
     slot = slots.get(resolved_type)
     if slot is None:
         slot = _node_id_slot(resolved_type)
@@ -398,8 +426,8 @@ def _decode_and_coerce(
         slot=slot,
     )
     if pk is None:
-        return DecodeResult(GlobalIDDecode.UNCOERCIBLE_PK, None, resolved_type)
-    return DecodeResult(GlobalIDDecode.OK, pk, resolved_type)
+        return DecodeRefusal(GlobalIDDecode.UNCOERCIBLE_PK, None, resolved_type)
+    return DecodeOk(GlobalIDDecode.OK, pk, resolved_type)
 
 
 def _resolve_real_pks_batched(
@@ -482,13 +510,12 @@ def decode_model_global_id(
     intermediate = _decode_and_coerce(value, expected_model, slots=slots, schema=schema)
     if intermediate.status is not GlobalIDDecode.OK:
         return intermediate
-    # An ``OK`` result always carries the decoded type (``_decode_and_coerce``).
-    resolved_type = cast("type[_RelayDjangoType]", intermediate.resolved_type)
+    resolved_type = intermediate.resolved_type
     slot = slots[resolved_type]
     real_pk = _resolve_real_pk(resolved_type, intermediate.pk, slot=slot)
     if real_pk is None:
-        return DecodeResult(GlobalIDDecode.UNCOERCIBLE_PK, None, resolved_type)
-    return DecodeResult(GlobalIDDecode.OK, real_pk, resolved_type)
+        return DecodeRefusal(GlobalIDDecode.UNCOERCIBLE_PK, None, resolved_type)
+    return DecodeOk(GlobalIDDecode.OK, real_pk, resolved_type)
 
 
 def _validate_node_target(target_type: type[object], *, field: str) -> type[DjangoType]:

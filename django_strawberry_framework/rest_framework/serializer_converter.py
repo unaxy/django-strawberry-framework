@@ -631,10 +631,7 @@ def convert_serializer_field(
         scalar_registry=_SERIALIZER_FIELD_CONVERTERS,
         fallthrough_error_factory=_unsupported_serializer_field,
     )
-    # Every precheck handler above returns a finished conversion (or raises) and every
-    # registry entry is a ``SerializerFieldConverter``; the skeleton hands either back.
-    conversion = cast("SerializerFieldConversion | SerializerFieldConverter", result)
-    return _finish_serializer_conversion(conversion, field)
+    return _finish_serializer_conversion(result, field)
 
 
 def _unsupported_serializer_field(field: DRFField) -> ConfigurationError:

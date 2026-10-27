@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from enum import Enum
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from django.db.models.fields import Field
 from strawberry import relay
@@ -440,7 +440,7 @@ def decode_visible_relation_ids(
     key_attname: str | None = None,
     project: Callable[[object, object], object] | None = None,
     single: bool = False,
-) -> tuple[list[object] | None, FieldError | None]:
+) -> tuple[list[object], None] | tuple[None, FieldError]:
     """Type-check each relation id, then confirm the whole set in one visibility query.
 
     The batched compose the model FK / M2M set decoder and the serializer
@@ -517,9 +517,7 @@ def decode_visible_relation_ids(
             )
             if text_error is not None:
                 return None, text_error
-            # An ``OK`` decode always carries the decoded type.
-            decoded_type = cast("type[_RelayDjangoType]", intermediate.resolved_type)
-            pending.append((position, decoded_type, intermediate.pk))
+            pending.append((position, intermediate.resolved_type, intermediate.pk))
         else:
             pk, error = type_check_relation_id(
                 value,

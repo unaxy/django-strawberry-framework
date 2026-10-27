@@ -47,7 +47,12 @@ from functools import partial
 import strawberry
 from django.core.management.base import BaseCommand, CommandError, CommandParser
 from strawberry.schema.name_converter import NameConverter
-from strawberry.types.base import StrawberryList, StrawberryOptional, StrawberryType
+from strawberry.types.base import (
+    StrawberryList,
+    StrawberryOptional,
+    StrawberryType,
+    get_object_definition,
+)
 from strawberry.types.enum import StrawberryEnumDefinition
 from strawberry.types.field import UNRESOLVED
 from strawberry.types.object_type import StrawberryObjectDefinition
@@ -74,13 +79,12 @@ from django_strawberry_framework.utils._narrowing import (
     is_concrete_field,
     is_str,
     optional_instance,
+    read_attr,
     require,
 )
 from django_strawberry_framework.utils.relations import is_single_column_foreign_key
 
 if typing.TYPE_CHECKING:
-    from strawberry.types.base import WithStrawberryObjectDefinition
-
     from django_strawberry_framework.optimizer.field_meta import FieldMeta
     from django_strawberry_framework.types.definition import DjangoTypeDefinition
     from django_strawberry_framework.utils.typing import ConcreteField, ModelField
@@ -470,10 +474,9 @@ def _strawberry_field_type(definition: "DjangoTypeDefinition", python_name: str)
     connection sibling, the consumer override), so a missing name raises
     ``StopIteration`` rather than degrading to a guessed type.
     """
-    # ``cast``: ``handle`` refused an unfinalized type, and finalization is
-    # what attaches ``origin.__strawberry_definition__``.
-    finalized_origin = typing.cast("type[WithStrawberryObjectDefinition]", definition.origin)
-    strawberry_fields = finalized_origin.__strawberry_definition__.fields
+    # ``handle`` refused an unfinalized type, and finalization is what attaches
+    # ``origin.__strawberry_definition__``; ``strict`` raises ``TypeError`` without it.
+    strawberry_fields = get_object_definition(definition.origin, strict=True).fields
     return next(sf.type for sf in strawberry_fields if sf.python_name == python_name)
 
 
@@ -646,9 +649,9 @@ def _scalar_name(
     mapped = _GRAPHQL_SCALAR_NAMES.get(scalar)
     if mapped is not None:
         return mapped
-    strawberry_type = truth.static_attr(scalar, "__strawberry_definition__", None)
+    strawberry_type: object = truth.static_attr(scalar, "__strawberry_definition__", None)
     if strawberry_type is None:
-        strawberry_type = getattr(scalar, "_scalar_definition", None)
+        strawberry_type = read_attr(scalar, "_scalar_definition", None)
     if strawberry_type is None and isinstance(
         scalar,
         (
@@ -659,9 +662,8 @@ def _scalar_name(
         ),
     ):
         strawberry_type = scalar
-    if strawberry_type is not None:
-        # Both slots hold Strawberry definitions, and the ``isinstance`` arm admits only those.
-        return _converter_type_name(name_converter, typing.cast("StrawberryType", strawberry_type))
+    if isinstance(strawberry_type, StrawberryType):
+        return _converter_type_name(name_converter, strawberry_type)
     if truth.is_type(scalar):
         return truth.name(scalar)
     declared = truth.static_attr(scalar, "__name__", None)

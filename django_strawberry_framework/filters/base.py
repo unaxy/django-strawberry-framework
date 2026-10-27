@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, NamedTuple, TypeVar, cast, final
+from typing import TYPE_CHECKING, NamedTuple, TypeVar, final
 
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import UploadedFile
@@ -2293,7 +2293,7 @@ def _filter_set_class() -> type[FilterSet]:
     return FilterSet
 
 
-class RelatedFilter(RelatedSetTargetMixin, ModelChoiceFilter):
+class RelatedFilter(RelatedSetTargetMixin["FilterSet"], ModelChoiceFilter):
     """`ModelChoiceFilter` that traverses into another `FilterSet`.
 
     Collapsed port of `django_graphene_filters/filters.py::BaseRelatedFilter`
@@ -2398,7 +2398,7 @@ class RelatedFilter(RelatedSetTargetMixin, ModelChoiceFilter):
         self._bind_owner(filterset)
 
     @override
-    def _validate_target(self, resolved: object) -> None:
+    def _validate_target(self, resolved: object) -> type[FilterSet]:
         """Enforce the ``RelatedSetTargetMixin`` family gate: target must be a ``FilterSet``.
 
         Fired by ``sets_mixins.py::RelatedSetTargetMixin._resolved_target`` on
@@ -2430,6 +2430,7 @@ class RelatedFilter(RelatedSetTargetMixin, ModelChoiceFilter):
                 "an OrderSet or unrelated class cannot filter a relation branch. "
                 "Declare the branch with a FilterSet or remove it.",
             )
+        return resolved
 
     @property
     def filterset(self) -> type[FilterSet] | None:
@@ -2444,8 +2445,7 @@ class RelatedFilter(RelatedSetTargetMixin, ModelChoiceFilter):
         must be ``None`` (the skip-silently placeholder) or a ``FilterSet``
         subclass.
         """
-        # ``_validate_target`` rejected every non-``None`` resolution outside the family.
-        return cast("type[FilterSet] | None", self._resolved_target())
+        return self._resolved_target()
 
     # basedpyright: the setter takes a lazy target (a class, an import path, or a factory)
     # that the getter resolves to the class on read

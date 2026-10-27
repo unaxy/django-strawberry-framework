@@ -23,7 +23,7 @@ cycle-safe local import inside ``TypeRegistry.clear``.
 from __future__ import annotations
 
 import enum
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import strawberry
 from django.db.models import F
@@ -152,8 +152,8 @@ class Ordering(enum.Enum):
 # ``filters.inputs`` per spec-028 Decision 9. ``clear_order_input_namespace``
 # leaves class objects parked in ``orders.inputs.__dict__``.
 _materialized_names: dict[str, type[object]]
-_field_specs: dict[tuple[type[OrderSet], str], FieldSpec]
-_namespace: SetInputNamespace[OrderSet] = make_set_input_namespace(
+_field_specs: dict[tuple[type[object], str], FieldSpec]
+_namespace: SetInputNamespace = make_set_input_namespace(
     INPUTS_MODULE_PATH,
     "OrderSet",
     factory_module="django_strawberry_framework.orders.factories",
@@ -273,13 +273,9 @@ def _build_input_fields(
     return emit_set_input_field_triples(
         orderset_cls,
         list(orderset_cls.get_fields().items()),
-        related_target_of=lambda _top_name, entry: (
-            (True, entry.orderset) if entry is not None else (False, None)
-        ),
-        # ``related_target_of`` reports a member related exactly when its entry is a
-        # ``RelatedOrder`` (a leaf's entry is ``None``), so this path reads one.
-        related_source_path_of=lambda top_name, entry: (
-            cast("RelatedOrder", entry).field_name or top_name
+        # A member is related exactly when its entry is a ``RelatedOrder`` (a leaf's is ``None``).
+        related_of=lambda top_name, entry: (
+            None if entry is None else (entry.orderset, entry.field_name or top_name)
         ),
         leaf_of=_leaf_of,
         input_type_name_for=_input_type_name_for,

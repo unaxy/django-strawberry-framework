@@ -50,11 +50,11 @@ This spec adds three public names at the package root:
 
 `DjangoOptimizerExtension`
 
-`auto` (re-exported from `strawberry`)
+`auto` (the package's own `Annotated[object, StrawberryAuto()]` alias, defined in `types/base.py`)
 
 It also adds internal support modules — `registry.py`, `exceptions.py`, the converter layer at `types/converters.py`, and a `py.typed` marker — plus the package-level logger. Every later public name in this package (`finalize_django_types`, the connection and relay fields, the mutation family, the filter and order sidecars) belongs to the spec that shipped it, not to this one.
 
-The `auto` re-export is a pass-through of `strawberry.auto` so consumers can annotate fields inside a `DjangoType` without a separate `import strawberry`.
+The `auto` export carries Strawberry's `StrawberryAuto()` marker over `object` rather than `strawberry.auto`'s `Any`, so consumers can annotate fields inside a `DjangoType` without a separate `import strawberry` and without spelling `Any`; `DjangoType` recognizes both spellings as the declare-but-infer marker.
 
 ```python
 from django_strawberry_framework import DjangoType, DjangoOptimizerExtension, auto

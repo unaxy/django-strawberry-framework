@@ -1456,7 +1456,7 @@ def test_omitted_list_arguments_do_not_resolve_policy(monkeypatch: pytest.Monkey
 
 
 def test_resolver_call_context_accepts_strawberry_shape_and_rejects_unknown_inputs() -> None:
-    info = SimpleNamespace(field_name="items")
+    info = make_info(field_name="items")
     root = object()
 
     assert _resolver_root_and_info((root, info), {}) == (root, info)
@@ -1471,6 +1471,9 @@ def test_resolver_call_context_accepts_strawberry_shape_and_rejects_unknown_inpu
         _resolver_root_and_info((root, info), {"info": info})
     with pytest.raises(TypeError, match="requires info"):
         _resolver_root_and_info((root,), {})
+    # Only Strawberry's own ``Info`` is the resolver context.
+    with pytest.raises(TypeError, match="expected an instance of"):
+        _resolver_root_and_info((root, SimpleNamespace(field_name="items")), {})
 
 
 def test_field_label_falls_back_without_a_field_name() -> None:

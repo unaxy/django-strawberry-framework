@@ -381,9 +381,8 @@ def test_nested_original_error_chain_reaches_the_terminal_python_exception() -> 
 def test_hop_policy_self_cycle_terminates_deterministically() -> None:
     cyclic = GraphQLError("self cycle")
     cyclic.original_error = cyclic
-    outer = GraphQLError("outer", original_error=cyclic)
 
-    assert _terminal_original_error(outer) is cyclic
+    assert _terminal_original_error(cyclic) is cyclic
 
 
 def test_hop_policy_multi_node_cycle_returns_last_unique_candidate() -> None:
@@ -391,18 +390,16 @@ def test_hop_policy_multi_node_cycle_returns_last_unique_candidate() -> None:
     node_b = GraphQLError("b")
     node_a.original_error = node_b
     node_b.original_error = node_a
-    outer = GraphQLError("outer", original_error=node_a)
 
-    assert _terminal_original_error(outer) is node_b
+    assert _terminal_original_error(node_a) is node_b
 
 
 def test_hop_policy_long_acyclic_chain_stops_at_the_ceiling() -> None:
     chain = [GraphQLError(f"hop {index}") for index in range(100)]
     for parent, child in itertools.pairwise(chain):
         parent.original_error = child
-    outer = GraphQLError("outer", original_error=chain[0])
 
-    result = _terminal_original_error(outer)
+    result = _terminal_original_error(chain[0])
 
     # 64 hops from chain[0] - the independent literal, never the production constant.
     assert result is chain[64]

@@ -68,6 +68,7 @@ from django_strawberry_framework.utils.relations import (
     is_row_key_column,
     is_single_column_foreign_key,
     m2m_through_link_fields,
+    m2m_through_model,
     non_pk_forward_link,
     non_pk_relation_key_attname,
     order_column_paths,
@@ -1576,6 +1577,24 @@ def test_non_pk_forward_link_answers_only_links_keyed_by_other_columns(
     assert (None if link is None else link.carrier_attnames) == carriers
 
 
+def test_non_pk_forward_link_refuses_an_unresolved_related_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A forward link names a resolved model; an unresolved ``"app.Model"`` string is a ``TypeError``."""
+    field = LnkSlugChild._meta.get_field("parent")
+    monkeypatch.setitem(vars(field), "related_model", "optimizer.LnkSlugParent")
+    with pytest.raises(TypeError, match="expected the type the source guarantees"):
+        non_pk_forward_link(field)
+
+
+def test_m2m_through_model_refuses_an_unresolved_through() -> None:
+    """A join table is a model class once resolved; an ``"app.Model"`` string is a ``TypeError``."""
+    assert m2m_through_model(SimpleNamespace(through=None, remote_field=None)) is None
+    assert m2m_through_model(Book._meta.get_field("genres")) is not None
+    with pytest.raises(TypeError, match="expected the type the source guarantees"):
+        m2m_through_model(SimpleNamespace(through="library.BookGenres"))
+
+
 @pytest.mark.parametrize(
     ("field", "key"),
     [
@@ -1650,7 +1669,7 @@ def test_order_column_paths_expands_only_a_terminal_foreign_object(
     "double",
     [
         SimpleNamespace(many_to_many=True, through=None, remote_field=None),
-        SimpleNamespace(many_to_many=True, through=object, m2m_field_name=None),
+        SimpleNamespace(many_to_many=True, through=Book, m2m_field_name=None),
     ],
     ids=["no_through_model", "no_naming_api"],
 )
