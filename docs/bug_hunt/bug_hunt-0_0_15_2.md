@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 363 done, 210 to do.
+Progress: 364 done, 212 to do.
 
 ## Done
 
@@ -2038,6 +2038,15 @@ Progress: 363 done, 210 to do.
 - [x] 643. Corrupt run-log/state evidence is an input to repository workspace tooling, not a supported
   package API or GraphQL wire/configuration path. Closed as tooling robustness outside the package defect gate;
   no malformed-evidence runtime fix is claimed (`scripts/workspace.py::load_runs`).
+- [x] 529. A decimal filter value whose spelling falls outside PostgreSQL `numeric`'s format (more than 131072 digits
+  before the point or 16383 after, a huge negative or a tiny exponent) is refused by the filter ask as the field-keyed
+  `FILTER_INVALID` "Enter a value the database can represent." on every filter family (generated `exact` / `in` /
+  `range` / comparisons, declared `ListFilter` / `RangeFilter`, nested, `not`, decimal `ArrayField` elements) instead
+  of the masked `DataError`: the filter ask (`filters/sets.py::_unbindable_value_errors`) reads each compiled
+  `Decimal` through `utils/errors.py::refuses_numeric_format`, the one model of `numeric_in` the identity decode (591)
+  shares; a zero is held only by its scale and its written exponent's bound. Other backends bind as given.
+  spec-027, README and the `filterset` glossary term say so. Tests: `tests/utils/test_errors.py`,
+  `tests/filters/test_sets.py`
 
 ## Outside review of the fixes
 
@@ -2125,11 +2134,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   value (`?tag=x` on a ForeignKey to an integer key) answers Django's `ValueError`, a 500, where a column path
   (`tag__pk`) answers the form's 400; the schema build refuses such a declaration, so GraphQL cannot send it. Found
   verifying 512
-- [ ] 529. (robustness) A generated filter value on any `DecimalField`, bounded or not, with a huge negative or tiny
-  exponent (`"-1e1000000"`, `"1e-1000000"`, `"1e-16384"`) reaches the PostgreSQL bind (`exact`, `in`, `range`,
-  comparisons) and answers numeric's "value overflows numeric format" as a masked `DataError`: django-filter's
-  `NumberFilter` caps only a positive value at `1e50`, and nothing holds a filter value to numeric's format. Found
-  verifying 591
 - [ ] 530. (robustness) The three write flavors accept `"1e1000000"` (or `"1e-1000000"`) for a Django 6.1
   `DecimalField` with no `max_digits` (a serializer through an explicit `serializers.DecimalField(max_digits=None,
   decimal_places=None)`): PostgreSQL refuses the bind with a masked `DataError`, and SQLite stores it as `Infinity`
@@ -2221,12 +2225,21 @@ tracker number are recorded there; open remainders and new defects are filed as 
   the request's current time zone differs from the default (`timezone.override("Asia/Tokyo")`: wire `2026-01-02` stores
   `2026-01-01`): `forms.DateTimeField.to_python(date)` makes midnight in the current zone and `models.DateField`
   converts in the default. Decide refusing the pair or normalizing. Found fact-finding 523
+- [ ] 672. (robustness) On SQLite a decimal filter value past float range or below its smallest subnormal binds as
+  REAL: `"1e-1000000"` underflows to 0.0 (`exact` matches a stored 0, `lt` drops it) and `"-1e1000000"` becomes -inf,
+  so the filter answers wrong rows without a word. Found fact-finding 529
+- [ ] 673. (robustness) A generated `NumberFilter` leaf on an `IntegerField` / `FloatField` column cleans
+  `"-1e1000000"` to a `Decimal` that reaches the bind as a huge int (integer column) or -inf (float column); the
+  filter ask reads only temporal and decimal columns. Unmeasured: the client-visible answer per backend. Found fixing
+  529
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 674. CHANGELOG entry for item 529: on PostgreSQL a decimal filter value outside `numeric`'s format is the
+  field-keyed `FILTER_INVALID` "Enter a value the database can represent." instead of a masked error
 - [ ] 901. CHANGELOG entry for item 645: async generated mutations drain abandoned running field/list siblings and
   their cancellation cleanup inside the atomic; active production masking snapshots the published error list so
   an ordinary awaiting result hook cannot expose late resolver exception text, including the standalone extension

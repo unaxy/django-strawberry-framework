@@ -9609,6 +9609,252 @@ def test_array_leaf_list_parameter_is_held_to_the_text_rule_in_every_binding_mod
     }
 
 
+def _priced_filter_class() -> type[FilterSet]:
+    """A specimen filterset reaching a bounded and an unbounded decimal column.
+
+    Generated ``exact`` / ``in`` / ``range`` / ``gt`` / ``lt`` leaves on ``price`` (a
+    ``DecimalField(20, 4)``), the package's declared ``ListFilter`` / ``RangeFilter`` on
+    it, and a ``NumberFilter`` over ``loose_price``, an annotation whose output field is a
+    ``DecimalField`` with no ``max_digits``.
+    """
+
+    class PricedSpecimenFilter(FilterSet):
+        prices_among = ListFilter(field_name="price", lookup_expr="in")
+        price_span = RangeFilter(field_name="price", lookup_expr="range")
+        loose_price = django_filters.NumberFilter(field_name="loose_price")
+
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = {
+                "price": [
+                    "exact",
+                    "in",
+                    "range",
+                    "gt",
+                    "lt",
+                ],
+            }
+
+    return PricedSpecimenFilter
+
+
+def _specimens_priced() -> QuerySet[scalar_models.ScalarSpecimen]:
+    """Every specimen, annotated with its ``price`` as an unbounded ``DecimalField``."""
+    return scalar_models.ScalarSpecimen.objects.annotate(
+        loose_price=models.ExpressionWrapper(
+            models.F("price"),
+            output_field=models.DecimalField(max_digits=None, decimal_places=None),
+        ),
+    )
+
+
+#: A spelling past PostgreSQL ``numeric``'s format by the integer digits, by the fraction
+#: digits, by the fraction digits alone at the format's edge, and by written trailing zeros.
+_NEGATIVE_HUGE = "-1e1000000"
+_TINY = "1e-1000000"
+_PAST_FRACTION = "1e-16384"
+_TRAILING_ZEROS_PAST_FRACTION = "1." + "0" * 16384
+#: The finest fraction ``numeric`` stores.
+_EDGE_FRACTION = "1e-16383"
+
+#: Each decimal filter value, the form field it is keyed to, and whether ``numeric`` refuses it.
+_NUMERIC_FORM_DATA = [
+    pytest.param({"price": _NEGATIVE_HUGE}, "price", True, id="exact-negative-huge"),
+    pytest.param({"price": _TINY}, "price", True, id="exact-tiny"),
+    pytest.param({"price": _PAST_FRACTION}, "price", True, id="exact-16384-fraction-digits"),
+    pytest.param(
+        {"price": _TRAILING_ZEROS_PAST_FRACTION},
+        "price",
+        True,
+        id="exact-16384-trailing-zeros",
+    ),
+    pytest.param({"price__gt": _TINY}, "price__gt", True, id="gt-tiny"),
+    pytest.param({"price__lt": _NEGATIVE_HUGE}, "price__lt", True, id="lt-negative-huge"),
+    pytest.param({"price__in": f"1,{_PAST_FRACTION}"}, "price__in", True, id="in-member"),
+    pytest.param(
+        {"price__range": f"{_NEGATIVE_HUGE},1"},
+        "price__range",
+        True,
+        id="range-start",
+    ),
+    pytest.param({"prices_among": ["1", _TINY]}, "prices_among", True, id="declared-list"),
+    pytest.param(
+        {"price_span_0": "1", "price_span_1": _PAST_FRACTION},
+        "price_span",
+        True,
+        id="declared-range-bound",
+    ),
+    pytest.param({"loose_price": _PAST_FRACTION}, "loose_price", True, id="unbounded-column"),
+    pytest.param({"price": _EDGE_FRACTION}, "price", False, id="exact-16383-fraction-digits"),
+    pytest.param({"price__in": f"1,-{_EDGE_FRACTION}"}, "price__in", False, id="in-edge"),
+    pytest.param(
+        {"price_span_0": f"-{_EDGE_FRACTION}", "price_span_1": "1e50"},
+        "price_span",
+        False,
+        id="declared-range-edges",
+    ),
+    pytest.param({"loose_price": _EDGE_FRACTION}, "loose_price", False, id="unbounded-edge"),
+    pytest.param({"price": "0e1000000"}, "price", False, id="exact-zero-huge-exponent"),
+    pytest.param({"price__in": "1,0e-16384"}, "price__in", True, id="in-zero-past-fraction"),
+]
+
+
+@pytest.mark.parametrize("mode", list(BINDING_MODES))
+@pytest.mark.parametrize(("data", "form_key", "refused"), _NUMERIC_FORM_DATA)
+def test_decimal_past_postgresql_numeric_is_refused_for_every_filter_family(
+    mode: str,
+    data: dict[str, object],
+    form_key: str,
+    refused: bool,  # noqa: FBT001
+) -> None:
+    """A decimal whose spelling PostgreSQL ``numeric`` cannot hold is refused keyed to its field.
+
+    The form clean holds a decimal to no digit bound (django-filter's ``NumberFilter``
+    caps only a positive value, at ``1e50``) and Django's decimal adapter passes it through,
+    so ``numeric_in`` would refuse it at the bind whatever the column's ``max_digits``.
+    Each filter family reaches the one rule in every binding mode: a generated ``exact``,
+    ``gt``, ``lt``, ``in`` member and ``range`` bound, the package's declared ``ListFilter``
+    element and ``RangeFilter`` bound, and an unbounded decimal column; 16383 fraction
+    digits pass either way.
+    """
+    driver, cursor_factory, _ = BINDING_MODES[mode]
+    priced_filter = _priced_filter_class()
+    with postgresql_stand_in(driver, cursor_factory) as alias:
+        filterset = priced_filter(data=data, queryset=_specimens_priced().using(alias))
+        if not refused:
+            priced_filter._validate_form_or_raise(filterset)
+            return
+        with pytest.raises(GraphQLError) as excinfo:
+            priced_filter._validate_form_or_raise(filterset)
+    assert excinfo.value.extensions == {
+        "code": "FILTER_INVALID",
+        "errors": {form_key: _UNBINDABLE},
+    }
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("data", "form_key", "refused"), _NUMERIC_FORM_DATA)
+def test_decimal_past_postgresql_numeric_is_refused_only_there(
+    data: dict[str, object],
+    form_key: str,
+    refused: bool,  # noqa: FBT001
+) -> None:
+    """On the test database a decimal is refused only where it is PostgreSQL.
+
+    Every other backend binds the decimal it is given, so each value passes there; on
+    PostgreSQL the ``numeric`` rows are refused keyed to their form field.
+    """
+    priced_filter = _priced_filter_class()
+    filterset = priced_filter(data=data, queryset=_specimens_priced())
+    if not refused or connection.vendor != "postgresql":
+        priced_filter._validate_form_or_raise(filterset)
+        return
+    with pytest.raises(GraphQLError) as excinfo:
+        priced_filter._validate_form_or_raise(filterset)
+    assert excinfo.value.extensions == {
+        "code": "FILTER_INVALID",
+        "errors": {form_key: _UNBINDABLE},
+    }
+
+
+@pytest.mark.parametrize("mode", list(BINDING_MODES))
+@pytest.mark.parametrize(
+    ("filter_input", "form_key"),
+    [
+        pytest.param({"not_": {"price": {"exact": _TINY}}}, "not__price", id="not"),
+        pytest.param(
+            {"partner": {"price": {"lt": _NEGATIVE_HUGE}}},
+            "partner__price__lt",
+            id="nested",
+        ),
+    ],
+)
+def test_decimal_past_postgresql_numeric_is_refused_on_a_not_and_a_nested_leaf(
+    mode: str,
+    filter_input: dict[str, object],
+    form_key: str,
+) -> None:
+    """A ``not`` arm and a related branch hold their decimal leaves to ``numeric``'s format.
+
+    Each refusal is keyed to the form field under the branch that applies it.
+    """
+
+    class SpecimenType(DjangoType):
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+
+    assert registry.get(scalar_models.ScalarSpecimen) is SpecimenType
+
+    class PartnerFilter(FilterSet):
+        partner = RelatedFilter(_priced_filter_class(), field_name="partner")
+
+        class Meta:
+            model = scalar_models.NullableScalarSpecimen
+            fields = {"price": ["exact"]}
+
+    driver, cursor_factory, _ = BINDING_MODES[mode]
+    with postgresql_stand_in(driver, cursor_factory) as alias:
+        rows = scalar_models.NullableScalarSpecimen.objects.using(alias)
+        with pytest.raises(GraphQLError) as excinfo:
+            PartnerFilter.apply_sync(filter_input, rows, _make_info())
+    assert excinfo.value.extensions == {
+        "code": "FILTER_INVALID",
+        "errors": {form_key: _UNBINDABLE},
+    }
+
+
+@pytest.mark.parametrize("mode", list(BINDING_MODES))
+@pytest.mark.parametrize(
+    ("prices", "refused"),
+    [
+        pytest.param(["1", _PAST_FRACTION], True, id="16384-fraction-digits"),
+        pytest.param(["1", _EDGE_FRACTION], False, id="16383-fraction-digits"),
+    ],
+)
+def test_decimal_array_list_parameter_is_held_to_postgresql_numeric(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    prices: list[str],
+    refused: bool,  # noqa: FBT001
+) -> None:
+    """Each decimal element of an ``ArrayField`` list parameter is held to ``numeric``'s format.
+
+    A ``gt`` binds the list as one parameter; an element past the format is refused in
+    every binding mode, and one at its edge passes.
+    """
+
+    class PricedShelf(django_models.Model):
+        prices = FakeArrayField(django_models.DecimalField(max_digits=20, decimal_places=4))
+
+        class Meta:
+            managed = False
+            app_label = "test_decimal_array_bind_ask"
+
+    class PricedShelfFilter(FilterSet):
+        prices_after = ArrayFilter(field_name="prices", lookup_expr="gt")
+
+        class Meta:
+            model = PricedShelf
+            fields = []
+
+    patch_array_field(monkeypatch)
+    driver, cursor_factory, _ = BINDING_MODES[mode]
+    with postgresql_stand_in(driver, cursor_factory) as alias:
+        filterset = PricedShelfFilter(
+            data={"prices_after": prices},
+            queryset=PricedShelf.objects.using(alias),
+        )
+        if not refused:
+            PricedShelfFilter._validate_form_or_raise(filterset)
+            return
+        with pytest.raises(GraphQLError) as excinfo:
+            PricedShelfFilter._validate_form_or_raise(filterset)
+    assert excinfo.value.extensions == {
+        "code": "FILTER_INVALID",
+        "errors": {"prices_after": _UNBINDABLE},
+    }
+
+
 _NAIVE_CLOCK = datetime.time(9, 30)
 
 

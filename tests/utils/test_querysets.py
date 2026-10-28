@@ -547,7 +547,7 @@ _WITHIN_UNCONSTRAINED_NUMERIC = tuple(
         ("1.50", "1.50", "written-trailing-zero"),
         ("1." + "0" * 16383, "1." + "0" * 16383, "16383-trailing-zeros"),
         ("1.5" + "0" * 20000, "1.5", "trailing-zeros"),
-        ("0E+1000000", "0", "zero-huge-exponent"),
+        ("0E+1000000", "0E+1000000", "zero-huge-exponent"),
         ("0E+1073741824", "0", "zero-past-exponent-limit"),
         ("0E-16384", "0", "zero-tiny-exponent"),
         (
