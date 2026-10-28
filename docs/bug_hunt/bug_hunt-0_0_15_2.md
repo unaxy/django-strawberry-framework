@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 346 done, 215 to do.
+Progress: 349 done, 213 to do.
 
 ## Done
 
@@ -1943,6 +1943,22 @@ Progress: 346 done, 215 to do.
   stream unbuffered. `status`, `audit`, a large `diff`, and `run` with stderr gone before or after its header exited
   120 or 1 with a traceback, and `run` with stderr gone before the header never started its command. Tests:
   `tests/test_workspace.py`
+- [x] 501. (robustness) The workspace pool's default root is claimed as this user's own: `scripts/workspace.py::
+  default_root` resolves the temp dir first and keeps `dsf-ws` when that dir is a real directory this user owns (so
+  macOS keys do not move) and names it `dsf-ws-<uid>` on a shared one; `workspace_base` refuses a symlinked or foreign
+  root as a typed `WorkspaceError` and creates nothing, and `_make_flow_dir` claims it (mode 0700, owner, lstat)
+  through `prove_failability.py::claim_private_directory`, shared with the prover's scratch parent and state home and
+  `forget_proof_state`'s check. A foreign root raised an uncaught `PermissionError`; a planted symlink was followed.
+  `DSF_WS_ROOT` stays the caller's. Tests: `tests/test_workspace.py`, `tests/test_prove_failability.py`
+- [x] 502. (robustness) `scripts/prove_failability.py::_new_capture` and `_read_probe` read their temp-resident file
+  once (`_read_text_if_present`), a missing one counting as absent, so the purge removing it between a check and the
+  read no longer raises `FileNotFoundError`. Tests: `tests/test_prove_failability.py`
+- [x] 505. (robustness) A ready copy whose manifest is gone while its folder still holds a regular file (an edit, or
+  any file written in the last three days, outlives the purge) is refused with a typed `WorkspaceError` naming
+  `--fresh` / `gc` instead of being resynced over its edits (`scripts/workspace.py::_admit`, `_holds_a_file` walks
+  without following symlinks); a copy gone with its manifest (a reboot, or a purge that left only folders and links)
+  resyncs into its slot. The manifest is not renewed on reuse, so it stays the copy's age canary. Module docstring and
+  START.md "Machine budget" say so. Tests: `tests/test_workspace.py`
 
 ## Outside review of the fixes
 
@@ -1987,18 +2003,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   every wire value cleans to `"Enter a number."`; and the generated `time` leaf on a `DateTimeField` raises
   `AttributeError: 'datetime.datetime' object has no attribute 'strip'` in `forms.TimeField` clean before the filter
   seam
-- [ ] 501. (robustness) `scripts/workspace.py::workspace_base` uses a fixed `$TMPDIR/dsf-ws` with no owner, symlink or
-  mode check, the shared-name shape 330 removed from `prove_failability.py`: on a shared Linux `/tmp` (no `TMPDIR`) a
-  second user's flows land in, or are refused by, the first user's directory, and a planted symlink is followed. Name
-  it per user and claim it as `prove_failability.py::_claim_private_directory` does. Found fact-finding 330
-- [ ] 502. (robustness) `scripts/prove_failability.py::_new_capture` checks then acts on a path under the scratch root,
-  which `workspace.py prove` points into the `$TMPDIR` flow folder, so the macOS purge can remove the entry between
-  the two calls (the window 331 closed in `workspace.py`). Read it once and treat a missing entry as absent. Found
-  fact-finding 331
-- [ ] 505. (robustness) `scripts/workspace.py`: a copy's manifest is written when the copy syncs and ages with it in
-  the temporary directory, so a copy only `run` for 3+ days (no sync) loses its manifest to the macOS purge, or to a
-  Linux reboot with its files, and the next run resyncs it, dropping its uncommitted edits, against the `run`
-  docstring's "later runs reuse that copy as it stands, edits included". Found verifying 345
 - [ ] 587. A lazy translation string (`gettext_lazy(...)`) as a FilterSet `Meta.exclude` passes
   `sets_mixins.py::require_re_readable_field_declaration` (its real class is not `str`) and excludes by substring:
   `lazy("title")` drops `title`, `lazy("titl")` excludes nothing with no error, against the spec-027 row that a
@@ -2179,6 +2183,10 @@ tracker number are recorded there; open remainders and new defects are filed as 
   stdout reader is gone, losing a 0 or 1 a pipeline reads (`check_trailing_commas.py --check`,
   `check_type_suppressions.py` reproduced). Move `workspace.py`'s `_ReaderGoneTolerant` / `_reader_gone_tolerant` /
   `_quiet_dead_sink` to a shared scripts module and install it at each entry. Found fixing 397
+- [ ] 662. (robustness) `scripts/workspace.py::_make_state_dir` re-raises EEXIST only when every level exists, so a
+  non-directory at a middle level of the state home loops instead of refusing (the shape 501 fixed in
+  `_make_flow_dir`); and `_read_text_if_present` exists in both `workspace.py` and `prove_failability.py`: keep one
+  owner. Found fixing 501
 
 ## To do: holes found re-checking the fixes
 

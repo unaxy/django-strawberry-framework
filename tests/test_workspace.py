@@ -28,6 +28,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
@@ -213,6 +214,116 @@ def test_workspace_base_is_keyed_per_checkout_and_honours_the_root_override(
 def test_workspace_base_refuses_a_root_inside_the_repository(repo: Path) -> None:
     with pytest.raises(workspace.WorkspaceError, match="recurse"):
         workspace.workspace_base(repo, {workspace.ROOT_ENV: str(repo / "hunt-ws")})
+
+
+@pytest.fixture
+def system_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point the system temporary directory into ``tmp_path`` and drop ``DSF_WS_ROOT``."""
+    directory = tmp_path / "system-tmp"
+    directory.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(directory))
+    monkeypatch.delenv(workspace.ROOT_ENV, raising=False)
+    return directory.resolve()
+
+
+def _stub_owners(
+    monkeypatch: pytest.MonkeyPatch,
+    owners: dict[Path, int],
+    default: int | None = None,
+) -> None:
+    """Make ``Path.lstat`` report ``owners[path]`` (else ``default``, if given) as the owner.
+
+    The ownership checks read ``Path.lstat``; Python 3.10's pathlib binds ``os.lstat`` at
+    import, so a stub on ``os.lstat`` would never reach them there.
+    """
+    real_lstat = Path.lstat
+
+    def _lstat(path: Path) -> os.stat_result:
+        status = real_lstat(path)
+        owner = owners.get(path, default)
+        if owner is None:
+            return status
+        fields = list(status)
+        fields[4] = owner
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(Path, "lstat", _lstat)
+
+
+def test_the_default_root_keeps_its_name_in_a_temporary_directory_of_this_users_own(
+    repo: Path,
+    system_tmp: Path,
+) -> None:
+    # macOS's ``$TMPDIR`` is a folder of this user's own: the root keeps the name every flow
+    # on such a machine already lives under, and a read-only caller creates nothing.
+    base = workspace.workspace_base(repo, {})
+
+    assert base == system_tmp / workspace.DEFAULT_ROOT_NAME / workspace.repo_key(repo)
+    assert not base.parent.exists()
+
+
+def test_users_sharing_one_temporary_directory_each_claim_their_own_root(
+    repo: Path,
+    system_tmp: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Linux ``/tmp`` is not this user's: the root is named by the numeric uid and made mode
+    # 0700, so a second user's flows neither land in nor are refused by the first user's.
+    first_uid = os.getuid()
+    second_uid = first_uid + 1
+    _stub_owners(monkeypatch, {system_tmp: first_uid + 2})
+    first = workspace.Layout(repo, workspace.workspace_base(repo, {}), "review")
+    with workspace.flow_lease(first) as flow:
+        assert flow.marked
+    first_root = system_tmp / f"{workspace.DEFAULT_ROOT_NAME}-{first_uid}"
+
+    # Every entry reads as the second user's once it is the caller, except the shared
+    # temporary directory and the root the first user claimed.
+    monkeypatch.setattr(os, "getuid", lambda: second_uid)
+    _stub_owners(monkeypatch, {system_tmp: first_uid + 2, first_root: first_uid}, second_uid)
+    second = workspace.Layout(repo, workspace.workspace_base(repo, {}), "review")
+    with workspace.flow_lease(second) as flow:
+        assert flow.marked
+    second_root = system_tmp / f"{workspace.DEFAULT_ROOT_NAME}-{second_uid}"
+
+    assert first.base.parent == first_root
+    assert second.base.parent == second_root
+    assert [stat.S_IMODE(root.stat().st_mode) for root in (first_root, second_root)] == [0o700] * 2
+    assert not (system_tmp / workspace.DEFAULT_ROOT_NAME).exists()
+
+
+@pytest.mark.parametrize("kind", ["symlink", "other-owner"])
+def test_a_default_root_that_is_not_this_users_own_folder_is_refused_typed(
+    repo: Path,
+    system_tmp: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    kind: str,
+) -> None:
+    # A planted symlink is never followed and another user's folder never used: the read-only
+    # path and the claim that makes a flow folder each refuse as a WorkspaceError.
+    root = system_tmp / workspace.DEFAULT_ROOT_NAME
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    if kind == "symlink":
+        root.symlink_to(elsewhere, target_is_directory=True)
+    else:
+        root.mkdir()
+        _stub_owners(monkeypatch, {root: os.getuid() + 1})
+    refusal = f"{re.escape(str(root))} is not a directory owned by this user"
+    planted = workspace.Layout(repo, root / workspace.repo_key(repo), "review")
+
+    with pytest.raises(workspace.WorkspaceError, match=refusal):
+        workspace.workspace_base(repo, {})
+    with pytest.raises(workspace.WorkspaceError, match=refusal), workspace.flow_lease(planted):
+        pass
+    code = workspace.main(["status"])
+
+    assert code == 1
+    assert capsys.readouterr().err.startswith(f"workspace: {root} is not a directory owned")
+    assert list(elsewhere.iterdir()) == []
+    assert list(root.iterdir()) == []
 
 
 def test_check_shared_checkout_refuses_a_copy(repo: Path, tmp_path: Path) -> None:
@@ -662,23 +773,32 @@ def test_a_resync_restores_a_killed_proofs_venv_mutation_before_it_drops_the_mar
             assert venv_files[0].read_text(encoding="utf-8") == "mutated\n"
 
 
+@pytest.mark.parametrize("kind", ["symlink", "other-owner"])
 @pytest.mark.parametrize("how", ["resync", "gc"])
-def test_a_prove_failability_directory_that_is_a_symlink_is_never_followed(
+def test_a_prove_failability_directory_that_is_not_this_users_own_is_never_touched(
     layout: workspace.Layout,
     syncs: _Syncs,
     state_home: Path,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     how: str,
+    kind: str,
 ) -> None:
     # The prover refuses a ``prove_failability`` that is not a real directory of this user, so
-    # whatever lies behind such a link is no copy's state and is never removed.
+    # whatever lies behind such a link, or in another user's folder, is no copy's state and is
+    # never removed.
     del syncs
     with workspace.lease(layout, _address("perf-1")) as held:
         pass
-    foreign = tmp_path / "foreign"
     # The workspace's own state already made the state home.
     state_home.mkdir(exist_ok=True)
-    (state_home / prove_failability.STATE_DIRECTORY_NAME).symlink_to(foreign)
+    shared = state_home / prove_failability.STATE_DIRECTORY_NAME
+    if kind == "symlink":
+        foreign = tmp_path / "foreign"
+        shared.symlink_to(foreign)
+    else:
+        foreign = shared
+        _stub_owners(monkeypatch, {shared.resolve(): os.getuid() + 1})
     behind = foreign / prove_failability.tree_namespace(held.directory.resolve())
     _write(behind / prove_failability.ACTIVE_MARKER_NAME, "{}\n")
 
@@ -729,7 +849,31 @@ def _run_once_after_checking(
     monkeypatch.setattr(owner, check, _check)
 
 
-def test_a_manifest_gone_when_the_lease_reads_it_resyncs_the_copy(
+def test_a_manifest_gone_when_the_lease_reads_it_refuses_a_copy_that_still_holds_files(
+    layout: workspace.Layout,
+    syncs: list[Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The read is the existence check: a manifest removed right before it reads as gone, and
+    # the copy's files, which may hold edits, are never synced over.
+    with workspace.lease(layout, _address("perf-1")) as first:
+        edit = _write(first.directory / "edit.txt", "kept\n")
+    manifest = layout.manifest_path(first.slot)
+    _run_once_before_reading(monkeypatch, manifest, manifest.unlink)
+
+    with (
+        pytest.raises(workspace.WorkspaceError, match=r"manifest of its copy .* is gone"),
+        workspace.lease(layout, _address("perf-1")),
+    ):
+        pass
+
+    assert syncs == [first.directory]
+    assert edit.read_text(encoding="utf-8") == "kept\n"
+    assert not manifest.exists()
+    assert _statuses(layout) == {"slot-1": "ready"}
+
+
+def test_a_manifest_gone_when_the_lease_reads_it_with_every_file_of_the_copy_resyncs_it(
     layout: workspace.Layout,
     syncs: list[Path],
     monkeypatch: pytest.MonkeyPatch,
@@ -737,7 +881,12 @@ def test_a_manifest_gone_when_the_lease_reads_it_resyncs_the_copy(
     with workspace.lease(layout, _address("perf-1")) as first:
         pass
     manifest = layout.manifest_path(first.slot)
-    _run_once_before_reading(monkeypatch, manifest, manifest.unlink)
+
+    def _reboot() -> None:
+        manifest.unlink()
+        shutil.rmtree(first.directory)
+
+    _run_once_before_reading(monkeypatch, manifest, _reboot)
     with workspace.lease(layout, _address("perf-1")) as again:
         pass
 
@@ -1637,6 +1786,95 @@ def test_a_binding_whose_copy_a_reboot_removed_resyncs_into_the_same_slot(
     assert _statuses(layout) == {"slot-1": "ready", "slot-2": "ready"}
 
 
+def test_a_copy_unrun_until_the_purge_took_its_manifest_is_refused_while_an_edit_remains(
+    layout: workspace.Layout,
+    syncs: list[Path],
+) -> None:
+    # An edit made since the copy's last run outlives the purge that takes the manifest; a
+    # resync would mirror it away, so the run is refused and ``--fresh`` is the caller's call.
+    # The edit sits in a subfolder, where the copy's sources are, under folders the purge keeps.
+    with workspace.lease(layout, _address("perf-1")) as first:
+        edit = _write(first.directory / workspace.PACKAGE_DIR / "edit.py", "kept\n")
+    del syncs[:]
+
+    _purge(layout.base, keep=(str(edit.relative_to(layout.base)),))
+    with (
+        pytest.raises(workspace.WorkspaceError, match="run with --fresh to resync it, or gc"),
+        workspace.lease(layout, _address("perf-1")),
+    ):
+        pass
+    refused_syncs = list(syncs)
+    kept = edit.read_text(encoding="utf-8")
+    with workspace.lease(layout, _address("perf-1"), fresh=True) as fresh:
+        pass
+
+    assert refused_syncs == []
+    assert kept == "kept\n"
+    assert syncs == [fresh.directory]
+    assert not edit.exists()
+    assert _statuses(layout) == {"slot-1": "ready"}
+
+
+def test_a_copy_the_purge_took_every_file_of_resyncs_into_its_slot(
+    layout: workspace.Layout,
+    syncs: list[Path],
+) -> None:
+    # The purge keeps directories and symlinks, as a copy's ``.venv`` holds: neither is a file
+    # an edit could live in.
+    with workspace.lease(layout, _address("perf-1")) as first:
+        interpreter = first.directory / ".venv" / "bin" / "python"
+        interpreter.parent.mkdir(parents=True)
+        interpreter.symlink_to(sys.executable)
+    del syncs[:]
+
+    _purge(layout.base)
+    assert interpreter.is_symlink()
+    with workspace.lease(layout, _address("perf-1")) as again:
+        synced = (again.directory / workspace.PACKAGE_DIR / "__init__.py").is_file()
+
+    assert again.slot == first.slot
+    assert syncs == [first.directory]
+    assert synced
+    assert layout.manifest_path(first.slot).is_file()
+
+
+def test_a_reused_copy_loses_its_manifest_with_its_unedited_files_and_is_refused_over_an_edit(
+    layout: workspace.Layout,
+    syncs: list[Path],
+) -> None:
+    # A run that reuses a copy writes nothing to its manifest, which ages from the sync as the
+    # copy's unedited files do: the purge takes them together, and an edit made since the sync
+    # is what remains, so the next run is refused rather than resynced over it.
+    with workspace.lease(layout, _address("perf-1")) as first:
+        pass
+    manifest = layout.manifest_path(first.slot)
+    aged = time.time() - 4 * _DAY
+    for path in layout.base.rglob("*"):
+        os.utime(path, (aged, aged), follow_symlinks=False)
+    with workspace.lease(layout, _address("perf-1")) as reused:
+        edit = _write(reused.directory / workspace.PACKAGE_DIR / "edit.py", "kept\n")
+    cutoff = time.time() - 3 * _DAY
+    written_since = tuple(
+        str(path.relative_to(layout.base))
+        for path in layout.base.rglob("*")
+        if path.is_file() and not path.is_symlink() and path.stat().st_mtime > cutoff
+    )
+
+    _purge(layout.base, keep=written_since)
+    with (
+        pytest.raises(workspace.WorkspaceError, match="run with --fresh to resync it, or gc"),
+        workspace.lease(layout, _address("perf-1")),
+    ):
+        pass
+
+    assert reused.slot == first.slot
+    assert syncs == [first.directory]
+    assert str(manifest.relative_to(layout.base)) not in written_since
+    assert not manifest.exists()
+    assert edit.read_text(encoding="utf-8") == "kept\n"
+    assert _statuses(layout) == {"slot-1": "ready"}
+
+
 def test_release_and_gc_reach_the_state_of_a_flow_a_reboot_removed(
     layout: workspace.Layout,
     monkeypatch: pytest.MonkeyPatch,
@@ -1941,14 +2179,14 @@ def test_a_flow_folder_gone_right_after_it_exists_is_made_again_and_a_file_there
         real_mkdir(path, mode, parents=parents, exist_ok=exist_ok)
 
     monkeypatch.setattr(Path, "mkdir", _exists_then_vanishes)
-    workspace._make_flow_dir(layout.flow_dir)
+    workspace._make_flow_dir(layout)
     assert vanished == []
     assert layout.flow_dir.is_dir()
 
     layout.flow_dir.rmdir()
     _write(layout.flow_dir, "not a folder\n")
     with pytest.raises(FileExistsError):
-        workspace._make_flow_dir(layout.flow_dir)
+        workspace._make_flow_dir(layout)
     assert layout.flow_dir.is_file()
 
 

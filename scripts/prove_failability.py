@@ -549,6 +549,15 @@ class ScratchRootError(ManifestError):
     """
 
 
+class PrivateDirectoryError(ScratchRootError):
+    """A directory one user's runs share is a symlink, not a directory, or another user's.
+
+    :func:`claim_private_directory` and :func:`refuse_foreign_directory` raise
+    it before anything is written there; ``scripts/workspace.py`` reports it as
+    its own refusal.
+    """
+
+
 class RestoreProofError(Exception):
     """A mutated file could not be restored, or the restore could not be proved."""
 
@@ -1260,31 +1269,75 @@ def _tree_state_directory() -> Path:
     return directory
 
 
-def _claim_private_directory(directory: Path) -> None:
+def is_private_directory(directory: Path) -> bool:
+    """Return whether ``directory`` is a real directory, not a symlink, owned by this user.
+
+    The answer is read from ``lstat``, so a symlink to a directory of this
+    user's is not one.
+
+    Raises:
+        FileNotFoundError: nothing is at ``directory``.
+
+    """
+    status = directory.lstat()
+    return stat.S_ISDIR(status.st_mode) and status.st_uid == os.getuid()
+
+
+def _refuse_unless_private(directory: Path, remedy: str) -> None:
+    """Raise :class:`PrivateDirectoryError` unless :func:`is_private_directory` holds."""
+    if not is_private_directory(directory):
+        raise PrivateDirectoryError(
+            f"{directory} is not a directory owned by this user (uid {os.getuid()}): a symlink "
+            "or another user's entry there could redirect or expose what is written into it, "
+            f"so nothing was written; {remedy}",
+        )
+
+
+def refuse_foreign_directory(directory: Path, remedy: str) -> None:
+    """Refuse an entry at ``directory`` that is not a real directory owned by this user.
+
+    Nothing at ``directory`` passes, and nothing is created: a caller that only
+    reads refuses what :func:`claim_private_directory` would refuse, and leaves
+    the claim to whatever writes there. ``remedy`` ends the refusal's message.
+
+    Raises:
+        PrivateDirectoryError: the entry is a symlink, not a directory, or another user's.
+
+    """
+    try:
+        _refuse_unless_private(directory, remedy)
+    except FileNotFoundError:
+        return
+
+
+def claim_private_directory(directory: Path, remedy: str) -> None:
     """Create ``directory`` with ``STATE_DIRECTORY_MODE`` unless it exists; refuse a foreign one.
 
-    The directory is shared by every run of this user (the per-user default
+    The directory is shared by every run of one user (the per-user default
     scratch parent under the system temporary directory, the state home's
-    ``prove_failability``), so in a temporary directory other users can write
-    to it may have been made by someone else first. Only a real directory, not
-    a symlink, owned by this user is used; anything else refuses the run before
-    anything is written into it.
+    ``prove_failability``, ``scripts/workspace.py``'s default root), so in a
+    temporary directory other users can write to it may have been made by
+    someone else first. Only a real directory, not a symlink, owned by this
+    user is used; anything else, a dangling symlink included, is refused
+    before anything is written into it. ``remedy`` ends the refusal's message.
+
+    Raises:
+        PrivateDirectoryError: the entry is a symlink, not a directory, or another user's.
+
     """
-    directory.mkdir(mode=STATE_DIRECTORY_MODE, exist_ok=True)
-    status = directory.lstat()
-    if not stat.S_ISDIR(status.st_mode) or status.st_uid != os.getuid():
-        raise ScratchRootError(
-            f"{directory} is not a directory owned by this user (uid {os.getuid()}): a symlink "
-            "or another user's directory there could redirect or expose the pristine copies, "
-            "so nothing was written; remove it or pass --scratch-root",
-        )
+    with contextlib.suppress(FileExistsError):
+        directory.mkdir(mode=STATE_DIRECTORY_MODE)
+    _refuse_unless_private(directory, remedy)
 
 
 def _claim_state_home() -> None:
     """Create the state home and its ``prove_failability`` directory, refusing a foreign one."""
     home = state_home().resolve()
     home.mkdir(mode=STATE_DIRECTORY_MODE, parents=True, exist_ok=True)
-    _claim_private_directory(home / STATE_DIRECTORY_NAME)
+    claim_private_directory(
+        home / STATE_DIRECTORY_NAME,
+        f"remove it or point {STATE_HOME_ENV} at a state home of your own",
+    )
 
 
 def _sweep_orphaned_copies(directory: Path) -> None:
@@ -1333,7 +1386,7 @@ def _resolve_scratch_root(raw_root: str | None) -> Path:
     and the pristine copies of proved restores, never a live mutation's state.
     The default parent is per user, so users sharing one temporary directory
     get disjoint parents, and must be a real directory owned by this user, as
-    :func:`_claim_private_directory` checks; an explicit root is the caller's.
+    :func:`claim_private_directory` checks; an explicit root is the caller's.
     """
     given = _given_scratch_root(raw_root)
     parent = (
@@ -1351,7 +1404,7 @@ def _resolve_scratch_root(raw_root: str | None) -> Path:
             "proved runs' pristine copies, so nothing was written; pass another --scratch-root",
         )
     if given is None:
-        _claim_private_directory(parent)
+        claim_private_directory(parent, "remove it or pass --scratch-root")
     resolved.mkdir(parents=True, exist_ok=True)
     return resolved
 
@@ -1937,6 +1990,18 @@ def git_blob_id(data: bytes) -> str:
     return hashlib.sha1(b"blob %d\0" % len(data) + data, usedforsecurity=False).hexdigest()
 
 
+def _read_text_if_present(path: Path) -> str | None:
+    """Return the text of ``path``, or ``None`` when no file is there as it is read.
+
+    The read is the existence check: under a scratch root in the temporary
+    directory, a file the OS purge removes after a separate check would raise.
+    """
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+
+
 @dataclass(frozen=True)
 class RunCapture:
     """Where one run's probe plugin lives and writes, and where its raw output is kept."""
@@ -1947,11 +2012,17 @@ class RunCapture:
 
 
 def _new_capture(scratch_root: Path, entry: ProofEntry, run_name: str) -> RunCapture:
-    """Return a fresh capture for one run, writing the probe plugin into the scratch root."""
+    """Return a fresh capture for one run, writing the probe plugin into the scratch root.
+
+    The plugin is rewritten unless it already holds :data:`PROBE_SOURCE`. The
+    read is the existence check (:func:`_read_text_if_present`): the scratch
+    root may sit in a temporary directory the OS cleans, so a plugin removed
+    after a separate check is written again instead of raising.
+    """
     probe_directory = scratch_root / PROBE_DIRECTORY_NAME
     probe_directory.mkdir(parents=True, exist_ok=True)
     probe_file = probe_directory / f"{PROBE_MODULE_NAME}.py"
-    if not probe_file.is_file() or probe_file.read_text(encoding="utf-8") != PROBE_SOURCE:
+    if _read_text_if_present(probe_file) != PROBE_SOURCE:
         _ = probe_file.write_text(PROBE_SOURCE, encoding="utf-8")
     runs = scratch_root / RUNS_DIRECTORY_NAME
     runs.mkdir(parents=True, exist_ok=True)
@@ -1967,12 +2038,17 @@ def _new_capture(scratch_root: Path, entry: ProofEntry, run_name: str) -> RunCap
 
 
 def _read_probe(path: Path) -> tuple[tuple[tuple[str, str], ...], tuple[Provenance, ...]]:
-    """Return the crash lines and provenance records the probe plugin wrote."""
-    if not path.is_file():
+    """Return the crash lines and provenance records the probe plugin wrote.
+
+    A run whose probe wrote nothing, or whose output is gone when it is read,
+    has none; the read is the existence check (:func:`_read_text_if_present`).
+    """
+    text = _read_text_if_present(path)
+    if text is None:
         return (), ()
     crashes: dict[str, str] = {}
     provenance: list[Provenance] = []
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
+    for raw_line in text.splitlines():
         if not raw_line.strip():
             continue
         record = _loads(raw_line)

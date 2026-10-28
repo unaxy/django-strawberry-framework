@@ -131,36 +131,48 @@ its full output kept in ``evidence/logs/<run id>.log``. A record cites the run
 id; ``audit`` checks it.
 
 Layout: ``$TMPDIR/dsf-ws/<sha16 of the repo root>/<flow>/`` holds
-``slots/slot-N/`` (the copies), ``gate/``, ``gate-floor/`` (the floor
-suite's virtualenv) and ``evidence/``. The flow's ``state.json`` (bindings
-and item baselines) lives in the XDG state home, ``$XDG_STATE_HOME`` or
+``slots/slot-N/`` (the copies), ``gate/``, ``gate-floor/`` (the floor suite's
+virtualenv) and ``evidence/``. The flow's ``state.json`` (bindings and item
+baselines) lives in the XDG state home, ``$XDG_STATE_HOME`` or
 ``~/.local/state`` (the prover's, ``scripts/prove_failability.py::state_home``),
-at ``dsf-ws/<sha16 of that workspace folder>/<flow>/state.json``.
-Both live outside the repository, keyed per checkout (so a git worktree gets
-its own), and are harness-agnostic. ``DSF_WS_ROOT`` replaces
-``$TMPDIR/dsf-ws``; a root inside the repository is refused, since copies of
-a tree holding its own copies recurse. ``DSF_WS_SLOTS`` caps each flow's pool
-(default 4: three parallel roles and the pinned ``before``). New copies are
-refused below 6 GB free.
+at ``dsf-ws/<sha16 of that workspace folder>/<flow>/state.json``. Both live
+outside the repository, keyed per checkout (so a git worktree gets its own),
+and are harness-agnostic. The root ``dsf-ws`` sits in the system temporary
+directory, resolved (``$TMPDIR``, else ``/tmp``), and is named
+``dsf-ws-<uid>`` instead when that directory is not a real directory owned by
+this user (Linux ``/tmp``), so users sharing it never share a root. The first
+command that makes a flow folder makes the root mode ``0700``; a symlink, a
+file or another user's folder at the root's name refuses every command that
+uses the root before anything is read or written there.
+``DSF_WS_ROOT`` replaces that root and is used as given; a root inside the
+repository is refused, since copies of a tree holding its own copies recurse.
+``DSF_WS_SLOTS`` caps each flow's pool (default 4: three parallel roles and
+the pinned ``before``). New copies are refused below 6 GB free.
 
 The temporary directory is cleaned behind this script's back. macOS deletes,
-daily, every regular file under ``$TMPDIR`` whose creation and last access
-are both over three days old, open or locked or not, and keeps every
-directory; a read renews the access time only of a file written since it was
-last read, so a file ages from its last write however often it is read. On
-Linux the directory is ``/tmp``: often a tmpfs that every reboot empties, or
-one systemd-tmpfiles cleans of entries unused for about ten days. The state
-therefore lives in the state home, which neither touches: an address keeps
-its copy's slot number whatever the temporary directory lost, no copy is
-renumbered or resynced for another address, and no address gets two copies. A binding whose
-copy's manifest is gone (the copy aged out, or a reboot took the flow folder)
-is resynced into that same slot on its next run. A copy that lost files but
-kept its manifest is used as it stands, and its run log may restart, so
-``gc`` the flow before reusing it after an idle stretch. A ``state.json`` an
-older version of this script left in the flow folder is moved to the state
-home by the next command that takes ``pool.lock``. The flow's marker is a
-directory, so ``gc`` still owns the folder after a purge. Every lock is a
-directory too, so the purge never takes one from a command that holds it.
+daily, every regular file under ``$TMPDIR`` whose creation and last access are
+both over three days old, open or locked or not, and keeps every directory; a
+read renews the access time only of a file written since it was last read, so
+a file ages from its last write however often it is read. On Linux the
+directory is ``/tmp``: often a tmpfs that every reboot empties, or one
+systemd-tmpfiles cleans of entries unused for about ten days. The state
+therefore lives in the state home, which neither touches: an address keeps its
+copy's slot number whatever the temporary directory lost, no copy is
+renumbered or resynced for another address, and no address gets two copies. A
+copy's manifest is written only when it syncs, so it ages from that sync as
+the copy's unedited files do, and the purge takes it with them. A binding
+whose copy is gone with its manifest (every file aged out, or a reboot took
+the flow folder) is resynced into that same slot on its next run. One whose
+manifest is gone while some of its files remain (an edit, or any file written
+in the last three days, outlives the purge) is refused rather than resynced
+over them: keep what is needed, then ``--fresh`` or ``gc``. A copy that lost
+files but kept its manifest is used as it stands, and its run log may
+restart, so ``gc`` the flow before reusing it after an idle stretch. A
+``state.json`` an older version of this script left in the flow folder is
+moved to the state home by the next command that takes ``pool.lock``. The
+flow's marker is a directory, so ``gc`` still owns the folder after a purge.
+Every lock is a directory too, so the purge never takes one from a command
+that holds it.
 
 Guarantees, each one a hand-run failure this encodes away:
 
@@ -354,6 +366,9 @@ PACKAGE_DIR = "django_strawberry_framework"
 COMPOSE_FILE = "docker-compose.postgres.yml"
 
 ROOT_ENV = "DSF_WS_ROOT"
+# The default root's name under the system temporary directory: as it stands when that
+# directory is this user's own (macOS's ``$TMPDIR``), ``-<uid>`` appended when it is shared.
+DEFAULT_ROOT_NAME = "dsf-ws"
 SLOTS_ENV = "DSF_WS_SLOTS"
 DEFAULT_SLOTS = 4
 MIN_FREE_BYTES = 6 * 1024**3
@@ -1102,12 +1117,44 @@ def check_shared_checkout(repo_root: Path) -> None:
         raise WorkspaceError(msg)
 
 
+def default_root() -> Path:
+    """Return the root used without ``DSF_WS_ROOT``, under the system temporary directory.
+
+    The temporary directory is resolved before the name is appended, so a
+    symlink planted at the name stays visible to ``lstat``. The name is
+    :data:`DEFAULT_ROOT_NAME` when that directory is a real directory owned by
+    this user, as macOS's per-user ``$TMPDIR`` is, and
+    ``<DEFAULT_ROOT_NAME>-<uid>`` when it is not (Linux ``/tmp``), so users
+    sharing one temporary directory never share a root.
+    """
+    temporary = Path(tempfile.gettempdir()).resolve()
+    own = prove_failability.is_private_directory(temporary)
+    return temporary / (DEFAULT_ROOT_NAME if own else f"{DEFAULT_ROOT_NAME}-{os.getuid()}")
+
+
+_FOREIGN_ROOT_REMEDY = f"remove it, or point {ROOT_ENV} at a folder of your own"
+
+
 def workspace_base(repo_root: Path, environ: dict[str, str] | None = None) -> Path:
-    """Return ``<root>/<repo key>``, refusing any root inside the repository."""
+    """Return ``<root>/<repo key>``, refusing any root inside the repository.
+
+    ``DSF_WS_ROOT`` is the caller's and used as given. The default root
+    (:func:`default_root`) is refused when something is there that is not a
+    real directory owned by this user (a symlink, another user's folder), and
+    never created here: :func:`_make_flow_dir` claims it before any flow
+    folder is made in it.
+    """
     source = os.environ if environ is None else environ
     raw = source.get(ROOT_ENV)
-    parent = Path(raw).expanduser() if raw else Path(tempfile.gettempdir()) / "dsf-ws"
-    base = parent.resolve() / repo_key(repo_root)
+    if raw:
+        parent = Path(raw).expanduser().resolve()
+    else:
+        parent = default_root()
+        try:
+            prove_failability.refuse_foreign_directory(parent, _FOREIGN_ROOT_REMEDY)
+        except prove_failability.PrivateDirectoryError as error:
+            raise WorkspaceError(str(error)) from None
+    base = parent / repo_key(repo_root)
     if _is_within(base, repo_root):
         msg = (
             f"workspace root {base} is inside the repository {repo_root}; copies of a tree "
@@ -1231,7 +1278,7 @@ class Layout:
         stretch. A marker file is replaced by the directory under
         ``pool.lock``, so two commands upgrading it at once never collide.
         """
-        self.flow_dir.mkdir(parents=True, exist_ok=True)
+        _make_flow_dir(self)
         marker = self.flow_dir / MARKER_NAME
         if marker.is_dir():
             return
@@ -1241,18 +1288,38 @@ class Layout:
                 marker.mkdir()
 
 
-def _make_flow_dir(flow_dir: Path) -> None:
+def _make_flow_dir(layout: Layout) -> None:
     """Create the flow folder and its parents, again while a ``gc`` removes the empty parents.
 
     A ``gc`` of another flow of this checkout removes the parents it finds
     empty; a ``mkdir`` racing that removal fails with ``ENOENT``, or on macOS
-    ``EINVAL``, or finds the folder gone right after ``EEXIST``.
+    ``EINVAL``, or finds the folder gone right after ``EEXIST``. Without
+    ``DSF_WS_ROOT`` the root is claimed on every attempt
+    (:func:`prove_failability.claim_private_directory`: made mode ``0700``, or
+    refused unless it is a real directory owned by this user), and only that
+    claim ever makes it, so a root a ``gc`` removed is never made again
+    unclaimed. A ``DSF_WS_ROOT`` folder is the caller's and made as given.
+
+    Raises:
+        WorkspaceError: the default root is a symlink, not a directory, or another user's;
+            nothing was written there.
+
     """
+    root = layout.base.parent
     while True:
+        level = root
         try:
-            flow_dir.mkdir(parents=True, exist_ok=True)
+            if os.environ.get(ROOT_ENV):
+                root.mkdir(parents=True, exist_ok=True)
+            else:
+                prove_failability.claim_private_directory(root, _FOREIGN_ROOT_REMEDY)
+            for level in (layout.base, layout.flow_dir):
+                level.mkdir(exist_ok=True)
+        except prove_failability.PrivateDirectoryError as error:
+            raise WorkspaceError(str(error)) from None
         except FileExistsError:
-            if os.path.lexists(flow_dir):
+            # The level that refused is still there and not a folder; gone, it is made again.
+            if os.path.lexists(level):
                 raise
         except OSError as error:
             if error.errno not in {errno.ENOENT, errno.EINVAL}:
@@ -1273,7 +1340,7 @@ def _lock_flow_dir(layout: Layout, operation: int, *, create: bool) -> int | Non
     """
     while True:
         if create:
-            _make_flow_dir(layout.flow_dir)
+            _make_flow_dir(layout)
         try:
             return _flock(layout.flow_dir, os.O_RDONLY | os.O_DIRECTORY, operation)
         except FileNotFoundError:
@@ -1871,10 +1938,9 @@ def forget_proof_state(copy: Path, preserved: frozenset[str]) -> None:
     directory = prove_failability.tree_state_directory(copy.resolve())
     parent = directory.parent
     try:
-        status = parent.lstat()
+        if not prove_failability.is_private_directory(parent):
+            return
     except FileNotFoundError:
-        return
-    if not stat.S_ISDIR(status.st_mode) or status.st_uid != os.getuid():
         return
     if directory.is_symlink() or directory.is_file():
         directory.unlink()
@@ -2366,12 +2432,16 @@ def _admit(
 
     Returns:
         The manifest of a copy already synced for ``address``, read here, so a
-        manifest that is gone by then means a sync; ``None`` when the copy
-        needs one.
+        manifest that is gone by then is settled here; ``None`` when the copy
+        needs a sync: it was never synced for ``address``, ``fresh`` asks for
+        one, or its manifest is gone and its folder holds no file (a reboot or
+        the purge took the whole copy).
 
     Raises:
         WorkspaceError: ``slot`` no longer holds ``address``: a ``release``
-            freed it while the run waited for its lock.
+            freed it while the run waited for its lock. Or the copy's manifest
+            is gone while its folder still holds a file, which may be an edit
+            made since its sync, so nothing is synced over it.
 
     """
     with file_lock(layout.pool_lock):
@@ -2381,14 +2451,44 @@ def _admit(
             msg = f"{address}: {slot} was released while this command waited for it; run it again"
             raise WorkspaceError(msg)
         if not fresh and bound["status"] == "ready":
-            synced = _read_json_object(layout.manifest_path(slot), None)
+            manifest_path = layout.manifest_path(slot)
+            synced = _read_json_object(manifest_path, None)
             if synced is not None:
                 # Only ``sync_slot`` writes a slot's manifest file, always from a ``_Manifest``.
                 return cast("_Manifest", synced)
+            copy = layout.slot_dir(slot)
+            if _holds_a_file(copy):
+                msg = (
+                    f"{address}: the manifest of its copy {copy} is gone while the copy still "
+                    "holds files, which may be edits made since its sync, so nothing was synced "
+                    "over them; keep what you need from the copy, then run with --fresh to "
+                    "resync it, or gc the flow"
+                )
+                raise WorkspaceError(msg)
         if bound["status"] != "syncing":
             bound["status"] = "syncing"
             _write_state(layout, state)
         return None
+
+
+def _holds_a_file(directory: Path) -> bool:
+    """Return whether ``directory`` holds a regular file at any depth, symlinks not followed.
+
+    The temporary directory's purge removes regular files alone and a reboot
+    removes the whole folder, so a copy either took to its end holds none.
+    """
+    pending = [directory]
+    while pending:
+        try:
+            entries = list(os.scandir(pending.pop()))
+        except FileNotFoundError:
+            continue
+        for entry in entries:
+            if entry.is_dir(follow_symlinks=False):
+                pending.append(Path(entry.path))
+            elif entry.is_file(follow_symlinks=False):
+                return True
+    return False
 
 
 @contextlib.contextmanager
@@ -2407,13 +2507,14 @@ def lease(
     manifest read under it, whether to sync: a copy already synced for the
     address is used as it stands, edits included, however long the run
     waited; a copy still ``syncing`` (a new binding, or a sync that never
-    finished), one whose manifest is gone, or one ``fresh`` asks for is
-    resynced.
+    finished), one ``fresh`` asks for, or one whose manifest is gone with
+    every file of it is resynced.
 
     Raises:
         WorkspaceError: the copy no longer holds ``address``: a release freed
-            it while the run waited for its lock. The run never binds the
-            address again.
+            it while the run waited for its lock; the run never binds the
+            address again. Or the copy's manifest is gone while files of it
+            remain (:func:`_admit`): nothing is synced over them.
 
     """
     slot = bind(layout, address).slot
