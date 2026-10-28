@@ -1234,6 +1234,34 @@ def test_node_id_annotation_overrides_default_id_attr() -> None:
     assert CategoryNode.resolve_id_attr() == "name"
 
 
+def test_two_node_id_annotations_are_refused_not_read_as_pk() -> None:
+    """Two ``relay.NodeID[...]`` annotations fail finalize instead of falling back to ``"pk"``.
+
+    ``strawberry/relay/types.py::Node.resolve_id_attr`` raises the same
+    ``NodeIDAnnotationError`` for zero candidates and for more than one; only
+    zero is the ``"pk"`` fallback. Reading both as ``"pk"`` made the type
+    silently encode and filter on the primary key, ignoring both declared ids.
+    """
+
+    class CategoryNode(DjangoType):
+        name: relay.NodeID[str]
+        description: relay.NodeID[str]
+
+        class Meta:
+            model = Category
+            fields = ("id", "name", "description")
+            interfaces = (relay.Node,)
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        finalize_django_types()
+    message = str(excinfo.value)
+    assert message.startswith(
+        f"{CategoryNode.__name__}: Strawberry refused the type's relay.NodeID annotations",
+    )
+    assert "More than one field annotated with `NodeID`" in message
+    assert "at most one relay.NodeID[...] annotation" in message
+
+
 @pytest.mark.django_db
 def test_relay_chain_child_resolvers_do_not_recurse() -> None:
     """A relay-shaped DjangoType subclassing another relay-shaped DjangoType works.
