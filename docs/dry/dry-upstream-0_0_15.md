@@ -176,19 +176,20 @@ it lands with its tick.
   - Glossary: the `relay-node-integration`, `djangonodefield`, `check_deadline`, `execution-resource-policy` and
     `syncmisuseerror` bodies were rewritten in the DB and re-rendered.
 
-- [ ] 7. (TYP-6) The per-row node-type stamp duplicates `strawberry.cast` and ignores a consumer's cast
-  - Our code: `types/relay.py::_NODE_TYPE_HINT_ATTR`, the `::install_is_type_of` closure and
-    `relay.py::_stamp_node_type`. About 40 lines.
-  - Upstream: `strawberry/types/cast.py::cast`, `::get_strawberry_type_cast` and `::TYPE_CAST_ATTRIBUTE`.
-    - Public `strawberry.cast`, present at 0.322.2.
-    - It is read in `schema/schema_converter.py::_get_is_type_of`, which our injected `is_type_of` replaces.
-  - Lines: ~10.
-  - Status: SUSPECTED.
-  - Reason to keep ours: the docstring calls `strawberry.cast` "a surface we have not committed to". It is public and
-    exported at the floor, so that reason no longer holds.
-  - Behaviour change: fixes the case where a consumer `strawberry.cast(TypeB, row)` on a multi-type model is ignored,
-    and graphql-core then picks the first candidate.
-  - Risk / blockers: the reader must use `truth.static_attr` (truthful-reads gate).
+- [x] 7. (TYP-6) The per-row node-type stamp duplicates `strawberry.cast` and ignores a consumer's cast
+  - Our code: `types/relay.py`'s `_NODE_TYPE_HINT_ATTR` was removed. The `install_is_type_of` closure reads
+    upstream's `TYPE_CAST_ATTRIBUTE` through `truth.static_attr` and answers `type_cast is type_cls`, the
+    strawberry-django branch. `relay.py::_stamp_node_type` now calls `strawberry.cast`.
+  - Upstream: `strawberry/types/cast.py::cast` and `::TYPE_CAST_ATTRIBUTE` (public, identical at 0.322.2).
+  - Status: CONFIRMED. The live row failed on the old code (`BookType` answered where the cast named
+    `NullabilityOverrideBookType`).
+  - Behaviour change: fixes a consumer's `strawberry.cast(TypeB, row)` on a multi-type model being ignored on
+    interface and union fields. The root `node`/`nodes` fields still cast their copy to the type the GlobalID
+    named, over any cast a consumer `resolve_nodes` put on the row.
+  - Tests:
+    - live: `test_library_api.py::test_consumer_cast_book_resolves_to_the_secondary_type_under_node_over_http`, over
+      the new `libraryCastSecondaryBookNodes` field behind `FAKESHOP_TEST_RELAY_SECONDARY_NODE`;
+    - `tests/test_relay_node_field.py` and `tests/types/test_relay_interfaces.py` read `TYPE_CAST_ATTRIBUTE`.
 
 - [ ] 8. (TYP-7) Two `relay.NodeID` annotations fall back silently to `"pk"`
   - Our code: `types/relay.py::_stamp_relay_id_attr #"except NodeIDAnnotationError:"` (2 lines).

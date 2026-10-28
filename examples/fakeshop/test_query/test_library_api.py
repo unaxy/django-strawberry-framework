@@ -8521,6 +8521,50 @@ def test_secondary_book_global_id_refetches_as_primary_book_type_over_http(
 
 
 @pytest.mark.django_db
+def test_consumer_cast_book_resolves_to_the_secondary_type_under_node_over_http(
+    project_schema_override: Callable[[], None],
+) -> None:
+    """A consumer's ``strawberry.cast`` picks the ``__typename`` of a multi-type ``Book`` row.
+
+    Under ``FAKESHOP_TEST_RELAY_SECONDARY_NODE`` both ``BookType`` and
+    ``NullabilityOverrideBookType`` implement ``Node``, so each one's installed
+    ``is_type_of`` answers ``True`` for a bare ``Book`` and graphql-core keeps the
+    first candidate it tests. ``libraryCastSecondaryBookNodes`` casts its rows to the
+    secondary; the must-not is the primary ``BookType`` fragment resolving instead.
+    """
+    shelf = models.Shelf.objects.create(
+        code="N-2",
+        topic="Fiction",
+        branch=models.Branch.objects.create(name="RelayCast", city="Boston"),
+    )
+    models.Book.objects.create(title="Kindred", subtitle="A Novel", shelf=shelf)
+
+    with override_settings(FAKESHOP_TEST_RELAY_SECONDARY_NODE=True):
+        project_schema_override()
+        response = _post_graphql(
+            """
+            query {
+              libraryCastSecondaryBookNodes {
+                __typename
+                ... on BookType { primaryTitle: title }
+                ... on NullabilityOverrideBookType { secondaryTitle: title subtitle }
+              }
+            }
+            """,
+        )
+        assert response.status_code == 200
+        payload = response_json(response)
+        assert "errors" not in payload, payload
+        assert json_at(payload, "data", "libraryCastSecondaryBookNodes") == [
+            {
+                "__typename": "NullabilityOverrideBookType",
+                "secondaryTitle": "Kindred",
+                "subtitle": "A Novel",
+            },
+        ]
+
+
+@pytest.mark.django_db
 def test_public_patron_exclude_deny_list_shapes_type_and_resolves() -> None:
     """``PublicPatron`` (``Meta.exclude`` + ``Meta.name`` + ``Meta.description``) vs ``PatronType``.
 

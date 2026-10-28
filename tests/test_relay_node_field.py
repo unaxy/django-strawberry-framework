@@ -29,6 +29,7 @@ from django.utils.functional import SimpleLazyObject
 from strawberry import relay
 from strawberry.schema_directive import Location as DirectiveLocation
 from strawberry.schema_directive import schema_directive
+from strawberry.types.cast import TYPE_CAST_ATTRIBUTE
 from typing_extensions import Self, override
 
 import django_strawberry_framework
@@ -200,7 +201,7 @@ def test_bare_node_field_multi_type_model_typename_follows_gid() -> None:
     registered types over one model both installed
     ``is_type_of`` hooks answered ``True`` - whichever candidate graphql-core
     tested first won, so a ``CategoryAdminNode`` gid came back
-    ``__typename: "CategoryNode"``. The ``_stamp_node_type`` hint carries the
+    ``__typename: "CategoryNode"``. The ``_stamp_node_type`` cast carries the
     decode-routing decision into type resolution.
     """
     services.seed_data(1)
@@ -309,7 +310,7 @@ def test_node_type_hint_does_not_poison_reused_model_instance() -> None:
     )
     assert result.errors is None, result.errors
     assert result.data == {"node": {"__typename": "SecondaryNode"}, "primary": {"name": row.name}}
-    assert not hasattr(row, "_dsf_node_type_hint")
+    assert not hasattr(row, TYPE_CAST_ATTRIBUTE)
 
 
 @pytest.mark.django_db
@@ -370,7 +371,7 @@ def test_node_type_hint_from_a_lazy_resolve_node_return_does_not_poison_the_row(
     )
     assert result.errors is None, result.errors
     assert result.data == {"node": {"__typename": "SecondaryNode"}, "primary": {"name": row.name}}
-    assert "_dsf_node_type_hint" not in vars(row)
+    assert TYPE_CAST_ATTRIBUTE not in vars(row)
 
 
 def test_stamp_node_type_passes_through_none_and_unstampable_objects() -> None:
@@ -395,7 +396,7 @@ def test_stamp_node_type_passes_through_none_and_unstampable_objects() -> None:
     # basedpyright: a plain stand-in class carrying no definition, which the code under test
     # reads through getattr; _stamp_node_type types the parameter as type[_RelayDjangoType]
     assert _stamp_node_type(object, unstampable) is unstampable  # pyright: ignore[reportArgumentType]
-    assert not hasattr(unstampable, "_dsf_node_type_hint")
+    assert not hasattr(unstampable, TYPE_CAST_ATTRIBUTE)
 
 
 # ---------------------------------------------------------------------------
