@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 352 done, 213 to do.
+Progress: 353 done, 212 to do.
 
 ## Done
 
@@ -1972,6 +1972,9 @@ Progress: 352 done, 213 to do.
 - [x] 659. Not a package defect under GOAL's trust boundary: the two repeat-stop tests in
   `tests/test_prove_failability.py` use wall-clock sleeps, but name no broken supported configuration or wire
   contract. Deterministic test timing is a tooling robustness task; the signal relay's behavior is unchanged.
+- [x] 607. Not a defect against the shipped contract: spec-015 explicitly leaves optimizer cooperation
+  out of both node defaults, and the glossary states that node refetch receives no optimizer plan. The capability
+  decision and its query-count evidence remain under Waiting item 327; this row adds no separate defect.
 
 ## Outside review of the fixes
 
@@ -2155,10 +2158,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   key: `optimizer/walker.py::_selected_scalar_names` reads the `id` selection as a model field name and
   misses, so `parent { child { id } }` keeps one JOIN; route it through `_relay_id_column`. No fakeshop Relay
   type omits its pk. Found researching 604
-- [ ] 607. (robustness) `node(id:)` / `nodes(ids:)` selecting a relation on the node cost one query per node
-  (`nodes` over two `PublisherType` ids with `editions { isbn13 }` = 3 statements): `DjangoNodeField` /
-  `DjangoNodesField` dispatch to `_resolve_node_default` / `_resolve_nodes_default` without an optimizer pass,
-  the seam spec-015 notes as not wired. Found fact-finding 604
 - [ ] 650. The write-side temporal check `utils/errors.py::unstorable_temporal` still hand-models Django's conversions
   (`_stored_datetime`): an aware year-1 `datetime` into a `DateField` (from a consumer hook, or a form / serializer field
   of another kind than its column) answers storable while `Field.get_db_prep_save` raises `OverflowError`; ask
