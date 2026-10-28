@@ -25664,3 +25664,90 @@ def test_branch_city_picks_update_binds_an_omitted_city_from_the_form_initial_ov
     assert len(sql) == statements + post_lock_rereads(1), sql
     updates = [statement for statement in sql if statement.lstrip().upper().startswith("UPDATE")]
     assert len(updates) == (expected["result"] is not None)
+
+
+def _relay_edition_key_schema(edition_fields: tuple[str, ...]) -> strawberry.Schema:
+    """Optimized holder schema whose Relay ``Edition`` node reads its GlobalID off the ISBN key.
+
+    Shipped ``EditionType`` is not a Relay node, so no shipped selection asks a
+    press run's ``edition`` for a GlobalID; this holder makes both types nodes.
+    ``Edition`` is keyed by ``isbn_13``, a primary key named something other
+    than ``id``, which ``edition_fields`` lists or leaves out.
+    """
+
+    class HolderRelayKeyEditionType(DjangoType):
+        class Meta:
+            model = models.Edition
+            fields = edition_fields
+            interfaces = (relay.Node,)
+            name = "HolderRelayKeyEditionType"
+
+    assert registry.get(models.Edition) is HolderRelayKeyEditionType
+
+    class HolderRelayKeyPrintingType(DjangoType):
+        class Meta:
+            model = models.Printing
+            fields = ("id", "edition")
+            interfaces = (relay.Node,)
+            name = "HolderRelayKeyPrintingType"
+
+    @strawberry.type
+    class Query:
+        printings: list[HolderRelayKeyPrintingType] = DjangoListField(HolderRelayKeyPrintingType)
+
+    finalize_django_types()
+    extension = DjangoOptimizerExtension()
+    return DjangoSchema(query=Query, config=strawberry_config(), extensions=[lambda: extension])
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "edition_fields",
+    [("isbn_13", "imprint"), ("imprint",)],
+    ids=["key-listed", "key-outside-fields"],
+)
+def test_relay_edition_id_under_printing_reads_the_stored_key_without_a_join(
+    edition_fields: tuple[str, ...],
+) -> None:
+    """``printings { id edition { id } }`` answers each edition's GlobalID from ``edition_id``.
+
+    The edition's GlobalID reads its ``isbn_13`` primary key, which the press
+    run's ``edition_id`` column already holds, so the one query selects
+    ``library_printing`` alone, whether or not ``Meta.fields`` lists the key,
+    and every id on the wire is the one the edition's own row would publish.
+    """
+    publisher = models.Publisher.objects.create(name="PA", house_code="pa")
+    editions = [
+        models.Edition.objects.create(isbn_13=isbn, imprint=isbn, publisher=publisher)
+        for isbn in ("9780000000001", "9780000000002")
+    ]
+    printings = [
+        models.Printing.objects.create(edition=edition, run_size=100) for edition in editions
+    ]
+
+    registry.clear()
+    try:
+        schema = _relay_edition_key_schema(edition_fields)
+        edition_type = registry.get(models.Edition)
+        printing_type = registry.get(models.Printing)
+        assert edition_type is not None
+        assert printing_type is not None
+        with CaptureQueriesContext(connection) as captured:
+            response = _post_holder(schema, "query { printings { id edition { id } } }")
+        expected = [
+            {
+                "id": global_id_for(printing_type, printing.pk),
+                "edition": {"id": global_id_for(edition_type, printing.edition_id)},
+            }
+            for printing in printings
+        ]
+    finally:
+        registry.clear()
+
+    assert response.status_code == 200
+    payload = response_json(response)
+    assert "errors" not in payload, payload
+    assert sorted(json_list(payload, "data", "printings"), key=str) == sorted(expected, key=str)
+    sql = [query["sql"] for query in captured.captured_queries]
+    assert len(sql) == 1, sql
+    assert "library_edition" not in sql[0], sql

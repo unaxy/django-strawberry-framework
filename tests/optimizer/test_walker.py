@@ -1362,6 +1362,134 @@ def test_plan_elides_forward_fk_when_target_pk_is_not_named_id() -> None:
     assert plan.fk_id_elisions == ("PrintingType.edition@edition",)
 
 
+#: Forward keys into a Relay target whose GlobalID reads the primary key, as
+#: (source model, relation, target model, target ``Meta.fields``): a key named
+#: ``id`` the fields leave out, a key named otherwise listed and left out, and a
+#: one-to-one primary key, whose field ``name`` (``patron``) is not its column.
+_RELAY_TARGET_PK_ID_SHAPES = {
+    "pk-named-id-outside-fields": (
+        Item,
+        "category",
+        Category,
+        ("name",),
+    ),
+    "pk-not-named-id-listed": (
+        Printing,
+        "edition",
+        Edition,
+        ("isbn_13", "imprint"),
+    ),
+    "pk-not-named-id-outside-fields": (
+        Printing,
+        "edition",
+        Edition,
+        ("imprint",),
+    ),
+    "one-to-one-pk": (
+        Annotation,
+        "profile",
+        PatronProfile,
+        ("postal_code",),
+    ),
+}
+
+
+@pytest.mark.parametrize("shape", list(_RELAY_TARGET_PK_ID_SHAPES))
+def test_plan_elides_forward_fk_when_relay_target_id_reads_the_pk(shape: str) -> None:
+    """B2: a Relay ``{ id }``-only child is the target key whatever the key is named.
+
+    The GlobalID selection counts as the model field its id is read from
+    (``optimizer/walker.py::_relay_id_field``), never a field-map entry named
+    ``id``, so the source row's stored key column answers it whether or not
+    ``Meta.fields`` lists the key and whatever the key is named.
+    """
+    source, relation, target, fields = _RELAY_TARGET_PK_ID_SHAPES[shape]
+    make_django_type("PkIdTargetType", target, fields)
+    finalize_django_types()
+
+    plan = plan_optimizations([_sel(relation, selections=[_global_id()])], source)
+
+    assert plan.select_related == ()
+    assert plan.prefetch_related == ()
+    assert plan.only_fields == (f"{relation}_id",)
+    assert plan.fk_id_elisions == (f"{relation}@{relation}",)
+
+
+def _category_name_node_id(_cls: type[object], root: Category, *, info: object) -> str:
+    """A consumer ``resolve_id`` reading ``name``, a column the stored key does not carry."""
+    del info
+    return f"C-{root.name}"
+
+
+def test_plan_does_not_elide_when_relay_target_resolve_id_is_custom() -> None:
+    """B2: a consumer ``resolve_id`` on a target that leaves its key out keeps the join.
+
+    The id is whatever the resolver builds from a loaded row, so the stored
+    key column cannot answer ``{ id }``.
+    """
+    make_django_type(
+        "CustomIdCategoryType",
+        Category,
+        ("name",),
+        namespace_extra={"resolve_id": classmethod(_category_name_node_id)},
+    )
+    finalize_django_types()
+
+    plan = plan_optimizations([_sel("category", selections=[_global_id()])], Item)
+
+    assert plan.select_related == ("category",)
+    assert plan.fk_id_elisions == ()
+
+
+def _edition_imprint_node_id(_cls: type[object], root: Edition, *, info: object) -> str:
+    """A consumer ``resolve_id`` reading ``imprint``, a column the stored key does not carry."""
+    del info
+    return f"E-{root.imprint}"
+
+
+def test_plan_does_not_elide_when_relay_target_keyed_off_id_resolves_id_custom() -> None:
+    """B2: a consumer ``resolve_id`` on a target keyed by ``isbn_13`` keeps the join.
+
+    The definition's custom-resolver check looks for ``resolve_<key>`` and so
+    does not see a ``resolve_id`` on a key named otherwise; the GlobalID
+    selection names no column then (``optimizer/walker.py::_relay_id_field``)
+    and resolves under ``id``, which no field of ``Edition`` holds.
+    """
+    make_django_type(
+        "CustomIdEditionType",
+        Edition,
+        ("isbn_13", "imprint"),
+        namespace_extra={"resolve_id": classmethod(_edition_imprint_node_id)},
+    )
+    finalize_django_types()
+
+    plan = plan_optimizations([_sel("edition", selections=[_global_id()])], Printing)
+
+    assert plan.select_related == ("edition",)
+    assert plan.fk_id_elisions == ()
+
+
+def test_plan_does_not_elide_when_relay_target_node_id_is_not_the_pk() -> None:
+    """B2: a ``NodeID`` column on a target that leaves its key out keeps the join.
+
+    ``house_code`` builds the GlobalID and the stored key column does not carry
+    it, so the join stays and loads the column the id reads.
+    """
+    make_django_type(
+        "HouseCodePublisherType",
+        Publisher,
+        ("name",),
+        namespace_extra={"__annotations__": {"house_code": relay.NodeID[str]}},
+    )
+    finalize_django_types()
+
+    plan = plan_optimizations([_sel("publisher", selections=[_global_id()])], Edition)
+
+    assert plan.select_related == ("publisher",)
+    assert plan.fk_id_elisions == ()
+    assert plan.only_fields == ("publisher_id", "publisher__house_code")
+
+
 def test_plan_does_not_elide_fk_to_non_pk_to_field() -> None:
     """B2: FK ``to_field`` values are not treated as related PK values.
 

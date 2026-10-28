@@ -1099,6 +1099,7 @@ For `{ category { id } }` and similar `id`-only forward-relation selections, the
 Safety properties:
 
 - falls back to a join when the target selection needs more than the primary key
+- on a Relay target the GlobalID selection counts as the primary key when the GlobalID reads it, whether or not `Meta.fields` lists the key and whatever the key is named; a one-to-one primary key the type lists keeps its join, since the type's relation resolver for that key counts as a custom id resolver
 - falls back when the target ID has a custom resolver
 - falls back when a target [`get_queryset`](#get_queryset-visibility-hook) hook must run
 - branch-isolated: aliases and sibling root fields do not leak elision state into each other
