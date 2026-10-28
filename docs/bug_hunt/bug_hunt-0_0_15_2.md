@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 359 done, 213 to do.
+Progress: 360 done, 213 to do.
 
 ## Done
 
@@ -2025,6 +2025,10 @@ Progress: 359 done, 213 to do.
   useless field-keyed error, or a silent truncation. A `CharField`, a subclass overriding `to_python` / `clean`, and a
   Duration column pass. spec-038, README and the `djangomodelformmutation` glossary term say so. Tests:
   `tests/forms/test_inputs.py`
+- [x] 645. Async generated-mutation completion cancels and drains abandoned running field/list siblings inside
+  its atomic, including repeated-cancellation cleanup. Active production masking snapshots managed and standalone
+  result error lists before an awaiting result hook can publish late resolver errors. Tests:
+  `examples/fakeshop/test_query/test_completion_lifecycle.py`, `tests/test_completion.py`, `tests/test_error_policy.py`
 
 ## Outside review of the fixes
 
@@ -2157,12 +2161,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   after a crash raises `json.JSONDecodeError`), `_read_text_if_present` catches only `FileNotFoundError` (a non-UTF-8
   run log or one that is a directory escapes), and `_read_json_object` shares the bare decode, while a wrong-shape line
   is already a `WorkspaceError` in `_logged_run`; found verifying 349
-- [ ] 645. (robustness, needs a live repro) On graphql-core 3.2 an async sibling that is still running when another
-  async field's non-null error resolves the parent's `gather` keeps running, and its error is appended to the live
-  `ExecutionResult.errors` list after the response is built (measured on a plain schema: one error right after
-  `await execute(...)`, two after draining the loop). Check whether such a late error reaches the wire past
-  `MaskErrors` / `Schema._process_errors`, or runs ORM work after the operation's atomic and leases closed, through the
-  fakeshop async view; found consulting on 377
 - [ ] 629. Test prose cites spec and test-plan rows by ordinal, against START's "Cite contract by CONTENT, never
   ordinal": "Matrix row N" in `tests/filters/test_sets.py` (15), "Spec-046 row N" / "Test plan rows N-M" in
   `tests/test_routers.py` (19), "Row N" / "Test plan rows" in `examples/fakeshop/test_query/test_transport_api.py`
@@ -2233,6 +2231,10 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 
 ## Waiting on you
+
+- [ ] 901. CHANGELOG entry for item 645: async generated mutations drain abandoned running field/list siblings and
+  their cancellation cleanup inside the atomic; active production masking snapshots the published error list so
+  an ordinary awaiting result hook cannot expose late resolver exception text, including the standalone extension
 
 - [ ] 671. CHANGELOG entry for item 523 (breaking): a `DjangoModelFormMutation` form declaring a built-in temporal
   field over a date, date-time or time column it cannot read (a `DateField` over a `TimeField` or `DateTimeField`

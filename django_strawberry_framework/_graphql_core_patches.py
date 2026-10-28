@@ -20,6 +20,9 @@ for, so any other value offering both protocols completes as upstream completes 
 The synchronous executor keeps upstream behavior. The arm moves the row fetch only:
 a resolver body that evaluates a queryset still runs on the loop.
 
+The adapter can also wrap the owned generated-mutation completion method.
+That mandatory cancellation/drain boundary is independent of this optional patch.
+
 The patch has its own ``APPLY_UPSTREAM_PATCHES`` dependency key,
 ``"graphql_core"``; switched off, both upstream behaviors return. Each arm can be
 retired independently when the captured upstream implementation no longer exhibits
@@ -183,10 +186,31 @@ def _patched_complete_list_value(
     path: "Path",
     result: "AsyncIterable[object] | Iterable[object]",
 ) -> "AwaitableOrValue[list[object]]":
+    return _complete_list_value_with_adapter(
+        self,
+        return_type,
+        field_nodes,
+        info,
+        path,
+        result,
+        _upstream_captures().complete_list_value,
+    )
+
+
+def _complete_list_value_with_adapter(
+    self: "_ExecutionContext",
+    return_type: "GraphQLList[_GraphQLOutputType]",
+    field_nodes: "list[FieldNode]",
+    info: "GraphQLResolveInfo",
+    path: "Path",
+    result: "AsyncIterable[object] | Iterable[object]",
+    complete_list_value: "_CompleteListValue",
+) -> "AwaitableOrValue[list[object]]":
+    """Apply the optional iterable adapter around the supplied completion owner."""
     upstream = _upstream_captures()
     if operation_is_async():
         result = wrap_async_queryset_adapter(result)
-    res = upstream.complete_list_value(
+    res = complete_list_value(
         self,
         return_type,
         field_nodes,

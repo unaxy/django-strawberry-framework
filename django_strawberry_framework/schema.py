@@ -42,6 +42,13 @@ Execution-mode split:
   thread and nests in whatever transaction the caller holds, exactly as sync
   execution does.
 
+Already-running engine-owned field and list-item siblings abandoned by an async
+completion failure are cancelled and drained inside that same window. Cleanup
+outlasts repeated cancellation. Nullable errors preserve upstream surviving-sibling
+completion; queries, unmarked mutations and application-created jobs stay stock.
+The revocable ownership lease identifies this execution context and this window.
+Optional upstream iterable patches do not control this mandatory transaction boundary.
+
 Both modes apply the same two failure rules. Any error added during the window
 rolls it back. A window whose connection was closed inside it
 (``close_old_connections`` run by consumer code on the window's own thread -
@@ -74,7 +81,6 @@ from asgiref.sync import AsyncToSync, async_to_sync, sync_to_async
 from django.db import DatabaseError, connections, transaction
 from django.db.transaction import TransactionManagementError
 from graphql import GraphQLError, located_error, parse
-from graphql.execution.execute import ExecutionContext
 from strawberry.exceptions import DuplicatedTypeName
 from strawberry.extensions.base_extension import SchemaExtension
 from strawberry.schema.schema_converter import GraphQLCoreConverter
@@ -85,6 +91,7 @@ from strawberry.types.private import is_private
 from typing_extensions import override
 
 from . import logger
+from ._completion import CompletionExecutionContext, owned_completion
 from ._graphql_core_patches import _is_awaitable
 from .error_policy import _PACKAGE_ERROR_POLICY, ErrorPolicy, resolve_error_policy
 from .exceptions import ConfigurationError
@@ -115,6 +122,7 @@ if TYPE_CHECKING:
 
     from django.db.transaction import Atomic
     from graphql import FieldNode, GraphQLFieldMap, GraphQLObjectType
+    from graphql.execution.execute import ExecutionContext
     from graphql.pyutils import AwaitableOrValue, Path
     from strawberry.extensions.runner import SchemaExtensionsRunner
     from strawberry.schema.config import StrawberryConfig
@@ -206,7 +214,7 @@ async def _outlast_cancellation(done: asyncio.Future[None]) -> None:
             _ = await asyncio.wait((done,))
 
 
-class DjangoMutationExecutionContext(ExecutionContext):
+class DjangoMutationExecutionContext(CompletionExecutionContext):
     """Generated-mutation execution context.
 
     The execution context that holds each generated mutation field's transaction open
@@ -463,7 +471,8 @@ class DjangoMutationExecutionContext(ExecutionContext):
         async def complete() -> object:
             if cancelled:
                 raise asyncio.CancelledError
-            return await _settled(execute_field(parent_type, source, field_nodes, path), self)
+            with owned_completion(self):
+                return await _settled(execute_field(parent_type, source, field_nodes, path), self)
 
         caller = getattr(AsyncToSync.executors, "current", None)
 
@@ -1279,13 +1288,12 @@ class DjangoSchema(strawberry.Schema):
         ``schema.error_policy``, which answers with a per-read copy any resolver
         can reach.
 
-        **Masking twice is a no-op, by construction rather than by a flag.** A
-        result the teardown already masked carries errors whose ``original_error``
-        is ``None``, and the structural classifier reads that as a deliberate,
-        client-facing error and returns it unchanged - so the whole error list
-        comes back identical, ``mask_execution_result`` answers with the very
-        object it was handed, and no second correlation id is minted or logged.
-        Nothing here needs to know whether the teardown ran.
+        **Masking twice preserves error identity.** Already-masked errors carry
+        no ``original_error``, so no second correlation id is minted or logged.
+        The final return snapshots the list after extension result collection,
+        including an all-deliberate or empty list. Later engine appends cannot
+        change what an awaiting HTTP result hook publishes. Debug and disabled
+        policies retain their pass-through behavior.
 
         **It fails closed**, exactly as the teardown does: a seam that cannot
         decide whether to mask publishes the policy message alone rather than
@@ -1301,7 +1309,7 @@ class DjangoSchema(strawberry.Schema):
             policy = _enforcement(self).error_policy
             if not masking_is_active(policy) or not is_maskable_result(result):
                 return result
-            return mask_execution_result(result, policy)
+            return mask_execution_result(result, policy, snapshot=True)
         except Exception:
             logger.exception(
                 "The error policy could not be applied to the returned execution result; "

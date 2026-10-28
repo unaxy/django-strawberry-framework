@@ -3,6 +3,8 @@
 # calls (`cast`) and the ignore comments per rule it holds; a count may only fall.
 
 "django_strawberry_framework/__init__.py::__getattr__" = { reportAny = 1, reportExplicitAny = 1 }
+"django_strawberry_framework/_completion.py::CompletionExecutionContext.complete_list_value" = { cast = 1 }
+"django_strawberry_framework/_completion.py::_completion_method" = { cast = 1 }
 "django_strawberry_framework/_cross_web_patches.py::_captured_upstream_body_getter" = { cast = 1 }
 "django_strawberry_framework/_cross_web_patches.py::apply" = { reportAttributeAccessIssue = 1 }
 "django_strawberry_framework/_django_patches.py::_disallowed_connection_methods" = { cast = 1, reportAttributeAccessIssue = 1 }
@@ -268,6 +270,14 @@
 "examples/fakeshop/apps/products/serializers.py::RenamedRelationItemSerializer.Meta" = { reportIncompatibleVariableOverride = 1 }
 "examples/fakeshop/apps/products/services.py::discover_providers" = { reportAny = 1 }
 "examples/fakeshop/drf_serializers.py::ModelSerializerBase.Meta" = { reportIncompatibleVariableOverride = 1 }
+"examples/fakeshop/test_query/test_completion_lifecycle.py::Observe.get_results" = { cast = 1 }
+"examples/fakeshop/test_query/test_completion_lifecycle.py::Observe.on_operation" = { cast = 1 }
+"examples/fakeshop/test_query/test_completion_lifecycle.py::make_schema.ProbeBranch.names" = { cast = 2 }
+"examples/fakeshop/test_query/test_completion_lifecycle.py::make_schema.ProbeBranch.values" = { cast = 2 }
+"examples/fakeshop/test_query/test_completion_lifecycle.py::make_schema.Query.branch" = { cast = 2 }
+"examples/fakeshop/test_query/test_completion_lifecycle.py::make_schema.Query.branches" = { cast = 1 }
+"examples/fakeshop/test_query/test_completion_lifecycle.py::test_live_late_errors" = { cast = 1 }
+"examples/fakeshop/test_query/test_completion_lifecycle.py::test_live_sync_bridge_mutation_orm" = { cast = 1 }
 "examples/fakeshop/test_query/test_connection_pagination_api.py::_TenantScopedGenreQuerySet.query" = { reportIncompatibleVariableOverride = 1 }
 "examples/fakeshop/test_query/test_debug_extension_api.py::install_probe_schema.Query.broken_non_null" = { reportReturnType = 1 }
 "examples/fakeshop/test_query/test_debug_toolbar_api.py::_debug_toolbar_cache_state" = { reportUnknownMemberType = 2 }
@@ -541,6 +551,7 @@
 "tests/rest_framework/test_sets.py::test_validate_nested_fields_rejects_malformed_entries.MalformedEntries.items" = { reportIncompatibleMethodOverride = 1 }
 "tests/rest_framework/test_sets.py::test_validate_nested_fields_rejects_non_plain_string_keys.HostileKeyEntries.items" = { reportIncompatibleMethodOverride = 1 }
 "tests/test_bench_common.py::test_bootstrap_refuses_an_unknown_mode_before_touching_django" = { reportArgumentType = 1 }
+"tests/test_completion.py::test_adapted_method_preserves_code_metadata_and_private_globals" = { cast = 2 }
 "tests/test_connection.py::_HostileConnQuerySet.__getitem__" = { reportIncompatibleMethodOverride = 1 }
 "tests/test_connection.py::_ListManager.all" = { reportIncompatibleMethodOverride = 1 }
 "tests/test_connection.py::_consumer_edge_schema" = { cast = 1 }
