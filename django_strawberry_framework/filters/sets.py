@@ -236,9 +236,13 @@ if TYPE_CHECKING:
     )
     #: Any forward ``ManyToManyField``, as django-stubs parametrizes it.
     _ManyToManyFieldAny: TypeAlias = models.ManyToManyField[models.Model, models.Model]
+    #: Any lookup, its result type unread.
+    _LookupAny: TypeAlias = model_lookups.Lookup[object]
 else:
     # ``ManyToManyField`` has no ``__class_getitem__`` at runtime: the hint stays the class.
     _ManyToManyFieldAny = models.ManyToManyField
+    # ``Lookup`` has no ``__class_getitem__`` at runtime: the hint stays the class.
+    _LookupAny = model_lookups.Lookup
 
 _M = TypeVar("_M", bound=models.Model)
 _EntryT = TypeVar("_EntryT")
@@ -2379,7 +2383,7 @@ def _unbindable_predicate(
     )
 
 
-def _bound_value_lookups(query: Query) -> Iterator[tuple[model_lookups.Lookup[object], Query]]:
+def _bound_value_lookups(query: Query) -> Iterator[tuple[_LookupAny, Query]]:
     """Yield each lookup ``query``'s ``WHERE`` holds that binds a value, with the query it is in.
 
     A lookup binds a value when its right-hand side is one

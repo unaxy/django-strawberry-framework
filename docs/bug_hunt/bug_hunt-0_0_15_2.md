@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 350 done, 214 to do.
+Progress: 351 done, 214 to do.
 
 ## Done
 
@@ -1966,6 +1966,9 @@ Progress: 350 done, 214 to do.
   `ConfigurationError` (it excluded by substring, excluded nothing, or expanded per character), and a lazy `"__all__"`
   is the shorthand in both families' `Meta.fields`. spec-027 and spec-028 say so. Tests: `tests/filters/test_sets.py`,
   `tests/orders/test_sets.py`, `tests/test_sets_mixins.py`, `tests/utils/test_narrowing.py`
+- [x] 900. The lookup iterator's return annotation uses a private runtime-safe alias, preserving
+  `Lookup[object]` for static checking without subscripting Django's runtime class. The unpatched annotation gate
+  passes; no filtering behavior or supported introspection contract changes. Tests: `tests/base/test_init.py`.
 
 ## Outside review of the fixes
 
