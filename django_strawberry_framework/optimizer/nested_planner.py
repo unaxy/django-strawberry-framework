@@ -1557,7 +1557,7 @@ def plan_connection_relation(
     # ONE permutation. The per-parent pipeline orders each page query once:
     # leave the relation to it. A keyset order never reaches here random - the
     # cursor vocabulary above refuses it first, with its own error.
-    if has_random_term(order_by, child_queryset.query):
+    if has_random_term(order_by, child_queryset):
         _log_connection_fallback(relation_field_name, _response_keys(sel), "random order")
         return NestedConnectionPlanResult(plan=plan)
 
