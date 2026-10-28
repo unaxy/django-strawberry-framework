@@ -1,6 +1,6 @@
 """Library GraphQL relation, optimizer, Relay/keyset, and model/form/serializer mutation surface."""
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import TYPE_CHECKING
 
 import strawberry
@@ -811,12 +811,45 @@ class ConsignmentType(DjangoType):
         orderset_class = orders.ConsignmentOrder
 
 
+#: The title prefix that marks a reading list as a curator's unpublished draft.
+DRAFT_READING_LIST_PREFIX = "Draft: "
+
+
 class ReadingListType(DjangoType):
     """A reading list, listed by the title ordering it inherits from ``TitledEntry``.
 
     ``entries`` keeps the Relay-node default and renders as a nested
     connection whose child model carries no default order.
+
+    Refetch by id answers from this type's own ``resolve_nodes``, the one
+    Relay resolver it overrides: a curator's draft list (a title under
+    ``DRAFT_READING_LIST_PREFIX``) names no node there, so ``nodes(ids:)``
+    and ``node(id:)``, which reads one id through Strawberry's
+    ``Node.resolve_node`` delegating to ``resolve_nodes``, both answer
+    ``null`` for it. Connections still list it.
     """
+
+    @classmethod
+    def resolve_nodes(
+        cls,
+        *,
+        info: Info,
+        node_ids: Iterable[str],
+        required: bool = False,
+    ) -> list[models.ReadingList | None]:
+        """Answer each id with its published reading list, ``None`` for a draft or missing one."""
+        del info  # the lookup reads no request state
+        ids = list(node_ids)
+        published = {
+            str(row.pk): row
+            for row in models.ReadingList.objects.exclude(
+                title__startswith=DRAFT_READING_LIST_PREFIX,
+            ).filter(pk__in=ids)
+        }
+        if required and any(node_id not in published for node_id in ids):
+            msg = "ReadingList: a required id names no published reading list."
+            raise models.ReadingList.DoesNotExist(msg)
+        return [published.get(node_id) for node_id in ids]
 
     class Meta:
         model = models.ReadingList

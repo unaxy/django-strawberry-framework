@@ -11504,6 +11504,38 @@ def test_node_missing_row_null_live() -> None:
 
 
 @pytest.mark.django_db
+def test_node_refetch_reads_a_resolve_nodes_only_override_live() -> None:
+    """``node(id:)`` answers through a type that overrides only ``resolve_nodes``.
+
+    ``ReadingListType`` withholds a draft list in its own ``resolve_nodes`` and
+    keeps Strawberry's ``Node.resolve_node``, which reads one id as a batch of
+    one: the draft's id is ``null`` on ``node(id:)`` exactly as on
+    ``nodes(ids:)``, and the published list's id answers its row on both.
+    """
+    published = models.ReadingList.objects.create(title="Classics")
+    draft = models.ReadingList.objects.create(
+        title=f"{library_schema.DRAFT_READING_LIST_PREFIX}Summer",
+    )
+    published_gid = global_id_for(library_schema.ReadingListType, published.pk)
+    draft_gid = global_id_for(library_schema.ReadingListType, draft.pk)
+    selection = "... on ReadingListType { title }"
+
+    response = _post_graphql(
+        f'query {{ published: node(id: "{published_gid}") {{ {selection} }}'
+        f' draft: node(id: "{draft_gid}") {{ {selection} }}'
+        f' batch: nodes(ids: ["{published_gid}", "{draft_gid}"]) {{ {selection} }} }}',
+    )
+    assert response.status_code == 200
+    payload = response_json(response)
+    assert "errors" not in payload, payload
+    assert payload["data"] == {
+        "published": {"title": "Classics"},
+        "draft": None,
+        "batch": [{"title": "Classics"}, None],
+    }
+
+
+@pytest.mark.django_db
 def test_node_hidden_and_missing_issue_equal_queries_live() -> None:
     """Hidden and missing refetches issue the SAME query count (no existence oracle)."""
     shelf = _seed_shelf()

@@ -149,20 +149,32 @@ it lands with its tick.
   - Risk / blockers:
     - Nullability reads `GeneratedField.null`, and the field has no write side.
     - Coordinate with spec-051, which plans the filter-side `GeneratedField` unwrap.
+  - Owner: spec-051 Slice 2. The maintainer left the conversion to the builder flow; it lands with that slice, not
+    here.
 
-- [ ] 6. (TYP-5) The Relay `resolve_node` default does not delegate to `resolve_nodes`
-  - Our code: `types/relay.py::_resolve_node_default`, `::_resolve_node_async` and the `resolve_node` row of
-    `::_RELAY_RESOLVER_DEFAULTS`. About 70 lines.
+- [x] 6. (TYP-5) The Relay `resolve_node` default does not delegate to `resolve_nodes`
+  - Our code: `types/relay.py`'s `_resolve_node_default`, `_resolve_node_async`, `_apply_node_filter` and the
+    `resolve_node` row of `_RELAY_RESOLVER_DEFAULTS` were removed. The package injects three defaults.
   - Upstream: `strawberry/relay/types.py::Node.resolve_node` (public). It calls
     `cls.resolve_nodes(info=, node_ids=[node_id], required=)`.
-  - Lines: ~60.
-  - Status: SUSPECTED.
-  - Reason to keep ours: the single-row `get()`/`first()` is one query, against `filter(__in)` plus `_order_nodes`.
-    That is a performance reason only.
-  - Behaviour change: fixes a consumer that overrides only `resolve_nodes` being bypassed by `node(id:)`,
-    `relay.node()` and `GlobalID.resolve_node`. It also unifies the answer for non-unique ids: today `get`/`first` and
-    the batch path's last-wins dict can disagree.
-  - Risk / blockers: `check_deadline` has to remain on the batch path.
+  - Landed: `node(id:)`, `relay.node()` and `GlobalID.resolve_node` read one id through the type's `resolve_nodes`,
+    the package default or a consumer's override.
+    - A single id is still one query (`pk__in` of one value); `test_node_hidden_and_missing_issue_equal_queries_live`
+      still pins it.
+    - The batch path keeps the visibility hooks (sync and async), `SyncMisuseError`, `check_deadline` first and the
+      `DoesNotExist` type on a `required=True` miss.
+  - Status: CONFIRMED. The live row failed on the old code (the draft list answered its row instead of `null`).
+  - Behaviour change:
+    - fixes a consumer overriding only `resolve_nodes` being bypassed by every single-id refetch;
+    - non-unique ids answer the last row, as upstream's `map_results` does, on both paths (the old single path
+      raised `MultipleObjectsReturned` or returned the lowest pk);
+    - a `required=True` miss message is now the batch path's (`"<Model>: no row matching pk='7'."`), same type.
+  - Tests:
+    - live: `test_library_api.py::test_node_refetch_reads_a_resolve_nodes_only_override_live`, over
+      `ReadingListType`, which now overrides only `resolve_nodes` and withholds `DRAFT_READING_LIST_PREFIX` titles;
+    - `tests/types/test_relay_interfaces.py` and `tests/test_registry.py` expect three injected resolvers.
+  - Glossary: the `relay-node-integration`, `djangonodefield`, `check_deadline`, `execution-resource-policy` and
+    `syncmisuseerror` bodies were rewritten in the DB and re-rendered.
 
 - [ ] 7. (TYP-6) The per-row node-type stamp duplicates `strawberry.cast` and ignores a consumer's cast
   - Our code: `types/relay.py::_NODE_TYPE_HINT_ATTR`, the `::install_is_type_of` closure and

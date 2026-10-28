@@ -39,10 +39,9 @@ Each top-level item maps to one of the five steps in the "Implementation plan" s
     - [ ] `test_relay_node_strips_django_id_annotation`
     - [ ] `test_non_relay_type_keeps_id_int`
 - [ ] Slice 4: Interface base-class injection + Relay resolver defaults
-  - [ ] Populate `django_strawberry_framework/types/relay.py` with the four `_resolve_*_default` implementations
+  - [ ] Populate `django_strawberry_framework/types/relay.py` with the three `_resolve_*_default` implementations
     - [ ] `_resolve_id_attr_default(cls)` (sync; reads the Phase-2.5 id-attribute stamp, `"pk"` fallback)
     - [ ] `_resolve_id_default(cls, root, *, info)` (sync; `"pk"` → concrete pk attname, `__dict__` cache check then `getattr`)
-    - [ ] `_resolve_node_default(cls, node_id, *, info, required=False)` (sync + async paths per Decision 9)
     - [ ] `_resolve_nodes_default(cls, *, info, node_ids=None, required=False)` (sync + async paths per Decision 9)
   - [ ] Add the helper surface in `types/relay.py`
     - [ ] `apply_interfaces(type_cls, definition)`
@@ -53,7 +52,7 @@ Each top-level item maps to one of the five steps in the "Implementation plan" s
     - [ ] Inject each entry of `definition.interfaces` into `cls.__bases__` (skip those already in `cls.__mro__`)
     - [ ] Surface `TypeError` from base assignment as [`ConfigurationError`][glossary-configurationerror] naming the offending interface
     - [ ] Run the composite-pk check when `relay.Node` is among the resolved bases
-    - [ ] Inject the four `resolve_*` defaults via the stored-function identity test
+    - [ ] Inject the three `resolve_*` defaults via the stored-function identity test
   - [ ] Relay Node behavior tests (`tests/types/test_relay_interfaces.py`)
     - [ ] `test_relay_node_injects_default_resolvers`
     - [ ] `test_resolve_id_attr_falls_back_to_pk`
@@ -106,7 +105,7 @@ The target is not a full connection/query-field release. The target is model-bac
 - `django_strawberry_framework/types/finalizer.py::finalize_django_types` runs Phase 1 (resolve pending relations), Phase 2 (`_attach_relation_resolvers`), the Phase 2.5 interface pass this spec owns, and Phase 3 (`strawberry.type(cls, name=..., description=...)`, then mark the definition finalized).
 - `django_strawberry_framework/types/converters.py::convert_scalar` synthesizes `id` from `AutoField` / `BigAutoField` / `SmallAutoField` (`django_strawberry_framework/types/converters.py #"SCALAR_MAP: "`, applied via `django_strawberry_framework/types/converters.py::convert_scalar`), so a non-Relay `DjangoType` produces a GraphQL `id: Int!`. On a Relay-shaped type that annotation would collide with Strawberry's `Node._id -> id: GlobalID!`, which is what Decision 2 suppresses.
 - `DjangoType.get_queryset(cls, queryset, info)` (`django_strawberry_framework/types/base.py::DjangoType.get_queryset`) is the shipped visibility hook, documented in `docs/README.md` `## Visibility and permissions`. Every framework-owned invocation of it — the Relay node resolvers included — runs through the shared hardened boundary at `django_strawberry_framework/utils/querysets.py::apply_type_visibility_sync` / `::apply_type_visibility_async`, so the Relay resolvers call into it through that seam rather than directly.
-- [`DjangoOptimizerExtension`][glossary-djangooptimizerextension] is consultable through `info.context` (`optimizer/extension.py`), and root-level list resolvers receive full optimizer treatment. Per-node optimizer cooperation inside `resolve_node` / `resolve_nodes` is deliberately not wired (Decision 3).
+- [`DjangoOptimizerExtension`][glossary-djangooptimizerextension] is consultable through `info.context` (`optimizer/extension.py`), and root-level list resolvers receive full optimizer treatment. Per-node optimizer cooperation inside `resolve_nodes` (which `resolve_node` reaches) is deliberately not wired (Decision 3).
 - The finalization lifecycle contract is pinned in `docs/GLOSSARY.md #"Declaring a new concrete"`: declaring a new concrete `DjangoType` after finalization raises `ConfigurationError`, and tests that need a new registry lifecycle use `registry.clear()` and fresh type classes. The Relay slice preserves this contract unchanged.
 ## Goals
 1. Accept `Meta.interfaces` end-to-end so a `DjangoType` can declare any Strawberry-compatible interface (Relay `Node` or otherwise).
@@ -150,8 +149,8 @@ Expected GraphQL behavior:
 - The model primary key remains the backing node ID by default (via `resolve_id_attr() -> "pk"`).
 - `BookType.resolve_id_attr()` returns the literal `"pk"` by default (a consumer `relay.NodeID[...]` annotation returns that attribute's name instead).
 - `BookType.resolve_id(root, info=info)` coerces `"pk"` to the model's concrete primary-key `attname` and returns `str(root.__dict__[attname])` when the row already carries it, falling back to `str(getattr(root, attname))` otherwise.
-- `BookType.resolve_node(node_id, info=info)` returns the matching row, with the type's `get_queryset` visibility applied through the shared boundary.
-- `BookType.resolve_nodes(info=info, node_ids=...)` returns the matching rows, same hook.
+- `BookType.resolve_nodes(info=info, node_ids=...)` returns the matching rows, with the type's `get_queryset` visibility applied through the shared boundary.
+- `BookType.resolve_node(node_id, info=info)` is Strawberry's own `Node.resolve_node`, which answers `resolve_nodes(info=info, node_ids=[node_id])`'s one row, so a single id and a batch read the same answer.
 - `title` remains a normal generated field.
 ### Custom Relay resolver override
 Consumers may override Relay methods explicitly, and the framework defaults must not clobber them:
@@ -173,9 +172,9 @@ class BookType(DjangoType):
         return "slug"
 ```
 
-The override discriminator is the stored-function identity check from Decision 3, not a simple `cls.__dict__` check. The same rule applies to `resolve_id`, `resolve_node`, and `resolve_nodes`. A consumer can also use Strawberry's native annotation mechanism to point Relay at a non-pk column without overriding any classmethod: annotate the target attribute as `slug: relay.NodeID[str]`, subscripted (the bare `Annotated[str, relay.NodeID]` form does not register). On a Relay-shaped type the `id` name itself is the interface's: an `id` annotation must be `relay.NodeID[...]`, and an assigned `id = strawberry.field(...)` is refused with `ConfigurationError` pointing at `resolve_id`, a `relay.NodeID[...]` annotation, or a resolver-backed sibling field.
+The override discriminator is the stored-function identity check from Decision 3, not a simple `cls.__dict__` check. The same rule applies to `resolve_id` and `resolve_nodes`. `resolve_node` gets no framework default: Strawberry's own delegates to `resolve_nodes`, so a consumer overriding only `resolve_nodes` changes the single-id refetch too, and one overriding `resolve_node` keeps it. A consumer can also use Strawberry's native annotation mechanism to point Relay at a non-pk column without overriding any classmethod: annotate the target attribute as `slug: relay.NodeID[str]`, subscripted (the bare `Annotated[str, relay.NodeID]` form does not register). On a Relay-shaped type the `id` name itself is the interface's: an `id` annotation must be `relay.NodeID[...]`, and an assigned `id = strawberry.field(...)` is refused with `ConfigurationError` pointing at `resolve_id`, a `relay.NodeID[...]` annotation, or a resolver-backed sibling field.
 ### `get_queryset` cooperation
-The default `resolve_node` / `resolve_nodes` apply `BookType.get_queryset(...)`, so a consumer that scopes visibility there sees those filters apply during node fetches:
+The default `resolve_nodes`, which `resolve_node` reaches, applies `BookType.get_queryset(...)`, so a consumer that scopes visibility there sees those filters apply during node fetches:
 
 ```python path=null start=null
 class BookType(DjangoType):
@@ -250,7 +249,6 @@ After interface injection, and before `strawberry.type(cls, ...)`, the finalizer
 for attr, default_impl in (
     ("resolve_id", _resolve_id_default),
     ("resolve_id_attr", _resolve_id_attr_default),
-    ("resolve_node", _resolve_node_default),
     ("resolve_nodes", _resolve_nodes_default),
 ):
     existing = truth.static_attr(cls, attr)
@@ -263,16 +261,17 @@ The identity test ports strawberry-django's check at `strawberry_django/type.py:
 
 Injection is preceded by one Phase-2.5 step, `_stamp_relay_id_attr`, which resolves the type's Relay id attribute **once** and pins it on the class's own `__dict__`. It seeds `_id_attr = None` on the class first so Strawberry's inherited-cache read cannot answer with a parent's value, then calls Strawberry's scan and records either the declared `relay.NodeID[...]` attribute name or `"pk"`. Without the stamp the `"pk"` fallback re-runs a full MRO annotation scan on every `resolve_id` call — once per row of every result set — because upstream caches only on success.
 
-The four default implementations live in `django_strawberry_framework/types/relay.py`. Their shapes port strawberry-django's `relay/utils.py`; we do not import strawberry-django at runtime, we copy the patterns and cite the source at the implementation site.
+The three default implementations live in `django_strawberry_framework/types/relay.py`. Their shapes port strawberry-django's `relay/utils.py`; we do not import strawberry-django at runtime, we copy the patterns and cite the source at the implementation site.
 
 - `_resolve_id_attr_default(cls) -> str` — read the `_stamp_relay_id_attr` slot from `cls.__dict__`; when absent (a subclass defined after finalization, or a direct unit call) stamp the class with `_stamp_relay_id_attr` and return the stamp, so a late subclass is scanned from its own annotations, never from a parent's inherited `_id_attr` cache. Behavioral port of `strawberry_django/relay/utils.py::resolve_model_id_attr`. **Not** `super(cls, cls).resolve_id_attr()`: with `cls` bound at runtime, a Relay-shaped `DjangoType` subclassing another Relay-shaped `DjangoType` inherits the parent's installed copy of this default and the MRO walk lands back on it re-bound to the child — infinite recursion. No `DjangoTypeDefinition.id_attr` slot is added; Strawberry owns the detection and the stamp owns the caching.
 - `_resolve_id_default(cls, root, *, info) -> str` — `id_attr = cls.resolve_id_attr(); if id_attr == "pk": id_attr = root.__class__._meta.pk.attname; try: return str(root.__dict__[id_attr]) except KeyError: return str(getattr(root, id_attr))`. Port of `strawberry_django/relay/utils.py::resolve_model_id`. The `"pk"` → concrete `attname` coercion is load-bearing: Django stores the pk under its column attname (`"id"`, `"uuid_id"`, …), never under the literal `"pk"`, so without it `root.__dict__["pk"]` always misses and Decision 7's "no avoidable lazy loads on `resolve_id`" invariant is violated. The key is read off `root.__class__`, not off the definition's model, so a proxy-model row is not mis-keyed.
-- `_resolve_node_default(cls, node_id, *, info, required=False)` — coerce `node_id` (a raw id string or a `relay.GlobalID`) to the id column's type, where an id the column rejects identifies no row; seed the queryset with `initial_queryset(cls)` (the model's `_default_manager.all()`, resolved through the definition), apply the type's visibility through `apply_type_visibility_sync`, filter on the resolved id attribute, and return `qs.get()` when `required` else `qs.first()`. Port of `strawberry_django/relay/utils.py::resolve_model_node`. The optimizer-extension consultation step upstream performs (`ext = optimizer extension on info.context; if ext: qs = ext.optimize(qs, info=info)`) is **not wired**: Decision 7's list-path invariants are exercised through the root-gated `DjangoOptimizerExtension`, and `DjangoNodeField` / `DjangoNodesField` dispatch into these defaults without an optimizer pass. The seam stays open at the same site.
-- `_resolve_nodes_default(cls, *, info, node_ids=None, required=False)` — same seed and visibility step, optionally filtering on `node_ids` via `id_attr__in`. `node_ids=None` returns the visibility-filtered queryset; a supplied sequence returns a list whose indexes correspond 1:1 with the input, materialized once so a one-shot iterable survives both the `IN` filter and the ordering pass. `required=False` yields `None` for a missing id; `required=True` raises the model's `DoesNotExist`, homogeneous with `_resolve_node_default`'s `qs.get()` so consumers write a single `except Model.DoesNotExist:` clause. Port of `strawberry_django/relay/utils.py::resolve_model_nodes`, its `map_results` ordering pass included. The same optimizer deferral applies.
+- `_resolve_nodes_default(cls, *, info, node_ids=None, required=False)` — coerce each of `node_ids` (a raw id string or a `relay.GlobalID`) to the id column's type, where an id the column rejects identifies no row; seed the queryset with `initial_queryset(cls)` (the model's `_default_manager.all()`, resolved through the definition), apply the type's visibility through `apply_type_visibility_sync`, and filter on the resolved id attribute via `id_attr__in`. `node_ids=None` returns the visibility-filtered queryset; a supplied sequence returns a list whose indexes correspond 1:1 with the input, materialized once so a one-shot iterable survives both the `IN` filter and the ordering pass. `required=False` yields `None` for a missing id; `required=True` raises the model's `DoesNotExist` for a missing or uncoercible id alike, so consumers write a single `except Model.DoesNotExist:` clause. Port of `strawberry_django/relay/utils.py::resolve_model_nodes`, its `map_results` ordering pass included, so rows sharing one id (a `relay.NodeID` over a non-unique column) answer with the last row the queryset yields. The optimizer-extension consultation step upstream performs (`ext = optimizer extension on info.context; if ext: qs = ext.optimize(qs, info=info)`) is **not wired**: Decision 7's list-path invariants are exercised through the root-gated `DjangoOptimizerExtension`, and `DjangoNodeField` / `DjangoNodesField` dispatch into this default without an optimizer pass. The seam stays open at the same site.
 
-`info` is keyword-only on all three resolvers that take it. Strawberry's Relay machinery calls `cls.resolve_node(node_id, info=info, required=...)`, so a positional `info` slot raises `TypeError: got multiple values for argument 'info'`.
+There is no `resolve_node` default. Strawberry's own `strawberry/relay/types.py::Node.resolve_node` answers one id as `cls.resolve_nodes(info=info, node_ids=[node_id], required=required)`'s single row (awaiting it when the batch is awaitable), so `node(id:)`, Strawberry's `relay.node()` and `GlobalID.resolve_node` read a single id through `resolve_nodes`, the framework default or a consumer override, with the same answer a batch gives it, in one query.
 
-Neither node default calls `cls.get_queryset` directly. Both route it through the shared visibility boundary in `django_strawberry_framework/utils/querysets.py`, which treats the hook's return as untrusted query state, awaits an async hook on the async path, and rejects one on the sync path (Decision 9).
+`info` is keyword-only on both resolvers that take it, mirroring Strawberry's own `relay.Node` signatures: every Relay caller passes it by keyword (`cls.resolve_nodes(info=info, node_ids=..., required=...)`, `cls.resolve_id(root, info=info)`).
+
+The node default never calls `cls.get_queryset` directly. Both route it through the shared visibility boundary in `django_strawberry_framework/utils/querysets.py`, which treats the hook's return as untrusted query state, awaits an async hook on the async path, and rejects one on the sync path (Decision 9).
 
 The rejected alternatives, the upstream borrow justifications, and the recursion the `super()` spelling would have shipped are in the [rationale companion][spec-015-rationale].
 ### Decision 4: validation
@@ -297,7 +296,7 @@ Composition with [`Meta.optimizer_hints`][glossary-metaoptimizer-hints]: the two
 - Finalizer step ordering at `django_strawberry_framework/types/finalizer.py::finalize_django_types`:
   - Phase 1 (`django_strawberry_framework/types/finalizer.py::finalize_django_types #"for pending in registry.iter_pending_relations():"`): resolve pending relations.
   - Phase 2 (`django_strawberry_framework/types/finalizer.py::finalize_django_types #"_attach_relation_resolvers"`): `_attach_relation_resolvers` for every non-finalized definition.
-  - Phase 2.5: for each non-finalized definition, if `definition.interfaces` is non-empty, inject those interfaces into `cls.__bases__` (only those not already present in `cls.__mro__`, found by identity so a consumer metaclass `__eq__` is never consulted); if the resolved class is Relay-Node-shaped, run the composite-pk check (Decision 2) and inject the four `resolve_*` defaults using the stored-function identity test from Decision 3. Gating the Relay half on the resolved MRO rather than on the `Meta` tuple is what makes a directly-inheriting `class Foo(DjangoType, relay.Node)` reach the same wiring. Later specs own further steps in this same window (the GlobalID type-name resolver, `Meta.cursor_field` validation, relation-as-Connection synthesis, sidecar and mutation binding); they run after this slice's and change nothing here.
+  - Phase 2.5: for each non-finalized definition, if `definition.interfaces` is non-empty, inject those interfaces into `cls.__bases__` (only those not already present in `cls.__mro__`, found by identity so a consumer metaclass `__eq__` is never consulted); if the resolved class is Relay-Node-shaped, run the composite-pk check (Decision 2) and inject the three `resolve_*` defaults using the stored-function identity test from Decision 3. Gating the Relay half on the resolved MRO rather than on the `Meta` tuple is what makes a directly-inheriting `class Foo(DjangoType, relay.Node)` reach the same wiring. Later specs own further steps in this same window (the GlobalID type-name resolver, `Meta.cursor_field` validation, relation-as-Connection synthesis, sidecar and mutation binding); they run after this slice's and change nothing here.
   - Phase 3 (`django_strawberry_framework/types/finalizer.py::finalize_django_types #"strawberry.type(type_cls, name=definition.name"`): `strawberry.type(cls, name=definition.name, description=definition.description)`; mark `definition.finalized = True`.
 
 The primary-key annotation suppression in Decision 2 happens earlier — during `__init_subclass__` collection (`django_strawberry_framework/types/base.py::DjangoType.__init_subclass__`, inside `_build_annotations`) — because that is where the synthesized annotation map is assembled. The split between suppression (collection-time) and base injection (finalization-time) is deliberate and constrains the implementation: collection is where `cls.__annotations__` is written, so keeping suppression beside annotation synthesis keeps that data flow local; base injection has to wait for finalization because Phase 1 relation resolution still mutates `cls.__annotations__`, and a partially-finalized class must not also be a partially-interface-injected one.
@@ -307,7 +306,7 @@ The foundation layer's relation-field consumer-override contract (`DjangoTypeDef
 The new `Meta.interfaces` consumer-override contract is:
 
 - Annotations and fields the interface itself declares (e.g. `Node._id`, which renders as the `id: GlobalID!` field) are owned by the interface. Consumers must not shadow them on the `DjangoType` subclass; doing so will produce a Strawberry-level error at decoration time, which the spec leaves to Strawberry rather than re-implementing.
-- `resolve_id_attr` / `resolve_id` / `resolve_node` / `resolve_nodes` declared anywhere in the consumer's MRO above `relay.Node` take precedence over framework defaults via the stored-function identity test, matching strawberry-django's semantics so migration from that package does not surprise consumers.
+- `resolve_id_attr` / `resolve_id` / `resolve_nodes` declared anywhere in the consumer's MRO above `relay.Node` take precedence over framework defaults via the stored-function identity test, matching strawberry-django's semantics so migration from that package does not surprise consumers.
 - Setting `interfaces = ()` or omitting the key changes nothing: Decision 4's validation makes the empty/absent case a true no-op, the primary-key suppression step included.
 - `is_type_of` injection (Decision-1 borrow) is added unconditionally for every `DjangoType`, not only Relay-declared ones. If the consumer declares their own `is_type_of` we do not overwrite it, matching `strawberry_django/type.py::_process_type #"is_type_of"`; the discriminator here is `cls.__dict__` membership, not the stored-function test, because there is no inherited framework default to distinguish.
 
@@ -323,19 +322,19 @@ Relay node support must not regress shipped optimizer behavior. Required invaria
 
 Implementation note: `DjangoTypeDefinition.field_map` (`django_strawberry_framework/types/definition.py::DjangoTypeDefinition #"field_map: dict[str, FieldMeta]"`) keeps every selected Django field including the primary key, regardless of whether the Strawberry annotation was suppressed — the field map is the optimizer's source of truth for every selection but a Relay `id` read from a column, which the model names, and suppression happens later in the data flow, in `_build_annotations`.
 ### Decision 8: registry implications and one-type-per-model
-This slice resolves a node lookup's model through the type's own `DjangoTypeDefinition`, so `_resolve_node_default` and `_resolve_nodes_default` never consult the model-to-type map and are unambiguous whatever else is registered against the model.
+This slice resolves a node lookup's model through the type's own `DjangoTypeDefinition`, so `_resolve_nodes_default` never consults the model-to-type map and are unambiguous whatever else is registered against the model.
 
 Which of several types per model a GlobalID decodes to is not this slice's contract: [`Meta.primary`][glossary-metaprimary] (`spec-018-meta_primary-0_0_6.md`) selects the primary type `registry.get(model)` returns, and `spec-031-globalid_encoding-0_0_9.md` owns the payload strategies that decide whether a GlobalID names the model (decoding to the primary) or the GraphQL type. The [rationale companion][spec-015-rationale] records why this slice left the question to them.
 
 `registry.clear()` resets the registry only; tests that need a clean lifecycle still create fresh class objects after clearing.
 ### Decision 9: async resolver support
-The four `resolve_*` defaults must work in both sync and async resolver contexts because Strawberry permits either at every field, and a consumer's `DjangoType.get_queryset` may itself be sync or async. Without explicit async coverage, the Relay borrow ports only half of strawberry-django's resolver shape and forces every async consumer to re-implement the four defaults.
+The three `resolve_*` defaults must work in both sync and async resolver contexts because Strawberry permits either at every field, and a consumer's `DjangoType.get_queryset` may itself be sync or async. Without explicit async coverage, the Relay borrow ports only half of strawberry-django's resolver shape and forces every async consumer to re-implement the three defaults.
 
 - `_resolve_id_attr_default(cls)` and `_resolve_id_default(cls, root, *, info)` are sync. They touch no database; they read class state, `root.__dict__`, and `getattr`. Promoting them to async would force `await` plumbing through every Relay node serialization for no benefit.
-- `_resolve_node_default` and `_resolve_nodes_default` execute querysets and ship both paths. The executor driving the operation is read from `django_strawberry_framework/utils/execution_mode.py::async_execution`; on the async branch each returns a coroutine that awaits the visibility hook, applies the id filter, and materializes through Django's native async ORM — `aget` / `afirst` for the singular path, `async for` for the plural one. No path wraps a sync call in `sync_to_async`.
+- `_resolve_nodes_default` executes querysets and ships both paths. The executor driving the operation is read from `django_strawberry_framework/utils/execution_mode.py::async_execution`; on the async branch it returns a coroutine that awaits the visibility hook, applies the id filter, and materializes through Django's native async ORM (`async for`). Strawberry's `Node.resolve_node` awaits that coroutine for a single id. No path wraps a sync call in `sync_to_async`.
 - The seam between the two colors is the shared visibility boundary, not the resolvers: the async branch awaits `apply_type_visibility_async`, so a consumer's `async def get_queryset` is honored, and the sync branch calls `apply_type_visibility_sync`, which **rejects** a coroutine return with `SyncMisuseError` rather than letting it surface as `AttributeError: 'coroutine' object has no attribute 'filter'`. `SyncMisuseError` multiple-inherits `ConfigurationError` and `RuntimeError` so a consumer catching either base class still matches, and the unawaited coroutine is closed before the raise.
 - Optimizer cooperation is not part of this contract on either color: per Decision 3 the node defaults consult no optimizer extension. The root-gated optimizer's own async support is unaffected because these resolvers do not call into it.
-- A consumer-authored `async def resolve_node(...)` overrides the framework default per Decision 3's stored-function identity test, exactly the same way a sync override does. The override discriminator does not care about the function's awaitability.
+- A consumer-authored `async def resolve_nodes(...)` overrides the framework default per Decision 3's stored-function identity test, exactly the same way a sync override does, and a consumer `async def resolve_node(...)` replaces Strawberry's delegating one. The override discriminator does not care about the function's awaitability.
 ## Internal helper surface
 The Relay machinery lives in `django_strawberry_framework/types/relay.py`. Its surface is internal — none of these helpers is re-exported from the top-level package (Definition of done, the no-new-public-exports item).
 
@@ -349,7 +348,7 @@ def implements_relay_node(type_cls: type) -> bool:
 
 
 def install_relay_node_resolvers(type_cls: type) -> None:
-    """Stamp the id attribute, then inject the four ``resolve_*`` defaults."""
+    """Stamp the id attribute, then inject the three ``resolve_*`` defaults."""
 
 
 def install_is_type_of(type_cls: type) -> None:
@@ -372,16 +371,6 @@ def _resolve_id_default(cls: type, root: models.Model, *, info: Any) -> str:
     """Default ``Node.resolve_id`` with the ``__dict__`` cache check."""
 
 
-def _resolve_node_default(
-    cls: type,
-    node_id: Any,
-    *,
-    info: Any,
-    required: bool = False,
-) -> Any:
-    """Default ``Node.resolve_node``; visibility-aware, sync and async."""
-
-
 def _resolve_nodes_default(
     cls: type,
     *,
@@ -392,7 +381,7 @@ def _resolve_nodes_default(
     """Default ``Node.resolve_nodes``; order-preserving and missing-aware."""
 ```
 
-`info` is keyword-only on every resolver that takes it, and `node_id` is positional on `_resolve_node_default`, because that is the shape Strawberry's Relay machinery calls (Decision 3). The signatures attached to the class must match Strawberry's `relay.Node` expectations as they exist at the `strawberry-graphql>=0.322.2` lower bound declared in `pyproject.toml #"strawberry-graphql>=0.322.2"`; the Django floor is `pyproject.toml #"Django>=5.2.16"`.
+`info` is keyword-only on every resolver that takes it, because that is the shape Strawberry's Relay machinery calls (Decision 3). The signatures attached to the class must match Strawberry's `relay.Node` expectations as they exist at the `strawberry-graphql>=0.322.2` lower bound declared in `pyproject.toml #"strawberry-graphql>=0.322.2"`; the Django floor is `pyproject.toml #"Django>=5.2.16"`.
 ## Implementation plan
 The slice is five steps, each naming the symbols it owns.
 1. **Validation + storage**
@@ -407,8 +396,8 @@ The slice is five steps, each naming the symbols it owns.
    - `django_strawberry_framework/types/base.py::_build_annotations`: when the class is Relay-shaped per Decision 2's predicate, the primary-key field's name is dropped from the synthesized annotations dict. The selected-field list itself is unchanged so `FieldMeta` and the optimizer still see the pk as a connector column (Decision 7).
 
 4. **Interface base-class injection + Relay resolver defaults**
-   - `django_strawberry_framework/types/relay.py` holds `_resolve_id_attr_default`, `_resolve_id_default`, `_resolve_node_default`, `_resolve_nodes_default`, `apply_interfaces`, `implements_relay_node`, `install_relay_node_resolvers`, `install_is_type_of`, `_check_composite_pk_for_relay_node`, and `_stamp_relay_id_attr` per Decision 3 and the helper surface above.
-   - `_resolve_node_default` and `_resolve_nodes_default` ship sync and async paths per Decision 9; the two ID-shape defaults stay sync.
+   - `django_strawberry_framework/types/relay.py` holds `_resolve_id_attr_default`, `_resolve_id_default`, `_resolve_nodes_default`, `apply_interfaces`, `implements_relay_node`, `install_relay_node_resolvers`, `install_is_type_of`, `_check_composite_pk_for_relay_node`, and `_stamp_relay_id_attr` per Decision 3 and the helper surface above.
+   - `_resolve_nodes_default` ships sync and async paths per Decision 9; the two ID-shape defaults stay sync.
    - `django_strawberry_framework/types/finalizer.py::finalize_django_types` runs the Phase 2.5 step from Decision 5 between the `_attach_relation_resolvers` loop and the `strawberry.type(...)` loop, iterating `registry.iter_definitions()` the same way those loops do (`django_strawberry_framework/types/finalizer.py::finalize_django_types #"_attach_relation_resolvers"` and `django_strawberry_framework/types/finalizer.py::finalize_django_types #"strawberry.type(type_cls, name=definition.name"`). The composite-pk check fires here when `relay.Node` is in the resolved bases; it surfaces a `ConfigurationError` that names the model.
    - Optimizer/projection tests for Relay `id` verify Decision 7.
 
@@ -444,20 +433,20 @@ Relay Node behavior:
 
 - `test_relay_node_strips_django_id_annotation` — on a Relay-shaped type the synthesized primary-key annotation is absent from the built annotation map (the Relay-supplied `id: GlobalID!` field is owned by the interface).
 - `test_non_relay_type_keeps_id_int` — control test: a `DjangoType` without `relay.Node` still produces `id: int!`.
-- `test_relay_node_injects_default_resolvers` — after finalization the type has classmethods `resolve_id_attr`, `resolve_id`, `resolve_node`, `resolve_nodes`.
+- `test_relay_node_injects_default_resolvers` — after finalization the type has classmethods `resolve_id_attr`, `resolve_id`, `resolve_nodes`, and its `resolve_node` is Strawberry's own.
 - `test_resolve_id_attr_falls_back_to_pk` — with no `relay.NodeID[...]` annotation the default returns the literal `"pk"` (the coercion to the concrete attname happens one layer later, in `resolve_id`).
 - `test_resolve_id_uses_dict_cache` — when the row is already loaded into `root.__dict__`, `resolve_id` returns the str without an extra query.
 - `test_resolve_id_falls_back_to_getattr` — when the pk is not in `root.__dict__`, `resolve_id` reads via `getattr` and coerces to `str`.
 - `test_resolve_node_applies_get_queryset` — a custom `get_queryset` filtering `is_private=False` is applied during node lookup; rows that the filter excludes return `None` (or raise when `required=True`).
 - `test_resolve_nodes_accepts_generator_node_ids` — passing a one-shot generator of `[a, missing, b]` returns `[obj_a, None, obj_b]` when `required=False`.
-- `test_resolve_nodes_required_raises_for_missing` — `required=True` raises the model's `DoesNotExist` for a missing id, the same exception the singular path raises.
-- `test_resolve_node_async_context` — when invoked from an async resolver, `_resolve_node_default` resolves through Django's async ORM API (`afirst`, or `aget` under `required=True`) and returns the matching row.
+- `test_resolve_nodes_required_raises_for_missing` — `required=True` raises the model's `DoesNotExist` for a missing id, the same exception the singular path raises through it.
+- `test_resolve_node_async_context` — when invoked from an async resolver, `resolve_node` awaits `_resolve_nodes_default`'s async batch of one and returns the matching row.
 - `test_resolve_nodes_async_context` — same for `_resolve_nodes_default`, including the order-preserving / missing-id behavior.
 - `test_consumer_async_resolve_node_wins` — a consumer-authored `async def resolve_node(...)` is preserved by the stored-function identity test exactly like a sync override.
 - `test_consumer_resolve_id_attr_wins` — declaring `resolve_id_attr` on the subclass keeps the consumer version.
 - `test_consumer_resolve_id_wins` — same for `resolve_id`.
 - `test_relay_node_default_re_export_is_not_an_override` — a body re-exporting `relay.Node`'s defaults (`resolve_id = relay.Node.resolve_id`, stored as a bound method) declares no override: the id-resolver check reads it as the framework default and the installer replaces it.
-- `test_consumer_resolve_node_wins` — same for `resolve_node`.
+- `test_consumer_resolve_node_wins` — same for a consumer `resolve_node` over Strawberry's delegating one.
 - `test_consumer_resolve_nodes_wins` — same for `resolve_nodes`.
 - `test_node_id_annotation_overrides_default_id_attr` — annotating a non-pk column as `<column>: relay.NodeID[str]` wires Relay to it without overriding any classmethod.
 - `test_non_relay_interface_works` — declaring a plain `@strawberry.interface` works and skips the Relay-only injection.
@@ -488,8 +477,9 @@ Decision 7's relation-traversal invariant is pinned live instead, across the fou
 - `test_registry_clear_allows_fresh_relay_declared_type_to_finalize` — after `registry.clear()`, redefining a Relay-declared `DjangoType` and finalizing again works, and the redefined class carries `relay.Node` in its MRO.
 ### `examples/fakeshop/test_query/test_library_api.py`
 - `test_library_relay_node_global_id_round_trips` — a Relay-declared `library` type answers a `/graphql/` query selecting `id` (`GlobalID`) and a scalar field, and the GlobalID decodes back to the expected database id.
+- `test_node_refetch_reads_a_resolve_nodes_only_override_live` — `ReadingListType` overrides only `resolve_nodes` (withholding a draft list); `node(id:)` answers through that override, `null` for the draft exactly as `nodes(ids:)` does.
 ## Doc updates
-- `docs/GLOSSARY.md` — `Meta.interfaces` and "Relay Node integration" entries: the four `resolve_*` methods, the id suppression behavior, and the composite-pk constraint.
+- `docs/GLOSSARY.md` — `Meta.interfaces` and "Relay Node integration" entries: the three injected `resolve_*` methods, the id suppression behavior, and the composite-pk constraint.
 - `docs/README.md` — a short Node example in the "Relay Node" subsection next to the quick start, so the simple example stays simple.
 - `KANBAN.md` — the Done card `DONE-015-0.0.5`, describing the shipped scope, the borrowed patterns, and the test files.
 - `CHANGELOG.md` — `[0.0.5]` `### Added`: Relay Node interface support, `Meta.interfaces` accepted for any Strawberry interface, default `resolve_id_attr` / `resolve_id` / `resolve_node` / `resolve_nodes` for Relay-declared types, automatic id suppression when `relay.Node` is declared, `is_type_of` injection for all `DjangoType`s; `### Changed`: `Meta.interfaces` promoted from `DEFERRED_META_KEYS` to `ALLOWED_META_KEYS`.
@@ -511,7 +501,7 @@ The slice is complete when all of the following are true:
 
 1. `"interfaces"` is in `ALLOWED_META_KEYS` (`django_strawberry_framework/types/base.py #"ALLOWED_META_KEYS: frozenset[str]"`), validated by `_validate_meta` per Decision 4, and stored on the `DjangoTypeDefinition.interfaces` slot at `django_strawberry_framework/types/definition.py::DjangoTypeDefinition #"interfaces: tuple[type[object], ...] = ()"`. The slice adds no other field to `DjangoTypeDefinition`.
 2. `finalize_django_types()` (`django_strawberry_framework/types/finalizer.py::finalize_django_types`) injects declared interfaces into `cls.__bases__` and runs the `relay.Node` resolver injection (Decision 3) before the `strawberry.type(cls, ...)` Phase 3 loop. Types that omit `Meta.interfaces` take no Relay or interface step.
-3. Declaring `interfaces = (relay.Node,)` produces a working Relay-Node GraphQL type with `id: GlobalID!`, the four injected `resolve_*` methods, the `is_type_of` virtual subclass behavior, and consumer override support per Decision 6. The single-interface forms `interfaces = relay.Node` and `interfaces = (relay.Node)` normalize to the same stored tuple.
+3. Declaring `interfaces = (relay.Node,)` produces a working Relay-Node GraphQL type with `id: GlobalID!`, the three injected `resolve_*` methods (Strawberry's own `resolve_node` delegating to the injected `resolve_nodes`), the `is_type_of` virtual subclass behavior, and consumer override support per Decision 6. The single-interface forms `interfaces = relay.Node` and `interfaces = (relay.Node)` normalize to the same stored tuple.
 4. A Relay-shaped type over a composite-pk model raises `ConfigurationError` at finalization with a message that names the model and proposes a remediation path, unless the type declares an explicit `id: relay.NodeID[...]` annotation on a column other than `pk` — the first remediation the message proposes, which the gate honors (Decision 2).
 5. Optimizer invariants in Decision 7 hold: `only()` includes the id column when the Relay GlobalID is selected, under whatever name the schema's `NameConverter` publishes for it, `resolve_id` does not trigger an avoidable lazy load, and a target type's Relay declaration does not change how relations to it are planned.
 6. Tests in `tests/types/test_relay_interfaces.py`, plus the rows in `tests/optimizer/test_walker.py`, `tests/test_registry.py`, `examples/fakeshop/test_query/test_library_api.py`, `examples/fakeshop/test_query/test_library_shapes_api.py`, and `examples/fakeshop/test_query/test_products_api.py` listed in the Test plan all pass.
@@ -519,7 +509,7 @@ The slice is complete when all of the following are true:
 8. `docs/GLOSSARY.md`, `docs/README.md`, `KANBAN.md`, and `CHANGELOG.md` carry the shipped state per the "Doc updates" section.
 9. `KANBAN.md` carries this work as the Done card `DONE-015-0.0.5` describing the shipped scope.
 10. No new public exports. Every Relay helper stays internal to `django_strawberry_framework/types/relay.py`; nothing it defines appears in `django_strawberry_framework/__init__.py #"__all__ = ("`, beside [`OptimizerHint`][glossary-optimizerhint], [`finalize_django_types`][glossary-finalize-django-types] and the rest of the root surface. The slice changes what `Meta.interfaces` enables, not the import surface.
-11. `_resolve_node_default` and `_resolve_nodes_default` work in both sync and async resolver contexts per Decision 9. A consumer-authored `async def resolve_node(...)` is preserved by the override contract.
+11. `_resolve_nodes_default`, and `resolve_node` through it, work in both sync and async resolver contexts per Decision 9. A consumer-authored `async def resolve_node(...)` is preserved by the override contract.
 
 <!-- LINK DEFINITIONS -->
 

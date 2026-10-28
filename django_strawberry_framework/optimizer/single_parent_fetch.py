@@ -33,8 +33,9 @@ order (``plans.py::effective_cursor_state``, read back by
 Two verified corrections to the original idea:
 
 1. ``node(id:)`` roots do NOT reach the windowed prefetch today -
-   ``types/relay.py::_resolve_node_default`` returns ``qs.first()`` (an instance)
-   and the extension middleware only optimizes ``QuerySet`` results. The fast
+   ``types/relay.py::_resolve_nodes_default`` returns a list of instances (one
+   per id, the single-id refetch included) and the extension middleware only
+   optimizes ``QuerySet`` results. The fast
    path targets the general case: any windowed prefetch whose injected parent-IN
    list has length 1 (e.g. a root connection/filtered list returning one parent
    row). It claims no node-root benefit.

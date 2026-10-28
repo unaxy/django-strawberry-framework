@@ -373,10 +373,10 @@ class ResourcePolicy:
         or not, ``connection.py::DjangoConnection.resolve_connection`` (the head
         every connection shape passes through), the Relay refetch fields
         (``relay.py::DjangoNodeField`` / ``DjangoNodesField``) and the
-        ``resolve_node`` / ``resolve_nodes`` defaults installed on every Relay
-        ``DjangoType`` (``types/relay.py::_resolve_node_default`` /
-        ``_resolve_nodes_default``), which Strawberry's own ``relay.node()``
-        field and a consumer's ``GlobalID.resolve_node`` reach directly, the
+        ``resolve_nodes`` default installed on every Relay ``DjangoType``
+        (``types/relay.py::_resolve_nodes_default``), which Strawberry's own
+        ``relay.node()`` field and a consumer's ``GlobalID.resolve_node`` reach
+        directly (a single id through Strawberry's ``Node.resolve_node``), the
         session-auth fields ``login`` / ``logout`` / ``me``
         (``auth/mutations.py::_make_auth_field``) before the request is
         resolved, a user authenticated or a session touched, and the write

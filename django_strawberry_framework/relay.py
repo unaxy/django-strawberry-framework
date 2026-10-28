@@ -217,8 +217,8 @@ def _coerce_pk_or_none(
 
     The coercion field is the SAME one the resolution filters on - the concrete
     field behind ``resolved_type.resolve_id_attr()`` (the value
-    ``_resolve_node(s)_default`` build their ``{id_attr: ...}`` / ``__in``
-    filter from), NOT ``model._meta.pk`` unconditionally. They coincide for the
+    ``types/relay.py::_resolve_nodes_default`` builds its ``__in`` filter
+    from), NOT ``model._meta.pk`` unconditionally. They coincide for the
     default (``"pk"``) but diverge for a consumer ``id: relay.NodeID[...]``
     annotation, which makes the id slot a non-pk column (and is the documented
     composite-pk escape hatch where ``_meta.pk`` is a ``CompositePrimaryKey``

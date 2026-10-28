@@ -1,7 +1,7 @@
 """Internal Relay helpers - interface injection, node resolver defaults, and GlobalID strategies.
 
 This module owns ``install_is_type_of``, the interface base-class injection
-step, and the four Relay node resolver defaults. The helpers split by
+step, and the three Relay node resolver defaults. The helpers split by
 lifecycle phase:
 
 - Class-creation time (``__init_subclass__``): ``install_is_type_of``.
@@ -94,7 +94,7 @@ def implements_relay_node(type_cls: type[DjangoType]) -> TypeGuard[type[_RelayDj
 
     Used by ``finalize_django_types()`` Phase 2.5 (after ``__bases__``
     mutation) to decide whether to run the composite-pk gate and the
-    four ``resolve_*`` defaults. Distinct from the tuple-membership
+    three ``resolve_*`` defaults. Distinct from the tuple-membership
     check (``relay.Node in interfaces`` at ``types/base.py``), which
     runs pre-base-injection at collection time against the validated
     ``Meta.interfaces`` tuple.
@@ -309,7 +309,7 @@ def _resolve_id_attr_default(cls: type[_RelayDjangoType]) -> str:
     direct call asks Strawberry's annotation scan the same question
     without traversing the MRO's method chain, so the default behaves
     identically at every inheritance depth. (Skipping installation on
-    the child is then harmless: all four defaults are stateless
+    the child is then harmless: all three defaults are stateless
     classmethods that act on the runtime ``cls``.)
     """
     # Only ``_stamp_relay_id_attr`` writes the slot, with the scanned ``str``.
@@ -384,7 +384,7 @@ def _node_value_or_none(
     cls: type[_RelayDjangoType],
     node_id: object,
     *,
-    slot: tuple[str, ModelField | None] | None = None,
+    slot: tuple[str, ModelField | None],
 ) -> object:
     """Return the id-slot value ``node_id`` names, coerced to its column type; ``None`` if no row.
 
@@ -399,8 +399,7 @@ def _node_value_or_none(
     UUID) still finds it, and a literal the column rejects identifies no row
     instead of leaking Django's ``ValueError`` from the filter. A
     ``relay.GlobalID`` is unwrapped first. ``slot`` is the batch's precomputed
-    ``relay.py::_node_id_slot`` value (see ``_node_values``); when omitted the
-    coercer resolves it.
+    ``relay.py::_node_id_slot`` value (see ``_node_values``).
     """
     # In-function import: ``relay.py`` imports this module at module top, so a
     # module-top import back would close the load cycle.
@@ -423,10 +422,9 @@ def _raise_if_required(
 ) -> None:
     """Raise ``DoesNotExist`` for an id that identifies no row when the caller required one.
 
-    Keeps the ``required=True`` failure homogeneous with the ``qs.get()`` /
-    ``_order_nodes`` misses, so a consumer catches one exception type for
-    "required id identifies no row"; with ``required=False`` the miss is the
-    caller's ``None``.
+    Keeps the ``required=True`` failure homogeneous with ``_order_nodes``'s
+    miss, so a consumer catches one exception type for "required id identifies
+    no row"; with ``required=False`` the miss is the caller's ``None``.
     """
     if not required:
         return
@@ -458,21 +456,6 @@ def _node_values(
         if value is None:
             _raise_if_required(cls, id_attr, node_id, required=required)
     return values
-
-
-def _apply_node_filter(
-    qs: models.QuerySet[_ModelT],
-    id_attr: str,
-    value: object,
-) -> models.QuerySet[_ModelT]:
-    """Filter ``qs`` to the row whose id slot equals the coerced ``value`` (color-agnostic).
-
-    The lazy ``.filter`` call is identical on sync and async paths; the
-    terminal materialization is what differs (``.get``/``.first`` on the
-    sync path, ``.aget``/``.afirst`` on the async path). An id that coerced to
-    no value never reaches here: the caller answers it without a query.
-    """
-    return qs.filter(**{id_attr: value})
 
 
 def _apply_nodes_filter(
@@ -814,7 +797,7 @@ def _consumer_overrode_resolve_typename(type_cls: type[relay.Node]) -> bool:
     """Return whether ``type_cls`` declares its own ``resolve_typename``.
 
     ``utils/truth.py::overrides`` against ``relay.Node`` (MRO-aware identity of
-    the stored functions) - the same discriminator ``install_relay_node_resolvers`` uses for the four
+    the stored functions) - the same discriminator ``install_relay_node_resolvers`` uses for the three
     ``resolve_*`` defaults. Every declared shape counts: a ``classmethod``, a
     ``staticmethod`` and a plain function taking ``(root, info)`` are all
     overrides, since Strawberry reads ``resolve_typename`` off the class and
@@ -1145,10 +1128,12 @@ def _order_nodes(
     emitted as ``None`` (a required miss already raised in ``_node_values``).
 
     ``required=True`` raises the model's ``DoesNotExist`` for any missing
-    key - homogeneous with ``_resolve_node_default``'s ``qs.get()`` so
+    key - homogeneous with ``_raise_if_required``'s uncoercible-id miss so
     consumers writing visibility-aware exception handling can catch a
     single exception type for the "required missing id" semantic.
-    ``required=False`` emits ``None`` for missing keys.
+    ``required=False`` emits ``None`` for missing keys. Rows sharing one key
+    (a ``relay.NodeID`` over a non-unique column) answer with the last row
+    the queryset yields, as upstream's ``map_results`` does.
     """
     index = {str(read_attr(obj, id_attr)): obj for obj in results}
     output: list[_ModelT | None] = []
@@ -1166,77 +1151,6 @@ def _order_nodes(
     return output
 
 
-def _resolve_node_default(
-    cls: type[_RelayDjangoType],
-    node_id: object,
-    *,
-    info: Info[object, object],
-    required: bool = False,
-) -> AwaitableOrValue[models.Model | None]:
-    """Default ``Node.resolve_node`` - ``get_queryset`` aware.
-
-    Signature mirrors ``strawberry.relay.Node.resolve_node`` after
-    ``classmethod`` binding: ``(cls, node_id, *, info, required=False)``.
-    ``info`` is keyword-only so Strawberry's runtime call shape
-    (``cls.resolve_node(node_id, info=info, required=...)``) lands
-    correctly. A ``(cls, info, node_id, ...)`` signature would make
-    Strawberry's machinery raise ``TypeError: got multiple values
-    for argument 'info'``.
-
-    Returns the single matching row (``qs.get()`` when ``required``,
-    ``qs.first()`` otherwise). The executor driving the operation is read from
-    ``utils/execution_mode.py::async_execution``; on the async branch
-    the returned coroutine awaits ``get_queryset`` (so async
-    ``get_queryset`` hooks are honored), applies the id filter, and
-    awaits ``aget``/``afirst``. On the sync branch a coroutine returned
-    from ``get_queryset`` is rejected with ``SyncMisuseError`` (a
-    ``ConfigurationError`` subclass that also inherits ``RuntimeError``)
-    rather than silently producing ``AttributeError: 'coroutine'
-    object has no attribute 'filter'``.
-
-    The cooperative deadline (``resource_policy.py::check_deadline``) is checked
-    first, ahead of the execution-mode branch, so one check covers both modes for
-    every caller: the package refetch fields, Strawberry's own ``relay.node()``
-    field, and a consumer's ``GlobalID.resolve_node``.
-    """
-    check_deadline(info)
-    id_attr = cls.resolve_id_attr()
-    value = _node_value_or_none(cls, node_id)
-    if async_execution():
-        return _resolve_node_async(cls, id_attr, node_id, value, info=info, required=required)
-    if value is None:
-        _raise_if_required(cls, id_attr, node_id, required=required)
-        return None
-    qs = apply_type_visibility_sync(cls, initial_queryset(cls), info)
-    qs = _apply_node_filter(qs, id_attr, value)
-    return qs.get() if required else qs.first()
-
-
-async def _resolve_node_async(
-    cls: type[_RelayDjangoType],
-    id_attr: str,
-    node_id: object,
-    value: object,
-    *,
-    info: Info[object, object],
-    required: bool,
-) -> models.Model | None:
-    """Async sibling of ``_resolve_node_default``.
-
-    Awaits the ``get_queryset`` hook (regardless of whether the consumer
-    declared it ``def`` or ``async def``) before applying the id filter
-    and the final ``aget``/``afirst``. Decision 9 of the spec promises
-    both shapes; this is the awaitable that actually delivers on that
-    contract.
-    """
-    if value is None:
-        _raise_if_required(cls, id_attr, node_id, required=required)
-        return None
-    qs = await apply_type_visibility_async(cls, initial_queryset(cls), info)
-    qs = _apply_node_filter(qs, id_attr, value)
-    return await (qs.aget() if required else qs.afirst())
-
-
 def _resolve_nodes_default(
     cls: type[_RelayDjangoType],
     *,
@@ -1248,6 +1162,12 @@ def _resolve_nodes_default(
 
     Signature mirrors ``strawberry.relay.Node.resolve_nodes`` after
     ``classmethod`` binding: ``(cls, *, info, node_ids, required=False)``.
+    The package installs no ``resolve_node``: Strawberry's own
+    ``strawberry/relay/types.py::Node.resolve_node`` answers a single id as
+    ``resolve_nodes(node_ids=[node_id])``, so ``node(id:)``, ``relay.node()``
+    and ``GlobalID.resolve_node`` read one id through this default, or
+    through a consumer's ``resolve_nodes`` override, with the same answer a
+    batch gives it.
     ``node_ids`` defaults to ``None`` here (Strawberry's upstream slot is
     a required keyword argument) so the package can offer the bulk-fetch
     "no ids -> full queryset" path documented in the spec without
@@ -1258,7 +1178,7 @@ def _resolve_nodes_default(
     provided, returns a list whose indexes correspond 1:1 with
     ``node_ids``: ``required=False`` yields ``None`` for missing ids,
     ``required=True`` raises the model's ``DoesNotExist`` for missing
-    ids (homogeneous with ``_resolve_node_default``'s ``qs.get()``).
+    ids.
 
     The executor driving the operation is read from
     ``utils/execution_mode.py::async_execution`` so async
@@ -1270,7 +1190,10 @@ def _resolve_nodes_default(
     ``ConfigurationError`` subclass that also inherits ``RuntimeError``)
     instead.
 
-    Checks the cooperative deadline first, as ``_resolve_node_default`` does.
+    The cooperative deadline (``resource_policy.py::check_deadline``) is
+    checked first, ahead of the execution-mode branch, so one check covers
+    both modes for every caller: the package refetch fields, Strawberry's own
+    ``relay.node()`` field, and a consumer's ``GlobalID.resolve_node``.
     """
     check_deadline(info)
     id_attr = cls.resolve_id_attr()
@@ -1311,19 +1234,20 @@ async def _resolve_nodes_async(
     return _order_nodes(cls, results, coerced_keys, id_attr, required=required)
 
 
-# Single source of truth for the four Relay resolver method names plus the
-# framework default implementation each one maps to. Iterated by
-# ``install_relay_node_resolvers``; appears nowhere else.
+# Single source of truth for the Relay resolver method names the package
+# defaults, plus the framework default implementation each one maps to.
+# ``resolve_node`` is absent: Strawberry's ``Node.resolve_node`` delegates to
+# ``resolve_nodes``. Iterated by ``install_relay_node_resolvers``; appears
+# nowhere else.
 _RELAY_RESOLVER_DEFAULTS: tuple[tuple[str, Callable[..., object]], ...] = (
     ("resolve_id", _resolve_id_default),
     ("resolve_id_attr", _resolve_id_attr_default),
-    ("resolve_node", _resolve_node_default),
     ("resolve_nodes", _resolve_nodes_default),
 )
 
 
 def install_relay_node_resolvers(type_cls: type[relay.Node]) -> None:
-    """Inject the four ``resolve_*`` defaults via the stored-function identity test.
+    """Inject the three ``resolve_*`` defaults via the stored-function identity test.
 
     Step 0 stamps the type's resolved Relay id attribute
     (``_stamp_relay_id_attr``) - the one-time scan whose result the

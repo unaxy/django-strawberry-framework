@@ -902,11 +902,11 @@ deadline is a seam the deadline does not cover:
 - `relay.py::DjangoNodeField` / `DjangoNodesField` — before the decode, which is the step
   that makes a visibility-scoped query inevitable (after the empty-`ids` short circuit, so
   a request that asks for nothing is never refused for it);
-- `types/relay.py::_resolve_node_default` / `types/relay.py::_resolve_nodes_default` — the
-  `resolve_node` / `resolve_nodes` defaults installed on every Relay `DjangoType`, ahead of the
-  execution-mode branch so one check covers both modes. The package refetch fields call them
-  after their own check, but Strawberry's own `relay.node()` field and a consumer's
-  `GlobalID.resolve_node` reach them directly, so they carry the check themselves;
+- `types/relay.py::_resolve_nodes_default` — the `resolve_nodes` default installed on every
+  Relay `DjangoType` (a single id reaches it through Strawberry's own `Node.resolve_node`),
+  ahead of the execution-mode branch so one check covers both modes. The package refetch
+  fields call it after their own check, but Strawberry's own `relay.node()` field and a
+  consumer's `GlobalID.resolve_node` reach it directly, so it carries the check itself;
 - `auth/mutations.py::_make_auth_field` — the one field builder `login`, `logout` and `me`
   share, ahead of its sync / async dispatch, so the check runs once per call in both execution
   modes and before either body resolves the request, forces `request.user`, authenticates, or
@@ -1202,7 +1202,7 @@ check runs rather than about how long anything takes.
 | 3 | `list_field.py` | `max_rows` / `trusted_max_rows`, constructor-site validation, the bound applied after visibility. |
 | 3 | `types/resolvers.py` | The generated many-side relation resolver bounds both the prefetched and the manager path. |
 | 3 | `utils/connections.py`, `connection.py` | The policy ceiling over `relay_max_results`, resolved once per connection resolve. |
-| 3 | `connection.py`, `relay.py`, `types/relay.py`, `mutations/resolvers.py`, `types/resolvers.py`, `auth/mutations.py` | The `check_deadline` seams: the shared connection resolve head, both Relay refetch fields, the `resolve_node` / `resolve_nodes` defaults, the write pipelines before their own transaction opens, the generated single-valued relation resolvers, and the session-auth field builder ([Decision 9](#decision-9--the-execution-deadline-is-cooperative-and-says-so)). |
+| 3 | `connection.py`, `relay.py`, `types/relay.py`, `mutations/resolvers.py`, `types/resolvers.py`, `auth/mutations.py` | The `check_deadline` seams: the shared connection resolve head, both Relay refetch fields, the `resolve_nodes` default, the write pipelines before their own transaction opens, the generated single-valued relation resolvers, and the session-auth field builder ([Decision 9](#decision-9--the-execution-deadline-is-cooperative-and-says-so)). |
 | 4 | `types/base.py`, `types/finalizer.py` | `DEFAULT_RELATION_SHAPE = "connection"` and the reconciled synthesis docstring. |
 | 4 | `examples/fakeshop/apps/{library,products}/schema.py` | Explicit `"both"` opt-ins where the example's live coverage needs the raw list; `CategoryType.properties` deliberately left on the new default. |
 | 4 | `tests/test_relay_connection.py`, `tests/test_connection.py`, `tests/optimizer/test_extension.py` | Re-pinned to the new default, with the `"both"` shape pinned separately. |

@@ -846,12 +846,7 @@ def test_registry_clear_allows_fresh_relay_declared_type_to_finalize() -> None:
     assert registry.is_finalized() is True
     assert registry.get(Category) is FreshCategoryNode
     assert relay.Node in FreshCategoryNode.__mro__
-    for attr in (
-        "resolve_id",
-        "resolve_id_attr",
-        "resolve_node",
-        "resolve_nodes",
-    ):
+    for attr in ("resolve_id", "resolve_id_attr", "resolve_nodes"):
         assert attr in FreshCategoryNode.__dict__
 
 
