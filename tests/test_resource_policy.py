@@ -82,6 +82,7 @@ from graphql import (
     GraphQLSchema,
     StringValueNode,
     ValueNode,
+    build_schema,
     parse,
 )
 from graphql.language.token_kind import TokenKind
@@ -99,7 +100,6 @@ from django_strawberry_framework.extensions.resource_policy import (
     _STRUCTURAL_DELIMITER_PAIRS,
     AdmissionGuard,
     DjangoResourcePolicyExtension,
-    _field_definition,
     charge_document,
     scan_document_text,
 )
@@ -4231,6 +4231,22 @@ def test_a_measurable_upload_is_charged_its_bytes() -> None:
     assert caught.value.charged == 10
 
 
+def test_a_schema_strawberry_did_not_build_binds_no_upload_scalar() -> None:
+    """The file scalar is the one a Strawberry schema binds ``Upload`` to, never a name.
+
+    A graphql-core schema has no such binding, so a scalar it merely calls
+    ``Upload`` is charged as an opaque scalar: the file bounds never see it.
+    Unreachable over the wire, where every schema is Strawberry's.
+    """
+    schema = build_schema("scalar Upload type Query { stash(document: Upload): String }")
+    charge_document(
+        ResourcePolicy(max_upload_file_bytes=9),
+        schema,
+        parse("query U($f: Upload) { stash(document: $f) }"),
+        {"f": SimpleNamespace(size=10)},
+    )
+
+
 class _TaggedResourceLimitExceeded(ResourceLimitExceeded):
     """A ``ResourceLimitExceeded`` carrying the extra instance state a roundtrip must keep."""
 
@@ -4312,13 +4328,6 @@ def test_charge_document_accepts_none_variables() -> None:
         None,
         None,
     )
-
-
-def test_field_definition_with_none_parent_type() -> None:
-    """_field_definition safely handles None parent_type when schema query_type is None."""
-    schema = GraphQLSchema()
-    assert schema.query_type is None
-    assert _field_definition(schema, None, "__schema") is None
 
 
 def test_memoryview_multibyte_buffer_charged_by_nbytes() -> None:

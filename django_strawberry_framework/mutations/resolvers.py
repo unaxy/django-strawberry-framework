@@ -165,8 +165,8 @@ from django_strawberry_framework.utils.relations import is_row_key_column
 from django_strawberry_framework.utils.typing import (
     graphql_input_fields,
     graphql_type_of,
-    input_field_python_name,
     published_argument,
+    published_python_name,
     strawberry_schema_from_info,
     unwrap_non_null,
 )
@@ -1271,7 +1271,7 @@ def _published_input_specs(
     schemas. The executable schema keys the ``data:`` input object's fields by
     the names it published and back-references each field's attr
     (``utils/typing.py::published_argument`` /
-    ``utils/typing.py::input_field_python_name``), so every name an error is
+    ``utils/typing.py::published_python_name``), so every name an error is
     keyed by - the decode's, ``full_clean()``'s and a save-time
     ``ValidationError``'s - is one a client of THIS schema could have sent.
 
@@ -1290,7 +1290,7 @@ def _published_input_specs(
     )
     wire_names: dict[str, str] = {}
     for wire_name, input_field in graphql_input_fields(input_type).items():
-        python_name = input_field_python_name(input_field)
+        python_name = published_python_name(input_field)
         if python_name is not None:
             wire_names[python_name] = wire_name
     if all(

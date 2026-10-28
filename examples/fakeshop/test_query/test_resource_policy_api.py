@@ -78,6 +78,7 @@ ladder, the narrowing rule, and the walker's degenerate inputs.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import enum
 import json
 import threading
@@ -85,7 +86,7 @@ import warnings
 from collections.abc import Callable, Coroutine, Generator, Iterator, Mapping
 from contextlib import contextmanager
 from functools import _lru_cache_wrapper, cache, partial
-from typing import TYPE_CHECKING, NewType, TypeAlias
+from typing import TYPE_CHECKING, ClassVar, NewType, TypeAlias
 
 import pytest
 import strawberry
@@ -105,7 +106,7 @@ from django.test import AsyncClient, Client
 from django.test.utils import CaptureQueriesContext
 from django.urls import include, path
 from django.views.decorators.csrf import csrf_exempt
-from graphql import get_named_type
+from graphql import GraphQLScalarType, get_named_type
 from graphql_client import (
     JSONObject,
     graphql_payload,
@@ -121,6 +122,10 @@ from strawberry import relay
 from strawberry.extensions import ValidationCache
 from strawberry.extensions.base_extension import SchemaExtension
 from strawberry.extensions.validation_cache import _get_validate_cache
+from strawberry.file_uploads import Upload
+from strawberry.file_uploads.scalars import UploadDefinition
+from strawberry.schema.name_converter import HasGraphQLName, NameConverter
+from strawberry.types.scalar import ScalarDefinition
 from typing_extensions import override
 
 from django_strawberry_framework import (
@@ -171,6 +176,50 @@ def _probe_schema(overrides: tuple[tuple[str, int], ...]) -> DjangoSchema:
         config=strawberry_config(),
         resource_policy=dict(overrides),
     )
+
+
+class _RenameRelayWireNames(NameConverter):
+    """Publishes the Relay names the budget classifies by under other wire names.
+
+    ``edges`` / ``node`` (the connection shape), ``first`` (the page size) and
+    ``ids`` (the node-refetch list) are renamed wherever Strawberry declares
+    them, which is every connection, edge, connection field and ``nodes`` field.
+    """
+
+    _RENAMED: ClassVar[Mapping[str, str]] = {
+        "edges": "rows",
+        "node": "entry",
+        "first": "take",
+        "ids": "keys",
+    }
+
+    @override
+    def get_graphql_name(self, obj: HasGraphQLName) -> str:
+        name = super().get_graphql_name(obj)
+        return self._RENAMED.get(name, name)
+
+
+@cache
+def _renamed_probe_schema(overrides: tuple[tuple[str, int], ...]) -> DjangoSchema:
+    """The ``_probe_schema`` twin whose Relay wire names ``_RenameRelayWireNames`` rewrites."""
+    return DjangoSchema(
+        query=config_schema.Query,
+        mutation=config_schema.Mutation,
+        config=strawberry_config(name_converter=_RenameRelayWireNames()),
+        resource_policy=dict(overrides),
+    )
+
+
+def _renamed_probe_view(**overrides: int) -> Callable[..., HttpResponseBase]:
+    """Mount the package view over a renamed probe schema narrowing exactly ``overrides``."""
+    frozen = tuple(sorted(overrides.items()))
+
+    @csrf_exempt
+    def view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
+        built = DjangoGraphQLView.as_view(schema=_renamed_probe_schema(frozen))
+        return built(request, *args, **kwargs)
+
+    return view
 
 
 @cache
@@ -225,6 +274,59 @@ def _probe_upload_view(**overrides: int) -> Callable[..., HttpResponseBase]:
     def view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
         built = DjangoGraphQLView.as_view(
             schema=_probe_schema(frozen),
+            multipart_uploads_enabled=True,
+        )
+        return built(request, *args, **kwargs)
+
+    return view
+
+
+def _uploaded_file(value: object) -> object:
+    """Hand the multipart view's file object to the resolver unchanged, as ``Upload`` does."""
+    return value
+
+
+def _file_scalar(*, prebuilt: bool) -> ScalarDefinition:
+    """Strawberry's ``UploadDefinition`` published as ``File`` instead of ``Upload``.
+
+    ``prebuilt`` hands Strawberry a ready ``GraphQLScalarType`` as the
+    definition's ``implementation``, the other route a rebinding can take.
+    """
+    if not prebuilt:
+        return dataclasses.replace(UploadDefinition, name="File")
+    return dataclasses.replace(
+        UploadDefinition,
+        name="File",
+        implementation=GraphQLScalarType("File", parse_value=_uploaded_file),
+    )
+
+
+@cache
+def _rebound_upload_schema(*, prebuilt: bool) -> DjangoSchema:
+    """The upload probe schema whose ``Upload`` type ``extra_scalar_map`` / ``scalar_overrides`` rebind."""
+    if prebuilt:
+        return DjangoSchema(
+            query=config_schema.Query,
+            mutation=config_schema.Mutation,
+            config=strawberry_config(),
+            scalar_overrides={Upload: _file_scalar(prebuilt=True)},
+            resource_policy={"max_upload_file_bytes": MAX_UPLOAD_FILE_BYTES},
+        )
+    return DjangoSchema(
+        query=config_schema.Query,
+        mutation=config_schema.Mutation,
+        config=strawberry_config(extra_scalar_map={Upload: _file_scalar(prebuilt=False)}),
+        resource_policy={"max_upload_file_bytes": MAX_UPLOAD_FILE_BYTES},
+    )
+
+
+def _rebound_upload_view(*, prebuilt: bool) -> Callable[..., HttpResponseBase]:
+    """Mount the multipart-enabled package view over ``_rebound_upload_schema``."""
+
+    @csrf_exempt
+    def view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
+        built = DjangoGraphQLView.as_view(
+            schema=_rebound_upload_schema(prebuilt=prebuilt),
             multipart_uploads_enabled=True,
         )
         return built(request, *args, **kwargs)
@@ -415,18 +517,13 @@ async def _async_relation_deadline_view(
     return await built(request, *args, **kwargs)
 
 
-@cache
-def _native_node_schema(node_type: type, deadline: float | None) -> DjangoSchema:
-    """Strawberry's own ``relay.node()`` fields, single and list, over one Relay type.
+def _native_node_query() -> type:
+    """A fresh query class with Strawberry's own ``relay.node()`` fields, single and list.
 
-    No package refetch field sits in front of them, so the first seam a request
-    meets is the ``resolve_node`` / ``resolve_nodes`` default the package installs
-    on every Relay ``DjangoType``. ``deadline`` ``None`` is the unarmed twin.
-
-    The type is an ARGUMENT and the cache is keyed on it, for the reason
-    ``_hostile_relation_schema`` gives.
+    Fresh per schema: Strawberry installs each field's node resolver once, while
+    the field is converted.
     """
-    query_cls = strawberry.type(
+    return strawberry.type(
         type(
             "_NativeNodeQuery",
             (),
@@ -438,12 +535,47 @@ def _native_node_schema(node_type: type, deadline: float | None) -> DjangoSchema
             },
         ),
     )
+
+
+@cache
+def _native_node_schema(node_type: type, deadline: float | None) -> DjangoSchema:
+    """Strawberry's own ``relay.node()`` fields, single and list, over one Relay type.
+
+    No package refetch field sits in front of them, so the first seam a request
+    meets is the ``resolve_node`` / ``resolve_nodes`` default the package installs
+    on every Relay ``DjangoType``. ``deadline`` ``None`` is the unarmed twin.
+
+    The type is an ARGUMENT and the cache is keyed on it, for the reason
+    ``_hostile_relation_schema`` gives.
+    """
     return DjangoSchema(
-        query=query_cls,
+        query=_native_node_query(),
         types=[node_type],
         config=strawberry_config(),
         resource_policy=ResourcePolicy(execution_deadline_seconds=deadline),
     )
+
+
+@cache
+def _legacy_global_id_nodes_schema() -> DjangoSchema:
+    """The native node fields under ``relay_use_legacy_global_id``: ``nodes(ids: [GlobalID!]!)``."""
+    return DjangoSchema(
+        query=_native_node_query(),
+        types=[products_schema.CategoryType],
+        config=strawberry_config(relay_use_legacy_global_id=True),
+        resource_policy=_VALUE_BOUNDS,
+    )
+
+
+@csrf_exempt
+def _legacy_global_id_nodes_view(
+    request: HttpRequest,
+    *args: object,
+    **kwargs: object,
+) -> HttpResponseBase:
+    """Mount ``_legacy_global_id_nodes_schema`` over the sync view."""
+    built = DjangoGraphQLView.as_view(schema=_legacy_global_id_nodes_schema())
+    return built(request, *args, **kwargs)
 
 
 def _native_node_view(deadline: float | None) -> Callable[..., HttpResponseBase]:
@@ -1482,8 +1614,11 @@ urlpatterns = [
         _probe_view(max_selections=MAX_SELECTIONS, max_aliases=MAX_ALIASES),
     ),
     path("rp-cost/", _probe_view(max_collection_cost=MAX_COST)),
+    path("rp-cost-renamed/", _renamed_probe_view(max_collection_cost=MAX_COST)),
     path("rp-nested-rows/", _probe_view(max_nested_rows=MAX_NESTED_ROWS)),
     path("rp-values/", _probe_view(**_VALUE_BOUNDS)),
+    path("rp-values-renamed/", _renamed_probe_view(**_VALUE_BOUNDS)),
+    path("rp-values-legacy-global-id/", _legacy_global_id_nodes_view),
     path("rp-value-depth/", _probe_view(max_value_depth=MAX_VALUE_DEPTH)),
     path("rp-deadline/", _probe_view(execution_deadline_seconds=DEADLINE_SECONDS)),
     path("rp-deadline-unarmed/", _probe_view()),
@@ -1512,6 +1647,8 @@ urlpatterns = [
             max_collection_cost=MAX_LIST_ROWS - 1,
         ),
     ),
+    path("rp-uploads-rebound/", _rebound_upload_view(prebuilt=False)),
+    path("rp-uploads-prebuilt/", _rebound_upload_view(prebuilt=True)),
     path(
         "rp-uploads/",
         _probe_upload_view(
@@ -1927,6 +2064,29 @@ def test_an_explicit_small_page_narrows_the_collection_cost() -> None:
     _no_rejection(_post("/rp-cost/", query))
 
 
+@pytest.mark.django_db
+def test_a_page_size_the_name_converter_renamed_narrows_the_collection_cost() -> None:
+    """The connection shape and ``first:`` are recognized under the wire names a converter gave.
+
+    The schema publishes ``edges`` / ``node`` / ``first`` as ``rows`` / ``entry`` /
+    ``take``. The budget reads each by the Python name Strawberry declared it
+    under, so ``take: 2`` narrows both pages and the ``rows`` list under each
+    connection is not charged as a second collection, exactly as on the
+    default-named twin above.
+    """
+    seed_data(1)
+    query = """
+    {
+      allCategories(take: 2) {
+        rows { entry { itemsConnection(take: 2) { rows { entry { name } } } } }
+      }
+    }
+    """
+    payload = _post("/rp-cost-renamed/", query)
+    assert "errors" not in payload, payload
+    assert json_at(payload, "data", "allCategories", "rows") == [], payload
+
+
 def test_a_page_argument_other_than_first_or_last_does_not_narrow_the_collection_cost() -> None:
     """``after:`` names no page size, so both nested connections still charge full pages."""
     query = """
@@ -2017,6 +2177,91 @@ def test_node_refetch_ids_over_the_bound_are_rejected_before_any_id_is_decoded()
     assert extensions["bound"] == "max_node_ids"
     assert extensions["charged"] == MAX_NODE_IDS + 1
     assert captured.captured_queries == []
+
+
+@pytest.mark.django_db
+def test_node_refetch_ids_the_name_converter_renamed_are_charged_as_node_ids() -> None:
+    """A ``nodes`` id list published as ``keys:`` is still the node-refetch family.
+
+    The budget reads the argument by the Python name ``ids``, so one id over
+    ``max_node_ids`` (and still within ``max_membership_items``) rejects on the
+    node-id bound rather than passing as a membership list.
+    """
+    seed_data(1)
+    with CaptureQueriesContext(connection) as captured:
+        payload = _post(
+            "/rp-values-renamed/",
+            "query N($ids: [ID!]!) { nodes(keys: $ids) { __typename } }",
+            {"ids": ["x"] * (MAX_NODE_IDS + 1)},
+        )
+    extensions = _rejection(payload)
+    assert extensions["bound"] == "max_node_ids"
+    assert extensions["charged"] == MAX_NODE_IDS + 1
+    assert captured.captured_queries == []
+
+
+@pytest.mark.django_db
+def test_a_variable_default_feeding_a_renamed_ids_argument_is_charged_as_node_ids() -> None:
+    """A default charged at its definition takes the family of the argument it fills.
+
+    The supplied ``$v`` shadows its default, so validation still parses the
+    default at the definition. ``$v`` feeds ``nodes(keys:)``, the argument
+    Strawberry declared ``ids``, so the default is a node-refetch list over
+    ``max_node_ids`` (and within ``max_membership_items``) whatever the client
+    named the variable.
+    """
+    seed_data(1)
+    default = ", ".join('"x"' for _ in range(MAX_NODE_IDS + 1))
+    payload = _post(
+        "/rp-values-renamed/",
+        "query N($v: [ID!]! = [%s]) { nodes(keys: $v) { __typename } }" % default,
+        {"v": []},
+    )
+    extensions = _rejection(payload)
+    assert extensions["bound"] == "max_node_ids"
+    assert extensions["charged"] == MAX_NODE_IDS + 1
+
+
+@pytest.mark.django_db
+def test_legacy_global_id_node_refetch_ids_are_charged_as_node_ids() -> None:
+    """``relay_use_legacy_global_id`` publishes the id scalar as ``GlobalID``, still a node id.
+
+    The budget identifies the node-id scalar by the schema's binding of
+    Strawberry's ``ID`` / ``GlobalID``, never by the name ``ID``, so a list one
+    over ``max_node_ids`` (and within ``max_membership_items``) rejects on the
+    node-id bound.
+    """
+    seed_data(1)
+    payload = _post(
+        "/rp-values-legacy-global-id/",
+        "query N($ids: [GlobalID!]!) { nodes(ids: $ids) { __typename } }",
+        {"ids": ["x"] * (MAX_NODE_IDS + 1)},
+    )
+    extensions = _rejection(payload)
+    assert extensions["bound"] == "max_node_ids"
+    assert extensions["charged"] == MAX_NODE_IDS + 1
+
+
+@pytest.mark.django_db
+def test_an_unselected_operations_default_feeding_ids_through_a_fragment_is_node_ids() -> None:
+    """The argument a default fills is found through the fragments its operation spreads.
+
+    ``Other`` is not selected, so validation still parses its default at the
+    definition, and ``$v`` reaches ``nodes(ids:)`` only inside ``F``. The default
+    is therefore a node-refetch list, one over ``max_node_ids`` (and within
+    ``max_membership_items``). A repeated spread and one naming no fragment
+    change nothing.
+    """
+    seed_data(1)
+    default = ", ".join('"x"' for _ in range(MAX_NODE_IDS + 1))
+    document = (
+        "query Picked { __typename } "
+        "query Other($v: [ID!]! = [%s]) { ...F ...F ...Missing } "
+        "fragment F on Query { nodes(ids: $v) { __typename } }" % default
+    )
+    extensions = _rejection(_post_named("/rp-values/", document, "Picked"))
+    assert extensions["bound"] == "max_node_ids"
+    assert extensions["charged"] == MAX_NODE_IDS + 1
 
 
 @pytest.mark.django_db
@@ -2963,6 +3208,30 @@ def test_an_oversized_upload_is_rejected_by_the_policy_not_by_the_body_cap() -> 
         "max_upload_file_bytes",
         "max_upload_total_bytes",
     }
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("mount", ["/rp-uploads-rebound/", "/rp-uploads-prebuilt/"])
+def test_an_oversized_upload_under_a_rebound_upload_scalar_is_rejected(mount: str) -> None:
+    """The file scalar is the one the schema binds ``Upload`` to, whatever it is published as.
+
+    Both mounts publish the ``Upload`` Python type as ``File``: one through
+    ``strawberry_config(extra_scalar_map=...)``, one through ``scalar_overrides`` with a prebuilt
+    ``GraphQLScalarType``. The budget identifies the scalar through the schema's
+    own binding, so an oversized file is still charged against
+    ``max_upload_file_bytes`` rather than passing as an opaque scalar.
+    """
+    res = TestClient().query(
+        _SPECIMEN,
+        variables={"d": {"label": "l", "attachment": None, "image": None}},
+        files={"d.attachment": SimpleUploadedFile("attachment.bin", b"z" * 200)},
+        assert_no_errors=False,
+        url=mount,
+    )
+    assert res.response.status_code == 200, res.response.content
+    extensions = _rejection(response_json(res.response))
+    assert extensions["bound"] == "max_upload_file_bytes"
+    assert extensions["charged"] == 200
 
 
 # ---------------------------------------------------------------------------
