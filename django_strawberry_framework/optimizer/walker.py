@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, NamedTuple, cast
+from typing import TYPE_CHECKING, cast
 
 from django.db import models
 from django.db.models import Prefetch
@@ -13,10 +13,9 @@ from strawberry.schema.config import StrawberryConfig
 from strawberry.schema.schema_converter import GraphQLCoreConverter
 from strawberry.types.base import get_object_definition
 from strawberry.types.field import StrawberryField
-from strawberry.utils.str_converters import to_camel_case
 
 from django_strawberry_framework.exceptions import ConfigurationError, OptimizerError
-from django_strawberry_framework.registry import register_subsystem_clear, registry
+from django_strawberry_framework.registry import registry
 from django_strawberry_framework.types.relay import implements_relay_node
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
@@ -48,7 +47,6 @@ from django_strawberry_framework.utils.relations import (
     is_model_class,
     relation_kind,
 )
-from django_strawberry_framework.utils.strings import snake_case
 from django_strawberry_framework.utils.typing import graphql_fields, schema_config_from_info
 
 from . import logger
@@ -73,12 +71,14 @@ from .plans import (
 )
 from .selections import (
     PYTHON_ARGUMENTS_ATTR,
+    PYTHON_NAME_ATTR,
     RUNTIME_PREFIXES_ATTR,
     included_field_selections,
     is_fragment,
     python_arguments,
     response_key,
     response_keys,
+    selection_python_name,
     should_include,
 )
 
@@ -87,7 +87,6 @@ if TYPE_CHECKING:
 
     from django.db.models import QuerySet
     from graphql.type.definition import GraphQLResolveInfo
-    from strawberry.schema.name_converter import NameConverter
     from strawberry.types import Info
 
     from django_strawberry_framework.types.base import DjangoType
@@ -249,217 +248,38 @@ def _target_has_custom_get_queryset(
     return target_type is not None and target_type.has_custom_get_queryset()
 
 
-def _schema_name_converter(info: object) -> NameConverter | None:
-    """Return the active Strawberry name converter from planner or resolver ``info``."""
-    return getattr(schema_config_from_info(info), "name_converter", None)
-
-
 # The GlobalID field ``relay.Node`` declares, its only field. Every Relay type's definition
-# holds this same field object, so the name a schema publishes for it is the converter's
-# answer for the field alone; a Strawberry that gives ``Node`` a second field fails here.
+# holds this same field object, so a selection of it carries the Python name the field
+# was declared under whatever wire name the schema's converter publishes; a Strawberry
+# that gives ``Node`` a second field fails here.
 (_RELAY_ID_FIELD,) = get_object_definition(relay.Node, strict=True).fields
-
-
-def _relay_id_graphql_name(info: object) -> str:
-    """Return the name the executing schema publishes for ``relay.Node``'s GlobalID field.
-
-    The schema's ``NameConverter`` names it (a consumer converter may rename ``id``); with
-    no schema in ``info`` it is the name Strawberry declares on the field.
-    """
-    converter = _schema_name_converter(info)
-    if converter is not None:
-        return converter.get_graphql_name(_RELAY_ID_FIELD)
-    return require_instance(_RELAY_ID_FIELD.graphql_name, str)
-
-
-def _graphql_names_by_python_name(
-    type_cls: type[DjangoType] | None,
-    info: object,
-) -> dict[str, str]:
-    """Return authoritative GraphQL names for the Strawberry fields on ``type_cls``."""
-    definition = truth.static_attr(type_cls, "__strawberry_definition__")
-    converter = _schema_name_converter(info)
-    names: dict[str, str] = {}
-    # A Strawberry type's ``__strawberry_definition__`` is a
-    # ``StrawberryObjectDefinition``, whose ``fields`` are ``StrawberryField``s.
-    strawberry_fields: Iterable[StrawberryField] = getattr(definition, "fields", ())
-    for field in strawberry_fields:
-        # ``StrawberryField.python_name`` reads a slot that may still be unset.
-        python_name: str | None = getattr(field, "python_name", None)
-        if python_name is None:
-            continue
-        if converter is not None:
-            names[python_name] = converter.get_graphql_name(field)
-        else:
-            graphql_name: str | None = getattr(field, "graphql_name", None)
-            names[python_name] = graphql_name or to_camel_case(python_name)
-    return names
-
-
-class _ForwardNames(NamedTuple):
-    """One type's forward GraphQL-name maps, as the active schema publishes them.
-
-    ``connections`` maps a synthesized connection's GraphQL name to its
-    underlying relation field name; ``fields`` maps a model field's GraphQL
-    name to ``(django_name, field)``. The first declaration of a name wins in
-    both, matching a scan in declaration order. ``converter`` is the schema
-    name converter the names came from.
-    """
-
-    converter: NameConverter | None
-    connections: dict[str, str]
-    fields: dict[str, tuple[str, FieldMeta]]
-
-
-# Memo of ``_ForwardNames`` per ``(type_cls, id(name converter))``. Every
-# selection the ``snake_case`` reversal cannot recover (a mixed-case Django
-# name, a digit boundary, an explicit ``name=``, an unknown name) otherwise
-# rebuilds the type's whole name table on every plan build. An entry holds its
-# converter, so the ``id`` in its key cannot be reused while it lives.
-# Correctness-neutral under concurrency like the plan cache: the value is
-# deterministic, so a dropped or double insert only changes the hit rate.
-# Drained by ``registry.clear()`` via the registered subsystem clear below so
-# a registry-clearing test drops the entries of the types it discards; the
-# next plan rebuilds each map once.
-_forward_names_memo: dict[tuple[type[DjangoType] | None, int], _ForwardNames] = {}
-
-
-register_subsystem_clear(_forward_names_memo.clear, owner="optimizer.forward_names")
-
-
-def _build_forward_names(
-    field_map: Mapping[str, FieldMeta],
-    relation_connections: Mapping[str, str],
-    graphql_names: Mapping[str, str],
-    *,
-    converter: NameConverter | None,
-) -> _ForwardNames:
-    """Map each field's and connection's GraphQL name to its target, first declaration winning."""
-    connections: dict[str, str] = {}
-    for generated, relation_name in relation_connections.items():
-        candidate = graphql_names.get(generated)
-        if candidate is None:
-            candidate = to_camel_case(generated)
-        _ = connections.setdefault(candidate, relation_name)
-    fields: dict[str, tuple[str, FieldMeta]] = {}
-    for field in field_map.values():
-        django_name: str | None = getattr(field, "name", None)
-        if django_name is None:
-            continue
-        candidate = graphql_names.get(django_name)
-        if candidate is None:
-            candidate = to_camel_case(django_name)
-        _ = fields.setdefault(candidate, (django_name, field))
-    return _ForwardNames(converter, connections, fields)
-
-
-def _forward_names(
-    field_map: Mapping[str, FieldMeta],
-    relation_connections: Mapping[str, str],
-    *,
-    type_cls: type[DjangoType] | None,
-    info: GraphQLResolveInfo | None,
-    definition: DjangoTypeDefinition | None = None,
-) -> _ForwardNames:
-    """Return the forward GraphQL-name maps for one type's fields and connections.
-
-    Strawberry's default camelizer is lossy at digit boundaries
-    (``address_2`` -> ``address2``), and explicit field names or custom schema
-    converters need not be reversible at all. Names come from the
-    authoritative Strawberry field name when available, falling back to the
-    default converter for unregistered models and synthetic planner calls.
-
-    Memoized only when ``definition`` (the one ``_resolve_field_map`` took
-    ``field_map`` from) is FINALIZED and ``info`` carries a schema name
-    converter. ``finalize_django_types`` sets ``finalized`` right after
-    ``strawberry.type`` builds the type, once ``relation_connections`` is
-    settled; from then on the registry refuses every mutator until
-    ``registry.clear()``, which empties this memo, so a type's definition and
-    published names cannot change under an entry. Any other call (an
-    unregistered model's fresh map, a type still being declared, no ``info``)
-    builds the maps uncached.
-    """
-    converter = _schema_name_converter(info)
-    if (
-        converter is None
-        or definition is None
-        or getattr(definition, "finalized", False) is not True
-    ):
-        return _build_forward_names(
-            field_map,
-            relation_connections,
-            _graphql_names_by_python_name(type_cls, info),
-            converter=converter,
-        )
-    key = (type_cls, id(converter))
-    cached = _forward_names_memo.get(key)
-    if cached is not None:
-        return cached
-    built = _build_forward_names(
-        field_map,
-        definition.relation_connections or {},
-        _graphql_names_by_python_name(type_cls, info),
-        converter=converter,
-    )
-    _forward_names_memo[key] = built
-    return built
-
-
-def _field_by_graphql_name(
-    graphql_name: str,
-    field_map: Mapping[str, FieldMeta],
-    *,
-    type_cls: type[DjangoType] | None = None,
-    info: GraphQLResolveInfo | None = None,
-    definition: DjangoTypeDefinition | None = None,
-) -> tuple[str, FieldMeta] | None:
-    """Forward-resolve a GraphQL name to its real Django field after a reverse miss."""
-    names = _forward_names(
-        field_map,
-        {},
-        type_cls=type_cls,
-        info=info,
-        definition=definition,
-    )
-    return names.fields.get(graphql_name)
+_RELAY_ID_PYTHON_NAME: str = _RELAY_ID_FIELD.python_name
+# The name ``relay.Node`` declares the field under (``id``), fixed by the declaration and
+# never a converter's answer: an id no column holds resolves through the field map under it.
+_RELAY_ID_DECLARED_NAME: str = require_instance(_RELAY_ID_FIELD.graphql_name, str)
 
 
 def _resolve_selection_target(
-    graphql_name: str,
+    python_name: str | None,
     field_map: Mapping[str, FieldMeta],
     relation_connections: Mapping[str, str],
-    *,
-    type_cls: type[DjangoType] | None,
-    info: GraphQLResolveInfo | None,
-    definition: DjangoTypeDefinition | None = None,
 ) -> tuple[str, str, FieldMeta | None] | None:
     """Resolve a selection across model-field and synthesized-connection namespaces.
 
-    The exact ``snake_case`` reversal answers first; a miss reads the forward
-    maps (``_forward_names``), where a connection outranks a model field of the
-    same GraphQL name.
+    Matches by the Python name the executing schema published the selected field
+    from (``selections.py::selection_python_name``): a synthesized connection's
+    generated attribute name (a key of ``relation_connections``) outranks a model
+    field of the same name (a key of ``field_map``). ``None`` for a selection the
+    schema publishes from neither namespace.
     """
-    snake = snake_case(graphql_name)
-    relation_field_name = relation_connections.get(snake)
+    if python_name is None:
+        return None
+    relation_field_name = relation_connections.get(python_name)
     if relation_field_name is not None:
         return "connection", relation_field_name, None
-    field = field_map.get(snake)
+    field = field_map.get(python_name)
     if field is not None:
-        return "field", snake, field
-    names = _forward_names(
-        field_map,
-        relation_connections,
-        type_cls=type_cls,
-        info=info,
-        definition=definition,
-    )
-    relation_name = names.connections.get(graphql_name)
-    if relation_name is not None:
-        return "connection", relation_name, None
-    resolved = names.fields.get(graphql_name)
-    if resolved is not None:
-        real, real_field = resolved
-        return "field", real, real_field
+        return "field", python_name, field
     return None
 
 
@@ -476,8 +296,9 @@ def _resolve_field_map(
     ``FieldMeta.from_django_field`` when the model has no registered
     definition. Centralizes the brittle Django-private ``_meta`` access
     used by the walker. Both paths key the map by the raw Django
-    ``f.name``; ``_resolve_selection_target`` reverses a selection name
-    with ``snake_case`` and forward-resolves it on a miss.
+    ``f.name``, the Python name a ``DjangoType`` publishes the field from, so
+    ``_resolve_selection_target`` matches a selection's published Python name
+    against it.
 
     ``source_type`` carries the root resolver's actual return type when
     the call comes from ``plan_optimizations`` - that type's field_map /
@@ -851,42 +672,34 @@ def _walk_selections(
         getattr(definition, "relation_connections", None) or {}
     )
     # On a ``relay.Node`` type the GlobalID is the field ``relay.Node`` declares, selected
-    # under the name the executing schema's converter publishes for it, never a model
-    # field named ``id``: when the id is read from a column it projects that column
-    # whatever the field map holds (spec-015 Decision 7); an id no column holds resolves
-    # through the field map like any selection.
-    relay_id_column = (
-        _relay_id_column(type_cls)
-        if type_cls is not None and implements_relay_node(type_cls)
-        else None
-    )
-    relay_id_name = _relay_id_graphql_name(info) if relay_id_column is not None else None
+    # under whatever name the executing schema's converter publishes for it and matched
+    # by the Python name it was declared under, never a model field named ``id``: when
+    # the id is read from a column it projects that column whatever the field map holds
+    # (spec-015 Decision 7); an id no column holds resolves through the field map under
+    # the name ``relay.Node`` declares the field as, like any selection.
+    relay_type = type_cls if type_cls is not None and implements_relay_node(type_cls) else None
+    relay_id_column = _relay_id_column(relay_type) if relay_type is not None else None
     for sel in merged:
-        if relay_id_column is not None and sel.name == relay_id_name:
-            append_unique(plan.only_fields, f"{prefix}{relay_id_column}")
-            continue
-        # Resolve the selection name through the ONE consolidated resolver
-        # (fast-path exact reversal, memoized forward name maps on a miss). It
-        # recognizes a synthesized nested connection BEFORE the field namespace
-        # and BEFORE the unknown-name guard below: ``booksConnection`` /
-        # ``line2Connection`` match no model field, so without this branch the
+        python_name = selection_python_name(sel)
+        if relay_type is not None and python_name == _RELAY_ID_PYTHON_NAME:
+            if relay_id_column is not None:
+                append_unique(plan.only_fields, f"{prefix}{relay_id_column}")
+                continue
+            python_name = _RELAY_ID_DECLARED_NAME
+        # Resolve the selection through the ONE consolidated resolver, by the
+        # Python name the schema published its field from. It recognizes a
+        # synthesized nested connection BEFORE the field namespace and BEFORE
+        # the unknown-name guard below: ``books_connection`` /
+        # ``line_2_connection`` name no model field, so without this branch the
         # unknown-name guard silently ``continue``s and the nested connection
-        # is never planned (the gap spec-033 closes, extended to digit-boundary
-        # relation names here). The ``relation_connections`` slot (Phase-2.5
+        # is never planned (the gap spec-033 closes). The ``relation_connections`` slot (Phase-2.5
         # synthesis metadata) maps the generated attr name to the underlying
         # relation field name; recognition is metadata-driven, never
         # name-pattern guessing (Decision 3). The ``definition`` resolved above
         # is the model's PRIMARY type, so a divergent secondary type's
         # connection is out of scope for windowed planning and falls through to
         # per-parent (Decision 3 primary contract).
-        resolved = _resolve_selection_target(
-            sel.name,
-            field_map,
-            relation_connections,
-            type_cls=type_cls,
-            info=info,
-            definition=definition,
-        )
+        resolved = _resolve_selection_target(python_name, field_map, relation_connections)
         if resolved is not None and resolved[0] == "connection":
             _plan_connection_relation(
                 sel,
@@ -1090,8 +903,7 @@ def _plan_select_relation(
         django_field.fk_id_elision_eligible
         and not _target_has_custom_get_queryset(target_type, target_definition)
         and not _has_custom_id_resolver(target_type, target_pk_name)
-        and _selected_scalar_names(sel.selections, django_field.related_model, info=info)
-        == {target_pk_name}
+        and _selected_scalar_names(sel.selections, django_field.related_model) == {target_pk_name}
     ):
         append_unique_many(plan.fk_id_elisions, resolver_identities)
         return
@@ -1672,10 +1484,15 @@ def _absorb_child_plan(parent_plan: OptimizationPlan, child_plan: OptimizationPl
 def _selected_scalar_names(
     selections: Iterable[ConvertedSelection],
     model: type[models.Model] | None,
-    *,
-    info: GraphQLResolveInfo | None = None,
 ) -> set[str] | None:
-    """Return selected scalar Django field names, or ``None`` when elision is unsafe."""
+    """Return selected scalar Django field names, or ``None`` when elision is unsafe.
+
+    Each selection resolves by the Python name the schema published its field
+    from. On a Relay target the GlobalID selection (the field ``relay.Node``
+    declares) resolves under the name ``relay.Node`` declares it as (``id``), so
+    it reads the target key only where the field map's ``id`` is that key; the
+    caller's ``_has_custom_id_resolver`` refuses an id read from anything else.
+    """
     if model is None:
         return None
     # Nested-only: do NOT thread source_type here. The only caller is
@@ -1686,7 +1503,8 @@ def _selected_scalar_names(
     # call already does. The scalar-only secondary-type regression is
     # exercised through the root _walk_selections path, not through this
     # helper. (An audit invariant.)
-    type_cls, definition, field_map = _resolve_field_map(model)
+    type_cls, _definition, field_map = _resolve_field_map(model)
+    relay_type = type_cls if type_cls is not None and implements_relay_node(type_cls) else None
     # TODO(BACKLOG polymorphic_interface_connections - the abstract-return optimizer entry card): audit
     # this FK-id-elision helper as the walker's second ``included_field_selections`` consumer. This
     # is that card's requirement R2 in spec-035 Decision 6, and it is unreachable until the same
@@ -1704,31 +1522,15 @@ def _selected_scalar_names(
     # fire (the common case: any non-pk scalar selected).
     scalar_names: set[str] = set()
     for sel in _included_field_selections(selections):
-        django_name = snake_case(sel.name)
-        django_field = field_map.get(django_name)
-        if django_field is None:
-            # Same lossy-reversal miss as ``_walk_selections`` (site 1): a
-            # digit-boundary scalar (``address_2`` -> schema ``address2``)
-            # reverses to ``"address2"`` and misses the real ``"address_2"``
-            # field-map key. Forward-resolve through the shared primitive so a
-            # digit-boundary target pk (e.g. ``code_2``) is recognized and the
-            # FK-id elision can fire instead of falling back to a redundant
-            # ``select_related`` JOIN. No connection form is possible here - the
-            # helper walks a single-valued relation's child scalar selections
-            # for elision, and any relation/connection child returns ``None``
-            # below regardless.
-            resolved = _field_by_graphql_name(
-                sel.name,
-                field_map,
-                type_cls=type_cls,
-                info=info,
-                definition=definition,
-            )
-            if resolved is not None:
-                django_name, django_field = resolved
+        python_name = selection_python_name(sel)
+        if relay_type is not None and python_name == _RELAY_ID_PYTHON_NAME:
+            python_name = _RELAY_ID_DECLARED_NAME
+        if python_name is None:
+            return None
+        django_field = field_map.get(python_name)
         if django_field is None or django_field.is_relation:
             return None
-        scalar_names.add(django_name)
+        scalar_names.add(python_name)
     return scalar_names
 
 
@@ -1869,6 +1671,7 @@ def _merge_aliased_selections(selections: Sequence[FieldSelection]) -> Sequence[
                 _optimizer_response_keys=[_response_key(sel)],
                 **{
                     RUNTIME_PREFIXES_ATTR: _selection_runtime_prefixes(sel),
+                    PYTHON_NAME_ATTR: selection_python_name(sel),
                     PYTHON_ARGUMENTS_ATTR: python_arguments(sel),
                 },
                 # Per-response-key argument payloads (spec-033 Decision 6), by

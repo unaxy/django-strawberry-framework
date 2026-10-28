@@ -61,31 +61,30 @@ it lands with its tick.
     Plus the union-arm package row in `tests/optimizer/test_selections.py`.
   - Follow-up: item 34. The resolver accepted a prefetched window whose bounds disagree with its own arguments.
 
-- [ ] 2. (OPT-2, was the name half of S1, plus the walker's hardcoded `to_camel_case`) The walker resolves selections
+- [x] 2. (OPT-2, was the name half of S1, plus the walker's hardcoded `to_camel_case`) The walker resolves selections
   by snake_case reversal, then re-runs the NameConverter
-  - Our code:
-    - `optimizer/walker.py::_resolve_selection_target`: the reversal runs first.
-    - `walker.py::_build_forward_names`, `::_forward_names`, `::_field_by_graphql_name` and
-      `::_graphql_names_by_python_name`: three `to_camel_case` fallbacks.
-    - `walker.py::_relay_id_graphql_name` and `_forward_names_memo`.
-    - `optimizer/selections.py::connection_field_names` / `ConnectionFieldNames`: these run `apply_naming_config`, and
-      the docstring admits they miss `get_graphql_name`/`from_field` overrides.
-    - About 220 lines.
-  - Upstream: the executing schema's published field map, read as
-    `GraphQLObjectType.fields[wire].extensions[GraphQLCoreConverter.DEFINITION_BACKREF].python_name`.
-    - Descend with `graphql.type.get_named_type`.
-    - `DEFINITION_BACKREF` is present at 0.322.2.
-    - This is the same read-back doctrine `utils/typing.py::published_argument` states.
-  - Lines: ~150 net.
-  - Status: SUSPECTED. The defect is traced in code, but no fakeshop model has the colliding shape.
-  - Reason to keep ours: none. Plan-time `info` lacks the Strawberry config, but it has the graphql-core schema.
-  - Behaviour change: fixes the case where, under `auto_camel_case=False`, Django fields `fooBar` and `foo_bar`
-    collide.
-    - The selection `fooBar` snake-cases to `foo_bar` and plans the wrong column: wrong `.only()`/prefetch, then a
-      deferred-load N+1.
-    - It also fixes the connection vocabulary under a converter that overrides `get_graphql_name`.
-  - Risk / blockers: the parent `GraphQLObjectType` has to be threaded through fragments and `edges`/`node`.
-    Abstract types are already out of scope (spec-035 TODO).
+  - Our code (deleted): `walker.py`'s snake_case reversal, `_schema_name_converter`, `_relay_id_graphql_name`,
+    `_graphql_names_by_python_name`, `_ForwardNames` / `_forward_names_memo`, `_build_forward_names`,
+    `_forward_names` and `_field_by_graphql_name`; `selections.py`'s `ConnectionFieldNames`,
+    `DEFAULT_CONNECTION_FIELD_NAMES` and `connection_field_names` (the `apply_naming_config` re-run).
+  - Upstream: `GraphQLCoreConverter.DEFINITION_BACKREF`, read through `utils/typing.py::published_python_name`.
+  - Landed:
+    - `optimizer/selections.py::ast_to_converted_selections` stamps each field selection with the Python name of the
+      field it selects (`selection_python_name`). The walker, the connection walks and the count predicates match by
+      Python name only.
+    - `optimizer/selections.py::info_selections` gives resolve time (`connection.py`) the same stamped selections.
+    - The Relay GlobalID is recognised by `relay.Node`'s declared field.
+  - Status: CONFIRMED. Three of the five new live rows failed on the old code:
+    - `displayName` planned the `display_name` column: 4 statements, i.e. per-row deferred loads;
+    - a converter-renamed connection vocabulary lost `totalCount` (`_django_total_count` missing).
+  - Behaviour change: fixes wrong-column planning when two published names differ only by case or underscore, and
+    connection planning under a converter that renames `edges`/`node`/`totalCount`/`hasNextPage`.
+  - Tests:
+    - `test_library_shapes_api.py::test_distributor_published_names_differing_by_case_each_project_their_own_column`.
+      Fakeshop's `Distributor` gains `display_name` (migration `library/0019`).
+    - `test_library_api.py::test_connection_vocabulary_renamed_by_the_name_converter_plans_what_the_defaults_plan`.
+  - Follow-up: item 35. Strawberry hardcodes `edges`/`pageInfo` when deciding whether to resolve edges.
+  - The tracked `examples/fakeshop/db.sqlite3` is not migrated to `library/0019`.
 
 - [ ] 3. (FLT-1, the remainder of F1) `_leaf_column` hand-walks the filter path and misses `FilteredRelation` aliases
   and `pk`
@@ -232,6 +231,18 @@ it lands with its tick.
   - Behaviour change: a drifted window falls back per parent (strictness-visible) instead of serving wrong rows.
   - Risk / blockers: robustness row, not a release blocker (GOAL.md trust boundary). It needs a way to make the
     planner drift in a test.
+
+- [ ] 35. (found landing item 2) Strawberry decides whether to resolve a root `ListConnection`'s edges by wire name
+  - Our code: `connection.py::DjangoConnection` calls `super().resolve_connection`, which reaches the upstream check.
+  - Upstream: `strawberry/relay/utils.py::should_resolve_list_connection_edges` hardcodes `{"edges", "pageInfo"}` as
+    wire names.
+  - Lines: small (override or wrap the check with the Python-name read item 2 added).
+  - Status: CONFIRMED by item 2's agent. A converter that renames both `edges` and `pageInfo` gets empty edges at the
+    root. So does `auto_camel_case=False` with only `page_info { has_next_page }` selected: `hasNextPage` reads false.
+  - Reason to keep as is: none. This is an upstream defect; report it upstream as well.
+  - Behaviour change: fixes empty root edges and a wrong `hasNextPage` under those converters.
+  - Risk / blockers: overriding upstream behaviour; it needs an origin comment if adapted. The item 2 vocabulary test
+    keeps `pageInfo` unrenamed until this lands.
 
 ## Plain replacements (no behaviour change, no reason to keep)
 

@@ -2672,8 +2672,8 @@ reuse:
   the serializer base); `unwrap_return_type` / `unwrap_graphql_type` apply only to a
   consumer `input_class` override, which the serializer flavor does not accept
   ([Decision 6](#decision-6--base-class-strategy-serializermutation-rides-the-djangomutation-base-modelserializer-driven)).
-- **`utils/strings.py::snake_case`** — an optimizer-walk helper, not a serializer-input
-  reuse; do not conflate it with `graphql_camel_name`, which lives in the same module and
+- **`utils/strings.py::snake_case`** — the inverse of `graphql_camel_name`, not a
+  serializer-input reuse; do not conflate it with `graphql_camel_name`, which lives in the same module and
   **is** the GraphQL↔Django input-name boundary the serializer flavor imports.
 
 ### Import manifest — the DRY contract per `rest_framework/` module

@@ -57,6 +57,8 @@ from graphql_client import (
     JSONObject,
     JSONValue,
     RecordCompiledSql,
+    is_json_list,
+    is_json_object,
     json_at,
     json_int,
     json_list,
@@ -14288,6 +14290,19 @@ _PAGE_ARGUMENT_WIRES: dict[str, dict[str, str]] = {
         "orderBy": "sort",
     },
     "swapped": {"first": "last", "last": "first"},
+    # The connection vocabulary itself, the connection fields and a node scalar.
+    # ``pageInfo`` keeps its name: Strawberry's ``ListConnection`` resolves a root
+    # page's edges only when a selection under it is spelled ``edges`` or ``pageInfo``
+    # on the wire (``strawberry.relay.utils.should_resolve_list_connection_edges``).
+    "vocabulary": {
+        "edges": "links",
+        "node": "target",
+        "hasNextPage": "hasMore",
+        "totalCount": "tally",
+        "booksConnection": "volumes",
+        "genresConnection": "categories",
+        "title": "heading",
+    },
 }
 
 #: The offset cursor of each genre's first book (``arrayconnection:0``).
@@ -14492,6 +14507,77 @@ def test_nested_connection_per_parent_page_stays_strictness_visible_under_any_na
     assert payload.get("errors"), payload
     assert "Unplanned N+1: books" in json_str(payload, "errors", 0, "message"), payload
     assert not any("_dst_" in statement for statement in sql), sql
+
+
+#: A root connection counting its genres, each genre paging its books, and a book list
+#: paging and counting each book's genres; spelled in the default names.
+_VOCABULARY_DOCUMENT = """
+{
+  allLibraryGenresConnection(first: 5) {
+    totalCount
+    pageInfo { hasNextPage }
+    edges {
+      node {
+        name
+        booksConnection(first: 1) { pageInfo { hasNextPage } edges { node { title } } }
+      }
+    }
+  }
+  allLibraryBooks {
+    title
+    genresConnection(first: 1) { totalCount edges { node { name } } }
+  }
+}
+"""
+
+
+def _respelled_keys(value: object, names: Mapping[str, str]) -> object:
+    """``value`` with every object key ``names`` maps respelled under its mapped name."""
+    if is_json_object(value):
+        return {names.get(key, key): _respelled_keys(item, names) for key, item in value.items()}
+    if is_json_list(value):
+        return [_respelled_keys(item, names) for item in value]
+    return value
+
+
+@pytest.mark.django_db
+def test_connection_vocabulary_renamed_by_the_name_converter_plans_what_the_defaults_plan() -> (
+    None
+):
+    """A converter renaming ``edges`` / ``node`` / ``hasNextPage`` / ``totalCount``.
+
+    The root connection seam, the nested window planner and the resolve-time
+    count observers match a connection's own fields by the Python names they were
+    declared under, so the renamed document runs the default document's statements
+    exactly - the root count, the root page, one window per nested connection
+    carrying the count or the n+1 probe its selection observes - with no per-parent
+    fallback (the optimizer raises on one), and serves the same data.
+    """
+    _seed_page_argument_genres()
+    wire = _PAGE_ARGUMENT_WIRES["vocabulary"]
+    renamed = re.sub(
+        r"\b(" + "|".join(wire) + r")\b",
+        lambda match: wire[match.group(1)],
+        _VOCABULARY_DOCUMENT,
+    )
+    assert "edges" not in renamed, renamed
+
+    with CaptureQueriesContext(connection) as default_captured:
+        default_payload = response_json(
+            _post_holder(_page_argument_schema("default"), _VOCABULARY_DOCUMENT),
+        )
+    with CaptureQueriesContext(connection) as captured:
+        payload = response_json(_post_holder(_page_argument_schema("vocabulary"), renamed))
+
+    assert "errors" not in default_payload, default_payload
+    assert "errors" not in payload, payload
+    assert json_at(default_payload, "data", "allLibraryGenresConnection", "totalCount") == 2
+    assert _respelled_keys(payload, {spelled: name for name, spelled in wire.items()}) == (
+        default_payload
+    )
+    default_sql = [query["sql"] for query in default_captured.captured_queries]
+    assert len(default_sql) == 5, default_sql
+    assert [query["sql"] for query in captured.captured_queries] == default_sql
 
 
 @pytest.mark.django_db

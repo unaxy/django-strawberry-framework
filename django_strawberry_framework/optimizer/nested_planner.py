@@ -86,8 +86,6 @@ from .plans import (
     order_entry_name_and_direction,
 )
 from .selections import (
-    ConnectionFieldNames,
-    connection_field_names,
     connection_has_next_page_selected,
     connection_node_children,
     connection_total_count_selected,
@@ -823,7 +821,6 @@ def _project_scalar_only_window(
 def _connection_node_selections(
     sel: FieldSelection,
     runtime_paths: tuple[tuple[str, ...], ...],
-    names: ConnectionFieldNames,
 ) -> list[SimpleNamespace]:
     """Unwrap a nested connection's ``edges { node { ... } }`` child selections.
 
@@ -834,11 +831,8 @@ def _connection_node_selections(
     (page-info / total-count) selection with no ``edges { node }`` - those
     are still PLANNED with a connector/ordering-only projection (Decision 6),
     not a fallback.
-
-    ``names`` is the active schema's connection vocabulary, resolved once per
-    plan build by ``plan_connection_relation``.
     """
-    return connection_node_children(sel, runtime_prefixes=runtime_paths, names=names)
+    return connection_node_children(sel, runtime_prefixes=runtime_paths)
 
 
 def _int_argument(arguments: Mapping[str, object], name: str) -> int | None:
@@ -1362,15 +1356,11 @@ def plan_connection_relation(
     # plan records nested identities under an UNPLANNED sibling key's paths
     # too. Deliberate conservatism: that sibling's per-parent pipeline plans
     # its own subtree, so those nested accesses never lazy-load - the
-    # imprecision can only mask a strictness flag, never serve wrong data.
-    # The active schema's connection vocabulary, resolved ONCE per plan build and
-    # shared by the edges/node unwrap and both count observers below: under a
-    # non-default ``NameConverter`` (``auto_camel_case=False``) a hardcoded
-    # camelCase match reported every observer absent, so the window carried
-    # neither the partition count nor the n+1 probe and ``hasNextPage`` resolved
-    # ``False`` on a page that had one.
-    field_names = connection_field_names(info)
-    node_selections = _connection_node_selections(sel, runtime_paths, field_names)
+    # imprecision can only mask a strictness flag, never serve wrong data. The
+    # unwrap and both count observers below match the connection's own fields by
+    # Python name (``selections.py::selection_python_name``), whatever wire names
+    # the schema's ``NameConverter`` publishes them under.
+    node_selections = _connection_node_selections(sel, runtime_paths)
     scalar_only = not node_selections
     node_sel = SimpleNamespace(selections=node_selections)
 
@@ -1577,8 +1567,8 @@ def plan_connection_relation(
     # UNION-conservative on purpose: a sibling alias selecting ``totalCount``
     # keeps every per-key window on the count (no probe) - correct for each
     # window, one shared decision input.
-    total_selected = connection_total_count_selected(sel, names=field_names)
-    has_next_selected = connection_has_next_page_selected(sel, names=field_names)
+    total_selected = connection_total_count_selected(sel)
+    has_next_selected = connection_has_next_page_selected(sel)
     # (g) Hand one fully-resolved fetch request PER WINDOW to the active
     # strategy (the nested_fetch.py seam): the single-window scheme sends the
     # legacy shared-``to_attr`` request; the divergent scheme sends one

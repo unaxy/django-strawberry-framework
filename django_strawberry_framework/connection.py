@@ -104,9 +104,9 @@ from .optimizer.plans import (
     runtime_path_from_info,
 )
 from .optimizer.selections import (
-    connection_field_names,
     connection_has_next_page_selected,
     connection_total_count_selected,
+    info_selections,
     prime_selected_fields,
 )
 from .registry import register_subsystem_clear
@@ -169,7 +169,7 @@ if TYPE_CHECKING:
     from typing_extensions import Self, TypeIs
 
     from .filters.sets import FilterSet
-    from .optimizer.selections import ConnectionFieldNames, ConvertedSelection
+    from .optimizer.selections import ConvertedSelection
     from .orders.sets import OrderSet
     from .types.base import DjangoType
     from .types.definition import DjangoTypeDefinition
@@ -185,12 +185,7 @@ if TYPE_CHECKING:
     class _SelectionPredicate(Protocol):
         """A per-selection observer: ``connection_total_count_selected`` and its sibling."""
 
-        def __call__(
-            self,
-            selection: ConvertedSelection,
-            *,
-            names: ConnectionFieldNames = ...,
-        ) -> bool: ...
+        def __call__(self, selection: ConvertedSelection) -> bool: ...
 
 
 # Re-export the hoisted deterministic-order predicate under its original
@@ -1260,25 +1255,26 @@ def _guard_first_and_last(first: int | None, last: int | None) -> None:
 def _connection_field_requested(info: Info[object, object], selected: _SelectionPredicate) -> bool:
     """Whether any direct connection selection matches ``selected``.
 
-    One ``connection_field_names`` + ``any(...)`` walk so ``totalCount`` and
-    ``hasNextPage`` resolve-time observers cannot drift in how they iterate
-    ``info.selected_fields`` or which schema vocabulary they read.
+    One ``any(...)`` walk so ``totalCount`` and ``hasNextPage`` resolve-time
+    observers cannot drift in how they iterate the selections. They read
+    ``optimizer/selections.py::info_selections``, the converted selections that
+    carry each field's Python name, so the observers match the connection's
+    fields by the names they were declared under whatever wire names the schema
+    publishes and whoever read ``info.selected_fields`` first.
     """
-    names = connection_field_names(info)
-    return any(selected(field, names=names) for field in info.selected_fields)
+    return any(selected(field) for field in info_selections(info))
 
 
 def _total_count_requested(info: Info[object, object]) -> bool:
     """Return whether the query selects the connection's ``totalCount`` field.
 
     Checks the connection field's DIRECT children (the count field is a sibling
-    of ``edges`` / the page-info field). The GraphQL name comes from the active
-    schema's ``NameConverter`` via
-    ``optimizer/selections.py::connection_field_names`` - the Python attribute is
-    ``total_count`` and it renders camelCase only under the DEFAULT converter, so
-    matching a ``"totalCount"`` literal made this predicate answer ``False`` for
-    every schema built with ``auto_camel_case=False`` (the count was then never
-    captured and the field raised for an unset attribute).
+    of ``edges`` / the page-info field), matched by the Python name
+    ``total_count`` the field was declared under: the wire name is whatever the
+    schema's ``NameConverter`` publishes (``totalCount`` by default,
+    ``total_count`` under ``auto_camel_case=False``, anything a converter
+    overriding ``get_graphql_name`` answers), so matching it would miss the count
+    and the field would raise for an unset attribute.
 
     Scoped to the direct children deliberately: unlike
     strawberry-django's ``_should_optimize_total_count``, which recurses through
@@ -1310,9 +1306,8 @@ def _has_next_page_requested(info: Info[object, object]) -> bool:
     Delegates the whole walk to the shared per-selection primitive
     ``optimizer/selections.py::connection_has_next_page_selected`` - the same
     implementation the plan-time ``nested_planner.py::plan_connection_relation``
-    uses - so the two halves cannot drift independently, and both read the
-    page-info / has-next-page GraphQL names from the active schema's converter
-    rather than a camelCase literal.
+    uses - so the two halves cannot drift independently, and both match the
+    page-info / has-next-page fields by Python name rather than a wire literal.
     """
     return _connection_field_requested(info, connection_has_next_page_selected)
 

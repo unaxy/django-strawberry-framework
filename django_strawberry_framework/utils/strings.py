@@ -5,9 +5,8 @@ Every name transform the package applies at the GraphQL/Django boundary:
 - ``graphql_camel_name`` maps a Python attribute to the ``camelCase`` GraphQL
   name of a generated input field (filter, order, form, serializer and model
   mutation inputs), injective over lowercase snake-case identifiers.
-- ``snake_case`` maps a ``camelCase`` GraphQL name back to ``snake_case``; the
-  optimizer walker reverses each selection name with it to find the Django
-  field, then matches the forward name where the reversal is lossy.
+- ``snake_case`` maps a ``camelCase`` GraphQL name back to ``snake_case``, the
+  inverse of ``graphql_camel_name``.
 - ``pascal_case`` builds ``PascalCase`` type-name stems from field names and
   lookup paths (``<TypeName><FieldName>Enum`` choice enums, per-field filter
   and order input types); ``pascal_case_or_raise`` adds the guard against an
@@ -132,18 +131,15 @@ def snake_case(name: str) -> str:
     ``isbn10``), adjacent one-letter segments (``is_a_b`` -> ``isAB``), a
     leading underscore (``_legacy_id`` -> ``LegacyId``) and an upper-case
     letter the Django name already carries (``isPublic`` stays ``isPublic``,
-    which reverses to ``is_public``). A caller that must resolve every
-    selection also matches the forward name
-    (``optimizer/walker.py::_field_by_graphql_name``).
+    which reverses to ``is_public``), so it never stands in for the name a schema
+    published a field from (``utils/typing.py::published_python_name``).
 
     Acronym runs stay together and split before their final title-cased word
     (``"HTTPServer"`` -> ``"http_server"``); a digit attaches to the token
     before it (``"HTTPServer2API"`` -> ``"http_server2_api"``).
 
     ``name`` is normalized to an exact ``str`` before the bounded ``lru_cache``
-    (2048 entries) is consulted: the walker reverses the same small vocabulary
-    of schema field names on every plan build (a plan-cache miss, or an
-    uncacheable plan once per execution). ``cache_clear``, ``cache_info`` and
+    (2048 entries) is consulted. ``cache_clear``, ``cache_info`` and
     ``cache_parameters`` are that cache's controls.
 
     Examples:

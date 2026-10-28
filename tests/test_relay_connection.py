@@ -1388,10 +1388,9 @@ def test_nested_window_count_observers_follow_a_non_camel_case_schema(
 ) -> None:
     """``auto_camel_case=False`` renames the count observers; the planner must follow.
 
-    The observers are matched by GraphQL name, resolved through the active
-    schema's ``NameConverter``
-    (``optimizer/selections.py::connection_field_names``). Matching hardcoded
-    camelCase literals made BOTH report absent on such a schema, so the window
+    The observers are matched by the Python name each field was published from
+    (``optimizer/selections.py::selection_python_name``). Matching camelCase
+    wire literals made BOTH report absent on such a schema, so the window
     carried neither the partition count nor the n+1 probe: ``has_next_page``
     resolved ``False`` on a page that had one, and ``total_count`` raised
     ``AttributeError`` for an attribute ``resolve_connection`` never set.

@@ -143,7 +143,6 @@ from .plans import (
 from .selections import (
     ast_child_selections,
     ast_to_converted_selections,
-    connection_field_names,
     connection_node_children,
     directive_variable_names,
     named_children,
@@ -757,17 +756,9 @@ def _connection_node_child_selections(
     """
     node_children: list[SimpleNamespace] = []
     root_path = runtime_path_from_info(info)
-    # The active schema's ``edges`` / ``node`` names (camel-invariant in practice,
-    # but resolved through the same one owner as the count observers so the
-    # connection vocabulary has a single source).
-    names = connection_field_names(info)
     for connection_selection in selections:
         node_children.extend(
-            connection_node_children(
-                connection_selection,
-                runtime_prefixes=(root_path,),
-                names=names,
-            ),
+            connection_node_children(connection_selection, runtime_prefixes=(root_path,)),
         )
     return node_children
 

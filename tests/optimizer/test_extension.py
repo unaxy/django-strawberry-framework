@@ -118,6 +118,7 @@ from django_strawberry_framework.optimizer.extension import (
 )
 from django_strawberry_framework.optimizer.hints import hint_is_skip
 from django_strawberry_framework.optimizer.plans import OptimizationPlan, PrefetchSeal
+from django_strawberry_framework.optimizer.selections import PYTHON_NAME_ATTR
 from django_strawberry_framework.permissions import apply_cascade_permissions
 from django_strawberry_framework.registry import iter_subsystem_clears, registry
 from django_strawberry_framework.types.resolvers import (
@@ -3655,14 +3656,20 @@ def test_publish_plan_to_context_rebuilds_metadata_for_unfinalized_plan() -> Non
 
 def test_named_children_skips_excluded_and_recurses_through_fragments() -> None:
     """Connection extraction: ``@skip`` children are dropped and fragments inlined."""
-    skipped = SimpleNamespace(name="edges", directives={"skip": {"if": True}}, selections=[])
-    inner_edges = SimpleNamespace(name="edges", alias=None, directives={}, selections=[])
+    edges = {PYTHON_NAME_ATTR: "edges"}
+    skipped = SimpleNamespace(
+        name="edges",
+        directives={"skip": {"if": True}},
+        selections=[],
+        **edges,
+    )
+    inner_edges = SimpleNamespace(name="edges", alias=None, directives={}, selections=[], **edges)
     fragment = SimpleNamespace(
         type_condition="ItemConnectionEdge",
         directives={},
         selections=[inner_edges],
     )
-    plain = SimpleNamespace(name="edges", alias=None, directives={}, selections=[])
+    plain = SimpleNamespace(name="edges", alias=None, directives={}, selections=[], **edges)
     container = SimpleNamespace(selections=[skipped, fragment, plain])
 
     result = _named_children(container, "edges")

@@ -36,15 +36,14 @@ contracts cannot drift:
   only).
 
 Cycle-safe: ``walker.py`` and ``extension.py`` both import from here; this
-module imports neither. Beyond graphql-core AST node types and the stdlib it
-reaches ``utils/typing.py`` (itself stdlib-only) for the schema-config dig
-``connection_field_names`` needs, and ``_context.py`` for the execution frame
-its converted-selection memo lives on - both below it in the dependency order.
+module imports neither. Beyond graphql-core and the stdlib it reaches
+``utils/typing.py`` for the published-name reads the converter stamps
+(``published_python_name``), and ``_context.py`` for the execution frame its
+converted-selection memo lives on - both below it in the dependency order.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
@@ -74,13 +73,12 @@ from django_strawberry_framework.utils.typing import (
     graphql_type_of,
     inline_fragment_type_condition,
     published_python_name,
-    schema_config_from_info,
 )
 
 from ._context import converted_selections_memo
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Mapping, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
     from typing import TypeAlias
 
     from graphql.language.ast import (
@@ -122,6 +120,29 @@ if TYPE_CHECKING:
 #: ``with_runtime_prefix`` and the walker's merge copy it, and
 #: ``python_arguments`` reads it.
 PYTHON_ARGUMENTS_ATTR = "_optimizer_python_arguments"
+
+#: The marker a converted field selection carries the Python name of the field
+#: it selects under: the name the schema published the field from
+#: (``utils/typing.py::published_python_name``), whatever wire name the
+#: ``NameConverter`` gave it. ``ast_to_converted_selections`` writes it,
+#: ``with_runtime_prefix`` and the walker's merge copy it, and
+#: ``selection_python_name`` reads it.
+PYTHON_NAME_ATTR = "_optimizer_python_name"
+
+
+def selection_python_name(selection: object) -> str | None:
+    """Return the Python name of the field a converted field selection selects.
+
+    The name ``ast_to_converted_selections`` stamped on the selection: the
+    declaration the executing schema published the selected field from, so a
+    reader matches a selection to a model field, a synthesized connection or a
+    connection's own ``edges`` / ``node`` / ``page_info`` / ``total_count`` /
+    ``has_next_page`` by the name it was declared under, never by the wire name
+    a ``NameConverter`` gave it. ``None`` for a selection the converter could not
+    resolve to a field of the schema (a meta field such as ``__typename``).
+    """
+    name = read_attr(selection, PYTHON_NAME_ATTR, None)
+    return name if is_str(name) else None
 
 
 def python_arguments(selection: object) -> Mapping[str, object]:
@@ -250,10 +271,12 @@ def ast_to_converted_selections(
     The recursion also tracks the GraphQL type each selection set is read on (the
     resolver's ``parent_type`` at the top, a field's named type below it, a
     fragment's type condition inside it) so each field selection the schema
-    publishes carries its arguments by Python name, coerced by graphql-core
-    (``PYTHON_ARGUMENTS_ATTR``, read through ``python_arguments``). That marker
-    is an attribute beside the dataclass fields, so the fields Strawberry's
-    consumers read stay the mirror described above.
+    publishes carries the Python name of its field (``PYTHON_NAME_ATTR``, read
+    through ``selection_python_name``) and its arguments by Python name, coerced
+    by graphql-core (``PYTHON_ARGUMENTS_ATTR``, read through
+    ``python_arguments``). Those markers are attributes beside the dataclass
+    fields, so the fields Strawberry's consumers read stay the mirror described
+    above.
     """
     memo = converted_selections_memo()
     memo_key: ConvertedMemoKey | None = None
@@ -314,6 +337,9 @@ def ast_to_converted_selections(
                         None if field_def is None else get_named_type(graphql_type_of(field_def)),
                     ),
                 )
+                field_python_name = None if field_def is None else published_python_name(field_def)
+                if field_python_name is not None:
+                    setattr(selected, PYTHON_NAME_ATTR, field_python_name)
                 if field_def is not None and field_def.args:
                     setattr(
                         selected,
@@ -364,15 +390,32 @@ def prime_selected_fields(info: Info[object, object]) -> None:
     the regression net that would catch such a Strawberry-internals rename on a
     version bump.
     """
+    # Strawberry's own ``cached_property`` slot on the Info it handed us.
+    namespace = info.__dict__  # truth: ok seeds Strawberry Info's cache slot, not an identity read
+    if "selected_fields" in namespace:
+        return
+    selections = info_selections(info)
+    if selections:
+        namespace["selected_fields"] = selections
+
+
+def info_selections(info: Info[object, object]) -> list[Selection]:
+    """Return a resolver ``info``'s own field selections, converted and stamped.
+
+    ``ast_to_converted_selections`` over the field nodes of the graphql-core info
+    Strawberry wraps, so every field selection carries ``PYTHON_NAME_ATTR`` /
+    ``PYTHON_ARGUMENTS_ATTR`` whoever read ``info.selected_fields`` first (a
+    consumer extension reading it before ``prime_selected_fields`` leaves
+    Strawberry's unstamped list in that slot). Memoized per execution like every
+    conversion. Empty when ``info`` carries no field nodes.
+    """
     # Strawberry's ``Info`` keeps the graphql-core info at ``_raw_info``, whose
     # ``field_nodes`` is a list of ``FieldNode``s.
     raw_info: GraphQLResolveInfo | None = getattr(info, "_raw_info", None)
     field_nodes: list[FieldNode] | None = getattr(raw_info, "field_nodes", None)
-    # Strawberry's own ``cached_property`` slot on the Info it handed us.
-    namespace = info.__dict__  # truth: ok seeds Strawberry Info's cache slot, not an identity read
-    if raw_info is None or not field_nodes or "selected_fields" in namespace:
-        return
-    namespace["selected_fields"] = ast_to_converted_selections(raw_info, field_nodes)
+    if raw_info is None or not field_nodes:
+        return []
+    return ast_to_converted_selections(raw_info, field_nodes)
 
 
 # ---------------------------------------------------------------------------
@@ -588,7 +631,11 @@ def included_field_selections(
 
 
 def named_children(selection: ConvertedSelection, name: str) -> list[FieldSelection]:
-    """Return included direct children named ``name``, recursing through fragments."""
+    """Return included direct children selecting the field Python-named ``name``, through fragments.
+
+    A child matches by ``selection_python_name``: the name the selected field was
+    declared under, whatever wire name the schema's ``NameConverter`` published it as.
+    """
     children: list[FieldSelection] = []
     members: Iterable[ConvertedSelection] = getattr(selection, "selections", None) or []
     for child in members:
@@ -604,7 +651,7 @@ def named_children(selection: ConvertedSelection, name: str) -> list[FieldSelect
             # recursion a ``.selections`` to walk.
             children.extend(named_children(child, name))
             continue
-        if getattr(child, "name", None) == name:
+        if selection_python_name(child) == name:
             # ``is_fragment`` rejected it, so it is a field selection.
             children.append(cast("FieldSelection", child))
     return children
@@ -646,6 +693,7 @@ def with_runtime_prefix(
         selections=list(getattr(selection, "selections", None) or []),
         **{
             RUNTIME_PREFIXES_ATTR: list(runtime_prefixes),
+            PYTHON_NAME_ATTR: selection_python_name(selection),
             PYTHON_ARGUMENTS_ATTR: python_arguments(selection),
         },
     )
@@ -666,88 +714,22 @@ def node_children_with_runtime_prefix(
     return children
 
 
-@dataclass(frozen=True)
-class ConnectionFieldNames:
-    """The GraphQL names the active schema gives a connection's own fields.
-
-    Every selection walk below matches a connection's structural fields by
-    GraphQL name, so those names must come from the schema Strawberry actually
-    built rather than from a hardcoded camelCase literal. Under
-    ``strawberry_config(auto_camel_case=False)`` - a supported, documented knob -
-    the fields render ``page_info`` / ``total_count`` / ``has_next_page``, and a
-    literal-matching walk silently reported "not selected" for both count
-    observers: the planner then chose ``FetchMode.NONE``, so ``hasNextPage``
-    resolved ``False`` on a page that had a next page and ``totalCount`` raised
-    for a never-set attribute.
-
-    ``edges`` / ``node`` are single lowercase words and therefore camel-invariant,
-    but they are carried here too so no half of the vocabulary is resolved by a
-    different mechanism than the other.
-    """
-
-    edges: str = "edges"
-    node: str = "node"
-    page_info: str = "pageInfo"
-    total_count: str = "totalCount"
-    has_next_page: str = "hasNextPage"
-
-
-#: The default-``NameConverter`` vocabulary (``auto_camel_case=True``). It is the
-#: fallback for every direct / test caller that has no ``info`` in hand, so those
-#: call sites keep their historical behavior without threading a schema through.
-DEFAULT_CONNECTION_FIELD_NAMES = ConnectionFieldNames()
-
-#: The PYTHON attribute names of the five fields above, derived directly in
-#: ``ConnectionFieldNames`` field order - the input the schema's name converter transforms.
-_CONNECTION_FIELD_PYTHON_NAMES = tuple(f.name for f in fields(ConnectionFieldNames))
-
-
-def connection_field_names(info: object) -> ConnectionFieldNames:
-    """Resolve a connection's structural field names through ``info``'s schema.
-
-    Forward resolution, the direction ``ATTENTION.md`` establishes for this
-    boundary and the walker already uses for MODEL fields
-    (``walker.py::_graphql_names_by_python_name``): the Python attribute name is
-    authoritative, and the active schema's ``NameConverter`` says what it renders
-    as. All five fields are framework-owned and declared WITHOUT an explicit
-    ``graphql_name`` (``connection.py`` declares ``total_count`` as a bare
-    ``strawberry.field(description=...)``; the rest come from Strawberry's own
-    ``Connection`` / ``Edge`` / ``PageInfo``), so the converter's naming policy -
-    ``NameConverter.apply_naming_config``, exactly what
-    ``get_graphql_name`` applies to a field with no explicit name - IS the whole
-    transformation.
-
-    Falls back to ``DEFAULT_CONNECTION_FIELD_NAMES`` when no schema config is
-    reachable (a plain graphql-core ``info`` stub, a direct planner call) or when
-    the converter does not expose ``apply_naming_config``; both mean "assume
-    Strawberry's default vocabulary", which is what the literals encoded before.
-
-    Known limitation: a consumer ``NameConverter`` that overrides
-    ``get_graphql_name`` / ``from_field`` to rename by something other than the
-    python name (e.g. keyed on the owning type) is not reproduced here, because
-    these predicates walk a SELECTION and never hold the ``StrawberryField``
-    objects. ``auto_camel_case`` and any ``apply_naming_config`` override - the
-    documented naming knobs - are.
-    """
-    converter = getattr(schema_config_from_info(info), "name_converter", None)
-    # Strawberry's ``NameConverter.apply_naming_config`` renders a python name as a ``str``.
-    apply_naming_config: Callable[[str], str] | None = getattr(
-        converter,
-        "apply_naming_config",
-        None,
-    )
-    if not callable(apply_naming_config):
-        return DEFAULT_CONNECTION_FIELD_NAMES
-    return ConnectionFieldNames(
-        *(apply_naming_config(name) for name in _CONNECTION_FIELD_PYTHON_NAMES),
-    )
+# The Python names of a Relay connection's own fields, the names Strawberry's
+# ``relay.Connection`` / ``Edge`` / ``PageInfo`` and ``connection.py``'s
+# ``total_count`` declare them under. Every walk below matches a selection to
+# them through ``selection_python_name``, so the wire names the executing
+# schema's ``NameConverter`` publishes them as never enter the match.
+_EDGES = "edges"
+_NODE = "node"
+_PAGE_INFO = "page_info"
+_TOTAL_COUNT = "total_count"
+_HAS_NEXT_PAGE = "has_next_page"
 
 
 def connection_node_children(
     selection: ConvertedSelection,
     *,
     runtime_prefixes: tuple[tuple[str, ...], ...],
-    names: ConnectionFieldNames = DEFAULT_CONNECTION_FIELD_NAMES,
 ) -> list[SimpleNamespace]:
     """Unwrap a Relay connection's ``edges { node { ... } }`` child selections.
 
@@ -756,16 +738,14 @@ def connection_node_children(
     connection apply seam (``extension.py``) and nested-connection planning
     (``nested_planner.py``) so fragment / directive / prefix semantics cannot
     drift between those call sites. Returns an empty list when the selection
-    has no ``edges { node }`` (e.g. ``pageInfo`` / ``totalCount`` only).
-
-    ``names`` carries the active schema's connection vocabulary
-    (``connection_field_names``); it defaults to Strawberry's camelCase names so
-    direct / test callers need not thread a schema.
+    has no ``edges { node }`` (e.g. ``pageInfo`` / ``totalCount`` only). Both
+    levels match by Python name (``named_children``), so the unwrap holds under
+    any wire names the schema publishes them as.
     """
     node_children: list[SimpleNamespace] = []
-    for edge_selection in named_children(selection, names.edges):
+    for edge_selection in named_children(selection, _EDGES):
         edge_path_prefixes = tuple((*rp, response_key(edge_selection)) for rp in runtime_prefixes)
-        for node_selection in named_children(edge_selection, names.node):
+        for node_selection in named_children(edge_selection, _NODE):
             node_path_prefixes = tuple(
                 (*ep, response_key(node_selection)) for ep in edge_path_prefixes
             )
@@ -779,8 +759,9 @@ def connection_node_children(
 
 
 def direct_child_selected(selection_roots: Iterable[ConvertedSelection], name: str) -> bool:
-    """Return whether ``name`` is a direct child of ``selection_roots``, through fragments only.
+    """Return whether the field Python-named ``name`` is a direct child, through fragments only.
 
+    A selection matches by ``selection_python_name``, never by its wire name.
     Recurses ONLY through fragment wrappers (``is_fragment``), NOT into a regular
     field's sub-selections, so a field named ``name`` nested deeper in the tree
     does NOT count. The connection field's ``totalCount`` detection
@@ -806,17 +787,12 @@ def direct_child_selected(selection_roots: Iterable[ConvertedSelection], name: s
         if is_fragment(selection):
             members: Iterable[ConvertedSelection] = getattr(selection, "selections", None) or []
             return any(_check(child) for child in members)
-        selection_name: str | None = getattr(selection, "name", None)
-        return selection_name == name
+        return selection_python_name(selection) == name
 
     return any(_check(child) for child in selection_roots)
 
 
-def connection_total_count_selected(
-    selection: ConvertedSelection,
-    *,
-    names: ConnectionFieldNames = DEFAULT_CONNECTION_FIELD_NAMES,
-) -> bool:
+def connection_total_count_selected(selection: ConvertedSelection) -> bool:
     """Return whether ``selection`` (a connection field) selects ``totalCount``.
 
     The count field as a DIRECT child of the connection, through fragment
@@ -825,18 +801,14 @@ def connection_total_count_selected(
     ``nested_planner.py::plan_connection_relation`` and the resolve-time
     ``connection.py::_total_count_requested`` both call it, so the two
     halves of the conditional ``_dst_total_count`` contract share one walk
-    by construction - which also means they share ONE resolved ``names``
-    vocabulary and cannot disagree about what the field is called.
+    by construction - and match the field by its Python name ``total_count``,
+    so neither depends on the wire name the schema publishes it under.
     """
     children: Iterable[ConvertedSelection] = getattr(selection, "selections", None) or []
-    return direct_child_selected(children, names.total_count)
+    return direct_child_selected(children, _TOTAL_COUNT)
 
 
-def connection_has_next_page_selected(
-    selection: ConvertedSelection,
-    *,
-    names: ConnectionFieldNames = DEFAULT_CONNECTION_FIELD_NAMES,
-) -> bool:
+def connection_has_next_page_selected(selection: ConvertedSelection) -> bool:
     """Return whether ``selection`` selects ``pageInfo { hasNextPage }``.
 
     The ``hasNextPage`` sibling of ``connection_total_count_selected``: a
@@ -848,7 +820,7 @@ def connection_has_next_page_selected(
     return any(
         direct_child_selected(
             getattr(page_info, "selections", None) or [],
-            names.has_next_page,
+            _HAS_NEXT_PAGE,
         )
-        for page_info in named_children(selection, names.page_info)
+        for page_info in named_children(selection, _PAGE_INFO)
     )

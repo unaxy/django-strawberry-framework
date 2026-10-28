@@ -244,6 +244,7 @@
 "examples/fakeshop/apps/library/models.py::ProxyBranch.Meta" = { reportIncompatibleVariableOverride = 1 }
 "examples/fakeshop/apps/library/models.py::VisibleBranch.Meta" = { reportIncompatibleVariableOverride = 1 }
 "examples/fakeshop/apps/library/schema.py::BranchType.shelves" = { reportAny = 1 }
+"examples/fakeshop/apps/library/schema.py::DistributorType.display_name" = { reportAny = 1 }
 "examples/fakeshop/apps/library/schema.py::PatronProfileType.address_2" = { reportAny = 1 }
 "examples/fakeshop/apps/library/schema.py::PatronProfileType.postal_code" = { reportAny = 1 }
 "examples/fakeshop/apps/library/serializers.py::FieldMap" = { reportExplicitAny = 1 }
@@ -471,10 +472,7 @@
 "tests/optimizer/test_walker.py::_as_definitionless_django_type" = { reportReturnType = 1 }
 "tests/optimizer/test_walker.py::_as_partial_resolve_info" = { reportReturnType = 1 }
 "tests/optimizer/test_walker.py::test_child_builder_spends_the_passed_definition_not_a_class_reread" = { reportAssignmentType = 1 }
-"tests/optimizer/test_walker.py::test_forward_name_maps_wait_for_finalization.PatronProfileNode" = { reportAny = 1 }
-"tests/optimizer/test_walker.py::test_name_resolution_defensively_skips_unusable_metadata" = { reportArgumentType = 2 }
 "tests/optimizer/test_walker.py::test_plan_tolerates_optimizer_hints_set_to_none" = { reportAttributeAccessIssue = 1 }
-"tests/optimizer/test_walker.py::test_plan_uses_exact_graphql_names_for_explicitly_named_fields.PatronProfileNode" = { reportAny = 2 }
 "tests/optimizer/test_walker.py::test_prefetch_hint_for_path_rejects_prefetch_without_lookup" = { reportArgumentType = 1 }
 "tests/optimizer/test_walker.py::test_unregistered_field_map_rejects_malformed_descriptor" = { reportArgumentType = 1 }
 "tests/orders/test_base.py::test_related_order_gate_rejection_message_is_pinned.Owner" = { reportArgumentType = 1 }

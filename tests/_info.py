@@ -11,8 +11,10 @@ response path a resolver several levels deep sees.
 The operation keyword (``query`` / ``mutation`` / ``subscription``) and a whole document with
 several operations are both accepted: the document is parsed, never validated, so the
 small schema needs no mutation or subscription root. Every built info's ``parent_type`` is
-that schema's query root, which carries Strawberry's definition backref for the default
-field ``field`` only.
+that schema's query root, which publishes the default field ``field`` and a
+``connectionField`` returning an ``XConnection`` (``edges { node }``, ``pageInfo``,
+``totalCount``), so a selection under either carries the Python names its fields were
+published from.
 
 ``unread_info`` is a real ``Info`` that refuses every attribute read. A test whose claim is
 that the path under test never reads ``info`` passes it: any read fails the test with the
@@ -67,6 +69,36 @@ if TYPE_CHECKING:
 
 
 @strawberry.type
+class _XNode:
+    """A connection node publishing its own ``total_count``, a name the connection also uses."""
+
+    total_count: int = 0
+
+
+@strawberry.type
+class _XEdge:
+    """A connection edge, its node under ``node``."""
+
+    node: _XNode = strawberry.field(default_factory=_XNode)
+
+
+@strawberry.type
+class _XPageInfo:
+    """A connection's page info, publishing ``has_next_page``."""
+
+    has_next_page: bool = False
+
+
+@strawberry.type(name="XConnection")
+class _XConnection:
+    """A connection shape: ``edges``, ``page_info`` and ``total_count``, by Python name."""
+
+    edges: list[_XEdge] = strawberry.field(default_factory=list)
+    page_info: _XPageInfo = strawberry.field(default_factory=_XPageInfo)
+    total_count: int = 0
+
+
+@strawberry.type
 class _Query:
     """The query root every built ``Info`` hangs off; no test resolves its fields.
 
@@ -76,6 +108,7 @@ class _Query:
     """
 
     field: str = ""
+    connection_field: _XConnection = strawberry.field(default_factory=_XConnection)
 
     @strawberry.field
     def page(

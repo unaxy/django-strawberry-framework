@@ -20,6 +20,7 @@ from typing_extensions import override
 
 from django_strawberry_framework import DjangoOptimizerExtension, DjangoType, finalize_django_types
 from django_strawberry_framework.optimizer.field_meta import FieldMeta
+from django_strawberry_framework.optimizer.selections import PYTHON_NAME_ATTR
 from django_strawberry_framework.optimizer.walker import plan_optimizations, plan_relation
 from django_strawberry_framework.registry import registry
 
@@ -33,13 +34,14 @@ def _isolate_registry() -> Iterator[None]:
 
 
 def _sel(name: str, selections: list[object] | None = None) -> SimpleNamespace:
-    """Build a synthetic selected field."""
+    """Build a synthetic selected field, published from the Python name ``name``."""
     return SimpleNamespace(
         name=name,
         alias=None,
         directives={},
         arguments={},
         selections=selections or [],
+        **{PYTHON_NAME_ATTR: name},
     )
 
 
