@@ -784,6 +784,35 @@ def to_python_value(field: _PythonCoercing, value: object) -> object:
     return field.to_python(value)
 
 
+def identity_key(field: ModelField | None, value: object) -> object:
+    """Return the key one identity of ``field``'s column compares by: the column's own value.
+
+    The comparison basis wherever the package matches an identity it decoded against
+    the rows a query returned (the ``nodes`` reorder, the relation membership map).
+    ``field.to_python`` (the cast every identity decode and every lookup goes through)
+    turns both sides into the column's Python value, which compares by value, not by
+    spelling: an unconstrained decimal key ``2.50`` is the stored ``2.5`` (PostgreSQL
+    keeps the written scale, so a row read back as ``1.50`` is the decoded ``1.5``), an
+    aware datetime key in any UTC offset is the row read back in UTC, ``"07"`` is the
+    integer pk ``7`` and an upper-case UUID is its lower-case form. Equality a database
+    collation adds (a case-insensitive key) is no part of the column's value, so an id
+    the lookup matched only through it misses.
+
+    A side with no column to cast against (``field`` is ``None`` or no concrete
+    ``models.Field``: a ``relay.NodeID`` attribute naming no model field) keys by
+    ``str``, the only form its raw literal has, and so does a value the cast leaves
+    unhashable (a list from a composite or array column).
+    """
+    if not isinstance(field, models.Field):
+        return str(value)
+    key = to_python_value(field, value)
+    try:
+        _ = hash(key)
+    except TypeError:
+        return str(key)
+    return key
+
+
 #: Django's all-backend NUL rule; a text id holding a NUL names no row.
 _PROHIBIT_NULL_CHARACTERS = ProhibitNullCharactersValidator()
 
@@ -5678,30 +5707,21 @@ def relation_path_visibility_types(
     )
 
 
-def _stringified(pks: Iterable[object]) -> set[str]:
-    """Stringify a pk collection into the type-agnostic comparison basis.
-
-    The ``{str(pk) for pk in ...}`` coercion both membership helpers share, so
-    the comparison basis (an int pk and its ``"3"`` string form compare equal -
-    the GlobalID-in-filter string-explosion class) has exactly one body.
-    """
-    return {str(pk) for pk in pks}
-
-
-def stringified_pks_present(
+def pks_present(
     queryset: models.QuerySet[models.Model],
     query_pks: Iterable[object],
     key_attname: str | None = None,
-) -> dict[str, object]:
-    """Map each pk among ``query_pks`` present in ``queryset``, stringified, to its key (one query).
+) -> dict[object, object]:
+    """Map the ``identity_key`` of each pk among ``query_pks`` present in ``queryset`` to its key.
 
     The ``queryset.filter(pk__in=...)`` lookup the relation membership checks share
     (spec-039): the model ``utils/write_values.py::decode_visible_relation_ids`` and the
     serializer ``visible_related_objects`` both build this present-map in one query,
-    keyed by each pk stringified for a type-agnostic membership compare (an int pk and
-    its ``"3"`` string form compare equal; the keys are the present set). Single-sites
-    the query + the str-coercion so the no-existence-leak comparison basis cannot
-    drift.
+    keyed by each present pk's ``identity_key`` through ``queryset``'s pk field, the
+    basis ``pks_all_present`` keys the requested pks by (the keys are the present set),
+    so a requested pk matches the row whose pk holds the same column value however it
+    is spelled (``"3"`` and ``3``, ``2.50`` and a stored ``2.5``). Single-sites the query + the
+    comparison key so the no-existence-leak comparison basis cannot drift.
 
     Each value is the key a relation stores for that row. ``key_attname`` ``None``
     reads the pk alone (``values_list("pk", flat=True)``), so the value is the pk; a
@@ -5736,7 +5756,8 @@ def stringified_pks_present(
     )
     if still_visible is not None:
         rows = [(pk, key) for pk, key in rows if pk in still_visible]
-    return _keys_by_str_pk(rows)
+    pk_field = queryset.model._meta.pk
+    return {identity_key(pk_field, pk): key for pk, key in rows}
 
 
 def linkable_rows(
@@ -5757,23 +5778,23 @@ def linkable_rows(
     return queryset.filter(**{f"{key_attname}__isnull": False})
 
 
-def _keys_by_str_pk(rows: Iterable[tuple[object, object]]) -> dict[str, object]:
-    """Index each row's key by its ``str``-formed ``pk``."""
-    return {str(pk): key for pk, key in rows}
-
-
-def pks_all_present(declared_pks: Iterable[object], present: AbstractSet[str]) -> bool:
-    """Return whether every ``declared_pks`` member (stringified) is in ``present`` (spec-039).
+def pks_all_present(
+    pk_field: ModelField | None,
+    declared_pks: Iterable[object],
+    present: AbstractSet[object],
+) -> bool:
+    """Return whether every ``declared_pks`` member's ``identity_key`` is in ``present`` (spec-039).
 
     The subset-membership test the model relation guard
     (``utils/write_values.py::decode_visible_relation_ids``) and the serializer M2M
     decoder (``rest_framework/resolvers.py::_decode_relation_multi``) share: a
-    ``declared`` set is fully present iff its stringified members are a subset of the
-    ``present`` set (typically the keys of ``stringified_pks_present``'s map). A
-    missing / hidden member fails the subset check, which each caller maps to the
-    uniform field-keyed relation error - the same no-existence-leak outcome.
+    ``declared`` set is fully present iff its members, keyed through ``pk_field`` (the
+    related model's pk), are a subset of the ``present`` set (typically the keys of
+    ``pks_present``'s map, keyed the same way). A missing / hidden member fails the
+    subset check, which each caller maps to the uniform field-keyed relation error -
+    the same no-existence-leak outcome.
     """
-    return _stringified(declared_pks) <= present
+    return {identity_key(pk_field, pk) for pk in declared_pks} <= present
 
 
 def visible_related_object(
@@ -5840,15 +5861,15 @@ def visible_related_objects(
     info: object,
     async_recourse: str = _RELAY_ASYNC_RECOURSE,
     key_attname: str | None = None,
-) -> dict[str, object]:
+) -> dict[object, object]:
     """Map the VISIBLE pks among ``pks`` to their stored keys in ONE visibility-scoped query.
 
     The BATCHED counterpart to ``visible_related_object``: instead of one visibility query per
     id (the per-element multi-relation decode), decode/type-check all ids first, then confirm
     the whole set's visibility in ONE ``pk__in`` query through the related primary
     ``DjangoType.get_queryset`` (or the target's default manager when no primary is registered -
-    no visibility contract). Returns ``stringified_pks_present``'s map: the pks actually visible
-    (stringified for a type-agnostic membership compare) to the value a relation keyed by
+    no visibility contract). Returns ``pks_present``'s map: the pks actually visible (each
+    keyed by its ``identity_key``, the column's own value) to the value a relation keyed by
     ``key_attname`` stores for each (the pk itself when ``None``); the caller asserts the
     REQUESTED set is a subset of its keys, so a hidden / missing member collapses to the same
     field-keyed relation error (no existence leak), exactly as the single decoder does. An
@@ -5859,7 +5880,7 @@ def visible_related_objects(
     # The visibility-or-default-manager base is single-sited in
     # ``related_visibility_queryset_or_default``.
     queryset = related_visibility_queryset_or_default(related_model, info, async_recourse)
-    return stringified_pks_present(queryset, pks, key_attname)
+    return pks_present(queryset, pks, key_attname)
 
 
 @overload

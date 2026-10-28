@@ -14,15 +14,20 @@ contracts, ``SyncMisuseError`` discrimination (``original_error`` is not a wire
 field), and the public-export surface.
 """
 
+import contextlib
+import datetime
 import re
-from collections.abc import Awaitable, Callable, Iterable, Iterator
+from collections.abc import Awaitable, Callable, Generator, Iterable, Iterator
+from decimal import Decimal
+from typing import TYPE_CHECKING
 
+import django
 import pytest
 import strawberry
 from apps.products import services
 from apps.products.models import Category
 from asgiref.sync import sync_to_async
-from django.db import DEFAULT_DB_ALIAS, connection
+from django.db import DEFAULT_DB_ALIAS, connection, models
 from django.db.models import Model, QuerySet
 from django.test.utils import CaptureQueriesContext
 from django.utils.functional import SimpleLazyObject
@@ -52,7 +57,11 @@ from django_strawberry_framework.relay import (
     _stamp_node_type,
     decode_model_global_id,
 )
-from django_strawberry_framework.types.relay import SyncMisuseError, implements_relay_node
+from django_strawberry_framework.types.relay import (
+    SyncMisuseError,
+    _order_nodes,
+    implements_relay_node,
+)
 from django_strawberry_framework.utils import truth as real_truth
 from django_strawberry_framework.utils._narrowing import read_attr
 from tests._idioms import (
@@ -63,6 +72,18 @@ from tests._idioms import (
     requires_fetch_modes,
     saved_pk,
 )
+
+if TYPE_CHECKING:
+    from typing import TypeAlias
+
+    from django.db.models.expressions import Combinable
+
+    # The field's descriptor types as django-stubs declares them (set type, get type), spelled
+    # out because the checker runs without the django-stubs mypy plugin that would infer them.
+    _AwareStamp: TypeAlias = models.DateTimeField[
+        str | datetime.datetime | datetime.date | Combinable,
+        datetime.datetime,
+    ]
 
 
 @pytest.fixture(autouse=True)
@@ -729,6 +750,160 @@ def test_default_resolvers_find_a_row_whose_id_literal_spells_its_pk_differently
 
     assert result.errors is None
     assert result.data == {"node": {"name": row.name}, "nodes": [{"name": row.name}]}
+
+
+class _SpelledDecimalKeyed(Model):
+    """A Relay row keyed by a ``DecimalField`` without ``max_digits``."""
+
+    code: "models.DecimalField[str | float | Decimal | Combinable, Decimal]" = models.DecimalField(
+        primary_key=True,
+        max_digits=None,
+        decimal_places=None,
+    )
+    name: "models.TextField[str | Combinable, str]" = models.TextField()
+
+    class Meta:
+        app_label = "products"
+        managed = False
+        db_table = "relay_spelled_decimal_keyed"
+
+
+class _SpelledStampKeyed(Model):
+    """A Relay row keyed by an aware ``DateTimeField``."""
+
+    stamp: "_AwareStamp" = models.DateTimeField(primary_key=True)
+    name: "models.TextField[str | Combinable, str]" = models.TextField()
+
+    class Meta:
+        app_label = "products"
+        managed = False
+        db_table = "relay_spelled_stamp_keyed"
+
+
+@contextlib.contextmanager
+def _spelled_key_table(model: type[Model], key: object) -> Generator[str, None, None]:
+    """Create ``model``'s table holding one row keyed ``key``; yield its model-label prefix."""
+    with connection.schema_editor() as editor:
+        editor.create_model(model)
+    try:
+        _ = model._default_manager.create(pk=key, name="stored")
+        yield f"products.{model._meta.model_name}"
+    finally:
+        with connection.schema_editor() as editor:
+            editor.delete_model(model)
+
+
+def _spelled_key_answer(
+    model: type[Model],
+    label: str,
+    spelled: str,
+    root: str,
+) -> object:
+    """Query the ``root`` refetch field over ``model`` with the id spelled ``spelled``."""
+    meta = {
+        "model": model,
+        "fields": ("name",),
+        "interfaces": (relay.Node,),
+        "name": "SpelledNode",
+    }
+    spelled_node = type("SpelledNode", (DjangoType,), {"Meta": type("Meta", (), meta)})
+
+    @strawberry.type
+    class Query:
+        node: relay.Node | None = DjangoNodeField()
+        nodes: list[relay.Node | None] = DjangoNodesField()
+
+    finalize_django_types()
+    schema = strawberry.Schema(query=Query, config=strawberry_config(), types=[spelled_node])
+    selection = "node(id: $id)" if root == "node" else "nodes(ids: [$id])"
+    result = schema.execute_sync(
+        f"query ($id: ID!) {{ {selection} {{ ... on SpelledNode {{ name }} }} }}",
+        variable_values={"id": _gid(label, spelled)},
+    )
+    assert result.errors is None, result.errors
+    return result.data
+
+
+_STORED_ANSWER = {"node": {"node": {"name": "stored"}}, "nodes": {"nodes": [{"name": "stored"}]}}
+_REFETCH_ROOTS = pytest.mark.parametrize("root", ["node", "nodes"])
+
+
+@pytest.mark.skipif(connection.vendor != "sqlite", reason="SQLite stores the value it is bound")
+@pytest.mark.skipif(
+    django.VERSION < (6, 1),
+    reason="Django below 6.1 cannot read back a DecimalField without decimal_places",
+)
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("stored", "spelled"),
+    [
+        pytest.param(Decimal("2.5"), "2.50", id="trailing-zero"),
+        pytest.param(Decimal(7), "7.0", id="one-fractional-zero"),
+        pytest.param(Decimal(7), "7.00", id="two-fractional-zeros"),
+        pytest.param(Decimal(70), "7E+1", id="exponent"),
+        pytest.param(Decimal(0), "0.00", id="zero"),
+    ],
+)
+@_REFETCH_ROOTS
+def test_refetch_finds_an_unconstrained_decimal_key_spelled_differently(
+    stored: Decimal,
+    spelled: str,
+    root: str,
+) -> None:
+    """``node`` and ``nodes`` match a decimal id to its row by value, as the ``__in`` filter does.
+
+    Both read through the ``resolve_nodes`` reorder, which keys both sides by the column's
+    value, so an id spelling the stored decimal with other trailing zeros or an exponent
+    gets the row, not ``null``.
+    """
+    with _spelled_key_table(_SpelledDecimalKeyed, stored) as label:
+        answer = _spelled_key_answer(_SpelledDecimalKeyed, label, spelled, root)
+    assert answer == _STORED_ANSWER[root]
+
+
+@pytest.mark.django_db(transaction=True)
+@_REFETCH_ROOTS
+def test_refetch_finds_an_aware_datetime_key_spelled_in_another_offset(root: str) -> None:
+    """An aware datetime id in a non-UTC offset gets the row the database reads back in UTC."""
+    stored = datetime.datetime(2024, 1, 1, 8, tzinfo=datetime.timezone.utc)
+    with _spelled_key_table(_SpelledStampKeyed, stored) as label:
+        answer = _spelled_key_answer(
+            _SpelledStampKeyed,
+            label,
+            "2024-01-01T10:00:00+02:00",
+            root,
+        )
+    assert answer == _STORED_ANSWER[root]
+
+
+def test_order_nodes_matches_a_row_holding_the_requested_decimal_at_another_scale() -> None:
+    """A row read back at the scale it was written (PostgreSQL's ``numeric``) matches its value.
+
+    PostgreSQL keeps an unconstrained decimal's written scale, so a row stored as ``1.50``
+    reads back as ``Decimal("1.50")`` while the decoded id is ``Decimal("1.5")``: the
+    reorder compares values, so the row fills its position and a required lookup holds.
+    """
+
+    class SpelledNode(DjangoType):
+        class Meta:
+            model = _SpelledDecimalKeyed
+            fields = ("name",)
+            interfaces = (relay.Node,)
+            name = "SpelledNode"
+
+    finalize_django_types()
+    assert implements_relay_node(SpelledNode)
+    row = _SpelledDecimalKeyed(code=Decimal("1.50"), name="stored")
+    for required in (False, True):
+        ordered = _order_nodes(
+            SpelledNode,
+            [row],
+            [Decimal("1.5"), None],
+            "pk",
+            field=_SpelledDecimalKeyed._meta.pk,
+            required=required,
+        )
+        assert ordered == [row, None]
 
 
 def _strawberry_node_schema() -> strawberry.Schema:

@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 364 done, 212 to do.
+Progress: 365 done, 214 to do.
 
 ## Done
 
@@ -2047,6 +2047,15 @@ Progress: 364 done, 212 to do.
   shares; a zero is held only by its scale and its written exponent's bound. Other backends bind as given.
   spec-027, README and the `filterset` glossary term say so. Tests: `tests/utils/test_errors.py`,
   `tests/filters/test_sets.py`
+- [x] 531. `node` / `nodes` and the relation-id decodes of the model (FK and M2M) and serializer (M2M) flavors match a
+  requested id to its row by the id column's own value (`utils/querysets.py::identity_key`, the column's `to_python`,
+  on both sides of `types/relay.py::_order_nodes`, `utils/querysets.py::pks_present` / `pks_all_present` and
+  `utils/write_values.py::decode_visible_relation_ids`), not by `str()`: an unconstrained decimal key spelled with other
+  trailing zeros or an exponent (`"2.50"` for a stored `2.5`, `"7E+1"` for `70`; PostgreSQL's kept scale) and an aware
+  datetime key spelled in another UTC offset find their row instead of answering null or "Invalid id". A NodeID slot
+  naming no model field keeps the string. spec-032, spec-036 and spec-039 say so. Tests:
+  `tests/test_relay_node_field.py`, `tests/mutations/test_resolvers.py`, `tests/rest_framework/test_resolvers.py`,
+  `tests/utils/test_querysets.py`
 
 ## Outside review of the fixes
 
@@ -2138,11 +2147,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `DecimalField` with no `max_digits` (a serializer through an explicit `serializers.DecimalField(max_digits=None,
   decimal_places=None)`): PostgreSQL refuses the bind with a masked `DataError`, and SQLite stores it as `Infinity`
   or `0` without a word. Found verifying 591
-- [ ] 531. (robustness) An unconstrained `DecimalField` key is matched by its spelling where the package compares
-  `str()` (`types/relay.py::_order_nodes` for `nodes`, `utils/querysets.py::stringified_pks_present` for relation
-  write ids): a row PostgreSQL stores as `1.50` misses `nodes(ids: ["…:1.5"])` though `node` finds it, and on
-  SQLite `createOwner(keyId: "2.50")` answers "Invalid id" for the stored `2.5` while the `key` filter finds it.
-  Found verifying 591
 - [ ] 534. (robustness) `OrderSetMetaclass` accepts any `Meta` key (`Meta.bogus`, a misspelt `fiels`) without a
   word, where `DjangoType` (`types/base.py::_validate_meta`) and the write flavors
   (`write_mixins.py::reject_unknown_meta_keys`) refuse an unknown key; a typo in an order set's narrowing passes
@@ -2232,12 +2236,19 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `"-1e1000000"` to a `Decimal` that reaches the bind as a huge int (integer column) or -inf (float column); the
   filter ask reads only temporal and decimal columns. Unmeasured: the client-visible answer per backend. Found fixing
   529
+- [ ] 675. (robustness) SQLite stores an unconstrained `DecimalField` key past 15 significant digits as a float (read
+  back rounded), so `node` / `nodes` answer null for an id spelling the written value. Found fixing 531
+- [ ] 676. (robustness) A naive datetime id on a `DateTimeField`-pk Relay type answers the masked error on `node` and
+  `nodes` (unexamined: possibly the naive-datetime bind warning). Found fact-finding 531
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 677. CHANGELOG entry for item 531: `node` / `nodes` and model / serializer relation ids find a row whose
+  decimal or aware-datetime key they spell differently (trailing zeros, exponent, UTC offset) instead of answering null
+  or "Invalid id"
 - [ ] 674. CHANGELOG entry for item 529: on PostgreSQL a decimal filter value outside `numeric`'s format is the
   field-keyed `FILTER_INVALID` "Enter a value the database can represent." instead of a masked error
 - [ ] 901. CHANGELOG entry for item 645: async generated mutations drain abandoned running field/list siblings and

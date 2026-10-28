@@ -51,11 +51,13 @@ import threading
 import time
 from collections.abc import Callable, Generator, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from decimal import Decimal
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, TypeAlias, TypeVar
 from unittest import mock
 from unittest.mock import MagicMock, patch
 
+import django
 import pytest
 import strawberry
 from apps.library import models as library_models
@@ -4786,3 +4788,185 @@ def test_to_field_through_m2m_input_sets_the_key_its_through_rows_store() -> Non
             flat=True,
         )
         assert sorted(stored) == ["c-t2", "c-t3"]
+
+
+class SpelledDecimalTarget(models.Model):
+    """A relation target keyed by a ``DecimalField`` without ``max_digits``."""
+
+    code: models.DecimalField[str | float | Decimal | Combinable, Decimal] = models.DecimalField(
+        primary_key=True,
+        max_digits=None,
+        decimal_places=None,
+    )
+
+    class Meta:
+        app_label = "products"
+        managed = False
+        db_table = "mutations_spelled_decimal_target"
+
+
+class SpelledStampTarget(models.Model):
+    """A relation target keyed by an aware ``DateTimeField``."""
+
+    stamp: models.DateTimeField[
+        str | datetime.datetime | datetime.date | Combinable,
+        datetime.datetime,
+    ] = models.DateTimeField(primary_key=True)
+
+    class Meta:
+        app_label = "products"
+        managed = False
+        db_table = "mutations_spelled_stamp_target"
+
+
+class SpelledKeyOwner(models.Model):
+    """A row relating to each spelled-key target by a nullable FK and an M2M."""
+
+    name: _Text = models.TextField()
+    decimal_target: models.ForeignKey[
+        SpelledDecimalTarget | Combinable | None,
+        SpelledDecimalTarget | None,
+    ] = models.ForeignKey(
+        SpelledDecimalTarget,
+        on_delete=models.CASCADE,
+        null=True,
+        related_name="+",
+    )
+    decimal_targets: models.ManyToManyField[SpelledDecimalTarget, models.Model] = (
+        models.ManyToManyField(SpelledDecimalTarget, related_name="+")
+    )
+    stamp_target: models.ForeignKey[
+        SpelledStampTarget | Combinable | None,
+        SpelledStampTarget | None,
+    ] = models.ForeignKey(
+        SpelledStampTarget,
+        on_delete=models.CASCADE,
+        null=True,
+        related_name="+",
+    )
+    stamp_targets: models.ManyToManyField[SpelledStampTarget, models.Model] = (
+        models.ManyToManyField(SpelledStampTarget, related_name="+")
+    )
+
+    class Meta:
+        app_label = "products"
+        managed = False
+        db_table = "mutations_spelled_key_owner"
+
+
+@contextlib.contextmanager
+def _spelled_key_tables(stored: object) -> Generator[None, None, None]:
+    """Create the spelled-key tables; the target ``stored`` names holds one row keyed by it."""
+    created: list[type[models.Model]] = []
+    try:
+        with connection.schema_editor() as editor:
+            for model in (SpelledDecimalTarget, SpelledStampTarget, SpelledKeyOwner):
+                editor.create_model(model)
+                created.append(model)
+        target = SpelledDecimalTarget if isinstance(stored, Decimal) else SpelledStampTarget
+        _ = target._default_manager.create(pk=stored)
+        yield
+    finally:
+        with connection.schema_editor() as editor:
+            for model in reversed(created):
+                editor.delete_model(model)
+
+
+def _spelled_key_schema() -> strawberry.Schema:
+    """A create mutation writing every ``SpelledKeyOwner`` relation by raw pk."""
+
+    class SpelledKeyOwnerT(DjangoType):
+        class Meta:
+            model = SpelledKeyOwner
+            fields = ("name",)
+
+    class CreateSpelledKeyOwner(DjangoMutation):
+        class Meta:
+            model = SpelledKeyOwner
+            operation = "create"
+            fields = (
+                "name",
+                "decimal_target",
+                "decimal_targets",
+                "stamp_target",
+                "stamp_targets",
+            )
+            permission_classes = [_AllowAll]
+
+    @strawberry.type
+    class Mutation:
+        create_spelled_key_owner = DjangoMutationField(CreateSpelledKeyOwner)
+
+    finalize_django_types()
+    del SpelledKeyOwnerT
+    return _schema(Mutation)
+
+
+_SPELLED_DECIMAL_PAIRS = [
+    pytest.param(Decimal("2.5"), "2.50", id="trailing-zero"),
+    pytest.param(Decimal(7), "7.0", id="one-fractional-zero"),
+    pytest.param(Decimal(7), "7.00", id="two-fractional-zeros"),
+    pytest.param(Decimal(70), "7E+1", id="exponent"),
+    pytest.param(Decimal(0), "0.00", id="zero"),
+]
+_SPELLED_STAMP_PAIR = pytest.param(
+    datetime.datetime(2024, 1, 1, 8, tzinfo=datetime.timezone.utc),
+    "2024-01-01T10:00:00+02:00",
+    id="aware-datetime-in-another-offset",
+)
+
+
+def _decimal_reads_back() -> bool:
+    """Whether this Django reads back a ``DecimalField`` without ``decimal_places``."""
+    return django.VERSION >= (6, 1)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("stored", "spelled"),
+    [
+        *(
+            pytest.param(
+                *case.values,
+                id=case.id,
+                marks=pytest.mark.skipif(
+                    connection.vendor != "sqlite" or not _decimal_reads_back(),
+                    reason="SQLite stores the value it is bound, read back from Django 6.1",
+                ),
+            )
+            for case in _SPELLED_DECIMAL_PAIRS
+        ),
+        _SPELLED_STAMP_PAIR,
+    ],
+)
+def test_relation_ids_spelling_a_stored_key_differently_link_its_row(
+    stored: object,
+    spelled: str,
+) -> None:
+    """A raw-pk FK and M2M id names its row by the key's value, as the ``pk__in`` lookup does.
+
+    The membership check keys the requested ids and the rows it found by the pk column's
+    value, so ``2.50`` is the stored ``2.5`` and an aware datetime in a ``+02:00`` offset
+    is the row stored in UTC: the write links the row through both relations, never the
+    uniform "Invalid id" error.
+    """
+    is_decimal = isinstance(stored, Decimal)
+    prefix = "decimal" if is_decimal else "stamp"
+    with _spelled_key_tables(stored):
+        result = _spelled_key_schema().execute_sync(
+            "mutation($d: SpelledKeyOwnerInput!) "
+            "{ createSpelledKeyOwner(data: $d) { errors { field messages } } }",
+            variable_values={
+                "d": {
+                    "name": "owner",
+                    f"{prefix}TargetId": spelled,
+                    f"{prefix}Targets": [spelled],
+                },
+            },
+        )
+        assert result.errors is None, result.errors
+        assert result.data == {"createSpelledKeyOwner": {"errors": []}}
+        owner = SpelledKeyOwner.objects.get(name="owner")
+        assert read_attr(owner, f"{prefix}_target_id") == stored
+        linked = owner.decimal_targets.all() if is_decimal else owner.stamp_targets.all()
+        assert [pk_of(row) for row in linked] == [stored]

@@ -88,7 +88,7 @@ from django_strawberry_framework.utils._queryset_private import (
     queryset_db,
 )
 from django_strawberry_framework.utils.querysets import (
-    stringified_pks_present,
+    pks_present,
     visible_related_object,
 )
 from django_strawberry_framework.utils.typing import object_result
@@ -1489,10 +1489,10 @@ def test_relation_reads_drop_a_locked_row_the_fresh_read_no_longer_sees(
         _answer(still_visible),
     )
 
-    present = stringified_pks_present(categories, [saved_pk(kept), saved_pk(dropped)])
-    assert present == {str(saved_pk(kept)): saved_pk(kept)}
-    keyed = stringified_pks_present(categories, [saved_pk(kept), saved_pk(dropped)], "name")
-    assert keyed == {str(saved_pk(kept)): "relock-kept"}
+    present = pks_present(categories, [saved_pk(kept), saved_pk(dropped)])
+    assert present == {saved_pk(kept): saved_pk(kept)}
+    keyed = pks_present(categories, [saved_pk(kept), saved_pk(dropped)], "name")
+    assert keyed == {saved_pk(kept): "relock-kept"}
     assert visible_related_object(product_models.Category, saved_pk(kept), None) == kept
     assert visible_related_object(product_models.Category, saved_pk(dropped), None) is None
 
