@@ -36,6 +36,7 @@ fail-loud, shape identity, and throwaway-type id mapping.
 
 from __future__ import annotations
 
+import datetime
 import decimal
 import functools
 import logging
@@ -73,6 +74,7 @@ from django_strawberry_framework.forms.converter import (
     SCALAR,
 )
 from django_strawberry_framework.forms.inputs import (
+    _TEMPORAL_COLUMN_FORM_CLASSES,
     CREATE_SHAPED_KINDS,
     FORM,
     INPUTS_MODULE_PATH,
@@ -1167,6 +1169,204 @@ def test_create_input_admits_a_kind_mismatch_on_a_narrowed_out_field(
     _cls, specs = build_form_input_class(form_class, operation_kind=CREATE, fields=("name",))
 
     assert [spec.target_name for spec in specs] == ["name"]
+
+
+class _WidgetOnlyDateField(forms.DateField):
+    """A ``DateField`` subclass that changes only its widget, so it reads what ``DateField`` reads."""
+
+    widget = forms.TextInput
+
+
+class _ValueReadingDateField(forms.DateField):
+    """A ``DateField`` subclass whose ``to_python`` hands a value that is no text on unparsed."""
+
+    @override
+    def to_python(
+        self,
+        value: str | datetime.datetime | datetime.date | None,
+    ) -> datetime.date | None:
+        return super().to_python(value) if isinstance(value, str) else value
+
+
+#: A built-in temporal form field over a temporal column of another kind, each failing or
+#: truncating every value the input carries for the column.
+_UNREADABLE_TEMPORAL_PAIRS = [
+    pytest.param("occurred_time", forms.DateField, "DateField", "TimeField", id="date-over-time"),
+    pytest.param(
+        "occurred_time",
+        forms.DateTimeField,
+        "DateTimeField",
+        "TimeField",
+        id="datetime-over-time",
+    ),
+    pytest.param(
+        "occurred_time",
+        forms.DurationField,
+        "DurationField",
+        "TimeField",
+        id="duration-over-time",
+    ),
+    pytest.param(
+        "occurred_time",
+        forms.SplitDateTimeField,
+        "SplitDateTimeField",
+        "TimeField",
+        id="split-datetime-over-time",
+    ),
+    pytest.param(
+        "occurred_time",
+        _WidgetOnlyDateField,
+        "DateField",
+        "TimeField",
+        id="date-subclass-over-time",
+    ),
+    pytest.param("occurred_on", forms.TimeField, "TimeField", "DateField", id="time-over-date"),
+    pytest.param(
+        "occurred_on",
+        forms.SplitDateTimeField,
+        "SplitDateTimeField",
+        "DateField",
+        id="split-datetime-over-date",
+    ),
+    pytest.param(
+        "occurred_on",
+        forms.DurationField,
+        "DurationField",
+        "DateField",
+        id="duration-over-date",
+    ),
+    pytest.param(
+        "occurred_at",
+        forms.TimeField,
+        "TimeField",
+        "DateTimeField",
+        id="time-over-datetime",
+    ),
+    pytest.param(
+        "occurred_at",
+        forms.DurationField,
+        "DurationField",
+        "DateTimeField",
+        id="duration-over-datetime",
+    ),
+    pytest.param(
+        "occurred_at",
+        forms.DateField,
+        "DateField",
+        "DateTimeField",
+        id="date-over-datetime",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    (
+        "name",
+        "field_class",
+        "reader",
+        "column_class",
+    ),
+    _UNREADABLE_TEMPORAL_PAIRS,
+)
+@pytest.mark.parametrize("operation_kind", [CREATE, PARTIAL])
+def test_temporal_field_over_a_temporal_column_it_cannot_read_is_refused(
+    name: str,
+    field_class: type[forms.Field],
+    reader: str,
+    column_class: str,
+    operation_kind: str,
+) -> None:
+    """A built-in temporal field reads only the kind it parses, whichever input carries it.
+
+    The input carries the column's own temporal value, so a field of another temporal kind
+    fails every write that binds it or drops the time of day, and an update binds it on
+    every write.
+    """
+    form_class = _column_form(scalar_models.ScalarSpecimen, name, field_class(required=False))
+    with pytest.raises(ConfigurationError) as excinfo:
+        _ = build_form_input_class(form_class, operation_kind=operation_kind)
+    assert (
+        f"field {name!r} ({field_class.__name__}) cannot read the value of the "
+        f"{column_class} column ScalarSpecimen.{name}: the input carries the column's value "
+        f"and {reader} reads only the kind it parses."
+    ) in str(excinfo.value)
+
+
+def test_temporal_refusal_names_the_form_the_column_and_the_remedy() -> None:
+    """The refusal names the form, the field, both classes, the column's readers and the fix."""
+    form_class = _column_form(scalar_models.ScalarSpecimen, "occurred_at", forms.DateField())
+    with pytest.raises(ConfigurationError) as excinfo:
+        _ = build_form_input_class(form_class, operation_kind=CREATE)
+    assert str(excinfo.value) == (
+        "Form KindForm field 'occurred_at' (DateField) cannot read the value of the "
+        "DateTimeField column ScalarSpecimen.occurred_at: the input carries the column's value "
+        "and DateField reads only the kind it parses. Declare a DateTimeField or "
+        "SplitDateTimeField, a CharField, or a subclass that reads the value by overriding "
+        "to_python or clean; an update binds every declared field, including those "
+        "Meta.fields / Meta.exclude leave out of its input."
+    )
+
+
+def test_update_input_refuses_an_unreadable_temporal_field_on_a_narrowed_out_field() -> None:
+    """An update rebinds every declared field from the row, the narrowed-out one included."""
+    form_class = _column_form(
+        scalar_models.ScalarSpecimen,
+        "occurred_time",
+        forms.DateField(required=False),
+        fields=("label",),
+    )
+    _cls, specs = build_form_input_class(form_class, operation_kind=CREATE, fields=("label",))
+    assert [spec.target_name for spec in specs] == ["label"]
+    with pytest.raises(ConfigurationError, match=re.escape("field 'occurred_time' (DateField)")):
+        _ = build_form_input_class(form_class, operation_kind=PARTIAL, fields=("label",))
+
+
+@pytest.mark.parametrize(
+    ("name", "field_class"),
+    [
+        pytest.param("occurred_time", forms.TimeField, id="time-over-time"),
+        pytest.param("occurred_on", forms.DateField, id="date-over-date"),
+        pytest.param("occurred_on", forms.DateTimeField, id="datetime-over-date"),
+        pytest.param("occurred_at", forms.DateTimeField, id="datetime-over-datetime"),
+        pytest.param("occurred_at", forms.SplitDateTimeField, id="split-datetime-over-datetime"),
+        pytest.param("occurred_time", forms.CharField, id="text-over-time"),
+        pytest.param("occurred_on", forms.CharField, id="text-over-date"),
+        pytest.param("occurred_at", forms.CharField, id="text-over-datetime"),
+        pytest.param(
+            "occurred_time",
+            _ValueReadingDateField,
+            id="reading-date-subclass-over-time",
+        ),
+    ],
+)
+@pytest.mark.parametrize("operation_kind", [CREATE, PARTIAL])
+def test_temporal_field_reading_its_column_builds(
+    name: str,
+    field_class: type[forms.Field],
+    operation_kind: str,
+) -> None:
+    """A temporal column builds under every form field that reads its value.
+
+    The column's own form class, admin's split pairing, a date-time field over a date, text,
+    or a subclass that reads the value itself.
+    """
+    form_class = _column_form(scalar_models.ScalarSpecimen, name, field_class(required=False))
+    _cls, specs = build_form_input_class(form_class, operation_kind=operation_kind)
+
+    assert [spec.target_name for spec in specs] == [name]
+
+
+def test_temporal_readers_open_with_the_form_class_django_builds_for_the_column() -> None:
+    """Each temporal column's first reader is the class its own ``formfield()`` builds."""
+    columns: tuple[models.Field[object, object], ...] = (
+        models.DateTimeField(),
+        models.DateField(),
+        models.TimeField(),
+    )
+
+    assert list(_TEMPORAL_COLUMN_FORM_CLASSES) == [type(column) for column in columns]
+    for column in columns:
+        assert _TEMPORAL_COLUMN_FORM_CLASSES[type(column)][0] is type(column.formfield())
 
 
 @pytest.mark.parametrize(

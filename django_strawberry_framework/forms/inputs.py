@@ -24,7 +24,8 @@ The shape is the ``036`` discipline adapted to forms (spec-038 Decision 7):
 - Where a ``ModelForm`` field has a backing model column, the annotation routes
   through ``model_column_input_annotation`` so the wire contract is symmetric
   with the read ``DjangoType``, and the field's own kind must agree with the
-  column's (``require_column_kind_agreement``); a choice field whose static choices
+  column's, a built-in temporal field reading the column's temporal kind
+  (``require_column_kind_agreement``); a choice field whose static choices
   admit fewer of a choice column's values than the column lists publishes a generated
   enum of the admitted values instead (``_form_choice_narrowing``). A plain ``Form``
   field with no column, and a field whose input shape disagrees with its column's (a
@@ -632,6 +633,34 @@ _KIND_WORDS: dict[str, str] = {
 }
 
 
+# Django's built-in temporal form classes. Each reads only the temporal kind it parses, so
+# one over a temporal column whose value it cannot read fails or truncates every value the
+# input carries (``_require_temporal_reader``).
+_TEMPORAL_FORM_CLASSES: tuple[type[forms.Field], ...] = (
+    forms.DateField,
+    forms.DateTimeField,
+    forms.TimeField,
+    forms.DurationField,
+    forms.SplitDateTimeField,
+)
+
+# Each temporal column class with the built-in form classes that read its value: first the
+# form class Django's ``ModelForm`` builds for it (the column's own ``formfield()``), then
+# admin's ``SplitDateTimeField`` over a ``DateTimeField``
+# (``django.contrib.admin.options.FORMFIELD_FOR_DBFIELD_DEFAULTS``) and a ``DateTimeField``
+# over a ``DateField``, whose ``to_python`` reads a ``datetime`` as its date. The most
+# specific class in a column's MRO answers (``truth.mro_entry``), so a ``DateTimeField``
+# reads its own row, never its ``DateField`` base's.
+_TEMPORAL_COLUMN_FORM_CLASSES: dict[type, tuple[type, ...]] = {
+    models.DateTimeField: (
+        truth.class_of(models.DateTimeField().formfield()),
+        forms.SplitDateTimeField,
+    ),
+    models.DateField: (truth.class_of(models.DateField().formfield()), forms.DateTimeField),
+    models.TimeField: (truth.class_of(models.TimeField().formfield()),),
+}
+
+
 def require_column_kind_agreement(
     form_class: FormClass,
     form_fields: Mapping[str, forms.Field] | None = None,
@@ -650,6 +679,9 @@ def require_column_kind_agreement(
     hides included), so it is a ``ConfigurationError``. A scalar field over a relation
     column agrees: the decode hands it the visible row's key, as an HTML form posts it,
     and the form resolves the key itself (a ``clean_<field>`` returning the row).
+    A field of the column's kind must also read the column's value: a built-in temporal form
+    field over a temporal column whose value it cannot read is refused too
+    (``_require_temporal_reader``).
     ``form_fields`` is the set the operation binds, as for ``require_readable_choice_keys``:
     every declared field for an update, the input's own fields for a create.
     """
@@ -659,18 +691,61 @@ def require_column_kind_agreement(
             continue
         column_kind = model_column_write_kind(column)
         field_kind = form_field_kind(field)
-        if field_kind == column_kind or (
+        if field_kind != column_kind and not (
             field_kind == SCALAR and column_kind in (RELATION_SINGLE, RELATION_MULTI)
         ):
-            continue
-        raise ConfigurationError(
-            f"Form {truth.name(form_class)} field {name!r} ({truth.kind(field)}) is a "
-            f"{_KIND_WORDS[field_kind]} field over the {_KIND_WORDS[column_kind]} column "
-            f"{truth.name(column.model)}.{column.name}: the input carries the column's value "
-            "and the form reads the field's. Declare a form field of the column's kind, or name "
-            "the field after no model column; an update binds every declared field, including "
-            "those Meta.fields / Meta.exclude leave out of its input.",
-        )
+            raise ConfigurationError(
+                f"Form {truth.name(form_class)} field {name!r} ({truth.kind(field)}) is a "
+                f"{_KIND_WORDS[field_kind]} field over the {_KIND_WORDS[column_kind]} column "
+                f"{truth.name(column.model)}.{column.name}: the input carries the column's "
+                "value and the form reads the field's. Declare a form field of the column's "
+                "kind, or name the field after no model column; an update binds every declared "
+                "field, including those Meta.fields / Meta.exclude leave out of its input.",
+            )
+        _require_temporal_reader(form_class, name, field, column)
+
+
+def _require_temporal_reader(
+    form_class: FormClass,
+    name: str,
+    field: forms.Field,
+    column: ConcreteField,
+) -> None:
+    """Refuse a built-in temporal form field over a temporal column whose value it cannot read.
+
+    The input carries a temporal column's value as the column's own Python type (a
+    ``Time`` argument decodes to a ``datetime.time``), and each of Django's temporal form
+    classes reads only the kind it parses: ``forms.DateField`` over a ``TimeField`` column
+    raises on every value (``BaseTemporalField.to_python`` calls ``strip()`` on the
+    ``time``), and ``forms.DateField`` over a ``DateTimeField`` column stores midnight,
+    dropping the time of day. A field reads the column's value when its nearest built-in
+    temporal class is one ``_TEMPORAL_COLUMN_FORM_CLASSES`` pairs with the column, or when its
+    class overrides ``to_python`` or ``clean`` to read the value itself; any other is a
+    ``ConfigurationError``. A form field of no temporal class (a ``CharField`` reads the
+    value's text), and a column of no paired class (a ``DurationField``, whose input scalar
+    a ``SCALAR_MAP`` entry decides), pass.
+    """
+    paired = truth.mro_entry(_TEMPORAL_COLUMN_FORM_CLASSES, truth.class_of(column))
+    reader = next(
+        (klass for klass in truth.mro(field) if truth.is_among(klass, _TEMPORAL_FORM_CLASSES)),
+        None,
+    )
+    if (
+        paired is None
+        or reader is None
+        or truth.is_among(reader, paired[1])
+        or truth.overrides(truth.class_of(field), reader, "to_python", "clean")
+    ):
+        return
+    readers = " or ".join(truth.name(klass) for klass in paired[1])
+    raise ConfigurationError(
+        f"Form {truth.name(form_class)} field {name!r} ({truth.kind(field)}) cannot read the "
+        f"value of the {truth.kind(column)} column {truth.name(column.model)}.{column.name}: "
+        f"the input carries the column's value and {truth.name(reader)} reads only the kind "
+        f"it parses. Declare a {readers}, a CharField, or a subclass that reads the value by "
+        "overriding to_python or clean; an update binds every declared field, including those "
+        "Meta.fields / Meta.exclude leave out of its input.",
+    )
 
 
 def form_binds_class_fields(form_class: FormClass) -> bool:
@@ -1319,8 +1394,9 @@ def build_form_input_class(
     value.
 
     Before any field is built, every field the operation binds (every declared field for
-    an update, the input's own for a create) must agree with its backing column's kind
-    (``require_column_kind_agreement``) and read a relation key that names one row
+    an update, the input's own for a create) must agree with its backing column's kind, a
+    built-in temporal field reading the column's temporal kind
+    (``require_column_kind_agreement``), and read a relation key that names one row
     (``require_readable_choice_keys``). The build then logs a warning for each field it binds
     whose input shape disagrees with its column (``_advise_shape_disagreement``); an update's
     also names the initial its omitted field binds. A plain form has no column to disagree with.
