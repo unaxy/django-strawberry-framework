@@ -15214,7 +15214,7 @@ def test_update_book_via_form_partial_update_preserves_m2m_over_http() -> None:
     The live FORM partial-update M2M-preservation case: the
     bound ``ModelForm`` would fail required-validation on ``genres`` unless the omitted
     M2M is reconstructed from the located row (``_reconstruct_partial_data`` ->
-    ``_to_form_key_value``). ``BookType`` is Relay-Node so the update ``id`` is a
+    ``ModelChoiceField.prepare_value``). ``BookType`` is Relay-Node so the update ``id`` is a
     ``GlobalID``; ``title`` changes while the two genres survive untouched.
     """
     shelf = _seed_shelf()

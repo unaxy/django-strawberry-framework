@@ -109,7 +109,6 @@ from django_strawberry_framework.forms.resolvers import (
     _decode_form_relation_multi,
     _is_empty_form_value,
     _reconstruct_partial_data,
-    _to_form_key_value,
 )
 from django_strawberry_framework.mutations.inputs import NON_FIELD_ERROR_KEY, FieldError
 from django_strawberry_framework.optimizer.plans import OptimizationPlan
@@ -853,7 +852,7 @@ def test_partial_update_preserves_unprovided_m2m_with_to_field_name() -> None:
     """An omitted M2M whose form field sets ``to_field_name`` survives a partial update.
 
     The decode lands a PROVIDED M2M as ``to_field_name`` values
-    (``_to_form_key_value``); ``model_to_dict`` would reconstruct an OMITTED one as
+    (``ModelChoiceField.prepare_value``); ``model_to_dict`` would reconstruct an OMITTED one as
     related INSTANCES (effectively pks), which a ``ModelMultipleChoiceField`` keyed
     by ``to_field_name`` cannot resolve - so an omitted M2M would spuriously fail
     validation on a one-field update. Reconstruction converts each member by
@@ -2842,31 +2841,6 @@ def test_partial_update_reconstruct_reports_an_unresolvable_stored_key(
         assert error.params == {"value": genre.name}
 
 
-def test_to_form_key_value_reads_the_key_off_the_row_and_never_substitutes_the_pk() -> None:
-    """The form key is the row's ``to_field_name`` value, or its pk when the field keys by pk.
-
-    The input build admits only ``pk`` or a concrete field
-    (``forms/inputs.py::require_readable_choice_keys``), so a name the row cannot answer
-    is a programming error that propagates, never a silent fall back to the pk, which the
-    form's ``queryset.get(<to_field_name>=pk)`` would resolve to another row.
-    """
-    row = library_models.Genre(pk=42, name="Poetry")
-
-    def key(to_field_name: str | None) -> object:
-        field = forms.ModelChoiceField(
-            queryset=library_models.Genre.objects.all(),
-            to_field_name=to_field_name,
-        )
-        return _to_form_key_value(row, field)
-
-    assert key("name") == "Poetry"
-    assert key("id") == 42
-    assert key("pk") == 42
-    assert key(None) == 42
-    with pytest.raises(AttributeError):
-        _ = key("missing__path")
-
-
 def test_is_empty_form_value_handles_unhashable_and_typeerror() -> None:
     class FakeField:
         empty_values = {None, ""}
@@ -2881,7 +2855,7 @@ def test_is_empty_form_value_handles_unhashable_and_typeerror() -> None:
             raise TypeError("cannot compare")
 
     # basedpyright: a stand-in form field carrying only the slots the code under test reads;
-    # _is_empty_form_value types the parameter as forms.Field | None
+    # _is_empty_form_value types the parameter as forms.Field
     assert not _is_empty_form_value(UnhashableValue(), FakeField())  # pyright: ignore[reportArgumentType]
 
 
