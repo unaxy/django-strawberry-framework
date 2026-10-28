@@ -64,7 +64,7 @@ Relation fields may point at target types declared earlier or later; `finalize_d
 
 ### Relay Node
 
-Add `Meta.interfaces = (relay.Node,)` to declare a Relay-node-shaped type; the package wires `id: GlobalID!`, the four `resolve_*` defaults, and `is_type_of` injection with no decorators on your class.
+Add `Meta.interfaces = (relay.Node,)` to declare a Relay-node-shaped type; the package wires `id: GlobalID!`, three `resolve_*` defaults (a single id reaches `resolve_nodes` through Strawberry's own `Node.resolve_node`), and `is_type_of` injection with no decorators on your class.
 
 ```python
 from strawberry import relay

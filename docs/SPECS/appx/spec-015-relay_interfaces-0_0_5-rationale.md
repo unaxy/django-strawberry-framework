@@ -20,8 +20,10 @@ Bears on [Decision 3][spec-015-decision-3] and [Decision 6][spec-015-decision-6]
 - **`resolve_id_attr` shape** (`strawberry_django/relay/utils.py::resolve_model_id_attr`): one
   try/except around Strawberry's own scan with a `"pk"` fallback, so a consumer writes
   `relay.NodeID[...]` and the framework adds no `Meta` key.
-- **`resolve_node` / `resolve_nodes` queryset shape** (`strawberry_django/relay/utils.py::resolve_model_node`
-  and `::resolve_model_nodes`): every step has a counterpart here; the borrow is structural.
+- **`resolve_nodes` queryset shape** (`strawberry_django/relay/utils.py::resolve_model_nodes`): every
+  step has a counterpart here; the borrow is structural. `resolve_model_node`'s single-row twin is not
+  ported: Strawberry's own `Node.resolve_node` answers one id through `resolve_nodes`, so a consumer
+  override of `resolve_nodes` alone also governs the single-id refetch.
 - **`MAP_AUTO_ID_AS_GLOBAL_ID` behavior**, tied to the per-type `Meta.interfaces` declaration
   instead of a global setting: a per-type opt-in keeps the contract local to the class declaration.
 - **`is_type_of` virtual subclass** (`strawberry_django/type.py::_process_type`): root and relation
@@ -111,14 +113,14 @@ the full MRO annotation scan on every `resolve_id` call, once per row. Seeding `
 class itself also blinds Strawberry's inherited-cache read, which otherwise lets whichever class in a
 chain resolved first decide the child's id attribute.
 
-**Why `info` is keyword-only.** Strawberry's Relay machinery calls
-`cls.resolve_node(node_id, info=info, required=...)`, so a positional `info` slot raises
-`TypeError: got multiple values for argument 'info'`.
+**Why `info` is keyword-only.** It mirrors Strawberry's own `relay.Node` signatures, where `info` is
+keyword-only and every Relay caller passes it by keyword (`cls.resolve_nodes(info=info, node_ids=...,
+required=...)`, `cls.resolve_id(root, info=info)`).
 
 **Rejected: a `Meta.id_attr` key.** A parallel key would fragment the surface Strawberry's
 `relay.NodeID[...]` annotation already provides.
 
-**Rejected: consulting the optimizer extension inside `resolve_node`.** Upstream calls
+**Rejected: consulting the optimizer extension inside `resolve_nodes`.** Upstream calls
 `ext.optimize(qs, info=info)`; here the list paths get full optimizer treatment through the root-gated
 extension, and the node defaults stay small so `DjangoNodeField` / `DjangoNodesField` and
 `DjangoConnectionField` dispatch into them rather than replacing them.

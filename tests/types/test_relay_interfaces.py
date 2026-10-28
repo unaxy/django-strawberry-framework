@@ -44,7 +44,6 @@ from django_strawberry_framework.types.relay import (
     _published_node_name_table,
     _resolve_id_attr_default,
     _resolve_id_default,
-    _resolve_node_default,
     _resolve_nodes_default,
     apply_interfaces,
     decode_global_id,
@@ -572,7 +571,11 @@ def _build_fake_root(id_value: int) -> object:
 
 
 def test_relay_node_injects_default_resolvers() -> None:
-    """Phase 2.5 injects all four ``resolve_*`` classmethods onto a Relay-declared type."""
+    """Phase 2.5 injects three ``resolve_*`` classmethods; ``resolve_node`` stays Strawberry's.
+
+    Strawberry's ``Node.resolve_node`` answers one id through ``resolve_nodes``, so the
+    package installs no ``resolve_node`` of its own.
+    """
 
     class CategoryNode(DjangoType):
         class Meta:
@@ -582,15 +585,12 @@ def test_relay_node_injects_default_resolvers() -> None:
 
     finalize_django_types()
     assert relay.Node in CategoryNode.__mro__
-    for attr in (
-        "resolve_id",
-        "resolve_id_attr",
-        "resolve_node",
-        "resolve_nodes",
-    ):
+    for attr in ("resolve_id", "resolve_id_attr", "resolve_nodes"):
         assert attr in CategoryNode.__dict__, f"{attr} was not injected"
         descriptor = class_dict(CategoryNode)[attr]
         assert isinstance(descriptor, classmethod)
+    assert "resolve_node" not in CategoryNode.__dict__
+    assert not truth.overrides(CategoryNode, relay.Node, "resolve_node")
 
 
 def test_resolve_id_attr_falls_back_to_pk() -> None:
@@ -831,7 +831,7 @@ def _build_seeded_category_node() -> type[DjangoType]:
 
 @pytest.mark.django_db(transaction=True)
 async def test_resolve_node_async_context() -> None:
-    """In an async context ``_resolve_node_default`` awaits the matching row via ``afirst``."""
+    """In an async context ``resolve_node`` awaits the async ``resolve_nodes`` batch of one."""
     CategoryNode = await sync_to_async(_build_seeded_category_node)()
     target = await Category.objects.afirst()
     assert target is not None
@@ -846,7 +846,7 @@ async def test_resolve_node_async_context() -> None:
 
 @pytest.mark.django_db(transaction=True)
 async def test_resolve_node_async_context_required() -> None:
-    """In an async context ``_resolve_node_default(required=True)`` awaits via ``aget``."""
+    """In an async context ``resolve_node(required=True)`` awaits the required batch of one."""
     CategoryNode = await sync_to_async(_build_seeded_category_node)()
     target = await Category.objects.afirst()
     assert target is not None
@@ -1262,7 +1262,7 @@ def test_relay_chain_child_resolvers_do_not_recurse() -> None:
             interfaces = (relay.Node,)
 
     finalize_django_types()
-    # The four defaults live on the parent only; the child inherits them.
+    # The three defaults live on the parent only; the child inherits them.
     assert "resolve_id_attr" in ParentNode.__dict__
     assert "resolve_id_attr" not in ChildNode.__dict__
     assert implements_relay_node(ParentNode)
@@ -1657,27 +1657,6 @@ def test_resolve_id_default_refuses_a_root_with_no_instance_namespace() -> None:
 
 
 @pytest.mark.django_db
-def test_resolve_node_default_invoked_via_helper() -> None:
-    """``_resolve_node_default`` works when invoked as a free function (not via classmethod)."""
-    services.seed_data(1)
-
-    class CategoryNode(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
-
-    finalize_django_types()
-    assert implements_relay_node(CategoryNode)
-    target = Category.objects.first()
-    assert target is not None
-    result = _resolve_node_default(CategoryNode, info=make_info(), node_id=saved_pk(target))
-    assert result is not None
-    assert isinstance(result, Category)
-    assert saved_pk(result) == saved_pk(target)
-
-
-@pytest.mark.django_db
 def test_resolve_nodes_default_invoked_via_helper() -> None:
     """``_resolve_nodes_default`` exercised as a free function with a ``relay.GlobalID``-coerced id."""
     services.seed_data(1)
@@ -1718,12 +1697,7 @@ def test_install_relay_node_resolvers_idempotent() -> None:
     assert implements_relay_node(CategoryNode)
     snapshot = {
         attr: _classmethod_func(CategoryNode, attr)
-        for attr in (
-            "resolve_id",
-            "resolve_id_attr",
-            "resolve_node",
-            "resolve_nodes",
-        )
+        for attr in ("resolve_id", "resolve_id_attr", "resolve_nodes")
     }
     install_relay_node_resolvers(CategoryNode)
     after = {attr: _classmethod_func(CategoryNode, attr) for attr in snapshot}
@@ -1777,7 +1751,7 @@ def test_direct_relay_node_inheritance_injects_resolvers_and_suppresses_id() -> 
     """End-to-end: ``class Foo(DjangoType, relay.Node)`` finalizes the Relay shape.
 
     Direct ``relay.Node`` inheritance must not bypass Relay finalization: Phase 2.5
-    must run the composite-pk gate and the four ``resolve_*`` defaults
+    must run the composite-pk gate and the three ``resolve_*`` defaults
     for every class whose resolved MRO includes ``relay.Node``, not only
     for classes with a non-empty ``Meta.interfaces`` tuple. Otherwise the
     consumer's class would inherit ``relay.Node``'s defaults
@@ -1795,13 +1769,8 @@ def test_direct_relay_node_inheritance_injects_resolvers_and_suppresses_id() -> 
     assert relay.Node in CategoryNode.__mro__
     # ``Meta.interfaces`` was empty - the definition stores the empty tuple.
     assert CategoryNode.__django_strawberry_definition__.interfaces == ()
-    # All four resolver defaults landed on the class itself.
-    for attr in (
-        "resolve_id",
-        "resolve_id_attr",
-        "resolve_node",
-        "resolve_nodes",
-    ):
+    # All three resolver defaults landed on the class itself.
+    for attr in ("resolve_id", "resolve_id_attr", "resolve_nodes"):
         assert attr in CategoryNode.__dict__, f"{attr} was not injected"
         assert isinstance(CategoryNode.__dict__[attr], classmethod)
     # The synthesized ``id`` annotation was dropped so the interface-supplied

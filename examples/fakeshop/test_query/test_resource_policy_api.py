@@ -542,8 +542,9 @@ def _native_node_schema(node_type: type, deadline: float | None) -> DjangoSchema
     """Strawberry's own ``relay.node()`` fields, single and list, over one Relay type.
 
     No package refetch field sits in front of them, so the first seam a request
-    meets is the ``resolve_node`` / ``resolve_nodes`` default the package installs
-    on every Relay ``DjangoType``. ``deadline`` ``None`` is the unarmed twin.
+    meets is the ``resolve_nodes`` default the package installs on every Relay
+    ``DjangoType`` (a single id reaches it through Strawberry's own
+    ``Node.resolve_node``). ``deadline`` ``None`` is the unarmed twin.
 
     The type is an ARGUMENT and the cache is keyed on it, for the reason
     ``_hostile_relation_schema`` gives.
@@ -3536,7 +3537,8 @@ def test_a_passed_deadline_stops_a_native_node_field_before_it_queries(field: st
     """Strawberry's own ``relay.node()`` fields reach the package's node defaults.
 
     No package refetch field checks in front of them, so the check at the head of
-    ``resolve_node`` / ``resolve_nodes`` is the one that rejects, with no query.
+    the ``resolve_nodes`` default, which ``resolve_node`` delegates to, is the one
+    that rejects, with no query.
     """
     seed_data(1)
     query, variables, _data = _native_node_cases(*_public_category_gid())[field]

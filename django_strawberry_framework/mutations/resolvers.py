@@ -883,8 +883,7 @@ def locate_instance(
 ) -> models.Model | None:
     """Locate an update / delete row through the visibility ``get_queryset`` (spec-036 Decision 10).
 
-    The same visibility hook every read surface uses (and the
-    ``_resolve_node_default`` locate shape), pinned to the pipeline's write
+    The same visibility hook every read surface uses, pinned to the pipeline's write
     ``alias`` - a hook that explicitly re-routed to a different alias fails
     closed (``pin_write_queryset``). A miss (``DoesNotExist``) returns ``None``;
     the caller maps it to a not-found ``FieldError`` on ``id``, indistinguishable
