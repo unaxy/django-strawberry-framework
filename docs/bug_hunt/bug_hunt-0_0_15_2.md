@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 373 done, 212 to do.
+Progress: 374 done, 213 to do.
 
 ## Done
 
@@ -2103,6 +2103,12 @@ Progress: 373 done, 212 to do.
   `OverflowError` at bind: `unstorable_temporal` holds the integer `get_db_prep_save` prepares to
   `utils/errors.py::binds_integer` (moved down from `utils/querysets.py`); PostgreSQL and Oracle bind any `timedelta`.
   Tests: `tests/utils/test_errors.py`, `tests/rest_framework/test_resolvers.py`
+- [x] 606. FK-id elision fires into a Relay target whenever its GlobalID reads the primary key: the walker counts the
+  `id` selection as the id slot's own model field (`optimizer/walker.py::_relay_id_field`, shared with
+  `_relay_id_column`), so `parent { child { id } }` answers from the stored key column with no JOIN when the target's
+  `Meta.fields` omit the pk or the pk is not named `id` (`isbn_13`); a NodeID on another column or a consumer
+  `resolve_id` keeps the JOIN. spec-015, spec-004 and the `fk-id-elision` glossary term say so. Tests:
+  `tests/optimizer/test_walker.py`, `examples/fakeshop/test_query/test_library_api.py`
 
 ## Outside review of the fixes
 
@@ -2201,10 +2207,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 538. (robustness) A `DateRangeFilter` declared on a `Choices` column builds and types as the column's enum, while
   its own form field accepts only its fixed date-range keys, so every enum member answers `FILTER_INVALID` "Select a
   valid choice"; the same filter on a plain column is refused at schema build. Found verifying 518
-- [ ] 606. (robustness) FK-id elision never fires into a Relay target whose `Meta.fields` omit its primary
-  key: `optimizer/walker.py::_selected_scalar_names` reads the `id` selection as a model field name and
-  misses, so `parent { child { id } }` keeps one JOIN; route it through `_relay_id_column`. No fakeshop Relay
-  type omits its pk. Found researching 604
 - [ ] 652. Generated `year__in` / `year__range` (and `iso_year`) filter leaves answer wrong rows whatever the value:
   `IntegerInFilter` coerces each member against the `DateTimeField` / `DateField` column (`filters/base.py::
   _bound_model_field` returns the column, not the transform's `IntegerField` output), so `year__in="2020"` matches
@@ -2270,6 +2272,13 @@ tracker number are recorded there; open remainders and new defects are filed as 
   masked error, before the package's unstorable check runs (`forms/resolvers.py`). Found fact-finding 650
   The `forms/resolvers.py` docstrings describing the write-side check as "datetime or time" columns go stale with 650
   (DateField and DurationField columns are held too): fix them with this row.
+- [ ] 682. (robustness) `types/definition.py::origin_has_custom_id_resolver` counts any class-dict attribute named after
+  the primary key as a consumer `resolve_id`, including the relation resolver the framework installs for a listed
+  one-to-one pk, so FK-id elision never fires into such a type (fakeshop `annotation { profile { id } }` on
+  `PatronProfileType` keeps its JOIN). Found fixing 606
+- [ ] 683. (robustness) `nodes(ids:)` over a type selecting a to-one relation's `id` (`AnnotationType`, `profile { id }`)
+  runs one query per row: the node fields dispatch without an optimizer pass, so the relation is never planned.
+  Decide planning the node root fields or documenting the cost. Found fixing 606
 
 ## To do: holes found re-checking the fixes
 

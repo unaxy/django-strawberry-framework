@@ -9,7 +9,7 @@ DjangoOptimizerExtension,djangooptimizerextension,Carried by Current state: root
 DjangoType,djangotype,Carried by the slice checklist and Decision 4: a DjangoType is rejected as a Meta.interfaces entry.
 FieldSet,fieldset,Carried by Out of scope: field-level permissions are owned elsewhere.
 finalize_django_types,finalize_django_types,Carried by Definition of done: part of the root import surface the slice leaves unchanged.
-FK-id elision,fk-id-elision,Carried by Decision 7: GlobalID handling never feeds FK-id elision.
+FK-id elision,fk-id-elision,Carried by Decision 7: a GlobalID selection counts as the target key when the GlobalID reads it.
 Meta.fields,metafields,Carried by Decision 2: a pk listed in Meta.fields on a Relay-shaped type is simply not generated.
 Meta.interfaces,metainterfaces,Carried by the slice checklist: the key this slice applies end to end.
 Meta.optimizer_hints,metaoptimizer_hints,Carried by Decision 4: independent of Meta.interfaces; pk suppression leaves the optimizer field map untouched.

@@ -92,6 +92,7 @@ if TYPE_CHECKING:
     from django_strawberry_framework.types.base import DjangoType
     from django_strawberry_framework.types.definition import DjangoTypeDefinition
     from django_strawberry_framework.types.relay import _RelayDjangoType
+    from django_strawberry_framework.utils.typing import ConcreteField
 
     from .selections import ConvertedSelection, FieldSelection
 
@@ -585,18 +586,17 @@ def _resolver_identities_for(
     return runtime_paths, resolver_identities
 
 
-def _relay_id_column(node_type: type[_RelayDjangoType]) -> str | None:
-    """Return the column a Relay type's GlobalID is read from, for ``only()``.
+def _relay_id_field(node_type: type[_RelayDjangoType]) -> ConcreteField | None:
+    """Return the concrete model field a Relay type's GlobalID is read from.
 
-    ``types/relay.py::_resolve_id_default`` reads ``resolve_id_attr()`` off the
-    row's instance namespace and loads it lazily on a miss, so a row that did
-    not load that column pays one query per row for its id (spec-015
-    Decision 7). ``relay.py::_node_id_slot`` names the model field behind the
-    id; a concrete one is projected by ``attname`` (a forward key named by its
-    ``attname``, or a primary key that is a one-to-one key, projects its key
-    column). ``None`` when the id is not read from a column: a consumer
-    ``resolve_id`` anywhere in the type's MRO, or an id attribute no concrete
-    model field holds (a property, an attribute ``get_queryset`` annotates).
+    ``relay.py::_node_id_slot`` names the model field behind the id, over the
+    model's own fields (so a ``relay.NodeID`` column ``Meta.fields`` leaves out,
+    or a primary key it leaves out, is still found). ``None`` when the id is not
+    read from a column: a consumer ``resolve_id`` anywhere in the type's MRO, or
+    an id attribute no concrete model field holds (a property, an attribute
+    ``get_queryset`` annotates). The one answer both GlobalID readers in this
+    module share: ``_relay_id_column`` projects the field's column, and
+    ``_selected_scalar_names`` counts the selection as the field it reads.
     """
     # Lazy imports: ``relay`` imports ``list_field``, whose ``types`` import
     # loads this walker; ``types.definition`` pulls in ``optimizer.field_meta``.
@@ -609,8 +609,22 @@ def _relay_id_column(node_type: type[_RelayDjangoType]) -> str | None:
         return None
     _id_attr, field = _node_id_slot(node_type)
     if truth.is_instance(field, models.Field) and field.concrete:
-        return field.attname
+        return field
     return None
+
+
+def _relay_id_column(node_type: type[_RelayDjangoType]) -> str | None:
+    """Return the column a Relay type's GlobalID is read from, for ``only()``.
+
+    ``types/relay.py::_resolve_id_default`` reads ``resolve_id_attr()`` off the
+    row's instance namespace and loads it lazily on a miss, so a row that did
+    not load that column pays one query per row for its id (spec-015
+    Decision 7). The ``_relay_id_field`` field is projected by ``attname`` (a
+    forward key named by its ``attname``, or a primary key that is a one-to-one
+    key, projects its key column); ``None`` when that helper names no field.
+    """
+    field = _relay_id_field(node_type)
+    return field.attname if field is not None else None
 
 
 def _walk_selections(
@@ -1489,9 +1503,15 @@ def _selected_scalar_names(
 
     Each selection resolves by the Python name the schema published its field
     from. On a Relay target the GlobalID selection (the field ``relay.Node``
-    declares) resolves under the name ``relay.Node`` declares it as (``id``), so
-    it reads the target key only where the field map's ``id`` is that key; the
-    caller's ``_has_custom_id_resolver`` refuses an id read from anything else.
+    declares) counts as the model field its id is read from (``_relay_id_field``,
+    by field ``name``: the caller compares against the target key's name, and a
+    one-to-one primary key's name is not its column), whether or not
+    ``Meta.fields`` lists that field and whatever it is named, so it equals the
+    target key exactly when the GlobalID reads the key. An id read from no
+    column resolves under the name ``relay.Node`` declares the field as (``id``),
+    like any selection: a consumer ``resolve_id`` on a target keyed by a column
+    named otherwise is refused here, since the caller's ``_has_custom_id_resolver``
+    looks for ``resolve_<key>`` and no field of that target is named ``id``.
     """
     if model is None:
         return None
@@ -1520,10 +1540,14 @@ def _selected_scalar_names(
     # scalar into a relation. Skipping the merge avoids a redundant second pass
     # over the same child selections the caller re-walks when elision does not
     # fire (the common case: any non-pk scalar selected).
+    relay_id_field = _relay_id_field(relay_type) if relay_type is not None else None
     scalar_names: set[str] = set()
     for sel in _included_field_selections(selections):
         python_name = selection_python_name(sel)
         if relay_type is not None and python_name == _RELAY_ID_PYTHON_NAME:
+            if relay_id_field is not None:
+                scalar_names.add(relay_id_field.name)
+                continue
             python_name = _RELAY_ID_DECLARED_NAME
         if python_name is None:
             return None
