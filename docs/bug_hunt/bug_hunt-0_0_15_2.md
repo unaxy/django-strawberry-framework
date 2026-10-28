@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 333 done, 214 to do.
+Progress: 334 done, 214 to do.
 
 ## Done
 
@@ -1865,6 +1865,16 @@ Progress: 333 done, 214 to do.
   parent, an unrelated table), hooked or not, FK or M2M. A `to_attr` Prefetch stays the consumer resolver's own; an
   unresolvable leaf (generic FK) is left to Django. The consumer `prefetch_related(Prefetch(...))` path keeps its
   per-parent re-read. spec-045 row. Tests: `tests/types/test_base.py`, `test_library_api.py`
+- [x] 462. A reverse relation whose `related_query_name` differs from its accessor is planned in both of Django's
+  spellings: the walker carries a query-name prefix for `select_related`, `only()` and select keys and an accessor
+  prefix for every prefetch lookup, prefetch key, seal, hint rebase and nested-connection window
+  (`optimizer/walker.py::_walk_selections` `lookup_prefix`, `optimizer/plans.py::JoinPrefix`), and the diff readers
+  (`_consumer_owned_paths`, `_withdraw_owned_select_paths`, `_release_select_related_to_prefetches`) compare consumer
+  paths respelled through Django's relation metadata (`utils/relations.py::respell_relation_path`). It served a row a
+  consumer `Prefetch` hid (the planned JOIN kept the reverse one-to-one), joined past a target type's `get_queryset`
+  hook (a consumer `select_related` never released), raised `AttributeError` for a prefetch planned beneath the JOIN,
+  and refused an accessor-spelled hinted `Prefetch` beneath a JOIN. Tests:
+  `tests/optimizer/test_relation_spelling_execution.py`, `test_walker.py`, `test_plans.py`, `tests/utils/test_relations.py`
 
 ## Outside review of the fixes
 
@@ -1905,11 +1915,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 462. A reverse one-to-one whose `related_query_name` differs from its `related_name` escapes 379's ownership:
-  consumer Prefetch paths are accessor names while `select_related` and the key ledgers use query names, so
-  `plans.py::_consumer_owned_paths` (and `_release_select_related_to_prefetches`) never match it and the JOIN still
-  serves the row; no fakeshop or `tests/` model has the shape (a library `PatronBadge(patron=OneToOneField(Patron,
-  related_name="badge", related_query_name="badges"))` would). Found landing 379/380
 - [ ] 384. A declared django-filter whose scalar kind differs from its column escapes the unbindable-temporal refusal: a
   `date` value on a `DateTimeField` (`date(1, 1, 1)` under a `TIME_ZONE` east of UTC) and a `datetime` through a
   `DateField` or a `__date` transform (`0001-01-01T00:00+05:00`, `9999-12-31T23:59-05:00`) overflow at evaluation as the
@@ -2121,6 +2126,9 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 648. CHANGELOG entry for item 462: on a reverse relation declared with its own `related_query_name`, the optimizer
+  now keeps a consumer `Prefetch` and a related type's `get_queryset` in charge of the joined row, plans a prefetch
+  beneath that relation's JOIN, and accepts a hinted `Prefetch` spelled by accessor beneath a JOIN
 - [ ] 647. CHANGELOG entry for item 460: a `Meta.optimizer_hints` `OptimizerHint.prefetch(Prefetch(...))` without
   `to_attr` whose queryset is over another model than the relation's target (or a proxy of it) now fails the type build
   with a `ConfigurationError` instead of serving rows the target type refuses at execution

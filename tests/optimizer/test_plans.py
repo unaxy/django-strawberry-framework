@@ -63,6 +63,7 @@ from django_strawberry_framework.utils._queryset_private import (
     queryset_prefetch_lookups,
 )
 from tests._definition import make_definition
+from tests.optimizer._spelling_models import SpBadge, SpCard, SpParent
 
 
 class TestOptimizationPlanIsEmpty:
@@ -187,6 +188,23 @@ class TestOptimizationPlanApply:
         fields, is_deferred = result.query.deferred_loading
         assert fields == {"name"}
         assert is_deferred is False
+
+    def test_apply_releases_the_query_name_join_of_a_relation_it_prefetches(self) -> None:
+        """A consumer ``select_related("cards")`` yields to the planned ``Prefetch("card")``.
+
+        ``SpParent.card`` is queried as ``cards``: the JOIN would cache the
+        relation and Django would skip the prefetch, so it is released; the
+        consumer's ``badge`` JOIN is on another relation and stays.
+        """
+        plan = OptimizationPlan(prefetch_related=[Prefetch("card", queryset=SpCard.objects.all())])
+        qs = SpParent.objects.select_related("cards", "badge")
+
+        result = plan.apply(qs)
+
+        assert result.query.select_related == {"badge": {}}
+        (lookup,) = queryset_prefetch_lookups(result)
+        assert isinstance(lookup, Prefetch)
+        assert lookup.prefetch_to == "card"
 
 
 class TestOptimizationPlanMerge:
@@ -592,6 +610,71 @@ class TestDiffPlanForQueryset:
         delta_plan, _ = diff_plan_for_queryset(plan, qs)
         assert delta_plan.prefetch_related == ()
         assert plan.prefetch_related == ["items"]
+
+    def test_consumer_prefetch_by_accessor_owns_the_query_name_join(self) -> None:
+        """``Prefetch("card", queryset=...)`` owns the JOIN ``cards`` of the same relation.
+
+        ``SpParent.card`` is queried as ``cards``. The JOIN, its key and the
+        ``only()`` entries beneath it leave the plan; the JOIN planned through it
+        becomes a prefetch lookup spelled in accessors (``card__parent``), and the
+        JOIN of the unrelated ``badge`` stays.
+        """
+        plan = OptimizationPlan(
+            select_related=["cards", "cards__parent", "badge"],
+            only_fields=[
+                "code",
+                "cards__name",
+                "cards__parent__code",
+                "badge__name",
+            ],
+            planned_resolver_keys=["cards-key", "parent-key", "badge-key"],
+            select_path_resolver_keys={
+                "cards": ("cards-key",),
+                "cards__parent": ("parent-key",),
+                "badge": ("badge-key",),
+            },
+        )
+        qs = SpParent.objects.prefetch_related(Prefetch("card", queryset=SpCard.objects.all()))
+
+        delta_plan, delta_qs = diff_plan_for_queryset(plan, qs)
+
+        assert delta_qs is qs
+        assert delta_plan.select_related == ("badge",)
+        assert delta_plan.prefetch_related == ("card__parent",)
+        assert delta_plan.only_fields == ("code", "badge__name")
+        assert delta_plan.planned_resolver_keys == ("parent-key", "badge-key")
+
+    def test_consumer_prefetch_by_accessor_leaves_the_join_it_does_not_name(self) -> None:
+        """The control: ``Prefetch("badge", queryset=...)`` owns ``badge`` and leaves ``cards``."""
+        plan = OptimizationPlan(
+            select_related=["cards", "badge"],
+            only_fields=["cards__name", "badge__name"],
+            planned_resolver_keys=["cards-key", "badge-key"],
+            select_path_resolver_keys={"cards": ("cards-key",), "badge": ("badge-key",)},
+        )
+        qs = SpParent.objects.prefetch_related(Prefetch("badge", queryset=SpBadge.objects.all()))
+
+        delta_plan, _ = diff_plan_for_queryset(plan, qs)
+
+        assert delta_plan.select_related == ("cards",)
+        assert delta_plan.only_fields == ("cards__name",)
+        assert delta_plan.planned_resolver_keys == ("cards-key",)
+
+    def test_consumer_join_by_query_name_keeps_its_prefetch_by_accessor(self) -> None:
+        """The consumer's own JOIN ``cards`` caches ``card``, so its ``Prefetch("card")`` owns nothing."""
+        plan = OptimizationPlan(
+            select_related=["cards"],
+            planned_resolver_keys=["cards-key"],
+            select_path_resolver_keys={"cards": ("cards-key",)},
+        )
+        qs = SpParent.objects.select_related("cards").prefetch_related(
+            Prefetch("card", queryset=SpCard.objects.all()),
+        )
+
+        delta_plan, _ = diff_plan_for_queryset(plan, qs)
+
+        assert delta_plan.select_related == ()
+        assert delta_plan.planned_resolver_keys == ("cards-key",)
 
     def test_consumer_prefetch_object_suppresses_plan_string(self) -> None:
         plan = OptimizationPlan(prefetch_related=["items"])

@@ -76,6 +76,8 @@ from django_strawberry_framework.utils.relations import (
     relation_bool,
     relation_kind,
     relation_link,
+    respell_relation_path,
+    reverse_relation_by_accessor,
     stored_value_column,
     validate_lookup_expr,
 )
@@ -88,10 +90,12 @@ from tests.optimizer._link_models import (
     LnkSlugObjectChild,
     LnkTag,
 )
+from tests.optimizer._spelling_models import SpBadge, SpCard, SpParent
 
 if TYPE_CHECKING:
     from django.db.models.expressions import Combinable
 
+    from django_strawberry_framework.utils.relations import RelationSpelling
     from django_strawberry_framework.utils.typing import ModelField
 
 
@@ -308,6 +312,198 @@ def test_instance_accessor_prefers_precomputed_field_meta_slot() -> None:
         get_accessor_name=lambda: "WRONG-not-consulted",
     )
     assert instance_accessor(meta_like) == "book_set"
+
+
+@pytest.mark.parametrize(
+    (
+        "model",
+        "path",
+        "source",
+        "expected",
+    ),
+    [
+        (
+            SpParent,
+            "cards",
+            "query",
+            "card",
+        ),
+        (
+            SpParent,
+            "card",
+            "accessor",
+            "cards",
+        ),
+        (
+            SpParent,
+            "cards__genres",
+            "query",
+            "card__genres",
+        ),
+        (
+            SpParent,
+            "card__genres__cards",
+            "accessor",
+            "cards__genres__cards",
+        ),
+        (
+            SpCard,
+            "parent__card",
+            "accessor",
+            "parent__cards",
+        ),
+        (
+            SpParent,
+            "badge",
+            "query",
+            "badge",
+        ),
+        (
+            SpParent,
+            "badge",
+            "accessor",
+            "badge",
+        ),
+        (
+            Genre,
+            "books",
+            "query",
+            "books",
+        ),
+        (
+            Book,
+            "genres",
+            "accessor",
+            "genres",
+        ),
+    ],
+)
+def test_respell_relation_path_translates_each_hop(
+    model: type[Model],
+    path: str,
+    source: "RelationSpelling",
+    expected: str,
+) -> None:
+    """Each hop is spelled in the other vocabulary through Django's relation metadata.
+
+    ``SpParent.card`` is a reverse one-to-one declared ``related_name="card",
+    related_query_name="cards"``: its query name answers ``select_related`` and
+    ``only()``, its accessor ``prefetch_related``. A forward hop (``genres``,
+    ``parent``, ``category``) and a reverse relation whose two names coincide
+    (``badge``, ``books``) are spelled the same both ways.
+    """
+    assert respell_relation_path(model, path, source=source) == expected
+
+
+@pytest.mark.parametrize(
+    ("model", "path", "source"),
+    [
+        (SpParent, "card", "query"),
+        (SpParent, "cards", "accessor"),
+        (SpParent, "nope", "query"),
+        (SpParent, "code", "query"),
+        (SpCard, "parent_id", "query"),
+        (SpCard, "genres__nope", "accessor"),
+        (TaggedItem, "content_object", "query"),
+        (SpBadge, "parent__card__name", "accessor"),
+    ],
+)
+def test_respell_relation_path_answers_none_for_a_path_it_cannot_spell(
+    model: type[Model],
+    path: str,
+    source: "RelationSpelling",
+) -> None:
+    """A path whose hops are not all relations in the given spelling has no translation.
+
+    The accessor of ``SpParent.card`` is no query name and its query name no
+    accessor; an unknown name, a column, a foreign key's ``attname``, a
+    ``GenericForeignKey`` (no related model) and a trailing column all stop the
+    walk, and the caller compares the path as written.
+    """
+    assert respell_relation_path(model, path, source=source) is None
+
+
+_respell_apps = Apps([AppConfig("test_relations_respell", sys.modules[__name__])])
+
+
+class _RsParent(models.Model):
+    """A parent where ``cards`` is the query name of one relation and the accessor of another.
+
+    Django's relation check ``fields.E305`` refuses the pair, so only a project
+    that silences it can hold it; the models live in the private
+    ``_respell_apps`` registry, so the system checks never see them and no test
+    creates their tables (only model metadata is read).
+    """
+
+    name: "models.TextField[str | Combinable, str]" = models.TextField()
+    friends: "models.ManyToManyField[_RsParent, models.Model]" = models.ManyToManyField("self")
+
+    class Meta:
+        app_label = "test_relations_respell"
+        apps = _respell_apps
+
+
+class _RsCard(models.Model):
+    """Reached as ``parent.card``, queried as ``cards``."""
+
+    parent: "models.OneToOneField[_RsParent | Combinable, _RsParent]" = models.OneToOneField(
+        _RsParent,
+        on_delete=models.CASCADE,
+        related_name="card",
+        related_query_name="cards",
+    )
+
+    class Meta:
+        app_label = "test_relations_respell"
+        apps = _respell_apps
+
+
+class _RsSleeve(models.Model):
+    """Reached as ``parent.cards``, queried as ``sleeves``."""
+
+    parent: "models.ForeignKey[_RsParent | Combinable, _RsParent]" = models.ForeignKey(
+        _RsParent,
+        on_delete=models.CASCADE,
+        related_name="cards",
+        related_query_name="sleeves",
+    )
+
+    class Meta:
+        app_label = "test_relations_respell"
+        apps = _respell_apps
+
+
+def test_respell_relation_path_reads_a_shared_name_in_the_spelling_it_is_given() -> None:
+    """``cards`` names ``_RsCard`` as a query name and ``_RsSleeve`` as an accessor.
+
+    The translation never guesses: the spelling a path arrives in picks the
+    relation, and ``reverse_relation_by_accessor`` answers only by accessor.
+    """
+    card_rel = _RsParent._meta.get_field("cards")
+    assert card_rel.related_model is _RsCard
+    assert respell_relation_path(_RsParent, "cards", source="query") == "card"
+    assert respell_relation_path(_RsParent, "cards", source="accessor") == "sleeves"
+    assert respell_relation_path(_RsParent, "sleeves", source="query") == "cards"
+    assert respell_relation_path(_RsParent, "card", source="accessor") == "cards"
+    sleeve_rel = reverse_relation_by_accessor(_RsParent, "cards")
+    assert sleeve_rel is not None
+    assert sleeve_rel.related_model is _RsSleeve
+    assert reverse_relation_by_accessor(_RsParent, "sleeves") is None
+
+
+def test_respell_relation_path_answers_none_for_a_relation_without_an_accessor() -> None:
+    """A symmetrical many-to-many on ``self`` has a reverse relation and no accessor.
+
+    Django's ``ManyToManyRel.get_accessor_name()`` answers ``None`` for it, so
+    the query-spelled path has no accessor spelling.
+    """
+    hidden = next(
+        field
+        for field in _RsParent._meta.get_fields(include_hidden=True)
+        if isinstance(field, models.ManyToManyRel) and field.related_model is _RsParent
+    )
+    assert hidden.get_accessor_name() is None
+    assert respell_relation_path(_RsParent, hidden.name, source="query") is None
 
 
 # ---------------------------------------------------------------------------

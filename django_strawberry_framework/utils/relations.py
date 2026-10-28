@@ -1009,17 +1009,20 @@ def order_column_paths(field_path: str, terminal: object) -> tuple[str, ...]:
 def instance_accessor(field: object) -> str:
     """Return the attribute name relation rows are reached through on an instance.
 
-    For a REVERSE relation declared without ``related_name``, Django's
-    ``ForeignObjectRel.name`` is the related *query* name (``"book"`` - the
-    filter/annotation vocabulary) while the instance attribute is
-    ``get_accessor_name()`` (``"book_set"``); ``getattr(root, field.name)``
-    raises ``AttributeError`` there, and Django's
-    ``prefetch_related`` rejects the query name as a lookup for the same
-    reason. They coincide whenever ``related_name`` is set, so only a
-    relation declared without one exposes the split (fakeshop's
-    ``RepairTicket.venue``, ``VenueBadge.venue``, ``VenueSponsor.venues``). Forward fields
+    For a REVERSE relation, Django's ``ForeignObjectRel.name`` is the related
+    *query* name (``related_query_name()``: the filter, ``select_related`` and
+    ``only()`` vocabulary) while the instance attribute is
+    ``get_accessor_name()``; ``getattr(root, field.name)`` raises
+    ``AttributeError`` where they differ, and Django's ``prefetch_related``
+    rejects the query name as a lookup for the same reason. They differ for a
+    relation declared without ``related_name`` (query name ``"book"``,
+    accessor ``"book_set"``; fakeshop's ``RepairTicket.venue``,
+    ``VenueBadge.venue``, ``VenueSponsor.venues``) and for one whose
+    ``related_query_name`` differs from its ``related_name``. Forward fields
     (``ForeignKey``, ``ManyToManyField``, ``OneToOneField``) have no
     ``get_accessor_name`` and their ``name`` IS the instance attribute.
+    ``respell_relation_path`` translates a whole lookup path between the two
+    vocabularies.
 
     Three-tier read, matching the two field shapes the package passes
     around: an ``optimizer/field_meta.py::FieldMeta`` carries the accessor
@@ -1056,6 +1059,106 @@ def instance_accessor(field: object) -> str:
             f"got {truth.kind(accessor_name)}.",
         )
     return accessor_name
+
+
+def reverse_relation_by_accessor(model: type[models.Model], part: str) -> ForeignObjectRel | None:
+    """Return the reverse relation of ``model`` whose accessor name is spelled ``part``.
+
+    ``_meta.get_field`` registers a reverse relation under its query name
+    (``related_query_name()``: the ``related_query_name``, else the
+    ``related_name``, else the child model's bare name) -- NOT under the
+    accessor the reverse descriptor (and therefore Django's prefetch
+    traversal, which resolves the lookup by attribute access) actually
+    accepts: ``<model>_set`` for a relation declared without
+    ``related_name``, the ``related_name`` for one whose
+    ``related_query_name`` differs. The accessor map is Django's own relation
+    metadata (``get_accessor_name()`` over ``_meta.get_fields()``), and only
+    reverse relations (``ForeignObjectRel``) carry accessor names -- a forward
+    M2M, a ``GenericForeignKey`` and a ``GenericRelation`` are non-concrete
+    relations too, but have none. A miss returns ``None``.
+    """
+    for candidate in model._meta.get_fields():
+        if not isinstance(candidate, ForeignObjectRel):
+            # Forward relations carry no accessor: their field-map name is it.
+            continue
+        accessor: object = candidate.get_accessor_name()
+        if type(accessor) is str and accessor == part:
+            return candidate
+    return None
+
+
+#: The two vocabularies Django names a relation lookup path in: ``"query"`` for
+#: ``select_related``, ``only()`` and filters (a reverse relation's
+#: ``related_query_name()``), ``"accessor"`` for ``prefetch_related`` and the
+#: instance attribute (a reverse relation's ``get_accessor_name()``).
+RelationSpelling: TypeAlias = Literal["query", "accessor"]
+
+
+def _relation_spelled(
+    model: type[models.Model],
+    part: str,
+    spelling: RelationSpelling,
+) -> object | None:
+    """Return the relation of ``model`` that ``part`` names in ``spelling``, or ``None``.
+
+    Each vocabulary is asked through the Django metadata that defines it, so a
+    query name of one relation that equals the accessor of another resolves to
+    the relation the spelling means. Under ``"query"`` it is ``_meta.get_field``
+    (forward fields by name, reverse relations by query name), and only a field
+    whose ``name`` is ``part`` answers: the ``attname`` alias the field map also
+    holds names a column, never a relation hop. Under ``"accessor"`` a reverse
+    relation answers by ``get_accessor_name()``, a forward field by its name.
+    """
+    if spelling == "accessor":
+        reverse = reverse_relation_by_accessor(model, part)
+        if reverse is not None:
+            return reverse
+    try:
+        field: object = model._meta.get_field(part)
+    except FieldDoesNotExist:
+        return None
+    if spelling == "accessor" and isinstance(field, ForeignObjectRel):
+        return None
+    if getattr(field, "name", None) != part:
+        return None
+    return field
+
+
+def respell_relation_path(
+    model: type[models.Model],
+    path: str,
+    *,
+    source: RelationSpelling,
+) -> str | None:
+    """Return the lookup ``path`` from ``model``, given in ``source`` spelling, in the other one.
+
+    Walks ``path`` one hop at a time through Django's relation metadata
+    (``_relation_spelled``) and spells each hop in the other vocabulary: a
+    reverse relation's ``get_accessor_name()`` for an accessor, its ``name``
+    (``related_query_name()``) for a query name, a forward field's own name for
+    either. ``None`` when a hop names no relation in ``source`` spelling (an
+    unknown name, a column, a ``to_attr``), ends on a model-less relation (a
+    ``GenericForeignKey``), or is a hidden reverse relation without an
+    accessor; a caller compares such a path as written.
+    """
+    current = model
+    hops: list[str] = []
+    for part in path.split(LOOKUP_SEP):
+        field = _relation_spelled(current, part, source)
+        if field is None or not getattr(field, "is_relation", False):
+            return None
+        related: object = getattr(field, "related_model", None)
+        if not truth.is_subclass(related, models.Model):
+            return None
+        if isinstance(field, ForeignObjectRel):
+            spelled: object = field.name if source == "accessor" else field.get_accessor_name()
+        else:
+            spelled = part
+        if type(spelled) is not str:
+            return None
+        hops.append(spelled)
+        current = related
+    return LOOKUP_SEP.join(hops)
 
 
 def has_composite_pk(model: type[models.Model]) -> bool:

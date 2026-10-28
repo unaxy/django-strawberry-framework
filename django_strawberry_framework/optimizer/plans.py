@@ -44,7 +44,7 @@ from __future__ import annotations
 import contextlib
 from collections.abc import MutableSequence
 from dataclasses import dataclass, field, fields, replace
-from typing import TYPE_CHECKING, ClassVar, TypeVar, cast
+from typing import TYPE_CHECKING, ClassVar, NamedTuple, TypeVar, cast
 
 from django.core.exceptions import FieldDoesNotExist, FieldError
 from django.db.models import Count, F, OrderBy, Prefetch, Q, QuerySet, Value, Window, sql
@@ -82,6 +82,7 @@ from django_strawberry_framework.utils.relations import (
     instance_accessor,
     is_model_class,
     relation_kind,
+    respell_relation_path,
 )
 
 from .field_meta import FieldMeta
@@ -213,6 +214,20 @@ def _indexed_list() -> _IndexedList[str]:
 def _prefetch_indexed_list() -> _IndexedList[PrefetchLookup]:
     """Return an indexed list keyed by Django prefetch lookup path."""
     return _IndexedList(key=_lookup_path)
+
+
+class JoinPrefix(NamedTuple):
+    """The ``select_related`` JOIN path a planned level hangs beneath, in both spellings.
+
+    ``query`` is the query-name spelling ``select_related`` and ``only()`` read,
+    ``accessor`` the spelling ``prefetch_related`` resolves on the instance
+    (``utils/relations.py::RelationSpelling``). Each carries its trailing
+    ``__``; both are ``""`` at the root. They differ where a reverse hop's
+    ``related_query_name()`` and ``get_accessor_name()`` do.
+    """
+
+    query: str
+    accessor: str
 
 
 @dataclass(frozen=True)
@@ -652,14 +667,16 @@ def _release_select_related_to_prefetches(
     The wildcard ``select_related()`` cannot be narrowed path by path and follows
     every non-null forward key, so it is released whole; the plan's own
     ``select_related`` entries, applied after this, still JOIN what the selection
-    reads.
+    reads. The prefetch paths are accessor-spelled and the JOINs query-spelled,
+    so each prefetch path is compared in its query spelling
+    (``_query_spelled``).
     """
     existing: object = queryset.query.select_related
     if existing is False:
         return queryset
     if existing is True:
         return queryset.select_related(None)
-    prefetch_paths = {_lookup_path(entry) for entry in prefetches}
+    prefetch_paths = {_query_spelled(queryset.model, _lookup_path(entry)) for entry in prefetches}
     joined = _flatten_select_related(existing)
     kept = [
         path
@@ -670,6 +687,18 @@ def _release_select_related_to_prefetches(
         return queryset
     released = queryset.select_related(None)
     return released.select_related(*kept) if kept else released
+
+
+def _query_spelled(model: type[models.Model], lookup: str) -> str:
+    """Return the accessor-spelled prefetch ``lookup`` from ``model`` in query-name spelling.
+
+    A prefetch lookup names each reverse hop by its accessor, a ``select_related``
+    path and an ``only()`` entry by its query name
+    (``utils/relations.py::RelationSpelling``); a comparison between them is
+    made in the query spelling. A lookup whose hops do not all resolve to
+    relations (a ``to_attr``, a generic foreign key) is compared as written.
+    """
+    return respell_relation_path(model, lookup, source="accessor") or lookup
 
 
 def _flatten_select_related(sr: object) -> set[str]:
@@ -1977,7 +2006,12 @@ def diff_plan_for_queryset(
 
     One rule runs through every arm: a consumer ``Prefetch`` carrying a
     queryset is the source of truth for the rows of its path, as it is
-    without the optimizer.
+    without the optimizer. Ownership is by relation, whatever the spelling:
+    a consumer prefetch path names a reverse hop by its accessor while a JOIN
+    names it by its query name (``utils/relations.py::RelationSpelling``), and
+    every comparison across the two is made in one spelling, so
+    ``Prefetch("card", ...)`` owns the JOIN ``cards`` of a relation declared
+    ``related_name="card", related_query_name="cards"``.
 
     ``select_related`` - compared as dotted lookup paths against the
     consumer's existing ``query.select_related`` dict. Exact matches
@@ -2142,12 +2176,16 @@ def _consumer_owned_paths(queryset: QuerySet[models.Model]) -> frozenset[str]:
     queryset's own ``select_related`` joins is not owned either: that JOIN
     caches the relation and Django skips the ``Prefetch``, as it does without
     the optimizer.
+
+    The paths are returned in query-name spelling (``_query_spelled``), the
+    spelling of the JOINs, ``only()`` entries and select-path resolver keys
+    they are compared against.
     """
     joined = _flatten_select_related(queryset.query.select_related)
     return frozenset(
         path
         for path in (
-            _lookup_path(entry)
+            _query_spelled(queryset.model, _lookup_path(entry))
             for entry in _consumer_prefetch_lookups(queryset)
             if not isinstance(entry, str) and entry.queryset is not None
         )
@@ -2166,7 +2204,8 @@ def _withdraw_owned_select_paths(
     - every planned JOIN at or through an owned path is released: Django skips
       a prefetch whose relation a JOIN already cached;
     - each released JOIN strictly beneath an owned path (and not owned itself)
-      becomes a plain prefetch lookup of the same path, which Django runs over
+      becomes a plain prefetch lookup of the same path, spelled in accessors
+      (``utils/relations.py::respell_relation_path``), which Django runs over
       the consumer's rows in one query, so the relation it loads stays planned;
     - the resolver keys of an owned path's own JOIN or FK-id elision
       (``select_path_resolver_keys``) are withdrawn: the consumer's rows answer
@@ -2175,8 +2214,10 @@ def _withdraw_owned_select_paths(
       since no JOIN loads them. An FK-id elision below an owned path stays: it
       reads the key on the consumer's own row.
     """
+    if not (plan.select_related or plan.fk_id_elisions):
+        return frozenset(), [], set(), ()
     owned = _consumer_owned_paths(queryset)
-    if not owned or not (plan.select_related or plan.fk_id_elisions):
+    if not owned:
         return frozenset(), [], set(), ()
     joined = frozenset(plan.select_related)
     released = frozenset(
@@ -2184,10 +2225,13 @@ def _withdraw_owned_select_paths(
         for path in joined
         if any(path == o or path.startswith(f"{o}{LOOKUP_SEP}") for o in owned)
     )
-    rerooted = sorted(
-        (path for path in released if path not in owned),
-        key=lambda path: (path.count(LOOKUP_SEP), path),
-    )
+    rerooted = [
+        respell_relation_path(queryset.model, path, source="query") or path
+        for path in sorted(
+            (path for path in released if path not in owned),
+            key=lambda path: (path.count(LOOKUP_SEP), path),
+        )
+    ]
     keys: set[str] = set()
     for owned_path in owned:
         keys.update(plan.select_path_resolver_keys.get(owned_path, ()))
