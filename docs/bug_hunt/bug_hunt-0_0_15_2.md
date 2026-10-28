@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 361 done, 212 to do.
+Progress: 362 done, 211 to do.
 
 ## Done
 
@@ -2032,6 +2032,9 @@ Progress: 361 done, 212 to do.
 - [x] 662. The state-folder retry and duplicated text reader belong to repository workspace/proof tooling,
   with no supported package wire/configuration path or public contract row. Closed as tooling robustness outside
   the package defect gate; no runtime fix is claimed (`scripts/workspace.py::_make_state_dir`).
+- [x] 661. Closed-reader exit codes in repository check/build/review scripts are tooling robustness, with no
+  supported package API or GraphQL wire/configuration path. The workspace command's own exit-code contract does
+  not extend to those entry points; no script runtime fix is claimed.
 
 ## Outside review of the fixes
 
@@ -2199,11 +2202,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 657. Unprobed: the integer ask (385) on an `ArrayField(IntegerField)` filter leaf: the gate admits only
   temporal / duration elements, so a list param of out-of-range integers reaches the driver unasked. Found
   fact-finding 389
-- [ ] 661. (robustness) The other `scripts/` entry points (the `check_*`, `build_*` `--check`, `prove_failability.py`,
-  `review_*`, `bug_hunt.py`, `count_queries.py` and the rest sharing the `sys.exit(main())` shape) exit 120 when their
-  stdout reader is gone, losing a 0 or 1 a pipeline reads (`check_trailing_commas.py --check`,
-  `check_type_suppressions.py` reproduced). Move `workspace.py`'s `_ReaderGoneTolerant` / `_reader_gone_tolerant` /
-  `_quiet_dead_sink` to a shared scripts module and install it at each entry. Found fixing 397
 - [ ] 663. (robustness) Other configuration slots read a lazy translation string one name per character, the shape 587
   closed for the set declarations: `utils/inputs.py::normalize_field_name_sequence` (model, form and serializer
   mutation `Meta.fields` / `Meta.exclude`: `gettext_lazy("name")` is `('n','a','m','e')`, a silent no-op as
