@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 356 done, 211 to do.
+Progress: 357 done, 211 to do.
 
 ## Done
 
@@ -2000,6 +2000,14 @@ Progress: 356 done, 211 to do.
   `_normalize_input`) backs `_named_leaf_filters`, which `_derive_flat_hop_visibility_async` reads; a malformed value
   raises before any hop hook. `_supplied_leaf_filters` and the permission walk are unchanged. spec-027 says so. Tests:
   `tests/filters/test_sets.py`
+- [x] 628. A many-to-many leaf, forward or reverse, whose through model's foreign key onto the leaf's target has a
+  non-pk `to_field` is compared by the target's primary key, as its wire type says: `filters/base.py::
+  _relation_uses_non_pk_to_field` asks `utils/relations.py::non_pk_forward_link` of that foreign key
+  (`m2m_through_link_fields` resolves the side), so the leaf carries 511's marker and compiles through `<relation>__pk`
+  in plain, scoped-hop and declared modes and as a Relay GlobalID leaf. It compared the `to_field` column: a linked
+  row's pk matched nothing unless it equalled that row's `code`, and a code value matched some other row. A pk-target
+  or source-side `to_field` link compiles byte-identically. spec-027 and the `filterset` glossary term say so. Tests:
+  `tests/filters/test_base.py`
 
 ## Outside review of the fixes
 
@@ -2088,11 +2096,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   list raises `IndexError` from `Range.get_rhs_op`. A build-time refusal must allow every list-consuming lookup (`in`,
   `range`, transforms ending in either, `ArrayField` `contains` / `contained_by` / `overlap`, `has_keys` /
   `has_any_keys`, a consumer-registered lookup) and every `method=` filter. Found fixing 508; widened triaging 516
-- [ ] 628. A raw-key many-to-many leaf whose through model keys the target by a non-pk `to_field` is typed by the
-  target's primary key but compares the `to_field` column: `bs: {exact: [1]}` over a through `ForeignKey(B,
-  to_field="code")` matches the row whose `code` is 1, and the primary key of a linked row matches nothing unless it
-  equals that row's `code`; the GLOSSARY "Relation leaves" `to_field` sentence covers forward foreign keys and
-  one-to-ones only. Found fixing 511
 - [ ] 523. A `DjangoModelFormMutation` whose form declares `forms.DateField` (or another date-parsing field) over a
   `TimeField` column passes `forms/inputs.py::require_column_kind_agreement`, which compares write kind only; the
   wire `Time` reaches the form as a `datetime.time`, `BaseTemporalField.to_python` calls `.strip()` on it, and the
@@ -2220,6 +2223,9 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 667. CHANGELOG entry for item 628: a many-to-many filter leaf (forward or reverse, raw key or Relay GlobalID)
+  whose through model's foreign key onto the target has a non-pk `to_field` matches by the target's primary key, as
+  its wire type says; it matched the `to_field` column and returned the wrong rows
 - [ ] 665. CHANGELOG entry for item 540: a serializer-flavor datetime DRF cannot place in the configured zone (a naive
   value near year 1 or 9999 under a non-UTC `TIME_ZONE`, an aware out-of-range one under `USE_TZ=False`) answers DRF's
   field-keyed `overflow` error instead of the masked top-level error
