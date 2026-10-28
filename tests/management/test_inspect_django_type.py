@@ -22,6 +22,7 @@ import sys
 import types
 from collections.abc import Iterator
 from enum import Enum
+from functools import partial
 from io import StringIO
 from typing import NewType
 
@@ -42,6 +43,7 @@ from django_strawberry_framework import DjangoType, finalize_django_types, straw
 from django_strawberry_framework.management.commands.inspect_django_type import (
     Command,
     _render_annotation,
+    _scalar_converter,
     _scalar_name,
     _sdl_type_name,
     _strawberry_field_type,
@@ -60,6 +62,10 @@ def _isolate_registry() -> Iterator[None]:
     registry.clear()
     yield
     registry.clear()
+
+
+# The namer a ``--schema``-less run uses: Strawberry's converter for a ``strawberry_config()`` schema.
+_COLD_NAMER = partial(_scalar_name, converter=_scalar_converter(None))
 
 
 def _make_test_module(monkeypatch: pytest.MonkeyPatch, **attrs: object) -> types.ModuleType:
@@ -393,7 +399,7 @@ def test_sdl_type_name_ignores_inherited_strawberry_definition() -> None:
 def test_render_annotation_renders_multi_member_union() -> None:
     # A consumer-authored union annotation (>1 non-None member) renders each
     # member name joined by " | " with no trailing "!" on the members.
-    assert _render_annotation(int | str) == "Int | String"
+    assert _render_annotation(int | str, _COLD_NAMER) == "Int | String"
 
 
 def test_inspect_unresolved_forward_ref_relation_raises_command_error() -> None:
@@ -437,7 +443,7 @@ def _connection_row(text: str, field_name: str) -> str:
 
 
 def test_inspect_direct_relay_node_inheritance_suppresses_pk_row() -> None:
-    """Direct ``class Foo(DjangoType, relay.Node)`` reports GlobalID! for the pk.
+    """Direct ``class Foo(DjangoType, relay.Node)`` reports the interface's ``ID!`` for the pk.
 
     The inspect command must flow through the shared suppression verdict in
     ``types/base.py`` (via ``_is_suppressed_relay_pk``) for both the
@@ -460,9 +466,57 @@ def test_inspect_direct_relay_node_inheritance_suppresses_pk_row() -> None:
     text = out.getvalue()
 
     id_row = _connection_row(text, "id")
-    assert "GlobalID!" in id_row
+    assert " ID! " in id_row
     assert "relay.Node id" in id_row
     assert "SCALAR_MAP" not in id_row
+
+
+def test_schema_rows_name_each_scalar_as_the_schema_publishes_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--schema`` names every scalar as that schema's own converter publishes it.
+
+    ``relay_use_legacy_global_id`` publishes the Relay ``id`` as ``GlobalID!`` where
+    the default config publishes ``ID!``, and a ``scalar_overrides`` entry renames a
+    column's scalar. Neither lives in ``StrawberryConfig.scalar_map``, so the table
+    reads the schema's own merged scalar registry, and each row matches the SDL.
+    """
+    plain_text = strawberry.scalar(name="PlainText", serialize=str, parse_value=str)
+
+    class CategoryNode(DjangoType, relay.Node):
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+
+    finalize_django_types()
+
+    @strawberry.type
+    class Query:
+        @strawberry.field
+        def category(self) -> CategoryNode:
+            raise NotImplementedError
+
+    schema = strawberry.Schema(
+        query=Query,
+        config=strawberry_config(relay_use_legacy_global_id=True),
+        scalar_overrides={str: plain_text},
+    )
+    _make_test_module(monkeypatch, schema=schema)
+    out = StringIO()
+    call_command(
+        "inspect_django_type",
+        "CategoryNode",
+        "--schema",
+        "test_module:schema",
+        stdout=out,
+    )
+    rendered = out.getvalue()
+
+    assert " GlobalID! " in _connection_row(rendered, "id")
+    assert " PlainText! " in _connection_row(rendered, "name")
+    sdl = str(schema)
+    assert "id: GlobalID!" in sdl
+    assert "name: PlainText!" in sdl
 
 
 def test_inspect_one_to_one_pk_on_relay_type_reports_relation_row() -> None:
@@ -474,9 +528,9 @@ def test_inspect_one_to_one_pk_on_relay_type_reports_relation_row() -> None:
     ``apps/library/models.py::PatronProfile`` is keyed by its one-to-one
     ``patron``, so the schema surface
     exposes ``patron: <TargetType>!`` (the pk column's relation field)
-    alongside the interface-supplied ``id: GlobalID!`` - the pk field is NOT the
+    alongside the interface-supplied ``id: ID!`` - the pk field is NOT the
     id field. The table must mirror that: a relation row naming the resolved
-    target type, never the interface's GlobalID row.
+    target type, never the interface's ``ID!`` row.
     """
 
     class InspRelPkTargetType(DjangoType):
@@ -501,7 +555,7 @@ def test_inspect_one_to_one_pk_on_relay_type_reports_relation_row() -> None:
     target_row = _connection_row(text, "patron")
     assert "InspRelPkTargetType!" in target_row
     assert "relation: forward FK" in target_row
-    assert "GlobalID!" not in target_row
+    assert " ID! " not in target_row
     assert "relay.Node id" not in target_row
 
     # The table agrees with the schema the type actually builds into.
@@ -520,7 +574,7 @@ def test_inspect_mti_parent_link_pk_on_relay_type_reports_relation_row() -> None
 
     The parent link is a ``OneToOneField`` - it IS ``model._meta.pk`` for the
     child, so the same non-suppression contract applies: the field renders the
-    resolved parent type, not the interface's GlobalID (the id derives FROM the
+    resolved parent type, not the interface's ``ID!`` (the id derives FROM the
     ptr column, but the GraphQL field named for it is a relation type).
     ``apps/library/models.py::LendingDesk``'s ``venue_ptr`` is that pk.
     """
@@ -549,7 +603,7 @@ def test_inspect_mti_parent_link_pk_on_relay_type_reports_relation_row() -> None
     ptr_row = _connection_row(text, "venue_ptr")
     assert "InspRelPkParentType" in ptr_row
     assert "relation: forward FK" in ptr_row
-    assert "GlobalID!" not in ptr_row
+    assert " ID! " not in ptr_row
     assert "relay.Node id" not in ptr_row
 
 
@@ -673,7 +727,7 @@ def test_inspect_consumer_authored_pk_on_relay_type_reports_consumer_row() -> No
     ``consumer_authored_fields`` before the Relay-pk suppression check, so a
     consumer ``isbn_13: str`` override keeps its annotation and the schema
     exposes the consumer's type. The table must mirror that: the consumer
-    converter row, never the interface's GlobalID row.
+    converter row, never the interface's ``ID!`` row.
     """
 
     class InspConsumerPkType(DjangoType):
@@ -692,7 +746,7 @@ def test_inspect_consumer_authored_pk_on_relay_type_reports_consumer_row() -> No
     text = out.getvalue()
 
     pk_row = _connection_row(text, "isbn_13")
-    assert "GlobalID!" not in pk_row
+    assert " ID! " not in pk_row
     assert "relay.Node id" not in pk_row
     assert "consumer annotation (scalar)" in pk_row
 
@@ -810,12 +864,12 @@ def test_scalar_name_uses_custom_scalar_definition_name() -> None:
     with pytest.warns(DeprecationWarning, match=r"Passing a class to strawberry\.scalar\(\)"):
         token = strawberry.scalar(TokenValue, name="OpaqueToken", serialize=str)
 
-    assert _scalar_name(token) == "OpaqueToken"
+    assert _COLD_NAMER(token) == "OpaqueToken"
 
 
 def test_scalar_name_uses_named_union_metadata() -> None:
     """A finalized named union leaf reports its SDL name, never its object repr."""
-    assert _scalar_name(strawberry.union("SearchResult")) == "SearchResult"
+    assert _COLD_NAMER(strawberry.union("SearchResult")) == "SearchResult"
 
 
 def test_scalar_name_falls_back_to_dunder_name_for_definitionless_type() -> None:
@@ -824,7 +878,7 @@ def test_scalar_name_falls_back_to_dunder_name_for_definitionless_type() -> None
     class UnmappedCustomScalar:
         pass
 
-    assert _scalar_name(UnmappedCustomScalar) == "UnmappedCustomScalar"
+    assert _COLD_NAMER(UnmappedCustomScalar) == "UnmappedCustomScalar"
 
 
 def test_scalar_name_reads_a_non_class_leafs_declared_name_or_its_text() -> None:
@@ -835,5 +889,5 @@ def test_scalar_name_reads_a_non_class_leafs_declared_name_or_its_text() -> None
         def __str__(self) -> str:
             return "nameless-leaf"
 
-    assert _scalar_name(NewType("OpaqueId", str)) == "OpaqueId"
-    assert _scalar_name(_Nameless()) == "nameless-leaf"
+    assert _COLD_NAMER(NewType("OpaqueId", str)) == "OpaqueId"
+    assert _COLD_NAMER(_Nameless()) == "nameless-leaf"
