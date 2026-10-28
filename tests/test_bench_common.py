@@ -534,11 +534,14 @@ def test_reset_plan_cache_clears_the_plan_cache_and_the_document_key_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The reset leaves both optimizer caches empty and the counters zeroed."""
-    empty_cache: OrderedDict[tuple[str, str | None], tuple[str, frozenset[str]]] = OrderedDict()
+    empty_cache: OrderedDict[
+        tuple[str, str | None, frozenset[str]],
+        tuple[str, frozenset[str]],
+    ] = OrderedDict()
     monkeypatch.setattr(extension_module, "_doc_key_cache", empty_cache)
     operation = parse("query Q { field }").definitions[0]
     assert isinstance(operation, OperationDefinitionNode)
-    extension_module._doc_cache_entry(operation, {})
+    extension_module._doc_cache_entry(operation, {}, frozenset({"first"}))
     optimizer = DjangoOptimizerExtension()
     optimizer._plan_cache["k", frozenset(), models.Model, (), None] = OptimizationPlan()
     optimizer._cache_hits, optimizer._cache_misses = 4, 2

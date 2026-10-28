@@ -14258,6 +14258,242 @@ def test_nested_connection_pagination_from_graphql_variable_live() -> None:
     assert json_at(conn, "pageInfo", "hasNextPage") is True
 
 
+class _RenamePageArguments(NameConverter):
+    """Publishes every name Strawberry spells as a key of ``wire`` under its value.
+
+    Built over the Relay page arguments and the ``orderBy`` sidecar, so a nested
+    connection's ``first`` / ``last`` / ``after`` / ``before`` / ``orderBy`` reach the
+    client under the names the mapping gives them.
+    """
+
+    def __init__(self, wire: Mapping[str, str]) -> None:
+        super().__init__()
+        self.wire: Mapping[str, str] = wire
+
+    @override
+    def get_graphql_name(self, obj: HasGraphQLName) -> str:
+        name = super().get_graphql_name(obj)
+        return self.wire.get(name, name)
+
+
+#: Each converter's wire spelling of the page arguments and the order sidecar: the
+#: default names, every name renamed, and ``first`` / ``last`` swapped.
+_PAGE_ARGUMENT_WIRES: dict[str, dict[str, str]] = {
+    "default": {},
+    "renamed": {
+        "first": "take",
+        "last": "tail",
+        "after": "since",
+        "before": "until",
+        "orderBy": "sort",
+    },
+    "swapped": {"first": "last", "last": "first"},
+}
+
+#: The offset cursor of each genre's first book (``arrayconnection:0``).
+_FIRST_ROW_CURSOR = base64.b64encode(b"arrayconnection:0").decode()
+
+
+def _page_argument_schema(converter: str) -> DjangoSchema:
+    """The project's ``Query`` under ``converter``'s wire names, its optimizer raising on N+1."""
+    optimizer = DjangoOptimizerExtension(strictness="raise")
+    return DjangoSchema(
+        query=config_schema.Query,
+        config=strawberry_config(
+            name_converter=_RenamePageArguments(_PAGE_ARGUMENT_WIRES[converter]),
+        ),
+        extensions=[lambda: optimizer],
+        error_policy={"enabled": False},
+    )
+
+
+def _page_argument_document(converter: str, arguments: str) -> str:
+    """``allLibraryGenres { booksConnection(<arguments>) }`` spelled in ``converter``'s names.
+
+    ``arguments`` names the page arguments by their Python names (``first: 1``).
+    """
+    wire = _PAGE_ARGUMENT_WIRES[converter]
+    spelled = re.sub(
+        r"\b(first|last|after|before|orderBy):",
+        lambda match: f"{wire.get(match.group(1), match.group(1))}:",
+        arguments,
+    )
+    variables = "($n: Int)" if "$n" in arguments else ""
+    return (
+        f"query Page{variables} {{ allLibraryGenres {{ name booksConnection("
+        + spelled
+        + ") { edges { node { title } } pageInfo { hasNextPage hasPreviousPage } } } }"
+    )
+
+
+def _post_page_arguments(
+    schema: DjangoSchema,
+    converter: str,
+    arguments: str,
+    n: int | None = None,
+) -> tuple[JSONObject, list[str]]:
+    """POST the page document to ``schema``; return the payload and every statement it ran."""
+    with CaptureQueriesContext(connection) as captured:
+        response = _post_holder(
+            schema,
+            _page_argument_document(converter, arguments),
+            variables=None if n is None else {"n": n},
+        )
+    assert response.status_code == 200
+    return response_json(response), [query["sql"] for query in captured.captured_queries]
+
+
+def _seed_page_argument_genres() -> None:
+    """Two genres with three books each, so every page window has rows past its bound."""
+    shelf = _seed_shelf()
+    _seed_genre_with_books("Alpha", shelf, ("a1", "a2", "a3"))
+    _seed_genre_with_books("Beta", shelf, ("b1", "b2", "b3"))
+
+
+#: Windowable page shapes, by their Python argument names, and the titles each serves.
+_WINDOWED_PAGES: dict[str, tuple[str, int | None, dict[str, list[str]]]] = {
+    "first": ("first: 1", None, {"Alpha": ["a1"], "Beta": ["b1"]}),
+    "last": ("last: 1", None, {"Alpha": ["a3"], "Beta": ["b3"]}),
+    "variable-first": ("first: $n", 2, {"Alpha": ["a1", "a2"], "Beta": ["b1", "b2"]}),
+    "after": (f'first: 1, after: "{_FIRST_ROW_CURSOR}"', None, {"Alpha": ["a2"], "Beta": ["b2"]}),
+    "before": (
+        f'last: 1, before: "{base64.b64encode(b"arrayconnection:2").decode()}"',
+        None,
+        {"Alpha": ["a2"], "Beta": ["b2"]},
+    ),
+}
+
+
+def _titles_by_genre(payload: JSONObject) -> dict[str, list[str]]:
+    """Map each genre's name to the titles its ``booksConnection`` page served."""
+    assert "errors" not in payload, payload
+    return {
+        json_str(genre, "name"): [
+            json_str(edge, "node", "title")
+            for edge in json_list(genre, "booksConnection", "edges")
+        ]
+        for genre in json_list(payload, "data", "allLibraryGenres")
+    }
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("converter", ["renamed", "swapped"])
+@pytest.mark.parametrize("shape", list(_WINDOWED_PAGES))
+def test_nested_connection_window_reads_page_arguments_by_python_name(
+    converter: str,
+    shape: str,
+) -> None:
+    """A converter renaming the page arguments plans the window the default names plan.
+
+    The planner reads each argument by the Python name the schema published it
+    from, so the window under ``take`` / ``tail`` / ``since`` / ``until`` (or under
+    ``first`` and ``last`` swapped) runs the same statements as the default schema:
+    the root list and one window bounded by the page, no overfetch and no
+    per-parent fallback, and every genre gets the same page.
+    """
+    _seed_page_argument_genres()
+    arguments, n, titles = _WINDOWED_PAGES[shape]
+    default_payload, default_sql = _post_page_arguments(
+        _page_argument_schema("default"),
+        "default",
+        arguments,
+        n,
+    )
+    payload, sql = _post_page_arguments(
+        _page_argument_schema(converter),
+        converter,
+        arguments,
+        n,
+    )
+
+    assert _titles_by_genre(default_payload) == titles
+    assert _titles_by_genre(payload) == titles
+    assert len(default_sql) == 2, default_sql
+    assert sql == default_sql
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("converter", ["default", "renamed", "swapped"])
+def test_nested_connection_plan_cache_keys_a_renamed_page_variable(converter: str) -> None:
+    """Two requests differing only in a nested page variable plan two windows.
+
+    The plan cache keys the variable whatever name the schema publishes ``first``
+    under, so the second request's window is bounded by its own value rather than
+    served the first request's cached plan.
+    """
+    _seed_page_argument_genres()
+    schema = _page_argument_schema(converter)
+    one_payload, one_sql = _post_page_arguments(schema, converter, "first: $n", 1)
+    two_payload, two_sql = _post_page_arguments(schema, converter, "first: $n", 2)
+
+    assert _titles_by_genre(one_payload) == {"Alpha": ["a1"], "Beta": ["b1"]}
+    assert _titles_by_genre(two_payload) == {"Alpha": ["a1", "a2"], "Beta": ["b1", "b2"]}
+    assert len(one_sql) == len(two_sql) == 2, (one_sql, two_sql)
+    assert one_sql[0] == two_sql[0]
+    assert one_sql[1] != two_sql[1]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("converter", ["default", "renamed"])
+def test_nested_connection_literal_and_variable_aliases_share_one_window(converter: str) -> None:
+    """``a: booksConnection(first: 2)`` and ``b: booksConnection(first: $n)`` with ``n = 2``.
+
+    Both aliases carry the same coerced page, so they share one window: the root
+    list and one window statement, each alias served the first two books.
+    """
+    _seed_page_argument_genres()
+    wire = _PAGE_ARGUMENT_WIRES[converter].get("first", "first")
+    document = (
+        "query Page($n: Int) { allLibraryGenres { name "
+        f"a: booksConnection({wire}: 2) {{ edges {{ node {{ title }} }} }} "
+        f"b: booksConnection({wire}: $n) {{ edges {{ node {{ title }} }} }} }} }}"
+    )
+    with CaptureQueriesContext(connection) as captured:
+        response = _post_holder(_page_argument_schema(converter), document, variables={"n": 2})
+    payload = response_json(response)
+
+    assert "errors" not in payload, payload
+    for genre in json_list(payload, "data", "allLibraryGenres"):
+        prefix = json_str(genre, "name")[0].lower()
+        for alias in ("a", "b"):
+            titles = [json_str(edge, "node", "title") for edge in json_list(genre, alias, "edges")]
+            assert titles == [f"{prefix}1", f"{prefix}2"], payload
+    assert len(captured.captured_queries) == 2, captured.captured_queries
+
+
+#: Page shapes the window cannot serve, by Python argument names: an order sidecar
+#: and an offset-bearing backward page. Each resolves per parent.
+_PER_PARENT_PAGES: dict[str, str] = {
+    "order-sidecar": "first: 1, orderBy: [{title: DESC}]",
+    "after-last": f'last: 1, after: "{_FIRST_ROW_CURSOR}"',
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("converter", ["default", "renamed", "swapped"])
+@pytest.mark.parametrize("shape", list(_PER_PARENT_PAGES))
+def test_nested_connection_per_parent_page_stays_strictness_visible_under_any_names(
+    converter: str,
+    shape: str,
+) -> None:
+    """A page shape the window cannot serve is the unplanned N+1 under every converter.
+
+    ``strictness="raise"`` reports the per-parent access whatever names the schema
+    publishes the sidecar and the page arguments under, and no window prefetch runs
+    before the report.
+    """
+    _seed_page_argument_genres()
+    payload, sql = _post_page_arguments(
+        _page_argument_schema(converter),
+        converter,
+        _PER_PARENT_PAGES[shape],
+    )
+
+    assert payload.get("errors"), payload
+    assert "Unplanned N+1: books" in json_str(payload, "errors", 0, "message"), payload
+    assert not any("_dst_" in statement for statement in sql), sql
+
+
 @pytest.mark.django_db
 def test_nested_connection_first_zero_empty_page_live() -> None:
     """Nested ``first: 0`` returns an empty page live, served from the marker row.

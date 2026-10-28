@@ -159,7 +159,18 @@ if TYPE_CHECKING:
     from django_strawberry_framework.optimizer.selections import FragmentVisitKey
 
 #: The optimizer's document-key memo shape, for a test that swaps in an empty one.
-_DocKeyCache = OrderedDict[tuple[str, str | None], tuple[str, frozenset[str]]]
+_DocKeyCache = OrderedDict[tuple[str, str | None, frozenset[str]], tuple[str, frozenset[str]]]
+
+#: The wire names the default ``NameConverter`` publishes the pagination arguments
+#: under, the vocabulary the collector rows below spell their documents in.
+_DEFAULT_PAGINATION_WIRE_NAMES = frozenset(
+    {
+        "first",
+        "last",
+        "before",
+        "after",
+    },
+)
 
 
 def _as_partial_resolve_info(stand_in: object) -> GraphQLResolveInfo:
@@ -1496,12 +1507,12 @@ def test_doc_key_cache_evicts_when_full(monkeypatch: pytest.MonkeyPatch) -> None
 
     ops = [_operation(parse(f"query Q{i} {{ field{i} }}")) for i in range(3)]
     for op in ops:
-        extension_module._doc_cache_entry(op, {})
+        extension_module._doc_cache_entry(op, {}, _DEFAULT_PAGINATION_WIRE_NAMES)
 
     # Three distinct documents into a size-2 cache: the first (LRU) is evicted,
     # the two most-recent survive.
     assert len(extension_module._doc_key_cache) == 2
-    cached_bodies = {body for (body, _name) in extension_module._doc_key_cache}
+    cached_bodies = {body for (body, _name, _wire_names) in extension_module._doc_key_cache}
     assert ops[0].loc is not None
     assert ops[0].loc.source.body not in cached_bodies
     assert ops[1].loc is not None
@@ -1554,7 +1565,11 @@ def test_cache_clear_makes_the_next_request_build_its_plan_again() -> None:
 def test_registry_clear_empties_the_document_key_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     """The document-key memo is registered with ``registry.clear()`` and empties on it."""
     monkeypatch.setattr(extension_module, "_doc_key_cache", _DocKeyCache())
-    extension_module._doc_cache_entry(_operation(parse("query Q { field }")), {})
+    extension_module._doc_cache_entry(
+        _operation(parse("query Q { field }")),
+        {},
+        _DEFAULT_PAGINATION_WIRE_NAMES,
+    )
     assert len(extension_module._doc_key_cache) == 1
 
     assert clear_document_key_cache in iter_subsystem_clears()
@@ -1724,21 +1739,21 @@ def test_build_cache_key_is_stable_when_source_location_missing() -> None:
 def test_directive_var_family_with_skip() -> None:
     """B1: the directive family finds vars in @skip directives."""
     doc = parse("query Q($show: Boolean!) { items @skip(if: $show) { name } }")
-    names = _collect_cache_var_families(doc.definitions[0], {})[0]
+    names = _collect_cache_var_families(doc.definitions[0], {}, _DEFAULT_PAGINATION_WIRE_NAMES)[0]
     assert names == frozenset({"show"})
 
 
 def test_directive_var_family_with_include() -> None:
     """B1: the directive family finds vars in @include directives."""
     doc = parse("query Q($v: Boolean!) { items @include(if: $v) { name } }")
-    names = _collect_cache_var_families(doc.definitions[0], {})[0]
+    names = _collect_cache_var_families(doc.definitions[0], {}, _DEFAULT_PAGINATION_WIRE_NAMES)[0]
     assert names == frozenset({"v"})
 
 
 def test_directive_var_family_ignores_non_directive_vars() -> None:
     """B1: variables in field arguments (not directives) are not collected."""
     doc = parse("query Q($limit: Int!) { items(limit: $limit) { name } }")
-    names = _collect_cache_var_families(doc.definitions[0], {})[0]
+    names = _collect_cache_var_families(doc.definitions[0], {}, _DEFAULT_PAGINATION_WIRE_NAMES)[0]
     assert names == frozenset()
 
 
@@ -1751,9 +1766,17 @@ def test_walk_cache_relevant_vars_ignores_non_directive_objects() -> None:
     directive_names: set[str] = set()
     pagination_names: set[str] = set()
     node = SimpleNamespace(directives=[object(), *field.directives], selection_set=None)
-    # basedpyright: a stand-in node carrying only the slots the code under test reads;
-    # _walk_cache_relevant_vars types the parameter as Node
-    _walk_cache_relevant_vars(node, {}, set(), 0, directive_names, pagination_names)  # pyright: ignore[reportArgumentType]
+    _walk_cache_relevant_vars(
+        # basedpyright: a stand-in node carrying only the slots the code under test reads;
+        # _walk_cache_relevant_vars types the parameter as Node
+        node,  # pyright: ignore[reportArgumentType]
+        {},
+        set(),
+        0,
+        directive_names,
+        pagination_names,
+        _DEFAULT_PAGINATION_WIRE_NAMES,
+    )
     assert directive_names == {"v"}
 
 
@@ -1771,7 +1794,15 @@ def test_walk_cache_relevant_vars_visits_each_fragment_once_across_sibling_sprea
     directive_names: set[str] = set()
     pagination_names: set[str] = set()
     visited: set[FragmentVisitKey] = set()
-    _walk_cache_relevant_vars(operation, fragments, visited, 0, directive_names, pagination_names)
+    _walk_cache_relevant_vars(
+        operation,
+        fragments,
+        visited,
+        0,
+        directive_names,
+        pagination_names,
+        _DEFAULT_PAGINATION_WIRE_NAMES,
+    )
     assert directive_names == {"v"}
     # Fragment F was descended exactly once even though it was spread twice: both
     # spread sites sit at the same response-path depth (inside an ``items`` field),
@@ -1786,7 +1817,15 @@ def test_walk_cache_relevant_vars_handles_unresolved_fragment_name() -> None:
     directive_names: set[str] = set()
     pagination_names: set[str] = set()
     visited: set[FragmentVisitKey] = set()
-    _walk_cache_relevant_vars(operation, {}, visited, 0, directive_names, pagination_names)
+    _walk_cache_relevant_vars(
+        operation,
+        {},
+        visited,
+        0,
+        directive_names,
+        pagination_names,
+        _DEFAULT_PAGINATION_WIRE_NAMES,
+    )
     assert directive_names == set()
     assert visited == set()
 
@@ -1794,7 +1833,7 @@ def test_walk_cache_relevant_vars_handles_unresolved_fragment_name() -> None:
 def test_directive_var_family_ignores_other_directives() -> None:
     """B1: only @skip and @include directives split the plan cache."""
     doc = parse("query Q($v: Boolean!) { items @custom(if: $v) { name } }")
-    names = _collect_cache_var_families(doc.definitions[0], {})[0]
+    names = _collect_cache_var_families(doc.definitions[0], {}, _DEFAULT_PAGINATION_WIRE_NAMES)[0]
     assert names == frozenset()
 
 
@@ -1804,14 +1843,14 @@ def test_directive_var_family_nested_fragments() -> None:
         "query Q($a: Boolean!, $b: Boolean!) { "
         "items { name @skip(if: $a) entries @include(if: $b) { value } } }",
     )
-    names = _collect_cache_var_families(doc.definitions[0], {})[0]
+    names = _collect_cache_var_families(doc.definitions[0], {}, _DEFAULT_PAGINATION_WIRE_NAMES)[0]
     assert names == frozenset({"a", "b"})
 
 
 def test_directive_var_family_no_directives() -> None:
     """B1: a query with no directives yields an empty directive family."""
     doc = parse("{ items { name } }")
-    names = _collect_cache_var_families(doc.definitions[0], {})[0]
+    names = _collect_cache_var_families(doc.definitions[0], {}, _DEFAULT_PAGINATION_WIRE_NAMES)[0]
     assert names == frozenset()
 
 
@@ -1939,7 +1978,9 @@ def test_fragment_spread_at_two_depths_collects_nested_pagination_variable() -> 
     for doc in (root_first, nested_first):
         operation = doc.definitions[0]
         fragments = _fragments_by_name(doc.definitions[1:])
-        names = _collect_cache_var_families(operation, fragments)[1]
+        names = _collect_cache_var_families(operation, fragments, _DEFAULT_PAGINATION_WIRE_NAMES)[
+            1
+        ]
         assert names == frozenset({"n"})
 
 
@@ -1952,14 +1993,14 @@ def test_pagination_var_collection_is_syntactic_superset() -> None:
     cache entries; under-collection would serve wrong data.
     """
     doc = parse("{ parents { someField(first: $n) { value } } }")
-    names = _collect_cache_var_families(doc.definitions[0], {})[1]
+    names = _collect_cache_var_families(doc.definitions[0], {}, _DEFAULT_PAGINATION_WIRE_NAMES)[1]
     assert names == frozenset({"n"})
 
 
 def test_nested_pagination_var_family_excludes_root_field() -> None:
     """Root-field pagination variables are excluded from the collected name set."""
     doc = parse("query Q($n: Int!) { rootConn(first: $n) { edges { node { name } } } }")
-    names = _collect_cache_var_families(doc.definitions[0], {})[1]
+    names = _collect_cache_var_families(doc.definitions[0], {}, _DEFAULT_PAGINATION_WIRE_NAMES)[1]
     assert names == frozenset()
 
 
@@ -1970,7 +2011,7 @@ def test_nested_pagination_var_family_all_arg_names() -> None:
         "parents { conn(first: $f, last: $l, before: $b, after: $a, limit: $lim) "
         "{ edges { node { name } } } } }",
     )
-    names = _collect_cache_var_families(doc.definitions[0], {})[1]
+    names = _collect_cache_var_families(doc.definitions[0], {}, _DEFAULT_PAGINATION_WIRE_NAMES)[1]
     assert names == frozenset(
         {
             "f",
@@ -1988,7 +2029,7 @@ def test_nested_pagination_var_family_ignores_inline_literals() -> None:
     only tracks variable references (mirroring the directive collector).
     """
     doc = parse("{ parents { booksConnection(first: 3) { edges { node { title } } } } }")
-    names = _collect_cache_var_families(doc.definitions[0], {})[1]
+    names = _collect_cache_var_families(doc.definitions[0], {}, _DEFAULT_PAGINATION_WIRE_NAMES)[1]
     assert names == frozenset()
 
 
@@ -2334,9 +2375,10 @@ def test_cache_key_variable_name_collection_memoized_for_nested_fallbacks(
     def _counting(
         operation: OperationDefinitionNode,
         fragments: Mapping[str, FragmentDefinitionNode],
+        pagination_wire_names: frozenset[str],
     ) -> frozenset[str]:
         calls["count"] += 1
-        return real(operation, fragments)
+        return real(operation, fragments, pagination_wire_names)
 
     monkeypatch.setattr(extension_module, "_collect_cache_relevant_var_names", _counting)
     # Isolate the cross-request document LRU. This document's text is byte-
@@ -2394,7 +2436,11 @@ def test_collect_cache_relevant_var_names_unifies_both_families_through_fragment
     )
     operation = _operation(doc)
     fragments = _fragments_by_name(doc.definitions[1:])
-    names = _collect_cache_relevant_var_names(operation, fragments)
+    names = _collect_cache_relevant_var_names(
+        operation,
+        fragments,
+        _DEFAULT_PAGINATION_WIRE_NAMES,
+    )
     assert names == frozenset({"skip", "n"})
 
 
@@ -3156,7 +3202,7 @@ def test_directive_var_family_in_named_fragment() -> None:
     )
     operation = doc.definitions[0]
     fragments = {d.name.value: d for d in doc.definitions if isinstance(d, FragmentDefinitionNode)}
-    names = _collect_cache_var_families(operation, fragments)[0]
+    names = _collect_cache_var_families(operation, fragments, _DEFAULT_PAGINATION_WIRE_NAMES)[0]
     assert names == frozenset({"show"})
 
 
@@ -3168,7 +3214,7 @@ def test_directive_var_family_includes_fragment_spread_directives() -> None:
     )
     operation = doc.definitions[0]
     fragments = {d.name.value: d for d in doc.definitions if isinstance(d, FragmentDefinitionNode)}
-    names = _collect_cache_var_families(operation, fragments)[0]
+    names = _collect_cache_var_families(operation, fragments, _DEFAULT_PAGINATION_WIRE_NAMES)[0]
     assert names == frozenset({"show"})
 
 

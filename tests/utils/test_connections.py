@@ -25,7 +25,6 @@ from django_strawberry_framework.resource_policy import ResourcePolicy
 from django_strawberry_framework.utils.connections import (
     CONNECTION_FILTER_KWARG,
     CONNECTION_ORDER_KWARG,
-    CONNECTION_ORDER_KWARG_GRAPHQL,
     ConnectionWindowBounds,
     FetchMode,
     PaginationArgumentError,
@@ -535,32 +534,15 @@ def test_window_range_plan_rejects_negative_direct_bounds(
 
 
 def test_sidecar_kwarg_family_constants() -> None:
-    """The sidecar kwarg names are pinned in both vocabularies the readers see."""
+    """The sidecar kwarg names are pinned by Python name."""
     assert CONNECTION_FILTER_KWARG == "filter"
     assert CONNECTION_ORDER_KWARG == "order_by"
-    assert CONNECTION_ORDER_KWARG_GRAPHQL == "orderBy"
 
 
 def test_connection_sidecar_inputs_from_kwargs_extracts_both() -> None:
     """Extraction reads the two kwarg keys (missing keys come back as ``None``)."""
     assert connection_sidecar_inputs_from_kwargs({"filter": "F", "order_by": "O"}) == ("F", "O")
     assert connection_sidecar_inputs_from_kwargs({}) == (None, None)
-
-
-def test_connection_sidecar_inputs_reads_the_graphql_order_spelling() -> None:
-    """The reader accepts BOTH order vocabularies (resolver kwargs vs walker args).
-
-    The walker passes the converted selection's RAW GraphQL argument names, so
-    the order sidecar arrives as ``orderBy`` under the default
-    ``auto_camel_case``; the resolver passes Python ``**kwargs`` (``order_by``).
-    Missing the camel spelling at plan time meant an ``orderBy:``-bearing
-    nested connection window-planned a DEAD window and its recorded identity
-    hid the per-parent fallback from strictness. The snake spelling wins when
-    both are present (impossible in practice; pinned for determinism).
-    """
-    assert connection_sidecar_inputs_from_kwargs({"orderBy": "O"}) == (None, "O")
-    assert connection_sidecar_inputs_from_kwargs({"order_by": "S", "orderBy": "C"}) == (None, "S")
-    assert has_connection_sidecar_kwargs({"orderBy": "O"}) is True
 
 
 def test_has_connection_sidecar_input_presence_predicate() -> None:

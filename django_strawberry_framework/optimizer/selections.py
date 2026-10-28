@@ -48,6 +48,12 @@ from dataclasses import dataclass, fields
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
+from graphql import (
+    GraphQLInterfaceType,
+    GraphQLObjectType,
+    get_argument_values,
+    get_named_type,
+)
 from graphql.language.ast import (
     DirectiveNode,
     FragmentSpreadNode,
@@ -62,9 +68,12 @@ from strawberry.types.nodes import (
     convert_directives,
 )
 
-from django_strawberry_framework.utils._narrowing import read_attr
+from django_strawberry_framework.utils._narrowing import is_dict, is_str, read_attr
 from django_strawberry_framework.utils.typing import (
+    graphql_fields,
+    graphql_type_of,
     inline_fragment_type_condition,
+    published_python_name,
     schema_config_from_info,
 )
 
@@ -80,7 +89,7 @@ if TYPE_CHECKING:
         Node,
         SelectionSetNode,
     )
-    from graphql.type.definition import GraphQLResolveInfo
+    from graphql.type.definition import GraphQLField, GraphQLNamedType, GraphQLResolveInfo
     from strawberry.types.info import Info
     from strawberry.types.nodes import (
         Selection,
@@ -105,6 +114,63 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 # AST -> converted-selection adapter - the package-owned ``convert_selections``
 # ---------------------------------------------------------------------------
+
+#: The marker a converted field selection carries its arguments under, keyed by
+#: the Python name each was declared with and coerced by graphql-core.
+#: ``ast_to_converted_selections`` writes it beside Strawberry's own
+#: ``arguments`` (which keep the wire names and the raw literal tokens),
+#: ``with_runtime_prefix`` and the walker's merge copy it, and
+#: ``python_arguments`` reads it.
+PYTHON_ARGUMENTS_ATTR = "_optimizer_python_arguments"
+
+
+def python_arguments(selection: object) -> Mapping[str, object]:
+    """Return a converted field selection's arguments by Python name, coerced.
+
+    The map ``ast_to_converted_selections`` stamped on the selection: the value
+    graphql-core coerced for each argument the field declares (a literal and a
+    variable alike), keyed by the Python name the schema published it from, so
+    no reader depends on the names a ``NameConverter`` gave the arguments on the
+    wire. Empty for a selection the converter could not resolve to a field of
+    the schema.
+    """
+    arguments = read_attr(selection, PYTHON_ARGUMENTS_ATTR, None)
+    if not is_dict(arguments):
+        return {}
+    return {name: value for name, value in arguments.items() if is_str(name)}
+
+
+def _coerced_python_arguments(
+    field_def: GraphQLField,
+    node: FieldNode,
+    variable_values: dict[str, object],
+) -> dict[str, object]:
+    """Coerce ``node``'s arguments against ``field_def``; key each by its Python name.
+
+    ``graphql.execution.values.get_argument_values`` is the executor's own
+    coercion (literal tokens to values, variables and defaults resolved) and keys
+    its answer by the published name; ``published_python_name`` reads the
+    declaration each published argument was built from back off the schema.
+    """
+    coerced = get_argument_values(field_def, node, variable_values)
+    by_python_name: dict[str, object] = {}
+    for wire_name, argument in field_def.args.items():
+        out_name = argument.out_name or wire_name
+        python_name = published_python_name(argument)
+        if python_name is not None and out_name in coerced:
+            by_python_name[python_name] = coerced[out_name]
+    return by_python_name
+
+
+def _published_field(parent: GraphQLNamedType | None, name: str) -> GraphQLField | None:
+    """Return the field ``parent`` publishes under ``name``, ``None`` when it has no such field.
+
+    Only object and interface types carry fields; a meta field such as
+    ``__typename`` is in no type's map.
+    """
+    if isinstance(parent, (GraphQLObjectType, GraphQLInterfaceType)):
+        return graphql_fields(parent).get(name)
+    return None
 
 
 # Per-execution memo for the converted-selection tree, keyed by the field
@@ -180,6 +246,14 @@ def ast_to_converted_selections(
     so the per-parent-row ``prime_selected_fields`` calls of a fallback
     connection pipeline reuse the first row's list instead of re-running the
     conversion for every parent.
+
+    The recursion also tracks the GraphQL type each selection set is read on (the
+    resolver's ``parent_type`` at the top, a field's named type below it, a
+    fragment's type condition inside it) so each field selection the schema
+    publishes carries its arguments by Python name, coerced by graphql-core
+    (``PYTHON_ARGUMENTS_ATTR``, read through ``python_arguments``). That marker
+    is an attribute beside the dataclass fields, so the fields Strawberry's
+    consumers read stay the mirror described above.
     """
     memo = converted_selections_memo()
     memo_key: ConvertedMemoKey | None = None
@@ -192,7 +266,10 @@ def ast_to_converted_selections(
         if converted is not None:
             return converted
 
-    def _convert(nodes: Iterable[AstSelection]) -> list[Selection]:
+    def _convert(
+        nodes: Iterable[AstSelection],
+        parent: GraphQLNamedType | None,
+    ) -> list[Selection]:
         out: list[Selection] = []
         for node in nodes:
             if isinstance(node, InlineFragmentNode):
@@ -204,7 +281,12 @@ def ast_to_converted_selections(
                         # ``None`` arm
                         type_condition=(condition.name.value if condition is not None else None),  # pyright: ignore[reportArgumentType]
                         directives=convert_directives(info, node.directives),
-                        selections=_convert(ast_child_selections(node)),
+                        selections=_convert(
+                            ast_child_selections(node),
+                            parent
+                            if condition is None
+                            else info.schema.get_type(condition.name.value),
+                        ),
                     ),
                 )
             elif isinstance(node, FragmentSpreadNode):
@@ -214,22 +296,34 @@ def ast_to_converted_selections(
                         name=node.name.value,
                         type_condition=fragment.type_condition.name.value,
                         directives=convert_directives(info, node.directives),
-                        selections=_convert(ast_child_selections(fragment)),
+                        selections=_convert(
+                            ast_child_selections(fragment),
+                            info.schema.get_type(fragment.type_condition.name.value),
+                        ),
                     ),
                 )
             else:
-                out.append(
-                    SelectedField(
-                        name=node.name.value,
-                        alias=getattr(node.alias, "value", None),
-                        directives=convert_directives(info, node.directives),
-                        arguments=convert_arguments(info, node.arguments),
-                        selections=_convert(ast_child_selections(node)),
+                field_def = _published_field(parent, node.name.value)
+                selected = SelectedField(
+                    name=node.name.value,
+                    alias=getattr(node.alias, "value", None),
+                    directives=convert_directives(info, node.directives),
+                    arguments=convert_arguments(info, node.arguments),
+                    selections=_convert(
+                        ast_child_selections(node),
+                        None if field_def is None else get_named_type(graphql_type_of(field_def)),
                     ),
                 )
+                if field_def is not None and field_def.args:
+                    setattr(
+                        selected,
+                        PYTHON_ARGUMENTS_ATTR,
+                        _coerced_python_arguments(field_def, node, info.variable_values),
+                    )
+                out.append(selected)
         return out
 
-    converted = _convert(field_nodes)
+    converted = _convert(field_nodes, info.parent_type)
     if memo is not None and memo_key is not None:
         memo[memo_key] = converted
     return converted
@@ -550,7 +644,10 @@ def with_runtime_prefix(
         directives=getattr(selection, "directives", None) or {},
         arguments=getattr(selection, "arguments", None) or {},
         selections=list(getattr(selection, "selections", None) or []),
-        **{RUNTIME_PREFIXES_ATTR: list(runtime_prefixes)},
+        **{
+            RUNTIME_PREFIXES_ATTR: list(runtime_prefixes),
+            PYTHON_ARGUMENTS_ATTR: python_arguments(selection),
+        },
     )
 
 

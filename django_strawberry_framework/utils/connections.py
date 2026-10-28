@@ -39,12 +39,9 @@ IDENTICALLY, or optimizer-on and optimizer-off behavior can split:
   per parent.
 
 This module depends on neither ``connection.py`` nor ``optimizer/walker.py`` so
-both can import it without a cycle. Plan-time argument coercion (an inline Int
-literal arrives as a token STRING; a Strawberry resolver argument is already
-``int``) is deliberately NOT owned here - it is the nested planner's concern and
-stays in ``optimizer/nested_planner.py::_coerce_pagination_int`` (the walker
-re-exports the same helper for argument-comparison); this helper assumes its
-``first`` / ``last`` are already the values ``SliceMetadata`` will gate on.
+both can import it without a cycle. Every reader here takes arguments by Python
+name, already coerced: a resolver's from Strawberry, the planner's from
+graphql-core (``optimizer/selections.py::python_arguments``).
 """
 
 from __future__ import annotations
@@ -79,20 +76,11 @@ _LastT = TypeVar("_LastT")
 _RowT = TypeVar("_RowT")
 _SuppliedT = TypeVar("_SuppliedT")
 
-# The connection sidecar argument names, in BOTH vocabularies the shared
-# readers below see. ``CONNECTION_ORDER_KWARG`` is the PYTHON kwarg name (the
-# key in the resolver ``**kwargs``); Strawberry's default ``auto_camel_case``
-# renders it as the ``orderBy`` GraphQL argument, and the walker's converted
-# ``sel.arguments`` carry the RAW GraphQL name (``convert_arguments`` keeps
-# ``node.name.value`` verbatim) - so the plan-time sidecar predicate must
-# recognize the camel spelling too, or an ``orderBy:``-bearing nested
-# connection window-plans a DEAD window (the resolver's own sidecar gate
-# refuses it and runs per-parent) and its recorded identity hides the
-# fallback from strictness. ``filter`` is spelled identically in both
-# vocabularies, which is why only the order kwarg needs the twin.
+# The connection sidecar arguments' Python names: the keys of a resolver's
+# ``**kwargs`` and of the planner's ``python_arguments`` alike, whatever wire
+# names the schema's ``NameConverter`` publishes them under.
 CONNECTION_FILTER_KWARG = "filter"
 CONNECTION_ORDER_KWARG = "order_by"
-CONNECTION_ORDER_KWARG_GRAPHQL = "orderBy"
 
 #: The sentinel row an n+1 next-page probe overfetches, in BOTH pagination
 #: domains: the window domain (a row-number ceiling or in-branch ``LIMIT``
@@ -169,20 +157,13 @@ def connection_sidecar_inputs_from_kwargs(
     """Extract ``(filter_input, order_by_input)`` from a kwargs/arguments dict.
 
     The single reader of the sidecar kwarg keys so no caller re-spells
-    ``kwargs.get("filter")`` / ``kwargs.get("order_by")``. Reads BOTH order
-    spellings because its callers speak two vocabularies: a resolver passes
-    Python ``**kwargs`` (``order_by``), the walker passes the converted
-    selection's RAW GraphQL argument names (``orderBy`` under the default
-    ``auto_camel_case``; ``order_by`` when camelization is disabled). No
-    collision is possible - a resolver's kwargs never carry the camel key, and
-    on the walker side either spelling IS the sidecar argument.
+    ``kwargs.get("filter")`` / ``kwargs.get("order_by")``. Both callers key by
+    Python name: a resolver passes its ``**kwargs``, the planner a selection's
+    ``python_arguments``.
     """
     if not kwargs:
         return None, None
-    order_by_input = kwargs.get(CONNECTION_ORDER_KWARG)
-    if order_by_input is None:
-        order_by_input = kwargs.get(CONNECTION_ORDER_KWARG_GRAPHQL)
-    return kwargs.get(CONNECTION_FILTER_KWARG), order_by_input
+    return kwargs.get(CONNECTION_FILTER_KWARG), kwargs.get(CONNECTION_ORDER_KWARG)
 
 
 def is_supplied(value: _SuppliedT | UnsetType | None) -> TypeGuard[_SuppliedT]:

@@ -56,7 +56,6 @@ from . import nested_planner as _nested_planner
 from .field_meta import FieldMeta
 from .hints import OptimizerHint, _PrefetchAny, hint_is_skip
 from .join_taxonomy import classify_relation_join
-from .nested_planner import _argument_value, _coerce_pagination_int
 from .nested_planner import (
     plan_connection_relation as _plan_nested_connection_relation,
 )
@@ -73,9 +72,11 @@ from .plans import (
     runtime_path_from_info,
 )
 from .selections import (
+    PYTHON_ARGUMENTS_ATTR,
     RUNTIME_PREFIXES_ATTR,
     included_field_selections,
     is_fragment,
+    python_arguments,
     response_key,
     response_keys,
     should_include,
@@ -88,7 +89,6 @@ if TYPE_CHECKING:
     from graphql.type.definition import GraphQLResolveInfo
     from strawberry.schema.name_converter import NameConverter
     from strawberry.types import Info
-    from strawberry.types.nodes import Arguments
 
     from django_strawberry_framework.types.base import DjangoType
     from django_strawberry_framework.types.definition import DjangoTypeDefinition
@@ -1795,7 +1795,7 @@ def _ensure_connector_only_fields(
 class _MergedSelection(SimpleNamespace):
     """A field selection merged across duplicate response names, carrying per-key payloads."""
 
-    _optimizer_response_key_arguments: dict[str, Arguments]
+    _optimizer_response_key_arguments: dict[str, Mapping[str, object]]
 
 
 def _merge_aliased_selections(selections: Sequence[FieldSelection]) -> Sequence[FieldSelection]:
@@ -1851,7 +1851,7 @@ def _merge_aliased_selections(selections: Sequence[FieldSelection]) -> Sequence[
             # comparable AFTER the merge (spec-033 Decision 6): identical
             # arguments across aliases are window-planned together (one shared
             # ``to_attr``), while divergent aliases (``a: books(first:2)`` +
-            # ``b: books(first:5)``, or differing filter/orderBy) plan ONE
+            # ``b: books(first:5)``, or differing filter/order_by) plan ONE
             # WINDOW PER RESPONSE KEY under per-key ``to_attr``s
             # (O(aliases) batched queries). The first occurrence's
             # ``arguments`` stays the merged selection's primary value (the
@@ -1867,12 +1867,14 @@ def _merge_aliased_selections(selections: Sequence[FieldSelection]) -> Sequence[
                 arguments=getattr(sel, "arguments", None) or {},
                 selections=list(getattr(sel, "selections", None) or []),
                 _optimizer_response_keys=[_response_key(sel)],
-                **{RUNTIME_PREFIXES_ATTR: _selection_runtime_prefixes(sel)},
-                # Per-response-key argument payloads (spec-033 Decision 6); see
-                # the merge branch above and ``_aliased_arguments_diverge``.
-                _optimizer_response_key_arguments={
-                    _response_key(sel): getattr(sel, "arguments", None) or {},
+                **{
+                    RUNTIME_PREFIXES_ATTR: _selection_runtime_prefixes(sel),
+                    PYTHON_ARGUMENTS_ATTR: python_arguments(sel),
                 },
+                # Per-response-key argument payloads (spec-033 Decision 6), by
+                # Python name; see the merge branch above and
+                # ``_aliased_arguments_diverge``.
+                _optimizer_response_key_arguments={_response_key(sel): python_arguments(sel)},
             )
             seen[key] = merged
             result.append(merged)
@@ -1883,7 +1885,8 @@ def _record_response_key_arguments(merged: _MergedSelection, selection: FieldSel
     """Record a duplicate selection's arguments under its response key.
 
     The merged selection carries ``_optimizer_response_key_arguments``: a map
-    from response key to that occurrence's resolved argument payload. Kept off
+    from response key to that occurrence's argument payload by Python name
+    (``selections.py::python_arguments``). Kept off
     the inline merge branch so ``_merge_aliased_selections`` (a control-flow
     hotspot) does not grow another branch (spec-033 Decision 6).
 
@@ -1897,40 +1900,15 @@ def _record_response_key_arguments(merged: _MergedSelection, selection: FieldSel
     the resolve side routes by response key alone (a silent overwrite here
     planned ONE nested window from the first payload and served the other
     alias a wrong page). ``_plan_connection_relation`` treats the flag as a
-    fully-unplanned fallback. Payloads compare pagination-NORMALIZED
-    (``_normalized_alias_payload``) so an inline literal and an equal
-    resolved variable do not conflict.
+    fully-unplanned fallback. Payloads are graphql-core-coerced, so an inline
+    literal and an equal resolved variable compare equal.
     """
     response_key = _response_key(selection)
-    payload: Arguments = getattr(selection, "arguments", None) or {}
+    payload = python_arguments(selection)
     per_key = merged._optimizer_response_key_arguments
-    if response_key in per_key and _normalized_alias_payload(
-        per_key[response_key],
-    ) != _normalized_alias_payload(payload):
+    if response_key in per_key and per_key[response_key] != payload:
         merged._optimizer_response_key_argument_conflict = True
     per_key[response_key] = payload
-
-
-def _normalized_alias_payload(payload: Arguments) -> Arguments:
-    """Return ``payload`` with pagination bounds coerced for equality checks.
-
-    Alias-payload comparison (the divergence selector and the same-key
-    conflict detector) must not be fooled by the argument VOCABULARY: an
-    inline Int literal arrives as the raw token string (``{"first": "2"}``)
-    while a resolved variable arrives engine-coerced (``{"first": 2}``) - the
-    same window either way (``_connection_window_slice_from_arguments``
-    applies the identical coercion). Without this, ``a: books(first: 2)`` +
-    ``b: books(first: $n)`` with ``n = 2`` would spuriously classify as
-    divergent and pay a second identical window query. Only ``first`` /
-    ``last`` are coerced; every other argument compares verbatim.
-    """
-    if "first" not in payload and "last" not in payload:
-        return payload
-    normalized = dict(payload)
-    for bound in ("first", "last"):
-        if bound in normalized:
-            normalized[bound] = _coerce_pagination_int(_argument_value(normalized, bound))
-    return normalized
 
 
 def _response_key_arguments_conflict(selection: FieldSelection) -> bool:
@@ -1952,21 +1930,20 @@ def _aliased_arguments_diverge(selection: FieldSelection) -> bool:
     ``b: books(first: 5)``). The scheme selector for
     ``_plan_connection_relation``: divergent aliases plan one window PER
     RESPONSE KEY (each under its own ``to_attr``), while agreeing
-    aliases share the single legacy window. Payloads compare
-    pagination-normalized (``_normalized_alias_payload``) so the literal
-    ``first: 2`` and a variable resolving to ``2`` agree. Selections built
+    aliases share the single legacy window. Payloads are graphql-core-coerced,
+    so the literal ``first: 2`` and a variable resolving to ``2`` agree. Selections built
     outside ``_merge_aliased_selections`` (direct test/helper callers) carry
     no per-response-key map and never diverge.
     """
     # ``_merge_aliased_selections`` built this map from response keys to payloads.
-    per_key: dict[str, Arguments] | None = getattr(
+    per_key: dict[str, Mapping[str, object]] | None = getattr(
         selection,
         "_optimizer_response_key_arguments",
         None,
     )
     if not per_key:
         return False
-    payloads = [_normalized_alias_payload(payload) for payload in per_key.values()]
+    payloads = list(per_key.values())
     first = payloads[0]
     return any(payload != first for payload in payloads[1:])
 
