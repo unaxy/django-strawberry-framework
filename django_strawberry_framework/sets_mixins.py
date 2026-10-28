@@ -1135,6 +1135,9 @@ __all__ = (
     "expanded_once",
     "is_re_readable_field_declaration",
     "reject_captured_branches",
+    "reject_unknown_exclude_names",
+    "require_field_name",
     "require_re_readable_field_declaration",
+    "require_sweep_model",
     "should_cache_expansion",
 )
