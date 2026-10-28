@@ -96,7 +96,6 @@
 "django_strawberry_framework/keyset.py::serialize_cursor_value" = { reportArgumentType = 1 }
 "django_strawberry_framework/list_field.py::DjangoListField" = { cast = 1 }
 "django_strawberry_framework/list_field.py::ListArgumentError" = { reportUnsafeMultipleInheritance = 1 }
-"django_strawberry_framework/list_field.py::_is_deterministic_order_lookup_chain" = { reportArgumentType = 1 }
 "django_strawberry_framework/management/commands/inspect_django_type.py::_converter_type_name" = { reportUnknownMemberType = 1 }
 "django_strawberry_framework/middleware/debug_toolbar.py::_panel_title" = { reportUnknownMemberType = 1, reportUnknownVariableType = 1 }
 "django_strawberry_framework/middleware/request_body.py::GraphQLRequestBodyBoundaryMiddleware.process_view" = { reportExplicitAny = 1 }

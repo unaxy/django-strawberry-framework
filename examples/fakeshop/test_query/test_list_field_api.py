@@ -2050,6 +2050,25 @@ class _RandomPlaceholderInteger(models.IntegerField[int, int]):
 #: has no date column, and a literal reads the same in every row.
 _STAMP = models.Value(datetime.date(2020, 1, 1))
 
+#: The interval the date arithmetic rows add to ``_STAMP``.
+_ONE_DAY = datetime.timedelta(days=1)
+
+#: What each backend compiles date arithmetic to: SQLite's registered helper
+#: functions, and Postgres's own interval arithmetic over the two operands.
+_DATE_DIFFERENCE_SQL = (
+    "DJANGO_TIMESTAMP_DIFF(" if connection.vendor == "sqlite" else "INTERVAL '1 DAY'"
+)
+_DATE_PLUS_DURATION_SQL = "DJANGO_FORMAT_DTDELTA(" if connection.vendor == "sqlite" else " + "
+
+
+class _ProjectLabelText(models.TextField[str, str]):
+    """A project text field that keeps Django's own value preparation."""
+
+
+def _project_label() -> models.ExpressionWrapper[models.F]:
+    """``Branch.name``, read through a project field class."""
+    return models.ExpressionWrapper(models.F("name"), output_field=_ProjectLabelText())
+
 
 def _branch_case(condition: models.Q, then: object = None) -> models.Case:
     """A conditional sort over ``condition``, picking ``then`` (or 0) when it holds."""
@@ -2273,6 +2292,38 @@ _GUARD_REFUSED_ORDERINGS: tuple[
         ).order_by("k", "name"),
         (),
     ),
+    (
+        "direct-negation-null-compensation",
+        lambda qs: qs.order_by(_branch_case(~models.Q(isil="x")), "name"),
+        ((models.TextField, _VolatileIsNull, "isnull"),),
+    ),
+    (
+        "direct-negation-nullable-rhs-column",
+        lambda qs: qs.order_by(_branch_case(~models.Q(name=models.F("isil"))), "name"),
+        ((models.TextField, _VolatileIsNull, "isnull"),),
+    ),
+    (
+        "direct-project-field-null-rewrite",
+        lambda qs: qs.alias(label=_project_label()).order_by(
+            _branch_case(models.Q(label=None)),
+            "name",
+        ),
+        ((_ProjectLabelText, _VolatileIsNull, "isnull"),),
+    ),
+    (
+        "join-promoted-by-an-earlier-term",
+        lambda qs: qs.filter(shelves__code="A").order_by(
+            _branch_case(models.Q(shelves__code="a")),
+            _branch_case(~models.Q(shelves__code="x")),
+            "name",
+        ),
+        ((models.TextField, _VolatileIsNull, "isnull"),),
+    ),
+    (
+        "f-naming-an-extra-alias-that-shadows-a-field",
+        lambda qs: qs.extra(select={"name": "RANDOM()"}).order_by(models.F("name").asc(), "id"),
+        (),
+    ),
 )
 
 
@@ -2352,6 +2403,28 @@ _SEAL_REFUSED_ORDERINGS: tuple[
         lambda qs: qs.annotate(o=_branch_case(_bare_condition())).order_by("o", "name"),
         ((models.BooleanField, _VolatileExact, "exact"),),
     ),
+    (
+        "annotated-negation-null-compensation",
+        lambda qs: qs.annotate(k=_branch_case(~models.Q(isil="x"))).order_by("k", "name"),
+        ((models.TextField, _VolatileIsNull, "isnull"),),
+    ),
+    (
+        "annotated-negation-nullable-rhs-column",
+        lambda qs: qs.annotate(k=_branch_case(~models.Q(name=models.F("isil")))).order_by(
+            "k",
+            "name",
+        ),
+        ((models.TextField, _VolatileIsNull, "isnull"),),
+    ),
+    (
+        "annotated-project-field-null-rewrite",
+        lambda qs: (
+            qs.alias(label=_project_label())
+            .annotate(k=_branch_case(models.Q(label=None)))
+            .order_by("k", "name")
+        ),
+        ((_ProjectLabelText, _VolatileIsNull, "isnull"),),
+    ),
 )
 
 
@@ -2391,7 +2464,9 @@ def test_shipped_branches_offset_annotated_project_sql_is_refused_by_the_seal_fi
 
 #: The orderings the offset guard must certify: each is the readable twin of a
 #: refusal above, or the form a resolved annotation takes of a direct spelling the
-#: guard accepts. ``(id, ordering, registrations, fragment the ORDER BY must hold)``.
+#: guard accepts. ``(id, ordering, registrations, fragment the statement must hold)``:
+#: an annotated term is ordered by its select position, so its fragment is the
+#: select's.
 _GUARD_ACCEPTED_ORDERINGS: tuple[
     tuple[str, _BranchOrdering, tuple[_LookupRegistration, ...], str],
     ...,
@@ -2562,6 +2637,75 @@ _GUARD_ACCEPTED_ORDERINGS: tuple[
         (),
         "IS NULL",
     ),
+    (
+        "direct-negation-over-a-nullable-column",
+        lambda qs: qs.order_by(_branch_case(~models.Q(isil="x")), "name"),
+        (),
+        "IS NOT NULL",
+    ),
+    (
+        "annotated-negation-over-a-nullable-column",
+        lambda qs: qs.annotate(k=_branch_case(~models.Q(isil="x"))).order_by("k", "name"),
+        (),
+        "IS NOT NULL",
+    ),
+    (
+        "direct-date-difference",
+        lambda qs: qs.alias(start=_STAMP, finish=_STAMP).order_by(
+            models.F("start") - models.F("finish"),
+            "name",
+        ),
+        (),
+        _DATE_DIFFERENCE_SQL,
+    ),
+    (
+        "annotated-date-difference",
+        lambda qs: (
+            qs.alias(start=_STAMP, finish=_STAMP)
+            .annotate(k=models.F("start") - models.F("finish"))
+            .order_by("k", "name")
+        ),
+        (),
+        _DATE_DIFFERENCE_SQL,
+    ),
+    (
+        "direct-date-plus-duration",
+        lambda qs: qs.alias(start=_STAMP).order_by(
+            models.F("start") + models.Value(_ONE_DAY),
+            "name",
+        ),
+        (),
+        _DATE_PLUS_DURATION_SQL,
+    ),
+    (
+        "annotated-date-plus-duration",
+        lambda qs: (
+            qs.alias(start=_STAMP)
+            .annotate(k=models.F("start") + models.Value(_ONE_DAY))
+            .order_by("k", "name")
+        ),
+        (),
+        _DATE_PLUS_DURATION_SQL,
+    ),
+    (
+        "direct-project-field-comparison",
+        lambda qs: qs.alias(label=_project_label()).order_by(
+            _branch_case(models.Q(label="Alpha")),
+            "name",
+        ),
+        ((_ProjectLabelText, _VolatileIsNull, "isnull"),),
+        "CASE WHEN",
+    ),
+    (
+        "annotated-project-field-comparison",
+        lambda qs: (
+            qs.alias(label=_project_label())
+            .annotate(k=_branch_case(models.Q(label="Alpha")))
+            .order_by("k", "name")
+        ),
+        ((_ProjectLabelText, _VolatileIsNull, "isnull"),),
+        "CASE WHEN",
+    ),
 )
 
 
@@ -2586,7 +2730,10 @@ def test_shipped_branches_offset_certifies_an_order_whatever_spelling_resolves_i
     a guard reading only the written form refuses the resolved one, and a guard
     refusing every transform refuses forms the resolved one shows are ordinary
     functions. The whole-name rows pin that an alias spelled with ``__`` is
-    resolved before its head, as Django resolves it.
+    resolved before its head, as Django resolves it. Date arithmetic resolves to
+    ``TemporalSubtraction`` and ``DurationExpression`` in either spelling, and a
+    comparison over a project field compiles Django's own ``exact`` in either,
+    whatever ``isnull`` that field registers for a comparison with ``None``.
     """
     _seed_three_branches()
 
