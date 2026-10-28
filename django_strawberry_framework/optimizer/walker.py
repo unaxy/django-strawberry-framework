@@ -61,6 +61,7 @@ from .nested_planner import (
     plan_connection_relation as _plan_nested_connection_relation,
 )
 from .plans import (
+    JoinPrefix,
     OptimizationPlan,
     PrefetchSeal,
     _consumer_projection,
@@ -799,9 +800,21 @@ def _walk_selections(
     info: GraphQLResolveInfo | None = None,
     runtime_prefixes: tuple[tuple[str, ...], ...] = ((),),
     *,
+    lookup_prefix: str = "",
     source_type: type[DjangoType] | None = None,
 ) -> None:
     """Recursive workhorse: descend one normalized level of the selection tree.
+
+    ``prefix`` and ``lookup_prefix`` both name the ``select_related`` JOIN path
+    this level hangs beneath, each in the vocabulary of the ledgers it builds
+    (``utils/relations.py::RelationSpelling``). ``prefix`` is the query-name
+    spelling Django's ``select_related`` and ``only()`` read: the plan's
+    ``select_related``, ``only_fields`` and ``select_path_resolver_keys``.
+    ``lookup_prefix`` is the accessor spelling ``prefetch_related`` resolves on
+    the instance: every prefetch lookup planned beneath the JOIN, with its
+    ``prefetch_path_resolver_keys`` and ``prefetch_path_seals`` entries and a
+    hinted ``Prefetch``'s rebase. A reverse relation whose ``related_query_name``
+    differs from its accessor spells one JOIN hop two ways.
 
     ``source_type`` is set only on the root invocation from
     ``plan_optimizations`` so the resolver's actual Strawberry return
@@ -882,6 +895,7 @@ def _walk_selections(
                 field_map=field_map,
                 plan=plan,
                 prefix=prefix,
+                lookup_prefix=lookup_prefix,
                 info=info,
                 runtime_prefixes=runtime_prefixes,
                 type_cls=type_cls,
@@ -952,6 +966,7 @@ def _walk_selections(
             target_definition=target_definition,
             plan=plan,
             prefix=prefix,
+            lookup_prefix=lookup_prefix,
             full_path=full_path,
             info=info,
             runtime_paths=runtime_paths,
@@ -973,6 +988,7 @@ def _walk_selections(
             target_definition=target_definition,
             plan=plan,
             prefix=prefix,
+            lookup_prefix=lookup_prefix,
             full_path=full_path,
             info=info,
             runtime_paths=runtime_paths,
@@ -989,6 +1005,7 @@ def _dispatch_single_relation(
     target_definition: DjangoTypeDefinition | None,
     plan: OptimizationPlan,
     prefix: str,
+    lookup_prefix: str,
     full_path: str,
     info: GraphQLResolveInfo | None,
     runtime_paths: tuple[tuple[str, ...], ...],
@@ -1002,7 +1019,8 @@ def _dispatch_single_relation(
     verdict), and the two hint branches in ``_apply_hint`` (``force_select``'s
     custom-``get_queryset`` downgrade and ``force_prefetch``). Only the
     DECISION (``prefer_prefetch``) differs per site; ``full_path`` is a
-    select-only concern (``select_related`` resolves query paths).
+    select-only concern (``select_related`` resolves query paths), and
+    ``lookup_prefix`` the accessor spelling of ``prefix`` (``_walk_selections``).
     """
     if prefer_prefetch:
         _plan_prefetch_relation(
@@ -1015,6 +1033,7 @@ def _dispatch_single_relation(
             info,
             runtime_paths,
             resolver_identities,
+            lookup_prefix=lookup_prefix,
         )
     else:
         _plan_select_relation(
@@ -1028,6 +1047,7 @@ def _dispatch_single_relation(
             info,
             runtime_paths,
             resolver_identities,
+            lookup_prefix=lookup_prefix,
         )
 
 
@@ -1042,13 +1062,19 @@ def _plan_select_relation(
     info: GraphQLResolveInfo | None,
     runtime_paths: tuple[tuple[str, ...], ...],
     resolver_identities: tuple[str, ...],
+    *,
+    lookup_prefix: str,
 ) -> None:
     """Plan a same-query single-valued relation traversal.
 
     ``full_path`` (field-name vocabulary) is correct here: Django's
-    ``select_related`` resolves QUERY paths, and single-valued forward
-    relations have no name/accessor split anyway - the accessor swap is
-    a ``_plan_prefetch_relation`` concern only.
+    ``select_related`` and ``only()`` resolve QUERY paths. A reverse one-to-one
+    is joined under its query name (``FieldMeta.name``) but reached on the
+    instance through its accessor (``FieldMeta.accessor_name``), and the two
+    differ for a relation declared without ``related_name`` or with a
+    ``related_query_name`` of its own; the child level therefore carries the
+    JOIN in both spellings, the accessor one for every prefetch lookup planned
+    beneath it (``_walk_selections``).
     """
     _record_relation_access(
         plan,
@@ -1079,6 +1105,7 @@ def _plan_select_relation(
             prefix=child_prefix,
             info=info,
             runtime_prefixes=runtime_paths,
+            lookup_prefix=f"{lookup_prefix}{instance_accessor(django_field)}__",
         )
         # A reverse one-to-one JOIN (an MTI parent link included) has no column
         # on this row, so a selection that reads no column of the related row
@@ -1106,19 +1133,21 @@ def _plan_prefetch_relation(
     info: GraphQLResolveInfo | None,
     runtime_paths: tuple[tuple[str, ...], ...],
     resolver_identities: tuple[str, ...],
+    *,
+    lookup_prefix: str,
 ) -> None:
     """Plan a queryset-boundary relation traversal with optional child optimization.
 
-    The prefetch LOOKUP segment is the relation's instance accessor
-    (``django_strawberry_framework/utils/relations.py::instance_accessor``),
-    not ``field.name``: Django's ``prefetch_related`` resolves lookups via
+    The prefetch LOOKUP is spelled in accessors throughout: ``lookup_prefix``
+    (the JOINs above, ``_walk_selections``) plus the relation's instance
+    accessor (``django_strawberry_framework/utils/relations.py::instance_accessor``),
+    not ``field.name``. Django's ``prefetch_related`` resolves lookups via
     ``getattr`` on the instance, and for a reverse relation without
     ``related_name`` the field name is the related QUERY name (``"book"``)
-    while the accessor is ``"book_set"`` - planning the query name made
-    every optimized query over such a relation fail with
-    ``AttributeError: ... invalid parameter to prefetch_related()``. Plan
-    keys and resolver identities stay in field-name vocabulary; only the
-    lookup string Django consumes uses the accessor.
+    while the accessor is ``"book_set"``; a query name in any hop fails with
+    ``AttributeError: ... invalid parameter to prefetch_related()``. Resolver
+    identities stay in field-name vocabulary; the lookup string Django consumes
+    and the ledgers keyed by it use the accessor.
     """
     _record_relation_access(
         plan,
@@ -1126,7 +1155,7 @@ def _plan_prefetch_relation(
         prefix,
         resolver_identities,
     )
-    lookup_path = f"{prefix}{instance_accessor(django_field)}"
+    lookup_path = f"{lookup_prefix}{instance_accessor(django_field)}"
     has_custom_get_queryset = _target_has_custom_get_queryset(target_type, target_definition)
     if has_custom_get_queryset:
         plan.cacheable = False
@@ -1346,6 +1375,7 @@ def _apply_hint(
     target_definition: DjangoTypeDefinition | None,
     plan: OptimizationPlan,
     prefix: str,
+    lookup_prefix: str,
     full_path: str,
     info: GraphQLResolveInfo | None,
     runtime_paths: tuple[tuple[str, ...], ...],
@@ -1423,7 +1453,8 @@ def _apply_hint(
                 info=info,
             ),
             django_name=django_name,
-            full_path=f"{prefix}{instance_accessor(django_field)}",
+            accessor=instance_accessor(django_field),
+            full_path=f"{lookup_prefix}{instance_accessor(django_field)}",
             type_name=truth.name(type_cls),
         )
         _record_relation_access(
@@ -1449,7 +1480,7 @@ def _apply_hint(
         if (
             _target_has_custom_get_queryset(target_type, target_definition)
             and not consumer_assigned
-            and hinted_lookup == f"{prefix}{instance_accessor(django_field)}"
+            and hinted_lookup == f"{lookup_prefix}{instance_accessor(django_field)}"
         ):
             _record_prefetch_seal(
                 plan,
@@ -1480,6 +1511,7 @@ def _apply_hint(
             target_definition=target_definition,
             plan=plan,
             prefix=prefix,
+            lookup_prefix=lookup_prefix,
             full_path=full_path,
             info=info,
             runtime_paths=runtime_paths,
@@ -1495,6 +1527,7 @@ def _apply_hint(
             target_definition=target_definition,
             plan=plan,
             prefix=prefix,
+            lookup_prefix=lookup_prefix,
             full_path=full_path,
             info=info,
             runtime_paths=runtime_paths,
@@ -1582,10 +1615,18 @@ def _prefetch_hint_for_path(
     prefetch: _PrefetchAny,
     *,
     django_name: str,
+    accessor: str,
     full_path: str,
     type_name: str,
 ) -> _PrefetchAny:
-    """Return ``prefetch`` adapted from a type-relative lookup to ``full_path``."""
+    """Return ``prefetch`` adapted from a type-relative lookup to ``full_path``.
+
+    The type-relative lookup names the hinted relation in either of Django's
+    spellings (``utils/relations.py::RelationSpelling``): its ``accessor``, the
+    one ``prefetch_related`` takes, or its query name ``django_name``, the
+    GraphQL field's. Either is rebased onto ``full_path``, which is spelled in
+    accessors through every JOIN above it.
+    """
     lookup: str | None = getattr(prefetch, "prefetch_through", None)
     if lookup is None:
         raise ConfigurationError(
@@ -1594,10 +1635,10 @@ def _prefetch_hint_for_path(
         )
     if lookup == full_path or lookup.startswith(f"{full_path}__"):
         return prefetch
-    if lookup == django_name:
-        adjusted_lookup = full_path
-    elif lookup.startswith(f"{django_name}__"):
-        adjusted_lookup = f"{full_path}{lookup.removeprefix(django_name)}"
+    for spelled in dict.fromkeys((accessor, django_name)):
+        if lookup == spelled or lookup.startswith(f"{spelled}__"):
+            adjusted_lookup = f"{full_path}{lookup.removeprefix(spelled)}"
+            break
     else:
         raise ConfigurationError(
             f"OptimizerHint.prefetch(obj) lookup on {type_name}.{django_name} "
@@ -1968,6 +2009,7 @@ def _plan_connection_relation(
     field_map: Mapping[str, FieldMeta],
     plan: OptimizationPlan,
     prefix: str,
+    lookup_prefix: str,
     info: GraphQLResolveInfo | None,
     runtime_prefixes: tuple[tuple[str, ...], ...],
     type_cls: type[DjangoType] | None,
@@ -1979,7 +2021,7 @@ def _plan_connection_relation(
         definition,
         relation_field_name=relation_field_name,
         field_map=field_map,
-        prefix=prefix,
+        prefix=JoinPrefix(query=prefix, accessor=lookup_prefix),
         info=info,
         runtime_prefixes=runtime_prefixes,
         type_cls=type_cls,

@@ -118,6 +118,7 @@ from tests._idioms import saved_pk
 from tests._info import make_info
 
 from ._link_models import LnkPairChild, LnkParent, LnkSlugChild
+from ._spelling_models import SpCard, SpGenre, SpParent
 
 if TYPE_CHECKING:
     from django_strawberry_framework.optimizer.nested_planner import _WindowPass
@@ -355,6 +356,121 @@ def test_plan_dispatches_mixed_relations() -> None:
     prefetch = _prefetch_entry(plan)
     assert prefetch.prefetch_to == "entries"
     assert plan.only_fields == ("category_id",)
+
+
+def test_plan_spells_each_ledger_of_a_split_name_join_in_its_own_vocabulary() -> None:
+    """A JOIN over ``SpParent.card`` (queried as ``cards``) is spelled per ledger.
+
+    ``select_related``, ``only()`` and the select-path keys read query names, so
+    the JOIN is ``cards``; the M2M prefetch planned beneath it is looked up on
+    the instance, so its lookup and its key ledger read ``card__genres``.
+    """
+    plan = plan_optimizations(
+        [_sel("cards", [_sel("name"), _sel("genres", [_sel("name")])])],
+        SpParent,
+    )
+
+    assert plan.select_related == ("cards",)
+    assert _prefetch_entry(plan).prefetch_to == "card__genres"
+    assert "cards__name" in plan.only_fields
+    assert set(plan.select_path_resolver_keys) == {"cards"}
+    assert set(plan.prefetch_path_resolver_keys) == {"card__genres"}
+
+
+def test_plan_rebases_a_hinted_prefetch_beneath_a_split_name_join_onto_accessors() -> None:
+    """A type-relative hinted ``Prefetch("genres")`` beneath the ``cards`` JOIN reads ``card__genres``."""
+    explicit = Prefetch("genres", queryset=SpGenre.objects.all())
+
+    class SpCardType:
+        @classmethod
+        def has_custom_get_queryset(cls) -> bool:
+            return False
+
+    _register_type_definition(
+        SpCard,
+        SpCardType,
+        optimizer_hints={"genres": OptimizerHint.prefetch(explicit)},
+    )
+    plan = plan_optimizations(
+        [_sel("cards", [_sel("genres", [_sel("name")])])],
+        SpParent,
+    )
+
+    assert plan.select_related == ("cards",)
+    rebased = _prefetch_entry(plan)
+    assert rebased.prefetch_to == "card__genres"
+    assert rebased.queryset is explicit.queryset
+    assert set(plan.prefetch_path_resolver_keys) == {"card__genres"}
+
+
+class _HintedSpParentType:
+    @classmethod
+    def has_custom_get_queryset(cls) -> bool:
+        return False
+
+
+@pytest.mark.parametrize(
+    (
+        "lookup",
+        "selections",
+        "model",
+        "expected",
+    ),
+    [
+        pytest.param(
+            "card",
+            [_sel("cards", [_sel("name")])],
+            SpParent,
+            "card",
+            id="accessor-root",
+        ),
+        pytest.param(
+            "card",
+            [_sel("parent", [_sel("cards", [_sel("name")])])],
+            SpCard,
+            "parent__card",
+            id="accessor-beneath-join",
+        ),
+        pytest.param(
+            "cards",
+            [_sel("parent", [_sel("cards", [_sel("name")])])],
+            SpCard,
+            "parent__card",
+            id="query-name-beneath-join",
+        ),
+        pytest.param(
+            "card__genres",
+            [_sel("parent", [_sel("cards", [_sel("name")])])],
+            SpCard,
+            "parent__card__genres",
+            id="accessor-descendant-beneath-join",
+        ),
+    ],
+)
+def test_plan_rebases_a_hinted_prefetch_named_in_either_spelling_onto_accessors(
+    lookup: str,
+    selections: list[SimpleNamespace],
+    model: type[Model],
+    expected: str,
+) -> None:
+    """A hint on ``SpParent.cards`` may name the relation by accessor (``card``) or query name.
+
+    Either spelling is rebased onto the accessor-spelled path, at the root and
+    beneath the ``parent`` JOIN; the lookup Django's prefetch takes is never
+    refused for spelling the relation the way Django spells it.
+    """
+    explicit = Prefetch(lookup, queryset=SpCard.objects.all())
+    _register_type_definition(
+        SpParent,
+        _HintedSpParentType,
+        optimizer_hints={"cards": OptimizerHint.prefetch(explicit)},
+    )
+
+    plan = plan_optimizations(selections, model)
+
+    rebased = _prefetch_entry(plan)
+    assert rebased.prefetch_through == expected
+    assert rebased.queryset is explicit.queryset
 
 
 def test_plan_skips_unknown_selections() -> None:
@@ -2660,6 +2776,7 @@ def test_prefetch_hint_for_path_rejects_prefetch_without_lookup() -> None:
             # _prefetch_hint_for_path types the parameter as a Prefetch
             no_lookup,  # pyright: ignore[reportArgumentType]
             django_name="items",
+            accessor="items",
             full_path="category__items",
             type_name="CategoryType",
         )
@@ -2679,6 +2796,7 @@ def test_prefetch_hint_for_path_adapts_nested_lookup_under_parent() -> None:
     rebased = _prefetch_hint_for_path(
         explicit,
         django_name="items",
+        accessor="items",
         full_path="category__items",
         type_name="CategoryType",
     )
@@ -2708,6 +2826,7 @@ def test_prefetch_hint_for_path_rejects_mismatched_lookup() -> None:
         _prefetch_hint_for_path(
             explicit,
             django_name="items",
+            accessor="items",
             full_path="category__items",
             type_name="CategoryType",
         )
@@ -2757,6 +2876,7 @@ def test_apply_hint_prefetch_obj_misconfigured_lookup_leaves_plan_clean() -> Non
             target_definition=None,
             plan=plan,
             prefix="",
+            lookup_prefix="",
             full_path="category",
             info=None,
             runtime_paths=((),),
@@ -3214,6 +3334,7 @@ def test_plan_connection_relation_unknown_field_is_noop() -> None:
         field_map={},
         plan=plan,
         prefix="",
+        lookup_prefix="",
         info=_fake_info(),
         runtime_prefixes=((),),
         type_cls=None,
@@ -3233,6 +3354,7 @@ def test_plan_connection_relation_field_without_related_model_is_noop() -> None:
         field_map={"modelless": FieldMeta(name="modelless", is_relation=True)},
         plan=plan,
         prefix="",
+        lookup_prefix="",
         info=_fake_info(),
         runtime_prefixes=((),),
         type_cls=None,
@@ -3260,6 +3382,7 @@ def test_plan_connection_relation_non_windowable_partition_is_noop() -> None:
             field_map={"category": FieldMeta.from_django_field(Item._meta.get_field("category"))},
             plan=plan,
             prefix="",
+            lookup_prefix="",
             info=_fake_info(),
             runtime_prefixes=((),),
             type_cls=None,
@@ -3310,6 +3433,7 @@ def test_non_windowable_relation_still_records_a_malformed_pagination_identity(
             field_map={"category": FieldMeta.from_django_field(Item._meta.get_field("category"))},
             plan=plan,
             prefix="",
+            lookup_prefix="",
             info=_fake_info(),
             runtime_prefixes=((),),
             type_cls=None,
@@ -6100,6 +6224,7 @@ def test_raising_nested_fetch_strategy_leaves_parent_byte_identical() -> None:
                 field_map=definition.field_map,
                 plan=parent,
                 prefix="",
+                lookup_prefix="",
                 info=_fake_info(),
                 runtime_prefixes=((),),
                 type_cls=genre_type,

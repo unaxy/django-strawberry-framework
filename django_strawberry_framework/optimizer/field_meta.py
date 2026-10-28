@@ -150,9 +150,10 @@ class FieldMeta:
         accessor_name: The attribute name relation rows are reached
             through on a model INSTANCE
             (``django_strawberry_framework/utils/relations.py::instance_accessor``).
-            Diverges from ``name`` for reverse relations without
-            ``related_name`` (query name ``"book"`` vs accessor
-            ``"book_set"``); the optimizer's prefetch lookups and the
+            Diverges from ``name`` (the query name) for a reverse relation
+            declared without ``related_name`` (query name ``"book"`` vs
+            accessor ``"book_set"``) or with a ``related_query_name`` that
+            differs from it; the optimizer's prefetch lookups and the
             strictness cache probes consume this slot because
             ``FieldMeta`` carries no ``get_accessor_name`` to ask live.
             ``None`` only on hand-built instances; both builders always

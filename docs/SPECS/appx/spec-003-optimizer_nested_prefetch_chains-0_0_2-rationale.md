@@ -51,9 +51,11 @@ Spec: [Prefetch-boundary recursion for many-side and downgraded paths][spec-003-
   same-query branch.
 - **The `Prefetch` lookup segment is the instance accessor.** Django's `prefetch_related` resolves a
   lookup by `getattr` on the instance, so a reverse relation declared without `related_name` (field
-  name `book`, accessor `book_set`) is reachable only under the accessor. The field name, the
-  intuitive choice, raises `AttributeError: ... invalid parameter to prefetch_related()`. Plan keys,
-  resolver identities, and `select_related` paths stay in field-name vocabulary.
+  name `book`, accessor `book_set`), or with a `related_query_name` that differs from its
+  `related_name`, is reachable only under the accessor. The field name, the intuitive choice, raises
+  `AttributeError: ... invalid parameter to prefetch_related()`. Only the lookup Django resolves on
+  the instance, and the per-lookup ledgers keyed by it, use the accessor; resolver identities,
+  `select_related` paths and `only()` entries stay in query-name vocabulary.
 - **The planner does not call `get_queryset` itself.** Every framework-side invocation routes through
   the shared visibility boundary ([`spec-045`][spec-045]), so sealing, degradation, and the
   sliced-queryset allowance are decided at one seam.

@@ -71,6 +71,7 @@ from .nested_fetch import (
     unwindowable_child_queryset_reason,
 )
 from .plans import (
+    JoinPrefix,
     OptimizationPlan,
     _extend_only_projection,
     append_unique,
@@ -1204,7 +1205,7 @@ def plan_connection_relation(
     *,
     relation_field_name: str,
     field_map: Mapping[str, FieldMeta],
-    prefix: str,
+    prefix: JoinPrefix,
     info: GraphQLResolveInfo | None,
     runtime_prefixes: tuple[tuple[str, ...], ...],
     type_cls: type[DjangoType] | None,
@@ -1245,6 +1246,10 @@ def plan_connection_relation(
     slice licence this path's own gate below answers for); the only addition is
     the window applied after ``child_plan.apply``.
 
+    ``prefix`` spells the JOIN path above the relation in the two vocabularies
+    the walker carries (``plans.py::JoinPrefix``): query names for the
+    parent-row link columns, accessors for the window's ``Prefetch`` lookup.
+
     Every decision about the relation TARGET spends one resolution.
     ``resolve_relation_target`` answers with the child definition beside its
     origin, and that object - never a fresh read of the target class - decides
@@ -1270,7 +1275,7 @@ def plan_connection_relation(
     # the map does not carry leaves them unloaded.
     append_unique_many(
         plan.only_fields,
-        [f"{prefix}{attname}" for attname in django_field.source_link_attnames],
+        [f"{prefix.query}{attname}" for attname in django_field.source_link_attnames],
     )
     hints_map = resolve_optimizer_hints(definition)
     if hint_is_skip(hints_map.get(relation_field_name)):
@@ -1657,7 +1662,7 @@ def plan_connection_relation(
         request = NestedConnectionRequest(
             django_field=raw_relation_field,
             relation_field_name=relation_field_name,
-            prefix=prefix,
+            prefix=prefix.query,
             child_queryset=child_queryset,
             join=join,
             order_by=tuple(order_by),
@@ -1668,7 +1673,7 @@ def plan_connection_relation(
             next_page_probe=next_page_probe,
             keyset_seek=window_seek,
             to_attr=relation_connection_to_attr(relation_field_name, resp_key),
-            lookup=f"{prefix}{instance_accessor(django_field)}",
+            lookup=f"{prefix.accessor}{instance_accessor(django_field)}",
         )
         strategy_plan = OptimizationPlan()
         if strategy.plan(request, strategy_plan):

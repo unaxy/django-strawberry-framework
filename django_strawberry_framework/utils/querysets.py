@@ -159,6 +159,7 @@ from .relations import (
     is_model_class,
     leading_relation_hops,
     order_column_paths,
+    reverse_relation_by_accessor,
     stored_value_column,
 )
 from .typing import MISSING_ATTRIBUTE, is_async_callable, object_result
@@ -3187,11 +3188,12 @@ def _prefetch_relation_target_or_none(
         try:
             field: object = current._meta.get_field(part)
         except FieldDoesNotExist:
-            # Not in the field map: the default ``<model>_set`` / bare-name
-            # reverse accessor spelling (a relation declared without a
-            # ``related_name``) is what prefetch actually accepts, so resolve
-            # the part over the accessor map before giving up.
-            field = _reverse_relation_by_accessor_or_none(current, part)
+            # Not in the field map: a reverse accessor spelled apart from its
+            # query name (the default ``<model>_set`` of a relation declared
+            # without a ``related_name``, or a ``related_name`` beside its own
+            # ``related_query_name``) is what prefetch actually accepts, so
+            # resolve the part over the accessor map before giving up.
+            field = reverse_relation_by_accessor(current, part)
         if field is None or not getattr(field, "is_relation", False):
             return None
         related: object = getattr(field, "related_model", None)
@@ -3199,35 +3201,6 @@ def _prefetch_relation_target_or_none(
             return None
         current = related
     return current
-
-
-def _reverse_relation_by_accessor_or_none(model: type[models.Model], part: str) -> object:
-    """Return the reverse relation whose accessor name is spelled ``part``.
-
-    ``_meta.get_field`` registers a reverse relation under its declared name
-    (the ``related_name``, or the child model's bare name when none is
-    declared) -- NOT under the ``<model>_set`` accessor spelling the reverse
-    descriptor (and therefore Django's prefetch traversal, which resolves the
-    lookup by attribute access) actually accepts. The accessor map is Django's
-    own relation metadata (``get_accessor_name()`` over ``_meta.get_fields()``),
-    and only reverse relations (``ForeignObjectRel``) carry accessor names -- a
-    forward M2M, a ``GenericForeignKey`` and a ``GenericRelation`` are
-    non-concrete relations too, but have none; ``model`` is
-    always an already-proven model class (the same proven ``parent_model`` walk
-    the field-map path runs on), so no consumer dispatch is reachable. A miss
-    returns ``None`` and the caller keeps the fail-open contract for genuinely
-    unresolvable paths (generic FKs, lazy ``related_model`` strings, plain
-    columns, unknown segments).
-    """
-    for candidate in model._meta.get_fields():
-        if not isinstance(candidate, ForeignObjectRel):
-            # Forward relations carry no accessor and are field-map names,
-            # already resolved by ``_meta.get_field`` before this scan runs.
-            continue
-        accessor: object = candidate.get_accessor_name()
-        if type(accessor) is str and accessor == part:
-            return candidate
-    return None
 
 
 def _sealed_prefetch_related_lookups(
