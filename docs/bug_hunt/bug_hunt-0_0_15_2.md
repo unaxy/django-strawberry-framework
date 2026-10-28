@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 355 done, 211 to do.
+Progress: 356 done, 211 to do.
 
 ## Done
 
@@ -1993,6 +1993,13 @@ Progress: 355 done, 211 to do.
   `django_stubs_ext` patch on every cell. The sweep found `utils/truth.py`'s overloads subscripting `classmethod` /
   `staticmethod` (evaluable on 3.11-3.13), now `TYPE_CHECKING` aliases. Tests:
   `tests/test_check_annotation_subscripts.py`, `tests/base/test_init.py`
+- [x] 562. (robustness) The async pre-pass derives a hop only for a flat leaf the form data names: a range naming no
+  bound (`{start: null, end: null}`, `{}`, inside `or_` / `not_` arms, package or django-filter `RangeFilter`,
+  `DateFromToRangeFilter`) writes no form key, so `apply_async` runs the hop target's `get_queryset` no more than
+  `apply_sync` does. `filters/sets.py::FilterSet._leaf_form_data` (the keys one lookup writes, shared with
+  `_normalize_input`) backs `_named_leaf_filters`, which `_derive_flat_hop_visibility_async` reads; a malformed value
+  raises before any hop hook. `_supplied_leaf_filters` and the permission walk are unchanged. spec-027 says so. Tests:
+  `tests/filters/test_sets.py`
 
 ## Outside review of the fixes
 
@@ -2037,8 +2044,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   every wire value cleans to `"Enter a number."`; and the generated `time` leaf on a `DateTimeField` raises
   `AttributeError: 'datetime.datetime' object has no attribute 'strip'` in `forms.TimeField` clean before the filter
   seam
-- [ ] 562. (robustness) A flat range leaf walking a hop with both bounds null (`{start: null, end: null}`) runs the
-  hop target's `get_queryset` on `apply_async` but not on `apply_sync`; same rows. Found verifying 399
 
 - [ ] 563. Package comments and docstrings outside the gated phrases still narrate history: "now", "no longer", "the
   former", "byte-unchanged" (634 removed every release number and gates it); judge each against START's provenance rule (dry-0_0_15_3 items 31 and 71 cover part of it; 566 restated the
@@ -2204,6 +2209,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `mutations/inputs.py::_frozenset_of_attr_names`, `utils/write_values.py::materialize_relation_id_container`
   (unreachable from the wire). Route each bare-string check through `is_text_atom`; mind the bytes message in
   `normalize_field_name_sequence`. DRY plan item 67 homes the same sites. Found verifying 587
+- [ ] 666. A declared hop-walking flat filter whose `filter` constrains on an absent or no-bound value raises
+  `SyncMisuseError` on `apply_async` when the hop target's `get_queryset` is async-only: the async pre-pass awaits only
+  the leaves the form data names, and the sync `.qs` absent-leaf probe then derives the hop inside the sync boundary
+  (spec-027: an async-only `get_queryset` never runs there). An omitted leaf raised before 562; a no-bound range joins
+  it. Await the hops of every declared walking leaf whose filter acts on an absent value. Found verifying 562
 
 ## To do: holes found re-checking the fixes
 
