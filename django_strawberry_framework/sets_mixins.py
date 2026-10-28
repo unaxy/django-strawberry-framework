@@ -57,8 +57,8 @@ from django.utils.module_loading import import_string
 from .exceptions import ConfigurationError
 from .utils import truth
 from .utils._narrowing import (
-    is_char_wise,
     is_mapping,
+    is_text_atom,
     read_attr,
     require,
     require_instance,
@@ -656,18 +656,20 @@ def is_re_readable_field_declaration(value: object) -> TypeGuard[Collection[obje
     (``some_dict.keys()``, ``some_dict.values()``, ``range(...)``, any custom
     ``Collection``), and rejects the one-shot shapes (generators, ``iter(...)``,
     ``map`` / ``filter`` objects) that expand correctly ONCE and silently to
-    nothing afterwards. Text and bytes-like values (``utils/_narrowing.py::is_char_wise``,
-    ``memoryview`` included) are ``Collection``s of characters or bytes, never of
-    field names, so they are refused even though they satisfy the protocol
-    structurally. The check is structural, so the value's ``__iter__`` is
-    never entered: an object that only defines ``__iter__`` is not a
-    ``Collection``. The protocol is asked of the value's real class, so an
-    instance-level ``__class__`` is never consulted (a value whose ``__class__``
-    read raises is judged by what it really is, never by the raise). Both
-    callers pass the declaration ``utils/inputs.py::plain_set_meta_fields``
-    already read, which reads a Django lazy proxy as the object it stands for.
+    nothing afterwards. Text atoms (``utils/_narrowing.py::is_text_atom``: text,
+    bytes-like values with ``memoryview`` included, and a lazy translation string
+    such as ``gettext_lazy("title")``, whose proxy class forwards the ``str``
+    protocol) are ``Collection``s of characters or bytes, never of field names, so
+    they are refused even though they satisfy the protocol structurally. The
+    check is structural, so the value's ``__iter__`` is never entered: an object
+    that only defines ``__iter__`` is not a ``Collection``. The protocol is asked
+    of the value's real class, so an instance-level ``__class__`` is never
+    consulted (a value whose ``__class__`` read raises is judged by what it really
+    is, never by the raise). Both callers pass the declaration
+    ``utils/inputs.py::plain_set_meta_fields`` already read, which reads a
+    ``SimpleLazyObject`` as the object it stands for.
     """
-    return issubclass(truth.class_of(value), Collection) and not is_char_wise(value)
+    return issubclass(truth.class_of(value), Collection) and not is_text_atom(value)
 
 
 def require_re_readable_field_declaration(
@@ -695,6 +697,9 @@ def require_re_readable_field_declaration(
     field passes (the excluded column becomes a filter), and a bare string
     answers that test by substring. The same gate refuses both shapes there,
     and in the order family's ``Meta.exclude`` (``OrderSet._read_meta_exclude``).
+    A lazy translation string is a bare string here: its proxy is no ``str``,
+    but it iterates and answers membership as the text it stands for, so it is
+    refused with the same message, naming its proxy class.
 
     ``subject`` is the family label, ``accepted`` the family's own list of
     legal spellings for the declaration (the filter family's ``Meta.fields``

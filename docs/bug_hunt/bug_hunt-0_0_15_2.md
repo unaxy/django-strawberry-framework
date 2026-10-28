@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 349 done, 213 to do.
+Progress: 350 done, 214 to do.
 
 ## Done
 
@@ -1959,6 +1959,13 @@ Progress: 349 done, 213 to do.
   without following symlinks); a copy gone with its manifest (a reboot, or a purge that left only folders and links)
   resyncs into its slot. The manifest is not renewed on reuse, so it stays the copy's age canary. Module docstring and
   START.md "Machine budget" say so. Tests: `tests/test_workspace.py`
+- [x] 587. A lazy translation string (any `Promise`) in a set's field declaration is read as text, never iterated:
+  `utils/_narrowing.py::is_text_atom` (char-wise, or a real `Promise` class, read without evaluating it; the rule
+  `utils/errors.py::_str_list` already used) backs `sets_mixins.py::is_re_readable_field_declaration`, so FilterSet
+  `Meta.exclude`, OrderSet `Meta.exclude` and OrderSet `Meta.fields` refuse a lazy string as the bare-string
+  `ConfigurationError` (it excluded by substring, excluded nothing, or expanded per character), and a lazy `"__all__"`
+  is the shorthand in both families' `Meta.fields`. spec-027 and spec-028 say so. Tests: `tests/filters/test_sets.py`,
+  `tests/orders/test_sets.py`, `tests/test_sets_mixins.py`, `tests/utils/test_narrowing.py`
 
 ## Outside review of the fixes
 
@@ -2003,10 +2010,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   every wire value cleans to `"Enter a number."`; and the generated `time` leaf on a `DateTimeField` raises
   `AttributeError: 'datetime.datetime' object has no attribute 'strip'` in `forms.TimeField` clean before the filter
   seam
-- [ ] 587. A lazy translation string (`gettext_lazy(...)`) as a FilterSet `Meta.exclude` passes
-  `sets_mixins.py::require_re_readable_field_declaration` (its real class is not `str`) and excludes by substring:
-  `lazy("title")` drops `title`, `lazy("titl")` excludes nothing with no error, against the spec-027 row that a
-  string `Meta.exclude` is refused. Found fact-finding 403
 - [ ] 540. (robustness) A `SerializerMutation` temporal input DRF's `DateTimeField.enforce_timezone` cannot place
   escapes `is_valid()` as a raw `OverflowError`, the masked uncoded error: a naive datetime near year 1 or 9999 under
   a non-UTC `TIME_ZONE` (`valid_datetime`) and an aware out-of-range one under `USE_TZ=False` (`make_naive`), where
@@ -2187,12 +2190,22 @@ tracker number are recorded there; open remainders and new defects are filed as 
   non-directory at a middle level of the state home loops instead of refusing (the shape 501 fixed in
   `_make_flow_dir`); and `_read_text_if_present` exists in both `workspace.py` and `prove_failability.py`: keep one
   owner. Found fixing 501
+- [ ] 663. (robustness) Other configuration slots read a lazy translation string one name per character, the shape 587
+  closed for the set declarations: `utils/inputs.py::normalize_field_name_sequence` (model, form and serializer
+  mutation `Meta.fields` / `Meta.exclude`: `gettext_lazy("name")` is `('n','a','m','e')`, a silent no-op as
+  `exclude`), `utils/directives.py::validated_field_directives`, `permissions.py::_validate_fields`,
+  `mutations/inputs.py::_frozenset_of_attr_names`, `utils/write_values.py::materialize_relation_id_container`
+  (unreachable from the wire). Route each bare-string check through `is_text_atom`; mind the bytes message in
+  `normalize_field_name_sequence`. DRY plan item 67 homes the same sites. Found verifying 587
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 664. CHANGELOG entry for item 587: a lazy translation string as FilterSet / OrderSet `Meta.exclude` or OrderSet
+  `Meta.fields` is refused at class creation like a bare string (it excluded by substring, excluded nothing, or was
+  expanded per character); a lazy `"__all__"` stays the shorthand
 - [ ] 660. CHANGELOG entry for items 392, 393, 394: the queryset seal admits a `TextChoices` / `StrEnum` where-node
   connector, seals a `QuerySet` as a pending deferred-filter value on Django 6.1 as on 5.2, and refuses a deferred
   filter nested too deeply, or a non-text model `db_table`, as a typed defect instead of a raw `RecursionError` /

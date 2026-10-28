@@ -18,7 +18,7 @@ Two families of container check, kept apart because they answer different questi
 * ``is_exact_*`` are ``type(value) is C`` checks (subclasses fail) and
   ``TypeGuard`` predicates, since a negative answer says nothing about a subclass.
 
-``is_class``, ``is_str`` and ``is_char_wise`` stand apart from both:
+``is_class``, ``is_str``, ``is_char_wise`` and ``is_text_atom`` stand apart from both:
 ``issubclass(type(value), C)`` checks (subclasses pass) that ask the value's real
 type. ``isinstance`` falls back to a ``__class__`` read when the real type does not
 match, and a ``__class__`` property can raise or claim a class the value is not;
@@ -63,6 +63,8 @@ from __future__ import annotations
 from collections.abc import Collection, Iterable, Mapping
 from collections.abc import Set as AbstractSet
 from typing import TYPE_CHECKING, TypeGuard, TypeVar
+
+from django.utils.functional import Promise
 
 from . import truth
 
@@ -330,6 +332,7 @@ __all__ = (
     "is_set",
     "is_set_or_frozenset",
     "is_str",
+    "is_text_atom",
     "is_tuple",
     "iter_of",
     "list_iter",
@@ -441,6 +444,24 @@ def is_char_wise(value: object) -> TypeIs[str | bytes | bytearray | memoryview]:
             memoryview,
         ),
     )
+
+
+def is_text_atom(value: object) -> TypeIs[str | bytes | bytearray | memoryview | Promise]:
+    """Return whether ``value`` is one piece of text, asked of its real type.
+
+    ``is_char_wise`` plus a Django lazy ``Promise`` (a ``gettext_lazy(...)``
+    string): the proxy is no ``str``, yet it stands for one and forwards
+    ``__iter__`` / ``__len__`` / ``__contains__`` to it, so it walks and answers
+    membership character by character exactly as the text does. Django reads a
+    ``Promise`` as text it has not evaluated yet (``django.utils.encoding.smart_str``
+    returns it unchanged), and so does this predicate: the proxy is recognised by
+    its real class and never evaluated. Every ``Promise`` counts, whatever result
+    class it wraps, since the proxy does not say which without evaluating it (a
+    ``lazy(..., list)`` value is text here too). A caller that refuses text where
+    it expects a container of items, or keeps text whole where it would iterate
+    anything else, asks this rather than ``is_char_wise``.
+    """
+    return is_char_wise(value) or issubclass(type(value), Promise)
 
 
 def is_exact_dict(value: object) -> TypeGuard[dict[object, object]]:
