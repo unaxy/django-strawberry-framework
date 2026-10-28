@@ -32,7 +32,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
-from typing import BinaryIO, cast
+from typing import IO, BinaryIO, cast
 
 import pytest
 import yaml
@@ -874,7 +874,8 @@ class _HeldClock:
 #: that file. ``bin`` puts a folder ahead of ``PATH`` (a stand-in ``uv``); ``real_stream`` and
 #: ``real_sync`` keep the script's own ``stream`` (with the environment ``uv run`` resolves)
 #: and ``uv sync``, run through that ``uv``; ``clock`` holds that ``stream``'s stop relay to
-#: the time in that file (``_HOLD_THE_CLOCK``).
+#: the time in that file (``_HOLD_THE_CLOCK``); ``cli`` runs the command line through the
+#: script's entry point (``_cli``) instead of ``main``.
 _ACTOR = (
     _HOLD_THE_CLOCK
     + """
@@ -986,11 +987,21 @@ if config["argv"] == ["hold"]:
     with real_file_lock(Path(config["path"])):
         step("in")
     sys.exit(0)
+if config.get("cli"):
+    sys.argv = ["workspace.py", *config["argv"]]
+    workspace._cli()
 sys.exit(workspace.main(config["argv"]))
 """
 )
 
 _ADDRESS = "review/pkg/a.py/perf-1"
+
+
+def _reader_gone_pipe() -> int:
+    """Return the write end of a pipe whose reader is gone: every write to it fails ``EPIPE``."""
+    reader, writer = os.pipe()
+    os.close(reader)
+    return writer
 
 
 class _Actors:
@@ -1006,8 +1017,10 @@ class _Actors:
         name: str,
         *argv: str,
         pauses: tuple[str, ...] = (),
+        gone: tuple[str, ...] = (),
         **options: object,
     ) -> None:
+        """Start ``argv`` as ``name``; each stream ``gone`` names is a pipe whose reader is gone."""
         payload = {
             "name": name,
             "argv": list(argv),
@@ -1020,6 +1033,7 @@ class _Actors:
         env = workspace.clean_env()
         env[workspace.ROOT_ENV] = str(self.layout.base.parent)
         _ = env.pop(workspace.SLOTS_ENV, None)
+        sinks = {stream: _reader_gone_pipe() for stream in gone}
         self.processes[name] = subprocess.Popen(
             [
                 sys.executable,
@@ -1027,11 +1041,13 @@ class _Actors:
                 _ACTOR,
                 json.dumps(payload),
             ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=sinks.get("stdout", subprocess.PIPE),
+            stderr=sinks.get("stderr", subprocess.PIPE),
             text=True,
             env=env,
         )
+        for sink in sinks.values():
+            os.close(sink)
 
     def run(
         self,
@@ -1039,9 +1055,20 @@ class _Actors:
         address: str = _ADDRESS,
         *flags: str,
         pauses: tuple[str, ...] = (),
+        gone: tuple[str, ...] = (),
         **options: object,
     ) -> None:
-        self.start(name, "run", address, *flags, "--", "edit", pauses=pauses, **options)
+        self.start(
+            name,
+            "run",
+            address,
+            *flags,
+            "--",
+            "edit",
+            pauses=pauses,
+            gone=gone,
+            **options,
+        )
 
     def reached(
         self,
@@ -4987,6 +5014,167 @@ def test_only_a_sink_whose_reader_is_gone_is_pointed_at_devnull(
     expected = Path(os.devnull).stat() if names == "devnull" else path.stat()
     assert log.getvalue() == b"chunk\n"
     assert (found.st_dev, found.st_ino) == (expected.st_dev, expected.st_ino)
+
+
+def test_a_cli_stream_keeps_its_settings_and_what_a_live_reader_gets(tmp_path: Path) -> None:
+    path = tmp_path / "out"
+    with path.open("w", encoding="utf-8", errors="backslashreplace", buffering=1) as original:
+        stream = workspace._reader_gone_tolerant(original)
+        _ = stream.write("caf\u00e9 \udcff\n")
+        _ = stream.buffer.write(b"bytes\n")
+        stream.flush()
+        settings = [
+            (
+                wrapper.encoding,
+                wrapper.errors,
+                wrapper.line_buffering,
+                wrapper.write_through,
+            )
+            for wrapper in (original, stream)
+            if isinstance(wrapper, io.TextIOWrapper)
+        ]
+
+    assert path.read_bytes() == "caf\u00e9 \\udcff\nbytes\n".encode()
+    assert (
+        settings
+        == [
+            (
+                "utf-8",
+                "backslashreplace",
+                True,
+                False,
+            ),
+        ]
+        * 2
+    )
+
+
+def test_an_unbuffered_cli_stream_stays_unbuffered(tmp_path: Path) -> None:
+    # ``python -u``: each write reaches the descriptor at once, with no flush.
+    path = tmp_path / "out"
+    raw = path.open("wb", buffering=0)
+    with io.TextIOWrapper(raw, encoding="utf-8", write_through=True) as original:
+        stream = workspace._reader_gone_tolerant(original)
+        _ = stream.write("at once\n")
+        reached = path.read_bytes()
+
+    assert reached == b"at once\n"
+
+
+@pytest.mark.parametrize("sink", ["pipe", "tty"])
+def test_a_cli_stream_drops_what_a_gone_reader_cannot_take_and_points_at_devnull(
+    sink: str,
+) -> None:
+    # A pipe whose reader exited (``EPIPE``) or a terminal whose master side closed (``EIO``).
+    reader, writer = os.pipe() if sink == "pipe" else os.openpty()
+    os.close(reader)
+    with os.fdopen(writer, "w", encoding="utf-8") as original:
+        stream = workspace._reader_gone_tolerant(original)
+        _ = stream.write("x" * (1 << 20))
+        stream.flush()
+        _ = stream.buffer.write(b"more")
+        stream.flush()
+        found = os.fstat(writer)
+
+    expected = Path(os.devnull).stat()
+    assert (found.st_dev, found.st_ino) == (expected.st_dev, expected.st_ino)
+
+
+# Stands in for a worker's command that writes nothing: waits until the file ``argv[2]`` appears,
+# writes ``ran`` to ``argv[1]`` and exits 7, so the run's own header and footer are all its
+# stderr carries.
+_RAN = """
+import sys, time
+from pathlib import Path
+
+ran, release = Path(sys.argv[1]), Path(sys.argv[2])
+deadline = time.monotonic() + 60
+while not release.exists() and time.monotonic() < deadline:
+    time.sleep(0.02)
+ran.write_text("ran")
+sys.exit(7)
+"""
+
+
+@pytest.mark.parametrize(
+    ("command", "code"),
+    [("status", 0), ("audit", 1), ("diff", 0)],
+)
+def test_a_command_whose_stdout_reader_is_gone_ends_with_its_own_code(
+    actors: _Actors,
+    repo: Path,
+    tmp_path: Path,
+    command: str,
+    code: int,
+) -> None:
+    # ``workspace.py status | head`` with ``head`` gone before the first write: the output is
+    # dropped and the code is the command's own, ``audit``'s failed record (a run id with no log
+    # entry) included. ``diff`` writes far past what a pipe buffers.
+    if command == "audit":
+        record = _write(tmp_path / "record.md", "cites review-20260101T000000-abcdef\n")
+        argv: tuple[str, ...] = ("audit", str(record))
+    elif command == "diff":
+        _ = _write(repo / PACKAGE / "big.py", "VALUE = 1\n" * 50000)
+        argv = (
+            "diff",
+            "HEAD",
+            "--",
+            PACKAGE,
+        )
+    else:
+        argv = ("status",)
+    actors.start("A", *argv, cli=True, gone=("stdout",))
+
+    returncode, _out, err = actors.finish("A")
+
+    assert (returncode, err) == (code, "")
+
+
+@pytest.mark.parametrize("gone", ["before-the-header", "after-the-header"])
+def test_a_run_whose_stderr_reader_is_gone_runs_its_command_and_ends_with_its_code(
+    layout: workspace.Layout,
+    actors: _Actors,
+    stand_in_uv: Path,
+    tmp_path: Path,
+    gone: str,
+) -> None:
+    # ``workspace.py run ... 2>&1 | head`` with ``head`` gone before the header, or after it and
+    # before the footer: the command runs all the same and its code is the run's.
+    ran, release = tmp_path / "ran", tmp_path / "release"
+    if gone == "before-the-header":
+        release.touch()
+    actors.start(
+        "A",
+        "run",
+        _ADDRESS,
+        "--",
+        sys.executable,
+        "-c",
+        _RAN,
+        str(ran),
+        str(release),
+        bin=str(stand_in_uv),
+        real_stream=True,
+        cli=True,
+        gone=("stderr",) if gone == "before-the-header" else (),
+    )
+    process = actors.processes["A"]
+    if gone == "after-the-header":
+        assert process.stderr is not None
+        stderr: IO[str] = process.stderr
+        header: list[str] = []
+        for line in stderr:
+            header.append(line)
+            if line.startswith("  log "):
+                break
+        assert header[0].startswith("workspace run ")
+        assert header[-1].startswith("  log ")
+        stderr.close()
+        release.touch()
+
+    assert process.wait(timeout=_LOADED_WAIT) == 7
+    assert ran.read_text(encoding="utf-8") == "ran"
+    assert _run_record(layout)["exit"] == 7
 
 
 @pytest.fixture

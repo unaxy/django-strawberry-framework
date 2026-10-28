@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 345 done, 215 to do.
+Progress: 346 done, 215 to do.
 
 ## Done
 
@@ -1937,6 +1937,12 @@ Progress: 345 done, 215 to do.
 - [x] 394. `utils/querysets.py::_base_table_defect` reads the model's `db_table` once and returns the typed `table`
   defect (its kind) for a non-text value, as the alias side does, instead of raising `TypeError`. Tests:
   `tests/utils/test_querysets.py`
+- [x] 397. Every `scripts/workspace.py` command keeps its own exit code when its reader is gone: `_cli` installs a
+  stdout / stderr whose raw writer (`_ReaderGoneTolerant`) drops a write that meets EPIPE / EIO and points the fd at
+  `/dev/null` through `_quiet_dead_sink` (the rule `_pump` uses), keeping encoding, line buffering and an unbuffered
+  stream unbuffered. `status`, `audit`, a large `diff`, and `run` with stderr gone before or after its header exited
+  120 or 1 with a traceback, and `run` with stderr gone before the header never started its command. Tests:
+  `tests/test_workspace.py`
 
 ## Outside review of the fixes
 
@@ -1981,8 +1987,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   every wire value cleans to `"Enter a number."`; and the generated `time` leaf on a `DateTimeField` raises
   `AttributeError: 'datetime.datetime' object has no attribute 'strip'` in `forms.TimeField` clean before the filter
   seam
-- [ ] 397. Unprobed: a `scripts/workspace.py` command other than `run` printing to a closed stdout (`workspace.py status
-  | head`) may exit 120 from the flush `BrokenPipeError` and lose its own return code, as `run` did (307)
 - [ ] 501. (robustness) `scripts/workspace.py::workspace_base` uses a fixed `$TMPDIR/dsf-ws` with no owner, symlink or
   mode check, the shared-name shape 330 removed from `prove_failability.py`: on a shared Linux `/tmp` (no `TMPDIR`) a
   second user's flows land in, or are refused by, the first user's directory, and a planted symlink is followed. Name
@@ -2170,6 +2174,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 659. (robustness) `tests/test_prove_failability.py` (near lines 2775 and 2806) times its stop signals around
   `STOP_REPEAT_GRACE` with real sleeps, the load-sensitive shape 428 removed from `tests/test_workspace.py`; drive it
   with the `_StopRelay` clock seam or an observable condition. Found verifying 428
+- [ ] 661. (robustness) The other `scripts/` entry points (the `check_*`, `build_*` `--check`, `prove_failability.py`,
+  `review_*`, `bug_hunt.py`, `count_queries.py` and the rest sharing the `sys.exit(main())` shape) exit 120 when their
+  stdout reader is gone, losing a 0 or 1 a pipeline reads (`check_trailing_commas.py --check`,
+  `check_type_suppressions.py` reproduced). Move `workspace.py`'s `_ReaderGoneTolerant` / `_reader_gone_tolerant` /
+  `_quiet_dead_sink` to a shared scripts module and install it at each entry. Found fixing 397
 
 ## To do: holes found re-checking the fixes
 

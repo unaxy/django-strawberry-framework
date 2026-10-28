@@ -291,7 +291,10 @@ its copy was released while it waited, wrong provenance, Postgres
 unavailable, ``uv`` or ``git`` not on ``PATH``, a ``prove`` extra argument
 naming one of its own flags), with the reason on stderr. The other
 commands return ``0`` on success and ``1`` on a failed audit, a failed gate
-suite, a ``diff --check`` mismatch or a refusal.
+suite, a ``diff --check`` mismatch or a refusal. A reader gone from this
+script's own output (``status | head``, a closed terminal) changes no code:
+what it cannot take is dropped, and ``run`` and ``prove`` start their
+command even when the header cannot be written.
 
 POSIX only (``fcntl`` locks). Run from the shared checkout's root as
 ``uv run python scripts/workspace.py ...``, never from inside a copy.
@@ -306,6 +309,7 @@ import datetime
 import errno
 import fcntl
 import hashlib
+import io
 import json
 import os
 import re
@@ -321,7 +325,7 @@ import threading
 import time
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, BinaryIO, NoReturn, TypedDict, cast, overload
+from typing import TYPE_CHECKING, BinaryIO, NoReturn, TextIO, TypedDict, cast, overload
 
 import tomli
 from typing_extensions import NotRequired, override
@@ -336,10 +340,10 @@ except ModuleNotFoundError:  # imported as ``scripts.workspace`` (repo root on p
     from scripts import _git as _git_runner
 
 if TYPE_CHECKING:
-    import io
     from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
     from types import FrameType
 
+    from _typeshed import ReadableBuffer
     from typing_extensions import TypeIs
 
 # ``json.loads`` returns ``Any``; this alias hands callers an ``object`` to narrow.
@@ -2656,14 +2660,16 @@ def _pump(
             _ = log.write(chunk)
 
 
-def _quiet_dead_sink(sink: BinaryIO) -> None:
+def _quiet_dead_sink(sink: BinaryIO | io.FileIO) -> None:
     """Point the sink's descriptor, and stdout or stderr on the same dead file, at ``os.devnull``.
 
-    What the failed write left buffered is flushed again as the process
-    exits, and the run's footer goes to stderr; either failing on the dead
-    file would end the process with ``120`` or a traceback instead of the
-    command's code. Never raises: a descriptor that cannot be read or
-    repointed is left as it is.
+    The one rule for output whose reader is gone (``EPIPE``, ``EIO``), used
+    by :func:`_pump` and by the script's own stdout and stderr
+    (:class:`_ReaderGoneTolerant`). What the failed write left buffered is
+    flushed again as the process exits, and the run's footer goes to
+    stderr; either failing on the dead file would end the process with
+    ``120`` or a traceback instead of the command's code. Never raises: a
+    descriptor that cannot be read or repointed is left as it is.
     """
     with contextlib.suppress(OSError, ValueError):
         fd = sink.fileno()
@@ -2677,6 +2683,54 @@ def _quiet_dead_sink(sink: BinaryIO) -> None:
                         _ = os.dup2(devnull, target)
         finally:
             os.close(devnull)
+
+
+class _ReaderGoneTolerant(io.FileIO):
+    """A write-only descriptor whose writes outlast its reader.
+
+    A write that fails because the reader is gone (``EPIPE``: a pipe whose
+    reader exited; ``EIO``: a closed terminal) points the descriptor at
+    ``os.devnull`` (:func:`_quiet_dead_sink`) and reports the bytes as
+    written, so the output is dropped and the caller carries on; every
+    other failure (a full disk) is raised as it is.
+    """
+
+    @override
+    def write(self, b: ReadableBuffer, /) -> int:
+        try:
+            return super().write(b)
+        except OSError as error:
+            if error.errno not in {errno.EPIPE, errno.EIO}:
+                raise
+            _quiet_dead_sink(self)
+            return memoryview(b).nbytes
+
+
+def _reader_gone_tolerant(stream: TextIO) -> TextIO:
+    """Return ``stream`` writing through :class:`_ReaderGoneTolerant`, settings kept.
+
+    The encoding, error handler, line buffering and write-through of the
+    stream are kept, and so is whether its ``buffer`` is buffered (``python
+    -u`` leaves it unbuffered); its ``buffer`` takes bytes. A stream that is
+    not a text wrapper over a descriptor (none at all, a test's capture) is
+    returned as it is.
+    """
+    if not isinstance(stream, io.TextIOWrapper):
+        return stream
+    try:
+        descriptor = stream.fileno()
+        stream.flush()
+    except (OSError, ValueError):
+        return stream
+    raw = _ReaderGoneTolerant(descriptor, "w", closefd=False)
+    return io.TextIOWrapper(
+        io.BufferedWriter(raw) if isinstance(stream.buffer, io.BufferedWriter) else raw,
+        encoding=stream.encoding,
+        errors=stream.errors,
+        newline="\n",
+        line_buffering=stream.line_buffering,
+        write_through=stream.write_through,
+    )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -3869,9 +3923,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _cli() -> NoReturn:
     """Run :func:`main` as the script does, ending by the stop signal that stopped the run.
 
-    :func:`main` returns ``128 + N`` for in-process callers; the process then
-    dies by ``N`` (``scripts/_stop_signals.py::exit_with``).
+    Stdout and stderr first write through :class:`_ReaderGoneTolerant`, so
+    output whose reader is gone (``| head``, a closed terminal) is dropped
+    and every command ends with its own code: ``run`` and ``prove`` start
+    their command and return its code even when the header or footer cannot
+    be written. :func:`main` returns ``128 + N`` for in-process callers; the
+    process then dies by ``N`` (``scripts/_stop_signals.py::exit_with``).
     """
+    sys.stdout = _reader_gone_tolerant(sys.stdout)
+    sys.stderr = _reader_gone_tolerant(sys.stderr)
     _stop_signals.exit_with(main())
 
 
