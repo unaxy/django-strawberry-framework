@@ -22234,6 +22234,88 @@ def test_library_consumer_prefetch_seals_only_a_seed_over_the_target_model(
     assert len(_library_sql(captured)) == 2 + per_note * notes, _library_sql(captured)
 
 
+def _hinted_proxy_branch_schema(*, optimizer: bool) -> strawberry.Schema:
+    """Notes whose ``branch`` hint seeds ``ProxyBranch`` rows through the proxy type's hook.
+
+    ``BranchNote.branch`` is declared to ``ProxyBranch``, whose type declares
+    ``get_queryset``; the hinted ``Prefetch`` is over that proxy target itself.
+    """
+
+    class HintedProxyBranchType(DjangoType):
+        @classmethod
+        @override
+        def get_queryset(
+            cls,
+            queryset: QuerySet[models.ProxyBranch],
+            info: strawberry.Info,
+        ) -> QuerySet[models.ProxyBranch]:
+            return queryset.exclude(city="restricted")
+
+        class Meta:
+            model = models.ProxyBranch
+            fields = ("id", "name")
+            name = "HintedProxyBranchType"
+
+    assert registry.get(models.ProxyBranch) is HintedProxyBranchType
+
+    class HintedBranchNoteType(DjangoType):
+        @classmethod
+        @override
+        def get_queryset(
+            cls,
+            queryset: QuerySet[models.BranchNote],
+            info: strawberry.Info,
+        ) -> QuerySet[models.BranchNote]:
+            return queryset.order_by("pk")
+
+        class Meta:
+            model = models.BranchNote
+            fields = ("id", "body", "branch")
+            name = "HintedBranchNoteType"
+            optimizer_hints = {
+                "branch": OptimizerHint.prefetch(
+                    Prefetch("branch", queryset=models.ProxyBranch.objects.all()),
+                ),
+            }
+
+    @strawberry.type
+    class Query:
+        all_notes: list[HintedBranchNoteType] = DjangoListField(HintedBranchNoteType)
+
+    finalize_django_types()
+    if not optimizer:
+        return DjangoSchema(query=Query, config=strawberry_config())
+    extension = DjangoOptimizerExtension(strictness="off")
+    return DjangoSchema(query=Query, config=strawberry_config(), extensions=[lambda: extension])
+
+
+@pytest.mark.django_db
+def test_library_hinted_proxy_seed_on_a_hooked_proxy_target_resolves() -> None:
+    """``OptimizerHint.prefetch`` over the proxy target serves what the unoptimized schema serves.
+
+    The hinted ``ProxyBranch`` seed is narrowed by the proxy type's hook and its
+    rows are ``ProxyBranch`` instances, which the proxy type resolves: each note
+    keeps its branch in one batch.
+    """
+    for index in range(2):
+        branch = models.ProxyBranch.objects.create(name=f"Proxy {index}", city="Boston")
+        models.BranchNote.objects.create(branch=branch, body=f"note {index}")
+    document = "{ allNotes { body branch { name } } }"
+
+    payload, sql = _post_owned(document, lambda: _hinted_proxy_branch_schema(optimizer=True))
+    reference, _reference_sql = _post_owned(
+        document,
+        lambda: _hinted_proxy_branch_schema(optimizer=False),
+    )
+
+    assert payload == reference, (payload, reference)
+    assert payload.get("errors") is None, payload
+    assert [
+        json_str(note, "branch", "name") for note in json_list(payload, "data", "allNotes")
+    ] == ["Proxy 0", "Proxy 1"], payload
+    assert len(sql) == 2, sql
+
+
 _UPDATE_HOLDER_SHELF = (
     "mutation($id: ID!, $d: ShelfCodePartialInput!) { updateShelf(id: $id, data: $d) { "
     "node { code books { subtitle } } errors { field } } }"

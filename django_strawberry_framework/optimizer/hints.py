@@ -254,7 +254,11 @@ class OptimizerHint:
 
         This is a leaf operation. The consumer-provided queryset is the
         source of truth, and nested selections under this field are not
-        walked by the optimizer.
+        walked by the optimizer. On a ``Prefetch`` without ``to_attr``, its
+        queryset's model must be the lookup's target model or a proxy of it,
+        because Django builds the prefetched rows from that model;
+        ``Meta.optimizer_hints`` refuses any other seed at type build
+        (``types/base.py::_validate_optimizer_hints``).
 
         Type-and-message ownership lives in ``_require_prefetch``; the
         factory must invoke it before construction so ``None`` cannot

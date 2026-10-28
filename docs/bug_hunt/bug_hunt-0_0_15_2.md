@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 332 done, 214 to do.
+Progress: 333 done, 214 to do.
 
 ## Done
 
@@ -1856,6 +1856,15 @@ Progress: 332 done, 214 to do.
   ranges, IPs and test data pass. 90 sites to 0; the `types/finalizer.py` strictness paragraph, false at HEAD, now
   states the rule (spec-033 Decision 8). Maintainer request. The road-to-1.0.0 vocabulary of `scripts/_kanban_lib.py`
   is refused once `__version__` reaches 1.0
+- [x] 460. A hinted `OptimizerHint.prefetch(Prefetch(lookup, queryset=...))` without `to_attr` whose queryset is not
+  over the lookup's leaf target (or a proxy of it sharing its table) is refused when the type is built, naming
+  `Type.field`, the row model and the target (`types/base.py::_hinted_prefetch_seed_defect`, read by
+  `_validate_optimizer_hints`): both the `Query.model` Django builds rows from and `QuerySet.model` must pass, a
+  `TextChoices` lookup is read as its text, and a non-QuerySet seed fails closed. It filled the relation with rows the
+  target type's `is_type_of` refuses (a `Branch` seed on a `ProxyBranch` target, a sibling proxy, an MTI child or
+  parent, an unrelated table), hooked or not, FK or M2M. A `to_attr` Prefetch stays the consumer resolver's own; an
+  unresolvable leaf (generic FK) is left to Django. The consumer `prefetch_related(Prefetch(...))` path keeps its
+  per-parent re-read. spec-045 row. Tests: `tests/types/test_base.py`, `test_library_api.py`
 
 ## Outside review of the fixes
 
@@ -1896,10 +1905,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 460. `optimizer/walker.py::_scoped_hint_prefetch` accepts an `OptimizerHint.prefetch(Prefetch("branch",
-  queryset=Branch.objects.all()))` seed over a proxy target's concrete model and serves `Branch` rows to
-  `ProxyBranchType` ("Expected value of type 'ProxyBranchType'"; `BranchNote.branch` onto a hooked proxy type); the
-  consumer seal (379/380) seals only a seed whose model is the target model. Found landing 379/380
 - [ ] 462. A reverse one-to-one whose `related_query_name` differs from its `related_name` escapes 379's ownership:
   consumer Prefetch paths are accessor names while `select_related` and the key ledgers use query names, so
   `plans.py::_consumer_owned_paths` (and `_release_select_related_to_prefetches`) never match it and the JOIN still
@@ -2116,6 +2121,9 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 647. CHANGELOG entry for item 460: a `Meta.optimizer_hints` `OptimizerHint.prefetch(Prefetch(...))` without
+  `to_attr` whose queryset is over another model than the relation's target (or a proxy of it) now fails the type build
+  with a `ConfigurationError` instead of serving rows the target type refuses at execution
 - [ ] 633. CHANGELOG entry for item 575: a `DjangoModelFormMutation` create whose form binds a single-value field
   over an `ArrayField` (or a `MultipleChoiceField` over a single-value column) logs the shape warning at schema
   build, as an update does, without the update's advice on the omitted field's initial value

@@ -34,10 +34,24 @@ from typing import Annotated, NoReturn
 import pytest
 import pytest_django
 import strawberry
-from apps.library.models import Patron, PatronProfile
+from apps.library.models import (
+    Book,
+    Branch,
+    BranchNote,
+    BranchSignage,
+    Genre,
+    KioskFault,
+    LendingDesk,
+    Patron,
+    PatronProfile,
+    ProxyBranch,
+    RepairTicket,
+    Shelf,
+)
 from apps.products.models import Category, Entry, Item, Property
 from apps.scalars.models import MediaSpecimen
 from django.db import models
+from django.db.models import Prefetch
 from django.db.models.expressions import Combinable
 from django.utils.functional import Promise, SimpleLazyObject
 from django.utils.translation import gettext_lazy
@@ -3081,6 +3095,265 @@ def test_optimizer_hints_bad_value_raises() -> None:
                 model = Category
                 fields = ("id", "name", "items")
                 optimizer_hints = {"items": "not_a_hint"}
+
+
+def _hinted_prefetch_type(
+    model: type[models.Model],
+    field: str,
+    prefetch: Callable[[], Prefetch[str]],
+) -> type[DjangoType]:
+    """Build ``HintedType`` over ``model`` whose ``field`` hint is ``OptimizerHint.prefetch``."""
+    hinted_model = model
+    selected = ("id", field)
+    hints = {field: OptimizerHint.prefetch(prefetch())}
+
+    class HintedType(DjangoType):
+        class Meta:
+            model = hinted_model
+            fields = selected
+            optimizer_hints = hints
+
+    return HintedType
+
+
+def _manager_seed_prefetch() -> Prefetch[str]:
+    """A ``Prefetch`` whose queryset slot holds a manager, which Django's ``Prefetch`` admits."""
+    # basedpyright: the manager is the non-QuerySet seed under test; Prefetch types the
+    # queryset parameter as a QuerySet
+    return Prefetch("branch", queryset=ProxyBranch.objects)  # pyright: ignore[reportArgumentType]
+
+
+def _lazy_lookup_prefetch() -> Prefetch[str]:
+    """A ``Prefetch`` whose lookup is a lazy translation string, which Django's ``Prefetch`` admits."""
+    # basedpyright: the lazy string is the non-text lookup under test, bound as the str
+    # Prefetch types its lookup parameter as
+    lookup: str = gettext_lazy("branch")  # pyright: ignore[reportAssignmentType]
+    return Prefetch(lookup, queryset=Branch.objects.all())
+
+
+class _NoteRelation(models.TextChoices):
+    """A relation name spelled as a ``TextChoices`` member, as a consumer may pass it."""
+
+    BRANCH = "branch"
+
+
+def _seed_refusal(
+    field: str,
+    lookup: str,
+    seed: str,
+    target: str,
+) -> str:
+    """The refusal ``Meta.optimizer_hints`` raises for a hinted seed over ``seed`` rows."""
+    return (
+        f"OptimizerHint.prefetch(obj) on HintedType.{field}: the hinted Prefetch({lookup!r}) "
+        f"queryset is over {seed} rows, but the {lookup!r} relation targets {target} rows. "
+        "Django builds the prefetched rows from the queryset's model, so the relation would "
+        f"serve {seed} instances in place of {target} ones. Pass a queryset over {target} "
+        "(or a proxy model of it)."
+    )
+
+
+@pytest.mark.parametrize(
+    (
+        "model",
+        "field",
+        "prefetch",
+        "expected",
+    ),
+    [
+        pytest.param(
+            BranchNote,
+            "branch",
+            lambda: Prefetch("branch", queryset=Branch.objects.all()),
+            _seed_refusal("branch", "branch", "Branch", "ProxyBranch"),
+            id="concrete-seed-under-proxy-target",
+        ),
+        pytest.param(
+            BranchSignage,
+            "branch",
+            lambda: Prefetch("branch", queryset=ProxyBranch.objects.all()),
+            _seed_refusal("branch", "branch", "ProxyBranch", "VisibleBranch"),
+            id="sibling-proxy-seed",
+        ),
+        pytest.param(
+            RepairTicket,
+            "venue",
+            lambda: Prefetch("venue", queryset=LendingDesk.objects.all()),
+            _seed_refusal("venue", "venue", "LendingDesk", "Venue"),
+            id="mti-child-seed",
+        ),
+        pytest.param(
+            KioskFault,
+            "kiosk",
+            lambda: Prefetch("kiosk", queryset=LendingDesk.objects.all()),
+            _seed_refusal("kiosk", "kiosk", "LendingDesk", "SelfServeDesk"),
+            id="mti-parent-seed",
+        ),
+        pytest.param(
+            Book,
+            "genres",
+            lambda: Prefetch("genres", queryset=Shelf.objects.all()),
+            _seed_refusal("genres", "genres", "Shelf", "Genre"),
+            id="unrelated-seed-many-to-many",
+        ),
+        pytest.param(
+            Branch,
+            "shelves",
+            lambda: Prefetch("shelves__books", queryset=Shelf.objects.all()),
+            _seed_refusal("shelves", "shelves__books", "Shelf", "Book"),
+            id="nested-lookup-leaf",
+        ),
+        pytest.param(
+            BranchNote,
+            "branch",
+            lambda: Prefetch(_NoteRelation.BRANCH, queryset=Branch.objects.all()),
+            _seed_refusal("branch", "branch", "Branch", "ProxyBranch"),
+            id="text-choices-lookup",
+        ),
+        pytest.param(
+            BranchNote,
+            "branch",
+            lambda: Prefetch(
+                "branch",
+                queryset=models.QuerySet(model=ProxyBranch, query=Branch.objects.all().query),
+            ),
+            _seed_refusal("branch", "branch", "Branch", "ProxyBranch"),
+            id="query-model-off-target",
+        ),
+        pytest.param(
+            BranchNote,
+            "branch",
+            lambda: Prefetch(
+                "branch",
+                queryset=models.QuerySet(model=Branch, query=ProxyBranch.objects.all().query),
+            ),
+            _seed_refusal("branch", "branch", "Branch", "ProxyBranch"),
+            id="queryset-model-off-target",
+        ),
+        pytest.param(
+            BranchNote,
+            "branch",
+            _manager_seed_prefetch,
+            (
+                "OptimizerHint.prefetch(obj) on HintedType.branch: the hinted Prefetch('branch') "
+                "queryset is a Manager, not a QuerySet. Pass a queryset over ProxyBranch (or a "
+                "proxy model of it)."
+            ),
+            id="manager-seed",
+        ),
+    ],
+)
+def test_optimizer_hints_refuse_a_prefetch_seed_the_relation_cannot_serve(
+    model: type[models.Model],
+    field: str,
+    prefetch: Callable[[], Prefetch[str]],
+    expected: str,
+) -> None:
+    """A hinted ``Prefetch`` seed over neither the lookup's target nor a proxy of it fails at build.
+
+    Django builds the prefetched rows from the seed's model, so such a seed fills
+    the relation with instances of another class or table.
+    """
+    with pytest.raises(ConfigurationError) as excinfo:
+        _ = _hinted_prefetch_type(model, field, prefetch)
+
+    assert str(excinfo.value) == expected
+
+
+@pytest.mark.parametrize(
+    ("model", "field", "prefetch"),
+    [
+        pytest.param(
+            BranchNote,
+            "branch",
+            lambda: Prefetch("branch", queryset=ProxyBranch.objects.all()),
+            id="exact-proxy-target",
+        ),
+        pytest.param(
+            Shelf,
+            "branch",
+            lambda: Prefetch("branch", queryset=ProxyBranch.objects.all()),
+            id="proxy-seed-under-concrete-target",
+        ),
+        pytest.param(
+            Book,
+            "genres",
+            lambda: Prefetch("genres", queryset=Genre.objects.all()),
+            id="exact-target-many-to-many",
+        ),
+        pytest.param(
+            Branch,
+            "shelves",
+            lambda: Prefetch("shelves__books", queryset=Book.objects.all()),
+            id="nested-lookup-leaf",
+        ),
+        pytest.param(
+            BranchNote,
+            "branch",
+            lambda: Prefetch("branch"),
+            id="queryset-less",
+        ),
+        pytest.param(
+            Shelf,
+            "branch",
+            lambda: Prefetch("branch__tags__content_object", queryset=Shelf.objects.all()),
+            id="generic-foreign-key-leaf-unresolved",
+        ),
+        pytest.param(
+            BranchNote,
+            "branch",
+            _lazy_lookup_prefetch,
+            id="non-text-lookup-unresolved",
+        ),
+    ],
+)
+def test_optimizer_hints_accept_a_prefetch_seed_the_relation_can_serve(
+    model: type[models.Model],
+    field: str,
+    prefetch: Callable[[], Prefetch[str]],
+) -> None:
+    """A seed over the target or a proxy of it builds, as do seeds the check cannot place.
+
+    A queryset-less ``Prefetch`` has no seed, and a lookup whose leaf Django's
+    relation metadata cannot resolve (a generic foreign key) is left to Django
+    at fetch.
+    """
+    hinted = _hinted_prefetch_type(model, field, prefetch)
+
+    assert hinted.__django_strawberry_definition__.optimizer_hints[field].prefetch_obj is not None
+
+
+def test_optimizer_hints_leave_a_to_attr_prefetch_to_the_consumer_resolver() -> None:
+    """A ``to_attr`` seed lands on the attribute a consumer-assigned resolver reads, so it builds.
+
+    The rows never reach the relation's cache, so their model is the resolver's
+    business: a ``Branch`` seed on the ``ProxyBranch``-targeted ``BranchNote.branch``
+    read through ``branch_rows`` is accepted.
+    """
+
+    class HintedBranchType(DjangoType):
+        class Meta:
+            model = Branch
+            fields = ("id", "name")
+
+    def _branch_row(root: BranchNote) -> Branch:
+        row = read_attr(root, "branch_rows")
+        assert isinstance(row, Branch)
+        return row
+
+    hint = OptimizerHint.prefetch(
+        Prefetch("branch", queryset=Branch.objects.all(), to_attr="branch_rows"),
+    )
+
+    class HintedNoteType(DjangoType):
+        branch: Branch = strawberry.field(resolver=_branch_row, graphql_type=HintedBranchType)
+
+        class Meta:
+            model = BranchNote
+            fields = ("id", "branch")
+            optimizer_hints = {"branch": hint}
+
+    assert HintedNoteType.__django_strawberry_definition__.optimizer_hints["branch"] is hint
 
 
 # ---------------------------------------------------------------------------

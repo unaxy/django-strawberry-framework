@@ -70,7 +70,12 @@ from django_strawberry_framework.optimizer.field_meta import FieldMeta
 from django_strawberry_framework.optimizer.hints import OptimizerHint
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import dict_of, list_of
+from django_strawberry_framework.utils._narrowing import dict_of, is_str, list_of
+from django_strawberry_framework.utils.querysets import (
+    _concrete_or_none,
+    _normalized_str,
+    _prefetch_relation_target_or_none,
+)
 from django_strawberry_framework.utils.relations import is_single_column_foreign_key
 from django_strawberry_framework.utils.typing import is_async_callable, object_result
 
@@ -705,7 +710,12 @@ class DjangoType:
         validated = _validate_meta(cls, meta)
         model = validated.model
         fields = _select_fields(model, validated.fields_spec, validated.exclude_spec)
-        optimizer_hints = _validate_optimizer_hints(validated.optimizer_hints, fields, model=model)
+        optimizer_hints = _validate_optimizer_hints(
+            validated.optimizer_hints,
+            fields,
+            model=model,
+            type_name=type_name,
+        )
 
         field_map = {f.name: FieldMeta.from_django_field(f) for f in fields}
         consumer_annotations = dict(cls.__annotations__)
@@ -1543,6 +1553,7 @@ def _validate_optimizer_hints(
     hints: dict[str, object],
     fields: "tuple[ModelField, ...]",
     model: type[models.Model],
+    type_name: str,
 ) -> dict[str, OptimizerHint]:
     """Validate ``Meta.optimizer_hints`` keys and values in one pass.
 
@@ -1554,6 +1565,9 @@ def _validate_optimizer_hints(
        optimizer intent otherwise - the walker only reads hints after
        entering the relation branch.
     3. Every hint value is an ``OptimizerHint`` instance.
+    4. Every ``OptimizerHint.prefetch(Prefetch(lookup, queryset=seed))``
+       without ``to_attr`` seeds rows the lookup's relation can serve
+       (``_hinted_prefetch_seed_defect``).
 
     Field-name error sites route through ``_format_unknown_fields_error``
     so the consumer-visible shape matches ``Meta.fields`` /
@@ -1573,6 +1587,8 @@ def _validate_optimizer_hints(
             ``Meta.model`` so the empty-``fields`` shape (e.g. ``Meta.exclude`` covering every
             field) is not fatal - earlier shapes inferred the model from
             ``fields[0].model`` and ``IndexError``'d here.
+        type_name: The type's class name, named in the ``prefetch(obj)``
+            seed-model refusal.
 
     Returns:
         The validated hints, every value an ``OptimizerHint``.
@@ -1615,7 +1631,79 @@ def _validate_optimizer_hints(
             "optimizer_hints values must be OptimizerHint instances, "
             f"got non-OptimizerHint for: {sorted(bad_values)}",
         )
+    for key, hint in validated.items():
+        if hint.prefetch_obj is None:
+            continue
+        defect = _hinted_prefetch_seed_defect(model, hint.prefetch_obj)
+        if defect is not None:
+            raise ConfigurationError(
+                f"OptimizerHint.prefetch(obj) on {type_name}.{key}: {defect}",
+            )
     return validated
+
+
+def _hinted_prefetch_seed_defect(model: type[models.Model], prefetch: object) -> str | None:
+    """Return why a hinted seed cannot serve its relation, or ``None`` when it can.
+
+    Django builds a prefetch's rows from its queryset's ``Query.model`` and
+    hands them to the lookup's final relation as they are, so a seed serves the
+    relation only when its model is the relation's target or a proxy of it: a
+    subclass sharing the target's concrete model reads the target's table and
+    yields instances the target type's ``is_type_of`` accepts. The target's
+    concrete model under a proxy target, a sibling proxy, a multi-table child or
+    parent and an unrelated model are refused, and both the public
+    ``QuerySet.model`` and the row-building ``Query.model`` must pass, a model
+    slot that holds no model class failing closed. The target comes from
+    Django's relation metadata through
+    ``utils/querysets.py::_prefetch_relation_target_or_none``, over the lookup
+    read as exact text (a ``TextChoices`` / ``StrEnum`` member resolves as its
+    text, as the prefetch seal reads it); a lookup it cannot resolve (a generic
+    relation, a lazy string target) is left to Django at fetch. Only a
+    ``Prefetch`` without ``to_attr`` is checked: a ``to_attr`` lands its rows on
+    that attribute, which only a consumer-assigned resolver reads, never on the
+    relation's cache, and a ``Prefetch`` with no queryset has no seed. Every read
+    is of the instance state Django's ``Prefetch``, ``QuerySet`` and ``Query``
+    store, the same reads the prefetch seal makes; a seed that is not a
+    ``QuerySet`` (a manager, say) carries no ``Query`` and is refused as such.
+    """
+    prefetch_state = truth.instance_state(prefetch)
+    queryset = prefetch_state.get("queryset")
+    to_attr = prefetch_state.get("to_attr")
+    if queryset is None or (is_str(to_attr) and _normalized_str(to_attr) != ""):
+        return None
+    through = prefetch_state.get("prefetch_through")
+    lookup = _normalized_str(through) if is_str(through) else None
+    if lookup is None:
+        return None
+    target = _prefetch_relation_target_or_none(model, lookup)
+    if target is None:
+        return None
+    # Read through an ``object`` binding: the class check below proves a ``QuerySet``
+    # without saying over which model, which the instance state answers.
+    seed: object = queryset
+    if not truth.is_instance(queryset, models.QuerySet):
+        return (
+            f"the hinted Prefetch({lookup!r}) queryset is a {truth.kind(queryset)}, not a "
+            f"QuerySet. Pass a queryset over {truth.name(target)} (or a proxy model of it)."
+        )
+    queryset_state = truth.instance_dict(seed)
+    query = queryset_state.get("_query") if queryset_state is not None else None
+    query_state = truth.instance_dict(query) if query is not None else None
+    row_models = (
+        query_state.get("model") if query_state is not None else None,
+        queryset_state.get("model") if queryset_state is not None else None,
+    )
+    concrete = _concrete_or_none(target)
+    for row_model in row_models:
+        if not (truth.is_subclass(row_model, target) and _concrete_or_none(row_model) is concrete):
+            served, wanted = truth.name(row_model), truth.name(target)
+            return (
+                f"the hinted Prefetch({lookup!r}) queryset is over {served} rows, but the "
+                f"{lookup!r} relation targets {wanted} rows. Django builds the prefetched rows "
+                f"from the queryset's model, so the relation would serve {served} instances in "
+                f"place of {wanted} ones. Pass a queryset over {wanted} (or a proxy model of it)."
+            )
+    return None
 
 
 def _selected_meta_targets(

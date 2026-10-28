@@ -655,6 +655,8 @@
 "tests/testing/test_client.py::test_files_non_string_key_raises_the_uniform_guard" = { reportArgumentType = 1 }
 "tests/testing/test_wrap.py::test_safe_wrap_connection_method_keeps_type_error_boundary_for_hostile_repr" = { reportArgumentType = 1 }
 "tests/testing/test_wrap.py::test_safe_wrap_connection_method_raises_on_non_callable_wrapper" = { reportArgumentType = 1 }
+"tests/types/test_base.py::_lazy_lookup_prefetch" = { reportAssignmentType = 1 }
+"tests/types/test_base.py::_manager_seed_prefetch" = { reportArgumentType = 1 }
 "tests/types/test_base.py::test_auto_string_spelling_accepted_without_future_import.StringAutoType" = { reportUndefinedVariable = 1 }
 "tests/types/test_base.py::test_has_custom_get_queryset_inherits_through_intermediate_base.ChildCategoryType.Meta" = { reportIncompatibleVariableOverride = 1 }
 "tests/types/test_converters.py::_blank_choice_model" = { reportAssignmentType = 1 }

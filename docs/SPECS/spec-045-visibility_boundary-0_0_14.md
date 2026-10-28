@@ -404,7 +404,11 @@ target overrides `get_queryset` takes the plain-list path with the hinted
 queryset as the seed the hook narrows
 (`django_strawberry_framework/optimizer/walker.py::_scoped_hint_prefetch`): the
 seal adopts the seed's explicit `.using(...)` as the alias the hook must keep,
-serves a combined seed as its primary-key set and refuses a sliced one. A
+serves a combined seed as its primary-key set and refuses a sliced one. A hinted
+seed on a `Prefetch` without `to_attr` whose model is neither the lookup's
+target nor a proxy of it is refused at type build
+(`django_strawberry_framework/types/base.py::_validate_optimizer_hints`), hooked
+target or not, since Django builds the prefetched rows from the seed's model. A
 consumer `Prefetch(queryset=...)` in a root or hook `prefetch_related` that wins
 over such a planned `Prefetch` is sealed the same way, its queryset the seed
 (`django_strawberry_framework/optimizer/plans.py::PrefetchSeal`, invoked by
