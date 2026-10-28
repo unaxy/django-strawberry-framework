@@ -388,7 +388,7 @@ const LIFECYCLE_DATA = {
               detail: "One pk__in query per type (a single id is a batch of one), then re-interleaved 1:1 with the input ids — null holes, duplicates supported.",
               module: "relay.py::_apply_nodes_filter / _order_nodes" },
             { title: "Typename stamped, node returned", kind: "result",
-              detail: "_stamp_node_type records the decode-resolved type so is_type_of picks the right __typename." },
+              detail: "_stamp_node_type strawberry.casts the row to the decode-resolved type so is_type_of picks the right __typename." },
           ],
         },
         {

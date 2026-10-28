@@ -1594,6 +1594,18 @@ class Query:
         # deterministic responses (spec-029 / Edge cases).
         return models.Book.objects.exclude(subtitle__isnull=True).order_by("id")
 
+    def _library_cast_secondary_book_nodes(self) -> list[models.Book]:
+        """Return non-null-``subtitle`` books cast to the secondary ``NullabilityOverrideBookType``.
+
+        The field serves them under the abstract ``relay.Node`` interface, where both
+        ``Book`` types are candidates; the consumer's ``strawberry.cast`` names the one
+        each row resolves to.
+        """
+        books = list(models.Book.objects.exclude(subtitle__isnull=True).order_by("id"))
+        for book in books:
+            _ = strawberry.cast(NullabilityOverrideBookType, book)
+        return books
+
     def _all_library_genres(
         self,
         info: strawberry.Info,
@@ -1786,6 +1798,18 @@ class Query:
         resolver=_all_library_nullability_override_books,
         graphql_type=list[NullabilityOverrideBookType],
     )
+
+    # Default-OFF acceptance flag ``FAKESHOP_TEST_RELAY_SECONDARY_NODE`` (the flag that puts
+    # ``NullabilityOverrideBookType`` on ``relay.Node``): ``libraryCastSecondaryBookNodes``
+    # returns ``Book`` rows the resolver casts to the secondary type under the ``Node``
+    # interface, so a live request can pin that a consumer's ``strawberry.cast`` picks the
+    # ``__typename`` over the primary ``BookType``. Read in the class body so a
+    # project-schema reload under ``override_settings`` re-executes it.
+    if getattr(settings, "FAKESHOP_TEST_RELAY_SECONDARY_NODE", False):
+        library_cast_secondary_book_nodes: list[models.Book] = strawberry.field(
+            resolver=_library_cast_secondary_book_nodes,
+            graphql_type=list[relay.Node],
+        )
 
     all_library_genres: QuerySet[models.Genre] = strawberry.field(
         resolver=_all_library_genres,

@@ -78,7 +78,7 @@ from .exceptions import ConfigurationError
 from .list_field import _validate_relay_djangotype_target
 from .registry import register_subsystem_clear
 from .resource_policy import check_deadline
-from .types.relay import _NODE_TYPE_HINT_ATTR, decode_global_id, published_node_type_name
+from .types.relay import decode_global_id, published_node_type_name
 from .utils import truth
 from .utils._queryset_private import model_row_peers, set_model_row_peers
 from .utils.directives import validated_field_directives
@@ -603,7 +603,7 @@ def _check_nodes_result(
 
 
 def _stamp_node_type(resolved_type: type[_RelayDjangoType], node: _NodeT) -> _NodeT:
-    """Stamp the decode-resolved ``DjangoType`` on a fetched node instance.
+    """``strawberry.cast`` a fetched node instance to the decode-resolved ``DjangoType``.
 
     The bare ``node``/``nodes`` fields hand graphql-core a raw model
     instance under the abstract ``Node`` annotation; concrete-type
@@ -611,20 +611,21 @@ def _stamp_node_type(resolved_type: type[_RelayDjangoType], node: _NodeT) -> _No
     model with two registered Relay types, plain
     ``isinstance(obj, (type_cls, model))`` answers ``True`` on BOTH
     candidates and iteration order picks the ``__typename`` - regardless
-    of which type the GlobalID named. The stamp
-    carries the decode-routing decision through to type resolution;
-    ``install_is_type_of``'s closure honors it before the isinstance
-    fallback.
+    of which type the GlobalID named. The cast carries the decode-routing
+    decision through to type resolution; ``install_is_type_of``'s closure
+    honors it before the isinstance fallback. The GlobalID names the type,
+    so the cast replaces any cast a consumer ``resolve_node(s)`` override
+    put on the row (on the copy; the override's object keeps its own).
 
     ``None`` (hidden/missing/uncoercible -> ``null``) passes through. Model
     instances are shallow-copied before stamping so a consumer that reuses
     the same ORM object in another field or request cannot retain a routing
-    hint for the earlier refetch. The copy keeps the row's fetch mode but not
+    cast for the earlier refetch. The copy keeps the row's fetch mode but not
     its ``FETCH_PEERS`` peers (``ModelState.__getstate__`` drops the weak
     references), so the ``nodes`` field stamps a whole ``resolve_nodes`` group
     through ``_stamp_nodes``, which links the copies to each other. A consumer
     ``resolve_node(s)`` override may return a non-model object that rejects
-    attribute writes (``__slots__``); the stamp is best-effort there - such
+    attribute writes (``__slots__``); the cast is best-effort there - such
     objects fall back to the ``isinstance`` behavior. A Django lazy proxy (a ``resolve_node``
     override returning ``request.user``) is unwrapped first, so the row it
     stands for is the one copied and stamped, never the shared proxied object.
@@ -638,7 +639,7 @@ def _stamp_node_type(resolved_type: type[_RelayDjangoType], node: _NodeT) -> _No
     if truth.is_type(model) and truth.is_instance(node, model):
         node = copy.copy(node)
     with contextlib.suppress(AttributeError):
-        setattr(node, _NODE_TYPE_HINT_ATTR, resolved_type)
+        node = strawberry.cast(resolved_type, node)
     return node
 
 

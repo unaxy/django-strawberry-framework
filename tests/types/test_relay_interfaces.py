@@ -24,6 +24,7 @@ from django.utils.functional import SimpleLazyObject
 from strawberry import relay
 from strawberry.schema.name_converter import NameConverter
 from strawberry.types.base import StrawberryObjectDefinition
+from strawberry.types.cast import TYPE_CAST_ATTRIBUTE
 from typing_extensions import override
 
 from django_strawberry_framework import DjangoType, conf, finalize_django_types, strawberry_config
@@ -417,14 +418,14 @@ def test_consumer_declared_is_type_of_is_preserved() -> None:
     assert CustomNode.__dict__["is_type_of"](Category(), None) is False
 
 
-def test_is_type_of_hostile_hint_descriptor_falls_back_to_instance_check() -> None:
-    """A hostile Relay hint descriptor never runs: the hint is read from the instance namespace."""
+def test_is_type_of_hostile_cast_lookup_falls_back_to_instance_check() -> None:
+    """A hostile ``__getattribute__`` never runs: the ``strawberry.cast`` mark is read statically."""
 
     class HostileObject:
         @override
         def __getattribute__(self, name: str) -> object:
-            if name == "_dsf_node_type_hint":
-                raise RuntimeError("hostile hint descriptor")
+            if name == TYPE_CAST_ATTRIBUTE:
+                raise RuntimeError("hostile cast lookup")
             return object_result(super().__getattribute__, name)
 
     class CategoryNode(DjangoType):

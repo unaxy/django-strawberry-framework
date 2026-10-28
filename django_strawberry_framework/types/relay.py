@@ -35,6 +35,7 @@ from django.db import models
 from strawberry import relay
 from strawberry.relay.exceptions import NodeIDAnnotationError
 from strawberry.types.base import StrawberryObjectDefinition
+from strawberry.types.cast import TYPE_CAST_ATTRIBUTE
 
 from django_strawberry_framework.conf import relay_globalid_strategy_setting
 from django_strawberry_framework.exceptions import ConfigurationError
@@ -102,26 +103,6 @@ def implements_relay_node(type_cls: type[DjangoType]) -> TypeGuard[type[_RelayDj
     return truth.is_subclass(type_cls, relay.Node)
 
 
-# Attribute the root ``node``/``nodes`` resolvers (the root ``relay.py``'s
-# ``_stamp_node_type``) set on a fetched model instance to carry the
-# decode-resolved ``DjangoType`` into abstract-type resolution. Without it, a
-# model with TWO registered Relay types makes every candidate's installed
-# ``is_type_of`` answer ``True`` for the same bare instance and graphql-core's
-# candidate-iteration order picks the ``__typename`` - regardless of which
-# type the GlobalID named. The hint is the missing wire
-# between the decode routing (which type's resolvers fetched the row) and
-# graphql-core's concrete-type selection.
-#
-# Reconsideration triggers (Family ``relay-node-type-stamp``): the stamp stays
-# in the root ``relay.py`` and the honor stays here - the stamp reads decode
-# routing only the root refetchers own, while every ``is_type_of`` reader
-# already depends on this module (moving either half reverses that direction).
-# A second hint scheme re-opens the attribute name; a stored value beyond the
-# resolving type re-opens the ``setattr``/``is`` value spells on both halves;
-# a stamper outside the root fields re-opens stamp ownership.
-_NODE_TYPE_HINT_ATTR = "_dsf_node_type_hint"
-
-
 def install_is_type_of(type_cls: type[DjangoType]) -> None:
     """Borrow strawberry-django's ``is_type_of`` virtual-subclass behavior.
 
@@ -133,25 +114,25 @@ def install_is_type_of(type_cls: type[DjangoType]) -> None:
     and surface as "Cannot determine type for object of model X" at
     runtime (spec-015 Decision 6 #"injection (Decision-1 borrow) is added unconditionally").
 
-    A ``_NODE_TYPE_HINT_ATTR`` stamp (set by the root refetch fields on the
-    instances they fetch) takes precedence over the isinstance fallback: the
-    hint names the exact ``DjangoType`` whose resolvers fetched the row, so a
-    multi-type model resolves ``__typename`` to the type the GlobalID named
-    instead of whichever candidate graphql-core happens to test first.
-    Unstamped instances (relation resolvers, consumer resolvers) keep the
-    pre-032 isinstance behavior unchanged.
+    A ``strawberry.cast(SomeType, obj)`` mark takes precedence over the
+    isinstance fallback, as in the ported branch: the type answers ``True``
+    exactly when it is the cast type. The mark names the one ``DjangoType`` a
+    row resolves to, so a model with two registered types resolves
+    ``__typename`` to the cast type instead of whichever candidate graphql-core
+    happens to test first. The mark comes from a consumer resolver's own
+    ``strawberry.cast`` or from the root refetch fields, which cast each fetched
+    row to the type the GlobalID named (``relay.py::_stamp_node_type``).
+    Unmarked instances (relation resolvers, uncast consumer resolvers) keep the
+    isinstance behavior.
+
+    The mark is read from the real namespaces through ``truth.static_attr``
+    (where upstream's ``get_strawberry_type_cast`` runs ``getattr``), so a
+    consumer object's ``__getattr__`` / ``__getattribute__`` never runs here.
 
     Preserves a consumer-declared ``is_type_of`` via the ``cls.__dict__``
     membership check (the same discriminator strawberry-django uses); a
     function inherited from a base does not count as "declared on this
     class" and is overwritten by the framework default.
-
-    The upstream ``get_strawberry_type_cast`` branch is intentionally
-    omitted - our package does not yet expose ``strawberry.cast(...)``
-    integration anywhere else, and adding it now would couple this module
-    to a Strawberry surface we have not committed to. If a future adopter
-    needs ``strawberry.cast(...)`` support, a focused follow-up can
-    add the branch without churn to the rest of the Relay machinery.
     """
     if "is_type_of" in truth.class_dict(type_cls):
         return
@@ -159,11 +140,9 @@ def install_is_type_of(type_cls: type[DjangoType]) -> None:
 
     def is_type_of(obj: object, _info: object) -> bool:
         obj = unwrap_lazy_object(obj)
-        # The hint is the value the root fields stored on the instance; it is
-        # read from the instance namespace, so no descriptor runs.
-        hinted = truth.static_attr(obj, _NODE_TYPE_HINT_ATTR)
-        if hinted is not None:
-            return hinted is type_cls
+        type_cast = truth.static_attr(obj, TYPE_CAST_ATTRIBUTE)
+        if type_cast is not None:
+            return type_cast is type_cls
         return truth.is_instance(obj, type_cls) or truth.is_instance(obj, model)
 
     type_cls.is_type_of = is_type_of
