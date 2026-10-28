@@ -1010,7 +1010,18 @@ the operation binds: every declared field for an update, whose reconstruction re
 fields the input leaves out, and the input's own fields for a create. A scalar field over a
 relation column agrees: it takes the relation's id input, and the decode hands it the
 visible row's key, as an HTML form posts it, for the form to resolve (a `clean_<field>`
-returning the row).
+returning the row). A built-in temporal form field must also read its temporal column's
+value, which the input carries as the column's own Python type: Django's `DateField`,
+`DateTimeField`, `TimeField`, `DurationField` and `SplitDateTimeField` each read only the
+kind they parse, so one over a `DateField`, `DateTimeField` or `TimeField` column is refused
+at the same build
+(`django_strawberry_framework/forms/inputs.py::_require_temporal_reader`) unless it is the
+form class the column's own `formfield()` builds, admin's `SplitDateTimeField` over a
+`DateTimeField`, or a `DateTimeField` over a `DateField`, or its class overrides `to_python`
+or `clean`: a `DateField` over a `TimeField` column fails every value, and one over a
+`DateTimeField` column stores midnight. A `CharField` over a temporal column reads the
+value's text and builds; a `DurationField` column, whose input scalar a `SCALAR_MAP` entry
+decides, is not checked.
 
 **The related model for a relation field's id basis.** A `ModelForm` relation
 field has a backing column, so the related model (and its primary
@@ -2142,6 +2153,8 @@ Rationale companion: [Decision 14][rationale-d14].
   every such pairing, other than a scalar field over a relation column, is a schema-build
   [`ConfigurationError`][glossary-configurationerror], a narrowed-out field included on an
   update ([Decision 7](#decision-7--form-field--strawberry-input-mapping-the-form-is-the-input-source-of-truth)).
+  A built-in temporal field over a temporal column whose value it cannot read is refused
+  the same way: a `DateField` over a `TimeField` column is handed a `time` it cannot parse.
   A field is a file field by its class (`FileField` / `ImageField`) or by its widget's real
   type (a `forms.FileInput`, `ClearableFileInput` included, read without running consumer
   widget code): a custom field rendered with `ClearableFileInput` agrees with a file
@@ -2482,7 +2495,18 @@ behavior reachable through `/graphql/`, package tests own internals.
     `::test_field_with_a_file_widget_over_a_file_column_builds`,
     `::test_field_with_a_file_widget_maps_to_upload`,
     `::test_field_with_a_multipart_text_widget_stays_a_string`,
-    `::test_field_with_a_multipart_text_widget_over_a_text_column_builds`). **Shape identity:**
+    `::test_field_with_a_multipart_text_widget_over_a_text_column_builds`). **Temporal
+    readers:** a built-in temporal field over a temporal column it cannot read, a subclass
+    overriding neither `to_python` nor `clean` included, is refused on both inputs, a
+    narrowed-out one on an update but not on a create, while the column's own form class,
+    `SplitDateTimeField` over a `DateTimeField`, `DateTimeField` over a `DateField`, a
+    `CharField` and a subclass overriding `to_python` build, and each column's first reader is
+    the class its `formfield()` builds
+    (`tests/forms/test_inputs.py::test_temporal_field_over_a_temporal_column_it_cannot_read_is_refused`,
+    `::test_temporal_refusal_names_the_form_the_column_and_the_remedy`,
+    `::test_update_input_refuses_an_unreadable_temporal_field_on_a_narrowed_out_field`,
+    `::test_temporal_field_reading_its_column_builds`,
+    `::test_temporal_readers_open_with_the_form_class_django_builds_for_the_column`). **Shape identity:**
     the same form with two different `Meta.fields` narrowings → two **distinct**
     generated names; two repeats of the **same** `(form_class, op, effective set)` →
     **dedupe** (one materialized class); two **different** form classes with the

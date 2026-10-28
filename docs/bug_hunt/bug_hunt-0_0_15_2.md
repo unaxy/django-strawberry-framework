@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 358 done, 212 to do.
+Progress: 359 done, 213 to do.
 
 ## Done
 
@@ -2017,6 +2017,14 @@ Progress: 358 done, 212 to do.
   The `""`-over-`ArrayField` cell stays with row 45. A fakeshop `createItemHoldViaSerializer` pins it live; README,
   spec-039 and the `fielderror-envelope` / `djangomodelformmutation` glossary terms say so. Tests:
   `tests/rest_framework/test_resolvers.py`, `examples/fakeshop/test_query/test_products_api.py`
+- [x] 523. A `DjangoModelFormMutation` whose form declares a built-in temporal field over a temporal column whose value
+  it cannot read is refused at build (`forms/inputs.py::_require_temporal_reader`, beside the kind check, over the same
+  binding sets): a Time column takes only the `TimeField` its own `formfield()` builds; a Date column also takes a
+  `DateTimeField`; a DateTime column also takes a `SplitDateTimeField` (admin's pairing), and refuses a `DateField`,
+  which stored midnight. Those pairs answered the masked `AttributeError` / `TypeError` (on every update too), a
+  useless field-keyed error, or a silent truncation. A `CharField`, a subclass overriding `to_python` / `clean`, and a
+  Duration column pass. spec-038, README and the `djangomodelformmutation` glossary term say so. Tests:
+  `tests/forms/test_inputs.py`
 
 ## Outside review of the fixes
 
@@ -2095,11 +2103,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   list raises `IndexError` from `Range.get_rhs_op`. A build-time refusal must allow every list-consuming lookup (`in`,
   `range`, transforms ending in either, `ArrayField` `contains` / `contained_by` / `overlap`, `has_keys` /
   `has_any_keys`, a consumer-registered lookup) and every `method=` filter. Found fixing 508; widened triaging 516
-- [ ] 523. A `DjangoModelFormMutation` whose form declares `forms.DateField` (or another date-parsing field) over a
-  `TimeField` column passes `forms/inputs.py::require_column_kind_agreement`, which compares write kind only; the
-  wire `Time` reaches the form as a `datetime.time`, `BaseTemporalField.to_python` calls `.strip()` on it, and the
-  `AttributeError` answers the masked error on every value, in both warning modes. Refuse the mismatched temporal
-  field at build, or say why not. Found fact-finding 547
 - [ ] 524. (robustness) A `ModelForm` update that omits a field whose declared form field is lossier than its column
   (`forms.DateField` over a `DateTimeField`) rebinds the stored value through that field and rewrites the row: a
   stored `03:04:05` becomes the default-zone midnight, and a stored year-1 value under `Asia/Tokyo` answers an
@@ -2221,12 +2224,20 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `update_fields` excluding the `None` column, or a refused save the consumer swallows before a different
   `IntegrityError` escapes, reports that column's `null` for another constraint; read `update_fields` from the
   `pre_save` kwargs and skip columns outside it. Found verifying 577
+- [ ] 670. (robustness) A ModelForm `DateTimeField` over a `DateField` column (kept by 523) stores the previous day when
+  the request's current time zone differs from the default (`timezone.override("Asia/Tokyo")`: wire `2026-01-02` stores
+  `2026-01-01`): `forms.DateTimeField.to_python(date)` makes midnight in the current zone and `models.DateField`
+  converts in the default. Decide refusing the pair or normalizing. Found fact-finding 523
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 671. CHANGELOG entry for item 523 (breaking): a `DjangoModelFormMutation` form declaring a built-in temporal
+  field over a date, date-time or time column it cannot read (a `DateField` over a `TimeField` or `DateTimeField`
+  column, a `TimeField` over a date column, ...) is refused at schema build instead of answering a masked error or
+  storing midnight
 - [ ] 669. CHANGELOG entry for item 577: a `SerializerMutation` save refused over a `blank=True, null=False` column the
   input left out, or a declared `allow_null` field set to `None`, answers that column's field-keyed `null` error
   instead of the `"__all__"` `constraint` error, as the model and `ModelForm` flavors do
