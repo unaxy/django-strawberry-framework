@@ -32,6 +32,7 @@ from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.filters import FilterSet, filter_input_type
 from django_strawberry_framework.filters import inputs as filter_inputs
 from django_strawberry_framework.filters import sets as filter_sets
+from django_strawberry_framework.forms import sets as form_sets
 from django_strawberry_framework.mutations import sets as mutation_sets
 from django_strawberry_framework.orders import OrderSet
 from django_strawberry_framework.orders import inputs as order_inputs
@@ -39,6 +40,7 @@ from django_strawberry_framework.orders import sets as order_sets
 from django_strawberry_framework.orders.factories import OrderArgumentsFactory
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.rest_framework import inputs as ser_inputs
+from django_strawberry_framework.rest_framework import sets as ser_sets
 from django_strawberry_framework.sets_mixins import (
     ClassBasedTypeNameMixin,
     is_re_readable_field_declaration,
@@ -86,6 +88,7 @@ from django_strawberry_framework.utils.inputs import (
     plain_set_meta_fields,
     promote_set_meta_fields,
     read_set_meta_fields,
+    reject_unknown_meta_keys,
     resolve_effective_fields,
     resolve_set_meta_fields,
     set_input_type_name,
@@ -761,6 +764,46 @@ def test_promote_set_meta_fields_writes_the_alias_onto_class_meta() -> None:
     assert promote_set_meta_fields(Meta, fields_alias=FILTERSET_FIELDS_ALIAS) == ["code"]
     assert Meta.fields == ["code"]
     assert Meta.filter_fields == ["code"]
+
+
+def test_reject_unknown_meta_keys_is_the_one_meta_key_guard() -> None:
+    """Every write flavor and both set metaclasses refuse an unknown ``Meta`` key through it."""
+    for module in (
+        mutation_sets,
+        form_sets,
+        ser_sets,
+        filter_sets,
+        order_sets,
+    ):
+        assert module_binding(module, "reject_unknown_meta_keys") is reject_unknown_meta_keys
+    assert "reject_unknown_meta_keys" in filter_sets.FilterSetMetaclass.__new__.__code__.co_names
+    assert "reject_unknown_meta_keys" in order_sets.OrderSetMetaclass.__new__.__code__.co_names
+
+
+@pytest.mark.parametrize(
+    "invalid_meta",
+    [
+        123,
+        "string",
+        [1, 2, 3],
+        (1, 2),
+        lambda: None,
+    ],
+)
+def test_reject_unknown_meta_keys_rejects_non_class_meta(invalid_meta: object) -> None:
+    """reject_unknown_meta_keys raises ConfigurationError if meta is not a class."""
+    with pytest.raises(ConfigurationError, match=r"TestMutation\.Meta must be a class; got "):
+        reject_unknown_meta_keys("TestMutation", invalid_meta, frozenset())
+
+
+@pytest.mark.filterwarnings("ignore:non-string key in the __dict__")
+def test_reject_unknown_meta_keys_non_string_dict_keys() -> None:
+    """reject_unknown_meta_keys handles non-string keys in vars(meta) cleanly."""
+    # basedpyright: the non-str namespace key is the hostile input under test; typeshed types the
+    # type() namespace as dict[str, Any]
+    meta = type("NonStrKeyMeta", (), {123: "foo"})  # pyright: ignore[reportArgumentType]
+    with pytest.raises(ConfigurationError, match=r"TestMutation\.Meta has unknown keys: \[123\]"):
+        reject_unknown_meta_keys("TestMutation", meta, frozenset({"model", "operation"}))
 
 
 def test_read_set_meta_fields_canonicalizes_sets_without_mutating_source() -> None:

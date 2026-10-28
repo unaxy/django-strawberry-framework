@@ -587,6 +587,38 @@ FILTERSET_FIELDS_ALIAS = "filter_fields"
 _META_ABSENT = object()
 
 
+def reject_unknown_meta_keys(name: str, meta: object, allowed: frozenset[str]) -> type[object]:
+    """Raise the ``Meta``-typo guard if ``meta`` declares a key outside ``allowed``.
+
+    The one ``Meta``-key typo guard every declaration family runs: each write
+    flavor's ``_validate_meta`` (model / modelform / plain-form / serializer) and
+    both set metaclasses (``FilterSetMetaclass`` / ``OrderSetMetaclass``) call it
+    with their OWN allowed-key frozenset rather than re-spelling the
+    own-keys-only (no MRO walk) ``vars(meta)`` scan + the reject. ``declared`` is
+    the public own-keys of ``meta`` (skipping dunders); a declared key outside
+    ``allowed`` raises ``ConfigurationError`` naming the offending key(s). Mirrors
+    ``types/base.py::_validate_meta``'s own-keys-only posture. A non-class
+    ``meta`` raises first; otherwise ``meta`` comes back narrowed to the class it
+    proved, which is the value every caller goes on to read.
+    """
+    if not truth.is_type(meta):
+        raise ConfigurationError(f"{name}.Meta must be a class; got {truth.render(meta)}.")
+    # A metaclass can inject non-string keys into the consumer's ``Meta`` namespace.
+    meta_keys: Iterable[object] = truth.class_dict(meta)
+    declared = {
+        key
+        for key in meta_keys
+        if not (truth.is_instance(key, str) and truth.text(key).startswith("_"))
+    }
+    unknown = sorted(
+        declared - allowed,
+        key=lambda k: (not truth.is_instance(k, str), truth.text(k)),
+    )
+    if unknown:
+        raise ConfigurationError(f"{name}.Meta has unknown keys: {unknown}.")
+    return meta
+
+
 def resolve_set_meta_fields(
     source: object,
     *,

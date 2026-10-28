@@ -57,6 +57,7 @@ from django_strawberry_framework.utils.inputs import (
     InputFieldSpec,
     get_or_store_shape_build,
     make_shape_build_cache,
+    reject_unknown_meta_keys,
 )
 from django_strawberry_framework.utils.relations import is_model_class
 from django_strawberry_framework.utils.write_values import relation_takes_global_id
@@ -70,7 +71,6 @@ from django_strawberry_framework.write_mixins import (
     make_meta_validating_metaclass,
     model_backed_permission_and_lock,
     normalize_meta_field_selection,
-    reject_unknown_meta_keys,
     require_model_class,
     resolver_seams,
 )

@@ -3134,23 +3134,31 @@ def test_filterset_whole_set_sweep_publishes_the_same_keys_for_both_spellings(
     "fields",
     [pytest.param(None, id="exclude-only"), pytest.param("__all__", id="all-fields")],
 )
-def test_filterset_whole_set_sweep_ignores_an_exclude_name_no_field_carries(
+def test_filterset_whole_set_sweep_refuses_an_exclude_name_no_field_carries(
     fields: str | None,
     model_key: str,
     excluded: str,
 ) -> None:
-    """An exclude naming no model field is ignored, as django-filter ignores it.
+    """An exclude naming no model field is refused at class creation, naming the set.
 
-    ``"pk"`` is not an alias of the primary key's name, so the sweep still adds the key.
+    A typo would exclude nothing and leave the column it meant filterable; ``"pk"`` is
+    not an alias of the primary key's name, so it is no field either.
     """
     spec = _SWEEP_MODELS[model_key]
-    exclude = ["pk"] if excluded == "pk-alias" else ["no_such_field"]
-    meta: dict[str, object] = {"model": spec.model, "exclude": exclude}
+    name = "pk" if excluded == "pk-alias" else "no_such_field"
+    meta: dict[str, object] = {"model": spec.model, "exclude": [name]}
     if fields is not None:
         meta["fields"] = fields
-    probe = type("SweepProbe", (FilterSet,), {"Meta": type("Meta", (), meta)})
 
-    assert set(probe.get_fields()) == spec.keys
+    with pytest.raises(ConfigurationError) as excinfo:
+        type("SweepProbe", (FilterSet,), {"Meta": type("Meta", (), meta)})
+    message = str(excinfo.value)
+    assert message.startswith(
+        f"FilterSet SweepProbe.Meta.exclude names unknown fields: [{name!r}]. Available: [",
+    )
+    assert message.endswith(
+        f"Exclude only a field of {spec.model.__name__} or a Meta.fields entry.",
+    )
 
 
 @pytest.mark.parametrize("model_key", list(_SWEEP_MODELS))
@@ -3562,6 +3570,292 @@ def test_filterset_meta_fields_lazy_translation_string_reads_as_the_plain_string
     with pytest.raises(TypeError) as plain_error:
         _category_filter_with_meta(fields="name")
     assert str(lazy_error.value) == str(plain_error.value)
+
+
+def test_filterset_meta_exclude_accepts_a_listed_path() -> None:
+    """A ``Meta.fields`` path is a legal ``Meta.exclude`` name though it is no model field.
+
+    Upstream excludes a listed path before it resolves it, so the exclude removes it.
+    """
+    probe = type(
+        "ExcludeNamesFilter",
+        (FilterSet,),
+        {
+            "Meta": type(
+                "Meta",
+                (),
+                {"model": Category, "fields": ["name", "items__name"], "exclude": ["items__name"]},
+            ),
+        },
+    )
+
+    assert set(probe.get_fields()) == {"name"}
+    assert set(probe.base_filters) == {"name"}
+
+
+def _declared_exclude_parent() -> type[FilterSet]:
+    """Return a ``Category`` set declaring a filter and a ``RelatedFilter`` for a child to inherit."""
+    item_filter = type(
+        "ItemExcludeProbeFilter",
+        (FilterSet,),
+        {"Meta": type("Meta", (), {"model": Item, "fields": ["name"]})},
+    )
+    return type(
+        "DeclaredParentFilter",
+        (FilterSet,),
+        {
+            "search": CharFilter(field_name="name"),
+            "items": RelatedFilter(item_filter, field_name="items"),
+            "Meta": type("Meta", (), {"model": Category, "fields": ["name"]}),
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "own filter",
+        "own filter over a model field",
+        "inherited filter",
+        "inherited related filter",
+    ],
+)
+def test_filterset_meta_exclude_refuses_a_declared_name(shape: str) -> None:
+    """An exclude naming a declared filter fails at class creation, naming the remedy.
+
+    django-filter publishes every declared filter whatever ``Meta.exclude`` says, so the
+    exclude would remove nothing and leave the filter it meant published; a declaration
+    over a model field's own name is no exception. The remedy is DRF's: remove the
+    declaration, or disable an inherited one with ``name = None``.
+    """
+    base: type[FilterSet] = FilterSet
+    attrs: dict[str, object] = {}
+    meta: dict[str, object] = {"model": Category, "fields": ["name"]}
+    if shape == "own filter":
+        attrs["search"] = CharFilter(field_name="name")
+        name = "search"
+    elif shape == "own filter over a model field":
+        attrs["name"] = CharFilter(field_name="name", lookup_expr="icontains")
+        meta["fields"] = "__all__"
+        name = "name"
+    else:
+        base = _declared_exclude_parent()
+        name = "search" if shape == "inherited filter" else "items"
+    meta["exclude"] = [name]
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        type("DeclaredExcludeFilter", (base,), {**attrs, "Meta": type("Meta", (), meta)})
+    assert str(excinfo.value) == (
+        f"FilterSet DeclaredExcludeFilter.Meta.exclude names declared filters: [{name!r}]. "
+        "An exclude never removes a declaration: remove it, or disable an inherited one with "
+        f"`{name} = None` in the class body."
+    )
+
+
+def test_filterset_meta_exclude_accepts_the_field_name_of_a_tombstoned_declaration() -> None:
+    """A declaration disabled with ``name = None`` is no declaration, so its field excludes."""
+    parent = type(
+        "OverrideParentFilter",
+        (FilterSet,),
+        {
+            "name": CharFilter(field_name="name", lookup_expr="icontains"),
+            "Meta": type("Meta", (), {"model": Category, "fields": ["name", "description"]}),
+        },
+    )
+    child = type(
+        "TombstoneChildFilter",
+        (parent,),
+        {
+            "name": None,
+            "Meta": type(
+                "Meta",
+                (),
+                {"model": Category, "fields": ["name", "description"], "exclude": ["name"]},
+            ),
+        },
+    )
+
+    assert set(child.base_filters) == {"description"}
+
+
+_NON_STRING_ENTRIES = [
+    pytest.param(None, "NoneType (None)", id="none"),
+    pytest.param(b"name", "bytes (b'name')", id="bytes"),
+    pytest.param(7, "int (7)", id="int"),
+    pytest.param(("name",), "tuple (('name',))", id="tuple"),
+]
+
+
+def _non_string_entry_meta(shape: str, entry: object) -> dict[str, object]:
+    """Return the ``Meta`` declarations one non-string-entry row builds around ``entry``."""
+    if shape == "exclude":
+        return {"exclude": [entry]}
+    if shape == "all-exclude":
+        return {"fields": "__all__", "exclude": ["name", entry]}
+    if shape == "fields-list":
+        return {"fields": ["name", entry]}
+    return {"fields": {"name": ["exact"], entry: ["exact"]}}
+
+
+@pytest.mark.parametrize(("entry", "received"), _NON_STRING_ENTRIES)
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "exclude",
+        "all-exclude",
+        "fields-list",
+        "fields-dict",
+    ],
+)
+def test_filterset_meta_refuses_a_non_string_field_name_entry(
+    shape: str,
+    entry: object,
+    received: str,
+) -> None:
+    """A ``Meta.fields`` / ``Meta.exclude`` entry that is no string fails closed by name.
+
+    In an exclude it would match no field (a silent no-op); in a field list it would reach
+    upstream as a raw ``AttributeError`` / ``TypeError``. The gate is the order family's.
+    """
+    declared = _non_string_entry_meta(shape, entry)
+    attr = "exclude" if "exclude" in declared else "fields"
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        _category_filter_with_meta(**declared)
+    assert str(excinfo.value) == (
+        f"FilterSet MetaProbeFilter.Meta.{attr} entries must be field-name strings; "
+        f"got {received}."
+    )
+
+
+_META_KEY_REFUSALS: dict[str, tuple[object, str]] = {
+    "unknown key": (
+        type("Meta", (), {"model": Category, "fields": ["name"], "bogus": True}),
+        "FilterSet MetaKeyFilter.Meta has unknown keys: ['bogus'].",
+    ),
+    "misspelt fields": (
+        type("Meta", (), {"model": Category, "fields": ["name"], "fiels": ["name"]}),
+        "FilterSet MetaKeyFilter.Meta has unknown keys: ['fiels'].",
+    ),
+    "key the package does not apply": (
+        type("Meta", (), {"model": Category, "fields": ["name"], "search_fields": ["name"]}),
+        "FilterSet MetaKeyFilter.Meta has unknown keys: ['search_fields'].",
+    ),
+    "non-class Meta": (
+        SimpleNamespace(model=Category, fields=["name"]),
+        "FilterSet MetaKeyFilter.Meta must be a class; got namespace(",
+    ),
+}
+
+
+@pytest.mark.parametrize("shape", list(_META_KEY_REFUSALS))
+def test_filterset_meta_refuses_an_unknown_key_at_class_creation(shape: str) -> None:
+    """An own ``Meta`` declaring a key a filterset does not read fails at class creation.
+
+    django-filter ignores a key its options object does not store, so a typo would
+    narrow nothing. The guard is the one every write flavor runs.
+    """
+    meta, message = _META_KEY_REFUSALS[shape]
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        type("MetaKeyFilter", (FilterSet,), {"Meta": meta})
+    assert str(excinfo.value).startswith(message)
+
+
+def test_filterset_meta_accepts_every_key_django_filter_reads_and_the_fields_synonym() -> None:
+    """Every ``FilterSetOptions`` key and ``filter_fields`` build; the audited set is pinned.
+
+    The allowed set is asked of upstream's options object; the literal below is the set
+    audited across the supported django-filter range, so a key upstream adds fails here
+    until it is audited.
+    """
+    assert {
+        "model",
+        "fields",
+        "exclude",
+        "filter_overrides",
+        "form",
+        "unknown_field_behavior",
+        "filter_fields",
+    } == sets_module._ALLOWED_FILTERSET_META_KEYS
+
+    probe = type(
+        "EveryKeyFilter",
+        (FilterSet,),
+        {
+            "Meta": type(
+                "Meta",
+                (),
+                {
+                    "model": Category,
+                    "filter_fields": ["name"],
+                    "exclude": ["description"],
+                    "filter_overrides": {},
+                    "form": forms.Form,
+                    "unknown_field_behavior": UnknownFieldBehavior.RAISE,
+                },
+            ),
+        },
+    )
+
+    assert set(probe.base_filters) == {"name"}
+
+
+@pytest.mark.parametrize(
+    ("meta", "declaration"),
+    [
+        pytest.param({"fields": "__all__"}, "Meta.fields = '__all__'", id="all-fields"),
+        pytest.param(
+            {"exclude": ["name"]},
+            "Meta.exclude without Meta.fields (the '__all__' sweep minus exclude)",
+            id="exclude-only",
+        ),
+        pytest.param(
+            {"exclude": []},
+            "Meta.exclude without Meta.fields (the '__all__' sweep minus exclude)",
+            id="empty-exclude",
+        ),
+    ],
+)
+@pytest.mark.parametrize("related", [False, True], ids=["plain", "with-related-filter"])
+def test_filterset_model_less_sweep_is_refused_by_name_and_a_subclass_supplies_the_model(
+    meta: dict[str, object],
+    declaration: str,
+    *,
+    related: bool,
+) -> None:
+    """A model-less sweep raises ``ConfigurationError`` naming the set, never upstream's crash.
+
+    The refusal runs where the sweep is expanded, so the model-less base still builds and
+    a subclass whose ``Meta`` adds ``Meta.model`` sweeps that model.
+    """
+    attrs: dict[str, object] = {"Meta": type("Meta", (), meta)}
+    if related:
+        item_filter = type(
+            "ItemProbeFilter",
+            (FilterSet,),
+            {"Meta": type("Meta", (), {"model": Item, "fields": ["name"]})},
+        )
+        attrs["items"] = RelatedFilter(item_filter, field_name="items")
+    base = type("ModelLessSweepFilter", (FilterSet,), attrs)
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        base.get_fields()
+    assert str(excinfo.value) == (
+        f"ModelLessSweepFilter.{declaration} requires Meta.model so the filter field names "
+        "can be derived from model._meta.get_fields()."
+    )
+
+    base_meta = truth.static_attr(base, "Meta")
+    assert truth.is_type(base_meta)
+    child = type(
+        "ModelSweepFilter",
+        (base,),
+        {"Meta": type("Meta", (base_meta,), {"model": Category})},
+    )
+    fields = child.get_fields()
+    assert "id" in fields
+    assert ("name" in fields) is (meta.get("exclude") != ["name"])
 
 
 def _category_filter_with_meta(**meta: object) -> type[FilterSet]:

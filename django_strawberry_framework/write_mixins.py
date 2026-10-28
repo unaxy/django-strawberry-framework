@@ -10,8 +10,7 @@ ledger, metaclass instance, allowed-key set and bind entry point in its own
 
 - the ``Meta`` vocabulary and validation primitives each ``_validate_meta``
   composes (``COMMON_WRITE_META_KEYS`` / ``MODEL_BACKED_WRITE_META_KEYS``,
-  ``reject_unknown_meta_keys``, ``normalize_meta_field_selection``, the
-  ``require_*`` gates, ``_validate_permission_classes``,
+  ``normalize_meta_field_selection``, the ``require_*`` gates, ``_validate_permission_classes``,
   ``validate_select_for_update``, ``model_backed_permission_and_lock``);
 - the validated ``Meta`` snapshot every flavor stashes
   (``_ValidatedMutationMeta``) and its readers (``backing_model_of`` /
@@ -23,6 +22,10 @@ ledger, metaclass instance, allowed-key set and bind entry point in its own
 - the input build / stash helpers and the phase-2.5 drain
   (``cached_build_input`` / ``build_and_stash_input`` / ``construction_kwargs`` /
   ``bind_write_declarations`` / ``bind_mutation_outputs``).
+
+The ``Meta``-key typo guard each ``_validate_meta`` opens with
+(``utils/inputs.py::reject_unknown_meta_keys``) is not here: the set
+metaclasses run it too, so it lives in the module both families import.
 """
 
 from __future__ import annotations
@@ -45,7 +48,7 @@ from .utils.inputs import get_or_store_shape_build, normalize_field_name_sequenc
 from .utils.relations import is_model_class
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Mapping
+    from collections.abc import Callable, Mapping
     from typing import Protocol, TypeAlias
 
     from strawberry.types import Info
@@ -100,37 +103,6 @@ def require_non_delete_operation(base_label: str, name: str, meta: type[object])
     ):
         raise non_delete_operation_error(base_label, name, raw_operation)
     return operation
-
-
-def reject_unknown_meta_keys(name: str, meta: object, allowed: frozenset[str]) -> type[object]:
-    """Raise the ``Meta``-typo guard if ``meta`` declares a key outside ``allowed``.
-
-    The ``unknown = sorted(declared - allowed)`` typo guard every ``_validate_meta``
-    computes inline (model / modelform / plain-form / serializer): promoted so each
-    flavor calls it with its OWN allowed-key frozenset rather than re-spelling the
-    own-keys-only (no MRO walk) ``vars(meta)`` scan + the reject. ``declared`` is the
-    public own-keys of ``meta`` (skipping dunders); a declared key outside ``allowed``
-    raises ``ConfigurationError`` naming the offending key(s). Mirrors
-    ``types/base.py::_validate_meta``'s own-keys-only posture. A non-class
-    ``meta`` raises first; otherwise ``meta`` comes back narrowed to the class
-    it proved, which is the value every ``_validate_meta`` goes on to read.
-    """
-    if not truth.is_type(meta):
-        raise ConfigurationError(f"{name}.Meta must be a class; got {truth.render(meta)}.")
-    # A metaclass can inject non-string keys into the consumer's ``Meta`` namespace.
-    meta_keys: Iterable[object] = truth.class_dict(meta)
-    declared = {
-        key
-        for key in meta_keys
-        if not (truth.is_instance(key, str) and truth.text(key).startswith("_"))
-    }
-    unknown = sorted(
-        declared - allowed,
-        key=lambda k: (not truth.is_instance(k, str), truth.text(k)),
-    )
-    if unknown:
-        raise ConfigurationError(f"{name}.Meta has unknown keys: {unknown}.")
-    return meta
 
 
 def normalize_meta_field_selection(

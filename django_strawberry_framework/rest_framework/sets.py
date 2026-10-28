@@ -69,7 +69,10 @@ from django_strawberry_framework.mutations.operations import NON_DELETE_OPERATIO
 from django_strawberry_framework.mutations.sets import DjangoMutation
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import is_mapping, tuple_iter
-from django_strawberry_framework.utils.inputs import normalize_field_name_sequence
+from django_strawberry_framework.utils.inputs import (
+    normalize_field_name_sequence,
+    reject_unknown_meta_keys,
+)
 from django_strawberry_framework.write_mixins import (
     MODEL_BACKED_WRITE_META_KEYS,
     _ValidatedMutationMeta,
@@ -77,7 +80,6 @@ from django_strawberry_framework.write_mixins import (
     construction_kwargs,
     normalize_meta_field_selection,
     own_backing_class,
-    reject_unknown_meta_keys,
     require_backing_class,
     require_model_class,
     require_non_delete_operation,
