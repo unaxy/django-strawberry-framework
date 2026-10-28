@@ -84,6 +84,7 @@ import asyncio
 import dataclasses
 import datetime
 import enum
+import functools
 import inspect
 import sys
 import uuid
@@ -1159,6 +1160,9 @@ def _is_model_of_concrete(
 def _base_table_defect(query: object, concrete: type[models.Model]) -> str | None:
     """Return the query's baked base table if it is not ``concrete``'s table.
 
+    A baked name or a ``Meta.db_table`` that is not text returns its kind instead, so
+    the caller reports a typed ``table`` defect rather than raising from the comparison.
+
     ``concrete`` is the registered type's ``_meta.concrete_model``, resolved once
     by the caller and threaded through (so a single seal walks the descriptor at
     most once rather than re-resolving it here).
@@ -1202,7 +1206,13 @@ def _base_table_defect(query: object, concrete: type[models.Model]) -> str | Non
     # names the table it spells; both sides compare as their exact text, and canonical
     # reconstruction rebinds the baked name as that text.
     table = _normalized_str(table)
-    if table != _normalized_str(concrete._meta.db_table):
+    # ``Meta.db_table`` is the model's own option, typed ``str``; one a project assigns
+    # as anything else is not a table name the baked one can equal, so it names the
+    # defect the same way a non-text baked name does.
+    db_table = read_attr(concrete._meta, "db_table")
+    if not is_str(db_table):
+        return truth.kind(db_table)
+    if table != _normalized_str(db_table):
         return table
     return None
 
@@ -2112,10 +2122,12 @@ def _where_tree_defect(node: object, walk: _GraphWalk) -> tuple[str, str] | None
         return shadow
     node_dict = truth.instance_state(node)
     # ``WhereNode.as_sql`` interpolates ``self.connector`` (``AND`` / ``OR``) straight
-    # into the emitted SQL, so an instance override with a non-``str`` connector would
-    # run its ``__str__`` at compile time (spec-045 Decision 2).
+    # into the emitted SQL, so the connector takes the text-term rule of every other SQL
+    # template slot (``_is_text_term``): a ``TextChoices`` / ``StrEnum`` member spells
+    # its text and reconstruction rebinds it as that exact ``str``, while any other
+    # object would run its own ``__str__`` at compile time (spec-045 Decision 2).
     connector = node_dict.get("connector")
-    if connector is not None and type(connector) is not str:
+    if connector is not None and not _is_text_term(connector):
         return ("untrusted", f"where node connector is a {truth.kind(connector)}")
     children = node_dict.get("children")
     if children is not None and not is_exact_list_or_tuple(children):
@@ -2603,9 +2615,15 @@ def _reconstructed_value(value: object, memo: dict[int, object]) -> object:
     slot-by-slot reconstruction, so it takes the admitted-bound-value rule instead: every
     clonable / compilable node carries an instance ``__dict__``, while Django's slotted
     module-level exports are ``str`` subclasses (normalized to an exact ``str``) and
-    namedtuples (refused closed). A namedtuple is NOT inert just because the tuple itself
-    is immutable -- ``sql.Query.explain_info`` is an ``ExplainInfo`` whose ``options``
-    member is a plain MUTABLE dict, and the compiler prepends
+    namedtuples (refused closed). The one slotted Django object retained by reference is
+    a ``QuerySet`` value's fetch mode (``_fetch_mode``, Django 6.1 and later): an
+    instance of exactly one of Django's own stateless fetch-mode classes
+    (``utils/_queryset_private.py::is_django_fetch_mode``) has no state to own, and the
+    sealed queryset carries the candidate's own fetch mode the same way. Only that slot
+    retains one; a fetch mode anywhere else, a ``FetchMode`` subclass, or a foreign
+    object in that slot takes the admitted-bound-value rule. A namedtuple is NOT inert
+    just because the tuple itself is immutable -- ``sql.Query.explain_info`` is an
+    ``ExplainInfo`` whose ``options`` member is a plain MUTABLE dict, and the compiler prepends
     ``explain_query_prefix(format, **options)`` to the emitted SQL of any query carrying
     one -- so retaining it by reference would leave the candidate holding a live handle
     into the sealed query's SQL. ``explain_info`` is one of the slots the graph proofs do
@@ -2721,10 +2739,15 @@ def _reconstructed_value(value: object, memo: dict[int, object]) -> object:
     rebuilt = object.__new__(value_type)
     memo[value_id] = rebuilt
     dropped = _QUERY_CLONE_DROPPED if value_type is sql.Query else _EXPRESSION_COPY_DROPPED
+    # A ``QuerySet`` value's ``_fetch_mode`` is the one slot that retains a Django fetch
+    # mode by reference (see the docstring); ``None`` names no slot for every other node.
+    fetch_mode_slot = "_fetch_mode" if value_type is models.QuerySet else None
     truth.instance_state(rebuilt).update(
         {
             key: item
-            if item is None or truth.is_exact_one_of(item, _RETAINED_TYPES)
+            if item is None
+            or truth.is_exact_one_of(item, _RETAINED_TYPES)
+            or (key == fetch_mode_slot and is_django_fetch_mode(item))
             else _reconstructed_value(item, memo)
             for key, item in source_state.items()
             if key not in dropped
@@ -3400,7 +3423,19 @@ def _sealed_prefetch_related_lookups(
     return tuple(sealed_entries), None
 
 
-def _deferred_value_defect(value: object, walk: _GraphWalk, label: str) -> tuple[str, str] | None:
+# The interpreter frames ``_deferred_value_defect`` may stack (its own and
+# ``_container_defect``'s) before it refuses to descend: half the default recursion limit,
+# so the walk leaves the caller the other half, while a ``Q`` tree as deep as Django's own
+# filter build resolves (two frames a level, so under 500 levels) still fits at one a level.
+_DEFERRED_VALUE_FRAME_BUDGET = 500
+
+
+def _deferred_value_defect(
+    value: object,
+    walk: _GraphWalk,
+    label: str,
+    frames: int = 0,
+) -> tuple[str, str] | None:
     """Return a defect if a deferred-filter value is neither inert nor genuine-Django.
 
     A pending ``_deferred_filter``'s ``args`` / ``kwargs`` are baked by ``add_q`` ->
@@ -3422,10 +3457,22 @@ def _deferred_value_defect(value: object, walk: _GraphWalk, label: str) -> tuple
       in its own ``__dict__`` would still be dispatched and fails closed
       (spec-045 Decision 2);
     - anything else fails closed.
+
+    ``frames`` counts the walk's own frames above ``value``: a ``Q`` child or pair value
+    adds one, a container member two (``_container_defect`` stands between). A ``Q`` or a
+    container met past ``_DEFERRED_VALUE_FRAME_BUDGET`` is refused rather than descended,
+    because ``Q`` trees and plain containers have no depth bound of their own on the
+    pending seam (Django's own filter build, which stops a deep tree, never ran over
+    them), and a walk that met the interpreter's recursion limit would escape as a raw
+    ``RecursionError`` past the typed contract.
     """
     if _is_inert_value(value):
         return None
     value_type = type(value)
+    if frames > _DEFERRED_VALUE_FRAME_BUDGET and (
+        type(value) is models.Q or _is_plain_container_value(value)
+    ):
+        return ("untrusted", f"{label} is nested too deeply to prove")
     if type(value) is models.Q:
         # ``Q`` trees and plain containers take the same three-state walk as the
         # expression graph: Django never produces a self-referential ``Q`` / list /
@@ -3439,9 +3486,9 @@ def _deferred_value_defect(value: object, walk: _GraphWalk, label: str) -> tuple
         q_children: Sequence[object] = value.children
         for child in q_children:
             if type(child) is models.Q:
-                child_defect = _deferred_value_defect(child, walk, label)
+                child_defect = _deferred_value_defect(child, walk, label, frames + 1)
             elif is_exact_pair(child) and type(child[0]) is str:
-                child_defect = _deferred_value_defect(child[1], walk, label)
+                child_defect = _deferred_value_defect(child[1], walk, label, frames + 1)
             else:
                 return ("untrusted", f"{label} Q child is a {truth.kind(child)}")
             if child_defect is not None:
@@ -3449,11 +3496,13 @@ def _deferred_value_defect(value: object, walk: _GraphWalk, label: str) -> tuple
         walk.leave(value_id)
         return None
     if _is_plain_container_value(value):
+        # ``functools.partial`` adds no interpreter frame of its own, so a member sits
+        # exactly two frames below its container.
         return _container_defect(
             value,
             walk,
             label,
-            _deferred_value_defect,
+            functools.partial(_deferred_value_defect, frames=frames + 2),
             _deferred_mapping_key_detail,
         )
     if getattr(value_type, "resolve_expression", None) is not None:
@@ -3518,18 +3567,30 @@ def _bake_deferred_filter_or_defect(
     if PROHIBITED_FILTER_KWARGS.intersection(kwargs):
         return ("untrusted", f"{cls_name} deferred filter carries prohibited kwargs")
     walk = _GraphWalk()
-    for value in args:
-        arg_defect = _deferred_value_defect(value, walk, f"{cls_name} deferred filter arg")
-        if arg_defect is not None:
-            return arg_defect
     text_kwargs: dict[str, object] = {}
-    for key, value in kwargs.items():
-        if type(key) is not str:
-            return ("untrusted", f"{cls_name} deferred filter kwarg key is a {truth.kind(key)}")
-        kwarg_defect = _deferred_value_defect(value, walk, f"{cls_name} deferred filter {key!r}")
-        if kwarg_defect is not None:
-            return kwarg_defect
-        text_kwargs[key] = value
+    try:
+        for value in args:
+            arg_defect = _deferred_value_defect(value, walk, f"{cls_name} deferred filter arg")
+            if arg_defect is not None:
+                return arg_defect
+        for key, value in kwargs.items():
+            if type(key) is not str:
+                return (
+                    "untrusted",
+                    f"{cls_name} deferred filter kwarg key is a {truth.kind(key)}",
+                )
+            kwarg_label = f"{cls_name} deferred filter {key!r}"
+            kwarg_defect = _deferred_value_defect(value, walk, kwarg_label)
+            if kwarg_defect is not None:
+                return kwarg_defect
+            text_kwargs[key] = value
+    except RecursionError:
+        # The frame budget bounds the ``Q`` / container descent, but an expression graph
+        # (``F("pk") + 1`` nested a thousand deep) has no depth bound of its own on the
+        # pending seam either: Django's filter build, which stops one, never ran over it.
+        # The proof is side-effect free, so a walk that met the recursion limit is the
+        # typed refusal of a value too deep to prove.
+        return ("untrusted", f"{cls_name} deferred filter is nested too deeply to prove")
     # ``add_q`` builds the predicate from the arguments as they stand, so they are
     # canonically reconstructed first: the baked predicate then holds framework-owned
     # nodes and containers, a ``TextChoices`` / ``StrEnum`` member rebound as its exact
