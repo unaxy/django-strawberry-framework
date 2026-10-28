@@ -41,6 +41,11 @@ branch is earned LIVE; this file holds the genuinely-unreachable internals:
   refused when its default-zone midnight cannot be stored, else stored as that
   midnight. Django warns on every such store, so the example app declares no such
   serializer and the schema is built in-process.
+- a ``DateTimeField`` DRF cannot place in a time zone below the top level (a ``ListField``
+  child, a nested and a ``many=True`` nested serializer) and a ``DateTimeField`` subclass:
+  DRF's ``overflow`` error keyed at its depth, and a ``to_internal_value`` override that
+  answers the overflow itself left to it. The example serializer writes its datetime at
+  the top level only (live in ``examples/fakeshop/test_query/test_scalars_mutation_api.py``).
 
 **No create/update happy path, envelope, reverse-map, partial-update, visibility,
 write-auth, authorize-before-decode, Upload, request-context, or re-fetch BEHAVIORAL test
@@ -113,6 +118,7 @@ from django_strawberry_framework.rest_framework.accessors import (
     declared_fields_of,
     list_child_of,
     serializer_errors,
+    validated_data_of,
 )
 from django_strawberry_framework.rest_framework.hook_context import (
     SerializerHookContext,
@@ -7263,3 +7269,137 @@ def test_serializer_date_over_a_datetime_column_stores_its_default_zone_midnight
     assert payload["result"] == {"label": "day"}
     stored = ScalarSpecimen.objects.get(label="day").occurred_at
     assert stored == datetime.datetime(2021, 6, 15, tzinfo=zoneinfo.ZoneInfo(zone))
+
+
+# A naive year-1 datetime made aware in Tokyo, and an aware one projected onto UTC under
+# ``USE_TZ = False``: DRF's ``DateTimeField`` raises a raw ``OverflowError`` placing either.
+_NAIVE_YEAR_ONE = "0001-01-01T05:00:00"
+_AWARE_YEAR_ONE = "0001-01-01T00:00:00+01:00"
+_IN_RANGE = "2021-06-15T09:30:00"
+_OUT_OF_RANGE = ["Datetime value out of range."]
+_DRF_TO_INTERNAL_VALUE = serializers.DateTimeField.to_internal_value
+#: What ``_OverflowTolerantDateTimeField`` answers for a datetime it cannot place.
+_TOLERATED = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+
+
+class _StampSerializer(serializers.Serializer[object]):
+    at = serializers.DateTimeField()
+
+
+class _SubclassedDateTimeField(serializers.DateTimeField):
+    """A ``DateTimeField`` subclass that leaves ``to_internal_value`` to DRF."""
+
+
+class _OverflowTolerantDateTimeField(serializers.DateTimeField):
+    """A consumer ``DateTimeField`` whose ``to_internal_value`` answers an overflow itself."""
+
+    @override
+    def to_internal_value(self, value: datetime.datetime | str) -> datetime.datetime:
+        try:
+            return super().to_internal_value(value)
+        except OverflowError:
+            return _TOLERATED
+
+
+def _stamp_shape(shape: str) -> tuple[serializers.Serializer[object], str]:
+    """A serializer placing ``_NAIVE_YEAR_ONE`` in a ``DateTimeField`` at ``shape``'s depth.
+
+    Returns the bound serializer and the dotted path the field's error flattens to.
+    """
+    fields: dict[str, object]
+    if shape == "list-child":
+        fields = {"stamps": serializers.ListField(child=serializers.DateTimeField())}
+        data: dict[str, object] = {"stamps": [_IN_RANGE, _NAIVE_YEAR_ONE]}
+        path = "stamps.1"
+    elif shape == "nested":
+        fields = {"stamp": _StampSerializer()}
+        data = {"stamp": {"at": _NAIVE_YEAR_ONE}}
+        path = "stamp.at"
+    elif shape == "many-nested":
+        fields = {"stamps": _StampSerializer(many=True)}
+        data = {"stamps": [{"at": _IN_RANGE}, {"at": _NAIVE_YEAR_ONE}]}
+        path = "stamps.1.at"
+    else:
+        fields = {"at": _SubclassedDateTimeField()}
+        data = {"at": _NAIVE_YEAR_ONE}
+        path = "at"
+    serializer_class = type("ShapeSerializer", (serializers.Serializer,), fields)
+    return serializer_class(data=data), path
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "list-child",
+        "nested",
+        "many-nested",
+        "subclass",
+    ],
+)
+def test_datetime_overflow_is_drf_overflow_error_at_every_depth(shape: str) -> None:
+    """A ``DateTimeField`` DRF cannot place answers its ``overflow`` error, keyed at its depth.
+
+    A naive year-1 datetime made aware in Tokyo raises a raw ``OverflowError`` inside
+    ``is_valid()`` from a ``ListField`` child, a nested serializer, a ``many=True`` nested
+    serializer and a ``DateTimeField`` subclass alike; after the translation each fails
+    ``is_valid()`` with DRF's ``overflow`` error, which the flattener keys to the field's
+    dotted path. Only the per-request field instances are wrapped: the declared field and
+    the class keep DRF's ``to_internal_value``.
+    """
+    serializer, path = _stamp_shape(shape)
+    serializer_resolvers._translate_datetime_overflow(serializer)
+    with override_settings(TIME_ZONE="Asia/Tokyo"):
+        assert not serializer.is_valid()
+
+    flat = serializer_resolvers.serializer_errors_to_field_errors(
+        serializer_errors(serializer),
+        {},
+    )
+    assert [(fe.field, fe.messages, fe.codes) for fe in flat] == [
+        (path, _OUT_OF_RANGE, ["overflow"]),
+    ]
+    wrapped = [
+        node
+        for node, _owner in serializer_resolvers._validation_tree(serializer)
+        if "to_internal_value" in vars(node)
+    ]
+    assert wrapped
+    assert all(isinstance(node, serializers.DateTimeField) for node in wrapped)
+    declared: list[object] = [
+        *declared_fields_of(type(serializer)).values(),
+        *declared_fields_of(_StampSerializer).values(),
+    ]
+    stamps = declared_fields_of(type(serializer)).get("stamps")
+    if isinstance(stamps, serializers.ListField):
+        declared.append(list_child_of(stamps))
+    assert not any("to_internal_value" in vars(field) for field in declared)
+    assert serializers.DateTimeField.to_internal_value is _DRF_TO_INTERNAL_VALUE
+
+
+@pytest.mark.parametrize(
+    ("value", "settings"),
+    [
+        pytest.param(_NAIVE_YEAR_ONE, {"TIME_ZONE": "Asia/Tokyo"}, id="naive-under-tokyo"),
+        pytest.param(_AWARE_YEAR_ONE, {"USE_TZ": False}, id="aware-without-time-zone-support"),
+    ],
+)
+def test_datetime_overflow_a_field_override_handles_itself_is_left_to_it(
+    value: str,
+    settings: dict[str, object],
+) -> None:
+    """A ``to_internal_value`` override that answers the ``OverflowError`` itself keeps its answer.
+
+    The translation wraps the instance's own method, so the consumer override runs first
+    and the wrapper never sees an overflow it caught: the value it returns validates.
+    """
+    serializer_class = type(
+        "TolerantSerializer",
+        (serializers.Serializer,),
+        {"at": _OverflowTolerantDateTimeField()},
+    )
+    serializer = serializer_class(data={"at": value})
+    serializer_resolvers._translate_datetime_overflow(serializer)
+    with override_settings(**settings):
+        assert serializer.is_valid(), serializer_errors(serializer)
+
+    assert validated_data_of(serializer) == {"at": _TOLERATED}

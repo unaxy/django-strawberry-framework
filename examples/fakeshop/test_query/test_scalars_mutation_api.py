@@ -16,7 +16,10 @@ or, bound as text as Django's default psycopg cursor binds, a fraction of a seco
 Each is the field's ``invalid`` ``FieldError`` ("Enter a value the database can
 represent.") with nothing written, on create and update, sync and async, never the
 masked unexpected error. DRF's own ``overflow`` answer for an aware datetime it cannot
-project onto the current time zone stands, and a value a flavor stores (the
+project onto the current time zone stands, and the serializer flavor answers the same
+``overflow`` error for a datetime DRF cannot place: a naive one that leaves years 1..9999
+once made aware under a non-UTC ``TIME_ZONE``, and an aware one whose UTC projection
+leaves them under ``USE_TZ = False``. A value a flavor stores (the
 serializer's naive projection under ``USE_TZ = False``, the serializer's projection of
 an aware datetime onto the current time zone, an aware time whose offset PostgreSQL
 accepts, there) is written.
@@ -175,8 +178,14 @@ _CELLS = {
     "naive-year-one-under-tokyo": _Cell(
         "occurredAt",
         "0001-01-01T05:00:00",
-        {"model": (_REFUSED, _REFUSED), "form": (_REFUSED, _REFUSED)},
+        {**_every(_REFUSED, _REFUSED), "serializer": (_OVERFLOW, _OVERFLOW)},
         settings={"TIME_ZONE": "Asia/Tokyo"},
+    ),
+    "naive-past-year-9999-under-new-york": _Cell(
+        "occurredAt",
+        "9999-12-31T23:00:00",
+        {"serializer": (_OVERFLOW, _OVERFLOW)},
+        settings={"TIME_ZONE": "America/New_York"},
     ),
     "aware-year-one-under-tokyo": _Cell(
         "occurredAt",
@@ -188,6 +197,18 @@ _CELLS = {
         "occurredAt",
         "2021-06-15T09:30:00+00:00",
         {**_every(_REFUSED, _STORED), "serializer": (_STORED, _STORED)},
+        settings={"USE_TZ": False},
+    ),
+    "before-year-one-without-time-zone-support": _Cell(
+        "occurredAt",
+        "0001-01-01T00:00:00+01:00",
+        {"serializer": (_OVERFLOW, _OVERFLOW)},
+        settings={"USE_TZ": False},
+    ),
+    "past-year-9999-without-time-zone-support": _Cell(
+        "occurredAt",
+        "9999-12-31T23:00:00-01:00",
+        {"serializer": (_OVERFLOW, _OVERFLOW)},
         settings={"USE_TZ": False},
     ),
     "past-year-9999-in-the-database-zone": _Cell(
@@ -340,7 +361,10 @@ def test_temporal_value_the_database_cannot_store_is_the_field_error(
     ``USE_TZ = False``, the serializer's projection of an aware datetime onto the current
     time zone, which drops any offset, and on PostgreSQL an aware time whose offset it
     accepts) is written, and DRF's own ``overflow`` answer for an aware datetime it cannot
-    project onto the current time zone stands. The connection's own ``TIME_ZONE`` is a
+    project onto the current time zone stands. The serializer flavor answers that
+    ``overflow`` error for every datetime DRF cannot place: a naive one made aware under a
+    non-UTC ``TIME_ZONE`` and an aware one projected onto UTC under ``USE_TZ = False``,
+    outside years 1..9999. The connection's own ``TIME_ZONE`` is a
     SQLite / MySQL / Oracle setting, so that cell runs on SQLite only.
     """
     cell = _CELLS[name]

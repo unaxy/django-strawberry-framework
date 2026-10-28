@@ -16,7 +16,9 @@ class ScalarSpecimenTemporalSerializer(ModelSerializerBase[ScalarSpecimen]):
     """``ModelSerializer`` over ``ScalarSpecimen``'s required columns, temporal ones included.
 
     DRF's ``DateTimeField`` refuses an aware value it cannot project onto the current time
-    zone with its own ``overflow`` error; its ``TimeField`` passes an aware time through,
+    zone with its own ``overflow`` error, and the mutation answers that error too for a
+    naive value it cannot make aware there and, under ``USE_TZ = False``, an aware value it
+    cannot project onto UTC; its ``TimeField`` passes an aware time through,
     which SQLite cannot store, and the mutation answers that as the field's ``invalid``
     error before the save. The time is written through ``clock_time``, renamed onto the
     ``occurred_time`` column by ``source=``, so the refusal is keyed to the input the client

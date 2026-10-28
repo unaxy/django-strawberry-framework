@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 353 done, 212 to do.
+Progress: 354 done, 212 to do.
 
 ## Done
 
@@ -1975,6 +1975,15 @@ Progress: 353 done, 212 to do.
 - [x] 607. Not a defect against the shipped contract: spec-015 explicitly leaves optimizer cooperation
   out of both node defaults, and the glossary states that node refetch receives no optimizer plan. The capability
   decision and its query-count evidence remain under Waiting item 327; this row adds no separate defect.
+- [x] 540. (robustness) The serializer flavor answers DRF's own field-keyed `overflow` ("Datetime value out of range.")
+  for a datetime DRF's `DateTimeField.enforce_timezone` cannot place (a naive one near year 1 or 9999 under a non-UTC
+  `TIME_ZONE`, an aware out-of-range one under `USE_TZ=False`), at every depth (`ListField` child, nested, `many=True`):
+  `rest_framework/resolvers.py::_translate_datetime_overflow` wraps each request's own `DateTimeField` instances'
+  `to_internal_value` and turns a raw `OverflowError` into `fail("overflow")`, the answer DRF gives the sibling cell;
+  a consumer override that answers it itself is left to it. These answered the masked top-level error. One walk
+  (`_validation_tree`) shared with `_pin_validator_querysets`. Live grid cells, README, spec-039 and the
+  `fielderror-envelope` glossary term say so. Tests: `examples/fakeshop/test_query/test_scalars_mutation_api.py`,
+  `tests/rest_framework/test_resolvers.py`
 
 ## Outside review of the fixes
 
@@ -2019,11 +2028,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   every wire value cleans to `"Enter a number."`; and the generated `time` leaf on a `DateTimeField` raises
   `AttributeError: 'datetime.datetime' object has no attribute 'strip'` in `forms.TimeField` clean before the filter
   seam
-- [ ] 540. (robustness) A `SerializerMutation` temporal input DRF's `DateTimeField.enforce_timezone` cannot place
-  escapes `is_valid()` as a raw `OverflowError`, the masked uncoded error: a naive datetime near year 1 or 9999 under
-  a non-UTC `TIME_ZONE` (`valid_datetime`) and an aware out-of-range one under `USE_TZ=False` (`make_naive`), where
-  DRF answers its own `overflow` for the other cells; upstream behaviour, decide whether the flavor maps it. Found
-  fixing 381
 - [ ] 562. (robustness) A flat range leaf walking a hop with both bounds null (`{start: null, end: null}`) runs the
   hop target's `get_queryset` on `apply_async` but not on `apply_sync`; same rows. Found verifying 399
 
@@ -2205,6 +2209,9 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 665. CHANGELOG entry for item 540: a serializer-flavor datetime DRF cannot place in the configured zone (a naive
+  value near year 1 or 9999 under a non-UTC `TIME_ZONE`, an aware out-of-range one under `USE_TZ=False`) answers DRF's
+  field-keyed `overflow` error instead of the masked top-level error
 - [ ] 664. CHANGELOG entry for item 587: a lazy translation string as FilterSet / OrderSet `Meta.exclude` or OrderSet
   `Meta.fields` is refused at class creation like a bare string (it excluded by substring, excluded nothing, or was
   expanded per character); a lazy `"__all__"` stays the shorthand
