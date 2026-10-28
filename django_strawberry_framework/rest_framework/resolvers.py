@@ -80,7 +80,10 @@ The serializer-specific invariants this module owns:
   ``validation_error_to_field_errors``), and returns a null-object payload. A
   validated datetime or time the pinned alias cannot store (or, on PostgreSQL, read
   back) is the field's ``invalid`` error through the same flattener before any write
-  (``_unstorable_temporal_errors``); DRF's own ``overflow`` answer comes first.
+  (``_unstorable_temporal_errors``); DRF's own ``overflow`` answer comes first, and a
+  datetime DRF cannot place in a time zone, which it raises as a raw ``OverflowError``,
+  fails its ``DateTimeField`` with that same ``overflow`` error
+  (``_translate_datetime_overflow``).
 
 - **Write via ``serializer.save()`` inside a nested-``atomic`` savepoint and the
   pinned-alias write phase, in a value-preserving closure** (the closure captures
@@ -295,6 +298,11 @@ if TYPE_CHECKING:
         """A field's ``run_validation``, as the relation-intent recording wraps it."""
 
         def __call__(self, data: object = ...) -> object: ...
+
+    class _DateTimeToInternal(Protocol):
+        """A ``DateTimeField``'s ``to_internal_value``, as the overflow translation wraps it."""
+
+        def __call__(self, value: datetime.datetime | str) -> datetime.datetime: ...
 
     class _RowSource(Protocol):
         """A validator's ``queryset``: a queryset or a manager, either of which ``all()`` re-reads."""
@@ -1574,16 +1582,58 @@ def _reads_a_queryset(validator: object) -> TypeGuard[_QuerysetValidator]:
     return read_attr(validator, "queryset", None) is not None
 
 
-def _pin_validator_querysets(serializer: DRFField, alias: str, *, path: str = "") -> None:
-    """Recursively pin every queryset-backed DRF validator to the write alias.
+def _validation_tree(serializer: DRFField, *, path: str = "") -> Iterator[tuple[DRFField, str]]:
+    """Yield every serializer and field instance ``serializer.is_valid()`` validates through.
+
+    Each node comes with the owner label naming it (the innermost serializer class and the
+    dotted path from the root). A serializer is yielded before its bound fields, a field
+    before what it validates through: a ``ListSerializer`` field's ``child`` serializer, a
+    nested serializer's own fields, a field's ``child`` (``ListField`` / ``DictField``) and
+    ``child_relation`` (a many relation). A nested serializer field is yielded both as its
+    parent's field and as the root of its own level. These are the per-request instances DRF
+    deep-copies from the declared fields, never shared class state.
+    """
+    serializer_name = truth.name(type(serializer))
+    yield serializer, f"{serializer_name}{f'.{path}' if path else ''}"
+    if not isinstance(serializer, serializers.Serializer):
+        # A plain ``BaseSerializer`` (a read-only ``source="*"`` renderer, a list
+        # child) declares no ``fields``.
+        return
+
+    def _field_nodes(field: DRFField, field_path: str) -> Iterator[tuple[DRFField, str]]:
+        yield field, f"{serializer_name}.{field_path}"
+        if isinstance(field, serializers.ListSerializer):
+            # ``ListSerializer.__init__`` asserts a ``child``; drf-stubs keep the class-level None.
+            yield from _validation_tree(
+                require(read_attr(field, "child"), is_drf_field),
+                path=field_path,
+            )
+            return
+        if isinstance(field, serializers.BaseSerializer):
+            yield from _validation_tree(field, path=field_path)
+            return
+        child: object = getattr(field, "child", None)
+        if is_drf_field(child):
+            yield from _field_nodes(child, f"{field_path}.child")
+        child_relation: object = getattr(field, "child_relation", None)
+        if is_drf_field(child_relation):
+            yield from _field_nodes(child_relation, f"{field_path}.child_relation")
+
+    for field_name, field in bound_fields(serializer).items():
+        yield from _field_nodes(field, f"{path}.{field_name}" if path else field_name)
+
+
+def _pin_validator_querysets(serializer: DRFField, alias: str) -> None:
+    """Pin every queryset-backed DRF validator in ``serializer``'s validation tree to the write alias.
 
     DRF uniqueness validators perform database reads during ``is_valid()``. Field
     ``UniqueValidator`` instances, serializer-level unique-together/date validators,
     and their nested-serializer counterparts must therefore share the transaction's
     alias. DRF intentionally shares validator objects while copying serializer fields,
-    so every queryset-backed validator is shallow-copied and replaced on this serializer
-    instance before its queryset is pinned. Filters and validator semantics remain intact,
-    while concurrent requests cannot rewrite one another's validator routing.
+    so every queryset-backed validator is shallow-copied and replaced on its serializer
+    or field instance (``_validation_tree``) before its queryset is pinned. Filters and
+    validator semantics remain intact, while concurrent requests cannot rewrite one
+    another's validator routing.
     """
 
     def _pinned(validators: Iterable[_ValidatorT], owner: str) -> list[_ValidatorT]:
@@ -1602,37 +1652,41 @@ def _pin_validator_querysets(serializer: DRFField, alias: str, *, path: str = ""
             pinned.append(local_validator)
         return pinned
 
-    serializer_name = truth.name(type(serializer))
+    for node, owner in _validation_tree(serializer):
+        node.validators = _pinned(node.validators, owner)
 
-    def _pin_field(field: DRFField, field_path: str) -> None:
-        field.validators = _pinned(field.validators, f"{serializer_name}.{field_path}")
-        if isinstance(field, serializers.ListSerializer):
-            # ``ListSerializer.__init__`` asserts a ``child``; drf-stubs keep the class-level None.
-            _pin_validator_querysets(
-                require(read_attr(field, "child"), is_drf_field),
-                alias,
-                path=field_path,
-            )
-            return
-        if isinstance(field, serializers.BaseSerializer):
-            _pin_validator_querysets(field, alias, path=field_path)
-            return
-        child: object = getattr(field, "child", None)
-        if is_drf_field(child):
-            _pin_field(child, f"{field_path}.child")
-        child_relation: object = getattr(field, "child_relation", None)
-        if is_drf_field(child_relation):
-            _pin_field(child_relation, f"{field_path}.child_relation")
 
-    owner = f"{serializer_name}{f'.{path}' if path else ''}"
-    serializer.validators = _pinned(serializer.validators, owner)
-    if not isinstance(serializer, serializers.Serializer):
-        # A plain ``BaseSerializer`` (a read-only ``source="*"`` renderer, a list
-        # child) declares no ``fields``; its own validators are pinned above.
-        return
-    for field_name, field in bound_fields(serializer).items():
-        field_path = f"{path}.{field_name}" if path else field_name
-        _pin_field(field, field_path)
+def _translate_datetime_overflow(serializer: DRFSerializer) -> None:
+    """Answer DRF's own ``overflow`` error where a ``DateTimeField`` raises a raw ``OverflowError``.
+
+    ``DateTimeField.enforce_timezone`` turns an ``OverflowError`` into its ``overflow``
+    error only when it projects an aware value onto the field's time zone; the same
+    overflow raised placing a naive value in a non-UTC current time zone (DRF's
+    ``valid_datetime`` check) or projecting an aware one onto UTC under ``USE_TZ = False``
+    (``timezone.make_naive``) escapes ``is_valid()`` raw. Every ``DateTimeField``
+    instance (subclasses included) in the validation tree (``_validation_tree``) gets its
+    current ``to_internal_value`` wrapped on the instance, so the field fails with the
+    error DRF gives the sibling value, keyed to it at any depth; a ``to_internal_value``
+    override that handles the ``OverflowError`` itself never lets one reach the wrapper.
+    """
+    for node, _owner in _validation_tree(serializer):
+        if isinstance(node, serializers.DateTimeField):
+            node.to_internal_value = _overflow_failing(node, node.to_internal_value)
+
+
+def _overflow_failing(
+    field: serializers.DateTimeField,
+    original: _DateTimeToInternal,
+) -> _DateTimeToInternal:
+    """Return ``original`` wrapped to fail ``field`` with ``overflow`` on a raw ``OverflowError``."""
+
+    def _to_internal_value(value: datetime.datetime | str) -> datetime.datetime:
+        try:
+            return original(value)
+        except OverflowError:
+            field.fail("overflow")
+
+    return _to_internal_value
 
 
 def _scope_specs_over_serializer(
@@ -2678,9 +2732,10 @@ def _unstorable_temporal_errors(
 ) -> dict[str, list[ErrorDetail]]:
     """Map each field whose validated datetime or time the pinned alias cannot store to its error.
 
-    DRF's ``DateTimeField`` answers its own ``overflow`` error for an aware value it cannot
-    project onto the current time zone, and that answer stands (it runs first, inside
-    ``is_valid()``); what it lets through can still be a value the database refuses: an
+    DRF's ``DateTimeField`` answers its own ``overflow`` error for a datetime it cannot place
+    in a time zone (``_translate_datetime_overflow`` extends DRF's answer to the values it
+    raises raw), and that answer stands (it runs first, inside ``is_valid()``); what it
+    lets through can still be a value the database refuses: an
     aware time (SQLite, MySQL and Oracle refuse it at ``save()``), an aware datetime whose
     projection onto the connection's time zone leaves years 1..9999 though the current
     zone's does not, one PostgreSQL stores but cannot load back at the re-fetch, or a
@@ -2777,6 +2832,9 @@ def _guarded_serializer_write(
     # queryset to the same alias before validation so uniqueness cannot consult
     # another shard or escape the transaction.
     _pin_validator_querysets(serializer, alias)
+    # A datetime DRF cannot place in a time zone fails with its own ``overflow`` error
+    # instead of escaping ``is_valid()`` as a raw ``OverflowError``.
+    _translate_datetime_overflow(serializer)
     # The relation-intent ledger: record the EXACT objects
     # each relation field's ``run_validation()`` resolves - top-level AND nested -
     # BEFORE field-level or object-level validators get a chance to replace them.

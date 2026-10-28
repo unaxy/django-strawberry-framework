@@ -2025,7 +2025,9 @@ The pipeline steps:
      cannot convert never reaches the check: a naive datetime that leaves years 1..9999
      once made aware under a non-UTC `TIME_ZONE`, and an aware datetime whose UTC
      projection leaves them under `USE_TZ = False`, raise a raw `OverflowError` inside
-     `is_valid()` and stay a masked error.
+     `is_valid()`, which each `DateTimeField` instance in the validation tree answers as
+     DRF's own `overflow` error
+     (`django_strawberry_framework/rest_framework/resolvers.py::_translate_datetime_overflow`).
    - **Validator queryset pinning.** `_pin_validator_querysets` walks the serializer's
      validators recursively — per instance, on a copy — and pins each one's queryset to
      the operation's write alias, so a `UniqueTogetherValidator` (or any author validator)
