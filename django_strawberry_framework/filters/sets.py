@@ -117,6 +117,7 @@ from django_strawberry_framework.utils.errors import (
     UNBINDABLE_TEMPORAL_MESSAGE,
     coded_error_extensions,
     psycopg_refuses_list_parameter,
+    refuses_numeric_format,
     refuses_utc_offset,
     unstorable_text,
 )
@@ -2295,12 +2296,15 @@ def _unbindable_predicate(
     holds an integer to that range only in an integer comparison (``IntegerFieldOverflow``:
     ``exact``, ``gt``, ``gte``, ``lt``, ``lte``), never in an ``in`` list, a ``range``
     bound or a duration's microsecond count, so every lookup binding a value is read
-    (``_bound_value_lookups``). The compiled parameters are last held to the one rule no
+    (``_bound_value_lookups``). The compiled parameters are last held to the two rules no
     Django call answers, a UTC offset PostgreSQL refuses
-    (``utils/errors.py::refuses_utc_offset``), and each list parameter to psycopg's own
-    dump of it (``utils/errors.py::psycopg_refuses_list_parameter``: one element dumper
-    for the whole list refuses a naive time beside an aware one). Building the predicate warns as the query
-    does (Django's naive-datetime ``RuntimeWarning``): the warning state is never touched.
+    (``utils/errors.py::refuses_utc_offset``) and a decimal past PostgreSQL ``numeric``'s
+    format (``utils/errors.py::refuses_numeric_format``: Django's decimal adapter passes
+    the value through, and the server refuses its spelling), and each list parameter to
+    psycopg's own dump of it (``utils/errors.py::psycopg_refuses_list_parameter``: one
+    element dumper for the whole list refuses a naive time beside an aware one). Building
+    the predicate warns as the query does (Django's naive-datetime ``RuntimeWarning``): the
+    warning state is never touched.
     """
     base = queryset.all()
     base.query.clear_limits()
@@ -2340,9 +2344,10 @@ def _unbindable_predicate(
         ):
             return True
     params = require(compiled[1], is_list_or_tuple)
-    return refuses_utc_offset(connection, params) or psycopg_refuses_list_parameter(
-        connection,
-        params,
+    return (
+        refuses_utc_offset(connection, params)
+        or refuses_numeric_format(connection, params)
+        or psycopg_refuses_list_parameter(connection, params)
     )
 
 
@@ -2374,19 +2379,18 @@ def _bound_value_lookups(query: Query) -> Iterator[tuple[_LookupAny, Query]]:
             )
 
 
-def _unbindable_temporal_errors(filterset_instance: FilterSet) -> dict[str, object]:
+def _unbindable_value_errors(filterset_instance: FilterSet) -> dict[str, object]:
     """Return the refusal of each cleaned filter value the queryset's database cannot bind.
 
-    Each cleaned value a filter applies to a temporal column (a ``DateField``,
-    ``DateTimeField``, ``TimeField`` or ``DurationField`` its ``field_name`` reaches over
-    the filterset's queryset, as Django resolves the path,
+    Each cleaned value a filter applies to a temporal or decimal column (a ``DateField``,
+    ``DateTimeField``, ``TimeField``, ``DurationField`` or ``DecimalField`` its
+    ``field_name`` reaches over the filterset's queryset, as Django resolves the path,
     ``utils/querysets.py::lookup_target_fields``: a queryset annotation's output field, a
     ``FilteredRelation`` alias and ``pk`` included, or an ``ArrayField`` whose innermost
     elements are stored through one, ``utils/_array_field.py::array_leaf_field``) is asked
-    of Django
-    (``_unbindable_predicate``): the filter's own ``filter`` builds the predicate and it is
-    compiled on the database the filterset's queryset runs on (``queryset.db``, resolved
-    only for a temporal leaf). A transform of a temporal column (``year``, ``month``)
+    of Django (``_unbindable_predicate``): the filter's own ``filter`` builds the predicate
+    and it is compiled on the database the filterset's queryset runs on (``queryset.db``,
+    resolved only for such a leaf). A transform of a temporal column (``year``, ``month``)
     binds integers, and a duration binds its microsecond count on a backend without a
     native interval, so the integers those leaves bind are asked too. Every filter family
     reaches it whatever value kind its form cleans to: a datetime on a ``DateField`` or
@@ -2394,10 +2398,13 @@ def _unbindable_temporal_errors(filterset_instance: FilterSet) -> dict[str, obje
     bound or ``in`` member, a duration, each member of a list and each bound of a range,
     as the filter applies them, and on an ``ArrayField`` each element a whole-array lookup
     binds, the element an index or slice reaches and an array's length (an integer held
-    to its range). Only a ``filter`` django-filter or this package
-    ships is run (``_runs_shipped_filter``): a ``filter`` of the filter's own (a
-    ``method=`` included, ``_own_filter``) or a class-level ``filter`` override is
-    consumer code, which owns what its value means and is not asked. A projected copy is
+    to its range), and on a decimal column each decimal it binds, whose spelling
+    PostgreSQL ``numeric``'s format holds whatever the column's ``max_digits`` (a
+    ``NumberFilter`` caps only a positive value, at ``1e50``). Only a ``filter``
+    django-filter or this package ships is run (``_runs_shipped_filter``): a ``filter``
+    of the filter's own (a ``method=`` included, ``_own_filter``) or a class-level
+    ``filter`` override is consumer code, which owns what its value means and is not
+    asked. A projected copy is
     asked through the child filter it runs (``_projected_terminal``), over its child filter
     set's queryset.
     """
@@ -2413,7 +2420,7 @@ def _unbindable_temporal_errors(filterset_instance: FilterSet) -> dict[str, obje
         if not any(
             isinstance(
                 array_leaf_field(column)[0],
-                models.DateField | models.TimeField | models.DurationField,
+                models.DateField | models.TimeField | models.DurationField | models.DecimalField,
             )
             for column in lookup_target_fields(queryset.query, _bound_field_name(filter_instance))
         ):
@@ -5100,8 +5107,8 @@ class FilterSet(
         (``shelf__or_0__branch__name``, ``or_0__shelf__branch__name``).
 
         A form that cleans is then held to the database its queryset runs on
-        (``_unbindable_temporal_errors``): a value a filter applies to a temporal or
-        duration column that the scalar parse and the form accept but that database cannot bind is
+        (``_unbindable_value_errors``): a value a filter applies to a temporal, duration or
+        decimal column that the scalar parse and the form accept but that database cannot bind is
         refused keyed to its form field, ``invalid`` with a fixed message, never the
         driver's text. Django is asked: the filter's own predicate is built and compiled
         on that database, so what is refused is what the query would raise, for every
@@ -5121,7 +5128,9 @@ class FilterSet(
         (psycopg 2, or psycopg 3 unless the connection binds on the server:
         ``OPTIONS["server_side_binding"]``, or an ``OPTIONS["cursor_factory"]`` that is
         not a ``ClientCursor``); bound on the server, a time whose offset is 16:00 or
-        more.
+        more. On PostgreSQL a decimal is held to ``numeric``'s format in either mode: a
+        spelling needing more than 131072 digits before the point or 16383 after
+        (``-1e1000000``, ``1e-16384``) is refused, bounded column or not.
         """
         form = filterset_instance.form
         copies = filterset_instance._copied_filters
@@ -5136,7 +5145,7 @@ class FilterSet(
             if not form.is_valid():
                 errors = form.errors.get_json_data()
             else:
-                errors = _unbindable_temporal_errors(filterset_instance)
+                errors = _unbindable_value_errors(filterset_instance)
                 if not errors:
                     return
         branch = filterset_instance._branch_path

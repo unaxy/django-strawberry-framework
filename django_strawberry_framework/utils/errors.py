@@ -24,8 +24,8 @@ write flavors):
   (a lone surrogate, an embedded NUL) and the record it answers, shared by the
   write decode (``utils/write_values.py::unstorable_text_error``) and the filter
   form validation (``filters/sets.py::FilterSet._validate_form_or_raise``);
-- ``UNBINDABLE_TEMPORAL_MESSAGE`` - the message a temporal or duration value the
-  database cannot bind answers, on a filter (``filters/sets.py::_unbindable_temporal_errors``,
+- ``UNBINDABLE_TEMPORAL_MESSAGE`` - the message a temporal, duration or decimal value
+  the database cannot bind answers, on a filter (``filters/sets.py::_unbindable_value_errors``,
   which asks Django to build and compile the filter's own predicate) and on a write;
 - ``unbindable_temporal`` - whether a datetime or time bound into a column is one
   the database cannot bind, asked of that connection's own adapters; the base of
@@ -35,6 +35,10 @@ write flavors):
   or time whose UTC offset PostgreSQL refuses in the connection's binding mode (a
   list parameter's elements by the text rule, as psycopg binds them), read over a
   compiled predicate's parameters or a write's values;
+- ``refuses_numeric_format`` - PostgreSQL ``numeric``'s format: a decimal whose spelling
+  needs more digits before or after the point than ``numeric`` stores, read over a
+  compiled predicate's parameters and by the identity decode
+  (``utils/querysets.py::coerce_field_value_or_none``);
 - ``unstorable_temporal`` - its write-side answer: a datetime or time a column
   cannot store on the database a write runs on, or (PostgreSQL) can store but not
   read back (a date or naive datetime a ``DateTimeField`` column holds read as the
@@ -59,6 +63,7 @@ from __future__ import annotations
 
 import datetime
 import zoneinfo
+from decimal import Decimal
 from typing import TYPE_CHECKING, NamedTuple
 
 import strawberry
@@ -126,6 +131,7 @@ __all__ = [
     "model_field_error_names",
     "null_field_error",
     "psycopg_refuses_list_parameter",
+    "refuses_numeric_format",
     "refuses_utc_offset",
     "rekey_error_segment",
     "relation_field_error",
@@ -717,7 +723,8 @@ def _unstorable_leaf(path: str, text: str) -> UnstorableText | None:
     return None
 
 
-#: The message a temporal value the database cannot bind answers (``unbindable_temporal``).
+#: The message a value the database cannot bind answers (``unbindable_temporal``,
+#: ``refuses_numeric_format``).
 UNBINDABLE_TEMPORAL_MESSAGE = "Enter a value the database can represent."
 
 
@@ -752,7 +759,7 @@ def unbindable_temporal(
     A ``None`` member binds. Any other column answers ``False`` without calling ``using``
     or touching ``django.db.connections``. A filter's value is not read here: the filter
     form validation asks Django to build and compile the filter's own predicate
-    (``filters/sets.py::_unbindable_temporal_errors``).
+    (``filters/sets.py::_unbindable_value_errors``).
     """
     if isinstance(column, models.DateTimeField):
         bound_type: type[object] = datetime.datetime
@@ -834,6 +841,57 @@ def _postgresql_refuses_offset(
     if bound_as_text or _binds_client_side(connection):
         return True
     return out_of_range and isinstance(scalar, datetime.time)
+
+
+_POSTGRESQL_NUMERIC_INTEGER_DIGITS = 131072
+"""Digits PostgreSQL's unconstrained ``numeric`` stores before the decimal point."""
+
+_POSTGRESQL_NUMERIC_FRACTION_DIGITS = 16383
+"""Digits PostgreSQL's unconstrained ``numeric`` stores after the decimal point."""
+
+_POSTGRESQL_NUMERIC_EXPONENT_LIMIT = 1073741823
+"""The written exponent ``numeric_in`` refuses at or past (``INT_MAX / 2``), a zero's included."""
+
+
+def refuses_numeric_format(connection: BaseDatabaseWrapper, values: Iterable[object]) -> bool:
+    """Whether PostgreSQL refuses any decimal in ``values`` as past ``numeric``'s format.
+
+    ``values`` are what a query binds on ``connection``: a compiled predicate's
+    parameters, or a decimal an identity decode is about to bind. psycopg sends a
+    ``Decimal`` as its own spelling (``str``), and ``numeric_in`` parses it into
+    ``numeric``'s format whatever the column's typmod: up to 131072 digits before the
+    decimal point and up to 16383 after (PostgreSQL's documentation, "Numeric Types"),
+    past either of which the server refuses the bind as "value overflows numeric format"
+    (``DataError``). The spelling is read as written, trailing fractional zeros
+    included: ``numeric_in`` keeps the written scale. A zero has no digit before the
+    point whatever its exponent (``numeric_in`` gives a zero weight 0), so only its
+    scale and its written exponent's own bound hold it (``0E+1000000`` binds as ``0``,
+    ``0E-16384`` is refused). A list or tuple among ``values``
+    is one list parameter, whose elements are read at any nesting depth. Every other
+    value, and every value on any other backend, is not read.
+    """
+    if connection.vendor != "postgresql":
+        return False
+    for value in values:
+        if is_list_or_tuple(value):
+            if refuses_numeric_format(connection, value):
+                return True
+        elif isinstance(value, Decimal) and not _fits_numeric(value):
+            return True
+    return False
+
+
+def _fits_numeric(number: Decimal) -> bool:
+    """Whether ``number``'s spelling stays within PostgreSQL ``numeric``'s format."""
+    exponent = number.adjusted() - len(number.as_tuple().digits) + 1
+    if number.is_zero():
+        return (
+            -_POSTGRESQL_NUMERIC_FRACTION_DIGITS <= exponent < _POSTGRESQL_NUMERIC_EXPONENT_LIMIT
+        )
+    return (
+        max(number.adjusted() + 1, 0) <= _POSTGRESQL_NUMERIC_INTEGER_DIGITS
+        and max(-exponent, 0) <= _POSTGRESQL_NUMERIC_FRACTION_DIGITS
+    )
 
 
 def _binds_client_side(connection: BaseDatabaseWrapper) -> bool:

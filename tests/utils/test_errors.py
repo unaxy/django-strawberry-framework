@@ -24,6 +24,7 @@ import uuid
 import warnings
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
+from decimal import Decimal
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING
@@ -70,6 +71,7 @@ from django_strawberry_framework.utils.errors import (
     join_error_path,
     model_field_error_names,
     null_field_error,
+    refuses_numeric_format,
     refuses_utc_offset,
     rekey_error_segment,
     relation_field_error,
@@ -1275,6 +1277,78 @@ def test_refuses_utc_offset_reads_the_backend_and_the_text_binding(
     with postgresql_stand_in(driver, cursor_factory) as alias:
         answer = refuses_utc_offset(connections[alias], [value], bound_as_text=bound_as_text)
     assert answer is refused
+
+
+#: Each decimal spelling, and whether PostgreSQL ``numeric``'s format refuses it: up to
+#: 131072 digits before the point and 16383 after, the written scale included.
+_NUMERIC_SPELLINGS = [
+    pytest.param("1e1000000", True, id="huge-exponent"),
+    pytest.param("-1e1000000", True, id="negative-huge-exponent"),
+    pytest.param("1e-1000000", True, id="tiny-exponent"),
+    pytest.param("1E+131072", True, id="131073-integer-digits"),
+    pytest.param("1E-16384", True, id="16384-fraction-digits"),
+    pytest.param("-1E-16384", True, id="negative-16384-fraction-digits"),
+    pytest.param("1." + "0" * 16384, True, id="16384-trailing-zeros"),
+    pytest.param("1E+131071", False, id="131072-integer-digits"),
+    pytest.param("1E-16383", False, id="16383-fraction-digits"),
+    pytest.param("-1E-16383", False, id="negative-16383-fraction-digits"),
+    pytest.param("1." + "0" * 16383, False, id="16383-trailing-zeros"),
+    pytest.param("12.50", False, id="plain"),
+    pytest.param("0E+1000000", False, id="zero-huge-exponent"),
+    pytest.param("-0E+1073741822", False, id="zero-below-exponent-limit"),
+    pytest.param("0E+1073741823", True, id="zero-at-exponent-limit"),
+    pytest.param("0E-16383", False, id="zero-16383-fraction-digits"),
+    pytest.param("0E-16384", True, id="zero-16384-fraction-digits"),
+]
+
+
+@pytest.mark.parametrize("mode", list(BINDING_MODES))
+@pytest.mark.parametrize(("raw", "refused"), _NUMERIC_SPELLINGS)
+def test_refuses_numeric_format_holds_each_decimal_a_query_binds_to_numeric(
+    mode: str,
+    raw: str,
+    refused: bool,  # noqa: FBT001
+) -> None:
+    """PostgreSQL refuses a decimal whose spelling lies past ``numeric``'s format.
+
+    The values are a compiled predicate's parameters, beside which a text, an integer, a
+    float and a ``None`` bind as they are. ``numeric_in`` parses the spelling psycopg
+    sends whatever the binding mode, so the answer is one rule in every mode.
+    """
+    driver, cursor_factory, _ = BINDING_MODES[mode]
+    params = [
+        "label",
+        5,
+        1.5,
+        None,
+        Decimal(raw),
+    ]
+    with postgresql_stand_in(driver, cursor_factory) as alias:
+        assert refuses_numeric_format(connections[alias], params) is refused
+
+
+@pytest.mark.parametrize(("raw", "refused"), _NUMERIC_SPELLINGS)
+@pytest.mark.parametrize("nested", [False, True], ids=["list", "nested-tuple"])
+def test_refuses_numeric_format_reads_each_element_of_a_list_parameter(
+    raw: str,
+    refused: bool,  # noqa: FBT001
+    nested: bool,  # noqa: FBT001
+) -> None:
+    """Each decimal element of a list parameter, at any nesting depth, is held to ``numeric``."""
+    elements: list[object] = [None, Decimal(1), Decimal(raw)]
+    parameter: object = (Decimal(1), tuple(elements)) if nested else elements
+    driver, cursor_factory, _ = BINDING_MODES["psycopg3-client"]
+    with postgresql_stand_in(driver, cursor_factory) as alias:
+        assert refuses_numeric_format(connections[alias], [parameter]) is refused
+
+
+@pytest.mark.parametrize(("raw", "_refused"), _NUMERIC_SPELLINGS)
+def test_refuses_numeric_format_reads_only_postgresql(raw: str, _refused: bool) -> None:  # noqa: FBT001
+    """No other backend is read: SQLite binds every one of the PostgreSQL rows."""
+    assert not refuses_numeric_format(
+        connections[DEFAULT_DB_ALIAS],
+        [Decimal(raw), [Decimal(raw)]],
+    )
 
 
 @pytest.mark.parametrize("mode", list(BINDING_MODES))
