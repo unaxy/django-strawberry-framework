@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import TYPE_CHECKING, NamedTuple, TypeVar, final
 
 from django.core.exceptions import ValidationError
@@ -62,10 +63,11 @@ from django_filters import (
     NumberFilter,
 )
 from django_filters import constants as _filter_constants
+from django_filters.exceptions import FieldLookupError
 from django_filters.fields import BaseCSVField, ChoiceField
 from django_filters.filters import BaseInFilter, BaseRangeFilter, FilterMethod
 from django_filters.filterset import BaseFilterSet, FilterSetOptions
-from django_filters.utils import get_model_field
+from django_filters.utils import get_model_field, resolve_field
 from django_filters.widgets import BaseCSVWidget
 from graphql import GraphQLError
 from strawberry import relay
@@ -466,6 +468,59 @@ def _bound_model_field(filter_instance: Filter) -> ModelField | None:
     """
     resolved = _bound_resolved_field(filter_instance)
     return None if resolved is None else resolved.field
+
+
+def _bound_value_field(filter_instance: Filter) -> ModelField | None:
+    """Return the field each value a per-request filter applies is a value of.
+
+    The column ``_bound_model_field`` answers, read through the transforms the filter's
+    ``lookup_expr`` carries ahead of its lookup: a generated ``<column>__year__in`` leaf's
+    members are values of the ``year`` transform's ``IntegerField`` output, never of the
+    ``DateTimeField`` column. The output is django-filter's own answer
+    (``_lookup_value_field``), the field it chose the leaf's filter class off. A lookup
+    carrying no transform, a path naming no model field, or a ``lookup_expr`` that walk
+    cannot read as the column's transforms (a declared one continuing the path across a
+    relation, ``field_name="shelf", lookup_expr="topic__icontains"``, which the filter's
+    own ``filter`` hands Django whole) answers the column.
+    """
+    column = _bound_model_field(filter_instance)
+    lookup_expr = filter_instance.lookup_expr
+    if not is_concrete_field(column) or LOOKUP_SEP not in lookup_expr:
+        return column
+    output_field = _lookup_value_field(column, lookup_expr)
+    return column if output_field is None else output_field
+
+
+def _reads_integer_transform(filter_instance: Filter) -> bool:
+    """Whether a per-request filter compares an integer transform's output, not its column.
+
+    A generated ``<column>__year__in``, an ``ArrayField``'s ``len``, or a transform a
+    project registers on a column (``Field.register_lookup``) with an ``IntegerField``
+    output: its values are integers no column stores (``_bound_value_field``), held to
+    their range where the filter form asks the database
+    (``filters/sets.py::_unbindable_value_errors``), never coerced through the column.
+    """
+    value_field = _bound_value_field(filter_instance)
+    return isinstance(value_field, models.IntegerField) and value_field is not (
+        _bound_model_field(filter_instance)
+    )
+
+
+@lru_cache(maxsize=1024)
+def _lookup_value_field(column: ConcreteField, lookup_expr: str) -> ModelField | None:
+    """Return the output field of the transforms ``lookup_expr`` applies to ``column``.
+
+    ``django_filters.utils.resolve_field``, the walk ``BaseFilterSet.filter_for_field``
+    selects a generated leaf's filter class by; it builds a query per call, so the answer
+    is kept per ``(column, lookup_expr)``, both fixed when the FilterSet is defined.
+    ``None`` when that walk refuses the expression (upstream's ``FieldLookupError``): a
+    name that is no transform or lookup of the column, as a relation hop is not.
+    """
+    try:
+        output_field, _lookup_name = resolve_field(column, lookup_expr)
+    except FieldLookupError:
+        return None
+    return require(output_field, is_concrete_field)
 
 
 class _ResolvedField(NamedTuple):
@@ -1288,6 +1343,16 @@ class IntegerInFilter(MembershipInFilter, NumberFilter):
       the empty set too (`MembershipInFilter`). A mixed input keeps its valid
       members. For an `exclude` filter the complement of "no row" is "every row", so
       it returns a new queryset over every row.
+
+    A lookup through an integer transform (a generated `<column>__year__in`, `iso_year`,
+    `month`, an `ArrayField`'s `len`, a transform a project registers with an
+    `IntegerField` output) compares the transform's output, a value no column stores
+    (`_reads_integer_transform`), so its members are not coerced through the column: each
+    binds as Django's lookup prepares it for that output, and the filter form's bind ask
+    (`filters/sets.py::_unbindable_value_errors`) refuses an integer transform's member
+    past the integer range the queryset's database stores for it, as it does for a
+    declared `in` over the same transform. A member inside that range that no row holds
+    matches nothing.
     """
 
     @override
@@ -1307,6 +1372,11 @@ class IntegerInFilter(MembershipInFilter, NumberFilter):
             message="Invalid filter value: expected a list of integers.",
             code=FILTER_INVALID_ERROR_CODE,
         )
+        if _reads_integer_transform(self):
+            # A transform's output names no stored column: each member binds as the
+            # lookup prepares it, so one past the integer range the database stores for
+            # the output is refused by the filter form's bind ask, never dropped.
+            return super().filter(qs, value)
         model_field = _bound_model_field(self)
         if model_field is not None:
             kept = _identifying_members(model_field, value, qs.db)
@@ -1339,6 +1409,10 @@ class IntegerRangeFilter(BaseRangeFilter, NumberFilter):
     (a below-min lower / above-max upper imposes no constraint) or empties the match
     (an above-max lower / below-min upper can identify no row) - the same outcome a raw
     ``BETWEEN`` would express if the backend could bind the value.
+
+    A lookup carrying a transform (a generated ``<column>__year__range``, ``iso_year``,
+    ``month``, an ``ArrayField``'s ``len``) applies the pair to the transform's output
+    (``<column>__year__gte`` + ``<column>__year__lte``), never to the column itself.
     """
 
     @override
@@ -1361,8 +1435,10 @@ class IntegerRangeFilter(BaseRangeFilter, NumberFilter):
         # ``BaseRangeField`` validates length == 2 before we run, and the generated
         # ``list[BigInt!]`` input carries non-null elements, so both bounds are present.
         start, end = bounds
-        lookups = {f"{self.field_name}__gte": start, f"{self.field_name}__lte": end}
-        return _apply_lookups(self, qs, lookups)
+        path = LOOKUP_SEP.join(
+            part for part in (self.field_name, self.lookup_expr.rpartition(LOOKUP_SEP)[0]) if part
+        )
+        return _apply_lookups(self, qs, {f"{path}__gte": start, f"{path}__lte": end})
 
 
 @dataclass(frozen=True)

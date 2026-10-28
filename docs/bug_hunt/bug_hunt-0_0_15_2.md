@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 374 done, 213 to do.
+Progress: 375 done, 216 to do.
 
 ## Done
 
@@ -2109,6 +2109,15 @@ Progress: 374 done, 213 to do.
   `Meta.fields` omit the pk or the pk is not named `id` (`isbn_13`); a NodeID on another column or a consumer
   `resolve_id` keeps the JOIN. spec-015, spec-004 and the `fk-id-elision` glossary term say so. Tests:
   `tests/optimizer/test_walker.py`, `examples/fakeshop/test_query/test_library_api.py`
+- [x] 652. Generated integer `in` / `range` leaves over a transform (`year`, `iso_year`, `month`, `day`, `week`,
+  `week_day`, `iso_week_day`, `quarter`, `hour`, `minute`, `second`, an `ArrayField`'s `len`) bind the transform's own
+  output: `filters/base.py::IntegerInFilter` hands a transform's members to the lookup's own prep instead of coercing
+  them through the column (which dropped every member), and `IntegerRangeFilter` applies its bounds through the
+  transform (`<col>__year__gte`), so `year__in` / `year__range` answer the rows of those years; the value field is
+  upstream's `django_filters.utils.resolve_field` output (`_bound_value_field`, cached). A member or bound past the
+  database's integer range of any integer transform (a project-registered one and `len` included, whatever the column)
+  is the field-keyed `FILTER_INVALID` through the filter ask (`filters/base.py::_reads_integer_transform`). spec-027,
+  README and the `filterset` glossary term say so. Tests: `tests/filters/test_base.py`, `tests/filters/test_sets.py`
 
 ## Outside review of the fixes
 
@@ -2207,11 +2216,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 538. (robustness) A `DateRangeFilter` declared on a `Choices` column builds and types as the column's enum, while
   its own form field accepts only its fixed date-range keys, so every enum member answers `FILTER_INVALID` "Select a
   valid choice"; the same filter on a plain column is refused at schema build. Found verifying 518
-- [ ] 652. Generated `year__in` / `year__range` (and `iso_year`) filter leaves answer wrong rows whatever the value:
-  `IntegerInFilter` coerces each member against the `DateTimeField` / `DateField` column (`filters/base.py::
-  _bound_model_field` returns the column, not the transform's `IntegerField` output), so `year__in="2020"` matches
-  nothing, and `IntegerRangeFilter` applies `__gte` / `__lte` to the column and is refused; resolve the transform's
-  output field (near 387, the same area). Found fact-finding 385
 - [ ] 654. (robustness) `filters/sets.py::_bound_value_lookups` also reads lookups inside a consumer annotation a leaf
   goes through, so an out-of-range consumer constant refuses the user's value; and `utils/querysets.py::binds_integer`
   raises `KeyError` for an `IntegerField` subclass whose `get_internal_type()` the backend's `integer_field_ranges`
@@ -2279,12 +2283,24 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 683. (robustness) `nodes(ids:)` over a type selecting a to-one relation's `id` (`AnnotationType`, `profile { id }`)
   runs one query per row: the node fields dispatch without an optimizer pass, so the relation is never planned.
   Decide planning the node root fields or documenting the cost. Found fixing 606
+- [ ] 684. (robustness) A declared `ListFilter` / `RangeFilter` with a transform in `lookup_expr`
+  (`field_name="occurred_at", lookup_expr="year__in"`) cleans each member through the column's form field
+  (`filters/base.py::_column_form_field` reads `_bound_model_field`), so `"2020"` answers "Enter a valid date/time."
+  (F6 area). Found fact-finding 652
+- [ ] 685. (robustness) A fractional member of a generated integer `in` leaf truncates to a matching integer
+  (`signed_big__in="1.5"` matches 1; `IntegerField.to_python`), where the exact leaf refuses it. Found fact-finding 652
+- [ ] 688. (robustness) A declared `ListFilter(field_name="<col>__year", lookup_expr="in")` refuses an integral
+  decimal member (`"2020.0"`, `"2.02e3"`) with "Enter a value the database can represent." where the generated
+  `year__in` leaf matches the 2020 rows. Found verifying 652
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 689. CHANGELOG entry for item 652: generated `year__in` / `year__range` (and every other integer transform's
+  `in` / `range`) filter leaves answer the rows of the values given instead of no rows or a refusal; a member past the
+  database's integer range of any integer transform is `FILTER_INVALID`
 - [ ] 687. CHANGELOG entry for items 650 and 653: a write of an aware datetime a `DateField` cannot store, or of a
   duration past 64 bits of microseconds on SQLite / MySQL, is the field-keyed "Enter a value the database can
   represent." instead of a masked error; the release ships Django's license text (`LICENSE.django`)

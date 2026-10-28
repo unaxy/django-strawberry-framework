@@ -61,8 +61,9 @@ from django.db import models as django_models
 from django.db.backends.base.base import BaseDatabaseWrapper
 from django.db.backends.base.operations import BaseDatabaseOperations
 from django.db.backends.sqlite3.operations import DatabaseOperations as SQLiteOperations
-from django.db.models import F, Lookup, Q, QuerySet
+from django.db.models import F, Lookup, Q, QuerySet, Transform
 from django.db.models.fields.related import ManyToManyRel, ManyToOneRel, OneToOneRel
+from django.db.models.functions import Length
 from django.forms import ModelChoiceField, ModelMultipleChoiceField
 from django.http import HttpRequest, QueryDict
 from django.test import override_settings
@@ -8735,7 +8736,8 @@ def _temporal_filter_class() -> type[FilterSet]:
     ``time`` / ``year`` transform or a ``month`` one, a ``DateFilter`` on the datetime
     column, a ``DateTimeFilter`` over its ``date`` transform and a ``DateTimeFilter`` on
     the time column), the package's ``ListFilter`` /
-    ``RangeFilter``, opted-in ``Meta.fields`` year leaves, a filter with its own
+    ``RangeFilter``, opted-in ``Meta.fields`` year leaves (``year`` / ``iso_year`` ``in``
+    and ``range`` among them, on the datetime and the date column), a filter with its own
     ``method``, ones over a datetime and a time annotation the queryset adds (the
     datetime one through ``year`` too), one over an annotation whose output field
     Django cannot resolve, and one over ``pk``, which Django reads as the primary key.
@@ -8778,8 +8780,19 @@ def _temporal_filter_class() -> type[FilterSet]:
                     "year__gt",
                     "year__lt",
                     "iso_year",
+                    "year__in",
+                    "year__range",
+                    "iso_year__in",
+                    "iso_year__range",
                 ],
-                "occurred_on": ["year", "iso_year__lte", "year__in"],
+                "occurred_on": [
+                    "year",
+                    "iso_year__lte",
+                    "year__in",
+                    "year__range",
+                    "iso_year__in",
+                    "iso_year__range",
+                ],
             }
 
         def own_filter(
@@ -8866,6 +8879,30 @@ _UNBINDABLE_FORM_DATA = [
     pytest.param({"occurred_at__iso_year": 9999}, "occurred_at__iso_year", False, id="iso-9999"),
     pytest.param({"occurred_on__year": 10000}, "occurred_on__year", False, id="date-year"),
     pytest.param(
+        {"occurred_at__year__in": f"2020,{2**63}"},
+        "occurred_at__year__in",
+        False,
+        id="generated-year-in-member-past-int64",
+    ),
+    pytest.param(
+        {"occurred_on__iso_year__in": str(2**63)},
+        "occurred_on__iso_year__in",
+        False,
+        id="generated-date-iso-year-in-member-past-int64",
+    ),
+    pytest.param(
+        {"occurred_at__year__range": f"2020,{2**63}"},
+        "occurred_at__year__range",
+        False,
+        id="generated-year-range-bound-past-int64",
+    ),
+    pytest.param(
+        {"occurred_on__iso_year__range": "2020,10000"},
+        "occurred_on__iso_year__range",
+        False,
+        id="generated-date-iso-year-range-bound-10000",
+    ),
+    pytest.param(
         {"occurred_on__iso_year__lte": 9999},
         "occurred_on__iso_year__lte",
         False,
@@ -8888,7 +8925,9 @@ def test_temporal_value_the_database_cannot_bind_is_refused_for_every_filter_fam
     ``field_name``, a ``ListFilter`` element, a ``RangeFilter`` bound, and opted-in
     ``year`` / ``iso_year`` leaves on a datetime and a date column (a year outside
     1..9999, ``iso_year`` 9999 whose last day falls in year 10000, a number past what a
-    date can hold, a value that is not a number). PostgreSQL binds those aware datetimes
+    date can hold, a value that is not a number, a generated ``in`` member past 64 bits,
+    as a declared ``in`` over the transform refuses it, and a generated ``range`` bound
+    outside the years). PostgreSQL binds those aware datetimes
     and times, whose UTC offsets it accepts, so they pass there; the year bounds fail on
     every backend. Package-only: no fakeshop filterset declares these filters or opts
     into a year leaf.
@@ -8949,6 +8988,239 @@ def test_temporal_value_the_database_binds_passes(data: dict[str, object]) -> No
     filterset = specimen_filter(data=data, queryset=_specimens_stamped())
 
     specimen_filter._validate_form_or_raise(filterset)
+
+
+def _specimens_in_years() -> dict[str, scalar_models.ScalarSpecimen]:
+    """Four specimens by label, each dated on its date and datetime column alike.
+
+    ``new-year-2021`` falls on 2021-01-01, a Friday in ISO week 53 of 2020, so its
+    ``iso_year`` is 2020 where its ``year`` is 2021.
+    """
+    days = {
+        "mid-2019": datetime.date(2019, 6, 15),
+        "mid-2020": datetime.date(2020, 6, 15),
+        "new-year-2021": datetime.date(2021, 1, 1),
+        "mid-2022": datetime.date(2022, 6, 15),
+    }
+    return {
+        label: scalar_models.ScalarSpecimen.objects.create(
+            label=label,
+            occurred_on=day,
+            occurred_at=datetime.datetime.combine(
+                day,
+                datetime.time(12),
+                tzinfo=datetime.timezone.utc,
+            ),
+            occurred_time=datetime.time(12),
+            external_id=uuid.uuid4(),
+        )
+        for label, day in days.items()
+    }
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("data", "labels"),
+    [
+        pytest.param(
+            {"occurred_at__year__in": "2020,2022"},
+            ["mid-2020", "mid-2022"],
+            id="datetime-year-in",
+        ),
+        pytest.param(
+            {"occurred_at__year__range": "2020,2021"},
+            ["mid-2020", "new-year-2021"],
+            id="datetime-year-range",
+        ),
+        pytest.param(
+            {"occurred_at__iso_year__in": "2020"},
+            ["mid-2020", "new-year-2021"],
+            id="datetime-iso-year-in",
+        ),
+        pytest.param(
+            {"occurred_at__iso_year__range": "2021,2022"},
+            ["mid-2022"],
+            id="datetime-iso-year-range",
+        ),
+        pytest.param({"occurred_on__year__in": "2021"}, ["new-year-2021"], id="date-year-in"),
+        pytest.param(
+            {"occurred_on__year__range": "2019,2020"},
+            ["mid-2019", "mid-2020"],
+            id="date-year-range",
+        ),
+        pytest.param(
+            {"occurred_on__iso_year__in": "2020"},
+            ["mid-2020", "new-year-2021"],
+            id="date-iso-year-in",
+        ),
+        pytest.param(
+            {"occurred_on__iso_year__range": "2020,2020"},
+            ["mid-2020", "new-year-2021"],
+            id="date-iso-year-range",
+        ),
+        pytest.param({"occurred_at__year__in": "0,10000"}, [], id="years-no-row-holds"),
+    ],
+)
+def test_generated_year_leaves_match_the_rows_of_their_years(
+    data: dict[str, object],
+    labels: list[str],
+) -> None:
+    """A generated ``year`` / ``iso_year`` ``in`` or ``range`` matches the rows of its years.
+
+    Each member and bound is a year, compared with the transform's output on the datetime
+    and the date column alike, never coerced or compared as a value of the column. A year
+    no row holds (0, 10000) matches nothing and is not refused: an ``in`` binds integers,
+    which the database holds. Package-only: no fakeshop filterset opts into a year leaf,
+    and the generated input types these leaves as the column's scalar.
+    """
+    _specimens_in_years()
+    specimen_filter = _temporal_filter_class()
+    filterset = specimen_filter(data=data, queryset=scalar_models.ScalarSpecimen.objects.all())
+
+    specimen_filter._validate_form_or_raise(filterset)
+    assert sorted(filterset.qs.values_list("label", flat=True)) == labels
+
+
+class _PlusOne(Transform):
+    """A project transform over an integer column whose output is an integer no column stores."""
+
+    lookup_name = "plus_one"
+    template = "(%(expressions)s + 1)"
+
+    def __init__(self, expression: object) -> None:
+        """Wrap ``expression`` with an output Django stores as a 64-bit integer."""
+        super().__init__(expression, output_field=dj_models.BigIntegerField[int, int]())
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("members", "labels"),
+    [
+        pytest.param(str(2**70), None, id="member-past-int64-refused"),
+        pytest.param(f"8,{2**70}", None, id="mixed-list-refused"),
+        pytest.param("8,3", ["mid-2020", "new-year-2021"], id="in-range-matches"),
+    ],
+)
+def test_project_integer_transform_member_is_asked(members: str, labels: list[str] | None) -> None:
+    """A generated ``in`` through a project's integer transform holds each member to its range.
+
+    The transform (``Field.register_lookup``) compares an integer no column stores, so a
+    member is never coerced through the integer column: one past the range the database
+    stores for the transform's output is ``FILTER_INVALID``, as a ``year`` member is, and
+    never reaches the driver, while members inside it match the rows they name.
+    """
+    specimens = _specimens_in_years()
+    scalar_models.ScalarSpecimen.objects.filter(
+        pk__in=[specimens["mid-2020"].pk, specimens["new-year-2021"].pk],
+    ).update(signed_big=7)
+    with register_lookup(dj_models.BigIntegerField, _PlusOne):
+
+        class PlusOneFilter(FilterSet):
+            class Meta:
+                model = scalar_models.ScalarSpecimen
+                fields = {"signed_big": ["plus_one__in"]}
+
+        filterset = PlusOneFilter(
+            data={"signed_big__plus_one__in": members},
+            queryset=scalar_models.ScalarSpecimen.objects.all(),
+        )
+        if labels is None:
+            with pytest.raises(GraphQLError) as excinfo:
+                PlusOneFilter._validate_form_or_raise(filterset)
+            assert excinfo.value.extensions == {
+                "code": "FILTER_INVALID",
+                "errors": {"signed_big__plus_one__in": _UNBINDABLE},
+            }
+            return
+        PlusOneFilter._validate_form_or_raise(filterset)
+        assert sorted(filterset.qs.values_list("label", flat=True)) == labels
+
+
+class _ElementCount(Length):
+    """An array's element count under the ``len`` name a real ``ArrayField`` registers."""
+
+    lookup_name = "len"
+
+
+class _CountedArrayField(FakeArrayField):
+    """A ``FakeArrayField`` carrying the ``len`` transform a real ``ArrayField`` registers."""
+
+
+_CountedArrayField.register_lookup(_ElementCount)
+
+
+class _TaggedShelf(django_models.Model):
+    """A table with an array of text whose ``len`` an integer filter compares.
+
+    Query-build only (``managed = False``): the bind ask compiles, never runs, its clause.
+    """
+
+    tags = _CountedArrayField(django_models.TextField())
+
+    class Meta:
+        managed = False
+        app_label = "test_array_len_bind_ask"
+
+
+@pytest.mark.parametrize(
+    ("member", "refused"),
+    [pytest.param(str(2**70), True, id="past-int64"), pytest.param("3", False, id="in-range")],
+)
+def test_array_len_member_is_asked_whatever_its_elements(
+    member: str,
+    refused: bool,  # noqa: FBT001
+) -> None:
+    """A generated ``len__in`` over an array of text holds each member to its range.
+
+    The array's elements are not temporal, so only the ``len`` transform's integer output
+    brings the leaf to the bind ask: a member past it is ``FILTER_INVALID``, and one inside
+    it passes.
+    """
+
+    class TaggedShelfFilter(FilterSet):
+        class Meta:
+            model = _TaggedShelf
+            fields = {"tags": ["len__in"]}
+
+    filterset = TaggedShelfFilter(
+        data={"tags__len__in": member},
+        queryset=_TaggedShelf.objects.all(),
+    )
+    if not refused:
+        TaggedShelfFilter._validate_form_or_raise(filterset)
+        return
+    with pytest.raises(GraphQLError) as excinfo:
+        TaggedShelfFilter._validate_form_or_raise(filterset)
+    assert excinfo.value.extensions == {
+        "code": "FILTER_INVALID",
+        "errors": {"tags__len__in": _UNBINDABLE},
+    }
+
+
+@pytest.mark.django_db
+def test_lookup_continuing_its_path_across_a_relation_is_not_read_as_a_transform() -> None:
+    """A declared ``lookup_expr`` walking on past its relation is no transform of the column.
+
+    ``field_name="branch", lookup_expr="name__iexact"`` names the related row's ``name``,
+    which django-filter's transform walk cannot read off the foreign key: the leaf is not
+    an integer transform's, so the bind ask passes it and Django applies the path whole.
+    """
+    _seed_two_shelved_branches()
+
+    class ShelfByBranchName(FilterSet):
+        branch_named = django_filters.CharFilter(field_name="branch", lookup_expr="name__iexact")
+
+        class Meta:
+            model = library_models.Shelf
+            fields = []
+
+    filterset = ShelfByBranchName(
+        data={"branch_named": "b1"},
+        queryset=library_models.Shelf.objects.all(),
+    )
+
+    ShelfByBranchName._validate_form_or_raise(filterset)
+    assert list(filterset.qs.values_list("code", flat=True)) == ["S1"]
 
 
 @pytest.mark.django_db
