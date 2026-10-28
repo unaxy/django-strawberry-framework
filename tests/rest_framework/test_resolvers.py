@@ -98,6 +98,7 @@ from django.test import override_settings
 from django.utils.functional import SimpleLazyObject
 from rest_framework import serializers
 from rest_framework.exceptions import ErrorDetail
+from rest_framework.settings import api_settings
 from rest_framework.validators import UniqueTogetherValidator, UniqueValidator
 from strawberry import relay
 from strawberry.types.base import StrawberryContainer, get_object_definition
@@ -382,7 +383,7 @@ def test_flattener_nested_dict_error_joins_its_path() -> None:
 
 def test_flattener_nested_non_field_error_normalizes_to_path_all() -> None:
     """A nested `non_field_errors` bucket normalizes to `<path>.__all__`, no leaf dropped."""
-    drf_key = serializer_resolvers._DRF_NON_FIELD_KEY
+    drf_key = api_settings.NON_FIELD_ERRORS_KEY
     errors = {"items": [{drf_key: ["cross-field at index 0"]}]}
     flat = serializer_resolvers.serializer_errors_to_field_errors(errors, {})
     # `items.0` + the non-field bucket -> the parent path's `"__all__"` at that level.
@@ -393,7 +394,7 @@ def test_flattener_nested_non_field_error_normalizes_to_path_all() -> None:
 
 def test_flattener_top_level_non_field_bucket_is_all_sentinel() -> None:
     """A top-level `non_field_errors` bucket normalizes to the bare `"__all__"` sentinel."""
-    drf_key = serializer_resolvers._DRF_NON_FIELD_KEY
+    drf_key = api_settings.NON_FIELD_ERRORS_KEY
     errors = {drf_key: ["model-wide error"]}
     flat = serializer_resolvers.serializer_errors_to_field_errors(errors, {})
     assert [(fe.field, fe.messages) for fe in flat] == [
@@ -459,7 +460,7 @@ def test_flattener_nested_non_field_bucket_keeps_all_sentinel_with_recursive_map
         ),
     ]
     key_map = build_error_key_map(top_specs)
-    drf_key = serializer_resolvers._DRF_NON_FIELD_KEY
+    drf_key = api_settings.NON_FIELD_ERRORS_KEY
     errors = {"shelves": [{drf_key: ["cross-field"]}]}
     (fe,) = serializer_resolvers.serializer_errors_to_field_errors(errors, key_map)
     assert fe.field == f"shelves.0.{NON_FIELD_ERROR_KEY}"
@@ -2132,7 +2133,7 @@ def test_flattener_preserves_error_detail_codes_and_path() -> None:
 
 def test_flattener_root_non_field_error_has_empty_path() -> None:
     """A ROOT non-field error is ``field="__all__"`` with an EMPTY ``path`` (the documented rule, #13)."""
-    drf_key = serializer_resolvers._DRF_NON_FIELD_KEY
+    drf_key = api_settings.NON_FIELD_ERRORS_KEY
     errors = {drf_key: [ErrorDetail("Model-wide problem.", code="invalid")]}
     (fe,) = serializer_resolvers.serializer_errors_to_field_errors(errors, {})
     assert fe.field == NON_FIELD_ERROR_KEY
@@ -2142,7 +2143,7 @@ def test_flattener_root_non_field_error_has_empty_path() -> None:
 
 def test_flattener_nested_non_field_error_keeps_all_sentinel_segment() -> None:
     """A NESTED non-field error keeps the ``"__all__"`` sentinel as its final path segment."""
-    drf_key = serializer_resolvers._DRF_NON_FIELD_KEY
+    drf_key = api_settings.NON_FIELD_ERRORS_KEY
     errors = {"items": [{drf_key: [ErrorDetail("Cross-field.", code="invalid")]}]}
     (fe,) = serializer_resolvers.serializer_errors_to_field_errors(errors, {})
     assert fe.path == ["items", "0", NON_FIELD_ERROR_KEY]
