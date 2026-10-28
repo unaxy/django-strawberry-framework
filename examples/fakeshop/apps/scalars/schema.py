@@ -32,10 +32,14 @@ pairs write ``occurred_at`` through ``forms.ScalarSpecimenSplitStampForm``'s
 ``SplitDateTimeField``, whose widget reads a date key and a time key: unprefixed, under the
 form's own prefix (``PrefixedSplitForm``), and from a copy a ``get_form`` keys under that
 prefix itself (``RekeyedSplitForm``).
+
+``all_scalar_specimens_by_parent_stamp`` lists specimens over a queryset holding a
+``FilteredRelation("parent")`` alias named ``par``, filtered by
+``filters.ScalarSpecimenParentStampFilter``, whose ``parentDayOf`` path crosses that alias.
 """
 
 import strawberry
-from django.db.models import Manager, Model, QuerySet
+from django.db.models import FilteredRelation, Manager, Model, QuerySet
 from django.forms import ModelForm
 from strawberry.types import Info
 from typing_extensions import override
@@ -112,6 +116,25 @@ class ScalarSpecimenType(DjangoType):
         )
         filterset_class = filters.ScalarSpecimenFilter
         orderset_class = orders.ScalarSpecimenOrder
+        # Explicit now that a second type wraps the same model: a relation to
+        # ``ScalarSpecimen`` resolves here, not to the parent-stamp sibling.
+        primary = True
+
+
+class ScalarSpecimenParentStampType(DjangoType):
+    """``ScalarSpecimen`` filtered through a ``FilteredRelation`` alias.
+
+    ``primary = False``: ``ScalarSpecimenType`` stays the type a relation to
+    ``ScalarSpecimen`` resolves to, and this one is reachable only through
+    ``allScalarSpecimensByParentStamp``, whose queryset holds the ``par`` alias
+    ``filters.ScalarSpecimenParentStampFilter`` crosses.
+    """
+
+    class Meta:
+        model = models.ScalarSpecimen
+        fields = ("id", "label")
+        filterset_class = filters.ScalarSpecimenParentStampFilter
+        primary = False
 
 
 class NullableScalarSpecimenType(DjangoType):
@@ -302,6 +325,27 @@ class Query:
     all_scalar_specimens: QuerySet[models.ScalarSpecimen] = strawberry.field(
         resolver=_all_scalar_specimens,
         graphql_type=list[ScalarSpecimenType],
+    )
+
+    def _all_scalar_specimens_by_parent_stamp(
+        self,
+        info: Info,
+        filter: FilterInput[filters.ScalarSpecimenParentStampFilter] | None = None,  # noqa: A002
+    ) -> QuerySet[models.ScalarSpecimen]:
+        """Root field listing scalar specimens over a queryset aliasing ``parent`` as ``par``.
+
+        The ``FilteredRelation`` alias exists only on this queryset, so the filter's
+        ``par__occurred_at`` path resolves only against the queryset it runs on.
+        """
+        queryset = models.ScalarSpecimen.objects.alias(par=FilteredRelation("parent"))
+        queryset = queryset.order_by("id")
+        if filter is not None:
+            queryset = filters.ScalarSpecimenParentStampFilter.apply_sync(filter, queryset, info)
+        return queryset
+
+    all_scalar_specimens_by_parent_stamp: QuerySet[models.ScalarSpecimen] = strawberry.field(
+        resolver=_all_scalar_specimens_by_parent_stamp,
+        graphql_type=list[ScalarSpecimenParentStampType],
     )
 
     def _all_scalar_specimens_via_manager(self) -> Manager[models.ScalarSpecimen]:

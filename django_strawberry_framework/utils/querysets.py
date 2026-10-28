@@ -495,6 +495,32 @@ def _names_to_path(
     return query.names_to_path(names, opts, allow_many=True, fail_on_missing=False)
 
 
+def lookup_target_fields(query: sql.Query, lookup: str) -> tuple[object, ...]:
+    """Return the fields a filter on ``lookup`` holds its value to, over ``query``; ``()`` for none.
+
+    Resolved the way ``django/db/models/sql/query.py::Query.build_filter`` resolves a
+    filter argument: ``Query.solve_lookup_type`` splits ``lookup`` into the field path
+    and the transforms and lookup left over, reading a name ``query`` annotates or
+    aliases (``Query.annotations``) as that expression, and the field path is then
+    walked by ``Query.names_to_path``, the walk ``Query.setup_joins`` runs, which reads
+    ``pk`` as the primary key, a ``FilteredRelation`` alias ``query`` holds as its
+    relation and a field on a concrete parent through the parent hop. The fields are
+    the walk's targets: the column a path ending on a field names (``occurred_at`` for
+    ``occurred_at__year``), or the fields of the model the last hop of a path ending on
+    a relation reaches that the join compares. An annotation's is its
+    ``output_field``. ``()`` where Django refuses the path (``FieldError``: a name
+    naming nothing, a generic foreign key hop, an expression whose output field Django
+    cannot resolve).
+    """
+    try:
+        _lookups, field_parts, expression = query.solve_lookup_type(lookup)
+        if expression is not False:
+            return (read_attr(expression, "output_field"),)
+        return _names_to_path(query, field_parts, query.get_meta())[2]
+    except FieldError:
+        return ()
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class ResolvedOrderName:
     """An order name as ``Query.setup_joins`` resolves it (``resolve_order_name``).

@@ -79,6 +79,13 @@ binding it.
 ``year`` transform (``occurredYearAmong: { in: [...] }``, ``occurredYearSpan: { range: {
 start, end } }``): the acceptance surface for an integer the transform binds as sent, held to
 the range the database stores for the transform's ``IntegerField`` output.
+
+``ScalarSpecimenParentStampFilter`` filters through a ``FilteredRelation`` alias rather than
+a field: ``parent_day_of`` is a declared ``DateTimeFilter`` whose ``field_name``
+(``par__occurred_at``) crosses ``par``, the ``FilteredRelation("parent")`` alias the
+``allScalarSpecimensByParentStamp`` resolver adds to its queryset, into the parent's
+``occurred_at`` column's ``date`` transform. It is the acceptance surface for a path only
+the queryset the filter runs on resolves.
 """
 
 from __future__ import annotations
@@ -234,6 +241,19 @@ class NullableScalarSpecimenFilter(FilterSet):
         }
 
 
+class ScalarSpecimenParentStampFilter(FilterSet):
+    """Filters scalar specimens by the day their parent occurred, through a ``FilteredRelation``."""
+
+    parent_day_of = django_filters.DateTimeFilter(
+        field_name="par__occurred_at",
+        lookup_expr="date",
+    )
+
+    class Meta:
+        model = models.ScalarSpecimen
+        fields = {"label": ["exact"]}
+
+
 __all__ = (
     "FieldBoxRangeFilter",
     "FieldBoxRangeWidget",
@@ -241,6 +261,7 @@ __all__ = (
     "FieldBoxWidgetMixin",
     "NullableScalarSpecimenFilter",
     "ScalarSpecimenFilter",
+    "ScalarSpecimenParentStampFilter",
     "ScalarSpecimenTagFilter",
     "UnderscoredRangeWidget",
 )

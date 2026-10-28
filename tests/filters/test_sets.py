@@ -8382,8 +8382,7 @@ def _temporal_filter_class() -> type[FilterSet]:
     ``RangeFilter``, opted-in ``Meta.fields`` year leaves, a filter with its own
     ``method``, ones over a datetime and a time annotation the queryset adds (the
     datetime one through ``year`` too), one over an annotation whose output field
-    Django cannot resolve, and one over ``pk``, a name that is neither a model field nor
-    an annotation.
+    Django cannot resolve, and one over ``pk``, which Django reads as the primary key.
     """
 
     class SpecimenFilter(FilterSet):
@@ -8577,7 +8576,7 @@ def test_temporal_value_the_database_cannot_bind_is_refused_for_every_filter_fam
         pytest.param({"stamped_year_after": 2020}, id="annotation-year"),
         pytest.param({"clocked": datetime.time(9, 30)}, id="time-annotation"),
         pytest.param({"mixed_below": 5}, id="annotation-without-output-field"),
-        pytest.param({"by_pk": 5}, id="neither-field-nor-annotation"),
+        pytest.param({"by_pk": 5}, id="integer-primary-key"),
     ],
 )
 def test_temporal_value_the_database_binds_passes(data: dict[str, object]) -> None:
@@ -8587,8 +8586,8 @@ def test_temporal_value_the_database_binds_passes(data: dict[str, object]) -> No
     the other type's adapter (the field converts them before binding); a transform the
     rule does not know (``month``) binds an integer; a year ``in`` compares integers,
     binding no computed bound; a filter with its own ``method`` owns what its value
-    means; an annotation whose output field Django cannot resolve, or a name that is
-    neither a model field nor an annotation, has no column to ask.
+    means; an annotation whose output field Django cannot resolve has no column to ask,
+    and ``pk`` reads the integer primary key, which is no temporal column.
     """
     specimen_filter = _temporal_filter_class()
     filterset = specimen_filter(data=data, queryset=_specimens_stamped())
@@ -9938,6 +9937,66 @@ def test_duration_the_database_cannot_bind_is_refused(
     assert excinfo.value.extensions == {
         "code": "FILTER_INVALID",
         "errors": {form_key: _UNBINDABLE},
+    }
+
+
+class _StampKeyedSpecimen(django_models.Model):
+    """A table keyed by an aware ``DateTimeField``, which a filter reaches through ``pk``.
+
+    Query-build only (``managed = False``): the rule compiles the filter's predicate and
+    never runs it.
+    """
+
+    stamp: django_models.DateTimeField[
+        str | datetime.datetime | datetime.date | Combinable,
+        datetime.datetime,
+    ] = django_models.DateTimeField(primary_key=True)
+
+    class Meta:
+        managed = False
+        app_label = "library"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("value", "refused"),
+    [
+        pytest.param(_BEFORE_YEAR_ONE, True, id="date-in-year-0"),
+        pytest.param(_BINDABLE_DATETIME, False, id="date-in-range"),
+    ],
+)
+def test_temporal_primary_key_reached_through_pk_is_asked(
+    value: datetime.datetime,
+    refused: bool,  # noqa: FBT001
+) -> None:
+    """A filter over ``pk`` is held to the primary key column Django reads ``pk`` as.
+
+    ``pk`` names no model field; Django resolves it to the primary key, here a
+    ``DateTimeField``, so a datetime through its ``date`` transform whose date falls in
+    year 0 is refused keyed to its form field on every backend, never the conversion's
+    ``OverflowError``, and one whose date binds passes. Package-only: no fakeshop model
+    has a temporal primary key.
+    """
+
+    class StampKeyedFilter(FilterSet):
+        day_of_key = django_filters.DateTimeFilter(field_name="pk", lookup_expr="date")
+
+        class Meta:
+            model = _StampKeyedSpecimen
+            fields = ()
+
+    filterset = StampKeyedFilter(
+        data={"day_of_key": value},
+        queryset=_StampKeyedSpecimen.objects.all(),
+    )
+    if not refused:
+        StampKeyedFilter._validate_form_or_raise(filterset)
+        return
+    with pytest.raises(GraphQLError) as excinfo:
+        StampKeyedFilter._validate_form_or_raise(filterset)
+    assert excinfo.value.extensions == {
+        "code": "FILTER_INVALID",
+        "errors": {"day_of_key": _UNBINDABLE},
     }
 
 

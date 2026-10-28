@@ -86,26 +86,24 @@ it lands with its tick.
   - Follow-up: item 35. Strawberry hardcodes `edges`/`pageInfo` when deciding whether to resolve edges.
   - The tracked `examples/fakeshop/db.sqlite3` is not migrated to `library/0019`.
 
-- [ ] 3. (FLT-1, the remainder of F1) `_leaf_column` hand-walks the filter path and misses `FilteredRelation` aliases
+- [x] 3. (FLT-1, the remainder of F1) `_leaf_column` hand-walks the filter path and misses `FilteredRelation` aliases
   and `pk`
-  - Our code: `filters/sets.py::_leaf_column`, about 30 lines. It decides whether `_unbindable_temporal_errors` asks the
-    leaf at all. It is the sixth `_meta.get_field` path walker beside O2's five.
-  - Upstream: `django/db/models/sql/query.py::Query.solve_lookup_type` (annotations via `refs_expression`) and
-    `Query.names_to_path(names, opts, fail_on_missing=False)`.
-    - `names_to_path` handles the `pk` alias, `_filtered_relations` and MTI hops.
-    - Both are private but unchanged in shape from 5.2 to 6.1.
-  - Lines: ~20 net.
-  - Status: CONFIRMED.
-    - Probe 1 covered all 6,801 fakeshop filters and found 85 diffs: 84 on a `pk` segment (ours None) and 1 from the
-      probe's adapter.
-    - Probe 2 used a FilterSet over `.alias(par=FilteredRelation("parent"))`:
-      - `par__occurred_at=0001-01-01T00:30:00+05:00` raised `OverflowError`;
-      - `parent__occurred_at` with the same value gave the coded `invalid` error.
-  - Reason to keep ours: none.
-  - Behaviour change: fixes the case where a consumer `get_queryset` adds a `FilteredRelation` alias plus a filter
-    whose `field_name` crosses it. Any temporal value Django cannot bind then escapes as `OverflowError` instead of the
-    coded error. The same applies to a temporal primary key reached through `pk`.
-  - Risk / blockers: private `Query` API. It raises `FieldError`, including for a GFK hop, and that must map to None.
+  - Our code (deleted): `filters/sets.py`'s `_leaf_column`.
+  - Upstream: `Query.solve_lookup_type` then `Query.names_to_path` (through the existing
+    `utils/querysets.py::_names_to_path` wrapper), the order `Query.build_filter` resolves a filter argument in.
+  - Landed: `utils/querysets.py::lookup_target_fields(query, lookup)` returns the walk's targets, or an annotation's
+    `output_field`, over the queryset the filter runs on. `FieldError` gives `()`.
+    `filters/sets.py::_unbindable_temporal_errors` asks Django when any target is temporal. A path that ends on a
+    relation is now checked against the target's key field too.
+  - Status: CONFIRMED. On the old code the live row let `OverflowError: date value out of range` escape, and the
+    package `pk` row did not raise.
+  - Behaviour change: fixes the case where a temporal value Django cannot bind, sent through a `FilteredRelation`
+    alias or a temporal primary key reached by `pk`, escaped as `OverflowError` instead of `FILTER_INVALID`.
+  - Tests:
+    - Live: `test_scalars_filter_api.py::test_datetime_crossing_a_filtered_relation_alias_outside_years_one_to_9999_is_filter_invalid`,
+      over the new root field `allScalarSpecimensByParentStamp` (`ScalarSpecimenParentStampFilter`).
+    - Package: `tests/filters/test_sets.py::test_temporal_primary_key_reached_through_pk_is_asked`. No fakeshop model
+      has a temporal pk.
 
 - [ ] 4. (TYP-1, was S5, plus `mutations/inputs.py::_predicted_input_field_name`) The collision guards use
   `to_camel_case`, not the schema's `NameConverter`
