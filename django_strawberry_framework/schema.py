@@ -77,6 +77,7 @@ from graphql import GraphQLError, located_error, parse
 from graphql.execution.execute import ExecutionContext
 from strawberry.exceptions import DuplicatedTypeName
 from strawberry.extensions.base_extension import SchemaExtension
+from strawberry.schema.schema_converter import GraphQLCoreConverter
 from strawberry.types.graphql import OperationType
 from typing_extensions import override
 
@@ -246,7 +247,7 @@ class DjangoMutationExecutionContext(ExecutionContext):
         mutation root; ``execute_field`` also fires for every nested payload
         field, whose completion the already-open transaction covers). The marker
         is read through Strawberry's field extension
-        (``extensions["strawberry-definition"].base_resolver.wrapped_func``) -
+        (``extensions[GraphQLCoreConverter.DEFINITION_BACKREF].base_resolver.wrapped_func``) -
         the synthesized ``_resolve`` the ``DjangoMutationField`` factory stamped
         with its mutation class.
         """
@@ -271,7 +272,9 @@ class DjangoMutationExecutionContext(ExecutionContext):
             return None
         extensions: object = getattr(field_def, "extensions", None)
         strawberry_field = (
-            mapping_get(extensions, "strawberry-definition") if is_mapping(extensions) else None
+            mapping_get(extensions, GraphQLCoreConverter.DEFINITION_BACKREF)
+            if is_mapping(extensions)
+            else None
         )
         base_resolver = getattr(strawberry_field, "base_resolver", None)
         wrapped = getattr(base_resolver, "wrapped_func", None)

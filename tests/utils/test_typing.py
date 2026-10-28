@@ -38,10 +38,10 @@ from django_strawberry_framework.utils.typing import (
     MAX_TYPE_WRAPPER_DEPTH,
     _callable_inspection_target,
     inline_fragment_type_condition,
-    input_field_python_name,
     is_async_callable,
     is_marked_coroutine_function,
     published_argument,
+    published_python_name,
     schema_config_from_info,
     strawberry_schema_from_info,
     strawberry_schema_from_schema,
@@ -63,12 +63,12 @@ def test_typing_exports_all() -> None:
         "graphql_input_fields",
         "graphql_type_of",
         "inline_fragment_type_condition",
-        "input_field_python_name",
         "is_async_callable",
         "is_graphql_list",
         "is_marked_coroutine_function",
         "object_result",
         "published_argument",
+        "published_python_name",
         "return_type_of",
         "schema_config_from_info",
         "strawberry_schema_from_info",
@@ -643,17 +643,17 @@ def test_published_argument_reads_the_executable_schemas_argument_map() -> None:
     )
 
 
-def test_input_field_python_name_reads_the_definition_backref() -> None:
+def test_published_python_name_reads_the_definition_backref() -> None:
     """An input field's attr comes from the ``StrawberryField`` filed on it, else ``None``."""
     assert isinstance(GraphQLInt, GraphQLScalarType)
     named = GraphQLInputField(
         GraphQLInt,
         extensions={"strawberry-definition": SimpleNamespace(python_name="isbn_10")},
     )
-    assert input_field_python_name(named) == "isbn_10"
-    assert input_field_python_name(GraphQLInputField(GraphQLInt)) is None
+    assert published_python_name(named) == "isbn_10"
+    assert published_python_name(GraphQLInputField(GraphQLInt)) is None
     not_text = GraphQLInputField(
         GraphQLInt,
         extensions={"strawberry-definition": SimpleNamespace(python_name=10)},
     )
-    assert input_field_python_name(not_text) is None
+    assert published_python_name(not_text) is None

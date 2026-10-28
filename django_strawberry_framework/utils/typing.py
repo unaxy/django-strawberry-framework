@@ -25,8 +25,8 @@ the same dig from plan-time graphql-core ``info`` and resolve-time Strawberry
 ``Info``, so the private attribute name lives in exactly one place.
 
 And to the published-name readers (``published_argument`` /
-``input_field_python_name``): a request-time reader learns the name the
-executing schema published for an argument or an input field from the
+``published_python_name``): a request-time reader learns the name the
+executing schema published for a field, an argument or an input field from the
 graphql-core maps Strawberry built, keyed by the published name and
 back-referenced to the Strawberry definition, never by running the schema's
 ``NameConverter`` again.
@@ -134,12 +134,12 @@ __all__ = (
     "graphql_input_fields",
     "graphql_type_of",
     "inline_fragment_type_condition",
-    "input_field_python_name",
     "is_async_callable",
     "is_graphql_list",
     "is_marked_coroutine_function",
     "object_result",
     "published_argument",
+    "published_python_name",
     "return_type_of",
     "schema_config_from_info",
     "strawberry_schema_from_info",
@@ -251,7 +251,7 @@ def published_argument(
     converter's answer and ``from_argument`` stores the ``StrawberryArgument``
     under ``DEFINITION_BACKREF`` in each entry's ``extensions`` (an input object's
     ``fields`` map is keyed and back-referenced the same way, which
-    ``input_field_python_name`` reads). That map is the only name a client could
+    ``published_python_name`` reads). That map is the only name a client could
     have sent, so a request-time reader reads it back instead of running the
     schema's shared ``NameConverter`` a second time - a converter is consumer
     code, may be stateful, and is not the framework's to invoke concurrently.
@@ -286,20 +286,24 @@ def published_argument(
     )
 
 
-def input_field_python_name(field: "GraphQLInputField") -> str | None:
-    """Return the Python attr a published input field was built from, or ``None``.
+def published_python_name(
+    owner: "GraphQLField | GraphQLArgument | GraphQLInputField",
+) -> str | None:
+    """Return the Python name a published field, argument or input field was built from.
 
-    ``GraphQLCoreConverter.from_input_field`` files the ``StrawberryField`` under
-    ``DEFINITION_BACKREF``, so the attr survives whatever wire name the schema's
-    converter gave the field: the one key a request-time reader shares with the
-    decode, which walks the input dataclass by attr. ``None`` for an input field
-    Strawberry did not convert.
+    ``GraphQLCoreConverter.from_field`` / ``from_argument`` / ``from_input_field``
+    file the ``StrawberryField`` / ``StrawberryArgument`` under
+    ``DEFINITION_BACKREF``, so the Python name survives whatever wire name the
+    schema's converter gave it: the one key a request-time reader shares with
+    the declaration (a write decode walks the input dataclass by attr; Relay
+    declares ``edges`` / ``first`` by Python name). ``None`` for an entry
+    Strawberry did not convert, such as graphql-core's introspection meta-fields.
     """
-    python_name = read_attr(_definition_backref(field), "python_name", None)
+    python_name = read_attr(_definition_backref(owner), "python_name", None)
     return python_name if isinstance(python_name, str) else None
 
 
-def _definition_backref(owner: "GraphQLArgument | GraphQLInputField") -> object:
+def _definition_backref(owner: "GraphQLField | GraphQLArgument | GraphQLInputField") -> object:
     """Return the Strawberry definition Strawberry filed on ``owner``, or ``None``."""
     extensions: Mapping[str, object] = owner.extensions
     return extensions.get(GraphQLCoreConverter.DEFINITION_BACKREF)
