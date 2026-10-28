@@ -3589,8 +3589,9 @@ class FilterSet(
             **_strip_model_choice_extras(default.extra),  # pyright: ignore[reportArgumentType]
         )
         _stamp(identity_replacement, "package_replacement")
-        # A forward relation whose link targets NON-pk columns (a ``to_field``
-        # FK/O2O, a ``ForeignObject`` off the pk) stores and joins on those columns,
+        # A relation whose link onto the target reads NON-pk columns (a ``to_field``
+        # FK/O2O, a ``ForeignObject`` off the pk, a many-to-many whose through foreign
+        # key onto the target has a ``to_field``) stores and joins on those columns,
         # but a raw-pk leaf, and a Relay GlobalID of a target whose id is its primary
         # key, both carry the target's PK. Set the BOOLEAN pk-qualification flag so the
         # filter DERIVES the ``<relation>__pk`` path from its LIVE ``field_name`` at
@@ -3600,7 +3601,7 @@ class FilterSet(
         # A boolean (not a frozen absolute path) survives ``_expand_related_filter``'s
         # deepcopy + ``field_name`` rebase, so an expanded leaf compiles against the
         # rebased relation path instead of a stale absolute ``"<relation>__pk"``. The
-        # common FK-to-pk / M2M / reverse case is not marked and keeps the raw
+        # common FK-to-pk / M2M-to-pk / reverse case is not marked and keeps the raw
         # ``{field_name__lookup_expr: node_id}`` predicate byte-identical.
         if _relation_uses_non_pk_to_field(field):
             setattr(identity_replacement, _GLOBALID_RELATION_PK_ATTR, True)

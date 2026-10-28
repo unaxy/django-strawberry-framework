@@ -50,7 +50,13 @@ from rest_framework.test import APIRequestFactory
 from strawberry import relay
 from typing_extensions import Self, override
 
-from django_strawberry_framework import DjangoType
+from django_strawberry_framework import (
+    DjangoConnection,
+    DjangoConnectionField,
+    DjangoType,
+    finalize_django_types,
+    strawberry_config,
+)
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.filters import (
     ArrayFilter,
@@ -93,13 +99,16 @@ from django_strawberry_framework.filters.factories import FilterArgumentsFactory
 from django_strawberry_framework.filters.inputs import convert_filter_to_input_annotation
 from django_strawberry_framework.orders import OrderSet
 from django_strawberry_framework.registry import registry
+from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.types.definition import DjangoTypeDefinition
 from django_strawberry_framework.utils._narrowing import (
     call_method,
     list_of,
     read_attr,
+    require,
     require_instance,
 )
+from django_strawberry_framework.utils.relations import is_model_class
 from django_strawberry_framework.utils.typing import object_result
 from tests._idioms import ModelSerializerBase, saved_pk
 from tests._postgres_fields import FakeArrayField, patch_array_field
@@ -1776,6 +1785,322 @@ def test_to_field_relation_key_coerces_through_the_target_primary_key(
             editor.delete_model(_DecimalKeyParent)
 
 
+class _CodedOwner(db_models.Model):
+    """A row carrying a unique ``code`` beside its primary key, linked to ``_CodedTarget`` rows.
+
+    ``targets`` runs through ``_TargetCodedLink`` (keyed to the target by its ``code``),
+    ``source_coded_targets`` through ``_SourceCodedLink`` (keyed to this owner by its ``code``).
+    """
+
+    name: db_models.TextField[str | Combinable, str] = db_models.TextField()
+    code: db_models.IntegerField[float | int | str | Combinable, int] = db_models.IntegerField(
+        unique=True,
+    )
+    visible: db_models.BooleanField[bool | Combinable, bool] = db_models.BooleanField()
+    targets: db_models.ManyToManyField[_CodedTarget, _TargetCodedLink] = db_models.ManyToManyField(
+        "_CodedTarget",
+        through="_TargetCodedLink",
+        related_name="owners",
+    )
+    source_coded_targets: db_models.ManyToManyField[_CodedTarget, _SourceCodedLink] = (
+        db_models.ManyToManyField(
+            "_CodedTarget",
+            through="_SourceCodedLink",
+            related_name="source_coded_owners",
+        )
+    )
+
+    class Meta:
+        managed = False
+        app_label = "library"
+        db_table = "filters_coded_owner"
+
+
+class _CodedTarget(db_models.Model):
+    """A row carrying a unique ``code`` beside its primary key, reached by ``_CodedOwner`` rows."""
+
+    name: db_models.TextField[str | Combinable, str] = db_models.TextField()
+    code: db_models.IntegerField[float | int | str | Combinable, int] = db_models.IntegerField(
+        unique=True,
+    )
+    visible: db_models.BooleanField[bool | Combinable, bool] = db_models.BooleanField()
+
+    class Meta:
+        managed = False
+        app_label = "library"
+        db_table = "filters_coded_target"
+
+
+class _TargetCodedLink(db_models.Model):
+    """The ``_CodedOwner.targets`` join row, keyed to the target by its ``code``."""
+
+    owner: db_models.ForeignKey[_CodedOwner | Combinable, _CodedOwner] = db_models.ForeignKey(
+        _CodedOwner,
+        on_delete=db_models.CASCADE,
+        related_name="+",
+    )
+    target: db_models.ForeignKey[_CodedTarget | Combinable, _CodedTarget] = db_models.ForeignKey(
+        _CodedTarget,
+        on_delete=db_models.CASCADE,
+        to_field="code",
+        related_name="+",
+    )
+
+    class Meta:
+        managed = False
+        app_label = "library"
+        db_table = "filters_target_coded_link"
+
+
+class _SourceCodedLink(db_models.Model):
+    """The ``_CodedOwner.source_coded_targets`` join row, keyed to the owner by its ``code``."""
+
+    owner: db_models.ForeignKey[_CodedOwner | Combinable, _CodedOwner] = db_models.ForeignKey(
+        _CodedOwner,
+        on_delete=db_models.CASCADE,
+        to_field="code",
+        related_name="+",
+    )
+    target: db_models.ForeignKey[_CodedTarget | Combinable, _CodedTarget] = db_models.ForeignKey(
+        _CodedTarget,
+        on_delete=db_models.CASCADE,
+        related_name="+",
+    )
+
+    class Meta:
+        managed = False
+        app_label = "library"
+        db_table = "filters_source_coded_link"
+
+
+_CODED_MODELS: tuple[type[Model], ...] = (
+    _CodedOwner,
+    _CodedTarget,
+    _TargetCodedLink,
+    _SourceCodedLink,
+)
+"""The ``coded_links`` tables, in creation order."""
+
+
+@pytest.fixture
+def coded_links() -> Generator[None, None, None]:
+    """Real tables: each row's ``code`` is another row's primary key.
+
+    Owners ``alpha`` (pk 1, code 2), ``beta`` (pk 2, code 1) and the hidden ``gamma`` (pk 3,
+    code 3); targets ``one`` (pk 1, code 2), ``two`` (pk 2, code 1) and the hidden ``three``
+    (pk 3, code 3). Both many-to-manys link ``alpha``-``one``, ``beta``-``two`` and
+    ``gamma``-``three``, so a leaf comparing a code where it takes a primary key answers
+    the swapped partner.
+    """
+    with db_connection.schema_editor() as editor:
+        for model in _CODED_MODELS:
+            editor.create_model(model)
+    try:
+        for pk, code, name, visible in (
+            (
+                1,
+                2,
+                "one",
+                True,
+            ),
+            (
+                2,
+                1,
+                "two",
+                True,
+            ),
+            (
+                3,
+                3,
+                "three",
+                False,
+            ),
+        ):
+            owner_name = {"one": "alpha", "two": "beta", "three": "gamma"}[name]
+            owner = _CodedOwner.objects.create(pk=pk, code=code, name=owner_name, visible=visible)
+            target = _CodedTarget.objects.create(pk=pk, code=code, name=name, visible=visible)
+            _ = _TargetCodedLink.objects.create(owner=owner, target=target)
+            _ = _SourceCodedLink.objects.create(owner=owner, target=target)
+        yield
+    finally:
+        with db_connection.schema_editor() as editor:
+            for model in reversed(_CODED_MODELS):
+                editor.delete_model(model)
+
+
+def _coded_set(source: type[Model], relation: str, mode: str) -> type[FilterSet]:
+    """Build a ``source`` set generating ``exact`` / ``in`` on the many-to-many key ``relation``.
+
+    ``plain`` registers no type, so the key leaf walks no visibility hop. ``scoped``
+    registers a target type whose ``get_queryset`` hides invisible rows; ``declared``
+    declares a ``RelatedFilter`` on the relation whose ``queryset=`` admits only visible
+    rows. Either makes the leaf walk the hop.
+    """
+    target = require(source._meta.get_field(relation).related_model, is_model_class)
+    namespace: dict[str, object] = {
+        "Meta": type("Meta", (), {"model": source, "fields": {relation: ["exact", "in"]}}),
+    }
+    if mode == "scoped":
+
+        class _ScopedCodedType(DjangoType):
+            class Meta:
+                model = target
+
+            @classmethod
+            @override
+            def get_queryset(
+                cls,
+                queryset: QuerySet[Model],
+                info: object,
+                **kwargs: object,
+            ) -> QuerySet[Model]:
+                return queryset.filter(visible=True)
+
+        assert registry.get(target) is _ScopedCodedType
+    elif mode == "declared":
+        _ = type("_PlainCodedType", (DjangoType,), {"Meta": type("Meta", (), {"model": target})})
+        namespace["hop"] = RelatedFilter(
+            _pk_alias_set(target),
+            field_name=relation,
+            queryset=target._default_manager.filter(visible=True),
+        )
+    return type("CodedSet", (FilterSet,), namespace)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("coded_links")
+@pytest.mark.parametrize("mode", ["plain", "scoped", "declared"])
+@pytest.mark.parametrize("lookup", ["exact", "in_"])
+@pytest.mark.parametrize(
+    ("source", "relation"),
+    [
+        pytest.param(_CodedOwner, "targets", id="forward-through-target-to-field"),
+        pytest.param(_CodedTarget, "source_coded_owners", id="reverse-through-target-to-field"),
+        pytest.param(_CodedOwner, "source_coded_targets", id="forward-through-source-to-field"),
+        pytest.param(_CodedTarget, "owners", id="reverse-through-source-to-field"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("members", "expected"),
+    [
+        pytest.param([1], {"plain": [1], "scoped": [1], "declared": [1]}, id="first-pk"),
+        pytest.param([2], {"plain": [2], "scoped": [2], "declared": [2]}, id="second-pk"),
+        pytest.param([1, 2], {"plain": [1, 2], "scoped": [1, 2], "declared": [1, 2]}, id="both"),
+        pytest.param([3], {"plain": [3], "scoped": [], "declared": []}, id="hidden-pk"),
+        pytest.param([4], {"plain": [], "scoped": [], "declared": []}, id="missing-pk"),
+    ],
+)
+def test_many_to_many_key_through_a_to_field_link_compares_the_target_primary_key(
+    *,
+    source: type[Model],
+    relation: str,
+    members: list[int],
+    expected: dict[str, list[int]],
+    lookup: str,
+    mode: str,
+) -> None:
+    """A many-to-many raw-key leaf matches the rows linked to the target whose primary key it names.
+
+    The leaf is typed and coerced by the target's primary key
+    (``filters/base.py::relation_identity_column``), and a through foreign key onto the
+    target keyed by a non-pk ``to_field`` makes Django's own ``<relation>=<value>``
+    compare that ``code`` instead; generation marks such a leaf
+    (``filters/base.py::_relation_uses_non_pk_to_field``) so it compiles against
+    ``<relation>__pk``, unhopped or across a visibility hop
+    (``filters/sets.py::FilterSet._leaf_chain``). Every code is another row's primary
+    key, so comparing it would answer the swapped partner; a ``to_field`` on the through
+    foreign key onto the SOURCE never enters the comparison. Package-only: no fakeshop
+    many-to-many runs through a ``to_field`` link.
+    """
+    rows = _coded_set(source, relation, mode).apply_sync(
+        {relation: {lookup: members}},
+        source._default_manager.order_by("pk"),
+        SimpleNamespace(context=SimpleNamespace(request=HttpRequest())),
+    )
+    assert list(rows.values_list("pk", flat=True)) == expected[mode]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("coded_links")
+@pytest.mark.parametrize(
+    (
+        "source",
+        "relation",
+        "field_name",
+        "name",
+    ),
+    [
+        pytest.param(_CodedOwner, "targets", "targets", "alpha", id="forward"),
+        pytest.param(
+            _CodedTarget,
+            "source_coded_owners",
+            "sourceCodedOwners",
+            "one",
+            id="reverse",
+        ),
+    ],
+)
+@pytest.mark.parametrize("lookup", ["exact", "in"])
+def test_relay_many_to_many_key_through_a_to_field_link_matches_by_decoded_primary_key(
+    *,
+    source: type[Model],
+    relation: str,
+    field_name: str,
+    name: str,
+    lookup: str,
+) -> None:
+    """A Relay target's many-to-many GlobalID leaf over a ``to_field`` link matches by decoded pk.
+
+    The finalized schema generates a ``GlobalIDMultipleChoiceFilter`` carrying the
+    ``_GLOBALID_RELATION_PK_ATTR`` marker for the leaf, so the GlobalID of target pk 1
+    selects the source row linked to it, never the row linked to the target whose
+    ``code`` is 1. Package-only: no fakeshop many-to-many runs through a ``to_field`` link.
+    """
+    target = require(source._meta.get_field(relation).related_model, is_model_class)
+    source_set = type(
+        "CodedSourceSet",
+        (FilterSet,),
+        {"Meta": type("Meta", (), {"model": source, "fields": {relation: ["exact", "in"]}})},
+    )
+    node = (strawberry.relay.Node,)
+    target_meta: dict[str, object] = {
+        "model": target,
+        "fields": ("id", "name"),
+        "interfaces": node,
+    }
+    target_type = type("CodedTargetType", (DjangoType,), {"Meta": type("Meta", (), target_meta)})
+    source_meta: dict[str, object] = {
+        "model": source,
+        "fields": ("id", "name"),
+        "filterset_class": source_set,
+        "interfaces": node,
+    }
+    source_type = type("CodedSourceType", (DjangoType,), {"Meta": type("Meta", (), source_meta)})
+    finalize_django_types()
+    query_cls = strawberry.type(
+        type(
+            "Query",
+            (),
+            {
+                "__annotations__": {"rows": DjangoConnection[source_type]},
+                "rows": DjangoConnectionField(source_type),
+            },
+        ),
+    )
+    schema = strawberry.Schema(query=query_cls, config=strawberry_config())
+    result = schema.execute_sync(
+        f"query ($ids: [String!]!) {{ rows(filter: {{ {field_name}: {{ {lookup}: $ids }} }}) "
+        "{ edges { node { name } } } }",
+        variable_values={"ids": [global_id_for(target_type, 1)]},
+        context_value=HttpRequest(),
+    )
+    assert result.errors is None, result.errors
+    assert result.data == {"rows": {"edges": [{"node": {"name": name}}]}}
+    leaf = source_set.base_filters[relation if lookup == "exact" else f"{relation}__in"]
+    assert isinstance(leaf, GlobalIDMultipleChoiceFilter)
+    assert getattr(leaf, _GLOBALID_RELATION_PK_ATTR) is True
+
+
 class _DecimalKeyed(db_models.Model):
     """A row keyed by a decimal column."""
 
@@ -2767,9 +3092,42 @@ def test_relation_uses_non_pk_to_field_false_for_ordinary_fk_to_pk() -> None:
 
 
 def test_relation_uses_non_pk_to_field_false_for_m2m() -> None:
-    """A ``ManyToManyField`` (non-concrete) is not flagged."""
+    """A ``ManyToManyField`` whose through foreign key onto the target reads its pk is not flagged."""
     field = models.Book._meta.get_field("genres")
     assert _relation_uses_non_pk_to_field(field) is False
+
+
+@pytest.mark.parametrize(
+    ("model", "relation", "flagged"),
+    [
+        pytest.param(_CodedOwner, "targets", True, id="forward-through-target-to-field"),
+        pytest.param(
+            _CodedTarget,
+            "source_coded_owners",
+            True,
+            id="reverse-through-target-to-field",
+        ),
+        pytest.param(
+            _CodedOwner,
+            "source_coded_targets",
+            False,
+            id="forward-through-source-to-field",
+        ),
+        pytest.param(_CodedTarget, "owners", False, id="reverse-through-source-to-field"),
+    ],
+)
+def test_relation_uses_non_pk_to_field_reads_the_through_link_onto_the_target(
+    *,
+    model: type[Model],
+    relation: str,
+    flagged: bool,
+) -> None:
+    """A many-to-many is flagged exactly when its through key onto the target has a ``to_field``.
+
+    The leaf compares the target side of the through table; a ``to_field`` on the
+    foreign key onto the source never enters that comparison.
+    """
+    assert _relation_uses_non_pk_to_field(model._meta.get_field(relation)) is flagged
 
 
 def test_relation_uses_non_pk_to_field_false_for_reverse_relation() -> None:
