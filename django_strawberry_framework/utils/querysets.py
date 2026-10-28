@@ -800,7 +800,7 @@ def coerce_field_value_or_none(field: ModelField | None, value: object, *, alias
     datetime SQLite cannot project to UTC, a malformed address PostgreSQL's
     ``inet`` adapter rejects) names no row there, and only there. PostgreSQL's
     server refuses one value its adapters pass, an aware datetime or time whose UTC
-    offset it cannot hold, so ``errors.py::unbindable_temporal`` answers that past
+    offset it cannot hold, so ``errors.py::refuses_utc_offset`` answers that past
     the bind. ``alias`` is the database the lookup reads: the filtered queryset's
     ``db``, or ``lookup_read_alias`` (the pinned write-pipeline alias, else the
     router's read database for the queried model).
@@ -859,7 +859,7 @@ def coerce_field_value_or_none(field: ModelField | None, value: object, *, alias
     ):
         return None
     column = stored_value_column(field)
-    if unbindable_temporal(column, (), coerced, lambda: alias):
+    if unbindable_temporal(column, coerced, lambda: alias):
         return None
     if isinstance(bound, int) and not isinstance(bound, bool):
         internal_type = (

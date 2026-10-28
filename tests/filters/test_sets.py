@@ -58,12 +58,13 @@ from django.db import DEFAULT_DB_ALIAS, connection, connections, models, transac
 from django.db import models as dj_models
 from django.db import models as django_models
 from django.db.backends.base.operations import BaseDatabaseOperations
+from django.db.backends.sqlite3.operations import DatabaseOperations as SQLiteOperations
 from django.db.models import F, Lookup, Q, QuerySet
 from django.db.models.fields.related import ManyToManyRel, ManyToOneRel, OneToOneRel
 from django.forms import ModelChoiceField, ModelMultipleChoiceField
 from django.http import HttpRequest, QueryDict
 from django.test import override_settings
-from django.test.utils import CaptureQueriesContext
+from django.test.utils import CaptureQueriesContext, register_lookup
 from django.utils.functional import SimpleLazyObject
 from django_filters import (
     AllValuesFilter,
@@ -181,6 +182,7 @@ from tests._idioms import (
     scrambled,
     str_subclass_name,
 )
+from tests._postgresql_stand_in import BINDING_MODES, postgresql_stand_in
 from tests._subprocess import run_in_fresh_process
 from tests.optimizer import _link_models
 
@@ -8314,6 +8316,11 @@ def test_required_upstream_range_filter_is_satisfied_by_the_keys_its_widget_read
     assert excinfo.value.extensions == {"code": "FILTER_INVALID", "errors": refusal}
 
 
+#: Django warns as a ``DateTimeField`` lookup makes a naive value (a date's midnight
+#: included) aware; the bind ask builds that lookup, so it warns as the query does.
+_IGNORES_NAIVE_DATETIME_WARNING = pytest.mark.filterwarnings(
+    "ignore:DateTimeField .* received a naive datetime:RuntimeWarning",
+)
 #: The refusal a temporal value the queryset's database cannot bind answers.
 _UNBINDABLE = [{"message": "Enter a value the database can represent.", "code": "invalid"}]
 _PLUS_FIVE = datetime.timezone(datetime.timedelta(hours=5))
@@ -8514,7 +8521,11 @@ def test_temporal_value_the_database_cannot_bind_is_refused_for_every_filter_fam
         pytest.param({"taken_between_before": _BINDABLE_DATETIME}, id="declared-range"),
         pytest.param({"timed_between_before": datetime.time(9, 30)}, id="declared-time-range"),
         pytest.param({"clock_time": datetime.time(9, 30)}, id="time-transform"),
-        pytest.param({"taken_on": datetime.date(2021, 6, 15)}, id="date-on-a-datetime-column"),
+        pytest.param(
+            {"taken_on": datetime.date(2021, 6, 15)},
+            id="date-on-a-datetime-column",
+            marks=_IGNORES_NAIVE_DATETIME_WARNING,
+        ),
         pytest.param({"timed_at": _BINDABLE_DATETIME}, id="datetime-on-a-time-column"),
         pytest.param({"month_after": 5}, id="unknown-transform"),
         pytest.param({"taken_among": [_BINDABLE_DATETIME]}, id="list-element"),
@@ -8727,16 +8738,16 @@ def test_date_transform_of_a_datetime_binds_any_utc_offset() -> None:
     assert list(filterset.qs.values_list("pk", flat=True)) == [specimen.pk]
 
 
-class _RefusingOperations(BaseDatabaseOperations):
-    """Operations whose datetime adapter refuses every value, as a backend's own refusal does."""
+class _RefusingOperations(SQLiteOperations):
+    """SQLite's operations, whose datetime adapter refuses every value, as a backend's own refusal does."""
 
     @override
     def adapt_datetimefield_value(self, value: datetime.datetime | None) -> str | None:
         raise ValueError(value)
 
 
-class _BindingOperations(BaseDatabaseOperations):
-    """Operations whose datetime adapter binds every value it is handed."""
+class _BindingOperations(SQLiteOperations):
+    """SQLite's operations, whose datetime adapter binds every value it is handed."""
 
     @override
     def adapt_datetimefield_value(self, value: datetime.datetime | None) -> str | None:
@@ -8824,6 +8835,552 @@ def test_queryset_alias_is_resolved_only_for_a_temporal_leaf(
 
         SpecimenFilter._validate_form_or_raise(filterset)
     assert router.asked == asked
+
+
+class _DateInFilter(django_filters.BaseInFilter, django_filters.DateFilter):
+    """django-filter's comma-separated ``in`` filter over dates."""
+
+
+class _DateTimeInFilter(django_filters.BaseInFilter, django_filters.DateTimeFilter):
+    """django-filter's comma-separated ``in`` filter over datetimes."""
+
+
+class _InheritingDateTimeFilter(django_filters.DateTimeFilter):
+    """A consumer subclass of ``DateTimeFilter`` that keeps django-filter's ``filter``."""
+
+
+def _cross_kind_filter_class() -> type[FilterSet]:
+    """A specimen filterset whose declared filters clean a value of another kind than their column.
+
+    A ``DateFilter`` on the datetime column (``exact``, ``lt``, an ``in`` list and a
+    ``DateFromToRangeFilter``); a ``DateTimeFilter`` on the date column (``exact``, ``gte``,
+    an ``in`` list and a ``DateTimeFromToRangeFilter``); a ``DateTimeFilter`` through the
+    datetime column's ``date`` transform (``date``, ``date__gte``, ``date__in`` and a
+    ``DateTimeFromToRangeFilter`` over ``occurred_at__date``); and a consumer subclass of
+    ``DateTimeFilter`` through the same transform keeping django-filter's ``filter``.
+    """
+
+    class CrossKindFilter(FilterSet):
+        on_instant = django_filters.DateFilter(field_name="occurred_at")
+        on_instant_before = django_filters.DateFilter(field_name="occurred_at", lookup_expr="lt")
+        on_instant_among = _DateInFilter(field_name="occurred_at", lookup_expr="in")
+        on_instant_between = django_filters.DateFromToRangeFilter(field_name="occurred_at")
+        instant_on_day = django_filters.DateTimeFilter(field_name="occurred_on")
+        instant_on_day_from = django_filters.DateTimeFilter(
+            field_name="occurred_on",
+            lookup_expr="gte",
+        )
+        instants_on_day = _DateTimeInFilter(field_name="occurred_on", lookup_expr="in")
+        instants_on_day_between = django_filters.DateTimeFromToRangeFilter(
+            field_name="occurred_on",
+        )
+        instant_day_of = django_filters.DateTimeFilter(
+            field_name="occurred_at",
+            lookup_expr="date",
+        )
+        instant_day_of_from = django_filters.DateTimeFilter(
+            field_name="occurred_at",
+            lookup_expr="date__gte",
+        )
+        instants_day_of = _DateTimeInFilter(field_name="occurred_at", lookup_expr="date__in")
+        instants_day_of_between = django_filters.DateTimeFromToRangeFilter(
+            field_name="occurred_at__date",
+        )
+        inheriting_day_of = _InheritingDateTimeFilter(field_name="occurred_at", lookup_expr="date")
+
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = []
+
+    return CrossKindFilter
+
+
+_YEAR_ONE = datetime.date(1, 1, 1)
+_TOKYO = "Asia/Tokyo"
+
+#: Each value Django cannot bind once it converts it to the column's kind, the form field it
+#: is keyed to, the ``TIME_ZONE`` it is sent under, and whether it binds on PostgreSQL.
+_CROSS_KIND_UNBINDABLE = [
+    pytest.param(
+        {"on_instant": _YEAR_ONE},
+        "on_instant",
+        _TOKYO,
+        True,
+        id="date-on-datetime",
+        marks=_IGNORES_NAIVE_DATETIME_WARNING,
+    ),
+    pytest.param(
+        {"on_instant_before": _YEAR_ONE},
+        "on_instant_before",
+        _TOKYO,
+        True,
+        id="date-on-datetime-lt",
+        marks=_IGNORES_NAIVE_DATETIME_WARNING,
+    ),
+    pytest.param(
+        {"on_instant_among": "2021-06-15,0001-01-01"},
+        "on_instant_among",
+        _TOKYO,
+        True,
+        id="date-on-datetime-in",
+        marks=_IGNORES_NAIVE_DATETIME_WARNING,
+    ),
+    pytest.param(
+        {"on_instant_between_after": _YEAR_ONE},
+        "on_instant_between",
+        _TOKYO,
+        True,
+        id="date-on-datetime-range",
+    ),
+    pytest.param(
+        {"instant_on_day": _BEFORE_YEAR_ONE},
+        "instant_on_day",
+        "UTC",
+        False,
+        id="datetime-on-date-before-year-one",
+    ),
+    pytest.param(
+        {"instant_on_day": _PAST_YEAR_9999},
+        "instant_on_day",
+        "UTC",
+        False,
+        id="datetime-on-date-past-year-9999",
+    ),
+    pytest.param(
+        {"instant_on_day_from": _BEFORE_YEAR_ONE},
+        "instant_on_day_from",
+        "UTC",
+        False,
+        id="datetime-on-date-gte",
+    ),
+    pytest.param(
+        {"instants_on_day": _PAST_YEAR_9999.isoformat()},
+        "instants_on_day",
+        "UTC",
+        False,
+        id="datetime-on-date-in",
+    ),
+    pytest.param(
+        {"instants_on_day_between_after": _BEFORE_YEAR_ONE},
+        "instants_on_day_between",
+        "UTC",
+        False,
+        id="datetime-on-date-range",
+    ),
+    pytest.param(
+        {"instant_day_of": _BEFORE_YEAR_ONE},
+        "instant_day_of",
+        "UTC",
+        False,
+        id="date-transform-before-year-one",
+    ),
+    pytest.param(
+        {"instant_day_of": _PAST_YEAR_9999},
+        "instant_day_of",
+        "UTC",
+        False,
+        id="date-transform-past-year-9999",
+    ),
+    pytest.param(
+        {"instant_day_of_from": _BEFORE_YEAR_ONE},
+        "instant_day_of_from",
+        "UTC",
+        False,
+        id="date-transform-gte",
+    ),
+    pytest.param(
+        {"instants_day_of": _PAST_YEAR_9999.isoformat()},
+        "instants_day_of",
+        "UTC",
+        False,
+        id="date-transform-in",
+    ),
+    pytest.param(
+        {"instants_day_of_between_after": _BEFORE_YEAR_ONE},
+        "instants_day_of_between",
+        "UTC",
+        False,
+        id="date-transform-range",
+    ),
+    pytest.param(
+        {"inheriting_day_of": _BEFORE_YEAR_ONE},
+        "inheriting_day_of",
+        "UTC",
+        False,
+        id="consumer-subclass-keeping-the-filter",
+    ),
+]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "data",
+        "form_key",
+        "time_zone",
+        "passes_on_postgresql",
+    ),
+    _CROSS_KIND_UNBINDABLE,
+)
+def test_value_of_another_kind_than_its_column_is_held_to_what_django_binds(
+    data: dict[str, object],
+    form_key: str,
+    time_zone: str,
+    passes_on_postgresql: bool,  # noqa: FBT001
+) -> None:
+    """A value cleaned to another temporal kind than its column is refused as Django binds it.
+
+    The filter's own predicate is built and compiled on the queryset's database, so the
+    value is read after Django's own conversion: a date on a datetime column is its
+    midnight made aware in ``TIME_ZONE`` (under ``Asia/Tokyo`` year 1's midnight projects
+    onto year 0 in UTC, which SQLite refuses and PostgreSQL binds); a datetime on a date
+    column, or through a datetime column's ``date`` transform, is made naive in UTC first,
+    which leaves years 1..9999 on every backend. Each ``in`` member and range bound is
+    read, and a consumer subclass that keeps django-filter's ``filter`` is asked as its
+    base is. Package-only: no fakeshop filterset declares these filters.
+    """
+    specimen_filter = _cross_kind_filter_class()
+    with override_settings(TIME_ZONE=time_zone):
+        filterset = specimen_filter(
+            data=data,
+            queryset=scalar_models.ScalarSpecimen.objects.all(),
+        )
+        if passes_on_postgresql and connection.vendor == "postgresql":
+            specimen_filter._validate_form_or_raise(filterset)
+            return
+        with pytest.raises(GraphQLError) as excinfo:
+            specimen_filter._validate_form_or_raise(filterset)
+    assert excinfo.value.extensions == {
+        "code": "FILTER_INVALID",
+        "errors": {form_key: _UNBINDABLE},
+    }
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("data", "time_zone"),
+    [
+        pytest.param(
+            {"on_instant": _YEAR_ONE},
+            "UTC",
+            id="date-on-datetime-at-utc",
+            marks=_IGNORES_NAIVE_DATETIME_WARNING,
+        ),
+        pytest.param(
+            {"on_instant_among": "2021-06-15"},
+            _TOKYO,
+            id="date-on-datetime-in-range",
+            marks=_IGNORES_NAIVE_DATETIME_WARNING,
+        ),
+        pytest.param(
+            {"instant_on_day": _BINDABLE_DATETIME},
+            "UTC",
+            id="datetime-on-date-in-range",
+        ),
+        pytest.param(
+            {"instants_day_of_between_before": _BINDABLE_DATETIME},
+            "UTC",
+            id="date-transform-in-range",
+        ),
+    ],
+)
+def test_value_of_another_kind_than_its_column_that_django_binds_passes(
+    data: dict[str, object],
+    time_zone: str,
+) -> None:
+    """A value Django binds after converting it to the column's kind passes, and the query runs."""
+    specimen_filter = _cross_kind_filter_class()
+    with override_settings(TIME_ZONE=time_zone):
+        filterset = specimen_filter(
+            data=data,
+            queryset=scalar_models.ScalarSpecimen.objects.all(),
+        )
+
+        specimen_filter._validate_form_or_raise(filterset)
+        assert list(filterset.qs) == []
+
+
+def _recording_override(kind: str, applied: list[object]) -> type[django_filters.DateTimeFilter]:
+    """A consumer ``DateTimeFilter`` subclass whose class-level ``filter`` records each value.
+
+    ``method`` overrides it with a plain method, ``staticmethod`` with a static method and
+    ``type`` with a plain function, the last two in a class built at runtime by ``type()``.
+    """
+
+    def record(qs: QuerySet[_M], value: object) -> QuerySet[_M]:
+        applied.append(value)
+        return qs
+
+    if kind == "staticmethod":
+        return type(
+            "StaticRecording",
+            (django_filters.DateTimeFilter,),
+            {"filter": staticmethod(record)},
+        )
+    if kind == "type":
+
+        def bound_record(_self: object, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
+            return record(qs, value)
+
+        return type("DynamicRecording", (django_filters.DateTimeFilter,), {"filter": bound_record})
+
+    class MethodRecording(django_filters.DateTimeFilter):
+        @override
+        def filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
+            return record(qs, value)
+
+    return MethodRecording
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("kind", ["method", "staticmethod", "type"])
+def test_class_level_filter_override_is_never_run_to_ask(kind: str) -> None:
+    """A consumer subclass whose class-level ``filter`` overrides django-filter's is not asked.
+
+    That code owns what its value means, as a ``method=`` does: the form validation never
+    runs it, so a value Django could not bind through the declared lookup passes to it,
+    and the queryset runs it once. The override is read as the function the class
+    resolves, whether a method, a static method or one a ``type()``-built class holds.
+    """
+    applied: list[object] = []
+    recording = _recording_override(kind, applied)
+
+    class RecordingFilter(FilterSet):
+        day_of = recording(field_name="occurred_at", lookup_expr="date")
+
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = []
+
+    filterset = RecordingFilter(
+        data={"day_of": _BEFORE_YEAR_ONE},
+        queryset=scalar_models.ScalarSpecimen.objects.all(),
+    )
+
+    RecordingFilter._validate_form_or_raise(filterset)
+    assert applied == []
+    assert list(filterset.qs) == []
+    assert applied == [_BEFORE_YEAR_ONE]
+
+
+class _TypeErrorLookup(Lookup[object]):
+    """A consumer lookup whose ``as_sql`` raises ``TypeError``, as a broken lookup would."""
+
+    lookup_name = "refuses_sql"
+
+    @override
+    def as_sql(self, compiler: object, connection: object) -> NoReturn:
+        raise TypeError("consumer lookup")
+
+
+@pytest.mark.django_db
+def test_consumer_lookup_raising_type_error_in_as_sql_is_not_filter_invalid() -> None:
+    """Only the build is read for ``TypeError``; a lookup's own ``as_sql`` raising it propagates.
+
+    Django's year bound raises ``TypeError`` while the predicate is built, for a value that
+    is no number; the same type raised while compiling is a consumer lookup's own error,
+    which the query would raise, so it is never answered as ``FILTER_INVALID``.
+    """
+    with register_lookup(dj_models.DateTimeField, _TypeErrorLookup):
+
+        class RefusingSqlFilter(FilterSet):
+            stamped = django_filters.DateTimeFilter(
+                field_name="occurred_at",
+                lookup_expr="refuses_sql",
+            )
+
+            class Meta:
+                model = scalar_models.ScalarSpecimen
+                fields = []
+
+        filterset = RefusingSqlFilter(
+            data={"stamped": _BINDABLE_DATETIME},
+            queryset=scalar_models.ScalarSpecimen.objects.all(),
+        )
+        with pytest.raises(TypeError, match="consumer lookup"):
+            RefusingSqlFilter._validate_form_or_raise(filterset)
+
+
+@pytest.mark.django_db
+@_IGNORES_NAIVE_DATETIME_WARNING
+def test_value_is_asked_free_of_the_querysets_own_predicate() -> None:
+    """The ask reads the filter's clause alone, never the queryset's own ``WHERE``.
+
+    Over a queryset that matches nothing (``none()``), year 1's midnight under
+    ``Asia/Tokyo`` is still refused on SQLite (PostgreSQL binds it), so no predicate of
+    the queryset's own decides it.
+    """
+    specimen_filter = _cross_kind_filter_class()
+    with override_settings(TIME_ZONE=_TOKYO):
+        filterset = specimen_filter(
+            data={"on_instant": _YEAR_ONE},
+            queryset=scalar_models.ScalarSpecimen.objects.none(),
+        )
+        if connection.vendor == "postgresql":
+            specimen_filter._validate_form_or_raise(filterset)
+            return
+        with pytest.raises(GraphQLError) as excinfo:
+            specimen_filter._validate_form_or_raise(filterset)
+    assert excinfo.value.extensions == {
+        "code": "FILTER_INVALID",
+        "errors": {"on_instant": _UNBINDABLE},
+    }
+
+
+@pytest.mark.django_db
+def test_value_is_asked_free_of_the_querysets_slice() -> None:
+    """A sliced queryset is asked without its slice, so a bindable value passes.
+
+    Django refuses to filter a sliced queryset (``TypeError``); the ask builds the
+    filter's clause on a copy holding no slice, so that refusal never reads as an
+    unbindable value.
+    """
+    specimen_filter = _temporal_filter_class()
+    filterset = specimen_filter(
+        data={"taken_before": _BINDABLE_DATETIME},
+        queryset=_specimens_stamped()[:5],
+    )
+
+    specimen_filter._validate_form_or_raise(filterset)
+
+
+class _ChildCustomizingSpecimenFilter(FilterSet):
+    """A specimen filterset whose ``__init__`` override projects its filters onto a parent."""
+
+    instant_day_of = django_filters.DateTimeFilter(field_name="occurred_at", lookup_expr="date")
+    own_day_of = django_filters.DateTimeFilter(
+        field_name="occurred_at",
+        lookup_expr="date",
+        method="keep_every_row",
+    )
+
+    class Meta:
+        model = scalar_models.ScalarSpecimen
+        fields = []
+
+    @override
+    def __init__(
+        self,
+        data: Mapping[str, object] | None = None,
+        queryset: QuerySet[dj_models.Model] | None = None,
+        *,
+        request: HttpRequest | None = None,
+        prefix: str | None = None,
+    ) -> None:
+        super().__init__(data, queryset, request=request, prefix=prefix)
+
+    def keep_every_row(
+        self,
+        queryset: QuerySet[scalar_models.ScalarSpecimen],
+        _name: str,
+        _value: object,
+    ) -> QuerySet[scalar_models.ScalarSpecimen]:
+        return queryset
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("form_key", "refused"),
+    [
+        pytest.param("partner__instant_day_of", True, id="shipped-filter"),
+        pytest.param("partner__own_day_of", False, id="method"),
+    ],
+)
+def test_projected_copy_is_asked_through_the_child_filter_it_runs(
+    form_key: str,
+    refused: bool,  # noqa: FBT001
+) -> None:
+    """A projected flat copy is asked through its child filter, over the child set's rows.
+
+    The child set's ``__init__`` override projects its filters onto the parent: a child
+    ``DateTimeFilter`` through the ``date`` transform builds its own predicate on the
+    child set's queryset and is refused there, while a child ``method=`` owns its value
+    and is not asked.
+    """
+
+    class PartnerParent(FilterSet):
+        partner = RelatedFilter(_ChildCustomizingSpecimenFilter, field_name="partner")
+
+        class Meta:
+            model = scalar_models.NullableScalarSpecimen
+            fields = []
+
+    assert isinstance(PartnerParent.get_filters()[form_key], ProjectedChildFilter)
+    filterset = PartnerParent(
+        data={form_key: _BEFORE_YEAR_ONE},
+        queryset=scalar_models.NullableScalarSpecimen.objects.all(),
+    )
+    if not refused:
+        PartnerParent._validate_form_or_raise(filterset)
+        return
+    with pytest.raises(GraphQLError) as excinfo:
+        PartnerParent._validate_form_or_raise(filterset)
+    assert excinfo.value.extensions == {
+        "code": "FILTER_INVALID",
+        "errors": {form_key: _UNBINDABLE},
+    }
+
+
+@pytest.mark.parametrize("mode", list(BINDING_MODES))
+@pytest.mark.parametrize(
+    (
+        "data",
+        "form_key",
+        "refused_as_text",
+        "refused_on_server",
+    ),
+    [
+        pytest.param(
+            {"clock_time": datetime.time(12, tzinfo=_PLUS_SIXTEEN)},
+            "clock_time",
+            True,
+            True,
+            id="time-transform-16-00",
+        ),
+        pytest.param(
+            {"clock_time": datetime.time(12, tzinfo=_HALF_SECOND_OFFSET)},
+            "clock_time",
+            True,
+            False,
+            id="time-transform-half-second",
+        ),
+        pytest.param({"clock_time": _AWARE_TIME}, "clock_time", False, False, id="time-transform"),
+        pytest.param(
+            {"taken_before": _AT_PLUS_SIXTEEN},
+            "taken_before",
+            True,
+            False,
+            id="datetime-16-00",
+        ),
+    ],
+)
+def test_compiled_predicate_is_held_to_the_utc_offsets_postgresql_refuses(
+    mode: str,
+    data: dict[str, object],
+    form_key: str,
+    refused_as_text: bool,  # noqa: FBT001
+    refused_on_server: bool,  # noqa: FBT001
+) -> None:
+    """The parameters a filter's compiled predicate binds are held to PostgreSQL's offset rule.
+
+    A stand-in alias carries each binding mode: bound as text a time through a datetime's
+    ``time`` transform, or a datetime, is refused for an offset of 16:00 or more or one
+    with a fraction of a second; bound on the server only a time's 16:00 is.
+    """
+    driver, cursor_factory, client_side = BINDING_MODES[mode]
+    refused = refused_as_text if client_side else refused_on_server
+    specimen_filter = _temporal_filter_class()
+    with postgresql_stand_in(driver, cursor_factory) as alias:
+        filterset = specimen_filter(data=data, queryset=_specimens_stamped().using(alias))
+        if not refused:
+            specimen_filter._validate_form_or_raise(filterset)
+            return
+        with pytest.raises(GraphQLError) as excinfo:
+            specimen_filter._validate_form_or_raise(filterset)
+    assert excinfo.value.extensions == {
+        "code": "FILTER_INVALID",
+        "errors": {form_key: _UNBINDABLE},
+    }
 
 
 def test_operator_bag_items_walks_lookup_attr_dict() -> None:
@@ -18602,6 +19159,54 @@ def test_a_global_id_filter_holding_its_own_filter_refuses_unstorable_text(
     errors = require(extensions["errors"], is_object_dict)
     (entry,) = require(errors["gid"], is_object_list)
     assert require(entry, is_object_dict)["code"] == code
+
+
+class _OverridingGlobalIDFilter(GlobalIDFilter):
+    """A ``GlobalIDFilter`` whose class-level ``filter`` override binds the raw value."""
+
+    @override
+    def filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
+        return qs.filter(title=value)
+
+
+class _InheritingGlobalIDFilter(GlobalIDFilter):
+    """A ``GlobalIDFilter`` subclass that keeps the decoding ``filter``."""
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("filter_class", "code"),
+    [
+        pytest.param(_OverridingGlobalIDFilter, "FILTER_INVALID", id="class-level-override"),
+        pytest.param(_InheritingGlobalIDFilter, "GLOBALID_INVALID", id="inherited-decode"),
+    ],
+)
+def test_a_global_id_filter_overriding_its_class_filter_refuses_unstorable_text(
+    filter_class: type[GlobalIDFilter],
+    code: str,
+) -> None:
+    """A class-level ``filter`` override replaces the decode, so a lone surrogate is ``FILTER_INVALID``.
+
+    The override receives the value undecoded and may bind it as sent, so the text no
+    driver encodes is refused keyed to the field before any query, as an instance
+    ``filter`` is; a subclass that keeps the GlobalID filter's ``filter`` keeps its
+    decode's ``GLOBALID_INVALID``.
+    """
+
+    class BookIds(FilterSet):
+        gid = filter_class("id")
+
+        class Meta:
+            model = library_models.Book
+            fields = []
+
+    _book("plain")
+    with pytest.raises(GraphQLError) as exc_info:
+        list(
+            BookIds.apply_sync({"gid": "\ud800"}, library_models.Book.objects.all(), _make_info()),
+        )
+    extensions: dict[str, object] = dict(exc_info.value.extensions or {})
+    assert extensions["code"] == code
 
 
 def _book_ids_by_raw_title(

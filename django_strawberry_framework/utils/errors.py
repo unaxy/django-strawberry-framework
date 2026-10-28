@@ -24,12 +24,16 @@ write flavors):
   (a lone surrogate, an embedded NUL) and the record it answers, shared by the
   write decode (``utils/write_values.py::unstorable_text_error``) and the filter
   form validation (``filters/sets.py::FilterSet._validate_form_or_raise``);
-- ``unbindable_temporal`` + ``UNBINDABLE_TEMPORAL_MESSAGE`` - the one rule for a
-  temporal value (a datetime, a time, a year bound) the database a query runs on
-  cannot bind, asked of that connection's own operations (and, on PostgreSQL, of
-  the UTC offsets its binding mode sends the server), and the message it
-  answers; the filter form validation applies it, and ``unstorable_temporal``
-  builds on it for writes;
+- ``UNBINDABLE_TEMPORAL_MESSAGE`` - the message a temporal value the database
+  cannot bind answers, on a filter (``filters/sets.py::_unbindable_temporal_errors``,
+  which asks Django to build and compile the filter's own predicate) and on a write;
+- ``unbindable_temporal`` - whether a datetime or time bound into a column is one
+  the database cannot bind, asked of that connection's own adapters; the base of
+  ``unstorable_temporal`` and of the identity decode
+  (``utils/querysets.py::coerce_field_value_or_none``);
+- ``refuses_utc_offset`` - the one rule no Django call answers: an aware datetime
+  or time whose UTC offset PostgreSQL refuses in the connection's binding mode,
+  read over a compiled predicate's parameters or a write's values;
 - ``unstorable_temporal`` - its write-side answer: a datetime or time a column
   cannot store on the database a write runs on, or (PostgreSQL) can store but not
   read back (a date or naive datetime a ``DateTimeField`` column holds read as the
@@ -54,7 +58,6 @@ from __future__ import annotations
 
 import datetime
 import zoneinfo
-from decimal import Decimal
 from typing import TYPE_CHECKING, NamedTuple
 
 import strawberry
@@ -85,11 +88,10 @@ from .lazy import unwrap_lazy_object
 from .relations import written_model_field
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Sequence
+    from collections.abc import Callable, Iterable
     from typing import TypeAlias
 
     from django.db.backends.base.base import BaseDatabaseWrapper
-    from django.db.backends.base.operations import BaseDatabaseOperations
 
     from .inputs import InputFieldSpec
     from .typing import ModelField
@@ -123,6 +125,7 @@ __all__ = [
     "join_error_path",
     "model_field_error_names",
     "null_field_error",
+    "refuses_utc_offset",
     "rekey_error_segment",
     "relation_field_error",
     "save_time_error_key_map",
@@ -712,139 +715,79 @@ def _unstorable_leaf(path: str, text: str) -> UnstorableText | None:
 #: The message a temporal value the database cannot bind answers (``unbindable_temporal``).
 UNBINDABLE_TEMPORAL_MESSAGE = "Enter a value the database can represent."
 
-#: The lookups whose right-hand side the backend's adapter binds as the column's own type.
-_ADAPTER_BOUND_LOOKUPS = frozenset(
-    {
-        "exact",
-        "gt",
-        "gte",
-        "lt",
-        "lte",
-        "in",
-        "range",
-    },
-)
-#: The comparisons a ``year`` / ``iso_year`` transform answers with bounds computed in Python.
-_YEAR_BOUND_LOOKUPS = frozenset(
-    {
-        "exact",
-        "gt",
-        "gte",
-        "lt",
-        "lte",
-    },
-)
-#: Each year transform and whether its bounds are ISO-8601 week-numbering years.
-_YEAR_TRANSFORMS = {"year": False, "iso_year": True}
-#: The values ``int`` converts as a year transform's ``IntegerField`` output converts them.
-_YEAR_NUMBER_TYPES = (
-    int,
-    float,
-    Decimal,
-    str,
-)
-
 
 def unbindable_temporal(
     column: object,
-    lookup_parts: Sequence[str],
     value: object,
     using: Callable[[], str],
     *,
     bound_as_text: bool = False,
 ) -> bool:
-    """Return whether the database ``using()`` names refuses to bind ``value`` against ``column``.
+    """Return whether the database ``using()`` names refuses to bind ``value`` into ``column``.
 
-    ``column`` is the model field a predicate or a write reaches, ``lookup_parts`` the
-    transforms and lookup after it (``("year", "gt")``; empty for a plain
-    ``exact`` or a write). A value the scalar parse and the form clean accept can
-    still be one the backend's own adapter cannot bind; the driver's error would
-    then escape as an unexpected one when the queryset runs. The answer asks the
-    connection's own operations, so it refuses exactly what that backend refuses
-    (an ``OverflowError`` or ``ValueError`` from the adapter), and nothing else:
+    ``column`` is the model field a write stores ``value`` in, or an identity decode binds it
+    against; ``value`` is the value itself, or a list of them (an ``ArrayField``'s flattened
+    elements). A value the scalar parse and the field's own clean accept can still be one
+    the backend's adapter cannot bind; the driver's error would then escape as an
+    unexpected one. The answer asks the connection's own operations, so it refuses exactly
+    what that backend refuses (an ``OverflowError`` or ``ValueError`` from the adapter),
+    and nothing else:
 
-    - a ``datetime`` against a ``DateTimeField``: ``adapt_datetimefield_value``.
-      SQLite, MySQL and Oracle project an aware value onto the connection's time
-      zone, which fails when the projection leaves years 1..9999 (a naive value
-      made aware under a non-UTC ``TIME_ZONE`` included), and refuse any aware
-      value when ``USE_TZ`` is false.
-    - a ``time`` against a ``TimeField`` (or a ``DateTimeField``'s ``time``
-      transform): ``adapt_timefield_value``, which refuses an aware time on
-      SQLite, MySQL and Oracle.
-    - on PostgreSQL, whose adapters pass both through, an aware one whose UTC offset
-      the server refuses (``_postgresql_refuses_offset``): 16:00 or more either way,
-      or one carrying a fraction of a second, when parameters are bound as text
-      (psycopg 2, or psycopg 3 unless the connection binds on the server:
-      ``OPTIONS["server_side_binding"]``, or an ``OPTIONS["cursor_factory"]`` that is
-      not a ``ClientCursor``); bound on
-      the server, a time whose offset is 16:00 or more, and no datetime.
-      ``bound_as_text`` holds the value to the text rule whatever the connection's
-      binding mode: psycopg binds the elements of a list parameter (an ``ArrayField``
-      write) as text even under server-side binding.
-    - a year against a ``year`` / ``iso_year`` transform's ``exact`` / ``gt`` /
-      ``gte`` / ``lt`` / ``lte``, whose bounds Django computes in Python
-      (``year_lookup_bounds_for_date_field`` / ``_datetime_field``) on every
-      backend: a year whose first or last instant leaves years 1..9999 (``iso_year``
-      9999 too, whose last day falls in year 10000; on SQLite, MySQL and Oracle a
-      datetime column's bounds projected onto the connection's time zone), or a
-      value ``int`` cannot convert.
+    - a ``datetime`` in a ``DateTimeField``: ``adapt_datetimefield_value``. SQLite, MySQL
+      and Oracle project an aware value onto the connection's time zone, which fails when
+      the projection leaves years 1..9999, and refuse any aware value when ``USE_TZ`` is
+      false.
+    - a ``time`` in a ``TimeField``: ``adapt_timefield_value``, which refuses an aware time
+      on SQLite, MySQL and Oracle.
+    - on PostgreSQL, whose adapters pass both through, an aware one whose UTC offset the
+      server refuses (``refuses_utc_offset``). ``bound_as_text`` holds the value to the
+      text rule whatever the connection's binding mode: psycopg binds the elements of a
+      list parameter (an ``ArrayField`` write) as text even under server-side binding.
 
-    Only the lookups whose value the adapter binds
-    (``exact``, ``gt``, ``gte``, ``lt``, ``lte``, ``in``, ``range``) are read, and
-    a ``date`` transform's value, a date, always binds. Every scalar of a list or
-    of a range (a list or a ``slice``) is read; a ``None`` member binds. Any other
-    column (an ``ArrayField`` of datetimes included), transform or lookup answers
-    ``False`` without calling ``using`` or touching ``django.db.connections``, so
-    the alias (a queryset's ``db``, which asks the router) and its connection are
-    resolved only for a temporal leaf.
+    A ``None`` member binds. Any other column answers ``False`` without calling ``using``
+    or touching ``django.db.connections``. A filter's value is not read here: the filter
+    form validation asks Django to build and compile the filter's own predicate
+    (``filters/sets.py::_unbindable_temporal_errors``).
     """
-    parts = list(lookup_parts)
-    lookup = (
-        parts.pop() if parts and parts[-1] not in {"date", "time", *_YEAR_TRANSFORMS} else "exact"
-    )
     if isinstance(column, models.DateTimeField):
-        kind = "datetime"
-    elif isinstance(column, models.DateField):
-        kind = "date"
+        bound_type: type[object] = datetime.datetime
     elif isinstance(column, models.TimeField):
-        kind = "time"
+        bound_type = datetime.time
     else:
-        return False
-    iso_year: bool | None = None
-    for transform in parts:
-        if iso_year is None and kind == "datetime" and transform in {"date", "time"}:
-            kind = transform
-        elif iso_year is None and kind != "time" and transform in _YEAR_TRANSFORMS:
-            iso_year = _YEAR_TRANSFORMS[transform]
-        else:
-            return False
-    if iso_year is None:
-        if kind == "date" or lookup not in _ADAPTER_BOUND_LOOKUPS:
-            return False
-    elif lookup not in _YEAR_BOUND_LOOKUPS:
         return False
     connection = connections[using()]
     operations = connection.ops
+    members = list(value) if is_list_or_tuple(value) else [value]
+    bound = [member for member in members if isinstance(member, bound_type)]
     try:
-        for scalar in _bound_scalars(value):
-            if iso_year is not None:
-                # The transform's ``IntegerField`` output converts the year with ``int``,
-                # which refuses a value that is not a number (a date a ``DateFilter`` cleans
-                # to) and reaches past what a date holds for a huge one.
-                if not isinstance(scalar, _YEAR_NUMBER_TYPES):
-                    return True
-                _year_bounds(operations, kind, int(scalar), iso_year=iso_year)
-            elif kind == "time" and isinstance(scalar, datetime.time):
-                _ = operations.adapt_timefield_value(scalar)
-                if _postgresql_refuses_offset(connection, scalar, bound_as_text=bound_as_text):
-                    return True
-            elif kind == "datetime" and isinstance(scalar, datetime.datetime):
-                _ = operations.adapt_datetimefield_value(scalar)
-                if _postgresql_refuses_offset(connection, scalar, bound_as_text=bound_as_text):
-                    return True
+        for member in bound:
+            if isinstance(member, datetime.datetime):
+                _ = operations.adapt_datetimefield_value(member)
+            else:
+                _ = operations.adapt_timefield_value(member)
     except (OverflowError, ValueError):
         return True
-    return False
+    return refuses_utc_offset(connection, bound, bound_as_text=bound_as_text)
+
+
+def refuses_utc_offset(
+    connection: BaseDatabaseWrapper,
+    values: Iterable[object],
+    *,
+    bound_as_text: bool = False,
+) -> bool:
+    """Whether PostgreSQL refuses any aware datetime or time in ``values`` for its UTC offset.
+
+    ``values`` are what a query or a write binds on ``connection``: a compiled predicate's
+    parameters, or a write's values. No Django call answers this: PostgreSQL's adapters pass
+    an aware datetime or time through, and the server refuses it (``DataError``) only once
+    the query runs. Every other value, and every value on any other backend, is not read.
+    """
+    return any(
+        isinstance(value, datetime.datetime | datetime.time)
+        and _postgresql_refuses_offset(connection, value, bound_as_text=bound_as_text)
+        for value in values
+    )
 
 
 #: The UTC offset magnitude from which PostgreSQL refuses a ``timestamptz`` / ``timetz``
@@ -894,29 +837,6 @@ def _binds_client_side(connection: BaseDatabaseWrapper) -> bool:
     return not is_class(client_cursor) or (
         is_class(factory) and issubclass(factory, client_cursor)
     )
-
-
-def _bound_scalars(value: object) -> list[object]:
-    """Return the scalars a cleaned value binds: a list's or range's members, else the value."""
-    if isinstance(value, slice):
-        return [read_attr(value, "start"), read_attr(value, "stop")]
-    if is_list_or_tuple(value):
-        return list(value)
-    return [value]
-
-
-def _year_bounds(
-    operations: BaseDatabaseOperations,
-    kind: str,
-    year: int,
-    *,
-    iso_year: bool,
-) -> None:
-    """Compute the bounds Django binds for a ``year`` / ``iso_year`` comparison; raise as it would."""
-    if kind == "datetime":
-        _ = operations.year_lookup_bounds_for_datetime_field(year, iso_year=iso_year)
-    else:
-        _ = operations.year_lookup_bounds_for_date_field(year, iso_year=iso_year)
 
 
 def _array_leaf(column: object) -> tuple[object, int]:
@@ -989,7 +909,7 @@ def unstorable_temporal(column: object, value: object, using: Callable[[], str])
             for element in values
         ]
         stored_type = datetime.time
-    if unbindable_temporal(column, (), values, lambda: alias, bound_as_text=in_array):
+    if unbindable_temporal(column, values, lambda: alias, bound_as_text=in_array):
         return True
     if in_array and _psycopg_refuses_list(connection, values, stored_type):
         return True

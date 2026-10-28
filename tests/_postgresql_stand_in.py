@@ -3,10 +3,11 @@
 ``postgresql_stand_in`` registers an SQLite wrapper whose ``vendor`` is ``postgresql``,
 on a stand-in driver module and the ``cursor_factory`` Django connects with, so a rule
 that reads the connection's vendor and binding mode
-(``django_strawberry_framework/utils/errors.py::unbindable_temporal``) answers as it does
-on PostgreSQL without a server. Its operations (``StoringOperations``) pass every aware
-datetime and time through, as PostgreSQL's adapters do, so the value reaches the rule
-rather than SQLite's own refusal. ``BINDING_MODES`` names each binding mode a
+(``django_strawberry_framework/utils/errors.py::refuses_utc_offset``) answers as it does
+on PostgreSQL without a server. Its operations (``StoringOperations``) are SQLite's, so a
+predicate compiles on it, except that they pass every datetime and time through, as
+PostgreSQL's adapters do, so the value reaches the rule (a compiled predicate's
+parameters included) rather than SQLite's own refusal. ``BINDING_MODES`` names each binding mode a
 PostgreSQL connection can run in::
 
     driver, cursor_factory, client_side = BINDING_MODES["psycopg3-client"]
@@ -21,8 +22,8 @@ from types import ModuleType
 from typing import TYPE_CHECKING
 
 from django.db import connections
-from django.db.backends.base.operations import BaseDatabaseOperations
 from django.db.backends.sqlite3.base import DatabaseWrapper as SQLiteDatabaseWrapper
+from django.db.backends.sqlite3.operations import DatabaseOperations as SQLiteOperations
 from typing_extensions import override
 
 if TYPE_CHECKING:
@@ -30,16 +31,26 @@ if TYPE_CHECKING:
     from collections.abc import Generator
 
 
-class StoringOperations(BaseDatabaseOperations):
-    """Operations whose adapters pass aware datetimes and times through, as PostgreSQL's do."""
+class StoringOperations(SQLiteOperations):
+    """SQLite's operations, whose adapters pass datetimes and times through, as PostgreSQL's do."""
 
+    # basedpyright: django-stubs types the adapter ``str | None``; PostgreSQL's returns the
+    # value itself, which this stand-in reproduces. It rejects the wider return
     @override
-    def adapt_datetimefield_value(self, value: datetime.datetime | None) -> str | None:
-        return None if value is None else value.isoformat()
+    def adapt_datetimefield_value(  # pyright: ignore[reportIncompatibleMethodOverride]
+        self,
+        value: datetime.datetime | None,
+    ) -> datetime.datetime | None:
+        return value
 
+    # basedpyright: django-stubs types the adapter ``str | None``; PostgreSQL's returns the
+    # value itself, which this stand-in reproduces. It rejects the wider return
     @override
-    def adapt_timefield_value(self, value: datetime.datetime | datetime.time | None) -> str | None:
-        return None if value is None else value.isoformat()
+    def adapt_timefield_value(  # pyright: ignore[reportIncompatibleMethodOverride]
+        self,
+        value: datetime.datetime | datetime.time | None,
+    ) -> datetime.datetime | datetime.time | None:
+        return value
 
 
 class ClientCursor:

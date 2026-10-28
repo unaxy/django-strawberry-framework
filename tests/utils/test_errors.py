@@ -64,6 +64,7 @@ from django_strawberry_framework.utils.errors import (
     join_error_path,
     model_field_error_names,
     null_field_error,
+    refuses_utc_offset,
     rekey_error_segment,
     relation_field_error,
     save_time_error_key_map,
@@ -1176,13 +1177,8 @@ _POSTGRESQL_OFFSETS = {
     "naive": (None, False, False),
 }
 
-#: Each temporal leaf the offset reaches: its column, lookup parts and whether its value is a
-#: ``time`` (a ``TimeField``, or a ``DateTimeField``'s ``time`` transform) or a ``datetime``.
-_OFFSET_LEAVES = {
-    "datetime": (_STAMP, ("gt",), False),
-    "time": (_TIME, ("in",), True),
-    "time-transform": (_STAMP, ("time", "exact"), True),
-}
+#: Each column the offset is bound into, and whether its value is a ``time`` or a ``datetime``.
+_OFFSET_LEAVES = {"datetime": (_STAMP, False), "time": (_TIME, True)}
 
 
 def _leaf_value(
@@ -1209,18 +1205,77 @@ def test_unbindable_temporal_holds_a_utc_offset_to_postgresql_binding_mode(
     refused for an offset of 16:00 or more either way, or one with a fraction of a
     second; bound on the server (any other psycopg 3 cursor) a datetime travels as a UTC
     instant, so no offset refuses it, while a time keeps its whole-second offset, refused
-    from 16:00. Every member of an ``in`` list is read. A stand-in alias carries each
-    mode, so the rule holds on every test tier; the real server's answers are pinned by
+    from 16:00. Every member of a list is read. A stand-in alias carries each mode, so
+    the rule holds on every test tier; the real server's answers are pinned by
     ``test_unbindable_temporal_answers_what_postgresql_refuses``.
     """
     driver, cursor_factory, client_side = BINDING_MODES[mode]
-    column, lookup_parts, is_time = _OFFSET_LEAVES[leaf]
+    column, is_time = _OFFSET_LEAVES[leaf]
     zone, refused_as_text, refused_time_on_server = _POSTGRESQL_OFFSETS[offset]
     value = _leaf_value(zone, is_time=is_time)
-    bound = [datetime.time(9, 30), value] if lookup_parts == ("in",) else value
+    bound = [datetime.time(9, 30), value] if is_time else value
     refused = refused_as_text if client_side else is_time and refused_time_on_server
     with postgresql_stand_in(driver, cursor_factory) as alias:
-        assert unbindable_temporal(column, lookup_parts, bound, lambda: alias) is refused
+        assert unbindable_temporal(column, bound, lambda: alias) is refused
+
+
+@pytest.mark.parametrize("mode", list(BINDING_MODES))
+@pytest.mark.parametrize("is_time", [False, True], ids=["datetime", "time"])
+@pytest.mark.parametrize("offset", list(_POSTGRESQL_OFFSETS))
+def test_refuses_utc_offset_reads_each_aware_datetime_or_time_a_query_binds(
+    mode: str,
+    is_time: bool,  # noqa: FBT001
+    offset: str,
+) -> None:
+    """The offset rule reads every datetime and time among the values a query binds.
+
+    The values are a compiled predicate's parameters, beside which a text, a number, a
+    date and a ``None`` bind as they are. A datetime or time is refused for the offset
+    its connection's binding mode sends the server, as ``unbindable_temporal`` refuses
+    one bound into a column.
+    """
+    driver, cursor_factory, client_side = BINDING_MODES[mode]
+    zone, refused_as_text, refused_time_on_server = _POSTGRESQL_OFFSETS[offset]
+    value = _leaf_value(zone, is_time=is_time)
+    refused = refused_as_text if client_side else is_time and refused_time_on_server
+    params = [
+        "label",
+        5,
+        datetime.date(2021, 6, 15),
+        None,
+        value,
+    ]
+    with postgresql_stand_in(driver, cursor_factory) as alias:
+        assert refuses_utc_offset(connections[alias], params) is refused
+
+
+@pytest.mark.parametrize(
+    ("alias_kind", "bound_as_text", "refused"),
+    [
+        pytest.param("sqlite", False, False, id="not-postgresql"),
+        pytest.param("server-side", False, False, id="datetime-bound-on-the-server"),
+        pytest.param("server-side", True, True, id="datetime-bound-as-text"),
+    ],
+)
+def test_refuses_utc_offset_reads_the_backend_and_the_text_binding(
+    alias_kind: str,
+    bound_as_text: bool,  # noqa: FBT001
+    refused: bool,  # noqa: FBT001
+) -> None:
+    """Only PostgreSQL refuses an offset, and ``bound_as_text`` holds it to the text rule.
+
+    A datetime carrying a fraction-of-a-second offset binds on SQLite and, on the server,
+    on psycopg 3's server-side binding; bound as text (an ``ArrayField`` element) it is
+    refused whatever the connection's binding mode.
+    """
+    value = _leaf_value(_offset(1, 0, 0, 500_000), is_time=False)
+    if alias_kind == "sqlite":
+        assert refuses_utc_offset(connections[DEFAULT_DB_ALIAS], [value]) is refused
+        return
+    driver, cursor_factory, _ = BINDING_MODES["psycopg3-server"]
+    with postgresql_stand_in(driver, cursor_factory) as alias:
+        answer = refuses_utc_offset(connections[alias], [value], bound_as_text=bound_as_text)
+    assert answer is refused
 
 
 @pytest.mark.parametrize(
@@ -1294,7 +1349,7 @@ def _postgresql_refuses(alias: str, column: str, value: object) -> bool:
 @pytest.mark.pg
 @pytest.mark.django_db
 @pytest.mark.parametrize("server_side_binding", [False, True], ids=["client-side", "server-side"])
-@pytest.mark.parametrize("leaf", list(_OFFSET_LEAVES))
+@pytest.mark.parametrize("leaf", [*_OFFSET_LEAVES, "time-transform"])
 @pytest.mark.parametrize("offset", list(_POSTGRESQL_OFFSETS))
 def test_unbindable_temporal_answers_what_postgresql_refuses(
     server_side_binding: bool,  # noqa: FBT001
@@ -1306,9 +1361,10 @@ def test_unbindable_temporal_answers_what_postgresql_refuses(
     Each value is filtered on (``exact``, ``in``, a datetime's ``time`` transform) and
     written over a second alias on the test database, connecting with psycopg 3's
     ``server_side_binding`` off and on; ``unbindable_temporal`` and ``unstorable_temporal``
-    answer what the server does.
+    answer what the server does, and so does ``refuses_utc_offset`` over the time a
+    datetime's ``time`` transform binds.
     """
-    column, lookup_parts, is_time = _OFFSET_LEAVES[leaf]
+    column, is_time = _OFFSET_LEAVES.get(leaf, (None, True))
     zone, _, _ = _POSTGRESQL_OFFSETS[offset]
     value = _leaf_value(zone, is_time=is_time)
     target = {"datetime": "occurred_at", "time": "occurred_time"}.get(leaf, "occurred_at__time")
@@ -1317,9 +1373,11 @@ def test_unbindable_temporal_answers_what_postgresql_refuses(
             # A naive datetime under ``USE_TZ`` is made aware in the current time zone.
             warnings.filterwarnings("ignore", "DateTimeField .* received a naive", RuntimeWarning)
             refused = _postgresql_refuses(alias, target, value)
-        assert unbindable_temporal(column, lookup_parts, [value], lambda: alias) is refused
-        if leaf != "time-transform":
-            assert unstorable_temporal(column, value, lambda: alias) is refused
+        if column is None:
+            assert refuses_utc_offset(connections[alias], [value]) is refused
+            return
+        assert unbindable_temporal(column, [value], lambda: alias) is refused
+        assert unstorable_temporal(column, value, lambda: alias) is refused
 
 
 @pytest.mark.parametrize(

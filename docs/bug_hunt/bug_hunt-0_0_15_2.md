@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 334 done, 214 to do.
+Progress: 337 done, 213 to do.
 
 ## Done
 
@@ -1875,6 +1875,22 @@ Progress: 334 done, 214 to do.
   hook (a consumer `select_related` never released), raised `AttributeError` for a prefetch planned beneath the JOIN,
   and refused an accessor-spelled hinted `Prefetch` beneath a JOIN. Tests:
   `tests/optimizer/test_relation_spelling_execution.py`, `test_walker.py`, `test_plans.py`, `tests/utils/test_relations.py`
+- [x] 384. A filter value the database cannot bind is refused by asking Django, not a model of it: each temporal leaf's
+  predicate is built by its own shipped `filter()` over the filterset's queryset with its WHERE and limits cleared, and
+  only that clause is compiled on `queryset.db` (`filters/sets.py::_unbindable_predicate`); a build `OverflowError` /
+  `ValueError` / `TypeError` / `ValidationError` or a compile `OverflowError` / `ValueError` is the coded
+  `FILTER_INVALID`, and the compiled params meet the PostgreSQL server-offset rule
+  (`utils/errors.py::refuses_utc_offset`, the one rule no Django call answers). A declared filter whose value kind
+  differs from its column (a `date` on a `DateTimeField` east of UTC, a `datetime` on a `DateField` or through
+  `__date`) overflowed as the masked uncoded error. The value-kind walk, lookup and year tables in
+  `unbindable_temporal` are gone (-80 lines). spec-027 row. Tests: `tests/filters/test_sets.py`,
+  `tests/utils/test_errors.py`, `test_scalars_filter_api.py`
+- [x] 388. A class-level `Filter.filter()` override owns its value like `method=`: the unbindable-value ask runs only a
+  `filter` defined by django-filter or this package (`filters/sets.py::_runs_shipped_filter`, the MRO owner's module),
+  so consumer code never runs to validate; documented in `_unbindable_temporal_errors`. Tests: `tests/filters/test_sets.py`
+- [x] 398. A class-level `GlobalIDFilter.filter` override is read by `filters/sets.py::_decodes_before_binding` through
+  `utils/truth.py::overrides`, so its lone-surrogate value is the coded `FILTER_INVALID` instead of a masked
+  `UnicodeEncodeError`. Tests: `tests/filters/test_sets.py`
 
 ## Outside review of the fixes
 
@@ -1915,10 +1931,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 384. A declared django-filter whose scalar kind differs from its column escapes the unbindable-temporal refusal: a
-  `date` value on a `DateTimeField` (`date(1, 1, 1)` under a `TIME_ZONE` east of UTC) and a `datetime` through a
-  `DateField` or a `__date` transform (`0001-01-01T00:00+05:00`, `9999-12-31T23:59-05:00`) overflow at evaluation as the
-  masked uncoded error
 - [ ] 385. A `year` / `iso_year` `in` / `range` filter value at or above 2**63, or a non-numeric string / inf / nan,
   raises the masked `OverflowError` / `ValueError` at SQLite bind (generic integer binding, not a temporal bound);
   `int(Decimal("1E+300000"))` also costs seconds on the same path
@@ -1928,9 +1940,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   every wire value cleans to `"Enter a number."`; and the generated `time` leaf on a `DateTimeField` raises
   `AttributeError: 'datetime.datetime' object has no attribute 'strip'` in `forms.TimeField` clean before the filter
   seam
-- [ ] 388. A filter whose class (not instance) overrides `Filter.filter()` is still read by the unbindable-temporal
-  refusal, because `filters/sets.py::_own_filter` reads only the instance `__dict__`; decide whether a class-level
-  override owns its value like `method=` and document it
 - [ ] 389. Unprobed: a PostgreSQL `ArrayField` of datetimes or times as a filter leaf; the unbindable-temporal refusal
   does not read its elements; probe whether PostgreSQL refuses any element value the scalar accepts
 - [ ] 427. (robustness)
@@ -1958,9 +1967,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   unless a project assigns one)
 - [ ] 397. Unprobed: a `scripts/workspace.py` command other than `run` printing to a closed stdout (`workspace.py status
   | head`) may exit 120 from the flush `BrokenPipeError` and lose its own return code, as `run` did (307)
-- [ ] 398. A class-level `GlobalIDFilter.filter` override skips the lone-surrogate `FILTER_INVALID` refusal, because
-  `filters/sets.py::_decodes_before_binding` reads only the instance's own filter, so a `UnicodeEncodeError` escapes as
-  the masked uncoded error; read it through `utils/truth.py::overrides` (the class-level-override family of 388)
 - [ ] 501. (robustness) `scripts/workspace.py::workspace_base` uses a fixed `$TMPDIR/dsf-ws` with no owner, symlink or
   mode check, the shared-name shape 330 removed from `prove_failability.py`: on a shared Linux `/tmp` (no `TMPDIR`) a
   second user's flows land in, or are refused by, the first user's directory, and a planted symlink is followed. Name
@@ -2120,12 +2126,20 @@ tracker number are recorded there; open remainders and new defects are filed as 
   (`nodes` over two `PublisherType` ids with `editions { isbn13 }` = 3 statements): `DjangoNodeField` /
   `DjangoNodesField` dispatch to `_resolve_node_default` / `_resolve_nodes_default` without an optimizer pass,
   the seam spec-015 notes as not wired. Found fact-finding 604
+- [ ] 650. The write-side temporal check `utils/errors.py::unstorable_temporal` still hand-models Django's conversions
+  (`_stored_datetime`): an aware year-1 `datetime` into a `DateField` (from a consumer hook, or a form / serializer field
+  of another kind than its column) answers storable while `Field.get_db_prep_save` raises `OverflowError`; ask
+  `get_db_prep_save` on the target connection instead, keeping `refuses_utc_offset`. Found landing 384
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 649. CHANGELOG entry for items 384, 388, 398: a declared filter whose value kind differs from its column (a
+  `date` on a `DateTimeField`, a `datetime` on a `DateField` or through `__date`) out of the database's range is now the
+  coded `FILTER_INVALID`; a class-level `filter()` override is never run to validate a value; a class-level
+  `GlobalIDFilter.filter` override's lone-surrogate value is `FILTER_INVALID`
 - [ ] 648. CHANGELOG entry for item 462: on a reverse relation declared with its own `related_query_name`, the optimizer
   now keeps a consumer `Prefetch` and a related type's `get_queryset` in charge of the joined row, plans a prefetch
   beneath that relation's JOIN, and accepts a hinted `Prefetch` spelled by accessor beneath a JOIN

@@ -306,6 +306,8 @@
 "tests/_idioms.py::STR_ENUM" = { cast = 1 }
 "tests/_idioms.py::UnreadableStateQuerySet.__dict__" = { reportGeneralTypeIssues = 1, reportIncompatibleVariableOverride = 1 }
 "tests/_idioms.py::bind_unparented" = { reportArgumentType = 1, reportUnknownMemberType = 1 }
+"tests/_postgresql_stand_in.py::StoringOperations.adapt_datetimefield_value" = { reportIncompatibleMethodOverride = 1 }
+"tests/_postgresql_stand_in.py::StoringOperations.adapt_timefield_value" = { reportIncompatibleMethodOverride = 1 }
 "tests/_soft_dependency.py::blocked_modules" = { reportArgumentType = 1 }
 "tests/auth/test_mutations.py::_channels_router" = { reportArgumentType = 2, reportCallIssue = 2, reportUnknownArgumentType = 2 }
 "tests/auth/test_mutations.py::_privilege_required_user.PrivilegeRequiredUser" = { reportAssignmentType = 1 }
