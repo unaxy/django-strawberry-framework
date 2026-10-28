@@ -70,11 +70,13 @@ from django_strawberry_framework.registry import register_subsystem_clear, regis
 from django_strawberry_framework.resource_policy import check_deadline
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
+    is_concrete_field,
     is_list,
     is_str,
     is_tuple,
     list_iter,
     read_attr,
+    require,
     require_instance,
     tuple_iter,
 )
@@ -1264,7 +1266,10 @@ def _register_write_step(
     """
     user, m2m_assignments, exclude, raw_password = decoded
     if raw_password is None:
-        return resolvers.StepFailure([null_field_error("password")])
+        # The user model's ``password`` column's message, as the decode's explicit-null
+        # refusal answers it.
+        password_column = require(type(user)._meta.get_field("password"), is_concrete_field)
+        return resolvers.StepFailure([null_field_error("password", password_column)])
     if not isinstance(raw_password, str):
         return resolvers.StepFailure(
             [field_error("password", "Invalid password.", codes=FIELD_ERROR_CODE_INVALID)],

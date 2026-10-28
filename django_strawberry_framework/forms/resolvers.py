@@ -1423,8 +1423,8 @@ def _column_null_errors(
     """Map each column to its Django ``error_messages["null"]`` error, code ``null``.
 
     The column's own message is the source of truth, so a custom or translated message
-    is sent as is; the error carries the field, code and path the model flavor gives the
-    same input (``mutations/resolvers.py::_explicit_null_error``).
+    is sent as is; the error carries the field, message, code and path the model flavor
+    gives the same input (``mutations/resolvers.py::_explicit_null_error``).
     """
     return {
         field.name: [ValidationError(field.error_messages["null"], code="null")]
@@ -1475,13 +1475,12 @@ def _modelform_save_or_field_errors(
     trigger, never the diagnosis: the failure is re-raised as that column's
     field-keyed ``ValidationError`` only when
     ``_unstorable_cleaned_fields`` finds such a column on the instance the save was
-    attempted on, so the error carries the field, code ``null`` and path the model
-    flavor gives the same input (``mutations/resolvers.py::_explicit_null_error`` for
+    attempted on, so the error carries the field, code ``null``, path and message the
+    model flavor gives the same input (``mutations/resolvers.py::_explicit_null_error`` for
     an explicit ``null`` scalar, ``mutations/resolvers.py::_decode_single_relation_id``
     for an explicit ``null`` foreign key, ``mutations/resolvers.py::_created_row_integrity_errors``
-    for a column a create omitted), with the column's Django ``error_messages["null"]``
-    as the message (the form is the message source of truth, so a custom or translated
-    message is sent as is).
+    for a column a create omitted): the column's Django ``error_messages["null"]``, so a
+    custom or translated message is sent as is.
     The diagnosis reads only the in-memory instance, so no query runs on a connection
     the ``IntegrityError`` / ``DataError`` left unusable; the shared mapper's envelope
     then rolls the pipeline transaction back (an update's failed save is already

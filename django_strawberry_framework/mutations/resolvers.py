@@ -733,7 +733,8 @@ def _explicit_null_error(
     only after its failed INSERT (``_created_row_integrity_errors``). The explicit
     ``null`` is rejected here, at decode, as a field-keyed ``FieldError``, before
     validation and before any write. A ``null=True`` column treats ``None`` as a valid
-    clear and is left alone.
+    clear and is left alone. The message is the column's own ``error_messages["null"]``
+    (``utils/errors.py::null_field_error``).
     ``django_field`` is the bind-time column from ``_model_fields_by_attr`` (never a
     live ``get_field``).
     """
@@ -741,7 +742,7 @@ def _explicit_null_error(
         return None
     if django_field.null:
         return None
-    return null_field_error(field_name)
+    return null_field_error(field_name, require(django_field, is_concrete_field))
 
 
 def _make_aware_if_naive(value: object) -> object:
@@ -790,20 +791,17 @@ def _decode_single_relation_id(
 
     An explicit ``None`` is the clear signal for a **nullable** FK / OneToOne and
     returns ``(None, None)`` without a membership query. On a ``null=False`` relation
-    the same ``None`` is rejected here as a field-keyed ``null`` ``FieldError``
-    (GraphQL name, e.g. ``categoryId``) - mirroring the scalar
-    ``_explicit_null_error`` guard, before validation and before any write. Django's
-    ``full_clean`` SKIPS a ``blank=True`` empty value, so a ``blank=True, null=False``
-    FK reaches the database's NOT NULL ``IntegrityError``, which names no field: an
-    update's is the ``"__all__"`` constraint envelope, and a create's is named only after
-    its failed INSERT (``_created_row_integrity_errors``). ``relation_field`` is the
-    bind-time Django field from ``extra(spec)`` (``null`` lives on the field, not on
-    ``InputFieldSpec``).
+    the same ``None`` is rejected by the scalar ``_explicit_null_error`` guard as a
+    field-keyed ``null`` ``FieldError`` (GraphQL name, e.g. ``categoryId``), before
+    validation and before any write. Django's ``full_clean`` SKIPS a ``blank=True`` empty
+    value, so a ``blank=True, null=False`` FK reaches the database's NOT NULL
+    ``IntegrityError``, which names no field: an update's is the ``"__all__"`` constraint
+    envelope, and a create's is named only after its failed INSERT
+    (``_created_row_integrity_errors``). ``relation_field`` is the bind-time Django field
+    from ``extra(spec)`` (``null`` lives on the field, not on ``InputFieldSpec``).
     """
     if value is None:
-        if getattr(relation_field, "null", False):
-            return None, None
-        return None, null_field_error(graphql_name)
+        return None, _explicit_null_error(relation_field, graphql_name, value)
     decoded = decode_visible_relation_ids(
         [value],
         graphql_name=graphql_name,
@@ -1465,7 +1463,7 @@ def _created_row_integrity_errors(
     columns = unstorable_columns(target, error_key_map)
     if not columns:
         return integrity_error_field_errors()
-    return [null_field_error(error_key_map[column.name][0]) for column in columns]
+    return [null_field_error(error_key_map[column.name][0], column) for column in columns]
 
 
 # Every table a create's row spans, its multi-table parents included: the

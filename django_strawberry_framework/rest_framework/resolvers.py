@@ -2831,7 +2831,7 @@ def _attempted_row_integrity_errors(
     columns = unstorable_columns(attempted[-1], error_key_map) if attempted else []
     if not columns:
         return integrity_error_field_errors()
-    return [null_field_error(error_key_map[column.name][0]) for column in columns]
+    return [null_field_error(error_key_map[column.name][0], column) for column in columns]
 
 
 def _guarded_serializer_write(

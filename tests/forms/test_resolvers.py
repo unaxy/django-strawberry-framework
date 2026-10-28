@@ -3676,7 +3676,7 @@ def test_modelform_update_null_on_not_null_foreign_key_is_field_keyed_null_error
     assert res.data["updateRow"] == {
         "result": None,
         "errors": [
-            {"field": "itemId", "messages": ["This field cannot be null."], "codes": ["null"]},
+            {"field": "itemId", "messages": ["A hold needs an item."], "codes": ["null"]},
         ],
     }
     assert list(product_models.ItemHold.objects.values_list("item", flat=True)) == [item.pk]

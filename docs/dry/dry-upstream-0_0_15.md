@@ -203,18 +203,25 @@ it lands with its tick.
   - Tests: `tests/types/test_relay_interfaces.py::test_two_node_id_annotations_are_refused_not_read_as_pk`; the zero
     case stays pinned by `test_resolve_id_attr_falls_back_to_pk`.
 
-- [ ] 9. (WRT-1 = TYP-9, also tracked in `dry-0_0_15_3.md`) The model and auth flavors hardcode Django's English
+- [x] 9. (WRT-1 = TYP-9, also tracked in `dry-0_0_15_3.md`) The model and auth flavors hardcode Django's English
   `"null"` message
-  - Our code: `utils/errors.py::null_field_error`. It is reached from `mutations/resolvers.py::_explicit_null_error`,
-    `::_decode_single_relation_id` and `::_created_row_integrity_errors`, and from `auth/mutations.py` (password).
-  - Upstream: `django/db/models/fields/__init__.py::Field.error_messages["null"]` (public). The ModelForm flavor
-    already reads it in `forms/resolvers.py::_column_null_errors`.
-  - Lines: ~0 (the signature takes the column).
-  - Status: CONFIRMED. Probe: `Item.name` under en/fr/de; 2 of the 3 locales differ.
-  - Reason to keep ours: none. The auth `password` site has no column and keeps its own message.
-  - Behaviour change: fixes an explicit `null` on a `null=False` column getting English or default text under another
-    active language or under custom `error_messages`. The flavors then agree. The wire `codes` stay `["null"]`.
-  - Risk / blockers: land it once with the `dry-0_0_15_3.md` item and tick both.
+  - Our code: `utils/errors.py::null_field_error(path, column)` sends the column's `error_messages["null"]`. Its
+    callers pass the column: `mutations/resolvers.py::_explicit_null_error` and `::_created_row_integrity_errors`,
+    `rest_framework/resolvers.py::_attempted_row_integrity_errors` (a caller the sweep missed), and
+    `auth/mutations.py::_register_write_step`, which reads the user model's `password` column.
+    `_decode_single_relation_id`'s null arm returns `_explicit_null_error` (`dry-0_0_15_3.md` item 17).
+  - Upstream: `django/db/models/fields/__init__.py::Field.error_messages["null"]`, which the ModelForm flavor
+    already reads in `forms/resolvers.py::_column_null_errors`.
+  - Status: CONFIRMED. Four live cases (model and serializer, `itemId` omitted and `null`) and the package row failed
+    on the old code.
+  - Behaviour change: a custom or translated column `null` message now reaches the model, serializer and auth
+    flavors as it already reached ModelForm. The wire `codes` stay `["null"]`.
+  - Tests:
+    - fakeshop `ItemHold.item` gets `error_messages={"null": "A hold needs an item."}` (migration
+      `products/0004_item_hold_item_null_message.py`, state only);
+    - live: `test_products_api.py::test_create_item_hold_null_item_is_a_field_error`, six cases that now agree;
+    - `tests/utils/test_errors.py::test_null_field_error_and_empty_validation_error_leaf_shapes`.
+  - Closes `dry-0_0_15_3.md` items 17 and 41.
 
 - [ ] 10. (WRT-2) The DRF non-field-errors key is captured once at import
   - Our code: `rest_framework/resolvers.py #"_DRF_NON_FIELD_KEY: str = api_settings.NON_FIELD_ERRORS_KEY"`, read
