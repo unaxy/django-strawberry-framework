@@ -223,18 +223,16 @@ it lands with its tick.
     - `tests/utils/test_errors.py::test_null_field_error_and_empty_validation_error_leaf_shapes`.
   - Closes `dry-0_0_15_3.md` items 17 and 41.
 
-- [ ] 10. (WRT-2) The DRF non-field-errors key is captured once at import
-  - Our code: `rest_framework/resolvers.py #"_DRF_NON_FIELD_KEY: str = api_settings.NON_FIELD_ERRORS_KEY"`, read
-    in `::_error_node_children` (1 line).
-  - Upstream: `rest_framework/settings.py::api_settings` (public). It is reloaded on `setting_changed`, and
-    `as_serializer_error` reads it live.
-  - Lines: ~1.
-  - Status: CONFIRMED. Probe: under `override_settings(REST_FRAMEWORK={"NON_FIELD_ERRORS_KEY": "errors"})` DRF emits
-    `errors`, and ours reports it as field `errors` instead of `__all__`. 1 of 2 cases differs.
-  - Reason to keep ours: none.
-  - Behaviour change: fixes the key changing after import, which leaves the whole-object bucket keyed as a field.
-    This is a robustness row (GOAL.md trust boundary), since production settings are static.
-  - Risk / blockers: none.
+- [x] 10. (WRT-2) The DRF non-field-errors key is captured once at import
+  - Our code: the module constant `_DRF_NON_FIELD_KEY` was removed. `rest_framework/resolvers.py::_error_node_children`
+    reads `api_settings.NON_FIELD_ERRORS_KEY` per dict node, as DRF's `as_serializer_error` does.
+  - Upstream: `rest_framework/settings.py::api_settings` (public), reloaded on `setting_changed`.
+  - Status: CONFIRMED. The live row failed on the old code at its second post (`field: "errors"` where `__all__` was
+    expected). The capture happened at the lazy first import, so only a key changed after the first serializer
+    request diverged.
+  - Behaviour change: fixes the whole-object bucket being keyed as a field named after the reconfigured key.
+  - Tests: live `test_products_api.py::test_create_item_via_serializer_object_validate_honours_a_reconfigured_non_field_key`
+    over `ItemSerializer.validate()`, once under the default key and once under `override_settings`.
 
 - [ ] 11. (FLT-2) The FilterSet M2M sweep uses `isinstance(ManyToManyField)` over `get_fields()`
   - Our code: `filters/sets.py::FilterSet.get_fields #"m2m_names = {"` (3 lines).

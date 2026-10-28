@@ -352,12 +352,6 @@ _OMITTED: Final = _Omitted.OMITTED
 # flavors via ``sync_pipeline_recourse`` (spec-039).
 _SERIALIZER_ASYNC_RECOURSE = sync_pipeline_recourse("serializer mutation")
 
-# DRF's non-field-errors bucket key (``api_settings.NON_FIELD_ERRORS_KEY``,
-# default ``"non_field_errors"``). Read once from DRF's settings so the recursive
-# flattener normalizes WHATEVER key DRF is configured to use (not a hard-coded
-# literal) to the package's ``"__all__"`` sentinel at every level.
-_DRF_NON_FIELD_KEY: str = api_settings.NON_FIELD_ERRORS_KEY
-
 
 def _decode_relation_single(
     value: object,
@@ -688,21 +682,24 @@ def _error_node_children(
     The single expansion rule the iterative flattener walks: a **dict** re-keys each key to its
     GraphQL name AS IT DESCENDS (not only the root) via the shared
     ``utils/errors.py::rekey_error_segment`` with the level's own key map, after normalizing
-    DRF's non-field bucket (``_DRF_NON_FIELD_KEY``) to the ``"__all__"`` sentinel segment with
-    no child map; a **list containing dicts / lists** indexes each child
-    under its numeric position, carrying the SAME level map (the items are the same nested
+    DRF's non-field bucket to the ``"__all__"`` sentinel segment with no child map (the bucket key
+    is read from ``api_settings.NON_FIELD_ERRORS_KEY`` per node, the way DRF's own
+    ``as_serializer_error`` reads it, so a key DRF reloads on ``setting_changed`` is honoured);
+    a **list containing dicts / lists** indexes each child under its numeric position,
+    carrying the SAME level map (the items are the same nested
     serializer; a mixed list never occurs in DRF's shape, but the guard keeps a stray leaf from
     dropping). Anything else - a list of leaf messages, a bare string, an ``ErrorDetail`` - is a
     leaf (``None``).
     """
     if is_dict(errors):
         error_map = errors
+        drf_non_field_key = api_settings.NON_FIELD_ERRORS_KEY
         children: list[tuple[object, ErrorKeyMap, str]] = []
         for key, value in error_map.items():
             name = str(key)
             segment, child_map = (
                 (NON_FIELD_ERROR_KEY, {})
-                if name == _DRF_NON_FIELD_KEY
+                if name == drf_non_field_key
                 else rekey_error_segment(name, key_map)
             )
             children.append((value, child_map, join_error_path(prefix, segment)))

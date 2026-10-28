@@ -6248,6 +6248,45 @@ def test_create_item_via_serializer_object_validate_all_sentinel_and_request_con
 
 
 @pytest.mark.django_db(transaction=True)
+def test_create_item_via_serializer_object_validate_honours_a_reconfigured_non_field_key() -> None:
+    """A reconfigured DRF `NON_FIELD_ERRORS_KEY` still lands the object `validate()` error on `"__all__"`.
+
+    DRF reloads `api_settings` on `setting_changed` and keys the whole-object bucket by the
+    live `NON_FIELD_ERRORS_KEY`; the flattener reads the same live key, so the bucket keyed
+    `errors` under the override is the whole-object error, never a field named `errors`. The
+    first request runs under the default key, so the serializer write path is already loaded
+    when the key changes.
+    """
+    create_users(1)
+    seed_data(1)
+    category = models.Category.objects.earliest("pk")
+    client = _login_with_perm("view_item_1", "add_item")
+    variables = {
+        "d": {
+            "name": "view_item_1",  # equals the authenticated username
+            "categoryId": _global_id("products.category", category.pk),
+        },
+    }
+    expected = [
+        {"field": "__all__", "messages": ["Item name must not equal the requesting username."]},
+    ]
+
+    def _errors() -> object:
+        response = _post_graphql(_CREATE_ITEM_VIA_SERIALIZER, client=client, variables=variables)
+        assert response.status_code == 200
+        payload = response_json(response)
+        assert "errors" not in payload, payload
+        result = json_at(payload, "data", "createItemViaSerializer")
+        assert json_at(result, "node") is None
+        return json_at(result, "errors")
+
+    assert _errors() == expected
+    with override_settings(REST_FRAMEWORK={"NON_FIELD_ERRORS_KEY": "errors"}):
+        assert _errors() == expected
+    assert not models.Item.objects.filter(name="view_item_1").exists()
+
+
+@pytest.mark.django_db(transaction=True)
 def test_create_item_via_serializer_unique_together_error_uses_all_sentinel() -> None:
     """The `unique_item_per_category` `UniqueTogetherValidator` surfaces under `"__all__"`.
 
