@@ -941,6 +941,41 @@ def test_upstream_range_filter_nan_bound_is_filter_invalid() -> None:
     }
 
 
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("shape", "kept"),
+    [("both", ["mid"]), ("start", ["mid", "dear"]), ("end", ["cheap", "mid"])],
+)
+@pytest.mark.parametrize("context", ["top", "flat-partner"])
+def test_range_filter_reads_the_keys_a_mixin_field_override_installs(
+    shape: str,
+    kept: list[str],
+    context: str,
+) -> None:
+    """The package's ``RangeFilter`` is sent under the keys a mixin's ``field`` installs.
+
+    ``priceSpanInFieldBoxes`` is the package's ``RangeFilter`` followed in its MRO by a
+    mixin whose ``field`` installs a widget reading ``_low`` / ``_high``. The schema reads
+    the keys off the form field the rest of the filter's MRO builds, the mixin included, so
+    the bounds reach the keys the bound filter's form reads, flat and through the flat
+    ``partner`` copy; read off ``Filter.field`` alone they would go to ``_0`` / ``_1`` and
+    filter nothing.
+    """
+    _seed_dated_price_tiers()
+    bounds = {"start": "10.0000", "end": "100.0000"}
+    bag = {"range": {key: bounds[key] for key in ("start", "end") if shape in {"both", key}}}
+
+    if context == "top":
+        query, filter_input = _BY_FILTER, {"priceSpanInFieldBoxes": bag}
+        root, labels = "allScalarSpecimens", kept
+    else:
+        query, filter_input = _BY_NULLABLE_FILTER, {"partnerPriceSpanInFieldBoxes": bag}
+        root, labels = "allNullableScalarSpecimens", [f"of-{label}" for label in kept]
+    payload = response_json(post_graphql(query, variables={"filter": filter_input}))
+
+    assert payload == {"data": {root: [{"label": label} for label in labels]}}
+
+
 _ALL_INPUT_FIELDS_QUERY = """
 query {
   __schema { types { name inputFields { name } } }

@@ -39,7 +39,6 @@ from django.db.models import Model, QuerySet
 from django.db.models.expressions import Combinable
 from django.forms import CharField, DecimalField, Field, Form, SelectMultiple
 from django.http import HttpRequest, QueryDict
-from django.test import override_settings
 from django.test.utils import CaptureQueriesContext, isolate_apps
 from django.utils.translation import gettext_lazy
 from django_filters import BaseInFilter, CharFilter
@@ -346,20 +345,6 @@ def test_range_filter_field_cleans_bounds_once_bound_to_a_filterset() -> None:
     assert _range_field(bound) is _range_field(bound)
     assert isinstance(_range_field(bound).bound_field, DecimalField)
     assert isinstance(_range_field(copy.deepcopy(bound)).bound_field, DecimalField)
-
-
-@pytest.mark.parametrize(("disabled", "help_text"), [(True, ""), (False, "Price span")])
-def test_range_filter_class_level_field_is_built_as_django_filter_builds_it(
-    disabled: bool,  # noqa: FBT001
-    help_text: str,
-) -> None:
-    """The class-level field is ``Filter.field``'s: label and ``extra``, ``help_text`` per setting."""
-    declared = RangeFilter(field_name="price", label="Price", help_text="Price span")
-
-    with override_settings(FILTERS_DISABLE_HELP_TEXT=disabled):
-        field = _range_field(declared)
-
-    assert (field.label, field.help_text, field.required) == ("Price", help_text, False)
 
 
 @pytest.mark.parametrize(

@@ -62,7 +62,6 @@ from django_filters import (
     NumberFilter,
 )
 from django_filters import constants as _filter_constants
-from django_filters.conf import settings as _df_settings
 from django_filters.fields import BaseCSVField, ChoiceField
 from django_filters.filters import BaseInFilter, BaseRangeFilter, FilterMethod
 from django_filters.filterset import BaseFilterSet, FilterSetOptions
@@ -102,7 +101,6 @@ from django_strawberry_framework.utils._narrowing import (
     optional_instance,
     read_attr,
     require,
-    require_instance,
 )
 from django_strawberry_framework.utils.errors import (
     FILTER_INVALID_ERROR_CODE,
@@ -573,22 +571,6 @@ def _column_form_field(filter_instance: Filter, *, element: bool = False) -> Fie
     return _built_filter(filter_class, filter_instance.field_name, params).field
 
 
-def unkept_form_field(filter_instance: Filter) -> Field:
-    """Build the form field ``Filter.field`` builds for ``filter_instance``, keeping nothing.
-
-    ``Filter.field`` caches the field in the filter's ``_field``; a class-level declaration
-    is shared by every request and deep-copied into each one, so a read of it must not
-    write to it. The construction is ``Filter.field``'s: the filter's ``field_class`` over
-    its ``label`` and ``extra``, without ``help_text`` under django-filter's
-    ``DISABLE_HELP_TEXT``.
-    """
-    field_kwargs: dict[str, object] = dict(filter_instance.extra)
-    if read_attr(_df_settings, "DISABLE_HELP_TEXT", False):
-        _ = field_kwargs.pop("help_text", None)
-    field_class = require(read_attr(filter_instance, "field_class"), callable)
-    return require_instance(field_class(label=filter_instance.label, **field_kwargs), Field)
-
-
 def copied_form_field(filter_instance: Filter) -> Field:
     """Return the form field the filter's own class builds, read on a copy of the filter.
 
@@ -598,7 +580,7 @@ def copied_form_field(filter_instance: Filter) -> Field:
     a read of it must not write to it. The read runs on a deep copy, the copy
     django-filter itself makes per request, so the filter class's own ``field``,
     a consumer subclass's override included, builds it and the declaration keeps
-    nothing. ``unkept_form_field`` rebuilds only the base ``Filter.field``.
+    nothing.
     """
     return copy.deepcopy(filter_instance).field
 
@@ -672,9 +654,10 @@ class _ColumnCleanedFilter(TypedFilter):
     once the filter is bound to a ``FilterSet``, the package's or django-filter's own: the
     per-request copy django-filter binds builds its field once and hands it that field
     (``_hand_column_field``). A class-level declaration has no column to read, so its field
-    is built on each read and nothing is written to the filter (``unkept_form_field``): the
-    declaration is shared by every request, and a field kept on it would ride every
-    per-request deep copy and clean no value.
+    is the one the rest of its class's MRO builds (a mixin's or a consumer subclass's
+    ``field`` override between this class and ``Filter`` included), read on a deep copy so
+    nothing is written to the filter: the declaration is shared by every request, and a
+    field kept on it would ride every per-request deep copy and clean no value.
     """
 
     def _hand_column_field(self, _field: Field, /) -> None:
@@ -686,7 +669,7 @@ class _ColumnCleanedFilter(TypedFilter):
     def field(self) -> Field:
         """The form field, holding the column's comparison form field once the filter is bound."""
         if read_attr(self, "parent", None) is None:
-            return unkept_form_field(self)
+            return super(_ColumnCleanedFilter, copy.deepcopy(self)).field
         state = truth.instance_state(self)
         if "_field" in state:
             return super().field

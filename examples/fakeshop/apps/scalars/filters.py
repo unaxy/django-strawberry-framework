@@ -64,7 +64,9 @@ it reads ``<name>__low`` / ``<name>__high``, past a ``__``: a request names its 
 ``price_in_field_boxes`` is a consumer ``RangeFilter`` subclass whose ``field`` property
 installs its own widget (``FieldBoxRangeWidget``: ``<name>_low`` / ``<name>_high``): the
 keys are read off the form field the filter's own class builds, so the range input and
-the flat ``partner`` copy are sent under exactly those keys.
+the flat ``partner`` copy are sent under exactly those keys. ``price_span_in_field_boxes``
+is the package's ``RangeFilter`` with the same widget installed by ``FieldBoxWidgetMixin``,
+a ``field`` override that follows it in the MRO, so it too is sent under ``_low`` / ``_high``.
 """
 
 from __future__ import annotations
@@ -99,8 +101,8 @@ class FieldBoxRangeWidget(SuffixedMultiWidget):
         super().__init__((forms.TextInput, forms.TextInput), attrs)
 
 
-class FieldBoxRangeFilter(django_filters.RangeFilter):
-    """django-filter's ``RangeFilter`` whose ``field`` property installs its own widget.
+class FieldBoxWidgetMixin(django_filters.Filter):
+    """A filter mixin whose ``field`` property installs a ``FieldBoxRangeWidget``.
 
     The widget is set on the form field the filter builds, not passed as the filter's
     ``widget`` argument, so only that built field says which keys it reads.
@@ -109,10 +111,23 @@ class FieldBoxRangeFilter(django_filters.RangeFilter):
     @property
     @override
     def field(self) -> forms.Field:
-        """The range field, given a ``FieldBoxRangeWidget``."""
+        """The filter's form field, given a ``FieldBoxRangeWidget``."""
         field = super().field
         field.widget = FieldBoxRangeWidget()
         return field
+
+
+class FieldBoxRangeFilter(FieldBoxWidgetMixin, django_filters.RangeFilter):
+    """django-filter's ``RangeFilter`` whose ``field`` property installs its own widget."""
+
+
+class FieldBoxSpanFilter(RangeFilter, FieldBoxWidgetMixin):
+    """The package's ``RangeFilter`` with ``FieldBoxWidgetMixin`` after it in the MRO.
+
+    The mixin's ``field`` sits between the package's ``RangeFilter`` and django-filter's
+    ``Filter``, so the field it installs its widget on is the one the package's filter
+    builds and hands its column's comparison field.
+    """
 
 
 class ScalarSpecimenTagFilter(FilterSet):
@@ -144,6 +159,7 @@ class ScalarSpecimenFilter(FilterSet):
         widget=UnderscoredRangeWidget,
     )
     price_in_field_boxes = FieldBoxRangeFilter(field_name="price")
+    price_span_in_field_boxes = FieldBoxSpanFilter(field_name="price", lookup_expr="range")
 
     class Meta:
         model = models.ScalarSpecimen
@@ -206,6 +222,8 @@ class NullableScalarSpecimenFilter(FilterSet):
 __all__ = (
     "FieldBoxRangeFilter",
     "FieldBoxRangeWidget",
+    "FieldBoxSpanFilter",
+    "FieldBoxWidgetMixin",
     "NullableScalarSpecimenFilter",
     "ScalarSpecimenFilter",
     "ScalarSpecimenTagFilter",
