@@ -94,9 +94,8 @@ def test_inspect_by_registered_name() -> None:
     text = out.getvalue()
     assert "BookType" in text
     # Relay-Node pk (BookType declares ``interfaces = (relay.Node,)``,
-    # spec-032): the interface-supplied GlobalID!, not a plain Int!.
-    assert "id" in text
-    assert "GlobalID!" in text
+    # spec-032): the interface-supplied ID!, not a plain Int!.
+    assert " ID! " in _field_row(text, "id")
     assert "relay.Node id" in text
     # Per-row assertions so ``subtitle``'s String intent cannot false-green
     # against the ``title`` row's ``String!`` (``String`` is a substring of it).
@@ -122,7 +121,7 @@ def test_inspect_by_dotted_path() -> None:
     call_command("inspect_django_type", "apps.library.schema.BookType", stdout=out)
     text = out.getvalue()
     assert "BookType" in text
-    assert "GlobalID!" in text
+    assert " ID! " in _field_row(text, "id")
     assert "title" in text
     assert "String!" in text
     assert "subtitle" in text
@@ -276,13 +275,11 @@ def test_inspect_consumer_authored_scalar_override_matrix() -> None:
 def test_inspect_bigint_field_rows_use_package_scalar_name() -> None:
     """Cold path (no ``--schema``) names the ``BigInt`` scalar from ``scalars.py``.
 
-    Without ``--schema``, ``scalar_namer`` gets no live schema ``scalar_map``, so
-    the command falls back to its own ``_GRAPHQL_SCALAR_NAMES`` table for
-    ``BigIntegerField`` / ``PositiveBigIntegerField`` columns. That table merges in
-    ``django_strawberry_framework.scalars._PACKAGE_SCALAR_MAP`` rather than
-    hardcoding a second "BigInt" literal, so this pins the fallback against the
-    real ``ScalarSpecimen`` model end-to-end - if the two literals ever drifted
-    apart, one of these two columns would report the stale name.
+    Without ``--schema`` there is no schema converter to read, so the command names
+    ``BigIntegerField`` / ``PositiveBigIntegerField`` columns through the converter a
+    ``strawberry_config()`` schema builds, whose scalar registry carries the package's
+    ``BigInt`` definition. This pins that cold path against the real
+    ``ScalarSpecimen`` model end-to-end.
     """
     out = StringIO()
     call_command("inspect_django_type", "ScalarSpecimenType", stdout=out)
@@ -297,16 +294,19 @@ def test_inspect_bigint_field_rows_use_package_scalar_name() -> None:
 def test_inspect_relay_node_pk_row() -> None:
     """GenreType declares ``interfaces = (relay.Node,)`` - its pk is suppressed.
 
-    The pk row must report the interface-supplied ``GlobalID!`` / ``relay.Node
-    id``, sourced from the interface rather than indexing
-    ``origin.__annotations__[pk_name]`` (which would ``KeyError``).
+    The pk row must report the interface-supplied ``ID!`` / ``relay.Node id``,
+    sourced from the interface rather than indexing
+    ``origin.__annotations__[pk_name]`` (which would ``KeyError``). ``ID!`` is the
+    scalar the schema publishes for ``relay.GlobalID`` under the default config
+    (``relay_use_legacy_global_id`` off), so the row matches the SDL's ``id: ID!``.
     """
     out = StringIO()
     call_command("inspect_django_type", "GenreType", stdout=out)
     text = out.getvalue()
     assert "GenreType" in text
-    assert "GlobalID!" in text
-    assert "relay.Node id" in text
+    id_row = _field_row(text, "id")
+    assert " ID! " in id_row
+    assert "relay.Node id" in id_row
 
 
 @pytest.mark.usefixtures("reload_inspect_schema")

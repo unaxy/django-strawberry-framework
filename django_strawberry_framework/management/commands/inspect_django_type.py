@@ -33,20 +33,19 @@ or ``ApiPublicPatron`` under a prefixing converter) or the class name
 (``PublicPatronType``). The optional
 ``--schema <selector>`` is imported first (via Strawberry's
 ``import_module_symbol``, mirroring ``export_schema``) to register and finalize
-every type before resolution and supply the schema's scalar map and name
+every type before resolution and supply the schema's scalar registry and name
 converter - required for a cold CLI process and exact schema-specific names.
 """
 
-import datetime
-import decimal
 import typing
-import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from functools import partial
 
-import strawberry
 from django.core.management.base import BaseCommand, CommandError, CommandParser
+from strawberry.relay import GlobalID
+from strawberry.scalars import is_scalar
 from strawberry.schema.name_converter import NameConverter
+from strawberry.schema.schema_converter import GraphQLCoreConverter
 from strawberry.types.base import (
     StrawberryList,
     StrawberryOptional,
@@ -66,7 +65,7 @@ from django_strawberry_framework.management.commands._imports import (
     import_string_or_command_error,
 )
 from django_strawberry_framework.registry import registry
-from django_strawberry_framework.scalars import _PACKAGE_SCALAR_MAP
+from django_strawberry_framework.scalars import strawberry_config
 from django_strawberry_framework.types.base import DjangoType, _is_suppressed_relay_pk
 from django_strawberry_framework.types.converters import (
     ArrayRoute,
@@ -85,14 +84,18 @@ from django_strawberry_framework.utils._narrowing import (
 from django_strawberry_framework.utils.relations import is_single_column_foreign_key
 
 if typing.TYPE_CHECKING:
+    from graphql import GraphQLScalarType
+
     from django_strawberry_framework.optimizer.field_meta import FieldMeta
     from django_strawberry_framework.types.definition import DjangoTypeDefinition
     from django_strawberry_framework.utils.typing import ConcreteField, ModelField
 
-_GLOBAL_ID_GRAPHQL_TYPE = "GlobalID!"
 _RELAY_PK_CONVERTER = "relay.Node id"
-_DEFAULT_NAME_CONVERTER = NameConverter()
 _ScalarNamer = Callable[[object], str]
+
+#: ``GraphQLCoreConverter.from_scalar``: Strawberry annotates its parameter ``type``, yet
+#: it converts every leaf ``is_scalar`` accepts, ``NewType`` scalars included.
+_from_scalar: "Callable[..., GraphQLScalarType]" = GraphQLCoreConverter.from_scalar
 
 # Friendly converter-column labels for relation rows, mirroring the spec's
 # illustrative output (``M2M`` / ``forward FK`` / ``reverse FK``); a forward
@@ -110,29 +113,6 @@ _UNFINALIZED_HINT = (
     "finalize_django_types() has not run - pass "
     "--schema <your project schema dotted path> so all types register and finalize"
 )
-
-# Python / Strawberry scalar -> GraphQL scalar name, mirroring the names
-# Strawberry prints in the SDL. True GraphQL built-ins are fixed spec constants
-# hardcoded below; package-defined scalars (currently just ``BigInt``) are
-# merged in from ``scalars._PACKAGE_SCALAR_MAP`` instead of a second hardcoded
-# literal, so this cold-path (no ``--schema``) fallback always matches the name
-# ``strawberry_config()`` registers - a hand-copied "BigInt" here would
-# silently drift if the scalar's public name ever changed in ``scalars.py``.
-# Strawberry-defined objects, enums, and custom scalar wrappers carry their
-# authoritative names on their definitions instead.
-_GRAPHQL_SCALAR_NAMES: dict[object, str] = {
-    int: "Int",
-    str: "String",
-    bool: "Boolean",
-    float: "Float",
-    decimal.Decimal: "Decimal",
-    uuid.UUID: "UUID",
-    datetime.date: "Date",
-    datetime.datetime: "DateTime",
-    datetime.time: "Time",
-    strawberry.scalars.JSON: "JSON",
-    **{scalar: definition.name for scalar, definition in _PACKAGE_SCALAR_MAP.items()},
-}
 
 
 class Command(BaseCommand):
@@ -169,13 +149,9 @@ class Command(BaseCommand):
                 default_symbol_name="schema",
             )
 
-        config = getattr(schema_object, "config", None)
-        name_converter = getattr(config, "name_converter", _DEFAULT_NAME_CONVERTER)
-        scalar_namer = partial(
-            _scalar_name,
-            name_converter=name_converter,
-            scalar_map=getattr(config, "scalar_map", None),
-        )
+        converter = _scalar_converter(schema_object)
+        name_converter = converter.config.name_converter
+        scalar_namer = partial(_scalar_name, converter=converter)
 
         type_name = str(options["type"])
         target = self._resolve_type(type_name, name_converter)
@@ -274,14 +250,14 @@ class Command(BaseCommand):
         Dispatch is most-specific first:
 
         1. A Relay-Node-suppressed NON-relation pk wins over the scalar branch -
-           its ``id: GlobalID!`` is interface-supplied, so it is absent from
+           its ``id`` (a ``relay.GlobalID``) is interface-supplied, so it is absent from
            ``origin.__annotations__`` and must not be read there. A RELATION pk
            (``OneToOneField(primary_key=True)``, an MTI parent link) is NOT
            suppressed: ``_build_annotations`` routes every relation field
            through its relation branch before the pk-suppression check, so a
            relation pk keeps its auto-synthesized annotation, finalize resolves
            it, and the schema exposes the resolved relation type - never the
-           interface's GlobalID row. Falling through to ``_relation_row`` is
+           interface's ``id`` row. Falling through to ``_relation_row`` is
            safe: the annotation is present, so no ``KeyError``.
         2. A consumer-authored field (``definition.consumer_authored_fields``)
            is next: ``_build_annotations`` deliberately skips auto-synthesis for
@@ -301,7 +277,7 @@ class Command(BaseCommand):
             field,
             definition.consumer_authored_fields,
         ):
-            return _GLOBAL_ID_GRAPHQL_TYPE, "no", _RELAY_PK_CONVERTER
+            return f"{scalar_namer(GlobalID)}!", "no", _RELAY_PK_CONVERTER
         if field.name in definition.consumer_authored_fields:
             return self._consumer_authored_row(definition, field, scalar_namer)
         if field_meta.is_relation:
@@ -315,7 +291,7 @@ class Command(BaseCommand):
         definition: "DjangoTypeDefinition",
         field: "ModelField",
         field_meta: "FieldMeta",
-        scalar_namer: _ScalarNamer | None = None,
+        scalar_namer: _ScalarNamer,
     ) -> tuple[str, str, str]:
         """Build the row for a relation field from its resolved annotation + cardinality.
 
@@ -330,7 +306,6 @@ class Command(BaseCommand):
         own ``<rel>_connection -> <rel>`` record) and rendered from the synthesized
         connection sibling instead - never indexing the deleted annotation.
         """
-        scalar_namer = scalar_namer or _scalar_name
         generated = cls._suppressed_connection_name(definition, field)
         if generated is not None:
             return cls._connection_only_relation_row(
@@ -378,7 +353,7 @@ class Command(BaseCommand):
         definition: "DjangoTypeDefinition",
         field_meta: "FieldMeta",
         generated: str,
-        scalar_namer: _ScalarNamer | None = None,
+        scalar_namer: _ScalarNamer,
     ) -> tuple[str, str, str]:
         """Render a ``"connection"``-shaped relation from its synthesized sibling.
 
@@ -391,7 +366,6 @@ class Command(BaseCommand):
         cardinality and the connection-only shape so the operator sees that the
         list form was deliberately dropped.
         """
-        scalar_namer = scalar_namer or _scalar_name
         field_type = _strawberry_field_type(definition, generated)
         graphql_type = _render_strawberry_type(field_type, scalar_namer)
         kind = field_meta.relation_kind
@@ -402,10 +376,9 @@ class Command(BaseCommand):
     def _scalar_row(
         definition: "DjangoTypeDefinition",
         field: "ConcreteField",
-        scalar_namer: _ScalarNamer | None = None,
+        scalar_namer: _ScalarNamer,
     ) -> tuple[str, str, str]:
         """Build the row for a scalar field, reading nullability from the annotation."""
-        scalar_namer = scalar_namer or _scalar_name
         annotation: object = definition.origin.__annotations__[field.name]
         graphql_type = _render_annotation(annotation, scalar_namer)
         nullable = _yes_no(value=_annotation_is_optional(annotation))
@@ -427,7 +400,7 @@ class Command(BaseCommand):
     def _consumer_authored_row(
         definition: "DjangoTypeDefinition",
         field: "ModelField",
-        scalar_namer: _ScalarNamer | None = None,
+        scalar_namer: _ScalarNamer,
     ) -> tuple[str, str, str]:
         """Build the row for a consumer-authored field (annotation / ``strawberry.field`` override).
 
@@ -448,7 +421,6 @@ class Command(BaseCommand):
         a GraphQL type would be a lie - Strawberry itself raises on it at schema-build
         time - so it raises ``CommandError`` with a concrete recovery hint instead.
         """
-        scalar_namer = scalar_namer or _scalar_name
         field_type = _strawberry_field_type(definition, field.name)
         if field_type is UNRESOLVED:
             raise CommandError(
@@ -509,16 +481,15 @@ def _scalar_route_label(field: "ConcreteField") -> str:
     return "choice enum" if route.choices else f"SCALAR_MAP[{truth.name(route.key)}]"
 
 
-def _render_strawberry_type(field_type: object, scalar_namer: _ScalarNamer | None = None) -> str:
+def _render_strawberry_type(field_type: object, scalar_namer: _ScalarNamer) -> str:
     """Render a finalized Strawberry field type as a GraphQL-shaped string.
 
     The Strawberry-wrapper analogue of ``_render_annotation`` (which renders
     Python typing annotations): ``StrawberryOptional`` is the nullable ``Name``
     form (strip the trailing ``!``), ``StrawberryList`` is ``[Inner!]!`` (a
     non-null list whose element keeps its own rendered nullability), and a
-    concrete leaf scalar / type is ``Name!`` via ``_scalar_name``.
+    concrete leaf scalar / type is ``Name!`` via ``scalar_namer``.
     """
-    scalar_namer = scalar_namer or _scalar_name
     if isinstance(field_type, StrawberryOptional):
         return _render_strawberry_type(field_type.of_type, scalar_namer).rstrip("!")
     if isinstance(field_type, StrawberryList):
@@ -628,30 +599,47 @@ def _model_name(model: object) -> str:
     return truth.name(model) if truth.is_type(model) else "?"
 
 
-def _scalar_name(
-    scalar: object,
-    *,
-    name_converter: NameConverter = _DEFAULT_NAME_CONVERTER,
-    scalar_map: Mapping[object, ScalarDefinition] | None = None,
-) -> str:
+def _scalar_converter(schema: object) -> GraphQLCoreConverter:
+    """Return a private Strawberry converter carrying the schema's scalar registry and config.
+
+    With ``--schema`` it copies the schema's own ``schema_converter``: its config
+    (name converter, ``relay_use_legacy_global_id``) and its merged scalar registry
+    (Strawberry's ``DEFAULT_SCALAR_REGISTRY``, the ``GlobalID`` row, the config's
+    ``scalar_map`` and the schema's ``scalar_overrides``). Without one it is the
+    converter a ``strawberry_config()`` schema builds. A private copy, because
+    ``from_scalar`` caches each scalar it converts on the converter.
+    """
+    live = optional_instance(read_attr(schema, "schema_converter", None), GraphQLCoreConverter)
+    if live is None:
+        config = strawberry_config()
+        return GraphQLCoreConverter(
+            config,
+            scalar_overrides={},
+            scalar_map=config.scalar_map,
+            # ``from_scalar`` never builds an object type, so this never runs.
+            get_fields=lambda definition: definition.fields,
+        )
+    return GraphQLCoreConverter(
+        live.config,
+        scalar_overrides=live.scalar_registry,
+        scalar_map={},
+        get_fields=live.get_fields,
+    )
+
+
+def _scalar_name(scalar: object, *, converter: GraphQLCoreConverter) -> str:
     """Return the GraphQL name for a resolved scalar / type.
 
-    A supplied schema scalar map takes precedence, then built-ins use the fixed
-    SDL map. Object and enum classes expose
-    ``__strawberry_definition__``; custom scalar wrappers expose
-    ``_scalar_definition``; finalized Strawberry fields may contain a definition
-    or union directly. The selected name converter renders every one of those
-    metadata forms. Only definition-less leaves fall back to ``__name__``.
+    A scalar is named by Strawberry's own ``from_scalar``, whose ``GraphQLScalarType``
+    carries the name the SDL prints (``GlobalID`` reads ``ID`` unless the config sets
+    ``relay_use_legacy_global_id``). Object and enum classes expose
+    ``__strawberry_definition__``; finalized Strawberry fields may contain a
+    definition or union directly. The converter's name converter renders every one
+    of those metadata forms. Only definition-less leaves fall back to ``__name__``.
     """
-    scalar_definition = scalar_map.get(scalar) if scalar_map is not None else None
-    if scalar_definition is not None:
-        return _converter_type_name(name_converter, scalar_definition)
-    mapped = _GRAPHQL_SCALAR_NAMES.get(scalar)
-    if mapped is not None:
-        return mapped
+    if is_scalar(scalar, converter.scalar_registry):
+        return _from_scalar(converter, scalar).name
     strawberry_type: object = truth.static_attr(scalar, "__strawberry_definition__", None)
-    if strawberry_type is None:
-        strawberry_type = read_attr(scalar, "_scalar_definition", None)
     if strawberry_type is None and isinstance(
         scalar,
         (
@@ -663,14 +651,14 @@ def _scalar_name(
     ):
         strawberry_type = scalar
     if isinstance(strawberry_type, StrawberryType):
-        return _converter_type_name(name_converter, strawberry_type)
+        return _converter_type_name(converter.config.name_converter, strawberry_type)
     if truth.is_type(scalar):
         return truth.name(scalar)
     declared = truth.static_attr(scalar, "__name__", None)
     return declared if type(declared) is str and declared else truth.text(scalar)
 
 
-def _render_annotation(annotation: object, scalar_namer: _ScalarNamer = _scalar_name) -> str:
+def _render_annotation(annotation: object, scalar_namer: _ScalarNamer) -> str:
     """Render a resolved GraphQL annotation as a GraphQL-shaped string.
 
     Mirrors how Strawberry renders the SDL: a non-``None`` scalar / type is
