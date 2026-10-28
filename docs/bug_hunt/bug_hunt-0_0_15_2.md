@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 362 done, 211 to do.
+Progress: 363 done, 210 to do.
 
 ## Done
 
@@ -2035,6 +2035,9 @@ Progress: 362 done, 211 to do.
 - [x] 661. Closed-reader exit codes in repository check/build/review scripts are tooling robustness, with no
   supported package API or GraphQL wire/configuration path. The workspace command's own exit-code contract does
   not extend to those entry points; no script runtime fix is claimed.
+- [x] 643. Corrupt run-log/state evidence is an input to repository workspace tooling, not a supported
+  package API or GraphQL wire/configuration path. Closed as tooling robustness outside the package defect gate;
+  no malformed-evidence runtime fix is claimed (`scripts/workspace.py::load_runs`).
 
 ## Outside review of the fixes
 
@@ -2162,11 +2165,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `field_name` (`real_shelf = RelatedFilter(..., field_name="shelf")` beside an attribute `shelf`) also fires
   that declaration's gates through the name walk of its gate path: fail-closed, an extra gate its nested twin
   does not fire. Found fixing 640
-- [ ] 643. (robustness) `workspace.py audit` (and every reader of the run log or a state file) exits by a traceback on
-  a corrupt evidence file: `scripts/workspace.py::load_runs` decodes each line with a bare `json.loads` (a torn append
-  after a crash raises `json.JSONDecodeError`), `_read_text_if_present` catches only `FileNotFoundError` (a non-UTF-8
-  run log or one that is a directory escapes), and `_read_json_object` shares the bare decode, while a wrong-shape line
-  is already a `WorkspaceError` in `_logged_run`; found verifying 349
 - [ ] 629. Test prose cites spec and test-plan rows by ordinal, against START's "Cite contract by CONTENT, never
   ordinal": "Matrix row N" in `tests/filters/test_sets.py` (15), "Spec-046 row N" / "Test plan rows N-M" in
   `tests/test_routers.py` (19), "Row N" / "Test plan rows" in `examples/fakeshop/test_query/test_transport_api.py`
