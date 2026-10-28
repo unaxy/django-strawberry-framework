@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 340 done, 218 to do.
+Progress: 341 done, 217 to do.
 
 ## Done
 
@@ -1910,6 +1910,14 @@ Progress: 340 done, 218 to do.
   a list param psycopg cannot dump (a naive and an aware time) is refused through `_psycopg_refuses_list`. An element
   whose UTC offset PostgreSQL refuses raised the masked `DataError` at evaluation. By source and the recorded real-server
   facts; the pg-marked rows run on the PostgreSQL tier. Tests: `tests/filters/test_sets.py`, `tests/utils/test_errors.py`
+- [x] 427. (robustness) The django.yml floor-cell check (`tests/test_ci_governance.py::_floor_cell_problems`) holds
+  step order (the Django install, the strawberry floor step and the soft-floor step each after `uv sync`, the floor
+  steps after the Django install), refuses a later `uv sync` or `uv run` without `--no-sync` that would put the lock
+  back over the pins, and finds floor nodes by their `(python, django)` content so every one must carry
+  `compatibility_only` and every marked node must be at the floor; mutation rows pin each. `scripts/workspace.py::
+  _lower_bounds` refuses a dependency stated by two or more rows (a marker-split floor) instead of the last winning, and
+  the `[dependency-groups]`-not-a-table / `dev`-not-an-array refusals have rows. Tests: `tests/test_ci_governance.py`,
+  `tests/test_workspace.py`
 
 ## Outside review of the fixes
 
@@ -1954,14 +1962,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   every wire value cleans to `"Enter a number."`; and the generated `time` leaf on a `DateTimeField` raises
   `AttributeError: 'datetime.datetime' object has no attribute 'strip'` in `forms.TimeField` clean before the filter
   seam
-- [ ] 427. (robustness)
-  `tests/test_ci_governance.py::test_every_floor_literal_in_the_django_workflow_is_its_pyproject_lower_bound` checks
-  the floor literals and the step's `if` but not the step's position: moving the soft-floor step (or the strawberry
-  step) above the test job's "Install dependencies" lets `uv sync` revert the pins and the cell silently runs the
-  lock; nor does it check that every floor node carries `compatibility_only` (dropping it from one dispatch node stays
-  green). And `scripts/workspace.py::_lower_bounds` takes the last of two dev rows for one soft dependency (a
-  marker-split `cryptography>=44.0.0; python_version<'3.12'` / `cryptography>=45.0.0; ...`) silently; the
-  `[dependency-groups]`-not-a-table and `dev`-not-an-array refusals have no row. Found verifying 328
 - [ ] 428. (robustness) `tests/test_workspace.py`'s stop-relay rows
   (`test_a_repeat_stop_inside_the_grace_is_dropped_and_a_later_one_is_relayed`,
   `test_a_stopped_run_keeps_its_leases_until_its_command_ends_then_records_the_stop`,

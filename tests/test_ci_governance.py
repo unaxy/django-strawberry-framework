@@ -29,7 +29,7 @@ import shutil
 import subprocess
 import sys
 import tokenize
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeAlias
 
@@ -1804,13 +1804,19 @@ _REQUIREMENT = re.compile(r"\s*([A-Za-z0-9][\w.-]*(?:\[[^\]]*\])?)\s*(.*)")
 _LOWER_BOUND = re.compile(r">=\s*([^,;\s]+)")
 
 
-def _pyproject_lower_bounds() -> dict[str, str]:
-    """Each ``>=`` bound ``pyproject.toml`` states, keyed by requirement name with its extras.
+#: The pyproject rows the floor cell pins, so each must state exactly one floor.
+_FLOOR_ROWS = ("Django", "strawberry-graphql", *SOFT_DEPENDENCIES)
+
+
+def _lower_bounds_of(pyproject_text: str) -> dict[str, str]:
+    """Each ``>=`` bound ``pyproject_text`` states, keyed by requirement name with its extras.
 
     ``python`` is ``requires-python``'s; every other key is a ``[project].dependencies``
-    or ``[dependency-groups].dev`` row's.
+    or ``[dependency-groups].dev`` row's. A floor row (``_FLOOR_ROWS``) two bounded
+    rows state (rows split by environment marker) fails, since the floor cell pins
+    one version per package.
     """
-    document = object_result(tomli.loads, (REPO_ROOT / "pyproject.toml").read_text("utf-8"))
+    document = object_result(tomli.loads, pyproject_text)
     rows = [
         *json_list(document, "project", "dependencies"),
         *json_list(document, "dependency-groups", "dev"),
@@ -1822,53 +1828,336 @@ def _pyproject_lower_bounds() -> dict[str, str]:
         requirement = _REQUIREMENT.match(row)
         bound = _LOWER_BOUND.search(requirement.group(2)) if requirement else None
         if requirement and bound:
-            bounds[requirement.group(1)] = bound.group(1)
+            name = requirement.group(1)
+            assert name not in _FLOOR_ROWS or name not in bounds, (
+                f"{name} states more than one floor: {bounds[name]} and {bound.group(1)}"
+            )
+            bounds[name] = bound.group(1)
     return bounds
 
 
+def _pyproject_lower_bounds() -> dict[str, str]:
+    """``_lower_bounds_of`` this repository's ``pyproject.toml``."""
+    return _lower_bounds_of((REPO_ROOT / "pyproject.toml").read_text("utf-8"))
+
+
+def test_the_floor_bounds_refuse_a_marker_split_floor_row() -> None:
+    """A floor row split by environment marker fails; a repeated non-floor row does not."""
+    text = (
+        "[project]\n"
+        'requires-python = ">=3.10"\n'
+        'dependencies = ["Django>=5.2.16", "strawberry-graphql>=0.322.2"]\n'
+        "[dependency-groups]\n"
+        "dev = [\"pytest>=9.0.2; python_version<'3.12'\", \"pytest>=9.1.0; python_version>='3.12'\", "
+        "\"cryptography>=44.0.0; python_version<'3.12'\", "
+        "\"cryptography>=45.0.0; python_version>='3.12'\"]\n"
+    )
+
+    with pytest.raises(
+        AssertionError,
+        match=r"^cryptography states more than one floor: 44\.0\.0 and 45\.0\.0",
+    ):
+        _lower_bounds_of(text)
+    assert _lower_bounds_of(text.replace("cryptography>=45.0.0", "cffi>=1.0"))["pytest"] == "9.1.0"
+
+
+#: The ``if`` of the ``test`` job's strawberry-graphql floor step and of its soft-dependency one.
+STRAWBERRY_FLOOR_IF = "matrix.strawberry"
+SOFT_FLOOR_IF = "matrix.compatibility_only == '1'"
+#: A ``uv`` command that syncs the environment to ``uv.lock``, reverting any pin installed over it.
+_SYNCING_UV = re.compile(r"\buv (?:sync\b|run\b(?![^\n;&|]*--no-sync\b))")
+#: ``(later, earlier)``: each step that must run after the other in the ``test`` job.
+_STEP_ORDER = (
+    ("Django install", "uv sync"),
+    ("strawberry floor", "uv sync"),
+    ("strawberry floor", "Django install"),
+    ("soft floor", "uv sync"),
+    ("soft floor", "Django install"),
+    ("pytest run", "strawberry floor"),
+    ("pytest run", "soft floor"),
+)
+
+
+def _step_script(step: dict[object, object]) -> str:
+    """A workflow step's ``run`` script with its backslash-newline continuations joined."""
+    return str(step.get("run", "")).replace("\\\n", " ")
+
+
+def _step_lines(step: dict[object, object]) -> list[str]:
+    """The stripped, non-blank lines of a workflow step's joined ``run`` script."""
+    return [line.strip() for line in _step_script(step).splitlines() if line.strip()]
+
+
+def _floor_cell_problems(workflow_text: str, bounds: dict[str, str]) -> list[str]:
+    """Each way the ``test`` job of ``workflow_text`` fails to run exactly the floors ``bounds`` states.
+
+    A floor node is identified by its content, a ``(python, django)`` pair equal to
+    the floor's, never by the ``compatibility_only`` marker the floor steps key on;
+    the floor steps are identified by their ``if``, the sync, the Django install and
+    the test run by their ``run`` lines.
+    """
+    job = json_object(object_result(yaml.safe_load, workflow_text), "jobs", "test")
+    include = str(json_at(job, "strategy", "matrix", "include"))
+    node_lists: list[str] = re.findall(r"fromJSON\('(\[.*?\])'\)", include, re.DOTALL)
+    problems: list[str] = []
+    if len(node_lists) != 2:
+        problems.append(f"{len(node_lists)} matrix node lists, not the full and push/PR pair")
+    floor = (bounds["python"], bounds["Django"], bounds["strawberry-graphql"])
+    for list_index, text in enumerate(node_lists):
+        nodes = list(map(json_object, json_list(json_loads(text))))
+        if not any((node.get("python"), node.get("django")) == floor[:2] for node in nodes):
+            problems.append(f"node list {list_index} has no node at the floor")
+        for index, node in enumerate(nodes):
+            marked = node.get("compatibility_only") == "1"
+            if (node.get("python"), node.get("django")) == floor[:2] and not marked:
+                problems.append(
+                    f"node list {list_index}, node {index}: at the floor without compatibility_only",
+                )
+            if (
+                marked
+                and (node.get("python"), node.get("django"), node.get("strawberry")) != floor
+            ):
+                problems.append(f"node list {list_index}, node {index}: marked but off the floor")
+
+    steps = list(map(json_object, json_list(job, "steps")))
+    located = {
+        "uv sync": [
+            index
+            for index, step in enumerate(steps)
+            if any(line.startswith("uv sync") for line in _step_lines(step))
+        ],
+        "Django install": [
+            index
+            for index, step in enumerate(steps)
+            if any(
+                line.startswith("uv pip install --upgrade-package Django ")
+                for line in _step_lines(step)
+            )
+        ],
+        "strawberry floor": [
+            index for index, step in enumerate(steps) if step.get("if") == STRAWBERRY_FLOOR_IF
+        ],
+        "soft floor": [
+            index for index, step in enumerate(steps) if step.get("if") == SOFT_FLOOR_IF
+        ],
+        "pytest run": [
+            index
+            for index, step in enumerate(steps)
+            if re.search(r"\bpytest\b", _step_script(step))
+        ],
+    }
+    if any(len(found) != 1 for found in located.values()):
+        return [*problems, f"steps located {located}, not one each"]
+    at = {name: found[0] for name, found in located.items()}
+    problems.extend(
+        f"the {later} step runs before the {earlier} step"
+        for later, earlier in _STEP_ORDER
+        if at[later] < at[earlier]
+    )
+    first_pin = min(at["Django install"], at["strawberry floor"], at["soft floor"])
+    for index in range(first_pin, at["pytest run"] + 1):
+        if index == at["uv sync"]:
+            continue
+        script = _step_script(steps[index])
+        for match in _SYNCING_UV.finditer(script):
+            line_end = script.find("\n", match.start())
+            line = script[
+                script.rfind("\n", 0, match.start()) + 1 : None if line_end == -1 else line_end
+            ]
+            problems.append(
+                f"{steps[index].get('name')!r} re-syncs the floor pins away: {line.strip()}",
+            )
+    installs = [
+        line for line in _step_lines(steps[at["soft floor"]]) if line.startswith("uv pip install ")
+    ]
+    pinned = [
+        (match.group(1), match.group(2))
+        for match in re.finditer(r'"([^"=]+)==([^"]+)"', installs[0] if len(installs) == 1 else "")
+    ]
+    if [name for name, _version in pinned] != list(SOFT_DEPENDENCIES):
+        problems.append(f"the soft floor step pins {installs}, not each of {SOFT_DEPENDENCIES}")
+    problems.extend(
+        f"the soft floor step pins {name} off its floor"
+        for name, version in pinned
+        if bounds.get(name) != version
+    )
+    return problems
+
+
 def test_every_floor_literal_in_the_django_workflow_is_its_pyproject_lower_bound() -> None:
-    """The CI floor cell installs exactly the floors ``pyproject.toml`` states.
+    """The CI floor cell installs exactly the floors ``pyproject.toml`` states, and keeps them.
 
     ``django.yml`` cannot read ``pyproject.toml``, so the floor cell carries
     each floor as a literal: the ``python`` / ``django`` / ``strawberry`` keys
-    of every ``compatibility_only`` matrix node (the push/PR list and the full
-    matrix alike) and each ``name==version`` pin of the soft-dependency install
-    step those nodes run. Each must equal the ``>=`` bound of its pyproject row,
-    extras included, and every soft dependency must be pinned, so a floor
-    raised on either side alone fails here instead of the cell silently
-    running a point the project no longer declares.
+    of the floor matrix nodes (the push/PR list and the full matrix alike) and
+    each ``name==version`` pin of the soft-dependency install step those nodes
+    run. Each must equal the ``>=`` bound of its pyproject row, extras
+    included, and every soft dependency must be pinned, so a floor raised on
+    either side alone fails here instead of the cell silently running a point
+    the project no longer declares. Every node at the floor Python and Django
+    carries ``compatibility_only`` (the floor steps' condition) and every node
+    carrying it is at the floor. The Django install runs after the job's
+    ``uv sync``, both floor steps after the two of them, the test run after the
+    floor steps, and nothing from the Django install through the test run
+    syncs again (``uv sync``, or ``uv run`` without ``--no-sync``), since any of
+    those would put the ``uv.lock`` resolution back over the pins.
     """
-    bounds = _pyproject_lower_bounds()
-    job = json_object(_workflow(WORKFLOW_DIR / "django.yml"), "jobs", "test")
-    include = str(json_at(job, "strategy", "matrix", "include"))
-    node_lists: list[str] = re.findall(r"fromJSON\('(\[.*?\])'\)", include, re.DOTALL)
-    floor_nodes = [
-        [
-            node
-            for node in map(json_object, json_list(json_loads(text)))
-            if node.get("compatibility_only") == "1"
-        ]
-        for text in node_lists
-    ]
-    soft_steps = [
-        line.strip()
-        for step in map(json_object, json_list(job, "steps"))
-        if step.get("if") == "matrix.compatibility_only == '1'"
-        for line in str(step.get("run", "")).splitlines()
-        if line.strip().startswith("uv pip install ")
-    ]
+    text = (WORKFLOW_DIR / "django.yml").read_text(encoding="utf-8")
 
-    assert len(node_lists) == 2, include
-    assert all(floor_nodes), floor_nodes
-    for node in (node for nodes in floor_nodes for node in nodes):
-        assert (node["python"], node["django"], node["strawberry"]) == (
-            bounds["python"],
-            bounds["Django"],
-            bounds["strawberry-graphql"],
-        ), node
-    assert len(soft_steps) == 1, soft_steps
-    pinned = re.findall(r'"([^"=]+)==([^"]+)"', soft_steps[0])
-    assert pinned == [(name, bounds[name]) for name in SOFT_DEPENDENCIES], soft_steps[0]
+    assert _floor_cell_problems(text, _pyproject_lower_bounds()) == []
+
+
+def _test_job_span(text: str) -> tuple[int, int]:
+    """The character span of ``django.yml``'s ``test`` job."""
+    start = text.index("\n  test:\n")
+    following = re.compile(r"\n  \S").search(text, start + 1)
+    return start, following.start() if following else len(text)
+
+
+def _move_step(text: str, step: str, above: str) -> str:
+    """Move the ``test`` job step named ``step...`` to just above the one named ``above...``."""
+    start, end = _test_job_span(text)
+    job = text[start:end]
+    marker = "\n      - name: "
+    assert job.count(marker + step) == job.count(marker + above) == 1, (step, above)
+    begin = job.index(marker + step)
+    finish = job.find(marker, begin + 1)
+    block = job[begin : finish if finish != -1 else len(job)]
+    rest = job.replace(block, "", 1)
+    target = rest.index(marker + above)
+    return text[:start] + rest[:target] + block + rest[target:] + text[end:]
+
+
+def _replace_once(
+    text: str,
+    old: str,
+    new: str,
+    *,
+    last: bool = False,
+) -> str:
+    """Replace the first (or ``last``) occurrence of ``old``, which must occur in ``text``."""
+    assert old in text, old
+    if last:
+        head, _, tail = text.rpartition(old)
+        return head + new + tail
+    return text.replace(old, new, 1)
+
+
+_MULTI_DB_FLOOR_NODE = '"database": "multi DB", "fakeshop_sharded": "1", "strawberry": "'
+_DJANGO_STEP = "'Install Django ${{ matrix.django }}'"
+_STRAWBERRY_STEP = "'Install Strawberry ${{ matrix.strawberry }} (minimum supported floor)'"
+_FLOOR_MUTATIONS: dict[str, tuple[Callable[[str, dict[str, str]], str], list[str]]] = {
+    "django-step-above-sync": (
+        lambda text, _bounds: _move_step(text, "Install Django", "Install dependencies"),
+        ["the Django install step runs before the uv sync step"],
+    ),
+    "strawberry-step-above-sync": (
+        lambda text, _bounds: _move_step(text, "Install Strawberry", "Install dependencies"),
+        [
+            "the strawberry floor step runs before the uv sync step",
+            "the strawberry floor step runs before the Django install step",
+        ],
+    ),
+    "soft-step-above-sync": (
+        lambda text, _bounds: _move_step(text, "Install the soft", "Install dependencies"),
+        [
+            "the soft floor step runs before the uv sync step",
+            "the soft floor step runs before the Django install step",
+        ],
+    ),
+    "soft-step-above-django": (
+        lambda text, _bounds: _move_step(text, "Install the soft", "Install Django"),
+        ["the soft floor step runs before the Django install step"],
+    ),
+    "test-run-above-soft-step": (
+        lambda text, _bounds: _move_step(text, "Run Tests", "Install the soft"),
+        ["the pytest run step runs before the soft floor step"],
+    ),
+    "test-run-syncs": (
+        lambda text, _bounds: _replace_once(text, "uv run --no-sync pytest", "uv run pytest"),
+        [
+            (
+                "'Run Tests (${{ matrix.database }}, ${{ matrix.shard }})' re-syncs the floor "
+                'pins away: uv run pytest -o addopts="$addopts" $targets'
+            ),
+        ],
+    ),
+    "test-run-tolerates-flags-before-no-sync": (
+        lambda text, _bounds: _replace_once(
+            text,
+            "uv run --no-sync pytest",
+            "uv run --frozen --no-sync pytest",
+        ),
+        [],
+    ),
+    "django-step-runs-uv-run": (
+        lambda text, _bounds: _replace_once(
+            text,
+            "uv run --no-sync django-admin --version",
+            "uv run django-admin --version",
+        ),
+        [f"{_DJANGO_STEP} re-syncs the floor pins away: uv run django-admin --version"],
+    ),
+    "strawberry-step-runs-uv-run-behind-an-and": (
+        lambda text, _bounds: _replace_once(
+            text,
+            "uv run --no-sync python -c",
+            "true && uv run python -c",
+        ),
+        [
+            (
+                f"{_STRAWBERRY_STEP} re-syncs the floor pins away: true && uv run python -c "
+                "\"import importlib.metadata as m; print('strawberry-graphql', "
+                "m.version('strawberry-graphql'))\""
+            ),
+        ],
+    ),
+    "full-list-node-unmarked": (
+        lambda text, bounds: _replace_once(
+            text,
+            f'{_MULTI_DB_FLOOR_NODE}{bounds["strawberry-graphql"]}", "compatibility_only": "1"',
+            f'{_MULTI_DB_FLOOR_NODE}{bounds["strawberry-graphql"]}"',
+        ),
+        ["node list 0, node 2: at the floor without compatibility_only"],
+    ),
+    "push-list-node-unmarked": (
+        lambda text, _bounds: _replace_once(
+            text,
+            ', "compatibility_only": "1", "shard": "remainder"',
+            ', "shard": "remainder"',
+            last=True,
+        ),
+        ["node list 1, node 1: at the floor without compatibility_only"],
+    ),
+    "floor-node-strawberry-drifts": (
+        lambda text, bounds: _replace_once(
+            text,
+            f'{_MULTI_DB_FLOOR_NODE}{bounds["strawberry-graphql"]}"',
+            f'{_MULTI_DB_FLOOR_NODE}{bounds["strawberry-graphql"]}.1"',
+        ),
+        ["node list 0, node 2: marked but off the floor"],
+    ),
+    "soft-pin-drifts": (
+        lambda text, bounds: _replace_once(
+            text,
+            f'"cryptography=={bounds["cryptography"]}"',
+            f'"cryptography=={bounds["cryptography"]}.1"',
+        ),
+        ["the soft floor step pins cryptography off its floor"],
+    ),
+}
+
+
+@pytest.mark.parametrize("mutation", list(_FLOOR_MUTATIONS))
+def test_the_floor_cell_check_judges_a_mutated_django_workflow(mutation: str) -> None:
+    """Each mutation of the floor cell yields exactly its own problems, a harmless one none."""
+    mutate, expected = _FLOOR_MUTATIONS[mutation]
+    bounds = _pyproject_lower_bounds()
+    text = (WORKFLOW_DIR / "django.yml").read_text(encoding="utf-8")
+    mutated = mutate(text, bounds)
+
+    assert mutated != text
+    assert _floor_cell_problems(mutated, bounds) == expected
 
 
 #: Files the project's ruff config excludes, each holding source ``ruff format`` would change.

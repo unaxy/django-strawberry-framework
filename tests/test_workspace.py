@@ -2816,6 +2816,25 @@ def test_floor_pins_are_the_pyproject_lower_bounds(tmp_path: Path) -> None:
             SOFT_DEV_GROUP.replace("cryptography>=44.0.0", "cryptography==44.0.0"),
             "states no >= floor",
         ),
+        (
+            '"Django>=5.2.16", "strawberry-graphql>=0.322.2"',
+            SOFT_DEV_GROUP.replace(
+                '"cryptography>=44.0.0"',
+                "\"cryptography>=44.0.0; python_version<'3.12'\", "
+                "\"cryptography>=45.0.0; python_version>='3.12'\"",
+            ),
+            re.escape(
+                "states more than one floor for cryptography in 2 rows "
+                "(\"cryptography>=44.0.0; python_version<'3.12'\", "
+                "\"cryptography>=45.0.0; python_version>='3.12'\")",
+            )
+            + "$",
+        ),
+        (
+            '"Django>=5.2.16", "strawberry-graphql>=0.322.2"',
+            '[dependency-groups]\ndev = "pytest>=9.0.2"\n',
+            r"\[dependency-groups\]\.dev is a str, not an array",
+        ),
     ],
 )
 def test_floor_pins_refuse_a_pyproject_without_a_floor(
@@ -2830,6 +2849,22 @@ def test_floor_pins_refuse_a_pyproject_without_a_floor(
     )
 
     with pytest.raises(workspace.WorkspaceError, match=match):
+        workspace.floor_pins(pyproject)
+
+
+def test_floor_pins_refuse_a_dependency_groups_key_that_is_not_a_table(tmp_path: Path) -> None:
+    pyproject = _write(
+        tmp_path / "pyproject.toml",
+        'dependency-groups = ["dev"]\n'
+        "[project]\n"
+        'requires-python = ">=3.10"\n'
+        'dependencies = ["Django>=5.2.16", "strawberry-graphql>=0.322.2"]\n',
+    )
+
+    with pytest.raises(
+        workspace.WorkspaceError,
+        match=r"\[dependency-groups\] is a list, not a table",
+    ):
         workspace.floor_pins(pyproject)
 
 

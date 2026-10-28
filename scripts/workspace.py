@@ -1622,27 +1622,40 @@ def _lower_bounds(
     when ``with_extras``, so a dev row that drops an extra the floor install
     names matches nothing rather than installing without it.
 
+    A name two or more requirements match (rows split by environment marker,
+    each with its own bound) is refused: the floor install pins one version per
+    package, so choosing one of several floors would be a silent guess.
+
     Raises:
-        WorkspaceError: a name matches no requirement, or one with no ``>=`` bound.
+        WorkspaceError: a name matches no requirement, more than one, or one
+            with no ``>=`` bound.
 
     """
     wanted = {
         _requirement_key(*_requirement_parts(name), with_extras=with_extras): name
         for name in names
     }
-    found: dict[str, str] = {}
+    rows: dict[str, list[tuple[str, str]]] = {name: [] for name in names}
     for requirement in requirements:
         match = REQUIREMENT_PATTERN.match(requirement)
         if match is None:
             continue
         key = _requirement_key(match["name"], match["extras"], with_extras=with_extras)
         if key in wanted:
-            found[wanted[key]] = _lower_bound(match["specifier"], requirement)
-    missing = [name for name in names if name not in found]
+            rows[wanted[key]].append((requirement, match["specifier"]))
+    missing = [name for name in names if not rows[name]]
     if missing:
         msg = f"{where} lists no {', '.join(missing)}"
         raise WorkspaceError(msg)
-    return {name: found[name] for name in names}
+    repeated = {name: matched for name, matched in rows.items() if len(matched) > 1}
+    if repeated:
+        listed = "; ".join(
+            f"{name} in {len(matched)} rows ({', '.join(repr(row) for row, _ in matched)})"
+            for name, matched in repeated.items()
+        )
+        msg = f"{where} states more than one floor for {listed}"
+        raise WorkspaceError(msg)
+    return {name: _lower_bound(rows[name][0][1], rows[name][0][0]) for name in names}
 
 
 def floor_pins(pyproject: Path) -> dict[str, str]:
@@ -1653,6 +1666,8 @@ def floor_pins(pyproject: Path) -> dict[str, str]:
     each of ``FLOOR_PACKAGES``' ``>=`` bound in ``[project].dependencies`` and
     each of ``SOFT_FLOOR_PACKAGES``' in ``[dependency-groups].dev`` is the
     exact point the floor run installs, the same points that section states.
+    Each package must have exactly one such row: one split by environment
+    marker states several floors, and the floor run installs one.
     """
     try:
         requires_python, dependencies, dev = _floor_declarations(
