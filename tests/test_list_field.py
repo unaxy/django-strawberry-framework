@@ -64,13 +64,19 @@ from apps.library import models as library_models
 from apps.products import services
 from apps.products.models import Category, Item
 from asgiref.sync import sync_to_async
-from django.db import connection, models
+from django.db import models
 from django.db.backends.base.base import BaseDatabaseWrapper
 from django.db.models import BooleanField, Case, ExpressionWrapper, F, Q, QuerySet, Value, When
-from django.db.models.expressions import Expression, RawSQL
-from django.db.models.fields.json import JSONExact
-from django.db.models.functions import Coalesce, Lower, Now, Random, RowNumber
-from django.db.models.lookups import Exact, GreaterThan, IsNull
+from django.db.models.expressions import (
+    BaseExpression,
+    Combinable,
+    DurationExpression,
+    Expression,
+    RawSQL,
+    TemporalSubtraction,
+)
+from django.db.models.functions import Lower, Now, Random, RowNumber
+from django.db.models.lookups import Exact
 from django.db.models.sql.compiler import SQLCompiler
 from django.db.models.sql.where import AND, OR, ExtraWhere, NothingNode, WhereNode
 from django.test import RequestFactory
@@ -102,14 +108,13 @@ from django_strawberry_framework.exceptions import (
 )
 from django_strawberry_framework.list_field import (
     _build_non_queryset_rejection_error,
-    _effective_order_lookups,
     _execute_queryset_pipeline_sync,
     _field_label,
     _handle_non_queryset_rejections_async,
     _has_deterministic_ordering,
-    _is_deterministic_order_implicit_exact,
     _is_deterministic_order_term,
     _is_model_default_ordering_active,
+    _is_readable_order_node,
     _ListArguments,
     _model_from_definition,
     _normalize_list_arguments,
@@ -163,6 +168,7 @@ from tests._idioms import (
 from tests._info import make_info
 
 _M = TypeVar("_M", bound=models.Model)
+_Node = TypeVar("_Node", bound=BaseExpression)
 
 
 def _as_strawberry_info(stand_in: object) -> Info[object, object]:
@@ -1882,12 +1888,17 @@ class _SubclassedLower(Lower):
         return "RANDOM()", ()
 
 
+#: What a consumer ``resolve_expression`` raises: the guard refuses such a term before
+#: resolving anything, so a row reaching it fails loudly instead of being refused late.
+_RESOLVED_CONSUMER_CODE = "the guard resolved a consumer form"
+
+
 class _SubclassedF(models.F):
     """A subclass of the reference form: an ordinary name over a different resolution."""
 
     @override
     def resolve_expression(self, *args: object, **kwargs: object) -> Random:
-        return Random()
+        raise AssertionError(_RESOLVED_CONSUMER_CODE)
 
 
 class _SubclassedQ(models.Q):
@@ -1896,14 +1907,14 @@ class _SubclassedQ(models.Q):
     @override
     # basedpyright: deliberately resolves to foreign SQL, the predicate subclass the guard refuses
     def resolve_expression(self, *args: object, **kwargs: object) -> Random:  # pyright: ignore[reportIncompatibleMethodOverride]
-        return Random()
+        raise AssertionError(_RESOLVED_CONSUMER_CODE)
 
 
 class _ResolvingName(str):
     """A field path that is an expression, because it carries ``resolve_expression``."""
 
     def resolve_expression(self, *_args: object, **_kwargs: object) -> Random:
-        return Random()
+        raise AssertionError(_RESOLVED_CONSUMER_CODE)
 
 
 @pytest.mark.parametrize(
@@ -1917,8 +1928,8 @@ class _ResolvingName(str):
         (models.Window(RowNumber()), False),
         (models.F("code"), True),
         (_SubclassedF("code"), False),
-        (models.Q(code__gt="A"), True),
-        (_SubclassedQ(code__gt="A"), False),
+        (ExpressionWrapper(models.Q(code__gt="A"), output_field=BooleanField()), True),
+        (ExpressionWrapper(_SubclassedQ(code__gt="A"), output_field=BooleanField()), False),
         (_ResolvingName("code"), False),
     ],
     ids=[
@@ -1946,7 +1957,9 @@ def test_order_term_classifier_admits_only_named_forms(term: object, *, expected
     of ``Q`` resolves to an expression of its own, whatever name or children it
     was built with. Which arm a term takes is decided by ``resolve_expression``
     the way the compiler decides it, so a ``str`` carrying that method is read as
-    the expression it resolves to and never as the field path it spells.
+    an expression and never as the field path it spells. A term is resolved only
+    once its written shape passes, so none of the three consumer forms is ever
+    resolved: each one's ``resolve_expression`` raises.
     """
     query = library_models.Shelf.objects.all().query
 
@@ -2010,138 +2023,43 @@ def test_order_term_classifier_reads_a_resolved_predicate_by_its_children(
     read. The connector is instance state written between the children, so only
     Django's own are read as punctuation.
     """
-    query = library_models.Branch.objects.all().query
     node = WhereNode(connector=connector)
     for child in children():
         node.add(child, connector)
 
-    assert _is_deterministic_order_term(query, node) is expected
-
-
-class _ProjectTextField(models.TextField[object, object]):
-    """A project field whose value preparation this package cannot predict."""
-
-
-#: ``(id, operand output field, lookup name, lookup class, value, effective classes)``.
-_EFFECTIVE_LOOKUP_ROWS: tuple[
-    tuple[str, models.Field[object, object], str, type[object], object, tuple[object, ...]],
-    ...,
-] = (
-    (
-        "exact-none-compiles-isnull",
-        models.TextField(),
-        "exact",
-        Exact,
-        None,
-        (IsNull,),
-    ),
-    (
-        "exact-value-compiles-exact",
-        models.TextField(),
-        "exact",
-        Exact,
-        "Bravo",
-        (Exact,),
-    ),
-    (
-        "only-exact-is-rewritten",
-        models.TextField(),
-        "gt",
-        GreaterThan,
-        None,
-        (GreaterThan,),
-    ),
-    (
-        "lookup-taking-none-is-not-rewritten",
-        models.JSONField(),
-        "exact",
-        JSONExact,
-        None,
-        (JSONExact,),
-    ),
-    (
-        "project-lookup-is-read-as-written",
-        models.TextField(),
-        "exact",
-        _SubclassedExact,
-        None,
-        (_SubclassedExact,),
-    ),
-    (
-        "project-field-may-prepare-either",
-        _ProjectTextField(),
-        "exact",
-        Exact,
-        None,
-        (Exact, IsNull),
-    ),
-)
-
-
-@pytest.mark.parametrize(
-    (
-        "output_field",
-        "name",
-        "lookup",
-        "value",
-        "expected",
-    ),
-    [row[1:] for row in _EFFECTIVE_LOOKUP_ROWS],
-    ids=[row[0] for row in _EFFECTIVE_LOOKUP_ROWS],
-)
-def test_effective_order_lookups_mirror_the_value_dependent_rewrite(
-    output_field: models.Field[object, object],
-    name: str,
-    lookup: type[object],
-    value: object,
-    expected: tuple[object, ...],
-) -> None:
-    """``Query.build_lookup`` turns ``exact`` against ``None`` into the operand's ``isnull``.
-
-    A lookup class that takes ``None`` as a value (``JSONExact``) keeps it, a
-    project class is read as written because it is refused regardless, and over
-    a project field the prepared value is unknown, so both classes are returned
-    for the guard to certify. The ``""`` arm needs a backend that reads empty
-    strings as null and is pinned below and live
-    (``test_query/test_list_field_api.py``).
-    """
-    operand = Value(None, output_field=output_field)
-
-    assert _effective_order_lookups(operand, name, lookup, value) == expected
+    assert _is_readable_order_node(node) is expected
 
 
 class _ProjectText(str):
-    """A ``str`` subclass, whose equality with ``""`` its own methods decide."""
+    """A ``str`` subclass standing in for a name, whose methods are its own."""
 
     __slots__ = ()
 
 
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [("", (IsNull,)), ("Bravo", (Exact,)), (_ProjectText(""), (Exact, IsNull))],
-    ids=["empty-string", "text", "str-subclass"],
-)
-def test_effective_order_lookups_read_an_empty_string_as_the_backend_does(
-    monkeypatch: pytest.MonkeyPatch,
-    value: str,
-    expected: tuple[object, ...],
-) -> None:
-    """On a backend reading ``""`` as null, only an exact ``""`` is known to compile ``isnull``.
+#: The literals the temporal arithmetic rows resolve over.
+_DAY_ONE = datetime.date(2020, 1, 1)
+_ONE_DAY = datetime.timedelta(days=1)
 
-    A ``str`` subclass may compare equal to ``""`` or not by its own code, so
-    both classes are returned for the guard to certify.
-    """
-    monkeypatch.setattr(type(connection.features), "interprets_empty_strings_as_nulls", True)
-    operand = Value(None, output_field=models.TextField())
 
-    assert _effective_order_lookups(operand, "exact", Exact, value) == expected
+def _with_state(node: _Node, **state: object) -> _Node:
+    """``node``, with ``state`` written into its instance namespace."""
+    vars(node).update(state)
+    return node
 
 
 def _lower_name_with(**state: object) -> Lower:
     """``Lower`` over the branch name, with ``state`` written into its instance namespace."""
-    node = Lower(_branch_name_column())
-    vars(node).update(state)
-    return node
+    return _with_state(Lower(_branch_name_column()), **state)
+
+
+def _date_difference() -> TemporalSubtraction:
+    """The node ``F("start") - F("finish")`` resolves to over two date literals."""
+    return TemporalSubtraction(Value(_DAY_ONE), Value(_DAY_ONE + _ONE_DAY))
+
+
+def _date_plus_a_day() -> DurationExpression:
+    """The node ``F("start") + timedelta(days=1)`` resolves to over a date literal."""
+    return DurationExpression(Value(_DAY_ONE), Combinable.ADD, Value(_ONE_DAY))
 
 
 @pytest.mark.parametrize(
@@ -2155,6 +2073,11 @@ def _lower_name_with(**state: object) -> Lower:
         (lambda: F("nowhere"), False),
         (lambda: F("shelves__lower"), False),
         (lambda: Case(When(Q(name__lower__exact="x"), then=Value(1)), default=Value(0)), False),
+        (_date_difference, True),
+        (lambda: _with_state(_date_difference(), connector="+ RANDOM() +"), False),
+        (_date_plus_a_day, True),
+        (lambda: _with_state(_date_plus_a_day(), connector="+ RANDOM() +"), False),
+        (lambda: F(_ProjectText("name")), False),
     ],
     ids=[
         "slot-restating-its-class",
@@ -2165,6 +2088,11 @@ def _lower_name_with(**state: object) -> Lower:
         "f-naming-nothing",
         "f-transforming-a-reverse-relation",
         "predicate-transform-not-registered",
+        "stock-date-difference",
+        "date-difference-connector-override",
+        "stock-date-plus-duration",
+        "date-plus-duration-connector-override",
+        "f-name-of-a-str-subclass",
     ],
 )
 def test_order_term_classifier_refuses_what_it_cannot_read_by_construction(
@@ -2174,42 +2102,33 @@ def test_order_term_classifier_refuses_what_it_cannot_read_by_construction(
 ) -> None:
     """Shapes the wire cannot build, each refused where the SQL is not the approved class's.
 
-    A node's instance slot is its class's text only when it restates it; an
-    ``F`` naming an ``extra`` select, no field at all, or a transform over a
-    reverse relation has no column ``resolve_ref`` could read; and a predicate piece naming no
-    registered transform resolves to nothing Django would compile.
+    A node's instance slot is its class's text only when it restates it, and the
+    two temporal arithmetic nodes hold the same connector constants a plain
+    ``CombinedExpression`` does. An ``F`` naming an ``extra`` select, no field
+    at all, or a transform over a reverse relation is a ``FieldError`` when
+    resolved, and so is a predicate piece naming no registered transform:
+    Django would compile none of them. An ``F`` whose name is a ``str``
+    subclass is refused before it is resolved, because resolution would run that
+    subclass's methods.
     """
     query = library_models.Branch.objects.extra(select={"r": "1"}).query
 
     assert _is_deterministic_order_term(query, term()) is expected
 
 
-@pytest.mark.parametrize(
-    ("condition", "expected"),
-    [
-        (lambda: Exact(_branch_name_column(), "Bravo"), True),
-        (lambda: ExpressionWrapper(Q(city="Boston"), output_field=BooleanField()), True),
-        (lambda: F("name"), False),
-        (lambda: Coalesce(Value(1), Value("a")), False),
-    ],
-    ids=[
-        "approved-lookup",
-        "boolean-expression",
-        "unresolved-reference",
-        "mixed-output-types",
-    ],
-)
-def test_implicit_exact_reads_the_lookup_a_bare_condition_compiles_with(
-    condition: Callable[[], object],
-    *,
-    expected: bool,
-) -> None:
-    """A bare conditional child is its own lookup, or the ``exact`` its output field registers.
+def test_order_classifier_resolves_on_a_clone_of_the_query() -> None:
+    """Resolving a term sets up its joins, so the guard resolves on a copy of the query.
 
-    A child that is no expression, or whose output field cannot be resolved,
-    has no ``exact`` this package can name.
+    A predicate over a reverse relation joins that relation once resolved; the
+    queryset the guard answers for still compiles with only the joins it had.
     """
-    assert _is_deterministic_order_implicit_exact(condition()) is expected
+    queryset = library_models.Branch.objects.order_by(
+        Case(When(Q(shelves__code="a"), then=Value(0)), default=Value(1)),
+    )
+    aliases = tuple(queryset.query.alias_map)
+
+    assert _has_deterministic_ordering(queryset) is True
+    assert tuple(queryset.query.alias_map) == aliases
 
 
 def test_order_predicate_classifier_refuses_an_unresolvable_reference(
