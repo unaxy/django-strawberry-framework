@@ -402,6 +402,7 @@
 "tests/mutations/test_fields.py::test_non_iterable_directives_raise_configuration_error" = { reportArgumentType = 1 }
 "tests/mutations/test_fields.py::test_non_mutation_target_raises_at_construction" = { reportArgumentType = 1 }
 "tests/mutations/test_inputs.py::test_build_mutation_input_rejects_bare_string_overrides" = { reportArgumentType = 1 }
+"tests/mutations/test_inputs.py::test_editable_fields_never_carry_a_consumer_auto_field_key.ConsumerAutoField" = { reportIncompatibleMethodOverride = 1, reportIncompatibleVariableOverride = 1, reportUnsafeMultipleInheritance = 1 }
 "tests/mutations/test_inputs.py::test_mutation_input_field_specs_rejects_bare_string_excluded_attrs" = { reportArgumentType = 1 }
 "tests/mutations/test_operations.py::test_mutation_operation_descriptor_immutability" = { reportAttributeAccessIssue = 1 }
 "tests/mutations/test_permissions.py::test_async_check_permission_override_is_rejected_not_bypassed.AsyncCheckCreateItem.check_permission" = { reportIncompatibleMethodOverride = 1 }

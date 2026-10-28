@@ -62,6 +62,7 @@ from django.contrib.contenttypes.fields import GenericForeignKey, GenericRelatio
 from django.contrib.contenttypes.models import ContentType
 from django.db import models
 from django.db.models import Value
+from django.db.models.fields import AutoFieldMixin
 from strawberry import relay
 from strawberry.types.base import (
     StrawberryList,
@@ -436,6 +437,35 @@ def test_editable_fields_never_carry_a_primary_key_django_assigns(
     assert key not in [field.name for field in editable_input_fields(model, operation_kind=CREATE)]
     with pytest.raises(ConfigurationError, match="non-editable or unknown field"):
         editable_input_fields(model, fields=(key,), operation_kind=CREATE)
+
+
+def test_editable_fields_never_carry_a_consumer_auto_field_key() -> None:
+    """A consumer ``AutoFieldMixin`` key outside the ``AutoField`` family is no create input.
+
+    ``AutoFieldMixin.contribute_to_class`` records it as the model's ``_meta.auto_field``,
+    the key the save path leaves to the database, though ``isinstance(field,
+    models.AutoField)`` is false for it.
+    """
+
+    # basedpyright: the stubs' ``AutoFieldMixin`` declares ``db_returning`` and
+    # ``contribute_to_class`` against ``Field``'s and has an ``__init__``, the clash
+    # django-stubs ignores on ``BigAutoField``; the mixin's ``__init__`` is cooperative, so
+    # ``Field.__init__`` runs, and this mixin-over-``IntegerField`` shape is the one under test
+    class ConsumerAutoField(  # pyright: ignore[reportIncompatibleMethodOverride, reportIncompatibleVariableOverride, reportUnsafeMultipleInheritance]
+        AutoFieldMixin,
+        models.IntegerField[int, int],
+    ):
+        pass
+
+    class ConsumerAutoRow(models.Model):
+        id = ConsumerAutoField(primary_key=True)
+        name: models.TextField[str | Combinable, str] = models.TextField()
+
+        class Meta:
+            app_label = _unique_app_label()
+
+    names = [field.name for field in editable_input_fields(ConsumerAutoRow, operation_kind=CREATE)]
+    assert names == ["name"]
 
 
 # ---------------------------------------------------------------------------

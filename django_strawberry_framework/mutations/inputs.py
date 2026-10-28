@@ -390,19 +390,21 @@ def editable_input_fields(
 def _client_assigned_primary_key(field: ConcreteField) -> bool:
     """Return whether a create must take ``field``, the primary key, from the client.
 
-    Django assigns the other primary keys itself: an ``AutoField`` (``BigAutoField`` and
-    ``SmallAutoField`` included) takes the database sequence, and a multi-table child's
-    parent link takes the parent row's key in ``Model._save_parents``. Every other editable
-    key - a ``OneToOneField(primary_key=True)``, a text or integer key - takes the value the
+    Django assigns the other primary keys itself: the model's ``_meta.auto_field`` (set by
+    ``AutoFieldMixin.contribute_to_class`` for ``AutoField``, ``BigAutoField``,
+    ``SmallAutoField`` and any consumer ``AutoFieldMixin`` field; the save path leaves it
+    out of the INSERT) takes the database value, and a multi-table child's parent link
+    takes the parent row's key in ``Model._save_parents``. Every other editable key - a
+    ``OneToOneField(primary_key=True)``, a text or integer key - takes the value the
     client supplies, falling back only to its own ``default`` / ``db_default`` (which make it
     optional, ``input_field_required``), the reason Django's ``ModelForm`` and DRF's
-    ``ModelSerializer`` publish it on create. Mirrors the two arms where ``AutoFieldMixin.formfield`` and
-    ``OneToOneField.formfield`` return ``None``.
+    ``ModelSerializer`` publish it on create. A ``formfield()`` returning ``None`` is not
+    asked: it opts a column out of ``ModelForm`` and says nothing about who assigns the key.
     """
-    if isinstance(field, models.AutoField):
+    if field is field.model._meta.auto_field:
         return False
-    remote = getattr(field, "remote_field", None)
-    return not getattr(remote, "parent_link", False)
+    remote = field.remote_field
+    return remote is None or not remote.parent_link
 
 
 def _carrier_backed_link_error(
