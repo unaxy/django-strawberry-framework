@@ -34,10 +34,10 @@ From the full entries, 2026-10-21. Item numbers are that file's.
     `ConfigurationError`); only a consumer `list[list[Enum]]` override reaches it. The docstring and a test already pin
     "one level only". A recursive unwrap would walk every JSON value. Document in spec-001's element-wise paragraph.
     Size S
-- [ ] 11. `django_strawberry_framework/utils/querysets.py::pks_all_present` compares `str()` forms, so a case-insensitive
-  pk (MySQL collation, citext) or a `Decimal`-keyed target reads a valid related row as not found (fails closed)
+- [ ] 11. `django_strawberry_framework/utils/querysets.py::pks_all_present` compares the pk column's Python value, so a
+  case-insensitive pk (MySQL collation, citext) reads a valid related row as not found (fails closed)
   - Research: reproduced (`Decimal` `"1.5"` against a stored `1.50`; `NOCASE` `"ABC"` against `abc`). Wider than stated:
-    `django_strawberry_framework/utils/write_values.py::decode_visible_relation_ids` also indexes by `str(pk)`, and a
+    `django_strawberry_framework/utils/write_values.py::decode_visible_relation_ids` also keys by that value, and a
     single relation id works while the same id in an M2M list fails. `to_python` fixes `Decimal` only, not collation.
     Document in README "Writing data" ("Four behaviors are easy to trip over"). A real fix is M-L. Size S
 - [ ] 12. `copy.copy` / `copy.deepcopy` of a `ChannelsRequestAdapter` raises `RecursionError`: `__getattr__` reads

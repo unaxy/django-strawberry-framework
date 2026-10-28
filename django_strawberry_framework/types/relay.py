@@ -61,11 +61,13 @@ from django_strawberry_framework.utils.querysets import SyncMisuseError as SyncM
 from django_strawberry_framework.utils.querysets import (
     apply_type_visibility_async,
     apply_type_visibility_sync,
+    identity_key,
     initial_queryset,
     lookup_read_alias,
     model_for,
 )
 from django_strawberry_framework.utils.relations import has_composite_pk
+from django_strawberry_framework.utils.typing import object_result
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -441,11 +443,12 @@ def _node_values(
     node_ids: Iterable[object],
     *,
     required: bool,
-) -> list[object]:
+) -> tuple[list[object], ModelField | None]:
     """Coerce each of ``node_ids`` (``None`` where it names no row); a required miss raises.
 
     The id slot is a per-type constant, so it is resolved once for the batch
-    and threaded to every coercion instead of once per id.
+    and threaded to every coercion instead of once per id. Returns the values
+    and the slot's field, which ``_order_nodes`` keys the reorder through.
     """
     # In-function import for the same load cycle ``_node_value_or_none`` names.
     from django_strawberry_framework.relay import _node_id_slot  # noqa: PLC0415 - import cycle
@@ -456,7 +459,7 @@ def _node_values(
     for node_id, value in zip(raw_ids, values, strict=True):
         if value is None:
             _raise_if_required(cls, id_attr, node_id, required=required)
-    return values
+    return values, slot[1]
 
 
 def _apply_nodes_filter(
@@ -1115,18 +1118,24 @@ def decode_global_id(
 def _order_nodes(
     cls: type[_RelayDjangoType],
     results: list[_ModelT],
-    coerced_keys: list[str | None],
+    values: list[object],
     id_attr: str,
     *,
+    field: ModelField | None,
     required: bool,
 ) -> list[_ModelT | None]:
-    """Re-order ``results`` to match ``coerced_keys`` (port of strawberry-django's map_results).
+    """Re-order ``results`` to match ``values`` (port of strawberry-django's map_results).
 
     Mirrors ``strawberry_django/relay/utils.py::resolve_model_nodes #"def map_results"``: build an index
-    keyed on ``str(getattr(obj, id_attr))`` (so the dict lookup matches
-    the ``coerced_keys`` shape - both are ``str``) and emit one entry per
-    requested key. A ``None`` key is an id that coerced to no column value; it is
-    emitted as ``None`` (a required miss already raised in ``_node_values``).
+    of the rows and emit one entry per requested value. Both sides are keyed by
+    ``utils/querysets.py::identity_key`` through ``field``, the id slot's field
+    (``relay.py::_node_id_slot``, as ``_node_values`` resolved it): the row's value
+    of that column and the coerced id compare as the column's Python value, so a row
+    matches every id spelling that value (an unconstrained decimal ``2.50`` is the
+    stored ``2.5``, an aware datetime in any offset is the row read back in UTC); a
+    slot naming no model field keys both by ``str``. A ``None`` value
+    is an id that coerced to no column value; it is emitted as ``None`` (a required
+    miss already raised in ``_node_values``).
 
     ``required=True`` raises the model's ``DoesNotExist`` for any missing
     key - homogeneous with ``_raise_if_required``'s uncoercible-id miss so
@@ -1136,20 +1145,32 @@ def _order_nodes(
     (a ``relay.NodeID`` over a non-unique column) answer with the last row
     the queryset yields, as upstream's ``map_results`` does.
     """
-    index = {str(read_attr(obj, id_attr)): obj for obj in results}
+    index = {identity_key(field, _row_id_value(obj, id_attr, field)): obj for obj in results}
     output: list[_ModelT | None] = []
     model = model_for(cls)
-    for key in coerced_keys:
-        if required and key is not None:
-            try:
-                output.append(index[key])
-            except KeyError as exc:
-                raise model.DoesNotExist(
-                    f"{truth.name(model)}: no row matching {id_attr}={key!r}.",
-                ) from exc
-        else:
-            output.append(None if key is None else index.get(key))
+    for value in values:
+        if value is None:
+            output.append(None)
+            continue
+        found = index.get(identity_key(field, value))
+        if required and found is None:
+            raise model.DoesNotExist(
+                f"{truth.name(model)}: no row matching {id_attr}={str(value)!r}.",
+            )
+        output.append(found)
     return output
+
+
+def _row_id_value(obj: models.Model, id_attr: str, field: ModelField | None) -> object:
+    """Return ``obj``'s value of its id slot: the column's own value when the slot is a field.
+
+    ``Field.value_from_object`` reads the column (a key's ``attname``, never the related
+    row its descriptor loads), the value the ``__in`` filter compared; a slot naming no
+    concrete field reads ``id_attr`` itself.
+    """
+    if isinstance(field, models.Field):
+        return object_result(field.value_from_object, obj)
+    return read_attr(obj, id_attr)
 
 
 def _resolve_nodes_default(
@@ -1202,11 +1223,10 @@ def _resolve_nodes_default(
         return _resolve_nodes_async(cls, id_attr, node_ids, info=info, required=required)
     if node_ids is None:
         return apply_type_visibility_sync(cls, initial_queryset(cls), info)
-    values = _node_values(cls, id_attr, node_ids, required=required)
+    values, field = _node_values(cls, id_attr, node_ids, required=required)
     qs = apply_type_visibility_sync(cls, initial_queryset(cls), info)
     qs = _apply_nodes_filter(qs, id_attr, [value for value in values if value is not None])
-    coerced_keys = [None if value is None else str(value) for value in values]
-    return _order_nodes(cls, list(qs), coerced_keys, id_attr, required=required)
+    return _order_nodes(cls, list(qs), values, id_attr, field=field, required=required)
 
 
 async def _resolve_nodes_async(
@@ -1227,12 +1247,11 @@ async def _resolve_nodes_async(
     """
     if node_ids is None:
         return await apply_type_visibility_async(cls, initial_queryset(cls), info)
-    values = _node_values(cls, id_attr, node_ids, required=required)
+    values, field = _node_values(cls, id_attr, node_ids, required=required)
     qs = await apply_type_visibility_async(cls, initial_queryset(cls), info)
     qs = _apply_nodes_filter(qs, id_attr, [value for value in values if value is not None])
-    coerced_keys = [None if value is None else str(value) for value in values]
     results = [obj async for obj in qs]
-    return _order_nodes(cls, results, coerced_keys, id_attr, required=required)
+    return _order_nodes(cls, results, values, id_attr, field=field, required=required)
 
 
 # Single source of truth for the Relay resolver method names the package

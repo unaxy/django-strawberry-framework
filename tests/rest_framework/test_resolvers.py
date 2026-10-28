@@ -75,6 +75,7 @@ from dataclasses import FrozenInstanceError
 from types import MappingProxyType, SimpleNamespace
 from typing import TYPE_CHECKING, ClassVar, NoReturn, Protocol, cast, runtime_checkable
 
+import django
 import pytest
 import pytest_django
 import strawberry
@@ -147,6 +148,7 @@ from django_strawberry_framework.utils._narrowing import (
     is_list,
     is_mapping,
     is_tuple,
+    pk_of,
     read_attr,
     require,
     require_instance,
@@ -7780,3 +7782,155 @@ def test_datetime_overflow_a_field_override_handles_itself_is_left_to_it(
         assert serializer.is_valid(), serializer_errors(serializer)
 
     assert validated_data_of(serializer) == {"at": _TOLERATED}
+
+
+class SerializerSpelledDecimalTarget(Model):
+    """An M2M target keyed by a ``DecimalField`` without ``max_digits``."""
+
+    code: models.DecimalField[str | float | decimal.Decimal | Combinable, decimal.Decimal] = (
+        models.DecimalField(primary_key=True, max_digits=None, decimal_places=None)
+    )
+
+    class Meta:
+        app_label = "products"
+        managed = False
+        db_table = "serializer_spelled_decimal_target"
+
+
+class SerializerSpelledStampTarget(Model):
+    """An M2M target keyed by an aware ``DateTimeField``."""
+
+    stamp: models.DateTimeField[
+        str | datetime.datetime | datetime.date | Combinable,
+        datetime.datetime,
+    ] = models.DateTimeField(primary_key=True)
+
+    class Meta:
+        app_label = "products"
+        managed = False
+        db_table = "serializer_spelled_stamp_target"
+
+
+class SerializerSpelledKeyOwner(Model):
+    """A row relating to each spelled-key target by an M2M."""
+
+    name: models.TextField[str | Combinable, str] = models.TextField()
+    decimal_targets: models.ManyToManyField[SerializerSpelledDecimalTarget, Model] = (
+        models.ManyToManyField(SerializerSpelledDecimalTarget, related_name="+", blank=True)
+    )
+    stamp_targets: models.ManyToManyField[SerializerSpelledStampTarget, Model] = (
+        models.ManyToManyField(SerializerSpelledStampTarget, related_name="+", blank=True)
+    )
+
+    class Meta:
+        app_label = "products"
+        managed = False
+        db_table = "serializer_spelled_key_owner"
+
+
+def _spelled_key_owner_schema() -> DjangoSchema:
+    """A create ``SerializerMutation`` writing both owner M2Ms by raw pk."""
+    for model in (SerializerSpelledDecimalTarget, SerializerSpelledStampTarget):
+        _ = type(
+            f"{model.__name__}T",
+            (DjangoType,),
+            {"Meta": type("Meta", (), {"model": model, "fields": "__all__", "primary": True})},
+        )
+
+    class SpelledKeyOwnerT(DjangoType):
+        class Meta:
+            model = SerializerSpelledKeyOwner
+            fields = ("name",)
+            primary = True
+
+    class SpelledKeyOwnerSerializer(ModelSerializerBase[SerializerSpelledKeyOwner]):
+        class Meta:
+            model = SerializerSpelledKeyOwner
+            fields = ("name", "decimal_targets", "stamp_targets")
+
+    class CreateSpelledKeyOwner(SerializerMutation):
+        class Meta:
+            serializer_class = SpelledKeyOwnerSerializer
+            operation = "create"
+            permission_classes = []
+
+    @strawberry.type
+    class Query:
+        @strawberry.field
+        def ping(self) -> int:
+            return 1
+
+    @strawberry.type
+    class Mutation:
+        create_spelled_key_owner = DjangoMutationField(CreateSpelledKeyOwner)
+
+    finalize_django_types()
+    del SpelledKeyOwnerT
+    return DjangoSchema(query=Query, mutation=Mutation)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("stored", "spelled"),
+    [
+        *(
+            pytest.param(
+                decimal.Decimal(stored),
+                spelled,
+                id=case_id,
+                marks=pytest.mark.skipif(
+                    connections["default"].vendor != "sqlite" or django.VERSION < (6, 1),
+                    reason="SQLite stores the value it is bound, read back from Django 6.1",
+                ),
+            )
+            for stored, spelled, case_id in (
+                ("2.5", "2.50", "trailing-zero"),
+                ("7", "7.0", "one-fractional-zero"),
+                ("7", "7.00", "two-fractional-zeros"),
+                ("70", "7E+1", "exponent"),
+                ("0", "0.00", "zero"),
+            )
+        ),
+        pytest.param(
+            datetime.datetime(2024, 1, 1, 8, tzinfo=datetime.timezone.utc),
+            "2024-01-01T10:00:00+02:00",
+            id="aware-datetime-in-another-offset",
+        ),
+    ],
+)
+def test_serializer_m2m_ids_spelling_a_stored_key_differently_link_its_row(
+    stored: object,
+    spelled: str,
+) -> None:
+    """A serializer M2M id names its row by the key's value, as the ``pk__in`` lookup does.
+
+    The batched membership check keys the requested ids and the rows it found by the pk
+    column's value, so ``2.50`` is the stored ``2.5`` and an aware datetime in a ``+02:00``
+    offset is the row stored in UTC: the write links the row, never the uniform
+    "Invalid id" error.
+    """
+    is_decimal = isinstance(stored, decimal.Decimal)
+    target = SerializerSpelledDecimalTarget if is_decimal else SerializerSpelledStampTarget
+    prefix = "decimal" if is_decimal else "stamp"
+    models_created = (
+        SerializerSpelledDecimalTarget,
+        SerializerSpelledStampTarget,
+        SerializerSpelledKeyOwner,
+    )
+    with contextlib.ExitStack() as tables:
+        for model in models_created:
+            tables.enter_context(_synthetic_table(model))
+        _ = target._default_manager.create(pk=stored)
+        request = HttpRequest()
+        request.user = User(username="u")
+        result = _spelled_key_owner_schema().execute_sync(
+            "mutation($d: SpelledKeyOwnerSerializerInput!){ createSpelledKeyOwner(data:$d){ "
+            "errors{ field messages } } }",
+            variable_values={"d": {"name": "owner", f"{prefix}Targets": [spelled]}},
+            context_value=SimpleNamespace(request=request),
+        )
+        assert result.errors is None, result.errors
+        assert result.data == {"createSpelledKeyOwner": {"errors": []}}
+        owner = SerializerSpelledKeyOwner.objects.get(name="owner")
+        linked = owner.decimal_targets.all() if is_decimal else owner.stamp_targets.all()
+        assert [pk_of(row) for row in linked] == [stored]

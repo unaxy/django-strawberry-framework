@@ -167,7 +167,7 @@ _MANAGED_WRITE_ALIAS: ContextVar[str | None] = ContextVar(
 
 # The active write pipeline's (alias, lock) pair, set by the pipeline bodies for
 # the duration of one operation so the SHARED relation-check helpers
-# (``utils/querysets.py::stringified_pks_present`` and the form-path
+# (``utils/querysets.py::pks_present`` and the form-path
 # ``visible_related_object``/``s``) pin their queries to the write alias and
 # apply the base-manager row lock - without forking their read-surface callers,
 # which run with no context set and stay byte-identical in behavior.

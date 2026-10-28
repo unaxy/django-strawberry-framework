@@ -58,6 +58,7 @@ from .inputs import FILE, RELATION_MULTI, RELATION_SINGLE, iter_provided_input_f
 from .lazy import unwrap_lazy_object
 from .querysets import (
     coerce_field_value_or_none,
+    identity_key,
     lookup_read_alias,
     pks_all_present,
     visible_related_object,
@@ -541,11 +542,13 @@ def decode_visible_relation_ids(
     if not pks:
         return [], None
     visible = visible_related_objects(related_model, pks, info, async_recourse, key_attname)
-    if not pks_all_present(pks, visible.keys()):
+    pk_field = related_model._meta.pk
+    if not pks_all_present(pk_field, pks, visible.keys()):
         return None, relation_field_error(graphql_name)
+    keys = [visible[identity_key(pk_field, pk)] for pk in pks]
     if project is None:
-        return [visible[str(pk)] for pk in pks], None
-    return [project(pk, visible[str(pk)]) for pk in pks], None
+        return keys, None
+    return [project(pk, key) for pk, key in zip(pks, keys, strict=True)], None
 
 
 def _spec_field_name(spec: InputFieldSpec) -> str:

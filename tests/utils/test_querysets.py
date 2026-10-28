@@ -918,7 +918,7 @@ def test_relation_write_visibility_boundary_is_controlled_by_type_registration()
     category = Category.objects.create(name="VisibilityBoundary")
     try:
         assert visible_related_objects(Category, [saved_pk(category)], info=None) == {
-            str(saved_pk(category)): saved_pk(category),
+            saved_pk(category): saved_pk(category),
         }
 
         class CategoryType(DjangoType):
@@ -962,11 +962,11 @@ def test_visible_related_objects_reads_a_non_pk_key_beside_the_pk_in_one_query()
                 info=None,
                 key_attname="label",
             )
-        assert present == {str(keyed.pk): "Keyed"}
+        assert present == {keyed.pk: "Keyed"}
         assert len(ctx.captured_queries) == 1
         assert visible_related_objects(NullableScalarSpecimen, pks, info=None) == {
-            str(keyed.pk): keyed.pk,
-            str(unkeyed.pk): unkeyed.pk,
+            keyed.pk: keyed.pk,
+            unkeyed.pk: unkeyed.pk,
         }
     finally:
         registry.clear()
@@ -6517,10 +6517,14 @@ def test_normalized_visibility_result_with_custom_render_error() -> None:
 
 
 def test_pks_all_present_subset_check() -> None:
-    """pks_all_present stringifies declared pks and tests subset against present set."""
-    assert pks_all_present([1, 2], {"1", "2", "3"}) is True
-    assert pks_all_present(["1", "2"], {"1", "2"}) is True
-    assert pks_all_present([1, 4], {"1", "2", "3"}) is False
+    """pks_all_present keys each declared pk through the pk field and tests subset membership.
+
+    The key is the column's value, so ``"1"`` and ``1`` are one integer pk.
+    """
+    pk_field = Category._meta.pk
+    assert pks_all_present(pk_field, [1, 2], {1, 2, 3}) is True
+    assert pks_all_present(pk_field, ["1", "02"], {1, 2}) is True
+    assert pks_all_present(pk_field, [1, 4], {1, 2, 3}) is False
 
 
 @pytest.mark.django_db
