@@ -155,7 +155,7 @@ from ._queryset_private import (
     set_queryset_prefetch_lookups,
     set_queryset_sticky_filter,
 )
-from .errors import refuses_numeric_format, unbindable_temporal
+from .errors import binds_integer, refuses_numeric_format, unbindable_temporal
 from .relations import (
     is_model_class,
     leading_relation_hops,
@@ -985,32 +985,6 @@ def _unconstrained_decimal_or_none(
         return Decimal((sign, (0,), 0))
     stripped = Decimal((sign, coefficient[:kept], exponent))
     return None if refuses_numeric_format(connection, (stripped,)) else stripped
-
-
-def binds_integer(connection: BaseDatabaseWrapper, field: object, number: int) -> bool:
-    """Whether ``connection`` binds the integer ``number`` as a value of ``field``.
-
-    ``number`` is held to the range the backend stores for ``field``'s internal type
-    (``DatabaseOperations.integer_field_range``, the range Django's integer comparison
-    lookups test a bound against before binding it): ``IntegerField``'s 32 bits on
-    PostgreSQL, 64 bits for every integer type on SQLite. A field that is no
-    ``IntegerField`` yet binds an integer, as a ``DurationField`` binds its microsecond
-    count on a backend without a native interval, is held to ``BigIntegerField``'s range.
-    """
-    internal_type = (
-        field.get_internal_type() if isinstance(field, models.IntegerField) else "BigIntegerField"
-    )
-    return _within_integer_range(number, connection.ops.integer_field_range(internal_type))
-
-
-def _within_integer_range(number: int, bounds: tuple[int | None, int | None]) -> bool:
-    """Whether ``number`` lies inside ``bounds``, either end of which a backend may leave open.
-
-    ``None`` at an end is no limit there, as Django's range-aware integer lookups read it
-    (``django.db.models.lookups.IntegerFieldOverflow``).
-    """
-    low, high = bounds
-    return (low is None or number >= low) and (high is None or number <= high)
 
 
 _RELAY_ASYNC_RECOURSE = (

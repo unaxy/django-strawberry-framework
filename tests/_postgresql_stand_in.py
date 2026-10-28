@@ -7,7 +7,8 @@ that reads the connection's vendor and binding mode
 on PostgreSQL without a server. Its operations (``StoringOperations``) are SQLite's, so a
 predicate compiles on it, except that they pass every datetime and time through, as
 PostgreSQL's adapters do, so the value reaches the rule (a compiled predicate's
-parameters included) rather than SQLite's own refusal. ``BINDING_MODES`` names each binding mode a
+parameters included) rather than SQLite's own refusal, and a duration binds as the
+``timedelta`` itself, PostgreSQL's native ``interval``. ``BINDING_MODES`` names each binding mode a
 PostgreSQL connection can run in::
 
     driver, cursor_factory, client_side = BINDING_MODES["psycopg3-client"]
@@ -32,7 +33,10 @@ if TYPE_CHECKING:
 
 
 class StoringOperations(SQLiteOperations):
-    """SQLite's operations, whose adapters pass datetimes and times through, as PostgreSQL's do."""
+    """SQLite's operations, whose adapters pass datetimes, times and durations through.
+
+    PostgreSQL's adapters pass all three through.
+    """
 
     # basedpyright: django-stubs types the adapter ``str | None``; PostgreSQL's returns the
     # value itself, which this stand-in reproduces. It rejects the wider return
@@ -50,6 +54,15 @@ class StoringOperations(SQLiteOperations):
         self,
         value: datetime.datetime | datetime.time | None,
     ) -> datetime.datetime | datetime.time | None:
+        return value
+
+    # basedpyright: django-stubs types the adapter ``int | None``; PostgreSQL's returns the
+    # value itself, which this stand-in reproduces. It rejects the wider return
+    @override
+    def adapt_durationfield_value(  # pyright: ignore[reportIncompatibleMethodOverride]
+        self,
+        value: datetime.timedelta | None,
+    ) -> datetime.timedelta | None:
         return value
 
 
@@ -91,8 +104,10 @@ def postgresql_stand_in(
 ) -> Generator[str, None, None]:
     """Register an alias that reads as PostgreSQL, on ``driver`` and ``cursor_factory``.
 
-    Its adapters pass every datetime and time through, as Django's PostgreSQL adapters do,
-    and it is never opened: the binding mode is read from its connection parameters. Its
+    Its adapters pass every datetime, time and duration through, as Django's PostgreSQL
+    adapters do, its features name the native duration column (``has_native_duration_field``,
+    which Django reads in place of the duration adapter on some releases), and it is never
+    opened: the binding mode is read from its connection parameters. Its
     settings carry the ``TIME_ZONE`` key Django's connection handler fills in.
     """
     alias = "postgresql_stand_in"
@@ -105,6 +120,7 @@ def postgresql_stand_in(
     connections[alias] = wrapper
     stand_in = connections[alias]
     stand_in.ops = StoringOperations(stand_in)
+    stand_in.features.has_native_duration_field = True
     try:
         yield alias
     finally:

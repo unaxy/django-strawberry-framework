@@ -39,12 +39,18 @@ write flavors):
   needs more digits before or after the point than ``numeric`` stores, read over a
   compiled predicate's parameters and by the identity decode
   (``utils/querysets.py::coerce_field_value_or_none``);
-- ``unstorable_temporal`` - its write-side answer: a datetime or time a column
-  cannot store on the database a write runs on, or (PostgreSQL) can store but not
-  read back (a date or naive datetime a ``DateTimeField`` column holds read as the
-  datetime Django binds for it), or (psycopg 3) an ``ArrayField`` list the driver
-  cannot dump as a whole, applied by every write flavor before the save
-  (``utils/write_values.py::unstorable_temporal_error`` on the model flavor);
+- ``unstorable_temporal`` - the write-side answer: a date, datetime, time or duration
+  a temporal or duration column cannot store on the database a write runs on, asked
+  of Django's own save-time preparation on that connection (``Field.get_db_prep_save``)
+  and of the integer range it binds (``binds_integer``), or (PostgreSQL) a value whose
+  UTC offset the server refuses or that it stores but cannot read back, or (psycopg 3)
+  an ``ArrayField`` list the driver cannot dump as a whole, applied by every write
+  flavor before the save (``utils/write_values.py::unstorable_temporal_error`` on the
+  model flavor);
+- ``binds_integer`` - whether a backend binds an integer as a value of a column, held
+  to the range it stores for the column's internal type; shared with the filter bind
+  ask (``filters/sets.py::_unbindable_predicate``) and the identity decode
+  (``utils/querysets.py::coerce_field_value_or_none``);
 - ``null_field_error`` / ``empty_validation_error`` - the two shared leaves
   for an explicit null on a non-nullable column (the column's own message) and a
   validation failure carrying no details (one message + code pair);
@@ -91,6 +97,7 @@ from ._narrowing import (
 )
 from .lazy import unwrap_lazy_object
 from .relations import written_model_field
+from .typing import object_result
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -122,6 +129,7 @@ __all__ = [
     "UNBINDABLE_TEMPORAL_MESSAGE",
     "FieldError",
     "UnstorableText",
+    "binds_integer",
     "build_error_key_map",
     "coded_error_extensions",
     "empty_validation_error",
@@ -914,20 +922,26 @@ def _binds_client_side(connection: BaseDatabaseWrapper) -> bool:
 def unstorable_temporal(column: object, value: object, using: Callable[[], str]) -> bool:
     """Return whether the database ``using()`` names cannot store ``value`` in ``column``.
 
-    The write-side answer to ``unbindable_temporal``: ``value`` is what a write flavor
-    is about to store in ``column``, after its own parse and validation. A
-    ``DateTimeField`` value is first read as the datetime Django binds for it at the
-    save (``_stored_datetime``): a ``date`` as its midnight and, under ``USE_TZ``, a
-    naive datetime (that midnight included) made aware in the default time zone; a
-    datetime a ``TimeField`` column holds is read as its naive ``time()``, as
-    ``TimeField.to_python`` stores it. Two kinds of datetime or time are then refused:
+    The write-side answer for a temporal or duration column: ``value`` is what a write
+    flavor is about to store in ``column``, after its own parse and validation. Each value
+    the column converts at the save is asked of Django itself, as the save prepares it
+    (``Field.get_db_prep_save`` on that connection): a datetime in a ``DateField`` (made
+    naive in the default time zone under ``USE_TZ``, then cast to its date), a date or
+    datetime in a ``DateTimeField``, a time or datetime in a ``TimeField`` (a datetime
+    stored as its naive ``time()``), a duration in a ``DurationField``. A plain ``date`` in
+    a ``DateField`` always stores and is not asked. Four kinds of value are refused:
 
-    - one the backend cannot bind, answered by ``unbindable_temporal`` for a plain
-      write (SQLite, MySQL and Oracle: an aware datetime whose projection onto the
-      connection's time zone leaves years 1..9999, any aware datetime when ``USE_TZ``
-      is false, an aware time; PostgreSQL: an aware datetime or time whose UTC offset
-      the server refuses in the connection's binding mode); the save would raise the
-      adapter's ``OverflowError`` / ``ValueError`` or the server's ``DataError``.
+    - one Django's preparation refuses (an ``OverflowError`` or ``ValueError``): an aware
+      datetime whose date in the default time zone leaves years 1..9999 in a
+      ``DateField``; on SQLite, MySQL and Oracle an aware datetime whose projection onto
+      the connection's time zone leaves years 1..9999, any aware datetime when
+      ``USE_TZ`` is false, and an aware time.
+    - one prepared as an integer the backend cannot bind (``binds_integer``): a duration
+      on a backend without a native interval (SQLite, MySQL) is bound as its microsecond
+      count, whose 64 bits hold durations up to 106751991 days 04:00:54.775807 either way.
+    - on PostgreSQL, whose adapters pass datetimes and times through, an aware one whose
+      UTC offset the server refuses in the connection's binding mode
+      (``refuses_utc_offset``).
     - an aware datetime on a backend that stores the instant itself
       (``features.supports_timezones``: PostgreSQL), whose wall clock in the session
       time zone (``connection.timezone_name``: ``UTC`` under ``USE_TZ``, else
@@ -936,50 +950,137 @@ def unstorable_temporal(column: object, value: object, using: Callable[[], str])
       row would raise. The zone's offset is read at the value's own wall clock, so no
       intermediate UTC value can overflow where the session's wall clock does not.
 
-    An ``ArrayField`` holds every element (at any nesting depth) to the same rule
-    against its ``base_field``, except that psycopg binds a list's elements as text
-    in either binding mode, so on PostgreSQL each is held to the client-side offset
-    rule; a ``None`` element, like a ``None`` value, stores. On PostgreSQL through
-    psycopg 3 the list as a whole is then asked of the driver
-    (``_psycopg_refuses_list``), which dumps every element with one dumper and can
-    refuse a list whose elements each store alone (a naive time beside an aware one).
-    A ``date`` in a ``DateField`` column always stores. Any other column answers
-    ``False`` without calling ``using`` or touching ``django.db.connections``.
+    A naive datetime or a date in a ``DateTimeField`` is first read as the datetime Django
+    binds for it (``_datetime_django_binds``), so the ask emits none of the warnings the
+    save emits for it. An ``ArrayField`` holds every element (at any nesting depth) to the
+    same rule against its ``base_field``, except that psycopg binds a list's elements as
+    text in either binding mode, so on PostgreSQL each is held to the client-side offset
+    rule; a ``None`` element, like a ``None`` value, stores. On PostgreSQL through psycopg
+    3 the prepared list as a whole is then asked of the driver
+    (``_psycopg_refuses_list``), which dumps every element with one dumper and can refuse
+    a list whose elements each store alone (a naive time beside an aware one). Any other
+    column, and a value holding nothing the column converts, answer ``False`` without
+    calling ``using`` or touching ``django.db.connections``.
     """
     column, depth = array_leaf_field(column)
     values: list[object] = [value]
     for _ in range(depth):
         values = [element for item in values if is_list_or_tuple(item) for element in item]
-    in_array = depth > 0
-    if not issubclass(truth.class_of(column), (models.DateTimeField, models.TimeField)):
+    kinds = _converted_kinds(column)
+    if kinds is None or not isinstance(column, models.Field):
         return False
-    alias = using()
-    connection = connections[alias]
-    if isinstance(column, models.DateTimeField):
-        # ``connection.timezone`` is ``None`` exactly when ``USE_TZ`` is off.
-        use_tz = connection.timezone is not None
-        values = [_stored_datetime(element, use_tz=use_tz) for element in values]
-        stored_type: type[object] = datetime.datetime
-    else:
-        # ``TimeField.to_python`` stores a datetime's naive ``time()``.
-        values = [
-            element.time() if isinstance(element, datetime.datetime) else element
-            for element in values
-        ]
-        stored_type = datetime.time
-    if unbindable_temporal(column, values, lambda: alias, bound_as_text=in_array):
+    asked_types, stored_type = kinds
+    if not any(isinstance(element, asked_types) for element in values):
+        return False
+    connection = connections[using()]
+    # ``connection.timezone`` is ``None`` exactly when ``USE_TZ`` is off.
+    use_tz = connection.timezone is not None
+    prepared: list[object] = []
+    asked: list[object] = []
+    try:
+        for element in values:
+            if not isinstance(element, asked_types):
+                prepared.append(element)
+                continue
+            bound = (
+                _datetime_django_binds(element, use_tz=use_tz)
+                if isinstance(column, models.DateTimeField) and isinstance(element, datetime.date)
+                else element
+            )
+            answer = object_result(column.get_db_prep_save, bound, connection)
+            prepared.append(answer)
+            asked.append(answer)
+    except (OverflowError, ValueError):
         return True
-    if in_array and _psycopg_refuses_list(connection, values, stored_type):
+    in_array = depth > 0
+    if (
+        any(
+            isinstance(answer, int)
+            and not isinstance(answer, bool)
+            and not binds_integer(connection, column, answer)
+            for answer in asked
+        )
+        or refuses_utc_offset(connection, asked, bound_as_text=in_array)
+        or (in_array and _psycopg_refuses_list(connection, prepared, stored_type))
+    ):
         return True
     if not isinstance(column, models.DateTimeField) or not connection.features.supports_timezones:
         return False
     zone = zoneinfo.ZoneInfo(connection.timezone_name)
     return any(
-        isinstance(element, datetime.datetime)
-        and timezone.is_aware(element)
-        and _session_wall_clock_overflows(element, zone)
-        for element in values
+        isinstance(answer, datetime.datetime)
+        and timezone.is_aware(answer)
+        and _session_wall_clock_overflows(answer, zone)
+        for answer in asked
     )
+
+
+def _converted_kinds(column: object) -> tuple[tuple[type[object], ...], type[object]] | None:
+    """Return the value kinds ``column`` converts at the save, and the kind it binds; else ``None``.
+
+    The first member is what ``unstorable_temporal`` asks Django to prepare for the
+    column, the second the type of a prepared value PostgreSQL's adapters pass through
+    (``_psycopg_refuses_list``). ``DateTimeField`` is read before ``DateField``, its base.
+    """
+    if isinstance(column, models.DateTimeField):
+        return (datetime.date,), datetime.datetime
+    if isinstance(column, models.DateField):
+        return (datetime.datetime,), datetime.date
+    if isinstance(column, models.TimeField):
+        return (datetime.time, datetime.datetime), datetime.time
+    if isinstance(column, models.DurationField):
+        return (datetime.timedelta,), datetime.timedelta
+    return None
+
+
+def _datetime_django_binds(value: datetime.date, *, use_tz: bool) -> datetime.datetime:
+    """Return the datetime a ``DateTimeField`` binds for ``value``, without Django's warning.
+
+    A ``date`` that is not a ``datetime`` becomes its midnight, and under ``USE_TZ``
+    (``use_tz``) a naive datetime (that midnight included) is made aware in the default
+    time zone (``TIME_ZONE``); an aware datetime is returned as it is. Django makes the
+    same projection at the save and warns (``RuntimeWarning``) as it makes a naive value
+    aware; this read is silent, since it only reads what the save will bind, and it runs
+    on the write pipeline's threads, where no warnings filter can be scoped to one call.
+    """
+    # Adapted from Django's DateTimeField.to_python and DateTimeField.get_prep_value
+    # (django/db/models/fields/__init__.py, BSD-3-Clause), their warning left out and
+    # ``settings.USE_TZ`` read as ``use_tz``.
+    # The complete upstream license ships in LICENSE.django.
+    if isinstance(value, datetime.datetime):
+        stamp = value
+    else:
+        stamp = datetime.datetime(value.year, value.month, value.day)  # noqa: DTZ001 - naive, as Django builds it
+    if use_tz and timezone.is_naive(stamp):
+        default_timezone = timezone.get_default_timezone()
+        stamp = timezone.make_aware(stamp, default_timezone)
+    return stamp
+
+
+def binds_integer(connection: BaseDatabaseWrapper, field: object, number: int) -> bool:
+    """Whether ``connection`` binds the integer ``number`` as a value of ``field``.
+
+    ``number`` is held to the range the backend stores for ``field``'s internal type
+    (``DatabaseOperations.integer_field_range``, the range Django's integer comparison
+    lookups test a bound against before binding it): ``IntegerField``'s 32 bits on
+    PostgreSQL, 64 bits for every integer type on SQLite. A field that is no
+    ``IntegerField`` yet binds an integer, as a ``DurationField`` binds its microsecond
+    count on a backend without a native interval, is held to ``BigIntegerField``'s range.
+    """
+    internal_type = (
+        field.get_internal_type() if isinstance(field, models.IntegerField) else "BigIntegerField"
+    )
+    return _within_integer_range(number, connection.ops.integer_field_range(internal_type))
+
+
+def _within_integer_range(number: int, bounds: tuple[int | None, int | None]) -> bool:
+    """Whether ``number`` lies inside ``bounds``, either end of which a backend may leave open.
+
+    ``None`` at an end is no limit there, as Django's range-aware integer lookups read it
+    (``django.db.models.lookups.IntegerFieldOverflow``).
+    """
+    low, high = bounds
+    return (low is None or number >= low) and (high is None or number <= high)
 
 
 def psycopg_refuses_list_parameter(
@@ -1016,10 +1117,10 @@ def _psycopg_refuses_list(
     the driver's ``adapt.Transformer`` over the open connection's adapters
     (``connection.connection``, only when already connected; the connection is never
     opened), else the driver module's own ``adapters``. Only the driver's ``DataError``
-    refuses; any other exception propagates. ``values`` are the elements
-    ``unstorable_temporal`` projected for an ``ArrayField`` write, ``None`` included (a
-    ``DateTimeField`` base's as ``_stored_datetime`` reads them, a ``TimeField`` base's
-    datetime as its naive ``time()``), or a filter's list parameter as Django prepared it
+    refuses; any other exception propagates. ``values`` are the elements of an
+    ``ArrayField`` write, each one its ``base_field`` converts as Django prepares it for
+    the save (``unstorable_temporal``) and every other one as it stands, ``None``
+    included, or a filter's list parameter as Django prepared it
     (``psycopg_refuses_list_parameter``, ``stored_type`` ``object``). They are asked only
     when every one is ``None`` or an instance of ``stored_type``, the type the column
     stores (any other element of a write is converted by the column's ``to_python`` at
@@ -1048,27 +1149,6 @@ def _psycopg_refuses_list(
     except refusal:
         return True
     return False
-
-
-def _stored_datetime(value: object, *, use_tz: bool) -> object:
-    """Return the datetime a ``DateTimeField`` binds for ``value``; any other value unchanged.
-
-    The projection ``DateTimeField.to_python`` and ``get_prep_value`` make at the save:
-    a ``date`` that is not a ``datetime`` becomes its midnight, and under ``USE_TZ``
-    (``use_tz``) a naive datetime, that midnight included, is made aware in the default
-    time zone (``TIME_ZONE``); an aware datetime is bound as it is. Django warns as it
-    makes a naive value aware; this projection is silent, since it only reads what the
-    save will bind. Attaching the ``ZoneInfo`` zone is what ``timezone.make_aware`` does
-    with it.
-    """
-    zone = timezone.get_default_timezone() if use_tz else None
-    if isinstance(value, datetime.datetime):
-        return (
-            value.replace(tzinfo=zone) if zone is not None and timezone.is_naive(value) else value
-        )
-    if isinstance(value, datetime.date):
-        return datetime.datetime(value.year, value.month, value.day, tzinfo=zone)
-    return value
 
 
 def _session_wall_clock_overflows(value: datetime.datetime, zone: datetime.tzinfo) -> bool:

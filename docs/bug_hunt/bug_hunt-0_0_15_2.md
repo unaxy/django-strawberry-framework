@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 371 done, 212 to do.
+Progress: 373 done, 212 to do.
 
 ## Done
 
@@ -2090,6 +2090,19 @@ Progress: 371 done, 212 to do.
   same string; so a flat expanded copy (`shelf__named` beside `real_shelf = RelatedFilter(..., field_name="shelf")`)
   and a plain declared filter named like another branch's accessor fire exactly their nested twin's gates. spec-027
   says so. Tests: `tests/filters/test_sets.py`
+- [x] 650. The write-side check `utils/errors.py::unstorable_temporal` asks Django's own save-time preparation
+  (`Field.get_db_prep_save` on the write connection) for every date, date-time, time and duration value it converts,
+  instead of hand-modelling the conversions: an aware datetime a `DateField` cannot make naive in the default zone
+  (year 1 / 9999 across an offset) is the field-keyed "Enter a value the database can represent." instead of the
+  masked `OverflowError`. A naive datetime or a date bound to a date-time column is projected as Django binds it (the
+  adapted `DateTimeField` naive branch; `LICENSE.django` ships beside ours), so no warnings filter is touched; the
+  PostgreSQL rules run over the prepared values. spec-036, spec-038, spec-039, README and the `fielderror-envelope`
+  glossary term say so. Tests: `tests/utils/test_errors.py`, `tests/rest_framework/test_resolvers.py`
+- [x] 653. A `DurationField` write past 64 bits of microseconds on a backend without a native interval (SQLite, MySQL)
+  is the field-keyed "Enter a value the database can represent." in every write flavor instead of the masked
+  `OverflowError` at bind: `unstorable_temporal` holds the integer `get_db_prep_save` prepares to
+  `utils/errors.py::binds_integer` (moved down from `utils/querysets.py`); PostgreSQL and Oracle bind any `timedelta`.
+  Tests: `tests/utils/test_errors.py`, `tests/rest_framework/test_resolvers.py`
 
 ## Outside review of the fixes
 
@@ -2192,19 +2205,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
   key: `optimizer/walker.py::_selected_scalar_names` reads the `id` selection as a model field name and
   misses, so `parent { child { id } }` keeps one JOIN; route it through `_relay_id_column`. No fakeshop Relay
   type omits its pk. Found researching 604
-- [ ] 650. The write-side temporal check `utils/errors.py::unstorable_temporal` still hand-models Django's conversions
-  (`_stored_datetime`): an aware year-1 `datetime` into a `DateField` (from a consumer hook, or a form / serializer field
-  of another kind than its column) answers storable while `Field.get_db_prep_save` raises `OverflowError`; ask
-  `get_db_prep_save` on the target connection instead, keeping `refuses_utc_offset`. Found landing 384
 - [ ] 652. Generated `year__in` / `year__range` (and `iso_year`) filter leaves answer wrong rows whatever the value:
   `IntegerInFilter` coerces each member against the `DateTimeField` / `DateField` column (`filters/base.py::
   _bound_model_field` returns the column, not the transform's `IntegerField` output), so `year__in="2020"` matches
   nothing, and `IntegerRangeFilter` applies `__gte` / `__lte` to the column and is refused; resolve the transform's
   output field (near 387, the same area). Found fact-finding 385
-- [ ] 653. A model-mutation write of a `DurationField` past 64 bits of microseconds (SQLite, MySQL) raises the masked
-  `OverflowError` at bind: `DurationField` carries no range validator and the write decode does not ask the
-  connection's integer range (`utils/write_values.py`, the `unstorable_temporal_error` precedent); form and serializer
-  flavors unprobed. Found fact-finding 385
 - [ ] 654. (robustness) `filters/sets.py::_bound_value_lookups` also reads lookups inside a consumer annotation a leaf
   goes through, so an out-of-range consumer constant refuses the user's value; and `utils/querysets.py::binds_integer`
   raises `KeyError` for an `IntegerField` subclass whose `get_internal_type()` the backend's `integer_field_ranges`
@@ -2259,12 +2264,21 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 680. `filters/inputs.py::_is_declared_head`'s docstring says a set borrowing a copy "restamps" it; 596 copies an
   owned filter at declaration, so the clause is false (one-clause fix, held for the `filters/inputs.py` refactor).
   Found fixing 596
+- [ ] 681. (robustness) A `DjangoModelFormMutation` whose `forms.DateTimeField` over a `DateField` column (a pairing
+  the build accepts), or whose `clean_<field>` hook, yields an aware datetime Django cannot make naive in the default
+  zone (year 1 / 9999 across an offset) raises `OverflowError` inside `form.is_valid()` (`DateField.to_python`), the
+  masked error, before the package's unstorable check runs (`forms/resolvers.py`). Found fact-finding 650
+  The `forms/resolvers.py` docstrings describing the write-side check as "datetime or time" columns go stale with 650
+  (DateField and DurationField columns are held too): fix them with this row.
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 687. CHANGELOG entry for items 650 and 653: a write of an aware datetime a `DateField` cannot store, or of a
+  duration past 64 bits of microseconds on SQLite / MySQL, is the field-keyed "Enter a value the database can
+  represent." instead of a masked error; the release ships Django's license text (`LICENSE.django`)
 - [ ] 686. CHANGELOG entry for items 596 and 597: a `ProjectedChildFilter` borrowed into a set without its branch is a
   `ConfigurationError` at schema build; a flat filter key or declared filter whose name spells another branch's
   relation no longer fires that branch's permission gates
