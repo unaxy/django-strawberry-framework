@@ -24,7 +24,9 @@ leaf, member and bound, under ``not`` and through ``partner``; PostgreSQL binds 
 values, so there the same input filters. A datetime sent through the declared
 ``occurredDayOf`` ``date`` transform is read as Django binds it, its date in the default
 time zone (``TIME_ZONE``), so one whose date leaves years 1..9999 is ``FILTER_INVALID``
-on every backend. A year sent to the declared ``occurredYearAmong`` (``in``) or
+on every backend, and so is one sent through ``parentDayOf`` on
+``allScalarSpecimensByParentStamp``, whose path crosses the ``FilteredRelation`` alias that
+root field's queryset holds. A year sent to the declared ``occurredYearAmong`` (``in``) or
 ``occurredYearSpan`` (``range``) through ``occurred_at``'s ``year`` transform binds as an
 integer, so a member or bound outside the range the database stores for the transform's
 ``IntegerField`` output (2**63, -2**63-1, a thirty-digit year) is ``FILTER_INVALID`` on
@@ -769,6 +771,53 @@ def test_datetime_through_the_date_transform_outside_years_one_to_9999_is_filter
     assert json_at(error, "extensions") == {
         "code": "FILTER_INVALID",
         "errors": {form_key: [_UNBINDABLE]},
+    }
+
+
+_BY_PARENT_STAMP = """
+query ($filter: ScalarSpecimenParentStampFilterInputType) {
+  allScalarSpecimensByParentStamp(filter: $filter) {
+    label
+  }
+}
+"""
+
+
+@pytest.mark.django_db
+def test_datetime_crossing_a_filtered_relation_alias_outside_years_one_to_9999_is_filter_invalid() -> (
+    None
+):
+    """A datetime crossing a ``FilteredRelation`` alias is held to the database like any other path.
+
+    ``parentDayOf`` is a declared ``DateTimeFilter`` whose ``field_name``
+    (``par__occurred_at``) crosses ``par``, the ``FilteredRelation("parent")`` alias the
+    resolver's queryset holds, into the parent's ``occurred_at`` ``date`` transform. The
+    path names no model field, so it is resolved over that queryset as Django resolves it:
+    a datetime whose date falls in year 0 is refused keyed to its form field on every
+    backend, never the conversion's ``OverflowError``, and a datetime whose date binds
+    filters by the parent's day.
+    """
+    alpha = _seed_specimen("alpha")
+    _seed_specimen("child-of-alpha", parent=alpha)
+    control = response_json(
+        post_graphql(
+            _BY_PARENT_STAMP,
+            variables={"filter": {"parentDayOf": {"date": _BINDABLE_DATETIME}}},
+        ),
+    )
+    payload = response_json(
+        post_graphql(
+            _BY_PARENT_STAMP,
+            variables={"filter": {"parentDayOf": {"date": _BEFORE_YEAR_ONE}}},
+        ),
+    )
+
+    assert control == {"data": {"allScalarSpecimensByParentStamp": [{"label": "child-of-alpha"}]}}
+    assert payload["data"] is None, payload
+    (error,) = json_list(payload, "errors")
+    assert json_at(error, "extensions") == {
+        "code": "FILTER_INVALID",
+        "errors": {"parent_day_of": [_UNBINDABLE]},
     }
 
 

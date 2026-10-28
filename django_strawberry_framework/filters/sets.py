@@ -36,7 +36,6 @@ from typing import (
 import django_filters
 from django.core.exceptions import (
     EmptyResultSet,
-    FieldDoesNotExist,
     FieldError,
     FullResultSet,
     ValidationError,
@@ -100,7 +99,6 @@ from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._array_field import array_leaf_field
 from django_strawberry_framework.utils._narrowing import (
     call_method,
-    dict_get,
     dict_items,
     is_dict,
     is_list_or_tuple,
@@ -153,6 +151,7 @@ from django_strawberry_framework.utils.querysets import (
     apply_type_visibility_sync,
     base_queryset,
     binds_integer,
+    lookup_target_fields,
     model_for,
     relation_path_visibility_types,
     run_in_one_sync_boundary,
@@ -2245,42 +2244,6 @@ def _cleaned_items(form: forms.BaseForm) -> ItemsView[str, object]:
     return form.cleaned_data.items()
 
 
-def _leaf_column(
-    model: type[models.Model],
-    annotations: dict[object, object],
-    filter_instance: Filter,
-) -> object | None:
-    """Return the column a filter's predicate reaches on ``model``, ``None`` when it reaches none.
-
-    The filter's ``field_name`` is walked as an ORM path: each relation hop moves
-    to its target model, and the first segment naming a field that is not a
-    relation is the column (``occurred_at__year`` reaches ``occurred_at``). A first
-    segment naming one of the queryset's ``annotations`` instead (Django refuses an
-    annotation named like a field) is that expression's ``output_field``, read
-    without compiling SQL; an expression whose output field Django cannot resolve
-    has none (``None``). ``None`` too for a path that ends on a relation or names
-    nothing.
-    """
-    path = _bound_field_name(filter_instance).split(LOOKUP_SEP)
-    current = model
-    for index, segment in enumerate(path):
-        try:
-            field = current._meta.get_field(segment)
-        except FieldDoesNotExist:
-            expression = dict_get(annotations, segment) if index == 0 else None
-            if expression is None:
-                return None
-            try:
-                return read_attr(expression, "output_field")
-            except FieldError:
-                return None
-        related_model = field.related_model if field.is_relation else None
-        if not is_model_class(related_model):
-            return field
-        current = related_model
-    return None
-
-
 #: The packages whose filter classes' ``filter`` the bind ask runs: django-filter's and this one's.
 _SHIPPED_FILTER_PACKAGES = frozenset(
     {truth.module(Filter).partition(".")[0], __name__.partition(".")[0]},
@@ -2415,10 +2378,12 @@ def _unbindable_temporal_errors(filterset_instance: FilterSet) -> dict[str, obje
     """Return the refusal of each cleaned filter value the queryset's database cannot bind.
 
     Each cleaned value a filter applies to a temporal column (a ``DateField``,
-    ``DateTimeField``, ``TimeField`` or ``DurationField`` its ``field_name`` reaches,
-    ``_leaf_column``, a queryset annotation's output field included, or an ``ArrayField``
-    whose innermost elements are stored through one,
-    ``utils/_array_field.py::array_leaf_field``) is asked of Django
+    ``DateTimeField``, ``TimeField`` or ``DurationField`` its ``field_name`` reaches over
+    the filterset's queryset, as Django resolves the path,
+    ``utils/querysets.py::lookup_target_fields``: a queryset annotation's output field, a
+    ``FilteredRelation`` alias and ``pk`` included, or an ``ArrayField`` whose innermost
+    elements are stored through one, ``utils/_array_field.py::array_leaf_field``) is asked
+    of Django
     (``_unbindable_predicate``): the filter's own ``filter`` builds the predicate and it is
     compiled on the database the filterset's queryset runs on (``queryset.db``, resolved
     only for a temporal leaf). A transform of a temporal column (``year``, ``month``)
@@ -2439,16 +2404,19 @@ def _unbindable_temporal_errors(filterset_instance: FilterSet) -> dict[str, obje
     # django-filter's ``BaseFilterSet.__init__`` stores the model's default queryset when
     # handed none; its stub types the attribute ``QuerySet[Any] | None``.
     queryset = require(filterset_instance.queryset, is_queryset)
-    model = require(queryset.model, is_model_class)
-    annotations = require(read_attr(queryset.query, "annotations"), is_dict)
     copies = filterset_instance._copied_filters
     errors: dict[str, object] = {}
     for name, value in _cleaned_items(filterset_instance.form):
         filter_instance = copies.get(name)
         if value is None or filter_instance is None or _own_filter(filter_instance) is not None:
             continue
-        column, _depth = array_leaf_field(_leaf_column(model, annotations, filter_instance))
-        if not isinstance(column, models.DateField | models.TimeField | models.DurationField):
+        if not any(
+            isinstance(
+                array_leaf_field(column)[0],
+                models.DateField | models.TimeField | models.DurationField,
+            )
+            for column in lookup_target_fields(queryset.query, _bound_field_name(filter_instance))
+        ):
             continue
         terminal = _projected_terminal(filter_instance)
         if not _runs_shipped_filter(terminal):
