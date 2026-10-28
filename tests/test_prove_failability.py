@@ -1171,7 +1171,7 @@ def test_a_scratch_root_that_overlaps_the_state_directory_is_refused(
     assert (fake_repo / "package" / "views.py").read_text(encoding="utf-8") == SOURCE
 
 
-@pytest.mark.parametrize("kind", ["symlink", "other-owner"])
+@pytest.mark.parametrize("kind", ["symlink", "dangling-symlink", "other-owner"])
 @pytest.mark.parametrize("shared", ["failability", "prove_failability"])
 def test_a_shared_directory_that_is_not_this_users_own_is_refused_before_anything_is_written(
     fake_repo: Path,
@@ -1194,9 +1194,12 @@ def test_a_shared_directory_that_is_not_this_users_own_is_refused_before_anythin
     )
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
+    nowhere = tmp_path / "nowhere"
     directory.parent.mkdir(parents=True, exist_ok=True)
     if kind == "symlink":
         directory.symlink_to(elsewhere, target_is_directory=True)
+    elif kind == "dangling-symlink":
+        directory.symlink_to(nowhere, target_is_directory=True)
     else:
         directory.mkdir()
         real_lstat = Path.lstat
@@ -1221,6 +1224,7 @@ def test_a_shared_directory_that_is_not_this_users_own_is_refused_before_anythin
     assert "scratch root refused" in error
     assert f"{directory} is not a directory owned by this user" in error
     assert list(elsewhere.iterdir()) == []
+    assert not nowhere.exists()
     assert (fake_repo / "package" / "views.py").read_text(encoding="utf-8") == SOURCE
 
 
@@ -4211,6 +4215,56 @@ def test_the_probe_records_package_file_database_names_and_crash_lines(
     assert dict(record.databases) == {
         alias: str(json_at(options, "NAME")) for alias, options in databases.items()
     }
+
+
+def _run_once_before_reading(
+    monkeypatch: pytest.MonkeyPatch,
+    target: Path,
+    action: Callable[[], object],
+) -> None:
+    """Run ``action`` once, right before the first ``read_text`` of ``target`` reads it."""
+    real_read_text = Path.read_text
+    pending = [action]
+
+    def _read_text(path: Path, encoding: str | None = None, errors: str | None = None) -> str:
+        if path == target and pending:
+            pending.pop()()
+        return real_read_text(path, encoding=encoding, errors=errors)
+
+    monkeypatch.setattr(Path, "read_text", _read_text)
+
+
+@pytest.mark.usefixtures("fake_repo")
+def test_a_probe_plugin_the_purge_removes_as_it_is_read_is_written_again(
+    scratch_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ``workspace.py prove`` puts the scratch root in the temporary directory the OS cleans:
+    # the read is the existence check, so a plugin gone by then is written, never a crash.
+    entry = _single_entry(tmp_path)
+    first = prove_failability._new_capture(scratch_root, entry, "baseline")
+    plugin = first.probe_directory / f"{prove_failability.PROBE_MODULE_NAME}.py"
+    _run_once_before_reading(monkeypatch, plugin, plugin.unlink)
+
+    again = prove_failability._new_capture(scratch_root, entry, "mutant")
+
+    assert again.probe_directory == first.probe_directory
+    assert plugin.read_text(encoding="utf-8") == prove_failability.PROBE_SOURCE
+
+
+def test_probe_output_the_purge_removes_as_it_is_read_reads_as_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "probe.jsonl"
+    _ = output.write_text(
+        json.dumps({"kind": "failed", "nodeid": COUNT_ROW, "crash": "t.py:9: boom"}) + "\n",
+        encoding="utf-8",
+    )
+    _run_once_before_reading(monkeypatch, output, output.unlink)
+
+    assert prove_failability._read_probe(output) == ((), ())
 
 
 def test_an_xdist_worker_reports_provenance_but_leaves_rows_to_the_controller(
