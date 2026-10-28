@@ -199,8 +199,8 @@ def test_filter_arguments_factory_rejects_flattened_field_collision() -> None:
     the ``_field_specs`` provenance table are keyed by that one attr, so the
     second member would silently overwrite the first -- the declared
     ``branch__name`` exact filter would vanish from the public schema with no
-    error. This is the exact silent-drop class the type surface
-    (``_audit_field_surface``) and the write-input surfaces
+    error. This is the exact silent-drop class the schema build
+    (``_refuse_field_name_collisions``) and the write-input surfaces
     (``iter_input_field_collisions``) already reject; the generated filter input
     surface must reject it too. Without the guard in
     ``utils/inputs.py::emit_set_input_field_triples`` the build silently emits a

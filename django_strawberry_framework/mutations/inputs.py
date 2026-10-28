@@ -189,29 +189,6 @@ def _predicted_input_field_name(field: StrawberryField) -> str:
     return field.graphql_name or to_camel_case(field.python_name)
 
 
-def _audit_mutation_input_surface(
-    name: str,
-    input_cls: type[WithStrawberryObjectDefinition],
-) -> None:
-    """Reject a duplicate effective GraphQL name on generated or merged inputs.
-
-    Each field's name is ``_predicted_input_field_name``'s: substituting the
-    package caser would let a consumer-authored ``field_2`` sit beside a
-    generated ``field2``, report no collision, and collapse to a single
-    ``field2`` in the SDL.
-    """
-    seen: dict[str, str] = {}
-    for field in input_cls.__strawberry_definition__.fields:
-        graphql_name = _predicted_input_field_name(field)
-        if graphql_name in seen:
-            raise ConfigurationError(
-                f"DjangoMutation input {name!r} maps input attributes "
-                f"{seen[graphql_name]!r} and {field.python_name!r} to the same GraphQL "
-                f"field name {graphql_name!r}; one would silently overwrite the other.",
-            )
-        seen[graphql_name] = field.python_name
-
-
 def materialize_mutation_input_class(
     name: str,
     input_cls: type[WithStrawberryObjectDefinition],
@@ -219,17 +196,17 @@ def materialize_mutation_input_class(
 ) -> None:
     """Set ``input_cls`` as a real module global of ``mutations.inputs`` under ``name``.
 
-    Audits the final Strawberry field surface first, which is the earliest point
-    both consumer-authored fields and the generated remainder of a merged input
-    are visible together. It then delegates to the ``make_input_namespace``
-    materializer. See that helper for the ``LazyType.resolve_type`` contract, the
+    Delegates to the ``make_input_namespace`` materializer. Two fields of a
+    merged input publishing one GraphQL name is refused per schema at build
+    (``schema.py::_refuse_field_name_collisions``), since a consumer-authored
+    field without ``name=`` is named by that schema's ``NameConverter``. See the
+    materializer for the ``LazyType.resolve_type`` contract, the
     idempotent ``(name, input_cls)`` clause, the distinct-class name collision
     raise, and the cross-family type-name claim, whose collision message names
     ``owner`` (the ``DjangoMutation`` or auth mutation the input belongs to).
 
     Defined here; called only by the phase-2.5 bind.
     """
-    _audit_mutation_input_surface(name, input_cls)
     _materialize_input(name, input_cls, owner)
 
 

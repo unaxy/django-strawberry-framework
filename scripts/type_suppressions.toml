@@ -670,7 +670,8 @@
 "tests/types/test_definition_order.py::test_consumer_id_typo_lookalike_nodeid_string_on_relay_node_type_raises.CategoryNodeMy" = { reportUndefinedVariable = 1 }
 "tests/types/test_definition_order.py::test_consumer_id_typo_lookalike_nodeid_string_on_relay_node_type_raises.CategoryNodeNot" = { reportUndefinedVariable = 1 }
 "tests/types/test_definition_order.py::test_consumer_id_unresolved_non_nodeid_string_on_relay_node_type_raises.CategoryNode" = { reportUndefinedVariable = 1 }
-"tests/types/test_definition_order.py::test_explicit_graphql_field_name_collision_raises.ExplicitNameCollisionType.custom" = { reportAny = 1 }
+"tests/types/test_definition_order.py::test_explicit_graphql_field_name_collision_raises_at_schema_build.ExplicitNameCollisionType.custom" = { reportAny = 1 }
+"tests/types/test_definition_order.py::test_str_enum_graphql_field_name_collision_raises_naming_the_wire_text.EnumNameCollisionType.custom" = { reportAny = 1 }
 "tests/types/test_definition_relations.py::_malformed_definition" = { reportArgumentType = 2 }
 "tests/types/test_definition_relations.py::test_custom_id_detection_normalizes_the_resolve_id_attr_result_under_its_guard._Node.resolve_id_attr" = { cast = 1 }
 "tests/types/test_definition_relations.py::test_custom_id_detection_propagates_and_flags_consumer_relay_resolver._NonStringNode.resolve_id_attr" = { reportIncompatibleMethodOverride = 1 }

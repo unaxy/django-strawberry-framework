@@ -2469,7 +2469,7 @@ def test_camel_case_graphql_name_collision_is_fail_loud() -> None:
     ``foo_bar`` and ``fooBar`` produce DISTINCT input attrs (so the input-attr guard
     passes) but the SAME ``graphql_name`` ``fooBar``; Strawberry would collapse the two
     onto one schema field. The graphql-name guard catches and names them, mirroring the
-    read-type guard ``types/finalizer.py::_audit_field_surface``.
+    per-schema guard ``schema.py::_refuse_field_name_collisions``.
     """
 
     class CamelCollideForm(forms.Form):

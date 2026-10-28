@@ -56,7 +56,6 @@ from typing import TYPE_CHECKING, Generic, TypeVar, cast
 import strawberry
 from strawberry import relay
 from strawberry.types.field import StrawberryField
-from strawberry.utils.str_converters import to_camel_case
 
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.keyset import validate_cursor_field_columns
@@ -215,8 +214,8 @@ def _audit_primary_ambiguity(multi_type_models: tuple[type[models.Model], ...]) 
     raise ConfigurationError(_format_ambiguity_error(offenders))
 
 
-def _field_surface_names(type_cls: type[DjangoType]) -> dict[str, str]:
-    """Return ``{python_name: graphql_name}`` for the settled pre-decoration surface.
+def _field_surface_names(type_cls: type[DjangoType]) -> frozenset[str]:
+    """Return the Python names of the settled pre-decoration field surface.
 
     Finalization changes the surface before ``strawberry.type`` freezes it:
     Relay suppresses the selected model primary-key annotation, connection-only
@@ -226,14 +225,13 @@ def _field_surface_names(type_cls: type[DjangoType]) -> dict[str, str]:
 
     Build the surface from the same three sources Strawberry will collect:
     inherited decorated-base fields, current annotations, and assigned
-    ``StrawberryField`` objects. Own fields replace inherited fields with the
-    same emitted GraphQL name (notably consumer ``id: relay.NodeID[...]`` over
-    Relay's private ``_id`` field); two distinct own Python names remain visible
-    to the collision audit. Explicit ``StrawberryField.graphql_name`` values win
-    over default camel-casing.
+    ``StrawberryField`` objects. Only Python names are read here: the GraphQL
+    name a field publishes is the executing schema's ``NameConverter``'s answer,
+    and no schema exists at finalization, so a wire-name collision is refused at
+    schema build (``schema.py::_refuse_field_name_collisions``).
     """
-    inherited_surface: dict[str, str] = {}
-    for base in reversed(truth.mro(type_cls)[1:]):
+    names: set[str] = set()
+    for base in truth.mro(type_cls)[1:]:
         definition = truth.static_attr(base, "__strawberry_definition__", None)
         if definition is None:
             continue
@@ -241,82 +239,40 @@ def _field_surface_names(type_cls: type[DjangoType]) -> dict[str, str]:
             # Strawberry declares ``python_name`` as ``str``, but its getter answers ``None``
             # for a field no name has been assigned to.
             python_name = read_attr(field, "python_name")
-            graphql_name = read_attr(field, "graphql_name")
-            label = python_name if python_name is not None else graphql_name
-            if label is None:
-                continue
-            label = str(label)
-            inherited_surface[label] = (
-                str(graphql_name) if graphql_name is not None else to_camel_case(label)
-            )
-    own_surface: dict[str, str] = {}
-
-    for name in _annotation_names(type_cls):
-        own_surface[name] = to_camel_case(name)
-
-    for name, value in truth.class_dict(type_cls).items():
-        if not truth.is_instance(value, StrawberryField):
-            continue
-        own_surface[name] = (
-            str(value.graphql_name) if value.graphql_name is not None else to_camel_case(name)
-        )
-
-    own_graphql_names = set(own_surface.values())
-    surface = {
-        name: graphql_name
-        for name, graphql_name in inherited_surface.items()
-        if graphql_name not in own_graphql_names
-    }
-    surface.update(own_surface)
-
-    return surface
+            label = python_name if python_name is not None else read_attr(field, "graphql_name")
+            if label is not None:
+                names.add(str(label))
+    names.update(_annotation_names(type_cls))
+    names.update(
+        name
+        for name, value in truth.class_dict(type_cls).items()
+        if truth.is_instance(value, StrawberryField)
+    )
+    return frozenset(names)
 
 
 def _audit_field_surface(type_cls: type[DjangoType], definition: DjangoTypeDefinition) -> None:
-    """Reject an empty or camel-colliding GraphQL field surface on ``type_cls``.
+    """Reject an empty GraphQL field surface on ``type_cls``.
 
-    Two misconfigurations Strawberry only catches late - as a generic
-    ``ValueError`` or, worse, a SILENT field drop inside
-    ``strawberry.Schema(...)`` - surfaced here with DjangoType attribution:
+    ``Meta.fields = ()`` (or a ``Meta.exclude`` that removes every column) with
+    no consumer-authored field leaves a type with zero GraphQL fields, which
+    Strawberry reports late as ``Type <X> must define one or more fields`` with
+    no DjangoType context. ``_field_surface_names`` owns the settled
+    pre-decoration surface: inherited interface fields, current annotations, and
+    consumer-assigned ``StrawberryField``s.
 
-    * Empty surface - ``Meta.fields = ()`` (or a ``Meta.exclude`` that removes
-      every column) with no consumer-authored field leaves a type with zero
-      GraphQL fields. Strawberry then raises ``Type <X> must define one or more
-      fields`` with no DjangoType context.
-    * Name collision - two DISTINCT field names that default-camel-case to ONE
-      GraphQL name (``foo_bar`` + ``fooBar`` -> ``fooBar``). Strawberry keeps one
-      and silently drops the other. The synthesized-relation-connection guard in
-      ``_synthesize_relation_connections`` already covers a generated
-      ``<name>_connection`` colliding with an existing field; this covers the
-      remaining column-vs-column / field-vs-field case.
-
-    ``_field_surface_names`` mirrors the connection guard and owns the settled
-    pre-decoration surface: inherited interface fields, current annotations,
-    and consumer-assigned ``StrawberryField``s. A consumer override shares its
-    column's Python name (e.g. ``name`` over ``name``), so it is one entry,
-    never a collision; only distinct Python names emitting one GraphQL name
-    raise.
+    Two distinct fields publishing one GraphQL name is not decided here: the
+    name is the executing schema's ``NameConverter``'s, so one definition can
+    collide under one schema's config and not under another's, and
+    ``schema.py::_refuse_field_name_collisions`` refuses it per schema.
     """
-    names = _field_surface_names(type_cls)
-    if not names:
+    if not _field_surface_names(type_cls):
         raise ConfigurationError(
             f"{definition.graphql_type_name}: DjangoType over "
             f"{truth.name(definition.model)} has no GraphQL fields. Meta.fields is empty "
             "(or Meta.exclude removes every column) and no field is consumer-authored; "
             "declare at least one field.",
         )
-    by_camel: dict[str, list[str]] = {}
-    for python_name, graphql_name in names.items():
-        by_camel.setdefault(graphql_name, []).append(python_name)
-    collisions = {camel: sorted(ns) for camel, ns in by_camel.items() if len(ns) > 1}
-    if not collisions:
-        return
-    details = ", ".join(f"{camel!r} from {ns}" for camel, ns in sorted(collisions.items()))
-    raise ConfigurationError(
-        f"{definition.graphql_type_name}: distinct fields collide on the GraphQL surface "
-        f"under default camel-casing: {details}. Rename one side, or drop one via "
-        "Meta.fields / Meta.exclude.",
-    )
 
 
 def _format_model_label_routing_error(
@@ -644,16 +600,12 @@ def _synthesize_relation_connections() -> None:
     relations are skipped under the implicit default - an explicit key
     already raised at type creation (Decision 7).
 
-    Collision guard: the generated name is checked against
-    every existing field name on BOTH surfaces - Python attribute names AND
-    default-camel-cased GraphQL names (``to_camel_case``, the rule
-    Strawberry's default ``NameConverter`` applies under
-    ``auto_camel_case=True``). The schema's actual ``StrawberryConfig`` does
-    not exist at finalization time (``strawberry.Schema(...)`` is constructed
-    after ``finalize_django_types``), so a collision visible only under a
-    non-default ``name_converter`` / ``auto_camel_case=False`` falls through
-    to Strawberry's own schema-build duplicate-field error - a documented
-    constraint (spec-032 Edge cases), not a gap this guard can close.
+    Collision guard: the generated name is checked against every existing
+    Python field name, since attaching it would overwrite that attribute. The
+    GraphQL name it publishes is the executing schema's ``NameConverter``'s
+    answer, which does not exist at finalization time, so a wire-name collision
+    with another field is refused per schema at ``DjangoSchema`` build
+    (``schema.py::_refuse_field_name_collisions``).
 
     Strictness (spec-033 Decision 8): the synthesized resolver consults the
     optimizer sentinels before its per-parent fallback pipeline
@@ -746,20 +698,11 @@ def _synthesize_relation_connections() -> None:
                 # through its registered identity-safe teardown instead.
                 _record_relation_connection(definition, generated, name)
                 continue
-            existing = _field_surface_names(type_cls)
-            camel = to_camel_case(generated)
-            colliding = sorted(
-                name
-                for name, graphql_name in existing.items()
-                if name == generated or graphql_name == camel
-            )
-            if colliding:
-                collides_with = ", ".join(truth.render(n) for n in colliding)
+            if generated in _field_surface_names(type_cls):
                 raise ConfigurationError(
                     f"{truth.name(type_cls)}: the synthesized relation connection "
-                    f"{truth.render(generated)} collides with existing field(s) "
-                    f"{collides_with} on the GraphQL surface "
-                    f"({truth.render(camel)} under default camel-casing). Rename the colliding attribute, "
+                    f"{truth.render(generated)} collides with the existing field of that "
+                    "name. Rename the colliding attribute, "
                     f'or opt out with relation_shapes = {{"{name}": "list"}}.',
                 )
             annotations = type_cls.__annotations__
@@ -1128,9 +1071,8 @@ def finalize_django_types() -> None:
 
     # Field-surface audit: after relation/connection synthesis has settled each
     # type's annotation set and before Phase 3 freezes it. Catches an empty
-    # surface (``Meta.fields = ()``) and a camel-case name collision between two
-    # distinct fields - both of which Strawberry otherwise reports late and
-    # without DjangoType attribution (the latter as a silent field drop).
+    # surface (``Meta.fields = ()``), which Strawberry otherwise reports late and
+    # without DjangoType attribution.
     for type_cls, definition in registry.iter_definitions():
         if definition.finalized:
             continue

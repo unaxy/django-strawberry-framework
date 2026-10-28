@@ -1350,8 +1350,9 @@ def _guard_input_attr_collisions(form_class: FormClass, field_specs: list[InputF
     * ``graphql_name`` clash - two distinct field names that default-camel-case to
       ONE GraphQL name (``foo_bar`` + ``fooBar`` -> ``fooBar``). The python attrs
       differ (so the input-attr check above passes), but Strawberry collapses the
-      two onto one schema field. Mirrors the read-type guard in
-      ``types/finalizer.py::_audit_field_surface``.
+      two onto one schema field. Every generated name is pinned, so this holds
+      under any schema config; a field the schema's converter names is refused
+      per schema instead (``schema.py::_refuse_field_name_collisions``).
 
     The seen-dict walk + the two collision arms are single-sited in
     ``utils/inputs.py::iter_input_field_collisions``; the form

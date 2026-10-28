@@ -576,9 +576,10 @@ sweeps (and future maintainer-agents) do not re-flag them:
 - `types/base.py`'s per-field loops (`_build_annotations` /
   `_select_fields` / `_consumer_assigned_fields`) — distinct concerns,
   import-time only; merging trades clarity for nothing.
-- `mutations/inputs.py::_audit_mutation_input_surface`'s post-consumer-merge
-  re-walk — a different lifecycle point than `build_strawberry_input_class`'s
-  own walk, not a duplicate.
+- `schema.py::_refuse_field_name_collisions`'s per-schema walk of every
+  published type's fields, merged mutation inputs included — a different
+  lifecycle point than `build_strawberry_input_class`'s own walk, not a
+  duplicate.
 
 ### Decision 9 — Phase sequencing and hot-path exclusions
 

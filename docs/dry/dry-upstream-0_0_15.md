@@ -105,27 +105,35 @@ it lands with its tick.
     - Package: `tests/filters/test_sets.py::test_temporal_primary_key_reached_through_pk_is_asked`. No fakeshop model
       has a temporal pk.
 
-- [ ] 4. (TYP-1, was S5, plus `mutations/inputs.py::_predicted_input_field_name`) The collision guards use
+- [x] 4. (TYP-1, was S5, plus `mutations/inputs.py::_predicted_input_field_name`) The collision guards use
   `to_camel_case`, not the schema's `NameConverter`
-  - Our code:
-    - `types/finalizer.py::_field_surface_names`, the collision half of `::_audit_field_surface`, and
-      `::_synthesize_relation_connections #"camel = to_camel_case(generated)"`. Three more `to_camel_case` sites in
-      finalizer.py.
-    - The bind-time audit `mutations/inputs.py::_predicted_input_field_name` / `_audit_mutation_input_surface`.
-    - About 75 lines.
-  - Upstream: `strawberry/schema/name_converter.py::NameConverter.from_field` / `get_graphql_name`, through
-    `schema.config.name_converter`. Public, and present at 0.322.2.
-  - Lines: ~0 net. The camel half moves to `DjangoSchema` build; the empty-surface check stays at finalize.
-  - Status: CONFIRMED.
-    - Probe: a Strawberry type with `foo_bar` and `fooBar`.
-    - Default config: one field published, the other silently dropped.
-    - `auto_camel_case=False`: two fields.
-  - Reason to keep ours: finalize runs before any `StrawberryConfig` exists. That decides where the check runs, not
-    which rule it uses.
-  - Behaviour change: fixes a false `ConfigurationError` under `auto_camel_case=False`. It also fixes a silent field
-    drop under a custom converter. The mutation audit has the same false collision (SUSPECTED).
-  - Risk / blockers: one `DjangoTypeDefinition` can be served by schemas with different configs, so the check has to
-    run per schema.
+  - Our code: the camel half of `types/finalizer.py`'s `_field_surface_names` / `_audit_field_surface` /
+    `_synthesize_relation_connections` was removed, and so was `mutations/inputs.py`'s
+    `_audit_mutation_input_surface`.
+    - Finalize keeps the empty-surface check and the Python-name clobber check.
+    - `_predicted_input_field_name` stays, only to seed the bind-time spec name.
+  - Upstream: `strawberry/schema/name_converter.py::NameConverter.from_field` through `schema.config.name_converter`,
+    over the schema's own `get_fields`, the walk `_get_thunk_mapping` does.
+  - Landed: `schema.py::_refuse_field_name_collisions` runs at `DjangoSchema` build over every published object,
+    interface and input type. It skips `strawberry.Private` fields and raises `ConfigurationError` naming the type,
+    both fields and the wire text.
+  - Status: CONFIRMED. All 8 new rows failed on the old code.
+  - Behaviour change:
+    - fixes a false refusal under `auto_camel_case=False` (`foo_bar` beside `fooBar`, `field_2` beside `field2`);
+    - fixes a silent field drop under a custom converter;
+    - a `(str, Enum)` `name=` now collides as its text (closes `dry-0_0_15_3.md` 13 and 56);
+    - a consumer's plain `@strawberry.type` with a colliding pair is refused too, where Strawberry silently drops
+      one;
+    - a DjangoType served by a plain `strawberry.Schema` no longer gets a collision check.
+  - Tests:
+    - `tests/types/test_definition_order.py`: the default, `auto_camel_case=False`, custom-converter, explicit-name and
+      StrEnum rows;
+    - `tests/test_relay_connection.py::test_generated_name_graphql_collision_is_the_schema_converters`;
+    - two `tests/mutations/test_inputs.py` rows;
+    - `tests/test_schema.py::test_postponed_private_field_does_not_collide_with_the_name_it_spells`;
+    - live: `test_library_shapes_api.py::test_distributor_unpinned_case_pair_is_served_by_a_snake_case_schema`.
+  - `DistributorType`'s `name="display_name"` pin stays: under the shipped `auto_camel_case=True`, `display_name`
+    really collides with `displayName`.
 
 - [ ] 5. (TYP-2) A `GeneratedField` column has no conversion
   - Our code: `types/converters.py::_scalar_map_entry`, `::scalar_route` and `::convert_scalar`. No `GeneratedField`
