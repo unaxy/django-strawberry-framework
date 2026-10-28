@@ -189,6 +189,7 @@ from .base import (
     RelationPkMultipleFilter,
     TextPatternFilter,
     _bound_field_name,
+    _reads_integer_transform,
     _relation_uses_non_pk_to_field,
     copied_declared_filter,
     copied_form_field,
@@ -2436,10 +2437,13 @@ def _unbindable_value_errors(filterset_instance: FilterSet) -> dict[str, object]
     and it is compiled on the database the filterset's queryset runs on (``queryset.db``,
     resolved only for such a leaf). A transform of a temporal column (``year``, ``month``)
     binds integers, and a duration binds its microsecond count on a backend without a
-    native interval, so the integers those leaves bind are asked too. Every filter family
+    native interval, so the integers those leaves bind are asked too, and so is every
+    leaf whose lookup reads an integer transform's output whatever its column
+    (``filters/base.py::_reads_integer_transform``: an ``ArrayField``'s ``len``, a
+    transform a project registers with an ``IntegerField`` output). Every filter family
     reaches it whatever value kind its form cleans to: a datetime on a ``DateField`` or
-    through a ``date`` transform, a date on a ``DateTimeField``, a ``year`` / ``iso_year``
-    bound or ``in`` member, a duration, each member of a list and each bound of a range,
+    through a ``date`` transform, a date on a ``DateTimeField``, an integer transform's
+    bound or member, a duration, each member of a list and each bound of a range,
     as the filter applies them, and on an ``ArrayField`` each element a whole-array lookup
     binds, the element an index or slice reaches and an array's length (an integer held
     to its range), and on a decimal column each decimal it binds, whose spelling
@@ -2461,15 +2465,24 @@ def _unbindable_value_errors(filterset_instance: FilterSet) -> dict[str, object]
         filter_instance = copies.get(name)
         if value is None or filter_instance is None or _own_filter(filter_instance) is not None:
             continue
-        if not any(
-            isinstance(
-                array_leaf_field(column)[0],
-                models.DateField | models.TimeField | models.DurationField | models.DecimalField,
+        terminal = _projected_terminal(filter_instance)
+        if not (
+            any(
+                isinstance(
+                    array_leaf_field(column)[0],
+                    models.DateField
+                    | models.TimeField
+                    | models.DurationField
+                    | models.DecimalField,
+                )
+                for column in lookup_target_fields(
+                    queryset.query,
+                    _bound_field_name(filter_instance),
+                )
             )
-            for column in lookup_target_fields(queryset.query, _bound_field_name(filter_instance))
+            or _reads_integer_transform(terminal)
         ):
             continue
-        terminal = _projected_terminal(filter_instance)
         if not _runs_shipped_filter(terminal):
             continue
         source = (
@@ -4127,8 +4140,9 @@ class FilterSet(
                 return EnumLookupFilter, params
             if lookup_type == "in" and isinstance(field, models.IntegerField):
                 # An element-binding integer ``__in`` routes through IntegerInFilter:
-                # it drops out-of-range members (an out-of-range value overflows the
-                # backend at bind) and matches NOTHING when a non-empty list fully
+                # it drops a column's out-of-range members (an out-of-range value overflows
+                # the backend at bind), binds a transform's members as the lookup prepares
+                # them (``IntegerInFilter``) and matches NOTHING when a non-empty list fully
                 # drops, instead of django-filter's empty-value skip that would widen
                 # a restrictive ``in`` to no constraint. Own-PK Relay ``in``
                 # is handled above (GlobalIDMultipleChoiceFilter).
@@ -5202,7 +5216,8 @@ class FilterSet(
 
         A form that cleans is then held to the database its queryset runs on
         (``_unbindable_value_errors``): a value a filter applies to a temporal, duration or
-        decimal column that the scalar parse and the form accept but that database cannot bind is
+        decimal column, or through an integer transform, that the scalar parse and the form
+        accept but that database cannot bind is
         refused keyed to its form field, ``invalid`` with a fixed message, never the
         driver's text. Django is asked: the filter's own predicate is built and compiled
         on that database, so what is refused is what the query would raise, for every
@@ -5213,8 +5228,10 @@ class FilterSet(
         backend a ``year`` / ``iso_year`` bound outside years 1..9999, a datetime on a
         date column or through a ``date`` transform whose date in the default time zone
         (``TIME_ZONE``) leaves them, and an integer a lookup binds outside the range the
-        database stores for its left-hand side: a ``year`` / ``iso_year`` ``in`` member
-        or ``range`` bound past 64 bits on SQLite or 32 on PostgreSQL, and on SQLite and
+        database stores for its left-hand side: an integer transform's member or bound
+        (``year``, ``iso_year``, an ``ArrayField``'s ``len``, a transform a project
+        registers with an ``IntegerField`` output, whatever its column) past 64 bits on
+        SQLite or 32 on PostgreSQL, and on SQLite and
         MySQL, which bind a duration as its microsecond count, a duration whose
         microsecond count lies past 64 bits either way). On PostgreSQL the compiled
         parameters are also held to the UTC offsets the server refuses: 16:00 or more

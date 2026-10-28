@@ -37,6 +37,7 @@ from django.db import connection as db_connection
 from django.db import models as db_models
 from django.db.models import Model, QuerySet
 from django.db.models.expressions import Combinable
+from django.db.models.functions import Length
 from django.forms import CharField, DecimalField, Field, Form, SelectMultiple
 from django.http import HttpRequest, QueryDict
 from django.test.utils import CaptureQueriesContext, isolate_apps
@@ -1123,6 +1124,109 @@ def test_integer_range_filter_applies_distinct_when_flagged() -> None:
     assert result is qs
     assert qs.distinct_calls == 1
     assert qs.captured == {"signed_big__gte": 1, "signed_big__lte": 100}
+
+
+class _CountedElements(Length):
+    """An array's element count, an integer no column stores, as an ``ArrayField``'s ``len``.
+
+    Django's ``Length`` transform, whose output is an ``IntegerField``, under the name.
+    """
+
+    lookup_name = "len"
+
+
+class _CountedArrayField(FakeArrayField):
+    """A ``FakeArrayField`` carrying the ``len`` transform a real ``ArrayField`` registers."""
+
+
+_CountedArrayField.register_lookup(_CountedElements)
+
+
+class _TaggedSpecimen(db_models.Model):
+    """A table with an array column whose ``len`` transform an integer filter compares.
+
+    Query-build only (``managed = False``): the recording queryset never runs SQL.
+    """
+
+    tags = _CountedArrayField(db_models.TextField())
+
+    class Meta:
+        managed = False
+        app_label = "test_integer_transform_filters"
+
+
+#: Each column an integer transform reads, with its model and the transform's name.
+_INTEGER_TRANSFORMS = [
+    pytest.param(scalar_models.ScalarSpecimen, "occurred_at", "year", id="datetime-year"),
+    pytest.param(scalar_models.ScalarSpecimen, "occurred_at", "iso_year", id="datetime-iso-year"),
+    pytest.param(scalar_models.ScalarSpecimen, "occurred_on", "year", id="date-year"),
+    pytest.param(scalar_models.ScalarSpecimen, "occurred_on", "month", id="date-month"),
+    pytest.param(scalar_models.ScalarSpecimen, "occurred_at", "hour", id="datetime-hour"),
+    pytest.param(scalar_models.ScalarSpecimen, "occurred_at", "week_day", id="datetime-week-day"),
+    pytest.param(_TaggedSpecimen, "tags", "len", id="array-len"),
+]
+
+
+def _bound_integer_filter(model: type[Model], filter_instance: _FilterT) -> _FilterT:
+    """``filter_instance`` as its declared set binds it per request, over ``model``."""
+    filterset_class = _declared_set(FilterSet, model, bound=filter_instance)
+    return require_instance(filterset_class().filters["bound"], type(filter_instance))
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("model", "column", "transform"), _INTEGER_TRANSFORMS)
+def test_integer_in_filter_binds_a_transform_members_uncoerced_by_the_column(
+    model: type[Model],
+    column: str,
+    transform: str,
+) -> None:
+    """An integer ``in`` through a transform binds every member to the transform's output.
+
+    The members are values of the transform's ``IntegerField`` output, never of the
+    column: none is coerced through the column's field (which drops every member of a
+    temporal column), and one past every integer range is kept for the filter form's bind
+    ask, which refuses it (``test_sets.py``).
+    """
+    qs = _RecordingQs()
+    f = _bound_integer_filter(
+        model,
+        IntegerInFilter(field_name=column, lookup_expr=f"{transform}__in"),
+    )
+
+    f.filter(qs, [Decimal(3), Decimal(2**70)])
+    assert qs.nothing is None
+    assert qs.captured == {f"{column}__{transform}__in": [Decimal(3), Decimal(2**70)]}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("model", "column", "transform"), _INTEGER_TRANSFORMS)
+def test_integer_range_filter_applies_its_bounds_through_the_transform(
+    model: type[Model],
+    column: str,
+    transform: str,
+) -> None:
+    """An integer ``range`` through a transform applies ``gte`` + ``lte`` to the transform."""
+    qs = _RecordingQs()
+    f = _bound_integer_filter(
+        model,
+        IntegerRangeFilter(field_name=column, lookup_expr=f"{transform}__range"),
+    )
+
+    f.filter(qs, [1, 5])
+    assert qs.captured == {f"{column}__{transform}__gte": 1, f"{column}__{transform}__lte": 5}
+
+
+@pytest.mark.django_db
+def test_integer_in_filter_coerces_an_integer_column_members() -> None:
+    """An integer ``in`` on the column itself coerces each member, dropping one past its range."""
+    qs = _RecordingQs()
+    f = _bound_integer_filter(
+        scalar_models.ScalarSpecimen,
+        IntegerInFilter(field_name="signed_big", lookup_expr="in"),
+    )
+
+    f.filter(qs, [Decimal(3), Decimal(2**70)])
+    assert qs.captured == {"signed_big__in": [3]}
 
 
 # ---------------------------------------------------------------------------
