@@ -4138,7 +4138,7 @@ def test_post_multibyte_encoded_json_body_is_rejected_as_400(encoding: str) -> N
 
     The three rows above pin the BOM'd UTF-16, BOM-less UTF-16-LE and BOM'd
     UTF-8 bodies; these four complete the "UTF-16 / UTF-32 (BOM and BOM-less)"
-    set the wire contract claims (spec-046 test-plan row 19). ``encode("utf-32")``
+    set the wire contract claims (spec-046 Decision 9). ``encode("utf-32")``
     emits a BOM and fails at the strict decode; the three BOM-less forms decode into
     NUL-studded text and fail at upstream's ``json.loads``. Both routes are the
     same status and the same message, which is the contract - one byte sequence,
@@ -4160,7 +4160,7 @@ _MULTIBYTE_CATEGORY_NAME = "zzz_live_caf\u00e9_\u00fcber"
 
 @pytest.mark.django_db(transaction=True)
 def test_post_multibyte_utf8_json_body_round_trips_the_non_ascii_value() -> None:
-    r"""Ordinary UTF-8 is unchanged, multi-byte characters included (test-plan row 20).
+    r"""Ordinary UTF-8 is unchanged, multi-byte characters included.
 
     The contract narrowed to UTF-8, **not** to ASCII, so a positive control
     built the usual way would be vacuous: ``json.dumps``'s default
@@ -4274,7 +4274,7 @@ def test_get_query_with_object_variables_executes_like_upstream() -> None:
     exactly what upstream's per-param contract accepts, so the request executes and
     returns data. Paired with the malformed-param row below, this pins that the
     shield's two nested parses still route around the envelope guard through
-    the shared gap-1 translator: a shield that stopped parsing (or
+    the shared decode-failure translator: a shield that stopped parsing (or
     started applying the request-body guard) would turn this 200 into a 400.
     """
     client = Client()
@@ -4292,7 +4292,7 @@ def test_get_query_with_malformed_variables_param_is_the_upstream_parse_400() ->
     """GET `?variables={not json` -> upstream's own malformed-JSON 400, byte for byte.
 
     The shield adds no envelope guard of its own: the failure is raised inside the
-    delegated original `parse_json` via the shared gap-1 translator, so an
+    delegated original `parse_json` via the shared decode-failure translator, so an
     unparseable GET param answers with the same body an unparseable POST body does.
     A shield that swallowed or reworded the parse failure would change that one wire
     meaning.
@@ -4352,7 +4352,7 @@ def test_get_query_with_pathologically_nested_param_returns_400_not_500(
     """GET ``?<param>=<deep>`` -> the shield translates the same escape.
 
     The shield deliberately routes the GET parses around the envelope guard,
-    but it shares gap 1's error channel, so a deep param's
+    but it shares the decode-failure translation's error channel, so a deep param's
     ``RecursionError`` is translated to a ``400`` on the shielded path
     rather than escaping as a ``500``.
     """

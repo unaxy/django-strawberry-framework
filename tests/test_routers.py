@@ -39,7 +39,7 @@ trip are all proven over the **WebSocket** branch, which is where the package's
 own Channels composition (and therefore ``AuthMiddlewareStack``) still lives.
 
 The WebSocket consumer-injection seam and the actor revalidation matrix (spec-046
-Decision 11, Test plan rows 25-30) also live here: the composition rows are
+Decision 11 and Decision 16) also live here: the composition rows are
 structural, and the revalidation rows drive real sockets through
 ``WebsocketCommunicator`` on BOTH subprotocols. Decision 13 #"Placement" pins
 them at this tier.
@@ -85,7 +85,7 @@ controlled query, and (on a second schema) a gated ``SchemaExtension``. All thre
 are driven through ``_OperationController``: no wall-clock sleeps, no polling on
 real time, and every release is an explicit ``asyncio.Event``.
 
-The WebSocket **Host** boundary (spec-046 Decision 19, Test plan rows 47-51) is
+The WebSocket **Host** boundary (spec-046 Decision 19) is
 the module's third subject, and it is deliberately proven by DELEGATION: every
 row that asks "which hosts are allowed" asserts the socket's verdict against
 Django's own answer for the same value over HTTP - ``_django_http_host_verdict``
@@ -402,7 +402,7 @@ class Query:
 
     @strawberry.field
     def actor_identity(self, info: strawberry.Info) -> str:
-        """The revalidation-freshness probe (spec-046 row 26): two identity reads.
+        """The revalidation-freshness probe (spec-046 Decision 11): two identity reads.
 
         A field of its own rather than an extension of ``actor`` (whose exact
         string the request-contract row asserts). Both values are attribute reads
@@ -1095,7 +1095,7 @@ def _poison_the_session_store(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make the revalidation's fresh-store resolver raise on every call.
 
     One poisoning target for three rows: it proves the fail-closed degrade when
-    the revalidation DOES run (spec-046 row 30), and it proves the two early
+    the revalidation DOES run (no fallback to the cached actor), and it proves the two early
     returns skipped the session read entirely when they do NOT - a swallowed
     exception would surface as a denied operation, so "the operation succeeded"
     is only possible if the read never happened.
@@ -1579,7 +1579,7 @@ def test_router_is_a_protocol_type_router_mapping_exactly_http_and_websocket() -
 
 
 def test_http_branch_is_the_supplied_django_application_by_identity() -> None:
-    """Spec-046 row 8: ``"http"`` IS the supplied object, with no wrapper.
+    """Spec-046 Decision 2: ``"http"`` IS the supplied object, with no wrapper.
 
     Object identity, not structural equality: after the protocol split there is
     nothing left to introspect on the HTTP branch, which is the point. The
@@ -1602,7 +1602,7 @@ def test_http_branch_is_the_supplied_django_application_by_identity() -> None:
 
 
 def test_construction_rejects_an_omitted_or_unusable_django_application() -> None:
-    """Spec-046 row 10: omission is ``TypeError``; unusable is ``ConfigurationError``.
+    """Spec-046 Decision 3: omission is ``TypeError``; unusable is ``ConfigurationError``.
 
     Omission fails as a required parameter should - Python's own signature
     binding, naming the parameter. Explicit ``None`` (what an asgi.py written for
@@ -1632,7 +1632,7 @@ def test_construction_rejects_an_omitted_or_unusable_django_application() -> Non
 
 
 def test_graphql_http_consumer_left_the_router_module_entirely() -> None:
-    """Spec-046 row 9: ``GraphQLHTTPConsumer`` is nowhere in ``routers.py``.
+    """Spec-046 Decision 2: ``GraphQLHTTPConsumer`` is nowhere in ``routers.py``.
 
     Read the module's own SOURCE, not ``dir(routers_module)``: an unimported name
     is absent from ``dir()`` whether or not the module still references it, so
@@ -1767,7 +1767,7 @@ def test_websocket_branch_wraps_origin_validator_outside_the_auth_stack() -> Non
 
 
 def test_custom_websocket_url_pattern_reaches_only_the_websocket_re_path() -> None:
-    """Spec-046 row 11, structural half: the pattern is WebSocket-only.
+    """Spec-046 Decision 4, structural half: the pattern is WebSocket-only.
 
     ``websocket_url_pattern=`` governs one branch; the HTTP value stays the
     identical supplied object, because HTTP path matching belongs entirely to
@@ -1897,7 +1897,7 @@ def test_concurrent_first_class_access_returns_one_cached_class(
 
 # ---------------------------------------------------------------------------
 # Channels-present: the WebSocket consumer-injection seam and the window's
-# construction-time validation (spec-046 Decision 11, rows 28-29).
+# construction-time validation (spec-046 Decision 11).
 # Structural only - no socket, no database.
 # ---------------------------------------------------------------------------
 
@@ -2041,7 +2041,7 @@ def test_only_information_bearing_frames_reach_the_outbound_checkpoint() -> None
 
 
 def test_an_injected_consumer_class_still_sits_inside_all_three_wrappers() -> None:
-    """Spec-046 row 28: injection opts out of revalidation, not of the wrappers.
+    """Spec-046 Decision 11: injection opts out of revalidation, not of the wrappers.
 
     ``DjangoWebSocketHostValidator``, ``AllowedHostsOriginValidator`` and
     ``AuthMiddlewareStack`` are applied by the ROUTER around whatever is injected,
@@ -2532,7 +2532,7 @@ def test_the_revalidation_window_accepts_and_coerces_numbers(
 
 
 def test_injecting_a_consumer_class_with_a_window_is_a_construction_error() -> None:
-    """Spec-046 row 29: a knob that does nothing is worse than an error.
+    """Spec-046 Decision 11: a knob that does nothing is worse than an error.
 
     The window configures the PACKAGE consumer, so a positive value alongside an
     injected class is rejected instead of silently ignored. An explicit ``0.0``
@@ -2692,7 +2692,7 @@ async def test_default_websocket_url_pattern_matches_exactly(
     *,
     expected_connected: bool,
 ) -> None:
-    """Spec-046 row 11, behavioral half: the default pattern is exact.
+    """Spec-046 Decision 4, behavioral half: the default pattern is exact.
 
     ``r"^graphql/?$"`` is anchored at both ends, so - with Channels' leading-slash
     strip - only ``/graphql`` and ``/graphql/`` reach the consumer; every prefix
@@ -2725,7 +2725,7 @@ async def test_default_websocket_url_pattern_matches_exactly(
 
 @pytest.mark.django_db(transaction=True)
 async def test_schema_object_passes_through_unchanged_with_extensions_intact() -> None:
-    """Spec-046 row 12: the consumer holds the exact schema; extensions execute.
+    """Spec-046 Decision 13: the consumer holds the exact schema; extensions execute.
 
     The transport is the WebSocket branch: the package composes no HTTP
     consumer to interrogate, so the structural half reads the
@@ -2756,8 +2756,8 @@ async def test_schema_object_passes_through_unchanged_with_extensions_intact() -
 
 
 # ---------------------------------------------------------------------------
-# Channels-present: the WebSocket Host boundary (spec-046 Decision 19, Test plan
-# rows 47-51). Channels'
+# Channels-present: the WebSocket Host boundary (spec-046 Decision 19).
+# Channels'
 # ``OriginValidator.__call__`` reads the ``Origin`` header and nothing else, so a
 # handshake with an allowed ``Origin`` and a hostile ``Host`` connected - while
 # ``routers.py`` promised an injected consumer "cannot escape Host/Origin
@@ -3651,7 +3651,7 @@ async def test_a_hostile_host_is_denied_before_the_auth_stack_and_the_consumer(
 
 @pytest.mark.django_db(transaction=True)
 async def test_an_injected_consumer_is_denied_by_both_handshake_boundaries() -> None:
-    """Spec-046 row 28 + Decision 19: injection opts out of neither check.
+    """Spec-046 Decision 11 + Decision 19: injection opts out of neither check.
 
     The behavioral half of the structural row above. Both wrappers are the ROUTER's,
     so a consumer injected through the seam is inside both by construction - and
@@ -3942,8 +3942,8 @@ async def test_authenticated_session_round_trip_reaches_the_resolver() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Channels-present: per-operation actor revalidation (spec-046 Decision 11,
-# Test plan rows 25-27 and 30). Every row drives a REAL socket through the
+# Channels-present: per-operation actor revalidation (spec-046 Decision 11 and Decision 16).
+# Every row drives a REAL socket through the
 # package's own mount.
 #
 # The spec's "separate request" is covered from both directions. The out-of-band
@@ -3969,7 +3969,7 @@ async def test_a_revoked_session_closes_the_socket_on_the_next_operation_without
     revoke: Callable[[AbstractBaseUser, str], Awaitable[None]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Spec-046 row 25: one socket, three revocation shapes, no reconnect.
+    """Spec-046 Decision 16: one socket, three revocation shapes, no reconnect.
 
     Operation 1 executes as the authenticated actor. The session is then revoked
     out of band - its row deleted, the user disabled, or the password rotated,
@@ -4031,7 +4031,7 @@ async def test_a_revoked_session_closes_the_socket_on_the_next_operation_without
 async def test_a_valid_session_keeps_executing_and_the_next_operation_sees_the_refreshed_actor() -> (
     None
 ):
-    """Spec-046 row 26: the refreshed actor is what the next operation observes.
+    """Spec-046 Decision 11: the refreshed actor is what the next operation observes.
 
     A valid session keeps executing, and the actor the second operation reads at
     ``request_from_info`` is the REFRESHED one, not the connect-time object: two
@@ -4064,7 +4064,7 @@ async def test_a_valid_session_keeps_executing_and_the_next_operation_sees_the_r
 async def test_the_revalidation_window_defers_the_denial_until_it_expires(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Spec-046 row 27: inside the window a revoked session still executes.
+    """Spec-046 Decision 11: inside the window a revoked session still executes.
 
     With ``websocket_revalidation_window=3600.0`` the accepted revocation delay
     is an hour, so operation 2 executes on the cached actor even though the
@@ -4151,7 +4151,7 @@ async def test_a_revalidation_store_failure_denies_the_operation_and_is_logged(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Spec-046 row 30: a failed revalidation read fails CLOSED, and is logged.
+    """Spec-046 Decision 11: a failed revalidation read fails CLOSED, and is logged.
 
     The fresh-store resolver raises, so the revalidation cannot answer. The
     connection is revoked and closed with the same reason a revoked session gets
@@ -4375,7 +4375,7 @@ async def test_revalidation_resolves_its_session_store_outside_the_opt_in_auth_p
 
 @pytest.mark.django_db(transaction=True)
 async def test_a_real_second_request_logout_denies_the_next_operation_on_the_open_socket() -> None:
-    """Spec-046 row 25: the separate request is a REAL request.
+    """Spec-046 Decision 16: the separate request is a REAL request.
 
     The direct-ORM revocation rows - session flushed, user disabled, password
     rotated - mutate the store in place: precise unit controls that stay, but none

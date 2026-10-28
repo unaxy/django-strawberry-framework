@@ -4691,7 +4691,7 @@ def test_library_branches_filter_by_reverse_fk_lookup() -> None:
     # ``BranchFilter.shelves`` carries the explicit ``queryset=Shelf.objects.filter(
     # topic="permanent collection")`` constraint per spec-027 - seed both
     # shelves under that topic so only the per-shelf code clause narrows the
-    # result; the topic-scope test (#8) inverts this pattern.
+    # result; the related-queryset-boundary test below inverts this pattern.
     models.Shelf.objects.create(code="A-Main", topic="permanent collection", branch=branch_with)
     models.Shelf.objects.create(
         code="B-2",
@@ -4870,7 +4870,9 @@ def test_nested_related_filter_honors_target_get_queryset() -> None:
     nested visibility hook on ``ShelfType.get_queryset`` is the only gate
     being exercised. ``BranchFilter.shelves`` carries an explicit
     ``queryset=Shelf.objects.filter(topic="permanent collection")``
-    constraint that test #8 pins separately - running both contracts
+    constraint, which
+    ``test_library_branches_filter_respects_related_queryset_boundary_on_parent``
+    pins separately - running both contracts
     through the same query path would double up the gates.
     """
     branch = models.Branch.objects.create(name="Branch", city="Cambridge")
@@ -12973,7 +12975,7 @@ def test_genre_books_connection_offset_page_edges_only_served_count_free() -> No
 def test_genre_books_connection_offset_overshoot_served_count_free_no_fallback() -> None:
     """An overshot ``after:`` on the offset page serves an empty page, no fallback.
 
-    Both the ``hasNextPage``-only shape and the edges-only shape (the Gap-6b hole):
+    Both the ``hasNextPage``-only shape and the edges-only shape:
     the marker proves ``total <= offset``, so ``hasNextPage`` is False and the
     edges are empty - served directly, count-free, in the fixed two-query cost
     (a per-parent fallback would be an N+1).
@@ -12995,7 +12997,7 @@ def test_genre_books_connection_offset_overshoot_served_count_free_no_fallback()
         "edges { node { title } }",
     )
     assert edges_only["edges"] == []
-    assert len(edges_captured) == 2  # Gap-6b: served, not per-parent fallback.
+    assert len(edges_captured) == 2  # Edges-only: served, not per-parent fallback.
     assert "_dst_total_count" not in edges_captured[1]["sql"]
 
 

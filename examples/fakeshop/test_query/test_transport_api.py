@@ -7,32 +7,32 @@ all (Decision 2). Fakeshop mounts
 (Decision 6), so these are proofs about the shipped package view rather than
 about a package reimplementation of Django's boundary.
 
-Test plan rows 1-7 land here: a project middleware sentinel on the GraphQL route
-(row 1), ``SecurityMiddleware``'s configured headers including HSTS (row 2), a
-hostile ``Host`` rejected before schema execution (row 3), the three CSRF
-directions on a cookie-authenticated mutation (row 4), ``Vary: Cookie`` on an
-authenticated GET (row 5), Django's own exact routing policy including the
-``APPEND_SLASH`` redirect (row 6), and ``graphql_ide=None`` /
-``allow_queries_via_get=False`` on a second mount of the package view (row 7).
-An async probe adds the ``AsyncDjangoGraphQLView`` colour of row 1 + row 2, and
+The HTTP-boundary test plan lands here: a project middleware sentinel on the
+GraphQL route, ``SecurityMiddleware``'s configured headers including HSTS, a
+hostile ``Host`` rejected before schema execution, the three CSRF directions on
+a cookie-authenticated mutation, ``Vary: Cookie`` on an authenticated GET,
+Django's own exact routing policy including the ``APPEND_SLASH`` redirect, and
+``graphql_ide=None`` / ``allow_queries_via_get=False`` on a second mount of the
+package view. An async probe adds the ``AsyncDjangoGraphQLView`` colour of the
+middleware-sentinel and security-header proofs, and
 one more async row proves the view hands a plain sync resolver an evaluated
 session actor: anonymous, non-staff and staff sessions each read their own actor
 on the event loop instead of ``SynchronousOnlyOperation``.
 One further mount proves ``docs/README.md``'s combined production-profile
-recipe (row 7's two knobs plus introspection disabled through
+recipe (the two per-mount knobs above plus introspection disabled through
 ``AddValidationRules``) as a single unit over the real fakeshop schema.
 
-Test plan rows 13-17 - the whole body-cap matrix (Decision 7) - land here
+The whole body-cap matrix (Decision 7) lands here
 too, against three more mounts of the package view that differ only in their
 ``max_request_body_bytes``: the below / at / above boundary trio, what an absent
 or understated ``Content-Length`` can and cannot do on each transport, a
 cumulative multi-fragment body, malformed JSON on both sides of the cap,
 multipart, the parse-and-execution witnesses, which of the two ceilings fired,
 the three precedence rungs, and a GET with a hostile ``Content-Length`` still
-answering ``200`` on ``cap-tiny/``. Row 18 (the py3.10 / Django 5.2.16 floor) is a
-separately-invoked run of this same file, not a separate row.
+answering ``200`` on ``cap-tiny/``. Floor parity (the py3.10 / Django 5.2.16 floor) is a
+separately-invoked run of this same file, not a separate test.
 
-Test plan rows 19 / 22 / 23 add one more async row. The strict UTF-8
+The wire contract's encoding rejections add one more async row. The strict UTF-8
 wire contract (Decision 9) is enforced in
 ``views.py::_RequestBodyBoundaryMixin.parse_json``, which both views inherit, so
 the async transport must reject UTF-16 and a leading UTF-8 BOM exactly as the sync
@@ -164,7 +164,7 @@ _CREATE_CATEGORY = (
 
 
 # ---------------------------------------------------------------------------
-# Row-1 scaffolding: a project middleware referenced from ``MIDDLEWARE`` by its
+# Middleware-sentinel scaffolding: a project middleware referenced from ``MIDDLEWARE`` by its
 # dotted path. Importable because pytest has already put this module in
 # ``sys.modules`` under ``__name__`` - the same mechanism the Probe URLconf below
 # relies on for ``ROOT_URLCONF=__name__``.
@@ -241,7 +241,7 @@ def _with_a_middleware_that_sets_the_encoding() -> override_settings:
 
 
 def _ide_off_view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
-    """The package view with the IDE and GET queries both turned off (row 7)."""
+    """The package view with the IDE and GET queries both turned off."""
     view = DjangoGraphQLView.as_view(
         schema=config_schema.schema,
         graphql_ide=None,
@@ -329,7 +329,7 @@ _ROOMY_CAP = 8 * 1024 * 1024
 #: most likely to write, and the one a mount must fail loudly on.
 _INVALID_CAP = 0
 
-#: Every ``parse_json`` call the spy mount saw, newest last. The row-15 witness:
+#: Every ``parse_json`` call the spy mount saw, newest last. The never-parsed witness:
 #: a ``413`` that leaves this empty is a ``413`` raised before any parse.
 _PARSE_CALLS: list[str | bytes] = []
 
@@ -662,7 +662,7 @@ def _assert_body_limit_response(response: "_TestResponse") -> None:
     """The package's own ``413``: the exact reason, ``text/plain``, no envelope.
 
     Pinning the literal reason is what distinguishes the package's ceiling from
-    Django's ``DATA_UPLOAD_MAX_MEMORY_SIZE`` rejection (row 16) - both are
+    Django's ``DATA_UPLOAD_MAX_MEMORY_SIZE`` rejection - both are
     correct outcomes, and a bare status assertion could not tell them apart.
     """
     assert response.status_code == 413
@@ -679,7 +679,7 @@ def _asgi_post(
     """Drive Django's own ``ASGIHandler`` in-process; return ``(status, headers, body)``.
 
     Neither ``django.test.Client`` nor ``AsyncClient`` can present the body
-    shapes test-plan row 13 requires: both derive ``CONTENT_LENGTH`` from the
+    shapes the cap's boundary proofs require: both derive ``CONTENT_LENGTH`` from the
     payload, both build the request object directly, and ``AsyncClientHandler``
     wraps the whole body in one ``LimitedStream`` without ever calling
     ``ASGIHandler.read_body``. So an absent ``Content-Length``, an understated
@@ -1028,13 +1028,13 @@ def _assert_no_graphql_envelope(response: "_TestResponse") -> None:
 
 
 # ---------------------------------------------------------------------------
-# Row 1: the project's own middleware runs on the GraphQL route
+# The project's own middleware runs on the GraphQL route
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.django_db
 def test_project_middleware_executes_on_the_graphql_http_route() -> None:
-    """Row 1: a consumer middleware sees the GraphQL request and shapes its response.
+    """A consumer middleware sees the GraphQL request and shapes its response.
 
     Asserting the recorded PATH is what makes this a proof about the GraphQL
     route rather than about any route. The ``Client`` is constructed INSIDE the
@@ -1056,13 +1056,13 @@ def test_project_middleware_executes_on_the_graphql_http_route() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Row 2: SecurityMiddleware's headers
+# SecurityMiddleware's headers
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.django_db
 def test_security_middleware_headers_ride_the_graphql_response() -> None:
-    """Row 2: ``SecurityMiddleware`` decorates the GraphQL response like any other.
+    """``SecurityMiddleware`` decorates the GraphQL response like any other.
 
     Nosniff and the referrer policy are Django's defaults under fakeshop's
     settings and need no override. HSTS does: ``SECURE_HSTS_SECONDS`` is ``0`` by
@@ -1085,13 +1085,13 @@ def test_security_middleware_headers_ride_the_graphql_response() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Row 3: the ALLOWED_HOSTS boundary
+# The ALLOWED_HOSTS boundary
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.django_db
 def test_a_hostile_host_header_is_rejected_before_the_schema_runs() -> None:
-    """Row 3: a hostile ``Host`` gets Django's ``400``, not a GraphQL envelope.
+    """A hostile ``Host`` gets Django's ``400``, not a GraphQL envelope.
 
     ``ALLOWED_HOSTS`` is set explicitly so the row never depends on fakeshop's
     ``DEBUG`` value (its shipped ``ALLOWED_HOSTS = []`` would accept only
@@ -1109,7 +1109,7 @@ def test_a_hostile_host_header_is_rejected_before_the_schema_runs() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Row 4: CSRF on a cookie-authenticated mutation
+# CSRF on a cookie-authenticated mutation
 # ---------------------------------------------------------------------------
 
 
@@ -1126,7 +1126,7 @@ def test_csrf_is_enforced_on_a_cookie_authenticated_graphql_mutation(
     token_mode: str,
     expected_status: int,
 ) -> None:
-    """Row 4: all three CSRF directions on a real write, under a cookie session.
+    """All three CSRF directions on a real write, under a cookie session.
 
     ``Client(enforce_csrf_checks=True)`` turns off the test client's usual CSRF
     bypass, so ``CsrfViewMiddleware`` runs for real. The correct token is read
@@ -1163,13 +1163,13 @@ def test_csrf_is_enforced_on_a_cookie_authenticated_graphql_mutation(
 
 
 # ---------------------------------------------------------------------------
-# Row 5: cache policy on an authenticated read
+# Cache policy on an authenticated read
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.django_db
 def test_an_authenticated_get_varies_on_cookie() -> None:
-    """Row 5: an authenticated GraphQL GET is not blindly cacheable.
+    """An authenticated GraphQL GET is not blindly cacheable.
 
     ``Vary: Cookie`` is deterministic on this mount from two directions:
     ``ensure_csrf_cookie`` forces ``CsrfViewMiddleware`` to set the CSRF cookie
@@ -1190,13 +1190,13 @@ def test_an_authenticated_get_varies_on_cookie() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Row 6: routing policy belongs to Django's URLconf
+# Routing policy belongs to Django's URLconf
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.django_db
 def test_routing_policy_is_djangos_urlconf_not_the_routers() -> None:
-    """Row 6: exact match at ``/graphql/``, ``APPEND_SLASH`` at ``/graphql``, ``404`` beyond.
+    """Exact match at ``/graphql/``, ``APPEND_SLASH`` at ``/graphql``, ``404`` beyond.
 
     The ``301`` on a POST to ``/graphql`` is the documented policy the migration
     note must warn about: most clients will not re-``POST`` a redirect. It is the
@@ -1224,13 +1224,13 @@ def test_routing_policy_is_djangos_urlconf_not_the_routers() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Row 7: the per-mount IDE and GET controls
+# The per-mount IDE and GET controls
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.django_db
 def test_graphql_ide_and_get_queries_can_be_turned_off_on_the_package_view() -> None:
-    """Row 7: ``graphql_ide=None`` and ``allow_queries_via_get=False`` are supported.
+    """``graphql_ide=None`` and ``allow_queries_via_get=False`` are supported.
 
     Proven against a second mount of the package view through the Probe URLconf,
     contrasted with fakeshop's default mount in the same test so the difference is
@@ -1276,7 +1276,8 @@ def test_the_production_profile_mount_refuses_introspection_and_still_serves_ope
     """The documented production mount works as one unit, not only knob by knob.
 
     ``graphql_ide=None`` and ``allow_queries_via_get=False`` are proven
-    individually in row 7 above; this row proves the guide's COMBINED recipe -
+    individually by the per-mount IDE and GET test above; this test proves the
+    guide's COMBINED recipe -
     those two plus ``AddValidationRules([NoSchemaIntrospectionCustomRule])`` on a
     ``DjangoSchema`` - over the real fakeshop surface. Introspection documents
     (``__schema`` / ``__type``) are refused at validation with ``data`` never
@@ -1318,7 +1319,7 @@ def test_the_production_profile_mount_refuses_introspection_and_still_serves_ope
     assert operation.status_code == 200
     assert operation.json()["data"]["allItems"]["edges"]
 
-    # The row-7 knobs hold on this mount too: no IDE page, no GET execution.
+    # The IDE and GET switches hold on this mount too: no IDE page, no GET execution.
     assert ide.status_code == 404
     assert b"<html" not in ide.content.lower()
     assert get_query.status_code == 400
@@ -1332,7 +1333,7 @@ def test_the_production_profile_mount_refuses_introspection_and_still_serves_ope
 async def test_the_async_package_view_runs_inside_djangos_middleware_chain() -> None:
     """``AsyncDjangoGraphQLView`` answers a real request with the security headers on.
 
-    The async colour of rows 1-2: Django dispatches the coroutine view directly
+    The async colour of the middleware proofs: Django dispatches the coroutine view directly
     (upstream's ``as_view`` marks it), and ``SecurityMiddleware`` still decorates
     the response, so the middleware chain demonstrably ran on the async path. The
     operation is deliberately DB-free: the subject is the transport, so the row
@@ -1351,7 +1352,7 @@ async def test_the_async_package_view_runs_inside_djangos_middleware_chain() -> 
 
 
 async def test_the_async_package_view_enforces_the_same_utf8_wire_contract() -> None:
-    """The async colour of rows 19 / 22 / 23: non-UTF-8 request JSON is a 400 here too.
+    """The async colour of the encoding rejections: non-UTF-8 request JSON is a 400 here too.
 
     The sync half of this contract runs over ``/graphql/`` in
     ``test_products_api.py``. The async half is the stronger attribution, and is
@@ -1482,12 +1483,12 @@ def test_the_package_view_serves_an_ordinary_graphql_response() -> None:
 
 
 # ===========================================================================
-# The cumulative request-body cap. Test-plan rows 13-18.
+# The cumulative request-body cap.
 # ===========================================================================
 
 
 # ---------------------------------------------------------------------------
-# Row 13 + 14 (JSON): below, at, and above the limit
+# JSON bodies below, at, and above the limit
 # ---------------------------------------------------------------------------
 
 
@@ -1505,7 +1506,7 @@ def test_a_declared_body_is_capped_at_the_configured_limit(
     size: int,
     expected_status: int,
 ) -> None:
-    """Row 13/14: a valid JSON operation below and AT the cap runs; above it gets ``413``.
+    """A valid JSON operation below and AT the cap runs; above it gets ``413``.
 
     The ``at`` and ``one-byte-above`` rows are the pair that pins the comparison
     as ``>`` rather than ``>=``: a body exactly at the configured limit is a legal
@@ -1525,7 +1526,7 @@ def test_a_declared_body_is_capped_at_the_configured_limit(
 
 
 # ---------------------------------------------------------------------------
-# Row 13: what the declared length can and cannot do, per transport
+# What the declared length can and cannot do, per transport
 # ---------------------------------------------------------------------------
 
 
@@ -1537,7 +1538,7 @@ def test_a_declared_body_is_capped_at_the_configured_limit(
 def test_on_wsgi_a_missing_or_understated_content_length_shrinks_the_body_it_cannot_grow_it(
     content_length: str,
 ) -> None:
-    """Row 13, WSGI colour: the declared length cannot UNDERSTATE what the app receives.
+    """WSGI colour: the declared length cannot UNDERSTATE what the app receives.
 
     Django's ``LimitedStream`` truncates reads at the declared length, so an
     absent declaration yields **0** bytes to the application and an understated
@@ -1573,7 +1574,7 @@ def test_on_asgi_an_absent_or_lying_content_length_cannot_buy_a_larger_body(
     extra_headers: tuple[tuple[bytes, bytes], ...],
     case_id: str,
 ) -> None:
-    """Row 13, ASGI colour: the COUNTED check is what bounds an undeclared body.
+    """ASGI colour: the COUNTED check is what bounds an undeclared body.
 
     This is the shape the declared gate structurally cannot see. Django's ASGI
     handler hands the application every byte it received regardless of the
@@ -1607,7 +1608,7 @@ def test_on_asgi_an_absent_or_lying_content_length_cannot_buy_a_larger_body(
 
 
 def test_a_body_arriving_in_several_asgi_fragments_is_capped_on_the_cumulative_total() -> None:
-    """Row 13: *cumulative* - three individually-legal fragments that together are not.
+    """*Cumulative* - three individually-legal fragments that together are not.
 
     Each fragment is comfortably under the cap; only their sum crosses it. The
     under-cap control in the same test is what makes the ``413`` attributable to
@@ -1639,13 +1640,13 @@ def test_a_body_arriving_in_several_asgi_fragments_is_capped_on_the_cumulative_t
 
 
 # ---------------------------------------------------------------------------
-# Row 14: malformed JSON, both sides of the cap
+# Malformed JSON, both sides of the cap
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.django_db
 def test_malformed_json_over_the_cap_gets_413_and_under_it_still_gets_400() -> None:
-    """Row 14/15: the cap outranks the parse, and the discrimination proves it ran.
+    """The cap outranks the parse, and the discrimination proves it ran.
 
     The same malformed bytes produce two different failures depending only on
     length, which is an independent witness that no parse happens above the cap:
@@ -1684,13 +1685,13 @@ def test_post_not_json_body_is_upstreams_malformed_json_400() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Row 14: multipart
+# Multipart
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.django_db
 def test_a_multipart_request_over_the_declared_cap_is_refused() -> None:
-    """Row 14: multipart gets the declared-size gate (Decision 7 step 3).
+    """Multipart gets the declared-size gate (Decision 7 step 3).
 
     The declared gate is the whole of the view's multipart contract: per-file
     count, per-file size, and aggregate size lie outside it. What the view must
@@ -1710,13 +1711,13 @@ def test_a_multipart_request_over_the_declared_cap_is_refused() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Row 15: proof that neither parsing nor schema execution ran
+# Proof that neither parsing nor schema execution ran
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.django_db(transaction=True)
 def test_an_over_cap_mutation_is_rejected_before_any_parse_or_schema_execution() -> None:
-    """Row 15: two negative witnesses, made meaningful by an under-cap control.
+    """Negative witnesses that parsing and execution never ran, made meaningful by a control.
 
     The rejected request is a **valid** ``createCategory`` mutation - it would
     have parsed and written a row had it run - padded past the cap. Over the cap:
@@ -1769,13 +1770,13 @@ def test_an_over_cap_mutation_is_rejected_before_any_parse_or_schema_execution()
 
 
 # ---------------------------------------------------------------------------
-# Row 16: which ceiling fired
+# Which ceiling fired
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.django_db
 def test_the_two_body_ceilings_are_distinguishable_by_the_response_they_produce() -> None:
-    """Row 16: the package cap vs Django's ``DATA_UPLOAD_MAX_MEMORY_SIZE``, both directions.
+    """Which ceiling fired: the package cap vs ``DATA_UPLOAD_MAX_MEMORY_SIZE``, both ways.
 
     Package direction: the tiny mount rejects with the package's own ``413`` and
     the package's exact reason, with Django's knob left at its default.
@@ -1807,13 +1808,13 @@ def test_the_two_body_ceilings_are_distinguishable_by_the_response_they_produce(
 
 
 # ---------------------------------------------------------------------------
-# Row 17: the precedence ladder, behaviorally
+# The precedence ladder, behaviorally
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.django_db
 def test_the_view_kwarg_beats_the_setting_on_a_real_request() -> None:
-    """Row 17: two mounts, one setting, one body - only the kwarg differs.
+    """Precedence: two mounts, one setting, one body - only the kwarg differs.
 
     A generous project-wide setting does not loosen a mount that pinned its own
     smaller cap, and a mount that pinned nothing takes the setting. Both halves
@@ -1839,7 +1840,7 @@ def test_the_view_kwarg_beats_the_setting_on_a_real_request() -> None:
 
 @pytest.mark.django_db
 def test_the_setting_beats_the_default_on_a_real_request() -> None:
-    """Row 17: a small setting caps fakeshop's own mount, which declares no kwarg.
+    """Precedence: a small setting caps fakeshop's own mount, which declares no kwarg.
 
     The default is 1 MiB, so this body would sail through without the setting -
     which the sibling row above demonstrates on the same path. The mount here is
@@ -1856,7 +1857,7 @@ def test_the_setting_beats_the_default_on_a_real_request() -> None:
 
 @pytest.mark.django_db
 def test_a_none_setting_disables_the_package_cap_that_the_default_would_apply() -> None:
-    """Row 17: ``MAX_REQUEST_BODY_BYTES = None`` disables the package cap.
+    """Precedence: ``MAX_REQUEST_BODY_BYTES = None`` disables the package cap.
 
     The only row that needs a megabyte-scale payload, because "disabled" is only
     demonstrable against a body the DEFAULT rejects. The same bytes are posted
@@ -1882,7 +1883,7 @@ def test_a_none_setting_disables_the_package_cap_that_the_default_would_apply() 
 
 
 # ---------------------------------------------------------------------------
-# Row 17: a cap the resolver refuses fails the mount, not one request shape
+# A cap the resolver refuses fails the mount, not one request shape
 # ---------------------------------------------------------------------------
 
 
@@ -2010,7 +2011,7 @@ async def test_the_cap_is_a_no_op_on_get_even_with_a_hostile_content_length(
 
 
 async def test_the_async_package_view_enforces_the_same_body_cap() -> None:
-    """The async colour of rows 13-14: the same ``413``, from the ``async def run``.
+    """The async colour of the JSON cap boundary: the same ``413``, from the ``async def run``.
 
     The two ``run`` overrides differ only in ``async`` / ``await``, which is the
     same irreducible split upstream carries in its own ``dispatch`` pair - so the
