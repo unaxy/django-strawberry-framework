@@ -174,6 +174,7 @@ SYNTHETIC_SOURCES = frozenset(
     {
         "scripts/check_citations.py",
         "scripts/prove_failability.py",
+        "tests/test_check_annotation_subscripts.py",
         "tests/test_check_citations.py",
         "tests/test_check_type_suppressions.py",
         "tests/test_export_dry_review.py",

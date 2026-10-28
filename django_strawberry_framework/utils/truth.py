@@ -69,6 +69,17 @@ from typing import TYPE_CHECKING, Generic, TypeAlias, TypeGuard, TypeVar, overlo
 if TYPE_CHECKING:  # pragma: no cover - type-checking-only imports.
     from typing_extensions import TypeIs
 
+if TYPE_CHECKING:
+    #: Any ``classmethod`` wrapper.
+    _ClassmethodAny: TypeAlias = classmethod[object, ..., object]
+    #: Any ``staticmethod`` wrapper.
+    _StaticmethodAny: TypeAlias = staticmethod[..., object]
+else:
+    # ``classmethod`` and ``staticmethod`` have no ``__class_getitem__`` before Python
+    # 3.14: each hint stays the class.
+    _ClassmethodAny = classmethod
+    _StaticmethodAny = staticmethod
+
 __all__ = (
     "IdentityMap",
     "IdentitySet",
@@ -273,10 +284,7 @@ def is_instance(obj: object, cls: type[frozenset[object]]) -> TypeIs[frozenset[o
 
 
 @overload
-def is_instance(
-    obj: object,
-    cls: type[classmethod[object, ..., object]],
-) -> TypeIs[classmethod[object, ..., object]]: ...
+def is_instance(obj: object, cls: type[_ClassmethodAny]) -> TypeIs[_ClassmethodAny]: ...
 
 
 @overload
@@ -340,10 +348,7 @@ def is_exact(obj: object, cls: type[list[object]]) -> TypeGuard[list[object]]: .
 
 
 @overload
-def is_exact(
-    obj: object,
-    cls: type[staticmethod[..., object]],
-) -> TypeGuard[staticmethod[..., object]]: ...
+def is_exact(obj: object, cls: type[_StaticmethodAny]) -> TypeGuard[_StaticmethodAny]: ...
 
 
 @overload

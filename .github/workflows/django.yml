@@ -84,6 +84,14 @@ jobs:
         # commits made with hooks skipped.
         run: uv run python scripts/check_truthful_reads.py --check
 
+      - name: Annotation subscripts (no Django class subscripted without a runtime hook)
+        # No package annotation subscripts a class that has no runtime
+        # `__class_getitem__` without django_stubs_ext, where anything can evaluate
+        # it; never-evaluated sites only as audited. The `annotation-subscripts`
+        # pre-commit hook runs the same gate; this step is the backstop for commits
+        # made with hooks skipped.
+        run: uv run python scripts/check_annotation_subscripts.py
+
       - name: Citations resolve (AGENTS.md source-refs rule, path::Symbol refs)
         # Every `path.py::Symbol` reference in first-party source must name a file
         # that exists and a symbol that file still defines; on the board and in the
