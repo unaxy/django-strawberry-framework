@@ -33,6 +33,7 @@ from typing import NoReturn, cast
 import pytest
 from apps.library.models import Book, Genre, Loan, MembershipCard, Patron, Shelf, TaggedItem
 from django.utils.functional import SimpleLazyObject
+from graphql import GraphQLError
 from strawberry import relay
 from typing_extensions import override
 
@@ -635,10 +636,19 @@ def test_related_target_for_rejects_unhashable_field_names() -> None:
 
 
 def test_graphql_type_name_rejects_invalid_graphql_names() -> None:
-    """Directly constructed definitions preserve the GraphQL name contract."""
+    """A name outside the GraphQL Name grammar fails with graphql-core's verdict as the cause."""
     definition = _malformed_definition(origin=Book, name="bad-name")
-    with pytest.raises(ConfigurationError, match="valid GraphQL name"):
+    with pytest.raises(ConfigurationError, match="valid GraphQL name") as exc_info:
         _ = definition.graphql_type_name
+    assert isinstance(exc_info.value.__cause__, GraphQLError)
+
+
+def test_graphql_type_name_rejects_the_introspection_prefix() -> None:
+    """A grammatical name in the ``__`` namespace GraphQL reserves for introspection fails."""
+    definition = _malformed_definition(origin=Book, name="__Book")
+    with pytest.raises(ConfigurationError, match="valid GraphQL name") as exc_info:
+        _ = definition.graphql_type_name
+    assert exc_info.value.__cause__ is None
 
 
 def test_custom_id_resolver_guards_reject_malformed_pk_names() -> None:

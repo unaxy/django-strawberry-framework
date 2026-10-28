@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
 from django.core.exceptions import FieldDoesNotExist
+from graphql import GraphQLError, assert_name
 from strawberry import relay
 from strawberry.relay.exceptions import NodeIDAnnotationError
 
@@ -37,7 +37,21 @@ if TYPE_CHECKING:
     #: A validated ``globalid_strategy``: a ``STRING_GLOBALID_STRATEGIES`` name or an encoder.
     GlobalIDStrategy: TypeAlias = str | GlobalIDEncoder
 
-_GRAPHQL_NAME_RE = re.compile(r"^[_A-Za-z][_0-9A-Za-z]*$")
+
+def _check_graphql_name(name: str, subject: str) -> None:
+    """Raise ``ConfigurationError`` unless ``name`` is a GraphQL Name a type can publish.
+
+    graphql-core's ``assert_name`` owns the Name grammar; the ``__`` prefix GraphQL
+    reserves for introspection is enforced by graphql-core only while validating a
+    built schema, so it is checked here, where the name is declared.
+    """
+    message = f"{subject} must be a valid GraphQL name; got {truth.render(name)}."
+    try:
+        _ = assert_name(name)
+    except GraphQLError as exc:
+        raise ConfigurationError(message) from exc
+    if name.startswith("__"):
+        raise ConfigurationError(message)
 
 
 @dataclass
@@ -275,11 +289,7 @@ class DjangoTypeDefinition:
             raise ConfigurationError(
                 f"GraphQL type name for {label} must be a non-empty string; got an empty name.",
             )
-        if not _GRAPHQL_NAME_RE.fullmatch(normalized) or normalized.startswith("__"):
-            raise ConfigurationError(
-                f"GraphQL type name for {label} must be a valid GraphQL "
-                f"name; got {truth.render(normalized)}.",
-            )
+        _check_graphql_name(normalized, f"GraphQL type name for {label}")
         return normalized
 
     def related_target_for(
