@@ -234,16 +234,16 @@ it lands with its tick.
   - Tests: live `test_products_api.py::test_create_item_via_serializer_object_validate_honours_a_reconfigured_non_field_key`
     over `ItemSerializer.validate()`, once under the default key and once under `override_settings`.
 
-- [ ] 11. (FLT-2) The FilterSet M2M sweep uses `isinstance(ManyToManyField)` over `get_fields()`
-  - Our code: `filters/sets.py::FilterSet.get_fields #"m2m_names = {"` (3 lines).
-  - Upstream: `django_filters/utils.py::get_all_model_fields` builds its sweep from
-    `opts.fields + opts.many_to_many`; `Options.many_to_many` is public.
-  - Lines: ~1.
-  - Status: CONFIRMED for fakeshop: 101 models, 0 diffs. The divergence itself is SUSPECTED.
-  - Reason to keep ours: none.
-  - Behaviour change: fixes a third-party M2M field that does not subclass `ManyToManyField` (e.g. taggit's
-    `TaggableManager`). Today it survives our removal, so `Meta.fields = "__all__"` fails at class creation.
-  - Risk / blockers: none.
+- [x] 11. (FLT-2) The FilterSet M2M sweep uses `isinstance(ManyToManyField)` over `get_fields()`
+  - Our code: `filters/sets.py::FilterSet.get_fields #"m2m_names = {"` now reads `model._meta.many_to_many`.
+  - Upstream: `django_filters/utils.py::get_all_model_fields` sweeps `opts.fields + opts.many_to_many`, and
+    `Options.add_field` files every `many_to_many=True` field there.
+  - Status: CONFIRMED. The new row failed on the old code: the third-party M2M field survived the removal and
+    `get_fields` raised.
+  - Behaviour change: fixes `Meta.fields = "__all__"` on a model with a third-party M2M field that does not subclass
+    `ManyToManyField` (taggit's `TaggableManager` shape).
+  - Tests: `tests/filters/test_sets.py::test_filterset_get_fields_excludes_an_m2m_field_outside_many_to_many_field`,
+    over a taggit-shaped `ForeignObject` with `many_to_many=True`. No query reaches a FilterSet that fails to build.
 
 - [ ] 34. (found landing item 1) The connection resolver serves a prefetched window without checking its bounds
   against its own arguments
