@@ -750,7 +750,8 @@ def pinned_write_alias() -> str:
     """Return the active write pipeline's pinned alias, the database a write stores on.
 
     The ``using`` callable each write flavor hands
-    ``utils/errors.py::unstorable_temporal``, which calls it only for a temporal column.
+    ``utils/errors.py::unstorable_temporal``, which calls it only for a value its temporal
+    or duration column converts at the save.
     """
     return require_write_pipeline().alias
 

@@ -5,8 +5,8 @@ runs at decode time (promoted from ``mutations/resolvers.py`` so the model
 mutation resolver is not the utility module for the other write flavors):
 
 - ``unstorable_text_error`` - the text storability preflight (lone surrogate, NUL);
-- ``unstorable_temporal_error`` - the temporal storability preflight (a datetime or
-  time the write alias cannot store, or cannot read back);
+- ``unstorable_temporal_error`` - the temporal storability preflight (a date, datetime,
+  time or duration the write alias cannot store, or cannot read back);
 - ``raw_choice_value`` - choice-enum member unwrapping;
 - ``coerce_relation_pk_or_none`` - raw relation-pk coercion;
 - ``relation_takes_global_id`` - whether a relation's id is a Relay GlobalID;
@@ -131,22 +131,23 @@ def unstorable_temporal_error(
     value: object,
     using: Callable[[], str],
 ) -> FieldError | None:
-    """Reject a datetime or time the write alias ``using()`` names cannot store in ``column``.
+    """Reject a temporal or duration value the write alias ``using()`` cannot store in ``column``.
 
     The write decode's envelope for the shared rule
-    (``utils/errors.py::unstorable_temporal``): a value the backend's adapter cannot bind
-    (an aware datetime whose projection onto the connection's time zone leaves years
-    1..9999, an aware time, any aware datetime under ``USE_TZ = False``; a date or naive
-    datetime a ``DateTimeField`` column holds is read as the datetime Django binds for it)
-    would raise its
+    (``utils/errors.py::unstorable_temporal``): a value Django's own save-time preparation
+    on that connection refuses (an aware datetime whose projection onto the connection's
+    time zone leaves years 1..9999, or whose date in the default time zone does in a
+    ``DateField``, an aware time, any aware datetime under ``USE_TZ = False``) or binds
+    as an integer the backend cannot hold (a duration past 64 bits of microseconds on
+    SQLite or MySQL) would raise its
     ``OverflowError`` / ``ValueError`` at ``save()``, and an aware datetime PostgreSQL
     stores but cannot load back would raise at the post-write re-fetch; neither is an
     error the save mappers own, so it would escape as a masked top-level error. It is the
     ``invalid`` ``FieldError`` keyed to ``field_name`` instead, carrying the message a
     filter answers for the same value (``UNBINDABLE_TEMPORAL_MESSAGE``), before any
     database-bound work. ``value`` is what the write stores (the model flavor's value
-    after the naive-datetime coercion), and a non-temporal column answers ``None``
-    without resolving the alias.
+    after the naive-datetime coercion), and a column that is neither temporal nor a
+    duration answers ``None`` without resolving the alias.
     """
     if not unstorable_temporal(column, value, using):
         return None

@@ -78,8 +78,8 @@ The serializer-specific invariants this module owns:
   ``items.0.name``; DRF's ``non_field_errors`` / ``NON_FIELD_ERRORS_KEY`` bucket ->
   the ``"__all__"`` sentinel at every level - NOT the one-level ``036``
   ``validation_error_to_field_errors``), and returns a null-object payload. A
-  validated datetime or time the pinned alias cannot store (or, on PostgreSQL, read
-  back) is the field's ``invalid`` error through the same flattener before any write
+  validated date, datetime, time or duration the pinned alias cannot store (or, on
+  PostgreSQL, read back) is the field's ``invalid`` error through the same flattener before any write
   (``_unstorable_temporal_errors``); DRF's own ``overflow`` answer comes first, and a
   datetime DRF cannot place in a time zone, which it raises as a raw ``OverflowError``,
   fails its ``DateTimeField`` with that same ``overflow`` error
@@ -2769,7 +2769,7 @@ def _unstorable_temporal_errors(
     serializer: DRFSerializer,
     model: type[models.Model],
 ) -> dict[str, list[ErrorDetail]]:
-    """Map each field whose validated datetime or time the pinned alias cannot store to its error.
+    """Map each field whose validated temporal or duration value the pinned alias cannot store.
 
     DRF's ``DateTimeField`` answers its own ``overflow`` error for a datetime it cannot place
     in a time zone (``_translate_datetime_overflow`` extends DRF's answer to the values it
@@ -2777,12 +2777,14 @@ def _unstorable_temporal_errors(
     lets through can still be a value the database refuses: an
     aware time (SQLite, MySQL and Oracle refuse it at ``save()``), an aware datetime whose
     projection onto the connection's time zone leaves years 1..9999 though the current
-    zone's does not, one PostgreSQL stores but cannot load back at the re-fetch, or a
-    date or naive datetime a ``validate_<field>`` hook leaves for a ``DateTimeField``
-    column, which Django makes aware in the default time zone (a date as its midnight).
-    Each
-    writable bound field whose ``source`` is a top-level ``validated_data`` key naming a
-    concrete column of ``model`` (``utils/relations.py::written_model_field``) is held to
+    zone's does not, one PostgreSQL stores but cannot load back at the re-fetch, a date
+    or naive datetime a ``validate_<field>`` hook leaves for a ``DateTimeField`` column,
+    which Django makes aware in the default time zone (a date as its midnight), an aware
+    datetime a hook leaves for a ``DateField`` column whose date in the default time zone
+    leaves years 1..9999, or a duration past 64 bits of microseconds on a backend that
+    binds it as that integer (SQLite, MySQL). Each writable bound field whose ``source``
+    is a top-level ``validated_data`` key naming a concrete column of ``model``
+    (``utils/relations.py::written_model_field``) is held to
     ``utils/errors.py::unstorable_temporal`` on the pinned alias; a refused one answers
     the ``invalid`` ``UNBINDABLE_TEMPORAL_MESSAGE`` ``ErrorDetail`` under its field name,
     the shape ``serializer.errors`` carries, so the flattener keys it to the input the

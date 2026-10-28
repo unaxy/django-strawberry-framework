@@ -39,6 +39,7 @@ include = [
     "/tests",
     "/README.md",
     "/LICENSE",
+    "/LICENSE.django",
     "/LICENSE.graphql-core",
     "/CHANGELOG.md",
     "/pyproject.toml",
@@ -51,7 +52,7 @@ name = "django-strawberry-framework"
 dynamic = ["version", "readme"]
 description = "A DRF-inspired Django integration framework for Strawberry GraphQL — filtering, ordering, aggregation, and permissions"
 license = "MIT"
-license-files = ["LICENSE", "LICENSE.graphql-core"]
+license-files = ["LICENSE", "LICENSE.django", "LICENSE.graphql-core"]
 requires-python = ">=3.10"
 authors = [
     { name = "Unaxy" },

@@ -2021,7 +2021,11 @@ The pipeline steps:
      under server-side binding, and on psycopg 3 an `ArrayField` list the driver cannot dump
      as a whole (one dumper for every element: a naive time beside an aware one); a date or naive datetime a `validate_<field>` hook leaves
      for a `DateTimeField` column, held as the datetime Django stores for it, made aware in
-     the default time zone, a date as its midnight) is the field's `invalid`
+     the default time zone, a date as its midnight; an aware datetime a hook leaves for a
+     `DateField` column whose date in the default time zone leaves years 1..9999; a
+     duration past 64 bits of microseconds on SQLite or MySQL, which bind it as that
+     integer: Django's own save-time preparation on that alias answers for every temporal
+     and duration column) is the field's `invalid`
      `ErrorDetail` `"Enter a value the database can represent."`, flattened like any
      `serializer.errors` entry, with nothing written. A nested serializer's values are
      written by the consumer's `create()` / `update()` and are not read. What DRF itself

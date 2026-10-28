@@ -118,6 +118,7 @@ from django_strawberry_framework.utils.errors import (
     FIELD_ERROR_CODE_INVALID,
     FILTER_INVALID_ERROR_CODE,
     UNBINDABLE_TEMPORAL_MESSAGE,
+    binds_integer,
     coded_error_extensions,
     psycopg_refuses_list_parameter,
     refuses_numeric_format,
@@ -155,7 +156,6 @@ from django_strawberry_framework.utils.querysets import (
     apply_type_visibility_async,
     apply_type_visibility_sync,
     base_queryset,
-    binds_integer,
     lookup_target_fields,
     model_for,
     relation_path_visibility_types,
@@ -2335,7 +2335,7 @@ def _unbindable_predicate(
     (``EmptyResultSet`` / ``FullResultSet``) binds no value. Each integer a lookup of the
     compiled clause binds for its right-hand side (``Lookup.process_rhs``) is then held to
     the range the database stores for that lookup's left-hand side
-    (``utils/querysets.py::binds_integer``, the connection's own ``integer_field_range``;
+    (``utils/errors.py::binds_integer``, the connection's own ``integer_field_range``;
     SQLite's driver refuses an integer past 64 bits with an ``OverflowError``). Django
     holds an integer to that range only in an integer comparison (``IntegerFieldOverflow``:
     ``exact``, ``gt``, ``gte``, ``lt``, ``lte``), never in an ``in`` list, a ``range``

@@ -143,6 +143,7 @@ from django_strawberry_framework.rest_framework.serializer_converter import (
 )
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.types import relay as relay_module
+from django_strawberry_framework.types.converters import SCALAR_MAP
 from django_strawberry_framework.utils._narrowing import (
     call_method,
     is_class,
@@ -7649,6 +7650,120 @@ def test_serializer_date_over_a_datetime_column_stores_its_default_zone_midnight
     assert payload["result"] == {"label": "day"}
     stored = ScalarSpecimen.objects.get(label="day").occurred_at
     assert stored == datetime.datetime(2021, 6, 15, tzinfo=zoneinfo.ZoneInfo(zone))
+
+
+_UNREPRESENTABLE = ["Enter a value the database can represent."]
+
+
+def _converted_columns_model(name: str) -> type[Model]:
+    """A synthetic model with a nullable ``amount``, a ``DateField`` and a ``DurationField``."""
+    return type(
+        name,
+        (Model,),
+        {
+            "__module__": __name__,
+            "amount": models.IntegerField(null=True, blank=True),
+            "day": models.DateField(null=True, blank=True),
+            "span": models.DurationField(null=True, blank=True),
+            "Meta": type("Meta", (), {"app_label": "products", "managed": False}),
+        },
+    )
+
+
+def _evening_utc(_serializer: object, value: datetime.date) -> datetime.datetime:
+    """A ``validate_day`` hook answering the validated date's 20:00 UTC instant."""
+    return datetime.datetime.combine(value, datetime.time(20), tzinfo=datetime.timezone.utc)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("sent", "stored"),
+    [
+        pytest.param("9999-12-31", None, id="past-year-9999-in-tokyo"),
+        pytest.param("2021-06-15", datetime.date(2021, 6, 16), id="in-range"),
+    ],
+)
+def test_serializer_datetime_from_a_date_hook_is_held_to_its_default_zone_date(
+    sent: str,
+    stored: datetime.date | None,
+) -> None:
+    """An aware datetime a hook leaves for a ``DateField`` is refused where Django cannot cast it.
+
+    A ``validate_day`` hook answers the sent date's 20:00 UTC instant, which Django casts
+    to a date in the default time zone (``Asia/Tokyo``) at the save; 9999-12-31 20:00 UTC
+    is in year 10000 there: the field's ``invalid`` error, nothing written, no masked
+    ``OverflowError``. A value inside the range stores as its Tokyo date.
+    """
+    model_class = _converted_columns_model(f"DayStampRow{'Refused' if stored is None else ''}")
+    serializer_cls = _serializer_over(
+        model_class,
+        ("day",),
+        methods={"validate_day": _evening_utc},
+    )
+    with _synthetic_table(model_class), override_settings(TIME_ZONE="Asia/Tokyo"):
+        schema, create_input, _ = _blank_columns_schema(serializer_cls, model_class)
+        payload = _run_row_write(schema, create_input, {"day": sent})
+        stored_days = list(model_class._default_manager.values_list("day", flat=True))
+
+    if stored is None:
+        assert payload == {
+            "result": None,
+            "errors": [{"field": "day", "messages": _UNREPRESENTABLE, "codes": ["invalid"]}],
+        }
+        assert stored_days == []
+    else:
+        assert json_at(payload, "errors") == []
+        assert stored_days == [stored]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("sent", "stored"),
+    [
+        pytest.param("106751992 00:00:00", None, id="past-64-bits"),
+        pytest.param("-106751992 00:00:00", None, id="past-64-bits-negative"),
+        pytest.param(
+            "106751991 00:00:00",
+            datetime.timedelta(days=106_751_991),
+            id="fits-64-bits",
+        ),
+    ],
+)
+def test_serializer_duration_past_the_backend_integer_is_refused(
+    sent: str,
+    stored: datetime.timedelta | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A duration whose microsecond count SQLite cannot bind is the field's ``invalid`` error.
+
+    SQLite stores a duration as its microsecond count in a 64-bit integer, which a
+    ``DurationField`` carries no validator for; past it the driver would raise
+    ``OverflowError`` at the save. The refusal is keyed to the input field and nothing
+    is written; a duration that fits stores. The column's scalar is the consumer's
+    ``SCALAR_MAP`` entry, here DRF's own duration text.
+    """
+    monkeypatch.setitem(SCALAR_MAP, models.DurationField, str)
+    suffix = re.sub(r"\W", "", sent.replace("-", "Minus"))
+    model_class = _converted_columns_model(f"SpanRow{suffix}")
+    serializer_cls = _serializer_over(
+        model_class,
+        ("span",),
+        declared={"span": serializers.DurationField()},
+    )
+    with _synthetic_table(model_class):
+        schema, create_input, _ = _blank_columns_schema(serializer_cls, model_class)
+        payload = _run_row_write(schema, create_input, {"span": sent})
+        stored_spans = list(model_class._default_manager.values_list("span", flat=True))
+
+    if stored is None:
+        assert payload == {
+            "result": None,
+            "errors": [{"field": "span", "messages": _UNREPRESENTABLE, "codes": ["invalid"]}],
+        }
+        assert stored_spans == []
+    else:
+        assert json_at(payload, "errors") == []
+        assert stored_spans == [stored]
 
 
 # A naive year-1 datetime made aware in Tokyo, and an aware one projected onto UTC under

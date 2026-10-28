@@ -1080,6 +1080,124 @@ def test_unstorable_temporal_holds_a_date_or_naive_datetime_to_the_datetime_djan
         assert unstorable_temporal(column, value, lambda: alias) is refused
 
 
+#: An aware year-9999 instant whose wall clock stays in year 9999 in UTC and reaches
+#: year 10000 in ``Asia/Tokyo`` (+09:18:59).
+_YEAR_9999_EVENING_UTC = datetime.datetime(9999, 12, 31, 20, tzinfo=_UTC)
+
+
+@pytest.mark.parametrize(
+    ("settings", "value", "refused"),
+    [
+        pytest.param({"TIME_ZONE": "UTC"}, _BEFORE_YEAR_ONE, True, id="utc-year-one"),
+        pytest.param({"TIME_ZONE": "UTC"}, _PAST_YEAR_9999, True, id="utc-year-9999"),
+        pytest.param(
+            {"TIME_ZONE": "UTC"},
+            _YEAR_9999_EVENING_UTC,
+            False,
+            id="utc-year-9999-evening",
+        ),
+        pytest.param({"TIME_ZONE": "UTC"}, _IN_RANGE, False, id="utc-in-range"),
+        pytest.param({"TIME_ZONE": "Asia/Tokyo"}, _BEFORE_YEAR_ONE, True, id="tokyo-year-one"),
+        pytest.param({"TIME_ZONE": "Asia/Tokyo"}, _PAST_YEAR_9999, True, id="tokyo-year-9999"),
+        pytest.param(
+            {"TIME_ZONE": "Asia/Tokyo"},
+            _YEAR_9999_EVENING_UTC,
+            True,
+            id="tokyo-year-9999-evening",
+        ),
+        pytest.param({"TIME_ZONE": "Asia/Tokyo"}, _IN_RANGE, False, id="tokyo-in-range"),
+        pytest.param({"USE_TZ": False}, _BEFORE_YEAR_ONE, False, id="year-one-without-use-tz"),
+    ],
+)
+def test_unstorable_temporal_holds_a_datetime_in_a_date_column_to_its_default_zone_date(
+    settings: dict[str, object],
+    value: datetime.datetime,
+    refused: bool,  # noqa: FBT001
+) -> None:
+    """An aware datetime a ``DateField`` column holds is refused when Django cannot cast it.
+
+    ``DateField.to_python`` makes an aware datetime naive in the default time zone
+    (``TIME_ZONE``) under ``USE_TZ`` before taking its date, which raises
+    ``OverflowError`` when that wall clock, or the UTC instant it is read through, leaves
+    years 1..9999, on every backend. 9999-12-31 20:00 UTC stays in year 9999 in UTC and
+    reaches year 10000 in ``Asia/Tokyo``; without ``USE_TZ`` the value's own date is
+    stored.
+    """
+    with override_settings(**settings), _sqlite_alias(None) as alias:
+        assert unstorable_temporal(_DATE, value, lambda: alias) is refused
+
+
+#: A duration column, typed as the ``object``-valued field ``unstorable_temporal`` reads.
+_DURATION: models.Field[object, object] = models.DurationField()
+#: The longest whole-day duration whose microsecond count fits 64 bits.
+_LONGEST_DAYS_IN_64_BITS = 106_751_991
+
+
+@pytest.mark.parametrize(
+    ("value", "refused_without_interval"),
+    [
+        pytest.param(datetime.timedelta(days=_LONGEST_DAYS_IN_64_BITS), False, id="fits"),
+        pytest.param(
+            datetime.timedelta(days=-_LONGEST_DAYS_IN_64_BITS),
+            False,
+            id="fits-negative",
+        ),
+        pytest.param(
+            datetime.timedelta(days=_LONGEST_DAYS_IN_64_BITS + 1),
+            True,
+            id="past-64-bits",
+        ),
+        pytest.param(
+            datetime.timedelta(days=-_LONGEST_DAYS_IN_64_BITS - 1),
+            True,
+            id="past-64-bits-negative",
+        ),
+        pytest.param(datetime.timedelta.max, True, id="timedelta-max"),
+        pytest.param(datetime.timedelta.min, True, id="timedelta-min"),
+    ],
+)
+def test_unstorable_temporal_holds_a_duration_to_the_integer_the_backend_binds(
+    value: datetime.timedelta,
+    refused_without_interval: bool,  # noqa: FBT001
+) -> None:
+    """A duration is refused where its microsecond count leaves the backend's 64 bits.
+
+    Without a native interval (SQLite, MySQL) Django binds a duration as its microsecond
+    count, which the driver refuses past ``BigIntegerField``'s range (2**63 microseconds
+    is 106751991 days 04:00:54.775808); a backend with a native interval (PostgreSQL,
+    stood in here) binds the ``timedelta`` itself, so every duration stores.
+    """
+    assert unstorable_temporal(_DURATION, value, lambda: DEFAULT_DB_ALIAS) is (
+        refused_without_interval
+    )
+    driver, cursor_factory, _ = BINDING_MODES["psycopg3-client"]
+    with postgresql_stand_in(driver, cursor_factory) as alias:
+        assert unstorable_temporal(_DURATION, value, lambda: alias) is False
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        pytest.param(_DATE, datetime.date(1, 1, 1), id="date-in-a-date-column"),
+        pytest.param(_DURATION, None, id="null-duration"),
+        pytest.param(_STAMPS, [None, None], id="array-of-nulls"),
+    ],
+)
+def test_unstorable_temporal_asks_no_alias_for_a_value_its_column_does_not_convert(
+    column: models.Field[object, object],
+    value: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A value holding nothing its column converts at the save answers ``False`` unasked.
+
+    A plain date in a ``DateField`` is stored as it is and ``None`` stores, so the alias
+    is never resolved.
+    """
+    patch_array_field(monkeypatch)
+
+    assert unstorable_temporal(column, value, _unresolvable_alias) is False
+
+
 @pytest.mark.pg
 @pytest.mark.parametrize(
     (
