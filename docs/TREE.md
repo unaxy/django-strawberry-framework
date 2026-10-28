@@ -504,6 +504,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_build_tree_md.py         # Tests for TREE renderer planned descriptions, replacements, and source discovery.
 ├── test_census_test_models.py    # Script tests for the test-model census's name resolution.
 ├── test_check_all_spec_glossaries.py  # Script tests for the every-spec glossary gate in ``scripts/check_all_spec_glossaries.py``.
+├── test_check_annotation_subscripts.py  # Script tests for the ``annotation-subscripts`` gate in ``scripts/check_annotation_subscripts.py``.
 ├── test_check_citations.py       # Script tests for the ``path::Symbol`` citation gate.
 ├── test_check_public_types.py    # Script tests for the public-API type-completeness gate in ``scripts/check_public_types.py``.
 ├── test_check_spec_glossary.py   # Script tests for the spec terms-CSV glossary gate.
@@ -804,6 +805,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_build_tree_md.py         # Tests for TREE renderer planned descriptions, replacements, and source discovery.
 ├── test_census_test_models.py    # Script tests for the test-model census's name resolution.
 ├── test_check_all_spec_glossaries.py  # Script tests for the every-spec glossary gate in ``scripts/check_all_spec_glossaries.py``.
+├── test_check_annotation_subscripts.py  # Script tests for the ``annotation-subscripts`` gate in ``scripts/check_annotation_subscripts.py``.
 ├── test_check_citations.py       # Script tests for the ``path::Symbol`` citation gate.
 ├── test_check_public_types.py    # Script tests for the public-API type-completeness gate in ``scripts/check_public_types.py``.
 ├── test_check_spec_glossary.py   # Script tests for the spec terms-CSV glossary gate.

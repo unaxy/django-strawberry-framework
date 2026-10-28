@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 354 done, 212 to do.
+Progress: 355 done, 211 to do.
 
 ## Done
 
@@ -1984,6 +1984,15 @@ Progress: 354 done, 212 to do.
   (`_validation_tree`) shared with `_pin_validator_querysets`. Live grid cells, README, spec-039 and the
   `fielderror-envelope` glossary term say so. Tests: `examples/fakeshop/test_query/test_scalars_mutation_api.py`,
   `tests/rest_framework/test_resolvers.py`
+- [x] 569. (robustness) `scripts/check_annotation_subscripts.py` (pre-commit hook, `django.yml` lint step,
+  `workspace.py` `LINT_COMMANDS`) sweeps every annotation by AST, strings inside annotations, runtime `TypeAlias`
+  values and unquoted `cast` arguments, resolves each subscripted name through its imports, and fails closed on a
+  class absent from its audited `SUBSCRIPTABLE` table (version-gated: `classmethod` / `staticmethod` take a hook only
+  from Python 3.14), on a hookless class at an evaluated site, and on an unaudited or stale never-evaluated site
+  (`AUDITED_SITES`, the item's seven). `tests/base/test_init.py` re-checks both tables at runtime without the
+  `django_stubs_ext` patch on every cell. The sweep found `utils/truth.py`'s overloads subscripting `classmethod` /
+  `staticmethod` (evaluable on 3.11-3.13), now `TYPE_CHECKING` aliases. Tests:
+  `tests/test_check_annotation_subscripts.py`, `tests/base/test_init.py`
 
 ## Outside review of the fixes
 
@@ -2038,14 +2047,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   package (`optimizer/extension.py`, `optimizer/plans.py`, `optimizer/walker.py`, `types/resolvers.py`) and most in
   `tests/optimizer/test_extension.py` and `test_walker.py`; the clause after each label already states the behaviour,
   so drop the label. Found fact-finding 500
-- [ ] 569. (robustness) Annotations no runtime evaluation reaches escape
-  `tests/base/test_init.py::test_annotations_evaluate_without_django_stubs_ext_patch`: function-local variable
-  annotations (`forms/resolvers.py::_coerced_null_fields` `coerced_fields`, `utils/querysets.py` `related_opts`,
-  `utils/relations.py` `meta`, `utils/write_values.py` `columns`) and bodies defined only under `TYPE_CHECKING`
-  (`utils/querysets.py::_PathStep.to_opts`, `utils/lazy.py` `_LAZY_OBJECT`, `_ModelFormConstructionHooks.get_form`)
-  subscript Django classes that lack `__class_getitem__`; harmless while unevaluated, but a static sweep with an
-  audited `__class_getitem__` table (fail closed on an unseen class) would catch the shape in the lint job instead of
-  the 45-minute test cells. Found fixing 506
 - [ ] 574. (robustness) A `blank=False` column a `required=False` form field cleans to `""` (Django's
   `_get_validation_exclusions` leaves it out of `full_clean`) answers the masked error at save (a raw `DataError` on
   an `ArrayField`, measured); `_is_unstorable_blank` needs `blank=True`, so no column that stores no empty string is

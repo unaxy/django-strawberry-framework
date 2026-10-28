@@ -69,7 +69,7 @@ if TYPE_CHECKING:
     #: One ``resolver_seams`` classmethod: a resolver seam of any signature.
     _SeamClassmethod: TypeAlias = classmethod[object, ..., object]
 else:
-    # ``classmethod`` has no ``__class_getitem__`` before Python 3.11: the hint stays the class.
+    # ``classmethod`` has no ``__class_getitem__`` before Python 3.14: the hint stays the class.
     _SeamClassmethod = classmethod
 
 #: Common Meta keys accepted by every write-flavor Mutation.Meta (fields, exclude, permission_classes).

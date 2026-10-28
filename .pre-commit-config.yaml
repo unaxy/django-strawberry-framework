@@ -105,6 +105,18 @@ repos:
         files: ^(django_strawberry_framework/.*\.py|scripts/check_truthful_reads\.py|pyproject\.toml)$
         require_serial: true
 
+      - id: annotation-subscripts
+        name: annotation subscripts (no class without a runtime subscript hook)
+        entry: uv run python scripts/check_annotation_subscripts.py
+        language: system
+        # `pass_filenames: false`: the gate sweeps the whole package (an audited
+        # site moved into a file not staged must read as stale), so a staged
+        # package file, the gate itself (which holds the tables) or the
+        # `requires-python` floor in pyproject.toml only triggers the run.
+        pass_filenames: false
+        files: ^(django_strawberry_framework/.*\.py|scripts/check_annotation_subscripts\.py|pyproject\.toml)$
+        require_serial: true
+
       - id: check-kanban-anchors
         name: kanban anchors collision-free (card vs card, card vs glossary, render ids)
         entry: uv run python scripts/check_kanban_anchors.py

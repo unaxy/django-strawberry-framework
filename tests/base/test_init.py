@@ -79,6 +79,7 @@ from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.utils.connections import (
     PaginationArgumentError as ConnectionsPaginationArgumentError,
 )
+from scripts.check_annotation_subscripts import CHECKER_ONLY, SUBSCRIPTABLE
 from tests._subprocess import run_in_fresh_process
 
 
@@ -490,3 +491,74 @@ def test_annotations_evaluate_without_django_stubs_ext_patch() -> None:
     annotations close over a scope no module namespace holds.
     """
     _run_without_django_stubs_ext(_ANNOTATION_CHECK)
+
+
+_SUBSCRIPT_HOOK_CHECK = textwrap.dedent(
+    """
+    def resolve(target):
+        parts = target.split(".")
+        for cut in range(len(parts), 0, -1):
+            try:
+                found = importlib.import_module(".".join(parts[:cut]))
+            except ModuleNotFoundError:
+                continue
+            for name in parts[cut:]:
+                found = getattr(found, name)
+            return found
+        raise ModuleNotFoundError(target)
+
+
+    def has_subscript_hook(found):
+        # CPython's subscript dispatch: the type's ``__getitem__``, then a class's
+        # ``__class_getitem__``, with ``type`` itself special-cased.
+        if found is type or hasattr(type(found), "__getitem__"):
+            return True
+        return isinstance(found, type) and hasattr(found, "__class_getitem__")
+
+
+    def exists(target):
+        try:
+            resolve(target)
+        except AttributeError:
+            return False
+        return True
+
+
+    def expected(verdict):
+        # A ``(major, minor)`` verdict: the hook exists from that Python on.
+        return verdict if isinstance(verdict, bool) else sys.version_info[:2] >= verdict
+
+
+    assert_unpatched()
+    wrong = [
+        f"{target}: SUBSCRIPTABLE {verdict}, runtime {has_subscript_hook(resolve(target))}"
+        for target, verdict in subscriptable.items()
+        if has_subscript_hook(resolve(target)) is not expected(verdict)
+    ]
+    wrong += [f"{target}: CHECKER_ONLY, yet defined at runtime" for target in checker_only if exists(target)]
+    assert_unpatched()
+    for line in wrong:
+        print(line, file=sys.stderr)
+    sys.exit(1 if wrong else 0)
+    """,
+)
+
+
+def test_annotation_subscript_tables_match_runtime_without_django_stubs_ext_patch() -> None:
+    """Verify the annotation-subscript gate's tables in a process ``django_stubs_ext`` never patched.
+
+    ``scripts/check_annotation_subscripts.py`` refuses a package annotation by
+    ``SUBSCRIPTABLE``, which records whether each subscripted target has a runtime
+    subscript hook (its type's ``__getitem__``, or a class's ``__class_getitem__``)
+    without the patch, or the Python it gains one in, and passes a ``CHECKER_ONLY``
+    target, a package class defined only under ``if TYPE_CHECKING:``. Every
+    ``SUBSCRIPTABLE`` row is resolved by import and its verdict compared, and every
+    ``CHECKER_ONLY`` row must have no runtime object, so each CI cell, the floor and the
+    latest included, re-audits both.
+    """
+    _run_without_django_stubs_ext(
+        _UNPATCHED_IMPORT
+        + f"subscriptable = {dict(SUBSCRIPTABLE)!r}\n"
+        + f"checker_only = {sorted(CHECKER_ONLY)!r}\n"
+        + _SUBSCRIPT_HOOK_CHECK,
+    )

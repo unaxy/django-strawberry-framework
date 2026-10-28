@@ -295,6 +295,7 @@ TRACKED_FILE_PATHS: tuple[str, ...] = (
     "tests/test_build_tree_md.py",
     "tests/test_census_test_models.py",
     "tests/test_check_all_spec_glossaries.py",
+    "tests/test_check_annotation_subscripts.py",
     "tests/test_check_citations.py",
     "tests/test_check_public_types.py",
     "tests/test_check_spec_glossary.py",
