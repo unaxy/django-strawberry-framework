@@ -811,6 +811,56 @@ def test_copy_path_syncs_an_unsynced_copy_and_reuses_a_synced_one(
 # Commands in other processes
 # --------------------------------------------------------------------------------------------
 
+#: Defines ``hold_the_clock(workspace, clock)`` for a process that runs the real ``stream``:
+#: every stop relay it makes then measures the stop grace on the seconds in the file ``clock``
+#: (:class:`_HeldClock`), so only the test moves that time, and appends the number of each stop
+#: it has handled to ``<clock>.handled``, so the test sees a dropped stop land.
+_HOLD_THE_CLOCK = """
+def hold_the_clock(workspace, clock):
+    from pathlib import Path
+
+    clock = Path(clock)
+    relay = workspace._StopRelay
+
+    class HeldClockRelay(relay):
+        def __init__(self):
+            super().__init__(clock=lambda: float(clock.read_text(encoding="utf-8")))
+
+        def __call__(self, signum, frame):
+            super().__call__(signum, frame)
+            with open(str(clock) + ".handled", "a", encoding="utf-8") as handled:
+                handled.write(f"{signum}\\n")
+
+    workspace._StopRelay = HeldClockRelay
+"""
+
+
+class _HeldClock:
+    """The time a run's stop relay reads (``_HOLD_THE_CLOCK``), held still until the test moves it."""
+
+    def __init__(self, tmp_path: Path) -> None:
+        self.path = tmp_path / "clock"
+        self.set(0.0)
+
+    def set(self, seconds: float) -> None:
+        # Replaced whole, so a relay never reads a half-written time.
+        staged = self.path.with_suffix(".tmp")
+        _ = staged.write_text(str(seconds), encoding="utf-8")
+        _ = staged.replace(self.path)
+
+    def past_the_grace(self) -> None:
+        """Move the time a whole grace on: a stop from now on is not a repeat of an earlier one."""
+        self.set(float(self.path.read_text(encoding="utf-8")) + workspace.STOP_REPEAT_GRACE)
+
+    def handled(self) -> int:
+        """Return how many stops the relay has handled, relayed or dropped."""
+        handled = self.path.with_name("clock.handled")
+        return len(handled.read_text(encoding="utf-8").split()) if handled.exists() else 0
+
+    def await_handled(self, count: int) -> None:
+        assert _poll(lambda: self.handled() >= count), f"the relay never handled stop {count}"
+
+
 #: One ``workspace.py`` command in its own process, so it holds its own locks on its own open
 #: file descriptions. It runs the real command line (``main``) against the test's layout; only
 #: what cannot run under test is replaced: ``uv sync``, the provenance probe, the environment
@@ -823,8 +873,11 @@ def test_copy_path_syncs_an_unsynced_copy_and_reuses_a_synced_one(
 #: the ``hold`` command only holds the lock at ``path``, stepping ``opened`` each time it opens
 #: that file. ``bin`` puts a folder ahead of ``PATH`` (a stand-in ``uv``); ``real_stream`` and
 #: ``real_sync`` keep the script's own ``stream`` (with the environment ``uv run`` resolves)
-#: and ``uv sync``, run through that ``uv``.
-_ACTOR = """
+#: and ``uv sync``, run through that ``uv``; ``clock`` holds that ``stream``'s stop relay to
+#: the time in that file (``_HOLD_THE_CLOCK``).
+_ACTOR = (
+    _HOLD_THE_CLOCK
+    + """
 import json, os, sys, time
 from pathlib import Path
 
@@ -909,6 +962,8 @@ workspace.Layout.for_flow = staticmethod(for_flow)
 workspace.bind = bind
 workspace.file_lock = file_lock
 workspace.probe = probe
+if config.get("clock"):
+    hold_the_clock(workspace, config["clock"])
 if not config.get("real_stream"):
     workspace.stream = stream
     workspace.uv_launch = uv_launch
@@ -933,6 +988,7 @@ if config["argv"] == ["hold"]:
     sys.exit(0)
 sys.exit(workspace.main(config["argv"]))
 """
+)
 
 _ADDRESS = "review/pkg/a.py/perf-1"
 
@@ -4306,6 +4362,7 @@ JOB_SIGNALS = (signal.SIGTSTP, signal.SIGTTIN, signal.SIGTTOU)
 # name of every stop signal it gets to ``<S_READY>.got`` and blocks until
 # ``<S_READY>.release`` exists, then prints ``released`` and exits 0. ``S_ON_STOP=teardown``
 # makes a stop take a second, print ``torn down`` and exit 3, as pytest's teardown does;
+# ``held-teardown`` makes that teardown last until ``<S_READY>.release`` exists instead;
 # ``count`` only records it; ``hang`` records the first and exits 4 on the second, as pytest
 # does on a second Ctrl-C during a teardown that hangs; ``ignore`` leaves every stop signal as
 # the command inherited it.
@@ -4322,8 +4379,13 @@ def stopped(signum, _frame):
     stops.append(signum)
     with open(str(ready) + ".got", "a", encoding="utf-8") as got:
         got.write(signal.Signals(signum).name + "\\n")
-    if mode == "teardown":
+    if mode == "held-teardown":
+        deadline = time.monotonic() + 120
+        while not Path(str(ready) + ".release").exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+    elif mode == "teardown":
         time.sleep(1)
+    if mode.endswith("teardown"):
         print("torn down", flush=True)
         sys.exit(3)
     if mode == "hang" and len(stops) == 2:
@@ -4334,11 +4396,11 @@ def stopped(signum, _frame):
 if mode != "ignore":
     for stop_signal in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT):
         signal.signal(stop_signal, stopped)
-child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
 ready.with_suffix(".tmp").write_text(f"{os.getpid()} {os.getpgid(0)} {child.pid}")
 os.replace(ready.with_suffix(".tmp"), ready)
 release = Path(str(ready) + ".release")
-deadline = time.monotonic() + 30
+deadline = time.monotonic() + 120
 while not release.exists() and time.monotonic() < deadline:
     time.sleep(0.02)
 child.kill()
@@ -4354,12 +4416,18 @@ print("released", flush=True)
 # ``started-continued`` then sends it ``SIGCONT`` as well, each signal handled before the next;
 # ``pipe-<stream>`` points that stream (``stdout`` or ``stderr``) at a pipe whose reader has
 # gone, ``tty-<stream>`` at a terminal whose master side has closed; ``<sink>-both`` points
-# the descriptors 1 and 2 at that one dead file, as ``2>&1 | head`` does.
-_STREAM_RUN = """
+# the descriptors 1 and 2 at that one dead file, as ``2>&1 | head`` does. ``S_CLOCK`` holds
+# the stop relay to the time in that file (``_HOLD_THE_CLOCK``).
+_STREAM_RUN = (
+    _HOLD_THE_CLOCK
+    + """
 import json, os, signal, subprocess, sys
 from pathlib import Path
 
 from scripts import workspace
+
+if os.environ.get("S_CLOCK"):
+    hold_the_clock(workspace, os.environ["S_CLOCK"])
 
 mode = os.environ["S_MODE"]
 signum = int(os.environ["S_SIGNUM"])
@@ -4407,6 +4475,7 @@ Path(os.environ["S_RESULT"]).write_text(json.dumps([finished.code, finished.stop
 sys.stderr.write(f"workspace run exit {finished.code}\\n")
 sys.exit(finished.code)
 """
+)
 
 # Sets ``S_SIGNUM`` to ``SIG_IGN`` and execs the rest of its argv under a fresh interpreter,
 # which inherits the ignored disposition as a process started under ``nohup`` does.
@@ -4527,7 +4596,7 @@ print("released", flush=True)
 """
 
 # Stands in for a command that leaves a process holding its output and exits at once:
-# ``bash -c 'sleep 30 & echo started'``, writing ``<pid> <pgid> <sleep pid>`` to ``S_READY``.
+# ``bash -c 'sleep 120 & echo started'``, writing ``<pid> <pgid> <sleep pid>`` to ``S_READY``.
 _LEAVING = """
 import os
 
@@ -4536,10 +4605,17 @@ os.execvp(
     [
         "bash",
         "-c",
-        'sleep 30 & echo "$$ $$ $!" > "$S_READY.tmp"; mv "$S_READY.tmp" "$S_READY"; echo started',
+        'sleep 120 & echo "$$ $$ $!" > "$S_READY.tmp"; mv "$S_READY.tmp" "$S_READY"; echo started',
     ],
 )
 """
+
+
+# How long a row waits on a process event before failing: a bound on a failure only, so it is
+# generous; a loaded machine stretches every step between a signal and what it sets off. A
+# stand-in command (``_COMMAND``, ``_LEAVING``) outlives it, so a stop that never lands leaves
+# what it should have ended running at the bound instead of being outwaited.
+_LOADED_WAIT = 60.0
 
 
 class _StreamRun:
@@ -4556,6 +4632,7 @@ class _StreamRun:
         command: str = _COMMAND,
         stream: str = "stdout",
         tty: int | None = None,
+        clock: _HeldClock | None = None,
     ) -> None:
         self.tmp_path = tmp_path
         self.shell = tmp_path / "shell"
@@ -4577,6 +4654,7 @@ class _StreamRun:
             "S_LOCK": str(self.lock),
             "S_LOG": str(self.log),
             "S_RESULT": str(self.result),
+            "S_CLOCK": "" if clock is None else str(clock.path),
         }
         argv = [sys.executable, "-c", _STREAM_RUN]
         if ignored:
@@ -4629,7 +4707,7 @@ class _StreamRun:
     def release(self) -> None:
         (self.tmp_path / "ready.release").touch()
 
-    def finish(self, timeout: float = 30) -> tuple[object, object]:
+    def finish(self, timeout: float = _LOADED_WAIT) -> tuple[object, object]:
         """Return the code and stop signal ``stream`` returned; fail on a run that never ends.
 
         What the run wrote to its own stderr lands in ``err``.
@@ -4665,7 +4743,7 @@ def _stops_got(tmp_path: Path) -> list[str]:
     return got.read_text(encoding="utf-8").split() if got.exists() else []
 
 
-def _poll(predicate: Callable[[], bool], seconds: float = 20) -> bool:
+def _poll(predicate: Callable[[], bool], seconds: float = _LOADED_WAIT) -> bool:
     """Return whether ``predicate`` became true within ``seconds``."""
     deadline = time.monotonic() + seconds
     while not predicate():
@@ -4722,18 +4800,19 @@ def test_a_stop_signal_to_the_run_alone_reaches_the_whole_command_and_the_run_ou
     stream_runs: list[_StreamRun],
     signum: signal.Signals,
 ) -> None:
-    run = _StreamRun(tmp_path)
+    run = _StreamRun(tmp_path, on_stop="held-teardown")
     stream_runs.append(run)
     command, group, grandchild = run.pids()
 
     os.kill(run.process.pid, signum)
 
-    assert _poll(lambda: not _is_running(grandchild))
+    assert _poll(lambda: not _is_running(grandchild)), "the stop never reached the grandchild"
     assert group == command != os.getpgid(run.process.pid)
-    assert run.got() == [signum.name]
-    # The command is tearing down: the run still holds its lease and waits for it.
+    assert _poll(lambda: run.got() == [signum.name]), "the command never got the stop"
+    # The command is tearing down until released: the run still holds its lease and waits.
     assert _is_running(run.process.pid)
     assert _lock_is_held(run.lock)
+    run.release()
     assert run.finish() == (3, signum)
     assert not _is_running(command)
     assert not _lock_is_held(run.lock)
@@ -4744,16 +4823,20 @@ def test_a_repeat_stop_inside_the_grace_is_dropped_and_a_later_one_is_relayed(
     tmp_path: Path,
     stream_runs: list[_StreamRun],
 ) -> None:
-    run = _StreamRun(tmp_path, on_stop="count")
+    # The relay's time stands still until the test moves it, so however late a signal lands,
+    # the repeat is inside the grace and the stop after the move is past it.
+    clock = _HeldClock(tmp_path)
+    run = _StreamRun(tmp_path, on_stop="count", clock=clock)
     stream_runs.append(run)
     _ = run.pids()
 
     os.kill(run.process.pid, signal.SIGTERM)
-    assert _poll(lambda: run.got() == ["SIGTERM"])
+    assert _poll(lambda: run.got() == ["SIGTERM"]), "the command never got the first stop"
     os.kill(run.process.pid, signal.SIGINT)
-    time.sleep(workspace.STOP_REPEAT_GRACE + 0.3)
+    clock.await_handled(2)
+    clock.past_the_grace()
     os.kill(run.process.pid, signal.SIGINT)
-    assert _poll(lambda: len(run.got()) >= 2)
+    assert _poll(lambda: len(run.got()) >= 2), "the command never got the stop past the grace"
     run.release()
 
     assert run.finish() == (0, signal.SIGTERM)
@@ -4766,16 +4849,17 @@ def test_a_second_stop_after_the_grace_reaches_a_command_whose_teardown_hangs(
     stream_runs: list[_StreamRun],
 ) -> None:
     # pytest ends on a second Ctrl-C during a teardown that hangs; the run passes it on.
-    run = _StreamRun(tmp_path, on_stop="hang")
+    clock = _HeldClock(tmp_path)
+    run = _StreamRun(tmp_path, on_stop="hang", clock=clock)
     stream_runs.append(run)
     _ = run.pids()
 
     os.kill(run.process.pid, signal.SIGTERM)
-    assert _poll(lambda: run.got() == ["SIGTERM"])
-    time.sleep(workspace.STOP_REPEAT_GRACE + 0.3)
+    assert _poll(lambda: run.got() == ["SIGTERM"]), "the command never got the first stop"
+    clock.past_the_grace()
     os.kill(run.process.pid, signal.SIGTERM)
 
-    assert run.finish(timeout=10) == (4, signal.SIGTERM)
+    assert run.finish() == (4, signal.SIGTERM)
     assert run.got() == ["SIGTERM", "SIGTERM"]
 
 
@@ -4785,13 +4869,14 @@ def test_a_stop_signal_the_run_inherited_as_ignored_stays_ignored_and_stops_noth
     stream_runs: list[_StreamRun],
     signum: signal.Signals,
 ) -> None:
-    run = _StreamRun(tmp_path, signum=signum, ignored=True)
+    clock = _HeldClock(tmp_path)
+    run = _StreamRun(tmp_path, signum=signum, ignored=True, clock=clock)
     stream_runs.append(run)
     _ = run.pids()
 
     os.kill(run.process.pid, signum)
     # Then, past the grace, a stop the run does relay: a relayed ``signum`` would show before it.
-    time.sleep(workspace.STOP_REPEAT_GRACE + 0.3)
+    clock.past_the_grace()
     other = signal.SIGTERM if signum != signal.SIGTERM else signal.SIGHUP
     os.kill(run.process.pid, other)
 
@@ -4814,7 +4899,7 @@ def test_a_stop_before_the_command_is_recorded_reaches_it_once_it_is(
     stream_runs.append(run)
 
     # The command died by the relayed signal, read as ``128 + N``, long before its sleep ended.
-    assert run.finish(timeout=10) == (128 + signal.SIGHUP, signal.SIGHUP)
+    assert run.finish() == (128 + signal.SIGHUP, signal.SIGHUP)
 
 
 def test_a_killed_stream_leaves_its_lock_held_while_its_command_runs(
@@ -5243,8 +5328,8 @@ def test_a_stop_after_the_command_exits_reaches_what_it_left_holding_its_output(
 
     os.kill(run.process.pid, signal.SIGTERM)
 
-    assert _poll(lambda: not _is_running(leftover), 5)
-    assert run.finish(timeout=5) == (0, signal.SIGTERM)
+    assert _poll(lambda: not _is_running(leftover)), "the stop never reached the leftover"
+    assert run.finish() == (0, signal.SIGTERM)
     assert run.log.read_text(encoding="utf-8").endswith("started\n")
 
 
@@ -5291,22 +5376,32 @@ def test_a_stopped_run_keeps_its_leases_until_its_command_ends_then_records_the_
         "-c",
         _COMMAND,
     )
-    actors.start("A", "run", _ADDRESS, *command, bin=str(stand_in_uv), real_stream=True)
-    assert _poll((tmp_path / "ready").exists)
+    clock = _HeldClock(tmp_path)
+    actors.start(
+        "A",
+        "run",
+        _ADDRESS,
+        *command,
+        bin=str(stand_in_uv),
+        real_stream=True,
+        clock=str(clock.path),
+    )
+    assert _poll((tmp_path / "ready").exists), "the command never started"
     process = actors.processes["A"]
 
     # A non-TTY Ctrl-C under ``uv run python scripts/workspace.py``: the group's SIGINT, then
-    # uv's forward of it 200 ms later. A stop after the grace is relayed.
+    # uv's forward of it 200 ms later, inside the grace however late it lands, since the relay's
+    # time stands still until the test moves it. A stop after the grace is relayed.
     os.kill(process.pid, signal.SIGINT)
-    assert _poll(lambda: _stops_got(tmp_path) == ["SIGINT"])
-    time.sleep(0.2)
+    assert _poll(lambda: _stops_got(tmp_path) == ["SIGINT"]), "the command never got the stop"
     os.kill(process.pid, signal.SIGINT)
-    time.sleep(workspace.STOP_REPEAT_GRACE + 0.3)
+    clock.await_handled(2)
+    clock.past_the_grace()
     os.kill(process.pid, signal.SIGTERM)
-    assert _poll(lambda: len(_stops_got(tmp_path)) >= 2)
+    assert _poll(lambda: len(_stops_got(tmp_path)) >= 2), "the stop past the grace never landed"
     refused = _gc_refused(layout)
     (tmp_path / "ready.release").touch()
-    code, _out, err = actors.finish("A")
+    code, _out, err = actors.finish("A", timeout=_LOADED_WAIT)
 
     assert _stops_got(tmp_path) == ["SIGINT", "SIGTERM"]
     assert refused

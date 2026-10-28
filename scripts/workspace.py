@@ -2702,16 +2702,20 @@ class _StopRelay:
     that lands before the command is recorded waits in ``pending`` until it
     is (:meth:`started`); a suspend that lands then waits likewise, in the
     job control (``_stop_signals._JobControl``).
+
+    ``clock`` is what the grace is measured on, ``time.monotonic`` unless a
+    caller hands it another clock in seconds.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self.clock: Callable[[], float] = clock
         self.signum: int | None = None
         self.relayed_at: float = 0.0
         self.pending: int | None = None
         self.group_id: int | None = None
 
     def __call__(self, signum: int, _frame: FrameType | None) -> None:
-        now = time.monotonic()
+        now = self.clock()
         if self.signum is not None and now - self.relayed_at < STOP_REPEAT_GRACE:
             return
         if self.signum is None:

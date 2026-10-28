@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 341 done, 217 to do.
+Progress: 342 done, 217 to do.
 
 ## Done
 
@@ -1918,6 +1918,13 @@ Progress: 341 done, 217 to do.
   _lower_bounds` refuses a dependency stated by two or more rows (a marker-split floor) instead of the last winning, and
   the `[dependency-groups]`-not-a-table / `dev`-not-an-array refusals have rows. Tests: `tests/test_ci_governance.py`,
   `tests/test_workspace.py`
+- [x] 428. (robustness) `tests/test_workspace.py`'s stop-relay rows drive the repeat-stop grace with a held clock
+  instead of wall-clock sleeps: `scripts/workspace.py::_StopRelay` takes a `clock` (default `time.monotonic`), the
+  child harness swaps in a relay whose clock reads a file the test writes and which records each stop it handles, and
+  the test waits until the relay has handled a stop before moving the clock past `STOP_REPEAT_GRACE` (which pins the
+  `<` boundary). Waits on real child events are bounded by `_LOADED_WAIT` (60 s), and every stand-in command outlives
+  it so a stop that never lands still fails. Green 15/15 at load ~100 where the parent failed 2-3. Tests:
+  `tests/test_workspace.py`
 
 ## Outside review of the fixes
 
@@ -1962,12 +1969,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   every wire value cleans to `"Enter a number."`; and the generated `time` leaf on a `DateTimeField` raises
   `AttributeError: 'datetime.datetime' object has no attribute 'strip'` in `forms.TimeField` clean before the filter
   seam
-- [ ] 428. (robustness) `tests/test_workspace.py`'s stop-relay rows
-  (`test_a_repeat_stop_inside_the_grace_is_dropped_and_a_later_one_is_relayed`,
-  `test_a_stopped_run_keeps_its_leases_until_its_command_ends_then_records_the_stop`,
-  `test_a_stop_before_the_command_is_recorded_reaches_it_once_it_is[started]` and siblings) time their signals with
-  fixed sleeps around `workspace.STOP_REPEAT_GRACE` and wait on `_poll`'s 20 s default, so they fail under machine
-  load (4 failed at load ~95, all green alone, 1 reproduced on main under 40 busy loops). Found verifying 328
 - [ ] 392. `utils/querysets.py::_where_tree_defect` still refuses a `Q(_connector=<TextChoices / StrEnum member>)`
   where-node connector (a private keyword); decide whether the connector joins the text-term slots or stays exact `str`
 - [ ] 393. A plain `QuerySet` as a pending deferred-filter value (`{"pk__in": qs.values("pk")}`) is refused by the seal
@@ -2163,6 +2164,9 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 657. Unprobed: the integer ask (385) on an `ArrayField(IntegerField)` filter leaf: the gate admits only
   temporal / duration elements, so a list param of out-of-range integers reaches the driver unasked. Found
   fact-finding 389
+- [ ] 659. (robustness) `tests/test_prove_failability.py` (near lines 2775 and 2806) times its stop signals around
+  `STOP_REPEAT_GRACE` with real sleeps, the load-sensitive shape 428 removed from `tests/test_workspace.py`; drive it
+  with the `_StopRelay` clock seam or an observable condition. Found verifying 428
 
 ## To do: holes found re-checking the fixes
 
