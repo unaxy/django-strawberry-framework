@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 339 done, 216 to do.
+Progress: 340 done, 218 to do.
 
 ## Done
 
@@ -1903,6 +1903,13 @@ Progress: 339 done, 216 to do.
   microseconds (SQLite, MySQL) a value past 64 bits of microseconds is the coded `FILTER_INVALID` instead of the masked
   bind `OverflowError` (`filters/sets.py::_unbindable_temporal_errors` gate, `binds_integer` with the
   `BigIntegerField` range). Tests: `tests/filters/test_sets.py`
+- [x] 389. A PostgreSQL `ArrayField` of datetimes, times or durations (nested too) is asked like a temporal column:
+  the gate reads its innermost element (`utils/_array_field.py::array_leaf_field`, shared with the write side), and
+  `utils/errors.py::refuses_utc_offset` holds a list param's elements to the text rule (psycopg dumps a list as text
+  even under server-side binding) while an `ARRAY[...]`-wrapped element or an index value keeps the binding-mode rule;
+  a list param psycopg cannot dump (a naive and an aware time) is refused through `_psycopg_refuses_list`. An element
+  whose UTC offset PostgreSQL refuses raised the masked `DataError` at evaluation. By source and the recorded real-server
+  facts; the pg-marked rows run on the PostgreSQL tier. Tests: `tests/filters/test_sets.py`, `tests/utils/test_errors.py`
 
 ## Outside review of the fixes
 
@@ -1947,8 +1954,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   every wire value cleans to `"Enter a number."`; and the generated `time` leaf on a `DateTimeField` raises
   `AttributeError: 'datetime.datetime' object has no attribute 'strip'` in `forms.TimeField` clean before the filter
   seam
-- [ ] 389. Unprobed: a PostgreSQL `ArrayField` of datetimes or times as a filter leaf; the unbindable-temporal refusal
-  does not read its elements; probe whether PostgreSQL refuses any element value the scalar accepts
 - [ ] 427. (robustness)
   `tests/test_ci_governance.py::test_every_floor_literal_in_the_django_workflow_is_its_pyproject_lower_bound` checks
   the floor literals and the step's `if` but not the step's position: moving the soft-floor step (or the strawberry
@@ -2150,12 +2155,23 @@ tracker number are recorded there; open remainders and new defects are filed as 
   goes through, so an out-of-range consumer constant refuses the user's value; and `utils/querysets.py::binds_integer`
   raises `KeyError` for an `IntegerField` subclass whose `get_internal_type()` the backend's `integer_field_ranges`
   lacks (Django's own exact lookup shares the limit). Found verifying 385
+- [ ] 656. A whole-array `ArrayFilter` over an `ArrayField` column (generated through `Meta.filter_overrides`, or
+  declared) fails the schema build: `filters/inputs.py::_element_annotation` asks `_scalar_from_model_field` of the
+  `ArrayField` itself (`types/converters.py::scalar_for_field` raises "Unsupported Django field type 'ArrayField'")
+  instead of its element (`array_element_field`); only index / slice / `len` leaves publish (F11 area). Found
+  fact-finding 389
+- [ ] 657. Unprobed: the integer ask (385) on an `ArrayField(IntegerField)` filter leaf: the gate admits only
+  temporal / duration elements, so a list param of out-of-range integers reaches the driver unasked. Found
+  fact-finding 389
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 658. CHANGELOG entry for item 389: on PostgreSQL an `ArrayField` filter element of datetimes or times whose UTC
+  offset the server refuses (16:00 or more, or a fraction of a second, per binding mode) is now the coded
+  `FILTER_INVALID` instead of a masked error
 - [ ] 655. Decide: on PostgreSQL a `year` / `month` transform `in` member or `range` bound between 2**31 and 2**63 is
   refused as `FILTER_INVALID` (the transform binds an `IntegerField`, int32 there; 385), while Django's own
   `IntegerFieldOverflow` answers `month__gt=2**31` as no / every row and the package's integer-column `in` drops such

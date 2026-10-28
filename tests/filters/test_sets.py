@@ -22,6 +22,7 @@ import copy
 import dataclasses
 import datetime
 import enum
+import importlib
 import inspect
 import threading
 import uuid
@@ -97,6 +98,7 @@ from django_strawberry_framework import (
 )
 from django_strawberry_framework.exceptions import ConfigurationError, PathResolutionError
 from django_strawberry_framework.filters import (
+    ArrayFilter,
     FilterSet,
     FilterSetMetaclass,
     GlobalIDFilter,
@@ -159,6 +161,7 @@ from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     call_method,
     class_dict,
+    is_class,
     is_dict,
     is_exact_pair,
     is_list_or_tuple,
@@ -183,6 +186,7 @@ from tests._idioms import (
     scrambled,
     str_subclass_name,
 )
+from tests._postgres_fields import FakeArrayField, patch_array_field, real_array_of
 from tests._postgresql_stand_in import BINDING_MODES, postgresql_stand_in
 from tests._subprocess import run_in_fresh_process
 from tests.optimizer import _link_models
@@ -9381,6 +9385,235 @@ def test_compiled_predicate_is_held_to_the_utc_offsets_postgresql_refuses(
     assert excinfo.value.extensions == {
         "code": "FILTER_INVALID",
         "errors": {form_key: _UNBINDABLE},
+    }
+
+
+def _stamped_shelf_filter_class(
+    array_of: Callable[[django_models.Field[object, object]], django_models.Field[object, object]],
+) -> tuple[type[django_models.Model], type[FilterSet]]:
+    """A model with arrays of datetimes and of times, and a filterset through every shape they bind.
+
+    ``array_of`` builds each array column. The whole-array ``contains`` and ``exact``, the
+    first element (index ``0``) and the first two (slice ``0_2``), each element wrapped in an
+    ``ARRAY[...]`` of its own parameters on PostgreSQL, and ``gt``, which binds the list as
+    one parameter. Query-build only (``managed = False``): the rule compiles the filter's
+    predicate and never runs it.
+    """
+
+    class StampedShelf(django_models.Model):
+        stamps = array_of(django_models.DateTimeField())
+        clocks = array_of(django_models.TimeField())
+        grid = array_of(array_of(django_models.DateTimeField()))
+
+        class Meta:
+            managed = False
+            app_label = "test_array_bind_ask"
+
+    class StampedShelfFilter(FilterSet):
+        stamps_contain = ArrayFilter(field_name="stamps", lookup_expr="contains")
+        stamps_are = ArrayFilter(field_name="stamps", lookup_expr="exact")
+        first_stamp = django_filters.DateTimeFilter(field_name="stamps__0")
+        first_two_stamps = ArrayFilter(field_name="stamps__0_2", lookup_expr="exact")
+        stamps_after = ArrayFilter(field_name="stamps", lookup_expr="gt")
+        clocks_contain = ArrayFilter(field_name="clocks", lookup_expr="contains")
+        first_clock = django_filters.TimeFilter(field_name="clocks__0")
+        clocks_after = ArrayFilter(field_name="clocks", lookup_expr="gt")
+        grid_contain = ArrayFilter(field_name="grid", lookup_expr="contains")
+
+        class Meta:
+            model = StampedShelf
+            fields = []
+
+    return StampedShelf, StampedShelfFilter
+
+
+_HALF_SECOND_OFFSET_TIME = datetime.time(12, tzinfo=_HALF_SECOND_OFFSET)
+
+
+@pytest.mark.parametrize("mode", list(BINDING_MODES))
+@pytest.mark.parametrize(
+    (
+        "data",
+        "form_key",
+        "refused_as_text",
+        "refused_on_server",
+    ),
+    [
+        pytest.param(
+            {"stamps_contain": [_AT_PLUS_SIXTEEN]},
+            "stamps_contain",
+            True,
+            False,
+            id="datetime-contains-16-00",
+        ),
+        pytest.param(
+            {"stamps_are": [_BINDABLE_DATETIME, _AT_PLUS_SIXTEEN]},
+            "stamps_are",
+            True,
+            False,
+            id="datetime-exact-16-00",
+        ),
+        pytest.param(
+            {"first_stamp": _AT_PLUS_SIXTEEN},
+            "first_stamp",
+            True,
+            False,
+            id="datetime-index-16-00",
+        ),
+        pytest.param(
+            {"first_two_stamps": [_AT_PLUS_SIXTEEN]},
+            "first_two_stamps",
+            True,
+            False,
+            id="datetime-slice-16-00",
+        ),
+        pytest.param(
+            {"stamps_after": [_AT_PLUS_SIXTEEN]},
+            "stamps_after",
+            True,
+            True,
+            id="datetime-list-param-16-00",
+        ),
+        pytest.param(
+            {"stamps_after": [_BINDABLE_DATETIME]},
+            "stamps_after",
+            False,
+            False,
+            id="datetime-list-param",
+        ),
+        pytest.param(
+            {"grid_contain": [_AT_PLUS_SIXTEEN]},
+            "grid_contain",
+            True,
+            False,
+            id="nested-datetime-contains-16-00",
+        ),
+        pytest.param(
+            {"clocks_contain": [_HALF_SECOND_OFFSET_TIME]},
+            "clocks_contain",
+            True,
+            False,
+            id="time-contains-half-second",
+        ),
+        pytest.param(
+            {"first_clock": _HALF_SECOND_OFFSET_TIME},
+            "first_clock",
+            True,
+            False,
+            id="time-index-half-second",
+        ),
+        pytest.param(
+            {"clocks_after": [_HALF_SECOND_OFFSET_TIME]},
+            "clocks_after",
+            True,
+            True,
+            id="time-list-param-half-second",
+        ),
+        pytest.param(
+            {"clocks_contain": [_AWARE_TIME]},
+            "clocks_contain",
+            False,
+            False,
+            id="time-contains",
+        ),
+    ],
+)
+def test_array_element_is_held_to_the_utc_offsets_postgresql_refuses(
+    mode: str,
+    data: dict[str, object],
+    form_key: str,
+    refused_as_text: bool,  # noqa: FBT001
+    refused_on_server: bool,  # noqa: FBT001
+) -> None:
+    """A temporal ``ArrayField`` leaf is asked, each element held to the rule its parameter takes.
+
+    An element ``ARRAY[...]``-wrapped or reached by an index or slice is its own parameter,
+    held to the connection's binding mode: bound as text, a datetime at +16:00 or a time
+    whose offset carries a fraction of a second is refused, and bound on the server neither
+    is. A ``gt`` binds the whole list as one parameter, whose elements psycopg binds as text
+    in either mode, so each is held to the text rule. Package-only: fakeshop declares no
+    ``ArrayField``.
+    """
+    driver, cursor_factory, client_side = BINDING_MODES[mode]
+    refused = refused_as_text if client_side else refused_on_server
+    model, shelf_filter = _stamped_shelf_filter_class(real_array_of)
+    with postgresql_stand_in(driver, cursor_factory) as alias:
+        filterset = shelf_filter(data=data, queryset=model.objects.using(alias))
+        if not refused:
+            shelf_filter._validate_form_or_raise(filterset)
+            return
+        with pytest.raises(GraphQLError) as excinfo:
+            shelf_filter._validate_form_or_raise(filterset)
+    assert excinfo.value.extensions == {
+        "code": "FILTER_INVALID",
+        "errors": {form_key: _UNBINDABLE},
+    }
+
+
+@pytest.mark.parametrize("mode", list(BINDING_MODES))
+def test_array_leaf_list_parameter_is_held_to_the_text_rule_in_every_binding_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    """A temporal array leaf is asked wherever ``django.contrib.postgres`` is unavailable too.
+
+    On the ``ArrayField`` double a ``gt`` binds the list as one parameter, as a real
+    ``ArrayField``'s does, whose elements are held to the text rule in every binding mode:
+    a datetime at +16:00 is refused.
+    """
+    patch_array_field(monkeypatch)
+    model, shelf_filter = _stamped_shelf_filter_class(FakeArrayField)
+    driver, cursor_factory, _ = BINDING_MODES[mode]
+    with postgresql_stand_in(driver, cursor_factory) as alias:
+        filterset = shelf_filter(
+            data={"stamps_after": [_AT_PLUS_SIXTEEN]},
+            queryset=model.objects.using(alias),
+        )
+        with pytest.raises(GraphQLError) as excinfo:
+            shelf_filter._validate_form_or_raise(filterset)
+    assert excinfo.value.extensions == {
+        "code": "FILTER_INVALID",
+        "errors": {"stamps_after": _UNBINDABLE},
+    }
+
+
+_NAIVE_CLOCK = datetime.time(9, 30)
+
+
+@pytest.mark.parametrize("client_side", [False, True], ids=["server-side", "client-side"])
+@pytest.mark.parametrize(
+    ("data", "refused"),
+    [
+        pytest.param({"clocks_after": [_NAIVE_CLOCK, _AWARE_TIME]}, True, id="naive-aware"),
+        pytest.param({"clocks_after": [_AWARE_TIME, _NAIVE_CLOCK]}, False, id="aware-naive"),
+        pytest.param({"clocks_after": [_NAIVE_CLOCK]}, False, id="naive"),
+    ],
+)
+def test_time_array_list_parameter_psycopg_cannot_dump_is_refused(
+    client_side: bool,  # noqa: FBT001
+    data: dict[str, object],
+    refused: bool,  # noqa: FBT001
+) -> None:
+    """A time array's list parameter is refused exactly when psycopg 3 itself cannot dump it.
+
+    psycopg dumps a list parameter with the dumper of one element, so a naive time before
+    an aware one raises its ``DataError`` in either binding mode, while each element binds
+    alone. The alias stands in for PostgreSQL on the real driver module, never connected.
+    """
+    pytest.importorskip("psycopg")
+    psycopg = importlib.import_module("psycopg")
+    model, shelf_filter = _stamped_shelf_filter_class(real_array_of)
+    cursor_factory = require(read_attr(psycopg, "ClientCursor"), is_class) if client_side else None
+    with postgresql_stand_in(psycopg, cursor_factory) as alias:
+        filterset = shelf_filter(data=data, queryset=model.objects.using(alias))
+        if not refused:
+            shelf_filter._validate_form_or_raise(filterset)
+            return
+        with pytest.raises(GraphQLError) as excinfo:
+            shelf_filter._validate_form_or_raise(filterset)
+    assert excinfo.value.extensions == {
+        "code": "FILTER_INVALID",
+        "errors": {"clocks_after": _UNBINDABLE},
     }
 
 

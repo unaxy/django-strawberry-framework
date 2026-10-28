@@ -32,8 +32,9 @@ write flavors):
   ``unstorable_temporal`` and of the identity decode
   (``utils/querysets.py::coerce_field_value_or_none``);
 - ``refuses_utc_offset`` - the one rule no Django call answers: an aware datetime
-  or time whose UTC offset PostgreSQL refuses in the connection's binding mode,
-  read over a compiled predicate's parameters or a write's values;
+  or time whose UTC offset PostgreSQL refuses in the connection's binding mode (a
+  list parameter's elements by the text rule, as psycopg binds them), read over a
+  compiled predicate's parameters or a write's values;
 - ``unstorable_temporal`` - its write-side answer: a datetime or time a column
   cannot store on the database a write runs on, or (PostgreSQL) can store but not
   read back (a date or naive datetime a ``DateTimeField`` column holds read as the
@@ -68,7 +69,7 @@ from django.utils import timezone
 from django.utils.functional import Promise
 
 from . import truth
-from ._array_field import array_element_field
+from ._array_field import array_leaf_field
 from ._narrowing import (
     call_method,
     dict_items,
@@ -125,6 +126,7 @@ __all__ = [
     "join_error_path",
     "model_field_error_names",
     "null_field_error",
+    "psycopg_refuses_list_parameter",
     "refuses_utc_offset",
     "rekey_error_segment",
     "relation_field_error",
@@ -781,13 +783,22 @@ def refuses_utc_offset(
     ``values`` are what a query or a write binds on ``connection``: a compiled predicate's
     parameters, or a write's values. No Django call answers this: PostgreSQL's adapters pass
     an aware datetime or time through, and the server refuses it (``DataError``) only once
-    the query runs. Every other value, and every value on any other backend, is not read.
+    the query runs. A list or tuple among ``values`` is one list parameter (an
+    ``ArrayField`` lookup's ``gt`` or ``in`` right-hand side): psycopg binds its elements
+    as text in either binding mode, so each, at any nesting depth, is held to the text
+    rule. Every other value, and every value on any other backend, is not read.
     """
-    return any(
-        isinstance(value, datetime.datetime | datetime.time)
-        and _postgresql_refuses_offset(connection, value, bound_as_text=bound_as_text)
-        for value in values
-    )
+    for value in values:
+        if is_list_or_tuple(value):
+            if refuses_utc_offset(connection, value, bound_as_text=True):
+                return True
+        elif isinstance(value, datetime.datetime | datetime.time) and _postgresql_refuses_offset(
+            connection,
+            value,
+            bound_as_text=bound_as_text,
+        ):
+            return True
+    return False
 
 
 #: The UTC offset magnitude from which PostgreSQL refuses a ``timestamptz`` / ``timetz``
@@ -839,20 +850,6 @@ def _binds_client_side(connection: BaseDatabaseWrapper) -> bool:
     )
 
 
-def _array_leaf(column: object) -> tuple[object, int]:
-    """Return the column an ``ArrayField``'s innermost elements are stored through, and its depth.
-
-    The depth counts the ``ArrayField`` levels walked, each read through
-    ``utils/_array_field.py::array_element_field``; ``(column, 0)`` for a column that is
-    no ``ArrayField``.
-    """
-    depth = 0
-    while (element := array_element_field(column)) is not None:
-        column = element
-        depth += 1
-    return column, depth
-
-
 def unstorable_temporal(column: object, value: object, using: Callable[[], str]) -> bool:
     """Return whether the database ``using()`` names cannot store ``value`` in ``column``.
 
@@ -888,7 +885,7 @@ def unstorable_temporal(column: object, value: object, using: Callable[[], str])
     A ``date`` in a ``DateField`` column always stores. Any other column answers
     ``False`` without calling ``using`` or touching ``django.db.connections``.
     """
-    column, depth = _array_leaf(column)
+    column, depth = array_leaf_field(column)
     values: list[object] = [value]
     for _ in range(depth):
         values = [element for item in values if is_list_or_tuple(item) for element in item]
@@ -924,29 +921,49 @@ def unstorable_temporal(column: object, value: object, using: Callable[[], str])
     )
 
 
+def psycopg_refuses_list_parameter(
+    connection: BaseDatabaseWrapper,
+    params: Iterable[object],
+) -> bool:
+    """Whether psycopg 3 refuses to dump any list parameter among ``params``.
+
+    ``params`` are a compiled predicate's parameters; a list or tuple among them is one
+    list parameter (an ``ArrayField`` lookup's ``gt`` or ``in`` right-hand side), which
+    psycopg dumps with one element dumper, so a naive time beside an aware one raises
+    the driver's ``DataError`` when the query binds it. Each is asked of the driver as
+    it stands, nested lists included (``_psycopg_refuses_list``): Django has already
+    prepared its elements for the lookup, so every one is dumped as the query dumps it.
+    """
+    return any(
+        is_list_or_tuple(param) and _psycopg_refuses_list(connection, list(param), object)
+        for param in params
+    )
+
+
 def _psycopg_refuses_list(
     connection: BaseDatabaseWrapper,
     values: list[object],
     stored_type: type[object],
 ) -> bool:
-    """Whether psycopg 3 refuses to dump ``values``, an ``ArrayField`` write's flattened elements.
+    """Whether psycopg 3 refuses to dump ``values``, one list parameter's elements.
 
     psycopg dumps a list parameter with one element dumper, chosen from a single element
     of the list, so a list whose elements each bind alone can still be refused: a naive
     time dumped by the aware-time dumper raises the driver's ``DataError`` ("cannot
-    calculate the offset of tzinfo 'None' without a date") inside the save. The list is
-    asked of the driver itself, as the save will bind it: dumped as text by the driver's
-    ``adapt.Transformer`` over the open connection's adapters (``connection.connection``,
-    only when already connected; the connection is never opened), else the driver
-    module's own ``adapters``. Only the driver's ``DataError`` refuses; any other
-    exception propagates. ``values`` are the elements ``unstorable_temporal`` projected
-    for the column, ``None`` included (a ``DateTimeField`` base's as ``_stored_datetime``
-    reads them, a ``TimeField`` base's datetime as its naive ``time()``), and are asked
-    only when every one is ``None`` or an instance of ``stored_type``, the type the
-    column stores (any other element is converted by the column's ``to_python`` at the
-    save, not dumped as it stands). A connection that is
-    not PostgreSQL, and psycopg 2 (no ``adapters`` / ``adapt.Transformer``), are not
-    asked.
+    calculate the offset of tzinfo 'None' without a date") when the query or save binds
+    it. The list is asked of the driver itself, as it will be bound: dumped as text by
+    the driver's ``adapt.Transformer`` over the open connection's adapters
+    (``connection.connection``, only when already connected; the connection is never
+    opened), else the driver module's own ``adapters``. Only the driver's ``DataError``
+    refuses; any other exception propagates. ``values`` are the elements
+    ``unstorable_temporal`` projected for an ``ArrayField`` write, ``None`` included (a
+    ``DateTimeField`` base's as ``_stored_datetime`` reads them, a ``TimeField`` base's
+    datetime as its naive ``time()``), or a filter's list parameter as Django prepared it
+    (``psycopg_refuses_list_parameter``, ``stored_type`` ``object``). They are asked only
+    when every one is ``None`` or an instance of ``stored_type``, the type the column
+    stores (any other element of a write is converted by the column's ``to_python`` at
+    the save, not dumped as it stands). A connection that is not PostgreSQL, and psycopg
+    2 (no ``adapters`` / ``adapt.Transformer``), are not asked.
     """
     if connection.vendor != "postgresql" or not all(
         element is None or isinstance(element, stored_type) for element in values

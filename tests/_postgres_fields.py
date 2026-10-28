@@ -12,7 +12,11 @@ column::
 ``patch_array_field`` points the one ``ArrayField`` owner
 (``django_strawberry_framework/utils/_array_field.py::ARRAY_FIELD_CLS``) at the double,
 so every reader of ``array_element_field`` (the read converter, the write inputs, the
-filter form fields and the write-side storability rule) sees the same class.
+filter form fields, the filter bind ask and the write-side storability rule) sees the
+same class.
+
+``real_array_of`` builds a real ``django.contrib.postgres`` ``ArrayField`` and skips the
+test where the module is unimportable (no PostgreSQL driver).
 
 A model hosting either double declares ``class Meta: managed = False``.
 
@@ -26,6 +30,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
 from django import forms
 from django.db import models
 from typing_extensions import Never, override
@@ -33,7 +38,6 @@ from typing_extensions import Never, override
 from django_strawberry_framework.utils import _array_field
 
 if TYPE_CHECKING:
-    import pytest
     from django.forms.utils import _DataT, _FilesT
 
 
@@ -117,3 +121,11 @@ class FakeSplitArrayWidget(forms.Widget):
             self.widget.value_omitted_from_data(data, files, f"{name}_{index}")
             for index in range(self.size)
         )
+
+
+def real_array_of(base_field: models.Field[object, object]) -> models.Field[object, object]:
+    """A ``django.contrib.postgres`` ``ArrayField`` of ``base_field``; skips without a driver."""
+    pytest.importorskip("django.contrib.postgres.fields")
+    from django.contrib.postgres.fields import ArrayField  # noqa: PLC0415 - after the skip guard
+
+    return ArrayField(base_field)
