@@ -1,0 +1,647 @@
+# DRY 0.0.15 upstream seams: to-do list
+
+These are the places where the package re-derives, hand-models or copies something an upstream library already
+exposes. AGENTS.md line 6 governs them: ask upstream through its own seam; where there is no seam, adapt upstream's
+code with attribution; hand-model only as a last resort. The list comes from a six-agent read-only sweep at
+`b890b75b`, one agent per area:
+- optimizer and pagination;
+- ORM utils and permissions;
+- filters and orders;
+- forms, mutations and DRF;
+- types, schema and Relay;
+- transport, extensions and patches.
+
+It also carries the items still open from the first sweep (O, F and S ids).
+
+The first sweep's removals already landed as `ed9be44a` (O1), `3ed8565a` (O3), `61deefd3` (F4, F10), `6f555782` (F6),
+`3f99e6d5` (F7), `036d3d37` (F9), `05ceb214` (S3), `9d12b310` (S7), `a935a894` (S8) and `7b059c0d` (S9).
+They are not repeated here.
+
+How to read the entries:
+- **Status:**
+  - CONFIRMED means a probe compared ours with upstream on fakeshop. The diff count is given.
+  - SUSPECTED means read only.
+- **Lines** are the agents' net estimates.
+- **"Reason to keep ours: none"** means the swap is a plain replacement.
+- **An item whose behaviour change says "fixes"** keeps a known defect for as long as our copy stays.
+
+Every item is a candidate, not a plan. Each one still gets the research pass, a root-cause fix and a live test before
+it lands with its tick.
+
+## Fixes behaviour (our copy is wrong today)
+
+- [x] 1. (OPT-1, was S4 + the argument half of S1) Nested planner and plan-cache key read connection arguments by wire
+  name
+  - Our code (deleted): `nested_planner.py`'s `_argument_value` and `_coerce_pagination_int`, `walker.py`'s
+    `_normalized_alias_payload`, `utils/connections.py`'s `CONNECTION_ORDER_KWARG_GRAPHQL` and `orderBy` twin read,
+    and the wire-literal `_PAGINATION_ARG_NAMES` in `optimizer/extension.py`.
+  - Upstream: `graphql/execution/values.py::get_argument_values(field_def, node, variable_values)`, re-keyed by
+    `utils/typing.py::published_python_name`. Public, present at 3.2.0.
+  - Landed:
+    - `optimizer/selections.py::ast_to_converted_selections` threads the parent GraphQL type and stamps each field
+      selection's coerced, Python-named arguments (`python_arguments`). The planner, the alias merge and the sidecar
+      predicate read only those.
+    - The plan-cache key collects variables under every wire name the schema publishes a pagination argument under
+      (`optimizer/extension.py::_pagination_wire_names`, memoized per schema). The document-key cache keys on that
+      set too.
+  - Status: CONFIRMED worse than the sweep said. On the old code a renamed or swapped `first`/`last` served wrong
+    rows, because the resolver consumed the dead window:
+    - `last`→`tail: 1` returned all 3 books instead of the last one;
+    - swapped, wire `last: 1` returned empty pages.
+
+    15 of the 19 new live rows failed on the old code; all pass now.
+  - Behaviour change: fixes wrong rows, overfetch to `relay_max_results`, a missed strictness N+1 and a plan-cache
+    key that ignored renamed variables, under any `NameConverter` that renames or swaps a pagination argument.
+  - Tests: the live rows in `test_library_api.py` on the `/graphql-test/` holder (renamed and swapped converters):
+    - `test_nested_connection_window_reads_page_arguments_by_python_name`
+    - `test_nested_connection_plan_cache_keys_a_renamed_page_variable`
+    - `test_nested_connection_literal_and_variable_aliases_share_one_window`
+    - `test_nested_connection_per_parent_page_stays_strictness_visible_under_any_names`
+
+    Plus the union-arm package row in `tests/optimizer/test_selections.py`.
+  - Follow-up: item 34. The resolver accepted a prefetched window whose bounds disagree with its own arguments.
+
+- [ ] 2. (OPT-2, was the name half of S1, plus the walker's hardcoded `to_camel_case`) The walker resolves selections
+  by snake_case reversal, then re-runs the NameConverter
+  - Our code:
+    - `optimizer/walker.py::_resolve_selection_target`: the reversal runs first.
+    - `walker.py::_build_forward_names`, `::_forward_names`, `::_field_by_graphql_name` and
+      `::_graphql_names_by_python_name`: three `to_camel_case` fallbacks.
+    - `walker.py::_relay_id_graphql_name` and `_forward_names_memo`.
+    - `optimizer/selections.py::connection_field_names` / `ConnectionFieldNames`: these run `apply_naming_config`, and
+      the docstring admits they miss `get_graphql_name`/`from_field` overrides.
+    - About 220 lines.
+  - Upstream: the executing schema's published field map, read as
+    `GraphQLObjectType.fields[wire].extensions[GraphQLCoreConverter.DEFINITION_BACKREF].python_name`.
+    - Descend with `graphql.type.get_named_type`.
+    - `DEFINITION_BACKREF` is present at 0.322.2.
+    - This is the same read-back doctrine `utils/typing.py::published_argument` states.
+  - Lines: ~150 net.
+  - Status: SUSPECTED. The defect is traced in code, but no fakeshop model has the colliding shape.
+  - Reason to keep ours: none. Plan-time `info` lacks the Strawberry config, but it has the graphql-core schema.
+  - Behaviour change: fixes the case where, under `auto_camel_case=False`, Django fields `fooBar` and `foo_bar`
+    collide.
+    - The selection `fooBar` snake-cases to `foo_bar` and plans the wrong column: wrong `.only()`/prefetch, then a
+      deferred-load N+1.
+    - It also fixes the connection vocabulary under a converter that overrides `get_graphql_name`.
+  - Risk / blockers: the parent `GraphQLObjectType` has to be threaded through fragments and `edges`/`node`.
+    Abstract types are already out of scope (spec-035 TODO).
+
+- [ ] 3. (FLT-1, the remainder of F1) `_leaf_column` hand-walks the filter path and misses `FilteredRelation` aliases
+  and `pk`
+  - Our code: `filters/sets.py::_leaf_column`, about 30 lines. It decides whether `_unbindable_temporal_errors` asks the
+    leaf at all. It is the sixth `_meta.get_field` path walker beside O2's five.
+  - Upstream: `django/db/models/sql/query.py::Query.solve_lookup_type` (annotations via `refs_expression`) and
+    `Query.names_to_path(names, opts, fail_on_missing=False)`.
+    - `names_to_path` handles the `pk` alias, `_filtered_relations` and MTI hops.
+    - Both are private but unchanged in shape from 5.2 to 6.1.
+  - Lines: ~20 net.
+  - Status: CONFIRMED.
+    - Probe 1 covered all 6,801 fakeshop filters and found 85 diffs: 84 on a `pk` segment (ours None) and 1 from the
+      probe's adapter.
+    - Probe 2 used a FilterSet over `.alias(par=FilteredRelation("parent"))`:
+      - `par__occurred_at=0001-01-01T00:30:00+05:00` raised `OverflowError`;
+      - `parent__occurred_at` with the same value gave the coded `invalid` error.
+  - Reason to keep ours: none.
+  - Behaviour change: fixes the case where a consumer `get_queryset` adds a `FilteredRelation` alias plus a filter
+    whose `field_name` crosses it. Any temporal value Django cannot bind then escapes as `OverflowError` instead of the
+    coded error. The same applies to a temporal primary key reached through `pk`.
+  - Risk / blockers: private `Query` API. It raises `FieldError`, including for a GFK hop, and that must map to None.
+
+- [ ] 4. (TYP-1, was S5, plus `mutations/inputs.py::_predicted_input_field_name`) The collision guards use
+  `to_camel_case`, not the schema's `NameConverter`
+  - Our code:
+    - `types/finalizer.py::_field_surface_names`, the collision half of `::_audit_field_surface`, and
+      `::_synthesize_relation_connections #"camel = to_camel_case(generated)"`. Three more `to_camel_case` sites in
+      finalizer.py.
+    - The bind-time audit `mutations/inputs.py::_predicted_input_field_name` / `_audit_mutation_input_surface`.
+    - About 75 lines.
+  - Upstream: `strawberry/schema/name_converter.py::NameConverter.from_field` / `get_graphql_name`, through
+    `schema.config.name_converter`. Public, and present at 0.322.2.
+  - Lines: ~0 net. The camel half moves to `DjangoSchema` build; the empty-surface check stays at finalize.
+  - Status: CONFIRMED.
+    - Probe: a Strawberry type with `foo_bar` and `fooBar`.
+    - Default config: one field published, the other silently dropped.
+    - `auto_camel_case=False`: two fields.
+  - Reason to keep ours: finalize runs before any `StrawberryConfig` exists. That decides where the check runs, not
+    which rule it uses.
+  - Behaviour change: fixes a false `ConfigurationError` under `auto_camel_case=False`. It also fixes a silent field
+    drop under a custom converter. The mutation audit has the same false collision (SUSPECTED).
+  - Risk / blockers: one `DjangoTypeDefinition` can be served by schemas with different configs, so the check has to
+    run per schema.
+
+- [ ] 5. (TYP-2) A `GeneratedField` column has no conversion
+  - Our code: `types/converters.py::_scalar_map_entry`, `::scalar_route` and `::convert_scalar`. No `GeneratedField`
+    arm exists in `types/`.
+  - Upstream: `django/db/models/fields/generated.py::GeneratedField.output_field`. Public, Django 5.0+.
+    strawberry-django routes on it in `fields/types.py::resolve_model_field_type` (crib only).
+  - Lines: about +4 (route on `field.output_field`).
+  - Status: CONFIRMED.
+    - `convert_scalar` raises `ConfigurationError: Unsupported Django field type 'GeneratedField'`.
+    - `scalar_for_field(gf.output_field)` gives `int`.
+  - Reason to keep ours: none.
+  - Behaviour change: fixes the `Meta.fields = "__all__"` build failure on any model with a `GeneratedField`.
+  - Risk / blockers:
+    - Nullability reads `GeneratedField.null`, and the field has no write side.
+    - Coordinate with spec-051, which plans the filter-side `GeneratedField` unwrap.
+
+- [ ] 6. (TYP-5) The Relay `resolve_node` default does not delegate to `resolve_nodes`
+  - Our code: `types/relay.py::_resolve_node_default`, `::_resolve_node_async` and the `resolve_node` row of
+    `::_RELAY_RESOLVER_DEFAULTS`. About 70 lines.
+  - Upstream: `strawberry/relay/types.py::Node.resolve_node` (public). It calls
+    `cls.resolve_nodes(info=, node_ids=[node_id], required=)`.
+  - Lines: ~60.
+  - Status: SUSPECTED.
+  - Reason to keep ours: the single-row `get()`/`first()` is one query, against `filter(__in)` plus `_order_nodes`.
+    That is a performance reason only.
+  - Behaviour change: fixes a consumer that overrides only `resolve_nodes` being bypassed by `node(id:)`,
+    `relay.node()` and `GlobalID.resolve_node`. It also unifies the answer for non-unique ids: today `get`/`first` and
+    the batch path's last-wins dict can disagree.
+  - Risk / blockers: `check_deadline` has to remain on the batch path.
+
+- [ ] 7. (TYP-6) The per-row node-type stamp duplicates `strawberry.cast` and ignores a consumer's cast
+  - Our code: `types/relay.py::_NODE_TYPE_HINT_ATTR`, the `::install_is_type_of` closure and
+    `relay.py::_stamp_node_type`. About 40 lines.
+  - Upstream: `strawberry/types/cast.py::cast`, `::get_strawberry_type_cast` and `::TYPE_CAST_ATTRIBUTE`.
+    - Public `strawberry.cast`, present at 0.322.2.
+    - It is read in `schema/schema_converter.py::_get_is_type_of`, which our injected `is_type_of` replaces.
+  - Lines: ~10.
+  - Status: SUSPECTED.
+  - Reason to keep ours: the docstring calls `strawberry.cast` "a surface we have not committed to". It is public and
+    exported at the floor, so that reason no longer holds.
+  - Behaviour change: fixes the case where a consumer `strawberry.cast(TypeB, row)` on a multi-type model is ignored,
+    and graphql-core then picks the first candidate.
+  - Risk / blockers: the reader must use `truth.static_attr` (truthful-reads gate).
+
+- [ ] 8. (TYP-7) Two `relay.NodeID` annotations fall back silently to `"pk"`
+  - Our code: `types/relay.py::_stamp_relay_id_attr #"except NodeIDAnnotationError:"` (2 lines).
+  - Upstream: `strawberry/relay/types.py::Node.resolve_id_attr`. It raises `NodeIDAnnotationError` for zero
+    candidates and for more than one; only the zero case is strawberry-django's `"pk"` fallback.
+  - Lines: 0 (the catch is split in two).
+  - Status: SUSPECTED.
+  - Reason to keep ours: none for the more-than-one case.
+  - Behaviour change: fixes a type with two `NodeID` fields silently encoding and filtering on the pk.
+  - Risk / blockers: none.
+
+- [ ] 9. (WRT-1 = TYP-9, also tracked in `dry-0_0_15_3.md`) The model and auth flavors hardcode Django's English
+  `"null"` message
+  - Our code: `utils/errors.py::null_field_error`. It is reached from `mutations/resolvers.py::_explicit_null_error`,
+    `::_decode_single_relation_id` and `::_created_row_integrity_errors`, and from `auth/mutations.py` (password).
+  - Upstream: `django/db/models/fields/__init__.py::Field.error_messages["null"]` (public). The ModelForm flavor
+    already reads it in `forms/resolvers.py::_column_null_errors`.
+  - Lines: ~0 (the signature takes the column).
+  - Status: CONFIRMED. Probe: `Item.name` under en/fr/de; 2 of the 3 locales differ.
+  - Reason to keep ours: none. The auth `password` site has no column and keeps its own message.
+  - Behaviour change: fixes an explicit `null` on a `null=False` column getting English or default text under another
+    active language or under custom `error_messages`. The flavors then agree. The wire `codes` stay `["null"]`.
+  - Risk / blockers: land it once with the `dry-0_0_15_3.md` item and tick both.
+
+- [ ] 10. (WRT-2) The DRF non-field-errors key is captured once at import
+  - Our code: `rest_framework/resolvers.py #"_DRF_NON_FIELD_KEY: str = api_settings.NON_FIELD_ERRORS_KEY"`, read
+    in `::_error_node_children` (1 line).
+  - Upstream: `rest_framework/settings.py::api_settings` (public). It is reloaded on `setting_changed`, and
+    `as_serializer_error` reads it live.
+  - Lines: ~1.
+  - Status: CONFIRMED. Probe: under `override_settings(REST_FRAMEWORK={"NON_FIELD_ERRORS_KEY": "errors"})` DRF emits
+    `errors`, and ours reports it as field `errors` instead of `__all__`. 1 of 2 cases differs.
+  - Reason to keep ours: none.
+  - Behaviour change: fixes the key changing after import, which leaves the whole-object bucket keyed as a field.
+    This is a robustness row (GOAL.md trust boundary), since production settings are static.
+  - Risk / blockers: none.
+
+- [ ] 11. (FLT-2) The FilterSet M2M sweep uses `isinstance(ManyToManyField)` over `get_fields()`
+  - Our code: `filters/sets.py::FilterSet.get_fields #"m2m_names = {"` (3 lines).
+  - Upstream: `django_filters/utils.py::get_all_model_fields` builds its sweep from
+    `opts.fields + opts.many_to_many`; `Options.many_to_many` is public.
+  - Lines: ~1.
+  - Status: CONFIRMED for fakeshop: 101 models, 0 diffs. The divergence itself is SUSPECTED.
+  - Reason to keep ours: none.
+  - Behaviour change: fixes a third-party M2M field that does not subclass `ManyToManyField` (e.g. taggit's
+    `TaggableManager`). Today it survives our removal, so `Meta.fields = "__all__"` fails at class creation.
+  - Risk / blockers: none.
+
+- [ ] 34. (found landing item 1) The connection resolver serves a prefetched window without checking its bounds
+  against its own arguments
+  - Our code: the resolver's window probe (`connection.py::_resolve_from_window` and its prefetch read). Before item 1
+    it consumed a window planned from different arguments and served wrong rows.
+  - Upstream: none. This is package behaviour; the root cause (the planner reading wire names) is fixed by item 1.
+  - Lines: small (a bounds-equality guard that falls back per parent on mismatch).
+  - Status: CONFIRMED on the pre-item-1 code; no current input reaches it.
+  - Reason to keep as is: none if the guard is cheap. Any future planner/resolver drift would serve wrong pages
+    silently again.
+  - Behaviour change: a drifted window falls back per parent (strictness-visible) instead of serving wrong rows.
+  - Risk / blockers: robustness row, not a release blocker (GOAL.md trust boundary). It needs a way to make the
+    planner drift in a test.
+
+## Plain replacements (no behaviour change, no reason to keep)
+
+- [ ] 12. (NET-1) `_root_type` re-derives `GraphQLSchema.get_root_type`
+  - Our code: `extensions/resource_policy.py::_root_type` (~10 lines). Its one caller is `_DocumentWalk.operation`.
+  - Upstream: `graphql/type/schema.py::GraphQLSchema.get_root_type(operation)`. Public, present at 3.2.0.
+  - Lines: ~9.
+  - Status: CONFIRMED (all 3 operation types on fakeshop, 0 diffs).
+  - Reason to keep ours: none.
+  - Behaviour change: none.
+  - Risk / blockers: none.
+
+- [ ] 13. (OPT-3, the plans.py half of O2) `_resolve_order_path_field` hand-walks order paths
+  - Our code: `optimizer/plans.py::_resolve_order_path_field` (~28 lines).
+  - Upstream: `django/db/models/sql/query.py::Query.names_to_path(names, opts, allow_many=False)`.
+    - It returns a `PathInfo` per hop and raises `MultiJoin` on a to-many hop.
+    - It handles `pk` and MTI hops.
+    - Private but stable.
+  - Lines: ~15. The nullable-intermediate check on `PathInfo.join_field.null` stays.
+  - Status: CONFIRMED (4,672 paths, 0 diffs).
+  - Reason to keep ours: none.
+  - Behaviour change: none.
+  - Risk / blockers: private API (`names_to_path`, `MultiJoin`). `plans.py::_select_path_missing_connectors` is a
+    second, smaller hand walk that could take the same `PathInfo`s.
+
+- [ ] 14. (FLT-3) `_get_concrete_field_names_for_order` re-derives `Options.fields` and `Field.concrete`
+  - Our code: `orders/inputs.py::_get_concrete_field_names_for_order`. It filters on
+    `read_attr(f, "column") is not None and not many_to_many`, plus a docstring paragraph about the 5.2 M2M `column`
+    quirk.
+  - Upstream: `django/db/models/options.py::Options.fields` with `Field.concrete`. Public.
+  - Lines: ~5. The carrier-backed `ForeignObject` clause stays.
+  - Status: CONFIRMED (101 models, content and order, 0 diffs).
+  - Reason to keep ours: none.
+  - Behaviour change: none.
+  - Risk / blockers: none.
+
+- [ ] 15. (WRT-3, the reducible part of F2) `_expression_references` hand-models `Model._get_expr_references`
+  - Our code: `mutations/resolvers.py::_expression_references` (~28 lines). Its docstring says it is "the public-API
+    walk of `Model._get_expr_references`".
+  - Upstream: `django/db/models/base.py::Model._get_expr_references`, a private classmethod whose body is
+    byte-identical in 5.2.16 and 6.1.2.
+  - Lines: ~20.
+  - Status: CONFIRMED (19 constraint expressions plus 3 synthetic trees, 0 multiset diffs).
+  - Reason to keep ours: none for the walk. The rest of `_constraint_groups` stays (see "Closed by this sweep").
+  - Behaviour change: none.
+  - Risk / blockers: private Django API.
+
+- [ ] 16. (TYP-4) Choice-group flattening re-walks `Field.flatchoices`
+  - Our code: the `flatten_groups` branch of `types/converters.py::_normalize_choice_pairs`, and
+    `::choice_column_pairs` (~10 lines).
+  - Upstream: `django/db/models/fields/__init__.py::Field.flatchoices`, which calls
+    `django/utils/choices.py::flatten_choices`. Public, Django 5.0+.
+  - Lines: ~8. The malformed-entry `ConfigurationError` checks stay, because Django validates choices only in system
+    checks.
+  - Status: CONFIRMED (7 choice columns, 0 diffs). The grouped path was not exercised; fakeshop has none.
+  - Reason to keep ours: none, as long as we validate first and then flatten with Django.
+  - Behaviour change: none.
+  - Risk / blockers: none.
+
+- [ ] 17. (TYP-8) The mutation-marker lookup indexes `parent_type.fields` by hand
+  - Our code: the field lookup in `schema.py::DjangoMutationExecutionContext._marked_mutation_class` (~8 lines).
+  - Upstream: `graphql/utilities/type_info.py::get_field_def(schema, parent_type, field_node)`, already used in
+    `extensions/resource_policy.py`.
+  - Lines: ~6.
+  - Status: SUSPECTED.
+  - Reason to keep ours: none.
+  - Behaviour change: none.
+  - Risk / blockers: removed in graphql-core 3.3, which the `<3.3` pin excludes. Record it in
+    `docs/graphql-core-3_3-upgrade.md` beside the S3 site.
+
+- [ ] 18. (TYP-10) `unwrap_non_null` / `unwrap_graphql_type` re-derive graphql-core's peels
+  - Our code: `utils/typing.py::unwrap_non_null` and `::unwrap_graphql_type` (~40 lines).
+  - Upstream: `graphql/type/definition.py::get_nullable_type` and `::get_named_type`. Public, 3.2.0.
+  - Lines: ~35.
+  - Status: CONFIRMED (10,312 fakeshop field and argument types, 0 diffs).
+  - Reason to keep ours: the bounded loop guards against cyclic chains. `GraphQLNonNull` refuses NonNull-of-NonNull at
+    construction, so a real schema cannot produce one.
+  - Behaviour change: none.
+  - Risk / blockers: `unwrap_graphql_type` also peels Strawberry `of_type`, and no caller uses that.
+
+- [ ] 19. (OPT-6) The GFK content-type carrier column is spelled as a string
+  - Our code: `optimizer/plans.py::_prefetch_carrier_attnames #"f\"{ct_field}_id\""` (1 line).
+  - Upstream: the same read `GenericForeignKeyDescriptor.get_prefetch_querysets` makes,
+    `model._meta.get_field(ct_field).attname`.
+  - Lines: 0.
+  - Status: SUSPECTED.
+  - Reason to keep ours: none (contenttypes.E004 forces a FK, so the attname is always `<name>_id` today).
+  - Behaviour change: none.
+  - Risk / blockers: none.
+
+- [ ] 20. (WRT-5) The default write permission spells Django's codename grammar by hand
+  - Our code: `mutations/permissions.py::DjangoModelPermission.has_permission #"codename = f"` (1 line).
+  - Upstream: `django/contrib/auth/__init__.py::get_permission_codename` (public; admin uses it).
+  - Lines: 0.
+  - Status: CONFIRMED (0 diffs).
+  - Reason to keep ours: none. It is low value: DRF's `DjangoModelPermissions.perms_map` spells the same grammar by
+    hand.
+  - Behaviour change: none.
+  - Risk / blockers: none.
+
+- [ ] 21. (ORM-2) `m2m_through_link_fields` re-reads through-FKs that `path_infos` already carries
+  - Our code: `utils/relations.py::m2m_through_link_fields` (~25 lines).
+  - Upstream: `ManyToManyField.path_infos` / `ManyToManyRel.path_infos`:
+    - `[0].join_field`, or `.field` when the hop is not `direct`;
+    - `[-1].join_field`.
+
+    Public and cached.
+  - Lines: ~15.
+  - Status: CONFIRMED (36 M2M hops in both directions, 0 diffs).
+  - Reason to keep ours: weak. It already composes Django's `m2m_field_name` / `m2m_reverse_field_name`. Optional.
+  - Behaviour change: none.
+  - Risk / blockers: none.
+
+## Attribution (required either way; removes nothing)
+
+- [ ] 22. (FLT-4, NET-4, TYP-11) Adapted upstream blocks lack origin comments, and no third-party license text ships
+  - Our code. The release ships only `LICENSE` (`pyproject.toml` `license-files = ["LICENSE"]`; `git ls-files`
+    tracks nothing else).
+    - Blocks with no origin comment:
+      - `filters/base.py::validate_range`: message and code verbatim from graphene-django.
+      - `filters/base.py::_EmptyListAwareFilterMethod.__call__` and `_install_empty_list_aware_method`: graphene's
+        `ListFilterMethod` / `ArrayFilterMethod` and the `.method` setters.
+      - `templates/django_strawberry_framework/debug_toolbar.html`: a hardened rewrite of strawberry-django's
+        template.
+      - `management/commands/export_schema.py::Command`: strawberry-django's command.
+    - Blocks named only in the module docstring: `filters/base.py::RangeField`, `RangeFilter` and
+      `GlobalIDMultipleChoiceFilter`.
+    - Blocks that name their origin but have no license file shipped:
+      - `_django_patches.py::_patched_remove_databases_failures` (Django);
+      - `_strawberry_patches.py::_patched_parse_query_params` (Strawberry);
+      - `middleware/debug_toolbar.py` (strawberry-django, "upstream verbatim");
+      - `extensions/debug.py` (graphene row shapes);
+      - the `types/relay.py` ports (strawberry-django);
+      - the `filters/sets.py` `_*_extra` builders (django-filter);
+      - the attributed `TypedFilter` / `ArrayFilter` / `ListFilter` / `GlobalIDFilter` (graphene-django).
+  - Upstream licenses owed:
+    - Django: BSD;
+    - django-filter: BSD;
+    - Strawberry: MIT;
+    - strawberry-graphql-django: MIT;
+    - graphene-django: MIT.
+
+    django-graphene-filters is the maintainer's own project and is excluded.
+  - Lines: 0.
+  - Status: CONFIRMED (both sides read).
+  - Reason to keep ours: n/a.
+  - Behaviour change: none.
+  - Risk / blockers: none. AGENTS.md line 6 says the license text ships "added with its first adapted block", so this
+    is overdue.
+
+## Maintainer decisions (a reason to keep exists)
+
+- [ ] 23. (OPT-4 = O5, with ORM-1) The lateral builder and relation-order expansion are a second compiler
+  - Our code:
+    - `optimizer/lateral_fetch.py::_select_columns` (~30 lines), `::_order_columns` (~40) and the raw SQL in
+      `::build_lateral_sql` (~200).
+    - The order expansion it reads: `utils/querysets.py::expand_relation_order`, `::_expanded_order_term`,
+      `::_expanded_order_name`, `::resolve_order_name`, `::ResolvedOrderName`, `::take_order_expansion_step` and
+      `::_UnexpandableOrderError` (~230).
+  - Upstream:
+    - `Query.get_select_mask()` with `get_default_columns(select_mask)`;
+    - `SQLCompiler.get_order_by()` / `find_ordering_name`;
+    - compile the child queryset via `qs.query.get_compiler(using).as_sql()`, and hand-write only the
+      LATERAL/VALUES shell.
+  - Lines: ~60–120 lateral, plus ~150 expansion.
+  - Status:
+    - Expansion: CONFIRMED faithful. 2,540 order terms, 0 diffs; the window OVER/JOIN was identical on 67/67 relations
+      whose target has `Meta.ordering`.
+    - Lateral: SUSPECTED.
+  - Reason to keep ours:
+    - The shell (the unnest/VALUES parent relation, in-branch `LIMIT`, the row-number range) has no Django
+      equivalent.
+    - The lateral column map, the random-order arm, the scalar-only projection, the index advisory and the keyset
+      vocabulary read the expanded terms as names or `F`, and compiled `Col`s change that input.
+    - `get_order_by()` adds joins to the query it compiles, so it must run on the executing queryset.
+  - Behaviour change: none intended. It would accept the `defer()` shapes and relation-name orders that downgrade
+    today.
+  - Risk / blockers: an EXPLAIN re-check on the Postgres tier; private compiler APIs. The two halves are entangled and
+    land together or not at all.
+
+- [ ] 24. (OPT-5) `_correlation_steps` hand-builds the GenericRelation content-type restriction
+  - Our code: the `kind == "generic"` arm of `optimizer/predicates.py::_correlation_steps` (~10 lines). It filters
+    `content_type__app_label` / `content_type__model`, which joins `django_content_type`.
+  - Upstream: `django/contrib/contenttypes/fields.py::GenericRelation.get_extra_restriction` /
+    `::get_content_type`, which restrict on `content_type_id = <pk>` and honour `for_concrete_model`.
+  - Lines: ~6.
+  - Status: SUSPECTED.
+  - Reason to keep ours: it avoids a `ContentType` lookup at predicate build and is multi-db neutral. That is arguably
+    deliberate, but undocumented.
+  - Behaviour change: none on rows; one join fewer per EXISTS.
+  - Risk / blockers: the ContentType cache is per `using`. Either swap, or document the reason at the site.
+
+- [ ] 25. (NET-2) The WebSocket Host projection re-derives `ASGIRequest.__init__`'s header-to-META mapping
+  - Our code: `consumers.py::_host_validation_request` and `consumers.py #"_HOST_META_KEYS_BY_HEADER = "` (~16
+    lines of code plus ~45 lines of justifying docstring).
+  - Upstream: `django/core/handlers/asgi.py::ASGIRequest(scope, body_file)`, then `.get_host()`. Its host code is
+    identical in 5.2.16 and 6.1.2.
+  - Lines: ~50.
+  - Status: CONFIRMED. 864 cases, 0 diffs, covering:
+    - `ALLOWED_HOSTS` sets;
+    - `USE_X_FORWARDED_HOST`;
+    - duplicate, IPv6 and invalid hosts;
+    - the underscore spoof header;
+    - 3 server shapes.
+  - Reason to keep ours: spec-046 Decision 19 rejected this on purpose.
+    - `ASGIRequest` wants an HTTP scope, so `method` would be synthesized.
+    - It parses cookies and content type for nothing.
+    - A WebSocket scope with no `path` raises `KeyError`.
+  - Behaviour change: none.
+  - Risk / blockers: it feeds a synthesized HTTP-only key into a Django constructor. Revisit Decision 19, or close
+    this as kept.
+
+- [ ] 26. (NET-3) The Strawberry patch shields `parse_query_params` with a pinned copy of upstream's body
+  - Our code: `_strawberry_patches.py::_patched_parse_query_params` (~17 lines), `_UPSTREAM_PARSE_QUERY_PARAMS_SOURCE`
+    (~20) and the body-source pin in `_validate_upstream_shape` (~12).
+  - Upstream: `strawberry/http/base.py::BaseView.parse_query_params`, unchanged from 0.322.2 to 0.327.7.
+  - Lines: ~40.
+  - Status: SUSPECTED.
+  - Two ways to drop the copy:
+    - a delegating wrapper that sets a ContextVar `_patched_parse_json` reads;
+    - moving the gap-2 envelope guard off `parse_json` to a provenance-scoped translation around
+      `parse_http_body`.
+  - Reason to keep ours:
+    - The origin is named, and the source pin already fails loud on drift.
+    - The ContextVar adds hidden state.
+    - The provenance option would turn a server-side `AttributeError` inside `parse_http_body` into a 400.
+  - Behaviour change: none intended.
+  - Risk / blockers: as above.
+
+- [ ] 27. (TYP-3) Enum values `True` / `False` / `NULL` get a `MEMBER_` prefix that GraphQL does not require
+  - Our code: `types/converters.py::_GRAPHQL_RESERVED_ENUM_VALUES` and the reserved arm of `::_sanitize_member_name`
+    (~6 lines). The check casefolds.
+  - Upstream: `graphql/type/assert_name.py::assert_enum_value_name` (public, 3.2.0+). It also covers the Name grammar
+    that `_NON_IDENT` and the digit-prefix rule enforce.
+  - Lines: ~4.
+  - Status: CONFIRMED (11 names, 5 diffs). `True`, `False` and `NULL` are the real divergence. `__x` and `mro` belong
+    to rules graphql-core has no callable for, and ours keeps them correctly.
+  - Reason to keep ours: swapping changes the wire.
+  - Behaviour change: changes the wire. Choice values `True`, `False` and `NULL` would publish without the prefix.
+  - Risk / blockers: a schema break for any consumer with such a choice value.
+
+- [ ] 28. (S12) `graphql_camel_name` pins input names instead of letting the `NameConverter` decide
+  - Our code:
+    - `utils/inputs.py::build_strawberry_input_class`;
+    - `forms/inputs.py::_simple_triple` and `::_field_triple_and_spec`;
+    - `rest_framework/serializer_converter.py::serializer_field_graphql_name` and `::resolve_serializer_field`;
+    - `rest_framework/inputs.py::_resolve_nested_field`;
+    - `mutations/inputs.py::relation_input_annotation` and `::model_column_input_annotation`.
+    - About 40 lines.
+  - Upstream: the schema's `NameConverter.from_field`.
+  - Lines: ~40.
+  - Status: still accurate (re-verified).
+  - Reason to keep ours: swapping changes the wire.
+  - Behaviour change: changes the wire. Input names would follow `auto_camel_case=False` and custom converters.
+  - Risk / blockers: a schema break for consumers on a non-default converter.
+
+- [ ] 29. (S6) Consumer per-frame masking → `SchemaExtension.on_stream_result`
+  - Our code: `consumers.py::_stop_aware_results #"mask_execution_result(result, policy)"` (~3 lines plus the local
+    import and docstring).
+  - Upstream: `SchemaExtension.on_stream_result`. It is absent at 0.322.2 and present at 0.327.7; the exact release
+    was not pinned.
+  - Lines: ~5.
+  - Status: re-verified.
+  - Reason to keep ours:
+    - It needs a floor raise.
+    - The hook allows only in-place mutation of the yielded result. Ours returns a masked copy so `original_error`
+      survives for `DjangoDebugExtension`, which moving would give up (or it would need in-place masking).
+  - Behaviour change: none intended.
+  - Risk / blockers: a floor raise, and losing the LIFO `original_error` contract.
+
+- [ ] 30. (F5) The package `RangeField` / `_RangeWidget` / `validate_range` → django-filter's `RangeFilter` /
+  `RangeField`
+  - Our code: `filters/base.py::RangeField`, `_RangeWidget` and `validate_range` (~70 lines).
+  - Upstream: `django_filters/fields.py::RangeField` (a `MultiValueField`, `_min`/`_max`, a `slice` value, Decimal
+    sub-fields).
+  - Lines: ~70.
+  - Status: re-verified, still accurate.
+  - Reason to keep ours:
+    - The swap changes the wire keys and the value shape.
+    - It loses per-column bound cleaning and the integer gte+lte split.
+  - Behaviour change: changes the wire.
+  - Risk / blockers: the attribution half is item 22.
+
+- [ ] 31. (F8) `_PUBLIC_PACKAGE_FILTER_DEFAULTS` is a verbatim copy of `FILTER_FOR_DBFIELD_DEFAULTS`
+  - Our code: `filters/sets.py::_PUBLIC_PACKAGE_FILTER_DEFAULTS` (~60 lines).
+  - Upstream: `django_filters/filterset.py::FILTER_FOR_DBFIELD_DEFAULTS`.
+  - Lines: ~60.
+  - Status: CONFIRMED identical on django-filter 26.1: 0 key, class or extra diffs, and 286 extra-provider outputs with
+    0 diffs.
+  - Reason to keep ours: it anchors optimizer-eligibility ownership against a consumer mutating django-filter's
+    global before import. That is a policy choice, not a missing seam.
+  - Behaviour change: none.
+  - Risk / blockers: keep and add a provenance check that the copy still matches upstream, or drop the anchor.
+
+- [ ] 32. (O6) Seal-family spoof resistance → `qs.query`, `base_table`, `all()`/`_chain()`
+  - Our code: `utils/querysets.py::_seal_or_defect`, `_base_table_defect`, `_query_genuineness_defect`,
+    `_rebuild_query_payloads`, `_reconstructed_value` and the `_normalized_*` family (~2,000 lines).
+  - Upstream: the plain queryset attributes.
+  - Lines: ~2,000.
+  - Status: re-verified; symbols unchanged.
+  - Reason to keep ours: spec-045 trust boundary (a sealed-execution queryset). This is a policy question, not a seam.
+  - Behaviour change: it would drop spoof resistance.
+  - Risk / blockers: GOAL.md "Trust boundary"; a decision for spec-045, not a refactor.
+
+- [ ] 33. (TYP-12) GIS/GEOS fields are unsupported; strawberry-django has a scalar block to adapt
+  - Our code: `types/converters.py::SCALAR_MAP` / `FIELD_OUTPUT_TYPE_MAP` have no GEOS arm.
+  - Upstream: the GEOS scalars and the `field_type_map.update` block in `strawberry_django/fields/types.py`. MIT,
+    crib only: adapt with attribution.
+  - Lines: adds code.
+  - Status: SUSPECTED.
+  - Reason to keep ours: n/a. This is a feature gap, not a copy.
+  - Behaviour change: adds new scalars.
+  - Risk / blockers: needs GDAL; it is a new KANBAN card, not a refactor. Item 22 covers the license.
+
+## Closed by this sweep (kept, with the reason)
+
+- [x] O2 walkers other than item 13 stay.
+  - `utils/relations.py::classify_path`, `path_traverses_to_many` and `_lenient_traverses_to_many` stay. Over 4,171
+    paths, the probe found 0 diffs in resolve-or-raise and cardinality.
+  - The earlier 9 `GenericRelation__content_object` diffs are gone; both sides now raise.
+  - The remaining 284 terminal diffs are by contract. Django returns the join field and flattens MTI hops, while we
+    need the declared field and one hop per segment.
+  - `utils/querysets.py::_prefetch_relation_target_or_none` stays: `get_prefetcher` needs a saved instance.
+- [x] F1, filter side: what remains stays.
+  - `binds_integer` stays: Django's `IntegerFieldOverflow` misses `in`, `range`, `RelatedExact` and duration
+    microseconds.
+  - `refuses_utc_offset` stays: PostgreSQL refuses on the server.
+  - `psycopg_refuses_list_parameter` stays: it asks the driver.
+  - The hand-walked gate is item 3.
+- [x] F2, `_constraint_groups`, cannot be replaced.
+  - `_get_unique_checks(include_meta_constraints=True)` adds a pk group on every model.
+  - It misses the check, conditional and expression groups on 7 models.
+  - `_expression_refs_exclude` changed between 5.2.16 and 6.1.
+  - Only the walk (item 15) is reducible.
+- [x] F3, `utils/widgets.py::multi_widget_keys` / `widget_keys` / `widget_entries`, stays.
+  - Filter widgets: 0 diffs over 6,874.
+  - A key recorder cannot pair keys with sub-widgets, misses `QueryArrayWidget`'s iteration reads, and adds harmless
+    `x-clear` / `SelectDateWidget` part keys.
+- [x] S2, `prime_selected_fields` → `convert_selections`, stays. Strawberry still dereferences
+  `node.type_condition.name.value` in `InlineFragment.from_node` from 0.322.2 to 0.327.7, so no floor raise helps.
+- [x] The four patch modules are all live at the ceiling.
+  - Strawberry `parse_json` / `parse_http_body` / `replace_placeholders_with_files`;
+  - cross_web `.body` decode;
+  - graphql-core `complete_list_value`;
+  - Django `_remove_databases_failures` (Trac #37064 wontfix).
+- [x] The first sweep's keeps:
+  - O4: the window row number on each row.
+  - F11: one cleaned element's type.
+  - S10: checks before names resolve.
+  - S11: `execute_wrapper` misses COMMIT.
+- [x] Docs drift, outside this list's scope. `docs/README.md` (the Relay `Meta.interfaces` paragraph) and specs
+  001/015/019/029–032/036/048 say `id: GlobalID!`. The live fakeshop SDL publishes `id: ID!` 70 times and `GlobalID!`
+  0 times. This is a spec-sweep item, not a seam.
+
+## Dropped by the sweep
+
+The candidates below were checked and thrown out, so the next sweep can skip them:
+- **The filter side:** `filters/base.py::_filterset_resolved_field`, `_resolve_globalid_target`;
+  `filters/sets.py::_TEXT_PATTERN_LOOKUPS` / `_lookups_for_field`, `_without_foreign_postgres_lookups`,
+  `_MODEL_CHOICE_ONLY_EXTRAS`, `_runs_shipped_filter`.
+- **Ordering:** the `orders/` `.asc()`/`.desc()` wrapper; `plans.py::_draws_at_random` (the Django `flatten` it would
+  use skips `WhereNode`), `runtime_path_from_path`, `order_entry_name_and_direction` / `keyset.py::split_order_ref`,
+  `_reverse_order_by`, `_diff_prefetch_related`, `_flatten_select_related`; `utils/querysets.py::default_order` /
+  `selected_order`; `list_field.py`'s determinism classifiers and `_is_model_default_ordering_active`.
+- **The optimizer extension:** `extension.py::_collect_reachable_fragment_definitions`, `_walk_cache_relevant_vars`,
+  `_collect_schema_reachable_types`; `join_taxonomy.py::_partition_expr`.
+- **Connections and pagination:** `connection.py::_resolve_from_window`, `_resolve_keyset_connection`,
+  `_window_edge_class`; `utils/connections.py::page_arguments` and its neighbours.
+- **Values and SQL:** `utils/querysets.py::binds_integer`, `_stored_decimal_or_none`;
+  `relations.py::stored_value_column` (it matches `get_col` but returns more), `validate_lookup_expr`;
+  `write_transaction.py::_sql_statement_token` (`sqlparse` fails open on a writable CTE).
+- **Mutations, forms and DRF:** DRF field mapping (never re-derived); `serializer_errors_to_field_errors` (iterative
+  on purpose); `writable_serializer_fields`; `input_field_required`; `adds_by_update_first`;
+  `_reconstruct_partial_data`; `_coerced_null_fields`; `form_field_kind`.
+- **Types and Relay:** `types/converters.py::_is_enum_reserved_member`, `_column_admits_empty_string`; `scalars.py`
+  BigInt; `utils/strings.py::pascal_case`; `utils/lazy.py::unwrap_lazy_object`; `types/base.py::_NODEID_STRING_RE`;
+  `relay.py::DjangoNodeField` / `_interleave`; `types/relay.py::node_definition_for_published_name`.
+- **Schema execution:** `schema.py::_close_thread_connections`, `_execution_errors`, `_refuse_operation_document`.
+- **Transport:** `routers.py`; `_request_body.py::body_exceeds_limit`; `views.py::_form_encoding_is_utf8` /
+  `_declared_content_length` / `_evaluate_request_user` / `_RawBodyRequestAdapter`.
+- **Resource policy and extensions:** `extensions/resource_policy.py::scan_document_text` (`max_tokens` is absent at
+  3.2.0), `_variable_names`; the Strawberry depth and alias limiters; `MaskErrors`.
+- **Auth and test tooling:** `auth/` (it already calls `authenticate`, `login`, `validate_password` and the channels
+  helpers); `testing/client.py::_build_body`.
+- **Context and execution utils:** `utils/context.py`, `directives.py`, `execution_mode.py`, `operation_lease.py`.
+- **Thin wrappers and trust boundary:** the `_multipart.py` constants; `utils/permissions.py::resolve_auth_aliases`;
+  the trust-boundary write code (`_merged_serializer_kwargs`, `_frozen_hook_view`, `_pin_validator_querysets`,
+  `permissions.py::_validated_target_subquery`).
+
+Adjacent, to look at next time: `filters/sets.py` hand-builds `{"message", "code"}` dicts where
+`ErrorList.get_json_data` exists.
+
+<!-- LINK DEFINITIONS -->
+
+<!-- Root -->
+
+<!-- docs/ -->
+
+<!-- docs/SPECS/ -->
+
+<!-- docs/builder/ -->
+
+<!-- django_strawberry_framework/ -->
+
+<!-- tests/ -->
+
+<!-- examples/ -->
+
+<!-- scripts/ -->
+
+<!-- .venv/ -->
+
+<!-- External -->

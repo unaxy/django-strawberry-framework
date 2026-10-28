@@ -91,6 +91,7 @@ from .selections import (
     connection_has_next_page_selected,
     connection_node_children,
     connection_total_count_selected,
+    python_arguments,
 )
 from .selections import (
     response_keys as _response_keys,
@@ -103,7 +104,6 @@ if TYPE_CHECKING:
     from django.contrib.postgres.indexes import BTreeIndex
     from django.db.models import QuerySet
     from graphql.type.definition import GraphQLResolveInfo
-    from strawberry.types.nodes import Arguments
 
     from django_strawberry_framework.keyset import CursorColumn
     from django_strawberry_framework.types.base import DjangoType
@@ -841,44 +841,27 @@ def _connection_node_selections(
     return connection_node_children(sel, runtime_prefixes=runtime_paths, names=names)
 
 
-def _argument_value(arguments: Mapping[str, object], name: str) -> object:
-    """Return the selection's ``name`` argument, or ``None`` when it was not given."""
-    return arguments.get(name)
+def _int_argument(arguments: Mapping[str, object], name: str) -> int | None:
+    """Return the Python-named ``Int`` page argument ``name``, ``None`` when it was not given.
+
+    The payload is graphql-core-coerced (``selections.py::python_arguments``), so a
+    given ``Int`` argument is already an ``int``.
+    """
+    value = arguments.get(name)
+    return value if isinstance(value, int) else None
 
 
 def _cursor_argument(arguments: Mapping[str, object], name: str) -> str | None:
-    """Return the selection's ``name`` cursor argument, ``None`` when it was not given.
+    """Return the Python-named ``String`` cursor argument ``name``, ``None`` when it was not given.
 
-    A validated operation hands a ``String`` argument over as a ``str`` (an inline
-    literal) or the ``str`` its variable coerced to.
+    The payload is graphql-core-coerced, so a given ``String`` argument is a ``str``.
     """
     value = arguments.get(name)
     return value if is_str(value) else None
 
 
-def _coerce_pagination_int(value: object) -> int | None:
-    """Coerce a pagination ``first`` / ``last`` argument to the ``int`` it spells, else ``None``.
-
-    An inline Int literal arrives as the raw token string; a resolved variable is
-    already an ``int``. An ``int``-castable string is coerced so the slice
-    arithmetic fires. Anything else answers ``None``: every reader of a page
-    argument (``page_arguments``, ``is_backward_shape``, the bound checks and
-    ``SliceMetadata.from_arguments``) gates on ``isinstance(..., int)``, so a
-    malformed value is read exactly as an absent one, which is the shipped
-    behavior (the bound is skipped) without the walker pre-judging it.
-    """
-    if isinstance(value, int):
-        return value
-    if not is_str(value):
-        return None
-    try:
-        return int(value)
-    except ValueError:
-        return None
-
-
 def _connection_window_slice_from_arguments(
-    arguments: Arguments,
+    arguments: Mapping[str, object],
     info: GraphQLResolveInfo | None,
 ) -> ConnectionWindowBounds | None:
     """Resolve the window bounds from one argument payload.
@@ -895,8 +878,9 @@ def _connection_window_slice_from_arguments(
     plan-time and resolve-time windows can never drift). Both window schemes
     iterate this: the shared-window scheme with one payload, the per-key
     scheme with each response key's recorded payload
-    (``_optimizer_response_key_arguments``). Applies the walker-only int
-    coercion, resolves ``max_results`` from the Strawberry schema config via
+    (``_optimizer_response_key_arguments``). Reads the payload by Python name
+    (graphql-core coerced it, ``selections.py::python_arguments``), resolves
+    ``max_results`` from the Strawberry schema config via
     ``_relay_max_results_from_info`` (the walker's graphql-core ``info.schema``
     has no ``.config`` the engine could read), and hands those to the shared
     helper, which owns the ``reverse`` / ``limit`` rule.
@@ -907,12 +891,10 @@ def _connection_window_slice_from_arguments(
     nested field path raises at its own error locality (Decision 4 step f). No
     other pagination exception can arise here: ``decode_offset_cursor`` folds
     every undecodable cursor, a non-``str`` one included, into that rejection,
-    a ``first`` / ``last`` the coercion above leaves non-``int`` is skipped by
-    the bound check exactly as the engine skips it, and once the validator has
-    returned ``SliceMetadata.from_arguments`` has nothing left to reject. The
-    walker only declines to plan: it constructs no error of its own. The
-    resolver calls the same helper directly with already-coerced Strawberry
-    arguments and lets the pagination error propagate instead.
+    and once the validator has returned ``SliceMetadata.from_arguments`` has
+    nothing left to reject. The walker only declines to plan: it constructs no
+    error of its own. The resolver calls the same helper directly with
+    Strawberry's arguments and lets the pagination error propagate instead.
 
     ``UnwindowableConnection`` (an offset-bearing backward or inverted interval)
     is deliberately NOT caught here: it is a VALID query that resolves correctly
@@ -921,26 +903,13 @@ def _connection_window_slice_from_arguments(
     distinct shapes) rather than the malformed-pagination ``None`` path that
     records the field as accounted-for (spec-033 Decision 5).
     """
-    # ``first`` / ``last`` from an inline GraphQL Int LITERAL arrive as the raw
-    # token STRING (``convert_value`` returns ``node.value`` and graphql-core
-    # stores an ``IntValueNode.value`` as ``"2"``); a variable
-    # (``first: $n``) is already coerced to ``int`` by the engine. Coerce to int
-    # so the shared helper's ``SliceMetadata.from_arguments`` - which gates the
-    # slice on ``isinstance(first, int)`` - applies the window bound instead of
-    # silently leaving the page uncapped at ``relay_max_results`` (the
-    # literal-vs-variable divergence the resolve-time ``ConnectionExtension``
-    # argument coercion hides at the field boundary). This coercion is
-    # plan-time-only and deliberately NOT folded into the shared helper, whose
-    # resolver caller already receives ``int`` arguments from Strawberry.
-    first = _coerce_pagination_int(_argument_value(arguments, "first"))
-    last = _coerce_pagination_int(_argument_value(arguments, "last"))
     try:
         bounds = derive_connection_window_bounds(
             info,
             before=_cursor_argument(arguments, "before"),
             after=_cursor_argument(arguments, "after"),
-            first=first,
-            last=last,
+            first=_int_argument(arguments, "first"),
+            last=_int_argument(arguments, "last"),
             max_results=_relay_max_results_from_info(info),
             # Only generated connections are planned, and each inherits the stock edge class.
             prefix=relay.Edge.CURSOR_PREFIX,
@@ -951,7 +920,7 @@ def _connection_window_slice_from_arguments(
 
 
 def _keyset_window_slice_from_arguments(
-    arguments: Arguments,
+    arguments: Mapping[str, object],
     info: GraphQLResolveInfo | None,
     *,
     columns: tuple[CursorColumn, ...],
@@ -975,8 +944,8 @@ def _keyset_window_slice_from_arguments(
       (``last`` / ``before:``) the v1 keyset window does not plan - a real
       per-parent access that must stay strictness-visible.
     """
-    first = _coerce_pagination_int(_argument_value(arguments, "first"))
-    last = _coerce_pagination_int(_argument_value(arguments, "last"))
+    first = _int_argument(arguments, "first")
+    last = _int_argument(arguments, "last")
     after = _cursor_argument(arguments, "after")
     before = _cursor_argument(arguments, "before")
     seek: KeysetSeek | None = None
@@ -1013,7 +982,7 @@ def _keyset_window_slice_from_arguments(
 
 
 def _divergent_key_windows(
-    response_key_arguments: Mapping[str | None, Arguments],
+    response_key_arguments: Mapping[str | None, Mapping[str, object]],
     info: GraphQLResolveInfo | None,
     keyset_context: CursorState | None = None,
 ) -> _WindowPass:
@@ -1030,7 +999,7 @@ def _divergent_key_windows(
     children query per response key, or one shared fetch when the key is
     ``None``), so one alias's refusal must not drag its siblings per-parent:
 
-    - sidecar input (``filter:`` / ``orderBy:``) -> that key stays UNPLANNED
+    - sidecar input (``filter`` / ``order_by``) -> that key stays UNPLANNED
       (per-parent, strictness-visible), siblings unaffected;
     - ``UnwindowableConnection`` (``after`` + ``last``; inverted offset interval;
       every backward keyset shape) -> likewise that key alone falls back
@@ -1339,13 +1308,13 @@ def plan_connection_relation(
     # legacy shared ``to_attr``; a real key namespaces it. ``seek`` is the
     # decoded keyset value seek, ``None`` under the offset vocabulary and for
     # keyset first pages alike.
-    response_key_arguments: Mapping[str | None, Arguments] = (
+    response_key_arguments: Mapping[str | None, Mapping[str, object]] = (
         # Diverging aliases exist only on the walker's merged ``SimpleNamespace``, whose
         # alias merge stored this map; read by name because the other selection shape
         # declares no such attribute.
         getattr(sel, "_optimizer_response_key_arguments")  # noqa: B009
         if divergent
-        else {None: getattr(sel, "arguments", None) or {}}
+        else {None: python_arguments(sel)}
     )
     argument_pass = _divergent_key_windows(response_key_arguments, info, keyset_context)
 

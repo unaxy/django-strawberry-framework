@@ -68,9 +68,26 @@ if TYPE_CHECKING:
 
 @strawberry.type
 class _Query:
-    """The query root every built ``Info`` hangs off; no test resolves its one field."""
+    """The query root every built ``Info`` hangs off; no test resolves its fields.
+
+    ``page`` declares the Relay pagination arguments, so the schema publishes their
+    default wire names: the optimizer's plan-cache key reads that vocabulary off the
+    executing schema.
+    """
 
     field: str = ""
+
+    @strawberry.field
+    def page(
+        self,
+        first: int | None = None,
+        last: int | None = None,
+        before: str | None = None,
+        after: str | None = None,
+    ) -> str:
+        """Publish the four Relay pagination arguments; never resolved."""
+        del first, last, before, after  # Strawberry derives the arguments; the body never runs
+        return ""
 
 
 _DEFAULT_SCHEMA = strawberry.Schema(query=_Query)

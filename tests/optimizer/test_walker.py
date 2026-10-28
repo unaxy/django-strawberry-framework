@@ -68,7 +68,6 @@ from django_strawberry_framework.optimizer.nested_fetch import (
     unwindowable_child_queryset_reason,
 )
 from django_strawberry_framework.optimizer.nested_planner import (
-    _coerce_pagination_int,
     _divergent_key_windows,
     _record_accounted_keys,
 )
@@ -79,6 +78,7 @@ from django_strawberry_framework.optimizer.plans import (
     OptimizationPlan,
     diff_plan_for_queryset,
 )
+from django_strawberry_framework.optimizer.selections import PYTHON_ARGUMENTS_ATTR
 from django_strawberry_framework.optimizer.walker import (
     _aliased_arguments_diverge,
     _apply_hint,
@@ -169,13 +169,18 @@ def _sel(
     alias: str | None = None,
     arguments: dict[str, object] | None = None,
 ) -> SimpleNamespace:
-    """Build a synthetic ``SelectedField``."""
+    """Build a synthetic ``SelectedField``.
+
+    ``arguments`` are by Python name and already coerced, the shape
+    ``ast_to_converted_selections`` stamps under ``PYTHON_ARGUMENTS_ATTR``.
+    """
     return SimpleNamespace(
         name=name,
         alias=alias,
         directives=directives or {},
         arguments=arguments or {},
         selections=selections or [],
+        **{PYTHON_ARGUMENTS_ATTR: arguments or {}},
     )
 
 
@@ -1340,11 +1345,11 @@ def test_merge_runtime_prefixes_adopts_then_unions_connection_prefixes() -> None
 
 
 def test_merge_aliased_selections_preserves_per_response_key_arguments() -> None:
-    """Aliased selections preserve each occurrence's ``arguments`` under its response key.
+    """Aliased selections preserve each occurrence's arguments under its response key.
 
     Per spec-033 Decision 6: the merge keeps the first occurrence's
     ``arguments`` as the merged selection's primary value (first args win) AND
-    records every occurrence's payload in
+    records every occurrence's Python-named payload in
     ``_optimizer_response_key_arguments`` so a synthesized connection sibling's
     divergent pagination/sidecar arguments stay detectable
     (``_aliased_arguments_diverge``).
@@ -1354,6 +1359,7 @@ def test_merge_aliased_selections_preserves_per_response_key_arguments() -> None
         alias="first",
         directives={},
         arguments={"active": True},
+        **{PYTHON_ARGUMENTS_ATTR: {"active": True}},
         selections=[_sel("id")],
     )
     sel_b = SimpleNamespace(
@@ -1361,6 +1367,7 @@ def test_merge_aliased_selections_preserves_per_response_key_arguments() -> None
         alias="second",
         directives={},
         arguments={"active": False},
+        **{PYTHON_ARGUMENTS_ATTR: {"active": False}},
         selections=[_sel("name")],
     )
 
@@ -3855,7 +3862,7 @@ def test_nested_connection_offset_window_count_free_unless_total_selected() -> N
                 _conn_sel(
                     "booksConnection",
                     node_selections=[_sel("title")],
-                    arguments={"first": "3", "after": after_offset_1},
+                    arguments={"first": 3, "after": after_offset_1},
                 ),
             ],
             genre_model,
@@ -3873,7 +3880,7 @@ def test_nested_connection_offset_window_count_free_unless_total_selected() -> N
                     "booksConnection",
                     node_selections=[_sel("title")],
                     scalar_children=["totalCount"],
-                    arguments={"first": "3", "after": after_offset_1},
+                    arguments={"first": 3, "after": after_offset_1},
                 ),
             ],
             genre_model,
@@ -3887,15 +3894,11 @@ def test_nested_connection_offset_window_count_free_unless_total_selected() -> N
         registry.clear()
 
 
-def test_window_slice_from_first_after_literals() -> None:
-    """Resolved ``first`` / ``after`` literals drive the window offset + limit.
+def test_window_slice_from_first_after_arguments() -> None:
+    """``first`` / ``after`` drive the window offset + limit.
 
-    ``first`` arrives as the raw token STRING ``"3"`` from an inline Int literal
-    (``convert_value`` returns ``IntValueNode.value``, a string); the walker
-    coerces it so the window actually bounds to ``offset + first`` rather than
-    silently leaving the page uncapped at ``relay_max_results``. The bound is
-    asserted, not just annotation presence, so an uncoerced literal string
-    leaving the page over the cap fails this row.
+    The window bounds to ``offset + first`` rather than the ``relay_max_results``
+    cap. The bound is asserted, not just annotation presence.
     """
     registry.clear()
     try:
@@ -3909,9 +3912,7 @@ def test_window_slice_from_first_after_literals() -> None:
                 _conn_sel(
                     "booksConnection",
                     node_selections=[_sel("title")],
-                    # String values - exactly what ``convert_selections`` emits
-                    # for inline Int literals (the real plan-time argument shape).
-                    arguments={"first": "3", "after": after},
+                    arguments={"first": 3, "after": after},
                 ),
             ],
             genre_model,
@@ -3929,22 +3930,6 @@ def test_window_slice_from_first_after_literals() -> None:
         assert "<= 5" in sql
     finally:
         registry.clear()
-
-
-def test_window_slice_coerces_int_literal_strings() -> None:
-    """``_coerce_pagination_int`` turns int-like strings to ints; anything else reads as absent.
-
-    Guards the literal-vs-variable divergence: an inline Int literal arrives as
-    a string (``"2"``), a resolved variable as an ``int`` (``2``); both must drive
-    the slice. A malformed value answers ``None``, which every page-argument
-    reader treats exactly as an absent bound (the shipped malformed-value
-    behavior: the bound is skipped).
-    """
-    assert _coerce_pagination_int("2") == 2
-    assert _coerce_pagination_int(2) == 2
-    assert _coerce_pagination_int(None) is None
-    assert _coerce_pagination_int("oops") is None
-    assert _coerce_pagination_int(2.5) is None
 
 
 def test_relay_max_results_from_optimizer_info_shapes() -> None:
@@ -3971,24 +3956,18 @@ def test_relay_max_results_from_optimizer_info_shapes() -> None:
 def test_window_slice_from_variables() -> None:
     """Variable-supplied pagination resolves through the converted selection's values.
 
-    Converted selections already carry resolved variable VALUES on
-    ``sel.arguments`` (Strawberry resolves them during ``convert_selections``),
-    so the walker reads the value the same way for a literal or a variable; the
-    walker grows no second variable-resolution path (spec-033 Decision 3/4).
+    Converted selections carry graphql-core-coerced values by Python name
+    (``selections.py::python_arguments``), so the walker reads a literal and a
+    variable the same way; the walker grows no second variable-resolution path
+    (spec-033 Decision 3/4).
 
-    The window BOUND is asserted (not just ``to_attr``) so this independently
-    proves the resolved variable value drives the slice: a resolved variable
-    arrives already as an ``int`` (``5``), distinct from the literals sibling's
-    raw token STRING (``"3"``); both must bound the window. ``first: 5`` with no
+    The window BOUND is asserted (not just ``to_attr``): ``first: 5`` with no
     ``after`` bounds the window to row 5, NOT the ``relay_max_results`` cap of 100.
     """
     registry.clear()
     try:
         types = _connection_relay_types()
         genre_model, genre_type = types["Genre"]
-        # ``arguments`` carries the RESOLVED int value (5), as convert_selections
-        # produces for a variable reference - NOT the raw token string a literal
-        # arrives as.
         plan = plan_optimizations(
             [
                 _conn_sel(
@@ -4386,17 +4365,7 @@ def test_malformed_slice_arguments_emit_no_window_but_record_resolver_key(
 
 @pytest.mark.parametrize(
     "sidecar",
-    [
-        {"filter": object()},
-        # The walker sees RAW GraphQL argument names (``convert_arguments``
-        # keeps ``node.name.value``), so the order sidecar arrives camelCased
-        # under the default ``auto_camel_case`` - missing it here planned a
-        # DEAD window (the resolver's own sidecar gate refuses it, one wasted
-        # query per request) and the recorded identity hid the per-parent
-        # fallback from strictness.
-        {"orderBy": object()},
-        {"order_by": object()},  # camelization disabled
-    ],
+    [{"filter": object()}, {"order_by": object()}],
 )
 def test_fallback_not_planned_sidecar_input(sidecar: dict[str, object]) -> None:
     """A nested connection carrying ``filter:`` / ``orderBy:`` is left unplanned."""
@@ -4787,8 +4756,7 @@ def test_merge_flags_same_key_conflicting_arguments() -> None:
 
     Reachable only through the parent-alias union merge (same-named children
     of two alias subtrees land in one merged selection); graphql-core rules
-    the shape out within a single selection set. Equal payloads - including
-    the literal-vs-variable vocabulary split (``"2"`` vs ``2``) - must NOT
+    the shape out within a single selection set. Equal payloads must NOT
     conflict.
     """
     conflicted = _merge_aliased_selections(
@@ -4799,13 +4767,13 @@ def test_merge_flags_same_key_conflicting_arguments() -> None:
     )[0]
     assert _response_key_arguments_conflict(conflicted) is True
 
-    vocab_split = _merge_aliased_selections(
+    agreeing = _merge_aliased_selections(
         [
-            _sel("loansConnection", arguments={"first": "2"}),  # inline literal
-            _sel("loansConnection", arguments={"first": 2}),  # resolved variable
+            _sel("loansConnection", arguments={"first": 2}),
+            _sel("loansConnection", arguments={"first": 2}),
         ],
     )[0]
-    assert _response_key_arguments_conflict(vocab_split) is False
+    assert _response_key_arguments_conflict(agreeing) is False
 
     plain = _sel("loansConnection", arguments={"first": 2})
     assert _response_key_arguments_conflict(plain) is False
@@ -4905,44 +4873,6 @@ def test_nested_same_key_conflict_leaves_only_the_nested_level_unplanned() -> No
             assert not any("_dst_genres" in str(attr) for attr in nested_attrs)
         # Outer keys planned; the conflicted nested relation recorded nothing
         # (strictness-visible per-parent access).
-        assert len(plan.planned_resolver_keys) == 2
-    finally:
-        registry.clear()
-
-
-def test_divergence_ignores_pagination_vocabulary() -> None:
-    """A literal ``first: 3`` and a variable-resolved ``3`` share ONE window.
-
-    Payload comparison is pagination-normalized: the inline literal arrives
-    as the raw token string while an engine-coerced variable arrives as
-    ``int`` - the same window either way, so classifying them divergent would
-    pay a second identical window query for nothing.
-    """
-    registry.clear()
-    try:
-        types = _connection_relay_types()
-        genre_model, genre_type = types["Genre"]
-        plan = plan_optimizations(
-            [
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": "3"},  # inline literal token
-                    alias="a",
-                ),
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": 3},  # resolved variable
-                    alias="b",
-                ),
-            ],
-            genre_model,
-            info=_fake_info(),
-            source_type=genre_type,
-        )
-        prefetch = _prefetch_entry(plan)
-        assert prefetch.to_attr == "_dst_books_connection"  # single shared window
         assert len(plan.planned_resolver_keys) == 2
     finally:
         registry.clear()

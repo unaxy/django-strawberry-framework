@@ -218,8 +218,8 @@ viewer cannot see.
   `_pipeline_sync` / `_pipeline_async` run visibility → filter → orderBy →
   `_finalize_queryset` (deterministic total order + optimizer plan).
 - `utils/connections.py` pins `CONNECTION_FILTER_KWARG = "filter"` /
-  `CONNECTION_ORDER_KWARG = "order_by"` (plus the GraphQL spelling
-  `CONNECTION_ORDER_KWARG_GRAPHQL = "orderBy"`). The guard chain names
+  `CONNECTION_ORDER_KWARG = "order_by"`, the Python names both the resolver's
+  kwargs and the planner's `python_arguments` key by. The guard chain names
   each sidecar explicitly: `connection_sidecar_inputs_from_kwargs` reads
   exactly those two kwargs, and `has_connection_sidecar_input` takes two
   keyword params (`filter_input`, `order_by_input`) tested with

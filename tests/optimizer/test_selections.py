@@ -9,8 +9,9 @@ import copy
 from collections.abc import Iterable
 from dataclasses import fields
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated
 
+import strawberry
 from graphql import parse
 from graphql.language.ast import (
     DocumentNode,
@@ -21,8 +22,10 @@ from graphql.language.ast import (
     OperationDefinitionNode,
 )
 from strawberry import Info
-from strawberry.schema.name_converter import NameConverter
-from strawberry.types.nodes import FragmentSpread, InlineFragment, SelectedField
+from strawberry.schema.config import StrawberryConfig
+from strawberry.schema.name_converter import HasGraphQLName, NameConverter
+from strawberry.types.nodes import FragmentSpread, InlineFragment, SelectedField, Selection
+from typing_extensions import override
 
 from django_strawberry_framework.optimizer._context import (
     begin_execution_frame,
@@ -45,6 +48,7 @@ from django_strawberry_framework.optimizer.selections import (
     named_children,
     node_children_with_runtime_prefix,
     prime_selected_fields,
+    python_arguments,
     resolve_unvisited_fragment,
     response_key,
     response_keys,
@@ -752,7 +756,12 @@ def test_prime_selected_fields_lifecycle() -> None:
     # 4. Valid unpopulated info -> primed with converted selections
     doc = parse("{ item { name } }")
     field_node = _operation(doc).selection_set.selections[0]
-    raw_info = SimpleNamespace(field_nodes=[field_node], fragments={}, variable_values={})
+    raw_info = SimpleNamespace(
+        field_nodes=[field_node],
+        fragments={},
+        variable_values={},
+        parent_type=None,
+    )
     info_to_prime = SimpleNamespace(_raw_info=raw_info)
     prime_selected_fields(_as_strawberry_info(info_to_prime))
     assert "selected_fields" in info_to_prime.__dict__
@@ -781,3 +790,64 @@ def test_connection_total_count_and_has_next_page_selected_direct() -> None:
     )
     assert connection_total_count_selected(prev_only) is False
     assert connection_has_next_page_selected(prev_only) is False
+
+
+@strawberry.type
+class _Shelf:
+    @strawberry.field
+    def books(self, first: int | None = None) -> list[str]:
+        del first  # Strawberry derives the argument from it; the body never runs
+        return []
+
+
+@strawberry.type
+class _Desk:
+    label: str = ""
+
+
+@strawberry.type
+class _UnionQuery:
+    @strawberry.field
+    def place(
+        self,
+        info: Info[object, object],
+    ) -> Annotated[_Shelf | _Desk, strawberry.union("Place")]:
+        _CAPTURED.append(ast_to_converted_selections(info._raw_info, info._raw_info.field_nodes))
+        return _Shelf()
+
+
+class _RenameFirst(NameConverter):
+    """Publishes ``first`` as ``take``."""
+
+    @override
+    def get_graphql_name(self, obj: HasGraphQLName) -> str:
+        name = super().get_graphql_name(obj)
+        return "take" if name == "first" else name
+
+
+_CAPTURED: list[list[Selection]] = []
+
+
+def test_converter_keys_arguments_by_python_name_under_a_union() -> None:
+    """A union's own ``__typename`` carries no arguments; a member's field carries them by Python name.
+
+    No fakeshop schema publishes a union, so the union arm of the published-field
+    read is reached here: the union has no field map, and the fragment's type
+    condition hands the member type to the field below it.
+    """
+    schema = strawberry.Schema(
+        query=_UnionQuery,
+        config=StrawberryConfig(name_converter=_RenameFirst()),
+    )
+    _CAPTURED.clear()
+    result = schema.execute_sync(
+        "query Q($n: Int) { place { __typename ... on Shelf { books(take: $n) } } }",
+        variable_values={"n": 2},
+    )
+    assert result.errors is None, result.errors
+    (place,) = _CAPTURED.pop()
+    typename, fragment = require(read_attr(place, "selections"), is_list)
+    assert python_arguments(typename) == {}
+    (books,) = require(read_attr(fragment, "selections"), is_list)
+    assert python_arguments(books) == {"first": 2}
+    assert read_attr(books, "arguments") == {"take": 2}

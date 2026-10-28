@@ -36,6 +36,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import suppress
 from typing import TYPE_CHECKING, ClassVar, NamedTuple, TypeVar, cast
+from weakref import WeakKeyDictionary
 
 from django.db import models
 from graphql.language.ast import (
@@ -43,7 +44,7 @@ from graphql.language.ast import (
     VariableNode,
 )
 from graphql.language.printer import print_ast
-from graphql.type.definition import GraphQLInterfaceType
+from graphql.type.definition import GraphQLInterfaceType, GraphQLObjectType
 from typing_extensions import override
 
 from django_strawberry_framework.extensions.operation_state import (
@@ -75,6 +76,8 @@ from django_strawberry_framework.utils.querysets import (
 )
 from django_strawberry_framework.utils.typing import (
     MISSING_ATTRIBUTE,
+    graphql_fields,
+    published_python_name,
     return_type_of,
     unwrap_graphql_type,
 )
@@ -153,9 +156,10 @@ from .walker import plan_optimizations
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from types import SimpleNamespace
+    from typing import TypeAlias
 
     from graphql.language.ast import FragmentDefinitionNode, Node, OperationDefinitionNode
-    from graphql.type.definition import GraphQLObjectType, GraphQLResolveInfo
+    from graphql.type.definition import GraphQLResolveInfo
     from graphql.type.schema import GraphQLSchema
     from strawberry.types.execution import ExecutionContext
     from strawberry.types.nodes import Selection
@@ -166,6 +170,9 @@ if TYPE_CHECKING:
     from ._context import FrozenVariableValue, PlanCacheKey
     from .plans import OptimizationPlan
     from .selections import ConvertedSelection, FragmentVisitKey
+
+    #: One ``_doc_key_cache`` key: source body, operation name, pagination wire names.
+    _DocCacheKey: TypeAlias = tuple[str, str | None, frozenset[str]]
 
 _M = TypeVar("_M", bound=models.Model)
 
@@ -214,13 +221,15 @@ def _matched_strictness(strictness: object) -> str | None:
     return None
 
 
-# The Relay pagination argument names whose variable-supplied values must key
-# the plan cache when they appear on a NON-ROOT field node (the planner bakes
-# those resolved values into windowed prefetch querysets, so two requests differing
-# only in a nested ``first: $n`` value need distinct cached plans -- spec-033 Decision 7).
-# Single source of truth for the four argument names; a future ``search:``
-# extension (spec-060) would extend the family here, not re-spell it inline.
-_PAGINATION_ARG_NAMES = frozenset(
+# The Python names of the Relay pagination arguments whose variable-supplied
+# values must key the plan cache when they appear on a NON-ROOT field node (the
+# planner bakes those resolved values into windowed prefetch querysets, so two
+# requests differing only in a nested ``first: $n`` value need distinct cached
+# plans -- spec-033 Decision 7). The document names them by the wire names the
+# executing schema published them under (``_pagination_wire_names``). Single
+# source of truth for the family; a future ``search:`` extension (spec-060)
+# would extend it here, not re-spell it inline.
+_PAGINATION_PARAMETERS = frozenset(
     {
         "first",
         "last",
@@ -228,6 +237,39 @@ _PAGINATION_ARG_NAMES = frozenset(
         "after",
     },
 )
+
+#: ``{executable schema: wire names of its pagination arguments}``, built once per
+#: schema and dropped with it. Keyed per schema because one document can be
+#: executed against schemas whose ``NameConverter`` spells the arguments differently.
+_pagination_wire_name_sets: "WeakKeyDictionary[GraphQLSchema, frozenset[str]]" = (
+    WeakKeyDictionary()
+)
+
+
+def _pagination_wire_names(schema: "GraphQLSchema") -> frozenset[str]:
+    """Return every wire name ``schema`` publishes a pagination argument under.
+
+    Read back off the published field maps: an argument whose declaration's
+    Python name (``published_python_name``) is one of ``_PAGINATION_PARAMETERS``
+    contributes the name a client sends it under, so a converter renaming
+    ``first`` keys the renamed variable and a converter swapping ``first`` and
+    ``last`` keys both. The set spans every field, which keeps the collection
+    a superset by name (spec-033 Decision 7). Memoized for the schema's lifetime.
+    """
+    memoized = _pagination_wire_name_sets.get(schema)
+    if memoized is not None:
+        return memoized
+    wire_names = frozenset(
+        wire_name
+        for named_type in schema.type_map.values()
+        if isinstance(named_type, (GraphQLObjectType, GraphQLInterfaceType))
+        for field in graphql_fields(named_type).values()
+        for wire_name, argument in field.args.items()
+        if published_python_name(argument) in _PAGINATION_PARAMETERS
+    )
+    _pagination_wire_name_sets[schema] = wire_names
+    return wire_names
+
 
 # Only exact immutable scalar types whose equality/hash is *library* code have a
 # contract the cache boundary can rely on. Custom scalar parsers may return
@@ -284,6 +326,7 @@ def _walk_cache_relevant_vars(
     depth: int,
     directive_names: set[str],
     pagination_names: set[str],
+    pagination_wire_names: frozenset[str],
 ) -> None:
     """Collect BOTH cache-relevant variable families in a single AST traversal.
 
@@ -291,8 +334,10 @@ def _walk_cache_relevant_vars(
 
     * **Directive variables** - ``@skip`` / ``@include`` variable references on
       EVERY node, independent of depth.
-    * **Nested pagination variables** - ``first`` / ``last`` / ``before`` /
-      ``after`` variable references only when the current node is a ``FieldNode``
+    * **Nested pagination variables** - variable references under an argument
+      named one of ``pagination_wire_names`` (the wire names the executing
+      schema publishes ``first`` / ``last`` / ``before`` / ``after`` under,
+      ``_pagination_wire_names``) only when the current node is a ``FieldNode``
       at response-path depth >= 1 (root-field pagination stays out: a root
       connection's slicing happens post-plan in ``ConnectionExtension`` and plan
       content is invariant in those, so hashing them would fragment the cache
@@ -328,7 +373,7 @@ def _walk_cache_relevant_vars(
     # Nested pagination variables: only on a field node at depth >= 1.
     if depth >= 1 and isinstance(node, FieldNode):
         for arg in node.arguments or ():
-            if arg.name.value in _PAGINATION_ARG_NAMES and isinstance(arg.value, VariableNode):
+            if arg.name.value in pagination_wire_names and isinstance(arg.value, VariableNode):
                 pagination_names.add(arg.value.name.value)
     # A field node deepens the response path for its children; a fragment
     # wrapper does not, so its body inherits the field node's depth here.
@@ -344,6 +389,7 @@ def _walk_cache_relevant_vars(
             child_depth,
             directive_names,
             pagination_names,
+            pagination_wire_names,
         )
         # Resolve the fragment spread depth-aware: pass ``depth=child_depth`` so
         # the shared AST-adapter guard keys ``visited_fragments`` on
@@ -364,33 +410,44 @@ def _walk_cache_relevant_vars(
                 child_depth,
                 directive_names,
                 pagination_names,
+                pagination_wire_names,
             )
 
 
 def _collect_cache_var_families(
     node: "Node",
     fragments: "Mapping[str, FragmentDefinitionNode]",
+    pagination_wire_names: frozenset[str],
 ) -> tuple[set[str], set[str]]:
     """Run the unified traversal and return ``(directive_names, pagination_names)``.
 
     ``directive_names`` holds only the variables inside a ``@skip`` /
     ``@include`` ``if`` argument: every other variable leaves the selection tree
     unchanged and stays out of the cache key to avoid cardinality explosion.
-    ``pagination_names`` holds the ``first`` / ``last`` / ``before`` / ``after``
-    variables on a non-root field node, which the planner bakes into windowed
+    ``pagination_names`` holds the variables under a pagination argument
+    (``pagination_wire_names``) on a non-root field node, which the planner bakes into windowed
     prefetch querysets; the collection is a syntactic SUPERSET by design, since
     over-collection costs a duplicate cache entry while under-collection would
     serve wrong data (spec-033 Decision 7). Both families come from ONE AST walk.
     """
     directive_names: set[str] = set()
     pagination_names: set[str] = set()
-    _walk_cache_relevant_vars(node, fragments, set(), 0, directive_names, pagination_names)
+    _walk_cache_relevant_vars(
+        node,
+        fragments,
+        set(),
+        0,
+        directive_names,
+        pagination_names,
+        pagination_wire_names,
+    )
     return directive_names, pagination_names
 
 
 def _collect_cache_relevant_var_names(
     operation: "OperationDefinitionNode",
     fragments: "Mapping[str, FragmentDefinitionNode]",
+    pagination_wire_names: frozenset[str],
 ) -> frozenset[str]:
     """Union of the cache-relevant variable names for one operation.
 
@@ -401,7 +458,11 @@ def _collect_cache_relevant_var_names(
     ``_doc_cache_entry`` memoizes cross-request alongside the rendered document
     key (both are pure functions of the document text).
     """
-    directive_names, pagination_names = _collect_cache_var_families(operation, fragments)
+    directive_names, pagination_names = _collect_cache_var_families(
+        operation,
+        fragments,
+        pagination_wire_names,
+    )
     return frozenset(directive_names | pagination_names)
 
 
@@ -569,10 +630,11 @@ _MAX_DOC_KEY_CACHE_SIZE = 256
 
 # Cross-request memo for the two document-derived cache-key ingredients - the
 # rendered document key AND the cache-relevant variable-NAME frozenset - keyed by
-# the operation's raw source text plus its name. Both values are pure functions
-# of the document text: two requests with byte-identical document text parse to
+# the operation's raw source text, its name, and the executing schema's
+# pagination wire names (``_pagination_wire_names``). Both values are pure
+# functions of those: two requests with byte-identical document text parse to
 # structurally identical ASTs, so the printed key and the ``@skip``/``@include``
-# plus nested-pagination name set are identical. Caching them together means a
+# plus nested-pagination name set are identical under one wire vocabulary. Caching them together means a
 # hot query neither ``print_ast``s NOR re-walks its full operation AST
 # (``_collect_cache_relevant_var_names`` was the last remaining per-request AST
 # descent on the plan-cache-hit path) after first sight. The per-execution
@@ -582,7 +644,7 @@ _MAX_DOC_KEY_CACHE_SIZE = 256
 # ``_plan_cache`` - the cached value is deterministic, so a dropped or double
 # insert only changes hit rate. Bounded LRU so a long-lived process with many
 # distinct documents does not grow without limit.
-_doc_key_cache: "OrderedDict[tuple[str, str | None], tuple[str, frozenset[str]]]" = OrderedDict()
+_doc_key_cache: "OrderedDict[_DocCacheKey, tuple[str, frozenset[str]]]" = OrderedDict()
 
 
 def clear_document_key_cache() -> None:
@@ -601,17 +663,20 @@ register_subsystem_clear(clear_document_key_cache, owner="optimizer.document_key
 def _doc_cache_entry(
     operation: "OperationDefinitionNode",
     fragments: "Mapping[str, FragmentDefinitionNode]",
+    pagination_wire_names: frozenset[str],
 ) -> tuple[str, frozenset[str]]:
     """Return ``(doc_key, cache_relevant_var_names)``, memoized cross-request by source text.
 
-    Keys on ``(operation.loc.source.body, operation_name)``: the source body is
-    the WHOLE document text (every operation and fragment definition), so any
-    difference in a reachable fragment body is already reflected in it, and the
-    operation name disambiguates the operations of a multi-operation document
-    (which share one body). Falls back to computing directly - never caching -
-    for a programmatically built AST that carries no source ``loc`` (the cache
-    would have no stable text key); the per-execution ``id(operation)`` memo in
-    ``_build_cache_key`` still dedupes those within one execution.
+    Keys on ``(operation.loc.source.body, operation_name, pagination_wire_names)``:
+    the source body is the WHOLE document text (every operation and fragment
+    definition), so any difference in a reachable fragment body is already
+    reflected in it, the operation name disambiguates the operations of a
+    multi-operation document (which share one body), and the wire names keep
+    one document executed against two schemas' vocabularies apart. Falls back to
+    computing directly - never caching - for a programmatically built AST that
+    carries no source ``loc`` (the cache would have no stable text key); the
+    per-execution ``id(operation)`` memo in ``_build_cache_key`` still dedupes
+    those within one execution.
 
     ``_collect_cache_relevant_var_names`` is called through the module global
     (not captured) so a test spy patched onto the module still intercepts the
@@ -623,10 +688,10 @@ def _doc_cache_entry(
     if body is None:
         return (
             _print_operation_with_reachable_fragments(operation, fragments),
-            _collect_cache_relevant_var_names(operation, fragments),
+            _collect_cache_relevant_var_names(operation, fragments, pagination_wire_names),
         )
     name_node = getattr(operation, "name", None)
-    key = (body, getattr(name_node, "value", None))
+    key = (body, getattr(name_node, "value", None), pagination_wire_names)
     cached = _doc_key_cache.get(key)
     if cached is not None:
         # ``move_to_end`` is the LRU promotion; guard the concurrent-eviction
@@ -637,7 +702,7 @@ def _doc_cache_entry(
         return cached
     entry = (
         _print_operation_with_reachable_fragments(operation, fragments),
-        _collect_cache_relevant_var_names(operation, fragments),
+        _collect_cache_relevant_var_names(operation, fragments, pagination_wire_names),
     )
     _doc_key_cache[key] = entry
     if len(_doc_key_cache) > _MAX_DOC_KEY_CACHE_SIZE:
@@ -1661,7 +1726,8 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
            sharing a cached plan.
         2. Frozenset of ``(var_name, var_value)`` for the variables
            referenced in ``@skip``/``@include`` directives and in
-           ``first``/``last``/``before``/``after`` arguments on non-root
+           the arguments the schema publishes ``first``/``last``/``before``/
+           ``after`` under, on non-root
            field nodes (nested pagination values are baked into windowed
            prefetch plans, so they must key the cache; root
            pagination variables stay out -- root slicing is post-plan).
@@ -1693,7 +1759,11 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         memo = _cache_key_parts_memo()
         parts = memo.get(id(operation)) if memo is not None else None
         if parts is None:
-            doc_key, relevant_var_names = _doc_cache_entry(operation, fragments)
+            doc_key, relevant_var_names = _doc_cache_entry(
+                operation,
+                fragments,
+                _pagination_wire_names(info.schema),
+            )
             variable_values: Mapping[str, object] = info.variable_values or {}
             # The name-keyed pagination collector deliberately over-collects, so
             # any GraphQL input shape (including an arbitrary custom-scalar
