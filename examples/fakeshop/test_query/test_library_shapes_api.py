@@ -76,10 +76,12 @@ One shape per planner rule, each read off the wire and off the SQL the request e
   ``library`` read: an ``orderBy:`` root list, root connection and nested
   connection each serve what the router's text alias serves.
 - Mixed-case Django names, whose published spelling reverses to a name the model
-  lacks: ``Distributor.displayName`` projects its own column, the forward key
-  ``Consignment.distributorRef`` plans one ``JOIN``, and its reverse
-  ``consignmentItems`` loads through one prefetch on ``distributorRef_id``, the
-  relation counts held at one and three parents.
+  lacks or to another field: ``Distributor.displayName`` projects its own column,
+  and beside it ``display_name`` (the name ``displayName`` reverses to, published
+  as written) projects its own, each alone in one statement with and without
+  ``auto_camel_case``; the forward key ``Consignment.distributorRef`` plans one
+  ``JOIN``, and its reverse ``consignmentItems`` loads through one prefetch on
+  ``distributorRef_id``, the relation counts held at one and three parents.
 - A model with no default order at all: ``ReadingListEntry`` clears its abstract
   parent's title ordering with ``ordering = None``, so a connection over entries
   with no ``orderBy:`` pages in primary-key order at the root and inside the
@@ -698,7 +700,10 @@ def _seed_distributors(count: int) -> list[models.Distributor]:
     """``count`` distributors with one consignment each, both numbered from zero."""
     distributors: list[models.Distributor] = []
     for index in range(count):
-        distributor = models.Distributor.objects.create(displayName=f"Distributor {index}")
+        distributor = models.Distributor.objects.create(
+            displayName=f"Distributor {index}",
+            display_name=f"distributor_{index}",
+        )
         models.Consignment.objects.create(label=f"Consignment {index}", distributorRef=distributor)
         distributors.append(distributor)
     return distributors
@@ -727,6 +732,59 @@ def test_distributor_mixed_case_scalar_projects_its_own_column() -> None:
     distributor_sql = _sql_touching(captured, "library_distributor")
     assert len(distributor_sql) == 1, captured.captured_queries
     assert '"displayName"' in distributor_sql[0], distributor_sql[0]
+
+
+def _snake_case_schema() -> DjangoSchema:
+    """The project's composed ``Query`` under ``auto_camel_case=False``, with the optimizer."""
+    optimizer = DjangoOptimizerExtension()
+    return DjangoSchema(
+        query=config_schema.Query,
+        config=strawberry_config(auto_camel_case=False),
+        extensions=[lambda: optimizer],
+    )
+
+
+#: The column each published ``Distributor`` scalar reads, and the one it must not.
+_DISTRIBUTOR_NAME_COLUMNS = {
+    "displayName": ('"displayName"', '"display_name"'),
+    "display_name": ('"display_name"', '"displayName"'),
+}
+
+
+@pytest.mark.parametrize("selected", list(_DISTRIBUTOR_NAME_COLUMNS))
+@pytest.mark.parametrize("auto_camel_case", [True, False])
+@pytest.mark.django_db
+def test_distributor_published_names_differing_by_case_each_project_their_own_column(
+    selected: str,
+    *,
+    auto_camel_case: bool,
+) -> None:
+    """``displayName`` and ``display_name`` are two columns, each loaded by its own selection.
+
+    Both names are published as written, with or without ``auto_camel_case``, and
+    ``displayName`` read back through un-camel-casing is ``display_name``: the walker
+    resolves each selection by the Python name the schema published its field from,
+    so the one statement projects the selected column and not the other, and no
+    row loads the selected column a second time.
+    """
+    distributors = _seed_distributors(3)
+    root = "allLibraryDistributors" if auto_camel_case else "all_library_distributors"
+
+    with CaptureQueriesContext(connection) as captured:
+        payload = _post(
+            f"{{ {root} {{ {selected} }} }}",
+            schema=None if auto_camel_case else _snake_case_schema(),
+        )
+
+    assert "errors" not in payload, payload
+    assert sorted(json_str(row, selected) for row in json_list(payload, "data", root)) == sorted(
+        getattr(distributor, selected) for distributor in distributors
+    ), payload
+    assert len(captured.captured_queries) == 1, captured.captured_queries
+    (distributor_sql,) = _sql_from_table(captured, "library_distributor")
+    projected, other = _DISTRIBUTOR_NAME_COLUMNS[selected]
+    assert projected in distributor_sql, distributor_sql
+    assert other not in distributor_sql, distributor_sql
 
 
 @pytest.mark.parametrize("distributor_count", [1, 3])

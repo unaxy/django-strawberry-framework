@@ -34,6 +34,7 @@ from django_strawberry_framework.exceptions import ConfigurationError, Optimizer
 from django_strawberry_framework.optimizer._context import DST_OPTIMIZER_PLAN
 from django_strawberry_framework.optimizer.field_meta import FieldMeta, _target_pk_name
 from django_strawberry_framework.optimizer.plans import OptimizationPlan
+from django_strawberry_framework.optimizer.selections import PYTHON_NAME_ATTR
 from django_strawberry_framework.optimizer.walker import _resolve_field_map, plan_optimizations
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.utils._narrowing import read_attr, require_instance
@@ -628,7 +629,13 @@ def test_walker_plan_never_projects_non_column_relation_names() -> None:
     """
 
     def sel(name: str, children: Iterable[SimpleNamespace] = ()) -> SimpleNamespace:
-        return SimpleNamespace(name=name, selections=list(children), arguments=None, alias=None)
+        return SimpleNamespace(
+            name=name,
+            selections=list(children),
+            arguments=None,
+            alias=None,
+            **{PYTHON_NAME_ATTR: name},
+        )
 
     m2m_plan = plan_optimizations([sel("genres", [sel("id"), sel("name")])], Book, None)
     assert "genres" not in m2m_plan.only_fields

@@ -780,13 +780,23 @@ class DistributorType(DjangoType):
     """A distributor, publishing the mixed-case ``displayName`` and ``consignmentItems`` as named.
 
     Strawberry keeps a mixed-case Django name as its GraphQL name, so a
-    selection resolves to its field by that exact name; reversing it
-    (``display_name``, ``consignment_items``) names nothing on the model.
+    selection resolves to its field by the Python name the schema published it
+    from: reversing ``displayName`` gives ``display_name``, another column,
+    published here under that name, and reversing ``consignmentItems`` names
+    nothing on the model.
     """
+
+    # basedpyright: strawberry.field's no-resolver overload (the field factory) returns Any
+    display_name: str = strawberry.field(name="display_name")  # pyright: ignore[reportAny]
 
     class Meta:
         model = models.Distributor
-        fields = ("id", "displayName", "consignmentItems")
+        fields = (
+            "id",
+            "displayName",
+            "display_name",
+            "consignmentItems",
+        )
         filterset_class = filters.DistributorFilter
         orderset_class = orders.DistributorOrder
 

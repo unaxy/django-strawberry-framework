@@ -38,7 +38,6 @@ from strategy_schemas import make_django_type
 from strawberry import relay
 from strawberry.relay.utils import to_base64
 from strawberry.schema.config import StrawberryConfig
-from strawberry.schema.name_converter import HasGraphQLName, NameConverter
 from strawberry.types.nodes import SelectedField, Selection
 from typing_extensions import override
 
@@ -50,7 +49,6 @@ from django_strawberry_framework.keyset import (
     order_fingerprint,
 )
 from django_strawberry_framework.optimizer import logger
-from django_strawberry_framework.optimizer import walker as walker_mod
 from django_strawberry_framework.optimizer._context import (
     begin_execution_frame,
     end_execution_frame,
@@ -78,16 +76,18 @@ from django_strawberry_framework.optimizer.plans import (
     OptimizationPlan,
     diff_plan_for_queryset,
 )
-from django_strawberry_framework.optimizer.selections import PYTHON_ARGUMENTS_ATTR
+from django_strawberry_framework.optimizer.selections import (
+    PYTHON_ARGUMENTS_ATTR,
+    PYTHON_NAME_ATTR,
+)
 from django_strawberry_framework.optimizer.walker import (
+    _RELAY_ID_PYTHON_NAME,
     _aliased_arguments_diverge,
     _apply_hint,
     _build_child_queryset,
     _build_connection_child_queryset,
     _concrete_order_columns,
     _ensure_connector_only_fields,
-    _field_by_graphql_name,
-    _graphql_names_by_python_name,
     _has_custom_id_resolver,
     _introduces_projection_for_operation,
     _is_fragment,
@@ -97,7 +97,6 @@ from django_strawberry_framework.optimizer.walker import (
     _prefetch_hint_for_path,
     _record_prefetch_path_keys,
     _relay_max_results_from_info,
-    _resolve_selection_target,
     _response_key_arguments_conflict,
     _selected_scalar_names,
     _should_include,
@@ -113,6 +112,7 @@ from django_strawberry_framework.utils._queryset_private import (
 )
 from django_strawberry_framework.utils.connections import ConnectionWindowBounds
 from django_strawberry_framework.utils.querysets import _COMBINED_WHAT
+from django_strawberry_framework.utils.strings import snake_case
 from tests._definition import make_definition
 from tests._idioms import saved_pk
 from tests._info import make_info
@@ -168,11 +168,16 @@ def _sel(
     directives: dict[str, object] | None = None,
     alias: str | None = None,
     arguments: dict[str, object] | None = None,
+    python_name: str | None = None,
 ) -> SimpleNamespace:
     """Build a synthetic ``SelectedField``.
 
-    ``arguments`` are by Python name and already coerced, the shape
-    ``ast_to_converted_selections`` stamps under ``PYTHON_ARGUMENTS_ATTR``.
+    ``python_name`` is the Python name the schema published the selected field
+    from, the marker ``ast_to_converted_selections`` stamps under
+    ``PYTHON_NAME_ATTR``; it defaults to ``name`` read back through the default
+    converter's camel-casing, which holds for every name these tests select
+    without a digit boundary. ``arguments`` are by Python name and already
+    coerced, the shape stamped under ``PYTHON_ARGUMENTS_ATTR``.
     """
     return SimpleNamespace(
         name=name,
@@ -180,8 +185,16 @@ def _sel(
         directives=directives or {},
         arguments=arguments or {},
         selections=selections or [],
-        **{PYTHON_ARGUMENTS_ATTR: arguments or {}},
+        **{
+            PYTHON_NAME_ATTR: python_name if python_name is not None else snake_case(name),
+            PYTHON_ARGUMENTS_ATTR: arguments or {},
+        },
     )
+
+
+def _global_id() -> SimpleNamespace:
+    """A selection of a Relay type's GlobalID: the field ``relay.Node`` declares as ``_id``."""
+    return _sel("id", python_name=_RELAY_ID_PYTHON_NAME)
 
 
 def _as_partial_resolve_info(stand_in: object) -> GraphQLResolveInfo:
@@ -534,7 +547,7 @@ def test_plan_relay_id_projects_the_id_column_meta_fields_does_not_name(shape: s
         )
         make_django_type("RelayIdColumnType", model, fields, namespace_extra=namespace)
         finalize_django_types()
-        plan = plan_optimizations([_sel("id")], model)
+        plan = plan_optimizations([_global_id()], model)
     finally:
         registry.clear()
 
@@ -563,7 +576,10 @@ def test_plan_relay_id_of_a_reverse_key_child_projects_its_node_id_column() -> N
             meta_extra={"relation_shapes": {"printings_2": "list"}},
         )
         finalize_django_types()
-        plan = plan_optimizations([_sel("printings2", selections=[_sel("id")])], Publisher)
+        plan = plan_optimizations(
+            [_sel("printings2", selections=[_global_id()], python_name="printings_2")],
+            Publisher,
+        )
     finally:
         registry.clear()
 
@@ -612,7 +628,7 @@ def test_plan_relay_id_no_column_holds_resolves_through_the_field_map(
     try:
         make_django_type("NoColumnIdType", Publisher, ("name",), namespace_extra=namespace)
         finalize_django_types()
-        plan = plan_optimizations([_sel("id")], Publisher)
+        plan = plan_optimizations([_global_id()], Publisher)
     finally:
         registry.clear()
 
@@ -646,7 +662,7 @@ def test_plan_relay_id_projects_attname_when_pk_is_relation() -> None:
         assert registry.get(PatronProfile) is PatronProfileNode
 
         finalize_django_types()
-        plan = plan_optimizations([_sel("id")], PatronProfile)
+        plan = plan_optimizations([_global_id()], PatronProfile)
 
         assert "patron_id" in plan.only_fields
     finally:
@@ -847,276 +863,11 @@ def test_selected_scalar_names_returns_none_without_model() -> None:
     assert _selected_scalar_names([_sel("id")], None) is None
 
 
-def test_plan_converts_camel_case_to_snake_case() -> None:
-    """Strawberry's camelCase names are converted back to snake_case for lookup."""
-    # Entry has "item" and "property" as FKs. Strawberry would expose
-    # them as "item" and "property" (already snake-compatible), but
-    # the walker converts via snake_case regardless.
+def test_plan_resolves_selections_by_their_published_python_name() -> None:
+    """A selection resolves to the Django field its stamped Python name names."""
+    # Entry has "item" and "property" as FKs, published from those Python names.
     plan = plan_optimizations([_sel("item"), _sel("property")], Entry)
     assert sorted(plan.select_related) == ["item", "property"]
-
-
-def test_plan_projects_digit_boundary_field_under_real_django_name() -> None:
-    """A ``<word>_<digit>`` field survives the lossy camel/snake round-trip.
-
-    Strawberry's default ``to_camel_case`` drops the ``_`` before a digit, so
-    ``apps/library/models.py::Edition``'s legacy number ``isbn_10`` is exposed in
-    the schema as ``isbn10`` and its second publishing house ``publisher_2`` as
-    ``publisher2``. ``snake_case`` cannot recover the dropped underscore
-    (``snake_case("isbn10") == "isbn10"``), so a lookup by the reversed selection
-    name misses the real ``"isbn_10"`` field-map key. Without the walker's
-    forward-resolution fallback the scalar would be silently dropped from
-    ``.only(...)`` (a per-row deferred-load N+1) and the relation left
-    entirely unplanned (a per-parent N+1) - exactly the failures the optimizer
-    exists to prevent. The walker resolves the selection name forward against
-    the real field names and projects / plans the REAL Django name.
-    """
-    registry.clear()
-    try:
-
-        class PublisherNode(DjangoType):
-            class Meta:
-                model = Publisher
-                fields = ("name",)
-
-        assert registry.get(Publisher) is PublisherNode
-
-        class EditionNode(DjangoType):
-            class Meta:
-                model = Edition
-                fields = (
-                    "isbn_13",
-                    "imprint",
-                    "isbn_10",
-                    "publisher_2",
-                )
-
-        finalize_django_types()
-
-        # Scalar: selected as the schema name ``isbn10`` -> projected as the
-        # real ``isbn_10`` column, not dropped from ``only_fields``.
-        scalar_plan = plan_optimizations(
-            [_sel("imprint"), _sel("isbn10")],
-            Edition,
-            source_type=EditionNode,
-        )
-        assert "isbn_10" in scalar_plan.only_fields
-        assert "isbn10" not in scalar_plan.only_fields
-
-        # Relation: forward FK selected as ``publisher2`` -> select_related on
-        # the real ``publisher_2`` name, not left unplanned.
-        relation_plan = plan_optimizations(
-            [_sel("publisher2", selections=[_sel("name")])],
-            Edition,
-            source_type=EditionNode,
-        )
-        assert relation_plan.select_related == ("publisher_2",)
-    finally:
-        registry.clear()
-
-
-def test_plan_uses_exact_graphql_names_for_explicitly_named_fields() -> None:
-    """Explicit GraphQL names resolve forward and remain distinct during selection merging.
-
-    ``apps/library/models.py::PatronProfile`` publishes ``address_2`` and
-    ``postal_code`` under two names that differ only by casing convention, so a
-    case-normalized match would collapse both selections onto one column.
-    """
-    registry.clear()
-    try:
-
-        class PatronProfileNode(DjangoType):
-            # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-            address_2: str = strawberry.field(name="secondaryAddress")  # pyright: ignore[reportAny]
-            # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-            postal_code: str = strawberry.field(name="secondary_address")  # pyright: ignore[reportAny]
-
-            class Meta:
-                model = PatronProfile
-                fields = ("address_2", "postal_code")
-
-        finalize_django_types()
-
-        plan = plan_optimizations(
-            [_sel("secondaryAddress"), _sel("secondary_address")],
-            PatronProfile,
-            source_type=PatronProfileNode,
-        )
-        assert plan.only_fields == ("address_2", "postal_code")
-    finally:
-        registry.clear()
-
-
-def test_name_resolution_defensively_skips_unusable_metadata() -> None:
-    """Malformed Strawberry/Django metadata is skipped while generated names still resolve."""
-    type_cls = SimpleNamespace(
-        __strawberry_definition__=SimpleNamespace(
-            fields=(SimpleNamespace(python_name=None),),
-        ),
-    )
-    # basedpyright: the malformed Strawberry definition is the hostile input under test;
-    # _graphql_names_by_python_name types the parameter as type[DjangoType] | None
-    assert _graphql_names_by_python_name(type_cls, None) == {}  # pyright: ignore[reportArgumentType]
-    nameless_field_map = {"broken": SimpleNamespace(name=None)}
-    # basedpyright: the nameless field metadata is the hostile input under test;
-    # _field_by_graphql_name types the parameter as Mapping[str, FieldMeta]
-    assert _field_by_graphql_name("missing", nameless_field_map) is None  # pyright: ignore[reportArgumentType]
-    assert _resolve_selection_target(
-        "line2Connection",
-        {},
-        {"line_2_connection": "line_2"},
-        type_cls=None,
-        info=None,
-    ) == ("connection", "line_2", None)
-
-
-def _converter_info(name_converter: NameConverter | None = None) -> GraphQLResolveInfo:
-    """Build a plan-time ``info`` over a schema of its own whose config carries ``name_converter``.
-
-    Every call builds a fresh config, so each info carries its own converter instance
-    (the default one when ``name_converter`` is ``None``).
-    """
-    config = StrawberryConfig()
-    if name_converter is not None:
-        config.name_converter = name_converter
-    return make_info(config=config)._raw_info
-
-
-def _declare_edition_node() -> tuple[type[Model], type[DjangoType]]:
-    """Declare and finalize a type over ``Edition``'s digit-boundary scalars.
-
-    ``apps/library/models.py::Edition`` keys on ``isbn_13`` and carries
-    ``isbn_10``; both publish as ``isbn13`` / ``isbn10``, which ``snake_case``
-    cannot reverse, so every selection of them takes the forward-name path.
-    """
-
-    class EditionNode(DjangoType):
-        class Meta:
-            model = Edition
-            fields = ("isbn_13", "isbn_10")
-
-    finalize_django_types()
-    return Edition, EditionNode
-
-
-def test_forward_name_maps_build_once_per_type_and_converter(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Plan builds that miss the reversal share one name table per type and converter.
-
-    Rebuilding the type's GraphQL-name table on every reverse miss made a
-    digit-boundary or mixed-case selection cost a full table build per plan.
-    The second plan under one converter builds nothing; another converter
-    builds its own table once; ``registry.clear()`` drops every table.
-    """
-    registry.clear()
-    try:
-        edition, edition_node = _declare_edition_node()
-        builds: list[type[DjangoType] | None] = []
-        real = walker_mod._graphql_names_by_python_name
-
-        def spy(type_cls: type[DjangoType] | None, info: object) -> dict[str, str]:
-            builds.append(type_cls)
-            return real(type_cls, info)
-
-        monkeypatch.setattr(walker_mod, "_graphql_names_by_python_name", spy)
-        info = _converter_info()
-        for _ in range(2):
-            plan = plan_optimizations(
-                [_sel("isbn13"), _sel("isbn10")],
-                edition,
-                info=info,
-                source_type=edition_node,
-            )
-            assert plan.only_fields == ("isbn_13", "isbn_10")
-        assert builds == [edition_node]
-
-        plan_optimizations(
-            [_sel("isbn13")],
-            edition,
-            info=_converter_info(),
-            source_type=edition_node,
-        )
-        assert builds == [edition_node, edition_node]
-
-        registry.clear()
-        assert walker_mod._forward_names_memo == {}
-    finally:
-        registry.clear()
-
-
-def test_forward_name_maps_answer_per_schema_converter() -> None:
-    """Each schema converter resolves the names it publishes, whichever planned first.
-
-    A converter that publishes ``isbn_13`` as ``bookNumber`` resolves
-    ``bookNumber`` and not the default ``isbn13``; the default converter,
-    planned first on the same type, keeps resolving ``isbn13`` and not
-    ``bookNumber``.
-    """
-
-    class BookNumberConverter(NameConverter):
-        @override
-        def get_graphql_name(self, obj: HasGraphQLName) -> str:
-            if obj.python_name == "isbn_13":
-                return "bookNumber"
-            return super().get_graphql_name(obj)
-
-    registry.clear()
-    try:
-        edition, edition_node = _declare_edition_node()
-        default_info = _converter_info()
-        custom_info = _converter_info(BookNumberConverter())
-
-        def only(name: str, info: GraphQLResolveInfo) -> Sequence[str]:
-            return plan_optimizations(
-                [_sel(name)],
-                edition,
-                info=info,
-                source_type=edition_node,
-            ).only_fields
-
-        assert only("isbn13", default_info) == ("isbn_13",)
-        assert only("bookNumber", custom_info) == ("isbn_13",)
-        assert only("isbn13", custom_info) == ()
-        assert only("bookNumber", default_info) == ()
-    finally:
-        registry.clear()
-
-
-def test_forward_name_maps_wait_for_finalization() -> None:
-    """A plan built before ``finalize_django_types`` leaves no names behind.
-
-    Before finalization the type has no Strawberry definition, so an explicit
-    ``strawberry.field(name=...)`` is not yet published and the selection
-    resolves nothing. After finalization the same selection resolves to its
-    column: nothing the early plan saw outlives it.
-    """
-    registry.clear()
-    try:
-
-        class PatronProfileNode(DjangoType):
-            # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-            address_2: str = strawberry.field(name="secondaryAddress")  # pyright: ignore[reportAny]
-
-            class Meta:
-                model = PatronProfile
-                fields = ("address_2",)
-
-        info = _converter_info()
-
-        def only() -> Sequence[str]:
-            return plan_optimizations(
-                [_sel("secondaryAddress")],
-                PatronProfile,
-                info=info,
-                source_type=PatronProfileNode,
-            ).only_fields
-
-        assert only() == ()
-        finalize_django_types()
-        assert only() == ("address_2",)
-    finally:
-        registry.clear()
 
 
 def test_plan_empty_selections_produces_empty_plan() -> None:
@@ -1592,7 +1343,7 @@ def _printing_edition_key_only_plan() -> OptimizationPlan:
 
     finalize_django_types()
     return plan_optimizations(
-        [_sel("edition", selections=[_sel("isbn13")])],
+        [_sel("edition", selections=[_sel("isbn13", python_name="isbn_13")])],
         Printing,
         source_type=PrintingType,
     )
@@ -1604,25 +1355,6 @@ def test_plan_elides_forward_fk_when_target_pk_is_not_named_id() -> None:
     ``apps/library/models.py::Edition`` is keyed by the text column ``isbn_13``,
     so a press run's forward key into it answers an ``{ isbn13 }``-only child
     selection from the source row's stored key column.
-    """
-    plan = _printing_edition_key_only_plan()
-    assert plan.select_related == ()
-    assert plan.only_fields == ("edition_id",)
-    assert plan.fk_id_elisions == ("PrintingType.edition@edition",)
-
-
-def test_plan_elides_forward_fk_when_target_pk_is_digit_boundary_name() -> None:
-    """B2: FK-id elision resolves a ``<word>_<digit>`` target pk via forward matching.
-
-    Reversing each pk selection with ``snake_case`` misses a digit-boundary pk
-    field-map key (``apps/library/models.py::Edition``'s pk ``isbn_13`` is
-    exposed as ``isbn13``, and ``snake_case("isbn13") == "isbn13"`` misses the
-    real ``"isbn_13"`` key). That miss would make ``_selected_scalar_names`` return
-    ``None`` (elision unsafe), so the walker would fall back to a redundant
-    ``select_related`` JOIN loading the whole related row rather than eliding to
-    the source FK column. The helper forward-resolves the real ``isbn_13`` name through the same
-    primitive as the main walk, so an ``{ isbn13 }``-only child selection elides
-    the JOIN.
     """
     plan = _printing_edition_key_only_plan()
     assert plan.select_related == ()
@@ -1678,7 +1410,7 @@ def test_plan_does_not_elide_when_target_type_has_custom_id_resolver() -> None:
 
         finalize_django_types()
         plan = plan_optimizations(
-            [_sel("publisher", selections=[_sel("id")])],
+            [_sel("publisher", selections=[_global_id()])],
             Edition,
             source_type=EditionType,
         )
@@ -3621,101 +3353,6 @@ def test_nested_connection_planned_as_windowed_prefetch() -> None:
         registry.clear()
 
 
-def test_plan_projects_digit_boundary_relation_connection_as_windowed_prefetch() -> None:
-    """A ``<word>_<digit>`` many-relation's connection survives the lossy round-trip.
-
-    A publisher reaches the press
-    runs it commissioned through ``apps/library/models.py::Printing.publisher_2``
-    (``related_name="printings_2"``), and Strawberry renders the synthesized
-    ``printings_2_connection`` sibling as ``printings2Connection``
-    (``to_camel_case`` drops the ``_`` before the digit). Reversing the selection
-    with ``snake_case`` gives ``"printings2_connection"``, which misses
-    the ``"printings_2_connection"`` ``relation_connections`` slot key.
-    ``_field_by_graphql_name`` cannot rescue it either: the connection GraphQL
-    name carries a ``Connection`` suffix the underlying relation name lacks
-    (``to_camel_case("printings_2") == "printings2" != "printings2Connection"``).
-    Without the forward resolver the nested connection would drop from the
-    plan entirely - no windowed ``Prefetch``, no
-    ``planned_resolver_keys`` entry - so every parent would run its own connection
-    query (a per-parent N+1). The walker forward-matches the synthesized slot
-    key and plans the batched window.
-    """
-    registry.clear()
-    try:
-
-        class PrintingNode(DjangoType):
-            class Meta:
-                model = Printing
-                fields = ("id", "run_size")
-                interfaces = (relay.Node,)
-
-        assert registry.get(Printing) is PrintingNode
-
-        class PublisherNode(DjangoType):
-            class Meta:
-                model = Publisher
-                fields = ("id", "name", "printings_2")
-                interfaces = (relay.Node,)
-
-        finalize_django_types()
-
-        # The synthesis records the slot under the Python attr name; Strawberry
-        # renders it in the schema as ``printings2Connection``.
-        definition = registry.get_definition(PublisherNode)
-        assert definition is not None
-        assert definition.relation_connections == {"printings_2_connection": "printings_2"}
-
-        plan = plan_optimizations(
-            [
-                _conn_sel(
-                    "printings2Connection",
-                    node_selections=[_sel("runSize")],
-                    arguments={"first": 3},
-                ),
-            ],
-            Publisher,
-            info=_fake_info(),
-            source_type=PublisherNode,
-        )
-        # Planned as a batched windowed Prefetch on the real relation accessor,
-        # not dropped from ``prefetch_related`` / ``planned_resolver_keys``.
-        prefetch = _prefetch_entry(plan)
-        assert prefetch.to_attr == "_dst_printings_2_connection"
-        assert prefetch.prefetch_through == "printings_2"
-        assert plan.planned_resolver_keys == (
-            "PublisherNode.printings_2@field.printings2Connection",
-        )
-
-        class ConnectionNameConverter(NameConverter):
-            @override
-            def get_graphql_name(self, obj: HasGraphQLName) -> str:
-                if obj.python_name == "printings_2_connection":
-                    return "numberedRuns"
-                return super().get_graphql_name(obj)
-
-        custom_info = _converter_info(ConnectionNameConverter())
-        custom_plan = plan_optimizations(
-            [
-                _conn_sel(
-                    "numberedRuns",
-                    node_selections=[_sel("runSize")],
-                    arguments={"first": 3},
-                ),
-            ],
-            Publisher,
-            info=custom_info,
-            source_type=PublisherNode,
-        )
-        custom_prefetch = _prefetch_entry(custom_plan)
-        assert custom_prefetch.to_attr == "_dst_printings_2_connection"
-        assert custom_prefetch.prefetch_through == "printings_2"
-        assert custom_plan.planned_resolver_keys == (
-            "PublisherNode.printings_2@field.numberedRuns",
-        )
-    finally:
-        registry.clear()
-
-
 @pytest.mark.parametrize(
     ("count_observer", "expected"),
     [
@@ -5509,13 +5146,19 @@ def test_every_operation_records_the_same_columns_and_relations(
 
 
 def _selected_field(name: str, selections: list[Selection] | None = None) -> SelectedField:
-    """A real Strawberry ``SelectedField``, the node the production extractor reads."""
-    return SelectedField(
+    """A real Strawberry ``SelectedField``, the node the production extractor reads.
+
+    Stamped with ``name`` as the Python name its field was published from, as
+    ``ast_to_converted_selections`` stamps it.
+    """
+    selected = SelectedField(
         name=name,
         directives={},
         arguments={},
         selections=selections or [],
     )
+    setattr(selected, PYTHON_NAME_ATTR, name)
+    return selected
 
 
 def _mutation_payload_selection(slot: str = "node") -> SelectedField:

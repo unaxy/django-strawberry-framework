@@ -1,13 +1,12 @@
 """Tests for the selection-traversal substrate (``optimizer/selections.py``).
 
-Fragment/directive AST helpers and connection-field-name converters are not
-request-observable. Cache-key and window behavior through a real document is
+Fragment/directive AST helpers and the converted-selection walks over hand-built
+selections are not request-observable. Cache-key and window behavior through a real document is
 ``examples/fakeshop/test_query/test_library_api.py``.
 """
 
 import copy
 from collections.abc import Iterable
-from dataclasses import fields
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Annotated
 
@@ -32,12 +31,9 @@ from django_strawberry_framework.optimizer._context import (
     end_execution_frame,
 )
 from django_strawberry_framework.optimizer.selections import (
-    _CONNECTION_FIELD_PYTHON_NAMES,
-    DEFAULT_CONNECTION_FIELD_NAMES,
-    ConnectionFieldNames,
+    PYTHON_NAME_ATTR,
     ast_child_selections,
     ast_to_converted_selections,
-    connection_field_names,
     connection_has_next_page_selected,
     connection_node_children,
     connection_total_count_selected,
@@ -52,9 +48,11 @@ from django_strawberry_framework.optimizer.selections import (
     resolve_unvisited_fragment,
     response_key,
     response_keys,
+    selection_python_name,
     should_include,
 )
 from django_strawberry_framework.utils._narrowing import is_list, read_attr, require
+from django_strawberry_framework.utils.strings import snake_case
 from tests._info import make_info
 
 if TYPE_CHECKING:
@@ -100,13 +98,20 @@ def _field(
     selections: list[SimpleNamespace] | None = None,
     directives: dict[str, object] | None = None,
     alias: str | None = None,
+    python_name: str | None = None,
 ) -> SimpleNamespace:
+    """A converted field selection stamped with the Python name its field was published from.
+
+    ``python_name`` defaults to ``name`` read back through the default converter's
+    camel-casing.
+    """
     return SimpleNamespace(
         name=name,
         alias=alias,
         directives=directives or {},
         arguments={},
         selections=selections or [],
+        **{PYTHON_NAME_ATTR: python_name if python_name is not None else snake_case(name)},
     )
 
 
@@ -334,10 +339,10 @@ def test_connection_node_children_empty_without_edges_node() -> None:
 def test_direct_child_selected_matches_direct_and_fragment_wrapped() -> None:
     """A direct ``totalCount`` and a fragment-wrapped one both match."""
     direct = [_field("edges"), _field("totalCount")]
-    assert direct_child_selected(direct, "totalCount") is True
+    assert direct_child_selected(direct, "total_count") is True
 
     wrapped = [_field("edges"), _fragment(selections=[_field("totalCount")])]
-    assert direct_child_selected(wrapped, "totalCount") is True
+    assert direct_child_selected(wrapped, "total_count") is True
 
 
 def test_direct_child_selected_honors_skip_include() -> None:
@@ -354,14 +359,14 @@ def test_direct_child_selected_honors_skip_include() -> None:
     assert (
         direct_child_selected(
             [_field("edges"), _field("totalCount", directives={"skip": {"if": True}})],
-            "totalCount",
+            "total_count",
         )
         is False
     )
     assert (
         direct_child_selected(
             [_field("totalCount", directives={"include": {"if": False}})],
-            "totalCount",
+            "total_count",
         )
         is False
     )
@@ -369,7 +374,7 @@ def test_direct_child_selected_honors_skip_include() -> None:
     assert (
         direct_child_selected(
             [_fragment(selections=[_field("totalCount")], directives={"skip": {"if": True}})],
-            "totalCount",
+            "total_count",
         )
         is False
     )
@@ -377,14 +382,14 @@ def test_direct_child_selected_honors_skip_include() -> None:
     assert (
         direct_child_selected(
             [_field("totalCount", directives={"skip": {"if": False}})],
-            "totalCount",
+            "total_count",
         )
         is True
     )
     assert (
         direct_child_selected(
             [_fragment(selections=[_field("totalCount")], directives={"include": {"if": True}})],
-            "totalCount",
+            "total_count",
         )
         is True
     )
@@ -401,7 +406,7 @@ def test_direct_child_selected_ignores_nested_field_selections() -> None:
         _field("edges", selections=[_field("node", selections=[_field("totalCount")])]),
         _field("pageInfo"),
     ]
-    assert direct_child_selected(roots, "totalCount") is False
+    assert direct_child_selected(roots, "total_count") is False
 
 
 def test_ast_to_converted_selections_memoized_per_execution() -> None:
@@ -492,14 +497,11 @@ def test_included_field_selections_materializes_one_shot_iterables() -> None:
     assert included_field_selections(tup) is tup
 
 
-def _count_observers(
-    selection: SimpleNamespace,
-    **kwargs: ConnectionFieldNames,
-) -> tuple[bool, bool]:
+def _count_observers(selection: SimpleNamespace) -> tuple[bool, bool]:
     """Return ``(totalCount selected, hasNextPage selected)`` for one connection selection."""
     return (
-        connection_total_count_selected(selection, **kwargs),
-        connection_has_next_page_selected(selection, **kwargs),
+        connection_total_count_selected(selection),
+        connection_has_next_page_selected(selection),
     )
 
 
@@ -566,108 +568,41 @@ def test_connection_count_observers_matrix() -> None:
     assert _count_observers(nested_only) == (False, False)
 
 
-# ---------------------------------------------------------------------------
-# connection_field_names -- the connection vocabulary comes from the SCHEMA
-# ---------------------------------------------------------------------------
+def test_connection_predicates_match_python_names_not_wire_names() -> None:
+    """Each connection walk matches the stamped Python name, whatever the wire name.
 
-
-def _info_with_converter(converter: object) -> SimpleNamespace:
-    """A plan-time-shaped ``info`` whose schema config carries ``converter``."""
-    return SimpleNamespace(
-        schema=SimpleNamespace(
-            _strawberry_schema=SimpleNamespace(
-                config=SimpleNamespace(name_converter=converter),
-            ),
-        ),
-    )
-
-
-def test_connection_field_names_default_converter_is_camel_case() -> None:
-    """Strawberry's default converter yields the camelCase vocabulary."""
-    names = connection_field_names(_info_with_converter(NameConverter()))
-    assert names == DEFAULT_CONNECTION_FIELD_NAMES
-    assert (names.page_info, names.total_count, names.has_next_page) == (
-        "pageInfo",
-        "totalCount",
-        "hasNextPage",
-    )
-
-
-def test_connection_field_names_follow_auto_camel_case_disabled() -> None:
-    """``auto_camel_case=False`` renders the snake_case field names, and we match those.
-
-    Matching the camelCase literals would make both count observers report "not
-    selected" on such a schema, so the planner would choose ``FetchMode.NONE`` -
-    ``hasNextPage`` would resolve ``False`` on a page that has a next page, and
-    ``totalCount`` would raise for an attribute the resolver never set.
+    A selection published under ``count`` / ``paging`` / ``more`` / ``links`` /
+    ``item`` from ``total_count`` / ``page_info`` / ``has_next_page`` / ``edges`` /
+    ``node`` is the connection's own field; one spelled ``totalCount`` on the wire
+    but published from another name is not.
     """
-    names = connection_field_names(_info_with_converter(NameConverter(auto_camel_case=False)))
-    assert (names.edges, names.node) == ("edges", "node")
-    assert (names.page_info, names.total_count, names.has_next_page) == (
-        "page_info",
-        "total_count",
-        "has_next_page",
-    )
-
-
-def test_connection_field_names_honor_a_custom_naming_config() -> None:
-    """A converter overriding ``apply_naming_config`` drives the vocabulary too."""
-
-    class _Shouty:
-        def apply_naming_config(self, name: str) -> str:
-            return name.upper()
-
-    names = connection_field_names(_info_with_converter(_Shouty()))
-    assert names.total_count == "TOTAL_COUNT"
-    assert names.has_next_page == "HAS_NEXT_PAGE"
-
-
-def test_connection_field_names_fall_back_without_a_reachable_converter() -> None:
-    """No schema config (or no ``apply_naming_config``) means Strawberry's defaults.
-
-    Covers the direct / test-caller shapes: a bare ``info`` stub, ``None``, and a
-    converter object that does not expose the naming hook.
-    """
-    assert connection_field_names(None) is DEFAULT_CONNECTION_FIELD_NAMES
-    assert connection_field_names(SimpleNamespace()) is DEFAULT_CONNECTION_FIELD_NAMES
-    assert (
-        connection_field_names(_info_with_converter(SimpleNamespace()))
-        is DEFAULT_CONNECTION_FIELD_NAMES
-    )
-
-
-def test_connection_field_python_names_matches_dataclass_fields() -> None:
-    """``_CONNECTION_FIELD_PYTHON_NAMES`` exactly matches the field attributes of ``ConnectionFieldNames``."""
-    expected = tuple(f.name for f in fields(ConnectionFieldNames))
-    assert expected == _CONNECTION_FIELD_PYTHON_NAMES
-    assert _CONNECTION_FIELD_PYTHON_NAMES == (
-        "edges",
-        "node",
-        "page_info",
-        "total_count",
-        "has_next_page",
-    )
-
-
-def test_connection_predicates_consume_the_resolved_names() -> None:
-    """Each selection walk matches the supplied vocabulary, not a camelCase literal."""
-    snake = connection_field_names(_info_with_converter(NameConverter(auto_camel_case=False)))
     connection = _field(
         "conn",
         selections=[
-            _field("total_count"),
-            _field("page_info", selections=[_field("has_next_page")]),
-            _field("edges", selections=[_field("node", selections=[_field("title")])]),
+            _field("count", python_name="total_count"),
+            _field(
+                "paging",
+                python_name="page_info",
+                selections=[_field("more", python_name="has_next_page")],
+            ),
+            _field(
+                "links",
+                python_name="edges",
+                selections=[
+                    _field("item", python_name="node", selections=[_field("title")]),
+                ],
+            ),
         ],
     )
-    assert _count_observers(connection, names=snake) == (True, True)
-    assert _count_observers(connection) == (False, False)
-    node_children = connection_node_children(
-        connection,
-        runtime_prefixes=(("conn",),),
-        names=snake,
-    )
+    assert _count_observers(connection) == (True, True)
+    node_children = connection_node_children(connection, runtime_prefixes=(("conn",),))
     assert [read_attr(child, "name") for child in node_children] == ["title"]
+    assert read_attr(node_children[0], "_optimizer_runtime_prefixes") == [
+        ("conn", "links", "item"),
+    ]
+
+    impostor = _field("conn", selections=[_field("totalCount", python_name="tally")])
+    assert _count_observers(impostor) == (False, False)
 
 
 def test_ast_to_converted_selections_converts_anonymous_and_named_fragments() -> None:
@@ -846,8 +781,11 @@ def test_converter_keys_arguments_by_python_name_under_a_union() -> None:
     )
     assert result.errors is None, result.errors
     (place,) = _CAPTURED.pop()
+    assert selection_python_name(place) == "place"
     typename, fragment = require(read_attr(place, "selections"), is_list)
     assert python_arguments(typename) == {}
+    assert selection_python_name(typename) is None
     (books,) = require(read_attr(fragment, "selections"), is_list)
+    assert selection_python_name(books) == "books"
     assert python_arguments(books) == {"first": 2}
     assert read_attr(books, "arguments") == {"take": 2}

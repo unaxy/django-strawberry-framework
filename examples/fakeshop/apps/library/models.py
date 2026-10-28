@@ -747,14 +747,16 @@ class Distributor(models.Model):
 
     Django keeps a mixed-case field name as written and names its column the
     same, and Strawberry publishes ``displayName`` unchanged, so reversing the
-    published name gives ``display_name``, which names no field. The reverse
-    relation ``consignmentItems`` carries the same shape on a relation.
+    published name gives ``display_name``, which is another field: the
+    snake_case column the distributor's legacy export fills. The reverse
+    relation ``consignmentItems`` carries the mixed-case shape on a relation.
     """
 
     # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
     pk: int | None
 
     displayName: _Text = models.TextField(unique=True)  # noqa: N815
+    display_name: _Text = models.TextField()
 
     # Reverse accessor Django adds at class creation, declared for the type checker.
     consignmentItems: RelatedManager[Consignment]  # noqa: N815

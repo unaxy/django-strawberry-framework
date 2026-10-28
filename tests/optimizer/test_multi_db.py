@@ -40,6 +40,7 @@ from apps.products.models import Category, Item
 from django.db.models import Prefetch
 
 from django_strawberry_framework import DjangoType, OptimizerHint
+from django_strawberry_framework.optimizer.selections import PYTHON_NAME_ATTR
 from django_strawberry_framework.optimizer.walker import plan_optimizations
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.utils._queryset_private import (
@@ -49,13 +50,14 @@ from django_strawberry_framework.utils._queryset_private import (
 
 
 def _sel(name: str, selections: list[SimpleNamespace] | None = None) -> SimpleNamespace:
-    """Build a synthetic ``SelectedField`` mirroring ``tests/optimizer/test_walker.py``."""
+    """Build a synthetic ``SelectedField`` published from the Python name ``name``."""
     return SimpleNamespace(
         name=name,
         alias=None,
         directives={},
         arguments={},
         selections=selections or [],
+        **{PYTHON_NAME_ATTR: name},
     )
 
 
