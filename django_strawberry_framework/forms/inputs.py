@@ -755,7 +755,7 @@ def require_readable_choice_keys(
 
     A relation id names its row by primary key. The decode reads that row through the
     target's visibility query and binds the value ``to_field_name`` reads off it
-    (``forms/resolvers.py::_to_form_key_value``); an omitted relation is rebound the same
+    (the field's own ``ModelChoiceField.prepare_value``); an omitted relation is rebound the same
     way from the stored row. The bound form then resolves that value with
     ``queryset.get(<to_field_name>=key)`` (a ``ModelMultipleChoiceField`` with
     ``filter(<to_field_name>__in=keys)``), so the key must name the one row the decode

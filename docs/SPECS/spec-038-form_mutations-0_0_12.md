@@ -1544,10 +1544,10 @@ write flavor rides.
        `model_to_dict` for scalars and for a FK / one-to-one whose `ModelChoiceField`
        resolves its choice by the column the relation stores (`to_field_name or "pk"`
        names `ForeignKey.target_field`, as every generated field does), so the stored
-       value is already the form key and no related row is read; `_to_form_key_value`
-       per member for a real forward M2M (the `to_field_name` value, default
+       value is already the form key and no related row is read; the form field's
+       `prepare_value` per member for a real forward M2M (the `to_field_name` value, default
        `obj.pk` — not `model_to_dict`'s list of related *instances*); and
-       `_to_form_key_value` of the related row for every other single
+       `prepare_value` of the related row for every other single
        `ModelChoiceField` FK / one-to-one: a `to_field_name` naming another column, or
        a `to_field_name`-**less** field over a `ForeignKey(to_field=…)`, which resolves
        by pk while the column stores the `to_field` value. Getting any of the three
