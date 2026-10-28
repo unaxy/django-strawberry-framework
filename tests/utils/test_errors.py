@@ -303,11 +303,16 @@ def test_coded_error_extensions_shape() -> None:
 
 
 def test_null_field_error_and_empty_validation_error_leaf_shapes() -> None:
-    null_leaf = null_field_error("categoryId")
+    default: models.TextField[str, str] = models.TextField()
+    null_leaf = null_field_error("categoryId", default)
     assert null_leaf.field == "categoryId"
     assert null_leaf.messages == ["This field cannot be null."]
     assert null_leaf.codes == [FIELD_ERROR_CODE_NULL]
     assert null_leaf.path == ["categoryId"]
+    custom: models.TextField[str, str] = models.TextField(
+        error_messages={"null": "A hold needs an item."},
+    )
+    assert null_field_error("itemId", custom).messages == ["A hold needs an item."]
 
     root_empty = empty_validation_error()
     assert root_empty.field == NON_FIELD_ERROR_KEY

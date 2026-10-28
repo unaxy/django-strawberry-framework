@@ -1747,9 +1747,9 @@ write flavor rides.
    the same input with (an explicit `null` on a non-nullable column or foreign key at
    decode, an omitted one after its failed INSERT, through the same column walk,
    `django_strawberry_framework/utils/write_values.py::unstorable_columns`), and the column's
-   Django `error_messages["null"]` as the message (the form is the message source of
-   truth, so a custom or translated message is sent as is, where the model flavor's
-   message is fixed). The check reads only the in-memory instance, so no query runs on a
+   Django `error_messages["null"]` as the message, the model flavor's message too
+   (`django_strawberry_framework/utils/errors.py::null_field_error`), so a custom or
+   translated message is sent as is. The check reads only the in-memory instance, so no query runs on a
    connection the `IntegrityError` / `DataError` left unusable. When no column explains the
    exception, an `IntegrityError` is the `"__all__"` envelope above, a `ValueError` or
    `DataError` propagates unchanged and a `ValidationError` is the consumer's own, mapped as above. The check runs on the instance after the

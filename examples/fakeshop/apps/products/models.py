@@ -291,6 +291,8 @@ class ItemHold(models.Model):
     default: the input field is optional, but a hold row cannot exist without one,
     so an omitted or explicit ``null`` item is the ``itemId`` field error rather
     than a silent skip past ``full_clean`` into an unattributed NOT NULL violation.
+    ``item`` declares its own ``error_messages["null"]``, the message every write
+    flavor sends for that error.
     """
 
     # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
@@ -302,6 +304,7 @@ class ItemHold(models.Model):
         related_name="holds",
         on_delete=models.PROTECT,
         blank=True,
+        error_messages={"null": "A hold needs an item."},
     )
     substitute: _NullFK[Item] = models.ForeignKey(
         Item,

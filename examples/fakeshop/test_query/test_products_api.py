@@ -507,7 +507,7 @@ _ITEM_HOLD_FLAVORS = [
     pytest.param(_CREATE_ITEM_HOLD_VIA_SERIALIZER, "createItemHoldViaSerializer", id="serializer"),
 ]
 _ITEM_HOLD_NULL_ITEM_ERRORS = [
-    {"field": "itemId", "messages": ["This field cannot be null."], "codes": ["null"]},
+    {"field": "itemId", "messages": ["A hold needs an item."], "codes": ["null"]},
 ]
 
 
@@ -527,7 +527,9 @@ def test_create_item_hold_null_item_is_a_field_error(
     The column has no default, ``full_clean`` skips a ``blank=True`` empty value, and
     the database's NOT NULL ``IntegrityError`` names no field; the client learns which
     field failed, with the same field, message and code on every flavor and both
-    spellings. The model flavor refuses an
+    spellings. The message is the column's own ``error_messages["null"]``
+    (``django_strawberry_framework/utils/errors.py::null_field_error``), a custom one
+    here. The model flavor refuses an
     explicit ``null`` at decode
     (``django_strawberry_framework/mutations/resolvers.py::_decode_single_relation_id``)
     and names an omitted one from the row its INSERT was refused on

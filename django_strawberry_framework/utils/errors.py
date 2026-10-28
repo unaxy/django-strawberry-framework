@@ -46,8 +46,8 @@ write flavors):
   cannot dump as a whole, applied by every write flavor before the save
   (``utils/write_values.py::unstorable_temporal_error`` on the model flavor);
 - ``null_field_error`` / ``empty_validation_error`` - the two shared leaves
-  for an explicit null on a non-nullable field and a validation failure
-  carrying no details, each one message + code pair;
+  for an explicit null on a non-nullable column (the column's own message) and a
+  validation failure carrying no details (one message + code pair);
 - ``FIELD_ERROR_CODE_*`` - the ``FieldError.codes`` vocabulary, a public wire
   contract named once here rather than left as the union of string literals at
   its raise sites;
@@ -99,7 +99,7 @@ if TYPE_CHECKING:
     from django.db.backends.base.base import BaseDatabaseWrapper
 
     from .inputs import InputFieldSpec
-    from .typing import ModelField
+    from .typing import ConcreteField, ModelField
 
     #: The recursive error key map: validator-side name (a model field, form field,
     #: serializer field or serializer ``source``) -> (the GraphQL input field name,
@@ -346,31 +346,31 @@ def empty_validation_error(path: str = "") -> FieldError:
     )
 
 
-def null_field_error(path: str) -> FieldError:
-    """Build the uniform "required field was sent as null" ``FieldError``.
+def null_field_error(path: str, column: ConcreteField) -> FieldError:
+    """Build the uniform "required field was sent as null" ``FieldError`` for ``column``.
 
-    Siblings :func:`relation_field_error`: one message + code pair for the
-    rejection the model flavor (``mutations/resolvers.py``) and the auth
-    mutations (``auth/mutations.py``) return when a non-nullable field arrives
-    explicitly null, and the model flavor's create returns for a ``blank=True,
-    null=False`` column with no default the input left out, after its INSERT fails
-    (``mutations/resolvers.py::_created_row_integrity_errors``). The ``ModelForm``
-    flavor answers a ``null=False`` column its form neither refuses nor resolves with
-    the same field, code ``null`` and path, the message being the column's Django
-    ``error_messages["null"]`` (``forms/resolvers.py::_column_null_errors``). The
-    serializer flavor hands the ``null`` to the serializer, whose DRF ``allow_null``
-    check refuses it in ``is_valid()`` with DRF's own message, code ``null``, when the
-    field is ``allow_null=False``; a ``blank=True, null=False`` column the serializer
-    lets through as ``None`` (a generated ``required=False`` field left out, a declared
-    ``allow_null=True`` field sent ``null``) answers this error after its failed save
-    (``rest_framework/resolvers.py::_attempted_row_integrity_errors``). Every caller
-    imports it from here, so the auth flavor does not depend on the model mutation
-    resolver.
+    Siblings :func:`relation_field_error`: the code ``null`` rejection the model flavor
+    (``mutations/resolvers.py``) returns when a non-nullable column arrives explicitly
+    null, and its create returns for a ``blank=True, null=False`` column with no default
+    the input left out, after its INSERT fails
+    (``mutations/resolvers.py::_created_row_integrity_errors``). The message is the
+    column's own Django ``error_messages["null"]``, so a custom or translated message is
+    sent as is: the message the ``ModelForm`` flavor answers a ``null=False`` column its
+    form neither refuses nor resolves with (``forms/resolvers.py::_column_null_errors``),
+    under the same field, code and path. The serializer flavor hands the ``null`` to the
+    serializer, whose DRF ``allow_null`` check refuses it in ``is_valid()`` with DRF's own
+    message, code ``null``, when the field is ``allow_null=False``; a ``blank=True,
+    null=False`` column the serializer lets through as ``None`` (a generated
+    ``required=False`` field left out, a declared ``allow_null=True`` field sent ``null``)
+    answers this error after its failed save
+    (``rest_framework/resolvers.py::_attempted_row_integrity_errors``). The register
+    write step answers an omitted ``password`` with the user model's ``password``
+    column (``auth/mutations.py::_register_write_step``).
 
     The M2M "send an empty list to clear it" rejection is a different
     condition with its own message and is deliberately NOT folded in here.
     """
-    return field_error(path, "This field cannot be null.", codes=FIELD_ERROR_CODE_NULL)
+    return field_error(path, column.error_messages["null"], codes=FIELD_ERROR_CODE_NULL)
 
 
 def relation_field_error(graphql_name: str) -> FieldError:

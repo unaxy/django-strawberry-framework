@@ -541,7 +541,7 @@ the model field has no `default`, is not `null=True`, and is not `blank=True`);
 partial inputs are all-optional `UNSET`. A provided upload is assigned through
 Django's normal model-field path before `full_clean()` / `save()`; an omitted upload on
 update leaves the current file untouched. An explicit `null` on a `null=False` file
-column is a field-keyed `FieldError` (`"This field cannot be null."`), **not** a silent
+column is a field-keyed `FieldError` (the column's `error_messages["null"]`), **not** a silent
 clear ([Decision 6](#decision-6--write-side-input-mapping-the-mutation-seam-becomes-upload)).
 The schema uses the package's standard `strawberry_config()` (required by `BigInt`);
 `Upload` itself needs no binding — Strawberry resolves it from its built-in default
@@ -773,7 +773,7 @@ non-required file column widens to `Upload | None` and may be **omitted**
 (`strawberry.UNSET` → the stored file is left unchanged). The widening does **not**
 make an explicit `null` a clear instruction. Because `FILE` rides the scalar handler,
 `_explicit_null_error` returns a [`FieldError`][glossary-fielderror-envelope]
-(`"This field cannot be null."`) for a provided `None` on a `null=False` file column —
+(the column's `error_messages["null"]`) for a provided `None` on a `null=False` file column —
 including the `blank=True, null=False` shape, which `full_clean()` alone would let slip
 to a `save()`-time `IntegrityError` — at decode, after the update's locate and
 authorization and before `full_clean()` and any write. A `null=True` file column
