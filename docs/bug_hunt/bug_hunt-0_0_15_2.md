@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 360 done, 213 to do.
+Progress: 361 done, 212 to do.
 
 ## Done
 
@@ -2029,6 +2029,9 @@ Progress: 360 done, 213 to do.
   its atomic, including repeated-cancellation cleanup. Active production masking snapshots managed and standalone
   result error lists before an awaiting result hook can publish late resolver errors. Tests:
   `examples/fakeshop/test_query/test_completion_lifecycle.py`, `tests/test_completion.py`, `tests/test_error_policy.py`
+- [x] 662. The state-folder retry and duplicated text reader belong to repository workspace/proof tooling,
+  with no supported package wire/configuration path or public contract row. Closed as tooling robustness outside
+  the package defect gate; no runtime fix is claimed (`scripts/workspace.py::_make_state_dir`).
 
 ## Outside review of the fixes
 
@@ -2201,10 +2204,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   stdout reader is gone, losing a 0 or 1 a pipeline reads (`check_trailing_commas.py --check`,
   `check_type_suppressions.py` reproduced). Move `workspace.py`'s `_ReaderGoneTolerant` / `_reader_gone_tolerant` /
   `_quiet_dead_sink` to a shared scripts module and install it at each entry. Found fixing 397
-- [ ] 662. (robustness) `scripts/workspace.py::_make_state_dir` re-raises EEXIST only when every level exists, so a
-  non-directory at a middle level of the state home loops instead of refusing (the shape 501 fixed in
-  `_make_flow_dir`); and `_read_text_if_present` exists in both `workspace.py` and `prove_failability.py`: keep one
-  owner. Found fixing 501
 - [ ] 663. (robustness) Other configuration slots read a lazy translation string one name per character, the shape 587
   closed for the set declarations: `utils/inputs.py::normalize_field_name_sequence` (model, form and serializer
   mutation `Meta.fields` / `Meta.exclude`: `gettext_lazy("name")` is `('n','a','m','e')`, a silent no-op as
