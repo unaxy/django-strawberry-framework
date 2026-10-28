@@ -159,7 +159,7 @@ from django_strawberry_framework.registry import registry
 from django_strawberry_framework.sets_mixins import collect_related_declarations
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.types.relay import SyncMisuseError, apply_interfaces
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils import truth, widgets
 from django_strawberry_framework.utils._narrowing import (
     call_method,
     class_dict,
@@ -188,7 +188,12 @@ from tests._idioms import (
     scrambled,
     str_subclass_name,
 )
-from tests._postgres_fields import FakeArrayField, patch_array_field, real_array_of
+from tests._postgres_fields import (
+    FakeArrayField,
+    FakeSplitArrayWidget,
+    patch_array_field,
+    real_array_of,
+)
 from tests._postgresql_stand_in import BINDING_MODES, postgresql_stand_in
 from tests._subprocess import run_in_fresh_process
 from tests.optimizer import _link_models
@@ -2071,6 +2076,156 @@ def test_a_prefixed_request_filters_on_the_flat_copy_its_prefixed_key_names() ->
 
     assert list(instance.qs.values_list("pk", flat=True)) == [pks["South"]]
     assert "desks__shelf__code" in instance._copied_filters
+
+
+def _split_code_branch_filter(monkeypatch: pytest.MonkeyPatch) -> type[FilterSet]:
+    """A ``Branch`` set copying a shelf ``code__in`` filter whose widget is a size-2 ``SplitArrayWidget``.
+
+    The widget sentinel points at the driver-free double before the set publishes, so
+    its copy keys are read off the widget the published copy builds.
+    """
+    monkeypatch.setattr(widgets, "_SPLIT_ARRAY_WIDGET", FakeSplitArrayWidget)
+
+    class SplitShelfChild(FilterSet):
+        arr = Filter(
+            field_name="code",
+            lookup_expr="in",
+            widget=FakeSplitArrayWidget(forms.TextInput(), size=2),
+        )
+
+        class Meta:
+            model = library_models.Shelf
+            fields = {"topic": ["exact"]}
+
+    class SplitBranch(FilterSet):
+        shelves = RelatedFilter(SplitShelfChild, field_name="shelves")
+
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"]}
+
+    _register_plain_types(library_models.Shelf)
+    SplitBranch.get_filters()
+    return SplitBranch
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("prefix", [None, "p"], ids=["unprefixed", "prefixed"])
+def test_a_split_array_copy_is_named_and_filters_by_its_per_index_keys(
+    prefix: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deferred copy whose widget is a ``SplitArrayWidget`` is named by ``<name>_0`` / ``_1``.
+
+    The widget reads one key per index, so those keys name the copy, which is bound
+    and filters; the bare name names nothing.
+    """
+    branch_filter = _split_code_branch_filter(monkeypatch)
+    assert _snapshot(branch_filter).copy_keys["shelves__arr_0"] == {"shelves__arr"}
+    assert _snapshot(branch_filter).copy_keys["shelves__arr_1"] == {"shelves__arr"}
+    assert "shelves__arr" not in _snapshot(branch_filter).copy_keys
+    alpha = library_models.Branch.objects.create(name="alpha")
+    library_models.Shelf.objects.create(branch=alpha, code="A-1", topic="maps")
+    beta = library_models.Branch.objects.create(name="beta")
+    library_models.Shelf.objects.create(branch=beta, code="B-1", topic="law")
+    library_models.Branch.objects.create(name="gamma")
+    lead = f"{prefix}-" if prefix else ""
+
+    instance = _pipeline_instance(
+        branch_filter,
+        data={f"{lead}shelves__arr_0": "A-1", f"{lead}shelves__arr_1": "Z-9"},
+        queryset=library_models.Branch.objects.order_by("name"),
+        prefix=prefix,
+    )
+
+    assert "shelves__arr" in instance._copied_filters
+    assert "shelves__arr" not in instance._unnamed_copies
+    assert list(instance.qs.values_list("name", flat=True)) == ["alpha"]
+
+
+@pytest.mark.django_db
+def test_a_supplied_split_array_leaf_is_read_by_its_prefixed_per_index_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A directly built prefixed set reads ``p-shelves__arr_0`` / ``_1`` as the leaf's keys.
+
+    Any per-index key present supplies the leaf; with none of them the leaf is absent.
+    """
+    branch_filter = _split_code_branch_filter(monkeypatch)
+
+    def build(data: dict[str, object]) -> FilterSet:
+        return branch_filter(
+            data=data,
+            queryset=library_models.Branch.objects.all(),
+            request=HttpRequest(),
+            prefix="p",
+        )
+
+    supplied = build({"p-shelves__arr_0": "A-1", "p-shelves__arr_1": "B-1"})
+    assert not supplied._leaf_absent("shelves__arr")
+    assert not build({"p-shelves__arr_1": "B-1"})._leaf_absent("shelves__arr")
+    assert build({"p-shelves__arr": "A-1"})._leaf_absent("shelves__arr")
+    assert build({})._leaf_absent("shelves__arr")
+
+
+@pytest.mark.django_db
+def test_a_leaf_whose_widget_reads_no_key_is_read_by_its_prefixed_name() -> None:
+    """A ``MultiWidget`` with no sub-widget reads no key, so its leaf is read under its name.
+
+    The bare prefixed key supplies the leaf; with none of it present the leaf is absent.
+    """
+
+    class EmptyShelfChild(FilterSet):
+        bare = Filter(field_name="code", widget=forms.MultiWidget([]))
+
+        class Meta:
+            model = library_models.Shelf
+            fields = {"topic": ["exact"]}
+
+    class EmptyBranch(FilterSet):
+        shelves = RelatedFilter(EmptyShelfChild, field_name="shelves")
+
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"]}
+
+    _register_plain_types(library_models.Shelf)
+    EmptyBranch.get_filters()
+
+    def build(data: dict[str, object]) -> FilterSet:
+        return EmptyBranch(
+            data=data,
+            queryset=library_models.Branch.objects.all(),
+            request=HttpRequest(),
+            prefix="p",
+        )
+
+    assert not build({"p-shelves__bare": "A-1"})._leaf_absent("shelves__bare")
+    assert build({})._leaf_absent("shelves__bare")
+
+
+def test_a_copys_form_keys_are_every_key_its_widget_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_widget_keys`` answers each key the widget reads, recursively, else the bare name.
+
+    A ``SplitArrayWidget`` reads one key per index; a ``MultiWidget`` nested in a
+    ``MultiWidget`` reads its own sub-widgets' keys; a ``MultiWidget`` with no
+    sub-widget reads none, so the copy is read under its name.
+    """
+    monkeypatch.setattr(widgets, "_SPLIT_ARRAY_WIDGET", FakeSplitArrayWidget)
+    split = CharFilter(field_name="code", widget=FakeSplitArrayWidget(forms.TextInput(), size=3))
+    nested = CharFilter(
+        field_name="code",
+        widget=forms.MultiWidget(
+            [forms.MultiWidget([forms.TextInput, forms.TextInput]), forms.TextInput],
+        ),
+    )
+    empty = CharFilter(field_name="code", widget=forms.MultiWidget([]))
+
+    assert sets_module._widget_keys(split, "arr") == ["arr_0", "arr_1", "arr_2"]
+    assert sets_module._widget_keys(nested, "pair") == ["pair_0_0", "pair_0_1", "pair_1"]
+    assert sets_module._widget_keys(empty, "none") == ["none"]
 
 
 _DEFERRED_EQUIVALENCE_INPUTS: dict[str, tuple[dict[str, object], list[str], int]] = {

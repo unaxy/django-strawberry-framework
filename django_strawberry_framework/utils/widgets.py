@@ -5,11 +5,14 @@ neither of which owns a widget:
 
 - ``multi_widget_keys`` - the keys a ``MultiWidget`` (django-filter's
   ``SuffixedMultiWidget`` included) reads for a field name; the filter side types and
-  binds a range filter's bounds through it and names a flat copy by it;
+  binds a range filter's bounds through it;
 - ``widget_keys`` / ``widget_entries`` - every key a widget reads, recursing into a
   ``MultiWidget``'s and PostgreSQL's ``SplitArrayWidget``'s sub-widgets, and the
   form-data entries binding one value under them; the form flavors bind each field's
-  value through them (``forms/resolvers.py::_bind_under_form_keys``).
+  value through them (``forms/resolvers.py::_bind_under_form_keys``), and the filter
+  side names a flat copy and tells a supplied leaf from an absent one through
+  ``widget_keys`` (``filters/sets.py::_widget_keys``,
+  ``filters/sets.py::FilterSet._leaf_absent``).
 """
 
 from __future__ import annotations

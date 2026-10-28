@@ -170,7 +170,7 @@ from django_strawberry_framework.utils.relations import (
     path_traverses_to_many,
     relation_kind,
 )
-from django_strawberry_framework.utils.widgets import multi_widget_keys
+from django_strawberry_framework.utils.widgets import widget_keys
 
 from .base import (
     _GLOBALID_RELATION_PK_ATTR,
@@ -1297,9 +1297,11 @@ class ExpansionSnapshot:
 def _widget_keys(filter_instance: Filter, name: str) -> list[str]:
     """Return the form-data keys the form field of ``filter_instance`` reads under ``name``.
 
-    A multi-widget reads its own keys (``utils/widgets.py::multi_widget_keys``: ``_0`` /
-    ``_1``, ``_min`` / ``_max``, or any suffix a consumer widget declares, ``__low``
-    included); any other widget reads ``name``. The field is the one the filter's own class
+    Every key the widget reads (``utils/widgets.py::widget_keys``): a multi-widget's own
+    keys (``_0`` / ``_1``, ``_min`` / ``_max``, or any suffix a consumer widget declares,
+    ``__low`` included), a ``SplitArrayWidget``'s ``_0`` .. ``_<size - 1>``, each
+    recursing into its sub-widgets; any other widget, or a multi-widget with no
+    sub-widget, reads ``name``. The field is the one the filter's own class
     builds, a consumer ``field`` override included, read on a copy so the class-level
     filter keeps nothing (``filters/base.py::copied_form_field``). A field that cannot be
     built here (a callable ``queryset`` resolves only with the request) reads ``name``, the
@@ -1309,7 +1311,7 @@ def _widget_keys(filter_instance: Filter, name: str) -> list[str]:
         widget = read_attr(copied_form_field(filter_instance), "widget")
     except Exception:  # noqa: BLE001 - consumer field code may raise anything; read the bare name
         return [name]
-    return multi_widget_keys(widget, name) or [name]
+    return widget_keys(widget, name) or [name]
 
 
 def _copy_form_keys(
@@ -6055,14 +6057,14 @@ class FilterSet(
         """Whether the request's data carries no key the form field of leaf ``name`` reads.
 
         Read as ``_named_flat_copies`` names a copy: the keys the field's widget
-        reads (``utils/widgets.py::multi_widget_keys``, else the name), under the
+        reads (``utils/widgets.py::widget_keys``, else the name), under the
         form prefix. A leaf with any of them present is supplied, whatever its
         value (``""`` included); one with none is absent, and its value is
         whatever its field cleans an absent key to.
         """
         form = self.form
         key = form.add_prefix(name)
-        keys = multi_widget_keys(read_attr(form.fields[name], "widget"), key) or [key]
+        keys = widget_keys(read_attr(form.fields[name], "widget"), key) or [key]
         return all(read not in form.data for read in keys)
 
     def _apply_flat_leaves(self, queryset: models.QuerySet[_M]) -> models.QuerySet[_M]:
