@@ -1921,7 +1921,8 @@ def save_or_field_errors(
       did not cover) returns ``integrity_errors()``: the ``"__all__"``
       ``integrity_error_field_errors`` envelope, unless the caller diagnoses the
       failure from in-memory state (the model create's
-      ``_created_row_integrity_errors``);
+      ``_created_row_integrity_errors``, the serializer write's
+      ``rest_framework/resolvers.py::_attempted_row_integrity_errors``);
     - a Django ``ValidationError`` raised by consumer save-time code (a
       ``Model.save()`` / ``ModelForm.save()`` override, a signal receiver, a
       ``perform_mutate``) returns ``validation_error_to_field_errors`` keyed

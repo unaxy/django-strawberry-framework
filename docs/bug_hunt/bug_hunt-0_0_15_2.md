@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 357 done, 211 to do.
+Progress: 358 done, 212 to do.
 
 ## Done
 
@@ -2008,6 +2008,15 @@ Progress: 357 done, 211 to do.
   row's pk matched nothing unless it equalled that row's `code`, and a code value matched some other row. A pk-target
   or source-side `to_field` link compiles byte-identically. spec-027 and the `filterset` glossary term say so. Tests:
   `tests/filters/test_base.py`
+- [x] 577. A `SerializerMutation` save refused over a `blank=True, null=False` column the input left out, or a declared
+  `allow_null` field set to `None`, is that column's field-keyed `null` error ("This field cannot be null."), as in the
+  model and `ModelForm` flavors: `rest_framework/resolvers.py::_write_witness` records this write's attempted
+  backing-model rows (a `pre_save` receiver scoped to the write's thread; a completed save drops out), and
+  `_attempted_row_integrity_errors` runs `utils/write_values.py::unstorable_columns` over the row whose save was
+  refused, falling back to the `"__all__"` `constraint` error. It answered that `"__all__"` error for every such cell.
+  The `""`-over-`ArrayField` cell stays with row 45. A fakeshop `createItemHoldViaSerializer` pins it live; README,
+  spec-039 and the `fielderror-envelope` / `djangomodelformmutation` glossary terms say so. Tests:
+  `tests/rest_framework/test_resolvers.py`, `examples/fakeshop/test_query/test_products_api.py`
 
 ## Outside review of the fixes
 
@@ -2064,16 +2073,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `_get_validation_exclusions` leaves it out of `full_clean`) answers the masked error at save (a raw `DataError` on
   an `ArrayField`, measured); `_is_unstorable_blank` needs `blank=True`, so no column that stores no empty string is
   named in this shape. Found fixing 541
-- [ ] 577. A `SerializerMutation` create that leaves out a `blank=True, null=False` column with no default (a
-  `ModelSerializer`'s generated field is `required=False` there) answers the `"__all__"` `constraint` error ("A
-  database constraint was violated.", the `IntegrityError` leaf) where docs/README.md says such a column is "that
-  column's field-keyed `null` error" and the model and `ModelForm` flavors answer it so (measured on an integer, an
-  integer-choice and an `ArrayField` column); a declared `allow_null=True` field over a `null=False` column sending
-  `null` answers the same `"__all__"` error, and an `allow_blank` `ChoiceField`'s `""` over an `ArrayField` a raw
-  `DataError`. The serializer flavor has no save-time diagnosis
-  (`rest_framework/resolvers.py::_guarded_serializer_write` maps only `IntegrityError` and Django `ValidationError`);
-  the GLOSSARY `FieldError` envelope scopes the `null` mapping to the model and `ModelForm` flavors, so README and
-  GLOSSARY disagree. Found fixing 542
 - [ ] 579. (robustness) A filter whose form field uses a `SplitArrayWidget` is still read under its bare name:
   `utils/widgets.py::multi_widget_keys` answers `None` for it, so the filter-side key spreading (`filters/inputs.py`,
   `filters/sets.py` copy keys) treats it as one key while the widget reads `<name>_0 ..`. Found fixing 553
@@ -2217,12 +2216,20 @@ tracker number are recorded there; open remainders and new defects are filed as 
   the leaves the form data names, and the sync `.qs` absent-leaf probe then derives the hop inside the sync boundary
   (spec-027: an async-only `get_queryset` never runs there). An omitted leaf raised before 562; a no-bound range joins
   it. Await the hops of every declared walking leaf whose filter acts on an absent value. Found verifying 562
+- [ ] 668. (robustness) The save-time `null` diagnosis (serializer `_attempted_row_integrity_errors`, model
+  `_created_row_integrity_errors`) reads every unstorable column of the refused row, so a consumer save with
+  `update_fields` excluding the `None` column, or a refused save the consumer swallows before a different
+  `IntegrityError` escapes, reports that column's `null` for another constraint; read `update_fields` from the
+  `pre_save` kwargs and skip columns outside it. Found verifying 577
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 669. CHANGELOG entry for item 577: a `SerializerMutation` save refused over a `blank=True, null=False` column the
+  input left out, or a declared `allow_null` field set to `None`, answers that column's field-keyed `null` error
+  instead of the `"__all__"` `constraint` error, as the model and `ModelForm` flavors do
 - [ ] 667. CHANGELOG entry for item 628: a many-to-many filter leaf (forward or reverse, raw key or Relay GlobalID)
   whose through model's foreign key onto the target has a non-pk `to_field` matches by the target's primary key, as
   its wire type says; it matched the `to_field` column and returned the wrong rows

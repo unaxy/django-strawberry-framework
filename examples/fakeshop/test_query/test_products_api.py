@@ -495,9 +495,16 @@ _CREATE_ITEM_HOLD_VIA_FORM = (
 )
 
 
+_CREATE_ITEM_HOLD_VIA_SERIALIZER = (
+    "mutation($d: ItemHoldSerializerInput!) { createItemHoldViaSerializer(data: $d) { "
+    "node { reason } errors { field messages codes } } }"
+)
+
+
 _ITEM_HOLD_FLAVORS = [
     pytest.param(_CREATE_ITEM_HOLD, "createItemHold", id="model"),
     pytest.param(_CREATE_ITEM_HOLD_VIA_FORM, "createItemHoldViaForm", id="modelform"),
+    pytest.param(_CREATE_ITEM_HOLD_VIA_SERIALIZER, "createItemHoldViaSerializer", id="serializer"),
 ]
 _ITEM_HOLD_NULL_ITEM_ERRORS = [
     {"field": "itemId", "messages": ["This field cannot be null."], "codes": ["null"]},
@@ -519,7 +526,7 @@ def test_create_item_hold_null_item_is_a_field_error(
 
     The column has no default, ``full_clean`` skips a ``blank=True`` empty value, and
     the database's NOT NULL ``IntegrityError`` names no field; the client learns which
-    field failed, with the same field, message and code on both flavors and both
+    field failed, with the same field, message and code on every flavor and both
     spellings. The model flavor refuses an
     explicit ``null`` at decode
     (``django_strawberry_framework/mutations/resolvers.py::_decode_single_relation_id``)
@@ -527,7 +534,11 @@ def test_create_item_hold_null_item_is_a_field_error(
     (``django_strawberry_framework/mutations/resolvers.py::_created_row_integrity_errors``);
     the ``ModelForm``'s optional ``ModelChoiceField`` cleans either to ``None``, and the
     refused save is diagnosed by
-    ``django_strawberry_framework/forms/resolvers.py::_unstorable_cleaned_fields``.
+    ``django_strawberry_framework/forms/resolvers.py::_unstorable_cleaned_fields``; the
+    serializer's ``item`` (generated ``required=False``, ``allow_null`` through
+    ``extra_kwargs``) validates either, and the refused save is diagnosed from the row the
+    write witness saw attempted
+    (``django_strawberry_framework/rest_framework/resolvers.py::_attempted_row_integrity_errors``).
     No row is written.
     """
     create_users(1)
@@ -5695,7 +5706,7 @@ async def test_create_item_hold_omitted_item_is_a_field_error_over_graphql_async
     """An omitted ``itemId`` over ``/graphql-async/`` is the ``itemId`` ``null`` error, no row.
 
     The async view runs the same sync write pipeline behind one ``sync_to_async``
-    boundary, so the refused INSERT is diagnosed from the in-memory row on both flavors
+    boundary, so the refused INSERT is diagnosed from the in-memory row on every flavor
     exactly as over ``/graphql/``.
     """
     await sync_to_async(create_users)(1)
