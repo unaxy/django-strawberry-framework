@@ -45,6 +45,12 @@ from typing_extensions import override
 
 from django_strawberry_framework.mutations.inputs import NON_FIELD_ERROR_KEY, FieldError
 from django_strawberry_framework.utils import errors as errors_module
+from django_strawberry_framework.utils._narrowing import (
+    call_method,
+    is_list_or_tuple,
+    is_tuple,
+    require,
+)
 from django_strawberry_framework.utils.errors import (
     FIELD_ERROR_CODE_CONFLICT,
     FIELD_ERROR_CODE_CONSTRAINT,
@@ -73,7 +79,7 @@ from django_strawberry_framework.utils.errors import (
     validation_error_to_field_errors,
 )
 from django_strawberry_framework.utils.inputs import RELATION_SINGLE, SCALAR, InputFieldSpec
-from tests._postgres_fields import FakeArrayField, patch_array_field
+from tests._postgres_fields import FakeArrayField, patch_array_field, real_array_of
 from tests._postgresql_stand_in import (
     BINDING_MODES,
     ClientCursor,
@@ -1067,13 +1073,6 @@ def test_unstorable_temporal_holds_a_date_or_naive_datetime_to_the_datetime_djan
         assert unstorable_temporal(column, value, lambda: alias) is refused
 
 
-def _real_array_of(base_field: models.Field[object, object]) -> models.Field[object, object]:
-    pytest.importorskip("django.contrib.postgres.fields")
-    from django.contrib.postgres.fields import ArrayField  # noqa: PLC0415 - after the skip guard
-
-    return ArrayField(base_field)
-
-
 @pytest.mark.pg
 @pytest.mark.parametrize(
     (
@@ -1100,28 +1099,28 @@ def _real_array_of(base_field: models.Field[object, object]) -> models.Field[obj
         ),
         pytest.param(
             {},
-            lambda: _real_array_of(models.DateTimeField()),
+            lambda: real_array_of(models.DateTimeField()),
             [_IN_RANGE, _PAST_YEAR_9999],
             True,
             id="array-element",
         ),
         pytest.param(
             {},
-            lambda: _real_array_of(models.DateTimeField()),
+            lambda: real_array_of(models.DateTimeField()),
             [_IN_RANGE, None],
             False,
             id="array-in-range",
         ),
         pytest.param(
             {},
-            lambda: _real_array_of(models.TimeField()),
+            lambda: real_array_of(models.TimeField()),
             [datetime.time(9, 30, tzinfo=_OFFSET_16), None],
             True,
             id="array-time-offset-16-00",
         ),
         pytest.param(
             {},
-            lambda: _real_array_of(models.DateTimeField()),
+            lambda: real_array_of(models.DateTimeField()),
             [datetime.datetime(2021, 6, 15, tzinfo=_OFFSET_HALF_SECOND)],
             True,
             id="array-datetime-offset-half-second",
@@ -1278,6 +1277,32 @@ def test_refuses_utc_offset_reads_the_backend_and_the_text_binding(
     assert answer is refused
 
 
+@pytest.mark.parametrize("mode", list(BINDING_MODES))
+@pytest.mark.parametrize("is_time", [False, True], ids=["datetime", "time"])
+@pytest.mark.parametrize("offset", list(_POSTGRESQL_OFFSETS))
+@pytest.mark.parametrize("nested", [False, True], ids=["list", "nested-tuple"])
+def test_refuses_utc_offset_holds_a_list_parameter_to_the_text_rule(
+    mode: str,
+    is_time: bool,  # noqa: FBT001
+    offset: str,
+    nested: bool,  # noqa: FBT001
+) -> None:
+    """Each element of a list parameter is held to the text rule in every binding mode.
+
+    An ``ArrayField`` lookup's ``gt`` or ``in`` right-hand side binds the list as one
+    parameter, whose elements psycopg binds as text whatever the cursor, at any nesting
+    depth: a datetime or time is refused for an offset of 16:00 or more either way, or
+    one with a fraction of a second, even where the same value bound alone on the server
+    passes.
+    """
+    driver, cursor_factory, _ = BINDING_MODES[mode]
+    zone, refused_as_text, _ = _POSTGRESQL_OFFSETS[offset]
+    elements: list[object] = [None, _leaf_value(zone, is_time=is_time)]
+    param: object = (tuple(elements),) if nested else elements
+    with postgresql_stand_in(driver, cursor_factory) as alias:
+        assert refuses_utc_offset(connections[alias], ["label", param]) is refused_as_text
+
+
 @pytest.mark.parametrize(
     ("column", "value"),
     [
@@ -1415,6 +1440,58 @@ def test_unstorable_temporal_holds_array_elements_to_the_text_rule_on_server_sid
     driver, cursor_factory, _ = BINDING_MODES["psycopg3-server"]
     with postgresql_stand_in(driver, cursor_factory) as alias:
         assert unstorable_temporal(column, value, lambda: alias) is refused
+
+
+@pytest.mark.pg
+@pytest.mark.django_db
+@pytest.mark.parametrize("server_side_binding", [False, True], ids=["client-side", "server-side"])
+@pytest.mark.parametrize("lookup", ["contains", "gt"])
+@pytest.mark.parametrize("offset", ["15-59-59", "16-00", "half-second"])
+def test_refuses_utc_offset_answers_postgresql_for_array_lookups(
+    server_side_binding: bool,  # noqa: FBT001
+    lookup: str,
+    offset: str,
+) -> None:
+    """On the real server an array lookup's parameters are refused as the rule answers.
+
+    A datetime array's ``contains`` (``@> ARRAY[%s]::timestamptz[]``, each element its own
+    parameter) and ``gt`` (the list bound as one parameter) run over a temporary table on
+    a second alias connecting with psycopg 3's ``server_side_binding`` off and on; the
+    server's answer and ``refuses_utc_offset`` over the compiled parameters agree. Bound on
+    the server only the list parameter's elements are refused, as text.
+    """
+
+    class ArrayOffsetProbe(models.Model):
+        stamps = real_array_of(models.DateTimeField())
+
+        class Meta:
+            managed = False
+            app_label = "test_array_offset_probe"
+            db_table = "array_offset_probe"
+
+    zone, refused_as_text, _ = _POSTGRESQL_OFFSETS[offset]
+    expected = refused_as_text and (lookup == "gt" or not server_side_binding)
+    value = [_leaf_value(zone, is_time=False)]
+    with _postgresql_alias(server_side_binding=server_side_binding) as alias:
+        connection = connections[alias]
+        queryset = ArrayOffsetProbe.objects.using(alias).filter(**{f"stamps__{lookup}": value})
+        compiler = call_method(queryset.query, "get_compiler", alias)
+        compiled = require(call_method(compiler, "compile", queryset.query.where), is_tuple)
+        params = require(compiled[1], is_list_or_tuple)
+        with transaction.atomic(using=alias), connection.cursor() as cursor:
+            cursor.execute(
+                "CREATE TEMP TABLE array_offset_probe (id serial PRIMARY KEY, stamps timestamptz[])",
+            )
+            try:
+                with transaction.atomic(using=alias):
+                    _ = list(queryset)
+            except DataError:
+                refused = True
+            else:
+                refused = False
+            transaction.set_rollback(True, using=alias)
+        assert refused is expected
+        assert refuses_utc_offset(connection, params) is expected
 
 
 class _DriverDataError(Exception):
@@ -1628,9 +1705,9 @@ def test_unstorable_temporal_refuses_a_time_array_psycopg_cannot_dump(
     """
     pytest.importorskip("psycopg")
     psycopg = importlib.import_module("psycopg")
-    column = _real_array_of(models.TimeField())
+    column = real_array_of(models.TimeField())
     if nested:
-        column = _real_array_of(column)
+        column = real_array_of(column)
     with postgresql_stand_in(psycopg, None) as alias:
         assert unstorable_temporal(column, value, lambda: alias) is refused
 
@@ -1664,13 +1741,13 @@ def _postgresql_refuses_array(
     ("column", "value", "refused"),
     [
         pytest.param(
-            lambda: _real_array_of(models.DateTimeField()),
+            lambda: real_array_of(models.DateTimeField()),
             [_leaf_value(_offset(16), is_time=False)],
             True,
             id="datetime-element",
         ),
         pytest.param(
-            lambda: _real_array_of(models.TimeField()),
+            lambda: real_array_of(models.TimeField()),
             [_leaf_value(_offset(1, 0, 0, 500_000), is_time=True)],
             True,
             id="time-element-half-second",

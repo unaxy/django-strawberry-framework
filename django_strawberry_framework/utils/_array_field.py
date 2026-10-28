@@ -9,9 +9,10 @@ that should fail rather than silently degrade.
 ``array_element_field`` is every subsystem's ``ArrayField`` test: the read-side
 converter (``types/converters.py::scalar_route``), the write inputs and their decode
 (``forms/inputs.py``, ``rest_framework/serializer_converter.py``), the filter form
-fields (``filters/base.py``) and the write-side storability rule
-(``utils/errors.py::unstorable_temporal``) all ask it, so a column is an array to every
-one of them or to none.
+fields (``filters/base.py``), the filter bind ask (``filters/sets.py``) and the
+write-side storability rule (``utils/errors.py::unstorable_temporal``) all ask it, so a
+column is an array to every one of them or to none. ``array_leaf_field`` walks it
+through nested arrays to the column the innermost elements are stored through.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ if TYPE_CHECKING:
 
     from .typing import ConcreteField
 
-__all__ = ("ARRAY_FIELD_CLS", "array_element_field")
+__all__ = ("ARRAY_FIELD_CLS", "array_element_field", "array_leaf_field")
 
 #: ``django.contrib.postgres.fields.ArrayField``, or ``None`` without a PostgreSQL
 #: driver. The cast names the class the by-name lookup returns.
@@ -49,3 +50,16 @@ def array_element_field(field: object) -> ConcreteField | None:
     if ARRAY_FIELD_CLS is not None and truth.is_instance(field, ARRAY_FIELD_CLS):
         return field.base_field
     return None
+
+
+def array_leaf_field(field: object) -> tuple[object, int]:
+    """Return the column an ``ArrayField``'s innermost elements are stored through, and its depth.
+
+    The depth counts the ``ArrayField`` levels walked, each read through
+    ``array_element_field``; ``(field, 0)`` for a column that is no ``ArrayField``.
+    """
+    depth = 0
+    while (element := array_element_field(field)) is not None:
+        field = element
+        depth += 1
+    return field, depth

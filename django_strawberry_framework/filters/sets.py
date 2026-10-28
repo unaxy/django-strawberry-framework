@@ -96,6 +96,7 @@ from django_strawberry_framework.sets_mixins import (
 )
 from django_strawberry_framework.types.relay import implements_relay_node
 from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._array_field import array_leaf_field
 from django_strawberry_framework.utils._narrowing import (
     call_method,
     dict_get,
@@ -116,6 +117,7 @@ from django_strawberry_framework.utils.errors import (
     FILTER_INVALID_ERROR_CODE,
     UNBINDABLE_TEMPORAL_MESSAGE,
     coded_error_extensions,
+    psycopg_refuses_list_parameter,
     refuses_utc_offset,
     unstorable_text,
 )
@@ -2327,7 +2329,9 @@ def _unbindable_predicate(
     bound or a duration's microsecond count, so every lookup binding a value is read
     (``_bound_value_lookups``). The compiled parameters are last held to the one rule no
     Django call answers, a UTC offset PostgreSQL refuses
-    (``utils/errors.py::refuses_utc_offset``). Building the predicate warns as the query
+    (``utils/errors.py::refuses_utc_offset``), and each list parameter to psycopg's own
+    dump of it (``utils/errors.py::psycopg_refuses_list_parameter``: one element dumper
+    for the whole list refuses a naive time beside an aware one). Building the predicate warns as the query
     does (Django's naive-datetime ``RuntimeWarning``): the warning state is never touched.
     """
     base = queryset.all()
@@ -2367,7 +2371,11 @@ def _unbindable_predicate(
             for param in require(bound[1], is_list_or_tuple)
         ):
             return True
-    return refuses_utc_offset(connection, require(compiled[1], is_list_or_tuple))
+    params = require(compiled[1], is_list_or_tuple)
+    return refuses_utc_offset(connection, params) or psycopg_refuses_list_parameter(
+        connection,
+        params,
+    )
 
 
 def _bound_value_lookups(query: Query) -> Iterator[tuple[model_lookups.Lookup[object], Query]]:
@@ -2403,16 +2411,20 @@ def _unbindable_temporal_errors(filterset_instance: FilterSet) -> dict[str, obje
 
     Each cleaned value a filter applies to a temporal column (a ``DateField``,
     ``DateTimeField``, ``TimeField`` or ``DurationField`` its ``field_name`` reaches,
-    ``_leaf_column``, a queryset annotation's output field included) is asked of Django
+    ``_leaf_column``, a queryset annotation's output field included, or an ``ArrayField``
+    whose innermost elements are stored through one,
+    ``utils/_array_field.py::array_leaf_field``) is asked of Django
     (``_unbindable_predicate``): the filter's own ``filter`` builds the predicate and it is
     compiled on the database the filterset's queryset runs on (``queryset.db``, resolved
     only for a temporal leaf). A transform of a temporal column (``year``, ``month``)
     binds integers, and a duration binds its microsecond count on a backend without a
-    native interval, so the integers those leaves bind are asked too. Every filter family reaches
-    it whatever value kind its form cleans to: a datetime on a ``DateField`` or through a
-    ``date`` transform, a date on a ``DateTimeField``, a ``year`` / ``iso_year`` bound or
-    ``in`` member, a duration, each member of a list and each bound of a range, as the
-    filter applies them. Only a ``filter`` django-filter or this package
+    native interval, so the integers those leaves bind are asked too. Every filter family
+    reaches it whatever value kind its form cleans to: a datetime on a ``DateField`` or
+    through a ``date`` transform, a date on a ``DateTimeField``, a ``year`` / ``iso_year``
+    bound or ``in`` member, a duration, each member of a list and each bound of a range,
+    as the filter applies them, and on an ``ArrayField`` each element a whole-array lookup
+    binds, the element an index or slice reaches and an array's length (an integer held
+    to its range). Only a ``filter`` django-filter or this package
     ships is run (``_runs_shipped_filter``): a ``filter`` of the filter's own (a
     ``method=`` included, ``_own_filter``) or a class-level ``filter`` override is
     consumer code, which owns what its value means and is not asked. A projected copy is
@@ -2430,10 +2442,8 @@ def _unbindable_temporal_errors(filterset_instance: FilterSet) -> dict[str, obje
         filter_instance = copies.get(name)
         if value is None or filter_instance is None or _own_filter(filter_instance) is not None:
             continue
-        if not isinstance(
-            _leaf_column(model, annotations, filter_instance),
-            models.DateField | models.TimeField | models.DurationField,
-        ):
+        column, _depth = array_leaf_field(_leaf_column(model, annotations, filter_instance))
+        if not isinstance(column, models.DateField | models.TimeField | models.DurationField):
             continue
         terminal = _projected_terminal(filter_instance)
         if not _runs_shipped_filter(terminal):
