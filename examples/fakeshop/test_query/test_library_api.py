@@ -76,6 +76,7 @@ from graphql_client import assert_graphql_success as _assert_graphql_success
 from graphql_client import graphql_payload as _graphql_payload
 from graphql_client import post_graphql as _post_graphql
 from strawberry import relay
+from strawberry.schema.name_converter import HasGraphQLName, NameConverter
 from strawberry.types import Info
 from typing_extensions import override
 
@@ -4426,6 +4427,72 @@ async def test_async_publisher_relay_id_is_read_from_the_loaded_house_code(
     payload = await _post_async_shipped(_ASYNC_PUBLISHER_ID_DOCUMENTS[position])
 
     assert payload == {"data": expected_by_position[position]}
+    assert len(publisher_sql) == 1, publisher_sql
+    assert '"house_code"' in publisher_sql[0], publisher_sql
+
+
+class _RenameRelayId(NameConverter):
+    """Publishes every field Strawberry declares as ``id`` under ``identity``.
+
+    ``relay.Node``'s GlobalID field is one, so every Relay type's id reads ``identity``.
+    """
+
+    @override
+    def get_graphql_name(self, obj: HasGraphQLName) -> str:
+        if obj.graphql_name == "id":
+            return "identity"
+        return super().get_graphql_name(obj)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("position", list(_ASYNC_PUBLISHER_ID_DOCUMENTS))
+async def test_async_publisher_relay_id_renamed_by_a_name_converter_reads_the_loaded_house_code(
+    record_compiled_sql: RecordCompiledSql,
+    position: str,
+) -> None:
+    """A GlobalID the schema publishes as ``identity`` loads ``house_code`` with its row.
+
+    The project's composed ``Query`` under a converter renaming the field ``relay.Node``
+    declares, on the async view: the walker recognizes the renamed field, so the page or
+    the join loads the ``NodeID`` column and no lazy read runs inside the event loop.
+    """
+    optimizer = DjangoOptimizerExtension()
+    renamed = DjangoSchema(
+        query=config_schema.Query,
+        config=strawberry_config(name_converter=_RenameRelayId()),
+        extensions=[lambda: optimizer],
+    )
+    gollancz: JSONObject = {
+        "identity": global_id_for(library_schema.PublisherType, "HOUSE-G"),
+        "name": "Gollancz",
+    }
+    orbit: JSONObject = {
+        "identity": global_id_for(library_schema.PublisherType, "HOUSE-O"),
+        "name": "Orbit",
+    }
+    expected_by_position: dict[str, JSONObject] = {
+        "root-page": {
+            "allLibraryPublishersConnection": {
+                "edges": [{"node": gollancz}, {"node": orbit}],
+            },
+        },
+        "edition-publisher": {"allLibraryEditions": [{"publisher": gollancz}]},
+    }
+    await sync_to_async(_seed_house_codes)()
+    publisher_sql = record_compiled_sql('"library_publisher"')
+    _CURRENT["schema"] = renamed
+    try:
+        with override_settings(ROOT_URLCONF=__name__):
+            result = await AsyncTestClient().query(
+                _ASYNC_PUBLISHER_ID_DOCUMENTS[position].replace(" id ", " identity "),
+                assert_no_errors=False,
+                url="/graphql-async-test/",
+            )
+    finally:
+        _CURRENT["schema"] = None
+
+    assert result.response.status_code == 200
+    assert response_json(result.response) == {"data": expected_by_position[position]}
     assert len(publisher_sql) == 1, publisher_sql
     assert '"house_code"' in publisher_sql[0], publisher_sql
 

@@ -174,7 +174,6 @@ from .base import (
     copied_declared_filter,
     copied_form_field,
     membership_in_filter_class,
-    unkept_form_field,
 )
 from .inputs import (
     LOGIC_OPERATORS,
@@ -252,17 +251,6 @@ else:
 _QUERYSET: type[models.QuerySet[models.Model, object]] = models.QuerySet
 
 
-# Process-lifetime memo for ``_lookups_for_field``, keyed by field CLASS.
-# A field class's concrete-lookup set is fixed by its registered class lookups
-# (Django computes ``Field.get_lookups()`` from the class MRO), so it is stable
-# across every instance of that class AND across ``registry.clear()`` (which
-# recreates DjangoTypes / FilterSets, never Django's field classes). It
-# therefore needs no clear hook -- the keys are Django field classes, not
-# package types.
-_lookups_for_field_class_cache: truth.IdentityMap[type[ModelField], list[str]] = (
-    truth.IdentityMap()
-)
-
 # Every operator-bag lookup attr ``LOOKUP_NAME_MAP`` can generate; a mapping
 # whose keys all name one is an operator bag (``FilterSet._operator_bag_items``).
 _LOOKUP_PYTHON_ATTRS: frozenset[str] = frozenset(
@@ -324,26 +312,23 @@ def _lookups_for_field(
     lookup the consumer registers is published like a built-in one. A consumer
     who wants ``search`` or a trigram lookup declares it explicitly.
 
-    The whole set is memoized by ``type(model_field)`` (see
-    ``_lookups_for_field_class_cache``): it is class-determined, so same-typed
-    fields share one crawl. The text-pattern withholding is applied to a COPY,
-    since it depends on the owning set's filter selection, and a caller mutating
-    the returned list cannot corrupt the cache.
+    The set is read from the field's own registry on every call:
+    ``Field.get_lookups()`` on the instance is the class registrations along the
+    MRO (which Django caches and invalidates on each ``register_lookup``) merged
+    with the instance's own. Two fields of one class with different instance
+    registrations therefore publish different sets, and a registration made at
+    any time before the set builds is seen.
     """
     if model_field is None:
         return []
     field_class = type(model_field)
-    cached = _lookups_for_field_class_cache.get(field_class)
-    if cached is None:
-        lookups = _without_foreign_postgres_lookups(field_class, model_field.get_lookups())
-        cached = _non_transform_lookups(lookups)
-        _lookups_for_field_class_cache[field_class] = cached
-    if not package_default or _is_text_column(field_class):
-        return list(cached)
     registered = model_field.get_lookups()
+    lookups = _non_transform_lookups(_without_foreign_postgres_lookups(field_class, registered))
+    if not package_default or _is_text_column(field_class):
+        return lookups
     return [
         lookup_expr
-        for lookup_expr in cached
+        for lookup_expr in lookups
         if not _is_text_pattern_lookup(registered.get(lookup_expr))
     ]
 
@@ -1281,13 +1266,14 @@ def _widget_keys(filter_instance: Filter, name: str) -> list[str]:
 
     A multi-widget reads its own keys (``utils/widgets.py::multi_widget_keys``: ``_0`` /
     ``_1``, ``_min`` / ``_max``, or any suffix a consumer widget declares, ``__low``
-    included); any other widget reads ``name``. The field is built without writing to
-    the class-level filter (``filters/base.py::unkept_form_field``). A field that cannot
-    be built here (a callable ``queryset`` resolves only with the request) reads ``name``,
-    the key a single-value widget reads.
+    included); any other widget reads ``name``. The field is the one the filter's own class
+    builds, a consumer ``field`` override included, read on a copy so the class-level
+    filter keeps nothing (``filters/base.py::copied_form_field``). A field that cannot be
+    built here (a callable ``queryset`` resolves only with the request) reads ``name``, the
+    key a single-value widget reads.
     """
     try:
-        widget = read_attr(unkept_form_field(filter_instance), "widget")
+        widget = read_attr(copied_form_field(filter_instance), "widget")
     except Exception:  # noqa: BLE001 - consumer field code may raise anything; read the bare name
         return [name]
     return multi_widget_keys(widget, name) or [name]

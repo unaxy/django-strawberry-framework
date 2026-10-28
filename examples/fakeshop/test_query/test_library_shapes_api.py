@@ -8,7 +8,8 @@ One shape per planner rule, each read off the wire and off the SQL the request e
 - Relay id projection when the id is a ``relay.NodeID`` column beside a surrogate
   ``id``: ``PublisherType``'s id is ``house_code``, read in the statement that loads
   the publisher row at the root page, through a forward key, and under a
-  prefetched reverse key; ``SeriesType``'s id is an annotation its
+  prefetched reverse key, also when a schema's ``NameConverter`` publishes the
+  GlobalID field ``relay.Node`` declares as ``identity``; ``SeriesType``'s id is an annotation its
   ``get_queryset`` adds, loaded beside the primary key alone.
 - Digit-boundary names round-tripping to their real Django columns:
   ``Edition.isbn_10`` on a scalar, ``Edition.publisher_2`` on a forward key.
@@ -88,12 +89,14 @@ One shape per planner rule, each read off the wire and off the SQL the request e
 """
 
 import enum
+import re
 from collections.abc import Callable
 
 import pytest
 import strawberry
 from apps.library import models
 from apps.library import schema as library_schema
+from config import schema as config_schema
 from django.db import connection
 from django.db.models import (
     BooleanField,
@@ -134,6 +137,8 @@ from graphql_client import (
 )
 from strategy_schemas import make_django_type
 from strawberry.relay.utils import to_base64
+from strawberry.schema.name_converter import HasGraphQLName, NameConverter
+from typing_extensions import override
 
 from django_strawberry_framework import (
     DjangoConnectionField,
@@ -286,20 +291,20 @@ _PUBLISHER_ID_POSITIONS = {
 }
 
 
-def _publisher_node_ids(value: object) -> list[str]:
-    """Every ``id`` under ``value``, decoded to its ``PublisherType`` node id."""
+def _publisher_node_ids(value: object, key: str = "id") -> list[str]:
+    """Every ``key`` under ``value`` (the GlobalID's published name), decoded to its node id."""
     if is_json_list(value):
-        return [node_id for item in value for node_id in _publisher_node_ids(item)]
+        return [node_id for item in value for node_id in _publisher_node_ids(item, key)]
     if not is_json_object(value):
         return []
     node_ids: list[str] = []
-    for key, item in value.items():
-        if key == "id":
+    for name, item in value.items():
+        if name == key:
             target_type, node_id = decode_global_id(json_str(item))
             assert target_type is library_schema.PublisherType, target_type
             node_ids.append(node_id)
         else:
-            node_ids.extend(_publisher_node_ids(item))
+            node_ids.extend(_publisher_node_ids(item, key))
     return node_ids
 
 
@@ -329,6 +334,58 @@ def test_publisher_relay_id_reads_its_node_id_column_in_the_statement_that_loads
     assert all('."house_code"' in sql for sql in publisher_sql), publisher_sql
     name_selected = " name " in document
     assert all(('."name"' in sql) is name_selected for sql in publisher_sql), publisher_sql
+
+
+class _RenameRelayId(NameConverter):
+    """Publishes every field Strawberry declares as ``id`` under ``identity``.
+
+    ``relay.Node``'s GlobalID field is one, so every Relay type's id reads ``identity``.
+    """
+
+    @override
+    def get_graphql_name(self, obj: HasGraphQLName) -> str:
+        if obj.graphql_name == "id":
+            return "identity"
+        return super().get_graphql_name(obj)
+
+
+def _renamed_relay_id_schema() -> DjangoSchema:
+    """The project's composed ``Query`` under ``_RenameRelayId``, with the optimizer."""
+    optimizer = DjangoOptimizerExtension()
+    return DjangoSchema(
+        query=config_schema.Query,
+        config=strawberry_config(name_converter=_RenameRelayId()),
+        extensions=[lambda: optimizer],
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("position", list(_PUBLISHER_ID_POSITIONS))
+def test_publisher_relay_id_renamed_by_the_name_converter_reads_its_node_id_column(
+    position: str,
+) -> None:
+    """A GlobalID the schema publishes as ``identity`` projects ``house_code`` as ``id`` does.
+
+    The walker recognizes the field ``relay.Node`` declares under the name the executing
+    schema's converter publishes for it, so every position loads the ``NodeID`` column
+    in the statement that reads the publisher row. Each document selects ``name`` beside
+    the id, so that statement projects only the columns the walker plans.
+    """
+    document, statements, house_codes = _PUBLISHER_ID_POSITIONS[position]
+    renamed = re.sub(r"\{ id( name)? \}", "{ identity name }", document)
+    assert renamed != document, document
+    _seed_publishing_graph()
+    schema = _renamed_relay_id_schema()
+
+    with CaptureQueriesContext(connection) as captured:
+        payload = _post(renamed, schema=schema)
+
+    assert "errors" not in payload, payload
+    assert sorted(_publisher_node_ids(payload["data"], "identity")) == house_codes, payload
+    assert len(captured.captured_queries) == statements, captured.captured_queries
+    publisher_sql = _sql_touching(captured, "library_publisher")
+    assert publisher_sql, captured.captured_queries
+    assert all('."house_code"' in sql for sql in publisher_sql), publisher_sql
 
 
 @pytest.mark.django_db

@@ -28,6 +28,12 @@ consumer's filter survives - the resulting query shape is two SQL
 statements (root SELECT + filtered tag SELECT), with the inactive-tag
 rows resolving to ``null`` on the source-side specimen.
 
+``ScalarSpecimen.label`` carries a lookup registered on that field instance alone
+(``prefix``, Django's ``IStartsWith`` under another name), while ``ScalarSpecimenTag.label``
+is a ``TextField`` without it: each per-field ``"__all__"`` publishes the lookups its own
+field registers, so ``prefix`` is a ``ScalarSpecimenFilter`` label leaf and no
+``ScalarSpecimenTagFilter`` one.
+
 ``ArrayField`` and ``HStoreField`` are deliberately absent - both are
 PostgreSQL-only and the fakeshop runs on SQLite. Their converter entries stay
 covered by ``tests/`` against package-internal fixtures.
@@ -57,6 +63,7 @@ from typing import TYPE_CHECKING, TypeAlias, TypeVar
 
 from django.core.validators import MinValueValidator
 from django.db import models
+from django.db.models.lookups import IStartsWith
 from typing_extensions import override
 
 if TYPE_CHECKING:
@@ -140,6 +147,14 @@ class ScalarSpecimenTag(models.Model):
         return self.label
 
 
+# ``ScalarSpecimen.label``, with a lookup registered on this field instance, not on
+# ``TextField``: it reads ``prefix`` (a case-insensitive starts-with) and
+# ``ScalarSpecimenTag.label``, the same field class, does not, so only
+# ``ScalarSpecimenFilter``'s ``label: "__all__"`` publishes it.
+_SPECIMEN_LABEL: _Text = models.TextField(unique=True)
+_ = _SPECIMEN_LABEL.register_instance_lookup(IStartsWith, lookup_name="prefix")
+
+
 class ScalarSpecimen(models.Model):
     """One row per "exercise this converter table entry end-to-end" case.
 
@@ -156,7 +171,7 @@ class ScalarSpecimen(models.Model):
     # ``label`` is a TextField rather than a generated identity column so each
     # row carries a human-readable handle inside the test response (the live
     # HTTP test pins each field's wire format against this label).
-    label: _Text = models.TextField(unique=True)
+    label: _Text = _SPECIMEN_LABEL
     flag: _Bool = models.BooleanField(default=False)
     score: _Float = models.FloatField(default=0.0)
     price: _Decimal = models.DecimalField(

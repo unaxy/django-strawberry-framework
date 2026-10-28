@@ -61,6 +61,10 @@ for a range input sent under the keys the filter's widget reads (``_min`` / ``_m
 ``RangeFilter`` over a consumer ``SuffixedMultiWidget`` whose suffixes open with ``_``, so
 it reads ``<name>__low`` / ``<name>__high``, past a ``__``: a request names its flat
 ``partner`` copy by exactly those keys, so the copy applies the bounds sent.
+``price_in_field_boxes`` is a consumer ``RangeFilter`` subclass whose ``field`` property
+installs its own widget (``FieldBoxRangeWidget``: ``<name>_low`` / ``<name>_high``): the
+keys are read off the form field the filter's own class builds, so the range input and
+the flat ``partner`` copy are sent under exactly those keys.
 """
 
 from __future__ import annotations
@@ -68,6 +72,7 @@ from __future__ import annotations
 import django_filters
 from django import forms
 from django_filters.widgets import SuffixedMultiWidget
+from typing_extensions import override
 
 from django_strawberry_framework.filters import FilterSet, ListFilter, RangeFilter, RelatedFilter
 
@@ -82,6 +87,32 @@ class UnderscoredRangeWidget(SuffixedMultiWidget):
     def __init__(self, attrs: dict[str, object] | None = None) -> None:
         """Two text boxes, one per suffix."""
         super().__init__((forms.TextInput, forms.TextInput), attrs)
+
+
+class FieldBoxRangeWidget(SuffixedMultiWidget):
+    """A two-box range widget reading ``<name>_low`` / ``<name>_high``."""
+
+    suffixes = ["low", "high"]
+
+    def __init__(self, attrs: dict[str, object] | None = None) -> None:
+        """Two text boxes, one per suffix."""
+        super().__init__((forms.TextInput, forms.TextInput), attrs)
+
+
+class FieldBoxRangeFilter(django_filters.RangeFilter):
+    """django-filter's ``RangeFilter`` whose ``field`` property installs its own widget.
+
+    The widget is set on the form field the filter builds, not passed as the filter's
+    ``widget`` argument, so only that built field says which keys it reads.
+    """
+
+    @property
+    @override
+    def field(self) -> forms.Field:
+        """The range field, given a ``FieldBoxRangeWidget``."""
+        field = super().field
+        field.widget = FieldBoxRangeWidget()
+        return field
 
 
 class ScalarSpecimenTagFilter(FilterSet):
@@ -112,6 +143,7 @@ class ScalarSpecimenFilter(FilterSet):
         field_name="price",
         widget=UnderscoredRangeWidget,
     )
+    price_in_field_boxes = FieldBoxRangeFilter(field_name="price")
 
     class Meta:
         model = models.ScalarSpecimen
@@ -172,6 +204,8 @@ class NullableScalarSpecimenFilter(FilterSet):
 
 
 __all__ = (
+    "FieldBoxRangeFilter",
+    "FieldBoxRangeWidget",
     "NullableScalarSpecimenFilter",
     "ScalarSpecimenFilter",
     "ScalarSpecimenTagFilter",
