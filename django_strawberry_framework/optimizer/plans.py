@@ -42,24 +42,19 @@ in a single pass once the walk completes.
 from __future__ import annotations
 
 import contextlib
-import functools
-import hashlib
-import inspect
-import textwrap
 from collections.abc import MutableSequence
 from dataclasses import dataclass, field, fields, replace
-from typing import TYPE_CHECKING, ClassVar, Literal, TypeVar, cast
+from typing import TYPE_CHECKING, ClassVar, TypeVar, cast
 
 from django.core.exceptions import FieldDoesNotExist, FieldError
 from django.db.models import Count, F, OrderBy, Prefetch, Q, QuerySet, Value, Window, sql
 from django.db.models.constants import LOOKUP_SEP
-from django.db.models.expressions import BaseExpression, RawSQL
+from django.db.models.expressions import BaseExpression
 from django.db.models.functions import Random, RowNumber
-from django.db.models.sql.compiler import SQLCompiler
-from django.utils.tree import Node
+from django.db.models.sql.where import WhereNode
 from typing_extensions import override
 
-from django_strawberry_framework.exceptions import ConfigurationError, OptimizerError
+from django_strawberry_framework.exceptions import OptimizerError
 from django_strawberry_framework.keyset import (
     CursorColumn,
     CursorState,
@@ -71,7 +66,6 @@ from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     is_concrete_field,
     is_dict,
-    is_exact_pair,
     is_str,
     list_of,
     read_attr,
@@ -90,12 +84,12 @@ from .predicates import visible_value_path
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
-    from typing import Protocol, TypeAlias
+    from typing import TypeAlias
 
     from django.db import models
-    from django.db.backends.base.base import BaseDatabaseWrapper
     from django.db.models.expressions import Combinable, Expression
     from django.db.models.options import Options
+    from django.db.models.sql.compiler import SQLCompiler
     from django.db.models.sql.query import Query
     from graphql import GraphQLResolveInfo
 
@@ -109,11 +103,10 @@ if TYPE_CHECKING:
     #: ``Lower(...)``, ...).
     OrderEntry: TypeAlias = str | F | Expression
 
-    class _AliasQuotingCompiler(Protocol):
-        """A compiler below Django 6.1, whose ``quote_name_unless_alias`` quotes a table."""
 
-        def quote_name_unless_alias(self, name: str) -> str: ...
-
+#: ``Query.get_compiler``: django-stubs types its result ``Any``; Django returns the
+#: ``SQLCompiler`` for the alias, whose ``get_order_by`` resolves each ORDER BY term.
+_query_compiler: Callable[[Query, str], SQLCompiler] = sql.Query.get_compiler
 
 _T = TypeVar("_T")
 _M = TypeVar("_M", bound="models.Model")
@@ -1268,124 +1261,11 @@ def effective_connection_order(
     return deterministic_order(applied_order(query, model), model)
 
 
-# ``django/db/models/sql/compiler.py::SQLCompiler._order_by_pairs`` emits a dotted
-# ``extra(order_by=...)`` term as ``RawSQL("%s.%s" % (<quote>(table), col), [])`` under
-# ``OrderBy``, ``<quote>`` being one of the compiler's own methods. ``_ExtraOrderColumn``
-# reproduces that arm, so it serves only a body audited here: the sha256 of the dedented
-# ``inspect.getsource(SQLCompiler._order_by_pairs)`` -> the method that body quotes the
-# table with. Audited in every published release from the floor up:
-#
-# * ``21667f94...`` - 5.2.16, 5.2.17, 5.2.18, 6.0.2 - 6.0.7: ``quote_name_unless_alias``
-#   (a name the query knows as a join alias, an ``extra(select=)`` key or an outer
-#   query's alias stays unquoted);
-# * ``06c53c51...`` - 6.0, 6.0.1: ``quote_name_unless_alias``;
-# * ``3a73414c...`` - 6.0.8, 6.0.9: ``quote_name_unless_alias``;
-# * ``666184a1...`` - 6.1: ``quote_name``, which always quotes (6.1 deprecates the old
-#   name with ``RemovedInDjango2028Warning``);
-# * ``7de78d5b...`` - 6.1.1, 6.1.2: ``quote_name``.
-#
-# Widening it is an audit: a new body joins only once its dotted-term arm is read and
-# the method it calls is named beside its digest. The digest covers the raw source, so
-# any change to the body, a comment included, needs that re-audit, and
-# ``test_running_body_is_audited_under_the_method_it_calls`` fails in CI first.
-#: The two compiler methods an audited body quotes a dotted term's table with.
-_TableQuoter = Literal["quote_name", "quote_name_unless_alias"]
-
-_AUDITED_ORDER_BY_PAIRS_QUOTERS: dict[str, _TableQuoter] = {
-    "21667f94e31d9fb8201d159194a9813a8d111672dcb92a26c3bd5913c1d51135": "quote_name_unless_alias",
-    "06c53c51fb3aee96992d5e4dae022826a89ba65c6d6396daf927ce8d4b0ca9aa": "quote_name_unless_alias",
-    "3a73414cba3f8f4adbeb3394e73ad8388176921ca65b626874571d065d6025d8": "quote_name_unless_alias",
-    "666184a13d657932ac5054e02a697c2e820747cd45282fe4adb0fbcbcce7e51b": "quote_name",
-    "7de78d5b9b9fcb336d042b79826d1dd118ec870810bb532d1dee789b1bcb10ef": "quote_name",
-}
-
-
-@functools.cache
-def _order_by_pairs_digest() -> str | None:
-    """Return the running ``SQLCompiler._order_by_pairs`` body's digest, or ``None`` if unreadable.
-
-    Read once per process, on the first term that moves as ``_ExtraOrderColumn``.
-    """
-    try:
-        source = inspect.getsource(SQLCompiler._order_by_pairs)
-    except (OSError, TypeError):
-        return None
-    return hashlib.sha256(textwrap.dedent(source).encode()).hexdigest()
-
-
-def _extra_order_table_quoter(term: str) -> _TableQuoter:
-    """Return the compiler method the running Django quotes ``term``'s table with.
-
-    Fails closed: a body outside ``_AUDITED_ORDER_BY_PAIRS_QUOTERS``, or one whose
-    source cannot be read, raises ``ConfigurationError``, since the SQL it emits for
-    ``term`` is not known.
-    """
-    digest = _order_by_pairs_digest()
-    quoter = _AUDITED_ORDER_BY_PAIRS_QUOTERS.get(digest) if digest is not None else None
-    if quoter is None:
-        raise ConfigurationError(
-            f"A connection cannot paginate the extra(order_by=...) term {term!r}: the "
-            "running Django's SQLCompiler._order_by_pairs body is not one "
-            "django-strawberry-framework has audited, so the raw SQL it emits for a "
-            "'table.column' term is not known. Order the queryset with order_by() "
-            "(a field path or an expression) instead.",
-        )
-    return quoter
-
-
-def _alias_quoting(compiler: _AliasQuotingCompiler) -> _AliasQuotingCompiler:
-    """Return ``compiler`` read through ``_AliasQuotingCompiler``.
-
-    django-stubs types ``SQLCompiler`` as of 6.1, which deprecates
-    ``quote_name_unless_alias``; the protocol is the compiler of the releases
-    below 6.1 that quote with it.
-    """
-    return compiler
-
-
-class _ExtraOrderColumn(RawSQL):
-    """The ``table.column`` raw SQL a dotted ``extra(order_by=...)`` term compiles to.
-
-    ``SQLCompiler._order_by_pairs`` passes such a term through as
-    ``RawSQL("%s.%s" % (<quote>(table), col), [])``, quoting the table with the
-    compiling query's own compiler (``quoter``, the method the running body calls:
-    ``_extra_order_table_quoter``), and only
-    while the term sits in ``query.extra_order_by``. Moved into ``order_by``,
-    the term would be read as a field path instead, so it moves as this
-    expression, which renders the same text with the compiler that compiles it
-    and resolves as that ``RawSQL`` does.
-    """
-
-    def __init__(
-        self,
-        table: str,
-        column: str,
-        quoter: _TableQuoter,
-    ) -> None:
-        super().__init__(f"{table}.{column}", [])
-        self.table: str = table
-        self.column: str = column
-        self.quoter: _TableQuoter = quoter
-
-    @override
-    def as_sql(
-        self,
-        compiler: SQLCompiler,
-        connection: BaseDatabaseWrapper,
-    ) -> tuple[str, tuple[str, ...]]:
-        aliasing = _alias_quoting(compiler)
-        table = (
-            compiler.quote_name(self.table)
-            if self.quoter == "quote_name"
-            else aliasing.quote_name_unless_alias(self.table)
-        )
-        return f"({table}.{self.column})", ()
-
-
 def _extra_order_term(
     term: str | Combinable,
     query: Query,
     model: type[models.Model],
+    using: str,
 ) -> str | Combinable:
     """Return the ``order_by`` term that compiles as ``extra(order_by=...)`` term ``term`` does.
 
@@ -1399,11 +1279,11 @@ def _extra_order_term(
     concrete column of ``model`` (its own table or an MTI parent's, spelled
     exactly as ``db_table`` and ``Field.column``) it becomes the field's
     ``attname``, the raw column (a foreign key's never expands into the related
-    model's ``Meta.ordering`` as its ``name`` would). Any other dotted term
-    (another table, a quoted or case-variant table name, text after the dot that
-    is no column) becomes ``_ExtraOrderColumn``, the raw SQL Django emits for it,
-    once the running compiler's body is an audited one (``_extra_order_table_quoter``).
-    ``-`` is kept either way.
+    model's ``Meta.ordering`` as its ``name`` would), so the order ladder reads it
+    as the column it is. Any other dotted term (another table, a quoted or
+    case-variant table name, text after the dot that is no column) becomes what
+    the compiler itself emits for it (``_compiled_extra_order_term``). ``-`` is
+    kept either way.
     """
     if not isinstance(term, str):
         return term
@@ -1420,8 +1300,27 @@ def _extra_order_term(
     for own in model._meta.concrete_fields:
         if own.model._meta.db_table == table and own.column == column:
             return f"-{own.attname}" if descending else own.attname
-    quoter = _extra_order_table_quoter(term)
-    return OrderBy(_ExtraOrderColumn(table, column, quoter), descending=descending)
+    return _compiled_extra_order_term(term, query, using)
+
+
+def _compiled_extra_order_term(term: str, query: Query, using: str) -> Combinable:
+    """Return the ``OrderBy`` the running compiler emits for the dotted ``extra`` term ``term``.
+
+    ``SQLCompiler.get_order_by`` compiles ``term`` alone, under the forward flag,
+    on a clone of ``query``: the dotted arm of ``SQLCompiler._order_by_pairs``
+    passes it through as ``RawSQL`` with the table quoted by the running
+    release's own method (``quote_name_unless_alias`` below Django 6.1,
+    ``quote_name`` from it), and only while the term sits in
+    ``query.extra_order_by``. Moved into ``order_by`` as written, the term would
+    be read as a field path instead; moved as this expression, it renders the
+    text the compiler rendered for it. The raw SQL is fixed text, so it
+    reads the same on whichever clone of the query compiles it.
+    """
+    probe = query.clone()
+    probe.standard_ordering = True
+    probe.extra_order_by = (term,)
+    ((compiled, _sql),) = _query_compiler(probe, using).get_order_by()
+    return compiled
 
 
 def _materialize_extra_order(queryset: QuerySet[_M], model: type[models.Model]) -> QuerySet[_M]:
@@ -1440,8 +1339,9 @@ def _materialize_extra_order(queryset: QuerySet[_M], model: type[models.Model]) 
     query = queryset.query
     if not query.extra_order_by:
         return queryset
+    using = queryset.db
     return queryset.order_by(
-        *(_extra_order_term(term, query, model) for term in query.extra_order_by),
+        *(_extra_order_term(term, query, model, using) for term in query.extra_order_by),
     )
 
 
@@ -1516,24 +1416,28 @@ def deterministic_order(
     return (*effective, model._meta.pk.attname)
 
 
-def has_random_term(order_by: Sequence[object], query: Query) -> bool:
+def has_random_term(order_by: Sequence[str | Combinable], queryset: QuerySet[_M]) -> bool:
     """Return whether a connection order draws any of its terms at random.
 
     Django spells a random order two ways: the ``"?"`` name, which
     ``django/db/models/sql/compiler.py::SQLCompiler._order_by_pairs`` compiles
     into ``Random()``, and the ``Random()`` expression itself. Either is a new
-    permutation every time the database evaluates it. A term is read the way
-    the compiler reads it - an expression through its whole source tree, a name
-    through ``query.annotations`` (the whole name, then the head of a transform
-    chain), an ``F`` through the annotation it names, a ``When`` condition (a
-    ``Q`` / ``WhereNode``) through each of its children - a lookup's left side
-    read as a name, its value as an expression, a string value staying the
-    literal it is - so ``Random()`` under a composition, behind an alias or in
-    a ``When`` condition reading one is found as surely as ``"?"`` is. The planner
-    asks after expanding each relation name into the related ``Meta.ordering``
-    the compiler orders it by (``utils/querysets.py::expand_relation_order``),
-    so a ``Random()`` reached through a relation is found too; a related ``"?"``
-    stays the relation name, which Django refuses with ``FieldError``.
+    permutation every time the database evaluates it. The terms are compiled
+    the way the statement compiles them: ``SQLCompiler.get_order_by`` runs on a
+    clone of ``queryset``'s query ordered by ``order_by`` alone and resolves each
+    term (``"?"`` into ``Random()``, a name or an ``F`` into the annotation it
+    names, a transform onto it, a relation name into the related
+    ``Meta.ordering``, a ``When`` condition into its lookups, whose string
+    values stay the literals they are), and the order is random when any
+    resolved tree holds a ``Random``. So ``Random()`` under a composition,
+    behind an alias, through a relation or in a ``When`` condition reading one
+    is found as surely as ``"?"`` is.
+
+    An order the compiler refuses (a related ``"?"`` or an ordering loop, a
+    ``FieldError``; a related ``Meta.ordering`` item with no direction method,
+    the ``AttributeError`` its missing ``asc()`` raises) is not certified
+    random: every statement compiling it raises that same error, the window's
+    as the per-parent pipeline's.
 
     The nested window evaluates its order more than once per statement: the
     ``RowNumber`` window, the reversed window a ``last:`` page adds, and the
@@ -1549,47 +1453,23 @@ def has_random_term(order_by: Sequence[object], query: Query) -> bool:
     a project ``Func``) is not certified either way, and a connection order must
     evaluate to the same value every time one statement compiles it.
     """
-    return any(_is_random_term(term, query) for term in order_by)
+    probe = queryset.query.clone()
+    probe.clear_ordering(force=True)
+    probe.order_by = tuple(order_by)
+    try:
+        compiled = _query_compiler(probe, queryset.db).get_order_by()
+    except (FieldError, AttributeError):
+        return False
+    return any(_draws_at_random(resolved) for resolved, _sql in compiled)
 
 
-def _is_random_term(term: object, query: Query) -> bool:
-    """Classify one order term for ``has_random_term``."""
-    if isinstance(term, F):
-        # django-stubs omits ``F.name``, the reference ``__init__`` stores, so it is read and
-        # proven a string.
-        name: object = getattr(term, "name", None)
-        return isinstance(name, str) and _is_random_alias(name, query)
-    if isinstance(term, Node):
-        # A ``When`` condition: a ``Q`` / ``WhereNode`` whose children are nested nodes,
-        # expressions, or ``(lookup, value)`` pairs whose lookup names its left side.
-        return any(_is_random_condition_child(child, query) for child in term.children)
-    if isinstance(term, BaseExpression):
-        return isinstance(term, Random) or any(
-            _is_random_term(source, query) for source in list_of(term.get_source_expressions())
-        )
-    # Anything else draws nothing unless it is ``"?"`` or an alias of a random term.
-    return term == "?" or (
-        isinstance(term, str) and _is_random_alias(term.removeprefix("-"), query)
-    )
-
-
-def _is_random_condition_child(child: object, query: Query) -> bool:
-    """Classify one child of a ``When`` condition for ``_is_random_term``."""
-    if is_exact_pair(child):
-        lookup, value = child
-        # A string value is a literal: a condition reads a reference only through ``F``.
-        return (is_str(lookup) and _is_random_alias(lookup, query)) or (
-            not isinstance(value, str) and _is_random_term(value, query)
-        )
-    return _is_random_term(child, query)
-
-
-def _is_random_alias(name: str, query: Query) -> bool:
-    """Return whether ``name`` resolves to an annotation that draws at random."""
-    annotation = query.annotations.get(name)
-    if annotation is None:
-        annotation = query.annotations.get(name.split(LOOKUP_SEP, maxsplit=1)[0])
-    return annotation is not None and _is_random_term(annotation, query)
+def _draws_at_random(node: object) -> bool:
+    """Return whether the resolved order tree ``node`` holds a ``Random`` (``has_random_term``)."""
+    if isinstance(node, Random):
+        return True
+    # A slot an expression leaves empty (a ``Window`` with no partition) holds ``None``.
+    sources = node.get_source_expressions() if isinstance(node, BaseExpression | WhereNode) else ()
+    return any(_draws_at_random(source) for source in list_of(sources))
 
 
 def _keyset_order_ref(entry: object) -> tuple[str, str, bool] | None:
