@@ -266,7 +266,8 @@ SQL-template metadata (`template` / `function` / `arg_joiner` / `connector` /
 or a `TextChoices` / `StrEnum` member Django formats as the text it spells), and an
 expression's open-ended `extra` template mapping must be an exact `dict` of
 text-term keys and exact inert scalar or text-term values; reconstruction rebinds
-every admitted member as its exact text.
+every admitted member as its exact text. A `WhereNode` connector (`AND` / `OR`, which
+`WhereNode.as_sql` formats into the emitted SQL) takes the same text-term rule.
 
 Three further properties the walk must hold, each of which a narrower reading of
 "prove the node genuine" does not supply:
@@ -293,7 +294,8 @@ Three further properties the walk must hold, each of which a narrower reading of
   `annotate` / `alias` / `extra(select=...)` / `FilteredRelation` name and a
   `Meta.db_table`: it is admitted by its real type, read as its exact text wherever
   a defect names it or the base-table proof compares it, and rebound as that text by
-  reconstruction, so the sealed query holds exact-`str` names only.
+  reconstruction, so the sealed query holds exact-`str` names only. A baked name or a
+  `Meta.db_table` that is not text is a `table` defect naming its kind.
 - **A reference cycle is untrusted state, not a shared diamond.** The walk is
   three-state: a node reached while still being visited closes a cycle and fails
   closed; a node reached after complete validation is a legitimate shared
@@ -488,7 +490,18 @@ at the floor.
 are canonically reconstructed before the bake: a `TextChoices` / `StrEnum` member
 inside one (a mapping key, an expression's SQL text or template slot) is rebound as
 its exact text, as the same member is anywhere else in the graph, and a bound payload
-the admitted-bound-value rule refuses fails closed. A combined result's primary-key
+the admitted-bound-value rule refuses fails closed. A `QuerySet` value
+(`pk__in=<queryset>`) is accepted on every supported Django release: its fetch mode
+(Django 6.1 and later) is one of Django's own stateless singletons, which reconstruction
+retains by reference in that slot only, while a `FetchMode` subclass or any other object
+in that slot, or a fetch mode bound anywhere else (a `Value` payload), takes the
+admitted-bound-value rule and is refused. The proof of `Q` trees and plain containers
+runs on a stack budget (`_DEFERRED_VALUE_FRAME_BUDGET`, half the interpreter's default
+recursion limit): Django's own filter build, which stops a deep tree, never ran over a
+pending filter, so a value nested past the budget is refused as `untrusted` rather than
+walked into a raw `RecursionError`; an expression graph too deep for the proof to walk is
+refused the same way, and a value the proof admits whose reconstruction exhausts the
+recursion limit is refused by reconstruction. A combined result's primary-key
 rewrite is reconstructed in turn, since the fresh `Query(model)` it builds bakes a
 `Meta.db_table` member as given.
 

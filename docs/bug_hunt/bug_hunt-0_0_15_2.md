@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 342 done, 217 to do.
+Progress: 345 done, 215 to do.
 
 ## Done
 
@@ -1925,6 +1925,18 @@ Progress: 342 done, 217 to do.
   `<` boundary). Waits on real child events are bounded by `_LOADED_WAIT` (60 s), and every stand-in command outlives
   it so a stop that never lands still fails. Green 15/15 at load ~100 where the parent failed 2-3. Tests:
   `tests/test_workspace.py`
+- [x] 392. `utils/querysets.py::_where_tree_defect` holds a where-node connector to the text-term rule
+  (`_is_text_term`, the rule `CombinedExpression.connector` takes): a `TextChoices` / `StrEnum` member seals and is
+  rebound as exact `str`, its SQL equal to Django's; a hostile object stays refused. Tests: `tests/utils/test_querysets.py`
+- [x] 393. A `QuerySet` as a pending deferred-filter value seals on every Django version: reconstruction retains
+  Django's own fetch-mode singleton in a `QuerySet`'s `_fetch_mode` slot only (exact class, `is_django_fetch_mode`), so
+  a fetch mode bound anywhere else (a `Value` payload) or a project subclass stays refused. The pre-bake proof
+  (`_deferred_value_defect`) carries `_DEFERRED_VALUE_FRAME_BUDGET` and a pending value whose expression graph
+  exhausts the recursion limit is caught, so a deferred filter nested too deeply is the typed `untrusted` defect, never
+  `RecursionError`. Floor rows on Django 5.2. Tests: `tests/utils/test_querysets.py`
+- [x] 394. `utils/querysets.py::_base_table_defect` reads the model's `db_table` once and returns the typed `table`
+  defect (its kind) for a non-text value, as the alias side does, instead of raising `TypeError`. Tests:
+  `tests/utils/test_querysets.py`
 
 ## Outside review of the fixes
 
@@ -1969,15 +1981,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   every wire value cleans to `"Enter a number."`; and the generated `time` leaf on a `DateTimeField` raises
   `AttributeError: 'datetime.datetime' object has no attribute 'strip'` in `forms.TimeField` clean before the filter
   seam
-- [ ] 392. `utils/querysets.py::_where_tree_defect` still refuses a `Q(_connector=<TextChoices / StrEnum member>)`
-  where-node connector (a private keyword); decide whether the connector joins the text-term slots or stays exact `str`
-- [ ] 393. A plain `QuerySet` as a pending deferred-filter value (`{"pk__in": qs.values("pk")}`) is refused by the seal
-  on Django 6.1 with a misleading message ("binds a FetchOne bound value", from `QuerySet._fetch_mode`) and accepted on
-  5.2; and a deferred filter nested about 1000 levels deep raises a raw `RecursionError` on Python 3.14 instead of a
-  typed defect; both reachable only through the private deferred seam: make the refusal version-independent and typed
-- [ ] 394. `utils/querysets.py::_base_table_defect` calls `_normalized_str` on `concrete._meta.db_table` unguarded, so a
-  non-`str` `db_table` raises `TypeError` instead of returning a typed defect (the stubs type it `str`; infeasible
-  unless a project assigns one)
 - [ ] 397. Unprobed: a `scripts/workspace.py` command other than `run` printing to a closed stdout (`workspace.py status
   | head`) may exit 120 from the flush `BrokenPipeError` and lose its own return code, as `run` did (307)
 - [ ] 501. (robustness) `scripts/workspace.py::workspace_base` uses a fixed `$TMPDIR/dsf-ws` with no owner, symlink or
@@ -2173,6 +2176,10 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 660. CHANGELOG entry for items 392, 393, 394: the queryset seal admits a `TextChoices` / `StrEnum` where-node
+  connector, seals a `QuerySet` as a pending deferred-filter value on Django 6.1 as on 5.2, and refuses a deferred
+  filter nested too deeply, or a non-text model `db_table`, as a typed defect instead of a raw `RecursionError` /
+  `TypeError`
 - [ ] 658. CHANGELOG entry for item 389: on PostgreSQL an `ArrayField` filter element of datetimes or times whose UTC
   offset the server refuses (16:00 or more, or a fraction of a second, per binding mode) is now the coded
   `FILTER_INVALID` instead of a masked error

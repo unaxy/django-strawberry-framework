@@ -134,6 +134,7 @@ from django_strawberry_framework.utils.querysets import (
     _CASCADE_SEAL_POLICY,
     _COMBINED_WHAT,
     _DEFAULT_SEAL_POLICY,
+    _DEFERRED_VALUE_FRAME_BUDGET,
     _EXPRESSION_COPY_DROPPED,
     _INERT_VALUE_TYPES,
     _LIST_RELATION_CHILD_POLICY,
@@ -2046,6 +2047,7 @@ class _TermChoices(models.TextChoices):
     PRECISION = "precision"
     CATEGORY_TABLE = "products_category"
     OTHER_TABLE = "products_item"
+    DISJUNCTION = "OR"
 
 
 #: The same terms as ``enum.StrEnum`` members.
@@ -4425,6 +4427,30 @@ def test_where_node_non_string_connector_fails_closed() -> None:
     assert defect == ("untrusted", "where node connector is a _EvilConnector")
 
 
+@pytest.mark.parametrize("kind", ["text-choices", "str-enum"])
+def test_where_node_member_connector_seals_as_its_exact_text(kind: str) -> None:
+    """A ``WhereNode`` connector spelled by a member is sealed as the exact text it spells.
+
+    The connector is a SQL template slot like ``CombinedExpression.connector``: Django
+    compares it with ``==`` and formats it with ``%s``, so a ``TextChoices`` / ``StrEnum``
+    member joins the children exactly as its text does, and the sealed node holds that
+    text as an exact ``str``.
+    """
+    source = Category.objects.filter(name="a", is_private=False)
+    text = Category.objects.filter(name="a", is_private=False)
+    source.query.where.__dict__["connector"] = _term(kind, "DISJUNCTION")
+    text.query.where.__dict__["connector"] = _term("text", "DISJUNCTION")
+
+    sealed, defect = _seal_or_defect(source, Category, None)
+
+    assert defect is None
+    assert sealed is not None
+    assert type(sealed.query.where.connector) is str
+    assert str(sealed.query) == str(source.query)
+    assert str(sealed.query) == str(text.query)
+    assert " OR " in str(sealed.query)
+
+
 @pytest.mark.parametrize(
     ("holder", "detail"),
     [
@@ -6313,6 +6339,25 @@ def test_base_table_defect_names_a_member_spelled_other_table_as_its_text(kind: 
 
     assert defect == "products_item"
     assert type(defect) is str
+
+
+def test_seal_reports_a_non_text_model_db_table_as_a_table_defect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model whose ``Meta.db_table`` is not text fails closed as a typed table defect.
+
+    The baked base table is compared with ``Meta.db_table`` as exact text, so an option
+    a project assigns as another object is named by its kind, never read through a
+    ``str`` slot that raises ``TypeError``.
+    """
+    source = Category.objects.filter(name="a")
+    str(source.query)
+    monkeypatch.setattr(Category._meta, "db_table", 5)
+
+    sealed, defect = _seal_or_defect(source, Category, None)
+
+    assert sealed is None
+    assert defect == ("table", "int")
 
 
 def test_concrete_model_probe_never_runs_a_metaclass_meta_hook(
@@ -8616,22 +8661,195 @@ def test_deferred_value_binding_an_opaque_payload_fails_closed() -> None:
     )
 
 
-def test_deferred_filter_too_deep_to_rebuild_fails_closed() -> None:
-    """A pending filter nested deeper than reconstruction can rebuild fails closed.
-
-    The argument graph is canonically rebuilt before the bake, so a ``Q`` tree whose
-    rebuild exhausts the interpreter's recursion limit is a typed defect rather than a
-    raw ``RecursionError``.
-    """
+def _nested_q(levels: int) -> Q:
+    """A ``Q`` whose innermost ``Q`` sits ``levels`` levels below the outermost."""
     nested = Q(title="x")
-    for _ in range(sys.getrecursionlimit() * 3 // 5):
+    for _ in range(levels):
         nested = Q(nested, pk__gte=0)
-    candidate = _pending(Book.objects.all(), {}, (nested,))
+    return nested
+
+
+def _nested_list(levels: int) -> list[object]:
+    """A list whose innermost list sits ``levels`` levels below the outermost."""
+    nested: list[object] = [1]
+    for _ in range(levels):
+        nested = [nested]
+    return nested
+
+
+def test_deferred_filter_too_deep_to_rebuild_fails_closed() -> None:
+    """A pending filter the walk proves but reconstruction cannot rebuild fails closed.
+
+    A ``Q`` tree exactly at the walk's frame budget is proven, and the argument graph is
+    then canonically rebuilt before the bake; a rebuild that exhausts the interpreter's
+    recursion limit is a typed defect rather than a raw ``RecursionError``.
+    """
+    candidate = _pending(Book.objects.all(), {}, (_nested_q(_DEFERRED_VALUE_FRAME_BUDGET),))
 
     sealed, defect = _seal_or_defect(candidate, Book, None)
 
     assert sealed is None
     assert defect == ("untrusted", "QuerySet deferred filter state cannot be reconstructed")
+
+
+@pytest.mark.parametrize(
+    "levels",
+    [_DEFERRED_VALUE_FRAME_BUDGET + 1, sys.getrecursionlimit() + 1],
+    ids=["past-the-budget", "past-the-recursion-limit"],
+)
+@pytest.mark.parametrize("position", ["positional-q", "keyword-list"])
+def test_deferred_filter_nested_past_the_walk_budget_fails_closed(
+    position: str,
+    levels: int,
+) -> None:
+    """A pending filter nested past the walk's frame budget is refused before it is walked.
+
+    ``Q`` trees and plain containers on the pending seam never passed Django's own filter
+    build, which stops a deep tree, so the proof bounds its own stack: a value nested past
+    the budget is a typed defect, never a raw ``RecursionError``, however deep it goes.
+    """
+    candidate = (
+        _pending(Book.objects.all(), {}, (_nested_q(levels),))
+        if position == "positional-q"
+        else _pending(Book.objects.all(), {"pk__in": _nested_list(levels)})
+    )
+    label = "arg" if position == "positional-q" else "'pk__in'"
+
+    sealed, defect = _seal_or_defect(candidate, Book, None)
+
+    assert sealed is None
+    assert defect == (
+        "untrusted",
+        f"QuerySet deferred filter {label} is nested too deeply to prove",
+    )
+
+
+@pytest.mark.django_db
+def test_deferred_filter_shallow_nesting_seals() -> None:
+    """A pending filter nested well inside the budget seals to Django's own SQL and rows."""
+    seed_data(2)
+    candidate = _pending(Item.objects.all(), {}, (Q(Q(Q(pk__gte=0)), name__gte=""),))
+    twin = Item.objects.filter(Q(Q(Q(pk__gte=0)), name__gte=""))
+
+    sealed, defect = _seal_or_defect(candidate, Item, None)
+
+    assert defect is None
+    assert sealed is not None
+    assert str(sealed.query) == str(twin.query)
+    assert list(sealed) == list(twin)
+
+
+def _item_pks(mode_name: str) -> models.QuerySet[Item, dict[str, object]]:
+    """``Item`` primary keys under ``mode_name``'s fetch mode, or the queryset's default."""
+    pks = Item.objects.values("pk")
+    return pks if mode_name == "default" else pks.fetch_mode(FETCH_MODES[mode_name])
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "mode_name",
+    [
+        "default",
+        *[
+            pytest.param(name, marks=requires_fetch_modes)
+            for name in ("FETCH_ONE", "FETCH_PEERS", "FETCH_RAISE")
+        ],
+    ],
+)
+def test_deferred_filter_queryset_value_seals_with_its_fetch_mode(mode_name: str) -> None:
+    """A ``QuerySet`` value in a pending filter seals on every supported Django release.
+
+    Django supports ``pk__in=<queryset>``; the value's fetch mode (where the release has
+    one) is one of Django's own stateless singletons, retained by reference, so the
+    sealed SQL and rows are Django's.
+    """
+    seed_data(2)
+    candidate = _pending(Item.objects.all(), {"pk__in": _item_pks(mode_name)})
+    twin = Item.objects.filter(pk__in=_item_pks(mode_name))
+
+    sealed, defect = _seal_or_defect(candidate, Item, None)
+
+    assert defect is None
+    assert sealed is not None
+    assert str(sealed.query) == str(twin.query)
+    rows = list(sealed)
+    assert rows
+    assert rows == list(twin)
+
+
+@pytest.mark.parametrize(
+    "planted",
+    [
+        pytest.param(object, id="foreign-object"),
+        pytest.param(
+            lambda: FETCH_MODES["project"],
+            id="project-subclass",
+            marks=requires_fetch_modes,
+        ),
+    ],
+)
+def test_deferred_filter_queryset_value_with_a_foreign_fetch_mode_fails_closed(
+    planted: Callable[[], object],
+) -> None:
+    """A ``QuerySet`` value carrying a fetch mode that is not Django's own is refused.
+
+    Only an instance of exactly one of Django's fetch-mode classes is retained by
+    reference; a ``FetchMode`` subclass or any other object in that slot takes the
+    admitted-bound-value rule, which refuses it.
+    """
+    inner = Item.objects.values("pk")
+    mode = planted()
+    vars(inner)["_fetch_mode"] = mode
+    candidate = _pending(Item.objects.all(), {"pk__in": inner})
+
+    sealed, defect = _seal_or_defect(candidate, Item, None)
+
+    assert sealed is None
+    assert defect == (
+        "untrusted",
+        f"QuerySet deferred filter binds a {truth.kind(mode)} bound value",
+    )
+
+
+@requires_fetch_modes
+@pytest.mark.parametrize("position", ["annotation", "pending-filter"])
+def test_fetch_mode_bound_outside_a_queryset_value_fails_closed(position: str) -> None:
+    """A Django fetch mode bound anywhere but a ``QuerySet`` value's own slot is refused.
+
+    Reconstruction retains a fetch mode by reference only as a ``QuerySet`` value's
+    ``_fetch_mode``; as a ``Value`` payload it is a bound parameter, which the
+    admitted-bound-value rule refuses like any other object that is not plain data.
+    """
+    payload = Value(FETCH_MODES["FETCH_ONE"])
+    candidate = (
+        Item.objects.annotate(mode=payload)
+        if position == "annotation"
+        else _pending(Item.objects.all(), {"pk": payload})
+    )
+    holder = "QuerySet" if position == "annotation" else "QuerySet deferred filter"
+
+    sealed, defect = _seal_or_defect(candidate, Item, None)
+
+    assert sealed is None
+    assert defect == ("untrusted", f"{holder} binds a FetchOne bound value")
+
+
+def test_deferred_filter_expression_nested_past_the_recursion_limit_fails_closed() -> None:
+    """A pending filter whose expression graph is too deep to walk is a typed defect.
+
+    ``F`` arithmetic on the pending seam never passed Django's own filter build, so an
+    expression nested past the interpreter's recursion limit is refused by the proof
+    rather than escaping as a raw ``RecursionError``.
+    """
+    expression: Combinable = F("pk")
+    for _ in range(sys.getrecursionlimit() + 1):
+        expression = expression + 1
+    candidate = _pending(Book.objects.all(), {"pk": expression})
+
+    sealed, defect = _seal_or_defect(candidate, Book, None)
+
+    assert sealed is None
+    assert defect == ("untrusted", "QuerySet deferred filter is nested too deeply to prove")
 
 
 @pytest.mark.parametrize("position", ["keyword", "positional"])
