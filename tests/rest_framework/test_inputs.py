@@ -42,6 +42,7 @@ from apps.library.models import Book, Genre
 from apps.products import models as product_models
 from django.db import models
 from django.utils.functional import SimpleLazyObject
+from django.utils.translation import gettext_lazy
 from rest_framework import serializers
 from strawberry import relay
 from strawberry.types.base import StrawberryOptional, get_object_definition
@@ -582,6 +583,30 @@ def test_meta_fields_rejects_bare_string() -> None:
     """A bare-string ``Meta.fields`` raises (it would iterate as characters)."""
     with pytest.raises(ConfigurationError, match="bare string"):
         resolve_effective_serializer_fields(_item_serializer(), fields="name")
+
+
+def test_meta_exclude_rejects_a_lazy_translation_string() -> None:
+    """A lazy translation ``Meta.exclude`` is refused, never read one name per character.
+
+    Over a basis holding ``a``, ``b``, ``ab`` and ``c``, ``gettext_lazy("ab")`` walked
+    as a sequence would exclude ``a`` and ``b`` and keep ``ab``: a silent wrong
+    exclude that every name check passes.
+    """
+
+    class LetterSerializer(serializers.Serializer[object]):
+        a = serializers.CharField()
+        b = serializers.CharField()
+        ab = serializers.CharField()
+        c = serializers.CharField()
+
+    with pytest.raises(
+        ConfigurationError,
+        match=(
+            r"SerializerMutation Meta\.exclude must be a sequence of field names, "
+            r"not a bare string: 'ab'\."
+        ),
+    ):
+        resolve_effective_serializer_fields(LetterSerializer, exclude=gettext_lazy("ab"))
 
 
 def test_meta_fields_rejects_unknown_name() -> None:

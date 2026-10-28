@@ -49,7 +49,7 @@ import dataclasses
 import itertools
 import re
 import sys
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Collection, Iterable, Iterator
 from typing import TYPE_CHECKING, get_origin
 
 import pytest
@@ -63,6 +63,8 @@ from django.contrib.contenttypes.models import ContentType
 from django.db import models
 from django.db.models import Value
 from django.db.models.fields import AutoFieldMixin
+from django.utils.functional import SimpleLazyObject, lazy
+from django.utils.translation import gettext_lazy
 from strawberry import relay
 from strawberry.types.base import (
     StrawberryList,
@@ -2025,43 +2027,58 @@ def test_editable_input_fields_normalizes_its_declared_sequences() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_build_mutation_input_rejects_bare_string_overrides() -> None:
-    """A bare ``str`` / ``bytes`` ``overrides`` fails loud instead of char-splitting.
+_BARE_ATTR_NAME_ATOMS = [
+    pytest.param(lambda: "name", id="str"),
+    pytest.param(lambda: b"name", id="bytes"),
+    pytest.param(lambda: bytearray(b"name"), id="bytearray"),
+    pytest.param(lambda: memoryview(b"name"), id="memoryview"),
+    pytest.param(lambda: gettext_lazy("name"), id="lazy-translation"),
+    pytest.param(
+        lambda: SimpleLazyObject(lambda: gettext_lazy("name")),
+        id="simple-lazy-over-lazy",
+    ),
+    pytest.param(lambda: SimpleLazyObject(lambda: "name"), id="simple-lazy-str"),
+    pytest.param(lazy(lambda: ["name"], list), id="lazy-list"),
+]
+
+
+@pytest.mark.parametrize("make_value", _BARE_ATTR_NAME_ATOMS)
+def test_build_mutation_input_rejects_bare_string_overrides(
+    make_value: Callable[[], Iterable[str]],
+) -> None:
+    """A bare text atom ``overrides`` fails loud instead of char-splitting.
 
     ``overrides`` freezes through ``frozenset``, so an unchecked bare string
-    would iterate as CHARACTERS (bytes as byte INTEGERS) - silently matching no
-    input attr, so the caller's override would never apply and, while non-empty,
-    the garbage set would satisfy the ``not overrides`` half of the empty-input
-    guard. The same iterate-as-characters defect class
-    ``normalize_field_name_sequence`` rejects loudly for ``fields`` / ``exclude``
-    (the row above), so the set-shaped siblings reject it too.
+    would iterate as CHARACTERS (bytes-like values as byte INTEGERS) - silently
+    matching no input attr, so the caller's override would never apply and, while
+    non-empty, the garbage set would satisfy the ``not overrides`` half of the
+    empty-input guard. A lazy translation string walks its text the same way, a
+    ``SimpleLazyObject`` is read as the object it stands for, and every lazy
+    ``Promise`` is text whatever result class it wraps. The same iterate-as-characters
+    defect class ``normalize_field_name_sequence`` rejects loudly for ``fields`` /
+    ``exclude`` (the row above), so the set-shaped siblings reject it too.
     """
-    with pytest.raises(ConfigurationError, match="overrides"):
+    with pytest.raises(ConfigurationError, match=r"overrides must be .*not a bare string"):
         build_mutation_input(
             product_models.Item,
             operation_kind=CREATE,
             primary_type=ItemType,
-            overrides="category_id",
-        )
-    with pytest.raises(ConfigurationError, match="overrides"):
-        build_mutation_input(
-            product_models.Item,
-            operation_kind=CREATE,
-            primary_type=ItemType,
-            # basedpyright: the bare bytes value is the hostile input under test;
-            # build_mutation_input types the parameter as Iterable[str] | None
-            overrides=b"name",  # pyright: ignore[reportArgumentType]
+            overrides=make_value(),
         )
 
 
-def test_mutation_input_field_specs_rejects_bare_string_excluded_attrs() -> None:
-    """A bare ``str`` / ``bytes`` ``excluded_attrs`` fails loud, keeping the D6 seam honest.
+@pytest.mark.parametrize("make_value", _BARE_ATTR_NAME_ATOMS)
+def test_mutation_input_field_specs_rejects_bare_string_excluded_attrs(
+    make_value: Callable[[], Collection[str]],
+) -> None:
+    """A bare text atom ``excluded_attrs`` fails loud, keeping the D6 seam honest.
 
     ``excluded_attrs`` records the spec-040 D6 capture attrs; frozen through
     ``frozenset``, an unchecked bare string would split into characters that
     match no attr, silently leaving every spec kind as its column/relation
     kind (the ``password`` capture seam would simply not fire). Sets of names
-    reject the bare-string shape like every other names-parameter surface.
+    reject the bare-string shape like every other names-parameter surface, a
+    lazy translation string and a bytes-like value included.
     """
 
     @strawberry.input
@@ -2069,19 +2086,11 @@ def test_mutation_input_field_specs_rejects_bare_string_excluded_attrs() -> None
         name: str
 
     assert has_object_definition(NameProbe)
-    with pytest.raises(ConfigurationError, match="excluded_attrs"):
+    with pytest.raises(ConfigurationError, match=r"excluded_attrs must be .*not a bare string"):
         mutation_input_field_specs(
             product_models.Item,
             NameProbe,
-            excluded_attrs="name",
-        )
-    with pytest.raises(ConfigurationError, match="excluded_attrs"):
-        mutation_input_field_specs(
-            product_models.Item,
-            NameProbe,
-            # basedpyright: the bare bytes value is the hostile input under test;
-            # mutation_input_field_specs types the parameter as Collection[str]
-            excluded_attrs=b"name",  # pyright: ignore[reportArgumentType]
+            excluded_attrs=make_value(),
         )
 
 

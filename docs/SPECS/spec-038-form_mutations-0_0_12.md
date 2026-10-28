@@ -219,8 +219,9 @@ package-internal; Slice 4 is the live consumer surface.
     raise for free) and materialize as module globals of the `forms` input namespace
     for the [`strawberry.lazy`][glossary-djangomutationfield] forward-ref. Normalize +
     fail-loud `Meta.fields` / `Meta.exclude` against `form_class.base_fields` (bare string,
-    duplicates, unknown names, empty effective set → `ConfigurationError`, via the
-    shared `utils/inputs.py::resolve_effective_fields` spine).
+    a lazy translation string or bytes-like value included, duplicates, unknown names,
+    empty effective set → `ConfigurationError`, via the shared
+    `utils/inputs.py::resolve_effective_fields` spine).
   - [ ] Package coverage: [`tests/forms/test_converter.py`][test-forms] — each
     supported form-field class → its annotation + required-ness; the
     `ModelChoiceField` / `ModelMultipleChoiceField` id mapping (Relay-`GlobalID`
@@ -1331,7 +1332,7 @@ flavor has the early-`ConfigurationError`-not-late-Strawberry-error posture. The
 creation** through the narrowing spine it shares with the serializer flavor
 ([`utils/inputs.py`][utils-inputs]`::resolve_effective_fields`): a bare string
 (`fields = "name"`) is rejected (it
-would iterate as characters), duplicate names are rejected, `fields` and `exclude`
+would iterate as characters; a lazy translation string (`gettext_lazy("name")`) and a bytes-like value are bare strings here, refused with the same message ([`utils/_narrowing.py::is_text_atom`][utils-narrowing]); every lazy `Promise` counts whatever result class it wraps, so a lazy list is refused too, while a `SimpleLazyObject` is judged as the object it stands for), duplicate names are rejected, `fields` and `exclude`
 are mutually exclusive, and a name in neither `form_class.base_fields` raises
 [`ConfigurationError`][glossary-configurationerror] naming the unknown field (a typo
 like `fields = ("emial",)` fails loud, never silently shrinks the input). An
@@ -2974,6 +2975,7 @@ The completion contract.
 [types-finalizer]: ../../django_strawberry_framework/types/finalizer.py
 [utils-errors]: ../../django_strawberry_framework/utils/errors.py
 [utils-inputs]: ../../django_strawberry_framework/utils/inputs.py
+[utils-narrowing]: ../../django_strawberry_framework/utils/_narrowing.py
 [utils-write-transaction]: ../../django_strawberry_framework/utils/write_transaction.py
 [utils-write-values]: ../../django_strawberry_framework/utils/write_values.py
 [write-mixins]: ../../django_strawberry_framework/write_mixins.py

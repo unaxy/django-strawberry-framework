@@ -15,7 +15,8 @@ from typing import TYPE_CHECKING, ClassVar, NoReturn, cast
 import pytest
 import strawberry
 from apps.library import models as library_models
-from django.utils.functional import LazyObject, SimpleLazyObject
+from django.utils.functional import LazyObject, SimpleLazyObject, lazy
+from django.utils.translation import gettext_lazy
 from django_filters import CharFilter
 from strawberry import relay
 from strawberry.exceptions import DuplicatedTypeName, MissingReturnAnnotationError
@@ -700,14 +701,47 @@ def test_normalize_field_name_sequence_rejects_an_entry_that_is_not_really_a_str
     )
 
 
-def test_normalize_field_name_sequence_judges_a_lazy_whole_value_by_its_class() -> None:
-    """A lazy proxy of a string is a bare string (refused); a lazy proxy of a list is a list.
+@pytest.mark.parametrize(
+    ("make_value", "rendered"),
+    [
+        pytest.param(lambda: SimpleLazyObject(lambda: "name"), "'name'", id="simple-lazy-str"),
+        pytest.param(lambda: gettext_lazy("name"), "'name'", id="lazy-translation"),
+        pytest.param(
+            lambda: SimpleLazyObject(lambda: gettext_lazy("name")),
+            "'name'",
+            id="simple-lazy-over-lazy-translation",
+        ),
+        pytest.param(lazy(lambda: ["name"], list), "['name']", id="lazy-list"),
+        pytest.param(lambda: b"ab", "b'ab'", id="bytes"),
+        pytest.param(lambda: bytearray(b"ab"), "bytearray(b'ab')", id="bytearray"),
+    ],
+)
+def test_normalize_field_name_sequence_judges_a_lazy_whole_value_by_its_class(
+    make_value: Callable[[], object],
+    rendered: str,
+) -> None:
+    """A text atom, lazy or bytes-like, is the bare-string refusal naming the slot it was given.
 
-    The whole-value tests keep asking the proxied class: reading the real type instead would
-    iterate the string into one name per character.
+    A ``SimpleLazyObject`` is judged as the object it stands for; a lazy translation
+    ``Promise`` is text by its own class, whatever result class it wraps, so a lazy list is
+    refused with it. Reading any of them as a sequence would split it into one name per
+    character (or one integer per byte), a silent no-op as ``exclude``.
     """
-    with pytest.raises(ConfigurationError, match="not a bare string"):
-        normalize_field_name_sequence(SimpleLazyObject(lambda: "name"), flavor="Probe")
+    with pytest.raises(ConfigurationError) as excinfo:
+        normalize_field_name_sequence(make_value(), label="exclude", flavor="Probe")
+    assert str(excinfo.value) == (
+        f"Probe Meta.exclude must be a sequence of field names, not a bare string: {rendered}."
+    )
+
+
+def test_normalize_field_name_sequence_refuses_a_memoryview_as_a_bare_string() -> None:
+    """A ``memoryview`` iterates into byte integers, so it takes the bare-string refusal too."""
+    with pytest.raises(ConfigurationError, match=r"Meta\.fields must be .*not a bare string"):
+        normalize_field_name_sequence(memoryview(b"ab"), flavor="Probe")
+
+
+def test_normalize_field_name_sequence_reads_a_simple_lazy_list_as_the_list() -> None:
+    """A ``SimpleLazyObject`` over a list is that list, never a text atom."""
     assert normalize_field_name_sequence(SimpleLazyObject(lambda: ["name"]), flavor="Probe") == (
         "name",
     )

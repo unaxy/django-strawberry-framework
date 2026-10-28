@@ -42,9 +42,10 @@ from .mutations.operations import NON_DELETE_WRITE_OPERATIONS, non_delete_operat
 from .mutations.permissions import DjangoModelPermission, is_permission_class
 from .registry import registry
 from .utils import truth
-from .utils._narrowing import list_of, optional_instance, read_attr, require
+from .utils._narrowing import is_text_atom, list_of, optional_instance, read_attr, require
 from .utils.imports import import_attr
 from .utils.inputs import get_or_store_shape_build, normalize_field_name_sequence
+from .utils.lazy import unwrap_lazy_object
 from .utils.relations import is_model_class
 
 if TYPE_CHECKING:
@@ -804,9 +805,12 @@ def _validate_permission_classes(
       ``permission_classes`` denies rather than crashing in the model-permission
       default (spec-038 Decision 11 - there is no safe model-permission default
       without a model).
-    - a bare ``str`` / ``bytes`` (a single name) or a bare class (forgot the
-      enclosing sequence) -> ``ConfigurationError``: the contract is a *sequence*
-      of permission classes.
+    - a bare text atom (``utils/_narrowing.py::is_text_atom``: a ``str``, a
+      bytes-like value, or a lazy translation ``Promise`` - a single name; every
+      ``Promise`` counts, so a ``lazy(..., list)`` value too; a ``SimpleLazyObject``
+      is judged as the object it stands for) or a bare class (forgot the
+      enclosing sequence) -> ``ConfigurationError``: the contract is a
+      *sequence* of permission classes.
     - any other non-iterable -> ``ConfigurationError``.
     - each entry must be a **class exposing a callable ``has_permission``** (the
       shape ``check_permission`` instantiates + calls); an instance, a non-class
@@ -824,12 +828,11 @@ def _validate_permission_classes(
     """
     if value is None:
         return tuple(unset_default)
-    # A bare string / bytes, a bare class, or a value whose real class defines no
+    # A bare text atom, a bare class, or a value whose real class defines no
     # ``__iter__`` is not a sequence; iterating an accepted one is the value's own
     # behaviour.
     if (
-        truth.is_instance(value, str)
-        or truth.is_instance(value, bytes)
+        is_text_atom(unwrap_lazy_object(value))
         or truth.is_type(value)
         or truth.mro_attr(truth.class_of(value), "__iter__") is None
     ):

@@ -24,7 +24,8 @@ from django.db import connection, models
 from django.db.models import Model
 from django.db.models.expressions import Combinable
 from django.test.utils import CaptureQueriesContext
-from django.utils.functional import SimpleLazyObject
+from django.utils.functional import SimpleLazyObject, lazy
+from django.utils.translation import gettext_lazy
 from strawberry import relay
 from typing_extensions import override
 
@@ -230,6 +231,10 @@ class _MappingSub(dict[str, object]):
         pytest.param(_MappingSub({"a": 1}), id="dict-subclass"),
         pytest.param(SimpleLazyObject(lambda: "12"), id="lazy-str"),
         pytest.param(SimpleLazyObject(lambda: {"a": 1}), id="lazy-dict"),
+        pytest.param(gettext_lazy("12"), id="lazy-translation"),
+        pytest.param(SimpleLazyObject(lambda: gettext_lazy("12")), id="simple-lazy-over-lazy"),
+        pytest.param(SimpleLazyObject(lambda: b"12"), id="simple-lazy-bytes"),
+        pytest.param(lazy(lambda: [1, 2], list)(), id="lazy-translation-list"),
         pytest.param(7, id="int"),
         pytest.param(object(), id="object"),
     ],
@@ -241,7 +246,8 @@ def test_materialize_relation_id_container_rejects_text_mapping_and_non_iterable
 
     A text atom iterated would decompose into per-character "ids" and a mapping
     into per-key "ids"; a non-iterable would raise ``TypeError`` out of ``list()``.
-    A Django lazy proxy is judged by the object it stands for.
+    A ``SimpleLazyObject`` is judged by the object it stands for; a lazy translation
+    ``Promise`` is text by its own class, whatever result class it wraps.
     """
     provided_values, error = materialize_relation_id_container(values, "categoryIds")
     assert provided_values is None

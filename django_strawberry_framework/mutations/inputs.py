@@ -51,7 +51,11 @@ from django_strawberry_framework.scalars import Upload
 from django_strawberry_framework.types.converters import convert_scalar, scalar_for_field
 from django_strawberry_framework.types.relay import implements_relay_node
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import is_concrete_field, require
+from django_strawberry_framework.utils._narrowing import (
+    is_concrete_field,
+    is_text_atom,
+    require,
+)
 
 # ``FieldError`` and ``NON_FIELD_ERROR_KEY`` are defined in ``utils/errors.py``
 # (below every write flavor, so the shared constructors import nothing upward);
@@ -73,6 +77,7 @@ from django_strawberry_framework.utils.inputs import (
     optional_input_field,
     resolve_effective_fields,
 )
+from django_strawberry_framework.utils.lazy import unwrap_lazy_object
 from django_strawberry_framework.utils.relations import (
     RelationLink,
     carrier_backed_link,
@@ -137,20 +142,26 @@ def _operation_kind_display_word(operation_kind: str) -> str:
 
 
 def _frozenset_of_attr_names(value: Iterable[str] | None, *, parameter: str) -> frozenset[str]:
-    """Freeze ``value`` into a python-attr-name set, rejecting bare ``str`` / ``bytes``.
+    """Freeze ``value`` into a python-attr-name set, rejecting a bare text atom.
 
     The one normalizer behind ``build_mutation_input``'s ``overrides`` and
     ``mutation_input_field_specs``' ``excluded_attrs``: both parameters are SETS
     of python attr names (order-free, duplicate-free), so any non-``None``
     iterable freezes through ``frozenset`` - a one-shot iterator is consumed
-    exactly once, which is the contract. A bare ``str`` (or ``bytes``, whose
-    items are byte INTEGERS) is the one shape that would iterate as CHARACTERS,
+    exactly once, which is the contract. A text atom
+    (``utils/_narrowing.py::is_text_atom``: a ``str``, a bytes-like value whose
+    items are byte INTEGERS, or a lazy translation ``Promise`` such as
+    ``gettext_lazy("name")``) is the one shape that would iterate as CHARACTERS,
     silently matching no input attribute - and, while non-empty, satisfying the
     ``not overrides`` half of the empty-input guard - so it fails loud instead,
     mirroring ``utils/inputs.py::normalize_field_name_sequence``'s bare-string
-    rejection for the ``fields`` / ``exclude`` sequences.
+    rejection for the ``fields`` / ``exclude`` sequences. Every ``Promise``
+    counts whatever result class it wraps, so a ``lazy(..., list)`` value is
+    refused too. A ``SimpleLazyObject`` is judged as the object it stands for
+    (``utils/lazy.py::unwrap_lazy_object``), so one over text is refused and
+    one over a set of names is that set.
     """
-    if truth.is_instance(value, str) or truth.is_instance(value, bytes):
+    if is_text_atom(unwrap_lazy_object(value)):
         raise ConfigurationError(
             f"DjangoMutation input {parameter} must be a collection of python attribute "
             f"names, not a bare string: {truth.render(value)}. A bare string would "
@@ -679,7 +690,8 @@ def mutation_input_field_specs(
 
     ``excluded_attrs`` is the spec-040 D6 exclusion seam: those python attrs are
     recorded with kind ``EXCLUDED`` so the decode capture handler runs instead of
-    the column/relation handler. A bare ``str`` / ``bytes`` is rejected
+    the column/relation handler. A bare text atom (a ``str``, a bytes-like value,
+    or a lazy translation ``Promise``) is rejected
     (``ConfigurationError``) - a string would iterate as characters and silently
     disable the seam by matching no attribute. Kind classification is the shared
     ``model_column_write_kind``: the resolution above leaves ``django_field``
@@ -967,7 +979,8 @@ def build_mutation_input(
     honored, not clobbered. ``mutations/sets.py`` wires it from
     ``Meta.input_class`` / ``Meta.partial_input_class``; a direct caller may pass
     it explicitly. File/image columns participate in this skip like any
-    scalar (spec-037). A bare ``str`` / ``bytes``
+    scalar (spec-037). A bare text atom (a ``str``, a bytes-like value, or a
+    lazy translation ``Promise``)
     is rejected (``ConfigurationError``): a string would iterate as characters,
     silently overriding nothing - and, while non-empty, bypassing the
     empty-input guard below.

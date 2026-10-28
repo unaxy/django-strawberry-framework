@@ -89,9 +89,11 @@ from django_strawberry_framework.utils._array_field import array_element_field
 from django_strawberry_framework.utils._narrowing import (
     is_iterable,
     is_list_or_tuple,
+    is_text_atom,
     optional_annotation,
 )
 from django_strawberry_framework.utils.imports import import_attr_if_importable
+from django_strawberry_framework.utils.lazy import unwrap_lazy_object
 from django_strawberry_framework.utils.strings import pascal_case
 
 if TYPE_CHECKING:
@@ -794,8 +796,16 @@ def _is_choice_group(label: object) -> TypeGuard[list[object] | tuple[object, ..
 
 
 def _unpack_choice_entry(entry: object, *, source_label: str) -> tuple[object, object]:
-    """Return one choice entry as its ``(value, label)`` pair, refusing a malformed entry."""
-    malformed = truth.is_instance(entry, str) or truth.is_instance(entry, bytes)
+    """Return one choice entry as its ``(value, label)`` pair, refusing a malformed entry.
+
+    A text atom (``utils/_narrowing.py::is_text_atom``: text, a bytes-like value,
+    or a lazy translation ``Promise``) is malformed even at length two, where
+    unpacking would read its two characters (or byte integers) as a pair; every
+    ``Promise`` counts whatever result class it wraps, so a ``lazy(..., tuple)``
+    entry is refused too. A ``SimpleLazyObject`` entry is judged as the object it
+    stands for (``utils/lazy.py::unwrap_lazy_object``).
+    """
+    malformed = is_text_atom(unwrap_lazy_object(entry))
     value: object = None
     label: object = None
     if not malformed:

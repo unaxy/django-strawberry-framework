@@ -605,7 +605,7 @@ the Slice 4 bench runs ([Test plan](#test-plan)).
 `utils/inputs.py::resolve_effective_fields`, which brings
 `normalize_field_name_sequence`'s bare-string/duplicate rejection to the
 mutation flavor — such declarations raise
-[`ConfigurationError`][glossary-configurationerror]. This is a fail-loud
+[`ConfigurationError`][glossary-configurationerror]. A lazy translation string (`gettext_lazy("name")`) and a bytes-like value are bare strings here, refused with the same message ([`utils/_narrowing.py::is_text_atom`][utils-narrowing]); every lazy `Promise` counts whatever result class it wraps, so a lazy list is refused too, while a `SimpleLazyObject` is judged as the object it stands for. This is a fail-loud
 improvement, pinned here as an accepted behavior change. The spine's
 `empty_message` knob is optional, and the mutation flavor passes none
 because it defers its empty-set raise to `build_mutation_input` (a
@@ -891,6 +891,7 @@ symbol before closing each item): `ActiveInputPermissionMixin`
 <!-- docs/builder/ -->
 
 <!-- django_strawberry_framework/ -->
+[utils-narrowing]: ../../django_strawberry_framework/utils/_narrowing.py
 
 <!-- tests/ -->
 
