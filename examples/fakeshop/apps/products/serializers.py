@@ -22,13 +22,17 @@ Decision-13 live matrix:
 * the model's ``unique_item_per_category`` ``UniqueConstraint`` - DRF's
   ``UniqueTogetherValidator`` surfaces it under ``"__all__"`` (the partial-update
   unique-together fire).
+
+``ItemHoldSerializer`` writes ``ItemHold``, whose ``item`` foreign key is ``blank=True,
+null=False`` with no default: an omitted or ``null`` item passes ``is_valid()`` and the
+database's ``NOT NULL`` refusal is answered as the ``itemId`` field's ``null`` error.
 """
 
 from django.contrib.auth.models import AbstractUser
 from rest_framework import serializers
 from typing_extensions import override
 
-from .models import Category, Item
+from .models import Category, Item, ItemHold
 
 # The sentinel value ``ItemSerializer.validate_name`` rejects - drives the
 # field-level ``serializer.errors`` keyed-to-``name`` live case (a
@@ -126,3 +130,19 @@ class RenamedRelationItemSerializer(serializers.ModelSerializer[Item]):
         if value == REJECTED_RENAMED_DISPLAY_NAME:
             raise serializers.ValidationError("This renamed name is not allowed.")
         return value
+
+
+class ItemHoldSerializer(serializers.ModelSerializer[ItemHold]):
+    """``ModelSerializer`` over ``ItemHold``: an optional field over a ``null=False`` column.
+
+    Declared the standard DRF way: DRF generates ``item``'s ``PrimaryKeyRelatedField``
+    ``required=False`` because the column is ``blank=True``, and ``extra_kwargs`` lets it
+    accept ``null``, so an omitted or explicit ``null`` item validates and the save is
+    refused by the database.
+    """
+
+    # basedpyright: DRF stubs declare ModelSerializer.Meta; the runtime class has none to subclass
+    class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
+        model = ItemHold
+        fields = ("reason", "item")
+        extra_kwargs = {"item": {"allow_null": True}}

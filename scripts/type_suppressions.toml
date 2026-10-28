@@ -263,6 +263,7 @@
 "examples/fakeshop/apps/products/forms.py::DefaultCategoryItemModelForm.__init__" = { reportArgumentType = 1 }
 "examples/fakeshop/apps/products/forms.py::StampedItemModelForm.__init__" = { reportArgumentType = 1 }
 "examples/fakeshop/apps/products/management/commands/seed_shards.py::Command.handle" = { reportAny = 1 }
+"examples/fakeshop/apps/products/serializers.py::ItemHoldSerializer.Meta" = { reportIncompatibleVariableOverride = 1 }
 "examples/fakeshop/apps/products/serializers.py::ItemSerializer.Meta" = { reportIncompatibleVariableOverride = 1 }
 "examples/fakeshop/apps/products/serializers.py::RenamedRelationItemSerializer.Meta" = { reportIncompatibleVariableOverride = 1 }
 "examples/fakeshop/apps/products/services.py::discover_providers" = { reportAny = 1 }

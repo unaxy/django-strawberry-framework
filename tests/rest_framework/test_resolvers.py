@@ -21,6 +21,11 @@ branch is earned LIVE; this file holds the genuinely-unreachable internals:
 - the value-preserving `save()`-called-once capture (a save spy);
 - the save-time DRF-vs-Django `ValidationError` class split + the `IntegrityError`
   branch (a synthetic serializer whose `save()` raises each);
+- the `IntegrityError` over a `blank=True, null=False` column on synthetic models: an
+  integer and an integer-choice column (fakeshop's live `createItemHoldViaSerializer`
+  pins the foreign key), a declared `allow_null` field's `null` on update, a model
+  `save()` that fills the value in, a `create()` that raises before saving a row, and a
+  second thread's attempted row left out of the diagnosis;
 - the `get_serializer_kwargs` / framework-merge / `partial` seams + the bare
   `HttpRequest` `request_from_info` fallback;
 - the config-assessment grep-guard + the post-finalization
@@ -54,6 +59,7 @@ is duplicated here** - those are owned by the live suite.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import datetime
 import decimal
@@ -63,7 +69,7 @@ import sys
 import threading
 import uuid
 import zoneinfo
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import FrozenInstanceError
 from types import MappingProxyType, SimpleNamespace
@@ -82,7 +88,7 @@ from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.files import File
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.db import IntegrityError, connections, transaction
+from django.db import IntegrityError, connections, models, transaction
 from django.db.models import Model, QuerySet
 from django.db.models.signals import post_save, pre_save
 from django.db.utils import OperationalError
@@ -157,6 +163,7 @@ from django_strawberry_framework.utils.inputs import (
     InputFieldSpec,
 )
 from django_strawberry_framework.utils.querysets import SyncMisuseError
+from django_strawberry_framework.utils.typing import call_forwarded
 from django_strawberry_framework.utils.write_transaction import (
     authorization_phase,
     managed_write_transaction,
@@ -183,6 +190,7 @@ if TYPE_CHECKING:
     from typing import TypeAlias, TypeVar
 
     from django.db.backends.utils import CursorWrapper
+    from django.db.models.expressions import Combinable
     from typing_extensions import TypeIs
 
     from django_strawberry_framework.mutations.inputs import FieldError
@@ -195,6 +203,10 @@ if TYPE_CHECKING:
     from django_strawberry_framework.utils.errors import ErrorKeyMap
 
     _ModelT = TypeVar("_ModelT", bound=Model)
+
+    # An integer column's descriptor types as django-stubs declares them (set type, get type),
+    # spelled out because the checker runs without the django-stubs mypy plugin.
+    _Int: TypeAlias = models.IntegerField[float | int | str | Combinable, int]
 
     # A declared ``PrimaryKeyRelatedField``: drf-stubs type its constructor as returning the
     # single relation or, under ``many=True``, a ``ManyRelatedField``.
@@ -1171,6 +1183,354 @@ def test_save_time_integrity_error_maps_to_all_sentinel_envelope() -> None:
         )
     assert isinstance(result, StepFailure)
     assert [fe.field for fe in result.errors] == [NON_FIELD_ERROR_KEY]
+
+
+# ===========================================================================
+# A save-time ``IntegrityError`` over a ``blank=True, null=False`` column
+# ===========================================================================
+
+_PICK_CHOICES = [(1, "One"), (2, "Two")]
+
+_NULL_AMOUNT_ERROR = {
+    "field": "amount",
+    "messages": ["This field cannot be null."],
+    "codes": ["null"],
+}
+_NULL_PICK_ERROR = {"field": "pick", "messages": ["This field cannot be null."], "codes": ["null"]}
+_CONSTRAINT_ENVELOPE = [
+    {
+        "field": NON_FIELD_ERROR_KEY,
+        "messages": ["A database constraint was violated."],
+        "codes": ["constraint"],
+    },
+]
+
+
+def _blank_columns_model(name: str) -> type[Model]:
+    """A synthetic model: ``blank=True, null=False`` integer ``amount`` and integer-choice ``pick``.
+
+    Neither column has a default, so a ``ModelSerializer`` generates both fields
+    ``required=False`` and ``allow_null=False``; an omitted one leaves ``None`` on the row.
+    """
+    return type(
+        name,
+        (Model,),
+        {
+            "__module__": __name__,
+            "amount": models.IntegerField(blank=True),
+            "pick": models.IntegerField(choices=_PICK_CHOICES, blank=True),
+            "Meta": type("Meta", (), {"app_label": "products", "managed": False}),
+        },
+    )
+
+
+@contextlib.contextmanager
+def _synthetic_table(model_class: type[Model]) -> Generator[None, None, None]:
+    """Give a ``managed = False`` synthetic model a real table for the test, then drop it."""
+    with connections["default"].schema_editor() as schema_editor:
+        schema_editor.create_model(model_class)
+    try:
+        yield
+    finally:
+        with connections["default"].schema_editor() as schema_editor:
+            schema_editor.delete_model(model_class)
+
+
+def _blank_columns_schema(
+    serializer_cls: type[DRFSerializer],
+    model_class: type[Model],
+) -> tuple[DjangoSchema, str, str]:
+    """A non-Relay primary + create / update ``SerializerMutation`` over ``serializer_cls``.
+
+    Returns the schema and the create / update input type names.
+    """
+    type(
+        f"{model_class.__name__}T",
+        (DjangoType,),
+        {
+            "Meta": type(
+                "Meta",
+                (),
+                {"model": model_class, "fields": ("id", "amount"), "primary": True},
+            ),
+        },
+    )
+    create = type(
+        "CreateRow",
+        (SerializerMutation,),
+        {
+            "Meta": type(
+                "Meta",
+                (),
+                {
+                    "serializer_class": serializer_cls,
+                    "operation": "create",
+                    "permission_classes": [],
+                },
+            ),
+        },
+    )
+    update = type(
+        "UpdateRow",
+        (SerializerMutation,),
+        {
+            "Meta": type(
+                "Meta",
+                (),
+                {
+                    "serializer_class": serializer_cls,
+                    "operation": "update",
+                    "permission_classes": [],
+                },
+            ),
+        },
+    )
+
+    @strawberry.type
+    class Query:
+        @strawberry.field
+        def ping(self) -> int:
+            return 1
+
+    @strawberry.type
+    class Mutation:
+        create_row = DjangoMutationField(create)
+        update_row = DjangoMutationField(update)
+
+    finalize_django_types()
+    assert create._input_class is not None
+    assert update._input_class is not None
+    return (
+        DjangoSchema(query=Query, mutation=Mutation),
+        create._input_class.__name__,
+        update._input_class.__name__,
+    )
+
+
+def _serializer_over(
+    model_class: type[Model],
+    fields: tuple[str, ...],
+    declared: Mapping[str, object] | None = None,
+    methods: Mapping[str, object] | None = None,
+) -> type[DRFSerializer]:
+    """A ``ModelSerializer`` over ``model_class`` writing ``fields``, plus ``declared`` fields."""
+    return type(
+        f"{model_class.__name__}Serializer",
+        (serializers.ModelSerializer,),
+        {
+            **(declared or {}),
+            **(methods or {}),
+            "Meta": type("Meta", (), {"model": model_class, "fields": fields}),
+        },
+    )
+
+
+def _run_row_write(
+    schema: DjangoSchema,
+    input_name: str,
+    data: dict[str, object],
+    row_id: object = None,
+) -> object:
+    """Run ``createRow`` (``row_id`` ``None``) or ``updateRow``; answer its payload."""
+    request = HttpRequest()
+    request.user = User(username="u")
+    if row_id is None:
+        document = (
+            f"mutation($d: {input_name}!){{ createRow(data:$d){{ "
+            "result{ id } errors{ field messages codes } } }"
+        )
+        variables: dict[str, object] = {"d": data}
+        root = "createRow"
+    else:
+        document = (
+            f"mutation($id: ID!, $d: {input_name}!){{ updateRow(id:$id, data:$d){{ "
+            "result{ id } errors{ field messages codes } } }"
+        )
+        variables = {"id": str(row_id), "d": data}
+        root = "updateRow"
+    result = schema.execute_sync(
+        document,
+        variable_values=variables,
+        context_value=SimpleNamespace(request=request),
+    )
+    assert result.errors is None, result.errors
+    return json_at(result.data, root)
+
+
+@pytest.mark.parametrize(
+    (
+        "amount_field",
+        "operation",
+        "data",
+        "errors",
+    ),
+    [
+        pytest.param(
+            "generated",
+            "create",
+            {},
+            [_NULL_AMOUNT_ERROR, _NULL_PICK_ERROR],
+            id="omitted",
+        ),
+        pytest.param(
+            "generated",
+            "create",
+            {"amount": 3},
+            [_NULL_PICK_ERROR],
+            id="omitted-choice",
+        ),
+        pytest.param(
+            "declared",
+            "create",
+            {"amount": None},
+            [_NULL_AMOUNT_ERROR],
+            id="create-null",
+        ),
+        pytest.param(
+            "declared",
+            "update",
+            {"amount": None},
+            [_NULL_AMOUNT_ERROR],
+            id="update-null",
+        ),
+    ],
+)
+@pytest.mark.django_db(transaction=True)
+def test_save_time_null_on_not_null_column_is_field_keyed_null_error(
+    amount_field: str,
+    operation: str,
+    data: dict[str, object],
+    errors: list[dict[str, object]],
+) -> None:
+    """``None`` on a ``blank=True, null=False`` column is that column's ``null`` error.
+
+    A generated field over such a column is ``required=False``, so an omitted value
+    leaves ``None`` on the row (an integer and an integer-choice column); a declared
+    ``allow_null=True`` field sends ``None`` through. ``Model.clean_fields`` skips a
+    ``blank=True`` empty value, so the database's ``NOT NULL`` ``IntegrityError`` is the
+    first refusal, and the write step diagnoses it from the row the witness saw attempted
+    (``_attempted_row_integrity_errors``): the field, message and code the model and
+    ``ModelForm`` flavors answer, never the ``"__all__"`` ``constraint`` envelope. Nothing
+    is written (no row on create, the stored value unchanged on update).
+    """
+    model_class = _blank_columns_model("BlankColumnsRow")
+    serializer_cls = (
+        _serializer_over(
+            model_class,
+            ("amount",),
+            {"amount": serializers.IntegerField(required=False, allow_null=True)},
+        )
+        if amount_field == "declared"
+        else _serializer_over(model_class, ("amount", "pick"))
+    )
+    with _synthetic_table(model_class):
+        schema, create_input, update_input = _blank_columns_schema(serializer_cls, model_class)
+        if operation == "create":
+            payload = _run_row_write(schema, create_input, data)
+            stored: list[object] = []
+        else:
+            row = model_class._default_manager.create(amount=7, pick=1)
+            payload = _run_row_write(schema, update_input, data, saved_pk(row))
+            stored = [7]
+        assert payload == {"result": None, "errors": errors}
+        assert list(model_class._default_manager.values_list("amount", flat=True)) == stored
+
+
+@pytest.mark.django_db(transaction=True)
+def test_save_time_null_filled_in_by_model_save_writes() -> None:
+    """A model ``save()`` that fills an omitted ``blank=True, null=False`` column in writes.
+
+    The diagnosis reads the attempted row only after its save failed (django-trac 13776):
+    the omitted ``amount`` reaches ``save()`` as ``None``, the override stores ``5`` and
+    the row is written with no error.
+    """
+
+    class FilledAmountRow(Model):
+        amount: _Int = models.IntegerField(blank=True)
+
+        class Meta:
+            app_label = "products"
+            managed = False
+
+        @override
+        def save(self, *args: object, **kwargs: object) -> None:
+            if vars(self)["amount"] is None:
+                self.amount = 5
+            call_forwarded(super().save, args, kwargs)
+
+    with _synthetic_table(FilledAmountRow):
+        schema, create_input, _ = _blank_columns_schema(
+            _serializer_over(FilledAmountRow, ("amount",)),
+            FilledAmountRow,
+        )
+        payload = _run_row_write(schema, create_input, {})
+        assert json_at(payload, "errors") == []
+        assert list(FilledAmountRow._default_manager.values_list("amount", flat=True)) == [5]
+
+
+def _raise_integrity_error(_serializer: object, _validated_data: object) -> NoReturn:
+    """A ``create()`` that saves nothing of the backing model and raises ``IntegrityError``."""
+    raise IntegrityError("refused before any row was saved")
+
+
+@pytest.mark.django_db(transaction=True)
+def test_save_time_integrity_error_with_no_attempted_row_is_the_constraint_envelope() -> None:
+    """A ``create()`` that raises without saving the backing model is the ``"__all__"`` envelope.
+
+    The omitted ``amount`` would be ``None`` on any row built from the validated data, but
+    no row of the backing model was attempted, so nothing names the column and the
+    failure stays the ``constraint`` envelope.
+    """
+    model_class = _blank_columns_model("UnsavedColumnsRow")
+    serializer_cls = _serializer_over(
+        model_class,
+        ("amount", "pick"),
+        methods={"create": _raise_integrity_error},
+    )
+    with _synthetic_table(model_class):
+        schema, create_input, _ = _blank_columns_schema(serializer_cls, model_class)
+        payload = _run_row_write(schema, create_input, {})
+        assert payload == {"result": None, "errors": _CONSTRAINT_ENVELOPE}
+
+
+@pytest.mark.django_db(transaction=True)
+def test_save_time_integrity_error_ignores_another_threads_attempted_row() -> None:
+    """A row another thread attempts during the save is never this write's diagnosis.
+
+    The ``create()`` starts a second thread that sends ``pre_save`` for a backing-model
+    row holding ``None`` on ``amount``, joins it, then raises ``IntegrityError`` without
+    saving a row of its own. The witness records attempts on the owning thread only, so
+    the failure stays the ``"__all__"`` envelope instead of ``amount``'s ``null`` error.
+    """
+    model_class = _blank_columns_model("ConcurrentColumnsRow")
+
+    def _create_racing(_serializer: object, _validated_data: object) -> NoReturn:
+        errors: list[BaseException] = []
+
+        def _other_request_save() -> None:
+            pre_save.send(
+                sender=model_class,
+                instance=model_class(pick=1),
+                raw=False,
+                using="default",
+                update_fields=None,
+            )
+
+        thread = threading.Thread(target=run_capturing, args=(errors, _other_request_save))
+        thread.start()
+        thread.join()
+        assert errors == []
+        raise IntegrityError("refused while another request saved")
+
+    serializer_cls = _serializer_over(
+        model_class,
+        ("amount", "pick"),
+        methods={"create": _create_racing},
+    )
+    with _synthetic_table(model_class):
+        schema, create_input, _ = _blank_columns_schema(serializer_cls, model_class)
+        payload = _run_row_write(schema, create_input, {})
+        assert payload == {"result": None, "errors": _CONSTRAINT_ENVELOPE}
 
 
 # ===========================================================================
@@ -4526,26 +4886,30 @@ def test_write_witness_blocks_cross_alias_pre_save() -> None:
     The post-hoc alias check on the returned row could only detect an escaped write after
     it was already committed outside the pinned transaction; the guard fires at the signal,
     so the query never runs. Same-alias writes pass; other threads are untouched (each
-    request installs its own thread-scoped witness).
+    request installs its own thread-scoped witness): another thread's save is neither
+    recorded as written nor as attempted on this one, and a save that completes is no
+    longer an attempt.
     """
     fake = type("WitnessMut", (), {})
     with serializer_resolvers._write_witness(
         _as_serializer_mutation(fake),
         product_models.Item,
         "default",
-    ) as written:
+    ) as witness:
         with pytest.raises(ConfigurationError, match="attempted to save"):
             pre_save.send(
                 sender=product_models.Item,
                 instance=product_models.Item(name="x"),
                 using="other",
             )
-        # Same-alias writes pass through the guard untouched.
+        # Same-alias writes pass through the guard untouched, and are this thread's attempts.
+        own_attempt = product_models.Item(name="x")
         pre_save.send(
             sender=product_models.Item,
-            instance=product_models.Item(name="x"),
+            instance=own_attempt,
             using="default",
         )
+        assert witness.attempted == [own_attempt]
 
         # A DIFFERENT thread's cross-alias save is not this request's to police - and its
         # writes are not recorded on this request's witness either.
@@ -4569,7 +4933,20 @@ def test_write_witness_blocks_cross_alias_pre_save() -> None:
         thread.start()
         thread.join()
         assert errors == []
-        assert written == []  # the other thread's write never lands on this witness
+        # The other thread's save never lands on this witness, written or attempted.
+        assert witness.written == []
+        assert len(witness.attempted) == 1
+        assert witness.attempted[0] is own_attempt
+
+        # This thread's save completing takes its row back out of the attempts.
+        post_save.send(
+            sender=product_models.Item,
+            instance=own_attempt,
+            created=True,
+            using="default",
+        )
+        assert [row for row, *_ in witness.written] == [own_attempt]
+        assert witness.attempted == []
 
 
 def _execute_nothing(*_args: object) -> None:

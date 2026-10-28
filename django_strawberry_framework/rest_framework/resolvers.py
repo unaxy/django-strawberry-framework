@@ -97,7 +97,10 @@ The serializer-specific invariants this module owns:
   mapper over ``error_dict`` / ``messages``, NEVER ``.detail``, its model-side
   names - ``spec.source or spec.target_name`` - re-keyed to the GraphQL input
   names through ``save_time_error_key_map``, one level, since a Django error names
-  no nested item; the integrity mapper), never a top-level ``GraphQLError``. A
+  no nested item; the integrity mapper, which answers a refused row's ``None`` on a
+  ``blank=True, null=False`` input column as that column's field-keyed ``null`` error,
+  read from the row the write witness saw attempted (``_attempted_row_integrity_errors``)),
+  never a top-level ``GraphQLError``. A
   nested item fails at save time through a DRF ``ValidationError`` in the nested
   shape, which the flattener keys to the item's path. DRF's ``update()`` saves
   through Django's update-else-insert, so on an update a ``created=True`` write the
@@ -135,6 +138,7 @@ flattener.
 from __future__ import annotations
 
 import copy
+import dataclasses
 import datetime
 import decimal
 import enum
@@ -185,7 +189,9 @@ from django_strawberry_framework.utils.errors import (
     build_error_key_map,
     empty_validation_error,
     field_error,
+    integrity_error_field_errors,
     join_error_path,
+    null_field_error,
     rekey_error_segment,
     save_time_error_key_map,
     unstorable_temporal,
@@ -222,6 +228,7 @@ from django_strawberry_framework.utils.write_values import (
     decode_visible_relation,
     decode_visible_relation_ids,
     decoded_into,
+    unstorable_columns,
 )
 from django_strawberry_framework.write_mixins import backing_model_of
 
@@ -2436,15 +2443,30 @@ def _attest_saved_relations(
             )
 
 
+@dataclasses.dataclass(frozen=True)
+class _Witness:
+    """What ``_write_witness`` observed of the backing model's saves on the owning thread.
+
+    ``written`` holds one ``(instance, pk_at_write, created, using)`` record per
+    completed save (its ``post_save``); ``attempted`` holds each instance whose save
+    started (its ``pre_save``) and has not completed, so after a failed
+    ``serializer.save()`` it names the row whose save the database refused
+    (``_attempted_row_integrity_errors``).
+    """
+
+    written: list[_WrittenRow]
+    attempted: list[models.Model]
+
+
 @contextmanager
 def _write_witness(
     mutation_cls: type[SerializerMutation],
     model: type[models.Model],
     alias: str,
-) -> Generator[list[_WrittenRow], None, None]:
+) -> Generator[_Witness, None, None]:
     """Observe + police the ORM writes of the consumer-controlled write phase.
 
-    Two guards scoped to the write phase (hooks, validation, and ``serializer.save()``),
+    Three receivers scoped to the write phase (hooks, validation, and ``serializer.save()``),
     on THIS thread only (concurrent requests in other threads are untouched - each request
     installs its own witness):
 
@@ -2457,7 +2479,12 @@ def _write_witness(
       (lexical classification is bypassable via comments, ``EXPLAIN ANALYZE``, and
       write-capable functions), so signal-less paths (``QuerySet.update()``,
       ``bulk_create``, raw cursor SQL) are covered there;
-    - a ``post_save`` recorder for the mutation's backing model: the yielded list collects
+    - a ``pre_save`` recorder for the mutation's backing model: the yielded witness's
+      ``attempted`` list holds every instance whose save started and has not completed
+      (``post_save`` takes it back out), so a save the database refused leaves its row
+      there for the save-time ``IntegrityError`` diagnosis;
+    - a ``post_save`` recorder for the mutation's backing model: the yielded witness's
+      ``written`` list collects
       ``(instance, pk_at_write, created, using)`` for every row the ORM actually wrote.
       The pk is SNAPSHOTTED at the signal because the model object is mutable - custom
       code could re-point ``instance.pk`` at a hidden row after a legitimate insert, so
@@ -2476,7 +2503,7 @@ def _write_witness(
     the pipeline's statement guard sees them regardless of signals.
     """
     owner = threading.get_ident()
-    written: list[_WrittenRow] = []
+    witness = _Witness(written=[], attempted=[])
 
     # The cross-alias ``pre_save`` blocker is the shared
     # ``write_transaction.py::make_cross_alias_save_guard`` body; only the
@@ -2499,7 +2526,7 @@ def _write_witness(
         del sender, kwargs
         if threading.get_ident() != owner:
             return
-        written.append(
+        witness.written.append(
             (
                 instance,
                 pk_of(instance),
@@ -2507,13 +2534,28 @@ def _write_witness(
                 using,
             ),
         )
+        # The save completed, so its row leaves the attempts. Identity, never ``==``
+        # (two saved instances of one row compare equal).
+        attempted = witness.attempted
+        for index in range(len(attempted) - 1, -1, -1):
+            if attempted[index] is instance:
+                del attempted[index]
+                break
+
+    def _attempt(sender: object, instance: models.Model, **kwargs: object) -> None:
+        del sender, kwargs
+        if threading.get_ident() != owner:
+            return
+        witness.attempted.append(instance)
 
     pre_save.connect(_block_cross_alias, weak=False)
+    pre_save.connect(_attempt, sender=model, weak=False)
     post_save.connect(_record, sender=model, weak=False)
     try:
-        yield written
+        yield witness
     finally:
         _ = post_save.disconnect(_record, sender=model)
+        _ = pre_save.disconnect(_attempt, sender=model)
         _ = pre_save.disconnect(_block_cross_alias)
 
 
@@ -2674,7 +2716,8 @@ def _serializer_write_step(
     ``save_or_field_errors`` wrapper every flavor's save rides (the flat ``036``
     mapper over ``error_dict`` / ``messages``, never ``.detail``, keyed through
     ``utils/errors.py::save_time_error_key_map``, top-level names only; the
-    integrity mapper) - never a top-level ``GraphQLError`` at the write. Every
+    integrity mapper, diagnosing the refused row through
+    ``_attempted_row_integrity_errors``) - never a top-level ``GraphQLError`` at the write. Every
     validation branch builds its key map on that failure path only; a successful
     write never builds one.
     """
@@ -2711,8 +2754,7 @@ def _serializer_write_step(
     # (signal-less paths included) is the pipeline skeleton's ``pipeline_alias_guard``,
     # which spans this step and every other consumer-reachable phase.
     model = backing_model_of(mutation_cls._mutation_meta)
-    witness = _write_witness(mutation_cls, model, alias)
-    with witness as written:
+    with _write_witness(mutation_cls, model, alias) as witness:
         return _guarded_serializer_write(
             mutation_cls,
             info,
@@ -2722,7 +2764,7 @@ def _serializer_write_step(
             alias=alias,
             authorized_pk=authorized_pk,
             hook_context=hook_context,
-            written=written,
+            witness=witness,
         )
 
 
@@ -2764,6 +2806,34 @@ def _unstorable_temporal_errors(
     return errors
 
 
+def _attempted_row_integrity_errors(
+    attempted: list[models.Model],
+    error_key_map: ErrorKeyMap,
+) -> list[FieldError]:
+    """Map a failed ``serializer.save()``'s ``IntegrityError``, naming each input column left null.
+
+    ``attempted`` is the write witness's record of the backing model's saves that started
+    and never completed; its last entry is the row whose save raised. A ``blank=True,
+    null=False`` column with no default skips ``Model.clean_fields`` on an empty value,
+    so a ``ModelSerializer`` field DRF generates ``required=False`` over it, left out, and
+    a declared ``allow_null=True`` field sent ``null`` both reach the database's ``NOT
+    NULL`` refusal as an ``IntegrityError`` naming no field. Each such input column the
+    row holds ``None`` on (``utils/write_values.py::unstorable_columns``, read from the
+    in-memory row, so no query runs on the failed connection) answers
+    ``null_field_error`` under its published input name, the model flavor's answer
+    (``mutations/resolvers.py::_created_row_integrity_errors``). The columns and their
+    names are the save-time key map (``utils/errors.py::save_time_error_key_map``), keyed
+    by model field name. No attempted row (a custom ``create()`` / ``update()`` that
+    raised without saving the backing model), or one no such column explains, is the
+    ``"__all__"`` ``constraint`` envelope. Read after the failed save, never before, so a
+    consumer ``save()`` that fills the value in still writes.
+    """
+    columns = unstorable_columns(attempted[-1], error_key_map) if attempted else []
+    if not columns:
+        return integrity_error_field_errors()
+    return [null_field_error(error_key_map[column.name][0]) for column in columns]
+
+
 def _guarded_serializer_write(
     mutation_cls: type[SerializerMutation],
     info: Info[object, object],
@@ -2774,9 +2844,19 @@ def _guarded_serializer_write(
     alias: str,
     authorized_pk: object,
     hook_context: SerializerHookContext,
-    written: list[_WrittenRow],
+    witness: _Witness,
 ) -> models.Model | StepFailure:
-    """Run the write-step body inside the ``_write_witness`` guards."""
+    """Run the write-step body inside the ``_write_witness`` guards.
+
+    A save-time ``IntegrityError`` is diagnosed from the row the database refused, the
+    instance ``witness.attempted`` names (``_attempted_row_integrity_errors``): each
+    input column it holds ``None`` on with ``null=False`` (a ``ModelSerializer`` field
+    DRF generates ``required=False`` over a ``blank=True`` column with no default, left
+    out; a declared ``allow_null=True`` field sent ``null``) answers the field-keyed
+    ``null`` error the model and ``ModelForm`` flavors answer for the same column; any
+    other is the ``"__all__"`` ``constraint`` envelope. Create and update alike.
+    """
+    written = witness.written
     # The pre-save M2M membership snapshot (update only), taken at write-step
     # entry - strictly AFTER authorization (relation membership is data an
     # unauthorized caller must never make the pipeline query) and strictly
@@ -2922,12 +3002,19 @@ def _guarded_serializer_write(
         with transaction.atomic(using=alias):
             _do_save()
 
+    def _error_key_map() -> ErrorKeyMap:
+        return save_time_error_key_map(
+            mutation_cls._input_field_specs,
+            backing_model_of(mutation_cls._mutation_meta),
+        )
+
     try:
         write_error = save_or_field_errors(
             _savepointed_save,
-            error_key_map=lambda: save_time_error_key_map(
-                mutation_cls._input_field_specs,
-                backing_model_of(mutation_cls._mutation_meta),
+            error_key_map=_error_key_map,
+            integrity_errors=lambda: _attempted_row_integrity_errors(
+                witness.attempted,
+                _error_key_map(),
             ),
         )
     except DRFValidationError as exc:

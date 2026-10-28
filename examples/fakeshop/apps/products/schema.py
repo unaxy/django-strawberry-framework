@@ -739,6 +739,14 @@ class UpdateItemViaSerializer(SerializerMutation):
         operation = "update"
 
 
+class CreateItemHoldViaSerializer(SerializerMutation):
+    """Create an ``ItemHold`` through ``ItemHoldSerializer``, whose ``item`` may validate as ``None``."""
+
+    class Meta:
+        serializer_class = serializers.ItemHoldSerializer
+        operation = "create"
+
+
 class CreateItemViaRenamedSerializer(SerializerMutation):
     """Create an ``Item`` through ``RenamedRelationItemSerializer``.
 
@@ -801,7 +809,10 @@ class Mutation:
     framework-injected `context["request"].user`. `createItemViaRenamedSerializer`
     (via `RenamedRelationItemSerializer`) adds the renamed-field reverse-map matrix - a
     renamed scalar (`displayName`) and a renamed relation (`categoryPk`) whose decode /
-    validation errors key to the GraphQL wire name.
+    validation errors key to the GraphQL wire name. `createItemHoldViaSerializer` (via
+    `ItemHoldSerializer`, codename `add_itemhold`) is the serializer twin of
+    `createItemHold` / `createItemHoldViaForm`: its omitted or `null` item reaches the
+    database's `NOT NULL` refusal and answers the same `itemId` `null` error.
     """
 
     create_item = DjangoMutationField(CreateItem)
@@ -839,6 +850,7 @@ class Mutation:
     create_item_via_serializer = DjangoMutationField(CreateItemViaSerializer)
     update_item_via_serializer = DjangoMutationField(UpdateItemViaSerializer)
     create_item_via_renamed_serializer = DjangoMutationField(CreateItemViaRenamedSerializer)
+    create_item_hold_via_serializer = DjangoMutationField(CreateItemHoldViaSerializer)
 
 
 __all__ = ("Mutation", "Query")

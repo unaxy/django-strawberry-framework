@@ -631,7 +631,9 @@ live-first mandate, so the resolver's reachable lines are covered by a real
     `HiddenField` stays covered only as an input-generation / drop rule (and, if desired, a
     create-only behavior), never as the request-context proof.
     [`products/schema.py`][products-schema] carries `CreateItemViaSerializer` /
-    `UpdateItemViaSerializer` / `CreateItemViaRenamedSerializer`. The example settings
+    `UpdateItemViaSerializer` / `CreateItemViaRenamedSerializer`, and an
+    `ItemHoldSerializer` (over `ItemHold`, whose `item` is `blank=True, null=False`)
+    backs `CreateItemHoldViaSerializer`. The example settings
     deliberately do **not** add `"rest_framework"` to `INSTALLED_APPS` (a flat
     `ModelSerializer` needs no app registry). DRF being a dev-group dependency
     ([Decision 12](#decision-12--soft-djangorestframework-dependency-and-the-100-coverage-strategy))
@@ -2040,7 +2042,11 @@ The pipeline steps:
    loud rather than looping.
 6. **Write** via `serializer.save()`, **wrapped by the `036` `IntegrityError` → envelope
    mapper** (`utils/errors.py::integrity_error_field_errors` — no top-level error on a
-   save-time race); `serializer.save()` runs `create()` / `update()` and handles M2M
+   save-time race; a refusal over a `blank=True, null=False` input column the attempted
+   row holds `None` on, left out of a generated `required=False` field or sent `null`
+   through a declared `allow_null=True` field, is that column's field-keyed `null` error,
+   as in the model and `ModelForm` flavors:
+   `django_strawberry_framework/rest_framework/resolvers.py::_attempted_row_integrity_errors`); `serializer.save()` runs `create()` / `update()` and handles M2M
    assignment internally (DRF's `ModelSerializer.save()` writes the instance + its
    relations). Five guards bracket the write, in order:
    - **In-memory target drift is rejected immediately before `serializer.save()`**
@@ -2056,7 +2062,9 @@ The pipeline steps:
    - **A thread-scoped write witness** (`_write_witness`) records the backing model's
      actual writes through `post_save`, **with a pk snapshot taken at the signal**,
      because the model object is mutable and identity alone is forgeable; a `pre_save`
-     arm blocks cross-alias writes.
+     arm blocks cross-alias writes, and a second records each backing-model save that
+     started and has not completed, the row a refused save leaves for the
+     `IntegrityError` diagnosis.
    - **`get_serializer_save_kwargs` runs inside the same value-preserving, error-mapped
      closure as `save()` itself**.
    - **After the save the returned top-level row is attested against the database**
@@ -2461,8 +2469,9 @@ Rationale companion — this Decision's justification and its three rejected alt
 
 Products carries a [`serializers.py`][products-serializers] with an `ItemSerializer`
 (`serializers.ModelSerializer` over `Item`, with a `validate_name` / `validate()`) and a
-`RenamedRelationItemSerializer`, and [`products/schema.py`][products-schema] carries
-`CreateItemViaSerializer` / `UpdateItemViaSerializer` / `CreateItemViaRenamedSerializer`.
+`RenamedRelationItemSerializer`, plus an `ItemHoldSerializer` over `ItemHold`, and
+[`products/schema.py`][products-schema] carries `CreateItemViaSerializer` /
+`UpdateItemViaSerializer` / `CreateItemViaRenamedSerializer` / `CreateItemHoldViaSerializer`.
 The [`examples/fakeshop/test_query/README.md`][test-query-readme] #"Live-first, both verdicts, and the must-not." /
 [`docs/TREE.md`][tree] #"Coverage priority." mandate is absolute: a
 `django_strawberry_framework/` line reachable by a real fakeshop `/graphql/` request
@@ -2854,7 +2863,12 @@ co-clear block) — `clear_serializer_input_namespace` registers through the
 - **Write-time `IntegrityError`.** A valid `serializer.save()` that loses a
   concurrent-uniqueness race returns the null-object + `FieldError` envelope via the
   shared `utils/errors.py::integrity_error_field_errors` leaf — never a top-level
-  `GraphQLError`.
+  `GraphQLError`. One the database raises over a `blank=True, null=False` column with no
+  default (a generated `required=False` field left out, a declared `allow_null=True`
+  field sent `null`) is that column's field-keyed `null` error instead, read from the
+  backing-model row the write witness saw attempted on the request's own thread; a
+  `create()` / `update()` that raises without saving a backing-model row stays the
+  `"__all__"` envelope.
 - **Write-time disappearing row.** An update whose located row a concurrent transaction
   deleted after the locate (reachable under `Meta.select_for_update = False` or on a
   backend without `FOR UPDATE`) is re-inserted by DRF's update-else-insert save; the
@@ -3035,6 +3049,10 @@ same transport, different app.
   `updatePrintingViaSerializer` naming the edition that vanished with the row
   (`test_library_api.py::test_update_whose_row_vanished_before_validation_failed_is_conflict_over_http`)
   return `conflict`, the located-row probe the last read, rolled back.
+  A `createItemHoldViaSerializer` leaving `itemId` out or sending it `null`
+  (`::test_create_item_hold_null_item_is_a_field_error`, the omission also over
+  `/graphql-async/`) answers the `itemId` `null` error the model and `ModelForm`
+  flavors answer, with no row written.
 - **Package-internal** ([`tests/rest_framework/`][test-rest-framework]):
   - `test_converter.py` — each supported serializer-field class → annotation +
     required-ness; `PrimaryKeyRelatedField` / `ManyRelatedField` id mapping
@@ -3151,7 +3169,12 @@ same transport, different app.
     top-level error; two distinct synthetic serializers (products' flat `ItemSerializer`
     has no custom `save()`), asserting a Django error never hits the `.detail` path and a
     DRF error never hits the flat mapper; **write-time `IntegrityError`** → `FieldError`
-    envelope (a monkeypatched `save()` race) stays the third branch;
+    envelope (a monkeypatched `save()` race) stays the third branch, and one over a
+    `blank=True, null=False` column the refused row holds `None` on is that column's
+    `null` error (an omitted integer and integer-choice column, a declared `allow_null`
+    field's `null` on create and update; a model `save()` filling the value in writes, and
+    a `create()` raising before any row save or another thread's attempted row stays the
+    `"__all__"` envelope);
     **the value-preserving save** — `serializer.save()` is called **exactly once** (a
     save spy) and the re-fetch uses the returned object (not a second save, not a stale
     `serializer.instance`); **`get_serializer_kwargs` precedence** — an override that
