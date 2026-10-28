@@ -40,8 +40,8 @@ from django_strawberry_framework.registry import registry
 from . import truth
 from ._narrowing import (
     enum_value,
-    is_char_wise,
     is_list,
+    is_text_atom,
     list_of,
     read_attr,
 )
@@ -416,14 +416,16 @@ def materialize_relation_id_container(
     the container is materialized BEFORE any member is decoded, so a
     partially-consumed iterator can never reach a visibility query, and a text,
     bytes-like or mapping atom is rejected outright rather than iterated into
-    per-character or per-key "ids". The atom check reads the real class of the
-    object a Django lazy proxy stands for, so a ``__class__`` claim neither
-    hides an atom nor turns a container into one.
+    per-character or per-key "ids". A lazy translation ``Promise`` is a text atom
+    too (``utils/_narrowing.py::is_text_atom``), whatever result class it wraps,
+    so a ``lazy(..., list)`` value is refused with it. The atom check reads the
+    real class of the object a ``SimpleLazyObject`` stands for, so a
+    ``__class__`` claim neither hides an atom nor turns a container into one.
 
     Returns ``(provided_values, None)`` or ``(None, field_error)``.
     """
     unwrapped = unwrap_lazy_object(values)
-    if is_char_wise(unwrapped) or issubclass(truth.class_of(unwrapped), Mapping):
+    if is_text_atom(unwrapped) or issubclass(truth.class_of(unwrapped), Mapping):
         return None, relation_field_error(graphql_name)
     try:
         return list_of(values), None

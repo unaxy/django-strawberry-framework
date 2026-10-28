@@ -11,13 +11,16 @@ assignment line that supplied it:
   bytes), so Strawberry builds a field whose "directives" are chars or ints
   without ``__strawberry_directive__``: a raw ``AttributeError`` at schema build
   for ``str``, and a silent build that crashes SDL render for the byte flavors;
+  a lazy translation ``Promise`` (``gettext_lazy(...)``) walks its text the same
+  way;
 - an iterator that raises midway escapes as whatever it raised;
 - a non-iterable detonates as a raw ``TypeError`` inside ``strawberry.field``;
 - a value whose ``__class__`` read raises escapes an ``isinstance`` text-or-bytes
   check itself, before any iteration starts.
 
-This module owns the ONE validation behind all of them: a char-wise value is
-refused by its real class (never a ``__class__`` read), and a non-iterable is
+This module owns the ONE validation behind all of them: a text atom
+(``utils/_narrowing.py::is_text_atom``) is refused by its real class (never a
+``__class__`` read), and a non-iterable is
 refused by the ``TypeError`` ``list()`` documents for it. An iterable's own ``__iter__`` / ``__next__`` is
 the consumer's behaviour and runs untouched; whatever it raises propagates.
 
@@ -37,7 +40,7 @@ error. ``scripts/check_truthful_reads.py`` enforces the identity and
 from django_strawberry_framework.exceptions import ConfigurationError
 
 from . import truth
-from ._narrowing import is_char_wise, list_of
+from ._narrowing import is_text_atom, list_of
 from .lazy import unwrap_lazy_object
 
 __all__ = ("validated_field_directives",)
@@ -53,13 +56,15 @@ def validated_field_directives(label: str, directives: object) -> tuple[object, 
     The message wording is fixed across every caller on purpose: it is the one
     string a consumer greps for, and the callers' tests match on it.
     """
-    # Text and bytes-like values are ``Iterable`` but their elements are never directives:
-    # ``bytearray`` and ``memoryview`` iterate into ``int`` exactly as ``bytes`` does, so
-    # they share the reject arm rather than silently building integer directives. The
-    # check reads the value's real class, never its ``__class__``; a Django lazy proxy is
-    # checked as the object it wraps (``utils/lazy.py::unwrap_lazy_object``), so a lazy
-    # ``str`` is text too.
-    if is_char_wise(unwrap_lazy_object(directives)):
+    # Text atoms are ``Iterable`` but their elements are never directives: ``bytearray``
+    # and ``memoryview`` iterate into ``int`` exactly as ``bytes`` does, and a lazy
+    # translation ``Promise`` (``gettext_lazy(...)``) walks its text character by
+    # character, so they share the reject arm rather than silently building character or
+    # integer directives (``utils/_narrowing.py::is_text_atom``). The check reads the
+    # value's real class, never its ``__class__``; a ``SimpleLazyObject`` is checked as the
+    # object it wraps (``utils/lazy.py::unwrap_lazy_object``). Every ``Promise`` is a text
+    # atom whatever result class it wraps, so a ``lazy(..., list)`` value is refused too.
+    if is_text_atom(unwrap_lazy_object(directives)):
         raise ConfigurationError(
             f"{label} directives must be a sequence of directive instances; "
             f"got {truth.kind(directives)}.",

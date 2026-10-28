@@ -60,6 +60,7 @@ from ._narrowing import (
     is_mapping,
     is_real_collection,
     is_str,
+    is_text_atom,
     list_of,
     optional_annotation,
     read_attr,
@@ -1016,18 +1017,24 @@ def normalize_field_name_sequence(
     names the mutation base(s) in the message (e.g. ``"DjangoMutation"`` or
     ``"DjangoFormMutation / DjangoModelFormMutation"``).
 
-    Strings, unordered containers and string entries are recognised by their
+    Text atoms, unordered containers and string entries are recognised by their
     real class; a value ``list()`` cannot iterate (its ``TypeError``) takes the
-    readable-sequence rejection. A lazy whole value is judged as the object it
-    stands for (``utils/lazy.py::unwrap_lazy_object``), so a lazy string is the
-    bare-string refusal and a lazy list the list, never one name per character.
+    readable-sequence rejection. A text atom (``utils/_narrowing.py::is_text_atom``:
+    text, a bytes-like value, or a lazy translation ``Promise`` such as
+    ``gettext_lazy("name")``) takes the bare-string refusal naming the ``label``
+    slot, never one name per character (or one byte integer per entry). A
+    ``SimpleLazyObject`` whole value is judged as the object it stands for
+    (``utils/lazy.py::unwrap_lazy_object``), so one over a list is that list and
+    one over text the bare-string refusal. Every ``Promise`` is a text atom,
+    whatever result class it wraps, so a ``lazy(..., list)`` value is refused as
+    a bare string, the same rule the set declarations follow.
     """
     value = unwrap_lazy_object(value)
     if value is None:
         return None
-    if truth.is_instance(value, str):
+    if is_text_atom(value):
         raise ConfigurationError(
-            f"{flavor} Meta.fields / Meta.exclude must be a sequence of field "
+            f"{flavor} Meta.{label} must be a sequence of field "
             f"names, not a bare string: {truth.render(value)}.",
         )
     if truth.is_one_of(value, _UNORDERED_TYPES):

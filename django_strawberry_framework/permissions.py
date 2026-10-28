@@ -109,7 +109,9 @@ from django.db.models import Q
 from .exceptions import ConfigurationError
 from .registry import registry
 from .utils import truth
+from .utils._narrowing import is_text_atom
 from .utils._queryset_private import queryset_db
+from .utils.lazy import unwrap_lazy_object
 
 # ``apply_type_visibility_sync`` runs a target's ``get_queryset`` and rejects an
 # async hook with ``SyncMisuseError`` (the coroutine closed first); the cascade
@@ -274,7 +276,13 @@ def _validate_fields(model: type[models.Model], fields: Iterable[str] | None) ->
     bare string is rejected up front: a string iterates as its characters, so
     ``fields="item"`` would otherwise validate ``'i'``, ``'t'``, ``'e'``,
     ``'m'`` and surface a misleading per-character error that hides the missing
-    brackets. A non-iterable value (``fields=1``) or a non-string entry
+    brackets. The refusal covers every text atom (``utils/_narrowing.py::is_text_atom``):
+    text, a bytes-like value, and a lazy translation ``Promise`` such as
+    ``gettext_lazy("item")``, which walks its text the same way; every ``Promise``
+    counts whatever result class it wraps, so a ``lazy(..., list)`` value is
+    refused too. A ``SimpleLazyObject`` is judged as the object it stands for
+    (``utils/lazy.py::unwrap_lazy_object``), so one over a list is that list and
+    one over text the bare-string refusal. A non-iterable value (``fields=1``) or a non-string entry
     (``fields=[1]`` / ``fields=[["item"]]``) likewise raises ``ConfigurationError``
     naming the field-name-iterable contract rather than escaping as a raw
     ``TypeError`` from ``set(...)``.
@@ -288,11 +296,12 @@ def _validate_fields(model: type[models.Model], fields: Iterable[str] | None) ->
     """
     if fields is None:
         return None
-    if truth.is_instance(fields, str):
+    unwrapped = unwrap_lazy_object(fields)
+    if is_text_atom(unwrapped):
         raise ConfigurationError(
             f"apply_cascade_permissions fields= must be a non-string iterable of "
-            f"field names, not the bare string {truth.render(fields)}; wrap it in a list "
-            f"(fields=[{truth.render(fields)}]).",
+            f"field names, not the bare string {truth.render(unwrapped)}; wrap it in a list "
+            f"(fields=[{truth.render(unwrapped)}]).",
         )
     try:
         # ``list`` (not ``set``) first: a non-iterable (``fields=1``) raises here,

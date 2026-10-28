@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 375 done, 216 to do.
+Progress: 376 done, 216 to do.
 
 ## Done
 
@@ -2118,6 +2118,19 @@ Progress: 375 done, 216 to do.
   database's integer range of any integer transform (a project-registered one and `len` included, whatever the column)
   is the field-keyed `FILTER_INVALID` through the filter ask (`filters/base.py::_reads_integer_transform`). spec-027,
   README and the `filterset` glossary term say so. Tests: `tests/filters/test_base.py`, `tests/filters/test_sets.py`
+- [x] 663. Every configuration slot that reads a field-name or entry sequence refuses a whole text atom by its class
+  (`utils/_narrowing.py::is_text_atom`, after `unwrap_lazy_object`): a lazy translation string (`gettext_lazy("name")`),
+  any lazy `Promise` whatever it wraps, bytes, `bytearray`, `memoryview` and a `SimpleLazyObject` over any of them are
+  the bare-string refusal instead of being read one name per character, at `utils/inputs.py::
+  normalize_field_name_sequence` (all three mutation flavors' `Meta.fields` / `exclude` / `optional_fields` /
+  `injected_fields` and the nested serializer config; the message names the slot), `utils/directives.py::
+  validated_field_directives`, `permissions.py::_validate_fields`, `mutations/inputs.py::_frozenset_of_attr_names`,
+  `utils/write_values.py::materialize_relation_id_container`, `write_mixins.py::_validate_permission_classes` and
+  `types/converters.py::_unpack_choice_entry` (a lazy choice label stays a label). Specs 020, 029, 034, 038, 039 and
+  053 and the `apply_cascade_permissions` glossary term say so. Tests: `tests/utils/test_inputs.py`,
+  `tests/test_permissions.py`, `tests/utils/test_directives.py`, `tests/mutations/test_inputs.py`,
+  `tests/utils/test_write_values.py`, `tests/test_write_mixins.py`, `tests/types/test_choice_entry_shapes.py`, and one
+  lazy `Meta.exclude` row per mutation flavor
 
 ## Outside review of the fixes
 
@@ -2228,13 +2241,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 657. Unprobed: the integer ask (385) on an `ArrayField(IntegerField)` filter leaf: the gate admits only
   temporal / duration elements, so a list param of out-of-range integers reaches the driver unasked. Found
   fact-finding 389
-- [ ] 663. (robustness) Other configuration slots read a lazy translation string one name per character, the shape 587
-  closed for the set declarations: `utils/inputs.py::normalize_field_name_sequence` (model, form and serializer
-  mutation `Meta.fields` / `Meta.exclude`: `gettext_lazy("name")` is `('n','a','m','e')`, a silent no-op as
-  `exclude`), `utils/directives.py::validated_field_directives`, `permissions.py::_validate_fields`,
-  `mutations/inputs.py::_frozenset_of_attr_names`, `utils/write_values.py::materialize_relation_id_container`
-  (unreachable from the wire). Route each bare-string check through `is_text_atom`; mind the bytes message in
-  `normalize_field_name_sequence`. DRY plan item 67 homes the same sites. Found verifying 587
 - [ ] 666. A declared hop-walking flat filter whose `filter` constrains on an absent or no-bound value raises
   `SyncMisuseError` on `apply_async` when the hop target's `get_queryset` is async-only: the async pre-pass awaits only
   the leaves the form data names, and the sync `.qs` absent-leaf probe then derives the hop inside the sync boundary
@@ -2298,6 +2304,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 690. CHANGELOG entry for item 663: a lazy translation string (or bytes-like value) given as a mutation flavor's
+  `Meta.fields` / `Meta.exclude` / `optional_fields` / `injected_fields`, a field's `directives=`,
+  `apply_cascade_permissions(fields=)` or `permission_classes` is refused as a bare string instead of read one name
+  per character (a form or serializer `exclude=_("ab")` dropped fields `a` and `b`); a lazy `Promise` wrapping a list
+  is refused the same way
 - [ ] 689. CHANGELOG entry for item 652: generated `year__in` / `year__range` (and every other integer transform's
   `in` / `range`) filter leaves answer the rows of the values given instead of no rows or a refusal; a member past the
   database's integer range of any integer transform is `FILTER_INVALID`

@@ -63,7 +63,7 @@ import os
 import re
 import threading
 import uuid
-from collections.abc import Callable, Generator, Iterator
+from collections.abc import Callable, Generator, Iterable, Iterator
 from types import SimpleNamespace
 from typing import Literal, NoReturn, TypeAlias
 from unittest import mock
@@ -94,6 +94,8 @@ from django.db import models, transaction
 from django.db.models import Manager, Prefetch, sql
 from django.db.models.expressions import Combinable
 from django.http import HttpRequest
+from django.utils.functional import SimpleLazyObject, lazy
+from django.utils.translation import gettext_lazy
 from graphql import GraphQLError
 from strategy_schemas import make_django_type
 from typing_extensions import Self, override
@@ -2364,22 +2366,44 @@ def test_fields_valid_but_unregistered_target_accepted() -> None:
     assert str(result.query) == str(Entry.objects.all().query)
 
 
-def test_fields_bare_string_raises() -> None:
-    """``fields="item"`` (a bare string) raises before any name lookup (spec-034 Decision 9).
+@pytest.mark.parametrize(
+    ("make_fields", "rendered"),
+    [
+        pytest.param(lambda: "item", "'item'", id="str"),
+        pytest.param(lambda: gettext_lazy("item"), "'item'", id="lazy-translation"),
+        pytest.param(
+            lambda: SimpleLazyObject(lambda: gettext_lazy("item")),
+            "'item'",
+            id="simple-lazy-over-lazy-translation",
+        ),
+        pytest.param(lambda: SimpleLazyObject(lambda: "item"), "'item'", id="simple-lazy-str"),
+        pytest.param(lazy(lambda: ["item"], list), "['item']", id="lazy-list"),
+        pytest.param(lambda: b"item", "b'item'", id="bytes"),
+        pytest.param(lambda: bytearray(b"item"), "bytearray(b'item')", id="bytearray"),
+    ],
+)
+def test_fields_bare_string_raises(
+    make_fields: Callable[[], Iterable[str]],
+    rendered: str,
+) -> None:
+    """A bare text atom for ``fields=`` raises before any name lookup (spec-034 Decision 9).
 
     Without the bare-string guard the walk would validate ``'i'``, ``'t'``,
     ``'e'``, ``'m'`` as field names and surface a misleading "'i' is not
     cascadable" - the guard names the non-string-iterable requirement and the
-    bracket fix instead, byte for byte.
+    bracket fix instead, byte for byte. A lazy translation string walks its text
+    the same way, bytes-like values walk byte integers, and a ``SimpleLazyObject``
+    is read as the object it stands for; every lazy translation ``Promise`` is
+    text whatever result class it wraps, so a lazy list is refused with it.
     """
     entry_type = _make_type("BareStrEntryType", Entry, primary=False)
     finalize_django_types()
 
     with pytest.raises(ConfigurationError) as excinfo:
-        apply_cascade_permissions(entry_type, Entry.objects.all(), _INFO, fields="item")
+        apply_cascade_permissions(entry_type, Entry.objects.all(), _INFO, fields=make_fields())
     assert str(excinfo.value) == (
         "apply_cascade_permissions fields= must be a non-string iterable of field names, "
-        "not the bare string 'item'; wrap it in a list (fields=['item'])."
+        f"not the bare string {rendered}; wrap it in a list (fields=[{rendered}])."
     )
 
 

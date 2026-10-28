@@ -340,7 +340,8 @@ live-first mandate, so the resolver's reachable lines are covered by a real
     raise for free) and materialize as module globals of the `rest_framework` input
     namespace for the [`strawberry.lazy`][glossary-djangomutationfield] forward-ref.
     Normalize + fail-loud `Meta.fields` / `Meta.exclude` against the serializer's
-    field set (bare string, duplicates, unknown names, empty effective set →
+    field set (bare string, a lazy translation string or bytes-like value included,
+    duplicates, unknown names, empty effective set →
     `ConfigurationError`, through the one shared
     `utils/inputs.py::normalize_field_name_sequence(..., flavor="SerializerMutation")`
     every flavor calls).
@@ -363,7 +364,7 @@ live-first mandate, so the resolver's reachable lines are covered by a real
     input shape (fields from the schema-time set, required-ness from `field.required`,
     `read_only` dropped, `Meta.fields` / `Meta.exclude` narrowing,
     `Meta.optional_fields` force-optional, `optional_fields = "__all__"` bare-string
-    rejected), materialized as a module global; **the schema-time hook** — a serializer
+    rejected, a lazy translation `Meta.exclude` rejected as a bare string), materialized as a module global; **the schema-time hook** — a serializer
     whose `__init__` requires kwargs **and** one whose `get_fields()` reads `self.context`
     (so it raises at **`.fields` access**, not at construction — proving the guard wraps
     `.fields`, not `serializer_class()`) are both rejected loudly under the default no-arg
@@ -1715,7 +1716,7 @@ unknown name, or an empty effective set raises
 sentinel** for these keys: the package's `"__all__"` is the non-field-error envelope key
 alone, never a field selector, so an all-optional create input is expressed by listing
 the fields in `optional_fields`, not by `optional_fields = "__all__"` (rejected as a
-bare string, with a message pointing at the explicit list). Every name the effective set
+bare string, with a message pointing at the explicit list). A lazy translation string (`gettext_lazy("name")`) and a bytes-like value are bare strings here, refused with the same message ([`utils/_narrowing.py::is_text_atom`][utils-narrowing]); every lazy `Promise` counts whatever result class it wraps, so a lazy list is refused too, while a `SimpleLazyObject` is judged as the object it stands for. Every name the effective set
 keeps becomes an attribute of the generated input class, so a kept name that is not a
 Python identifier, or is a keyword (`"with space"`, `"9lead"`, `"class"`), raises a
 class-creation [`ConfigurationError`][glossary-configurationerror] naming it, at the root
@@ -4000,6 +4001,7 @@ re-keying / opt-in-gated-fingerprint branches are package-tested.
 [types-finalizer]: ../../django_strawberry_framework/types/finalizer.py
 [types-relay]: ../../django_strawberry_framework/types/relay.py
 [utils-inputs]: ../../django_strawberry_framework/utils/inputs.py
+[utils-narrowing]: ../../django_strawberry_framework/utils/_narrowing.py
 [utils-permissions]: ../../django_strawberry_framework/utils/permissions.py
 [utils-querysets]: ../../django_strawberry_framework/utils/querysets.py
 [utils-relations]: ../../django_strawberry_framework/utils/relations.py

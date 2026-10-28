@@ -5,10 +5,11 @@ sites stay in ``tests/test_list_field.py`` / ``tests/mutations/test_fields.py``;
 consumer fields over HTTP live in ``examples/fakeshop/test_query/test_list_field_api.py``.
 """
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 import pytest
-from django.utils.functional import SimpleLazyObject
+from django.utils.functional import SimpleLazyObject, lazy
+from django.utils.translation import gettext_lazy
 
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.utils.directives import validated_field_directives
@@ -22,14 +23,18 @@ from tests._idioms import ClaimsClassBase, ClassReadRaises
         (b"@deprecated", "bytes"),
         (bytearray(b"@deprecated"), "bytearray"),
         (memoryview(b"@deprecated"), "memoryview"),
+        (gettext_lazy("@deprecated"), "__proxy__"),
+        (lazy(lambda: ["@deprecated"], list)(), "__proxy__"),
     ],
 )
 def test_char_wise_sequences_are_rejected_typed(value: object, type_name: str) -> None:
-    """The four Iterable-but-not-directives types reject at the construction line.
+    """The Iterable-but-not-directives text atoms reject at the construction line.
 
     A bare `str` iterates into characters and a `bytes` / `bytearray` /
-    `memoryview` into ints; Strawberry consumes the iterable lazily, so an
-    unvalidated value builds a field out of chars or ints and detonates at
+    `memoryview` into ints; a lazy translation string walks its text character by
+    character, and every lazy ``Promise`` is text whatever result class it wraps,
+    so a lazy list is refused with it. Strawberry consumes the iterable lazily, so
+    an unvalidated value builds a field out of chars or ints and detonates at
     schema build or SDL render instead of here.
     """
     with pytest.raises(ConfigurationError) as exc:
@@ -131,18 +136,32 @@ def test_value_whose_class_read_raises_is_judged_by_its_real_class(
     assert isinstance(exc.value.__cause__, TypeError)
 
 
-def test_lazy_proxy_over_text_is_rejected_as_text() -> None:
-    """A Django lazy proxy is checked as the object it wraps: a lazy ``str`` is text.
+@pytest.mark.parametrize(
+    "wrapped",
+    [
+        pytest.param(lambda: "@deprecated", id="str"),
+        pytest.param(lambda: gettext_lazy("@deprecated"), id="lazy-translation"),
+        pytest.param(lambda: b"@deprecated", id="bytes"),
+    ],
+)
+def test_lazy_proxy_over_text_is_rejected_as_text(wrapped: Callable[[], object]) -> None:
+    """A ``SimpleLazyObject`` is checked as the object it wraps: wrapped text is text.
 
     Checking the proxy's own real class would let ``list()`` iterate the proxy's
-    characters and the raw ``AttributeError`` at schema build would return.
+    characters and the raw ``AttributeError`` at schema build would return; a lazy
+    translation string or bytes under the proxy are text atoms the same way.
     """
     with pytest.raises(ConfigurationError) as exc:
-        validated_field_directives("DjangoListField", SimpleLazyObject(lambda: "@deprecated"))
+        validated_field_directives("DjangoListField", SimpleLazyObject(wrapped))
     assert str(exc.value) == (
         "DjangoListField directives must be a sequence of directive instances; "
         "got SimpleLazyObject."
     )
+
+
+def test_lazy_proxy_over_a_list_is_read_as_the_list() -> None:
+    """A ``SimpleLazyObject`` over a list is that list, never a text atom."""
+    assert validated_field_directives("DjangoListField", SimpleLazyObject(lambda: ["a"])) == ("a",)
 
 
 def test_value_claiming_text_through_its_class_is_judged_by_its_real_class() -> None:

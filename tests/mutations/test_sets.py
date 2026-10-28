@@ -41,6 +41,7 @@ import strawberry
 from apps.library import models as library_models
 from apps.products import models as product_models
 from django.db.models import Model
+from django.utils.translation import gettext_lazy
 from strawberry import relay
 from strawberry.types.base import StrawberryObjectDefinition, get_object_definition
 from typing_extensions import override
@@ -1484,10 +1485,29 @@ def test_meta_fields_bare_string_raises() -> None:
                 fields = "name"
 
 
+def test_meta_exclude_lazy_translation_string_raises() -> None:
+    """A lazy translation ``Meta.exclude`` is the bare-string refusal naming ``exclude``.
+
+    The ``gettext_lazy`` proxy walks its text character by character, so read as a
+    sequence it would exclude one name per character instead of the one it spells.
+    """
+    with pytest.raises(
+        ConfigurationError,
+        match=r"DjangoMutation Meta\.exclude must be a sequence of field names, not a bare string",
+    ):
+
+        @definition_raises
+        class CreateItem(DjangoMutation):
+            class Meta:
+                model = product_models.Item
+                operation = "create"
+                exclude = gettext_lazy("name")
+
+
 def test_meta_permission_classes_non_iterable_raises() -> None:
     """A non-iterable ``Meta.permission_classes`` (an int) raises via the ``list()`` guard.
 
-    A bare ``str`` / ``bytes`` / class is caught by the explicit ``isinstance`` guard;
+    A bare text atom or class is caught by the explicit text-atom and class guards;
     any *other* non-iterable (here an ``int``) trips the ``list(value)`` ``TypeError``
     branch instead, surfacing the same fail-loud ``ConfigurationError`` at class creation.
     """

@@ -24,6 +24,8 @@ from typing import NoReturn
 import pytest
 from apps.products import models as product_models
 from django import forms
+from django.utils.functional import SimpleLazyObject, lazy
+from django.utils.translation import gettext_lazy
 from typing_extensions import override
 
 from django_strawberry_framework import (
@@ -484,6 +486,45 @@ def test_validate_permission_classes_custom_base_label_and_flavor_forwarding() -
             _meta_class(permission_classes=[123]),
             flavor="DjangoModelFormMutation",
         )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("DjangoModelPermission", id="str"),
+        pytest.param(b"DjangoModelPermission", id="bytes"),
+        pytest.param(bytearray(b"DjangoModelPermission"), id="bytearray"),
+        pytest.param(memoryview(b"DjangoModelPermission"), id="memoryview"),
+        pytest.param(gettext_lazy("DjangoModelPermission"), id="lazy-translation"),
+        pytest.param(
+            SimpleLazyObject(lambda: gettext_lazy("DjangoModelPermission")),
+            id="simple-lazy-over-lazy",
+        ),
+        pytest.param(SimpleLazyObject(lambda: "DjangoModelPermission"), id="simple-lazy-str"),
+        pytest.param(lazy(lambda: [DjangoModelPermission], list)(), id="lazy-translation-list"),
+    ],
+)
+def test_validate_permission_classes_refuses_a_text_atom_as_a_sequence(value: object) -> None:
+    """A text atom is one name, never a sequence of permission classes.
+
+    Iterated, it would surface a misleading per-character "entry 'D' is not a permission
+    class". A lazy translation string walks its text the same way, a ``SimpleLazyObject`` is
+    read as the object it stands for, and every lazy ``Promise`` is text whatever result
+    class it wraps, so a lazy list is refused with it.
+    """
+    with pytest.raises(
+        ConfigurationError,
+        match=r"Probe\.Meta\.permission_classes must be a sequence of permission classes",
+    ):
+        _validate_permission_classes("Probe", value)
+
+
+def test_validate_permission_classes_reads_a_simple_lazy_list_as_the_list() -> None:
+    """A ``SimpleLazyObject`` over a list of classes is that list."""
+    assert _validate_permission_classes(
+        "Probe",
+        SimpleLazyObject(lambda: [DjangoModelPermission]),
+    ) == (DjangoModelPermission,)
 
 
 def test_require_non_delete_operation_reads_a_hostile_hash_operation_as_its_text() -> None:
