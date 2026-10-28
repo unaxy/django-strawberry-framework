@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 365 done, 214 to do.
+Progress: 368 done, 212 to do.
 
 ## Done
 
@@ -2056,6 +2056,22 @@ Progress: 365 done, 214 to do.
   naming no model field keeps the string. spec-032, spec-036 and spec-039 say so. Tests:
   `tests/test_relay_node_field.py`, `tests/mutations/test_resolvers.py`, `tests/rest_framework/test_resolvers.py`,
   `tests/utils/test_querysets.py`
+- [x] 534. `FilterSet` and `OrderSet` refuse an unknown `Meta` key at class creation, through the one typo guard every
+  write flavor runs (`utils/inputs.py::reject_unknown_meta_keys`): a `FilterSet` takes the keys django-filter's
+  `FilterSetOptions` reads plus the `filter_fields` synonym, an `OrderSet` `model`, `fields` and `exclude`; a `Meta` that
+  is not a class is refused too. spec-027, spec-028 and the `filterset` / `orderset` glossary terms say so. Tests:
+  `tests/filters/test_sets.py`, `tests/orders/test_sets.py`, `tests/utils/test_inputs.py`
+- [x] 535. A `Meta.exclude` name is held in both set families (`sets_mixins.py::reject_unknown_exclude_names`): a name
+  the set declares, own or inherited, is refused with the remedy (remove it, or `<name> = None`), as DRF refuses an
+  excluded declared field; any other name outside the model's fields and the `Meta.fields` entries is refused naming
+  the legal ones, as on a `DjangoType`. A non-string `Meta.exclude` or `Meta.fields` entry is a `ConfigurationError`
+  naming the set in both families (`sets_mixins.py::require_field_name`), not a raw `AttributeError`. The `meta.exclude`
+  glossary term, spec-027, spec-028 and the README say so. Tests: `tests/filters/test_sets.py`,
+  `tests/orders/test_sets.py`
+- [x] 536. A model-less `FilterSet` whose `Meta` sweeps (`"__all__"`, or `Meta.exclude` without `Meta.fields`) raises a
+  `ConfigurationError` naming the set from `get_fields` (`sets_mixins.py::require_sweep_model`, the wording an
+  `OrderSet` uses), not upstream's raw `AttributeError`; a model-less base whose subclass supplies `Meta.model` still
+  builds in both families. Tests: `tests/filters/test_sets.py`
 
 ## Outside review of the fixes
 
@@ -2147,17 +2163,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `DecimalField` with no `max_digits` (a serializer through an explicit `serializers.DecimalField(max_digits=None,
   decimal_places=None)`): PostgreSQL refuses the bind with a masked `DataError`, and SQLite stores it as `Infinity`
   or `0` without a word. Found verifying 591
-- [ ] 534. (robustness) `OrderSetMetaclass` accepts any `Meta` key (`Meta.bogus`, a misspelt `fiels`) without a
-  word, where `DjangoType` (`types/base.py::_validate_meta`) and the write flavors
-  (`write_mixins.py::reject_unknown_meta_keys`) refuse an unknown key; a typo in an order set's narrowing passes
-  silently. Found fact-finding 558
-- [ ] 535. (robustness) A `Meta.exclude` name that matches no field drops nothing in both set families, so a typo
-  (`exclude = ("emial",)`) leaves the column filterable or orderable where `DjangoType`, the write flavors and DRF
-  refuse an unknown name; a `FilterSet` also accepts a non-string `exclude` entry (`None`, bytes) silently, which an
-  `OrderSet` refuses. Found fixing 558
-- [ ] 536. (robustness) A `FilterSet` with no `Meta.model` and a `Meta.exclude` (with or without a `RelatedFilter`)
-  raises a raw `AttributeError: 'NoneType' object has no attribute '_meta'` from `get_fields` instead of a
-  `ConfigurationError` naming the set. Found verifying 558
 - [ ] 537. (robustness) `AllValuesMultipleFilter(field_name=<column>, method=...)` is refused at schema build ("exposes
   no form field") though its column alone would type it, as the same filter without `method=` is typed: its form field
   reads the per-request `model`, so the unbound copy builds none and the catch-all refuses before the column is
@@ -2246,6 +2251,9 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 678. CHANGELOG entry for items 534, 535 and 536 (breaking): a `FilterSet` / `OrderSet` with an unknown `Meta`
+  key, a `Meta.exclude` naming no field of the model and no `Meta.fields` entry, or a `Meta.exclude` naming a declared
+  filter / `RelatedOrder` raises `ConfigurationError` instead of being ignored
 - [ ] 677. CHANGELOG entry for item 531: `node` / `nodes` and model / serializer relation ids find a row whose
   decimal or aware-datetime key they spell differently (trailing zeros, exponent, UTC offset) instead of answering null
   or "Invalid id"

@@ -661,7 +661,6 @@
 "tests/test_views_async_callback.py::test_async_view_refuses_an_unmarked_upstream_callback._Unmarked" = { reportIncompatibleMethodOverride = 1 }
 "tests/test_workspace.py::test_runs_started_during_the_first_sync_reuse_its_copy_and_every_edit_since" = { cast = 2 }
 "tests/test_write_mixins.py::test_make_declaration_registry_identity_dedup_hostile_eq_safe_containment.HostileEqMeta" = { reportAssignmentType = 1 }
-"tests/test_write_mixins.py::test_reject_unknown_meta_keys_non_string_dict_keys" = { reportArgumentType = 1 }
 "tests/test_write_mixins.py::test_whole_record_swap_and_deletion_on_a_real_mutation_class_are_sealed" = { reportAttributeAccessIssue = 1 }
 "tests/testing/test_client.py::test_export_surface_is_the_testing_root_not_the_package_root" = { reportAny = 1 }
 "tests/testing/test_client.py::test_files_non_string_key_raises_the_uniform_guard" = { reportArgumentType = 1 }
@@ -732,6 +731,7 @@
 "tests/utils/test_inputs.py::test_lazy_annotation_and_factory_subclass_messages_are_pinned" = { reportArgumentType = 1 }
 "tests/utils/test_inputs.py::test_plain_set_meta_fields_reads_a_lazy_declaration_as_the_object_it_stands_for" = { cast = 1 }
 "tests/utils/test_inputs.py::test_plain_set_meta_fields_reads_every_str_subclass_name_as_plain_text" = { cast = 3 }
+"tests/utils/test_inputs.py::test_reject_unknown_meta_keys_non_string_dict_keys" = { reportArgumentType = 1 }
 "tests/utils/test_policies.py::_resolve_through" = { reportArgumentType = 1 }
 "tests/utils/test_policies.py::test_a_hashable_non_string_key_is_typed_rejected_at_the_key_guard" = { reportArgumentType = 1 }
 "tests/utils/test_policies.py::test_a_non_mapping_override_is_rejected_with_the_derived_article" = { reportArgumentType = 1 }

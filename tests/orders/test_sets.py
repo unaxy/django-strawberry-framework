@@ -435,8 +435,8 @@ _EXCLUDE_GRID: dict[str, tuple[dict[str, object], list[str]]] = {
             "shelf",
         ],
     ),
-    "all + unknown name": (
-        {"model": Book, "fields": "__all__", "exclude": ("nope",)},
+    "all + excluded many-to-many": (
+        {"model": Book, "fields": "__all__", "exclude": ("genres", "loans")},
         _BOOK_SWEEP,
     ),
     "list + exclude": (
@@ -488,34 +488,12 @@ def test_orderset_meta_exclude_narrows_the_expansion(shape: str) -> None:
 
     ``"__all__"`` and an exclude-only declaration sweep the model and drop the excluded names
     (the primary key included); a named declaration drops them by exact name, before path
-    validation; a name matching no field, and an empty exclude, drop nothing.
+    validation; a field the sweep never publishes (a many-to-many, a reverse relation) and an
+    empty exclude drop nothing.
     """
     meta, expected = _EXCLUDE_GRID[shape]
 
     assert list(_order_class(meta).get_fields()) == expected
-
-
-def test_orderset_meta_exclude_keeps_a_related_order_declared_under_an_excluded_name() -> None:
-    """A declared ``RelatedOrder`` outranks ``Meta.exclude``, as a declared ``RelatedFilter`` does."""
-
-    class ShelfOrder(OrderSet):
-        class Meta:
-            model = Shelf
-            fields = ["code"]
-
-    order = _order_class(
-        {"model": Book, "fields": "__all__", "exclude": ("shelf", "subtitle")},
-        shelf=RelatedOrder(ShelfOrder, field_name="shelf"),
-    )
-
-    fields = order.get_fields()
-    assert list(fields) == [
-        "id",
-        "title",
-        "circulation_status",
-        "shelf",
-    ]
-    assert fields["shelf"] is order.related_orders["shelf"]
 
 
 def test_orderset_meta_exclude_is_inherited_with_the_parent_meta() -> None:
@@ -656,6 +634,26 @@ _EXCLUDE_REFUSALS: dict[str, tuple[dict[str, object], str]] = {
             "requires Meta.model"
         ),
     ),
+    "all + unknown name": (
+        {"model": Book, "fields": "__all__", "exclude": ("subtitel",)},
+        "OrderSet ExcludeOrder.Meta.exclude names unknown fields: ['subtitel']. Available: [",
+    ),
+    "exclude only + unknown name": (
+        {"model": Book, "exclude": ("subtitle", "nope")},
+        "OrderSet ExcludeOrder.Meta.exclude names unknown fields: ['nope']. Available: [",
+    ),
+    "list + unknown name": (
+        {"model": Book, "fields": ["title", "subtitle"], "exclude": ["subtitel"]},
+        "OrderSet ExcludeOrder.Meta.exclude names unknown fields: ['subtitel']. Available: [",
+    ),
+    "pk alias": (
+        {"model": Book, "fields": "__all__", "exclude": ["pk"]},
+        (
+            "OrderSet ExcludeOrder.Meta.exclude names unknown fields: ['pk']. Available: "
+            "['archive_genres', 'circulation_status', 'genres', 'id', 'loans', 'shelf', "
+            "'subtitle', 'title']. Exclude only a field of Book or a Meta.fields entry."
+        ),
+    ),
 }
 
 
@@ -665,14 +663,182 @@ def test_orderset_meta_exclude_refuses_a_declaration_it_cannot_apply(shape: str)
 
     A bare string (a lazy translation string included) would exclude by character, a
     one-shot iterator only on the first expansion, a non-string entry would match
-    nothing, and an exclude-only declaration without ``Meta.model`` has no model to
-    sweep.
+    nothing, an exclude-only declaration without ``Meta.model`` has no model to
+    sweep, and a name that is no field and no ``Meta.fields`` entry (a typo, ``pk``)
+    would leave the column it meant orderable.
     """
     meta, message = _EXCLUDE_REFUSALS[shape]
 
     with pytest.raises(ConfigurationError) as excinfo:
         _order_class(meta).get_fields()
     assert message in str(excinfo.value)
+
+
+def _shelf_code_order() -> type[OrderSet]:
+    """Return a ``Shelf`` order set a ``RelatedOrder`` branch can target."""
+    built = type(
+        "ShelfCodeOrder",
+        (OrderSet,),
+        {"Meta": type("Meta", (), {"model": Shelf, "fields": ["code"]}), "__module__": __name__},
+    )
+    assert issubclass(built, OrderSet)
+    return built
+
+
+@pytest.mark.parametrize(
+    ("shape", "name"),
+    [
+        pytest.param("own", "shelf_branch", id="own-branch"),
+        pytest.param("own-sweep", "shelf", id="own-branch-over-a-model-field"),
+        pytest.param("inherited", "shelf_branch", id="inherited-branch"),
+    ],
+)
+def test_orderset_meta_exclude_refuses_a_declared_related_order_name(
+    shape: str,
+    name: str,
+) -> None:
+    """An exclude naming a declared ``RelatedOrder`` fails when the set expands, naming the remedy.
+
+    The expansion publishes every declared branch whatever ``Meta.exclude`` says, so the
+    exclude would remove nothing and leave the branch orderable; a branch over a model
+    field's own name is no exception.
+    """
+    branch = RelatedOrder(_shelf_code_order(), field_name="shelf")
+    if shape == "inherited":
+        parent = _order_class({"model": Book, "fields": ["title"]}, shelf_branch=branch)
+        order = type(
+            "ExcludeOrder",
+            (parent,),
+            {
+                "Meta": type("Meta", (), {"model": Book, "fields": ["title"], "exclude": [name]}),
+                "__module__": __name__,
+            },
+        )
+        assert issubclass(order, OrderSet)
+    elif shape == "own-sweep":
+        order = _order_class(
+            {"model": Book, "fields": "__all__", "exclude": [name]},
+            shelf=branch,
+        )
+    else:
+        order = _order_class(
+            {"model": Book, "fields": ["title"], "exclude": [name]},
+            shelf_branch=branch,
+        )
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        order.get_fields()
+    assert str(excinfo.value) == (
+        f"OrderSet ExcludeOrder.Meta.exclude names declared RelatedOrder branches: [{name!r}]. "
+        "An exclude never removes a declaration: remove it, or disable an inherited one with "
+        f"`{name} = None` in the class body."
+    )
+
+
+def test_orderset_meta_exclude_accepts_the_field_name_of_a_tombstoned_branch() -> None:
+    """A branch disabled with ``name = None`` is no declaration, so its field excludes."""
+    parent = _order_class(
+        {"model": Book, "fields": "__all__"},
+        shelf=RelatedOrder(_shelf_code_order(), field_name="shelf"),
+    )
+    child = type(
+        "TombstoneOrder",
+        (parent,),
+        {
+            "shelf": None,
+            "Meta": type("Meta", (), {"model": Book, "fields": "__all__", "exclude": ["shelf"]}),
+            "__module__": __name__,
+        },
+    )
+    assert issubclass(child, OrderSet)
+
+    assert "shelf" not in child.get_fields()
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [pytest.param({"fields": "__all__"}, id="all-fields"), pytest.param({}, id="exclude-only")],
+)
+def test_orderset_model_less_sweep_base_builds_and_its_subclass_supplies_the_model(
+    fields: dict[str, object],
+) -> None:
+    """A model-less sweep is refused where it is expanded, so a base set without a model builds.
+
+    The subclass's ``Meta`` inherits the base's declaration and adds ``Meta.model``.
+    """
+    base = _order_class({**fields, "exclude": ("subtitle",)})
+    base_meta = truth.static_attr(base, "Meta")
+    assert truth.is_type(base_meta)
+    child = type("ModelOrder", (base,), {"Meta": type("Meta", (base_meta,), {"model": Book})})
+    assert issubclass(child, OrderSet)
+
+    assert list(child.get_fields()) == [
+        "id",
+        "title",
+        "circulation_status",
+        "shelf",
+    ]
+    with pytest.raises(ConfigurationError, match=r"requires Meta\.model"):
+        base.get_fields()
+
+
+_META_KEY_REFUSALS: dict[str, tuple[object, str]] = {
+    "unknown key": (
+        type("Meta", (), {"model": Book, "fields": ["title"], "bogus": True}),
+        "OrderSet MetaKeyOrder.Meta has unknown keys: ['bogus'].",
+    ),
+    "misspelt fields": (
+        type("Meta", (), {"model": Book, "fiels": ["title"]}),
+        "OrderSet MetaKeyOrder.Meta has unknown keys: ['fiels'].",
+    ),
+    "filter-family synonym": (
+        type("Meta", (), {"model": Book, "filter_fields": ["title"]}),
+        "OrderSet MetaKeyOrder.Meta has unknown keys: ['filter_fields'].",
+    ),
+    "non-class Meta": (
+        SimpleNamespace(model=Book, fields=["title"]),
+        "OrderSet MetaKeyOrder.Meta must be a class; got namespace(",
+    ),
+}
+
+
+@pytest.mark.parametrize("shape", list(_META_KEY_REFUSALS))
+def test_orderset_meta_refuses_an_unknown_key_at_class_creation(shape: str) -> None:
+    """An own ``Meta`` declaring a key an order set does not read fails at class creation.
+
+    ``model`` / ``fields`` / ``exclude`` are the whole vocabulary; a typo would otherwise
+    narrow nothing. The guard is the one every write flavor runs.
+    """
+    meta, message = _META_KEY_REFUSALS[shape]
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        type("MetaKeyOrder", (OrderSet,), {"Meta": meta, "__module__": __name__})
+    assert str(excinfo.value).startswith(message)
+
+
+def test_orderset_meta_key_guard_reads_only_the_class_body_own_meta() -> None:
+    """A subclass without its own ``Meta`` is not re-checked; an inherited ``Meta`` key counts once.
+
+    A subclassed ``Meta`` declares only its own keys, so the parent's legal keys never read as
+    the child's.
+    """
+    parent = _order_class({"model": Book, "fields": ["title"], "exclude": ["subtitle"]})
+    parent_meta = truth.static_attr(parent, "Meta")
+    assert truth.is_type(parent_meta)
+    child = type("PlainChildOrder", (parent,), {"__module__": __name__})
+    grandchild = type(
+        "MetaChildOrder",
+        (parent,),
+        {
+            "Meta": type("Meta", (parent_meta,), {"fields": ["subtitle"]}),
+            "__module__": __name__,
+        },
+    )
+    assert issubclass(child, OrderSet)
+    assert issubclass(grandchild, OrderSet)
+
+    assert list(child.get_fields()) == ["title"]
+    assert list(grandchild.get_fields()) == []
 
 
 # ---------------------------------------------------------------------------

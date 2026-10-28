@@ -2,7 +2,7 @@
 
 Covers ``django_strawberry_framework/write_mixins.py``: the shared ``Meta``
 vocabulary each flavor composes its allowed keys from; the ``Meta`` validation
-primitives (``reject_unknown_meta_keys``, ``normalize_meta_field_selection``,
+primitives (``normalize_meta_field_selection``,
 ``require_subclass`` / ``require_model_class`` / ``require_non_delete_operation``,
 ``_validate_permission_classes``, ``validate_select_for_update``,
 ``model_backed_permission_and_lock``), including their hostile-input reads; the
@@ -56,7 +56,6 @@ from django_strawberry_framework.write_mixins import (
     make_meta_validating_metaclass,
     model_backed_permission_and_lock,
     normalize_meta_field_selection,
-    reject_unknown_meta_keys,
     require_model_class,
     require_non_delete_operation,
     require_subclass,
@@ -402,22 +401,6 @@ def test_model_and_plain_form_binds_ride_bind_mutation_outputs() -> None:
     assert "bind_mutation_outputs" in bind_write_declarations.__code__.co_names
 
 
-@pytest.mark.parametrize(
-    "invalid_meta",
-    [
-        123,
-        "string",
-        [1, 2, 3],
-        (1, 2),
-        lambda: None,
-    ],
-)
-def test_reject_unknown_meta_keys_rejects_non_class_meta(invalid_meta: object) -> None:
-    """reject_unknown_meta_keys raises ConfigurationError if meta is not a class."""
-    with pytest.raises(ConfigurationError, match=r"TestMutation\.Meta must be a class; got "):
-        reject_unknown_meta_keys("TestMutation", invalid_meta, frozenset())
-
-
 @pytest.mark.parametrize("invalid_op", _UNHASHABLE_AND_NON_STRING_OPERATIONS)
 def test_require_non_delete_operation_rejects_unhashable_and_non_string_operation(
     invalid_op: object,
@@ -467,16 +450,6 @@ def test_validate_permission_classes_hostile_metaclass_never_runs() -> None:
         match=r"permission_classes entry .* is not a permission class exposing has_permission",
     ):
         _validate_permission_classes("Probe", [HostilePerm])
-
-
-@pytest.mark.filterwarnings("ignore:non-string key in the __dict__")
-def test_reject_unknown_meta_keys_non_string_dict_keys() -> None:
-    """reject_unknown_meta_keys handles non-string keys in vars(meta) cleanly."""
-    # basedpyright: the non-str namespace key is the hostile input under test; typeshed types the
-    # type() namespace as dict[str, Any]
-    meta = type("NonStrKeyMeta", (), {123: "foo"})  # pyright: ignore[reportArgumentType]
-    with pytest.raises(ConfigurationError, match=r"TestMutation\.Meta has unknown keys: \[123\]"):
-        reject_unknown_meta_keys("TestMutation", meta, frozenset({"model", "operation"}))
 
 
 def test_validate_permission_classes_custom_base_label_and_flavor_forwarding() -> None:

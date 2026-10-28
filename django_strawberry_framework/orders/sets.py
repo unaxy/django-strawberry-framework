@@ -56,7 +56,10 @@ from django_strawberry_framework.sets_mixins import (
     declaration_map,
     expanded_once,
     reject_captured_branches,
+    reject_unknown_exclude_names,
+    require_field_name,
     require_re_readable_field_declaration,
+    require_sweep_model,
     should_cache_expansion,
 )
 from django_strawberry_framework.utils import truth
@@ -66,6 +69,7 @@ from django_strawberry_framework.utils.inputs import (
     plain_set_meta_fields,
     promote_set_meta_fields,
     read_set_meta_fields,
+    reject_unknown_meta_keys,
 )
 from django_strawberry_framework.utils.permissions import (
     set_bound_type,
@@ -379,6 +383,11 @@ def _classify_declared_path(model: object, field_path: str) -> None:
     _ = classify_path(model, field_path)
 
 
+#: The ``Meta`` keys an ``OrderSet`` reads (``OrderSet._expand_meta_fields``); a class
+#: body's own ``Meta`` declaring any other key is refused at class creation.
+_ALLOWED_ORDERSET_META_KEYS: frozenset[str] = frozenset({"model", "fields", "exclude"})
+
+
 class OrderSetMetaclass(type):
     """Discover ``RelatedOrder`` declarations and bind them to the new class.
 
@@ -399,6 +408,14 @@ class OrderSetMetaclass(type):
         attrs: dict[str, object],
     ) -> OrderSetMetaclass:
         """Build the class, collect ``RelatedOrder`` declarations, bind owner."""
+        # A class body declaring its own ``Meta`` declares only the keys the
+        # expansion reads; a misspelt key (``fiels``) would otherwise narrow nothing.
+        if "Meta" in attrs:
+            _ = reject_unknown_meta_keys(
+                f"OrderSet {name}",
+                attrs["Meta"],
+                _ALLOWED_ORDERSET_META_KEYS,
+            )
         # No cookbook ``order_fields`` synonym (``fields_alias=None``); the
         # call still goes through the shared write-back so FilterSet / OrderSet
         # class Meta cannot grow divergent field-fingerprint rules.
@@ -519,7 +536,7 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
         ``_get_concrete_field_names_for_order``
         (spec-028 Decision 3), narrowed by ``Meta.exclude``
         (``_expand_meta_fields``); a declared ``RelatedOrder`` is merged after
-        that narrowing, so one declared under an excluded name stays.
+        that narrowing, so an exclude naming one is refused there.
         """
 
         def _build() -> OrderedDict[str, RelatedOrder | None]:
@@ -585,8 +602,13 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
         is dropped from the ``"__all__"`` sweep (the primary key included) or
         from the declared names, by exact name; ``Meta.exclude`` with no
         ``Meta.fields`` is the ``"__all__"`` sweep minus the excluded names,
-        so it needs ``Meta.model`` too; a name matching no field drops
-        nothing. ``_read_meta_exclude`` owns its shape gate.
+        so it needs ``Meta.model`` too (``sets_mixins.py::require_sweep_model``).
+        A declared ``RelatedOrder`` is published whatever the exclude says, so
+        excluding one is refused (disable an inherited one with ``name = None``),
+        and so is a name that is no field of ``Meta.model`` and no ``Meta.fields``
+        entry (``sets_mixins.py::reject_unknown_exclude_names``); a model-less set
+        has no field names to check the rest against. ``_read_meta_exclude`` owns
+        its shape gate.
 
         Two declaration contracts are enforced at this gate:
 
@@ -605,8 +627,9 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
           expansion (or raising raw ``TypeError`` from the dict write). A
           ``str`` subclass (a ``StrEnum`` member) is a string: the shared
           reader has already read it as the plain text it spells
-          (``utils/inputs.py::plain_set_meta_fields``), so the exact-``str``
-          gate below sees only the entries that are not strings at all.
+          (``utils/inputs.py::plain_set_meta_fields``), so the shared
+          exact-``str`` gate (``sets_mixins.py::require_field_name``) sees only
+          the entries that are not strings at all.
         """
         fields: OrderedDict[str, RelatedOrder | None] = OrderedDict()
         meta = truth.static_attr(cls, "Meta", None)
@@ -624,17 +647,21 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
             # imported at module level with the other ``.inputs`` symbols;
             # ``inputs.py`` only TYPE_CHECKING-imports ``OrderSet``, so the
             # runtime cycle stays inert without a deferred local import.
-            model = truth.static_attr(meta, "model", None)
-            if model is None:
-                declaration = (
-                    "Meta.fields = '__all__'"
-                    if meta_fields is not None
-                    else "Meta.exclude without Meta.fields (the '__all__' sweep minus exclude)"
-                )
-                raise ConfigurationError(
-                    f"{truth.name(cls)}.{declaration} requires Meta.model "
-                    "so the order field names can be derived from "
-                    "model._meta.get_fields().",
+            model = require_sweep_model(
+                cls,
+                truth.static_attr(meta, "model", None),
+                fields_declared=meta_fields is not None,
+                noun="order",
+            )
+            if excluded is not None:
+                reject_unknown_exclude_names(
+                    cls,
+                    excluded,
+                    subject="OrderSet",
+                    model=model,
+                    listed=(),
+                    declared=cls._declared_order_names(),
+                    declared_kind="RelatedOrder branches",
                 )
             for name in _get_concrete_field_names_for_order(model):
                 if excluded is None or name not in excluded:
@@ -656,21 +683,28 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
             accepted="'__all__' or a re-readable collection of field names",
         )
         model = truth.static_attr(meta, "model", None)
-        for field_path in names:
-            # Entry-TYPE validation is unconditional: a model-less related-only
-            # set defers path validation to the concrete ``queryset.model`` at
-            # apply time, but every entry is a path TOKEN here regardless, so a
-            # non-string entry is a declaration error at this gate instead of a
-            # silent ``{None: None}`` / ``{b'title': None}`` expansion (or a raw
-            # ``TypeError: unhashable type`` from the ``fields[...]`` write
-            # below) when ``Meta.model`` is absent.
-            if not truth.is_exact(field_path, str):
-                cls_label = truth.qualname(cls)
-                raise ConfigurationError(
-                    f"OrderSet {cls_label}.Meta.fields entries must be field-name "
-                    f"strings; got {truth.kind(field_path)} "
-                    f"({truth.render(field_path)}).",
-                )
+        # Entry-TYPE validation is unconditional: a model-less related-only
+        # set defers path validation to the concrete ``queryset.model`` at
+        # apply time, but every entry is a path TOKEN here regardless, so a
+        # non-string entry is a declaration error at this gate instead of a
+        # silent ``{None: None}`` / ``{b'title': None}`` expansion (or a raw
+        # ``TypeError: unhashable type`` from the ``fields[...]`` write
+        # below) when ``Meta.model`` is absent.
+        listed = [
+            require_field_name(cls, field_path, subject="OrderSet", meta_attr="fields")
+            for field_path in names
+        ]
+        if excluded is not None:
+            reject_unknown_exclude_names(
+                cls,
+                excluded,
+                subject="OrderSet",
+                model=model,
+                listed=listed,
+                declared=cls._declared_order_names(),
+                declared_kind="RelatedOrder branches",
+            )
+        for field_path in listed:
             if excluded is not None and field_path in excluded:
                 continue
             if model is not None:
@@ -697,7 +731,8 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
         ``meta_attr="exclude"``): a bare string would exclude by character and
         a one-shot iterator only on the first of the expansion's re-runs, so
         both are refused. An entry that is not a field-name string is refused
-        as ``Meta.fields`` entries are, instead of silently matching nothing.
+        as ``Meta.fields`` entries are (``sets_mixins.py::require_field_name``),
+        instead of silently matching nothing.
         """
         if meta is None:
             return None
@@ -711,15 +746,15 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
             accepted="a re-readable collection of field names",
             meta_attr="exclude",
         )
-        excluded: set[str] = set()
-        for name in names:
-            if not truth.is_exact(name, str):
-                raise ConfigurationError(
-                    f"OrderSet {truth.qualname(cls)}.Meta.exclude entries must be field-name "
-                    f"strings; got {truth.kind(name)} ({truth.render(name)}).",
-                )
-            excluded.add(name)
-        return frozenset(excluded)
+        return frozenset(
+            require_field_name(cls, name, subject="OrderSet", meta_attr="exclude")
+            for name in names
+        )
+
+    @classmethod
+    def _declared_order_names(cls) -> Iterable[str]:
+        """Return the names of the ``RelatedOrder`` branches this class declares or inherits."""
+        return declaration_map(truth.static_attr(cls, "related_orders", {}), RelatedOrder).keys()
 
     # ------------------------------------------------------------------
     # Resolver-facing API (spec-028 Decision 8)

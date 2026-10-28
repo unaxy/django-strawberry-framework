@@ -60,7 +60,10 @@ from django_strawberry_framework.mutations.sets import DjangoMutation
 from django_strawberry_framework.registry import register_subsystem_clear
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import require
-from django_strawberry_framework.utils.inputs import make_shape_build_cache
+from django_strawberry_framework.utils.inputs import (
+    make_shape_build_cache,
+    reject_unknown_meta_keys,
+)
 from django_strawberry_framework.write_mixins import (
     COMMON_WRITE_META_KEYS,
     MODEL_BACKED_WRITE_META_KEYS,
@@ -76,7 +79,6 @@ from django_strawberry_framework.write_mixins import (
     model_backed_permission_and_lock,
     normalize_meta_field_selection,
     own_backing_class,
-    reject_unknown_meta_keys,
     require_backing_class,
     require_model_class,
     require_non_delete_operation,

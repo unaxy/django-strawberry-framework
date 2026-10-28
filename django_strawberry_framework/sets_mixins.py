@@ -33,6 +33,11 @@ metaclass + expansion lifecycle a third time:
   both families run before their first consumption (and the filter family's
   ``Meta.exclude`` gate), since both expansions may re-run and a one-shot
   declaration is exhausted by the first walk.
+- ``require_field_name`` / ``reject_unknown_exclude_names`` /
+  ``require_sweep_model`` -- the ``Meta.fields`` / ``Meta.exclude`` entry gate,
+  the refusal of an exclude name it cannot remove (a declaration or an unknown
+  name) and the model-less sweep refusal, so both families refuse one
+  declaration error in one wording.
 - ``SetLifecycleAttrs`` -- the per-family binding-state descriptor naming the
   ``registry.clear()`` reset attrs (owner / expansion cache / reentry guard) in
   one place instead of re-spelled tuples.
@@ -73,6 +78,7 @@ from .utils.permissions import (
     run_active_input_permission_checks,
     verbatim_path,
 )
+from .utils.relations import is_model_class
 from .utils.strings import pascal_case_or_raise
 
 #: Django's ``import_string``: django-stubs types its result ``Any``; a lazy reference names
@@ -712,6 +718,116 @@ def require_re_readable_field_declaration(
     raise ConfigurationError(
         f"{subject} {truth.qualname(set_cls)}.Meta.{meta_attr} must be {accepted}; got "
         f"{truth.kind(value)} ({truth.render(value)}). {RE_READABLE_FIELDS_HELP}",
+    )
+
+
+def require_field_name(
+    set_cls: type[object],
+    value: object,
+    *,
+    subject: str,
+    meta_attr: str,
+) -> str:
+    """Return one ``Meta.fields`` / ``Meta.exclude`` entry as the field-name string it is.
+
+    The entry gate both set families run over every member of a re-readable
+    declaration (``require_re_readable_field_declaration`` proved the container).
+    Both families read a declaration through
+    ``utils/inputs.py::plain_set_meta_fields`` first, so a ``str`` subclass (a
+    ``StrEnum`` member) arrives as the plain text it spells and the exact-``str``
+    test sees only entries that are not strings at all: a ``None``, bytes, a
+    number or a nested list would otherwise match no field in an exclude (a
+    silent no-op) and reach a raw ``AttributeError`` / ``TypeError`` in a
+    field list. ``subject`` is the family label and ``meta_attr`` the ``Meta``
+    attribute the message names.
+    """
+    if truth.is_exact(value, str):
+        return value
+    raise ConfigurationError(
+        f"{subject} {truth.qualname(set_cls)}.Meta.{meta_attr} entries must be field-name "
+        f"strings; got {truth.kind(value)} ({truth.render(value)}).",
+    )
+
+
+def reject_unknown_exclude_names(
+    set_cls: type[object],
+    excluded: Iterable[str],
+    *,
+    subject: str,
+    model: object,
+    listed: Iterable[str],
+    declared: Iterable[str],
+    declared_kind: str,
+) -> None:
+    """Refuse a ``Meta.exclude`` name the exclude cannot remove from the set.
+
+    An exclude only ever removes a name from the ``Meta.fields`` expansion, so a
+    misspelt one (``"emial"``) removes nothing and leaves the column it meant
+    filterable or orderable. ``declared`` is every name the set declares, its
+    own and inherited declarations alike, tombstones (``name = None``) already
+    dropped: a declared filter or ``RelatedFilter`` / ``RelatedOrder`` branch is
+    published whatever the exclude says, so excluding one is refused first, with
+    the remedy (remove the declaration, or disable an inherited one with
+    ``name = None``), as DRF's ``ModelSerializer`` refuses an excluded declared
+    field. Every other name must be a field ``model._meta.get_fields()`` reports
+    (reverse relations, many-to-many and the primary key's own name included) or
+    one of ``listed``, the set's ``Meta.fields`` entries (a listed path may be
+    excluded before it is validated); any other name raises
+    ``ConfigurationError`` naming the set, the unknown names and the legal ones,
+    as ``DjangoType`` and the write flavors refuse an unknown ``Meta.exclude``
+    name. A ``model`` that is not a model class has no field names to check
+    against, so a model-less set is checked only against its declarations.
+    ``declared_kind`` names the family's declarations in the message.
+    """
+    excluded_names = set(excluded)
+    excluded_declarations = sorted(excluded_names & set(declared))
+    if excluded_declarations:
+        raise ConfigurationError(
+            f"{subject} {truth.qualname(set_cls)}.Meta.exclude names declared "
+            f"{declared_kind}: {excluded_declarations}. An exclude never removes a "
+            "declaration: remove it, or disable an inherited one with "
+            f"`{excluded_declarations[0]} = None` in the class body.",
+        )
+    if not is_model_class(model):
+        return
+    legal = {field.name for field in model._meta.get_fields()} | set(listed)
+    unknown = sorted(excluded_names - legal)
+    if unknown:
+        raise ConfigurationError(
+            f"{subject} {truth.qualname(set_cls)}.Meta.exclude names unknown fields: "
+            f"{unknown}. Available: {sorted(legal)}. Exclude only a field of "
+            f"{truth.name(model)} or a Meta.fields entry.",
+        )
+
+
+def require_sweep_model(
+    set_cls: type[object],
+    model: _T | None,
+    *,
+    fields_declared: bool,
+    noun: str,
+) -> _T:
+    """Return ``Meta.model`` for a whole-set sweep, or refuse the declaration naming the set.
+
+    Both families resolve ``Meta.fields = "__all__"``, and ``Meta.exclude`` with
+    no ``Meta.fields`` ("exclude with no fields implies all other fields"), to
+    every field of ``Meta.model``; without a model there is nothing to sweep.
+    The refusal runs where the sweep is expanded, never at class creation, so a
+    model-less base set whose subclass supplies the model still builds.
+    ``fields_declared`` says which spelling the set used and ``noun`` names the
+    family's field kind in the message.
+    """
+    if model is not None:
+        return model
+    declaration = (
+        "Meta.fields = '__all__'"
+        if fields_declared
+        else "Meta.exclude without Meta.fields (the '__all__' sweep minus exclude)"
+    )
+    raise ConfigurationError(
+        f"{truth.name(set_cls)}.{declaration} requires Meta.model "
+        f"so the {noun} field names can be derived from "
+        "model._meta.get_fields().",
     )
 
 

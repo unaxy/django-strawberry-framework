@@ -570,7 +570,8 @@ resolves to. [`Meta.name`][glossary-metaname] decouples the GraphQL name from th
 class, and [`Meta.description`][glossary-metadescription] shows up in introspection.
 Each view orders the way it selects: `PatronOrder` lists its columns, while
 `PublicPatronOrder` repeats the type's `exclude`, so `orderBy` on the public field offers
-every column that view shows and none it hides.
+every column that view shows and none it hides; a misspelt name in either `exclude` raises
+`ConfigurationError` rather than leaving the column exposed.
 
 The shipped database has no patrons, so add one:
 

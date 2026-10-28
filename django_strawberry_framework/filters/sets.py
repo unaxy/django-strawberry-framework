@@ -91,7 +91,10 @@ from django_strawberry_framework.sets_mixins import (
     collect_related_declarations,
     expanded_once,
     reject_captured_branches,
+    reject_unknown_exclude_names,
+    require_field_name,
     require_re_readable_field_declaration,
+    require_sweep_model,
     should_cache_expansion,
 )
 from django_strawberry_framework.types.relay import implements_relay_node
@@ -138,6 +141,7 @@ from django_strawberry_framework.utils.inputs import (
     canonicalize_set_meta_fields,
     plain_set_meta_fields,
     promote_set_meta_fields,
+    reject_unknown_meta_keys,
 )
 from django_strawberry_framework.utils.permissions import (
     RelationHop,
@@ -1424,6 +1428,17 @@ else:
     _FilterSetMetaclassBase = filterset.FilterSetMetaclass
 
 
+#: The ``Meta`` keys a ``FilterSet`` reads: the ones django-filter's ``FilterSetOptions``
+#: stores (asked of upstream's own options object, so the set moves with upstream) plus
+#: the package's ``filter_fields`` synonym. Audited at every published django-filter
+#: release in the supported range (25.2, 26.1, 26.2): ``model``, ``fields``, ``exclude``,
+#: ``filter_overrides``, ``form``, ``unknown_field_behavior``. A class body's own ``Meta``
+#: declaring any other key is refused at class creation.
+_ALLOWED_FILTERSET_META_KEYS: frozenset[str] = frozenset(
+    truth.instance_state(FilterSetOptions()),
+) | frozenset({FILTERSET_FIELDS_ALIAS})
+
+
 class FilterSetMetaclass(_FilterSetMetaclassBase):
     """Discover `RelatedFilter` declarations and bind them to the new class.
 
@@ -1443,6 +1458,15 @@ class FilterSetMetaclass(_FilterSetMetaclassBase):
     ) -> FilterSetMetaclass:
         """Build the class, collect `RelatedFilter`s, and bind them to the owner."""
         class_items = tuple(attrs.items())
+
+        # A class body declaring its own ``Meta`` declares only the keys a filterset
+        # reads; a misspelt key (``fiels``) would otherwise narrow nothing.
+        if "Meta" in attrs:
+            _ = reject_unknown_meta_keys(
+                f"FilterSet {name}",
+                attrs["Meta"],
+                _ALLOWED_FILTERSET_META_KEYS,
+            )
 
         # ``filter_fields`` is the cookbook / graphene-django synonym for
         # ``Meta.fields``. Write-back is
@@ -3298,6 +3322,7 @@ class FilterSet(
         )
         options.exclude = cast("Sequence[str] | None", plain_set_meta_fields(options.exclude))
         meta_fields = options.fields
+        listed: list[str] = []
         if (
             meta_fields is not None
             and not truth.is_instance(meta_fields, str)
@@ -3307,25 +3332,56 @@ class FilterSet(
             # ``"__all__"`` shorthand IS a string declaration, and any other
             # string is upstream's to reject. A lazy translation string is text
             # too, so upstream compares it with ``"__all__"`` and walks it
-            # exactly as the plain string it stands for.
-            _ = require_re_readable_field_declaration(
-                cls,
-                meta_fields,
-                subject="FilterSet",
-                accepted=(
-                    "'__all__', a lookup-bag dict, or a re-readable collection of field names"
-                ),
-            )
-        if options.exclude is not None:
+            # exactly as the plain string it stands for. Every entry (a dict
+            # declaration's keys) is a field-name string, as in the order family.
+            listed = [
+                require_field_name(cls, name, subject="FilterSet", meta_attr="fields")
+                for name in require_re_readable_field_declaration(
+                    cls,
+                    meta_fields,
+                    subject="FilterSet",
+                    accepted=(
+                        "'__all__', a lookup-bag dict, or a re-readable collection of field names"
+                    ),
+                )
+            ]
+        exclude = options.exclude
+        if exclude is not None:
             # No ``str`` exemption: upstream reads ``exclude`` only by membership, so a
             # string would exclude every field whose name is a substring of it.
-            _ = require_re_readable_field_declaration(
+            excluded = [
+                require_field_name(cls, name, subject="FilterSet", meta_attr="exclude")
+                for name in require_re_readable_field_declaration(
+                    cls,
+                    exclude,
+                    subject="FilterSet",
+                    accepted="a re-readable collection of field names",
+                    meta_attr="exclude",
+                )
+            ]
+            reject_unknown_exclude_names(
                 cls,
-                options.exclude,
+                excluded,
                 subject="FilterSet",
-                accepted="a re-readable collection of field names",
-                meta_attr="exclude",
+                model=options.model,
+                listed=listed,
+                declared=cls.declared_filters,
+                declared_kind="filters",
             )
+        # The whole-set sweep: ``fields = "__all__"``, or ``Meta.exclude`` with no
+        # ``Meta.fields``, which upstream resolves to the same sweep ("exclude with no fields
+        # implies all other fields"). Both narrow alike; any other declaration names its fields.
+        # Upstream would read ``None._meta`` for a model-less sweep; it is refused by name.
+        sweep_model = (
+            require_sweep_model(
+                cls,
+                options.model,
+                fields_declared=meta_fields is not None,
+                noun="filter",
+            )
+            if meta_fields == "__all__" or (meta_fields is None and exclude is not None)
+            else None
+        )
         # Upstream's field-name-to-lookups map (see the ``override`` note above).
         fields = cast("OrderedDict[str, object]", super().get_fields())
         # Upstream iterates the declaration as given, so a ``set`` / ``frozenset`` (of names, or
@@ -3363,20 +3419,9 @@ class FilterSet(
                         lookups = [lk for lk in lookups if lk in ("exact", "in", "isnull")]
                     fields[field_name] = lookups
 
-        # The whole-set sweep: ``fields = "__all__"``, or ``Meta.exclude`` with no
-        # ``Meta.fields``, which upstream resolves to the same sweep ("exclude with no fields
-        # implies all other fields"). Both narrow alike; any other declaration names its fields.
-        exclude = options.exclude
-        if meta_fields != "__all__" and not (meta_fields is None and exclude is not None):
+        if sweep_model is None:
             return fields
-
-        if model is None:  # pragma: no cover - unreachable defensive guard.
-            # ``super().get_fields()`` above already dereferences
-            # ``self._meta.model._meta`` for the whole-set sweep and
-            # raises ``AttributeError`` when the model is ``None``; control
-            # never reaches this guard for that field shape. Kept as a
-            # forward-defensive no-op in case the upstream contract changes.
-            return fields
+        model = sweep_model
 
         # ADD the PK if upstream excluded it (typically the auto-id column), unless
         # ``Meta.exclude`` names it: an excluded name is never a filter key.
