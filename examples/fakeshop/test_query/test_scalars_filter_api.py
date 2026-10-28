@@ -21,10 +21,14 @@ same column whose elements are cleaned the same way. A temporal value the databa
 query runs on cannot bind (on SQLite an aware datetime whose UTC projection leaves years
 1..9999, an aware time) is ``FILTER_INVALID`` keyed to its form field on each adapter-bound
 leaf, member and bound, under ``not`` and through ``partner``; PostgreSQL binds those
-values, so there the same input filters. On PostgreSQL a UTC offset the server refuses
-(16:00 or more either way, or, bound as text as Django's default psycopg cursor binds, a
-fraction of a second) is ``FILTER_INVALID`` the same way, where SQLite projects the
-datetime onto UTC and filters. django-filter's own range filters
+values, so there the same input filters. A datetime sent through the declared
+``occurredDayOf`` ``date`` transform is read as Django binds it, its date in the default
+time zone (``TIME_ZONE``), so one whose date leaves years 1..9999 is ``FILTER_INVALID``
+on every backend.
+On PostgreSQL a UTC offset the server refuses (16:00 or more either way, or, bound as
+text as Django's default psycopg cursor binds, a fraction of a second) is
+``FILTER_INVALID`` the same way, where SQLite projects the datetime onto UTC and filters.
+django-filter's own range filters
 (``priceBetween``, ``occurredBetween`` over ``DateRangeWidget``, ``occurredInBoxes`` over a
 plain ``MultiWidget``, ``priceInUnderscoredBoxes`` over a consumer widget reading ``__``
 keys, and ``priceInFieldBoxes``, whose consumer ``field`` property installs its widget)
@@ -673,6 +677,89 @@ def test_temporal_value_the_database_cannot_bind_is_filter_invalid(
     if connection.vendor == "postgresql":
         assert payload == {"data": {root: [{"label": label} for label in postgresql_labels]}}
         return
+    assert payload["data"] is None, payload
+    (error,) = json_list(payload, "errors")
+    assert json_at(error, "extensions") == {
+        "code": "FILTER_INVALID",
+        "errors": {form_key: [_UNBINDABLE]},
+    }
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "query",
+        "unbindable",
+        "form_key",
+        "bindable",
+        "labels",
+    ),
+    [
+        pytest.param(
+            _BY_FILTER,
+            {"occurredDayOf": {"date": _BEFORE_YEAR_ONE}},
+            "occurred_day_of",
+            {"occurredDayOf": {"date": _BINDABLE_DATETIME}},
+            ["alpha"],
+            id="before-year-one",
+        ),
+        pytest.param(
+            _BY_FILTER,
+            {"occurredDayOf": {"date": "9999-12-31T23:59:00-05:00"}},
+            "occurred_day_of",
+            {"occurredDayOf": {"date": "2021-06-15T23:59:00-05:00"}},
+            [],
+            id="past-year-9999",
+        ),
+        pytest.param(
+            _BY_FILTER,
+            {"not": {"occurredDayOf": {"date": _BEFORE_YEAR_ONE}}},
+            "not__occurred_day_of",
+            {"not": {"occurredDayOf": {"date": _BINDABLE_DATETIME}}},
+            [],
+            id="not",
+        ),
+        pytest.param(
+            _BY_NULLABLE_FILTER,
+            {"partner": {"occurredDayOf": {"date": _PAST_YEAR_9999}}},
+            "partner__occurred_day_of",
+            {"partner": {"occurredDayOf": {"date": _BINDABLE_DATETIME}}},
+            ["of-alpha"],
+            id="nested-partner",
+        ),
+        pytest.param(
+            _BY_NULLABLE_FILTER,
+            {"partnerOccurredDayOf": {"date": _BEFORE_YEAR_ONE}},
+            "partner__occurred_day_of",
+            {"partnerOccurredDayOf": {"date": _BINDABLE_DATETIME}},
+            ["of-alpha"],
+            id="flat-partner",
+        ),
+    ],
+)
+def test_datetime_through_the_date_transform_outside_years_one_to_9999_is_filter_invalid(
+    query: str,
+    unbindable: dict[str, object],
+    form_key: str,
+    bindable: dict[str, object],
+    labels: list[str],
+) -> None:
+    """A datetime whose date leaves years 1..9999 is ``FILTER_INVALID`` through the ``date`` transform.
+
+    ``occurredDayOf`` is a declared ``DateTimeFilter`` through ``occurred_at``'s ``date``
+    transform: Django makes the datetime naive in the default time zone (``TIME_ZONE``,
+    UTC) and reads its date before binding it, which for ``0001-01-01T00:00:00+05:00`` falls in year 0
+    and for ``9999-12-31T23:59:00-05:00`` in year 10000, on every backend. Each is refused
+    keyed to its form field, flat, under ``not`` and through ``partner`` nested and flat,
+    never the conversion's error; a datetime whose date binds filters by that date.
+    """
+    alpha = _seed_specimen("alpha")
+    models.NullableScalarSpecimen.objects.create(label="of-alpha", partner=alpha)
+    root = "allScalarSpecimens" if query == _BY_FILTER else "allNullableScalarSpecimens"
+    control = response_json(post_graphql(query, variables={"filter": bindable}))
+    payload = response_json(post_graphql(query, variables={"filter": unbindable}))
+
+    assert control == {"data": {root: [{"label": label} for label in labels]}}
     assert payload["data"] is None, payload
     (error,) = json_list(payload, "errors")
     assert json_at(error, "extensions") == {

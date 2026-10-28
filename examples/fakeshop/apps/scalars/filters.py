@@ -67,6 +67,12 @@ keys are read off the form field the filter's own class builds, so the range inp
 the flat ``partner`` copy are sent under exactly those keys. ``price_span_in_field_boxes``
 is the package's ``RangeFilter`` with the same widget installed by ``FieldBoxWidgetMixin``,
 a ``field`` override that follows it in the MRO, so it too is sent under ``_low`` / ``_high``.
+
+``occurred_day_of`` on ``ScalarSpecimenFilter`` is a declared ``DateTimeFilter`` through the
+``occurred_at`` column's ``date`` transform (``occurredDayOf: { date: <DateTime> }``): the
+acceptance surface for a value whose kind differs from the predicate's, a datetime Django
+makes naive in the default time zone (``TIME_ZONE``) and reads as its date before
+binding it.
 """
 
 from __future__ import annotations
@@ -160,6 +166,7 @@ class ScalarSpecimenFilter(FilterSet):
     )
     price_in_field_boxes = FieldBoxRangeFilter(field_name="price")
     price_span_in_field_boxes = FieldBoxSpanFilter(field_name="price", lookup_expr="range")
+    occurred_day_of = django_filters.DateTimeFilter(field_name="occurred_at", lookup_expr="date")
 
     class Meta:
         model = models.ScalarSpecimen
