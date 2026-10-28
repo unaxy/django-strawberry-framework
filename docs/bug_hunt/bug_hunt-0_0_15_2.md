@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 368 done, 212 to do.
+Progress: 369 done, 212 to do.
 
 ## Done
 
@@ -2072,6 +2072,11 @@ Progress: 368 done, 212 to do.
   `ConfigurationError` naming the set from `get_fields` (`sets_mixins.py::require_sweep_model`, the wording an
   `OrderSet` uses), not upstream's raw `AttributeError`; a model-less base whose subclass supplies `Meta.model` still
   builds in both families. Tests: `tests/filters/test_sets.py`
+- [x] 629. Test prose in `tests/filters/test_sets.py`, `tests/test_routers.py`, `tests/test_strawberry_patches.py` and
+  fakeshop's `test_transport_api.py`, `test_products_api.py` and `test_library_api.py` cites each contract by its
+  content (the spec-046 Decision a test pins, the equivalence-matrix case it proves, the named test it defers to)
+  instead of a test-plan row, matrix row, gap or test ordinal; comments and docstrings only (stripped ASTs and
+  collected node ids identical).
 
 ## Outside review of the fixes
 
@@ -2178,12 +2183,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `field_name` (`real_shelf = RelatedFilter(..., field_name="shelf")` beside an attribute `shelf`) also fires
   that declaration's gates through the name walk of its gate path: fail-closed, an extra gate its nested twin
   does not fire. Found fixing 640
-- [ ] 629. Test prose cites spec and test-plan rows by ordinal, against START's "Cite contract by CONTENT, never
-  ordinal": "Matrix row N" in `tests/filters/test_sets.py` (15), "Spec-046 row N" / "Test plan rows N-M" in
-  `tests/test_routers.py` (19), "Row N" / "Test plan rows" in `examples/fakeshop/test_query/test_transport_api.py`
-  (42), "test-plan row 19/20" and "gap 1/2" in `test_products_api.py`, "gap 1/2" in
-  `tests/test_strawberry_patches.py`, "test #8" in `test_library_api.py`; restate each by the contract it pins. Found
-  fixing 566
 - [ ] 606. (robustness) FK-id elision never fires into a Relay target whose `Meta.fields` omit its primary
   key: `optimizer/walker.py::_selected_scalar_names` reads the `id` selection as a model field name and
   misses, so `parent { child { id } }` keeps one JOIN; route it through `_relay_id_column`. No fakeshop Relay
@@ -2245,6 +2244,13 @@ tracker number are recorded there; open remainders and new defects are filed as 
   back rounded), so `node` / `nodes` answer null for an id spelling the written value. Found fixing 531
 - [ ] 676. (robustness) A naive datetime id on a `DateTimeField`-pk Relay type answers the masked error on `node` and
   `nodes` (unexamined: possibly the naive-datetime bind warning). Found fact-finding 531
+- [ ] 679. Ordinal citations outside 629's six files: `_strawberry_patches.py` names its shields "gap 1" / "gap 2"
+  (the shield comment, the retirement-diagnostic docstring, its "GAP 1 STILL NEEDED" print literals) where the tests
+  say "decode failure" / "non-envelope body"; plan-section labels "C.3 / C.3a", "C.4 -", "C.4 fixtures" in
+  `tests/filters/test_sets.py` and "C.5 expanded-origin" in `test_library_api.py`; `(#4 / #13)` /
+  `(#10 happy path)` tags in `tests/rest_framework/test_resolvers.py` / `test_sets.py`, `#6` / `#7` / `#11` in
+  `test_library_api.py`, "Test-6 identity flake" in `tests/test_routers.py`, and "DoD item N" / "Goal N" in about 12
+  test lines; restate each by its contract. Found fixing 629
 
 ## To do: holes found re-checking the fixes
 

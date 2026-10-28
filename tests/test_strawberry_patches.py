@@ -7,22 +7,22 @@ applied at app-load time by
 The patch wraps :meth:`strawberry.http.base.BaseView.parse_json` to
 close two upstream gaps that otherwise surface as unhandled ``500``s:
 
-1. ``json.loads`` on ``bytes`` raises ``UnicodeDecodeError`` when the
-   bytes are not decodable under the encoding it detects, and that is a
-   ``ValueError`` rather than a ``JSONDecodeError``, so it escapes
-   upstream's ``except`` and becomes a ``500``; a pathologically nested
-   document likewise escapes as ``RecursionError``. The wrapper translates
-   both into the same ``HTTPException(400, ...)`` Strawberry already raises for
-   malformed JSON.
-2. A body that is not a GraphQL-over-HTTP envelope is rejected with
-   ``HTTPException(400, ...)``: a top-level JSON *scalar*, or a JSON
-   *array* containing any non-object element. Upstream's
-   ``parse_http_body`` handles a JSON object and a JSON array of objects
-   (batch) but lets a scalar fall through to ``data.get("query")`` and a
-   non-object batch element fall through to ``item.get("query")`` -> raw
-   ``AttributeError`` -> ``500``. A well-typed batch ``list`` (every
-   element a ``dict``) is passed through so upstream's batch validation
-   keeps ownership of enablement / size limits.
+- **Decode failures.** ``json.loads`` on ``bytes`` raises
+  ``UnicodeDecodeError`` when the bytes are not decodable under the encoding
+  it detects, and that is a ``ValueError`` rather than a ``JSONDecodeError``,
+  so it escapes upstream's ``except`` and becomes a ``500``; a pathologically
+  nested document likewise escapes as ``RecursionError``. The wrapper
+  translates both into the same ``HTTPException(400, ...)`` Strawberry already
+  raises for malformed JSON.
+- **Non-envelope bodies.** A body that is not a GraphQL-over-HTTP envelope is
+  rejected with ``HTTPException(400, ...)``: a top-level JSON *scalar*, or a
+  JSON *array* containing any non-object element. Upstream's
+  ``parse_http_body`` handles a JSON object and a JSON array of objects
+  (batch) but lets a scalar fall through to ``data.get("query")`` and a
+  non-object batch element fall through to ``item.get("query")`` -> raw
+  ``AttributeError`` -> ``500``. A well-typed batch ``list`` (every
+  element a ``dict``) is passed through so upstream's batch validation
+  keeps ownership of enablement / size limits.
 
 The same module also wraps Strawberry's sync and async ``parse_multipart``
 delegators. A multipart ``operations`` field may be a batched JSON array, but
@@ -32,15 +32,15 @@ or lets malformed path values escape as low-level traversal errors. The delegate
 turn those client-input failures into Strawberry's controlled ``400`` while
 leaving accepted multipart behavior and non-structural consumer failures alone.
 
-Because gap 2's scalar guard is a request-*body* contract enforced from
+Because the non-envelope scalar guard is a request-*body* contract enforced from
 a generic JSON helper, ``apply()`` also installs
 :func:`_patched_parse_query_params` - a source-pinned reimplementation
 of ``BaseView.parse_query_params`` routing its two nested parses around
-the guard through the shared gap-1 translator - so the guard never fires on
+the guard through the shared decode-failure translator - so the guard never fires on
 upstream's GET ``variables`` / ``extensions`` parses, where upstream has
 its own precise per-param handling (``null`` -> ``None`` -> the request
 executes; a scalar -> a per-param 400). Every wire-observable outcome of
-both gap 2's envelope guard and the shield - rejected scalar and
+both the envelope guard and the shield - rejected scalar and
 non-object-batch bodies, object / null / malformed / scalar GET params,
 and the RecursionError 400 on a nested body or GET param - is earned
 over real HTTP in ``examples/fakeshop/test_query/test_products_api.py``.
@@ -169,7 +169,7 @@ def test_apply_reinstalls_all_members_when_one_multipart_method_reverted(
 def test_patched_parse_json_translates_unicode_decode_error() -> None:
     """An undecodable ``bytes`` body -> controlled ``400``, not a raw ``UnicodeDecodeError``.
 
-    This is gap 1 in isolation, i.e. the state a consumer who mounts
+    This is the decode-failure gap in isolation, i.e. the state a consumer who mounts
     Strawberry's own view is in. The raise originates inside the delegated
     ``json.loads``: it detects UTF-8 for these bytes (they start with ``{``) and
     then fails to decode ``FF FE``, which upstream's ``except
@@ -732,7 +732,7 @@ def test_patched_parse_json_translates_a_pathologically_nested_body(
 ) -> None:
     """A body nested past the parser's C stack -> controlled 400, not a raw escape.
 
-    The second half of gap 1: ``json.loads`` answers a pathologically nested
+    The second half of the decode-failure gap: ``json.loads`` answers a pathologically nested
     document with ``RecursionError`` - a ``RuntimeError``, so neither
     upstream's ``except json.JSONDecodeError`` nor a ``ValueError`` widening
     catches it, and it escaped as an unhandled ``500`` from every one of the
@@ -753,7 +753,7 @@ def test_patched_parse_query_params_translates_a_deep_param(
     param: str,
     pathological_json_text: str,
 ) -> None:
-    """The GET shield owns gap 1's error channel without owning its guard.
+    """The GET shield owns the decode-failure error channel, not the envelope guard.
 
     The shield routes the two query-param parses around the envelope guard
     (upstream's per-param handling owns validity there), but a deep param

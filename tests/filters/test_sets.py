@@ -6317,19 +6317,19 @@ def test_qs_and_apply_sync_and_async_over_eligible_candidate() -> None:
 # (``test_generated_deep_to_many_path_correctness_is_row_preserving``,
 # ``test_flattened_related_filter_leaf_is_row_preserving``) and the adapter
 # tests are not repeated here: forward M2M single-parent equivalence, the
-# expanded-vs-root classification EXECUTION equivalence (matrix row 13, covered
+# expanded-vs-root classification EXECUTION equivalence (covered
 # by ``test_flattened_related_filter_leaf_is_row_preserving`` which compares the
 # expanded ``BookFilter`` ``genres__name`` leaf against its direct-invocation
 # oracle), inactive-candidate no-op (row: one active among many), and
 # restrictive-empty membership.
 #
-# Matrix row 7 (``to_field`` FK-to-non-pk hop) is proven by
+# The ``to_field`` FK-to-non-pk hop case is proven by
 # ``test_to_field_reverse_to_many_children_is_row_preserving`` below, over the
 # ``Genre`` reverse to-many ``favoring_profiles__postal_code`` (whose join binds
 # on the non-pk ``name`` column of ``PatronProfile.favorite_genre``).
 #
 # Package-tier notes:
-# - matrix row 11 GlobalID-list sub-case: a framework-generated FLAT Relay M2M
+# - the integer-``in`` case's GlobalID-list sub-case: a framework-generated FLAT Relay M2M
 #   leaf (``Meta.fields = {"genres": [...]}`` with a Relay-Node target) IS
 #   generated as a ``GlobalIDMultipleChoiceFilter``; its form field is
 #   constructible because the replacement strips the model-choice-only extras
@@ -6365,7 +6365,7 @@ def _make_scalar_specimen(
 
 @pytest.mark.django_db
 def test_reverse_fk_loans_note_is_row_preserving() -> None:
-    """Matrix row 1 (reverse FK) + row 14 (ordinary generated ``CharFilter``).
+    """Equivalence matrix: reverse FK, through an ordinary generated ``CharFilter``.
 
     ``Book`` root, generated ``loans__note`` ``icontains`` leaf (a plain upstream
     ``CharFilter`` crossing the reverse-FK ``Book.loans`` to-many hop). A parent
@@ -6410,7 +6410,7 @@ def test_reverse_fk_loans_note_is_row_preserving() -> None:
 
 @pytest.mark.django_db
 def test_forward_m2m_multiple_parents_is_row_preserving() -> None:
-    """Matrix row 2 (forward M2M) gap: MULTIPLE parents, one direct, one via dups.
+    """Equivalence matrix, forward M2M: MULTIPLE parents, one direct, one via dups.
 
     ``Book`` root over the forward M2M ``Book.genres``. One book matches through a
     single genre; another matches through two duplicate-matching genres. Both are
@@ -6449,7 +6449,7 @@ def test_forward_m2m_multiple_parents_is_row_preserving() -> None:
 
 @pytest.mark.django_db
 def test_reverse_m2m_genre_books_title_is_row_preserving() -> None:
-    """Matrix row 3 (reverse M2M): ``Genre`` root over ``books__title``.
+    """Equivalence matrix, reverse M2M: ``Genre`` root over ``books__title``.
 
     A genre linked to two matching books is returned once; ordered equivalence
     against the direct-invocation oracle.
@@ -6486,7 +6486,7 @@ def test_reverse_m2m_genre_books_title_is_row_preserving() -> None:
 
 @pytest.mark.django_db
 def test_generic_relation_branch_tags_is_row_preserving() -> None:
-    """Matrix row 4 (``GenericRelation``): ``Branch`` root over ``tags__tag``.
+    """Equivalence matrix, ``GenericRelation``: ``Branch`` root over ``tags__tag``.
 
     ``Meta.fields = {"tags__tag": ["icontains"]}`` DOES generate through
     django-filter's ``get_model_field`` (a plain ``CharFilter``, ``distinct=True``
@@ -6536,7 +6536,7 @@ def test_generic_relation_branch_tags_is_row_preserving() -> None:
 
 @pytest.mark.django_db
 def test_isnull_on_nullable_child_field_is_row_preserving() -> None:
-    """Matrix row 5 (``isnull`` on a nullable child field over a to-many hop).
+    """Equivalence matrix: ``isnull`` on a nullable child field over a to-many hop.
 
     ``Genre`` root over ``books__subtitle`` (``subtitle`` is nullable). Both
     ``isnull=True`` and ``isnull=False`` match the production result to the
@@ -6579,7 +6579,7 @@ def test_isnull_on_nullable_child_field_is_row_preserving() -> None:
 
 @pytest.mark.django_db
 def test_nullable_intermediate_to_one_hop_is_row_preserving() -> None:
-    """Matrix row 6 (nullable intermediate to-one hop in the multiplying chain).
+    """Equivalence matrix: a nullable intermediate to-one hop in the multiplying chain.
 
     ``ScalarSpecimen`` root over ``parent__children__label`` - a nullable self-FK
     (``parent``) followed by the reverse-FK to-many hop (``children``). The
@@ -6617,7 +6617,7 @@ def test_nullable_intermediate_to_one_hop_is_row_preserving() -> None:
 
 @pytest.mark.django_db
 def test_to_field_reverse_to_many_children_is_row_preserving() -> None:
-    """Matrix row 7 (``to_field`` FK-to-non-pk hop) executes.
+    """Equivalence matrix: the ``to_field`` FK-to-non-pk hop executes.
 
     ``Genre`` root over its reverse to-many ``favoring_profiles__postal_code`` --
     the hop whose join binds on the non-pk ``name`` column
@@ -6672,7 +6672,7 @@ def test_to_field_reverse_to_many_children_is_row_preserving() -> None:
 
 @pytest.mark.django_db
 def test_two_active_leaves_same_relation_cross_row_and() -> None:
-    """Matrix row 8 (two active leaves on one relation, cross-row AND).
+    """Equivalence matrix: two active leaves on one relation, cross-row AND.
 
     ``Book`` root with TWO active leaves on the M2M ``genres`` relation matching
     DIFFERENT genre rows of the same book (name ``icontains`` matches one genre,
@@ -6721,7 +6721,7 @@ def test_two_active_leaves_same_relation_cross_row_and() -> None:
 
 @pytest.mark.django_db
 def test_range_binds_to_single_child_row() -> None:
-    """Matrix row 9 (positive multi-lookup single-invocation binding).
+    """Equivalence matrix: a positive multi-lookup binds in a single invocation.
 
     A ``range`` leaf on ``Book.loans__id``: both bounds must bind to ONE child row
     inside a single invocation. A book whose loans SPLIT the range (one below, one
@@ -6764,7 +6764,7 @@ def test_range_binds_to_single_child_row() -> None:
 
 @pytest.mark.django_db
 def test_negated_split_across_rows_range_counterexample() -> None:
-    """Matrix row 10 (negated split-across-rows range counterexample).
+    """Equivalence matrix: the negated split-across-rows range counterexample.
 
     The framework's generated FLAT leaves never carry ``exclude=True`` (proven
     executably by ``test_generated_flat_leaves_never_carry_exclude`` below);
@@ -6811,7 +6811,7 @@ def test_negated_split_across_rows_range_counterexample() -> None:
 
 
 def test_generated_flat_leaves_never_carry_exclude() -> None:
-    """No framework-GENERATED flat leaf carries ``exclude=True`` (row 10 invariant).
+    """No framework-GENERATED flat leaf carries ``exclude=True`` (negated-range invariant).
 
     Negation is a logic-tree ``not_`` concern (``_q_for_branch``), never baked
     into a generated leaf, so the flat-leaf correlated-``EXISTS`` adapter never
@@ -6840,7 +6840,7 @@ def test_generated_flat_leaves_never_carry_exclude() -> None:
 
 @pytest.mark.django_db
 def test_integer_in_over_to_many_path() -> None:
-    """Matrix row 11 (integer ``in`` semantics over an eligible to-many path).
+    """Equivalence matrix: integer ``in`` semantics over an eligible to-many path.
 
     ``Genre`` root over ``books__id`` ``in``: an explicit empty list is the empty
     set (matches no row, as ``filter(books__id__in=[])`` does); a mixed valid/invalid
@@ -6936,7 +6936,7 @@ def test_flat_relay_fk_leaf_builds_form_field_without_model_choice_extras() -> N
 
 @pytest.mark.django_db
 def test_global_id_list_over_flat_relay_m2m_is_row_preserving() -> None:
-    """Matrix row 11, GlobalID-list sub-case: decode + row-preserving apply.
+    """Equivalence matrix, integer ``in`` over GlobalIDs: decode + row-preserving apply.
 
     A flat Relay M2M ``in`` leaf decodes real ``global_id_for``-minted ids and
     routes through the correlated-EXISTS applicator: a book linked to BOTH
@@ -6995,7 +6995,7 @@ def test_global_id_list_over_flat_relay_m2m_is_row_preserving() -> None:
 
 @pytest.mark.django_db
 def test_untouched_surfaces_attach_no_reserved_alias() -> None:
-    """Matrix row 12 (untouched surfaces): declared / method / custom / overrides.
+    """Equivalence matrix, untouched surfaces: declared / method / custom / overrides.
 
     Each ineligible surface must run without the predicate rewrite: no reserved
     ``_dst_predicate_`` alias attaches, and the correct row is still returned. A
