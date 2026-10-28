@@ -229,6 +229,16 @@ def _check_composite_pk_for_relay_node(type_cls: type[_RelayDjangoType]) -> None
 # scan of a subclass in place of its own annotations.
 _RELAY_ID_ATTR_SLOT = "_dsf_relay_id_attr"
 
+# Opening of the message ``strawberry/relay/types.py::Node.resolve_id_attr``
+# raises its ``NodeIDAnnotationError`` with for ZERO ``relay.NodeID``
+# candidates - the only case the ``"pk"`` fallback answers. Upstream raises the
+# same class (same ``cls``, ``rich_message`` and ``suggestion``) for MORE than
+# one candidate and exposes neither the candidate list nor a count, so the
+# message is the only discriminator; identical from the 0.322.2 floor through
+# the locked release. Matched fail-closed: any other message (more than one
+# candidate, or a reworded zero case) is refused, never read as ``"pk"``.
+_NO_NODE_ID_MESSAGE = "No field annotated with `NodeID` found in "
+
 
 def _stamp_relay_id_attr(type_cls: type[relay.Node]) -> str:
     """Resolve the Relay id attribute ONCE, pin it on the class and return it (Phase 2.5).
@@ -250,7 +260,12 @@ def _stamp_relay_id_attr(type_cls: type[relay.Node]) -> str:
 
     The seed-then-scan keeps upstream as the single scan implementation (no
     ported annotation walk to drift); the ``"pk"`` fallback ports
-    ``strawberry_django/relay/utils.py::resolve_model_id_attr``. Stamped
+    ``strawberry_django/relay/utils.py::resolve_model_id_attr`` for the ZERO
+    ``relay.NodeID`` case only. Upstream raises the same
+    ``NodeIDAnnotationError`` for more than one candidate, which
+    strawberry-django also reads as ``"pk"`` (the type then silently encodes
+    and filters on the pk); that case is a ``ConfigurationError`` here,
+    raised at finalize. Stamped
     unconditionally for every Relay-Node-shaped type at finalize (when the
     consumer overrode ``resolve_id_attr`` the stamp is simply never read) and
     by ``_resolve_id_attr_default`` on its first read of a class finalize
@@ -259,7 +274,14 @@ def _stamp_relay_id_attr(type_cls: type[relay.Node]) -> str:
     type_cls._id_attr = None
     try:
         id_attr = require(call_method(relay.Node.resolve_id_attr, "__func__", type_cls), is_str)
-    except NodeIDAnnotationError:
+    except NodeIDAnnotationError as exc:
+        if not exc.message.startswith(_NO_NODE_ID_MESSAGE):
+            raise ConfigurationError(
+                f"{truth.name(type_cls)}: Strawberry refused the type's relay.NodeID "
+                f"annotations ({exc.message}). A Relay node takes at most one "
+                "relay.NodeID[...] annotation (none keeps the primary key as its id); "
+                "keep the one that names the id column.",
+            ) from exc
         id_attr = "pk"
     setattr(type_cls, _RELAY_ID_ATTR_SLOT, id_attr)
     return id_attr

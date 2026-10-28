@@ -191,15 +191,17 @@ it lands with its tick.
       the new `libraryCastSecondaryBookNodes` field behind `FAKESHOP_TEST_RELAY_SECONDARY_NODE`;
     - `tests/test_relay_node_field.py` and `tests/types/test_relay_interfaces.py` read `TYPE_CAST_ATTRIBUTE`.
 
-- [ ] 8. (TYP-7) Two `relay.NodeID` annotations fall back silently to `"pk"`
-  - Our code: `types/relay.py::_stamp_relay_id_attr #"except NodeIDAnnotationError:"` (2 lines).
-  - Upstream: `strawberry/relay/types.py::Node.resolve_id_attr`. It raises `NodeIDAnnotationError` for zero
-    candidates and for more than one; only the zero case is strawberry-django's `"pk"` fallback.
-  - Lines: 0 (the catch is split in two).
-  - Status: SUSPECTED.
-  - Reason to keep ours: none for the more-than-one case.
+- [x] 8. (TYP-7) Two `relay.NodeID` annotations fall back silently to `"pk"`
+  - Our code: `types/relay.py::_stamp_relay_id_attr` keeps the `"pk"` fallback for zero candidates only; any other
+    `NodeIDAnnotationError` is a `ConfigurationError` at finalize naming the type and embedding upstream's message.
+  - Upstream: `strawberry/relay/types.py::Node.resolve_id_attr`. Its `NodeIDAnnotationError` carries the same
+    `cls`, `rich_message` and `suggestion` for zero and for more than one candidate, so only the message opening
+    (`types/relay.py::_NO_NODE_ID_MESSAGE`) tells them apart. The match is fail-closed: a reworded zero case is
+    refused loudly, never read as `"pk"`.
+  - Status: CONFIRMED. The new row did not raise on the old code.
   - Behaviour change: fixes a type with two `NodeID` fields silently encoding and filtering on the pk.
-  - Risk / blockers: none.
+  - Tests: `tests/types/test_relay_interfaces.py::test_two_node_id_annotations_are_refused_not_read_as_pk`; the zero
+    case stays pinned by `test_resolve_id_attr_falls_back_to_pk`.
 
 - [ ] 9. (WRT-1 = TYP-9, also tracked in `dry-0_0_15_3.md`) The model and auth flavors hardcode Django's English
   `"null"` message
