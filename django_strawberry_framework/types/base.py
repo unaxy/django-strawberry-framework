@@ -75,7 +75,7 @@ from django_strawberry_framework.utils.relations import is_single_column_foreign
 from django_strawberry_framework.utils.typing import is_async_callable, object_result
 
 from .converters import _field_output_type_for, convert_field_output
-from .definition import _GRAPHQL_NAME_RE, DjangoTypeDefinition
+from .definition import DjangoTypeDefinition, _check_graphql_name
 from .relations import PendingRelation, PendingRelationAnnotation
 from .relay import install_is_type_of
 
@@ -1403,10 +1403,7 @@ def _validate_meta(cls: type[DjangoType], meta: object) -> _ValidatedMeta:
             raise ConfigurationError(
                 f"{model_name}.Meta.name must be a non-empty string; got an empty name.",
             )
-        if not _GRAPHQL_NAME_RE.fullmatch(name) or name.startswith("__"):
-            raise ConfigurationError(
-                f"{model_name}.Meta.name must be a valid GraphQL name; got {truth.render(name)}.",
-            )
+        _check_graphql_name(name, f"{model_name}.Meta.name")
     else:
         name = None
 
