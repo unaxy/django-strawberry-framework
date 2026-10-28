@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 351 done, 214 to do.
+Progress: 352 done, 213 to do.
 
 ## Done
 
@@ -1969,6 +1969,9 @@ Progress: 351 done, 214 to do.
 - [x] 900. The lookup iterator's return annotation uses a private runtime-safe alias, preserving
   `Lookup[object]` for static checking without subscripting Django's runtime class. The unpatched annotation gate
   passes; no filtering behavior or supported introspection contract changes. Tests: `tests/base/test_init.py`.
+- [x] 659. Not a package defect under GOAL's trust boundary: the two repeat-stop tests in
+  `tests/test_prove_failability.py` use wall-clock sleeps, but name no broken supported configuration or wire
+  contract. Deterministic test timing is a tooling robustness task; the signal relay's behavior is unchanged.
 
 ## Outside review of the fixes
 
@@ -2181,9 +2184,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 657. Unprobed: the integer ask (385) on an `ArrayField(IntegerField)` filter leaf: the gate admits only
   temporal / duration elements, so a list param of out-of-range integers reaches the driver unasked. Found
   fact-finding 389
-- [ ] 659. (robustness) `tests/test_prove_failability.py` (near lines 2775 and 2806) times its stop signals around
-  `STOP_REPEAT_GRACE` with real sleeps, the load-sensitive shape 428 removed from `tests/test_workspace.py`; drive it
-  with the `_StopRelay` clock seam or an observable condition. Found verifying 428
 - [ ] 661. (robustness) The other `scripts/` entry points (the `check_*`, `build_*` `--check`, `prove_failability.py`,
   `review_*`, `bug_hunt.py`, `count_queries.py` and the rest sharing the `sys.exit(main())` shape) exit 120 when their
   stdout reader is gone, losing a 0 or 1 a pipeline reads (`check_trailing_commas.py --check`,
