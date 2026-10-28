@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 376 done, 216 to do.
+Progress: 377 done, 216 to do.
 
 ## Done
 
@@ -2131,6 +2131,13 @@ Progress: 376 done, 216 to do.
   `tests/test_permissions.py`, `tests/utils/test_directives.py`, `tests/mutations/test_inputs.py`,
   `tests/utils/test_write_values.py`, `tests/test_write_mixins.py`, `tests/types/test_choice_entry_shapes.py`, and one
   lazy `Meta.exclude` row per mutation flavor
+- [x] 579. The filter side names a flat copy and reads a supplied leaf by every form-data key its widget reads
+  (`utils/widgets.py::widget_keys`): `filters/sets.py::_widget_keys` and `FilterSet._leaf_absent` read a
+  `SplitArrayWidget`'s per-index keys (`<name>_0 ..`) and a nested `MultiWidget`'s deeper keys, so a child set's
+  split-array copy on a set built outside the schema is bound and filters by `<prefix>-shelves__arr_0 ..` instead of
+  being dropped, and the leaf reads as supplied; a widget reading no key keeps its bare name. Range bounds keep the
+  two-key `multi_widget_keys`. spec-027 and the `utils/widgets.py` module docstring say so. Tests:
+  `tests/filters/test_sets.py`
 
 ## Outside review of the fixes
 
@@ -2187,9 +2194,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `_get_validation_exclusions` leaves it out of `full_clean`) answers the masked error at save (a raw `DataError` on
   an `ArrayField`, measured); `_is_unstorable_blank` needs `blank=True`, so no column that stores no empty string is
   named in this shape. Found fixing 541
-- [ ] 579. (robustness) A filter whose form field uses a `SplitArrayWidget` is still read under its bare name:
-  `utils/widgets.py::multi_widget_keys` answers `None` for it, so the filter-side key spreading (`filters/inputs.py`,
-  `filters/sets.py` copy keys) treats it as one key while the widget reads `<name>_0 ..`. Found fixing 553
 - [ ] 620. (robustness) On a `null=True` `ArrayField`, a `ModelForm` explicit `null`, or an update omitting the field
   over a stored NULL, writes `[]` instead of NULL, with the default `SimpleArrayField` and a `SplitArrayField` alike.
   Found verifying 553
@@ -2304,6 +2308,9 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 691. CHANGELOG entry for item 579: on a `FilterSet` used outside the schema (a django-filter view, a direct
+  construction), a related child filter whose widget is a `SplitArrayWidget` or a nested `MultiWidget` filters by the
+  keys the widget reads instead of being silently dropped
 - [ ] 690. CHANGELOG entry for item 663: a lazy translation string (or bytes-like value) given as a mutation flavor's
   `Meta.fields` / `Meta.exclude` / `optional_fields` / `injected_fields`, a field's `directives=`,
   `apply_cascade_permissions(fields=)` or `permission_classes` is refused as a bare string instead of read one name
