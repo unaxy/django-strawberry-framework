@@ -36,8 +36,9 @@ from django_strawberry_framework.optimizer.plans import (
     _consumer_projection,
     _flatten_select_related,
     _IndexedList,
-    _projection_aliases,
+    _loads,
     _reverse_order_by,
+    _select_mask,
     _select_path_missing_connectors,
     append_prefetch_unique,
     append_unique,
@@ -1675,7 +1676,8 @@ def test_select_path_missing_connectors(
     expected: tuple[str, ...] | None,
 ) -> None:
     """The ``.only()`` entries a joined path still needs, or ``None`` when it does not resolve."""
-    assert _select_path_missing_connectors(path, frozenset(names), model=Entry) == expected
+    select_mask = _select_mask(Entry, names)
+    assert _select_path_missing_connectors(path, select_mask, model=Entry) == expected
 
 
 def test_apply_projection_leaves_a_filtered_relation_join_alone() -> None:
@@ -1718,20 +1720,19 @@ def test_merged_projection_defer_mode_matches_every_spelling_of_a_read_column(
 
 
 @pytest.mark.parametrize(
-    ("entry", "model", "aliases"),
+    ("entry", "loaded"),
     [
-        pytest.param("missing", Item, {"missing"}, id="unknown-field"),
-        pytest.param("missing__name", Item, {"missing__name"}, id="unknown-head"),
-        pytest.param("category__missing", Item, {"category__missing"}, id="unknown-leaf"),
-        pytest.param("name__a__b", Item, {"name__a__b"}, id="through-a-column"),
-        pytest.param("category", None, {"category"}, id="no-model"),
-        pytest.param("category", Item, {"category", "category_id"}, id="forward-key"),
+        pytest.param("category", True, id="name"),
+        pytest.param("category_id", True, id="attname"),
+        pytest.param("category__description", False, id="dotted-unread"),
+        pytest.param("missing", False, id="unknown-field"),
+        pytest.param("name__a", False, id="through-a-column"),
     ],
 )
-def test_projection_aliases_resolve_only_what_the_model_names(
-    entry: str,
-    model: type[Model] | None,
-    aliases: set[str],
-) -> None:
-    """An entry aliases its name and attname spellings; an unresolvable one only itself."""
-    assert _projection_aliases(entry, model) == aliases
+def test_loads_reads_an_entry_through_djangos_select_mask(entry: str, *, loaded: bool) -> None:
+    """An entry is loaded under any spelling Django resolves; one it cannot resolve loads nothing.
+
+    The read mask is ``.only("name", "category__name")``: the dotted read loads the
+    ``category`` key column, not the related ``description``.
+    """
+    assert _loads(_select_mask(Item, ["name", "category__name"]), entry, Item) is loaded

@@ -51,6 +51,7 @@ from django.db.models import Count, F, OrderBy, Prefetch, Q, QuerySet, Value, Wi
 from django.db.models.constants import LOOKUP_SEP
 from django.db.models.expressions import BaseExpression
 from django.db.models.functions import Random, RowNumber
+from django.db.models.query_utils import select_related_descend
 from django.db.models.sql.where import WhereNode
 from typing_extensions import override
 
@@ -77,7 +78,11 @@ from django_strawberry_framework.utils.connections import (
     window_range_plan,
 )
 from django_strawberry_framework.utils.querysets import applied_order, resolve_order_name
-from django_strawberry_framework.utils.relations import instance_accessor, relation_kind
+from django_strawberry_framework.utils.relations import (
+    instance_accessor,
+    is_model_class,
+    relation_kind,
+)
 
 from .field_meta import FieldMeta
 from .predicates import visible_value_path
@@ -107,6 +112,11 @@ if TYPE_CHECKING:
 #: ``Query.get_compiler``: django-stubs types its result ``Any``; Django returns the
 #: ``SQLCompiler`` for the alias, whose ``get_order_by`` resolves each ORDER BY term.
 _query_compiler: Callable[[Query, str], SQLCompiler] = sql.Query.get_compiler
+
+#: ``select_related_descend``: django-stubs types ``field`` as a ``Field`` and
+#: ``select_mask`` as a set; the compiler passes reverse relations too, with the
+#: dict ``Query.get_select_mask`` returns.
+_select_related_descend: Callable[..., bool] = select_related_descend
 
 _T = TypeVar("_T")
 _M = TypeVar("_M", bound="models.Model")
@@ -819,48 +829,45 @@ def _extend_only_projection(
     return child_queryset.only(*names, *missing)
 
 
-def _projection_aliases(entry: str, model: type[models.Model] | None) -> set[str]:
-    """Every spelling of one projection entry: the field name and its attname at that level.
+def _select_mask(model: type[models.Model], names: Iterable[str]) -> dict[object, object]:
+    """Django's select mask for ``.only(*names)`` on ``model`` (``Query.get_select_mask``).
 
-    ``shelf`` and ``shelf_id`` name the same column of a ``Book`` row, and Django
-    accepts either in ``.only()`` / ``.defer()``; a dotted entry (``shelf__branch``)
-    is resolved along its path. An unresolvable entry aliases only itself.
+    The mask the compiler selects columns from: the loaded fields keyed by field
+    object, each relation holding its own nested mask. Every spelling Django
+    accepts for a column (name, attname, ``pk``, a dotted path) lands on the same
+    key. An empty nested mask under a relation loads the whole related row. The
+    primary key, which Django always loads, is named too, so an empty ``names``
+    reads as the pk alone rather than as Django's unrestricted empty mask.
     """
-    aliases = {entry}
-    head, sep, last = entry.rpartition("__")
-    current = model
-    for segment in head.split("__") if head else ():
-        if current is None:
-            break
-        try:
-            current = getattr(current._meta.get_field(segment), "related_model", None)
-        except FieldDoesNotExist:
-            current = None
-    if current is None:
-        return aliases
-    try:
-        field_obj = current._meta.get_field(last)
-    except FieldDoesNotExist:
-        return aliases
-    for spelling in (getattr(field_obj, "name", None), getattr(field_obj, "attname", None)):
-        if spelling:
-            aliases.add(f"{head}{sep}{spelling}")
-    return aliases
+    # Django keys the mask by field object; django-stubs reads it as ``dict[str, Any]``.
+    return require(QuerySet(model=model).only("pk", *names).query.get_select_mask(), is_dict)
 
 
-def _entry_loaded_by(
-    entry: str,
-    projection: frozenset[str],
-    model: type[models.Model] | None,
-) -> bool:
-    """Whether ``projection`` (an ``.only()`` set) loads the column ``entry`` names."""
-    return any(
-        alias in projection or any(name.startswith(f"{alias}__") for name in projection)
-        for alias in _projection_aliases(entry, model)
+def _mask_covers(select_mask: dict[object, object], entry_mask: dict[object, object]) -> bool:
+    """Whether ``select_mask`` loads every field ``entry_mask`` loads, level by level."""
+    return not select_mask or all(
+        field_obj in select_mask
+        and _mask_covers(require(select_mask[field_obj], is_dict), require(nested, is_dict))
+        for field_obj, nested in entry_mask.items()
     )
 
 
-def merged_projection(queryset: object, names: Sequence[str]) -> tuple[list[str], bool]:
+def _loads(select_mask: dict[object, object], entry: str, model: type[models.Model]) -> bool:
+    """Whether ``select_mask`` loads the column the ``.only()`` / ``.defer()`` entry names.
+
+    Django resolves the entry into its own mask (``_select_mask``), so ``shelf``,
+    ``shelf_id`` and a dotted ``shelf__code`` read under ``shelf`` all match. An
+    entry Django cannot resolve (a ``FilteredRelation`` alias, a path through a
+    column) loads nothing.
+    """
+    try:
+        entry_mask = _select_mask(model, [entry])
+    except (FieldDoesNotExist, FieldError):
+        return False
+    return _mask_covers(select_mask, entry_mask)
+
+
+def merged_projection(queryset: QuerySet[_M], names: Sequence[str]) -> tuple[list[str], bool]:
     """Union the queryset's own projection with ``names`` as loaded column sets.
 
     Returns ``(entries, defer_mode)``: the entries to write with ``.only()``
@@ -872,8 +879,8 @@ def merged_projection(queryset: object, names: Sequence[str]) -> tuple[list[str]
       entries in sorted order - Django's ``.only()`` chaining REPLACES the set, so
       the union has to be spelled out;
     - a consumer ``.defer(D)``: the consumer loads every column but ``D``, so the
-      union defers ``D`` minus whatever ``names`` reads (name or attname spelling,
-      or a dotted entry under it).
+      union defers ``D`` minus every column ``names`` loads, as Django's select
+      mask reads both (``_loads``).
     """
     entries = list(dict.fromkeys(names))
     loading = _consumer_projection(queryset)
@@ -883,11 +890,9 @@ def merged_projection(queryset: object, names: Sequence[str]) -> tuple[list[str]
     if not defer_flag:
         append_unique_many(entries, sorted(existing))
         return entries, False
-    projection = frozenset(entries)
-    model = getattr(queryset, "model", None)
-    return [
-        entry for entry in sorted(existing) if not _entry_loaded_by(entry, projection, model)
-    ], True
+    model = queryset.model
+    read = _select_mask(model, entries)
+    return [entry for entry in sorted(existing) if not _loads(read, entry, model)], True
 
 
 def _consumer_projection(queryset: object) -> tuple[frozenset[str], bool] | None:
@@ -910,51 +915,51 @@ def _consumer_projection(queryset: object) -> tuple[frozenset[str], bool] | None
 
 def _select_path_missing_connectors(
     path: str,
-    names: frozenset[str],
+    select_mask: dict[object, object],
     *,
-    model: type[models.Model] | None,
+    model: type[models.Model],
 ) -> tuple[str, ...] | None:
     """Return the ``.only()`` entries ``select_related(path)`` still needs, or ``None``.
 
-    Walks the path one relation segment at a time, mirroring Django's
-    deferred-loading rule at each level (pinned empirically; the error is
-    ``Field X cannot be both deferred and traversed using select_related``):
-    a level is RESTRICTED when ``names`` holds any column at it; a restricted
-    level loads a segment only when some entry leads with the segment's name or
-    attname (a dotted entry like ``"category__code"`` loads its connector). An
-    unrestricted deeper level (no entries under the prefix) loads every column.
-    A restricted level missing its connector contributes the connector's
-    ``.only()`` entry: the FK column (attname) for a forward relation, which
-    Django's select mask reads as the relation itself and so loads the whole
-    related row - what the JOIN's author asked for - or the relation name for a
-    reverse one-to-one, which has no column.
+    Walks the path one relation at a time through Django's own descent check,
+    ``django.db.models.query_utils.select_related_descend``, against the
+    projection's select mask (``_select_mask``): the check raises ``FieldError``
+    (``Field X cannot be both deferred and traversed using select_related``)
+    exactly where the compiler refuses the JOIN. Each refused level contributes
+    its connector: the FK column (attname) for a forward relation, which the
+    select mask reads as the relation itself and so loads the whole related row -
+    what the JOIN's author asked for - or the relation name for a reverse
+    one-to-one, which has no column. Below a refused or unrestricted level the
+    related row loads whole.
 
-    ``()`` means the path is traversable as-is. ``None`` means unresolvable
-    (no model, unknown field - a ``FilteredRelation`` alias, say).
+    ``()`` means the path is traversable as-is. ``None`` means it names something
+    Django does not descend (an unknown field, a ``FilteredRelation`` alias, a
+    column, a parent link); Django's own ``select_related`` validation owns it.
     """
-    current_model = model
+    opts = model._meta
     prefix = ""
     missing: list[str] = []
     for segment in path.split("__"):
-        if current_model is None:
-            return None
         try:
-            field_obj = current_model._meta.get_field(segment)
+            field_obj = opts.get_field(segment)
         except FieldDoesNotExist:
             return None
-        aliases = {segment}
-        attname: str | None = getattr(field_obj, "attname", None)
-        if attname:
-            aliases.add(attname)
-        scoped = (
-            {name[len(prefix) :] for name in names if name.startswith(prefix)}
-            if prefix
-            else set(names)
-        )
-        if scoped and not (aliases & {entry.split("__", 1)[0] for entry in scoped}):
-            missing.append(f"{prefix}{attname or segment}")
+        try:
+            descends = _select_related_descend(
+                field_obj,
+                restricted=True,
+                requested={field_obj.name: {}},
+                select_mask=select_mask,
+            )
+        except FieldError:
+            missing.append(f"{prefix}{getattr(field_obj, 'attname', None) or segment}")
+            select_mask = {}
+        else:
+            if not descends:
+                return None
+            select_mask = require(select_mask.get(field_obj, {}), is_dict)
         prefix = f"{prefix}{segment}__"
-        current_model = getattr(field_obj, "related_model", None)
+        opts = require(field_obj.related_model, is_model_class)._meta
     return tuple(missing)
 
 
@@ -1002,14 +1007,14 @@ def apply_projection(
         cleared = queryset.defer(None)
         return cleared.defer(*entries) if entries else cleared
     model = queryset.model
-    projection = frozenset(entries)
+    select_mask = _select_mask(model, entries)
     extras: list[str] = []
     for path in sorted(_flatten_select_related(queryset.query.select_related)):
-        missing = _select_path_missing_connectors(path, projection, model=model)
+        missing = _select_path_missing_connectors(path, select_mask, model=model)
         if missing is not None:
             append_unique_many(extras, missing)
     for attname in _prefetch_carrier_attnames(queryset):
-        if not _entry_loaded_by(attname, projection, model):
+        if not _loads(select_mask, attname, model):
             append_unique(extras, attname)
     return queryset.only(*entries, *extras)
 
