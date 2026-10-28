@@ -57,6 +57,7 @@ from django.core.exceptions import FieldError
 from django.db import DEFAULT_DB_ALIAS, connection, connections, models, transaction
 from django.db import models as dj_models
 from django.db import models as django_models
+from django.db.backends.base.base import BaseDatabaseWrapper
 from django.db.backends.base.operations import BaseDatabaseOperations
 from django.db.backends.sqlite3.operations import DatabaseOperations as SQLiteOperations
 from django.db.models import F, Lookup, Q, QuerySet
@@ -9377,6 +9378,403 @@ def test_compiled_predicate_is_held_to_the_utc_offsets_postgresql_refuses(
             return
         with pytest.raises(GraphQLError) as excinfo:
             specimen_filter._validate_form_or_raise(filterset)
+    assert excinfo.value.extensions == {
+        "code": "FILTER_INVALID",
+        "errors": {form_key: _UNBINDABLE},
+    }
+
+
+_PAST_INT64 = str(2**63)
+_BEFORE_INT64 = str(-(2**63) - 1)
+_THIRTY_DIGITS = str(10**30)
+
+
+def _year_integer_filter_class() -> type[FilterSet]:
+    """A specimen filterset whose declared filters bind a temporal transform's integers.
+
+    The package's ``ListFilter`` (``in``) and ``RangeFilter`` (``range``) over the date
+    column's ``year`` and the datetime column's ``iso_year``, the ``ListFilter`` through
+    the reverse ``children`` relation with ``exclude=True`` (Django puts an excluded
+    multi-valued relation's predicate in an ``Exists`` subquery), and django-filter's
+    ``MultipleChoiceFilter`` over the ``month`` transform, which joins its choices with
+    ``OR``.
+    """
+
+    class YearIntegerFilter(FilterSet):
+        day_years_among = ListFilter(field_name="occurred_on__year", lookup_expr="in")
+        day_years_span = RangeFilter(field_name="occurred_on__year", lookup_expr="range")
+        iso_years_among = ListFilter(field_name="occurred_at__iso_year", lookup_expr="in")
+        iso_years_span = RangeFilter(field_name="occurred_at__iso_year", lookup_expr="range")
+        child_years_not_among = ListFilter(
+            field_name="children__occurred_at__year",
+            lookup_expr="in",
+            exclude=True,
+        )
+        months_any = MultipleChoiceFilter(
+            field_name="occurred_at__month",
+            choices=[("1", "January"), (_PAST_INT64, "past 64 bits")],
+        )
+
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = []
+
+    return YearIntegerFilter
+
+
+#: Each integer past the database's range, sent to each declared year leaf by its form key.
+_YEAR_INTEGER_UNBINDABLE = [
+    pytest.param({"day_years_among": [_PAST_INT64]}, "day_years_among", id="year-in-past-int64"),
+    pytest.param(
+        {"day_years_among": ["2021", _BEFORE_INT64]},
+        "day_years_among",
+        id="year-in-before-int64",
+    ),
+    pytest.param(
+        {"day_years_among": [_THIRTY_DIGITS]},
+        "day_years_among",
+        id="year-in-thirty-digits",
+    ),
+    pytest.param(
+        {"day_years_span_0": _PAST_INT64, "day_years_span_1": "2021"},
+        "day_years_span",
+        id="year-range-start-past-int64",
+    ),
+    pytest.param(
+        {"day_years_span_0": _BEFORE_INT64, "day_years_span_1": "2021"},
+        "day_years_span",
+        id="year-range-start-before-int64",
+    ),
+    pytest.param(
+        {"day_years_span_0": "2021", "day_years_span_1": _THIRTY_DIGITS},
+        "day_years_span",
+        id="year-range-end-thirty-digits",
+    ),
+    pytest.param(
+        {"iso_years_among": [_PAST_INT64]},
+        "iso_years_among",
+        id="iso-year-in-past-int64",
+    ),
+    pytest.param(
+        {"iso_years_span_0": "2021", "iso_years_span_1": _BEFORE_INT64},
+        "iso_years_span",
+        id="iso-year-range-end-before-int64",
+    ),
+    pytest.param(
+        {"child_years_not_among": [_PAST_INT64]},
+        "child_years_not_among",
+        id="excluded-multi-valued-relation",
+    ),
+]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("data", "form_key"), _YEAR_INTEGER_UNBINDABLE)
+def test_temporal_transform_integer_the_database_cannot_bind_is_refused(
+    data: dict[str, object],
+    form_key: str,
+) -> None:
+    """An integer a ``year`` / ``iso_year`` ``in`` member or ``range`` bound binds past range is refused.
+
+    The transform's ``in`` and ``range`` lookups bind each integer as sent: Django holds
+    an integer to the column's range only in an integer comparison, never in a list or a
+    range bound, and SQLite's driver refuses one past 64 bits at bind. Each compiled
+    integer is held to the range the queryset's database stores for the transform's
+    ``IntegerField`` output, so 2**63, -2**63-1 and a thirty-digit year are refused keyed
+    to the form field, an excluded multi-valued relation's member inside its ``Exists``
+    subquery included. Package-only: the date column and ``iso_year`` leaves are declared
+    by no fakeshop filterset (``occurredYearAmong`` / ``occurredYearSpan`` hold the
+    datetime column's ``year`` live).
+    """
+    specimen_filter = _year_integer_filter_class()
+    filterset = specimen_filter(data=data, queryset=scalar_models.ScalarSpecimen.objects.all())
+
+    with pytest.raises(GraphQLError) as excinfo:
+        specimen_filter._validate_form_or_raise(filterset)
+    assert excinfo.value.extensions == {
+        "code": "FILTER_INVALID",
+        "errors": {form_key: _UNBINDABLE},
+    }
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "data",
+    [
+        pytest.param({"day_years_among": ["2021"]}, id="year-in"),
+        pytest.param({"iso_years_among": ["2021"]}, id="iso-year-in"),
+        pytest.param({"child_years_not_among": ["2021"]}, id="excluded-multi-valued-relation"),
+        pytest.param({"months_any": ["1", _PAST_INT64]}, id="or-member-django-drops"),
+    ],
+)
+def test_temporal_transform_integer_the_database_binds_passes(data: dict[str, object]) -> None:
+    """An integer inside the database's range passes, and the query runs.
+
+    A plain year passes, as does a year inside an excluded multi-valued relation's
+    ``Exists`` subquery; the ``month`` choice past 64 bits is
+    one Django's own integer comparison drops from its ``OR`` before binding
+    (``IntegerFieldOverflow``), so the query binds only the other choice.
+    """
+    specimen_filter = _year_integer_filter_class()
+    filterset = specimen_filter(data=data, queryset=scalar_models.ScalarSpecimen.objects.all())
+
+    specimen_filter._validate_form_or_raise(filterset)
+    assert list(filterset.qs) == []
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "form",
+        "low_offset",
+        "high_offset",
+        "refused",
+    ),
+    [
+        pytest.param("in", 0, None, False, id="in-min"),
+        pytest.param("in", None, 0, False, id="in-max"),
+        pytest.param("in", -1, None, True, id="in-below-min"),
+        pytest.param("in", None, 1, True, id="in-above-max"),
+        pytest.param("range", 0, 0, False, id="range-min-max"),
+        pytest.param("range", -1, 0, True, id="range-start-below-min"),
+        pytest.param("range", 0, 1, True, id="range-end-above-max"),
+    ],
+)
+def test_year_integer_is_held_to_the_databases_integer_field_range(
+    form: str,
+    low_offset: int | None,
+    high_offset: int | None,
+    refused: bool,  # noqa: FBT001
+) -> None:
+    """A year ``in`` member or ``range`` bound passes inside the database's ``IntegerField`` range.
+
+    The ``year`` transform's output is an ``IntegerField``, so its bounds are the ones the
+    test database's own operations answer (``integer_field_range``: 64 bits on SQLite,
+    32 on PostgreSQL): each bound itself passes, and one past either end is refused keyed
+    to the form field.
+    """
+    low, high = connection.ops.integer_field_range("IntegerField")
+    assert low is not None
+    assert high is not None
+    ends = [
+        str(low + low_offset) if low_offset is not None else None,
+        str(high + high_offset) if high_offset is not None else None,
+    ]
+    if form == "in":
+        form_key = "day_years_among"
+        data: dict[str, object] = {form_key: [end for end in ends if end is not None]}
+    else:
+        form_key = "day_years_span"
+        data = {"day_years_span_0": ends[0], "day_years_span_1": ends[1]}
+    specimen_filter = _year_integer_filter_class()
+    filterset = specimen_filter(data=data, queryset=scalar_models.ScalarSpecimen.objects.all())
+    if not refused:
+        specimen_filter._validate_form_or_raise(filterset)
+        assert list(filterset.qs) == []
+        return
+    with pytest.raises(GraphQLError) as excinfo:
+        specimen_filter._validate_form_or_raise(filterset)
+    assert excinfo.value.extensions == {
+        "code": "FILTER_INVALID",
+        "errors": {form_key: _UNBINDABLE},
+    }
+
+
+class _ElapsedSpecimen(django_models.Model):
+    """A ``DurationField`` column, which a consumer exposes by registering a scalar for it.
+
+    Query-build only (``managed = False``): the rule compiles the filter's predicate and
+    never runs it.
+    """
+
+    elapsed: django_models.DurationField[object, datetime.timedelta] = (
+        django_models.DurationField()
+    )
+
+    class Meta:
+        managed = False
+        app_label = "library"
+
+
+def _elapsed_filter_class() -> type[FilterSet]:
+    """An ``_ElapsedSpecimen`` filterset opting the duration into ``exact``, ``gt``, ``in`` and ``range``."""
+
+    class ElapsedFilter(FilterSet):
+        class Meta:
+            model = _ElapsedSpecimen
+            fields = {
+                "elapsed": [
+                    "exact",
+                    "gt",
+                    "in",
+                    "range",
+                ],
+            }
+
+    return ElapsedFilter
+
+
+#: The longest duration whose microseconds fit 64 bits, in whole days, and the next day.
+_INT64_DAYS = datetime.timedelta(days=106751991)
+_PAST_INT64_DAYS = datetime.timedelta(days=106751992)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("data", "form_key", "refused"),
+    [
+        pytest.param({"elapsed": _PAST_INT64_DAYS}, "elapsed", True, id="exact"),
+        pytest.param({"elapsed": -_PAST_INT64_DAYS}, "elapsed", True, id="exact-negative"),
+        pytest.param({"elapsed__gt": _PAST_INT64_DAYS}, "elapsed__gt", True, id="gt"),
+        pytest.param(
+            {"elapsed__in": f"1 00:00:00,{_PAST_INT64_DAYS.days} 00:00:00"},
+            "elapsed__in",
+            True,
+            id="in-member",
+        ),
+        pytest.param(
+            {"elapsed__range": f"-{_PAST_INT64_DAYS.days} 00:00:00,1 00:00:00"},
+            "elapsed__range",
+            True,
+            id="range-start",
+        ),
+        pytest.param({"elapsed": _INT64_DAYS}, "elapsed", False, id="exact-in-range"),
+        pytest.param({"elapsed": -_INT64_DAYS}, "elapsed", False, id="exact-negative-in-range"),
+        pytest.param(
+            {"elapsed__range": f"-{_INT64_DAYS.days} 00:00:00,{_INT64_DAYS.days} 00:00:00"},
+            "elapsed__range",
+            False,
+            id="range-in-range",
+        ),
+    ],
+)
+def test_duration_the_database_cannot_bind_is_refused(
+    data: dict[str, object],
+    form_key: str,
+    refused: bool,  # noqa: FBT001
+) -> None:
+    """A duration whose microsecond count the database cannot bind is refused keyed to its field.
+
+    A backend without a native interval (SQLite, MySQL) binds a duration as its
+    microsecond count, an integer held to ``BigIntegerField``'s range there, so 106751992
+    days either way (past 64 bits of microseconds) is refused for ``exact``, ``gt``, an
+    ``in`` member and a ``range`` bound, and 106751991 days binds. PostgreSQL binds an
+    ``interval``, so every value passes there. Package-only: no fakeshop type carries a
+    ``DurationField``, which needs a consumer-registered scalar.
+    """
+    elapsed_filter = _elapsed_filter_class()
+    filterset = elapsed_filter(data=data, queryset=_ElapsedSpecimen.objects.all())
+    if not refused or connection.features.has_native_duration_field:
+        elapsed_filter._validate_form_or_raise(filterset)
+        return
+    with pytest.raises(GraphQLError) as excinfo:
+        elapsed_filter._validate_form_or_raise(filterset)
+    assert excinfo.value.extensions == {
+        "code": "FILTER_INVALID",
+        "errors": {form_key: _UNBINDABLE},
+    }
+
+
+@pytest.mark.django_db
+def test_integer_column_value_is_not_asked() -> None:
+    """An integer column's leaf is never asked: its values are held where its filters bind them.
+
+    A generated ``in`` over the integer column drops a member past the column's range
+    (``_identifying_members``) and its ``gt`` is Django's own range-aware comparison, so
+    neither reaches the rule and the queryset's alias is never resolved for them.
+    """
+
+    class SignedBigFilter(FilterSet):
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = {"signed_big": ["in", "gt"]}
+
+    router = _RecordingRouter()
+    with override_settings(DATABASE_ROUTERS=[router]):
+        filterset = SignedBigFilter(
+            data={"signed_big__in": _PAST_INT64, "signed_big__gt": _PAST_INT64},
+            queryset=scalar_models.ScalarSpecimen.objects.all(),
+        )
+
+        SignedBigFilter._validate_form_or_raise(filterset)
+    assert router.asked == []
+
+
+def _default_range_operations(wrapper: BaseDatabaseWrapper) -> BaseDatabaseOperations:
+    """``wrapper``'s own operations, reading Django's default integer ranges (PostgreSQL's)."""
+
+    class DefaultRangeOperations(type(wrapper.ops)):
+        @override
+        def integer_field_range(self, internal_type: str) -> tuple[int, int]:
+            return BaseDatabaseOperations.integer_field_range(self, internal_type)
+
+    return DefaultRangeOperations(wrapper)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "filter_class",
+        "model",
+        "data",
+        "form_key",
+        "refused",
+    ),
+    [
+        pytest.param(
+            _year_integer_filter_class,
+            scalar_models.ScalarSpecimen,
+            {"day_years_among": [str(2**31)]},
+            "day_years_among",
+            True,
+            id="year-past-int32",
+        ),
+        pytest.param(
+            _year_integer_filter_class,
+            scalar_models.ScalarSpecimen,
+            {"day_years_among": [str(2**31 - 1)]},
+            "day_years_among",
+            False,
+            id="year-max-int32",
+        ),
+        pytest.param(
+            _elapsed_filter_class,
+            _ElapsedSpecimen,
+            {"elapsed": datetime.timedelta(microseconds=2**31)},
+            "elapsed",
+            False,
+            id="duration-past-int32",
+        ),
+    ],
+)
+def test_integer_is_held_to_the_range_of_the_type_its_lookup_binds(
+    filter_class: Callable[[], type[FilterSet]],
+    model: type[django_models.Model],
+    data: dict[str, object],
+    form_key: str,
+    refused: bool,  # noqa: FBT001
+) -> None:
+    """Each integer is held to the range the queryset's database stores for its lookup's type.
+
+    On a stand-in alias reading Django's default ranges (PostgreSQL's), a ``year``
+    transform's ``IntegerField`` output holds 32 bits, so 2**31 is refused there and
+    2**31-1 binds, while a duration's microsecond count holds ``BigIntegerField``'s 64
+    bits, so 2**31 microseconds binds.
+    """
+    alias = "integer_range_stand_in"
+    wrapper = connections.create_connection(DEFAULT_DB_ALIAS)
+    wrapper.ops = _default_range_operations(wrapper)
+    connections[alias] = wrapper
+    filterset_class = filter_class()
+    try:
+        filterset = filterset_class(data=data, queryset=model._default_manager.using(alias))
+        if not refused:
+            filterset_class._validate_form_or_raise(filterset)
+            return
+        with pytest.raises(GraphQLError) as excinfo:
+            filterset_class._validate_form_or_raise(filterset)
+    finally:
+        del connections[alias]
     assert excinfo.value.extensions == {
         "code": "FILTER_INVALID",
         "errors": {form_key: _UNBINDABLE},

@@ -45,7 +45,9 @@ from django.db import connections, models
 from django.db.models import Exists, Q
 from django.db.models import lookups as model_lookups
 from django.db.models.constants import LOOKUP_SEP
+from django.db.models.expressions import BaseExpression
 from django.db.models.fields.related import ManyToManyRel, ManyToOneRel, OneToOneRel
+from django.db.models.sql.query import Query
 from django.db.models.sql.where import WhereNode
 from django_filters import (
     BaseInFilter,
@@ -147,6 +149,7 @@ from django_strawberry_framework.utils.querysets import (
     apply_type_visibility_async,
     apply_type_visibility_sync,
     base_queryset,
+    binds_integer,
     model_for,
     relation_path_visibility_types,
     run_in_one_sync_boundary,
@@ -2314,8 +2317,16 @@ def _unbindable_predicate(
     (``get_db_prep_lookup``, the year bounds), which refuse with an ``OverflowError`` or
     ``ValueError``; anything else a compile raises (a consumer lookup's own ``as_sql``)
     propagates, as the query would raise it. A clause that matches nothing or everything
-    (``EmptyResultSet`` / ``FullResultSet``) binds no value. The compiled parameters are
-    then held to the one rule no Django call answers, a UTC offset PostgreSQL refuses
+    (``EmptyResultSet`` / ``FullResultSet``) binds no value. Each integer a lookup of the
+    compiled clause binds for its right-hand side (``Lookup.process_rhs``) is then held to
+    the range the database stores for that lookup's left-hand side
+    (``utils/querysets.py::binds_integer``, the connection's own ``integer_field_range``;
+    SQLite's driver refuses an integer past 64 bits with an ``OverflowError``). Django
+    holds an integer to that range only in an integer comparison (``IntegerFieldOverflow``:
+    ``exact``, ``gt``, ``gte``, ``lt``, ``lte``), never in an ``in`` list, a ``range``
+    bound or a duration's microsecond count, so every lookup binding a value is read
+    (``_bound_value_lookups``). The compiled parameters are last held to the one rule no
+    Django call answers, a UTC offset PostgreSQL refuses
     (``utils/errors.py::refuses_utc_offset``). Building the predicate warns as the query
     does (Django's naive-datetime ``RuntimeWarning``): the warning state is never touched.
     """
@@ -2340,21 +2351,68 @@ def _unbindable_predicate(
         return False
     except (OverflowError, ValueError):
         return True
-    return refuses_utc_offset(connections[alias], require(compiled[1], is_list_or_tuple))
+    connection = connections[alias]
+    for lookup, owner in _bound_value_lookups(filtered.query):
+        try:
+            lookup_compiler = call_method(owner, "get_compiler", alias)
+            bound = require(
+                call_method(lookup, "process_rhs", lookup_compiler, connection),
+                is_tuple,
+            )
+        except (EmptyResultSet, FullResultSet):
+            continue
+        column = read_attr(read_attr(lookup, "lhs"), "output_field")
+        if any(
+            isinstance(param, int) and not binds_integer(connection, column, param)
+            for param in require(bound[1], is_list_or_tuple)
+        ):
+            return True
+    return refuses_utc_offset(connection, require(compiled[1], is_list_or_tuple))
+
+
+def _bound_value_lookups(query: Query) -> Iterator[tuple[model_lookups.Lookup[object], Query]]:
+    """Yield each lookup ``query``'s ``WHERE`` holds that binds a value, with the query it is in.
+
+    A lookup binds a value when its right-hand side is one
+    (``Lookup.rhs_is_direct_value``), and what it binds for it is what Django's own
+    ``Lookup.process_rhs`` answers, read apart from its left-hand side, which may hold a
+    subquery whose own lookups bind theirs; one whose right-hand side is an expression
+    binds only what that expression's own lookups bind. The walk follows Django's own
+    operand accessor (``get_source_expressions``) through every predicate and expression,
+    and into the ``WHERE`` of each subquery it meets (the ``Exists`` an excluded
+    multi-valued relation adds), so each lookup is paired with the query whose compiler
+    compiles it. A clause child that is no expression (an ``ExtraWhere``) has no lookup.
+    """
+    pending: list[object] = [query.where]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, Query):
+            yield from _bound_value_lookups(node)
+            continue
+        if isinstance(node, model_lookups.Lookup) and node.rhs_is_direct_value():
+            yield node, query
+        if isinstance(node, BaseExpression | WhereNode):
+            # A slot an expression leaves empty holds ``None``.
+            pending.extend(
+                source for source in list_of(node.get_source_expressions()) if source is not None
+            )
 
 
 def _unbindable_temporal_errors(filterset_instance: FilterSet) -> dict[str, object]:
     """Return the refusal of each cleaned filter value the queryset's database cannot bind.
 
     Each cleaned value a filter applies to a temporal column (a ``DateField``,
-    ``DateTimeField`` or ``TimeField`` its ``field_name`` reaches, ``_leaf_column``, a
-    queryset annotation's output field included) is asked of Django
+    ``DateTimeField``, ``TimeField`` or ``DurationField`` its ``field_name`` reaches,
+    ``_leaf_column``, a queryset annotation's output field included) is asked of Django
     (``_unbindable_predicate``): the filter's own ``filter`` builds the predicate and it is
     compiled on the database the filterset's queryset runs on (``queryset.db``, resolved
-    only for a temporal leaf). Every filter family reaches it whatever value kind its form
-    cleans to: a datetime on a ``DateField`` or through a ``date`` transform, a date on a
-    ``DateTimeField``, a ``year`` / ``iso_year`` bound, each member of a list and each bound
-    of a range, as the filter applies them. Only a ``filter`` django-filter or this package
+    only for a temporal leaf). A transform of a temporal column (``year``, ``month``)
+    binds integers, and a duration binds its microsecond count on a backend without a
+    native interval, so the integers those leaves bind are asked too. Every filter family reaches
+    it whatever value kind its form cleans to: a datetime on a ``DateField`` or through a
+    ``date`` transform, a date on a ``DateTimeField``, a ``year`` / ``iso_year`` bound or
+    ``in`` member, a duration, each member of a list and each bound of a range, as the
+    filter applies them. Only a ``filter`` django-filter or this package
     ships is run (``_runs_shipped_filter``): a ``filter`` of the filter's own (a
     ``method=`` included, ``_own_filter``) or a class-level ``filter`` override is
     consumer code, which owns what its value means and is not asked. A projected copy is
@@ -2374,7 +2432,7 @@ def _unbindable_temporal_errors(filterset_instance: FilterSet) -> dict[str, obje
             continue
         if not isinstance(
             _leaf_column(model, annotations, filter_instance),
-            models.DateField | models.TimeField,
+            models.DateField | models.TimeField | models.DurationField,
         ):
             continue
         terminal = _projected_terminal(filter_instance)
@@ -5034,8 +5092,8 @@ class FilterSet(
         (``shelf__or_0__branch__name``, ``or_0__shelf__branch__name``).
 
         A form that cleans is then held to the database its queryset runs on
-        (``_unbindable_temporal_errors``): a value a filter applies to a temporal column
-        that the scalar parse and the form accept but that database cannot bind is
+        (``_unbindable_temporal_errors``): a value a filter applies to a temporal or
+        duration column that the scalar parse and the form accept but that database cannot bind is
         refused keyed to its form field, ``invalid`` with a fixed message, never the
         driver's text. Django is asked: the filter's own predicate is built and compiled
         on that database, so what is refused is what the query would raise, for every
@@ -5043,11 +5101,15 @@ class FilterSet(
         SQLite, MySQL and Oracle an aware time, an aware datetime whose projection onto
         the connection's time zone leaves years 1..9999, a date on a datetime column
         whose midnight does, any aware datetime when ``USE_TZ`` is false; on every
-        backend a ``year`` / ``iso_year`` bound outside years 1..9999, and a datetime on
-        a date column or through a ``date`` transform whose date in the default time
-        zone (``TIME_ZONE``) leaves them). On PostgreSQL the compiled parameters are
-        also held to the UTC offsets the server refuses: 16:00 or more either way, or
-        one carrying a fraction of a second, when parameters are bound as text
+        backend a ``year`` / ``iso_year`` bound outside years 1..9999, a datetime on a
+        date column or through a ``date`` transform whose date in the default time zone
+        (``TIME_ZONE``) leaves them, and an integer a lookup binds outside the range the
+        database stores for its left-hand side: a ``year`` / ``iso_year`` ``in`` member
+        or ``range`` bound past 64 bits on SQLite or 32 on PostgreSQL, and on SQLite and
+        MySQL, which bind a duration as its microsecond count, a duration whose
+        microsecond count lies past 64 bits either way). On PostgreSQL the compiled
+        parameters are also held to the UTC offsets the server refuses: 16:00 or more
+        either way, or one carrying a fraction of a second, when parameters are bound as text
         (psycopg 2, or psycopg 3 unless the connection binds on the server:
         ``OPTIONS["server_side_binding"]``, or an ``OPTIONS["cursor_factory"]`` that is
         not a ``ClientCursor``); bound on the server, a time whose offset is 16:00 or

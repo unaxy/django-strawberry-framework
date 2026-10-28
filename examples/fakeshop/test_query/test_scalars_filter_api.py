@@ -24,7 +24,11 @@ leaf, member and bound, under ``not`` and through ``partner``; PostgreSQL binds 
 values, so there the same input filters. A datetime sent through the declared
 ``occurredDayOf`` ``date`` transform is read as Django binds it, its date in the default
 time zone (``TIME_ZONE``), so one whose date leaves years 1..9999 is ``FILTER_INVALID``
-on every backend.
+on every backend. A year sent to the declared ``occurredYearAmong`` (``in``) or
+``occurredYearSpan`` (``range``) through ``occurred_at``'s ``year`` transform binds as an
+integer, so a member or bound outside the range the database stores for the transform's
+``IntegerField`` output (2**63, -2**63-1, a thirty-digit year) is ``FILTER_INVALID`` on
+every backend, flat, under ``not`` and through ``partner`` nested and flat.
 On PostgreSQL a UTC offset the server refuses (16:00 or more either way, or, bound as
 text as Django's default psycopg cursor binds, a fraction of a second) is
 ``FILTER_INVALID`` the same way, where SQLite projects the datetime onto UTC and filters.
@@ -752,6 +756,118 @@ def test_datetime_through_the_date_transform_outside_years_one_to_9999_is_filter
     and for ``9999-12-31T23:59:00-05:00`` in year 10000, on every backend. Each is refused
     keyed to its form field, flat, under ``not`` and through ``partner`` nested and flat,
     never the conversion's error; a datetime whose date binds filters by that date.
+    """
+    alpha = _seed_specimen("alpha")
+    models.NullableScalarSpecimen.objects.create(label="of-alpha", partner=alpha)
+    root = "allScalarSpecimens" if query == _BY_FILTER else "allNullableScalarSpecimens"
+    control = response_json(post_graphql(query, variables={"filter": bindable}))
+    payload = response_json(post_graphql(query, variables={"filter": unbindable}))
+
+    assert control == {"data": {root: [{"label": label} for label in labels]}}
+    assert payload["data"] is None, payload
+    (error,) = json_list(payload, "errors")
+    assert json_at(error, "extensions") == {
+        "code": "FILTER_INVALID",
+        "errors": {form_key: [_UNBINDABLE]},
+    }
+
+
+_PAST_INT64 = str(2**63)
+_BEFORE_INT64 = str(-(2**63) - 1)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "query",
+        "unbindable",
+        "form_key",
+        "bindable",
+        "labels",
+    ),
+    [
+        pytest.param(
+            _BY_FILTER,
+            {"occurredYearAmong": {"in": ["2021", _PAST_INT64]}},
+            "occurred_year_among",
+            {"occurredYearAmong": {"in": ["2021"]}},
+            ["alpha"],
+            id="in-member-past-int64",
+        ),
+        pytest.param(
+            _BY_FILTER,
+            {"occurredYearAmong": {"in": [_BEFORE_INT64]}},
+            "occurred_year_among",
+            {"occurredYearAmong": {"in": ["2020", "2021"]}},
+            ["alpha"],
+            id="in-member-before-int64",
+        ),
+        pytest.param(
+            _BY_FILTER,
+            {"occurredYearAmong": {"in": [str(10**30)]}},
+            "occurred_year_among",
+            {"occurredYearAmong": {"in": ["2021"]}},
+            ["alpha"],
+            id="in-member-thirty-digits",
+        ),
+        pytest.param(
+            _BY_FILTER,
+            {"occurredYearSpan": {"range": {"start": _BEFORE_INT64, "end": "2021"}}},
+            "occurred_year_span",
+            {"occurredYearSpan": {"range": {"start": "2021", "end": "2021"}}},
+            ["alpha"],
+            id="range-start",
+        ),
+        pytest.param(
+            _BY_FILTER,
+            {"occurredYearSpan": {"range": {"start": "2020", "end": _PAST_INT64}}},
+            "occurred_year_span",
+            {"occurredYearSpan": {"range": {"start": "2020", "end": "2022"}}},
+            ["alpha"],
+            id="range-end",
+        ),
+        pytest.param(
+            _BY_FILTER,
+            {"not": {"occurredYearAmong": {"in": [_PAST_INT64]}}},
+            "not__occurred_year_among",
+            {"not": {"occurredYearAmong": {"in": ["2020"]}}},
+            ["alpha"],
+            id="not",
+        ),
+        pytest.param(
+            _BY_NULLABLE_FILTER,
+            {"partner": {"occurredYearAmong": {"in": [_PAST_INT64]}}},
+            "partner__occurred_year_among",
+            {"partner": {"occurredYearAmong": {"in": ["2021"]}}},
+            ["of-alpha"],
+            id="nested-partner",
+        ),
+        pytest.param(
+            _BY_NULLABLE_FILTER,
+            {"partnerOccurredYearSpan": {"range": {"start": "2020", "end": _PAST_INT64}}},
+            "partner__occurred_year_span",
+            {"partnerOccurredYearSpan": {"range": {"start": "2020", "end": "2022"}}},
+            ["of-alpha"],
+            id="flat-partner",
+        ),
+    ],
+)
+def test_year_integer_the_database_cannot_bind_is_filter_invalid(
+    query: str,
+    unbindable: dict[str, object],
+    form_key: str,
+    bindable: dict[str, object],
+    labels: list[str],
+) -> None:
+    """A year ``in`` member or ``range`` bound past the database's integer range is ``FILTER_INVALID``.
+
+    ``occurredYearAmong`` / ``occurredYearSpan`` are a declared ``ListFilter`` and
+    ``RangeFilter`` through ``occurred_at``'s ``year`` transform: each integer binds as
+    sent, held to the range the database stores for the transform's ``IntegerField``
+    output (64 bits on SQLite, 32 on PostgreSQL). 2**63, -2**63-1 and a thirty-digit year
+    lie past both, so each is refused keyed to its form field, flat, under ``not`` and
+    through ``partner`` nested and flat, never the driver's overflow; a year inside the
+    range filters by it.
     """
     alpha = _seed_specimen("alpha")
     models.NullableScalarSpecimen.objects.create(label="of-alpha", partner=alpha)

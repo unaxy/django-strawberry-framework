@@ -24,8 +24,8 @@ write flavors):
   (a lone surrogate, an embedded NUL) and the record it answers, shared by the
   write decode (``utils/write_values.py::unstorable_text_error``) and the filter
   form validation (``filters/sets.py::FilterSet._validate_form_or_raise``);
-- ``UNBINDABLE_TEMPORAL_MESSAGE`` - the message a temporal value the database
-  cannot bind answers, on a filter (``filters/sets.py::_unbindable_temporal_errors``,
+- ``UNBINDABLE_TEMPORAL_MESSAGE`` - the message a temporal or duration value the
+  database cannot bind answers, on a filter (``filters/sets.py::_unbindable_temporal_errors``,
   which asks Django to build and compile the filter's own predicate) and on a write;
 - ``unbindable_temporal`` - whether a datetime or time bound into a column is one
   the database cannot bind, asked of that connection's own adapters; the base of

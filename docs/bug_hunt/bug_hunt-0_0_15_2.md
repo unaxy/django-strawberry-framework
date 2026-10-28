@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 337 done, 213 to do.
+Progress: 339 done, 216 to do.
 
 ## Done
 
@@ -1891,6 +1891,18 @@ Progress: 337 done, 213 to do.
 - [x] 398. A class-level `GlobalIDFilter.filter` override is read by `filters/sets.py::_decodes_before_binding` through
   `utils/truth.py::overrides`, so its lone-surrogate value is the coded `FILTER_INVALID` instead of a masked
   `UnicodeEncodeError`. Tests: `tests/filters/test_sets.py`
+- [x] 385. A filter value that compiles but carries an integer the connection's driver cannot bind is the coded
+  `FILTER_INVALID`: after 384's build and compile, every integer each bound lookup's own `process_rhs` yields (found
+  through expressions and into subquery WHEREs, `filters/sets.py::_bound_value_lookups`) is held to the connection's
+  `integer_field_range` for the type its lookup binds (`utils/querysets.py::binds_integer`, shared with
+  `coerce_field_value_or_none`). A declared `ListFilter` `in` / `RangeFilter` over `__year` / `__iso_year` with a member
+  past the range (2**63 on SQLite) raised the masked `OverflowError` at bind. Non-numeric / inf / nan members were
+  already refused by 384's build; `Decimal("1E+300000")` reaches no shipped filter (django-filter's 1e50 cap). Tests:
+  `tests/filters/test_sets.py`, `test_scalars_filter_api.py` (new `occurredYearAmong` / `occurredYearSpan` filters)
+- [x] 386. A `DurationField` filter leaf is asked like a temporal one: on a backend that binds durations as integer
+  microseconds (SQLite, MySQL) a value past 64 bits of microseconds is the coded `FILTER_INVALID` instead of the masked
+  bind `OverflowError` (`filters/sets.py::_unbindable_temporal_errors` gate, `binds_integer` with the
+  `BigIntegerField` range). Tests: `tests/filters/test_sets.py`
 
 ## Outside review of the fixes
 
@@ -1931,11 +1943,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 385. A `year` / `iso_year` `in` / `range` filter value at or above 2**63, or a non-numeric string / inf / nan,
-  raises the masked `OverflowError` / `ValueError` at SQLite bind (generic integer binding, not a temporal bound);
-  `int(Decimal("1E+300000"))` also costs seconds on the same path
-- [ ] 386. A consumer-registered `DurationField` scalar: a `timedelta` of 106751992 days or more overflows at SQLite
-  bind (`adapt_durationfield_value` returns an int) as the masked uncoded error
 - [ ] 387. Generated opt-in `year` / `iso_year` filter leaves are typed as the column's scalar (`Date` / `DateTime`), so
   every wire value cleans to `"Enter a number."`; and the generated `time` leaf on a `DateTimeField` raises
   `AttributeError: 'datetime.datetime' object has no attribute 'strip'` in `forms.TimeField` clean before the filter
@@ -2130,12 +2137,32 @@ tracker number are recorded there; open remainders and new defects are filed as 
   (`_stored_datetime`): an aware year-1 `datetime` into a `DateField` (from a consumer hook, or a form / serializer field
   of another kind than its column) answers storable while `Field.get_db_prep_save` raises `OverflowError`; ask
   `get_db_prep_save` on the target connection instead, keeping `refuses_utc_offset`. Found landing 384
+- [ ] 652. Generated `year__in` / `year__range` (and `iso_year`) filter leaves answer wrong rows whatever the value:
+  `IntegerInFilter` coerces each member against the `DateTimeField` / `DateField` column (`filters/base.py::
+  _bound_model_field` returns the column, not the transform's `IntegerField` output), so `year__in="2020"` matches
+  nothing, and `IntegerRangeFilter` applies `__gte` / `__lte` to the column and is refused; resolve the transform's
+  output field (near 387, the same area). Found fact-finding 385
+- [ ] 653. A model-mutation write of a `DurationField` past 64 bits of microseconds (SQLite, MySQL) raises the masked
+  `OverflowError` at bind: `DurationField` carries no range validator and the write decode does not ask the
+  connection's integer range (`utils/write_values.py`, the `unstorable_temporal_error` precedent); form and serializer
+  flavors unprobed. Found fact-finding 385
+- [ ] 654. (robustness) `filters/sets.py::_bound_value_lookups` also reads lookups inside a consumer annotation a leaf
+  goes through, so an out-of-range consumer constant refuses the user's value; and `utils/querysets.py::binds_integer`
+  raises `KeyError` for an `IntegerField` subclass whose `get_internal_type()` the backend's `integer_field_ranges`
+  lacks (Django's own exact lookup shares the limit). Found verifying 385
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 655. Decide: on PostgreSQL a `year` / `month` transform `in` member or `range` bound between 2**31 and 2**63 is
+  refused as `FILTER_INVALID` (the transform binds an `IntegerField`, int32 there; 385), while Django's own
+  `IntegerFieldOverflow` answers `month__gt=2**31` as no / every row and the package's integer-column `in` drops such
+  a member. Keep the refusal, or answer it as Django does (drop the member; clamp the bound)?
+- [ ] 651. CHANGELOG entry for items 385, 386: a filter `in` / `range` value over a `year` / `iso_year` transform past
+  the database's integer range, and a `DurationField` filter value past 64 bits of microseconds (SQLite, MySQL), are
+  now the coded `FILTER_INVALID` instead of a masked error
 - [ ] 649. CHANGELOG entry for items 384, 388, 398: a declared filter whose value kind differs from its column (a
   `date` on a `DateTimeField`, a `datetime` on a `DateField` or through `__date`) out of the database's range is now the
   coded `FILTER_INVALID`; a class-level `filter()` override is never run to validate a value; a class-level

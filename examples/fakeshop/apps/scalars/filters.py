@@ -73,6 +73,12 @@ a ``field`` override that follows it in the MRO, so it too is sent under ``_low`
 acceptance surface for a value whose kind differs from the predicate's, a datetime Django
 makes naive in the default time zone (``TIME_ZONE``) and reads as its date before
 binding it.
+
+``occurred_year_among`` / ``occurred_year_span`` on ``ScalarSpecimenFilter`` are a declared
+``ListFilter`` (``in``) and ``RangeFilter`` (``range``) through the ``occurred_at`` column's
+``year`` transform (``occurredYearAmong: { in: [...] }``, ``occurredYearSpan: { range: {
+start, end } }``): the acceptance surface for an integer the transform binds as sent, held to
+the range the database stores for the transform's ``IntegerField`` output.
 """
 
 from __future__ import annotations
@@ -167,6 +173,8 @@ class ScalarSpecimenFilter(FilterSet):
     price_in_field_boxes = FieldBoxRangeFilter(field_name="price")
     price_span_in_field_boxes = FieldBoxSpanFilter(field_name="price", lookup_expr="range")
     occurred_day_of = django_filters.DateTimeFilter(field_name="occurred_at", lookup_expr="date")
+    occurred_year_among = ListFilter(field_name="occurred_at__year", lookup_expr="in")
+    occurred_year_span = RangeFilter(field_name="occurred_at__year", lookup_expr="range")
 
     class Meta:
         model = models.ScalarSpecimen
