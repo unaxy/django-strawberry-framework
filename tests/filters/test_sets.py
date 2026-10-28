@@ -16096,8 +16096,9 @@ def _shelf_and_branch_filters(
     """``BranchFilter.shelves -> ShelfFilter`` plus a ``ShelfType`` whose ``get_queryset`` is given.
 
     ``ShelfFilter.code_is`` is a ``method=`` filter, so ``shelves__code_is`` is a
-    ``ProjectedChildFilter``; ``shelves__code`` / ``shelves__topic`` are plain
-    expansions. ``shelf_type_get_queryset`` of ``None`` registers no ``ShelfType``.
+    ``ProjectedChildFilter``; ``shelves__code`` / ``shelves__topic`` and the range
+    ``shelves__code_span`` are plain expansions. ``shelf_type_get_queryset`` of
+    ``None`` registers no ``ShelfType``.
     """
     if shelf_type_get_queryset is not None:
         type(
@@ -16111,6 +16112,7 @@ def _shelf_and_branch_filters(
 
     class ShelfFilter(FilterSet):
         code_is = CharFilter(field_name="code", method="filter_code_is")
+        code_span = RangeFilter(field_name="code", lookup_expr="range")
 
         class Meta:
             model = library_models.Shelf
@@ -16259,6 +16261,23 @@ def test_apply_async_awaits_async_get_queryset_of_every_flat_hop(
             {"sync": 1, "async": 1},
             ["alpha"],
         ),
+        (
+            {"shelves__code_span": {"start": None, "end": None}},
+            {"sync": 0, "async": 0},
+            ["alpha", "beta"],
+        ),
+        ({"shelves__code_span": dict[str, object]()}, {"sync": 0, "async": 0}, ["alpha", "beta"]),
+        (
+            {"or_": [{"shelves__code_span": {"start": None, "end": None}}]},
+            {"sync": 0, "async": 0},
+            ["alpha", "beta"],
+        ),
+        (
+            {"or_": [{"shelves__code_span": dict[str, object]()}]},
+            {"sync": 0, "async": 0},
+            ["alpha", "beta"],
+        ),
+        ({"shelves__code_span": {"start": "a", "end": None}}, {"sync": 1, "async": 1}, ["alpha"]),
     ],
     ids=[
         "no-relation-leaf",
@@ -16267,6 +16286,11 @@ def test_apply_async_awaits_async_get_queryset_of_every_flat_hop(
         "one-leaf",
         "three-leaves-one-hop",
         "two-or-arms-one-hop",
+        "range-both-bounds-null",
+        "range-no-bounds",
+        "range-both-bounds-null-in-or-arm",
+        "range-no-bounds-in-or-arm",
+        "range-one-bound",
     ],
 )
 def test_flat_hop_visibility_runs_once_per_request_and_never_for_an_unsupplied_leaf(
@@ -16277,7 +16301,8 @@ def test_flat_hop_visibility_runs_once_per_request_and_never_for_an_unsupplied_l
 ) -> None:
     """A hop's ``get_queryset`` runs once per request however many leaves and arms walk it.
 
-    A leaf the request does not supply derives nothing. A supplied leaf derives
+    A leaf the request does not supply derives nothing, a range naming no bound
+    included (its form data names no key, so the form does not run it). A supplied leaf derives
     its hops before its filter runs over the visible rows, so a supplied empty
     value (django-filter's empty-value skip returns its input by identity) costs
     one hook on either path, as a present-but-empty nested branch does

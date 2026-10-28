@@ -4466,26 +4466,43 @@ class FilterSet(
                 field.python_attr,
                 field.raw_value,
             ):
-                normalized = normalize_input_value(filter_instance, value, field_name=form_key)
-                if isinstance(normalized, _RangeFormPatch):
-                    # Range-filter patch: the two keys its widget reads, for one lookup.
-                    data.update(normalized)
-                elif isinstance(normalized, dict):
-                    cls._reject_dict_form_value(filter_instance, form_key, value)
-                else:
-                    # An element-binding integer ``__in`` is range-coerced (and
-                    # empty-aware) by ``IntegerInFilter`` at filter time, not here
-                    # (``filter_for_lookup`` routes it there), so the normalized
-                    # list passes straight through.
-                    data[form_key] = normalized
+                data.update(cls._leaf_form_data(form_key, filter_instance, value))
         return data
+
+    @classmethod
+    def _leaf_form_data(
+        cls,
+        form_key: str,
+        filter_instance: Filter,
+        value: object,
+    ) -> Mapping[str, object]:
+        """Return the form-data keys and values one active lookup of a leaf writes.
+
+        The value's form-data shape is ``inputs.py::normalize_input_value``'s: a
+        range patch writes the keys its widget reads for the bounds it carries
+        (none for a range naming no bound), any other value writes ``form_key``,
+        and a dict other than the range patch raises (``_reject_dict_form_value``).
+        A lookup writing no key is one the form data does not name
+        (``_named_leaf_filters``): the form reads it as absent (``_leaf_absent``).
+        """
+        normalized = normalize_input_value(filter_instance, value, field_name=form_key)
+        if isinstance(normalized, _RangeFormPatch):
+            # Range-filter patch: the keys its widget reads, for one lookup.
+            return normalized
+        if isinstance(normalized, dict):
+            cls._reject_dict_form_value(filter_instance, form_key, value)
+        # An element-binding integer ``__in`` is range-coerced (and
+        # empty-aware) by ``IntegerInFilter`` at filter time, not here
+        # (``filter_for_lookup`` routes it there), so the normalized
+        # list passes straight through.
+        return {form_key: normalized}
 
     @classmethod
     def _leaf_lookups_by_attr(cls) -> Mapping[str, Mapping[str, FormKeyedFilter]]:
         """Return the leaf form-key table keyed by input attr, empty when model-less.
 
         A ``FilterSet`` without ``Meta.model`` exposes no leaf lookups: the empty map makes
-        ``_normalize_input`` reject any leaf and ``_supplied_leaf_filters`` supply none, so
+        ``_normalize_input`` reject any leaf and ``_supplied_leaf_entries`` supply none, so
         the pre-pass and the form can never disagree. One body serves both readers.
         """
         return filter_lookup_table(cls).by_input_attr if cls._meta.model is not None else {}
@@ -4935,7 +4952,7 @@ class FilterSet(
         rather than waiting for the sync recursion to discover it.
 
         ``flat_hop_visibility``, when given, also receives the awaited target
-        visibility of every hop a supplied flat leaf of each arm walks
+        visibility of every hop a flat leaf of each arm the form data names walks
         (``_derive_flat_hop_visibility_async``), so this one walk of the
         logical arms pre-derives both kinds of relational scoping.
 
@@ -5276,24 +5293,49 @@ class FilterSet(
         """Return ``(name, filter)`` for every supplied leaf of one input level, in input order.
 
         The supplied leaves are read through ``inputs.py::filter_lookup_table``,
-        the one input-leaf to filter mapping, so this is exactly the filters the
-        form will run. A leaf is supplied when present and not ``None`` /
-        ``UNSET``, whether or not the filter then skips its value.
+        the one input-leaf to filter mapping. A leaf is supplied when present and
+        not ``None`` / ``UNSET``, whether or not the filter then skips its value
+        or its form data names it (a range naming no bound is supplied, not
+        named: ``_named_leaf_filters``).
+        """
+        return [
+            (form_key, filter_instance)
+            for form_key, filter_instance, _value in cls._supplied_leaf_entries(input_value)
+        ]
+
+    @classmethod
+    def _supplied_leaf_entries(cls, input_value: object) -> list[tuple[str, Filter, object]]:
+        """Return ``(form key, filter, value)`` for every supplied leaf lookup of one input level.
+
+        The one walk ``_supplied_leaf_filters`` and ``_named_leaf_filters`` read:
+        each active ``LEAF`` field's lookups through ``_leaf_form_entries``.
         """
         lookups_by_attr = cls._leaf_lookups_by_attr()
-        filters: list[tuple[str, Filter]] = []
+        entries: list[tuple[str, Filter, object]] = []
         for field in iter_active_fields(cls, input_value, cls._input_traversal()):
-            if field.kind != LEAF:
-                continue
-            filters.extend(
-                (form_key, filter_instance)
-                for form_key, filter_instance, _value in cls._leaf_form_entries(
-                    lookups_by_attr,
-                    field.python_attr,
-                    field.raw_value,
+            if field.kind == LEAF:
+                entries.extend(
+                    cls._leaf_form_entries(lookups_by_attr, field.python_attr, field.raw_value),
                 )
-            )
-        return filters
+        return entries
+
+    @classmethod
+    def _named_leaf_filters(cls, input_value: object) -> list[tuple[str, Filter]]:
+        """Return ``(name, filter)`` for every leaf of one input level the form data names.
+
+        In input order, as ``_supplied_leaf_filters``. A leaf is named when the
+        form-data keys it writes (``_leaf_form_data``, what ``_normalize_input``
+        binds) are not empty: the keys the form names a flat copy by
+        (``_named_flat_copies``) and reads a leaf's value from (``_leaf_absent``).
+        Every supplied leaf (``_supplied_leaf_filters``) is named except a range
+        naming no bound (``{start: null, end: null}``, ``{}``), which writes no
+        key, so the form reads it as absent.
+        """
+        return [
+            (form_key, filter_instance)
+            for form_key, filter_instance, value in cls._supplied_leaf_entries(input_value)
+            if cls._leaf_form_data(form_key, filter_instance, value)
+        ]
 
     @classmethod
     @override
@@ -5387,24 +5429,25 @@ class FilterSet(
         *,
         parent_db: str | None,
     ) -> None:
-        """Await the target visibility of every hop a supplied flat leaf of one input level walks.
+        """Await the target visibility of every hop a flat leaf the form data names walks.
 
         The flat-leaf twin of ``_derive_related_visibility_querysets_async``:
         ``apply_async`` runs it for the top level and
         ``_collect_nested_visibility_querysets_async`` for every ``and`` / ``or``
         / ``not`` arm, so the sync ``.qs`` read finds each hop already in the
         request-wide map and never runs an async-only ``get_queryset``. The
-        leaves are ``_supplied_leaf_filters``'s, so the pre-pass sees exactly the
-        filters the form will run.
-        It runs before any form exists, so it awaits
-        the hops of every SUPPLIED leaf (present, not ``None`` / ``UNSET``): a
-        supplied value the filter then skips (an empty string) costs one awaited
+        leaves are ``_named_leaf_filters``'s: those whose form data names a key,
+        the one rule the sync form reads a flat leaf as supplied by
+        (``_named_flat_copies``, ``_leaf_absent``), so the pre-pass sees exactly
+        the leaves the form runs as supplied. It runs before any form exists, so a
+        named value the filter then skips (an empty string) costs one awaited
         ``get_queryset`` and constrains nothing, as a present-but-empty nested
-        branch does; an unsupplied leaf costs nothing.
+        branch does; a leaf the form data does not name (absent, or a range
+        naming no bound) costs nothing.
         """
         hops = (
             hop
-            for _name, filter_instance in cls._supplied_leaf_filters(input_value)
+            for _name, filter_instance in cls._named_leaf_filters(input_value)
             for hop in cls._visibility_hops(filter_instance)
         )
         for hop in hops:
@@ -6537,8 +6580,8 @@ class FilterSet(
                so every active ``RelatedFilter`` branch's target
                ``get_queryset`` runs on the async path.
             2. Await, via ``_derive_flat_hop_visibility_async``, the target
-               visibility of every declared hop a supplied top-level flat
-               relation leaf walks, into the request-wide hop map.
+               visibility of every declared hop a top-level flat relation
+               leaf the form data names walks, into the request-wide hop map.
             3. Pre-walk every ``and`` / ``or`` / ``not`` arm via
                ``_collect_nested_visibility_querysets_async`` so nested
                branches whose target type's ``get_queryset`` is async-only
