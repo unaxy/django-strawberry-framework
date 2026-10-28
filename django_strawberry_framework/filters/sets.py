@@ -203,6 +203,7 @@ from .inputs import (
     FormKeyedFilter,
     LogicOperatorDescriptor,
     _field_specs,
+    _is_declared_head,
     _RangeFormPatch,
     filter_lookup_table,
     leaf_gate_path,
@@ -1457,6 +1458,21 @@ class FilterSetMetaclass(_FilterSetMetaclassBase):
         attrs: dict[str, object],
     ) -> FilterSetMetaclass:
         """Build the class, collect `RelatedFilter`s, and bind them to the owner."""
+        # A class-body filter another set already owns (one carrying a provenance
+        # record, which only a set's own metaclass run or generation writes, or an
+        # expansion record: a filter read off another set's ``declared_filters`` /
+        # ``get_filters()``) is declared here as a deep copy, so every
+        # set-specific write below (provenance, owner binding, django-filter's
+        # ``field_name`` default) lands on this set's own object and the owner's
+        # copy never changes under it. django-filter keeps the same boundary at
+        # instance scope: ``BaseFilterSet.__init__`` deep-copies ``base_filters``
+        # before binding ``model`` and ``parent``.
+        for attr_name, attr_value in tuple(attrs.items()):
+            if truth.is_instance(attr_value, Filter) and (
+                filter_generation_provenance(attr_value) is not None
+                or _expansion_record(attr_value) is not None
+            ):
+                attrs[attr_name] = copy.deepcopy(attr_value)
         class_items = tuple(attrs.items())
 
         # A class body declaring its own ``Meta`` declares only the keys a filterset
@@ -1528,7 +1544,9 @@ class FilterSetMetaclass(_FilterSetMetaclassBase):
         #   ``framework_default`` / ``package_replacement`` stamp) and assign it
         #   here; keeping the old stamp would let ``_candidate_metadata_for`` /
         #   ``get_filters._build`` re-authorize a now-consumer declaration through
-        #   the correlated ``EXISTS`` adapter.
+        #   the correlated ``EXISTS`` adapter. A borrowed object was deep-copied
+        #   at the top of ``__new__``, so the stamp lands on this set's copy and
+        #   the owning set's record is untouched.
         # * An INHERITED declaration was already stamped ``declared`` by its owning
         #   class's metaclass run, so restamping it is a no-op; the
         #   ``provenance is None`` arm only BACKFILLS an inherited declaration that
@@ -1591,8 +1609,10 @@ class ChildProjection:
     def holds_in(self, owner: type[FilterSet]) -> bool:
         """Whether ``owner`` expands the copy: it declares ``branch`` into ``filterset``.
 
-        A copy a consumer moves onto another set (a class attribute borrowed from
-        a ``get_filters()`` result) is that set's own filter there.
+        A rebound copy a consumer moves onto another set (a class attribute
+        borrowed from a ``get_filters()`` result) is that set's own filter there;
+        a ``ProjectedChildFilter`` runs only inside a set that holds it, so
+        ``FilterSet._publish_filters`` refuses one any other set publishes.
         """
         declaration = owner.related_filters.get(self.branch)
         return declaration is not None and declaration.filterset is self.filterset
@@ -3038,9 +3058,12 @@ class FilterSet(
         (``_reshape``) so an override's additions, removals and renames are the
         published table: ``base_filters`` (every instance's copies), the
         snapshot's candidate rows, flat copies and form keys, and every package
-        read (``_filter_table``).
+        read (``_filter_table``). A projected copy the set does not hold is
+        refused first (``_reject_foreign_projection``).
         """
         table = OrderedDict(cls._reshape(expansion))
+        for filter_name, filter_instance in table.items():
+            cls._reject_foreign_projection(filter_name, filter_instance)
         model = cls._meta.model
         candidates: dict[str, CandidateFilterMetadata] = {}
         if model is not None:
@@ -3091,6 +3114,32 @@ class FilterSet(
             copy_keys=_copy_form_keys(table, deferred),
         )
         cls.base_filters = table
+
+    @classmethod
+    def _reject_foreign_projection(cls, filter_name: str, filter_instance: Filter) -> None:
+        """Raise when ``filter_name`` holds a ``ProjectedChildFilter`` this set does not expand.
+
+        A projected copy runs its child filter across its branch's declared hop
+        (``_projection_hop``) inside a child set instance
+        (``ProjectedChildFilter._child``), so it answers only on a set declaring
+        that branch into that child set (``ChildProjection.holds_in``): one
+        borrowed from another set's ``get_filters()`` result would read a branch
+        this set does not declare, or run across a different one. A rebound
+        copy carries no such dependency and stays a filter of the set holding it.
+        """
+        if not isinstance(filter_instance, ProjectedChildFilter):
+            return
+        projection = filter_instance._projection
+        if projection.holds_in(cls):
+            return
+        raise ConfigurationError(
+            f"FilterSet {truth.qualname(cls)}: filter {filter_name!r} is a projected copy of "
+            f"{truth.qualname(projection.filterset)}.{projection.name} expanded through a "
+            f"{projection.branch!r} branch, but {truth.qualname(cls)} declares no "
+            f"{projection.branch!r} RelatedFilter into {truth.qualname(projection.filterset)}, "
+            "so the copy has no branch to run its child filter across. Declare that "
+            "RelatedFilter, or declare a filter of this set's own.",
+        )
 
     @classmethod
     def _filter_table(cls) -> Mapping[str, Filter]:
@@ -5283,7 +5332,8 @@ class FilterSet(
     @classmethod
     def _projection_hop(cls, projection: ChildProjection) -> RelationHop:
         """Return the declared hop a ``ProjectedChildFilter`` of this set runs its child across."""
-        # The projection was expanded from one of ``related_filters``' entries.
+        # Every projected copy in a published table holds in its set
+        # (``_reject_foreign_projection``): its branch is one of ``related_filters``' entries.
         return RelationHop(
             cls,
             projection.branch,
@@ -5363,19 +5413,27 @@ class FilterSet(
     @classmethod
     @override
     def _permission_walk_gates(cls, input_value: object) -> tuple[tuple[type[object], str], ...]:
-        """Return the gates the nested twin of each supplied leaf's ORM path fires (``_leaf_gates``)."""
-        return tuple(
-            gate
-            for _name, filter_instance in cls._supplied_leaf_filters(input_value)
-            for gate in cls._leaf_gates(filter_instance)
-        )
+        """Return the gates the nested twin of each supplied leaf's ORM path fires (``_leaf_gates``).
+
+        Plus the walk of a leaf's gate path that ``_gate_path_spells_relations``
+        read as a declared head's name, from the string alone, though the leaf
+        is no declared head: its gate path is its ``field_name``, an ORM path
+        (``_gate_path_walk_gates``).
+        """
+        gates: list[tuple[type[object], str]] = []
+        for name, filter_instance in cls._supplied_leaf_filters(input_value):
+            if not cls._gate_path_spells_relations(leaf_gate_path(cls, name, filter_instance)):
+                gates.extend(cls._gate_path_walk_gates(name, filter_instance))
+            gates.extend(cls._leaf_gates(filter_instance))
+        return tuple(gates)
 
     @classmethod
     def _leaf_gates(cls, filter_instance: Filter) -> tuple[tuple[type[object], str], ...]:
         """Return the gates the nested twin of a leaf's ORM path fires beyond its gate path's.
 
         The leaf's gate path fires its own gate (and, through
-        ``_fire_flat_relation_path_gates``, the hops its spelling walks). What
+        ``_fire_flat_relation_path_gates``, the hops it walks when it is an ORM
+        path, ``_gate_path_spells_relations``). What
         remains is the walk of the filter's own path in the set that declares it,
         the gates the nested twin's run of that set fires:
 
@@ -5425,23 +5483,60 @@ class FilterSet(
         its branch's and its child filter's (``_leaf_gates``), as its fully
         nested twin does; any other leaf, a copy borrowed from another set
         included, fires its gate path's gate (``inputs.py::leaf_gate_path``),
-        the hops that path walks (``utils/permissions.py::relation_path_gates``,
-        what ``_fire_flat_relation_path_gates`` fires) and its own walk's.
+        the hops that path walks when it is an ORM path
+        (``_gate_path_walk_gates``) and its own walk's.
         """
         projection = _expansion_record(filter_instance)
         if projection is not None and projection.holds_in(cls):
             return cls._leaf_gates(filter_instance)
-        gate_path = leaf_gate_path(cls, name, filter_instance)
         return (
-            (cls, gate_path),
-            *relation_path_gates(
-                cls,
-                gate_path,
-                related_attr=cls._permission.traversal.related_attr,
-                target_attr=cls._permission.target_attr,
-            ),
+            (cls, leaf_gate_path(cls, name, filter_instance)),
+            *cls._gate_path_walk_gates(name, filter_instance),
             *cls._leaf_gates(filter_instance),
         )
+
+    @classmethod
+    def _gate_path_walk_gates(
+        cls,
+        name: str,
+        filter_instance: Filter,
+    ) -> tuple[tuple[type[object], str], ...]:
+        """Return the gates leaf ``name``'s gate path walks: none for a declared head.
+
+        A declared head gates on its own name (``inputs.py::_is_declared_head``),
+        no ORM path; any other leaf gates on its ``field_name``
+        (``inputs.py::leaf_gate_path``), whose hops
+        ``utils/permissions.py::relation_path_gates`` reads, the gates
+        ``_fire_flat_relation_path_gates`` fires.
+        """
+        if _is_declared_head(cls, name, filter_instance):
+            return ()
+        return relation_path_gates(
+            cls,
+            leaf_gate_path(cls, name, filter_instance),
+            related_attr=cls._permission.traversal.related_attr,
+            target_attr=cls._permission.target_attr,
+        )
+
+    @classmethod
+    @override
+    def _gate_path_spells_relations(cls, gate_path: str) -> bool:
+        """Whether ``gate_path`` is an ORM path rather than a declared head's name.
+
+        A declared head gates on its own name (``inputs.py::leaf_gate_path``),
+        a flat expanded copy of a child set's declared filter included
+        (``inputs.py::_is_declared_head``): the name is no ORM path, so a first
+        segment equal to another branch's ``field_name`` (``shelf__named`` beside
+        ``real_shelf = RelatedFilter(..., field_name="shelf")``) names no hop of
+        it. The gates the leaf's ORM path fires are its nested twin's
+        (``_leaf_gates``). Any other head gates on its ``field_name``, which
+        ``utils/permissions.py::relation_path_gates`` walks. The answer reads
+        the string alone, so a leaf that is no declared head, gating on a
+        ``field_name`` that is also a declared head's name, has its path walked
+        per leaf (``_permission_walk_gates``).
+        """
+        filter_instance = cls._filter_table().get(gate_path)
+        return filter_instance is None or not _is_declared_head(cls, gate_path, filter_instance)
 
     @classmethod
     async def _derive_flat_hop_visibility_async(

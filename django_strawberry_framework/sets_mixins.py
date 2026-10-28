@@ -911,6 +911,9 @@ class ActiveInputPermissionMixin:
       ``not``; order has none.
     - ``_permission_walk_gates`` -- filter names the gates each active leaf's ORM
       path fires; order walks its source paths alone.
+    - ``_gate_path_spells_relations`` -- whether a gate path is an ORM path
+      whose declared hops fire their gates; filter answers no for a declared
+      head's name, order walks every source path.
 
     Apply pipelines stay family-owned: filters still derive related
     visibility and validate a django-filter form; orders still flatten to
@@ -1009,6 +1012,17 @@ class ActiveInputPermissionMixin:
         like its nested twin.
         """
         return ()
+
+    @classmethod
+    def _gate_path_spells_relations(cls, _gate_path: str) -> bool:
+        """Whether ``gate_path`` is an ORM path whose declared hops fire their gates. Default: yes.
+
+        ``utils/permissions.py::run_active_input_permission_checks`` walks each
+        gate path that answers yes (``_fire_flat_relation_path_gates``). An order
+        term's source path is its ORM path; ``FilterSet`` answers no for a
+        declared head, whose gate path is its name.
+        """
+        return True
 
     @classmethod
     def _active_permission_targets(

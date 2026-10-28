@@ -899,7 +899,9 @@ def run_active_input_permission_checks(
     Flat relation-traversal leaves are gated the same as their nested twins: for
     each active leaf whose source path crosses a relation (``category__name``),
     ``_fire_flat_relation_path_gates`` fires the target set's gate chain so a
-    client cannot bypass a target gate by spelling the predicate flat, and
+    client cannot bypass a target gate by spelling the predicate flat (a gate
+    path the set reads as a name, not an ORM path, walks nothing:
+    ``_gate_path_spells_relations``), and
     ``_permission_walk_gates`` names the gates the nested twin of each active
     leaf's ORM path fires (a declared filter's ``field_name``, a projected child
     filter's own path in its set), which fire too.
@@ -915,7 +917,11 @@ def run_active_input_permission_checks(
         cls._invoke_permission_method(bare, field_path, request, fired=class_fired)
         # A flat relation-traversal leaf (``category__name``) must ALSO fire the
         # target set's gate chain its nested twin (``category: {name}``) fires, or
-        # the flat spelling silently bypasses the target gate.
+        # the flat spelling silently bypasses the target gate. A gate path that
+        # is a declared name, not an ORM path, walks nothing: whatever its leaf's
+        # ORM path walks, ``_permission_walk_gates`` fires below.
+        if not cls._gate_path_spells_relations(field_path):
+            continue
         _fire_flat_relation_path_gates(
             cls,
             field_path,
