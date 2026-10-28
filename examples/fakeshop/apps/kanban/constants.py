@@ -3,6 +3,7 @@
 TRACKED_FILE_PATHS: tuple[str, ...] = (
     "django_strawberry_framework/__init__.py",
     "django_strawberry_framework/_boundary_ordering.py",
+    "django_strawberry_framework/_completion.py",
     "django_strawberry_framework/_cross_web_patches.py",
     "django_strawberry_framework/_django_patches.py",
     "django_strawberry_framework/_graphql_core_patches.py",
@@ -159,6 +160,7 @@ TRACKED_FILE_PATHS: tuple[str, ...] = (
     "examples/fakeshop/test_query/test_auth_api.py",
     "examples/fakeshop/test_query/test_client_api.py",
     "examples/fakeshop/test_query/test_combined_visibility_api.py",
+    "examples/fakeshop/test_query/test_completion_lifecycle.py",
     "examples/fakeshop/test_query/test_connection_pagination_api.py",
     "examples/fakeshop/test_query/test_debug_extension_api.py",
     "examples/fakeshop/test_query/test_debug_toolbar_api.py",
@@ -304,6 +306,7 @@ TRACKED_FILE_PATHS: tuple[str, ...] = (
     "tests/test_check_type_suppressions.py",
     "tests/test_ci_governance.py",
     "tests/test_clean_up.py",
+    "tests/test_completion.py",
     "tests/test_connection.py",
     "tests/test_connection_window_rows.py",
     "tests/test_consumer_base_check.py",

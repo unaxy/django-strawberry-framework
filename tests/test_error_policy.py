@@ -1139,15 +1139,10 @@ def test_masking_leaves_the_original_result_holding_its_originals() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_the_return_seam_passes_an_already_masked_result_through_by_identity() -> None:
-    """The teardown and the return seam compose without a flag between them.
-
-    The teardown masks whatever it found on the execution context and the schema
-    masks what it returns, so the ordinary operation meets both. The second pass
-    has to be a no-op, and it is one structurally: a masked error carries
-    ``original_error=None``, which the classifier reads as deliberate. Identity is
-    the assertion because it is what proves no id was minted and no record logged.
-    """
+def test_the_return_seam_snapshots_an_already_masked_result_without_remasking(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Final publication owns its list while keeping the teardown's exact errors."""
     schema = DjangoSchema(query=_Query)
     already_masked = GraphQLError(
         DEFAULT_ERROR_POLICY.message,
@@ -1156,7 +1151,13 @@ def test_the_return_seam_passes_an_already_masked_result_through_by_identity() -
     )
     result = StrawberryExecutionResult(data=None, errors=[already_masked])
 
-    assert schema._masked_return(result) is result
+    snapshot = schema._masked_return(result)
+    assert isinstance(snapshot, StrawberryExecutionResult)
+    assert snapshot is not result
+    assert snapshot.errors is not result.errors
+    assert snapshot.errors is not None
+    assert snapshot.errors[0] is already_masked
+    assert not caplog.records
 
 
 def test_the_return_seam_degrades_when_masking_itself_raises(

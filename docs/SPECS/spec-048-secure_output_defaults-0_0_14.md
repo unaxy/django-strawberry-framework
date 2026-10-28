@@ -864,11 +864,12 @@ The single implementation handles both result shapes it can be handed: graphql-c
 `is_maskable_result`, which both seams ask so neither can drift on the question. Both
 admitted shapes expose an `errors` sequence; the masking reads it, replaces the entries it
 must, and the extension assigns the list back. A result that is `None` (a sync
-parse/validation early return), carries no errors, or is not an admitted shape is a no-op.
+parse/validation early return), has no error list, or is not an admitted shape is a no-op. An empty list is also a
+no-op unless the caller explicitly requests a publication snapshot.
 
 **One seam is not enough, because a response is not always one result.** A query or a
 mutation answered through `schema.execute` produces exactly one already-torn-down
-`ExecutionResult`, so the operation teardown IS the response for it. A **streamed
+`ExecutionResult`, and final return follows extension result collection. A **streamed
 operation** is not: a subscription delivers one `ExecutionResult` per EVENT through the
 result source the transport iterates, and a query or mutation run over a streaming
 transport (`graphql-transport-ws` dispatches EVERY operation type through `schema.stream`
@@ -916,10 +917,18 @@ into a result inside the `except` behind its operation lifecycle, after every te
 unwound over an execution context whose `result` was still `None`, so no extension can reach
 it. `DjangoSchema.execute` / `execute_sync` therefore mask the value they RETURN
 (`schema.py::DjangoSchema._masked_return`) through the same helpers and gates, failing
-closed to `degraded_result` when the policy cannot be applied. Masking twice is a no-op by
+closed to `degraded_result` when the policy cannot be applied. Masking twice preserves error identity by
 construction: an already-masked error carries no `original_error`, so the classifier leaves
 it alone and no second id is minted. A plain `strawberry.Schema` carrying the exported
 extension has no such seam, so a hook failure is unmasked there.
+
+With the production policy active, `DjangoSchema` snapshots the error list at final
+return, after extension result collection. An ordinary async result hook can await
+I/O without admitting a late resolver error into the published list. Existing error
+objects, order and correlation identifiers are preserved; debug and disabled policies
+remain pass-through. The standalone `DjangoErrorPolicyExtension` on a plain
+`strawberry.Schema` snapshots at teardown instead, so errors arriving after teardown
+are absent from that result; its documented hook-failure limitation still applies.
 
 *Alternatives rejected: see the [rationale][rationale] (the transport's frame writer, a
 schema subclass, accepting the gap for subscriptions, an upper strawberry version bound
@@ -1034,6 +1043,11 @@ constants look like they want a setting.
   the extension ever needs the request; it does not re-derive one.
 
 ## Edge cases and constraints
+
+- **Late resolver errors during async result-hook I/O.** An active production policy owns
+  the returned error list even when the initial errors are all deliberate. Managed schemas
+  snapshot after result collection; standalone extensions snapshot at teardown. The same
+  error objects and correlation identifiers survive, and debug/disabled policies pass through.
 
 - **A `FileField` on a model but not selected by [`Meta.fields`][glossary-metafields]** and
   named in `filesystem_path_fields` is a `ConfigurationError`, not a silent no-op — a
@@ -1190,8 +1204,11 @@ builder's field-for-field preservation and its `original_error=None`; the `None`
 empty-errors no-ops; both `ExecutionResult` shapes; the `isinstance`-guarded policy read over
 every wrong attribute shape; both fail-closed degrades (an error object whose
 `original_error` raises, a result whose `errors` cannot be read);
-`mask_execution_result`'s copy contract — same object when nothing was masked, a copy that
-leaves the original holding its originals otherwise; and the chain contract
+`mask_execution_result`'s default copy contract — same object when nothing was masked;
+explicit publication snapshots detach all-deliberate and empty lists too. Live
+`test_completion_lifecycle.py` covers managed final-return versus standalone teardown
+timing and supplied query execution contexts. A masked copy leaves the engine result
+holding its original errors. The package tier also pins the chain contract
 (`test_the_error_policy_extension_runs_first_in_every_chain`, a consumer extension kept in
 order behind the policy, a supplied masker declaring rather than duplicating the automatic
 one, and a debug factory beside a declared masker still capturing the original exception —
@@ -1305,7 +1322,8 @@ Each risk's pre-planned fallback position, should a real consumer need appear, i
       after serialization and before the stash; truncation is marked with one shared literal,
       rows drop from the tail, and both lists are always present.
 - [ ] `ErrorPolicy`, `resolve_error_policy`, `conf.py::error_policy_setting()`, and
-      `DjangoErrorPolicyExtension` exist; `DjangoSchema` resolves the policy once at
+      `DjangoErrorPolicyExtension` exist; active-policy publication snapshots exclude late
+      resolver appends while retaining managed result-collection errors; `DjangoSchema` resolves the policy once at
       construction, exposes `schema.error_policy` as a copy, and puts the extension FIRST in
       every operation's chain.
 - [ ] Under `DEBUG=False` with the policy enabled, an unexpected exception reaches the

@@ -15,7 +15,7 @@ server-side under that same identifier.
 **There are three seams, because a response is not always one result and is not
 always a result this extension can still reach.** A query or mutation answered
 through ``schema.execute`` normally produces exactly one already-torn-down result,
-and this extension's ``on_operation`` teardown is the story for that one. A
+and this extension's ``on_operation`` teardown masks its current errors. A
 STREAMED operation is not: a subscription delivers one ``ExecutionResult`` PER EVENT
 through the result source the transport iterates, and a query or mutation run over a
 streaming transport has its single result yielded from inside the operation
@@ -44,7 +44,10 @@ every result built after teardown; until then a check moved to any one of
 them observes different state than the other two. A plain ``strawberry.Schema``
 that a consumer assembled themselves with ``DjangoErrorPolicyExtension`` in its
 extensions list has no schema seam, so on that schema a hook failure is the one
-case the masking does not cover.
+case the masking does not cover. On that standalone schema, teardown snapshots
+its error list; late resolver errors cannot append into the published result.
+Managed schemas defer that snapshot until final return, after result collection,
+so errors observed during ``get_results`` are still classified and masked.
 
 ``mask_execution_result`` RETURNS a masked value rather than editing the result
 it was handed, which is what lets the per-event seam leave the engine's own
@@ -90,7 +93,7 @@ from django_strawberry_framework.error_policy import (
 )
 from django_strawberry_framework.utils import truth
 
-from .operation_state import OperationState, _OperationBoundExtension
+from .operation_state import OperationState, _binds_operation_state, _OperationBoundExtension
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -295,15 +298,18 @@ def schema_error_policy(schema: object) -> ErrorPolicy:
 def mask_execution_result(
     result: _MaskableResultT,
     policy: ErrorPolicy,
+    *,
+    snapshot: bool = False,
 ) -> _MaskableResultT | StrawberryExecutionResult:
     """Return the client-safe value for one completed or per-event ``result``.
 
-    ``result`` itself is returned whenever nothing needed masking, so the common
-    path allocates nothing and the caller can test identity to learn whether the
-    policy did anything. Otherwise a SHALLOW COPY carries the rewritten error
-    list: the object the engine assigned to ``execution_context.result`` keeps its
-    originals, so an extension reading ``original_error`` after this ran still
-    reads what was raised.
+    By default ``result`` itself is returned whenever nothing needed masking,
+    so the caller can test identity to learn whether the policy did anything.
+    ``snapshot=True`` instead owns a fresh list even when every entry is deliberate
+    or the list is empty; error identity and order remain unchanged. A SHALLOW
+    COPY carries the rewritten error list: the object the engine assigned to
+    ``execution_context.result`` keeps its originals, so an extension reading
+    ``original_error`` after this ran still reads what was raised.
 
     The error list is MATERIALIZED before the emptiness check: a container that
     answers falsy while carrying entries (a lying ``__len__`` or ``__bool__``)
@@ -328,10 +334,12 @@ def mask_execution_result(
         if errors is None:
             return result
         errors_list = list(errors)
-        if not errors_list:
+        if not errors_list and not snapshot:
             return result
         replacements = [_replacement_for(error, policy) for error in errors_list]
-        if all(new is old for new, old in zip(replacements, errors_list, strict=True)):
+        if not snapshot and all(
+            new is old for new, old in zip(replacements, errors_list, strict=True)
+        ):
             return result
         masked = copy.copy(result)
         masked.errors = replacements
@@ -411,7 +419,11 @@ class DjangoErrorPolicyExtension(_OperationBoundExtension[OperationState]):
         fail, replace the execution-context result itself with the safe stock
         shape rather than leaving the original data on the wire.
         """
-        masked = mask_execution_result(result, policy)
+        masked = mask_execution_result(
+            result,
+            policy,
+            snapshot=not _binds_operation_state(self._hook_context()),
+        )
         if masked is not result:
             try:
                 result.data = masked.data

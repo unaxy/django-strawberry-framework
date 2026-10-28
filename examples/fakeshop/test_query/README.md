@@ -593,6 +593,11 @@ Module docstring = authoritative description; this = index. Read the docstring b
 
 Outside this dir: [`../tests/`][fakeshop-tests] = project-level rows (urls, settings guard, schema export, `inspect_django_type`); `../apps/<app>/tests/` = that app's in-process rows; [`../../../tests/`][tests-dir] = package tier, one file per module.
 
+`test_completion_lifecycle.py` owns async generated-mutation field/list cleanup,
+nullable survivors, successful lists, and late-error publication through real HTTP.
+It covers direct async and synchronous-client bridges, standalone policy installation,
+custom query execution contexts and optional-adapter independence.
+
 <!-- LINK DEFINITIONS -->
 
 <!-- Root -->

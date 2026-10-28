@@ -160,6 +160,14 @@ schema = DjangoSchema(query=Query, config=strawberry_config(), error_policy={"en
 
 The extension runs **first** in every operation's chain, because Strawberry unwinds teardowns LIFO and masking must happen after every extension that reads `GraphQLError.original_error` has had its turn; your own extensions keep their order behind it. Subscriptions served through the package's ASGI router are covered per event rather than per operation, so every event carries the policy message and its own `correlationId`. An exception escaping a **hook** — yours or the package's — is masked by `DjangoSchema` itself rather than by the extension, because Strawberry turns such an exception into a response only after every teardown has already unwound; that seam is on the schema, so a plain `strawberry.Schema` you assembled around the exported extension yourself does not have it.
 
+With the production policy active, `DjangoSchema` snapshots the error list at final
+return, after extension result collection. An ordinary async result hook can await
+I/O without admitting a late resolver error into the published list. Existing error
+objects, order and correlation identifiers are preserved; debug and disabled policies
+remain pass-through. The standalone `DjangoErrorPolicyExtension` on a plain
+`strawberry.Schema` snapshots at teardown instead, so errors arriving after teardown
+are absent from that result; its documented hook-failure limitation still applies.
+
 The schema owns both, and `extensions=` carries your own extensions. `DjangoSchema` builds one error-policy extension and one resource-policy extension per operation from the configuration it was constructed with, so every request is bounded and masked whatever the extension list says. Configure them with `DjangoSchema(resource_policy=..., error_policy=...)`; passing `DjangoResourcePolicyExtension(policy=...)` as an entry still works and is read as that same declaration, with the entry folded into the schema rather than kept. Declaring the policy twice raises `ConfigurationError` at construction, and so does a subclass of either extension - supplied as a class or as an instance, and whether or not it declares a policy of its own - because a subclass can override the hook that does the enforcing while still answering every check for it. A `config=` with Strawberry's `enable_experimental_incremental_execution` set is refused at construction the same way: masking, the resource bounds and a generated mutation's transaction each hold for one response per operation, and a `@defer` / `@stream` payload is delivered outside it. An entry that would decide enforcement later is refused when the operation resolves it: a factory returning either policy extension, a factory that raises, and a factory returning something other than a `SchemaExtension` instance all answer every request with the `SCHEMA_CONFIGURATION_UNAVAILABLE` error instead of running, with the exception text and the returned object left in the server's log. A refused schema answers every request identically: the refusal is published before the parse stage and replaces both the document and the operation selector with the package's own, so a document that will not parse and an `operationName` no document can carry get the same code as a valid request, over `execute_sync`, `execute` and `stream` alike. It still bounds what it is sent, too - its chain keeps the package's resource extension, so an oversized or deeply nested document is answered with `RESOURCE_LIMIT_EXCEEDED` before anything parses it.
 
 ## Reading data
@@ -474,6 +482,15 @@ class Mutation:
 ```
 
 `<Model>Input` and `<Model>PartialInput` are generated from `Meta.model` reusing the read-side converters (forward FK / OneToOne become `<field>_id`, M2M `list[id]`, `FileField` / `ImageField` `Upload`; a relation id names the related row, and a `to_field` relation stores that row's `to_field` key; an update input never carries the primary key, a composite key's member columns included, while a create takes a client-assigned key such as a `OneToOneField(primary_key=True)`, a text key or a composite key's member columns, and saves it as an INSERT, so a `save()` override must pass `force_insert` through); `Meta.fields` / `Meta.exclude` narrow them and `Meta.input_class` / `Meta.partial_input_class` replace them. The pipeline is visibility-scoped locate (update and delete only), authorize, decode relations, `full_clean()`, write, optimizer-planned re-fetch. Authorizing before decoding is deliberate, so a denied caller cannot probe related-object visibility, and locating through `get_queryset` first means a hidden row is not-found rather than forbidden.
+
+Async generated-mutation completion cancels already-running engine-owned field
+and list-item siblings abandoned by a propagating failure, and drains their cleanup
+before the atomic exits. Repeated cancellation still waits for that cleanup. Nullable
+failures keep surviving siblings running under upstream semantics. This ownership is
+per execution context and mutation window; ordinary queries, unmarked mutations and
+application-created background tasks retain upstream behavior. The mandatory boundary
+is independent of `APPLY_UPSTREAM_PATCHES`, which still gates only the optional
+QuerySet/AsyncIterable adapter.
 
 Four behaviors are easy to trip over. M2M inputs are **replacements**: a list becomes the complete membership, `[]` clears, omission leaves an update unchanged, explicit `null` is a field error. Relation visibility exists only where the related model has a registered primary `DjangoType`; without one, raw primary keys get existence checks only and any existing row may be attached. The post-write row is re-fetched through the **default manager**, so an update moving a row out of the actor's read scope still returns it. And because the transaction spans response completion, external effects must be scheduled with `transaction.on_commit(...)`.
 

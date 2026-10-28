@@ -1699,7 +1699,9 @@ Strawberry's HTTP-view patch module and has no HTTP-view lifecycle coupling.
 `django_strawberry_framework/apps.py::DjangoStrawberryFrameworkConfig.ready` dispatches it
 beside the other three patch modules, and it self-gates on its own `APPLY_UPSTREAM_PATCHES`
 key, `"graphql_core"` (`django_strawberry_framework/conf.py #"UPSTREAM_PATCH_DEPENDENCIES = frozenset("`),
-so `APPLY_UPSTREAM_PATCHES = {"graphql_core": False}` disables only this dependency boundary.
+so `APPLY_UPSTREAM_PATCHES = {"graphql_core": False}` disables only this optional
+iterable boundary. Generated-mutation field/list cancellation and drain remain
+mandatory inside their owned completion window, independent of this gate.
 
 The same wrapper owns a second graphql-core behavior, the completion order Decision 5 names.
 Under the asynchronous executor

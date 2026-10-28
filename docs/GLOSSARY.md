@@ -639,7 +639,15 @@ The `SchemaExtension` that ENFORCES the [production error policy](#production-er
 
 **The install position is load-bearing.** `on_operation` teardowns unwind LIFO, so the FIRST-listed extension tears down LAST; prepending is therefore what guarantees masking happens after every other teardown — critically after [`DjangoDebugExtension`](#djangodebugextension), which must read `original_error` to build its [exception rows](#debug-exception-row), and after any consumer masking extension, which expects to see the originals. This is the exact inverse of the resource policy's append, and the inversion is principled: [`DjangoResourcePolicyExtension`](#djangoresourcepolicyextension) does its work in the SETUP half, which runs in list order. **One rule states both — install the extension where its own half of the lifecycle runs LAST**, because each policy is the final word on its side of the operation.
 
-The teardown is **one synchronous generator serving both execution colors** (the engine enters sync generator hooks on the async path too), handling both result shapes it can be handed — graphql-core's `ExecutionResult` and Strawberry's — and treating a `None` result or an error-free one as a no-op. Each remaining entry is classified by [structural error classification](#structural-error-classification) and, when masked, **replaced** by a fresh `GraphQLError` carrying the policy message, a [correlation identifier](#correlation-identifier), the original `nodes` / `source` / `positions` / `path`, and `original_error=None`. Because both the deliberate rejections and the replacements are plain `GraphQLError`s, sync HTTP, async HTTP and both WebSocket protocols render them identically with no translation layer.
+The teardown is **one synchronous generator serving both execution colors** (the engine enters sync generator hooks on the async path too), handling both result shapes it can be handed — graphql-core's `ExecutionResult` and Strawberry's — and treating a `None` result or an absent error list as a no-op; an explicit publication snapshot also detaches an empty list. Each remaining entry is classified by [structural error classification](#structural-error-classification) and, when masked, **replaced** by a fresh `GraphQLError` carrying the policy message, a [correlation identifier](#correlation-identifier), the original `nodes` / `source` / `positions` / `path`, and `original_error=None`. Because both the deliberate rejections and the replacements are plain `GraphQLError`s, sync HTTP, async HTTP and both WebSocket protocols render them identically with no translation layer.
+
+With the production policy active, `DjangoSchema` snapshots the error list at final
+return, after extension result collection. An ordinary async result hook can await
+I/O without admitting a late resolver error into the published list. Existing error
+objects, order and correlation identifiers are preserved; debug and disabled policies
+remain pass-through. The standalone `DjangoErrorPolicyExtension` on a plain
+`strawberry.Schema` snapshots at teardown instead, so errors arriving after teardown
+are absent from that result; its documented hook-failure limitation still applies.
 
 **See also:** [Production error policy](#production-error-policy) · [`ErrorPolicy`](#errorpolicy) · [Masking-extension ordering](#masking-extension-ordering) · [Strawberry extension lifecycle](#strawberry-extension-lifecycle).
 
@@ -861,6 +869,23 @@ The `strawberry.Schema` subclass every schema exposing generated mutations is bu
 **A generated type-name clash names its declarations.** Two generated input types of different fields under one GraphQL type name (two sets, a `FilterSet` and an `OrderSet`, or a model input and a form or serializer input) cannot share a schema: Strawberry refuses the pair with `DuplicatedTypeName`, and `DjangoSchema` restates the refusal as [`ConfigurationError`](#configurationerror) naming both declarations and how their names met. Any other duplicate name keeps Strawberry's own error.
 
 **`DjangoMutationExecutionContext`** is the graphql-core `ExecutionContext` subclass the schema installs by default; it is root-exported so a consumer needing a custom execution context subclasses it and passes it as `execution_context_class=`. For each top-level field whose resolver carries the [`DjangoMutationField`](#djangomutationfield) marker it opens one `transaction.atomic(using=<write alias>)` before the resolver runs and exits it only after graphql-core has finished completing that field's value, and it publishes the managed write alias the [`DjangoMutation`](#djangomutation) pipeline requires. Any error added inside that window, resolver-raised or completion-raised, rolls the write back, so a payload that fails to serialize cannot leave a committed write behind a `data: null` response; a window whose connection was closed inside it cannot commit, so the field fails rather than report a write that was never stored. Under sync execution the window wraps the field on the calling thread; under async execution each window runs on a private thread and therefore a private connection, except under a sync caller blocked in `async_to_sync`, where the window runs on that caller's thread and nests in whatever transaction the caller holds, as sync execution does. A private connection stays private under an outer `ThreadSensitiveContext`, and a cancelled task exits the window's atomic, rolled back. Mutation root fields execute serially, so consecutive top-level generated mutations get independent transactions; every other field executes as stock graphql-core.
+
+Async generated-mutation completion cancels already-running engine-owned field
+and list-item siblings abandoned by a propagating failure, and drains their cleanup
+before the atomic exits. Repeated cancellation still waits for that cleanup. Nullable
+failures keep surviving siblings running under upstream semantics. This ownership is
+per execution context and mutation window; ordinary queries, unmarked mutations and
+application-created background tasks retain upstream behavior. The mandatory boundary
+is independent of `APPLY_UPSTREAM_PATCHES`, which still gates only the optional
+QuerySet/AsyncIterable adapter.
+
+With the production policy active, `DjangoSchema` snapshots the error list at final
+return, after extension result collection. An ordinary async result hook can await
+I/O without admitting a late resolver error into the published list. Existing error
+objects, order and correlation identifiers are preserved; debug and disabled policies
+remain pass-through. The standalone `DjangoErrorPolicyExtension` on a plain
+`strawberry.Schema` snapshots at teardown instead, so errors arriving after teardown
+are absent from that result; its documented hook-failure limitation still applies.
 
 **See also:** [Execution resource policy](#execution-resource-policy) · [Production error policy](#production-error-policy) · [`DjangoMutation`](#djangomutation) · [Per-operation extension isolation](#per-operation-extension-isolation).
 
@@ -1705,6 +1730,14 @@ Under `settings.DEBUG = False`, an unexpected resolver or hook exception is repl
 
 **Under `settings.DEBUG` the policy is a pass-through.** Development keeps its real messages; a masked stack trace in a developer's browser is a worse day for everyone and teaches the developer to disable the policy wholesale. The setting is read at operation time, for the same reason the [debug fail-closed gate](#debug-fail-closed-gate) reads it there.
 
+With the production policy active, `DjangoSchema` snapshots the error list at final
+return, after extension result collection. An ordinary async result hook can await
+I/O without admitting a late resolver error into the published list. Existing error
+objects, order and correlation identifiers are preserved; debug and disabled policies
+remain pass-through. The standalone `DjangoErrorPolicyExtension` on a plain
+`strawberry.Schema` snapshots at teardown instead, so errors arriving after teardown
+are absent from that result; its documented hook-failure limitation still applies.
+
 **See also:** [`ErrorPolicy`](#errorpolicy) · [`DjangoErrorPolicyExtension`](#djangoerrorpolicyextension) · [Structural error classification](#structural-error-classification) · [Correlation identifier](#correlation-identifier) · [Masking-extension ordering](#masking-extension-ordering).
 
 ## Queryset diffing
@@ -2228,9 +2261,18 @@ The package ships one defensive patch module per third-party dependency it has t
 
 `ready()` shipped at `0.0.7` dispatching the Django applier alone. The Strawberry and `cross_web` appliers arrived with the global kill switch at `0.0.11`, and the per-dependency form of the switch at `0.0.14`.
 
-**The kill switch.** Every applier is gated by `APPLY_UPSTREAM_PATCHES`, default on, read once per `apply()` at app load. Two shapes are accepted: a bool, which turns all four off (`DJANGO_STRAWBERRY_FRAMEWORK = {"APPLY_UPSTREAM_PATCHES": False}`), or a mapping keyed by dependency name (`django`, `strawberry`, `cross_web`, `graphql_core`), so `{"django": False}` drops only the test-only teardown patch while the production request hardening stays installed. Names left out of the mapping default to `True`. Any other shape raises `ConfigurationError` at the first gate rather than silently inverting the consumer's intent — an unknown name, a non-bool mapping value, or a `"false"` string that bool coercion would read as *enable* — and the whole mapping is validated on every read regardless of which applier reads it first. `strawberry` and `cross_web` jointly own the malformed-body hardening on Strawberry's own sync view, so disabling one of that pair leaves it half-done. The `graphql_core` gate owns only executor completion, so either workaround can be disabled or retired without changing the other.
+**The kill switch.** Every applier is gated by `APPLY_UPSTREAM_PATCHES`, default on, read once per `apply()` at app load. Two shapes are accepted: a bool, which turns all four off (`DJANGO_STRAWBERRY_FRAMEWORK = {"APPLY_UPSTREAM_PATCHES": False}`), or a mapping keyed by dependency name (`django`, `strawberry`, `cross_web`, `graphql_core`), so `{"django": False}` drops only the test-only teardown patch while the production request hardening stays installed. Names left out of the mapping default to `True`. Any other shape raises `ConfigurationError` at the first gate rather than silently inverting the consumer's intent — an unknown name, a non-bool mapping value, or a `"false"` string that bool coercion would read as *enable* — and the whole mapping is validated on every read regardless of which applier reads it first. `strawberry` and `cross_web` jointly own the malformed-body hardening on Strawberry's own sync view, so disabling one of that pair leaves it half-done. The `graphql_core` gate owns only the optional iterable adapter, so either workaround can be disabled or retired without changing the other.
 
 **The switch scopes upstream defects only, never package policy.** The [UTF-8 wire contract](#utf-8-wire-contract) and the [request-body cap](#request-body-cap) are permanent policy on the package's own view: they do not consult this setting in either direction, and turning the patches off does not relax them.
+
+Async generated-mutation completion cancels already-running engine-owned field
+and list-item siblings abandoned by a propagating failure, and drains their cleanup
+before the atomic exits. Repeated cancellation still waits for that cleanup. Nullable
+failures keep surviving siblings running under upstream semantics. This ownership is
+per execution context and mutation window; ordinary queries, unmarked mutations and
+application-created background tasks retain upstream behavior. The mandatory boundary
+is independent of `APPLY_UPSTREAM_PATCHES`, which still gates only the optional
+QuerySet/AsyncIterable adapter.
 
 **See also:** [Django Trac #37064 hardening](#django-trac-37064-hardening) · [Django `AppConfig`](#django-appconfig).
 

@@ -194,6 +194,7 @@ Source: `django_strawberry_framework/`
 ```text
 django_strawberry_framework/    # Public API of django-strawberry-framework, a DRF-inspired Django integration for Strawberry GraphQL.
 ├── _boundary_ordering.py         # The marks and the method name the request-body boundary's ordering rests on.
+├── _completion.py                # Join graphql-core-owned concurrent completion before returning to its owner.
 ├── _cross_web_patches.py         # Defensive patches for upstream ``cross_web`` bugs, applied at app load.
 ├── _django_patches.py            # Defensive patches for upstream Django bugs, applied at app load.
 ├── _graphql_core_patches.py      # Defensive patches for graphql-core list completion.
@@ -334,6 +335,7 @@ Source: `django_strawberry_framework/ (+ planned card paths)`
 ```text
 django_strawberry_framework/    # Public API of django-strawberry-framework, a DRF-inspired Django integration for Strawberry GraphQL.
 ├── _boundary_ordering.py         # The marks and the method name the request-body boundary's ordering rests on.
+├── _completion.py                # Join graphql-core-owned concurrent completion before returning to its owner.
 ├── _cross_web_patches.py         # Defensive patches for upstream ``cross_web`` bugs, applied at app load.
 ├── _django_patches.py            # Defensive patches for upstream Django bugs, applied at app load.
 ├── _graphql_core_patches.py      # Defensive patches for graphql-core list completion.
@@ -513,6 +515,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_check_type_suppressions.py  # Script tests for the ``check-type-suppressions`` gate in ``scripts/check_type_suppressions.py``.
 ├── test_ci_governance.py         # Governance tests for CI workflows, Dependabot, install floors and first-party source.
 ├── test_clean_up.py              # Script tests for clean_up generated-artifact deletion boundaries.
+├── test_completion.py            # Completion source audits and revocable ownership that a wire response cannot inspect.
 ├── test_connection.py            # DjangoConnection tests for generated types, fields, resolvers, sidecars, optimization, and pagination.
 ├── test_connection_window_rows.py  # The windowed-prefetch hand-off accepts only model rows as a connection window.
 ├── test_consumer_base_check.py   # The revalidating consumer factory proves its bases carry the hooks it overrides.
@@ -741,6 +744,7 @@ examples/fakeshop/test_query/    # Live GraphQL HTTP tests for fakeshop's consum
 ├── test_auth_api.py              # Live ``/graphql/`` auth API acceptance tests.
 ├── test_client_api.py            # Live GraphQL HTTP acceptance tests for the ``testing`` package's test-client family.
 ├── test_combined_visibility_api.py  # Live GraphQL HTTP tests for a combined ``get_queryset`` result served as its primary-key set.
+├── test_completion_lifecycle.py  # Live HTTP acceptance for owned async mutation completion and stable error delivery.
 ├── test_connection_pagination_api.py  # Live /graphql pagination error containment and ``totalCount`` gating for connections.
 ├── test_debug_extension_api.py   # Live GraphQL HTTP tests for the ``DjangoDebugExtension`` request-visible contract.
 ├── test_debug_toolbar_api.py     # Live HTTP tests for ``DebugToolbarMiddleware`` across GraphQL, panel, and pass-through routes.
@@ -814,6 +818,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_check_type_suppressions.py  # Script tests for the ``check-type-suppressions`` gate in ``scripts/check_type_suppressions.py``.
 ├── test_ci_governance.py         # Governance tests for CI workflows, Dependabot, install floors and first-party source.
 ├── test_clean_up.py              # Script tests for clean_up generated-artifact deletion boundaries.
+├── test_completion.py            # Completion source audits and revocable ownership that a wire response cannot inspect.
 ├── test_connection.py            # DjangoConnection tests for generated types, fields, resolvers, sidecars, optimization, and pagination.
 ├── test_connection_window_rows.py  # The windowed-prefetch hand-off accepts only model rows as a connection window.
 ├── test_consumer_base_check.py   # The revalidating consumer factory proves its bases carry the hooks it overrides.
