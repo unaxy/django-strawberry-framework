@@ -68,6 +68,7 @@ from django.http import HttpRequest, QueryDict
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext, register_lookup
 from django.utils.functional import SimpleLazyObject
+from django.utils.translation import gettext_lazy
 from django_filters import (
     AllValuesFilter,
     BaseInFilter,
@@ -3493,6 +3494,8 @@ def _category_filter_with_exclude(exclude: Callable[[], object]) -> type[FilterS
         pytest.param(lambda: iter(["is_private"]), "list_iterator", id="iter"),
         pytest.param(lambda: map(str, ["is_private"]), "map", id="map"),
         pytest.param(lambda: "is_private", "str", id="bare-str"),
+        pytest.param(lambda: gettext_lazy("is_private"), "__proxy__", id="lazy-str"),
+        pytest.param(lambda: gettext_lazy("is_priv"), "__proxy__", id="lazy-str-substring"),
     ],
 )
 def test_filterset_rejects_a_meta_exclude_that_cannot_be_re_read(
@@ -3505,7 +3508,10 @@ def test_filterset_rejects_a_meta_exclude_that_cannot_be_re_read(
     exclude is exhausted by the first membership test, so every later field
     (the excluded column included) would become a client-queryable filter, and
     a bare string answers by substring. Both are refused before upstream reads
-    the declaration, naming ``Meta.exclude``.
+    the declaration, naming ``Meta.exclude``. A lazy translation string is a
+    bare string whose proxy class is no ``str``: it would drop ``is_private``
+    as the name it spells and exclude nothing as a substring of one, so it is
+    refused as the plain string is.
     """
     with pytest.raises(ConfigurationError) as excinfo:
         _category_filter_with_exclude(exclude)
@@ -3538,6 +3544,33 @@ def test_filterset_meta_exclude_re_readable_collection_drops_the_column(exclude:
     assert "name" in probe.base_filters
     # A second expansion reads the same declaration to the same field map.
     assert "is_private" not in probe.get_fields()
+
+
+def test_filterset_meta_fields_lazy_translation_string_reads_as_the_plain_string() -> None:
+    """A lazy translation ``Meta.fields`` takes the text exemption the plain string takes.
+
+    ``"__all__"`` spelled lazily is the whole-set sweep, and any other lazy string
+    reaches django-filter's own ``TypeError`` for a bare-string ``Meta.fields``,
+    exactly as the plain string it stands for does.
+    """
+    swept = _category_filter_with_meta(fields=gettext_lazy("__all__"))
+    plain = _category_filter_with_meta(fields="__all__")
+    assert set(swept.base_filters) == set(plain.base_filters)
+
+    with pytest.raises(TypeError) as lazy_error:
+        _category_filter_with_meta(fields=gettext_lazy("name"))
+    with pytest.raises(TypeError) as plain_error:
+        _category_filter_with_meta(fields="name")
+    assert str(lazy_error.value) == str(plain_error.value)
+
+
+def _category_filter_with_meta(**meta: object) -> type[FilterSet]:
+    """Build a ``Category`` FilterSet over the given ``Meta`` declarations."""
+    return type(
+        "MetaProbeFilter",
+        (FilterSet,),
+        {"Meta": type("Meta", (), {"model": Category, **meta})},
+    )
 
 
 _Namer: TypeAlias = Callable[[str], str]

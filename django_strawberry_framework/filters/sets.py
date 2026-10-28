@@ -49,6 +49,7 @@ from django.db.models.expressions import BaseExpression
 from django.db.models.fields.related import ManyToManyRel, ManyToOneRel, OneToOneRel
 from django.db.models.sql.query import Query
 from django.db.models.sql.where import WhereNode
+from django.utils.functional import Promise
 from django_filters import (
     BaseInFilter,
     BaseRangeFilter,
@@ -3273,9 +3274,10 @@ class FilterSet(
         is consumed by membership (``f not in exclude`` once per field), so a
         one-shot exclude is exhausted by the first test and every later field,
         the excluded column included, becomes a filter, while a bare string
-        answers by substring; it passes the same gate. The re-readability
-        contract is shared with the order family's ``_expand_meta_fields``
-        through ``sets_mixins.py::require_re_readable_field_declaration``,
+        answers by substring (a lazy translation string included); it passes the
+        same gate. The re-readability contract is shared with the order family's
+        ``_expand_meta_fields`` through
+        ``sets_mixins.py::require_re_readable_field_declaration``,
         applied here before the first consumption so the declaration fails
         closed at class creation.
 
@@ -3317,10 +3319,16 @@ class FilterSet(
         )
         options.exclude = cast("Sequence[str] | None", plain_set_meta_fields(options.exclude))
         meta_fields = options.fields
-        if meta_fields is not None and not truth.is_instance(meta_fields, str):
-            # ``str`` is exempt here (unlike the order family): the top-level
+        if (
+            meta_fields is not None
+            and not truth.is_instance(meta_fields, str)
+            and not truth.is_instance(meta_fields, Promise)
+        ):
+            # Text is exempt here (unlike the order family): the top-level
             # ``"__all__"`` shorthand IS a string declaration, and any other
-            # string is upstream's to reject.
+            # string is upstream's to reject. A lazy translation string is text
+            # too, so upstream compares it with ``"__all__"`` and walks it
+            # exactly as the plain string it stands for.
             _ = require_re_readable_field_declaration(
                 cls,
                 meta_fields,

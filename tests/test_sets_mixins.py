@@ -32,6 +32,7 @@ from apps.library.filters import BookFilter
 from apps.library.models import Book
 from django.db.models import Model
 from django.utils.functional import SimpleLazyObject
+from django.utils.translation import gettext_lazy
 from typing_extensions import override
 
 import django_strawberry_framework.filters.sets as filter_sets
@@ -982,10 +983,11 @@ def test_re_readable_gate_rejects_one_shot_and_text_atoms() -> None:
     """One-shot producers, text atoms, and non-collections are the three rejected shapes.
 
     A generator / ``iter(...)`` / ``map`` object is exhausted by the first
-    expansion; a ``str`` / ``bytes`` / ``bytearray`` / ``memoryview`` is a
-    collection of CHARACTERS, not of field names, and satisfies ``Collection``
-    structurally, so it needs the explicit exclusion. Plain non-collections
-    (``123``, ``object()``, ``None``) fail the ``Collection`` check outright.
+    expansion; a ``str`` / lazy translation string / ``bytes`` / ``bytearray`` /
+    ``memoryview`` is a collection of CHARACTERS, not of field names, and
+    satisfies ``Collection`` structurally, so it needs the explicit exclusion. Plain
+    non-collections (``123``, ``object()``, ``None``) fail the ``Collection`` check
+    outright.
     Rejected at class creation (``ConfigurationError``), never as a GraphQL
     error.
     """
@@ -994,6 +996,7 @@ def test_re_readable_gate_rejects_one_shot_and_text_atoms() -> None:
         iter(["code"]),
         map(str, ["code"]),
         "code",
+        gettext_lazy("code"),
         b"code",
         bytearray(b"code"),
         memoryview(b"code"),

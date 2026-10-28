@@ -42,6 +42,7 @@ from django.contrib.auth.models import AnonymousUser, User
 from django.db.models import F, Min, Model, QuerySet
 from django.http import HttpRequest
 from django.utils.functional import SimpleLazyObject
+from django.utils.translation import gettext_lazy
 from graphql import GraphQLError
 from typing_extensions import override
 
@@ -626,6 +627,13 @@ _EXCLUDE_REFUSALS: dict[str, tuple[dict[str, object], str]] = {
             "got str ('subtitle')."
         ),
     ),
+    "lazy translation str": (
+        {"model": Book, "fields": "__all__", "exclude": gettext_lazy("subtitle")},
+        (
+            "OrderSet ExcludeOrder.Meta.exclude must be a re-readable collection of field names; "
+            "got __proxy__ ('subtitle')."
+        ),
+    ),
     "one-shot iterator": (
         {"model": Book, "fields": "__all__", "exclude": iter(["subtitle"])},
         (
@@ -655,9 +663,10 @@ _EXCLUDE_REFUSALS: dict[str, tuple[dict[str, object], str]] = {
 def test_orderset_meta_exclude_refuses_a_declaration_it_cannot_apply(shape: str) -> None:
     """A ``Meta.exclude`` the expansion cannot apply on every re-run fails closed by name.
 
-    A bare string would exclude by character, a one-shot iterator only on the first
-    expansion, a non-string entry would match nothing, and an exclude-only declaration
-    without ``Meta.model`` has no model to sweep.
+    A bare string (a lazy translation string included) would exclude by character, a
+    one-shot iterator only on the first expansion, a non-string entry would match
+    nothing, and an exclude-only declaration without ``Meta.model`` has no model to
+    sweep.
     """
     meta, message = _EXCLUDE_REFUSALS[shape]
 
@@ -1343,7 +1352,11 @@ def test_orderset_apply_sync_handles_unset_in_nested_dict() -> None:
 
 @pytest.mark.django_db
 def test_orderset_expand_meta_fields_rejects_non_iterable_fields() -> None:
-    """Non-collection or string Meta.fields (other than '__all__') raises ConfigurationError."""
+    """Non-collection or string Meta.fields (other than '__all__') raises ConfigurationError.
+
+    A lazy translation string is a string: its proxy class is no ``str``, yet it would
+    expand into one order path per character.
+    """
 
     class IntFieldsOrder(OrderSet):
         class Meta:
@@ -1367,6 +1380,17 @@ def test_orderset_expand_meta_fields_rejects_non_iterable_fields() -> None:
     ):
         StrFieldsOrder.get_fields()
 
+    class LazyStrFieldsOrder(OrderSet):
+        class Meta:
+            model = Book
+            fields = gettext_lazy("title")
+
+    with pytest.raises(
+        ConfigurationError,
+        match=r"got __proxy__ \('title'\)\. .*not a bare string",
+    ):
+        LazyStrFieldsOrder.get_fields()
+
     class ObjFieldsOrder(OrderSet):
         class Meta:
             model = Book
@@ -1377,6 +1401,23 @@ def test_orderset_expand_meta_fields_rejects_non_iterable_fields() -> None:
         match="must be '__all__' or a re-readable collection of field names",
     ):
         ObjFieldsOrder.get_fields()
+
+
+@pytest.mark.django_db
+def test_orderset_expand_meta_fields_lazy_all_is_the_shorthand() -> None:
+    """A lazy translation ``"__all__"`` compares equal to the shorthand and sweeps as it does."""
+
+    class LazyAllOrder(OrderSet):
+        class Meta:
+            model = Book
+            fields = gettext_lazy("__all__")
+
+    class PlainAllOrder(OrderSet):
+        class Meta:
+            model = Book
+            fields = "__all__"
+
+    assert list(LazyAllOrder.get_fields()) == list(PlainAllOrder.get_fields())
 
 
 @pytest.mark.django_db

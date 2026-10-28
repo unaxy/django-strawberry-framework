@@ -66,19 +66,18 @@ from django.core.exceptions import NON_FIELD_ERRORS, ValidationError
 from django.core.validators import ProhibitNullCharactersValidator
 from django.db import connections, models
 from django.utils import timezone
-from django.utils.functional import Promise
 
 from . import truth
 from ._array_field import array_leaf_field
 from ._narrowing import (
     call_method,
     dict_items,
-    is_char_wise,
     is_class,
     is_dict,
     is_iterable,
     is_list,
     is_list_or_tuple,
+    is_text_atom,
     list_iter,
     list_of,
     read_attr,
@@ -299,13 +298,13 @@ def _str_list(value: object) -> list[str]:
 
     The one body behind ``field_error``'s ``messages`` AND ``codes`` coercion
     (the rule the DRF ``ErrorDetail`` flattener depends on): a text atom (text,
-    bytes-like, or a lazy translation ``Promise``, each asked of its real class)
+    bytes-like, or a lazy translation ``Promise``; ``utils/_narrowing.py::is_text_atom``)
     or any other non-iterable becomes a one-element list (never iterated
     char-by-char into per-character leaves); any other iterable (a DRF
     ``ErrorDetail`` list, a tuple) is materialized with each element rendered by
     ``truth.text``.
     """
-    if is_char_wise(value) or truth.is_instance(value, Promise) or not is_iterable(value):
+    if is_text_atom(value) or not is_iterable(value):
         return [truth.text(value)]
     return [truth.text(item) for item in value]
 

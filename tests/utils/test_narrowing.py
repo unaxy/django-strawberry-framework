@@ -12,6 +12,8 @@ from collections.abc import Callable, Collection, Mapping
 
 import pytest
 from django.db import models
+from django.utils.functional import Promise, lazy
+from django.utils.translation import gettext_lazy
 from typing_extensions import override
 
 from django_strawberry_framework.utils._narrowing import (
@@ -25,6 +27,7 @@ from django_strawberry_framework.utils._narrowing import (
     is_real_collection,
     is_real_mapping,
     is_str,
+    is_text_atom,
     iter_of,
     optional_annotation,
     require,
@@ -73,6 +76,13 @@ class _ClaimsStr(ClaimsClassBase):
     claimed: type = str
 
 
+class _ClaimsPromise(ClaimsClassBase):
+    """A value whose ``__class__`` claims ``Promise``; its real class is not a lazy proxy."""
+
+    __slots__ = ()
+    claimed: type = Promise
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
@@ -101,6 +111,53 @@ class _ClaimsStr(ClaimsClassBase):
 def test_is_char_wise_asks_the_real_class(value: object, expected: bool) -> None:  # noqa: FBT001 - the expected verdict
     """Text and bytes-like values pass, subclasses included; a ``__class__`` claim does not."""
     assert is_char_wise(value) is expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("text", True),
+        (b"bytes", True),
+        (memoryview(b"bytes"), True),
+        (gettext_lazy("text"), True),
+        (lazy(lambda: ["text"], list)(), True),
+        (["text"], False),
+        (1, False),
+        (_ClaimsStr(), False),
+        (_ClaimsPromise(), False),
+    ],
+    ids=[
+        "str",
+        "bytes",
+        "memoryview",
+        "gettext_lazy",
+        "lazy_list",
+        "list",
+        "int",
+        "class_claims_str",
+        "class_claims_promise",
+    ],
+)
+def test_is_text_atom_counts_a_lazy_promise_as_text(value: object, expected: bool) -> None:  # noqa: FBT001 - the expected verdict
+    """A Django lazy ``Promise`` is text, judged by its real class and never evaluated.
+
+    Every ``Promise`` counts, whatever its result class, since the proxy does not
+    expose which one it stands for without evaluating it; Django's own
+    ``smart_str`` reads every ``Promise`` as text the same way.
+    """
+    assert is_text_atom(value) is expected
+
+
+def test_is_text_atom_never_evaluates_a_lazy_promise() -> None:
+    """The verdict on a lazy proxy is read from its class: the wrapped function never runs."""
+    calls: list[str] = []
+
+    def translate() -> str:
+        calls.append("run")
+        return "text"
+
+    assert is_text_atom(lazy(translate, str)()) is True
+    assert calls == []
 
 
 class _ClaimsEveryClassMeta(type):
