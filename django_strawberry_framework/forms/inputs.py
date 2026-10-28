@@ -54,7 +54,7 @@ from types import GenericAlias
 from typing import TYPE_CHECKING, Any, cast
 
 from django import forms
-from django.core.exceptions import FieldDoesNotExist
+from django.core.exceptions import FieldDoesNotExist, ValidationError
 from django.db import models
 from django.utils.choices import CallableChoiceIterator
 
@@ -852,16 +852,18 @@ def _form_admits_choice_value(
 ) -> bool:
     """Return whether a form choice field admits ``value``, the way its own ``validate`` decides.
 
-    A single-value ``ChoiceField`` passes an empty value (``""``) without consulting its choices
-    when the field is not required (``ChoiceField.validate`` checks ``valid_value`` only for a
-    non-empty value), and refuses it as required otherwise; every other value, and every element
-    of a ``MultipleChoiceField`` list, is admitted exactly when ``valid_value`` admits it (the
-    field's own choices, option groups descended, compared as given and as ``str``). Whatever a
-    consumer ``valid_value`` override raises propagates to the schema build.
+    The field's own ``to_python`` then ``validate`` judge the value; a ``MultipleChoiceField``
+    judges the one-element list ``[value]``, so each listed value is judged as an element. The
+    field's validators and a ``TypedChoiceField`` coerce stay out (they run in ``clean``): the
+    narrowing reads the field's choices, not consumer checks that may query or depend on the
+    request. Any exception other than ``ValidationError`` the field raises propagates to the
+    schema build.
     """
-    if not writes_list and truth.is_instance(value, str) and value == "":
-        return not field.required
-    return bool(field.valid_value(value))
+    try:
+        field.validate(field.to_python([value] if writes_list else value))
+    except ValidationError:
+        return False
+    return True
 
 
 def _input_shape_disagrees(field: forms.Field, column: ConcreteField) -> bool:
