@@ -57,6 +57,7 @@ from typing import TYPE_CHECKING, Protocol, TypeGuard, TypeVar, cast
 
 from graphql import GraphQLError
 from strawberry.relay.utils import SliceMetadata, from_base64, to_base64
+from strawberry.schema.config import StrawberryConfig
 
 from django_strawberry_framework.exceptions import DjangoStrawberryFrameworkError, OptimizerError
 from django_strawberry_framework.resource_policy import effective_bound, policy_from_info
@@ -892,13 +893,6 @@ def derive_connection_window_bounds(
     return ConnectionWindowBounds(slice_meta.start, limit, reverse)
 
 
-#: Strawberry's ``StrawberryConfig.relay_max_results`` default, mirrored for
-#: the keyset bounds derivation when neither an explicit ``max_results`` nor
-#: a readable schema config is in reach (the same terminal default
-#: ``SliceMetadata.from_arguments`` would land on through ``info``).
-_RELAY_MAX_RESULTS_DEFAULT = 100
-
-
 def assert_relay_pagination_bound(argument: str, value: object, *, cap: int) -> None:
     """Raise ``SliceMetadata``'s ``PaginationArgumentError`` for a negative or over-cap page size.
 
@@ -1041,7 +1035,8 @@ def resolve_relay_max_results(info: EitherInfo | None, max_results: int | None) 
 
     Precedence mirrors ``SliceMetadata.from_arguments``: an explicit
     ``max_results`` wins; otherwise :func:`relay_max_results_from_info` reads the
-    schema config, and finally Strawberry's documented default applies. The dig
+    schema config, and finally ``StrawberryConfig``'s own ``relay_max_results``
+    default (the cap a config built with no arguments carries) applies. The dig
     itself is shared with the planner so the plan-time and resolve-time caps
     cannot read different attribute paths.
     """
@@ -1049,7 +1044,7 @@ def resolve_relay_max_results(info: EitherInfo | None, max_results: int | None) 
         cap = max_results
     else:
         configured = relay_max_results_from_info(info)
-        cap = configured if is_supplied(configured) else _RELAY_MAX_RESULTS_DEFAULT
+        cap = configured if is_supplied(configured) else StrawberryConfig.relay_max_results
     # The request policy is a CEILING over whichever cap won above, never a
     # replacement for it: a connection can be narrower than the policy and can
     # never be wider (``resource_policy.py::effective_bound``). This is the seam
