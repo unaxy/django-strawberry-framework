@@ -79,7 +79,8 @@ One shape per planner rule, each read off the wire and off the SQL the request e
   lacks or to another field: ``Distributor.displayName`` projects its own column,
   and beside it ``display_name`` (the name ``displayName`` reverses to, published
   as written) projects its own, each alone in one statement with and without
-  ``auto_camel_case``; the forward key ``Consignment.distributorRef`` plans one
+  ``auto_camel_case``, and an ``auto_camel_case=False`` schema serves a type
+  publishing both unpinned; the forward key ``Consignment.distributorRef`` plans one
   ``JOIN``, and its reverse ``consignmentItems`` loads through one prefetch on
   ``distributorRef_id``, the relation counts held at one and three parents.
 - A model with no default order at all: ``ReadingListEntry`` clears its abstract
@@ -785,6 +786,50 @@ def test_distributor_published_names_differing_by_case_each_project_their_own_co
     projected, other = _DISTRIBUTOR_NAME_COLUMNS[selected]
     assert projected in distributor_sql, distributor_sql
     assert other not in distributor_sql, distributor_sql
+
+
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.django_db
+def test_distributor_unpinned_case_pair_is_served_by_a_snake_case_schema() -> None:
+    """An ``auto_camel_case=False`` schema serves ``displayName`` beside an unpinned ``display_name``.
+
+    The name a field publishes is the executing schema's, so a type publishing both
+    columns unpinned finalizes, and this schema publishes and serves both from one
+    statement. The default converter names both ``displayName``, which is why the
+    shipped ``DistributorType`` pins ``display_name``; a default-config build refusing
+    the pair is pinned in ``tests/types/test_definition_order.py``.
+    """
+    distributors = _seed_distributors(2)
+    distributor_type = make_django_type(
+        "SnakeDistributorType",
+        models.Distributor,
+        ("id", "displayName", "display_name"),
+    )
+    finalize_django_types()
+    query = strawberry.type(
+        type(
+            "SnakeDistributorQuery",
+            (),
+            {
+                "__annotations__": {"distributors": list[distributor_type]},
+                "distributors": DjangoListField(distributor_type),
+            },
+        ),
+    )
+    with CaptureQueriesContext(connection) as captured:
+        payload = _post(
+            "{ distributors { displayName display_name } }",
+            schema=DjangoSchema(query=query, config=strawberry_config(auto_camel_case=False)),
+        )
+
+    assert "errors" not in payload, payload
+    assert sorted(
+        (json_str(row, "displayName"), json_str(row, "display_name"))
+        for row in json_list(payload, "data", "distributors")
+    ) == sorted((row.displayName, row.display_name) for row in distributors), payload
+    (distributor_sql,) = _sql_from_table(captured, "library_distributor")
+    assert '"displayName"' in distributor_sql, distributor_sql
+    assert '"display_name"' in distributor_sql, distributor_sql
 
 
 @pytest.mark.parametrize("distributor_count", [1, 3])

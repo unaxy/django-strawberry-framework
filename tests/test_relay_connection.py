@@ -51,6 +51,7 @@ from django_strawberry_framework import (
     DjangoConnectionField,
     DjangoListField,
     DjangoOptimizerExtension,
+    DjangoSchema,
     DjangoType,
     OptimizerHint,
     finalize_django_types,
@@ -357,27 +358,41 @@ def test_generated_name_collision_raises() -> None:
     assert 'relation_shapes = {"items": "list"}' in message
 
 
-def test_generated_name_graphql_camel_collision_raises() -> None:
-    """A camelCase consumer attribute collides on the GraphQL surface.
+@pytest.mark.parametrize("auto_camel_case", [True, False])
+def test_generated_name_graphql_collision_is_the_schema_converters(
+    *,
+    auto_camel_case: bool,
+) -> None:
+    """A consumer ``itemsConnection`` beside the generated ``items_connection`` is the schema's call.
 
-    ``itemsConnection`` and the generated ``items_connection`` are distinct
-    Python names but the SAME default-camel-cased GraphQL name; the guard
-    compares both surfaces and names both colliding identifiers.
+    The two are distinct Python names, so finalization attaches the connection;
+    the default converter names both ``itemsConnection`` and that schema's build
+    refuses the pair, naming both, while ``auto_camel_case=False`` publishes both.
     """
     _make_type("ItemType", Item, ("id", "name", "category"))
-    _make_type(
+    category_type = _make_type(
         "CategoryType",
         Category,
         ("id", "name", "items"),
         namespace_extra={"__annotations__": {"itemsConnection": str}},
     )
+    finalize_django_types()
+    query_cls = strawberry.type(
+        type("Query", (), {"__annotations__": {"node": category_type | None}, "node": None}),
+    )
+    config = strawberry_config(auto_camel_case=auto_camel_case)
 
+    if not auto_camel_case:
+        sdl = str(DjangoSchema(query=query_cls, config=config))
+        assert "itemsConnection: String!" in sdl
+        assert "items_connection(" in sdl
+        return
     with pytest.raises(ConfigurationError) as excinfo:
-        finalize_django_types()
-    message = str(excinfo.value)
-    assert "'items_connection'" in message
-    assert "'itemsConnection'" in message
-    assert 'relation_shapes = {"items": "list"}' in message
+        _ = DjangoSchema(query=query_cls, config=config)
+    assert str(excinfo.value).startswith(
+        "CategoryType: fields 'itemsConnection' and 'items_connection' both publish the "
+        "GraphQL field name 'itemsConnection'",
+    )
 
 
 # =============================================================================

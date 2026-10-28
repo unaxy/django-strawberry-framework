@@ -78,7 +78,10 @@ from graphql.execution.execute import ExecutionContext
 from strawberry.exceptions import DuplicatedTypeName
 from strawberry.extensions.base_extension import SchemaExtension
 from strawberry.schema.schema_converter import GraphQLCoreConverter
+from strawberry.types.base import StrawberryObjectDefinition
+from strawberry.types.field import StrawberryField
 from strawberry.types.graphql import OperationType
+from strawberry.types.private import is_private
 from typing_extensions import override
 
 from . import logger
@@ -875,6 +878,14 @@ class DjangoSchema(strawberry.Schema):
     declarations and members that generated them
     (``utils/inputs.py::generated_type_name_collision``). Any other duplicate name
     passes through with Strawberry's own error.
+
+    **Two fields this schema names alike are refused.** Strawberry keeps one of
+    two distinct fields its ``NameConverter`` gives one GraphQL name and drops the
+    other with no error; this class raises ``ConfigurationError`` naming the type
+    and both fields (:func:`_refuse_field_name_collisions`). The name is this
+    schema's, so ``foo_bar`` beside ``fooBar`` is refused under the default
+    ``auto_camel_case=True`` and served as two fields under
+    ``auto_camel_case=False``.
     """
 
     def __init__(
@@ -952,6 +963,7 @@ class DjangoSchema(strawberry.Schema):
             if restated is None:
                 raise
             raise restated from exc
+        _refuse_field_name_collisions(self)
 
     @property
     @override
@@ -1444,6 +1456,42 @@ def _admitted_chain(resolved: list[SchemaExtension], *, sync: bool) -> list[Sche
         AdmissionGuard(),
         _OperationModeMarker(_operation_mode(sync=sync)),
     ]
+
+
+def _refuse_field_name_collisions(schema: strawberry.Schema) -> None:
+    """Refuse two fields of one published type that this schema names alike.
+
+    Strawberry keys each object, interface and input type's GraphQL fields by
+    ``config.name_converter.from_field`` (``_get_thunk_mapping`` in
+    ``strawberry/schema/schema_converter.py``), so two distinct fields the
+    converter names alike leave ONE field on the wire and the other silently
+    dropped, with no error. The name is the executing schema's: ``foo_bar``
+    beside ``fooBar`` collides under the default ``auto_camel_case=True``, not
+    under ``auto_camel_case=False``, and a custom ``NameConverter`` can collide
+    two names neither of those does. One ``DjangoType`` (or merged mutation
+    input) can be served by schemas of different configs, so the check runs
+    here, per schema, over the same fields the conversion walked: the schema's
+    own ``get_fields`` with ``strawberry.Private`` ones skipped.
+    """
+    name_converter = schema.config.name_converter
+    for type_name, concrete in schema.schema_converter.type_map.items():
+        definition = concrete.definition
+        if not truth.is_instance(definition, StrawberryObjectDefinition):
+            continue
+        published: dict[str, StrawberryField] = {}
+        for field in schema.get_fields(definition):
+            if is_private(field.type):
+                continue
+            graphql_name = name_converter.from_field(field)
+            prior = published.setdefault(graphql_name, field)
+            if prior is field:
+                continue
+            raise ConfigurationError(
+                f"{type_name}: fields {prior.python_name!r} and {field.python_name!r} both "
+                f"publish the GraphQL field name {truth.text(graphql_name)!r} under this schema's name "
+                "converter, so one would silently replace the other. Rename one, give one an "
+                "explicit name=, or drop one from the type.",
+            )
 
 
 def _refuse_incremental_execution(config: StrawberryConfig | None) -> None:

@@ -93,8 +93,10 @@ Terms this spec relies on (statuses per [`docs/GLOSSARY.md`][glossary]):
 - [`FieldError` envelope][glossary-fielderror-envelope] — shipped; named for
   contrast only (mutation-side errors; field denial uses `GraphQLError`, not
   the envelope).
-- [Schema audit][glossary-schema-audit] — shipped; `_audit_field_surface` is
-  the collision-check precedent computed-field transplant extends.
+- [Schema audit][glossary-schema-audit] — shipped; `_audit_field_surface` (Python
+  surface, finalize) and `schema.py::_refuse_field_name_collisions` (GraphQL
+  names, per schema build) are the collision-check precedents computed-field
+  transplant extends.
 
 ---
 
@@ -509,8 +511,9 @@ installed as the field's resolver. Validation is fail-closed, all raising
 2. A computed-field name colliding with the owning type's existing field
    surface (model-backed, consumer-authored, or relation-synthesized)
    raises — routed through the same surface audit family as
-   `types/finalizer.py::_audit_field_surface` so camelCase collisions are
-   caught too.
+   `types/finalizer.py::_audit_field_surface`, with a collision on the
+   GraphQL name refused per schema by
+   `schema.py::_refuse_field_name_collisions`.
 3. A computed field paired with a `check_<field>_permission` gate is legal —
    the gate wraps the transplanted resolver like any managed field.
 
@@ -664,7 +667,8 @@ coroutine and bypassed.
 - `types/finalizer.py::_bind_set_owner_common` — the owner-binding skeleton;
   `_bind_fieldsets` MUST reuse it rather than re-deriving owner validation
   (Decision 4).
-- `types/finalizer.py::_audit_field_surface` family — computed-field
+- `types/finalizer.py::_audit_field_surface` /
+  `schema.py::_refuse_field_name_collisions` family — computed-field
   collision checks route through the existing surface-audit machinery, not a
   parallel name check (Decision 5).
 - `types/resolvers.py` `skip_field_names` /

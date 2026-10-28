@@ -10,12 +10,15 @@ The synthetic models declared inside tests here carry shapes the package refuses
 to expose (two columns camel-casing to one GraphQL name, a Strawberry
 ``name=`` colliding with a column, an empty ``Meta.fields``, an unsupported
 field class, grouped choices), so no fakeshop model can carry them; they alone
-reach the collision and empty-surface raises in
-``django_strawberry_framework/types/finalizer.py::_audit_field_surface`` and the
+reach the empty-surface raise in
+``django_strawberry_framework/types/finalizer.py::_audit_field_surface``, the
+schema-build collision raise in
+``django_strawberry_framework/schema.py::_refuse_field_name_collisions`` and the
 consumer-annotation bypass of those converter raises in
 ``django_strawberry_framework/types/base.py::_build_annotations``.
 """
 
+import enum
 import importlib
 import sys
 import types
@@ -30,12 +33,21 @@ from apps.products.models import Category, Entry, Item, Property
 from django.db import models
 from django.db.models.expressions import Combinable
 from strawberry import relay
+from strawberry.schema.config import StrawberryConfig
+from strawberry.schema.name_converter import NameConverter
 from strawberry.types import get_object_definition
 from strawberry.types.base import StrawberryObjectDefinition
 from strawberry.types.field import StrawberryField
 from strawberry.types.lazy_type import StrawberryLazyReference
+from typing_extensions import override
 
-from django_strawberry_framework import DjangoType, auto, finalize_django_types
+from django_strawberry_framework import (
+    DjangoSchema,
+    DjangoType,
+    auto,
+    finalize_django_types,
+    strawberry_config,
+)
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.types.base import _build_annotations
@@ -610,21 +622,37 @@ def test_assigned_scalar_field_override_keeps_consumer_resolver() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Field-surface audit (finalizer ``_audit_field_surface``): empty surface +
-# camel-case name collision between two distinct fields. Both are misconfigs
-# Strawberry catches only late - the empty case as a generic ``ValueError``, the
-# collision case as a SILENT field drop - so the finalizer fails loud first with
-# DjangoType attribution. Sibling of the synthesized-connection camel guard.
+# Field-surface audits. The empty surface fails at finalize
+# (``types/finalizer.py::_audit_field_surface``); two distinct fields one
+# schema's ``NameConverter`` names alike fail at that schema's build
+# (``schema.py::_refuse_field_name_collisions``), since Strawberry would keep
+# one and SILENTLY drop the other, and the name is the schema's, not the
+# definition's.
 # ---------------------------------------------------------------------------
 
 
-def test_camel_case_field_collision_raises() -> None:
-    """Two columns whose names default-camel-case to one GraphQL name fail loud.
+class _UnderscoreBlindConverter(NameConverter):
+    """A converter that drops underscores and lowercases: ``foo_bar`` and ``foobar`` are one name."""
 
-    ``foo_bar`` and ``fooBar`` are distinct Django columns that both camel-case to
-    ``fooBar``; Strawberry keeps one and SILENTLY drops the other. The field-surface
-    audit catches the collision at finalize and names both colliding fields.
-    """
+    @override
+    def apply_naming_config(self, name: str) -> str:
+        return name.replace("_", "").lower()
+
+
+def _schema_over(
+    type_cls: type[DjangoType],
+    config: StrawberryConfig | None = None,
+) -> DjangoSchema:
+    """Finalize, then build a ``DjangoSchema`` whose one root field returns ``type_cls``."""
+    finalize_django_types()
+    query = strawberry.type(
+        type("Query", (), {"__annotations__": {"node": type_cls | None}, "node": None}),
+    )
+    return DjangoSchema(query=query, config=config)
+
+
+def _camel_collide_type() -> type[DjangoType]:
+    """A DjangoType over two columns, ``foo_bar`` and ``fooBar``."""
 
     class CamelCollide(models.Model):
         foo_bar: "models.IntegerField[float | int | str | Combinable, int]" = models.IntegerField()
@@ -639,18 +667,73 @@ def test_camel_case_field_collision_raises() -> None:
             model = CamelCollide
             fields = ("foo_bar", "fooBar")
 
-    assert registry.get(CamelCollide) is CamelCollideType
+    return CamelCollideType
+
+
+def test_camel_case_field_collision_raises_at_default_schema_build() -> None:
+    """Two columns the default converter names alike fail the schema build, naming both.
+
+    ``foo_bar`` and ``fooBar`` both publish ``fooBar`` under the default
+    ``auto_camel_case=True``; Strawberry keeps one and SILENTLY drops the other.
+    """
+    type_cls = _camel_collide_type()
 
     with pytest.raises(ConfigurationError) as exc:
-        finalize_django_types()
+        _ = _schema_over(type_cls)
     message = str(exc.value)
-    assert "fooBar" in message
-    assert "foo_bar" in message
-    assert "collide" in message
+    assert message.startswith("CamelCollideType: fields 'foo_bar' and 'fooBar' both publish ")
+    assert "'fooBar'" in message
 
 
-def test_explicit_graphql_field_name_collision_raises() -> None:
-    """An explicit Strawberry name participates in the settled-surface audit."""
+def test_camel_case_field_pair_is_two_fields_without_auto_camel_case() -> None:
+    """Under ``auto_camel_case=False`` the same definition publishes both columns."""
+    type_cls = _camel_collide_type()
+
+    schema = _schema_over(type_cls, strawberry_config(auto_camel_case=False))
+
+    result = schema.execute_sync(
+        '{ t: __type(name: "CamelCollideType") { fields { name type { name } } } }',
+    )
+    assert result.errors is None, result.errors
+    assert set(_introspected_field_types(result, "t")) == {"foo_bar", "fooBar"}
+
+
+def test_custom_name_converter_collision_raises_at_schema_build() -> None:
+    """A collision only a custom ``NameConverter`` creates fails that schema's build.
+
+    ``foo_bar`` and ``foobar`` are distinct under the default config and under
+    ``auto_camel_case=False``; the converter names both ``foobar``.
+    """
+
+    class ConverterCollide(models.Model):
+        foo_bar: "models.IntegerField[float | int | str | Combinable, int]" = models.IntegerField()
+        foobar: "models.IntegerField[float | int | str | Combinable, int]" = models.IntegerField()
+
+        class Meta:
+            managed = False
+            app_label = "test_field_surface"
+
+    class ConverterCollideType(DjangoType):
+        class Meta:
+            model = ConverterCollide
+            fields = ("foo_bar", "foobar")
+
+    with pytest.raises(ConfigurationError) as exc:
+        _ = _schema_over(
+            ConverterCollideType,
+            strawberry_config(name_converter=_UnderscoreBlindConverter()),
+        )
+    message = str(exc.value)
+    assert message.startswith(
+        "ConverterCollideType: fields 'foo_bar' and 'foobar' both publish the GraphQL "
+        "field name 'foobar'",
+    )
+    # The default config publishes both, so the refusal is the converter's.
+    assert _schema_over(ConverterCollideType).get_type_by_name("ConverterCollideType") is not None
+
+
+def test_explicit_graphql_field_name_collision_raises_at_schema_build() -> None:
+    """An explicit Strawberry ``name=`` collides with the column the converter names alike."""
 
     class ExplicitNameCollision(models.Model):
         foo_bar: "models.IntegerField[float | int | str | Combinable, int]" = models.IntegerField()
@@ -669,14 +752,45 @@ def test_explicit_graphql_field_name_collision_raises() -> None:
             model = ExplicitNameCollision
             fields = ("foo_bar",)
 
-    assert registry.get(ExplicitNameCollision) is ExplicitNameCollisionType
+    with pytest.raises(ConfigurationError) as exc:
+        _ = _schema_over(ExplicitNameCollisionType)
+    message = str(exc.value)
+    assert message.startswith("ExplicitNameCollisionType: fields ")
+    assert "'custom'" in message
+    assert "'foo_bar'" in message
+
+
+def test_str_enum_graphql_field_name_collision_raises_naming_the_wire_text() -> None:
+    """A ``(str, Enum)`` member given as ``name=`` collides as the text it publishes.
+
+    The StrEnum idiom on the 3.10 floor: ``str()`` of the member renders
+    ``Spelling.FOO_BAR``, but the schema publishes ``fooBar``, so the refusal
+    names the wire text.
+    """
+
+    class Spelling(str, enum.Enum):
+        FOO_BAR = "fooBar"
+
+    class EnumNameCollision(models.Model):
+        foo_bar: "models.IntegerField[float | int | str | Combinable, int]" = models.IntegerField()
+
+        class Meta:
+            app_label = "test_field_surface"
+            managed = False
+
+    class EnumNameCollisionType(DjangoType):
+        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
+        @strawberry.field(name=Spelling.FOO_BAR)  # pyright: ignore[reportAny]
+        def custom(self) -> int:
+            return 1
+
+        class Meta:
+            model = EnumNameCollision
+            fields = ("foo_bar",)
 
     with pytest.raises(ConfigurationError) as exc:
-        finalize_django_types()
-    message = str(exc.value)
-    assert "custom" in message
-    assert "foo_bar" in message
-    assert "collide" in message
+        _ = _schema_over(EnumNameCollisionType)
+    assert "the GraphQL field name 'fooBar' under" in str(exc.value)
 
 
 def test_relay_suppressed_pk_does_not_collide_with_real_consumer_field() -> None:

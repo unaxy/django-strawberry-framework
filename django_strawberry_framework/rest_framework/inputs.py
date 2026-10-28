@@ -1378,8 +1378,10 @@ def _collect_input_attr_collision_messages(
     * ``graphql_name`` clash - two distinct names that default-camel-case to ONE
       GraphQL name (``foo_bar`` + ``fooBar`` -> ``fooBar``; or ``category`` ->
       ``categoryId`` vs a literal ``category_id`` -> ``categoryId``). Strawberry
-      would collapse the two onto one schema field. Mirrors the read-type guard
-      ``types/finalizer.py::_audit_field_surface``.
+      would collapse the two onto one schema field. Every generated name is
+      pinned, so this holds under any schema config; a field the schema's
+      converter names is refused per schema instead
+      (``schema.py::_refuse_field_name_collisions``).
     * ``source`` clash - two WRITABLE fields whose sources resolve to one model
       attribute would double-write it. A ``read_only`` field sharing a ``source``
       with a writable one is fine (read-only is dropped before this is reached), so

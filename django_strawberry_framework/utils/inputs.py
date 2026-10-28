@@ -262,19 +262,19 @@ def emit_set_input_field_triples(
     (``foo_bar`` / ``fooBar``) would make ``build_strawberry_input_class``
     silently overwrite one field in the generated input dataclass, dropping a
     filter / ordering the consumer declared from the public schema with NO
-    error. The type surface
-    (``types/finalizer.py::_audit_field_surface``) and the write-input surfaces
-    (``iter_input_field_collisions``) already reject this class of silent drop;
-    this is the parity guard for the filter / order generated-input surfaces,
-    which both route their emission through here.
+    error. The schema build (``schema.py::_refuse_field_name_collisions``) and
+    the write-input surfaces (``iter_input_field_collisions``) already reject
+    this class of silent drop; this is the parity guard for the filter / order
+    generated-input surfaces, which both route their emission through here.
 
     The package rejects this collision class at four points, and they are
     deliberately NOT one walk. This one and ``iter_input_field_collisions`` read
     generated specs and word the cause the consumer can act on (a flattened
     ``__`` path here, a relation's ``<name>_id`` remap there);
-    ``mutations/inputs.py::_audit_mutation_input_surface`` reads STRAWBERRY's own
-    resolved field definitions, because a merged consumer ``input_class``'s
-    naming is only visible after decoration; and
+    ``schema.py::_refuse_field_name_collisions`` reads STRAWBERRY's own
+    resolved field definitions under the executing schema's ``NameConverter``,
+    because a consumer-authored field's name (a merged ``input_class``'s, a
+    DjangoType's) is that schema's; and
     ``build_strawberry_input_class`` is the independent BACKSTOP at the
     construction site, whose value is precisely that it does not share a body
     with the domain guards - one walk would mean one bug disabling all of them.

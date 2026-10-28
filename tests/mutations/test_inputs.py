@@ -74,7 +74,7 @@ from strawberry.types.base import (
 from strawberry.types.field import StrawberryField
 
 import django_strawberry_framework
-from django_strawberry_framework import DjangoType, strawberry_config
+from django_strawberry_framework import DjangoSchema, DjangoType, strawberry_config
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.forms import inputs as form_inputs
 from django_strawberry_framework.mutations import FieldError as FieldErrorFromPackage
@@ -128,6 +128,8 @@ if TYPE_CHECKING:
     from typing import TypeAlias
 
     from django.db.models.expressions import Combinable
+    from strawberry.schema.config import StrawberryConfig
+    from strawberry.types.base import WithStrawberryObjectDefinition
 
     from django_strawberry_framework.utils.typing import ConcreteField
 
@@ -1033,7 +1035,7 @@ def test_camel_case_graphql_name_collision_is_fail_loud() -> None:
     ``foo_bar`` and ``fooBar`` produce DISTINCT input attrs (the input-attr arm passes) but
     the SAME ``graphql_name`` ``fooBar``; Strawberry would collapse the two onto one schema
     field with no error. The graphql-name arm catches and names them, at parity with the
-    form / serializer flavors and the read-type guard ``types/finalizer.py::_audit_field_surface``.
+    form / serializer flavors.
     ``CamelCollide`` stays synthetic: two columns camel-casing to one name is a clash the
     package refuses to build, so no fakeshop mutation can expose it, and it alone drives the
     graphql-name arm of
@@ -1057,23 +1059,6 @@ def test_camel_case_graphql_name_collision_is_fail_loud() -> None:
     message = str(exc.value)
     assert "fooBar" in message
     assert "collide" in message
-
-    # Unlike an attr collision, distinct Python attrs can be disambiguated by a
-    # consumer wire alias. Audit the effective merged surface, not the discarded
-    # generated name for the overridden field.
-    remainder = build_mutation_input(
-        CamelCollide,
-        operation_kind=CREATE,
-        primary_type=CamelCollideType,
-        overrides=frozenset({"foo_bar"}),
-    )
-
-    @strawberry.input
-    class ConsumerInput:
-        foo_bar: int = strawberry.field(name="fooBarAlternate")
-
-    merged = strawberry.input(type("ResolvedCamelInput", (ConsumerInput, remainder), {}))
-    materialize_mutation_input_class("ResolvedCamelInput", merged)
 
 
 def test_no_false_positive_collision_on_ordinary_model() -> None:
@@ -1368,8 +1353,26 @@ def test_distinct_shapes_colliding_on_one_name_raise_configuration_error() -> No
         materialize_mutation_input_class("CollidingInput", cls_b)
 
 
-def test_materializer_rejects_consumer_alias_colliding_with_generated_remainder() -> None:
-    """A merged input is audited after inheritance combines both field surfaces."""
+def _schema_taking(
+    input_cls: type[WithStrawberryObjectDefinition],
+    config: StrawberryConfig | None = None,
+) -> DjangoSchema:
+    """A ``DjangoSchema`` whose one mutation takes ``input_cls`` as its ``data`` argument."""
+
+    def _accept(data: object) -> int:
+        del data
+        return 0
+
+    _accept.__annotations__ = {"data": input_cls, "return": int}
+    query = strawberry.type(type("Query", (), {"__annotations__": {"ok": int}, "ok": 0}))
+    mutation = strawberry.type(
+        type("Mutation", (), {"accept": strawberry.mutation(resolver=_accept)}),
+    )
+    return DjangoSchema(query=query, mutation=mutation, config=config or strawberry_config())
+
+
+def test_schema_build_rejects_consumer_alias_colliding_with_generated_remainder() -> None:
+    """A merged input's consumer alias beside the generated field it names fails the build."""
 
     @strawberry.input
     class ConsumerInput:
@@ -1381,18 +1384,23 @@ def test_materializer_rejects_consumer_alias_colliding_with_generated_remainder(
         primary_type=ItemType,
     )
     merged = strawberry.input(type("MergedItemInput", (ConsumerInput, remainder), {}))
+    materialize_mutation_input_class("MergedItemInput", merged)
 
-    with pytest.raises(ConfigurationError, match="same GraphQL field name 'name'"):
-        materialize_mutation_input_class("MergedItemInput", merged)
+    with pytest.raises(ConfigurationError) as exc:
+        _ = _schema_taking(merged)
+    message = str(exc.value)
+    assert message.startswith("MergedItemInput: fields ")
+    assert "'custom'" in message
+    assert "'name'" in message
 
 
-def test_materializer_audits_an_unnamed_consumer_field_under_its_schema_name() -> None:
-    """An unnamed consumer field is audited under the name a default-config schema publishes.
+def test_unnamed_consumer_field_collides_only_where_the_schema_names_it_alike() -> None:
+    """An unnamed consumer field is named by each schema's converter, and refused only there.
 
-    ``field_2`` declares no ``name=``, so the schema's converter names it ``field2``
+    ``field_2`` declares no ``name=``: the default converter names it ``field2``
     (Strawberry's ``to_camel_case``; the package caser would keep ``field_2``), the
-    name the generated ``field2`` already pins: the two would collapse onto one SDL
-    field, so the merged input is refused.
+    name the generated ``field2`` already pins, so that schema's build refuses the
+    pair; under ``auto_camel_case=False`` it publishes ``field_2`` beside ``field2``.
     """
 
     class DigitCollide(models.Model):
@@ -1416,9 +1424,17 @@ def test_materializer_audits_an_unnamed_consumer_field_under_its_schema_name() -
         primary_type=DigitCollideType,
     )
     merged = strawberry.input(type("DigitCollideInput", (ConsumerInput, remainder), {}))
+    materialize_mutation_input_class("DigitCollideInput", merged)
 
-    with pytest.raises(ConfigurationError, match="same GraphQL field name 'field2'"):
-        materialize_mutation_input_class("DigitCollideInput", merged)
+    with pytest.raises(ConfigurationError) as exc:
+        _ = _schema_taking(merged)
+    assert str(exc.value).startswith(
+        "DigitCollideInput: fields 'field_2' and 'field2' both publish the GraphQL field "
+        "name 'field2'",
+    )
+    sdl = str(_schema_taking(merged, strawberry_config(auto_camel_case=False)))
+    assert "field_2: Int!" in sdl
+    assert "field2: Int!" in sdl
 
 
 # ---------------------------------------------------------------------------

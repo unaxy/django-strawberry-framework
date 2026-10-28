@@ -2920,8 +2920,8 @@ co-clear block) — `clear_serializer_input_namespace` registers through the
   [`ConfigurationError`][glossary-configurationerror] **before materialization**, naming both
   offending fields. This is the serializer analog of the form collision guard
   [`forms/inputs.py`][forms-inputs]`::_guard_input_attr_collisions` (which guards both the
-  input-attr and the camel-cased GraphQL-name clash) and the read-side
-  [`types/finalizer.py`][types-finalizer]`::_audit_field_surface`; the serializer reuses that
+  input-attr and the camel-cased GraphQL-name clash) and the per-schema
+  `django_strawberry_framework/schema.py::_refuse_field_name_collisions`; the serializer reuses that
   guard's shape rather than re-forking it (a silent drop of one field would otherwise let
   `build_strawberry_input_class` collapse the two).
 - **Two writable fields sharing one `source`.** A writable serializer `source`

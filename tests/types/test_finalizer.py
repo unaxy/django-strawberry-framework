@@ -208,7 +208,7 @@ def test_field_surface_names_ignores_field_without_python_or_graphql_name() -> N
     # graphql name, the malformed base the surface read skips; _field_surface_names types the
     # parameter as type[DjangoType]
     surface = _field_surface_names(_ChildType)  # pyright: ignore[reportArgumentType]
-    assert surface == {}
+    assert surface == frozenset()
 
 
 def test_filterset_multi_owner_model_mismatch_raises_on_secondary_owner() -> None:

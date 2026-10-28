@@ -2925,3 +2925,35 @@ def test_django_schema_passes_any_other_duplicate_name_through(
         == str(plain.value)
         == "Type Shade is defined multiple times in the schema"
     )
+
+
+@strawberry.type
+class _PostponedPrivateSurface:
+    """``fooBar`` is a ``strawberry.Private`` whose type is defined only below this class.
+
+    Under postponed annotations decoration cannot resolve it, so the field stays in
+    the definition until the schema build resolves it as private.
+    """
+
+    foo_bar: int
+    fooBar: strawberry.Private[_PostponedSecret]  # noqa: N815 - the camel spelling of foo_bar
+
+
+class _PostponedSecret:
+    """The type ``_PostponedPrivateSurface.fooBar`` names before it exists."""
+
+
+@strawberry.type
+class _PostponedPrivateQuery:
+    surface: _PostponedPrivateSurface | None = None
+
+
+def test_postponed_private_field_does_not_collide_with_the_name_it_spells() -> None:
+    """A private field the schema build resolves late publishes no name, so none collides.
+
+    ``fooBar`` reaches the build as a field and is skipped as Strawberry's conversion
+    skips it; only ``foo_bar`` publishes ``fooBar``.
+    """
+    sdl = str(DjangoSchema(query=_PostponedPrivateQuery, config=strawberry_config()))
+
+    assert "type Postponedprivatesurface {\n  fooBar: Int!\n}" in sdl
