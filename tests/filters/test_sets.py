@@ -66,7 +66,7 @@ from django.db.models.fields.related import ManyToManyRel, ManyToOneRel, OneToOn
 from django.forms import ModelChoiceField, ModelMultipleChoiceField
 from django.http import HttpRequest, QueryDict
 from django.test import override_settings
-from django.test.utils import CaptureQueriesContext, register_lookup
+from django.test.utils import CaptureQueriesContext, isolate_apps, register_lookup
 from django.utils.functional import SimpleLazyObject
 from django.utils.translation import gettext_lazy
 from django_filters import (
@@ -2978,6 +2978,68 @@ def test_filterset_get_fields_excludes_m2m_for_all_fields_shorthand() -> None:
     fields = BookFilter.get_fields()
     # `Book.genres` is an M2M relation; it must be excluded.
     assert "genres" not in fields
+
+
+class _TagManager(django_models.ForeignObject[object, object]):
+    """A many-to-many field that is no ``ManyToManyField``, as taggit's ``TaggableManager`` is.
+
+    It joins the model the way taggit's does: ``Options.add_field`` files it under
+    ``Options.many_to_many``, the list django-filter's whole-set sweep reads. It is a
+    ``ForeignObject`` (taggit's is a ``RelatedField``) only because django-stubs types a
+    relation's ``field`` as one.
+    """
+
+    many_to_many = True
+    many_to_one = False
+    one_to_many = False
+    one_to_one = False
+
+    def __init__(self, to: type[django_models.Model]) -> None:
+        super().__init__(
+            to,
+            on_delete=django_models.CASCADE,
+            from_fields=[],
+            to_fields=[],
+            rel=django_models.ForeignObjectRel(self, to, related_name="+"),
+        )
+
+    @override
+    def contribute_to_class(
+        self,
+        cls: type[django_models.Model],
+        name: str,
+        private_only: bool = False,
+        **kwargs: object,
+    ) -> None:
+        self.set_attributes_from_name(name)
+        self.model = cls
+        cls._meta.add_field(self)
+        setattr(cls, name, self)
+
+
+@isolate_apps("apps.library")
+def test_filterset_get_fields_excludes_an_m2m_field_outside_many_to_many_field() -> None:
+    """``fields = "__all__"`` drops every many-to-many field upstream's sweep added.
+
+    The sweep removes the names in ``Options.many_to_many``, so a third-party M2M field
+    that does not subclass ``ManyToManyField`` leaves the swept keys like the built-in one,
+    and building the filters no longer refuses it as a path that is no traversable relation.
+    """
+
+    class _Tagged(django_models.Model):
+        name: django_models.TextField[str | Combinable, str] = django_models.TextField()
+        tags = _TagManager(library_models.Genre)
+
+        class Meta:
+            app_label = "library"
+
+    class TaggedFilter(FilterSet):
+        class Meta:
+            model = _Tagged
+            fields = "__all__"
+
+    assert list(TaggedFilter.get_fields()) == ["name", "id"]
+    assert set(TaggedFilter.get_filters()) == {"name", "id"}
 
 
 class _SweepModel(NamedTuple):

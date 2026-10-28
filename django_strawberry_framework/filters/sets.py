@@ -3429,10 +3429,10 @@ class FilterSet(
         if pk_field.name not in fields and (exclude is None or pk_field.name not in exclude):
             fields[pk_field.name] = ["exact"]
 
-        # REMOVE every ManyToManyField from the swept dict.
-        m2m_names = {
-            f.name for f in model._meta.get_fields() if isinstance(f, models.ManyToManyField)
-        }
+        # REMOVE every many-to-many field upstream's sweep added: ``Options.many_to_many``, the
+        # list django-filter's ``get_all_model_fields`` reads, so a third-party one that does
+        # not subclass ``ManyToManyField`` goes too.
+        m2m_names = {f.name for f in model._meta.many_to_many}
         for name in list(fields):
             if name in m2m_names:
                 del fields[name]
