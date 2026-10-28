@@ -174,6 +174,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
     from typing import Literal, Protocol, TypeAlias
 
+    from django.db.backends.base.base import BaseDatabaseWrapper
     from typing_extensions import TypeIs
 
     from django_strawberry_framework.filters.sets import FilterSet
@@ -807,10 +808,10 @@ def coerce_field_value_or_none(field: ModelField | None, value: object, *, alias
 
     The prepared value is held to the column's storage domain. An integer stays
     inside the range ``alias`` stores for the internal type of the column holding
-    the value (``DatabaseOperations.integer_field_range``, the range Django's
-    integer comparison lookups test a bound against before binding it; a
-    ``BigIntegerField``'s for a column that is no ``IntegerField`` yet binds an
-    integer, as a ``DurationField`` binds its microsecond count on a backend
+    the value (``binds_integer``: ``DatabaseOperations.integer_field_range``, the
+    range Django's integer comparison lookups test a bound against before binding
+    it; a ``BigIntegerField``'s for a column that is no ``IntegerField`` yet binds
+    an integer, as a ``DurationField`` binds its microsecond count on a backend
     without a native interval, so a duration past 64 bits of microseconds names
     no row there). That column is the one ``relations.py::stored_value_column`` walks
     a key to, so a one-to-one primary key, a parent link or a ``ForeignKey`` is
@@ -861,14 +862,12 @@ def coerce_field_value_or_none(field: ModelField | None, value: object, *, alias
     column = stored_value_column(field)
     if unbindable_temporal(column, coerced, lambda: alias):
         return None
-    if isinstance(bound, int) and not isinstance(bound, bool):
-        internal_type = (
-            column.get_internal_type()
-            if isinstance(column, models.IntegerField)
-            else "BigIntegerField"
-        )
-        if not _within_integer_range(bound, connection.ops.integer_field_range(internal_type)):
-            return None
+    if (
+        isinstance(bound, int)
+        and not isinstance(bound, bool)
+        and not binds_integer(connection, column, bound)
+    ):
+        return None
     if isinstance(coerced, Decimal) and isinstance(column, models.DecimalField):
         return _stored_decimal_or_none(coerced, column, connection.vendor)
     return coerced
@@ -942,6 +941,22 @@ def _fits_postgresql_numeric(number: Decimal) -> bool:
         max(number.adjusted() + 1, 0) <= _POSTGRESQL_NUMERIC_INTEGER_DIGITS
         and max(-exponent, 0) <= _POSTGRESQL_NUMERIC_FRACTION_DIGITS
     )
+
+
+def binds_integer(connection: BaseDatabaseWrapper, field: object, number: int) -> bool:
+    """Whether ``connection`` binds the integer ``number`` as a value of ``field``.
+
+    ``number`` is held to the range the backend stores for ``field``'s internal type
+    (``DatabaseOperations.integer_field_range``, the range Django's integer comparison
+    lookups test a bound against before binding it): ``IntegerField``'s 32 bits on
+    PostgreSQL, 64 bits for every integer type on SQLite. A field that is no
+    ``IntegerField`` yet binds an integer, as a ``DurationField`` binds its microsecond
+    count on a backend without a native interval, is held to ``BigIntegerField``'s range.
+    """
+    internal_type = (
+        field.get_internal_type() if isinstance(field, models.IntegerField) else "BigIntegerField"
+    )
+    return _within_integer_range(number, connection.ops.integer_field_range(internal_type))
 
 
 def _within_integer_range(number: int, bounds: tuple[int | None, int | None]) -> bool:
