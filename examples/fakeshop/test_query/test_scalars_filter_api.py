@@ -26,13 +26,16 @@ values, so there the same input filters. On PostgreSQL a UTC offset the server r
 fraction of a second) is ``FILTER_INVALID`` the same way, where SQLite projects the
 datetime onto UTC and filters. django-filter's own range filters
 (``priceBetween``, ``occurredBetween`` over ``DateRangeWidget``, ``occurredInBoxes`` over a
-plain ``MultiWidget`` and ``priceInUnderscoredBoxes`` over a consumer widget reading ``__``
-keys) apply every bound they are sent, under the keys each widget reads.
+plain ``MultiWidget``, ``priceInUnderscoredBoxes`` over a consumer widget reading ``__``
+keys, and ``priceInFieldBoxes``, whose consumer ``field`` property installs its widget)
+apply every bound they are sent, under the keys each widget reads.
 The per-field ``"__all__"`` leaves never publish a ``django.contrib.postgres``
 lookup Django registers onto a core field (``containedBy`` on the numeric and
 temporal leaves), whether or not a PostgreSQL driver is installed, and publish
 the text-pattern lookups (``iExact`` / ``contains`` / ``startsWith`` / ``regex`` / ...)
-only on the text column ``label``. Listed explicitly on ``occurredAt`` or
+only on the text column ``label``, where ``prefix``, a lookup registered on the
+``ScalarSpecimen.label`` field instance alone, is a leaf of that set and of no
+``ScalarSpecimenTag`` label set. Listed explicitly on ``occurredAt`` or
 ``unsignedBig``, a pattern leaf is a ``String`` the backend matches against its text
 rendering of the column, on SQLite and PostgreSQL alike.
 """
@@ -814,12 +817,14 @@ def test_utc_offset_postgresql_refuses_is_filter_invalid_there(
 # ``occurredBetween`` (``DateRangeWidget``: ``_after`` / ``_before``),
 # ``occurredInBoxes`` (the same filter over a plain ``MultiWidget``: ``_0`` / ``_1``) and
 # ``priceInUnderscoredBoxes`` (a consumer ``SuffixedMultiWidget``: ``__low`` / ``__high``,
-# keys the flat-copy scan reads as a relation path).
+# keys the flat-copy scan reads as a relation path) and ``priceInFieldBoxes`` (a consumer
+# ``RangeFilter`` whose ``field`` property installs a widget reading ``_low`` / ``_high``).
 _UPSTREAM_RANGES = {
     "priceBetween": ("10.0000", "100.0000"),
     "occurredBetween": ("2021-03-01", "2021-12-31"),
     "occurredInBoxes": ("2021-03-01", "2021-12-31"),
     "priceInUnderscoredBoxes": ("10.0000", "100.0000"),
+    "priceInFieldBoxes": ("10.0000", "100.0000"),
 }
 # Each range shape and the specimens it keeps (the seed puts ``mid`` alone inside both bounds).
 _RANGE_SHAPES = {
@@ -906,7 +911,8 @@ def test_upstream_range_filter_reads_the_keys_its_widget_reads(
     ``and`` / ``not`` and through the ``partner`` relation, nested and flat. ``not`` of
     a range that constrains nothing keeps every row. The flat ``partner`` copy of a widget
     reading a ``__`` key (``priceInUnderscoredBoxes``) is named by exactly those keys, so
-    its bounds apply too.
+    its bounds apply too. A filter whose own ``field`` installs its widget
+    (``priceInFieldBoxes``) is sent under the keys that widget reads, flat copy included.
     """
     _seed_dated_price_tiers()
     query, filter_input, expected = _upstream_range_case(name, shape, context)
@@ -1117,6 +1123,35 @@ def test_all_lookups_on_a_text_column_keep_every_text_pattern_leaf() -> None:
         _TEXT_PATTERN_LEAVES,
         "String",
     )
+
+
+@pytest.mark.django_db
+def test_instance_registered_lookup_is_a_leaf_of_its_own_field_only() -> None:
+    """``prefix``, registered on ``ScalarSpecimen.label`` alone, is a leaf of that set only.
+
+    ``ScalarSpecimenTag.label`` is a ``TextField`` too; its ``"__all__"`` reads its own
+    field's registry, which holds no ``prefix``.
+    """
+    specimen_leaves = _leaf_types("ScalarSpecimenFilterLabelFilterInputType")
+    tag_leaves = _leaf_types("ScalarSpecimenTagFilterLabelFilterInputType")
+
+    assert specimen_leaves["prefix"] == "String"
+    assert "prefix" not in tag_leaves
+    assert {"exact", "iStartsWith"} <= set(tag_leaves)
+
+
+@pytest.mark.django_db
+def test_instance_registered_lookup_filters_by_its_own_comparison() -> None:
+    """``label: { prefix }`` keeps the labels starting with the value, in any case."""
+    _seed_specimen("alpha")
+    _seed_specimen("Alder")
+    _seed_specimen("beta")
+    data = _assert_graphql_success(
+        'query { allScalarSpecimens(filter: { label: { prefix: "al" } }) { label } }',
+    )
+
+    labels = [json_str(row, "label") for row in json_list(data, "allScalarSpecimens")]
+    assert sorted(labels) == ["Alder", "alpha"], labels
 
 
 @pytest.mark.django_db

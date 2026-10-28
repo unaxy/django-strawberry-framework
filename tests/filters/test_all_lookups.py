@@ -5,8 +5,10 @@ lookups ``django.contrib.postgres`` registers onto a field that is not its own: 
 module registers ``contained_by`` onto the core numeric and temporal fields at import, and
 its app config registers ``search`` / ``trigram_*`` onto the core text fields. A
 ``django.contrib.postgres`` field keeps its whole set, and a consumer-registered lookup is
-published like a built-in one. The ``django.contrib.postgres`` rows skip where the module
-is unimportable (no PostgreSQL driver installed).
+published like a built-in one: a class registration on every field of the class, whenever
+it is made, and an instance registration on that field alone. The
+``django.contrib.postgres`` rows skip where the module is unimportable (no PostgreSQL
+driver installed).
 
 Django's text-pattern lookups (``iexact``, the ``contains`` / ``startswith`` / ``endswith``
 families, ``regex`` / ``iregex``) join the set only on a text column, one whose default
@@ -27,11 +29,12 @@ from apps.library import models as library_models
 from apps.products.models import Item
 from apps.scalars import models as scalar_models
 from django.db import models
+from django.db.models import lookups as model_lookups
 from django.test.utils import register_lookup
 from django_filters import CharFilter
 from django_filters.filterset import UnknownFieldBehavior
 
-from django_strawberry_framework.filters import FilterSet, sets
+from django_strawberry_framework.filters import FilterSet
 from django_strawberry_framework.filters.base import EnumChoiceFilter, TextPatternFilter
 from django_strawberry_framework.filters.inputs import convert_filter_to_input_annotation
 from django_strawberry_framework.filters.sets import (
@@ -68,13 +71,6 @@ _CORE_RANGE_OPERAND_FIELDS: tuple[type[models.Field[object, object]], ...] = (
     models.DateField,
     models.DateTimeField,
 )
-
-
-@pytest.fixture(autouse=True)
-def _fresh_lookup_cache(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Give each test an empty class-keyed memo, so a registration it makes is crawled."""
-    cache: truth.IdentityMap[type[models.Field[object, object]], list[str]] = truth.IdentityMap()
-    monkeypatch.setattr(sets, "_lookups_for_field_class_cache", cache)
 
 
 @pytest.mark.parametrize("field_class", _CORE_RANGE_OPERAND_FIELDS)
@@ -168,6 +164,40 @@ def test_consumer_registered_lookup_is_published() -> None:
         lookups = _lookups_for_field(models.IntegerField())
     assert "divisible_by" in lookups
     assert "exact" in lookups
+
+
+def test_class_registration_after_a_first_read_is_published() -> None:
+    """A class registration made after the field's set was first read joins the next read."""
+    field: models.IntegerField[int, int] = models.IntegerField()
+    assert "divisible_by" not in _lookups_for_field(field)
+    with register_lookup(models.IntegerField, _DivisibleBy):
+        assert "divisible_by" in _lookups_for_field(field)
+    assert "divisible_by" not in _lookups_for_field(field)
+
+
+@pytest.mark.parametrize(
+    "read_first",
+    ["registered", "other"],
+)
+def test_instance_registered_lookup_publishes_on_that_field_only(read_first: str) -> None:
+    """A lookup registered on one field instance joins that field's set and no sibling's.
+
+    Two fields of one class read their own registries, whichever is read first.
+    """
+    registered: models.TextField[str, str] = models.TextField()
+    other: models.TextField[str, str] = models.TextField()
+    _ = registered.register_instance_lookup(model_lookups.IStartsWith, lookup_name="prefix")
+    try:
+        if read_first == "registered":
+            registered_lookups = _lookups_for_field(registered)
+            other_lookups = _lookups_for_field(other)
+        else:
+            other_lookups = _lookups_for_field(other)
+            registered_lookups = _lookups_for_field(registered)
+    finally:
+        registered._unregister_instance_lookup(model_lookups.IStartsWith, lookup_name="prefix")
+    assert "prefix" in registered_lookups
+    assert "prefix" not in other_lookups
 
 
 class _ConsumerCharField(models.CharField[str, str]):

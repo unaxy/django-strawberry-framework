@@ -100,7 +100,6 @@ from .base import (
     copied_form_field,
     model_choice_identity_column,
     relation_identity_column,
-    unkept_form_field,
 )
 
 # Domain-local aliases for the shared generated-input substrate (the mechanics
@@ -1164,14 +1163,25 @@ def range_form_keys(
 ) -> tuple[str, str]:
     """Return the start and end form-data keys a range filter's widget reads for ``base``.
 
-    The widget is the one the filter's form field builds (``filters/base.py::unkept_form_field``,
-    which writes nothing to a class-level declaration every request shares), asked for its
-    keys through ``utils/widgets.py::multi_widget_keys``. A widget that does not read exactly
-    two keys has no slot for a start and an end, so it is a ``ConfigurationError`` naming
-    the filter as declared on ``filterset_cls`` (``_declaration_of``);
-    ``convert_filter_to_input_annotation`` runs this when the schema is built.
+    The widget is the one the form field the filter's own class builds carries, a consumer
+    ``field`` override included, read on a copy so the class-level declaration every request
+    shares keeps nothing (``_declared_form_field``), and asked for its keys through
+    ``utils/widgets.py::multi_widget_keys``. A widget that does not read exactly two keys has
+    no slot for a start and an end, and neither has a field the filter builds only inside a
+    bound ``FilterSet``, so each is a ``ConfigurationError`` naming the filter as declared on
+    ``filterset_cls`` (``_declaration_of``); ``convert_filter_to_input_annotation`` runs this
+    when the schema is built.
     """
-    keys = multi_widget_keys(read_attr(unkept_form_field(filter_instance), "widget"), base)
+    form_field = _declared_form_field(filter_instance)
+    if form_field is None:
+        declaration = _declaration_of(filter_instance, filterset_cls)
+        raise ConfigurationError(
+            f"{declaration.kind} consumes a range input for its {base!r} "
+            f"input{declaration.site}, but its form field is built only inside a bound "
+            "FilterSet, so the form-data keys its widget reads cannot be known when the "
+            "schema is built; build the field from the filter's own arguments.",
+        )
+    keys = multi_widget_keys(read_attr(form_field, "widget"), base)
     if keys is None or len(keys) != _RANGE_BOUNDS:
         declaration = _declaration_of(filter_instance, filterset_cls)
         raise ConfigurationError(

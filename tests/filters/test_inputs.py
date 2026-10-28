@@ -60,7 +60,7 @@ from django_filters import (
 from django_filters import RangeFilter as DjangoRangeFilter
 from django_filters.filters import BaseInFilter as DjangoBaseInFilter
 from django_filters.rest_framework import DjangoFilterBackend
-from django_filters.widgets import RangeWidget
+from django_filters.widgets import RangeWidget, SuffixedMultiWidget
 from rest_framework import generics
 from rest_framework.test import APIRequestFactory
 from strawberry import relay
@@ -113,8 +113,9 @@ from django_strawberry_framework.filters.inputs import (
     filter_lookup_table,
     materialize_input_class,
     normalize_input_value,
+    range_form_keys,
 )
-from django_strawberry_framework.filters.sets import filter_generation_provenance
+from django_strawberry_framework.filters.sets import _widget_keys, filter_generation_provenance
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.sets_mixins import ClassBasedTypeNameMixin
 from django_strawberry_framework.types.finalizer import finalize_django_types
@@ -1817,6 +1818,56 @@ def test_normalize_input_value_range_filter_emits_its_widget_keys() -> None:
 
     patch = normalize_input_value(f, _RangeInput(), field_name="lifetime_fines_cents")
     assert patch == {"lifetime_fines_cents_0": 1, "lifetime_fines_cents_1": 10}
+
+
+class _LowHighWidget(SuffixedMultiWidget):
+    """A two-box range widget reading ``<name>_low`` / ``<name>_high``."""
+
+    suffixes = ["low", "high"]
+
+    def __init__(self, attrs: dict[str, object] | None = None) -> None:
+        super().__init__((forms.TextInput, forms.TextInput), attrs)
+
+
+class _FieldWidgetRangeFilter(DjangoRangeFilter):
+    """django-filter's ``RangeFilter`` whose ``field`` property installs ``_LowHighWidget``."""
+
+    @property
+    @override
+    def field(self) -> forms.Field:
+        field = super().field
+        field.widget = _LowHighWidget()
+        return field
+
+
+class _ParentReadingRangeFilter(DjangoRangeFilter):
+    """A ``RangeFilter`` whose ``field`` reads the bound ``FilterSet`` it runs in."""
+
+    @property
+    @override
+    def field(self) -> forms.Field:
+        _ = read_attr(self, "parent")
+        return super().field
+
+
+def test_range_and_flat_copy_keys_read_a_field_override_on_a_copy() -> None:
+    """Both key readers ask the field the filter's own class builds; the declaration keeps none.
+
+    ``range_form_keys`` (the range input's keys) and ``_widget_keys`` (the flat copy's
+    keys) read ``_LowHighWidget`` off the overriding ``field``, and the class-level
+    declaration every request deep-copies holds no cached ``_field`` afterwards.
+    """
+    declared = _FieldWidgetRangeFilter(field_name="price")
+
+    assert range_form_keys(declared, "span") == ("span_low", "span_high")
+    assert _widget_keys(declared, "span") == ["span_low", "span_high"]
+    assert "_field" not in vars(declared)
+
+
+def test_range_form_keys_of_a_field_built_only_in_a_bound_set_is_a_configuration_error() -> None:
+    """A ``field`` that reads ``self.parent`` builds nothing at schema build: a ``ConfigurationError``."""
+    with pytest.raises(ConfigurationError, match="built only inside a bound FilterSet"):
+        _ = range_form_keys(_ParentReadingRangeFilter(field_name="price"), "span")
 
 
 def test_normalize_input_value_range_filter_drops_none_axes_partial_range() -> None:

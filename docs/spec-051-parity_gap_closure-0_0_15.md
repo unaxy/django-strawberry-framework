@@ -248,10 +248,13 @@ on the shared seams by then ([Risks](#risks-and-open-questions)).
         `FILTER_DEFAULTS` has no `GeneratedField` row, and
         `handle_unrecognized_field` raises);
         `django_strawberry_framework/filters/sets.py::_lookups_for_field`
-        keys its memo on the output field's class for a `GeneratedField`
-        (`GeneratedField.contribute_to_class` registers the output field's
-        lookups per instance, so the outer class is not a sound key); errors
-        name the outer field.
+        already reads the lookup registry off the field instance, where
+        `GeneratedField.contribute_to_class` registers the output field's
+        lookups; its class-keyed reads (`_is_text_column`,
+        `_without_foreign_postgres_lookups`, and
+        `FilterSet._origin_for_selection_class` on the same column) read the
+        output field's class for a `GeneratedField`; errors name the outer
+        field.
   - [ ] The write-side exclusion pinned (Django forces `editable=False`, so
         `django_strawberry_framework/mutations/inputs.py::editable_input_fields`
         already drops it — a test, not code).
@@ -447,9 +450,10 @@ on card `TODO-ALPHA-057-0.1.0` (the beta cut) true rather than asserted.
   needs a pin, not a change. The order side
   (`django_strawberry_framework/orders/inputs.py::_get_concrete_field_names_for_order`)
   requires a real database column, which a generated column is. On the filter
-  side, django-filter's `FILTER_DEFAULTS` walk has no `GeneratedField` row and
-  `django_strawberry_framework/filters/sets.py::_lookups_for_field` memoizes
-  by field class. No fakeshop model declares one;
+  side, django-filter's `FILTER_DEFAULTS` walk has no `GeneratedField` row, and
+  `django_strawberry_framework/filters/sets.py::_lookups_for_field` reads the
+  instance's lookup registry but classifies the column by `type(model_field)`.
+  No fakeshop model declares one;
   `tests/mutations/test_resolvers.py::LinkedDesk` declares an unmanaged one
   (`db_persist=True`) for the write-side test only.
 - **`help_text`**: `django_strawberry_framework/types/base.py::_build_annotations`
@@ -892,11 +896,13 @@ The filter side changes in `django_strawberry_framework/filters/sets.py`:
 `GeneratedField` to its `output_field` before django-filter's `try_dbfield`
 walk over `FILTER_DEFAULTS` (which has no `GeneratedField` row, so
 `handle_unrecognized_field` raises today), and
-`django_strawberry_framework/filters/sets.py::_lookups_for_field` keys its
-memo on the output field's class (Django registers the output class's
-lookups on each `GeneratedField` instance, so two generated columns of
-different output types would otherwise share the first one's lookups). Any
-error names the outer field.
+`django_strawberry_framework/filters/sets.py::_lookups_for_field` classifies
+the column by the output field's class (`_is_text_column`,
+`_without_foreign_postgres_lookups` and `FilterSet._origin_for_selection_class`
+each read a field class). Its lookup registry already comes off the instance
+(`Field.get_lookups()`), where Django registers the output class's lookups on
+each `GeneratedField`, so two generated columns of different output types
+publish their own sets. Any error names the outer field.
 
 The write side changes nothing and pins everything: Django's
 `GeneratedField.__init__` forces `editable=False`, so
@@ -1232,7 +1238,7 @@ exports.
 | Slice | Seam | Change | Risk profile |
 |---|---|---|---|
 | 1 | `utils/relations.py`, `mutations/sets.py`, `forms/inputs.py`, `rest_framework/inputs.py` | one predicate, one formatter, three raise sites, two override checks | MEDIUM — three flavors with different raise moments; the override checks decide which canonical patterns stay legal |
-| 2 | `types/converters.py`, `filters/sets.py`, `management/commands/inspect_django_type.py`, library models + migration | a route arm with re-stamped facts, a shared unwrap with three refusals, the django-filter unwrap and memo key, a label row, two fixture columns | MEDIUM — the filter side has its own field-class dispatch and memo that the scalar route does not reach |
+| 2 | `types/converters.py`, `filters/sets.py`, `management/commands/inspect_django_type.py`, library models + migration | a route arm with re-stamped facts, a shared unwrap with three refusals, the django-filter unwrap and output-class reads, a label row, two fixture columns | MEDIUM — the filter side has its own field-class dispatch that the scalar route does not reach |
 | 3 | `types/base.py`, `types/finalizer.py`, `types/resolvers.py`, `mutations/inputs.py`, `forms/inputs.py`, `rest_framework/serializer_converter.py`, library models + migration | one accessor, a type-creation check, `description=` threaded into the Phase-2 attachers, the Phase-2.5 sibling and three input builders | MEDIUM — the scalar `strawberry.field(description=…)` assignment is the one new shape, and live SDL changes ([Risks](#risks-and-open-questions)) |
 | 4 | `types/converters.py`, `pyproject.toml` / `uv.lock`, library models + migration | a detection branch, two refusals, a registry teardown, a dev pin, a fixture column | LOW — dead branch when the package is absent |
 | 5 | docs, DB, board, `spec-053` | verification, card amendments, fold-in | mechanical |

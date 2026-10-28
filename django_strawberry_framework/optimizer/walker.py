@@ -8,8 +8,10 @@ from typing import TYPE_CHECKING, NamedTuple, cast
 from django.db import models
 from django.db.models import Prefetch
 from graphql import OperationType
+from strawberry import relay
 from strawberry.schema.config import StrawberryConfig
 from strawberry.schema.schema_converter import GraphQLCoreConverter
+from strawberry.types.base import get_object_definition
 from strawberry.types.field import StrawberryField
 from strawberry.utils.str_converters import to_camel_case
 
@@ -249,6 +251,24 @@ def _target_has_custom_get_queryset(
 def _schema_name_converter(info: object) -> NameConverter | None:
     """Return the active Strawberry name converter from planner or resolver ``info``."""
     return getattr(schema_config_from_info(info), "name_converter", None)
+
+
+# The GlobalID field ``relay.Node`` declares, its only field. Every Relay type's definition
+# holds this same field object, so the name a schema publishes for it is the converter's
+# answer for the field alone; a Strawberry that gives ``Node`` a second field fails here.
+(_RELAY_ID_FIELD,) = get_object_definition(relay.Node, strict=True).fields
+
+
+def _relay_id_graphql_name(info: object) -> str:
+    """Return the name the executing schema publishes for ``relay.Node``'s GlobalID field.
+
+    The schema's ``NameConverter`` names it (a consumer converter may rename ``id``); with
+    no schema in ``info`` it is the name Strawberry declares on the field.
+    """
+    converter = _schema_name_converter(info)
+    if converter is not None:
+        return converter.get_graphql_name(_RELAY_ID_FIELD)
+    return require_instance(_RELAY_ID_FIELD.graphql_name, str)
 
 
 def _graphql_names_by_python_name(
@@ -817,16 +837,21 @@ def _walk_selections(
     relation_connections: Mapping[str, str] = (
         getattr(definition, "relation_connections", None) or {}
     )
+    # On a ``relay.Node`` type the GlobalID is the field ``relay.Node`` declares, selected
+    # under the name the executing schema's converter publishes for it, never a model
+    # field named ``id``: when the id is read from a column it projects that column
+    # whatever the field map holds (spec-015 Decision 7); an id no column holds resolves
+    # through the field map like any selection.
+    relay_id_column = (
+        _relay_id_column(type_cls)
+        if type_cls is not None and implements_relay_node(type_cls)
+        else None
+    )
+    relay_id_name = _relay_id_graphql_name(info) if relay_id_column is not None else None
     for sel in merged:
-        # On a ``relay.Node`` type the ``id`` selection is the GlobalID, never a
-        # model field named ``id``: when the id is read from a column it projects
-        # that column whatever the field map holds (spec-015 Decision 7); an id
-        # no column holds resolves through the field map like any selection.
-        if sel.name == "id" and type_cls is not None and implements_relay_node(type_cls):
-            id_column = _relay_id_column(type_cls)
-            if id_column is not None:
-                append_unique(plan.only_fields, f"{prefix}{id_column}")
-                continue
+        if relay_id_column is not None and sel.name == relay_id_name:
+            append_unique(plan.only_fields, f"{prefix}{relay_id_column}")
+            continue
         # Resolve the selection name through the ONE consolidated resolver
         # (fast-path exact reversal, memoized forward name maps on a miss). It
         # recognizes a synthesized nested connection BEFORE the field namespace
