@@ -743,7 +743,9 @@ not routable / no snapshot row
   transitions **every own class-body declaration** to `origin="declared"`
   unconditionally, so a `Filter` borrowed or deepcopied from another FilterSet
   cannot smuggle a stale `framework_default` / `package_replacement` stamp
-  into a consumer-owned declaration. Only **inherited**
+  into a consumer-owned declaration; the borrowed object is deep-copied
+  first, so the stamp lands on the declaring set's own copy and the owning
+  set's record is untouched. Only **inherited**
   declarations keep the provenance record their owning class already stamped
   (the `provenance is None` fallback merely backfills an inherited record
   that is somehow absent). Own vs inherited is computed from the class body

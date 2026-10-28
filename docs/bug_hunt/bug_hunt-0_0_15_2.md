@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 369 done, 212 to do.
+Progress: 371 done, 212 to do.
 
 ## Done
 
@@ -2077,6 +2077,19 @@ Progress: 369 done, 212 to do.
   content (the spec-046 Decision a test pins, the equivalence-matrix case it proves, the named test it defers to)
   instead of a test-plan row, matrix row, gap or test ordinal; comments and docstrings only (stripped ASTs and
   collected node ids identical).
+- [x] 596. A `ProjectedChildFilter` a set does not hold (borrowed from another set's `get_filters()` without the
+  branch it projects through) is a `ConfigurationError` at publish naming the set, the key, the donor child set and
+  the branch (`filters/sets.py::FilterSet._reject_foreign_projection`), instead of a raw `KeyError` on supply or, under
+  a same-named branch, the donor's child filter run silently across the borrower's branch. `FilterSetMetaclass`
+  deep-copies a class-body filter another set already owns before stamping it, as django-filter never writes
+  set-specific state on a shared filter, so the donor's record stays its own. spec-027 and the `filterset` glossary
+  term say so. Tests: `tests/filters/test_sets.py`
+- [x] 597. A declared head's name is never walked as a relation path: `run_active_input_permission_checks` asks the
+  set's `_gate_path_spells_relations` seam, which a `FilterSet` answers "no" for a declared head, and
+  `FilterSet._gate_path_walk_gates` walks a non-declared leaf's `field_name` even where a declared name spells the
+  same string; so a flat expanded copy (`shelf__named` beside `real_shelf = RelatedFilter(..., field_name="shelf")`)
+  and a plain declared filter named like another branch's accessor fire exactly their nested twin's gates. spec-027
+  says so. Tests: `tests/filters/test_sets.py`
 
 ## Outside review of the fixes
 
@@ -2175,14 +2188,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 538. (robustness) A `DateRangeFilter` declared on a `Choices` column builds and types as the column's enum, while
   its own form field accepts only its fixed date-range keys, so every enum member answers `FILTER_INVALID` "Select a
   valid choice"; the same filter on a plain column is refused at schema build. Found verifying 518
-- [ ] 596. (robustness) A `ProjectedChildFilter` borrowed from another set's `get_filters()` as a class
-  attribute raises `KeyError` on the borrower when supplied (`filters/sets.py::_projection_hop` /
-  `FilterSet._visibility_hops` read `related_filters[branch]` unguarded), and `FilterSetMetaclass` restamps a
-  shared filter object's provenance in place, so the donor's copy changes under it. Found fixing 640
-- [ ] 597. (robustness) A flat expanded copy whose key's first segment equals another `RelatedFilter`'s
-  `field_name` (`real_shelf = RelatedFilter(..., field_name="shelf")` beside an attribute `shelf`) also fires
-  that declaration's gates through the name walk of its gate path: fail-closed, an extra gate its nested twin
-  does not fire. Found fixing 640
 - [ ] 606. (robustness) FK-id elision never fires into a Relay target whose `Meta.fields` omit its primary
   key: `optimizer/walker.py::_selected_scalar_names` reads the `id` selection as a model field name and
   misses, so `parent { child { id } }` keeps one JOIN; route it through `_relay_id_column`. No fakeshop Relay
@@ -2251,12 +2256,18 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `(#10 happy path)` tags in `tests/rest_framework/test_resolvers.py` / `test_sets.py`, `#6` / `#7` / `#11` in
   `test_library_api.py`, "Test-6 identity flake" in `tests/test_routers.py`, and "DoD item N" / "Goal N" in about 12
   test lines; restate each by its contract. Found fixing 629
+- [ ] 680. `filters/inputs.py::_is_declared_head`'s docstring says a set borrowing a copy "restamps" it; 596 copies an
+  owned filter at declaration, so the clause is false (one-clause fix, held for the `filters/inputs.py` refactor).
+  Found fixing 596
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 686. CHANGELOG entry for items 596 and 597: a `ProjectedChildFilter` borrowed into a set without its branch is a
+  `ConfigurationError` at schema build; a flat filter key or declared filter whose name spells another branch's
+  relation no longer fires that branch's permission gates
 - [ ] 678. CHANGELOG entry for items 534, 535 and 536 (breaking): a `FilterSet` / `OrderSet` with an unknown `Meta`
   key, a `Meta.exclude` naming no field of the model and no `Meta.fields` entry, or a `Meta.exclude` naming a declared
   filter / `RelatedOrder` raises `ConfigurationError` instead of being ignored

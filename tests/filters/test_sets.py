@@ -13264,7 +13264,11 @@ def test_borrowed_generated_leaf_becomes_declared_and_fails_closed() -> None:
             fields = {"title": ["icontains"]}
 
     own_decl = DeclaredReuse.declared_filters["loans__note__icontains"]
-    assert own_decl is borrowed
+    # The set declares its own deep copy: the borrowed object and the source's leaf keep
+    # their framework records.
+    assert own_decl is not borrowed
+    assert _provenance(borrowed).origin == "framework_default"
+    assert filter_generation_provenance(source_leaf) is source_record
     # (a) origin transitioned to ``declared`` REGARDLESS of the borrowed stamp.
     assert _provenance(own_decl).origin == "declared"
 
@@ -21196,14 +21200,22 @@ def test_child_set_leaf_reached_flat_fires_exactly_its_nested_twins_gates(
     assert _fired_gates(parent, {leaf: value}, root) == expected
 
 
-def _rekeyed(parent: type[FilterSet], *, rename: bool, fresh: bool) -> type[FilterSet]:
+def _rekeyed(
+    parent: type[FilterSet],
+    *,
+    rename: bool,
+    fresh: bool,
+    branch_attr: str | None = None,
+) -> type[FilterSet]:
     """``parent`` under a ``get_filters()`` override reshaping its expanded child leaves.
 
-    Each ``_GENRE_CHILD_LEAVES`` copy is held under ``alias_<child name>`` when
+    Each ``_GENRE_CHILD_LEAVES`` copy of ``branch_attr`` (``parent``'s one
+    branch when ``None``) is held under ``alias_<child name>`` when
     ``rename``, and every filter is a deep copy of the one ``super()`` returns
     when ``fresh``.
     """
-    (branch_attr,) = parent.related_filters
+    if branch_attr is None:
+        (branch_attr,) = parent.related_filters
     aliases = {
         f"{branch_attr}__{child_name}": f"alias_{child_name}"
         for child_name, _value, _gates in _GENRE_CHILD_LEAVES.values()
@@ -21315,11 +21327,16 @@ def test_a_borrowed_expanded_copy_is_its_borrowers_own_filter(
     ``genres__named``. ``Borrower`` expands no ``genres`` branch into
     ``GenreChild`` (it declares none, or one into another set), so the copy
     fires its own gate and the walk of its ``field_name`` on ``Borrower``,
-    never ``GenreChild``'s; declaring it restamps nothing the donor's copy
-    reads, so ``BookParent``'s flat leaf still fires its nested twin's gates.
+    never ``GenreChild``'s. ``Borrower`` declares a deep copy of it, so the
+    donor's object keeps its own records and ``BookParent``'s flat leaf still
+    fires its nested twin's gates.
     """
     donor = _gate_recording_genre_parent("genres", customize_child=False)
     borrowed = donor.get_filters()["genres__named"]
+    donor_provenance = filter_generation_provenance(borrowed)
+    donor_expansion = _expansion_record(borrowed)
+    assert donor_provenance is not None
+    assert donor_expansion is not None
 
     class OtherGenreChild(FilterSet):
         class Meta:
@@ -21335,7 +21352,13 @@ def test_a_borrowed_expanded_copy_is_its_borrowers_own_filter(
     if borrower_branch:
         attrs["genres"] = RelatedFilter(OtherGenreChild, field_name="genres")
     borrower = type("Borrower", (FilterSet,), attrs)
-    assert borrower.get_filters()["aliased"] is borrowed
+    aliased = borrower.get_filters()["aliased"]
+    assert aliased is not borrowed
+    assert aliased is borrower.declared_filters["aliased"]
+    assert _expansion_record(aliased) is donor_expansion
+    assert filter_generation_provenance(borrowed) is donor_provenance
+    assert _expansion_record(borrowed) is donor_expansion
+    assert donor.get_filters()["genres__named"] is borrowed
 
     root = library_models.Book.objects.all()
     assert _fired_gates(borrower, {"aliased": "x"}, root) == borrower_gates
@@ -21385,6 +21408,339 @@ def test_a_borrowed_copy_reached_through_a_branch_is_gated_as_its_borrowers_own_
     expected = {"Loan.lent", "BorrowerChild.aliased"}
     assert _fired_gates(LoanParent, {"lent": {"aliased": "x"}}, root) == expected
     assert _fired_gates(LoanParent, {"lent__aliased": "x"}, root) == expected
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "borrower_branch",
+    [False, True],
+    ids=["no-branch", "branch-to-another-set"],
+)
+def test_a_borrowed_projected_copy_is_refused_where_its_branch_is_not_held(
+    *,
+    borrower_branch: bool,
+) -> None:
+    """A projected copy declared on a set that does not expand its branch into its child set is refused.
+
+    ``Borrower.aliased`` is the ``ProjectedChildFilter`` ``BookParent.get_filters()``
+    holds as ``genres__named``: it runs ``CustomizedGenreChild.named`` across the
+    ``genres`` hop inside a child set instance, which ``Borrower`` lacks (it
+    declares no ``genres`` branch, or one into another set), so the table
+    publishing it is a ``ConfigurationError`` naming the remedy. The donor's
+    object keeps its records and its flat leaf its nested twin's gates.
+    """
+    donor = _gate_recording_genre_parent("genres", customize_child=True)
+    borrowed = donor.get_filters()["genres__named"]
+    assert isinstance(borrowed, ProjectedChildFilter)
+    donor_provenance = filter_generation_provenance(borrowed)
+    donor_expansion = _expansion_record(borrowed)
+
+    class OtherGenreChild(FilterSet):
+        class Meta:
+            model = library_models.Genre
+            fields = {"name": ["exact"]}
+
+    attrs: dict[str, object] = {
+        "aliased": borrowed,
+        "Meta": type("Meta", (), {"model": library_models.Book, "fields": {"title": ["exact"]}}),
+    }
+    if borrower_branch:
+        attrs["genres"] = RelatedFilter(OtherGenreChild, field_name="genres")
+    borrower = type("Borrower", (FilterSet,), attrs)
+    with pytest.raises(ConfigurationError) as exc_info:
+        borrower.get_filters()
+    message = str(exc_info.value)
+    assert "Borrower: filter 'aliased' is a projected copy of" in message
+    assert "CustomizedGenreChild.named expanded through a 'genres' branch" in message
+    assert "declares no 'genres' RelatedFilter into" in message
+    assert "Declare that RelatedFilter, or declare a filter of this set's own." in message
+
+    assert filter_generation_provenance(borrowed) is donor_provenance
+    assert _expansion_record(borrowed) is donor_expansion
+    root = library_models.Book.objects.all()
+    donor_gates = {
+        "Book.genres",
+        "Genre.named",
+        "Genre.books",
+        "Book.title",
+    }
+    assert _fired_gates(donor, {"genres": {"named": "x"}}, root) == donor_gates
+    assert _fired_gates(donor, {"genres__named": "x"}, root) == donor_gates
+
+
+@pytest.mark.django_db
+def test_a_projected_copy_publishes_where_its_branch_is_held() -> None:
+    """A set expanding the copy's branch into its child set holds a borrowed projected copy.
+
+    ``Borrower`` declares ``genres`` into the donor's own child set, so
+    ``aliased`` runs as ``genres: {named: ...}`` and fires its gates; a subclass
+    of the donor keeping the inherited branch publishes its own projected copies.
+    """
+    donor = _gate_recording_genre_parent("genres", customize_child=True)
+    borrowed = donor.get_filters()["genres__named"]
+    child = donor.related_filters["genres"].filterset
+    borrower = type(
+        "Borrower",
+        (FilterSet,),
+        {
+            "aliased": borrowed,
+            "genres": RelatedFilter(child, field_name="genres"),
+            "check_aliased_permission": _gate("Borrower.aliased"),
+            "check_genres_permission": _gate("Borrower.genres"),
+            "Meta": type(
+                "Meta",
+                (),
+                {"model": library_models.Book, "fields": {"title": ["exact"]}},
+            ),
+        },
+    )
+    assert isinstance(borrower.get_filters()["aliased"], ProjectedChildFilter)
+    root = library_models.Book.objects.all()
+    child_gates = {
+        "Borrower.genres",
+        "Genre.named",
+        "Genre.books",
+        "Book.title",
+    }
+    assert _fired_gates(borrower, {"aliased": "x"}, root) == {"Borrower.aliased", *child_gates}
+    assert _fired_gates(borrower, {"genres": {"named": "x"}}, root) == child_gates
+
+    subclass = type("BookParentSubclass", (donor,), {})
+    assert isinstance(subclass.get_filters()["genres__named"], ProjectedChildFilter)
+    donor_gates = {
+        "Book.genres",
+        "Genre.named",
+        "Genre.books",
+        "Book.title",
+    }
+    assert _fired_gates(subclass, {"genres__named": "x"}, root) == donor_gates
+
+
+def _denying_gate(label: str) -> Callable[[FilterSet, _GateProbeRequest], None]:
+    """A ``check_*_permission`` recording ``label``, refusing the request when it is ``denied``."""
+
+    def check(_self: FilterSet, request: _GateProbeRequest) -> None:
+        request.fired.add(label)
+        if getattr(request, "denied", False):
+            raise GraphQLError(f"{label} denied")
+
+    return check
+
+
+def _real_shelf_child() -> type[FilterSet]:
+    """``ShelfChild``, whose gates for every ``_GENRE_CHILD_LEAVES`` name and its key refuse ``denied``."""
+    _register_plain_types(library_models.Shelf)
+    gates = {
+        f"check_{child_name}_permission": _denying_gate(f"Shelf.{child_name}")
+        for child_name, _value, _gates in _GENRE_CHILD_LEAVES.values()
+    }
+    return type(
+        "ShelfChild",
+        (FilterSet,),
+        {
+            **gates,
+            "check_id_permission": _denying_gate("Shelf.id"),
+            "Meta": type(
+                "Meta",
+                (),
+                {"model": library_models.Shelf, "fields": {"code": ["exact"]}},
+            ),
+        },
+    )
+
+
+def _denied_outcome(filterset: type[FilterSet], filter_input: object) -> str:
+    """``"denied"`` when a gate refuses ``filter_input`` for a ``denied`` request, else ``"allowed"``."""
+    request = _GateProbeRequest()
+    request.denied = True
+    request.fired = set()
+    try:
+        list(
+            filterset.apply_sync(
+                filter_input,
+                library_models.Book.objects.all(),
+                _make_info(request),
+            ),
+        )
+    except GraphQLError:
+        return "denied"
+    return "allowed"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("leaf_case", list(_GENRE_CHILD_LEAVES))
+@pytest.mark.parametrize("customize_child", [True, False], ids=["projected", "expanded"])
+@pytest.mark.parametrize(
+    ("rename", "fresh"),
+    [
+        (False, False),
+        (False, True),
+        (True, True),
+        (True, False),
+    ],
+    ids=[
+        "published",
+        "deep-copies",
+        "deep-copies-rekeyed",
+        "rekeyed",
+    ],
+)
+def test_a_flat_copy_named_like_another_branchs_relation_fires_only_its_nested_twins_gates(
+    leaf_case: str,
+    *,
+    customize_child: bool,
+    rename: bool,
+    fresh: bool,
+) -> None:
+    """``shelf__<child filter>`` beside ``real_shelf`` over ``shelf`` fires no ``real_shelf`` gate.
+
+    ``BookParent.shelf`` is a branch over ``genres``; ``real_shelf`` declares
+    the ``shelf`` relation. The flat copy's key is a name, not an ORM path, so
+    its first segment names no hop of ``real_shelf``: flat and nested fire the
+    same gates, held as published or under a ``get_filters()`` override, and a
+    ``ShelfChild`` gate refusing the request refuses neither spelling.
+    """
+    child_name, value, child_gates = _GENRE_CHILD_LEAVES[leaf_case]
+    collision = type(
+        "Collision",
+        (_gate_recording_genre_parent("shelf", customize_child=customize_child),),
+        {
+            "real_shelf": RelatedFilter(_real_shelf_child(), field_name="shelf"),
+            "check_real_shelf_permission": _denying_gate("Book.real_shelf"),
+        },
+    )
+    parent = (
+        _rekeyed(collision, rename=rename, fresh=fresh, branch_attr="shelf")
+        if rename or fresh
+        else collision
+    )
+    leaf = f"alias_{child_name}" if rename else f"shelf__{child_name}"
+    assert isinstance(parent.get_filters()[leaf], ProjectedChildFilter) is customize_child
+    root = library_models.Book.objects.all()
+    expected = {"Book.shelf", *child_gates}
+    assert _fired_gates(parent, {"shelf": {child_name: value}}, root) == expected
+    assert _fired_gates(parent, {leaf: value}, root) == expected
+    assert _denied_outcome(parent, {"shelf": {child_name: value}}) == "allowed"
+    assert _denied_outcome(parent, {leaf: value}) == "allowed"
+    assert _denied_outcome(parent, {"real_shelf": {"code": "x"}}) == "denied"
+
+
+@pytest.mark.django_db
+def test_a_declared_filter_named_like_another_branchs_relation_fires_only_its_own_gate() -> None:
+    """``shelf = CharFilter(field_name="title")`` beside ``real_shelf`` over ``shelf`` walks no hop.
+
+    Its gate path is its name, never read as the ``shelf`` relation, so it fires
+    ``check_shelf_permission`` alone and a ``ShelfChild`` gate refusing the
+    request does not refuse it; reached flat through ``LoanParent.lent`` it
+    fires the gates ``lent: {shelf: ...}`` fires.
+    """
+    parent = type(
+        "PlainParent",
+        (FilterSet,),
+        {
+            "shelf": CharFilter(field_name="title"),
+            "real_shelf": RelatedFilter(_real_shelf_child(), field_name="shelf"),
+            "check_shelf_permission": _gate("Book.shelf"),
+            "check_real_shelf_permission": _denying_gate("Book.real_shelf"),
+            "Meta": type(
+                "Meta",
+                (),
+                {"model": library_models.Book, "fields": {"title": ["exact"]}},
+            ),
+        },
+    )
+    root = library_models.Book.objects.all()
+    assert _fired_gates(parent, {"shelf": "x"}, root) == {"Book.shelf"}
+    assert _denied_outcome(parent, {"shelf": "x"}) == "allowed"
+    assert _denied_outcome(parent, {"real_shelf": {"code": "x"}}) == "denied"
+
+    _register_plain_types(library_models.Loan, library_models.Book)
+
+    class LoanParent(FilterSet):
+        lent = RelatedFilter(parent, field_name="book")
+
+        class Meta:
+            model = library_models.Loan
+            fields = {"note": ["exact"]}
+
+        check_lent_permission = _gate("Loan.lent")
+
+    loans = library_models.Loan.objects.all()
+    expected = {"Loan.lent", "Book.shelf"}
+    assert _fired_gates(LoanParent, {"lent": {"shelf": "x"}}, loans) == expected
+    assert _fired_gates(LoanParent, {"lent__shelf": "x"}, loans) == expected
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("declared", [False, True], ids=["alone", "beside-a-declared-name"])
+def test_a_leaf_gating_on_its_field_name_walks_it_where_a_declared_name_spells_it(
+    *,
+    declared: bool,
+) -> None:
+    """A leaf that is no declared head walks its ``field_name`` whatever declared name spells it.
+
+    ``by_code``, a ``method=`` filter over ``shelf__code`` a ``get_filters()``
+    override adds, gates on its ``field_name``: an ORM path through
+    ``real_shelf``, walked alone and beside a declared ``shelf__code`` over
+    ``title``, whose gate path is the same string; reached flat through
+    ``LoanParent.lent`` it fires the gates ``lent: {by_code: ...}`` fires. The
+    declared ``shelf__code`` walks nothing.
+    """
+    _register_plain_types(library_models.Shelf, library_models.Loan, library_models.Book)
+
+    class CodeShelfChild(FilterSet):
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+        check_code_permission = _gate("Shelf.code")
+
+    def filter_code(
+        _self: FilterSet,
+        queryset: QuerySet[library_models.Book],
+        _name: str,
+        value: object,
+    ) -> QuerySet[library_models.Book]:
+        return queryset.filter(shelf__code=value)
+
+    attrs: dict[str, object] = {
+        "real_shelf": RelatedFilter(CodeShelfChild, field_name="shelf"),
+        "filter_code": filter_code,
+        "check_real_shelf_permission": _gate("Book.real_shelf"),
+        "check_shelf_code_permission": _gate("Book.shelf_code"),
+        "Meta": type("Meta", (), {"model": library_models.Book, "fields": {"title": ["exact"]}}),
+    }
+    if declared:
+        attrs["shelf__code"] = CharFilter(field_name="title")
+    base = type("CodeParent", (FilterSet,), attrs)
+
+    class CodeParent(base):
+        @classmethod
+        @override
+        def get_filters(cls) -> OrderedDict[str, Filter]:
+            filters = super().get_filters()
+            filters["by_code"] = CharFilter(field_name="shelf__code", method="filter_code")
+            return filters
+
+    root = library_models.Book.objects.all()
+    walked = {"Book.shelf_code", "Book.real_shelf", "Shelf.code"}
+    assert _fired_gates(CodeParent, {"by_code": "x"}, root) == walked
+    if declared:
+        assert _fired_gates(CodeParent, {"shelf__code": "x"}, root) == {"Book.shelf_code"}
+
+    class LoanParent(FilterSet):
+        lent = RelatedFilter(CodeParent, field_name="book")
+
+        class Meta:
+            model = library_models.Loan
+            fields = {"note": ["exact"]}
+
+        check_lent_permission = _gate("Loan.lent")
+
+    loans = library_models.Loan.objects.all()
+    expected = {"Loan.lent", *walked}
+    assert _fired_gates(LoanParent, {"lent": {"by_code": "x"}}, loans) == expected
+    assert _fired_gates(LoanParent, {"lent__by_code": "x"}, loans) == expected
 
 
 @pytest.mark.parametrize("how", ["pickle", "deepcopy"])
