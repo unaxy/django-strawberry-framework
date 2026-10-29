@@ -28,6 +28,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from django.contrib.auth import get_permission_codename
+
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import call_method, read_attr
@@ -218,7 +220,8 @@ class DjangoModelPermission:
 
         model = backing_model_of(mutation._mutation_meta)
         action = _OPERATION_PERMISSION_ACTION[operation]
-        codename = f"{model._meta.app_label}.{action}_{model._meta.model_name}"
+        opts = model._meta
+        codename = f"{opts.app_label}.{get_permission_codename(action, opts)}"
         # ``user.has_perm`` is sync Django auth; an awaitable / non-bool return
         # is the same authorization-bypass class ``_require_sync_bool_auth_result``
         # closes for ``has_permission`` / ``check_permission``.
