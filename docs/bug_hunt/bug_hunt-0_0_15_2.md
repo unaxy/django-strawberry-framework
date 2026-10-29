@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 391 done, 213 to do.
+Progress: 392 done, 212 to do.
 
 ## Done
 
@@ -2233,6 +2233,13 @@ Progress: 391 done, 213 to do.
   twin), so an arm branch's `FILTER_INVALID` answers before an arm or root form error or a permission denial on both,
   and the depth cap raises from the same set. spec-027 says so. Tests: `tests/filters/test_sets.py`,
   `examples/fakeshop/test_query/test_library_api.py`
+- [x] 701. On raw form data the integer comparisons (`exact`, `gt`, `gte`, `lt`, `lte`, `range`) truncate a fractional
+  value toward zero, as a stock django-filter `NumberFilter` does: its `DecimalField` cleans `"1.5"` to a `Decimal`,
+  which skips Django's float ceiling (`IntegerFieldFloatRounding`) and reaches the column's `int()`, so `gte=1.5`
+  matches a row holding 1 and `lt=1.5` drops it, while an `in` member is dropped (685). Documented, not changed: the
+  GraphQL `Int` / `BigInt` scalars refuse a fraction first, and an integer-aware filter would add a `NumberFilter`
+  subclass to the seam under refactor. README, spec-027; pinned by `tests/filters/test_sets.py::
+  test_integer_comparison_truncates_a_fractional_value`
 
 ## Outside review of the fixes
 
@@ -2377,12 +2384,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   reads every unstorable column of `form.instance`, so a model `save()` narrowed by `update_fields` away from the `None`
   column reports that column's `null` for another constraint; apply 668's `update_fields` filter there once
   `forms/resolvers.py` is free. Found fact-finding 668
-- [ ] 701. (robustness) On raw form data (`FilterSet(data=...)`, `DjangoFilterBackend`) the integer comparison leaves
-  truncate a fractional value as Django's own lookups do: `signed_big=1.5` binds `= 1`, `signed_big__gte=1.5` binds
-  `>= 1` and answers a row holding 1, `signed_big__lt=1.5` binds `< 1` and drops it, and a `range` of fractions narrows
-  to the truncated bounds (the GraphQL `BigInt` / `Int` scalars refuse fractions, so the wire never reaches it). Decide
-  an integer-aware form field for the integer `NumberFilter` family or documenting the raw-form semantics. Found
-  fact-finding 685
 
 ## To do: holes found re-checking the fixes
 
