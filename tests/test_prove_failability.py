@@ -96,6 +96,8 @@ from tests._idioms import is_object_dict, json_at, json_list, json_loads
 if TYPE_CHECKING:
     from typing_extensions import TypeIs
 
+pytestmark = pytest.mark.usefixtures("stop_signals_at_default")
+
 
 def _is_json_object(value: object) -> "TypeIs[dict[str, object]]":
     """Return whether a decoded JSON value is an object (JSON object keys are always strings)."""

@@ -43,6 +43,8 @@ from django_strawberry_framework.utils.typing import object_result
 from scripts import prove_failability, workspace
 from tests._idioms import json_at, json_list, json_loads, json_object
 
+pytestmark = pytest.mark.usefixtures("stop_signals_at_default")
+
 PACKAGE = workspace.PACKAGE_DIR
 
 

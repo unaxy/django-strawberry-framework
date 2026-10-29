@@ -35,6 +35,7 @@ relaxing ``-W error`` or filtering the warning.
 import asyncio
 import contextlib
 import importlib
+import signal
 import sqlite3
 import sys
 from collections.abc import Callable, Iterator
@@ -134,6 +135,39 @@ def scripts_module(monkeypatch: pytest.MonkeyPatch) -> Callable[[str], ModuleTyp
         return importlib.import_module(name)
 
     return load
+
+
+# The signals that ask a run to stop, spelled out as the stop-signal test modules spell them.
+_STOP_SIGNALS = (
+    signal.SIGINT,
+    signal.SIGTERM,
+    signal.SIGHUP,
+    signal.SIGQUIT,
+)
+
+
+@pytest.fixture
+def stop_signals_at_default() -> Iterator[None]:
+    """Give every stop signal pytest inherited as ignored its default action for one test.
+
+    ``SIG_IGN`` survives ``exec``: pytest started as a background job of a
+    non-interactive shell ignores ``SIGINT`` and ``SIGQUIT``, under ``nohup``
+    it ignores ``SIGHUP``, and every process a test starts inherits the same.
+    ``scripts/_stop_signals.py::routed_to`` leaves an inherited ``SIG_IGN``
+    alone by contract, so a row that signals a run it started would measure
+    how pytest was launched instead of the script. Each ignored signal gets the
+    disposition an interpreter starts with (``default_int_handler`` for
+    ``SIGINT``, ``SIG_DFL`` for the rest) and is ignored again at teardown; a
+    signal that was not ignored is left as it was. A row about an inherited
+    ``SIG_IGN`` sets it on the process it starts.
+    """
+    ignored = [signum for signum in _STOP_SIGNALS if signal.getsignal(signum) == signal.SIG_IGN]
+    for signum in ignored:
+        default = signal.default_int_handler if signum == signal.SIGINT else signal.SIG_DFL
+        signal.signal(signum, default)
+    yield
+    for signum in ignored:
+        signal.signal(signum, signal.SIG_IGN)
 
 
 @pytest.fixture
