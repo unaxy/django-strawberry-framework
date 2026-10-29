@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 386 done, 215 to do.
+Progress: 387 done, 214 to do.
 
 ## Done
 
@@ -2200,6 +2200,12 @@ Progress: 386 done, 215 to do.
   }` over a type listing `patron` reads the stored key with no JOIN. spec-015 and the `fk-id-elision` glossary term say
   so. Tests: `tests/types/test_definition_relations.py`, `tests/optimizer/test_walker.py`,
   `examples/fakeshop/test_query/test_library_api.py`
+- [x] 693. The filter ask's params-wide rules read only what the leaf's own lookups bind: `filters/sets.py::
+  _unbindable_predicate` runs `refuses_utc_offset`, `refuses_numeric_format` and `psycopg_refuses_list_parameter` over
+  each `_bound_value_lookups` lookup's `process_rhs` params, as the integer rules do, so a constant inside a consumer
+  annotation the leaf goes through never refuses the user's value, while the user's own past-rule value is still
+  refused. spec-027, the `filterset` glossary term and the `utils/errors.py` docstrings say so. Tests:
+  `tests/filters/test_sets.py`
 
 ## Outside review of the fixes
 
@@ -2336,11 +2342,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   cleans its members as text (`[["1", "9223372036854775808"]]`) and binds them as strings, so the integer ask never
   reads them and PostgreSQL refuses the cast at execution (the element form field, `filters/base.py`). Found
   verifying 657
-- [ ] 693. (robustness) `filters/sets.py::_unbindable_predicate`'s params-wide rules (`refuses_utc_offset`,
-  `refuses_numeric_format`, `psycopg_refuses_list_parameter`) read the compiled params of the whole clause, so a
-  constant inside a consumer annotation the leaf goes through (a `Value(Decimal(...))` past `numeric`'s format) can
-  refuse the user's in-range value; hold them to the leaf's own bound lookups as 654 does for integers. Found
-  verifying 654
 - [ ] 695. (robustness) A refused save the consumer swallows before a different `IntegrityError` escapes is still
   diagnosed as the swallowed row's `null` (serializer `_attempted_row_integrity_errors` reads `attempted[-1]`; model
   `_created_row_integrity_errors` reads the create target; ModelForm `_modelform_save_or_field_errors` reads
