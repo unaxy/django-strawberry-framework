@@ -315,7 +315,7 @@ def test_counted_keyset_window_without_seek_count_falls_back() -> None:
     row = Issue(id=1, number=1)
     # The window columns arrive as annotations: attributes Django sets on each row it builds.
     vars(row).update({WINDOW_ROW_NUMBER: 1, WINDOW_TOTAL_COUNT: 3})
-    info = make_info(field_name="issues", selections="{ pageInfo { hasNextPage } }")
+    info = make_info(field_name="connectionField", selections="{ pageInfo { hasNextPage } }")
     window = _WindowedConnectionRows(rows=[row], fallback=Issue.objects.all)
     assert (
         _resolve_from_window(
