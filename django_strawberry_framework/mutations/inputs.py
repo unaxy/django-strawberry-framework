@@ -268,11 +268,12 @@ def editable_input_fields(
     - deliberately the OPPOSITE selection: writes EXCLUDE read-only timestamps
     (``editable=False`` covers ``auto_now`` / ``auto_now_add``) and a forward
     ``ForeignObject`` link, and INCLUDE M2M, where the order side does the
-    reverse. So this is a genuinely new selector, not a duplication; both walk
-    ``model._meta.get_fields()`` and both recognize a forward ``ForeignObject``
-    through ``utils/relations.py::carrier_backed_link``, but this one keeps any
-    field with a ``column`` attribute (the cookbook's ``hasattr(f, "column")``
-    idiom) where the order side requires a real database column.
+    reverse. So this is a genuinely new selector, not a duplication; this one
+    walks ``model._meta.get_fields()`` and the order side ``model._meta.fields``,
+    both recognize a forward ``ForeignObject`` through
+    ``utils/relations.py::carrier_backed_link``, and this one keeps any field
+    with a ``column`` attribute (the cookbook's ``hasattr(f, "column")`` idiom)
+    where the order side requires ``Field.concrete``.
 
     Kept (in declaration order): concrete editable columns whose ``editable``
     flag is ``True`` and that are not the primary key, plus forward M2M fields,

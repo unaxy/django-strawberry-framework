@@ -299,16 +299,21 @@ it lands with its tick.
   - Kept: `plans.py::_select_path_missing_connectors`. `PathInfo`s do not map one to one onto path segments (an MTI
     field adds a parent hop, an M2M segment is two), and its result names segments.
 
-- [ ] 14. (FLT-3) `_get_concrete_field_names_for_order` re-derives `Options.fields` and `Field.concrete`
-  - Our code: `orders/inputs.py::_get_concrete_field_names_for_order`. It filters on
-    `read_attr(f, "column") is not None and not many_to_many`, plus a docstring paragraph about the 5.2 M2M `column`
-    quirk.
-  - Upstream: `django/db/models/options.py::Options.fields` with `Field.concrete`. Public.
-  - Lines: ~5. The carrier-backed `ForeignObject` clause stays.
-  - Status: CONFIRMED (101 models, content and order, 0 diffs).
-  - Reason to keep ours: none.
-  - Behaviour change: none.
-  - Risk / blockers: none.
+- [x] 14. (FLT-3) `_get_concrete_field_names_for_order` re-derives `Options.fields` and `Field.concrete`
+  - Our code: `orders/inputs.py::_get_concrete_field_names_for_order` walks `_meta.fields` and keeps `Field.concrete`;
+    the carrier-backed `ForeignObject` clause stays. The `column` / `many_to_many` predicate over `get_fields()` and
+    its Django 5.2 M2M `column` paragraph are gone, since `Options.fields` holds no many-to-many field.
+  - Upstream: `django/db/models/options.py::Options.fields` (documented private, like the `concrete_fields` the package
+    already reads at about ten sites) and `Field.concrete` (public). Bare `concrete_fields` drops the carrier-backed
+    link (6 diffs), so it is not the swap.
+  - Status: CONFIRMED (287 models, fakeshop plus every module-level test model, content and order, 0 diffs at 5.2.16
+    and 6.1.2).
+  - Behaviour change: none. The non-model `ConfigurationError` names `'_meta.fields'`.
+  - Tests: existing pins, `tests/orders/test_inputs.py::test_get_concrete_field_names_for_order_*`,
+    `tests/orders/test_sets.py::test_orderset_all_excludes_virtual_generic_fields` and the live
+    `test_library_inheritance_api.py::test_shelf_label_order_input_publishes_the_foreign_object_beside_its_carriers`.
+  - Not in this change: `mutations/resolvers.py::_column_field_names` (the same seam changes the `exclude` it passes,
+    46 of 287 models differ) and `forms/inputs.py::require_readable_choice_keys` (`dry-0_0_15_3.md` item 74).
 
 - [ ] 15. (WRT-3, the reducible part of F2) `_expression_references` hand-models `Model._get_expr_references`
   - Our code: `mutations/resolvers.py::_expression_references` (~28 lines). Its docstring says it is "the public-API
