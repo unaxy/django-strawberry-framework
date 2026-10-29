@@ -2280,15 +2280,15 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 387. Generated opt-in `year` / `iso_year` filter leaves are typed as the column's scalar (`Date` / `DateTime`), so
+- [ ] 387. **SKIP for now** (upstream-seam refactor in flight: F11, filter scalar typing in `filters/inputs.py`). Generated opt-in `year` / `iso_year` filter leaves are typed as the column's scalar (`Date` / `DateTime`), so
   every wire value cleans to `"Enter a number."`; and the generated `time` leaf on a `DateTimeField` raises
   `AttributeError: 'datetime.datetime' object has no attribute 'strip'` in `forms.TimeField` clean before the filter
   seam
 
-- [ ] 563. Package comments and docstrings outside the gated phrases still narrate history: "now", "no longer", "the
+- [ ] 563. **SKIP for now** (upstream-seam refactor in flight: package-wide comment sweep). Package comments and docstrings outside the gated phrases still narrate history: "now", "no longer", "the
   former", "byte-unchanged" (634 removed every release number and gates it); judge each against START's provenance rule (dry-0_0_15_3 items 31 and 71 cover part of it; 566 restated the
   `(hardened)`, `(hardening)` and `historically` sites in `schema.py` and `rest_framework/`). Found fact-finding 500
-- [ ] 565. Optimizer plan labels (B1-B8, O2-O6, G1-G3) label 177 comment and docstring sites, 15 of them in the
+- [ ] 565. **SKIP for now** (upstream-seam refactor in flight: package-wide comment sweep, `optimizer/extension.py`). Optimizer plan labels (B1-B8, O2-O6, G1-G3) label 177 comment and docstring sites, 15 of them in the
   package (`optimizer/extension.py`, `optimizer/plans.py`, `optimizer/walker.py`, `types/resolvers.py`) and most in
   `tests/optimizer/test_extension.py` and `test_walker.py`; the clause after each label already states the behaviour,
   so drop the label. Found fact-finding 500
@@ -2296,30 +2296,30 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `_get_validation_exclusions` leaves it out of `full_clean`) answers the masked error at save (a raw `DataError` on
   an `ArrayField`, measured); `_is_unstorable_blank` needs `blank=True`, so no column that stores no empty string is
   named in this shape. Found fixing 541
-- [ ] 620. (robustness) On a `null=True` `ArrayField`, a `ModelForm` explicit `null`, or an update omitting the field
+- [ ] 620. **SKIP for now** (upstream-seam refactor in flight: F4, partial-update rebinding in `forms/resolvers.py`). (robustness) On a `null=True` `ArrayField`, a `ModelForm` explicit `null`, or an update omitting the field
   over a stored NULL, writes `[]` instead of NULL, with the default `SimpleArrayField` and a `SplitArrayField` alike.
   Found verifying 553
-- [ ] 621. (robustness) A `get_form` hook binding `QueryDict(urlencode(data))` turns a `SplitDateTimeField`'s datetime
+- [ ] 621. **SKIP for now** (upstream-seam refactor in flight: F4, partial-update rebinding in `forms/resolvers.py`). (robustness) A `get_form` hook binding `QueryDict(urlencode(data))` turns a `SplitDateTimeField`'s datetime
   into text, which `SplitDateTimeWidget.decompress` cannot split: the request answers a top-level `AttributeError` (it
   silently stored NULL before 553's binding). Found verifying 553
-- [ ] 624. A package `RangeFilter` whose `lookup_expr` carries a transform (`date__range`, `date__exact`, `date`)
+- [ ] 624. **SKIP for now** (upstream-seam refactor in flight: F6, `filters/base.py::_ColumnCleanedFilter`). A package `RangeFilter` whose `lookup_expr` carries a transform (`date__range`, `date__exact`, `date`)
   applies a lone bound as `<field_name>__gte` / `__lte` without it: `RangeFilter(field_name="occurred_at",
   lookup_expr="date__range")` sent `{end: "2021-12-31"}` compares the datetime with midnight and leaves out a
   2021-12-31 09:30 row that both bounds include; spec-027's RangeFilter row says a lone bound applies as `gte` / `lte`
   of the declared range. Its bounds are also cleaned by the column's own `gte` field whatever the transform, so a
   `year` lookup refuses a year as "Enter a valid date/time.". Found verifying 508
-- [ ] 625. (robustness) A package `ListFilter` declared with a lookup other than `in` (the default `exact`, `gte`)
+- [ ] 625. **SKIP for now** (upstream-seam refactor in flight: F6, `filters/base.py::_ColumnCleanedFilter`). (robustness) A package `ListFilter` declared with a lookup other than `in` (the default `exact`, `gte`)
   hands the list to a scalar lookup: a masked `ValidationError` / `TypeError` over a decimal or number column and
   silently no rows over text, even for one element. A consumer-declared bare `BaseCSVFilter` subclass does the same
   with `exact` / `iexact` / `icontains` / `startswith` (as plain django-filter does), and with `range` a one-element
   list raises `IndexError` from `Range.get_rhs_op`. A build-time refusal must allow every list-consuming lookup (`in`,
   `range`, transforms ending in either, `ArrayField` `contains` / `contained_by` / `overlap`, `has_keys` /
   `has_any_keys`, a consumer-registered lookup) and every `method=` filter. Found fixing 508; widened triaging 516
-- [ ] 524. (robustness) A `ModelForm` update that omits a field whose declared form field is lossier than its column
+- [ ] 524. **SKIP for now** (upstream-seam refactor in flight: F4, partial-update rebinding in `forms/resolvers.py`). (robustness) A `ModelForm` update that omits a field whose declared form field is lossier than its column
   (`forms.DateField` over a `DateTimeField`) rebinds the stored value through that field and rewrites the row: a
   stored `03:04:05` becomes the default-zone midnight, and a stored year-1 value under `Asia/Tokyo` answers an
   `invalid` `FieldError` keyed to a field the client did not send. Found fact-finding 547
-- [ ] 527. (robustness) A declared `ListFilter` (or `RangeFilter`) whose `field_name` is a relation itself keeps
+- [ ] 527. **SKIP for now** (upstream-seam refactor in flight: F6, `filters/base.py::_ColumnCleanedFilter`). (robustness) A declared `ListFilter` (or `RangeFilter`) whose `field_name` is a relation itself keeps
   its elements uncleaned ("a relation's elements reach the ORM as sent"), so under `DjangoFilterBackend` a junk raw
   value (`?tag=x` on a ForeignKey to an integer key) answers Django's `ValueError`, a 500, where a column path
   (`tag__pk`) answers the form's 400; the schema build refuses such a declaration, so GraphQL cannot send it. Found
@@ -2328,11 +2328,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `DecimalField` with no `max_digits` (a serializer through an explicit `serializers.DecimalField(max_digits=None,
   decimal_places=None)`): PostgreSQL refuses the bind with a masked `DataError`, and SQLite stores it as `Infinity`
   or `0` without a word. Found verifying 591
-- [ ] 537. (robustness) `AllValuesMultipleFilter(field_name=<column>, method=...)` is refused at schema build ("exposes
+- [ ] 537. **SKIP for now** (upstream-seam refactor in flight: F11, filter scalar typing in `filters/inputs.py`). (robustness) `AllValuesMultipleFilter(field_name=<column>, method=...)` is refused at schema build ("exposes
   no form field") though its column alone would type it, as the same filter without `method=` is typed: its form field
   reads the per-request `model`, so the unbound copy builds none and the catch-all refuses before the column is
   consulted. Found implementing 517
-- [ ] 538. (robustness) A `DateRangeFilter` declared on a `Choices` column builds and types as the column's enum, while
+- [ ] 538. **SKIP for now** (upstream-seam refactor in flight: F11, filter scalar typing in `filters/inputs.py`). (robustness) A `DateRangeFilter` declared on a `Choices` column builds and types as the column's enum, while
   its own form field accepts only its fixed date-range keys, so every enum member answers `FILTER_INVALID` "Select a
   valid choice"; the same filter on a plain column is refused at schema build. Found verifying 518
 - [ ] 656. A whole-array `ArrayFilter` over an `ArrayField` column (generated through `Meta.filter_overrides`, or

@@ -13,8 +13,8 @@ giving one up elsewhere. A rule whose last ignore is cleared leaves the ledger a
 total (casts, or one rule's ignores) fails unless it carries a `Suppression-Growth-Approved:` trailer, the
 maintainer's consent.
 
-Progress: 28 done, 6 closed (survey verdicts), 3 open (one waits on upstream, one is the cast sweep's second
-phase, one is a behavior change outside typing). Ignore comments: 715 lines (1897 at the start of 0.0.15's ignore
+Progress: 29 done, 6 closed (survey verdicts), 2 open (one waits on upstream, one is a behavior change outside
+typing). Ignore comments: 715 lines (1897 at the start of 0.0.15's ignore
 sweep); `typing.cast` calls: 130 (432 at the start of the cast work).
 
 ## Pre-commit (`uvx pre-commit run --all-files`, 4ce779e1, clean clone)
@@ -160,6 +160,72 @@ sweep); `typing.cast` calls: 130 (432 at the start of the cast work).
   `require_instance`) where the value's source proves the class; a raising validator returns what it proved. Kept:
   a cast on a line a KANBAN row quotes, and two casts on security paths (`consumers.py::_ConnectionRevocation.close`,
   `schema.py::_consumer_extension_entries`) where the replacement would be a dead `is not None` that fails silently
+- [x] 37. Cast sweep, phase 2: the fixes phase 1 left because each writes a new raise or branch (with its test),
+  changes a public annotation, changes behavior for an input accepted today, or sits on a per-row path that needs a
+  benchmark. First pass done (package casts 191 to 153): generic `RelatedSetTargetMixin` and `convert_with_mro`
+  (`MroContinue` is the sentinel's public name), `decode_visible_relation_ids` typed as a value-or-defect pair,
+  `DecodeResult` as `DecodeOk | DecodeRefusal`, a generic `is_supplied` TypeGuard (a TypeIs would narrow the False
+  branch of an `object` argument to `Never`), `is_concrete_field` folds, and single raises through `require` /
+  `require_instance` with their tests. Second pass (package casts 152 to 130): `types/finalizer.py`'s registry reads
+  (`_definition_or_raise`, `declaration_map` over the related-declaration maps, `require` / `require_instance` where
+  the source guarantees the class), the bind-slot readers (`mutations/resolvers.py::_bound_model_fields`,
+  `types/base.py::_is_django_type_class`, `rest_framework/inputs.py::_is_serializer_class`, the hook-built form and
+  serializer constructor calls through `call_forwarded`), `_resolve_model` / `resolve_meta_model` answering the
+  unchecked `object` that `write_mixins.py::resolve_backed_model_or_raise` gates through `require_model_class`, and
+  `rest_framework/inputs.py::serializer_model` refusing a non-class nested `Meta.model` as a `ConfigurationError`.
+  Third pass (package casts 130 to 116): `utils/permissions.py::RelationHop` split into `DeclaredHop` (owner a set
+  class, declaration as collected) and `UndeclaredHop` (model always set, `scope` its own), the walker overloaded so the
+  declared reading returns `DeclaredHop`s (`relation_path_gates` reads each owner uncast), `isinstance` in place of the
+  `declared` property, and `filters/sets.py::_filter_declaration` / `_hop_target_set` reading a declared hop's
+  `FilterSet`, `RelatedFilter` and target set through `require` / `require_instance` (an active leaf crossing a `None`
+  hand-assigned into `related_filters`, which no collector stores, now raises `TypeError` there; with no other hop
+  in the walk it ran raw, and with declared hops before it it already raised `AttributeError`); the
+  `_LeafChain` reads go through `require_instance`. Fourth pass (package casts 116 to 107): the
+  `mutations/resolvers.py` write pipeline, whose statement order is a security invariant, left unmoved: the skeleton
+  holds a `_WriteTarget` (primary type, payload slot, model; `None` for the model-less plain form) and, once an
+  update / delete locates, a `_Located` (model, row), so its six reads of `primary_type` / `model` need no cast; a
+  model-backed write step's product and the delete rider's located row pass `require_instance(..., Model)` after the
+  permission gate (no shipped flavor answers anything else: the model and register steps return the decoded row, and
+  the `ModelForm` step and the serializer's `_checked_saved_result` already require a model instance; a product
+  without `pk` died with `AttributeError` at the same stage); `_model_write_step` takes either decode tuple and raises `ValueError` on any length but three, as the strict unpack it replaces did, and
+  `auth/mutations.py::_register_decode_step` raises `ValueError` on any length but four. Its user read keeps one
+  `cast("_User", ...)`: Django admits an `AUTH_USER_MODEL` that is not an `AbstractBaseUser` subclass and the
+  register bind refuses none, so a runtime check would refuse a project that works today. Fifth pass (package casts
+  107 to 98), the security-path singles, every check order kept: `utils/permissions.py::set_bound_definition` reads
+  the owner slot through `optional_instance(..., DjangoTypeDefinition)`;
+  `utils/permissions.py::run_active_input_permission_checks` requires a related target other than `None` to be a set
+  class carrying `ActiveInputPermissionMixin` (real MRO) and raises `TypeError` before the child dispatch and the
+  parent's branch gate, where a target without `_run_permission_checks` was skipped and the branch gate still fired;
+  `consumers.py::_ConnectionRevocation.close` requires the attempt task in `CLOSING`,
+  `consumers.py::_actor_is_current` reuses a revalidation only for an exact `float` stamp (anything else falls through
+  to the session read), and `consumers.py::_refreshed_actor` requires a `str` or `None` `session_key` (a failure the
+  checkpoint already answers fail-closed); `resource_policy.py::begin_resource_budget`'s scope carries the armed
+  snapshot `on_operation` scans with, `_DocumentWalk.operation` keeps its `read` set in a typed local,
+  `_DocumentWalk.walk` requires a `FieldNode` once both fragment kinds are handled, and
+  `_ValueBudget._charge_container` looks up only a `str` key in an input object's field map (a non-name key is charged
+  and classifies no spec, where an unhashable one raised `TypeError`). `auth/sessions.py::require_session` keeps its
+  cast: Django never checks that a custom `SESSION_ENGINE` store is a `SessionBase`, so a runtime check would refuse a
+  duck-typed store that works today, the reasoning that keeps the `_User` cast. Sixth pass (package casts 98 to
+  85), the per-row reads, each benchmarked: `utils/querysets.py::_reconstructed_value` keeps its `value_type`
+  identity cascade and asks the exact predicate only inside a taken branch (`is_exact_tuple_or_frozenset` is new),
+  and allocates a rebuilt node from `type(value)`, since the cascade leaves the cached class typed as a possible
+  container (seal time unchanged within noise); `optimizer/_context.py` reads the stashes through
+  `planned_resolver_keys`, `fk_id_elision_keys` and `stashed_strictness` (a stash of any other shape than a
+  `set` / `frozenset` or a `str` raises `TypeError` rather than reading as absent or `"off"`, so a wrong-shape stash
+  never disarms the N+1 guard); `utils/lazy.py::unwrap_lazy_object` is overloaded checker-only, `LazyObject[_T]` to `_T` and `_T` to
+  itself, so `types/relay.py::_resolve_id_default` and `relay.py::_stamp_node_type` read the unwrapped row uncast; the
+  async many-side reads (`types/resolvers.py::_visible_many_rows` and the many resolver) take the bound through
+  `require(..., is_queryset)`, since `bounded_rows_async` honestly answers a `list` for an evaluated queryset and
+  only the caller knows its source is unevaluated. Not taken: `optimizer/selections.py`'s `is_fragment` (its
+  `hasattr` check matches no class claim), `bind_auth_mutations`'s ledger (holders and the register rider share one
+  metaclass), the walker's hook-type reads (threading the type through four callers on the visibility path),
+  `ends_in_unique_column` / `TypeRegistry.unregister` (the check solves to `Unknown` type arguments),
+  `testing/client.py::_finish_response` (a TypedDict member has no runtime check), `strawberry_schema_from_info` /
+  `schema_config_from_info` (tests pass namespace stand-ins), `payload_cls_for` (the keyword constructor has no
+  runtime check). Upstream-only (re-verified against the lock): types-django-filter (`FilterSetMetaclass.__new__`
+  returning `Self`, `get_fields`, `FilterSetOptions.fields`, `Filter.filter`), django-stubs (`Options.concrete_model`
+  optional, `QuerySet(hints=)`, `Window(order_by=)`), Strawberry (`SliceMetadata.from_arguments` reading `info` only
+  without `max_results`, `Edge.node`, `Info._raw_info`)
 
 ## Rules off
 
@@ -261,72 +327,6 @@ Survey verdicts recorded so nothing is re-tried blind:
   `tests/_idioms.py::ModelSerializerBase`, `examples/fakeshop/apps/library/serializers.py::ModelSerializerBase` (which
   every library serializer derives from) and the two `products/serializers.py` `Meta` ignores, and lower
   `reportIncompatibleVariableOverride` by 4
-- [ ] 37. Cast sweep, phase 2: the fixes phase 1 left because each writes a new raise or branch (with its test),
-  changes a public annotation, changes behavior for an input accepted today, or sits on a per-row path that needs a
-  benchmark. First pass done (package casts 191 to 153): generic `RelatedSetTargetMixin` and `convert_with_mro`
-  (`MroContinue` is the sentinel's public name), `decode_visible_relation_ids` typed as a value-or-defect pair,
-  `DecodeResult` as `DecodeOk | DecodeRefusal`, a generic `is_supplied` TypeGuard (a TypeIs would narrow the False
-  branch of an `object` argument to `Never`), `is_concrete_field` folds, and single raises through `require` /
-  `require_instance` with their tests. Second pass (package casts 152 to 130): `types/finalizer.py`'s registry reads
-  (`_definition_or_raise`, `declaration_map` over the related-declaration maps, `require` / `require_instance` where
-  the source guarantees the class), the bind-slot readers (`mutations/resolvers.py::_bound_model_fields`,
-  `types/base.py::_is_django_type_class`, `rest_framework/inputs.py::_is_serializer_class`, the hook-built form and
-  serializer constructor calls through `call_forwarded`), `_resolve_model` / `resolve_meta_model` answering the
-  unchecked `object` that `write_mixins.py::resolve_backed_model_or_raise` gates through `require_model_class`, and
-  `rest_framework/inputs.py::serializer_model` refusing a non-class nested `Meta.model` as a `ConfigurationError`.
-  Third pass (package casts 130 to 116): `utils/permissions.py::RelationHop` split into `DeclaredHop` (owner a set
-  class, declaration as collected) and `UndeclaredHop` (model always set, `scope` its own), the walker overloaded so the
-  declared reading returns `DeclaredHop`s (`relation_path_gates` reads each owner uncast), `isinstance` in place of the
-  `declared` property, and `filters/sets.py::_filter_declaration` / `_hop_target_set` reading a declared hop's
-  `FilterSet`, `RelatedFilter` and target set through `require` / `require_instance` (an active leaf crossing a `None`
-  hand-assigned into `related_filters`, which no collector stores, now raises `TypeError` there; with no other hop
-  in the walk it ran raw, and with declared hops before it it already raised `AttributeError`); the
-  `_LeafChain` reads go through `require_instance`. Fourth pass (package casts 116 to 107): the
-  `mutations/resolvers.py` write pipeline, whose statement order is a security invariant, left unmoved: the skeleton
-  holds a `_WriteTarget` (primary type, payload slot, model; `None` for the model-less plain form) and, once an
-  update / delete locates, a `_Located` (model, row), so its six reads of `primary_type` / `model` need no cast; a
-  model-backed write step's product and the delete rider's located row pass `require_instance(..., Model)` after the
-  permission gate (no shipped flavor answers anything else: the model and register steps return the decoded row, and
-  the `ModelForm` step and the serializer's `_checked_saved_result` already require a model instance; a product
-  without `pk` died with `AttributeError` at the same stage); `_model_write_step` takes either decode tuple and raises `ValueError` on any length but three, as the strict unpack it replaces did, and
-  `auth/mutations.py::_register_decode_step` raises `ValueError` on any length but four. Its user read keeps one
-  `cast("_User", ...)`: Django admits an `AUTH_USER_MODEL` that is not an `AbstractBaseUser` subclass and the
-  register bind refuses none, so a runtime check would refuse a project that works today. Fifth pass (package casts
-  107 to 98), the security-path singles, every check order kept: `utils/permissions.py::set_bound_definition` reads
-  the owner slot through `optional_instance(..., DjangoTypeDefinition)`;
-  `utils/permissions.py::run_active_input_permission_checks` requires a related target other than `None` to be a set
-  class carrying `ActiveInputPermissionMixin` (real MRO) and raises `TypeError` before the child dispatch and the
-  parent's branch gate, where a target without `_run_permission_checks` was skipped and the branch gate still fired;
-  `consumers.py::_ConnectionRevocation.close` requires the attempt task in `CLOSING`,
-  `consumers.py::_actor_is_current` reuses a revalidation only for an exact `float` stamp (anything else falls through
-  to the session read), and `consumers.py::_refreshed_actor` requires a `str` or `None` `session_key` (a failure the
-  checkpoint already answers fail-closed); `resource_policy.py::begin_resource_budget`'s scope carries the armed
-  snapshot `on_operation` scans with, `_DocumentWalk.operation` keeps its `read` set in a typed local,
-  `_DocumentWalk.walk` requires a `FieldNode` once both fragment kinds are handled, and
-  `_ValueBudget._charge_container` looks up only a `str` key in an input object's field map (a non-name key is charged
-  and classifies no spec, where an unhashable one raised `TypeError`). `auth/sessions.py::require_session` keeps its
-  cast: Django never checks that a custom `SESSION_ENGINE` store is a `SessionBase`, so a runtime check would refuse a
-  duck-typed store that works today, the reasoning that keeps the `_User` cast. Sixth pass (package casts 98 to
-  85), the per-row reads, each benchmarked: `utils/querysets.py::_reconstructed_value` keeps its `value_type`
-  identity cascade and asks the exact predicate only inside a taken branch (`is_exact_tuple_or_frozenset` is new),
-  and allocates a rebuilt node from `type(value)`, since the cascade leaves the cached class typed as a possible
-  container (seal time unchanged within noise); `optimizer/_context.py` reads the stashes through
-  `planned_resolver_keys`, `fk_id_elision_keys` and `stashed_strictness` (a stash of any other shape than a
-  `set` / `frozenset` or a `str` raises `TypeError` rather than reading as absent or `"off"`, so a wrong-shape stash
-  never disarms the N+1 guard); `utils/lazy.py::unwrap_lazy_object` is overloaded checker-only, `LazyObject[_T]` to `_T` and `_T` to
-  itself, so `types/relay.py::_resolve_id_default` and `relay.py::_stamp_node_type` read the unwrapped row uncast; the
-  async many-side reads (`types/resolvers.py::_visible_many_rows` and the many resolver) take the bound through
-  `require(..., is_queryset)`, since `bounded_rows_async` honestly answers a `list` for an evaluated queryset and
-  only the caller knows its source is unevaluated. Not taken in the first pass: `optimizer/selections.py`'s `is_fragment` (its
-  `hasattr` check matches no class claim), `bind_auth_mutations`'s ledger (holders and the register rider share one
-  metaclass), the walker's hook-type reads (threading the type through four callers on the visibility path),
-  `ends_in_unique_column` / `TypeRegistry.unregister` (the check solves to `Unknown` type arguments),
-  `testing/client.py::_finish_response` (a TypedDict member has no runtime check), `strawberry_schema_from_info` /
-  `schema_config_from_info` (tests pass namespace stand-ins), `payload_cls_for` (the keyword constructor has no
-  runtime check). Upstream-only (re-verified against the lock): types-django-filter (`FilterSetMetaclass.__new__`
-  returning `Self`, `get_fields`, `FilterSetOptions.fields`, `Filter.filter`), django-stubs (`Options.concrete_model`
-  optional, `QuerySet(hints=)`, `Window(order_by=)`), Strawberry (`SliceMetadata.from_arguments` reading `info` only
-  without `max_results`, `Edge.node`, `Info._raw_info`)
 - [ ] 35. Behavior, not typing (item 6's open question): on the prefetch path a `get_queryset` hook reads the planning
   resolver's `info.field_name` / `selected_fields`; run by the relation's own resolver it reads the relation's. The
   optimizer should not change what a hook observes: build a per-relation raw info, as strawberry_django's
