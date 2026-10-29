@@ -1,4 +1,4 @@
-# Part 1 plan: row-preserving predicate machinery, enacted now (Rev 15)
+# Part 1 plan: row-preserving predicate machinery, enacted now (Rev 16)
 
 **Floor note (2026-08-05).** The package's declared Django floor moved from `>=5.2` to
 `>=5.2.16` by maintainer decision; Django `5.2.0`-`5.2.15` are no longer supported. Every
@@ -160,7 +160,8 @@ normalized baseline `django_strawberry_framework/filters/sets.py::_PACKAGE_POLIC
 ownership is decided by comparing the effective selection against that private baseline by
 normalized VALUE (`django_strawberry_framework/filters/sets.py::_normalize_policy_entry`),
 not by object identity, so a consumer mutating `BaseFilterSet.FILTER_DEFAULTS` before OR
-after package import can never taint the baseline (Blocker 1 + High 3). Family resolution
+after package import can never taint the baseline (Blocker 1 + High 3). (Rev 16 derives the
+public table from django-filter's own instead of authoring it; see below.) Family resolution
 replaces the round-7 MRO walk with **exact-class match** plus structurally-validated
 recognition of django-filter's genuine dynamic `ConcreteInFilter` / `ConcreteRangeFilter`
 (`django_strawberry_framework/filters/sets.py::_dynamic_csv_profile_for`), so an unaudited
@@ -182,10 +183,11 @@ whose own attribute-NAME set differs from a `pass`-body reference
 (`django_strawberry_framework/filters/sets.py::_EMPTY_BODY_DYNAMIC_CSV_ATTRS`), closing a gap
 where a DUNDER-named state/behavior member (`__evil_state__`, an overridden `__getattribute__`
 / `__init_subclass__`, `__slots__`) slipped the fail-closed check that a
-"startswith/endswith `__`" test had exempted; and a drift-guard test pins
-`_PUBLIC_PACKAGE_FILTER_DEFAULTS` to the installed django-filter's
-`FILTER_FOR_DBFIELD_DEFAULTS`, so a future release that changes the table fails loudly instead
-of generating from a stale mirror. The scope simplification collapsed Rev 13's per-family
+"startswith/endswith `__`" test had exempted; and a drift-guard test pinned
+the then-authored `_PUBLIC_PACKAGE_FILTER_DEFAULTS` to the installed django-filter's
+`FILTER_FOR_DBFIELD_DEFAULTS`, so a future release that changed the table failed loudly instead
+of generating from a stale mirror (retired in Rev 16, which derives the table from upstream's,
+so it cannot drift). The scope simplification collapsed Rev 13's per-family
 extractor tuples: `_FilterFamilyProfile` became a bare family IDENTITY (no `extractors`
 field, no computed `relevant_reads`), and the fingerprint schema became ONE canonical
 `_ALL_SEMANTIC_EXTRACTORS` tuple that `_fingerprint_of` ran for EVERY family — the
@@ -244,6 +246,20 @@ django-filter behavior, NOT to forbid custom filters, and NOT to add a consumer
   audited). Widening the range is an AUDIT, not a version bump: the SQL-shape and
   semantic-parity suite must pass against the new release first, and a CI tripwire test
   fails when the lock moves outside the audited range.
+
+Rev 16 stops authoring the generation-policy table.
+`django_strawberry_framework/filters/sets.py::_PUBLIC_PACKAGE_FILTER_DEFAULTS` is now a
+per-entry copy of django-filter's `FILTER_FOR_DBFIELD_DEFAULTS` taken when the module is
+imported, so the package's hand mirror and its four `extra` provider functions are gone and
+the drift-guard test with them. The pre-import-mutation defense moves to a provenance check,
+`django_strawberry_framework/filters/sets.py::_upstream_authored`: an entry enters
+`_PACKAGE_POLICY_BASELINE` only when its `filter_class` is the `django_filters.filters`
+class of that name and its `extra` provider, if any, is defined in
+`django_filters.filterset`; any other entry records a tainted sentinel no selection equals.
+A consumer's pre-import mutation of django-filter's table is therefore ADOPTED by the
+package's FilterSets, as stock django-filter adopts it, but every selection of a mutated
+entry is `override_generated`, never routable. A post-import mutation of upstream's dict
+never reaches the package table (each entry is copied).
 
 Two review findings **dissolved** under this architecture rather than being fixed: Medium 3
 (make behavioral/equivalence coverage of the fingerprint schema executable) and Medium 4
@@ -768,17 +784,19 @@ not routable / no snapshot row
   `django_strawberry_framework/filters/sets.py::FilterSet._merged_filter_defaults`
   builds, which the relation null test reads too), then a **normalized-VALUE**
   comparison of that selected
-  entry against the corresponding entry in the **private, immutable, package-authored
+  entry against the corresponding entry in the **private, immutable, package-owned
   normalized baseline**
   `django_strawberry_framework/filters/sets.py::_PACKAGE_POLICY_BASELINE` — a
   `MappingProxyType` of `_NormalizedPolicyEntry` records (each capturing an entry's
-  `filter_class` and `extra` provider) derived from the package's OWN
+  `filter_class` and `extra` provider) derived from the package's
   `django_strawberry_framework/filters/sets.py::_PUBLIC_PACKAGE_FILTER_DEFAULTS` table via
-  `django_strawberry_framework/filters/sets.py::_normalize_policy_entry`, never from
-  django-filter's live global. `_PUBLIC_PACKAGE_FILTER_DEFAULTS` is a package-AUTHORED
-  plain `dict` — it mirrors django-filter's `FILTER_FOR_DBFIELD_DEFAULTS` exactly but is
-  the package's own object graph built from stable filter classes and package-owned
-  `extra` provider functions — and is installed as `FilterSet.FILTER_DEFAULTS`, a plain,
+  `django_strawberry_framework/filters/sets.py::_normalize_policy_entry`, recording only the
+  entries `django_strawberry_framework/filters/sets.py::_upstream_authored` proves
+  django-filter's own (any other entry records a tainted sentinel no selection equals).
+  `_PUBLIC_PACKAGE_FILTER_DEFAULTS` is a plain `dict` copied entry by entry from
+  django-filter's `FILTER_FOR_DBFIELD_DEFAULTS` at import — the package's own object
+  graph, so a later mutation of upstream's dict never reaches it — and is installed as
+  `FilterSet.FILTER_DEFAULTS`, a plain,
   deepcopyable, customizable mapping (restoring the inherited `copy.deepcopy` /
   `dict(...)` / `[cls][key]=...` extension seam that round-7's nested-`MappingProxyType`
   install broke). The private `_PACKAGE_POLICY_BASELINE` is the SINGLE comparison target
@@ -787,11 +805,12 @@ not routable / no snapshot row
   _PUBLIC_PACKAGE_FILTER_DEFAULTS`), replacing round-7's reliance on comparing object
   identity against a frozen snapshot of django-filter's live-mutable, process-shared
   `BaseFilterSet.FILTER_DEFAULTS` (feedback Blocker 1 + High 3). Because the baseline
-  derives from the package's own table and is compared by value, it is
-  **import-order-immune**: a consumer mutating `BaseFilterSet.FILTER_DEFAULTS` before OR
-  after package import cannot taint it, closing at its source the round-7 defect of
-  capturing a consumer's pre-import mutation as trusted package policy and treating it as
-  routable.
+  records only upstream-authored entries and is compared by value, a consumer mutating
+  `BaseFilterSet.FILTER_DEFAULTS` before package import cannot make its entry trusted
+  package policy (the entry is tainted, so every selection of it is
+  `override_generated`), and a mutation after import never reaches the package table,
+  closing at its source the round-7 defect of capturing a consumer's pre-import mutation
+  as trusted package policy and treating it as routable.
   Merge order is load-bearing: a more-derived `FILTER_DEFAULTS` default shadows a
   less-derived override (e.g. a `OneToOneField` selection keeps the base default even
   when `filter_overrides` supplies a `ForeignKey` entry), so an earlier revision that

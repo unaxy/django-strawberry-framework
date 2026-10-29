@@ -431,7 +431,7 @@ it lands with its tick.
       `_DatabaseFailure` and then calls Django's own classmethod; both pinned Django bodies go.
     - [x] 22b. `_strawberry_patches.py::_patched_parse_query_params` delegates to upstream's own method under a
       ContextVar flag instead of a pinned copy.
-    - [ ] 22c. `filters/sets.py::_PUBLIC_PACKAGE_FILTER_DEFAULTS` is built from django-filter's
+    - [x] 22c. `filters/sets.py::_PUBLIC_PACKAGE_FILTER_DEFAULTS` is built from django-filter's
       `FILTER_FOR_DBFIELD_DEFAULTS` at import, with a provenance check for the baseline.
     - [ ] 22d. `filters/base.py::ArrayFilter.filter` hands every value but `[]` to `Filter.filter`.
     - [ ] 22e. `types/relay.py::_resolve_id_default` goes; types inherit `strawberry.relay.Node.resolve_id`.
@@ -576,12 +576,12 @@ it lands with its tick.
   - Behaviour change: changes the wire.
   - Risk / blockers: the attribution half is item 22.
 
-- [ ] 31. (F8) `_PUBLIC_PACKAGE_FILTER_DEFAULTS` is a verbatim copy of `FILTER_FOR_DBFIELD_DEFAULTS`
+- [x] 31. (F8) `_PUBLIC_PACKAGE_FILTER_DEFAULTS` is a verbatim copy of `FILTER_FOR_DBFIELD_DEFAULTS`
   - Our code: `filters/sets.py::_PUBLIC_PACKAGE_FILTER_DEFAULTS` (~60 lines).
   - Upstream: `django_filters/filterset.py::FILTER_FOR_DBFIELD_DEFAULTS`.
   - Lines: ~60.
   - Status: CONFIRMED identical on django-filter 26.1: 0 key, class or extra diffs, and 286 extra-provider outputs with
-    0 diffs.
+    0 diffs. Landed as 22c (derived from upstream, provenance-checked baseline).
   - Reason to keep ours: it anchors optimizer-eligibility ownership against a consumer mutating django-filter's
     global before import. That is a policy choice, not a missing seam.
   - Behaviour change: none.

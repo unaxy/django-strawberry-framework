@@ -52,7 +52,6 @@ from apps.products.models import Category, Item
 from apps.scalars import models as scalar_models
 from asgiref.sync import sync_to_async
 from django import forms
-from django.apps import apps
 from django.contrib.auth.models import User
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import FieldError
@@ -63,7 +62,6 @@ from django.db.backends.base.base import BaseDatabaseWrapper
 from django.db.backends.base.operations import BaseDatabaseOperations
 from django.db.backends.sqlite3.operations import DatabaseOperations as SQLiteOperations
 from django.db.models import F, Lookup, Q, QuerySet, Transform
-from django.db.models.fields.related import ManyToManyRel, ManyToOneRel, OneToOneRel
 from django.db.models.functions import Length
 from django.forms import ModelChoiceField, ModelMultipleChoiceField
 from django.http import HttpRequest, QueryDict
@@ -153,6 +151,7 @@ from django_strawberry_framework.filters.sets import (
     _NormalizedPolicyEntry,
     _release_is_audited,
     _stamp_generation_provenance,
+    _upstream_authored,
     filter_generation_provenance,
 )
 from django_strawberry_framework.optimizer.predicates import correlated_inner_root
@@ -15905,8 +15904,8 @@ def test_shallow_copy_untouched_entry_stays_framework_default() -> None:
 # extension seam), NOT a nested ``MappingProxyType`` that breaks ``copy.deepcopy`` on
 # every Python version. Ownership is instead anchored on the PRIVATE, immutable,
 # normalized ``_PACKAGE_POLICY_BASELINE`` (a distinct object graph derived from the
-# package's OWN table), compared by VALUE -- so the public surface can be freely
-# copyable without weakening the ownership boundary. The ``deepcopy`` / mutation
+# package table's upstream-authored entries), compared by VALUE -- so the public
+# surface can be freely copyable without weakening the ownership boundary. The ``deepcopy`` / mutation
 # ``TypeError``s a nested ``MappingProxyType`` produced were a consumer-visible
 # compatibility break, not a feature, so these tests assert they do NOT happen.
 # ======================================================================
@@ -15916,7 +15915,7 @@ def test_public_filter_defaults_is_deepcopyable() -> None:
     """``copy.deepcopy(FilterSet.FILTER_DEFAULTS)`` works and the copy is independent.
 
     The public table is a plain ``dict`` of plain ``dict`` entries (the ``extra``
-    providers are module-level functions ``deepcopy`` treats as atomic), so
+    providers are functions, which ``deepcopy`` treats as atomic), so
     ``copy.deepcopy`` succeeds -- keeping django-filter's inherited customization seam,
     which a nested ``MappingProxyType`` would break on both the Python 3.10 floor and
     current Python. This is a pure ``deepcopy`` of plain dicts, so it is
@@ -15993,7 +15992,7 @@ def test_inherited_defaults_identity() -> None:
     """A pristine subclass inherits ``_PUBLIC_PACKAGE_FILTER_DEFAULTS`` by identity.
 
     An unmodified subclass does not reassign ``FILTER_DEFAULTS``, so its
-    ``cls.FILTER_DEFAULTS`` IS the package-authored public table -- the identity
+    ``cls.FILTER_DEFAULTS`` IS the package's public table -- the identity
     ``_is_generation_capable`` checks as the coarse whole-table-replacement gate.
     """
 
@@ -16006,130 +16005,88 @@ def test_inherited_defaults_identity() -> None:
     assert InheritedDefaultsFilter._is_generation_capable() is True
 
 
-def test_public_filter_defaults_matches_upstream_django_filter_table() -> None:
-    """Drift guard: the package table's SHAPE matches upstream ``FILTER_FOR_DBFIELD_DEFAULTS``.
+def _consumer_extra(_field: object) -> dict[str, object]:
+    return {"exclude": True}
 
-    The package table is a package-AUTHORED copy, not a snapshot of django-filter's
-    mutable global. That copy is deliberate duplication, so it can silently drift
-    from django-filter across versions: a new
-    field type, a changed default ``filter_class``, or an added/removed ``extra`` in a
-    future release would go unnoticed.
 
-    SCOPE -- what this actually compares:
-    the key SET, the per-key ``filter_class`` IDENTITY, ``extra`` PRESENCE per key, and for
-    the six relation kinds the provider's OUTPUT keys plus ``to_field_name`` /
-    ``null_label`` / ``queryset.model``. It does NOT compare full queryset semantics
-    (predicates, database alias, hints, ordering), nor anything INSIDE upstream's
-    registered classes -- a release that changes ``CharFilter.filter`` while keeping the
-    table identical passes this test. Behavior inside an audited release is covered by the
-    optimizer's audited-version range (``_release_is_audited``), not here.
+_ConsumerNamedCharFilter = type("CharFilter", (CharFilter,), {})
+_ConsumerJSONFilter = type("ConsumerJSONFilter", (CharFilter,), {})
 
-    Scope of enforcement: this is a PACKAGE test, so it guards THIS repository's locked
-    run, not a consumer application's installed version. The consumer-facing boundary is
-    the audited-range gate, which disables the optimization on an unaudited release.
+
+@pytest.mark.parametrize(
+    ("entry", "expected"),
+    [
+        pytest.param(UPSTREAM[dj_models.CharField], True, id="pristine"),
+        pytest.param(UPSTREAM[dj_models.ForeignKey], True, id="pristine-lambda-extra"),
+        pytest.param({"filter_class": NumberFilter}, True, id="upstream-class-no-extra"),
+        pytest.param({"filter_class": _ConsumerNamedCharFilter}, False, id="consumer-namesake"),
+        pytest.param({}, False, id="no-filter-class"),
+        pytest.param(
+            {"filter_class": ModelChoiceFilter, "extra": _consumer_extra},
+            False,
+            id="consumer-extra",
+        ),
+        pytest.param({"filter_class": _ConsumerJSONFilter}, False, id="consumer-added-key"),
+    ],
+)
+def test_upstream_authored_accepts_only_django_filters_own_entries(
+    entry: dict[str, object],
+    *,
+    expected: bool,
+) -> None:
+    """``_upstream_authored`` accepts an entry only when django-filter itself wrote it.
+
+    Its ``filter_class`` must be the ``django_filters.filters`` class of that name (a
+    consumer subclass reusing the name ``CharFilter`` is rejected) and its ``extra``
+    provider, when present, must be defined in ``django_filters.filterset``.
     """
-    package = _PUBLIC_PACKAGE_FILTER_DEFAULTS
-
-    # (1) identical key set -- a new/removed upstream field type surfaces here.
-    assert set(package) == set(UPSTREAM)
-    for field_type in UPSTREAM:
-        up_entry, pkg_entry = UPSTREAM[field_type], package[field_type]
-        # (2) identical default filter_class per key.
-        assert up_entry.get("filter_class") is pkg_entry.get("filter_class"), field_type.__name__
-        # (3) identical extra-presence per key.
-        assert ("extra" in up_entry) == ("extra" in pkg_entry), field_type.__name__
-
-    # (4) the six relation ``extra`` providers must compute byte-equivalent output. Reading
-    # the same live-field attributes as upstream's lambdas is what keeps generation
-    # identical to using django-filter's own table; a representative field per relation
-    # kind proves the mirror still reads what upstream reads.
-    def _first_field(predicate: Callable[[object], bool]) -> object | None:
-        for model in apps.get_models():
-            for field in model._meta.get_fields():
-                if predicate(field):
-                    return field
-        return None
-
-    relation_samples = {
-        dj_models.ForeignKey: _first_field(
-            lambda f: (
-                isinstance(f, dj_models.ForeignKey) and not isinstance(f, dj_models.OneToOneField)
-            ),
-        ),
-        dj_models.OneToOneField: _first_field(
-            lambda f: isinstance(f, dj_models.OneToOneField),
-        ),
-        dj_models.ManyToManyField: _first_field(
-            lambda f: isinstance(f, dj_models.ManyToManyField),
-        ),
-        ManyToOneRel: _first_field(
-            lambda f: (
-                isinstance(f, ManyToOneRel) and not isinstance(f, (ManyToManyRel, OneToOneRel))
-            ),
-        ),
-        ManyToManyRel: _first_field(lambda f: isinstance(f, ManyToManyRel)),
-        OneToOneRel: _first_field(lambda f: isinstance(f, OneToOneRel)),
-    }
-    upstream_by_type: dict[type, dict[str, object]] = dict(UPSTREAM.items())
-    for field_type, sample in relation_samples.items():
-        assert sample is not None, f"no live sample field for {field_type.__name__}"
-        upstream_entry = upstream_by_type[field_type]
-        up_provider = upstream_entry["extra"]
-        assert callable(up_provider), field_type.__name__
-        up_extra = up_provider(sample)
-        assert is_object_dict(up_extra), field_type.__name__
-        pkg_provider = package[field_type]["extra"]
-        assert callable(pkg_provider), field_type.__name__
-        pkg_extra = pkg_provider(sample)
-        assert is_object_dict(pkg_extra), field_type.__name__
-        assert set(up_extra) == set(pkg_extra), field_type.__name__
-        assert up_extra.get("to_field_name") == pkg_extra.get("to_field_name"), field_type.__name__
-        assert up_extra.get("null_label") == pkg_extra.get("null_label"), field_type.__name__
-        pkg_queryset = pkg_extra["queryset"]
-        assert isinstance(pkg_queryset, QuerySet), field_type.__name__
-        up_queryset = up_extra["queryset"]
-        assert isinstance(up_queryset, QuerySet), field_type.__name__
-        assert up_queryset.model is pkg_queryset.model, field_type.__name__
+    assert _upstream_authored(entry) is expected
 
 
 # ======================================================================
 # Package ownership must be
 # ------------------------------------------------------------------------
-# anchored on the package-AUTHORED table, not on a snapshot of django-filter's mutable
-# global. These regressions prove: (a) a consumer mutation of the global BEFORE the
-# package filter module is imported is NOT captured; (b) an ordering filter and (c) an
+# anchored on upstream-authored entries only. These regressions prove: (a) a consumer
+# mutation of django-filter's table BEFORE the package filter module is imported is
+# adopted but never trusted as package policy; (b) an ordering filter and (c) an
 # ``exclude=True`` provider installed via ``Meta.filter_overrides`` are consumer-owned
 # and never routed; and (d) pristine package defaults still produce ROUTABLE
 # candidates.
 # ======================================================================
 
 
-def test_import_order_does_not_capture_consumer_global_mutation() -> None:
-    """Fresh-process: a pre-import mutation of django-filter's global is NOT captured.
+def test_pre_import_consumer_mutation_is_adopted_but_override_generated() -> None:
+    """Fresh-process: a pre-import mutation of django-filter's table is adopted, not trusted.
 
-    Snapshotting ``filterset.BaseFilterSet.FILTER_DEFAULTS`` at
-    import time would freeze whatever a consumer/reusable-app/init-hook had already put there
-    into the "package" baseline. In a FRESH process, a consumer swaps the ``TextField``
-    ``filter_class`` to its own class and installs an ``exclude=True`` ``extra`` provider
-    BEFORE importing ``django_strawberry_framework.filters.sets``; the package table must
-    still hold ``CharFilter`` with no ``extra`` for those classes, because it authors its
-    OWN table and never reads the global. Process isolation makes global-state
+    In a FRESH process, a consumer swaps the ``TextField`` ``filter_class`` to its own
+    class and installs an ``exclude=True`` ``extra`` provider for ``CharField`` BEFORE
+    importing ``django_strawberry_framework.filters.sets``. The package table copies
+    django-filter's, so it carries both mutated entries (as stock django-filter would use
+    them), but neither is upstream-authored: their baseline records are the truthy
+    tainted sentinel, so every selection of them is ``override_generated``, while an
+    untouched class stays ``framework_default``. Process isolation makes global-state
     restoration in the parent unnecessary (the child is disposable); the child exits 0.
     """
     run_in_fresh_process(
         "from django.db import models\n"
-        "from django_filters import CharFilter, filterset\n"
+        "from django_filters import filterset\n"
+        "from django_filters import CharFilter\n"
         "Consumer = type('Consumer', (CharFilter,), {})\n"
+        "consumer_extra = lambda f: {'exclude': True}\n"
         "g = filterset.BaseFilterSet.FILTER_DEFAULTS\n"
         "g[models.TextField]['filter_class'] = Consumer\n"
-        "g[models.CharField]['extra'] = (lambda f: {'exclude': True})\n"
+        "g[models.CharField]['extra'] = consumer_extra\n"
         "assert 'django_strawberry_framework.filters.sets' not in sys.modules\n"
         "import django_strawberry_framework.filters.sets as S\n"
         "pub = S.FilterSet.FILTER_DEFAULTS\n"
-        "assert pub[models.TextField]['filter_class'] is CharFilter, pub[models.TextField]\n"
-        "assert pub[models.TextField]['filter_class'] is not Consumer\n"
-        "assert 'extra' not in pub[models.CharField], pub[models.CharField]\n"
-        "assert S._PACKAGE_POLICY_BASELINE[models.TextField].filter_class is CharFilter\n",
+        "assert pub[models.TextField]['filter_class'] is Consumer, pub[models.TextField]\n"
+        "assert pub[models.CharField]['extra'] is consumer_extra, pub[models.CharField]\n"
+        "origin = S.FilterSet._origin_for_selection_class\n"
+        "assert origin(models.TextField) == 'override_generated'\n"
+        "assert origin(models.CharField) == 'override_generated'\n"
+        "assert origin(models.IntegerField) == 'framework_default'\n"
+        "tainted = S._PACKAGE_POLICY_BASELINE[models.TextField]\n"
+        "assert tainted is S._TAINTED_POLICY and tainted\n",
     )
 
 
@@ -16241,13 +16198,13 @@ def test_pristine_defaults_produce_routable_candidate() -> None:
 
 
 @pytest.mark.django_db
-def test_reverse_o2o_relation_generation_uses_package_reverse_o2o_provider() -> None:
-    """Generating a reverse-O2O filter exercises the package-owned ``_reverse_o2o_extra``.
+def test_reverse_o2o_relation_generation_uses_upstream_reverse_o2o_provider() -> None:
+    """Generating a reverse-O2O filter runs the table's ``OneToOneRel`` ``extra`` provider.
 
     ``Patron.card`` is the reverse of ``MembershipCard.patron`` (a ``OneToOneRel``), so
-    django-filter selects the package table's ``OneToOneRel`` entry and calls
-    ``_reverse_o2o_extra`` to build the choice queryset from the reverse relation. This
-    pins coverage of the package-owned reverse-O2O provider (the rarest relation kind).
+    django-filter selects the package table's ``OneToOneRel`` entry (copied from
+    upstream's) and calls its ``extra`` provider to build the choice queryset from the
+    reverse relation (the rarest relation kind).
     The generated leaf is then the raw-pk ``RelationPkFilter`` (no ``DjangoType`` exposes
     ``MembershipCard`` here), which drops the model-choice ``queryset`` kwarg.
     """
@@ -16277,7 +16234,7 @@ def test_replacement_shadow_does_not_contaminate_other_filtersets() -> None:
     queryset) in a shadow copied from ``FilterSet.FILTER_DEFAULTS``; filterset B is an
     unmodified ``FilterSet`` on the SAME model. A keeps its own
     ``ModelMultipleChoiceFilter`` while B still generates the framework GlobalID for the
-    relation, and the shared package-authored public entry is unchanged -- proving the
+    relation, and the shared package public entry is unchanged -- proving the
     customization is confined to A. A ``{**FilterSet.FILTER_DEFAULTS, M2M: {...}}``
     shadow puts a NEW object at the M2M key and carries every other entry by reference,
     so A never mutates the shared package table; ownership is decided by normalizing A's
@@ -16312,7 +16269,7 @@ def test_replacement_shadow_does_not_contaminate_other_filtersets() -> None:
     assert isinstance(a_leaf, django_filters.ModelMultipleChoiceFilter)
     assert not isinstance(a_leaf, GlobalIDMultipleChoiceFilter)
     assert isinstance(b_leaf, GlobalIDMultipleChoiceFilter)
-    # The shared package-authored public entry is unchanged -- no cross-filterset
+    # The shared package public entry is unchanged -- no cross-filterset
     # contamination -- and the private normalized baseline still holds the framework
     # policy record.
     assert (
