@@ -1865,9 +1865,9 @@ def test_order_column_paths_expands_only_a_terminal_foreign_object(
     "double",
     [
         SimpleNamespace(many_to_many=True, through=None, remote_field=None),
-        SimpleNamespace(many_to_many=True, through=Book, m2m_field_name=None),
+        SimpleNamespace(many_to_many=True, is_relation=True, through=Book),
     ],
-    ids=["no_through_model", "no_naming_api"],
+    ids=["no_through_model", "no_path_infos"],
 )
 def test_m2m_through_link_answers_empty_without_a_through_link(double: SimpleNamespace) -> None:
     """An M2M hop whose through FKs do not resolve has no link pairs."""
