@@ -175,17 +175,14 @@ defined but never called anywhere in the installed package at 0.322.2 or
   per-param message with a "request body" message on a bodyless GET.
 
 The two GET sites are therefore shielded: :func:`apply` also installs
-:func:`_patched_parse_query_params`, a source-pinned reimplementation
-of upstream's ``parse_query_params`` whose two nested parses call
-:func:`_translated_parse_json`, keeping the envelope guard off the GET
-path while the shared translator still owns the decode-failure error channel;
-upstream's per-param handling keeps ownership of validity there while
-the wrapper keeps hardening the seven
-body/multipart sites. Because the shield is a *reimplementation* rather
-than a delegating wrapper, ``_validate_upstream_shape`` pins the
-superseded upstream body source so an
-upstream body change fails loudly at ``apply()`` time instead of being
-silently superseded. The shield shares the envelope guard's lifecycle:
+:func:`_patched_parse_query_params`, which calls upstream's own
+``parse_query_params`` with ``_IN_QUERY_PARAMS`` set. The two nested
+``self.parse_json`` calls still reach :func:`_patched_parse_json`, which
+reads the flag and skips the envelope guard while keeping the
+decode-failure translation; upstream's per-param handling keeps ownership
+of validity there while the wrapper keeps hardening the seven
+body/multipart sites. Because the shield delegates, an upstream change to
+``parse_query_params`` flows through it. The shield shares the envelope guard's lifecycle:
 retire both together once upstream guards both ``.get()`` sites (see
 "Upstream status" below).
 
@@ -381,7 +378,7 @@ the AppConfig.
 """
 
 import inspect
-import textwrap
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, NamedTuple, TypeVar, cast
 
 from .conf import upstream_patches_enabled
@@ -548,33 +545,14 @@ _UPSTREAM_JSON_PARSE_REASON = "Unable to parse request body as JSON"
 _UPSTREAM_MULTIPART_PARSE_REASON = "Unable to parse the multipart body"
 
 
-# The exact upstream body :func:`_patched_parse_query_params` supersedes
-# (verbatim at strawberry-graphql 0.322.2 and 0.324.0, dedented). Because the shield
-# REIMPLEMENTS upstream's body instead of wrapping and delegating to it, an
-# upstream body change does not flow through the patch the way it does for
-# the delegating ``parse_json`` wrapper. ``_validate_upstream_shape``
-# therefore pins this source so any upstream body change - new query params,
-# changed falsy-skip semantics, or different parse routing - fails loudly at
-# apply() time instead of being silently superseded.
-_UPSTREAM_PARSE_QUERY_PARAMS_SOURCE = textwrap.dedent(
-    """\
-    def parse_query_params(self, params: QueryParams) -> dict[str, Any]:
-        params = dict(params)
-
-        if "variables" in params:
-            variables = params["variables"]
-
-            if variables:
-                params["variables"] = self.parse_json(variables)
-
-        if "extensions" in params:
-            extensions = params["extensions"]
-
-            if extensions:
-                params["extensions"] = self.parse_json(extensions)
-
-        return params
-    """,
+# True while :func:`_patched_parse_query_params` runs upstream's own
+# ``parse_query_params``: the nested ``self.parse_json`` calls are GET query-param
+# parses, which :func:`_patched_parse_json` reads to keep its request-body guard off.
+# A context variable, so concurrent requests on other threads or async tasks never
+# see it.
+_IN_QUERY_PARAMS: ContextVar[bool] = ContextVar(
+    "django_strawberry_framework_in_query_params",
+    default=False,
 )
 
 
@@ -636,16 +614,9 @@ def _upstream_captures() -> _UpstreamCaptures:
 def _validate_upstream_shape() -> _UpstreamCaptures:
     """Fail loudly when Strawberry no longer exposes the method shapes we patch.
 
-    Four patched methods have two validation depths (delegators pin the call
-    shape, reimplementers pin the body):
-
-    - ``parse_json`` is wrapped and delegated to, so only its presence and
-      parameter signature are pinned; upstream body changes flow through the call.
-    - ``parse_query_params`` is reimplemented, so on top of presence and
-      the ``(self, params)`` arity the captured original's body source
-      is pinned against ``_UPSTREAM_PARSE_QUERY_PARAMS_SOURCE``.
-      Unreadable source (e.g. a bytecode-only distribution) is treated
-      as drift: an unverifiable body must not be silently superseded.
+    All four patched methods delegate to the captured original, so only each
+    one's presence and ``(self, argument)`` signature are pinned; upstream body
+    changes flow through the call.
 
     Returns the captures (see :func:`_upstream_captures`) the install step uses.
     """
@@ -667,54 +638,7 @@ def _validate_upstream_shape() -> _UpstreamCaptures:
                 'Disable this patch with APPLY_UPSTREAM_PATCHES = {"strawberry": False} '
                 "or use a supported Strawberry version.",
             )
-    try:
-        source = textwrap.dedent(inspect.getsource(upstream.parse_query_params))
-    except (OSError, TypeError):
-        source = None
-    if source != _UPSTREAM_PARSE_QUERY_PARAMS_SOURCE:
-        raise RuntimeError(
-            "Cannot apply django-strawberry-framework's Strawberry patch: "
-            "BaseView.parse_query_params no longer matches the upstream body "
-            "this patch supersedes. "
-            'Disable this patch with APPLY_UPSTREAM_PATCHES = {"strawberry": False} '
-            "or use a supported Strawberry version.",
-        )
     return upstream
-
-
-def _translated_parse_json(self: "_AnyBaseView", data: "str | bytes") -> object:
-    """Parse through the captured original, translating the raises it lets escape as 500s.
-
-    Upstream's ``parse_json`` translates ``json.JSONDecodeError`` into
-    ``HTTPException(400, ...)`` and nothing else. Two further client-input
-    raises escape it as unhandled ``500``s, from every one of its call sites:
-
-    - ``UnicodeDecodeError`` - ``json.loads`` on ``bytes`` that are not
-      decodable under the encoding it detects; a ``ValueError``, so a bare
-      ``except ValueError`` would have covered it.
-    - ``RecursionError`` - a pathologically nested document drives the
-      parser past the interpreter's C-stack budget (a ~150 KB body on this
-      interpreter, a couple of kilobytes where that budget is smaller); a
-      ``RuntimeError``, reachable with input no larger than the body cap.
-
-    Both mean "the request body is not a parseable JSON document", which is
-    exactly the condition upstream already answers with
-    ``HTTPException(400, _UPSTREAM_JSON_PARSE_REASON)`` - so each is
-    translated into that same rejection, indistinguishable from upstream's
-    own except for ``__cause__``.
-
-    Shared by :func:`_patched_parse_json` (which adds the envelope guard)
-    and :func:`_patched_parse_query_params` (whose GET parses must keep
-    upstream's per-param semantics but own this same error channel), so the
-    two cannot drift about which raises count as client input.
-    """
-    upstream = _upstream_captures()
-    try:
-        return upstream.parse_json(self, data)
-    except UnicodeDecodeError as exc:
-        raise upstream.http_exception(400, _UPSTREAM_JSON_PARSE_REASON) from exc
-    except RecursionError as exc:
-        raise upstream.http_exception(400, _UPSTREAM_JSON_PARSE_REASON) from exc
 
 
 def _is_operation_batch(parsed: object) -> "TypeGuard[list[dict[object, object]]]":
@@ -724,22 +648,30 @@ def _is_operation_batch(parsed: object) -> "TypeGuard[list[dict[object, object]]
     return all(is_dict(item) for item in parsed)
 
 
-def _patched_parse_json(
-    self: "_AnyBaseView",
-    data: "str | bytes",
-) -> "dict[object, object] | list[dict[object, object]]":
+def _patched_parse_json(self: "_AnyBaseView", data: "str | bytes") -> object:
     """Parse as the patched ``BaseView.parse_json``, closing two upstream gaps.
 
     1. **The ``UnicodeDecodeError`` / ``RecursionError`` translation.**
-       Upstream's ``parse_json`` catches only ``json.JSONDecodeError``, but
-       two further client-input raises escape it as unhandled ``500``s:
-       ``json.loads`` on ``bytes`` that are not decodable under the encoding
-       it detects raises ``UnicodeDecodeError`` (a ``ValueError``, and not a
-       ``JSONDecodeError``), and a pathologically nested document raises
-       ``RecursionError`` (a ``RuntimeError``). Both are translated here to
-       the same ``HTTPException(400, ...)`` Strawberry already raises for
-       unparseable JSON, which is why closing the gap needs no new status
-       code or message; see :func:`_translated_parse_json`.
+       Upstream's ``parse_json`` translates ``json.JSONDecodeError`` into
+       ``HTTPException(400, ...)`` and nothing else. Two further
+       client-input raises escape it as unhandled ``500``s, from every one
+       of its call sites:
+
+       - ``UnicodeDecodeError`` - ``json.loads`` on ``bytes`` that are not
+         decodable under the encoding it detects; a ``ValueError``, so a
+         bare ``except ValueError`` would have covered it.
+       - ``RecursionError`` - a pathologically nested document drives the
+         parser past the interpreter's C-stack budget (a ~150 KB body on
+         this interpreter, a couple of kilobytes where that budget is
+         smaller); a ``RuntimeError``, reachable with input no larger than
+         the body cap.
+
+       Both mean "the request body is not a parseable JSON document", which
+       is exactly the condition upstream already answers with
+       ``HTTPException(400, _UPSTREAM_JSON_PARSE_REASON)`` - so each is
+       translated into that same rejection, indistinguishable from
+       upstream's own except for ``__cause__``. This needs no new status
+       code or message.
     2. A successfully-parsed body that is not a GraphQL-over-HTTP envelope
        is rejected with ``HTTPException(400, ...)``. ``parse_http_body``
        handles a JSON object (a single operation) and a JSON array of
@@ -776,21 +708,26 @@ def _patched_parse_json(
     docstring's inventory): correct at the seven body/multipart sites (at
     the multipart sites it converts an upstream scalar-``operations``/``map``
     ``500`` into this ``400``; the paired multipart delegates handle the
-    remaining map-specific structural errors), and deliberately kept OFF the two GET
-    sites inside
-    ``parse_query_params``, which :func:`_patched_parse_query_params`
-    routes through the shared translator instead of the guard, so upstream's
-    own per-param handling keeps ownership of validity there. Both views inherit the single
-    ``BaseView`` method, so one install covers sync and async. Every
-    other outcome - a successful object / well-typed-array parse, or any
-    other exception - is passed through untouched.
+    remaining map-specific structural errors), and deliberately kept OFF the
+    two GET sites inside ``parse_query_params``: while
+    :func:`_patched_parse_query_params` runs upstream's method,
+    ``_IN_QUERY_PARAMS`` is set and the parsed value is returned unguarded,
+    so upstream's own per-param handling keeps ownership of validity there.
+    The decode-failure translation applies on that path too. Both views
+    inherit the single ``BaseView`` method, so one install covers sync and
+    async. Every other outcome - a successful object / well-typed-array
+    parse, or any other exception - is passed through untouched.
     """
-    parsed = _translated_parse_json(self, data)
-    if is_dict(parsed):
+    upstream = _upstream_captures()
+    try:
+        parsed = upstream.parse_json(self, data)
+    except UnicodeDecodeError as exc:
+        raise upstream.http_exception(400, _UPSTREAM_JSON_PARSE_REASON) from exc
+    except RecursionError as exc:
+        raise upstream.http_exception(400, _UPSTREAM_JSON_PARSE_REASON) from exc
+    if _IN_QUERY_PARAMS.get() or is_dict(parsed) or _is_operation_batch(parsed):
         return parsed
-    if _is_operation_batch(parsed):
-        return parsed
-    raise _upstream_captures().http_exception(
+    raise upstream.http_exception(
         400,
         "The GraphQL request body must be a JSON object "
         "(or an array of operations for a batch request).",
@@ -801,51 +738,38 @@ def _patched_parse_query_params(
     self: "_AnyBaseView",
     params: "QueryParams",
 ) -> "dict[str, object]":
-    """Reimplement ``BaseView.parse_query_params`` with the nested parses routed around the envelope guard.
+    """Run upstream's ``BaseView.parse_query_params`` with the envelope guard turned off.
 
-    Byte-for-byte upstream semantics (the superseded body is pinned as
-    ``_UPSTREAM_PARSE_QUERY_PARAMS_SOURCE``) except that the two nested
-    ``self.parse_json`` calls go through :func:`_translated_parse_json`
-    instead of the patched method. That keeps
-    :func:`_patched_parse_json`'s scalar guard - a request-*body*
-    contract - out of the GET query-param path, where upstream's
-    ``parse_http_body`` has its own precise handling downstream:
+    Upstream's method parses the ``variables`` / ``extensions`` params through
+    ``self.parse_json``, which reaches :func:`_patched_parse_json`. Its scalar
+    guard is a request-*body* contract, and upstream's ``parse_http_body``
+    already handles query params precisely downstream, so this delegate sets
+    ``_IN_QUERY_PARAMS`` for the duration of the call and the guard steps
+    aside:
 
     - ``variables=null`` / ``extensions=null`` parse to ``None`` and the
       request executes (valid "object or null" values per upstream);
     - a scalar param (``variables=42``) parses and then gets upstream's
       per-param ``400`` ("must be an object or null, if provided"),
       not the guard's request-body message on a bodyless GET;
-    - malformed JSON still becomes upstream's ``HTTPException(400,
-      ...)``, raised inside the delegated original. Of the decode-failure
-      translator's two raises, the decode half is moot on this path - query
-      params arrive as ``str`` (Django has already decoded the query
-      string), so ``json.loads`` cannot raise ``UnicodeDecodeError``
-      here - while the recursion half is real: a pathologically deep
-      param reaches the same C-stack overflow, and the shared
-      translator turns it into the same controlled ``400`` instead of
-      an unhandled ``500``.
+    - malformed JSON still becomes upstream's ``HTTPException(400, ...)``.
+      Of the decode-failure translation's two raises, the decode half is
+      moot on this path - query params arrive as ``str`` (Django has
+      already decoded the query string), so ``json.loads`` cannot raise
+      ``UnicodeDecodeError`` here - while the recursion half is real: a
+      pathologically deep param reaches the same C-stack overflow, and
+      :func:`_patched_parse_json` turns it into the same controlled ``400``
+      instead of an unhandled ``500``.
 
-    An empty-string param is left unparsed (upstream's falsy skip),
-    exactly as upstream leaves it. Installed by :func:`apply` alongside
-    :func:`_patched_parse_json`; both live on ``BaseView`` so the sync
-    and async views share them.
+    The flag is reset however the call exits. Installed by :func:`apply`
+    alongside :func:`_patched_parse_json`; both live on ``BaseView`` so the
+    sync and async views share them.
     """
-    parsed: dict[str, object] = dict(params)
-
-    if "variables" in params:
-        variables = params["variables"]
-
-        if variables:
-            parsed["variables"] = _translated_parse_json(self, variables)
-
-    if "extensions" in params:
-        extensions = params["extensions"]
-
-        if extensions:
-            parsed["extensions"] = _translated_parse_json(self, extensions)
-
-    return parsed
+    token = _IN_QUERY_PARAMS.set(True)
+    try:
+        return _upstream_captures().parse_query_params(self, params)
+    finally:
+        _IN_QUERY_PARAMS.reset(token)
 
 
 # The exception types the upstream upload utility raises on malformed client
@@ -1002,9 +926,8 @@ def apply() -> None:
       (``{"strawberry": False}``). Returns before touching anything.
     - Every patch member is already installed (re-entrant call).
 
-    Before installation, validates the imported symbols, the delegated
-    methods' ``(self, argument)`` signatures, and the superseded
-    ``parse_query_params`` body source (see
+    Before installation, validates the imported symbols and the delegated
+    methods' ``(self, argument)`` signatures (see
     :func:`_validate_upstream_shape`). Dependency drift raises a
     targeted ``RuntimeError`` instead of silently dropping the request
     hardening.

@@ -34,9 +34,9 @@ leaving accepted multipart behavior and non-structural consumer failures alone.
 
 Because the non-envelope scalar guard is a request-*body* contract enforced from
 a generic JSON helper, ``apply()`` also installs
-:func:`_patched_parse_query_params` - a source-pinned reimplementation
-of ``BaseView.parse_query_params`` routing its two nested parses around
-the guard through the shared decode-failure translator - so the guard never fires on
+:func:`_patched_parse_query_params` - a delegate that runs upstream's own
+``BaseView.parse_query_params`` with a context flag the wrapper reads to skip
+the guard while keeping the decode-failure translation - so the guard never fires on
 upstream's GET ``variables`` / ``extensions`` parses, where upstream has
 its own precise per-param handling (``null`` -> ``None`` -> the request
 executes; a scalar -> a per-param 400). Every wire-observable outcome of
@@ -50,8 +50,7 @@ The rows here pin the parse semantics that have no wire shape of their
 own (the falsy skip, the well-typed batch handed on to upstream's own
 validator), the ``__cause__`` values for UnicodeDecodeError and RecursionError
 a live JSON 400 cannot isolate from the view's own decode, multipart structural vs
-non-structural translation, the full install lifecycle, and the
-reimplementer's body pin.
+non-structural translation, and the full install lifecycle.
 
 **What is deliberately absent here.** The strict UTF-8 wire contract
 (spec-046 Decision 9) is not in this module: it is package *policy* with
@@ -86,7 +85,7 @@ from django.test import RequestFactory
 from strawberry.http.async_base_view import AsyncBaseHTTPView
 from strawberry.http.base import BaseView
 from strawberry.http.sync_base_view import SyncBaseHTTPView
-from typing_extensions import Never, override
+from typing_extensions import override
 
 from django_strawberry_framework import _strawberry_patches as patches
 from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
@@ -464,7 +463,7 @@ def test_patched_sync_parse_multipart_preserves_valid_batched_operations() -> No
 
 
 def test_patched_parse_query_params_skips_empty_string_param() -> None:
-    """An empty-string param is left unparsed - upstream's falsy skip, byte-for-byte."""
+    """An empty-string param is left unparsed by upstream's own falsy skip."""
     result = patches._patched_parse_query_params(BaseView(), {"variables": ""})
     assert result["variables"] == ""
 
@@ -557,7 +556,7 @@ def test_apply_fails_loudly_when_parse_query_params_missing() -> None:
 
 
 def test_apply_fails_loudly_when_parse_query_params_signature_changes() -> None:
-    """The shield pins the reimplemented method's arity."""
+    """The shield pins the delegated method's arity."""
     with (
         mock.patch.object(patches, "_original_parse_query_params", _self_only_method),
         pytest.raises(RuntimeError, match=r"expected \(self, params\) signature"),
@@ -580,63 +579,6 @@ def test_apply_fails_loudly_when_parse_multipart_signature_changes(
     with (
         mock.patch.object(patches, name, method),
         pytest.raises(RuntimeError, match=r"expected \(self, request\) signature"),
-    ):
-        patches.apply()
-
-
-def test_apply_fails_loudly_when_parse_query_params_body_drifts(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A shape-passing but body-drifted upstream must not be silently superseded.
-
-    The shield *reimplements* upstream's ``parse_query_params`` body, so
-    validation pins the captured original's source, not just the
-    ``(self, params)`` call shape. A future strawberry that keeps the signature but changes
-    the body - new query params, changed falsy-skip semantics - would
-    otherwise pass validation and have its behavior replaced by a stale
-    reimplementation. ``apply()`` must raise the targeted ``RuntimeError``
-    before installing anything.
-    """
-    monkeypatch.setattr(BaseView, "parse_json", patches._original_parse_json)
-    monkeypatch.setattr(BaseView, "parse_query_params", patches._original_parse_query_params)
-    assert patches._patch_is_installed() is False
-
-    def _drifted(self: BaseView[Never], params: Mapping[str, str]) -> dict[str, str]:
-        """A (self, params)-shaped upstream whose body dropped the falsy skip."""
-        params = dict(params)
-        if "variables" in params:
-            params["variables"] = self.parse_json(params["variables"])
-        if "extensions" in params:
-            params["extensions"] = self.parse_json(params["extensions"])
-        return params
-
-    with (
-        mock.patch.object(patches, "_original_parse_query_params", _drifted),
-        pytest.raises(RuntimeError, match="upstream body"),
-    ):
-        patches.apply()
-    # ``apply()`` raised during validation, before the install step.
-    assert patches._patch_is_installed() is False
-
-
-def test_apply_fails_loudly_when_parse_query_params_source_is_unavailable() -> None:
-    """An unreadable captured original is treated as drift, not approved.
-
-    ``inspect.getsource`` raises ``OSError`` for a function with no
-    retrievable source file (built here from a code object whose file
-    does not exist, the shape a bytecode-only distribution would
-    present). The validator must refuse to supersede a body it cannot
-    verify.
-    """
-
-    def _sourceless(_self: object, _params: object) -> None:
-        """Never called; only its unreadable source matters."""
-
-    _sourceless.__code__ = _sourceless.__code__.replace(co_filename="<sourceless>")
-
-    with (
-        mock.patch.object(patches, "_original_parse_query_params", _sourceless),
-        pytest.raises(RuntimeError, match="upstream body"),
     ):
         patches.apply()
 
@@ -752,9 +694,9 @@ def test_patched_parse_query_params_translates_a_deep_param(
     param: str,
     pathological_json_text: str,
 ) -> None:
-    """The GET shield owns the decode-failure error channel, not the envelope guard.
+    """The GET shield keeps the decode-failure error channel, not the envelope guard.
 
-    The shield routes the two query-param parses around the envelope guard
+    The shield turns the envelope guard off for the two query-param parses
     (upstream's per-param handling owns validity there), but a deep param
     still drives ``json.loads`` past the C stack - client input that must
     meet the same controlled ``400`` as malformed JSON, not an unhandled

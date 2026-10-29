@@ -5,7 +5,7 @@ build-plan leftovers, and CI and test gaps. Each one is verified, fixed at the r
 commit that lands it. The bug-hunt findings stay in `docs/bug_hunt/bug_hunt-0_0_15_2.md`; only their beta triage is
 recorded here.
 
-Progress: 21 to do.
+Progress: 20 to do.
 
 Every item below was re-verified at HEAD on 2026-10-22 by one research agent per item; each "Research" sub-bullet is
 that pass's finding and recommended landing.
@@ -83,13 +83,6 @@ From the full entries, 2026-10-21. Item numbers are that file's.
   - Research: reproduced on SQLite (`contains` matches across ASCII case; an accented `icontains` misses the other
     case). Nothing documents it. Add a "Text matching is the database's" paragraph to README "Filtering with
     `FilterSet`" and the `FilterSet` glossary entry; confirm `EnumLookupFilter` also defers to Django first. Size S
-- [ ] 19. `django_strawberry_framework/_strawberry_patches.py::_validate_upstream_shape` pins exact
-  `inspect.getsource` text, comments included, and aborts startup on a mismatch: a comment-only upstream edit, or a
-  source-less install, stops the app booting until `APPLY_UPSTREAM_PATCHES` changes. Every published release in range
-  matches today
-  - Research: reproduced (a comment-only edit and a `.pyc`-only install both raise). Fail-loud is the design: document
-    in the "Upstream patches" glossary kill-switch paragraph. Also fix the stale "verbatim at strawberry-graphql 0.322.2
-    and 0.324.0" comment in `_strawberry_patches.py` (0.327.7 matches). Size S
 - [ ] 20. The `lru_cache`s keyed on model classes (`_classify_path_cached` and siblings) are not cleared by registry
   teardown; no stale answer was shown, but a test that monkeypatches `_meta.pk` could poison them
   - Research: reproduced (a cached classification survives `registry.clear()`). The model-keyed caches are

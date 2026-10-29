@@ -29,7 +29,9 @@ or understated ``Content-Length`` can and cannot do on each transport, a
 cumulative multi-fragment body, malformed JSON on both sides of the cap,
 multipart, the parse-and-execution witnesses, which of the two ceilings fired,
 the three precedence rungs, and a GET with a hostile ``Content-Length`` still
-answering ``200`` on ``cap-tiny/``. Floor parity (the py3.10 / Django 5.2.16 floor) is a
+answering ``200`` on ``cap-tiny/``. The parse witness's mount also shows a GET's
+``variables`` / ``extensions`` reaching the view's own ``parse_json`` with the
+request-body envelope guard off. Floor parity (the py3.10 / Django 5.2.16 floor) is a
 separately-invoked run of this same file, not a separate test.
 
 The wire contract's encoding rejections add one more async row. The strict UTF-8
@@ -1767,6 +1769,32 @@ def test_an_over_cap_mutation_is_rejected_before_any_parse_or_schema_execution()
     assert isinstance(recorded, bytes)
     assert under_name.encode() in recorded
     _PARSE_CALLS.clear()
+
+
+@pytest.mark.django_db
+def test_get_query_params_reach_the_views_parse_json_unguarded() -> None:
+    """A GET's ``variables`` / ``extensions`` parse through the mounted view's own ``parse_json``.
+
+    Upstream's ``BaseView.parse_query_params`` parses both params with
+    ``self.parse_json``, so a view's ``parse_json`` override sees them exactly as
+    under unpatched Strawberry: the spy records the two raw strings, in upstream's
+    order. The request-body envelope guard behind that override stays off for
+    them, so ``variables=null`` (a valid "object or null" value) still executes
+    and answers ``200``.
+    """
+    seed_data(1)
+    _PARSE_CALLS.clear()
+    with override_settings(ROOT_URLCONF=__name__):
+        response = Client().get(
+            "/cap-spy/",
+            {"query": _TYPENAME, "variables": "null", "extensions": "{}"},
+        )
+
+    recorded = list(_PARSE_CALLS)
+    _PARSE_CALLS.clear()
+    assert response.status_code == 200
+    assert response_json(response) == {"data": {"__typename": "Query"}}
+    assert recorded == ["null", "{}"]
 
 
 # ---------------------------------------------------------------------------
