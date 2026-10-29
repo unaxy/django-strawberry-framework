@@ -1128,18 +1128,6 @@ class _NodeIdArguments(Visitor):
         self.spreads.add(node.name.value)
 
 
-def _root_type(
-    graphql_schema: GraphQLSchema,
-    operation: OperationType,
-) -> GraphQLObjectType | None:
-    """Return the schema root type for an operation kind, or ``None`` if absent."""
-    if operation is OperationType.MUTATION:
-        return graphql_schema.mutation_type
-    if operation is OperationType.SUBSCRIPTION:
-        return graphql_schema.subscription_type
-    return graphql_schema.query_type
-
-
 def _page_bound(
     policy: ResourcePolicy,
     field_def: GraphQLField,
@@ -1387,7 +1375,7 @@ class _DocumentWalk:
     ) -> None:
         """Walk one operation, then charge each default no use site charged, at its definition."""
         graphql_schema = self.graphql_schema
-        root = _root_type(graphql_schema, operation.operation)
+        root = graphql_schema.get_root_type(operation.operation)
         definitions = operation.variable_definitions or ()
         defaulted: dict[str, VariableDefinitionNode] = {}
         self.variables = None
