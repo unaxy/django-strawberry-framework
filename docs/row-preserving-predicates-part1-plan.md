@@ -23,7 +23,7 @@ the same restriction a nested `RelatedFilter` branch applies
 only the `and` / `or` / `not` arms of `_q_for_branch` compose a parent-pk
 `pk__in`. A relation no `RelatedFilter` declares is walked too when the type
 registered for its model declares a `get_queryset` of its own (an undeclared
-hop, `utils/permissions.py::RelationHop`), so only framework-generated leaves
+hop, `utils/permissions.py::UndeclaredHop`), so only framework-generated leaves
 whose every relation reaches an unregistered model or a type keeping the
 identity hook route, and the Boolean relation `isnull` routing below applies
 only to such a relation. Every routing statement below about

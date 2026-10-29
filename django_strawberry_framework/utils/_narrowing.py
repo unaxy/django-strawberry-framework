@@ -320,6 +320,7 @@ __all__ = (
     "is_exact_pair",
     "is_exact_set_or_frozenset",
     "is_exact_tuple",
+    "is_exact_tuple_or_frozenset",
     "is_frozenset",
     "is_iterable",
     "is_list",
@@ -511,3 +512,14 @@ def is_exact_set_or_frozenset(value: object) -> TypeGuard[set[object] | frozense
     """
     value_type = type(value)
     return value_type is set or value_type is frozenset
+
+
+def is_exact_tuple_or_frozenset(
+    value: object,
+) -> TypeGuard[tuple[object, ...] | frozenset[object]]:
+    """Return whether ``value`` is EXACTLY a builtin ``tuple`` or ``frozenset``.
+
+    The type is compared by identity, as in ``is_exact_list_or_tuple``.
+    """
+    value_type = type(value)
+    return value_type is tuple or value_type is frozenset

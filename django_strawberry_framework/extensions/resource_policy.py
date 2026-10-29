@@ -86,7 +86,7 @@ Where each pass reaches, stated as the boundary rather than as parity:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, TypeVar, cast
+from typing import TYPE_CHECKING, ClassVar, TypeVar
 
 import graphql
 from graphql import (
@@ -146,6 +146,7 @@ from django_strawberry_framework.utils._narrowing import (
     is_list_or_tuple,
     is_mapping,
     is_memoryview,
+    is_str,
     mapping_get,
     read_attr,
     require_instance,
@@ -180,7 +181,6 @@ if TYPE_CHECKING:
         ExecutableDefinitionNode,
         GraphQLArgument,
         GraphQLField,
-        GraphQLInputField,
         GraphQLNamedType,
         GraphQLSchema,
         GraphQLType,
@@ -747,14 +747,9 @@ class _ValueBudget:
             )
             child_path = (*path, mapping)
             for name, item in entries:
-                # A key is whatever the value carried, and a lookup by a key that is
-                # not a name just misses, so the name-keyed field map is read through
-                # an object-keyed view.
-                field_def = (
-                    cast("Mapping[object, GraphQLInputField]", field_map).get(name)
-                    if field_map is not None
-                    else None
-                )
+                # A key is whatever the value carried; one that is not a name names no
+                # field, so it is charged like any other entry and classified as none.
+                field_def = field_map.get(name) if field_map is not None and is_str(name) else None
                 # Specs resolve only through a declared input field: a hostile
                 # mapping parked under a scalar argument, or a key the input object
                 # does not publish, is charged, never classified, and a child's own
@@ -1406,7 +1401,10 @@ class _DocumentWalk:
                     self.variables[name] = _value_from_ast(var_def.default_value)
                     self.references[name] = var_def.default_value
                     defaulted[name] = var_def
-        self.read = set() if defaulted else None
+        # The walk adds to this set through ``self.read``, armed only while a default
+        # waits on its use sites.
+        read: set[str] = set()
+        self.read = read if defaulted else None
         self.in_mutation = operation.operation is OperationType.MUTATION
         for var_def in definitions:
             self.charge_directives(var_def)
@@ -1421,8 +1419,8 @@ class _DocumentWalk:
         for var_def in definitions:
             name = var_def.variable.name.value
             if var_def.default_value is None or (
-                # A default still waiting on its use sites is what kept ``read`` a set.
-                defaulted.get(name) is var_def and name in cast("set[str]", self.read)
+                # A default still waiting on its use sites is what kept ``read`` armed.
+                defaulted.get(name) is var_def and name in read
             ):
                 continue
             if node_id_variables is None:
@@ -1542,8 +1540,9 @@ class _DocumentWalk:
                 )
                 continue
             # graphql-core's selection grammar has three node kinds and both fragment
-            # kinds continued above, so what remains is a field.
-            node = cast("FieldNode", node)
+            # kinds continued above, so what remains is a field; any other node is a
+            # hand-built document's defect, refused rather than charged as a field.
+            node = require_instance(node, FieldNode)
             if shape:
                 self.budget.charge_selection(aliased=node.alias is not None)
             # graphql-core's static lookup, the one validation's ``TypeInfo`` makes. It
@@ -1869,11 +1868,7 @@ class DjangoResourcePolicyExtension(_OperationBoundExtension[OperationState]):
             try:
                 # The ARMED snapshot, not the object it was resolved from: the
                 # scan and the seams that run under it must charge one policy.
-                # ``cast``: the budget armed just above is what this reads back.
-                scan_document_text(
-                    cast("ResourcePolicy", armed_resource_policy()),
-                    self._hook_context().query,
-                )
+                scan_document_text(scope.policy, self._hook_context().query)
                 yield
             finally:
                 end_resource_budget(scope)

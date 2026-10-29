@@ -68,6 +68,7 @@ from django_strawberry_framework.mutations.sets import (
 )
 from django_strawberry_framework.registry import register_subsystem_clear, registry
 from django_strawberry_framework.resource_policy import check_deadline
+from django_strawberry_framework.types.base import _is_django_type_class
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     is_concrete_field,
@@ -114,7 +115,6 @@ if TYPE_CHECKING:
     from strawberry.types import Info
     from strawberry.types.base import WithStrawberryObjectDefinition
 
-    from django_strawberry_framework.mutations.inputs import ModelFieldIndex
     from django_strawberry_framework.mutations.resolvers import (
         StepFailure,
         _GeneratedPayload,
@@ -671,7 +671,7 @@ def _login_authenticate(
     payload_cls = resolvers.payload_cls_for(holder_cls)
     # The login holder's primary is bound at finalize (``bind_auth_mutations``), before
     # any request reaches this prologue.
-    slot = payload_object_slot(cast("type[DjangoType]", holder_cls._primary_type))
+    slot = payload_object_slot(require(holder_cls._primary_type, _is_django_type_class))
     unstorable = (
         unstorable_text_error("username", username) is not None
         or unstorable_text_error("password", password) is not None
@@ -1199,6 +1199,10 @@ def derive_register_fields(user_model: type[AbstractBaseUser]) -> tuple[str, ...
     return deduped
 
 
+# The register decode answers ``(user, m2m_assignments, exclude, excluded_values)``.
+_REGISTER_DECODED_ARITY = 4
+
+
 def _register_decode_step(
     mutation_cls: type[DjangoMutation],
     data: object,
@@ -1227,17 +1231,24 @@ def _register_decode_step(
         info,
         instance=instance,
         specs=mutation_cls._input_field_specs,
-        model_fields=cast("ModelFieldIndex", mutation_cls._model_fields_by_attr),
+        model_fields=resolvers._bound_model_fields(mutation_cls),
     )
     if isinstance(decoded, resolvers.StepFailure):
         return decoded
-    # The rider's model is ``get_user_model()`` and its bind stashed the ``EXCLUDED``
-    # password spec, so the decode answers the user plus the captured values.
-    user, m2m_assignments, exclude, excluded_values = cast(
-        "tuple[_User, _M2MAssignments, resolvers.CleanExcludes, dict[str, object]]",
-        decoded,
-    )
-    return user, m2m_assignments, exclude, excluded_values.get("password")
+    # The rider's bind stashed the ``EXCLUDED`` password spec, so the decode answers
+    # the four-tuple carrying the captured values.
+    if len(decoded) != _REGISTER_DECODED_ARITY:
+        raise ValueError(
+            f"{truth.name(mutation_cls)}: the register decode answers the "
+            "(user, m2m_assignments, exclude, excluded_values) four-tuple; a bind without "
+            "the EXCLUDED password spec cannot register a user.",
+        )
+    user, m2m_assignments, exclude, excluded_values = decoded
+    # The row is constructed from ``get_user_model()``, which Django admits without
+    # requiring an ``AbstractBaseUser`` subclass, and the register bind refuses no
+    # such model; the write step reads only the ``set_password`` / password-validator
+    # surface of the stub's user type.
+    return cast("_User", user), m2m_assignments, exclude, excluded_values.get("password")
 
 
 def _register_write_step(
@@ -1571,7 +1582,11 @@ def bind_auth_mutations() -> None:
         # imported ``current_user`` (which imported ``queries``).
         from .queries import CURRENT_USER_ALIAS_NAME, materialize_current_user_alias  # noqa: PLC0415 - import cycle
 
-        materialize_current_user_alias(CURRENT_USER_ALIAS_NAME, cast("type[DjangoType]", primary))
+        # A ``current_user`` holder is user-typed, so ``primary`` was resolved above.
+        materialize_current_user_alias(
+            CURRENT_USER_ALIAS_NAME,
+            require(primary, _is_django_type_class),
+        )
     # ``register`` needs no auth-side emit work: the rider is an ordinary
     # ``DjangoMutation``, so ``bind_mutations()`` (next in the pinned order)
     # materializes its ``RegisterInput`` / ``RegisterPayload``; this bind's

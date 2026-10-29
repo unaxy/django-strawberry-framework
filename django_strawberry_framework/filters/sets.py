@@ -146,7 +146,9 @@ from django_strawberry_framework.utils.inputs import (
     reject_unknown_meta_keys,
 )
 from django_strawberry_framework.utils.permissions import (
+    DeclaredHop,
     RelationHop,
+    UndeclaredHop,
     relation_path_gates,
     set_bound_definition,
     set_bound_type,
@@ -2085,17 +2087,16 @@ def _hop_model(hop: RelationHop) -> type[models.Model]:
 
     A declared hop's target set's ``Meta.model``; an undeclared hop's ``model``.
     """
-    if hop.declared:
-        # A resolved branch target is a ``FilterSet`` declaring ``Meta.model``.
-        return cast("type[models.Model]", cast("type[FilterSet]", hop.target)._meta.model)
-    # The walk records the model of every undeclared hop it appends.
-    return cast("type[models.Model]", hop.model)
+    if isinstance(hop, UndeclaredHop):
+        return hop.model
+    # A resolved branch target is a ``FilterSet`` declaring ``Meta.model``.
+    return require(_hop_target_set(hop)._meta.model, is_model_class)
 
 
 def _hop_relation(hop: RelationHop) -> str:
     """Return the ORM path a hop crosses from the model it starts on."""
-    if hop.declared:
-        return _bound_field_name(cast("RelatedFilter", hop.related_obj))
+    if isinstance(hop, DeclaredHop):
+        return _bound_field_name(_filter_declaration(hop)[1])
     return hop.declared_attr
 
 
@@ -2103,7 +2104,8 @@ def _hop_source_model(hops: tuple[RelationHop, ...], index: int) -> type[models.
     """Return the model ``hops[index]`` starts on: its owner set's model, else the previous hop's."""
     owner = hops[index].owner
     if owner is not None:
-        return cast("type[models.Model]", cast("type[FilterSet]", owner)._meta.model)
+        # The walk's owner is the walking ``FilterSet`` or one declaring a branch: model-backed.
+        return require(require(owner, _is_filterset_class)._meta.model, is_model_class)
     # Only an undeclared hop following another undeclared hop has no owner.
     return _hop_model(hops[index - 1])
 
@@ -2131,7 +2133,7 @@ class _UndeclaredHopSet:
     GlobalID terminal validates against it) and ``request`` the walking set's.
     """
 
-    def __init__(self, hop: RelationHop, request: object) -> None:
+    def __init__(self, hop: UndeclaredHop, request: object) -> None:
         """Bind the face to ``hop``'s model and target type, with the walking set's request."""
         self._meta: filterset.FilterSetOptions = filterset.FilterSetOptions()
         self._meta.model = _hop_model(hop)
@@ -2597,8 +2599,31 @@ def _is_related_filter_map(value: object) -> TypeIs[dict[str, RelatedFilter]]:
 
 
 def _is_filterset_class(value: object) -> TypeIs[type[FilterSet]]:
-    """Whether ``value`` is a ``FilterSet`` subclass: a declared hop's owner, which declares the hop."""
+    """Whether ``value`` is a ``FilterSet`` subclass.
+
+    Asked of a walked hop's owner, and of the set a declared hop's declaration resolves.
+    """
     return truth.is_subclass(value, FilterSet)
+
+
+def _filter_declaration(hop: DeclaredHop) -> tuple[type[FilterSet], RelatedFilter]:
+    """Return the ``FilterSet`` declaring ``hop`` and its ``RelatedFilter`` declaration.
+
+    A filter set's walk reads its ``related_filters``, which hold only
+    ``RelatedFilter`` declarations on ``FilterSet`` classes; anything else raises ``TypeError``.
+    """
+    return require(hop.owner, _is_filterset_class), require_instance(
+        hop.related_obj,
+        RelatedFilter,
+    )
+
+
+def _hop_target_set(hop: DeclaredHop) -> type[FilterSet]:
+    """Return the ``FilterSet`` ``hop``'s declaration resolves; ``TypeError`` when it resolves none.
+
+    A caller reads only a hop whose target the walk resolved (it stops after one that does not).
+    """
+    return require(hop.target, _is_filterset_class)
 
 
 def _reachable_filtersets(filterset: type[FilterSet], scope: _ExpansionScope) -> frozenset[int]:
@@ -5486,7 +5511,7 @@ class FilterSet(
         for a relation-key leaf (``shelf``, ``shelf__branch``, ``alt_shelves``:
         nothing after the last relation). ``None`` for a leaf whose walk reads no
         visibility: a same-model leaf, a path whose relations no declaration
-        claims and whose models no type scopes (``RelationHop.scope``), a
+        claims and whose models no type scopes (``UndeclaredHop.scope``), a
         filter declared on this set holding a ``filter`` of its own
         (``_own_filter``: a consumer ``method=`` or a callable stored on the
         instance; its Python receives this set's queryset and owns its own
@@ -5506,16 +5531,16 @@ class FilterSet(
             target_attr=cls._permission.target_attr,
             undeclared=True,
         )
-        if not any(hop.declared or hop.scope is not None for hop in hops):
+        if not any(isinstance(hop, DeclaredHop) or hop.scope is not None for hop in hops):
             return None
         return hops, LOOKUP_SEP.join(remainder)
 
     @classmethod
-    def _projection_hop(cls, projection: ChildProjection) -> RelationHop:
+    def _projection_hop(cls, projection: ChildProjection) -> DeclaredHop:
         """Return the declared hop a ``ProjectedChildFilter`` of this set runs its child across."""
         # Every projected copy in a published table holds in its set
         # (``_reject_foreign_projection``): its branch is one of ``related_filters``' entries.
-        return RelationHop(
+        return DeclaredHop(
             cls,
             projection.branch,
             cls.related_filters[projection.branch],
@@ -5780,11 +5805,10 @@ class FilterSet(
         ``into`` is not awaited again.
         """
         for hop in hops:
-            if not hop.declared:
+            if isinstance(hop, UndeclaredHop):
                 await cls._await_scoped_rows(hop.scope, info, into, parent_db)
                 continue
-            owner = require(hop.owner, _is_filterset_class)
-            related_filter = require_instance(hop.related_obj, RelatedFilter)
+            owner, related_filter = _filter_declaration(hop)
             for scope in owner._branch_via_types(related_filter):
                 await cls._await_scoped_rows(scope, info, into, parent_db)
             key = (id(related_filter), parent_db)
@@ -5904,7 +5928,7 @@ class FilterSet(
         scopes its model, every row of it, as Django's join reads them.
         """
         visibility = self._hop_visibility()
-        if not hop.declared:
+        if isinstance(hop, UndeclaredHop):
             scope = hop.scope
             if scope is None:
                 return _hop_model(hop)._base_manager.using(parent_db)
@@ -5912,10 +5936,10 @@ class FilterSet(
         key = (id(hop.related_obj), parent_db)
         rows = visibility.get(key)
         if rows is None:
-            owner = cast("type[FilterSet]", hop.owner)
+            owner, related_filter = _filter_declaration(hop)
             target_type, _child, child_base = owner._branch_visibility_seed(
                 hop.declared_attr,
-                cast("RelatedFilter", hop.related_obj),
+                related_filter,
                 parent_db,
             )
             rows = apply_type_visibility_sync(
@@ -5967,8 +5991,8 @@ class FilterSet(
         terminal.field_name = field_name
         target_set = (
             # The walk continues only past a declared hop whose target resolved to a set class.
-            self._projection_child(cast("type[FilterSet]", hop.target))
-            if hop.declared
+            self._projection_child(_hop_target_set(hop))
+            if isinstance(hop, DeclaredHop)
             else _UndeclaredHopSet(hop, self.request)
         )
         # django-filter stamps ``parent`` on every per-request filter; the stubs omit it.
@@ -6063,11 +6087,9 @@ class FilterSet(
         intermediate model its ``field_name`` crosses (``_via_rows``); an
         undeclared hop admits ``rows`` as they are.
         """
-        if not hop.declared:
+        if isinstance(hop, UndeclaredHop):
             return _reaches_related(outer, hop.declared_attr, rows)
-        related_filter = cast("RelatedFilter", hop.related_obj)
-        # A declared hop's owner is the ``FilterSet`` declaring it.
-        owner = cast("type[FilterSet]", hop.owner)
+        owner, related_filter = _filter_declaration(hop)
         admitted = _admitted_rows(owner, hop.declared_attr, related_filter, rows)
         via = owner._via_rows(related_filter, self._apply_info, self._hop_visibility(), outer.db)
         return _reaches_related(outer, _bound_field_name(related_filter), admitted, via)
@@ -6110,7 +6132,7 @@ class FilterSet(
         """
         built = require(self.queryset, is_queryset)
         if any(
-            hop.declared and hop.target is None
+            isinstance(hop, DeclaredHop) and hop.target is None
             for hop in type(self)._visibility_hops(filter_instance)
         ):
             terminal = _projected_terminal(filter_instance)
@@ -6126,7 +6148,7 @@ class FilterSet(
             return terminal.filter(rows, value) is not rows
         # A caller passes only a leaf ``_flat_leaf_walk`` reads or a ``ProjectedChildFilter``,
         # which always carries its projection hop.
-        chain = cast("_LeafChain", self._leaf_chain(filter_instance))
+        chain = require_instance(self._leaf_chain(filter_instance), _LeafChain)
         rows = self._chain_base(chain, built)
         try:
             return chain.terminal.filter(rows, chain.terminal_value(value)) is not rows
@@ -6324,7 +6346,7 @@ class FilterSet(
         # (``_branch_visibility_seed``).
         for hop in type(self)._visibility_hops(filter_instance):
             _ = self._hop_visible_rows(hop, using)
-        chain = cast("_LeafChain", self._leaf_chain(filter_instance))
+        chain = require_instance(self._leaf_chain(filter_instance), _LeafChain)
         terminal = chain.terminal
         negate = _own_filter(terminal) is None and terminal.exclude
         if negate:

@@ -82,7 +82,10 @@ from django_strawberry_framework.filters.inputs import (
 )
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.types.definition import DjangoTypeDefinition
-from django_strawberry_framework.types.finalizer import _bind_filterset_owner
+from django_strawberry_framework.types.finalizer import (
+    _audit_globalid_filter_strategies,
+    _bind_filterset_owner,
+)
 from django_strawberry_framework.types.relay import apply_interfaces
 from django_strawberry_framework.utils._narrowing import (
     class_dict,
@@ -209,6 +212,18 @@ def test_phase_2_5_binds_all_owners_before_expansion(monkeypatch: pytest.MonkeyP
 # ---------------------------------------------------------------------------
 # Strict multi-owner reuse.
 # ---------------------------------------------------------------------------
+
+
+def test_globalid_strategy_audit_refuses_a_filterset_with_no_bound_owner() -> None:
+    """The audit reads only wired filtersets; one bound to no owner is a typed error."""
+
+    class UnboundBookFilter(FilterSet):
+        class Meta:
+            model = Book
+            fields = {"title": ["exact"]}
+
+    with pytest.raises(TypeError, match="expected an instance of"):
+        _audit_globalid_filter_strategies([UnboundBookFilter])
 
 
 def test_phase_2_5_rejects_multi_owner_with_diverging_pk_identity() -> None:

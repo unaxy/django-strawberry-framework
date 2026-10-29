@@ -1136,11 +1136,12 @@ to `Register`** with:
   `model(**scalar_and_fk_attrs)`. `_model_decode_step` then returns the extended
   four-tuple `(target, m2m_assignments, exclude, excluded_values)` for any mutation
   whose specs carry that kind and the three-tuple otherwise (the register
-  `decode_step` reduces `excluded_values` to the captured password), and the generic
-  `_model_write_step` unpacks the three-tuple
-  **strictly** — so a bind that introduces an `EXCLUDED` spec without pairing it to a
-  flavor write step that knows what the value MEANS raises there instead of silently
-  discarding it. **The seam must preserve the provided-marker**: `_model_decode_step`
+  `decode_step` reduces `excluded_values` to the captured password, and raises
+  `ValueError` on a three-tuple, a bind without the `EXCLUDED` password spec), and the
+  generic `_model_write_step` takes the three-tuple **only**, raising `ValueError` on
+  any other length before it unpacks — so a bind that introduces an `EXCLUDED` spec
+  without pairing it to a flavor write step that knows what the value MEANS raises
+  there instead of silently discarding it. **The seam must preserve the provided-marker**: `_model_decode_step`
   computes the create-path `full_clean` exclude from the
   *provided* attrs (`_provided_attr_names` → `_unprovided_exclude`), so naively
   popping `password` before the walk would mark it

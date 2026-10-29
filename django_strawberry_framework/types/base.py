@@ -965,7 +965,7 @@ class DjangoType:
         disables FK-id elision, marks the plan uncacheable); the generated
         relation resolver (applies the hook to a relation the optimizer did not
         plan); relation-visibility resolution in ``utils/querysets.py`` and
-        ``RelationHop.scope`` in ``utils/permissions.py`` (the hops a
+        ``UndeclaredHop.scope`` in ``utils/permissions.py`` (the hops a
         ``FilterSet`` relation path crosses); ``OrderSet`` (an order term across
         the relation reads ``NULL`` for a hidden row); the finalizer (refuses a
         ``FilterSet`` / ``OrderSet`` bound to two owners when either owner's hook
@@ -976,6 +976,11 @@ class DjangoType:
         this method reads the class's own stamp.
         """
         return not truth.static_attr(cls, "_is_default_get_queryset", default=True)
+
+
+def _is_django_type_class(value: object) -> "TypeIs[type[DjangoType]]":
+    """Return whether ``value`` is a ``DjangoType`` subclass, asked of its real MRO."""
+    return truth.is_subclass(value, DjangoType)
 
 
 def _normalize_fields_spec(value: object) -> tuple[str, ...] | Literal["__all__"] | None:

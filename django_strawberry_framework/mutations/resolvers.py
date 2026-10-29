@@ -100,7 +100,7 @@ from __future__ import annotations
 
 import datetime
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, NamedTuple, cast
 
 from django.core.exceptions import NON_FIELD_ERRORS, ObjectDoesNotExist, ValidationError
 from django.db import IntegrityError, transaction
@@ -295,6 +295,10 @@ if TYPE_CHECKING:
 _MUTATION_ASYNC_RECOURSE = sync_pipeline_recourse("DjangoMutation")
 
 
+# The model write step's decoded product is ``(target, m2m_assignments, exclude)``.
+_MODEL_DECODED_ARITY = 3
+
+
 @dataclass(frozen=True)
 class CleanExcludes:
     """The two ``exclude`` sets the model write validates a decoded row with (spec-036 step 4).
@@ -320,6 +324,24 @@ class StepFailure:
     """
 
     errors: list[FieldError]
+
+
+class _WriteTarget(NamedTuple):
+    """A model-backed mutation's write target: its primary type, payload object slot, and model.
+
+    The model-less plain form has none, so the skeleton holds ``None`` in its place.
+    """
+
+    primary_type: type[DjangoType]
+    slot: str
+    model: type[models.Model]
+
+
+class _Located(NamedTuple):
+    """The row an update / delete located, beside the model it was located for."""
+
+    model: type[models.Model]
+    row: models.Model
 
 
 def run_write_pipeline_sync(
@@ -402,13 +424,18 @@ def run_write_pipeline_sync(
     meta = mutation_cls._mutation_meta
     primary_type = mutation_cls._primary_type
     payload_cls = payload_cls_for(mutation_cls)
-    slot = None if primary_type is None else payload_object_slot(primary_type)
-    model = None if primary_type is None else model_for(primary_type)
-    needs_locate = primary_type is not None and operation_takes_id(meta.operation)
-    # ``primary_type`` / ``model`` are ``None`` only for the model-less plain form,
-    # which never locates (``needs_locate``), holds no located instance, and returns
-    # before the object-slot tail (``slot is None``); every read below sits on one of
-    # those model-backed paths, so each is cast to its non-``None`` type there.
+    # ``target`` is ``None`` only for the model-less plain form, which never locates,
+    # holds no located row, and returns before the object-slot tail.
+    target = (
+        None
+        if primary_type is None
+        else _WriteTarget(
+            primary_type,
+            payload_object_slot(primary_type),
+            model_for(primary_type),
+        )
+    )
+    locate_target = None if target is None or not operation_takes_id(meta.operation) else target
 
     # The managed-transaction gate + the pinned write alias (mutation atomicity): the
     # completion-spanning ``DjangoSchema`` transaction must already be open on the
@@ -417,13 +444,17 @@ def run_write_pipeline_sync(
     # visibility, re-fetch) and the rollback marking are pinned to this alias via
     # the ``write_pipeline`` context the shared queryset helpers consult.
     with open_write_pipeline(mutation_cls) as using:
-        _error_payload = error_payload_builder(payload_cls, slot, using)
+        _error_payload = error_payload_builder(
+            payload_cls,
+            None if target is None else target.slot,
+            using,
+        )
 
-        instance = None
-        if needs_locate:
+        located = None
+        if locate_target is not None:
             node_id, id_error = coerce_lookup_id(
                 id_,
-                cast("type[DjangoType]", primary_type),
+                locate_target.primary_type,
                 schema=strawberry_schema_from_info(info),
             )
             if id_error is not None:
@@ -431,18 +462,20 @@ def run_write_pipeline_sync(
             # ``Meta.select_for_update`` (default True): a
             # base-manager ``SELECT ... FOR UPDATE`` on the update/delete locate, constrained by the
             # visibility queryset's pk subquery, inside this transaction.
-            instance = locate_instance(
-                cast("type[DjangoType]", primary_type),
+            row = locate_instance(
+                locate_target.primary_type,
                 node_id,
                 info,
                 alias=using,
                 select_for_update=meta.select_for_update,
             )
-            if instance is None:
+            if row is None:
                 return _error_payload([not_found_error()])
+            located = _Located(locate_target.model, row)
             # An instance-sensitive router answering differently now that the row
             # is known cannot be honored mid-pipeline - fail closed before writing.
-            check_instance_write_alias(cast("type[models.Model]", model), using, instance)
+            check_instance_write_alias(located.model, using, located.row)
+        instance = None if located is None else located.row
 
         # The IMMUTABLE authorization snapshot - captured immediately after the
         # locate, BEFORE the permission hook (the first consumer-controlled code)
@@ -488,14 +521,14 @@ def run_write_pipeline_sync(
                     data,
                     instance=instance,
                 )
-                if instance is not None and authorized_pk is not None:
+                if located is not None and authorized_pk is not None:
                     reject_substituted_row(
-                        cast("type[models.Model]", model),
-                        pk_of(instance),
+                        located.model,
+                        pk_of(located.row),
                         authorized_pk,
                         message=(
                             f"{truth.name(mutation_cls)}: the located instance's pk changed from "
-                            f"{truth.render(authorized_pk)} to {truth.render(pk_of(instance))} during "
+                            f"{truth.render(authorized_pk)} to {truth.render(pk_of(located.row))} during "
                             "authorization; an update must "
                             "write the row that was authorized, never a substituted one."
                         ),
@@ -541,11 +574,10 @@ def run_write_pipeline_sync(
             if tail_step is not None:
                 return tail_step(saved)
 
-            if slot is None:
+            if target is None:
                 return payload_cls(ok=True, errors=[])
-            # ``slot`` is non-``None`` only on the model-backed flavors, whose
-            # ``write_step`` answers the saved model instance.
-            saved_row = cast("models.Model", saved)
+            # A model-backed flavor's ``write_step`` answers the saved model instance.
+            saved_row = require_instance(saved, Model)
 
             # The flavor-independent backstop over the snapshot: whatever the
             # flavor's own validation concluded, an update result whose pk
@@ -555,12 +587,12 @@ def run_write_pipeline_sync(
             # spelling of the same row), never a ``str()`` comparison.
             if meta.operation == "update":
                 reject_substituted_row(
-                    cast("type[models.Model]", model),
+                    target.model,
                     pk_of(saved_row),
                     authorized_pk,
                     message=(
                         f"{truth.name(mutation_cls)}: the write step returned "
-                        f"{truth.name(model)} pk={truth.render(pk_of(saved_row))}, but the located, "
+                        f"{truth.name(target.model)} pk={truth.render(pk_of(saved_row))}, but the located, "
                         f"authorized row is pk={truth.render(authorized_pk)}; an update must write "
                         "the row that was "
                         "authorized, never a substituted one."
@@ -568,7 +600,7 @@ def run_write_pipeline_sync(
                 )
 
             obj = refetch_optimized(
-                cast("type[DjangoType]", primary_type),
+                target.primary_type,
                 pk_of(saved_row),
                 info,
                 alias=using,
@@ -580,7 +612,7 @@ def run_write_pipeline_sync(
                 # would lie, so it is the in-band ``conflict`` envelope - which also
                 # rolls this transaction back (the disappearing-row contract).
                 return _error_payload([conflict_error()])
-            return build_payload(payload_cls, slot, obj, [])
+            return build_payload(payload_cls, target.slot, obj, [])
 
 
 def error_payload_builder(
@@ -1238,14 +1270,14 @@ def _run_pipeline_sync(
             info,
             instance=instance,
             specs=specs,
-            model_fields=cast("ModelFieldIndex", mutation_cls._model_fields_by_attr),
+            model_fields=_bound_model_fields(mutation_cls),
         ),
         # The model flavor's bind stashes no ``EXCLUDED`` spec, so its decode
-        # answers the three-tuple.
+        # answers the three-tuple ``_model_write_step`` requires.
         write_step=lambda instance, decoded: _model_write_step(
             mutation_cls,
             instance,
-            cast("_ModelDecoded", decoded),
+            decoded,
             specs=specs,
         ),
     )
@@ -1366,7 +1398,7 @@ def _model_decode_step(
 def _model_write_step(
     mutation_cls: type[DjangoMutation],
     instance: models.Model | None,
-    decoded: _ModelDecoded,
+    decoded: _ModelDecoded | _ModelDecodedWithExcluded,
     *,
     specs: Sequence[InputFieldSpec],
 ) -> models.Model | StepFailure:
@@ -1393,11 +1425,17 @@ def _model_write_step(
     ``EXCLUDED`` kind, but an excluded value is by definition one this generic
     tail cannot write - only a flavor that knows what the value MEANS can. The
     register flavor hashes its ``password`` and calls this with a re-packed
-    three-tuple (``auth/mutations.py::_register_write_step``). Unpacking
-    strictly is therefore the guard: a bind that introduces an ``EXCLUDED``
-    spec without pairing it to a flavor write step raises here instead of
+    three-tuple (``auth/mutations.py::_register_write_step``). A four-tuple
+    therefore raises ``ValueError`` here: a bind that introduces an ``EXCLUDED``
+    spec without pairing it to a flavor write step fails loud instead of
     silently discarding the excluded value.
     """
+    if len(decoded) != _MODEL_DECODED_ARITY:
+        raise ValueError(
+            f"{truth.name(mutation_cls)}: the model write step takes the decoded "
+            "(target, m2m_assignments, exclude) three-tuple; a decode carrying "
+            "EXCLUDED values needs a flavor write step that consumes them.",
+        )
     target, m2m_assignments, exclude = decoded
 
     # ``full_clean`` and a save-time ``ValidationError`` key through one map, built
@@ -1669,7 +1707,7 @@ def _run_delete(
         write_step=lambda instance, _decoded: _delete_write_step(
             mutation_cls,
             info,
-            cast("models.Model", instance),
+            require_instance(instance, Model),
         ),
         tail_step=lambda snapshot: build_payload(payload_cls, slot, snapshot, []),
     )
@@ -1874,6 +1912,21 @@ def _full_clean_or_field_errors(
     return None
 
 
+def _bound_model_fields(mutation_cls: type[DjangoMutation]) -> ModelFieldIndex:
+    """Return the input-attr -> model-field index the bind stashed for a create / update.
+
+    Only a bound create / update holds one: a delete has no input and an unbound class
+    no bind, so reading it there raises ``TypeError``.
+    """
+    model_fields = mutation_cls._model_fields_by_attr
+    if model_fields is None:
+        raise TypeError(
+            f"{truth.name(mutation_cls)} holds no bound model-field index; "
+            "only a bound create or update mutation decodes input.",
+        )
+    return model_fields
+
+
 def _model_error_key_map(
     mutation_cls: type[DjangoMutation],
     specs: Sequence[InputFieldSpec],
@@ -1890,7 +1943,7 @@ def _model_error_key_map(
     published specs (``_published_input_specs``), so each key is a name the
     executing schema published.
     """
-    model_fields = cast("ModelFieldIndex", mutation_cls._model_fields_by_attr)
+    model_fields = _bound_model_fields(mutation_cls)
     return build_error_key_map(
         specs,
         keys_of=lambda spec: model_field_error_names(model_fields[spec.input_attr]),

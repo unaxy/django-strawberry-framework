@@ -103,3 +103,27 @@ def test_step_failure_short_circuits_to_the_error_envelope(
 
     assert written == []
     assert result == resolvers.payload_cls_for(create_item)(result=None, errors=[error])
+
+
+@pytest.mark.django_db
+def test_model_backed_write_step_answering_a_non_model_raises(
+    create_item: type[DjangoMutation],
+) -> None:
+    """A model-backed write step must answer the saved row; any other product raises ``TypeError``.
+
+    The success tail re-fetches the saved row by pk, so a product that is not a model row
+    is refused there, inside the pipeline's transaction, before any re-fetch.
+    """
+    with (
+        transaction.atomic(),
+        managed_write_transaction("default"),
+        pytest.raises(TypeError, match="expected an instance of"),
+    ):
+        resolvers.run_write_pipeline_sync(
+            create_item,
+            info=make_info(),
+            data=None,
+            id_=None,
+            decode_step=lambda _instance: ["product"],
+            write_step=lambda _instance, _decoded: "not a row",
+        )

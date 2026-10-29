@@ -461,9 +461,9 @@ references) that import-linter already handles.
 optimizer's declared package-internal contract, re-exported from
 `optimizer/__init__.py` with a docstring naming them as such. Verified
 consumer inventory to cover: the `_context` names
-(`DST_OPTIMIZER_FK_ID_ELISIONS`, `DST_OPTIMIZER_PLANNED`,
-`DST_OPTIMIZER_STRICTNESS`, `active_strictness`, `optimizer_value`,
-`relation_is_optimizer_scoped`) used by `types/resolvers.py`;
+(`active_strictness`, `fk_id_elision_keys`, `planned_resolver_keys`,
+`relation_is_optimizer_scoped`, `stashed_strictness`) used by
+`types/resolvers.py`;
 `plans.resolver_key` / `plans.runtime_path_from_info`;
 `extension.apply_connection_optimization` (used by `mutations/resolvers.py`
 and `connection.py`) and `extension.mutation_payload_child_selections`

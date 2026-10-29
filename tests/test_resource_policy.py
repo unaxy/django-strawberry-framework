@@ -80,6 +80,8 @@ from graphql import (
     GraphQLDirective,
     GraphQLError,
     GraphQLSchema,
+    OperationDefinitionNode,
+    SelectionNode,
     StringValueNode,
     ValueNode,
     build_schema,
@@ -4319,6 +4321,72 @@ def test_an_untyped_container_list_is_not_classified_as_membership_list() -> Non
     assert caught.value.bound == "max_container_width"
 
 
+class _ExoticSelection(SelectionNode):
+    """A selection node of a kind graphql-core's parser never builds."""
+
+
+def test_charge_document_refuses_a_selection_that_is_no_known_kind() -> None:
+    """A hand-built document whose selection is neither a field nor a fragment raises."""
+    document = parse("{ echo }")
+    operation = document.definitions[0]
+    assert isinstance(operation, OperationDefinitionNode)
+    operation.selection_set.selections = (_ExoticSelection(directives=()),)
+
+    with pytest.raises(TypeError, match="expected an instance of FieldNode"):
+        charge_document(DEFAULT_RESOURCE_POLICY, _PROBE_SCHEMA._schema, document)
+
+
+_INPUT_OBJECT_SCHEMA = build_schema(
+    "input Pair { a: String b: String } type Query { pair(p: Pair): String }",
+)
+
+
+class _ListKeyedMapping(Mapping[object, object]):
+    """A mapping whose keys are not names: one unhashable, one an ``int``."""
+
+    def __init__(self) -> None:
+        self._entries: list[tuple[object, object]] = [(["a"], "x"), (1, "y")]
+
+    @override
+    def __getitem__(self, key: object) -> object:
+        for entry_key, value in self._entries:
+            if entry_key == key:
+                return value
+        raise KeyError(key)
+
+    @override
+    def __iter__(self) -> Iterator[object]:
+        return (key for key, _ in self._entries)
+
+    @override
+    def __len__(self) -> int:
+        return len(self._entries)
+
+
+def _charge_pair(value: object, policy: ResourcePolicy) -> None:
+    charge_document(
+        policy,
+        _INPUT_OBJECT_SCHEMA,
+        parse("query P($p: Pair) { pair(p: $p) }"),
+        {"p": value},
+    )
+
+
+def test_keys_that_are_not_names_are_charged_and_name_no_input_field() -> None:
+    """An input object's non-``str`` keys are charged for width and nodes like any entry.
+
+    They name no declared field, so the lookup is never asked of them: an
+    unhashable key raises nothing, and each entry is charged untyped.
+    """
+    _charge_pair(_ListKeyedMapping(), ResourcePolicy(max_container_width=2, max_input_nodes=3))
+    with pytest.raises(ResourceLimitExceeded) as caught:
+        _charge_pair(_ListKeyedMapping(), ResourcePolicy(max_container_width=1))
+    assert caught.value.bound == "max_container_width"
+    with pytest.raises(ResourceLimitExceeded) as caught:
+        _charge_pair(_ListKeyedMapping(), ResourcePolicy(max_input_nodes=2))
+    assert caught.value.bound == "max_input_nodes"
+
+
 def test_charge_document_accepts_none_variables() -> None:
     """charge_document safely accepts variables=None."""
     charge_document(
@@ -4409,10 +4477,14 @@ def test_the_armed_budget_is_not_the_policy_the_caller_armed_it_with() -> None:
     context: dict[str, object] = {}
     token = begin_resource_budget(context, policy)
     try:
+        # The scope carries the snapshot the lease arms, never the caller's object.
+        assert token.policy is armed_resource_policy()
+        assert token.policy is not policy
         policy.__dict__["max_list_rows"] = 999
         info = SimpleNamespace(context=context)
 
         assert policy_from_info(info).max_list_rows == 2
+        assert token.policy.max_list_rows == 2
     finally:
         end_resource_budget(token)
 
@@ -4462,7 +4534,7 @@ def test_disarming_with_a_token_from_another_variable_is_not_swallowed() -> None
         foreign: contextvars.ContextVar[OperationLease[_RequestBudget] | None] = (
             contextvars.ContextVar("foreign_budget", default=None)
         )
-        mismatched = _BudgetScope(lease=scope.lease, token=foreign.set(None))
+        mismatched = _BudgetScope(policy=scope.policy, lease=scope.lease, token=foreign.set(None))
 
         with pytest.raises(ValueError, match="different ContextVar"):
             end_resource_budget(mismatched)

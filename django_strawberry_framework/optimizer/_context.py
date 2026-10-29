@@ -22,6 +22,11 @@ import contextlib
 from contextvars import ContextVar, Token
 from typing import TYPE_CHECKING, NamedTuple
 
+from django_strawberry_framework.utils._narrowing import (
+    is_set_or_frozenset,
+    require,
+    require_instance,
+)
 from django_strawberry_framework.utils.context import (
     clear_context_key,
     get_context_value,
@@ -31,6 +36,7 @@ from django_strawberry_framework.utils.operation_lease import OperationLease
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
+    from collections.abc import Set as AbstractSet
     from typing import TypeAlias
 
     from django.db import models
@@ -78,14 +84,17 @@ __all__ = (
     "converted_selections_memo",
     "end_execution_frame",
     "execution_plan_memo",
+    "fk_id_elision_keys",
     "get_context_value",
     "operation_publishes_to_context",
     "optimizer_value",
+    "planned_resolver_keys",
     "publish_scoped_relations",
     "publish_window_cursor_states",
     "relation_is_optimizer_scoped",
     "stash_for_optimizer",
     "stash_on_context",
+    "stashed_strictness",
     "window_cursor_state",
 )
 
@@ -94,6 +103,9 @@ DST_OPTIMIZER_FK_ID_ELISIONS = "dst_optimizer_fk_id_elisions"
 DST_OPTIMIZER_PLANNED = "dst_optimizer_planned"
 DST_OPTIMIZER_LOOKUP_PATHS = "dst_optimizer_lookup_paths"
 DST_OPTIMIZER_STRICTNESS = "dst_optimizer_strictness"
+
+#: The key set an absent or non-set elision stash reads as.
+_NO_KEYS: frozenset[object] = frozenset()
 
 #: One managed execution's scratch, and the lease every reader reaches it through.
 #:
@@ -405,6 +417,37 @@ def optimizer_value(context: object, key: str, default: object = None) -> object
     if frame is None:
         return get_context_value(context, key, default)
     return frame.stashes.get(key, default)
+
+
+def planned_resolver_keys(context: object) -> AbstractSet[object] | None:
+    """Return the planned resolver-key set the optimizer stashed, or ``None`` when absent.
+
+    The extension stashes a ``frozenset`` (``_stash_union`` merges into a ``set`` or
+    ``frozenset``); any other value under the key raises ``TypeError`` rather than
+    reading as absent, which would skip the N+1 guard a stashed strictness arms.
+    """
+    value = optimizer_value(context, DST_OPTIMIZER_PLANNED)
+    return None if value is None else require(value, is_set_or_frozenset)
+
+
+def fk_id_elision_keys(context: object) -> AbstractSet[object]:
+    """Return the FK-id-elided resolver-key set the optimizer stashed (empty when absent).
+
+    Any other value under the key than a ``set`` / ``frozenset`` raises ``TypeError``
+    rather than reading as no elisions.
+    """
+    value = optimizer_value(context, DST_OPTIMIZER_FK_ID_ELISIONS)
+    return _NO_KEYS if value is None else require(value, is_set_or_frozenset)
+
+
+def stashed_strictness(context: object) -> str:
+    """Return the strictness string the optimizer stashed (``"off"`` when absent).
+
+    The extension stashes its validated ``strictness`` string; any other value under
+    the key raises ``TypeError`` rather than reading as ``"off"``, which would silence
+    the N+1 guard a hand-built context meant to arm.
+    """
+    return require_instance(optimizer_value(context, DST_OPTIMIZER_STRICTNESS, "off"), str)
 
 
 def stash_for_optimizer(context: object, key: str, value: object) -> None:

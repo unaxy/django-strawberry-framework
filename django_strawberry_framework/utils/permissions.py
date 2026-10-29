@@ -35,7 +35,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, TypeAlias, overload
 
 from django.apps import apps
 from django.db import router
@@ -45,9 +45,18 @@ from graphql import GraphQLError
 
 from django_strawberry_framework.conf import django_setting
 from django_strawberry_framework.exceptions import ConfigurationError
+from django_strawberry_framework.types.definition import DjangoTypeDefinition
 
 from . import truth
-from ._narrowing import dict_items, is_mapping, is_str, mapping_get, read_attr, require
+from ._narrowing import (
+    dict_items,
+    is_mapping,
+    is_str,
+    mapping_get,
+    optional_instance,
+    read_attr,
+    require,
+)
 from .input_values import (
     LEAF,
     RELATED,
@@ -66,13 +75,12 @@ from .strings import flatten_lookup_path
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, MutableMapping
-    from typing import TypeAlias
 
     from django.db import models
+    from typing_extensions import TypeIs
 
     from django_strawberry_framework.sets_mixins import ActiveInputPermissionMixin
     from django_strawberry_framework.types.base import DjangoType
-    from django_strawberry_framework.types.definition import DjangoTypeDefinition
 
     from .input_values import FieldSpecMap, RelatedBranch
 
@@ -571,36 +579,39 @@ def _fire_gate_on_class(
 
 
 @dataclass(frozen=True)
-class RelationHop:
-    """One relation a flat source path walks through: a declared branch, or a relation none declares.
+class DeclaredHop:
+    """One declared branch a flat source path walks through.
 
-    A declared hop: ``owner`` declares ``related_obj`` (a ``RelatedFilter`` /
-    ``RelatedOrder``) under the public attribute ``declared_attr``; ``target`` is
-    the child set class the declaration resolves, ``None`` when it resolves none.
+    ``owner`` declares ``related_obj`` (a ``RelatedFilter`` / ``RelatedOrder``)
+    under the public attribute ``declared_attr``; ``target`` is the child set
+    class the declaration resolves, ``None`` when it resolves none.
+    """
 
-    An undeclared hop (``related_obj`` is ``None``): the relation segment
-    ``declared_attr`` of the model the walk has reached (``owner`` is the set
-    whose model that is, ``None`` past another undeclared hop), reaching
-    ``model``, whose rows answer for ``target_type``
+    owner: type[object]
+    declared_attr: str
+    related_obj: object
+    target: type[object] | None
+
+
+@dataclass(frozen=True)
+class UndeclaredHop:
+    """One relation a flat source path walks through that no branch declares.
+
+    The relation segment ``declared_attr`` of the model the walk has reached
+    (``owner`` is the set whose model that is, ``None`` past another undeclared
+    hop), reaching ``model``, whose rows answer for ``target_type``
     (``utils/querysets.py::relation_target_type``; ``None`` when no type is
     registered for it).
     """
 
     owner: type[object] | None
     declared_attr: str
-    related_obj: object | None
-    target: type[object] | None
-    model: type[models.Model] | None = None
-    target_type: type[DjangoType] | None = None
-
-    @property
-    def declared(self) -> bool:
-        """Whether a ``RelatedFilter`` / ``RelatedOrder`` declares this hop."""
-        return self.related_obj is not None
+    model: type[models.Model]
+    target_type: type[DjangoType] | None
 
     @property
     def scope(self) -> type[DjangoType] | None:
-        """The type whose ``get_queryset`` scopes an undeclared hop's rows, ``None`` when none does.
+        """The type whose ``get_queryset`` scopes this hop's rows, ``None`` when none does.
 
         ``target_type`` when it declares a ``get_queryset`` of its own (the
         identity default changes no row), as
@@ -610,6 +621,32 @@ class RelationHop:
         if target_type is None or not target_type.has_custom_get_queryset():
             return None
         return target_type
+
+
+#: One relation a flat source path walks through: a declared branch, or a relation none declares.
+RelationHop: TypeAlias = DeclaredHop | UndeclaredHop
+
+
+@overload
+def walk_declared_relation_path(
+    owning_cls: type[object],
+    source_path: str,
+    *,
+    related_attr: str,
+    target_attr: str,
+    undeclared: Literal[False] = False,
+) -> tuple[tuple[DeclaredHop, ...], tuple[str, ...]]: ...
+
+
+@overload
+def walk_declared_relation_path(
+    owning_cls: type[object],
+    source_path: str,
+    *,
+    related_attr: str,
+    target_attr: str,
+    undeclared: bool,
+) -> tuple[tuple[RelationHop, ...], tuple[str, ...]]: ...
 
 
 def walk_declared_relation_path(
@@ -649,7 +686,7 @@ def walk_declared_relation_path(
 
     ``undeclared=True`` is the visibility reading: past the last declared hop the
     walk goes on through every relation segment of the model reached, one
-    undeclared hop each (``RelationHop``), until a segment that is not a relation.
+    undeclared hop each (``UndeclaredHop``), until a segment that is not a relation.
     A relation reaching the table of the set the undeclared hops start from
     answers for the type that set is bound to
     (``utils/querysets.py::relation_target_type``): same table is the same
@@ -677,7 +714,7 @@ def walk_declared_relation_path(
         consumed, declared_attr, related_obj = max(matches, key=lambda match: match[0])
         target: object = getattr(related_obj, target_attr, None)
         resolved = target if truth.is_type(target) else None
-        hops.append(RelationHop(current_cls, declared_attr, related_obj, resolved))
+        hops.append(DeclaredHop(current_cls, declared_attr, related_obj, resolved))
         index += consumed
         if resolved is None:
             return tuple(hops), segments[index:]
@@ -705,8 +742,12 @@ def set_bound_definition(set_cls: object) -> DjangoTypeDefinition | None:
     placeholder's target).
     """
     # The binder is the one writer of a class's own slot and stores a ``DjangoTypeDefinition``;
-    # the set bases' own ``None`` is the unbound default.
-    return cast("DjangoTypeDefinition | None", truth.class_dict(set_cls).get("_owner_definition"))
+    # the set bases' own ``None`` is the unbound default. Anything else in the slot is a
+    # defect, refused rather than read as an owner.
+    return optional_instance(
+        truth.class_dict(set_cls).get("_owner_definition"),
+        DjangoTypeDefinition,
+    )
 
 
 def set_bound_type(set_cls: object) -> type[DjangoType] | None:
@@ -741,9 +782,7 @@ def _walk_undeclared_hops(
     for hop in leading_relation_hops(model, LOOKUP_SEP.join(segments[index:])):
         name = model._meta.pk.name if hop.segment == "pk" else hop.segment
         target_type = relation_target_type(hop.target_model, root=root)
-        hops.append(
-            RelationHop(owner, name, None, None, model=hop.target_model, target_type=target_type),
-        )
+        hops.append(UndeclaredHop(owner, name, hop.target_model, target_type))
         owner, model = None, hop.target_model
         index += 1
     return index
@@ -779,8 +818,7 @@ def relation_path_gates(
         related_attr=related_attr,
         target_attr=target_attr,
     )
-    # The declared reading's hops all carry the set that declares them.
-    gates = [(cast("type[object]", hop.owner), hop.declared_attr) for hop in hops]
+    gates = [(hop.owner, hop.declared_attr) for hop in hops]
     target = hops[-1].target if hops else None
     if target is not None:
         terminal = LOOKUP_SEP.join(remainder) if remainder else _key_gate_path(target)
@@ -858,6 +896,26 @@ def _related_declarations(cls: type[object], related_attr: str) -> tuple[tuple[s
             )
         declarations.append((declared_attr, related_obj))
     return tuple(declarations)
+
+
+def _permission_mixin() -> type[ActiveInputPermissionMixin]:
+    """Return the permission facade both set families inherit.
+
+    Deferred so the ``sets_mixins -> utils.permissions`` module-load edge stays
+    one-directional: ``sets_mixins`` imports this module at module scope, so a
+    module-level import back would re-enter a partially-initialized
+    ``sets_mixins`` at import time.
+    """
+    from django_strawberry_framework.sets_mixins import (  # noqa: PLC0415 - import cycle
+        ActiveInputPermissionMixin,
+    )
+
+    return ActiveInputPermissionMixin
+
+
+def _is_permission_set(value: object) -> TypeIs[type[ActiveInputPermissionMixin]]:
+    """Return whether ``value`` is a set class carrying the shared permission facade (real MRO)."""
+    return truth.is_subclass(value, _permission_mixin())
 
 
 def run_active_input_permission_checks(
@@ -942,12 +1000,12 @@ def run_active_input_permission_checks(
     for field_name, related_obj, child_input in related_branches:
         # ``related_obj`` is a declaration ``sets_mixins.py::collect_related_declarations``
         # collected; its target property admits only ``None`` or the family's set class
-        # (``RelatedSetTargetMixin._validate_target``).
-        child_set = cast(
-            "type[ActiveInputPermissionMixin] | None",
-            getattr(related_obj, target_attr, None),
-        )
-        if child_set is not None and hasattr(child_set, "_run_permission_checks"):
+        # (``RelatedSetTargetMixin._validate_target``). A target other than ``None`` that
+        # is not a set class carrying the permission facade is a defect: refused before
+        # any gate below fires, never skipped as a branch with no child set to check.
+        child_target: object = getattr(related_obj, target_attr, None)
+        if child_target is not None:
+            child_set = require(child_target, _is_permission_set)
             # Child set is (usually) a different class; it keys its own per-class
             # set inside the shared ``fired`` map and allocates its own bare.
             # Thread the shared depth budget so a self-referential related branch

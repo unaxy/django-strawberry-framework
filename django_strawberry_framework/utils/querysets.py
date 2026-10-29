@@ -139,6 +139,7 @@ from ._narrowing import (
     is_exact_pair,
     is_exact_set_or_frozenset,
     is_exact_tuple,
+    is_exact_tuple_or_frozenset,
     is_str,
     iter_of,
     pk_of,
@@ -2730,24 +2731,23 @@ def _reconstructed_value(value: object, memo: dict[int, object]) -> object:
     # strings, flags, marks), so every comprehension below tests ``_RETAINED_TYPES``
     # INLINE and recurses only for a member that can carry AST, keeping the traversal one
     # call per non-leaf rather than one call per element.
-    # Neither checker narrows ``value`` through the cached ``value_type``, so each branch
-    # below casts to the exact builtin its identity test just proved.
-    if value_type is tuple or value_type is frozenset:
+    # Each branch tests the cached ``value_type`` first and only then asks the exact
+    # predicate that narrows ``value`` for the checker, so a value no branch takes pays
+    # identity tests alone.
+    if (value_type is tuple or value_type is frozenset) and is_exact_tuple_or_frozenset(value):
         # IMMUTABLE containers take no memo entry: nothing can rewrite one in place, so
         # only their members need reconstruction, an empty one is already a shared
         # singleton, and a traversal cycle can only close through a MUTABLE member, which
         # IS memoized. Skipping the bookkeeping keeps the commonest query-state shape (a
         # tuple of alias strings) at one call and one allocation.
-        frozen = cast("tuple[object, ...] | frozenset[object]", value)
-        if not frozen:
+        if not value:
             return value
-        frozen_type = cast("type[tuple[object, ...] | frozenset[object]]", value_type)
-        return frozen_type(
+        return type(value)(
             [
                 item
                 if item is None or truth.is_exact_one_of(item, _RETAINED_TYPES)
                 else _reconstructed_value(item, memo)
-                for item in frozen
+                for item in value
             ],
         )
     value_id = id(value)
@@ -2760,7 +2760,7 @@ def _reconstructed_value(value: object, memo: dict[int, object]) -> object:
     # A MUTABLE container is memoized EMPTY before its members are reconstructed, so a
     # graph that reaches it again mid-traversal terminates on the memo entry instead of
     # recursing forever.
-    if value_type is list:
+    if value_type is list and is_exact_list(value):
         rebuilt_list: list[object] = []
         memo[value_id] = rebuilt_list
         rebuilt_list.extend(
@@ -2768,11 +2768,11 @@ def _reconstructed_value(value: object, memo: dict[int, object]) -> object:
                 item
                 if item is None or truth.is_exact_one_of(item, _RETAINED_TYPES)
                 else _reconstructed_value(item, memo)
-                for item in cast("list[object]", value)
+                for item in value
             ],
         )
         return rebuilt_list
-    if value_type is dict:
+    if value_type is dict and is_exact_dict(value):
         rebuilt_dict: dict[object, object] = {}
         memo[value_id] = rebuilt_dict
         # Keys take the same retain-or-reconstruct rule as values: a rebuilt mapping that
@@ -2781,7 +2781,7 @@ def _reconstructed_value(value: object, memo: dict[int, object]) -> object:
         # keys the graph proofs never constrain), so a key is retained only when it is a
         # retained leaf and otherwise reconstructed -- normalized, retained as schema, or
         # failed closed -- exactly like a value in the same slot.
-        for raw_key, raw_item in cast("dict[object, object]", value).items():
+        for raw_key, raw_item in value.items():
             key = raw_key
             if not (key is None or truth.is_exact_one_of(key, _RETAINED_TYPES)):
                 key = _reconstructed_value(key, memo)
@@ -2790,7 +2790,7 @@ def _reconstructed_value(value: object, memo: dict[int, object]) -> object:
                 item = _reconstructed_value(item, memo)
             rebuilt_dict[key] = item
         return rebuilt_dict
-    if value_type is set:
+    if value_type is set and is_exact_set_or_frozenset(value):
         rebuilt_set: set[object] = set()
         memo[value_id] = rebuilt_set
         rebuilt_set.update(
@@ -2798,7 +2798,7 @@ def _reconstructed_value(value: object, memo: dict[int, object]) -> object:
                 item
                 if item is None or truth.is_exact_one_of(item, _RETAINED_TYPES)
                 else _reconstructed_value(item, memo)
-                for item in cast("set[object]", value)
+                for item in value
             ],
         )
         return rebuilt_set
@@ -2821,8 +2821,10 @@ def _reconstructed_value(value: object, memo: dict[int, object]) -> object:
     # ``object.__new__``, never ``value_type.__new__``: the base allocator only, so a
     # class-level ``__new__`` (Django's ``@deconstructible`` wrapper, or any other) is not
     # dispatched during reconstruction and cannot observe or alter the fresh node before
-    # its validated state is transferred.
-    rebuilt = object.__new__(value_type)
+    # its validated state is transferred. The class is read afresh rather than through the
+    # cached ``value_type``, which the container tests above leave typed as a possible
+    # builtin container class for the checker.
+    rebuilt = object.__new__(type(value))
     memo[value_id] = rebuilt
     dropped = _QUERY_CLONE_DROPPED if value_type is sql.Query else _EXPRESSION_COPY_DROPPED
     # A ``QuerySet`` value's ``_fetch_mode`` is the one slot that retains a Django fetch

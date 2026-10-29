@@ -24,7 +24,7 @@ import inspect
 from collections.abc import Callable, Mapping
 from collections.abc import Set as AbstractSet
 from enum import Enum
-from typing import TYPE_CHECKING, Final, Literal, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Final, Literal, Protocol, TypeVar
 
 import strawberry
 from django.db import models, router
@@ -40,15 +40,18 @@ from django_strawberry_framework.exceptions import OptimizerError
 # "_resolver_logger.warning(...)" rather than as "logger.warning(...)"
 # (which would mask the cross-subpackage origin).
 from django_strawberry_framework.optimizer import logger as _resolver_logger
-from django_strawberry_framework.optimizer._context import (
-    DST_OPTIMIZER_FK_ID_ELISIONS,
-    DST_OPTIMIZER_PLANNED,
-    DST_OPTIMIZER_STRICTNESS,
-)
 from django_strawberry_framework.optimizer._context import active_strictness as _active_strictness
-from django_strawberry_framework.optimizer._context import optimizer_value as _optimizer_value
+from django_strawberry_framework.optimizer._context import (
+    fk_id_elision_keys as _fk_id_elision_keys,
+)
+from django_strawberry_framework.optimizer._context import (
+    planned_resolver_keys as _planned_resolver_keys,
+)
 from django_strawberry_framework.optimizer._context import (
     relation_is_optimizer_scoped as _relation_is_optimizer_scoped,
+)
+from django_strawberry_framework.optimizer._context import (
+    stashed_strictness as _stashed_strictness,
 )
 from django_strawberry_framework.optimizer.field_meta import FieldMeta
 from django_strawberry_framework.optimizer.plans import resolver_key, runtime_path_from_info
@@ -59,7 +62,7 @@ from django_strawberry_framework.resource_policy import (
     check_deadline,
 )
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import is_str, read_attr, require
+from django_strawberry_framework.utils._narrowing import is_queryset, is_str, read_attr, require
 from django_strawberry_framework.utils.execution_mode import async_execution
 from django_strawberry_framework.utils.querysets import (
     apply_type_visibility_async,
@@ -273,11 +276,10 @@ def _strictness_for(context: object) -> str:
     live = _active_strictness()
     if live is not None:
         return live
-    # The extension stashes its ``strictness`` string under this key.
-    return cast("str", _optimizer_value(context, DST_OPTIMIZER_STRICTNESS, "off"))
+    return _stashed_strictness(context)
 
 
-def _relation_is_planned(key: str, planned: AbstractSet[str] | None) -> bool:
+def _relation_is_planned(key: str, planned: AbstractSet[object] | None) -> bool:
     """Return whether the optimizer planned the relation named by ``key``.
 
     Reads both publish channels: the ``DST_OPTIMIZER_PLANNED`` stash (``planned``,
@@ -299,7 +301,7 @@ def _check_n1(
     kind: RelationKind | Literal["connection_to_attr"] | None,
     cache_name: str | None = None,
     reason: str | None = None,
-    planned: AbstractSet[str] | _PlanUnread | None = _PLAN_UNREAD,
+    planned: AbstractSet[object] | _PlanUnread | None = _PLAN_UNREAD,
     precomputed_key: str | None = None,
     force_unplanned: bool = False,
     strictness: str | None = None,
@@ -373,8 +375,7 @@ def _check_n1(
     # once per row, not once per consumer. Other call sites omit
     # both and get the original read-and-compute behavior.
     if planned is _PLAN_UNREAD:
-        # The extension stashes its planned resolver-key set under this key.
-        planned = cast("AbstractSet[str] | None", _optimizer_value(context, DST_OPTIMIZER_PLANNED))
+        planned = _planned_resolver_keys(context)
     key = (
         precomputed_key
         if precomputed_key is not None
@@ -492,7 +493,7 @@ def _visible_many_rows(
     source: models.QuerySet[models.Model],
     target_type: "type[DjangoType]",
     info: Info[object, object],
-) -> AwaitableOrValue[list[models.Model]]:
+) -> AwaitableOrValue[list[object]]:
     """Apply target visibility, then bound and materialize a many-side relation.
 
     The async branch iterates the bound with ``async for`` unconditionally: the
@@ -503,15 +504,12 @@ def _visible_many_rows(
     """
     if async_execution():
 
-        async def _resolve() -> list[models.Model]:
+        async def _resolve() -> list[object]:
             visible = await apply_type_visibility_async(target_type, source, info)
             # ``querysets.py::_normalized_visibility_result`` returns a fresh, unsliced,
             # UNEVALUATED plain ``QuerySet`` (its seal never carries ``_result_cache``),
             # so the bound's slice is a ``QuerySet``, never the evaluated-cache list.
-            bounded = cast(
-                "models.QuerySet[models.Model, models.Model]",
-                await bounded_rows_async(visible, info),
-            )
+            bounded = require(await bounded_rows_async(visible, info), is_queryset)
             return [row async for row in bounded]
 
         return _resolve()
@@ -751,15 +749,12 @@ def _make_relation_resolver(
                 # the query on the event-loop thread. Iterate the bound queryset
                 # asynchronously instead - the same rows in the same order.
 
-                async def _resolve() -> list[models.Model]:
+                async def _resolve() -> list[object]:
                     # ``row_source`` is an exact, unevaluated ``QuerySet``: a manager's
                     # ``all()`` is a queryset, ``normalized_row_source`` rebuilds a
                     # subclass into a plain one, and the evaluated case was routed
                     # above. Its slice is therefore a ``QuerySet``, never a ``list``.
-                    bounded = cast(
-                        "models.QuerySet[models.Model, models.Model]",
-                        await bounded_rows_async(row_source, info),
-                    )
+                    bounded = require(await bounded_rows_async(row_source, info), is_queryset)
                     return [row async for row in bounded]
 
                 return _resolve()
@@ -820,17 +815,10 @@ def _make_relation_resolver(
         # first; when neither is active - the common request shape - skip the walk
         # entirely. When at least one is active, walk once and share the key
         # across both checks.
-        # The extension stashes its elided resolver-key set and its planned
-        # resolver-key set under these keys.
         elisions = (
-            cast(
-                "AbstractSet[str]",
-                _optimizer_value(context, DST_OPTIMIZER_FK_ID_ELISIONS, _EMPTY_ELISIONS),
-            )
-            if field_meta.attname is not None
-            else _EMPTY_ELISIONS
+            _fk_id_elision_keys(context) if field_meta.attname is not None else _EMPTY_ELISIONS
         )
-        planned = cast("AbstractSet[str] | None", _optimizer_value(context, DST_OPTIMIZER_PLANNED))
+        planned = _planned_resolver_keys(context)
         # Cheap per-row gate: a ``ContextVar`` read, not a second stash dispatch.
         # ``None`` (no extension ran) plus an absent plan sentinel means nothing
         # armed the guard and there is no plan to compare against, so the

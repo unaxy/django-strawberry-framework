@@ -179,6 +179,7 @@ from django_strawberry_framework.utils.write_transaction import (
     snapshot_target_state,
     write_pipeline,
 )
+from django_strawberry_framework.write_mixins import _ValidatedMutationMeta
 from tests._generated_inputs import keyword_constructor as _keyword_constructor
 from tests._idioms import (
     ClaimsClassBase,
@@ -832,6 +833,29 @@ def test_save_time_drf_validation_error_uses_recursive_flattener_not_flat_mapper
         )
     assert isinstance(result, StepFailure)
     assert [(fe.field, fe.messages) for fe in result.errors] == [("name", ["drf save-time"])]
+
+
+def test_serializer_write_step_refuses_a_snapshot_with_no_serializer_class() -> None:
+    """The write step reads only a serializer-flavor snapshot; one without a class is a typed error."""
+    stand_in = _as_serializer_mutation(
+        type(
+            "NoSerializerMutation",
+            (),
+            {
+                "_mutation_meta": _ValidatedMutationMeta(
+                    model=None,
+                    operation="create",
+                    input_class=None,
+                    partial_input_class=None,
+                    fields=None,
+                    exclude=None,
+                    permission_classes=(),
+                ),
+            },
+        ),
+    )
+    with pytest.raises(TypeError, match="expected the type the source guarantees, got NoneType"):
+        serializer_resolvers._serializer_write_step(stand_in, unread_info(), None, {})
 
 
 @pytest.mark.django_db

@@ -692,6 +692,20 @@ def test_ambiguous_user_primary_raises_the_set_meta_primary_message() -> None:
     )
 
 
+def test_current_user_bind_refuses_an_unresolved_primary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``current_user`` bind reached with no resolved user type is a typed error."""
+
+    def unresolved(_model: object, _surfaces: object) -> None:
+        return None
+
+    current_user()
+    monkeypatch.setattr(auth_mutations, "_resolve_user_primary_or_raise", unresolved)
+    with pytest.raises(TypeError, match="expected the type the source guarantees, got NoneType"):
+        bind_auth_mutations()
+
+
 def test_sealed_holder_rebind_message_names_the_holder() -> None:
     """A rebind of a holder's sealed ``_mutation_meta`` names the holder class."""
     holder = _make_permission_holder("login", "Login", ())
@@ -1134,6 +1148,37 @@ def test_login_gate_sees_the_attempted_username_and_never_the_password() -> None
     assert seen["data"] == {"username": "probe"}
     assert "sekrit" not in str(seen["data"])
     assert seen["instance"] is None
+
+
+@pytest.mark.django_db
+def test_login_holder_with_no_bound_primary_fails_after_the_gate() -> None:
+    """A login holder whose primary slot holds no ``DjangoType`` raises past the gate."""
+    seen: list[str] = []
+
+    class RecordingGate:
+        def has_permission(
+            self,
+            _info: object,
+            _mutation: type[object],
+            operation: str,
+            data: object,
+            instance: object = None,
+        ) -> bool:
+            del data, instance
+            seen.append(operation)
+            return True
+
+    schema = _login_logout_schema(permission_classes=[RecordingGate])
+    holder = _declared_holder("login")
+    holder._primary_type = None
+    res = schema.execute_sync(
+        _LOGIN_Q,
+        variable_values={"p": "x"},
+        context_value=_session_request(),
+    )
+    assert seen == ["login"]
+    assert res.errors is not None
+    assert res.errors[0].message == "expected the type the source guarantees, got NoneType"
 
 
 @pytest.mark.django_db
@@ -1860,6 +1905,36 @@ def test_model_decode_step_without_exclusion_returns_a_three_tuple() -> None:
     )
     assert not isinstance(decoded, StepFailure)
     assert len(decoded) == 3
+
+
+def test_register_decode_step_refuses_a_bind_without_the_excluded_password() -> None:
+    """A create over the user model whose bind stashes no ``EXCLUDED`` spec raises ``ValueError``.
+
+    Its decode answers the model flavor's three-tuple, which carries no captured password
+    for the register write step to hash.
+    """
+    _declare_user_type()
+
+    class CreateUser(DjangoMutation):
+        class Meta:
+            model = User
+            operation = "create"
+            fields = ("username",)
+            permission_classes = []
+
+    finalize_django_types()
+
+    @strawberry.input
+    class ProbeInput:
+        username: str
+
+    with pytest.raises(ValueError, match="four-tuple; a bind without the EXCLUDED password spec"):
+        _register_decode_step(
+            CreateUser,
+            ProbeInput(username="plain"),
+            info=unread_info(),
+            instance=None,
+        )
 
 
 def _register_rider() -> type[DjangoMutation]:

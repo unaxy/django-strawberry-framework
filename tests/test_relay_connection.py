@@ -22,6 +22,7 @@ nested ``pageInfo``, and shipped SDL field presence live in
 ``examples/fakeshop/test_query/test_products_visibility_api.py``.
 """
 
+import copy
 import inspect
 from types import SimpleNamespace, new_class
 from typing import cast, get_args
@@ -71,7 +72,11 @@ from django_strawberry_framework.filters import FilterSet, filter_input_type
 from django_strawberry_framework.optimizer.plans import WINDOW_ROW_NUMBER, resolver_key
 from django_strawberry_framework.orders import OrderSet
 from django_strawberry_framework.registry import registry
-from django_strawberry_framework.types.finalizer import _register_relation_connection_teardown
+from django_strawberry_framework.types.finalizer import (
+    _register_relation_connection_teardown,
+    _synthesize_relation_connections,
+)
+from django_strawberry_framework.types.relay import apply_interfaces
 from django_strawberry_framework.types.resolvers import _check_n1
 from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.utils.connections import (
@@ -675,6 +680,62 @@ def test_relation_connection_teardown_keeps_a_present_relation_annotation() -> N
     registry.unregister(CategoryType)
 
     assert replaced == {"items": consumer_items}
+
+
+def test_relation_connection_teardown_refuses_a_non_dict_annotations_entry() -> None:
+    """A class-namespace ``__annotations__`` entry that is not a dict is a typed error.
+
+    The failed teardown stays registered; once the entry is a dict again, it runs.
+    """
+    field_obj = _synthesized_field()
+
+    # Built through ``type()``: a class statement types ``__annotations__`` as a dict.
+    category_type = _as_django_type(
+        type("CategoryType", (), {"__annotations__": "not-a-dict", "items_connection": field_obj}),
+    )
+
+    definition = make_definition(
+        Category,
+        origin=category_type,
+        relation_connections={"items_connection": "items"},
+    )
+    registry.register(Category, category_type)
+    _register_relation_connection_teardown(
+        category_type,
+        definition,
+        generated="items_connection",
+        field_obj=field_obj,
+        relation_name="items",
+        shape="both",
+        annotations={},
+        annotations_snapshot={},
+        list_resolver=object(),
+    )
+
+    with pytest.raises(TypeError, match="expected the type the source guarantees, got str"):
+        registry.unregister(category_type)
+
+    category_type.__annotations__ = {}
+    registry.unregister(category_type)
+    assert registry.get(Category) is None
+
+
+def test_relation_connection_synthesis_refuses_a_non_class_related_model() -> None:
+    """A many-side relation whose ``related_model`` is not a model class is a typed error."""
+    _make_type("ItemType", Item, ("id", "name", "category"))
+    category_type = _make_type("CategoryType", Category, ("id", "name", "items"))
+    definition = category_type.__django_strawberry_definition__
+    items = Category._meta.get_field("items")
+    unresolved = copy.copy(items)
+    vars(unresolved)["related_model"] = "products.Item"
+    definition.selected_fields = tuple(
+        unresolved if field is items else field for field in definition.selected_fields
+    )
+    # Synthesis reads only Relay-Node-shaped types, which the interface phase makes them.
+    apply_interfaces(category_type, definition)
+
+    with pytest.raises(TypeError, match="expected the type the source guarantees, got str"):
+        _synthesize_relation_connections()
 
 
 def test_registry_clear_removes_synthesized_state_before_different_shape_rebuild() -> None:

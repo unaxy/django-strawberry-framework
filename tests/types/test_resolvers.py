@@ -1893,3 +1893,57 @@ def test_sync_many_side_served_from_an_mti_ancestor_prefetch_costs_no_query() ->
         ],
     }
     assert len(captured.captured_queries) == 4, captured.captured_queries
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("visibility_hook", [False, True], ids=["no-hook", "visibility-hook"])
+async def test_async_many_side_refuses_a_bound_that_is_not_a_queryset(
+    monkeypatch: pytest.MonkeyPatch,
+    visibility_hook: bool,  # noqa: FBT001 - the parametrized branch
+) -> None:
+    """The async many side iterates the bound as a queryset and refuses any other value.
+
+    An unevaluated queryset's bound is always a queryset slice, so no real relation
+    reaches the refusal; the bound is replaced by a ``list`` to pin that the iteration
+    raises ``TypeError`` instead of reading the rows of something that is not a queryset.
+    """
+    await sync_to_async(services.seed_data)(1)
+
+    class CategoryRowsType(DjangoType):
+        class Meta:
+            model = Category
+            fields = ("id", "name", "items")
+
+    class ItemRowsType(DjangoType):
+        class Meta:
+            model = Item
+            fields = ("id", "name")
+
+        if visibility_hook:
+
+            @classmethod
+            @override
+            def get_queryset(cls, queryset: QuerySet[Item], info: object) -> QuerySet[Item]:
+                # The hook hides nothing; its presence routes the rows through visibility.
+                return queryset
+
+    assert registry.get(Item) is ItemRowsType
+    finalize_django_types()
+    category = await Category.objects.afirst()
+    assert category is not None
+
+    async def _unbounded_list(result: object, info: object) -> list[object]:
+        del result, info  # the stand-in bound ignores its source
+        return []
+
+    monkeypatch.setattr(resolvers_mod, "bounded_rows_async", _unbounded_list)
+    resolver = _make_relation_resolver(
+        Category._meta.get_field("items"),
+        parent_type=CategoryRowsType,
+    )
+    pending = resolver(category, make_info(path=response_path("category", "items"), context={}))
+
+    assert is_awaitable(pending)
+    with pytest.raises(TypeError, match="expected the type the source guarantees, got list"):
+        await pending

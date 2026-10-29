@@ -5652,6 +5652,28 @@ async def test_close_observes_an_already_cancelled_attempt_as_abandoned() -> Non
     await _discard(starter)
 
 
+async def test_close_refuses_a_closing_state_that_holds_no_attempt() -> None:
+    """``CLOSING`` without an attempt task is a defect: ``close`` raises and sends nothing.
+
+    Production enters ``CLOSING`` only together with the attempt it starts, so the
+    state is built by hand here; ``close`` starts no attempt of its own for it.
+
+    Fakeshop has no ``config/asgi.py`` or WebSocket mount (rungs 1-3). Live HTTP
+    sibling: ``examples/fakeshop/test_query/test_transport_api.py``.
+    """
+    revocation = consumers_module._ConnectionRevocation()
+    revocation.state = consumers_module._REVOCATION_CLOSING
+    websocket = _ParkedCloseWebSocket()
+
+    with pytest.raises(TypeError, match="expected the type the source guarantees"):
+        await revocation.close(websocket)
+
+    assert websocket.closes == []
+    assert revocation.attempt is None
+    assert revocation.attempts == 0
+    assert revocation.state == consumers_module._REVOCATION_CLOSING
+
+
 def _is_revalidating_consumer_class(
     consumer_class: "type[GraphQLWSConsumer]",
 ) -> TypeGuard["type[RevalidatingGraphQLWSConsumer]"]:
@@ -6722,6 +6744,68 @@ async def test_the_window_authorizes_only_a_revalidation_strictly_younger_than_i
     assert len(reads) == expected_reads
     expected_stamp = now if expected_reads else stamped_at
     assert scope[consumers_module._REVALIDATED_AT_SCOPE_KEY] == expected_stamp
+
+
+@pytest.mark.parametrize(
+    "stamp",
+    [
+        pytest.param("1000.0", id="str"),
+        pytest.param(1000, id="int"),
+        pytest.param(object(), id="object"),
+    ],
+)
+async def test_a_revalidation_stamp_that_is_not_a_float_authorizes_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    stamp: object,
+) -> None:
+    """Only the monotonic float the package writes can reuse a revalidation.
+
+    Any other value under the private key - one no package write produces - is read
+    as no cached revalidation: the checkpoint reads the session again and the read
+    rewrites the key with the current clock.
+
+    Fakeshop has no ``config/asgi.py`` or WebSocket mount (rungs 1-3). Live HTTP
+    sibling: ``examples/fakeshop/test_query/test_transport_api.py``.
+    """
+    reads = _count_actor_reads(monkeypatch)
+    now = 1000.5
+    monkeypatch.setattr(consumers_module, "_monotonic", lambda: now)
+    scope: dict[str, object] = {
+        "user": SimpleNamespace(is_authenticated=True),
+        consumers_module._REVALIDATED_AT_SCOPE_KEY: stamp,
+    }
+    consumer = _ConsumerState(scope, window=8.0)
+
+    assert await consumers_module._actor_is_current(consumer) is True
+    assert len(reads) == 1
+    assert scope[consumers_module._REVALIDATED_AT_SCOPE_KEY] == now
+
+
+async def test_a_session_key_that_is_not_a_string_fails_the_revalidation_closed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A scope session whose ``session_key`` is neither ``None`` nor a ``str`` denies the checkpoint.
+
+    ``_refreshed_actor`` refuses the key before any store is built, and
+    ``_actor_is_current`` answers that failure as every other revalidation failure:
+    the checkpoint is denied and the stale actor stays on the scope.
+
+    Fakeshop has no ``config/asgi.py`` or WebSocket mount (rungs 1-3). Live HTTP
+    sibling: ``examples/fakeshop/test_query/test_transport_api.py``.
+    """
+    session = SimpleNamespace(session_key=42)
+    with pytest.raises(TypeError, match="expected an instance of str"):
+        await consumers_module._refreshed_actor({"session": session})
+
+    stale = SimpleNamespace(is_authenticated=True)
+    scope: dict[str, object] = {"user": stale, "session": session}
+    consumer = _ConsumerState(scope)
+    with caplog.at_level(logging.ERROR, logger="django_strawberry_framework"):
+        assert await consumers_module._actor_is_current(consumer) is False
+    assert scope["user"] is stale
+    records = _package_logger_records(caplog)
+    assert [record.levelname for record in records] == ["ERROR"]
+    assert "fail-closed" in records[0].getMessage()
 
 
 async def test_the_default_zero_window_never_writes_a_revalidation_timestamp(

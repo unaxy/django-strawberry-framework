@@ -64,7 +64,6 @@ from typing import (
     NamedTuple,
     Protocol,
     TypeVar,
-    cast,
     overload,
 )
 
@@ -633,7 +632,7 @@ def _stamp_node_type(resolved_type: type[_RelayDjangoType], node: _NodeT) -> _No
     if node is None:
         return node
     # A lazy proxy stands in for the object it wraps, so the unwrapped row is still a ``_NodeT``.
-    node = cast("_NodeT", unwrap_lazy_object(node))
+    node = unwrap_lazy_object(node)
     definition = truth.static_attr(resolved_type, "__django_strawberry_definition__", None)
     model = getattr(definition, "model", None)
     if truth.is_type(model) and truth.is_instance(node, model):

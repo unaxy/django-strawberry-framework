@@ -18,9 +18,9 @@
 "django_strawberry_framework/auth/mutations.py::_channels_http_login_establish" = { reportArgumentType = 1 }
 "django_strawberry_framework/auth/mutations.py::_channels_logout" = { reportArgumentType = 1 }
 "django_strawberry_framework/auth/mutations.py::_declare_auth_surface" = { cast = 1 }
-"django_strawberry_framework/auth/mutations.py::_login_authenticate" = { cast = 1, reportArgumentType = 1 }
-"django_strawberry_framework/auth/mutations.py::_register_decode_step" = { cast = 2 }
-"django_strawberry_framework/auth/mutations.py::bind_auth_mutations" = { cast = 2 }
+"django_strawberry_framework/auth/mutations.py::_login_authenticate" = { reportArgumentType = 1 }
+"django_strawberry_framework/auth/mutations.py::_register_decode_step" = { cast = 1 }
+"django_strawberry_framework/auth/mutations.py::bind_auth_mutations" = { cast = 1 }
 "django_strawberry_framework/auth/sessions.py::require_session" = { cast = 1 }
 "django_strawberry_framework/conf.py::testing_endpoint_setting" = { reportFunctionMemberAccess = 1 }
 "django_strawberry_framework/connection.py::DjangoConnection" = { reportInvalidTypeArguments = 1 }
@@ -35,22 +35,16 @@
 "django_strawberry_framework/consumers.py::RevalidatingGraphQLWSConsumer.graphql_transport_ws_handler_class" = { reportIncompatibleVariableOverride = 1 }
 "django_strawberry_framework/consumers.py::RevalidatingGraphQLWSConsumer.graphql_ws_handler_class" = { reportIncompatibleVariableOverride = 1 }
 "django_strawberry_framework/consumers.py::RevalidatingGraphQLWSConsumer.scope" = { reportIncompatibleVariableOverride = 1 }
-"django_strawberry_framework/consumers.py::_ConnectionRevocation.close" = { cast = 1 }
 "django_strawberry_framework/consumers.py::_HandlerShape.schema" = { reportPropertyTypeMismatch = 1 }
 "django_strawberry_framework/consumers.py::_SchemaSeat.schema" = { reportPropertyTypeMismatch = 1 }
 "django_strawberry_framework/consumers.py::_StopAwareSchema.stream" = { reportUnknownArgumentType = 1, reportUnknownMemberType = 1 }
-"django_strawberry_framework/consumers.py::_actor_is_current" = { cast = 1 }
-"django_strawberry_framework/consumers.py::_refreshed_actor" = { cast = 1, reportArgumentType = 1 }
+"django_strawberry_framework/consumers.py::_refreshed_actor" = { reportArgumentType = 1 }
 "django_strawberry_framework/extensions/debug.py::DjangoDebugExtension._stash_payload_if_executed" = { reportUnknownMemberType = 1, reportUnknownVariableType = 1 }
 "django_strawberry_framework/extensions/operation_state.py::DjangoExtensionsRunner.on_stream_result" = { reportAny = 1, reportExplicitAny = 1, reportUnknownMemberType = 1 }
 "django_strawberry_framework/extensions/operation_state.py::DjangoExtensionsRunner.operation" = { reportAny = 1, reportExplicitAny = 1 }
 "django_strawberry_framework/extensions/operation_state.py::_OperationBoundExtension._new_operation_state" = { cast = 1 }
 "django_strawberry_framework/extensions/operation_state.py::_OperationBoundExtension.execution_context" = { reportIncompatibleVariableOverride = 1 }
 "django_strawberry_framework/extensions/operation_state.py::_bound_state" = { cast = 1 }
-"django_strawberry_framework/extensions/resource_policy.py::DjangoResourcePolicyExtension.on_operation" = { cast = 1 }
-"django_strawberry_framework/extensions/resource_policy.py::_DocumentWalk.operation" = { cast = 1 }
-"django_strawberry_framework/extensions/resource_policy.py::_DocumentWalk.walk" = { cast = 1 }
-"django_strawberry_framework/extensions/resource_policy.py::_ValueBudget._charge_container" = { cast = 1 }
 "django_strawberry_framework/extensions/resource_policy.py::_declared_input_type" = { reportUnknownMemberType = 1 }
 "django_strawberry_framework/filters/base.py::ArrayFilter.method" = { reportAttributeAccessIssue = 1, reportFunctionMemberAccess = 1, reportOptionalMemberAccess = 1, reportUnknownMemberType = 1, reportUntypedFunctionDecorator = 1 }
 "django_strawberry_framework/filters/base.py::EnumChoiceFilter" = { reportUnsafeMultipleInheritance = 1 }
@@ -65,16 +59,11 @@
 "django_strawberry_framework/filters/base.py::_install_empty_list_aware_method" = { reportAttributeAccessIssue = 1, reportFunctionMemberAccess = 1, reportOptionalMemberAccess = 1, reportUnknownMemberType = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSet.FILTER_DEFAULTS" = { reportIncompatibleVariableOverride = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSet.__init__" = { reportArgumentType = 2 }
-"django_strawberry_framework/filters/sets.py::FilterSet._absent_leaf_applies" = { cast = 1 }
-"django_strawberry_framework/filters/sets.py::FilterSet._apply_relation_leaf" = { cast = 1 }
-"django_strawberry_framework/filters/sets.py::FilterSet._bound_terminal" = { cast = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSet._build_stashed_instance" = { reportArgumentType = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSet._filter_child_rows" = { cast = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSet._generation_origin_for_field" = { reportArgumentType = 1 }
-"django_strawberry_framework/filters/sets.py::FilterSet._hop_visible_rows" = { cast = 2 }
 "django_strawberry_framework/filters/sets.py::FilterSet._leaf_chain" = { cast = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSet._null_test_filter_for_relation" = { cast = 2 }
-"django_strawberry_framework/filters/sets.py::FilterSet._reaches_hop" = { cast = 2 }
 "django_strawberry_framework/filters/sets.py::FilterSet._upstream_filter_for_field" = { reportArgumentType = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSet._upstream_filter_for_lookup" = { reportArgumentType = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSet.filter_for_field" = { cast = 1, reportArgumentType = 1, reportIncompatibleMethodOverride = 1 }
@@ -83,16 +72,12 @@
 "django_strawberry_framework/filters/sets.py::FilterSet.get_fields" = { cast = 3, reportIncompatibleMethodOverride = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSetMetaclass.__new__" = { cast = 1 }
 "django_strawberry_framework/filters/sets.py::_admitted_rows" = { cast = 1 }
-"django_strawberry_framework/filters/sets.py::_hop_model" = { cast = 3 }
-"django_strawberry_framework/filters/sets.py::_hop_relation" = { cast = 1 }
-"django_strawberry_framework/filters/sets.py::_hop_source_model" = { cast = 2 }
 "django_strawberry_framework/filters/sets.py::_reverse_o2o_extra" = { reportArgumentType = 1 }
 "django_strawberry_framework/filters/sets.py::_reverse_rel_extra" = { reportArgumentType = 1 }
 "django_strawberry_framework/forms/inputs.py::FormClass" = { reportExplicitAny = 1 }
 "django_strawberry_framework/forms/inputs.py::get_form_fields" = { cast = 1 }
 "django_strawberry_framework/forms/sets.py::_FormConstructionHooks.get_form_kwargs" = { reportExplicitAny = 1 }
 "django_strawberry_framework/forms/sets.py::_ModelFormConstructionHooks.get_form" = { cast = 1, reportExplicitAny = 2 }
-"django_strawberry_framework/forms/sets.py::_default_get_form" = { cast = 1 }
 "django_strawberry_framework/keyset.py::serialize_cursor_value" = { reportArgumentType = 1 }
 "django_strawberry_framework/list_field.py::DjangoListField" = { cast = 1 }
 "django_strawberry_framework/list_field.py::ListArgumentError" = { reportUnsafeMultipleInheritance = 1 }
@@ -101,12 +86,7 @@
 "django_strawberry_framework/middleware/request_body.py::GraphQLRequestBodyBoundaryMiddleware.process_view" = { reportExplicitAny = 1 }
 "django_strawberry_framework/mutations/inputs.py::build_payload_type" = { cast = 1 }
 "django_strawberry_framework/mutations/permissions.py::DjangoModelPermission.has_permission" = { reportAny = 2, reportExplicitAny = 2 }
-"django_strawberry_framework/mutations/resolvers.py::_model_error_key_map" = { cast = 1 }
-"django_strawberry_framework/mutations/resolvers.py::_run_delete" = { cast = 1 }
-"django_strawberry_framework/mutations/resolvers.py::_run_pipeline_sync" = { cast = 2 }
 "django_strawberry_framework/mutations/resolvers.py::payload_cls_for" = { cast = 1 }
-"django_strawberry_framework/mutations/resolvers.py::run_write_pipeline_sync" = { cast = 7 }
-"django_strawberry_framework/mutations/sets.py::DjangoMutation._resolve_model" = { cast = 1 }
 "django_strawberry_framework/mutations/sets.py::DjangoMutation.check_permission" = { reportAny = 3, reportExplicitAny = 2 }
 "django_strawberry_framework/optimizer/extension.py::DjangoOptimizerExtension._optimize" = { cast = 1 }
 "django_strawberry_framework/optimizer/extension.py::_raw_resolve_info" = { cast = 1 }
@@ -131,7 +111,6 @@
 "django_strawberry_framework/orders/base.py::RelatedOrder.orderset" = { reportPropertyTypeMismatch = 1 }
 "django_strawberry_framework/orders/sets.py::OrderSet._active_order_terms" = { reportUnnecessaryIsInstance = 1 }
 "django_strawberry_framework/registry.py::TypeRegistry.unregister" = { cast = 1 }
-"django_strawberry_framework/relay.py::_stamp_node_type" = { cast = 1 }
 "django_strawberry_framework/resource_policy.py::ResourceLimitExceeded" = { reportUnsafeMultipleInheritance = 1 }
 "django_strawberry_framework/rest_framework/accessors.py::base_fields" = { reportUnknownMemberType = 1, reportUnknownVariableType = 1 }
 "django_strawberry_framework/rest_framework/accessors.py::child_relation_of" = { reportUnknownMemberType = 1, reportUnknownVariableType = 1 }
@@ -139,20 +118,14 @@
 "django_strawberry_framework/rest_framework/accessors.py::list_child_of" = { reportUnknownMemberType = 1, reportUnknownVariableType = 1 }
 "django_strawberry_framework/rest_framework/accessors.py::serializer_errors" = { reportUnknownMemberType = 1, reportUnknownVariableType = 1 }
 "django_strawberry_framework/rest_framework/inputs.py::normalize_nested_serializer_configs" = { reportUnnecessaryIsInstance = 1 }
-"django_strawberry_framework/rest_framework/inputs.py::serializer_model" = { cast = 1 }
 "django_strawberry_framework/rest_framework/resolvers.py::_nested_specs_of" = { cast = 1 }
 "django_strawberry_framework/rest_framework/resolvers.py::_scope_specs_over_serializer" = { cast = 1, reportAttributeAccessIssue = 1 }
-"django_strawberry_framework/rest_framework/resolvers.py::_serializer_write_step" = { cast = 1 }
 "django_strawberry_framework/rest_framework/serializer_converter.py::DRFBaseSerializer" = { reportExplicitAny = 1 }
 "django_strawberry_framework/rest_framework/serializer_converter.py::DRFField" = { reportExplicitAny = 1 }
 "django_strawberry_framework/rest_framework/serializer_converter.py::DRFRelatedField" = { reportExplicitAny = 1 }
 "django_strawberry_framework/rest_framework/serializer_converter.py::DRFSerializer" = { reportExplicitAny = 1 }
 "django_strawberry_framework/rest_framework/serializer_converter.py::_bound_field_name" = { cast = 1 }
 "django_strawberry_framework/rest_framework/serializer_converter.py::nested_serializer_child" = { cast = 2 }
-"django_strawberry_framework/rest_framework/sets.py::SerializerMutation.build_input" = { cast = 1 }
-"django_strawberry_framework/rest_framework/sets.py::SerializerMutation.get_serializer_for_schema" = { cast = 1 }
-"django_strawberry_framework/rest_framework/sets.py::_checked_schema_field_map" = { cast = 1 }
-"django_strawberry_framework/rest_framework/sets.py::_serializer_input_shape_for" = { cast = 1 }
 "django_strawberry_framework/routers.py::DjangoGraphQLProtocolRouter.__init__" = { reportMissingSuperCall = 1 }
 "django_strawberry_framework/routers.py::_build_router_class_uncached.DjangoGraphQLProtocolRouter.__init__" = { reportArgumentType = 2, reportCallIssue = 1, reportUnknownArgumentType = 1 }
 "django_strawberry_framework/schema.py::DjangoSchema.__init__" = { reportArgumentType = 1, reportUnknownMemberType = 1 }
@@ -165,22 +138,8 @@
 "django_strawberry_framework/testing/client.py::_GraphQLTestClientBase.request" = { reportArgumentType = 1 }
 "django_strawberry_framework/types/base.py::DjangoType.get_queryset" = { reportAny = 1, reportExplicitAny = 3 }
 "django_strawberry_framework/types/converters.py::_HSTORE_FIELD_CLS" = { cast = 1 }
-"django_strawberry_framework/types/finalizer.py::_audit_globalid_filter_strategies" = { cast = 1 }
-"django_strawberry_framework/types/finalizer.py::_audit_model_label_routing" = { cast = 1 }
-"django_strawberry_framework/types/finalizer.py::_audit_unregistered_related_filter_targets" = { cast = 1 }
-"django_strawberry_framework/types/finalizer.py::_bind_set_owner_common" = { cast = 1 }
-"django_strawberry_framework/types/finalizer.py::_expand_orderset" = { cast = 1 }
-"django_strawberry_framework/types/finalizer.py::_register_relation_connection_teardown.teardown" = { cast = 1 }
-"django_strawberry_framework/types/finalizer.py::_synthesize_relation_connections" = { cast = 1 }
-"django_strawberry_framework/types/finalizer.py::_warn_model_label_secondary_collapse" = { cast = 1 }
 "django_strawberry_framework/types/relay.py::_install_typename_closure" = { cast = 1, reportAttributeAccessIssue = 1 }
-"django_strawberry_framework/types/relay.py::_resolve_id_default" = { cast = 1 }
 "django_strawberry_framework/types/relay.py::decode_global_id" = { cast = 1 }
-"django_strawberry_framework/types/resolvers.py::_check_n1" = { cast = 1 }
-"django_strawberry_framework/types/resolvers.py::_make_relation_resolver.forward_resolver" = { cast = 2 }
-"django_strawberry_framework/types/resolvers.py::_make_relation_resolver.many_resolver._resolve" = { cast = 1 }
-"django_strawberry_framework/types/resolvers.py::_strictness_for" = { cast = 1 }
-"django_strawberry_framework/types/resolvers.py::_visible_many_rows._resolve" = { cast = 1 }
 "django_strawberry_framework/utils/_array_field.py::ARRAY_FIELD_CLS" = { cast = 1 }
 "django_strawberry_framework/utils/_queryset_private.py::chain_queryset" = { reportAttributeAccessIssue = 1, reportUnknownMemberType = 1, reportUnknownVariableType = 1 }
 "django_strawberry_framework/utils/_queryset_private.py::queryset_db" = { reportAttributeAccessIssue = 1, reportUnknownMemberType = 1, reportUnknownVariableType = 1 }
@@ -202,16 +161,12 @@
 "django_strawberry_framework/utils/converters.py::convert_with_mro" = { reportExplicitAny = 1 }
 "django_strawberry_framework/utils/inputs.py::build_strawberry_input_class" = { cast = 1 }
 "django_strawberry_framework/utils/inputs.py::promote_set_meta_fields" = { cast = 1 }
-"django_strawberry_framework/utils/permissions.py::relation_path_gates" = { cast = 1 }
-"django_strawberry_framework/utils/permissions.py::run_active_input_permission_checks" = { cast = 1 }
-"django_strawberry_framework/utils/permissions.py::set_bound_definition" = { cast = 1 }
 "django_strawberry_framework/utils/private_state.py::PrivateMembership.recall" = { cast = 1 }
 "django_strawberry_framework/utils/querysets.py::_BOUND_VALUE_NORMALIZERS" = { reportExplicitAny = 1 }
 "django_strawberry_framework/utils/querysets.py::_built_queryset" = { cast = 1 }
 "django_strawberry_framework/utils/querysets.py::_expr_graph_defect" = { cast = 1 }
 "django_strawberry_framework/utils/querysets.py::_normalized_decimal" = { reportArgumentType = 1 }
 "django_strawberry_framework/utils/querysets.py::_normalized_uuid" = { reportAttributeAccessIssue = 1, reportUnknownArgumentType = 1, reportUnknownMemberType = 1 }
-"django_strawberry_framework/utils/querysets.py::_reconstructed_value" = { cast = 5 }
 "django_strawberry_framework/utils/querysets.py::_seal_or_defect" = { cast = 1 }
 "django_strawberry_framework/utils/querysets.py::_snapshot_routing_intent" = { cast = 2 }
 "django_strawberry_framework/utils/querysets.py::_validate_post_orderset_result" = { cast = 1 }
@@ -229,7 +184,6 @@
 "django_strawberry_framework/views.py::AsyncDjangoGraphQLView.as_view" = { reportIncompatibleMethodOverride = 1 }
 "django_strawberry_framework/views.py::AsyncDjangoGraphQLView.run" = { reportAny = 1, reportExplicitAny = 1 }
 "django_strawberry_framework/write_mixins.py::make_meta_validating_metaclass.MetaValidatingMetaclass.__new__" = { cast = 1 }
-"django_strawberry_framework/write_mixins.py::resolve_meta_model" = { cast = 1 }
 "examples/fakeshop/apps/glossary/migrations/0001_initial.py::Migration.operations" = { reportUnknownArgumentType = 1 }
 "examples/fakeshop/apps/kanban/migrations/0001_initial.py::Migration.operations" = { reportUnknownArgumentType = 1 }
 "examples/fakeshop/apps/kanban/migrations/0002_card_glossary_terms.py::Migration.operations" = { reportUnknownArgumentType = 2 }

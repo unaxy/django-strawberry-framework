@@ -332,12 +332,7 @@ def own_backing_class(cls: type[object], key: str) -> object:
     return backing
 
 
-def resolve_meta_model(
-    meta: type[object],
-    *,
-    key: str,
-    meta_attr: str,
-) -> type[models.Model] | None:
+def resolve_meta_model(meta: type[object], *, key: str, meta_attr: str) -> object:
     """Resolve a backing class's ``Meta.model`` via the shared three-getattr chain.
 
     The ``meta.<key> -> backing.<meta_attr> -> backing_meta.model`` chain (each link a
@@ -346,11 +341,12 @@ def resolve_meta_model(
     ``ModelForm``'s ``_meta`` vs a serializer's ``Meta``). Returns ``None`` for any
     missing link (no backing class, no meta, no model), so the caller's base
     validation raises the clean "resolves no model" error rather than an
-    ``AttributeError``.
+    ``AttributeError``. Any other value is the consumer's declaration as written,
+    which ``require_model_class`` type-gates.
     """
     backing = truth.static_attr(meta, key)
     backing_meta = truth.static_attr(backing, meta_attr)
-    return cast("type[models.Model] | None", truth.static_attr(backing_meta, "model"))
+    return truth.static_attr(backing_meta, "model")
 
 
 def resolve_backed_model_or_raise(
@@ -361,12 +357,14 @@ def resolve_backed_model_or_raise(
     key: str,
     noun: str,
 ) -> type[models.Model]:
-    """Return ``cls._resolve_model(meta)`` or raise the shared "resolves no model" error.
+    """Return ``cls._resolve_model(meta)`` as a model class, or raise the shared errors.
 
     The no-model raise both flavors' ``_validate_meta`` share, run AFTER the backing
-    class is type-validated (so ``Meta.<key>`` is a real class).
+    class is type-validated (so ``Meta.<key>`` is a real class), then the
+    ``require_model_class`` type-gate on a resolved value that is not a model class
+    (a string / instance ``Meta.model``), so it cannot leak to bind.
     ``base_label`` / ``key`` / ``noun`` (``ModelForm`` / ``ModelSerializer``) are the
-    only per-flavor axes; the message is otherwise byte-identical across flavors.
+    only per-flavor axes; the messages are otherwise byte-identical across flavors.
     """
     model = cls._resolve_model(meta)
     if model is None:
@@ -375,7 +373,7 @@ def resolve_backed_model_or_raise(
             f"{base_label} {truth.name(cls)}.Meta.{key} {truth.name(backing)} resolves no model; "
             f"a {noun} must set Meta.model so the mutation has a model + a DjangoType to return.",
         )
-    return model
+    return require_model_class(truth.name(cls), model, base_label=base_label)
 
 
 def resolver_seams(

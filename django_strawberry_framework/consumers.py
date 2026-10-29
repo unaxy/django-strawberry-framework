@@ -370,7 +370,7 @@ import contextlib
 import logging
 import math
 import time
-from typing import TYPE_CHECKING, TypeVar, cast, get_origin
+from typing import TYPE_CHECKING, TypeVar, get_origin
 
 from django.core.exceptions import DisallowedHost
 from django.http import HttpRequest
@@ -385,7 +385,7 @@ from .extensions.error_policy import (
     schema_error_policy,
 )
 from .utils import truth
-from .utils._narrowing import is_class, read_attr
+from .utils._narrowing import is_class, optional_instance, read_attr, require
 from .utils.sessions import (
     actor_lease,
     connection_was_authenticated,
@@ -405,7 +405,6 @@ if TYPE_CHECKING:
         ASGISendCallable,
         WebSocketScope,
     )
-    from django.contrib.sessions.backends.base import SessionBase
     from strawberry.channels import GraphQLWSConsumer
     from strawberry.schema import BaseSchema
     from typing_extensions import TypeIs
@@ -759,6 +758,11 @@ if TYPE_CHECKING:
             """
 
 
+def _is_attempt_task(value: object, /) -> TypeIs[asyncio.Task[object]]:
+    """Return whether ``value`` is an ``asyncio.Task`` by its real class: a close attempt."""
+    return truth.is_instance(value, asyncio.Task)
+
+
 class _ConnectionRevocation:
     """One connection's revocation decision and the state of its ``4403`` close.
 
@@ -861,12 +865,13 @@ class _ConnectionRevocation:
             self.attempt = asyncio.create_task(self._attempt_close(websocket))
         if self.state == _REVOCATION_CLOSING:
             # ``CLOSING`` is entered only together with the ``create_task`` store above,
-            # so an attempt task is always held here.
-            attempt = cast("asyncio.Task[None]", self.attempt)
+            # so an attempt task is always held here; a state without one is a defect,
+            # refused before anything is sent.
+            attempt = require(self.attempt, _is_attempt_task)
             if attempt.done() and attempt.cancelled():
                 self.state = _REVOCATION_ABANDONED
                 return
-            await asyncio.shield(attempt)
+            _ = await asyncio.shield(attempt)
 
     async def settle(self) -> None:
         """End this connection's close attempt, if it ever started one.
@@ -1120,14 +1125,15 @@ async def _actor_is_current(consumer: _RevalidatedConsumer) -> bool:
     # lives in an expression, where statement coverage cannot see it) instead of
     # failing loudly.
     window = consumer.revalidation_window
-    # ``-inf`` reads as "never revalidated, i.e. infinitely long ago", which
-    # keeps the expiry test one comparison with no sentinel branch of its own.
-    # With the default window of ``0.0`` the left arm short-circuits, so nothing
-    # is ever written to the scope.
+    # The key is package-private and written below only as a monotonic float; a
+    # missing stamp (never revalidated) or anything that is not exactly a float
+    # authorizes nothing and falls through to the session re-read. With the
+    # default window of ``0.0`` the left arm short-circuits, so nothing is ever
+    # written to the scope.
     if (
         window > 0.0
-        # The key is package-private and written below only as a monotonic float.
-        and _monotonic() - cast("float", scope.get(_REVALIDATED_AT_SCOPE_KEY, -math.inf)) < window
+        and type(stamped := scope.get(_REVALIDATED_AT_SCOPE_KEY)) is float
+        and _monotonic() - stamped < window
     ):
         return True
 
@@ -1468,7 +1474,9 @@ async def _refreshed_actor(scope: Mapping[str, object]) -> object:
 
     # ``AuthMiddlewareStack``'s ``SessionMiddleware`` stores the engine's lazy
     # ``SessionStore`` under ``"session"`` (channels-stubs: ``_ChannelScope.session``).
-    store = session_store_class()(cast("SessionBase", scope["session"]).session_key)
+    store = session_store_class()(
+        optional_instance(read_attr(scope["session"], "session_key"), str),
+    )
     # basedpyright: channels-stubs types ``get_user``'s argument as a full ``_ChannelScope``
     # holding a lazy session, so it rejects a ``SessionBase`` where it types ``_LazySession``;
     # ``get_user`` reads only ``scope["session"]`` (see above).
