@@ -137,6 +137,7 @@ __all__ = [
     "binds_integer",
     "build_error_key_map",
     "coded_error_extensions",
+    "datetime_django_binds",
     "empty_validation_error",
     "field_error",
     "integrity_error_field_errors",
@@ -992,7 +993,7 @@ def unstorable_temporal(column: object, value: object, using: Callable[[], str])
       intermediate UTC value can overflow where the session's wall clock does not.
 
     A naive datetime or a date in a ``DateTimeField`` is first read as the datetime Django
-    binds for it (``_datetime_django_binds``), so the ask emits none of the warnings the
+    binds for it (``datetime_django_binds``), so the ask emits none of the warnings the
     save emits for it. An ``ArrayField`` holds every element (at any nesting depth) to the
     same rule against its ``base_field``, except that psycopg binds a list's elements as
     text in either binding mode, so on PostgreSQL each is held to the client-side offset
@@ -1024,7 +1025,7 @@ def unstorable_temporal(column: object, value: object, using: Callable[[], str])
                 prepared.append(element)
                 continue
             bound = (
-                _datetime_django_binds(element, use_tz=use_tz)
+                datetime_django_binds(element, use_tz=use_tz)
                 if isinstance(column, models.DateTimeField) and isinstance(element, datetime.date)
                 else element
             )
@@ -1074,15 +1075,17 @@ def _converted_kinds(column: object) -> tuple[tuple[type[object], ...], type[obj
     return None
 
 
-def _datetime_django_binds(value: datetime.date, *, use_tz: bool) -> datetime.datetime:
+def datetime_django_binds(value: datetime.date, *, use_tz: bool) -> datetime.datetime:
     """Return the datetime a ``DateTimeField`` binds for ``value``, without Django's warning.
 
     A ``date`` that is not a ``datetime`` becomes its midnight, and under ``USE_TZ``
     (``use_tz``) a naive datetime (that midnight included) is made aware in the default
     time zone (``TIME_ZONE``); an aware datetime is returned as it is. Django makes the
-    same projection at the save and warns (``RuntimeWarning``) as it makes a naive value
-    aware; this read is silent, since it only reads what the save will bind, and it runs
-    on the write pipeline's threads, where no warnings filter can be scoped to one call.
+    same projection at the save and at a lookup's bind, and warns (``RuntimeWarning``) as
+    it makes a naive value aware; this read is silent, since it only reads what Django
+    will bind, and it runs on the write pipeline's threads and in an identity decode
+    (``utils/querysets.py::coerce_field_value_or_none``), where no warnings filter can be
+    scoped to one call.
     """
     # Adapted from Django's DateTimeField.to_python and DateTimeField.get_prep_value
     # (django/db/models/fields/__init__.py, BSD-3-Clause), their warning left out and

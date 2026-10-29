@@ -23,6 +23,7 @@ import functools
 import sys
 import threading
 import uuid
+import warnings
 import zoneinfo
 from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Iterable, Iterator
 from contextlib import contextmanager
@@ -178,6 +179,7 @@ from django_strawberry_framework.utils.querysets import (
     apply_type_visibility_sync,
     coerce_field_value_or_none,
     expand_relation_order,
+    identity_key,
     initial_queryset,
     is_async_only_iterable,
     linkable_rows,
@@ -708,6 +710,125 @@ def test_coerce_field_value_or_none_holds_the_bind_sqlite_makes(
     """
     coerced = coerce_field_value_or_none(column(), raw, alias=DEFAULT_DB_ALIAS)
     assert (None if coerced is None else str(coerced)) == held
+
+
+#: A non-UTC default time zone, so a naive value made aware in it differs from UTC.
+_NAIVE_ZONE = "America/New_York"
+_EIGHT_IN_ZONE = datetime.datetime(2024, 1, 1, 8, tzinfo=zoneinfo.ZoneInfo(_NAIVE_ZONE))
+#: The naive spelling of ``_EIGHT_IN_ZONE``'s wall clock.
+_NAIVE_EIGHT = _EIGHT_IN_ZONE.replace(tzinfo=None)
+
+
+@override_settings(TIME_ZONE=_NAIVE_ZONE)
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        pytest.param("2024-01-01T08:00:00", _EIGHT_IN_ZONE, id="iso-t"),
+        pytest.param("2024-01-01 08:00:00", _EIGHT_IN_ZONE, id="iso-space"),
+        pytest.param("2024-01-01", _EIGHT_IN_ZONE.replace(hour=0), id="date-only-midnight"),
+        pytest.param(_NAIVE_EIGHT, _EIGHT_IN_ZONE, id="naive-datetime"),
+        pytest.param(datetime.date(2024, 1, 1), _EIGHT_IN_ZONE.replace(hour=0), id="date"),
+    ],
+)
+def test_coerce_field_value_or_none_makes_a_naive_datetime_aware_in_the_default_zone(
+    raw: object,
+    expected: datetime.datetime,
+) -> None:
+    """A naive datetime key is the aware value Django binds for it, read without its warning.
+
+    Under ``USE_TZ`` Django's lookup makes a naive ``DateTimeField`` value aware in the
+    default time zone and warns as it does; the coercion makes the same projection
+    silently and returns the aware value, so the reorder keys the request as the row.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with _unopened_alias(_sqlite_wrapper) as alias:
+            coerced = coerce_field_value_or_none(_datetime_column(), raw, alias=alias)
+    assert isinstance(coerced, datetime.datetime)
+    assert coerced == expected
+    assert coerced.utcoffset() == expected.utcoffset()
+
+
+@override_settings(USE_TZ=False, TIME_ZONE=_NAIVE_ZONE)
+def test_coerce_field_value_or_none_keeps_a_naive_datetime_naive_without_use_tz() -> None:
+    """With ``USE_TZ`` off Django binds a naive datetime as it is, so the coercion does too."""
+    with _unopened_alias(_sqlite_wrapper) as alias:
+        coerced = coerce_field_value_or_none(
+            _datetime_column(),
+            "2024-01-01T08:00:00",
+            alias=alias,
+        )
+    assert coerced == _NAIVE_EIGHT
+
+
+@pytest.mark.parametrize(
+    ("zone", "raw"),
+    [
+        pytest.param("Asia/Tokyo", "0001-01-01T00:00:00", id="year-1-east-of-utc"),
+        pytest.param("America/New_York", "9999-12-31T23:00:00", id="year-9999-west-of-utc"),
+    ],
+)
+def test_coerce_field_value_or_none_drops_a_naive_datetime_whose_utc_bind_overflows(
+    zone: str,
+    raw: str,
+) -> None:
+    """A naive datetime whose aware projection leaves years 1..9999 in UTC names no row.
+
+    SQLite binds an aware datetime as its UTC wall clock; made aware in a zone east of
+    UTC on year 1 (or west of it on the last hour of year 9999) the projection
+    overflows, so the id is ``None``, never a crash and never a warning.
+    """
+    with override_settings(TIME_ZONE=zone), warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with _unopened_alias(_sqlite_wrapper) as alias:
+            assert coerce_field_value_or_none(_datetime_column(), raw, alias=alias) is None
+
+
+@override_settings(TIME_ZONE=_NAIVE_ZONE)
+@pytest.mark.parametrize(
+    ("utc_row", "naive"),
+    [
+        pytest.param(
+            datetime.datetime(2024, 1, 1, 13, tzinfo=datetime.timezone.utc),
+            "2024-01-01T08:00:00",
+            id="standard-time",
+        ),
+        pytest.param(
+            datetime.datetime(2024, 11, 3, 5, 30, tzinfo=datetime.timezone.utc),
+            "2024-11-03T01:30:00",
+            id="dst-fold",
+        ),
+        pytest.param(
+            datetime.datetime(2024, 3, 10, 7, 30, tzinfo=datetime.timezone.utc),
+            "2024-03-10T02:30:00",
+            id="dst-gap",
+        ),
+    ],
+)
+def test_identity_key_keys_a_naive_datetime_as_the_aware_row_it_binds(
+    utc_row: datetime.datetime,
+    naive: str,
+) -> None:
+    """A naive request and the aware row Django's lookup matched for it share one key.
+
+    The row reads back aware (in UTC); the naive spelling is made aware in the default
+    zone, so both key as the same instant without the naive-datetime warning, a wall
+    clock the zone repeats (a DST fold) or skips (a gap) included: Django binds it at
+    its first offset, and PEP 495 would hold that aware value unequal to the UTC row.
+    """
+    field = _DatetimeKeyed._meta.pk
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        keys = {
+            identity_key(field, spelled)
+            for spelled in (
+                utc_row,
+                naive,
+                datetime.datetime.fromisoformat(naive),
+                utc_row.astimezone(datetime.timezone(datetime.timedelta(hours=5))),
+            )
+        }
+    assert len(keys) == 1
 
 
 def _refused_raw_decimal(raw: str) -> None:

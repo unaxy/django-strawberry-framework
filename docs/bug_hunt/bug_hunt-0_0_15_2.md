@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 383 done, 218 to do.
+Progress: 385 done, 216 to do.
 
 ## Done
 
@@ -2179,6 +2179,20 @@ Progress: 383 done, 218 to do.
   reads the cached verdict, so a consumer filter body and an async-only `get_queryset` run as often as on `apply_sync`.
   A relation-key leaf's probe reads the rows the set was built over on both colors, and a walking leaf a consumer `__init__` adds is probed too. spec-027 says so. Tests:
   `tests/filters/test_sets.py`
+- [x] 675. On SQLite a `DecimalField` key is not reliably addressable by `node` / `nodes` or a relation id: SQLite
+  stores a non-integral or past-64-bit value as a float, Django reads decimals through 15 significant digits (an
+  integral one too before Django 6.1), and a column with decimal places binds even an integral key in a spelling SQLite
+  compares as a float, so neither the written spelling nor the emitted id need name the row. README's Relay paragraph
+  and spec-032 say so with the remedy (a key the column holds exactly); `tests/test_relay_node_field.py` pins it. No code
+  change: the key does not round-trip through Django itself
+- [x] 676. A naive datetime id on a `DateTimeField` key is read as Django's own lookup binds it, aware in the default
+  time zone, with no naive-datetime warning: `utils/querysets.py::column_python_value` (through the public
+  `utils/errors.py::datetime_django_binds`) serves `coerce_field_value_or_none` and `identity_key`, and `identity_key`
+  keys an aware datetime by its instant, so `node`, `nodes` and relation ids find the row, also in a repeated or skipped
+  DST hour; an id past the representable range answers null. The datetime spelled-key relation tests own stamp-only
+  owner models, so the Django floor never reads an unconstrained decimal column there. README and spec-032 say so. Tests:
+  `tests/utils/test_querysets.py`, `tests/test_relay_node_field.py`, `tests/mutations/test_resolvers.py`,
+  `tests/rest_framework/test_resolvers.py`
 
 ## Outside review of the fixes
 
@@ -2283,10 +2297,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `"-1e1000000"` to a `Decimal` that reaches the bind as a huge int (integer column) or -inf (float column); the
   filter ask reads only temporal and decimal columns. Unmeasured: the client-visible answer per backend. Found fixing
   529
-- [ ] 675. (robustness) SQLite stores an unconstrained `DecimalField` key past 15 significant digits as a float (read
-  back rounded), so `node` / `nodes` answer null for an id spelling the written value. Found fixing 531
-- [ ] 676. (robustness) A naive datetime id on a `DateTimeField`-pk Relay type answers the masked error on `node` and
-  `nodes` (unexamined: possibly the naive-datetime bind warning). Found fact-finding 531
 - [ ] 679. Ordinal citations outside 629's six files: `_strawberry_patches.py` names its shields "gap 1" / "gap 2"
   (the shield comment, the retirement-diagnostic docstring, its "GAP 1 STILL NEEDED" print literals) where the tests
   say "decode failure" / "non-envelope body"; plan-section labels "C.3 / C.3a", "C.4 -", "C.4 fixtures" in

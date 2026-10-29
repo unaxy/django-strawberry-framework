@@ -17,6 +17,7 @@ field), and the public-export surface.
 import contextlib
 import datetime
 import re
+import zoneinfo
 from collections.abc import Awaitable, Callable, Generator, Iterable, Iterator
 from decimal import Decimal
 from typing import TYPE_CHECKING
@@ -29,6 +30,7 @@ from apps.products.models import Category
 from asgiref.sync import sync_to_async
 from django.db import DEFAULT_DB_ALIAS, connection, models
 from django.db.models import Model, QuerySet
+from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
 from django.utils.functional import SimpleLazyObject
 from strawberry import relay
@@ -799,6 +801,16 @@ def _spelled_key_answer(
     root: str,
 ) -> object:
     """Query the ``root`` refetch field over ``model`` with the id spelled ``spelled``."""
+    return _spelled_key_answers(model, label, [spelled], root)[0]
+
+
+def _spelled_key_answers(
+    model: type[Model],
+    label: str,
+    spellings: Iterable[str],
+    root: str,
+) -> list[object]:
+    """Query the ``root`` refetch field over ``model`` once per id spelling in ``spellings``."""
     meta = {
         "model": model,
         "fields": ("name",),
@@ -815,15 +827,19 @@ def _spelled_key_answer(
     finalize_django_types()
     schema = strawberry.Schema(query=Query, config=strawberry_config(), types=[spelled_node])
     selection = "node(id: $id)" if root == "node" else "nodes(ids: [$id])"
-    result = schema.execute_sync(
-        f"query ($id: ID!) {{ {selection} {{ ... on SpelledNode {{ name }} }} }}",
-        variable_values={"id": _gid(label, spelled)},
-    )
-    assert result.errors is None, result.errors
-    return result.data
+    answers: list[object] = []
+    for spelled in spellings:
+        result = schema.execute_sync(
+            f"query ($id: ID!) {{ {selection} {{ ... on SpelledNode {{ name }} }} }}",
+            variable_values={"id": _gid(label, spelled)},
+        )
+        assert result.errors is None, result.errors
+        answers.append(result.data)
+    return answers
 
 
 _STORED_ANSWER = {"node": {"node": {"name": "stored"}}, "nodes": {"nodes": [{"name": "stored"}]}}
+_MISSING_ANSWER = {"node": {"node": None}, "nodes": {"nodes": [None]}}
 _REFETCH_ROOTS = pytest.mark.parametrize("root", ["node", "nodes"])
 
 
@@ -872,6 +888,111 @@ def test_refetch_finds_an_aware_datetime_key_spelled_in_another_offset(root: str
             "2024-01-01T10:00:00+02:00",
             root,
         )
+    assert answer == _STORED_ANSWER[root]
+
+
+@pytest.mark.skipif(
+    connection.vendor != "sqlite",
+    reason="SQLite stores such a decimal as a float",
+)
+@pytest.mark.skipif(
+    django.VERSION < (6, 1),
+    reason="Django below 6.1 cannot read back a DecimalField without decimal_places",
+)
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    "stored",
+    [
+        pytest.param(Decimal("1234567890.1234567"), id="non-integral-past-15-digits"),
+        pytest.param(Decimal(123456789012345678901), id="integral-past-64-bits"),
+    ],
+)
+@_REFETCH_ROOTS
+def test_refetch_cannot_address_a_decimal_key_sqlite_stores_as_a_float(
+    stored: Decimal,
+    root: str,
+) -> None:
+    """On SQLite a decimal key past 15 significant digits is stored as a float.
+
+    Django reads it back rounded to 15 digits, so neither the written value nor the
+    rounded one the row reads back as (the value its emitted id carries) equals the
+    stored float: both spellings answer null.
+    """
+    with _spelled_key_table(_SpelledDecimalKeyed, stored) as label:
+        read_back = _SpelledDecimalKeyed.objects.get().code
+        assert read_back != stored
+        answers = _spelled_key_answers(
+            _SpelledDecimalKeyed,
+            label,
+            [str(stored), str(read_back)],
+            root,
+        )
+    assert answers == [_MISSING_ANSWER[root]] * 2
+
+
+#: A non-UTC default time zone, so a naive id read in UTC would name another instant.
+_NAIVE_ZONE = "America/New_York"
+
+
+@override_settings(TIME_ZONE=_NAIVE_ZONE)
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("spelled", "answers"),
+    [
+        pytest.param("2024-01-01T08:00:00", _STORED_ANSWER, id="naive-iso-t"),
+        pytest.param("2024-01-01 08:00:00", _STORED_ANSWER, id="naive-iso-space"),
+        pytest.param("2024-01-01", _MISSING_ANSWER, id="date-only-is-midnight"),
+        pytest.param("2024-01-01T13:00:00", _MISSING_ANSWER, id="naive-utc-wall-clock"),
+    ],
+)
+@_REFETCH_ROOTS
+def test_refetch_reads_a_naive_datetime_key_in_the_default_time_zone(
+    spelled: str,
+    answers: dict[str, object],
+    root: str,
+) -> None:
+    """A naive datetime id names the instant Django's lookup binds: its wall clock in ``TIME_ZONE``.
+
+    The id is made aware in the default zone without Django's naive-datetime warning, so
+    ``node`` and ``nodes`` get the row stored at that instant; a date-only spelling is its
+    midnight and the same wall clock read as UTC is another instant, so both answer null.
+    """
+    stored = datetime.datetime(2024, 1, 1, 8, tzinfo=zoneinfo.ZoneInfo(_NAIVE_ZONE))
+    with _spelled_key_table(_SpelledStampKeyed, stored) as label:
+        answer = _spelled_key_answer(_SpelledStampKeyed, label, spelled, root)
+    assert answer == answers[root]
+
+
+@override_settings(TIME_ZONE=_NAIVE_ZONE)
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("stored", "spelled"),
+    [
+        pytest.param(
+            datetime.datetime(2024, 11, 3, 5, 30, tzinfo=datetime.timezone.utc),
+            "2024-11-03T01:30:00",
+            id="dst-fold",
+        ),
+        pytest.param(
+            datetime.datetime(2024, 3, 10, 7, 30, tzinfo=datetime.timezone.utc),
+            "2024-03-10T02:30:00",
+            id="dst-gap",
+        ),
+    ],
+)
+@_REFETCH_ROOTS
+def test_refetch_reads_a_naive_datetime_key_the_default_zone_repeats_or_skips(
+    stored: datetime.datetime,
+    spelled: str,
+    root: str,
+) -> None:
+    """A naive id on a DST fold or gap wall clock names the instant Django's lookup binds.
+
+    Django makes the wall clock aware at its first offset; the row it matches reads back
+    in UTC, and the reorder keys both as that instant, so ``node`` and ``nodes`` get it.
+    """
+    with _spelled_key_table(_SpelledStampKeyed, stored) as label:
+        answer = _spelled_key_answer(_SpelledStampKeyed, label, spelled, root)
     assert answer == _STORED_ANSWER[root]
 
 
