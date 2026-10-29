@@ -283,18 +283,21 @@ it lands with its tick.
     `::test_the_streaming_path_carries_the_same_admission_verdict` and the mutation rows of
     `test_resource_policy_api.py`.
 
-- [ ] 13. (OPT-3, the plans.py half of O2) `_resolve_order_path_field` hand-walks order paths
-  - Our code: `optimizer/plans.py::_resolve_order_path_field` (~28 lines).
-  - Upstream: `django/db/models/sql/query.py::Query.names_to_path(names, opts, allow_many=False)`.
-    - It returns a `PathInfo` per hop and raises `MultiJoin` on a to-many hop.
-    - It handles `pk` and MTI hops.
-    - Private but stable.
-  - Lines: ~15. The nullable-intermediate check on `PathInfo.join_field.null` stays.
-  - Status: CONFIRMED (4,672 paths, 0 diffs).
-  - Reason to keep ours: none.
+- [x] 13. (OPT-3, the plans.py half of O2) `_resolve_order_path_field` hand-walks order paths
+  - Our code: `optimizer/plans.py::_resolve_order_path_field` now resolves the path through
+    `utils/querysets.py::resolve_order_name`, the package's existing wrapper of `Query.names_to_path`, and refuses a
+    leftover lookup or any hop that is many-to-many, reverse or nullable (`PathInfo.m2m`, `.direct`,
+    `.join_field.null`). The terminal concrete non-relation check stays.
+  - Upstream: `django/db/models/sql/query.py::Query.names_to_path`. Private, already pinned by `resolve_order_name`;
+    the body is the same at 5.2.16, 6.0.9 and 6.1.2. No new private import.
+  - Status: CONFIRMED (978 published OrderSet paths and 63,126 model-universe paths to depth 3, by identity of the
+    returned field, 0 diffs; MTI parent-link, reverse O2O, M2M, GenericRelation and GenericForeignKey hops included).
   - Behaviour change: none.
-  - Risk / blockers: private API (`names_to_path`, `MultiJoin`). `plans.py::_select_path_missing_connectors` is a
-    second, smaller hand walk that could take the same `PathInfo`s.
+  - Tests: existing pins, `tests/test_keyset_connection.py::test_resolve_order_path_field_arms`,
+    `::test_resolve_order_path_field_accepts_mti_parent_link`, the `keyset_order_state` rows and the related-path rows
+    of `test_keyset_api.py`.
+  - Kept: `plans.py::_select_path_missing_connectors`. `PathInfo`s do not map one to one onto path segments (an MTI
+    field adds a parent hop, an M2M segment is two), and its result names segments.
 
 - [ ] 14. (FLT-3) `_get_concrete_field_names_for_order` re-derives `Options.fields` and `Field.concrete`
   - Our code: `orders/inputs.py::_get_concrete_field_names_for_order`. It filters on

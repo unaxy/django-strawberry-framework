@@ -81,7 +81,6 @@ from django_strawberry_framework.utils.querysets import applied_order, resolve_o
 from django_strawberry_framework.utils.relations import (
     instance_accessor,
     is_model_class,
-    relation_kind,
     respell_relation_path,
 )
 
@@ -102,7 +101,7 @@ if TYPE_CHECKING:
     from django_strawberry_framework.keyset import KeysetSeek
     from django_strawberry_framework.utils._queryset_private import PrefetchLookup
     from django_strawberry_framework.utils.connections import WindowRangePlan
-    from django_strawberry_framework.utils.typing import ConcreteField, ModelField
+    from django_strawberry_framework.utils.typing import ConcreteField
 
     #: One connection order entry both ``QuerySet.order_by`` and a ``Window``'s
     #: ``order_by`` accept: a string ref, an ``F``, or an expression (``OrderBy``,
@@ -1526,30 +1525,23 @@ def _keyset_order_ref(entry: object) -> tuple[str, str, bool] | None:
 
 
 def _resolve_order_path_field(model: type[models.Model], path: str) -> ConcreteField | None:
-    """Resolve a (possibly ``__``-traversing) order path to its terminal field.
+    """Resolve a (possibly ``__``-traversing) order path to its terminal column.
 
-    Returns ``None`` when any segment fails to resolve, an intermediate
-    relation is nullable / reverse / multi-valued, or the terminal is not a
-    concrete non-relation column. A non-null terminal behind an optional join
-    still yields NULL cursor values, and a to-many join duplicates source rows.
+    Django's own order-name walk resolves it (``utils/querysets.py::resolve_order_name``).
+    Returns the terminal field only when it is a concrete non-relation column reached
+    through forward, single-valued, non-null hops, else ``None``: a non-null terminal
+    behind an optional join still yields NULL cursor values, and a reverse or
+    many-to-many hop duplicates source rows.
     """
-    current: type[models.Model] | None = model
-    field: ModelField | None = None
-    segments = path.split("__")
-    for index, segment in enumerate(segments):
-        if current is None:
-            return None
-        resolved_segment = current._meta.pk.name if segment == "pk" else segment
-        try:
-            field = current._meta.get_field(resolved_segment)
-        except FieldDoesNotExist:
-            return None
-        if index < len(segments) - 1:
-            if not getattr(field, "is_relation", False):
-                return None
-            if relation_kind(field) != "forward_single" or getattr(field, "null", False):
-                return None
-        current = getattr(field, "related_model", None)
+    try:
+        resolved = resolve_order_name(sql.Query(model), path, model._meta)
+    except FieldError:
+        return None
+    if resolved.lookups or any(
+        step.m2m or not step.direct or step.join_field.null for step in resolved.path
+    ):
+        return None
+    field = resolved.final_field
     if not is_concrete_field(field) or field.is_relation or not field.concrete:
         return None
     return field
