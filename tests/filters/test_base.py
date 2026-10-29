@@ -4409,7 +4409,7 @@ def test_globalid_multiple_choice_list_subclass_iteration_error_propagates() -> 
 
 
 def test_array_filter_emptiness_probe_propagates_the_value_eq_error() -> None:
-    """``value in EMPTY_VALUES`` compares through the value's own ``__eq__``.
+    """``value == []`` compares through the value's own ``__eq__``.
 
     Whatever that ``__eq__`` raises propagates.
     """
@@ -4418,10 +4418,6 @@ def test_array_filter_emptiness_probe_propagates_the_value_eq_error() -> None:
         @override
         def __eq__(self, other: object) -> bool:
             raise RuntimeError("value __eq__ raised")
-
-        @override
-        def __ne__(self, other: object) -> bool:
-            raise RuntimeError("value __ne__ raised")
 
         @override
         def __hash__(self) -> int:
