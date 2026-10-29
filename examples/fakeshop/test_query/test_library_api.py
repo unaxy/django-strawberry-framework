@@ -25751,3 +25751,92 @@ def test_relay_edition_id_under_printing_reads_the_stored_key_without_a_join(
     sql = [query["sql"] for query in captured.captured_queries]
     assert len(sql) == 1, sql
     assert "library_edition" not in sql[0], sql
+
+
+def _relay_listed_profile_key_schema() -> strawberry.Schema:
+    """Optimized holder schema whose Relay profile node lists its one-to-one key ``patron``.
+
+    Listing the key installs the framework's relation resolver under ``patron``
+    on the profile type; the GlobalID still reads the key column, which an
+    annotation's ``profile_id`` already holds.
+    """
+
+    class HolderListedKeyPatronType(DjangoType):
+        class Meta:
+            model = models.Patron
+            fields = ("id", "name")
+            name = "HolderListedKeyPatronType"
+
+    assert registry.get(models.Patron) is HolderListedKeyPatronType
+
+    class HolderListedKeyProfileType(DjangoType):
+        class Meta:
+            model = models.PatronProfile
+            fields = ("patron", "postal_code")
+            interfaces = (relay.Node,)
+            name = "HolderListedKeyProfileType"
+
+    assert registry.get(models.PatronProfile) is HolderListedKeyProfileType
+
+    class HolderListedKeyAnnotationType(DjangoType):
+        class Meta:
+            model = models.Annotation
+            fields = ("id", "body", "profile")
+            name = "HolderListedKeyAnnotationType"
+
+    @strawberry.type
+    class Query:
+        annotations: list[HolderListedKeyAnnotationType] = DjangoListField(
+            HolderListedKeyAnnotationType,
+        )
+
+    finalize_django_types()
+    extension = DjangoOptimizerExtension()
+    return DjangoSchema(query=Query, config=strawberry_config(), extensions=[lambda: extension])
+
+
+@pytest.mark.django_db
+def test_relay_profile_id_under_annotation_reads_the_stored_key_when_the_key_is_listed() -> None:
+    """``annotations { body profile { id } }`` answers each profile's GlobalID from ``profile_id``.
+
+    The profile type lists its one-to-one primary key ``patron``, whose relation
+    resolver builds the ``patron`` field and never the GlobalID, so the one
+    query selects ``library_annotation`` alone and every id on the wire is the
+    one the profile's own row would publish.
+    """
+    profiles = [
+        models.PatronProfile.objects.create(
+            patron=models.Patron.objects.create(name=name),
+            postal_code=code,
+        )
+        for name, code in (("Ada", "02101"), ("Bo", "02202"))
+    ]
+    annotations = [
+        models.Annotation.objects.create(profile=profile, body=f"note {profile.postal_code}")
+        for profile in profiles
+    ]
+
+    registry.clear()
+    try:
+        schema = _relay_listed_profile_key_schema()
+        profile_type = registry.get(models.PatronProfile)
+        assert profile_type is not None
+        with CaptureQueriesContext(connection) as captured:
+            response = _post_holder(schema, "query { annotations { body profile { id } } }")
+        expected = [
+            {
+                "body": annotation.body,
+                "profile": {"id": global_id_for(profile_type, profile.patron_id)},
+            }
+            for annotation, profile in zip(annotations, profiles, strict=True)
+        ]
+    finally:
+        registry.clear()
+
+    assert response.status_code == 200
+    payload = response_json(response)
+    assert "errors" not in payload, payload
+    assert sorted(json_list(payload, "data", "annotations"), key=str) == sorted(expected, key=str)
+    sql = [query["sql"] for query in captured.captured_queries]
+    assert len(sql) == 1, sql
+    assert "library_patronprofile" not in sql[0], sql

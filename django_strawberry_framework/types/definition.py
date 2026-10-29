@@ -179,13 +179,12 @@ class DjangoTypeDefinition:
           ``Meta.primary`` as its first return state, then falls back
           to the single-registered-type rule). Returns ``None`` for
           non-relation fields and for fields not present on the model.
-        - ``has_custom_id_resolver_for(pk_name)`` memoizes the
-          custom id resolver check used by the optimizer's FK-id
-          elision guard. It reports both an ``origin`` MRO-level
-          ``resolve_id`` / ``resolve_{pk_name}`` override (ignoring the
-          framework-installed Relay default) and a ``relay.NodeID``
-          annotation pointing off the pk column; both inputs are stable
-          for a definition's lifetime.
+        - ``has_custom_id_resolver_for(pk_name, pk_is_relation=...)``
+          memoizes the custom id resolver check used by the optimizer's
+          FK-id elision guard. It reports both an ``origin`` MRO-level id
+          resolver override (ignoring the framework-installed Relay
+          default) and a ``relay.NodeID`` annotation pointing off the pk
+          column; both inputs are stable for a definition's lifetime.
     """
 
     origin: type[DjangoType]
@@ -254,11 +253,12 @@ class DjangoTypeDefinition:
         repr=False,
         compare=False,
     )
-    # Per-instance memoization of ``has_custom_id_resolver_for(pk_name)``.
-    # Values are keyed by concrete model primary-key field name and include
-    # negative results; use membership checks instead of ``dict.get`` so
-    # ``False`` remains a valid cached answer.
-    _custom_id_resolver_cache: dict[str, bool] = field(
+    # Per-instance memoization of ``has_custom_id_resolver_for``. Values are
+    # keyed by (concrete model primary-key field name, whether that key is a
+    # relation), the two inputs the answer depends on, and include negative
+    # results; use membership checks instead of ``dict.get`` so ``False``
+    # remains a valid cached answer.
+    _custom_id_resolver_cache: dict[tuple[str, bool], bool] = field(
         default_factory=dict,
         repr=False,
         compare=False,
@@ -352,41 +352,63 @@ class DjangoTypeDefinition:
             self._related_target_cache[field_name] = result
         return result
 
-    def has_custom_id_resolver_for(self, pk_name: str) -> bool:
+    def has_custom_id_resolver_for(self, pk_name: str, *, pk_is_relation: bool = False) -> bool:
         """Return whether ``origin`` resolves its id from something other than ``pk_name``.
 
         Reports the two shapes that make pk-only FK-id elision unsafe:
 
-        - a consumer ``resolve_id`` / ``resolve_{pk_name}`` override (the
-          framework-installed Relay default is *not* counted); or
+        - a consumer id resolver override (the framework-installed Relay
+          default is *not* counted): ``resolve_{pk_name}`` or an attribute
+          named ``pk_name`` for a scalar key; ``resolve_id`` for a key that
+          is a relation (``pk_is_relation``), since the attribute named after
+          such a key is the relation field's own resolver, never the id's; or
         - a ``relay.NodeID`` annotation pointing at a non-pk column, so the
           GlobalID is built from a column the FK-id stub does not carry.
 
-        Memoized per ``pk_name``; both inputs (MRO class attributes and the
-        ``NodeID`` annotation) are stable for the definition's lifetime.
+        Memoized per ``(pk_name, pk_is_relation)``; both inputs (MRO class
+        attributes and the ``NodeID`` annotation) are stable for the
+        definition's lifetime.
         """
         normalized_pk_name = _normalize_pk_name(pk_name)
         if normalized_pk_name is None:
             return False
-        if normalized_pk_name in self._custom_id_resolver_cache:
-            return self._custom_id_resolver_cache[normalized_pk_name]
+        cache_key = (normalized_pk_name, pk_is_relation)
+        if cache_key in self._custom_id_resolver_cache:
+            return self._custom_id_resolver_cache[cache_key]
 
-        result = origin_has_custom_id_resolver(self.origin, normalized_pk_name)
-        self._custom_id_resolver_cache[normalized_pk_name] = result
+        result = origin_has_custom_id_resolver(
+            self.origin,
+            normalized_pk_name,
+            pk_is_relation=pk_is_relation,
+        )
+        self._custom_id_resolver_cache[cache_key] = result
         return result
 
 
-def origin_has_custom_id_resolver(origin: type[object], pk_name: str) -> bool:
+def origin_has_custom_id_resolver(
+    origin: type[object],
+    pk_name: str,
+    *,
+    pk_is_relation: bool = False,
+) -> bool:
     """Return whether ``origin`` customizes id resolution away from ``pk_name``.
 
     Shared by ``DjangoTypeDefinition.has_custom_id_resolver_for`` (the memoized
     hot path) and the optimizer's definition-less fallback so the two cannot
-    drift. See ``has_custom_id_resolver_for`` for the two shapes detected.
+    drift. See ``has_custom_id_resolver_for`` for the two shapes detected and
+    for what ``pk_is_relation`` changes. A relation key's own name is skipped
+    because ``types/resolvers.py::_attach_relation_resolvers`` installs the
+    relation resolver under it whenever the type lists the key, and that
+    resolver never builds the id.
     """
     normalized_pk_name = _normalize_pk_name(pk_name)
     if normalized_pk_name is None:
         return False
-    resolver_names = (normalized_pk_name, f"resolve_{normalized_pk_name}")
+    resolver_names = (
+        ("resolve_id",)
+        if pk_is_relation
+        else (normalized_pk_name, f"resolve_{normalized_pk_name}")
+    )
     if any(
         _class_has_custom_id_resolver(cls, name)
         for cls in truth.mro(origin)

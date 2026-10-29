@@ -916,7 +916,11 @@ def _plan_select_relation(
     if (
         django_field.fk_id_elision_eligible
         and not _target_has_custom_get_queryset(target_type, target_definition)
-        and not _has_custom_id_resolver(target_type, target_pk_name)
+        and not _has_custom_id_resolver(
+            target_type,
+            target_pk_name,
+            pk_is_relation=_pk_is_relation(django_field.related_model),
+        )
         and _selected_scalar_names(sel.selections, django_field.related_model) == {target_pk_name}
     ):
         append_unique_many(plan.fk_id_elisions, resolver_identities)
@@ -1509,9 +1513,10 @@ def _selected_scalar_names(
     ``Meta.fields`` lists that field and whatever it is named, so it equals the
     target key exactly when the GlobalID reads the key. An id read from no
     column resolves under the name ``relay.Node`` declares the field as (``id``),
-    like any selection: a consumer ``resolve_id`` on a target keyed by a column
-    named otherwise is refused here, since the caller's ``_has_custom_id_resolver``
-    looks for ``resolve_<key>`` and no field of that target is named ``id``.
+    like any selection: a consumer ``resolve_id`` on a target keyed by a scalar
+    column named otherwise is refused here, since the caller's
+    ``_has_custom_id_resolver`` looks for ``resolve_<key>`` on a scalar key and no
+    field of that target is named ``id``.
     """
     if model is None:
         return None
@@ -1558,9 +1563,16 @@ def _selected_scalar_names(
     return scalar_names
 
 
+def _pk_is_relation(model: type[models.Model] | None) -> bool:
+    """Return whether ``model``'s primary key is a relation (a one-to-one key, say)."""
+    return model is not None and model._meta.pk.is_relation
+
+
 def _has_custom_id_resolver(
     target_type: type[DjangoType] | None,
     target_pk_name: str | None,
+    *,
+    pk_is_relation: bool = False,
 ) -> bool:
     """Return ``True`` when target type customizes the selected id field.
 
@@ -1568,18 +1580,27 @@ def _has_custom_id_resolver(
     and otherwise delegates to the *same* free function
     (``definition.origin_has_custom_id_resolver``) so the registered and
     definition-less paths cannot answer the same type differently.
+    ``pk_is_relation`` says the target key is a relation, whose own name holds
+    the relation resolver the framework installs rather than an id resolver.
     """
     if target_type is None or target_pk_name is None:
         return False
     definition = registry.get_definition(target_type)
     if definition is not None:
-        return definition.has_custom_id_resolver_for(target_pk_name)
+        return definition.has_custom_id_resolver_for(
+            target_pk_name,
+            pk_is_relation=pk_is_relation,
+        )
     # Lazy import: ``types.definition`` pulls in ``optimizer.field_meta`` at
     # module load, so importing it at the top of the walker risks an
     # import-time cycle through the optimizer package init.
     from django_strawberry_framework.types.definition import origin_has_custom_id_resolver  # noqa: PLC0415 - import cycle
 
-    return origin_has_custom_id_resolver(target_type, target_pk_name)
+    return origin_has_custom_id_resolver(
+        target_type,
+        target_pk_name,
+        pk_is_relation=pk_is_relation,
+    )
 
 
 def _ensure_connector_only_fields(

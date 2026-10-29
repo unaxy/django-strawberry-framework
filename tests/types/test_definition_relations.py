@@ -31,7 +31,17 @@ from types import SimpleNamespace
 from typing import NoReturn, cast
 
 import pytest
-from apps.library.models import Book, Genre, Loan, MembershipCard, Patron, Shelf, TaggedItem
+from apps.library.models import (
+    Book,
+    Edition,
+    Genre,
+    Loan,
+    MembershipCard,
+    Patron,
+    PatronProfile,
+    Shelf,
+    TaggedItem,
+)
 from django.utils.functional import SimpleLazyObject
 from graphql import GraphQLError
 from strawberry import relay
@@ -466,7 +476,7 @@ def test_has_custom_id_resolver_for_caches_mro_result() -> None:
 
     assert definition.has_custom_id_resolver_for("id") is True
     assert definition.has_custom_id_resolver_for("uuid") is False
-    assert definition._custom_id_resolver_cache == {"id": True, "uuid": False}
+    assert definition._custom_id_resolver_cache == {("id", False): True, ("uuid", False): False}
 
 
 def test_has_custom_id_resolver_for_ignores_framework_relay_default() -> None:
@@ -482,7 +492,7 @@ def test_has_custom_id_resolver_for_ignores_framework_relay_default() -> None:
     definition = BookType.__django_strawberry_definition__
 
     assert definition.has_custom_id_resolver_for("id") is False
-    assert definition._custom_id_resolver_cache == {"id": False}
+    assert definition._custom_id_resolver_cache == {("id", False): False}
 
 
 def test_has_custom_id_resolver_for_ignores_inherited_relay_default() -> None:
@@ -498,7 +508,7 @@ def test_has_custom_id_resolver_for_ignores_inherited_relay_default() -> None:
     definition = BookType.__django_strawberry_definition__
 
     assert definition.has_custom_id_resolver_for("id") is False
-    assert definition._custom_id_resolver_cache == {"id": False}
+    assert definition._custom_id_resolver_cache == {("id", False): False}
 
 
 def test_has_custom_id_resolver_for_detects_non_id_pk_resolver() -> None:
@@ -519,7 +529,7 @@ def test_has_custom_id_resolver_for_detects_non_id_pk_resolver() -> None:
     definition = BookType.__django_strawberry_definition__
 
     assert definition.has_custom_id_resolver_for("uuid") is True
-    assert definition._custom_id_resolver_cache == {"uuid": True}
+    assert definition._custom_id_resolver_cache == {("uuid", False): True}
 
 
 def test_has_custom_id_resolver_for_flags_non_pk_node_id() -> None:
@@ -542,7 +552,7 @@ def test_has_custom_id_resolver_for_flags_non_pk_node_id() -> None:
     definition = BookType.__django_strawberry_definition__
 
     assert definition.has_custom_id_resolver_for("id") is True
-    assert definition._custom_id_resolver_cache == {"id": True}
+    assert definition._custom_id_resolver_cache == {("id", False): True}
 
 
 def test_has_custom_id_resolver_for_allows_pk_node_id() -> None:
@@ -560,7 +570,99 @@ def test_has_custom_id_resolver_for_allows_pk_node_id() -> None:
     definition = BookType.__django_strawberry_definition__
 
     assert definition.has_custom_id_resolver_for("id") is False
-    assert definition._custom_id_resolver_cache == {"id": False}
+    assert definition._custom_id_resolver_cache == {("id", False): False}
+
+
+def _patron_profile_node_type(
+    namespace_extra: dict[str, object] | None = None,
+) -> type[DjangoType]:
+    """Finalize a Relay ``PatronProfile`` type listing its one-to-one primary key ``patron``."""
+
+    class PatronType(DjangoType):
+        class Meta:
+            model = Patron
+            fields = ("id", "name")
+
+    assert registry.get(Patron) is PatronType
+    namespace: dict[str, object] = {
+        "Meta": type(
+            "Meta",
+            (),
+            {
+                "model": PatronProfile,
+                "fields": ("patron", "postal_code"),
+                "interfaces": (relay.Node,),
+            },
+        ),
+        **(namespace_extra or {}),
+    }
+    profile_type = type("PatronProfileType", (DjangoType,), namespace)
+    assert issubclass(profile_type, DjangoType)
+    finalize_django_types()
+    return profile_type
+
+
+def test_has_custom_id_resolver_for_skips_the_relation_resolver_of_a_relation_pk() -> None:
+    """A listed one-to-one primary key's framework relation resolver is no id resolver.
+
+    Listing ``patron`` installs the relation resolver under that name
+    (``types/resolvers.py::_attach_relation_resolvers``); it builds the
+    ``patron`` field, never the GlobalID, so a relation key does not count it.
+    The same attribute still counts under a scalar key's reading, and the memo
+    keeps the two answers apart.
+    """
+    profile_type = _patron_profile_node_type()
+    definition = profile_type.__django_strawberry_definition__
+
+    assert "patron" in vars(profile_type)
+    assert definition.has_custom_id_resolver_for("patron", pk_is_relation=True) is False
+    assert definition.has_custom_id_resolver_for("patron") is True
+    assert definition._custom_id_resolver_cache == {
+        ("patron", True): False,
+        ("patron", False): True,
+    }
+    assert origin_has_custom_id_resolver(profile_type, "patron", pk_is_relation=True) is False
+
+
+def _patron_profile_postal_node_id(
+    _cls: type[object],
+    root: PatronProfile,
+    *,
+    info: object,
+) -> str:
+    """A consumer ``resolve_id`` reading ``postal_code``, a column the stored key does not carry."""
+    del info
+    return f"P-{root.postal_code}"
+
+
+def test_has_custom_id_resolver_for_counts_resolve_id_on_a_relation_pk() -> None:
+    """A consumer ``resolve_id`` on a type keyed by a relation still counts as custom."""
+    profile_type = _patron_profile_node_type(
+        {"resolve_id": classmethod(_patron_profile_postal_node_id)},
+    )
+    definition = profile_type.__django_strawberry_definition__
+
+    assert definition.has_custom_id_resolver_for("patron", pk_is_relation=True) is True
+
+
+def test_has_custom_id_resolver_for_counts_a_scalar_pk_override() -> None:
+    """A scalar key's ``resolve_<pk>`` counts as custom under the scalar-key reading."""
+
+    class EditionType(DjangoType):
+        class Meta:
+            model = Edition
+            fields = ("isbn_13", "imprint")
+            interfaces = (relay.Node,)
+
+        def resolve_isbn_13(self) -> str:
+            return "custom"
+
+    finalize_django_types()
+    definition = EditionType.__django_strawberry_definition__
+
+    assert definition.has_custom_id_resolver_for("isbn_13") is True
+    assert definition.has_custom_id_resolver_for("isbn_13", pk_is_relation=False) is True
+    assert definition._custom_id_resolver_cache == {("isbn_13", False): True}
 
 
 def test_related_target_for_resolves_to_primary_when_two_types_share_target_model() -> None:
@@ -675,7 +777,7 @@ def test_definition_equality_ignores_memoization_caches() -> None:
 
     # Populate cache on d1
     assert d1.has_custom_id_resolver_for("id") is False
-    assert d1._custom_id_resolver_cache == {"id": False}
+    assert d1._custom_id_resolver_cache == {("id", False): False}
     assert d2._custom_id_resolver_cache == {}
 
     # Dataclass equality ignores private cache fields
@@ -693,4 +795,4 @@ def test_custom_id_resolver_guards_reject_empty_pk_names() -> None:
     definition = _malformed_definition(origin=Book)
     assert definition.has_custom_id_resolver_for("") is False
     assert origin_has_custom_id_resolver(Book, "") is False
-    assert "" not in definition._custom_id_resolver_cache
+    assert definition._custom_id_resolver_cache == {}
