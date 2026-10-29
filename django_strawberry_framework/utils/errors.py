@@ -1088,17 +1088,13 @@ def datetime_django_binds(value: datetime.date, *, use_tz: bool) -> datetime.dat
     (``utils/querysets.py::coerce_field_value_or_none``), where no warnings filter can be
     scoped to one call.
     """
-    # Adapted from Django's DateTimeField.to_python and DateTimeField.get_prep_value
-    # (django/db/models/fields/__init__.py, BSD-3-Clause), their warning left out and
-    # ``settings.USE_TZ`` read as ``use_tz``.
-    # The complete upstream license ships in LICENSE.django.
     if isinstance(value, datetime.datetime):
         stamp = value
     else:
-        stamp = datetime.datetime(value.year, value.month, value.day)  # noqa: DTZ001 - naive, as Django builds it
+        stamp = datetime.datetime.combine(value, datetime.time.min)
     if use_tz and timezone.is_naive(stamp):
-        default_timezone = timezone.get_default_timezone()
-        stamp = timezone.make_aware(stamp, default_timezone)
+        # ``make_aware`` alone would use the current time zone; Django binds in the default.
+        stamp = timezone.make_aware(stamp, timezone.get_default_timezone())
     return stamp
 
 

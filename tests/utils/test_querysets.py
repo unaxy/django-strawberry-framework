@@ -94,6 +94,7 @@ from django.db.models.sql.where import ExtraWhere, WhereNode
 from django.http import HttpRequest
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
+from django.utils import timezone
 from django.utils.safestring import SafeString
 from django.utils.translation import gettext_lazy
 from typing_extensions import Self, override
@@ -852,6 +853,30 @@ def test_coerce_field_value_or_none_makes_a_naive_datetime_aware_in_the_default_
         warnings.simplefilter("error")
         with _unopened_alias(_sqlite_wrapper) as alias:
             coerced = coerce_field_value_or_none(_datetime_column(), raw, alias=alias)
+    assert isinstance(coerced, datetime.datetime)
+    assert coerced == expected
+    assert coerced.utcoffset() == expected.utcoffset()
+
+
+@override_settings(TIME_ZONE=_NAIVE_ZONE)
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        pytest.param(_NAIVE_EIGHT, _EIGHT_IN_ZONE, id="naive-datetime"),
+        pytest.param(datetime.date(2024, 1, 1), _EIGHT_IN_ZONE.replace(hour=0), id="date"),
+    ],
+)
+def test_coerce_field_value_or_none_makes_a_naive_datetime_aware_in_the_default_zone_not_the_current(
+    raw: object,
+    expected: datetime.datetime,
+) -> None:
+    """An activated current time zone does not move the zone a naive key is made aware in.
+
+    Django binds a naive ``DateTimeField`` value in the default time zone (``TIME_ZONE``)
+    whatever zone ``timezone.activate`` made current, so the coercion does too.
+    """
+    with timezone.override("Asia/Tokyo"), _unopened_alias(_sqlite_wrapper) as alias:
+        coerced = coerce_field_value_or_none(_datetime_column(), raw, alias=alias)
     assert isinstance(coerced, datetime.datetime)
     assert coerced == expected
     assert coerced.utcoffset() == expected.utcoffset()
