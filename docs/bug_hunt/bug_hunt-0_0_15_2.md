@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 390 done, 214 to do.
+Progress: 391 done, 213 to do.
 
 ## Done
 
@@ -2227,6 +2227,12 @@ Progress: 390 done, 214 to do.
   (`_ProbedArm`), so a consumer `__init__`, form `clean` and filter body run once per arm on both colors; an arm whose
   input a `filter_queryset` override swapped, or whose `__init__` replaced its queryset, is built again. spec-027 says so.
   Tests: `tests/filters/test_sets.py`
+- [x] 702. Both colors answer the same first error for a filter input carrying several: `apply_sync` derives every
+  `and` / `or` / `not` arm's related branches in tree order before the permission pass and form validation, as
+  `apply_async` does (`FilterSet._iter_logic_arms`, read by `_collect_nested_visibility_querysets_sync` and its async
+  twin), so an arm branch's `FILTER_INVALID` answers before an arm or root form error or a permission denial on both,
+  and the depth cap raises from the same set. spec-027 says so. Tests: `tests/filters/test_sets.py`,
+  `examples/fakeshop/test_query/test_library_api.py`
 
 ## Outside review of the fixes
 
@@ -2377,11 +2383,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   to the truncated bounds (the GraphQL `BigInt` / `Int` scalars refuse fractions, so the wire never reaches it). Decide
   an integer-aware form field for the integer `NumberFilter` family or documenting the raw-form semantics. Found
   fact-finding 685
-- [ ] 702. (robustness) A filter input carrying both an arm form error and an arm related-branch error answers a
-  different first `FILTER_INVALID` key on the two colors: `apply_sync` reports the arm forms first (they validate in the
-  probe), `apply_async` the related branches first (its pre-pass derives them before the probe), e.g.
-  `{"or_": [{"branch": {"name": "bad"}}, {"topic": "bad"}]}` answers `or_1__topic` sync and `or_0__branch__name` async.
-  Found verifying 700
 
 ## To do: holes found re-checking the fixes
 

@@ -13587,9 +13587,9 @@ def test_collect_nested_visibility_querysets_async_rejects_malformed_logical_bra
 def test_q_for_branch_falls_back_to_sync_derive_on_stash_miss() -> None:
     """``_q_for_branch`` with a present-but-missing stash uses the sync-derive fallback.
 
-    Under ``apply_async`` the nested visibility map is pre-derived and threaded
-    through ``_nested_qs_by_branch_id`` keyed by ``id(child_input)``. A consumer
-    who short-circuits past the async pre-pass (modeled here by an empty stash
+    Under ``apply_sync`` and ``apply_async`` the nested visibility map is pre-derived
+    and threaded through ``_nested_qs_by_branch_id`` keyed by ``id(child_input)``. A
+    consumer who short-circuits past the pre-pass (modeled here by an empty stash
     dict, so ``.get(id(child_input))`` misses) still gets a correct result via
     the defensive sync-derive fallback rather than a ``None`` map.
     """
@@ -13620,6 +13620,30 @@ def test_q_for_branch_falls_back_to_sync_derive_on_stash_miss() -> None:
         _nested_qs_by_branch_id={},  # present but empty -> stash miss -> sync fallback
     )
     assert isinstance(q, Q)
+
+
+@pytest.mark.django_db
+def test_q_for_branch_composes_arms_outside_the_pipeline() -> None:
+    """A set built outside the apply pipeline composes its arms with no pre-derived stash.
+
+    No pre-pass ran, so the instance carries no ``_nested_qs_by_branch_id`` stash;
+    ``_q_for_branch`` derives each arm's (empty) branch map itself and the ``or``
+    keeps the two branches its arms name.
+    """
+
+    class BranchFilter(FilterSet):
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"]}
+
+    _seed_open_and_secret_match_shelves()
+    library_models.Branch.objects.create(name="gamma")
+    filter_set = BranchFilter(
+        data={"or": [{"name": "alpha"}, {"name": "beta"}]},
+        queryset=library_models.Branch.objects.order_by("name"),
+    )
+    assert filter_set._nested_qs_by_branch_id is None
+    assert list(filter_set.qs.values_list("name", flat=True)) == ["alpha", "beta"]
 
 
 def test_collect_related_declarations_honors_base_tombstone() -> None:
@@ -24155,3 +24179,270 @@ def test_logical_branch_container_rejection_message_is_pinned() -> None:
         f"FilterSet {CategoryFilter.__qualname__}: logical branch 'or' takes a "
         "list of filter inputs, got a dict. Wrap the clauses as 'or: [{...}]'."
     )
+
+
+_BAD_BRANCH = {"branch": {"name": "bad"}}
+_NO_KEYS: list[str] = []
+
+
+def _arm_error_order_filter(
+    mode: str,
+    *,
+    gated: bool,
+    hook_runs: list[str] | None = None,
+) -> type[FilterSet]:
+    """A shelf set whose ``topic`` and ``branch`` ``name`` reject ``"bad"`` (``NumberFilter``).
+
+    ``BranchType.get_queryset`` is sync for ``"sync"`` and ``"async_sync_hooks"``
+    and async-only for ``"async_only_hooks"``, and appends to ``hook_runs`` when
+    given; with ``gated`` the set's ``check_topic_permission`` denies every
+    request naming ``topic``.
+    """
+    runs = [] if hook_runs is None else hook_runs
+
+    def _sync_visible(
+        _cls: type[DjangoType],
+        queryset: QuerySet[library_models.Branch],
+        _info: object,
+        **_kwargs: object,
+    ) -> QuerySet[library_models.Branch]:
+        runs.append("branch")
+        return queryset
+
+    async def _async_visible(
+        _cls: type[DjangoType],
+        queryset: QuerySet[library_models.Branch],
+        _info: object,
+        **_kwargs: object,
+    ) -> QuerySet[library_models.Branch]:
+        runs.append("branch")
+        return queryset
+
+    type(
+        "BranchType",
+        (DjangoType,),
+        {
+            "Meta": type("Meta", (), {"model": library_models.Branch}),
+            "get_queryset": classmethod(
+                _async_visible if mode == "async_only_hooks" else _sync_visible,
+            ),
+        },
+    )
+
+    class BranchByNumber(FilterSet):
+        name = NumberFilter(field_name="name")
+
+        class Meta:
+            model = library_models.Branch
+            fields: dict[str, list[str]] = {}
+
+    class ShelfByNumber(FilterSet):
+        branch = RelatedFilter(BranchByNumber, field_name="branch")
+        topic = NumberFilter(field_name="topic")
+
+        class Meta:
+            model = library_models.Shelf
+            fields: dict[str, list[str]] = {}
+
+    if not gated:
+        return ShelfByNumber
+
+    class GatedShelfByNumber(ShelfByNumber):
+        def check_topic_permission(self, _request: object) -> bool:
+            return False
+
+    return GatedShelfByNumber
+
+
+def _first_filter_error(
+    filter_set: type[FilterSet],
+    filter_input: dict[str, object],
+    mode: str,
+) -> tuple[type[BaseException], object, list[str]]:
+    """Run ``filter_set`` on ``mode``'s color; return the error's type, code and error keys."""
+    filter_set.get_filters()
+    base = library_models.Shelf.objects.all()
+
+    def _apply() -> object:
+        if mode == "sync":
+            return filter_set.apply_sync(filter_input, base, _make_info())
+        return asyncio.run(filter_set.apply_async(filter_input, base, _make_info()))
+
+    with pytest.raises(GraphQLError) as excinfo:
+        _apply()
+    extensions = excinfo.value.extensions or {}
+    errors = extensions.get("errors")
+    keys = sorted(str(key) for key in errors) if is_dict(errors) else []
+    return type(excinfo.value), extensions.get("code"), keys
+
+
+_ARM_FORM_VERSUS_BRANCH_CASES = [
+    pytest.param(
+        {"or_": [_BAD_BRANCH, {"topic": "bad"}]},
+        ["or_0__branch__name"],
+        id="branch-arm-first",
+    ),
+    pytest.param(
+        {"or_": [{"topic": "bad"}, _BAD_BRANCH]},
+        ["or_1__branch__name"],
+        id="form-arm-first",
+    ),
+    pytest.param(
+        {"or_": [{**_BAD_BRANCH, "topic": "bad"}]},
+        ["or_0__branch__name"],
+        id="one-arm-both",
+    ),
+    pytest.param(
+        {"and_": [{"topic": "bad"}], "or_": [_BAD_BRANCH]},
+        ["or_0__branch__name"],
+        id="and-form-or-branch",
+    ),
+    pytest.param(
+        {"or_": [{"topic": "bad", "or_": [_BAD_BRANCH]}]},
+        ["or_0__or_0__branch__name"],
+        id="nested-arm-branch",
+    ),
+    pytest.param(
+        {"and_": [{"or_": [{"topic": "bad"}, _BAD_BRANCH]}]},
+        ["and_0__or_1__branch__name"],
+        id="nested-or-in-and",
+    ),
+    pytest.param(
+        {"or_": [{"topic": "bad"}, {"and_": [_BAD_BRANCH]}]},
+        ["or_1__and_0__branch__name"],
+        id="deeper-branch-later-arm",
+    ),
+    pytest.param(
+        {"not_": _BAD_BRANCH, "topic": "bad"},
+        ["not__branch__name"],
+        id="not-branch-root-form",
+    ),
+    pytest.param(
+        {"not_": {"topic": "bad"}, "or_": [_BAD_BRANCH]},
+        ["or_0__branch__name"],
+        id="not-form-or-branch",
+    ),
+    pytest.param(
+        {"not_": {"or_": [{"topic": "bad"}, _BAD_BRANCH]}},
+        ["not__or_1__branch__name"],
+        id="nested-or-in-not",
+    ),
+    pytest.param(
+        {"topic": "bad", "or_": [_BAD_BRANCH]},
+        ["or_0__branch__name"],
+        id="root-form-arm-branch",
+    ),
+    pytest.param(
+        {**_BAD_BRANCH, "or_": [{"topic": "bad"}]},
+        ["branch__name"],
+        id="root-branch-arm-form",
+    ),
+    pytest.param(
+        {"or_": [_BAD_BRANCH, _BAD_BRANCH]},
+        ["or_0__branch__name"],
+        id="two-branch-arms",
+    ),
+    pytest.param(
+        {"or_": [{**_BAD_BRANCH, "or_": [_BAD_BRANCH]}]},
+        ["or_0__branch__name"],
+        id="arm-branch-before-its-nested-arm",
+    ),
+    pytest.param({"or_": [{"topic": "bad"}]}, ["or_0__topic"], id="control-arm-form-alone"),
+]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("filter_input", "keys"), _ARM_FORM_VERSUS_BRANCH_CASES)
+@pytest.mark.parametrize("mode", ["sync", "async_sync_hooks", "async_only_hooks"])
+def test_an_arm_branch_error_answers_before_any_form_error_on_both_colors(
+    filter_input: dict[str, object],
+    keys: list[str],
+    mode: str,
+) -> None:
+    """Every arm's related branches derive, in tree order, before any set's form validates.
+
+    Both colors derive the root's and every ``and`` / ``or`` / ``not`` arm's
+    ``branch`` before the root form and the arm forms validate (spec-027
+    Decision 8, step 3), so an input holding a rejected ``topic`` beside a
+    rejected ``branch`` ``name`` answers the branch's ``FILTER_INVALID`` key,
+    the first in tree order, on ``apply_sync`` and on ``apply_async`` with a sync
+    or an async-only ``BranchType.get_queryset``.
+    """
+    filter_set = _arm_error_order_filter(mode, gated=False)
+    assert _first_filter_error(filter_set, filter_input, mode) == (
+        GraphQLError,
+        "FILTER_INVALID",
+        keys,
+    )
+
+
+_ARM_PERMISSION_VERSUS_BRANCH_CASES = [
+    pytest.param(
+        {"topic": "1", "or_": [_BAD_BRANCH]},
+        ("FILTER_INVALID", ["or_0__branch__name"]),
+        id="root-gate-arm-branch",
+    ),
+    pytest.param(
+        {"or_": [{"topic": "1"}, _BAD_BRANCH]},
+        ("FILTER_INVALID", ["or_1__branch__name"]),
+        id="arm-gate-later-branch",
+    ),
+    pytest.param(
+        {"or_": [{"topic": "1", **_BAD_BRANCH}]},
+        ("FILTER_INVALID", ["or_0__branch__name"]),
+        id="one-arm-gate-branch",
+    ),
+    pytest.param(
+        {"and_": [{"or_": [{"topic": "1"}]}], "not_": _BAD_BRANCH},
+        ("FILTER_INVALID", ["not__branch__name"]),
+        id="nested-gate-not-branch",
+    ),
+    pytest.param({"or_": [{"topic": "1"}]}, (None, _NO_KEYS), id="control-gate-alone"),
+]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("filter_input", "expected"), _ARM_PERMISSION_VERSUS_BRANCH_CASES)
+@pytest.mark.parametrize("mode", ["sync", "async_sync_hooks", "async_only_hooks"])
+def test_an_arm_branch_error_answers_before_a_permission_denial_on_both_colors(
+    filter_input: dict[str, object],
+    expected: tuple[str | None, list[str]],
+    mode: str,
+) -> None:
+    """Every arm's related branches derive before the permission pass, on both colors.
+
+    ``check_topic_permission`` denies any ``topic``; each input also holds a
+    rejected ``branch`` ``name`` in an arm, whose ``FILTER_INVALID`` answers
+    first on ``apply_sync`` and on ``apply_async`` with a sync or an async-only
+    ``BranchType.get_queryset`` (spec-027 Decision 8: step 3 before step 5).
+    The gate alone answers its denial, a ``GraphQLError`` with no code.
+    """
+    filter_set = _arm_error_order_filter(mode, gated=True)
+    code, keys = expected
+    assert _first_filter_error(filter_set, filter_input, mode) == (GraphQLError, code, keys)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("mode", ["sync", "async_sync_hooks", "async_only_hooks"])
+def test_each_arm_branch_derives_once_on_both_colors(mode: str) -> None:
+    """The ``.qs`` read reuses each arm's pre-derived branch rather than deriving it again.
+
+    ``BranchType.get_queryset`` runs once per active ``branch``, the root's and
+    each ``and`` / ``or`` / ``not`` arm's, on ``apply_sync`` and on ``apply_async``
+    with a sync or an async-only hook.
+    """
+    hook_runs: list[str] = []
+    filter_set = _arm_error_order_filter(mode, gated=False, hook_runs=hook_runs)
+    filter_set.get_filters()
+    filter_input = {
+        "branch": {"name": "1"},
+        "or_": [{"branch": {"name": "2"}}, {"and_": [{"branch": {"name": "3"}}]}],
+        "not_": {"branch": {"name": "4"}},
+    }
+    base = library_models.Shelf.objects.all()
+    if mode == "sync":
+        rows = filter_set.apply_sync(filter_input, base, _make_info())
+    else:
+        rows = asyncio.run(filter_set.apply_async(filter_input, base, _make_info()))
+    assert list(rows) == []
+    assert hook_runs == ["branch"] * 4

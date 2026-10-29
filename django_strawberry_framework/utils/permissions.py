@@ -370,8 +370,8 @@ def extract_branch_value(
 
     Shares the active-value rule with every traversal surface via
     ``input_values.is_inactive_value``. Used by the filter
-    side's logical-branch pre-walk
-    (``_collect_nested_visibility_querysets_async``) to read ``and_`` / ``or_`` /
+    side's logical-branch walk
+    (``filters/sets.py::FilterSet._iter_logic_branches``) to read ``and_`` / ``or_`` /
     ``not_`` arms off the raw input. The dict-vs-dataclass single-field read is
     ``input_values.input_field_value``, so the shape sniff stays
     single-sited in the traversal-primitives module.
