@@ -647,17 +647,26 @@ _TEMPORAL_FORM_CLASSES: tuple[type[forms.Field], ...] = (
 # Each temporal column class with the built-in form classes that read its value: first the
 # form class Django's ``ModelForm`` builds for it (the column's own ``formfield()``), then
 # admin's ``SplitDateTimeField`` over a ``DateTimeField``
-# (``django.contrib.admin.options.FORMFIELD_FOR_DBFIELD_DEFAULTS``) and a ``DateTimeField``
-# over a ``DateField``, whose ``to_python`` reads a ``datetime`` as its date. The most
-# specific class in a column's MRO answers (``truth.mro_entry``), so a ``DateTimeField``
-# reads its own row, never its ``DateField`` base's.
+# (``django.contrib.admin.options.FORMFIELD_FOR_DBFIELD_DEFAULTS``). A ``DateTimeField`` over
+# a ``DateField`` pairs with nothing: its ``to_python`` makes the input's date midnight in the
+# current time zone and the column's ``to_python`` takes the date of that instant in the
+# default zone, so a current zone ahead of the default stores an earlier day
+# (``_TEMPORAL_ZONE_SHIFTS``). The most specific class in a column's MRO answers
+# (``truth.mro_entry``), so a ``DateTimeField`` reads its own row, never its ``DateField``
+# base's.
 _TEMPORAL_COLUMN_FORM_CLASSES: dict[type, tuple[type, ...]] = {
     models.DateTimeField: (
         truth.class_of(models.DateTimeField().formfield()),
         forms.SplitDateTimeField,
     ),
-    models.DateField: (truth.class_of(models.DateField().formfield()), forms.DateTimeField),
+    models.DateField: (truth.class_of(models.DateField().formfield()),),
     models.TimeField: (truth.class_of(models.TimeField().formfield()),),
+}
+
+# Each temporal column class with the built-in form class that parses its value but shifts it
+# through the current time zone, for ``_require_temporal_reader``'s refusal message.
+_TEMPORAL_ZONE_SHIFTS: dict[type, type[forms.Field]] = {
+    models.DateField: forms.DateTimeField,
 }
 
 
@@ -718,12 +727,15 @@ def _require_temporal_reader(
     classes reads only the kind it parses: ``forms.DateField`` over a ``TimeField`` column
     raises on every value (``BaseTemporalField.to_python`` calls ``strip()`` on the
     ``time``), and ``forms.DateField`` over a ``DateTimeField`` column stores midnight,
-    dropping the time of day. A field reads the column's value when its nearest built-in
-    temporal class is one ``_TEMPORAL_COLUMN_FORM_CLASSES`` pairs with the column, or when its
-    class overrides ``to_python`` or ``clean`` to read the value itself; any other is a
-    ``ConfigurationError``. A form field of no temporal class (a ``CharField`` reads the
-    value's text), and a column of no paired class (a ``DurationField``, whose input scalar
-    a ``SCALAR_MAP`` entry decides), pass.
+    dropping the time of day. ``forms.DateTimeField`` over a ``DateField`` column parses the
+    date but shifts it: it makes the date midnight in the current time zone and the column
+    stores that instant's date in the default zone, an earlier day under a current zone
+    ahead of the default (``_TEMPORAL_ZONE_SHIFTS``). A field reads the column's value when
+    its nearest built-in temporal class is one ``_TEMPORAL_COLUMN_FORM_CLASSES`` pairs with
+    the column, or when its class overrides ``to_python`` or ``clean`` to read the value
+    itself; any other is a ``ConfigurationError``. A form field of no temporal class (a
+    ``CharField`` reads the value's text), and a column of no paired class (a
+    ``DurationField``, whose input scalar a ``SCALAR_MAP`` entry decides), pass.
     """
     paired = truth.mro_entry(_TEMPORAL_COLUMN_FORM_CLASSES, truth.class_of(column))
     reader = next(
@@ -738,13 +750,23 @@ def _require_temporal_reader(
     ):
         return
     readers = " or ".join(truth.name(klass) for klass in paired[1])
+    shifting = _TEMPORAL_ZONE_SHIFTS.get(paired[0])
+    if shifting is not None and truth.is_among(reader, (shifting,)):
+        failure = "shifts the"
+        why = (
+            "reads the date as midnight in the current time zone, so a current zone ahead of the "
+            "default stores an earlier day"
+        )
+    else:
+        failure = "cannot read the"
+        why = "reads only the kind it parses"
     raise ConfigurationError(
-        f"Form {truth.name(form_class)} field {name!r} ({truth.kind(field)}) cannot read the "
+        f"Form {truth.name(form_class)} field {name!r} ({truth.kind(field)}) {failure} "
         f"value of the {truth.kind(column)} column {truth.name(column.model)}.{column.name}: "
-        f"the input carries the column's value and {truth.name(reader)} reads only the kind "
-        f"it parses. Declare a {readers}, a CharField, or a subclass that reads the value by "
-        "overriding to_python or clean; an update binds every declared field, including those "
-        "Meta.fields / Meta.exclude leave out of its input.",
+        f"the input carries the column's value and {truth.name(reader)} {why}. Declare a "
+        f"{readers}, a CharField, or a subclass that reads the value by overriding to_python "
+        "or clean; an update binds every declared field, including those Meta.fields / "
+        "Meta.exclude leave out of its input.",
     )
 
 

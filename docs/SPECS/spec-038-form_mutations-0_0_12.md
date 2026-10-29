@@ -1017,12 +1017,13 @@ value, which the input carries as the column's own Python type: Django's `DateFi
 kind they parse, so one over a `DateField`, `DateTimeField` or `TimeField` column is refused
 at the same build
 (`django_strawberry_framework/forms/inputs.py::_require_temporal_reader`) unless it is the
-form class the column's own `formfield()` builds, admin's `SplitDateTimeField` over a
-`DateTimeField`, or a `DateTimeField` over a `DateField`, or its class overrides `to_python`
-or `clean`: a `DateField` over a `TimeField` column fails every value, and one over a
-`DateTimeField` column stores midnight. A `CharField` over a temporal column reads the
-value's text and builds; a `DurationField` column, whose input scalar a `SCALAR_MAP` entry
-decides, is not checked.
+form class the column's own `formfield()` builds or admin's `SplitDateTimeField` over a
+`DateTimeField`, or its class overrides `to_python` or `clean`: a `DateField` over a
+`TimeField` column fails every value, one over a `DateTimeField` column stores midnight, and
+a `DateTimeField` over a `DateField` column makes the date midnight in the current time zone,
+so a current zone ahead of the default stores an earlier day. A `CharField` over a
+temporal column reads the value's text and builds; a `DurationField` column, whose input
+scalar a `SCALAR_MAP` entry decides, is not checked.
 
 **The related model for a relation field's id basis.** A `ModelForm` relation
 field has a backing column, so the related model (and its primary
@@ -2501,12 +2502,13 @@ behavior reachable through `/graphql/`, package tests own internals.
     `::test_field_with_a_multipart_text_widget_over_a_text_column_builds`). **Temporal
     readers:** a built-in temporal field over a temporal column it cannot read, a subclass
     overriding neither `to_python` nor `clean` included, is refused on both inputs, a
-    narrowed-out one on an update but not on a create, while the column's own form class,
-    `SplitDateTimeField` over a `DateTimeField`, `DateTimeField` over a `DateField`, a
-    `CharField` and a subclass overriding `to_python` build, and each column's first reader is
-    the class its `formfield()` builds
+    narrowed-out one on an update but not on a create, a `DateTimeField` over a `DateField`
+    included, while the column's own form class, `SplitDateTimeField` over a `DateTimeField`,
+    a `CharField` and a subclass overriding `to_python` build, and each column's first reader
+    is the class its `formfield()` builds
     (`tests/forms/test_inputs.py::test_temporal_field_over_a_temporal_column_it_cannot_read_is_refused`,
     `::test_temporal_refusal_names_the_form_the_column_and_the_remedy`,
+    `::test_datetime_over_date_refusal_names_the_zone_shift_and_the_remedy`,
     `::test_update_input_refuses_an_unreadable_temporal_field_on_a_narrowed_out_field`,
     `::test_temporal_field_reading_its_column_builds`,
     `::test_temporal_readers_open_with_the_form_class_django_builds_for_the_column`). **Shape identity:**
