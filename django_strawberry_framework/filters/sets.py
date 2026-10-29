@@ -398,7 +398,7 @@ def _is_text_column(field_class: type[ModelField]) -> bool:
     """Return whether the package's default filter for ``field_class`` is a ``CharFilter``.
 
     Read off ``_PUBLIC_PACKAGE_FILTER_DEFAULTS`` (the package's class-level defaults
-    table, copied from django-filter's) by the field class's MRO, never off
+    table, built from django-filter's ``FILTER_FOR_DBFIELD_DEFAULTS``) by the field class's MRO, never off
     ``Meta.filter_overrides``: the text columns are ``CharField`` and its
     subclasses, ``TextField``, ``GenericIPAddressField``, ``FilePathField`` and
     ``CommaSeparatedIntegerField``.
@@ -5887,7 +5887,7 @@ class FilterSet(
         ``QuerySet`` return assertion ``BaseFilterSet.filter_queryset`` makes.
         """
         result = self._invoke_suppressing_framework_distinct(filter_instance, rows, value)
-        assert truth.is_instance(result, models.QuerySet), (  # noqa: S101 - mirrors django-filter's filter_queryset assertion
+        assert truth.is_instance(result, models.QuerySet), (  # noqa: S101 - same assertion as django-filter's filter_queryset
             f"Expected '{truth.kind(self)}' filter {filter_instance.field_name!r} "
             f"to return a QuerySet, but got a {truth.kind(result)} instead."
         )
@@ -6294,7 +6294,7 @@ class FilterSet(
             # The parent's own rows: the filter's original invocation, consumer
             # ``distinct`` included, as for a leaf walking no hop.
             matched = terminal.filter(queryset, value)
-            assert truth.is_instance(matched, models.QuerySet), (  # noqa: S101 - mirrors django-filter's filter_queryset assertion
+            assert truth.is_instance(matched, models.QuerySet), (  # noqa: S101 - same assertion as django-filter's filter_queryset
                 f"Expected '{truth.kind(self)}' filter {terminal.field_name!r} "
                 f"to return a QuerySet, but got a {truth.kind(matched)} instead."
             )
@@ -6456,7 +6456,7 @@ class FilterSet(
             routed = candidate is not None and candidate.routable
             if not routed:
                 queryset = filter_instance.filter(queryset, value)
-                assert truth.is_instance(queryset, models.QuerySet), (  # noqa: S101 - mirrors django-filter's filter_queryset assertion
+                assert truth.is_instance(queryset, models.QuerySet), (  # noqa: S101 - same assertion as django-filter's filter_queryset
                     f"Expected '{truth.kind(self)}.{name}' to return a QuerySet, "
                     f"but got a {truth.kind(queryset)} instead."
                 )
@@ -6467,7 +6467,7 @@ class FilterSet(
                 inner_root,
                 value,
             )
-            assert truth.is_instance(result, _QUERYSET), (  # noqa: S101 - mirrors django-filter's filter_queryset assertion
+            assert truth.is_instance(result, _QUERYSET), (  # noqa: S101 - same assertion as django-filter's filter_queryset
                 f"Expected '{truth.kind(self)}.{name}' to return a QuerySet, "
                 f"but got a {truth.kind(result)} instead."
             )

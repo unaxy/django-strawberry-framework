@@ -281,8 +281,8 @@ else:
 
 
 # Django < 6.0 has no module-level constant; ``QuerySet._filter_or_exclude``
-# rejects the same ``models.Q.__init__`` internals inline. The fallback mirrors Django
-# 6.0's ``django.db.models.query.PROHIBITED_FILTER_KWARGS`` verbatim so the
+# rejects the same ``models.Q.__init__`` internals inline. The fallback holds the same
+# two names as Django 6.0's ``django.db.models.query.PROHIBITED_FILTER_KWARGS`` so the
 # deferred-filter defect gate behaves identically at the declared
 # ``Django>=5.2.16`` floor (pyproject ``[project.dependencies]``).
 PROHIBITED_FILTER_KWARGS: frozenset[str] = getattr(

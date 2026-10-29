@@ -57,16 +57,15 @@ def owned_completion(context: ExecutionContext) -> "Generator[None]":
         _owner.reset(token)
 
 
-# Adapted from graphql-core 3.3.0, graphql/pyutils/gather_with_cancel.py (MIT).
-# The complete upstream license ships in LICENSE.graphql-core.
 async def _gather_with_cancel(*awaitables: "Awaitable[object]") -> list[object]:
     """Join siblings before propagating failure; cancel them only on caller cancellation.
 
-    Adapted from graphql-core 3.3.0 graphql.pyutils.gather_with_cancel (MIT).
-    Ordinary failures must not cancel a shared DataLoader future that a surviving
-    branch also awaits. The shielded drain keeps repeated caller cancellation from
-    ending the owning mutation window before cleanup finishes. GeneratorExit is
-    deliberately outside this handler: closing a coroutine cannot await cleanup.
+    graphql-core 3.3's own ``gather_with_cancel`` cancels every sibling on the first
+    failure; this join cancels none on an ordinary failure, which must not cancel a
+    shared DataLoader future that a surviving branch also awaits. The shielded drain
+    keeps repeated caller cancellation from ending the owning mutation window before
+    cleanup finishes. GeneratorExit is deliberately outside this handler: closing a
+    coroutine cannot await cleanup.
     """
     futures = [asyncio.ensure_future(value) for value in awaitables]
     running = asyncio.gather(*futures)
@@ -99,7 +98,7 @@ async def _gather_with_cancel(*awaitables: "Awaitable[object]") -> list[object]:
 # Complete stable support census (docstring-free syntax, not version-only approval):
 # 3.2.0, 3.2.1, 3.2.2, 3.2.3, 3.2.4, 3.2.5, 3.2.6, 3.2.7, 3.2.8,
 # 3.2.9 share one pair; 3.2.10-3.2.13 share the CollectedErrors list body.
-# Comments, formatting and private docstrings do not affect the adapted dependency.
+# Comments, formatting and private docstrings do not affect the audited dependency.
 _AUDITED = MappingProxyType(
     {
         "execute_fields": frozenset(
@@ -140,15 +139,16 @@ def _syntax_shape(node: object) -> object:
     return node
 
 
-# Adapted graphql-core 3.2.0-3.2.13 graphql/execution/execute.py method bodies:
-# retain installed code and replace only their gather dependency, under the audited body allowlist.
+# The installed graphql-core 3.2.0-3.2.13 ExecutionContext methods run as installed: the
+# rebuilt function keeps their code object and swaps only its gather global, under the
+# audited digest allowlist. No upstream source is stored here.
 @functools.lru_cache(maxsize=8)
 def _completion_method(method: "Callable[_P, _R]") -> "Callable[_P, _R]":
-    """Adapt the installed upstream method by replacing only its gather dependency.
+    """Rebuild the installed upstream method with only its gather dependency replaced.
 
     The selected body retains upstream field ordering, error paths and version's
-    error-collection protocol. No global in graphql-core is changed. The adapted
-    bodies originate in graphql-core 3.2.0-3.2.13 graphql.execution.execute (MIT).
+    error-collection protocol. No global in graphql-core is changed. The rebuilt
+    function runs the installed method's own code object.
     """
     if not isinstance(method, FunctionType):
         raise TypeError(

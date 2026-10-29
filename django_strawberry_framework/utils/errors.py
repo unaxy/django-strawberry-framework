@@ -186,7 +186,8 @@ class FieldError:
     flavors return this same class rather than a per-flavor mirror,
     so a client's error branch is written once. The type is ADDITIVE, not
     frozen - a member may be added (``codes`` / ``path`` below were), never
-    removed or retyped. Mirrors graphene-django's ``ErrorType``.
+    removed or retyped. Same wire contract as
+    ``graphene_django/types.py::ErrorType`` (``field`` + ``messages``).
 
     **Additive client-ergonomics fields.** Two optional,
     default-empty lists sit alongside the legacy ``field`` / ``messages`` (both kept

@@ -20,8 +20,9 @@ helpers split by lifecycle phase:
   the type names the executing schema published (a lazy per-schema table), so
   a ``type`` id round-trips under whatever ``NameConverter`` that schema runs.
 
-Direct ports of behavior from ``strawberry_django/type.py`` and
-``strawberry_django/relay/utils.py`` cited in the spec; the upstream
+Each installer has the same contract as the matching behavior in
+``strawberry_django/type.py`` or ``strawberry_django/relay/utils.py`` cited
+in the spec; the upstream
 package is not imported at runtime.
 """
 
@@ -107,18 +108,18 @@ def implements_relay_node(type_cls: type[DjangoType]) -> TypeGuard[type[_RelayDj
 
 
 def install_is_type_of(type_cls: type[DjangoType]) -> None:
-    """Borrow strawberry-django's ``is_type_of`` virtual-subclass behavior.
+    """Install the ``is_type_of`` virtual-subclass check.
 
-    Direct port of ``strawberry_django/type.py::_process_type``
+    Same contract as ``strawberry_django/type.py::_process_type``
     (the ``if "is_type_of" not in cls.__dict__`` branch). Strawberry's
     interface dispatch uses ``is_type_of`` to identify the concrete type
-    for a returned ORM instance. Without this borrow, an interface field
+    for a returned ORM instance. Without this check, an interface field
     that returns a Django model can fail Strawberry's isinstance check
     and surface as "Cannot determine type for object of model X" at
     runtime (spec-015 Decision 6 #"injection (Decision-1 borrow) is added unconditionally").
 
     A ``strawberry.cast(SomeType, obj)`` mark takes precedence over the
-    isinstance fallback, as in the ported branch: the type answers ``True``
+    isinstance fallback, as in upstream's branch: the type answers ``True``
     exactly when it is the cast type. The mark names the one ``DjangoType`` a
     row resolves to, so a model with two registered types resolves
     ``__typename`` to the cast type instead of whichever candidate graphql-core
@@ -262,7 +263,7 @@ def _stamp_relay_id_attr(type_cls: type[relay.Node]) -> str:
       result set. The stamp turns that into one ``__dict__`` read.
 
     The seed-then-scan keeps upstream as the single scan implementation (no
-    ported annotation walk to drift); the ``"pk"`` fallback ports
+    second annotation walk to drift); the ``"pk"`` fallback has the same contract as
     ``strawberry_django/relay/utils.py::resolve_model_id_attr`` for the ZERO
     ``relay.NodeID`` case only. Upstream raises the same
     ``NodeIDAnnotationError`` for more than one candidate, which
@@ -1079,10 +1080,11 @@ def _order_nodes(
     field: ModelField | None,
     required: bool,
 ) -> list[_ModelT | None]:
-    """Re-order ``results`` to match ``values`` (port of strawberry-django's map_results).
+    """Re-order ``results`` to match ``values`` (same contract as strawberry-django's map_results).
 
-    Mirrors ``strawberry_django/relay/utils.py::resolve_model_nodes #"def map_results"``: build an index
-    of the rows and emit one entry per requested value. Both sides are keyed by
+    Same contract as
+    ``strawberry_django/relay/utils.py::resolve_model_nodes #"def map_results"``: build
+    an index of the rows and emit one entry per requested value. Both sides are keyed by
     ``utils/querysets.py::identity_key`` through ``field``, the id slot's field
     (``relay.py::_node_id_slot``, as ``_node_values`` resolved it): the row's value
     of that column and the coerced id compare as the column's Python value, so a row
@@ -1241,7 +1243,7 @@ def install_relay_node_resolvers(type_cls: type[relay.Node]) -> None:
       ``setattr(type_cls, attr, classmethod(default))``.
     - When they differ, the consumer's override wins and is preserved.
 
-    Direct port of ``strawberry_django/type.py::_process_type``
+    Same contract as ``strawberry_django/type.py::_process_type``
     (the ``if issubclass(cls, relay.Node)`` branch). The stored-function
     discriminator is structurally distinct from the ``__dict__``
     membership discriminator (``is_type_of`` injection) and the
