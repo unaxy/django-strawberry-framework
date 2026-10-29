@@ -19,7 +19,9 @@ import strawberry
 from apps.products import services
 from apps.products.models import Category, Item
 from asgiref.sync import sync_to_async
+from django.db import connection
 from django.db.models import CompositePrimaryKey, Model, QuerySet
+from django.test.utils import CaptureQueriesContext
 from django.utils.functional import SimpleLazyObject
 from strawberry import relay
 from strawberry.schema.name_converter import NameConverter
@@ -44,7 +46,6 @@ from django_strawberry_framework.types.relay import (
     SyncMisuseError,
     _published_node_name_table,
     _resolve_id_attr_default,
-    _resolve_id_default,
     _resolve_nodes_default,
     apply_interfaces,
     decode_global_id,
@@ -58,7 +59,7 @@ from django_strawberry_framework.utils._narrowing import class_dict, require
 from django_strawberry_framework.utils.querysets import model_for
 from django_strawberry_framework.utils.typing import call_forwarded, object_result
 from tests._idioms import async_relay_hooks, comparing_metaclass, relay_hooks, saved_pk
-from tests._info import make_info, unread_info
+from tests._info import make_info
 
 if TYPE_CHECKING:
     from typing_extensions import TypeIs
@@ -550,27 +551,6 @@ def test_non_relay_type_keeps_id_int() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _build_fake_root(id_value: int) -> object:
-    """Build a synthetic ``root`` whose ``__dict__`` is empty but ``getattr`` resolves the pk.
-
-    Django model instances always cache the pk in ``__dict__`` when loaded
-    through the ORM, so the literal "dict-cache miss" branch of
-    ``_resolve_id_default`` is not reachable with a real saved row. The
-    branch IS reachable when the root is a synthetic non-model object
-    that mimics the ``__class__._meta.pk.attname`` contract - exactly the
-    shape ``strawberry-django`` documents as the fallback path. We build
-    that shape here so the fallback branch has a faithful test.
-    """
-
-    # Mimic ``root.__class__._meta.pk.attname`` so the "pk" -> "id"
-    # coercion in ``_resolve_id_default`` resolves cleanly.
-    class _FakeRoot:
-        _meta = Category._meta
-        id = id_value
-
-    return _FakeRoot()
-
-
 def test_relay_node_injects_default_resolvers() -> None:
     """Phase 2.5 injects three ``resolve_*`` classmethods; ``resolve_node`` stays Strawberry's.
 
@@ -611,8 +591,8 @@ def test_resolve_id_attr_falls_back_to_pk() -> None:
 
 
 @pytest.mark.django_db
-def test_resolve_id_uses_dict_cache() -> None:
-    """``resolve_id`` reads ``root.__dict__`` first (no extra lazy load)."""
+def test_resolve_id_reads_the_loaded_pk_without_a_query() -> None:
+    """The installed ``resolve_id`` reads the pk a projected row already loaded."""
     services.seed_data(1)
 
     class CategoryNode(DjangoType):
@@ -624,31 +604,10 @@ def test_resolve_id_uses_dict_cache() -> None:
     finalize_django_types()
     row = Category.objects.only("id", "name").first()
     assert row is not None
-    # Force a known pk into ``__dict__`` so the cache branch fires.
-    vars(row)["id"] = 9999
-    assert relay_hooks(CategoryNode, Category).resolve_id(row, info=None) == "9999"
-
-
-def test_resolve_id_falls_back_to_getattr() -> None:
-    """When ``root.__dict__`` is missing the pk, ``resolve_id`` falls back to ``getattr``.
-
-    Real Django model instances always cache the pk in ``__dict__``; the
-    fallback branch only fires on synthetic ``root`` objects that mimic
-    the ``__class__._meta.pk.attname`` contract. The synthetic shape is
-    faithful to the spec contract at spec-015 #"id_attr = cls.resolve_id_attr" (``try ... __dict__ ...
-    except KeyError: return str(getattr(root, id_attr))``).
-    """
-
-    class CategoryNode(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
-
-    finalize_django_types()
-    fake = _build_fake_root(42)
-    assert "id" not in fake.__dict__
-    assert relay_hooks(CategoryNode, Category).resolve_id(fake, info=None) == "42"
+    with CaptureQueriesContext(connection) as queries:
+        resolved = relay_hooks(CategoryNode, Category).resolve_id(row, info=None)
+    assert resolved == saved_pk(row)
+    assert len(queries) == 0
 
 
 @pytest.mark.django_db
@@ -1301,7 +1260,7 @@ def test_relay_chain_child_resolvers_do_not_recurse() -> None:
 
     row = Item.objects.first()
     assert row is not None
-    assert child_hooks.resolve_id(row, info=None) == str(saved_pk(row))
+    assert child_hooks.resolve_id(row, info=None) == saved_pk(row)
     child_result = child_hooks.resolve_node(str(saved_pk(row)), info=None)
     assert child_result is not None
     assert saved_pk(child_result) == saved_pk(row)
@@ -1636,53 +1595,6 @@ def test_model_for_returns_registered_model() -> None:
 
     assert model_for(CategoryNode) is Category
     assert model_for(CategoryNode) is CategoryNode.__django_strawberry_definition__.model
-
-
-def test_resolve_id_default_unit_dict_cache_and_getattr_branches(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Direct unit-test of the dict-cache / ``getattr`` split (no DB hit)."""
-
-    class CategoryNode(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
-
-    finalize_django_types()
-    assert implements_relay_node(CategoryNode)
-    # Dict-cache hit: explicitly seed ``__dict__``.
-    inst = Category(id=7, name="x")
-    vars(inst)["id"] = 7
-    assert _resolve_id_default(CategoryNode, inst, info=unread_info()) == "7"
-    # Cache-miss fallback to ``getattr``: a real row whose ``__dict__`` lacks the pk but whose
-    # class-level ``id`` attribute resolves the value.
-    monkeypatch.setattr(Category, "id", 12)
-    uncached = Category(name="x")
-    del vars(uncached)["id"]
-    assert _resolve_id_default(CategoryNode, uncached, info=unread_info()) == "12"
-
-
-def test_resolve_id_default_refuses_a_root_with_no_instance_namespace() -> None:
-    """A root without an instance ``__dict__`` raises what reading ``root.__dict__`` raises."""
-
-    class CategoryNode(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
-
-    finalize_django_types()
-
-    class SlottedRoot:
-        __slots__ = ()
-        _meta = Category._meta
-
-    with pytest.raises(AttributeError) as excinfo:
-        # basedpyright: a root with no instance namespace is the input under test;
-        # _resolve_id_default types root as a Model
-        _resolve_id_default(CategoryNode, SlottedRoot(), info=unread_info())  # pyright: ignore[reportArgumentType]
-    assert str(excinfo.value) == "'SlottedRoot' object has no attribute '__dict__'"
 
 
 @pytest.mark.django_db
@@ -2620,10 +2532,11 @@ def test_relay_node_default_re_export_is_not_an_override() -> None:
     """A body re-exporting ``relay.Node``'s defaults declares no override.
 
     ``relay.Node.resolve_id`` read off the class is a bound method, so the
-    namespace stores a ``MethodType`` holding ``relay.Node``'s own function: the
-    id-resolver check reads it as the framework default, the installer replaces
-    it with the framework's ``resolve_id``, and the re-exported
-    ``resolve_typename`` leaves the type on its resolved strategy.
+    namespace stores a ``MethodType`` bound to ``relay.Node``: the id-resolver
+    check reads it as Strawberry's own, the installer re-binds that function to
+    the type as a ``classmethod`` (the bound copy would ask ``relay.Node`` for
+    its id attribute), and the re-exported ``resolve_typename`` leaves the type
+    on its resolved strategy.
     """
 
     class CategoryNode(DjangoType):
@@ -2639,9 +2552,36 @@ def test_relay_node_default_re_export_is_not_an_override() -> None:
     assert type(class_dict(CategoryNode)["resolve_typename"]) is MethodType
     assert origin_has_custom_id_resolver(CategoryNode, "id") is False
     finalize_django_types()
-    assert _classmethod_func(CategoryNode, "resolve_id") is _resolve_id_default
+    assert _classmethod_func(CategoryNode, "resolve_id") is truth.stored_function(
+        class_dict(relay.Node)["resolve_id"],
+    )
+    assert relay_hooks(CategoryNode, Category).resolve_id(Category(id=5), info=None) == 5
     assert _definition_of(CategoryNode).effective_globalid_strategy == "model"
     assert _emitted_typename(CategoryNode) == "products.category"
+
+
+def test_relay_node_resolve_id_re_export_on_a_mixin_is_re_bound_to_the_type() -> None:
+    """A mixin holding ``resolve_id = relay.Node.resolve_id`` declares no override either.
+
+    The type inherits the mixin's bound method, which would ask ``relay.Node``
+    for its id attribute; the installer re-binds Strawberry's function to the type.
+    """
+
+    class ReExportMixin:
+        resolve_id = relay.Node.resolve_id
+
+    class CategoryNode(ReExportMixin, DjangoType):
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+
+    assert origin_has_custom_id_resolver(CategoryNode, "id") is False
+    finalize_django_types()
+    assert _classmethod_func(CategoryNode, "resolve_id") is truth.stored_function(
+        class_dict(relay.Node)["resolve_id"],
+    )
+    assert relay_hooks(CategoryNode, Category).resolve_id(Category(id=5), info=None) == 5
 
 
 # --- the RELAY_GLOBALID_STRATEGY setting path (callable arity/sync reuse) ----

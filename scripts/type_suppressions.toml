@@ -642,7 +642,6 @@
 "tests/types/test_relay_interfaces.py::test_relay_chain_child_resolvers_do_not_recurse.ChildNode.Meta" = { reportIncompatibleVariableOverride = 1 }
 "tests/types/test_relay_interfaces.py::test_relay_chain_composite_pk_child_still_gated.ChildNode.Meta" = { reportIncompatibleVariableOverride = 1 }
 "tests/types/test_relay_interfaces.py::test_relay_chain_distinct_node_ids_resolve_independently_any_call_order.ChildNode.Meta" = { reportIncompatibleVariableOverride = 1 }
-"tests/types/test_relay_interfaces.py::test_resolve_id_default_refuses_a_root_with_no_instance_namespace" = { reportArgumentType = 1 }
 "tests/types/test_relay_interfaces.py::test_resolve_node_sync_with_async_get_queryset_raises.CategoryNode.get_queryset" = { reportIncompatibleMethodOverride = 1 }
 "tests/types/test_relay_interfaces.py::test_resolve_nodes_sync_with_async_get_queryset_raises.CategoryNode.get_queryset" = { reportIncompatibleMethodOverride = 1 }
 "tests/types/test_relay_interfaces.py::test_routing_audit_sees_child_true_recorded_strategy.DefaultChild.Meta" = { reportIncompatibleVariableOverride = 1 }

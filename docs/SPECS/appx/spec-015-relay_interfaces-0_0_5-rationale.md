@@ -14,9 +14,10 @@ Bears on [Decision 3][spec-015-decision-3] and [Decision 6][spec-015-decision-6]
   four `resolve_*` attributes only when it is absent or its `__func__` is `relay.Node`'s. The slice
   reuses an override-detection scheme already hardened against Strawberry version churn rather than
   inventing one.
-- **`resolve_id` shape** (`strawberry_django/relay/utils.py::resolve_model_id`): read
-  `root.__dict__` first, fall back to `getattr`, coerce to `str`, the same no-lazy-load philosophy
-  as the rest of the optimizer cooperation.
+- **`resolve_id` not ported** (`strawberry_django/relay/utils.py::resolve_model_id`): its
+  `root.__dict__`-first read adds nothing over Django's field descriptor, which already answers a
+  loaded column from the row, so the type keeps Strawberry's own `Node.resolve_id` and the optimizer's
+  id projection alone keeps it free of lazy loads.
 - **`resolve_id_attr` shape** (`strawberry_django/relay/utils.py::resolve_model_id_attr`): one
   try/except around Strawberry's own scan with a `"pk"` fallback, so a consumer writes
   `relay.NodeID[...]` and the framework adds no `Meta` key.
@@ -159,8 +160,8 @@ not surprised.
 
 Spec: [Decision 7][spec-015-decision-7].
 
-`resolve_id` reads `root.__dict__` before `getattr` because the optimizer keeps the pk attname in
-`only()`; reversing the order costs a query per row. GlobalID handling lives entirely in the Relay
+Strawberry's `resolve_id` costs no query because the optimizer keeps the id column in `only()`;
+dropping it from the projection costs a query per row. GlobalID handling lives entirely in the Relay
 resolvers, so the walker sees the Django primary-key column it always saw, and the field map stays the
 optimizer's source of truth because suppression happens later, in `_build_annotations`.
 

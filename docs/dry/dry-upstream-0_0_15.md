@@ -434,7 +434,7 @@ it lands with its tick.
     - [x] 22c. `filters/sets.py::_PUBLIC_PACKAGE_FILTER_DEFAULTS` is built from django-filter's
       `FILTER_FOR_DBFIELD_DEFAULTS` at import, with a provenance check for the baseline.
     - [x] 22d. `filters/base.py::ArrayFilter.filter` hands every value but `[]` to `Filter.filter`.
-    - [ ] 22e. `types/relay.py::_resolve_id_default` goes; types inherit `strawberry.relay.Node.resolve_id`.
+    - [x] 22e. `types/relay.py::_resolve_id_default` goes; the resolver table installs Strawberry's own `Node.resolve_id`.
     - [ ] 22f. `utils/errors.py::datetime_django_binds` projects a date with `datetime.combine` and
       `timezone.make_aware`, and no longer claims to adapt Django's code.
   - Maintainer decisions still open: the debug toolbar redesign onto the stock `djdt-request-id` header (drops the

@@ -537,7 +537,7 @@ def test_plan_relay_id_projects_the_id_column_meta_fields_does_not_name(shape: s
     """An ``id`` selection projects the model column its GlobalID reads, listed or not.
 
     The column comes from the model (``relay.py::_node_id_slot``), never from the
-    type's field map, so ``_resolve_id_default`` finds it loaded on every row.
+    type's field map, so Strawberry's ``resolve_id`` finds it loaded on every row.
     """
     model, fields, node_id_attr, expected = _RELAY_ID_COLUMN_SHAPES[shape]
     registry.clear()
@@ -641,7 +641,7 @@ def test_plan_relay_id_projects_attname_when_pk_is_relation() -> None:
     ``apps/library/models.py::PatronProfile`` is keyed by its ``OneToOneField``
     to the patron it extends: the field's ``name`` is ``patron`` and its column
     ``patron_id``. The id projection names the column, the key
-    ``_resolve_id_default`` reads from the row.
+    Strawberry's ``resolve_id`` reads from the row.
     """
     registry.clear()
     try:
