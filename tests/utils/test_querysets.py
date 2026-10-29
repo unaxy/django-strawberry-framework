@@ -19,6 +19,7 @@ import asyncio
 import copy
 import datetime
 import enum
+import functools
 import sys
 import threading
 import uuid
@@ -68,6 +69,7 @@ from django.db import (
     transaction,
 )
 from django.db.backends.base.base import BaseDatabaseWrapper
+from django.db.backends.base.operations import BaseDatabaseOperations
 from django.db.backends.sqlite3.base import DatabaseWrapper as SQLiteDatabaseWrapper
 from django.db.models import (
     F,
@@ -460,6 +462,44 @@ def test_coerce_field_value_or_none_reads_the_range_of_the_named_database(
         assert coerce_field_value_or_none(Category._meta.pk, 11, alias=DEFAULT_DB_ALIAS) == 11
         assert coerce_field_value_or_none(Category._meta.pk, 11, alias=alias) is None
         assert coerce_field_value_or_none(Category._meta.pk, 10, alias=alias) == 10
+    finally:
+        connections[alias].close()
+        del connections[alias]
+        del connections.databases[alias]
+
+
+class _UnrangedIntegerField(models.IntegerField[int, int]):
+    """An integer column type naming an internal type no backend states a range for."""
+
+    @override
+    def get_internal_type(self) -> str:
+        return "UnrangedIntegerField"
+
+
+def test_coerce_field_value_or_none_holds_a_type_without_a_stated_range_to_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A column type the ``alias`` database states no range for holds its value to none.
+
+    A second alias reads Django's default ranges (PostgreSQL's), whose
+    ``integer_field_range`` raises ``KeyError`` for an internal type absent from them, so
+    that column keeps ``2**70`` there, while an ``IntegerField`` is still held to its
+    32 bits.
+    """
+    alias = "default_range_alias"
+    connections.databases[alias] = {**connections.databases["default"], "NAME": ":memory:"}
+    try:
+        operations = connections[alias].ops
+        monkeypatch.setattr(
+            operations,
+            "integer_field_range",
+            functools.partial(BaseDatabaseOperations.integer_field_range, operations),
+        )
+        assert coerce_field_value_or_none(_UnrangedIntegerField(), 2**70, alias=alias) == 2**70
+        assert coerce_field_value_or_none(models.IntegerField(), 2**31, alias=alias) is None
+        assert (
+            coerce_field_value_or_none(models.IntegerField(), 2**31 - 1, alias=alias) == 2**31 - 1
+        )
     finally:
         connections[alias].close()
         del connections[alias]
