@@ -29,18 +29,20 @@ Django defines `_remove_databases_failures` on `SimpleTestCase`. Patching the de
 
 - **Install on `TransactionTestCase`.** Rejected: a direct `SimpleTestCase` subclass with `TransactionTestCase` nowhere in its MRO bypasses the net entirely, which is a correctness hole rather than a stylistic preference.
 
-## Decision 3 — The replacement reimplements the loop behind one guard
+## Decision 3 — The replacement re-wraps foreign replacements, then delegates
 
 Spec text: [Decision 3][spec-024-d3].
 
 ### Derivation
 
-- The `isinstance(method, _DatabaseFailure)` guard **is** the patch proposed in the upstream ticket. Keeping the replacement otherwise faithful to upstream is what makes "strictly defensive" checkable rather than asserted.
-- The guard restores the symmetry Django's own docstring claims: `_add_databases_failures` and `_remove_databases_failures` operate on the methods *they* wrapped, and the patched form simply declines to crash on a method the pair never owned.
+- The crash is *inside* the loop upstream runs, at its unconditional `method.wrapped` read, so a wrapper cannot skip one method's unwrap. It can instead make that read succeed: wrapping a foreign replacement in a `_DatabaseFailure` of the patch's own before the call means Django's unwrap reads the replacement back off `wrapped` and restores it. Django's `_DatabaseFailure(wrapped, message)` constructor and its unwrap's single `.wrapped` read are the only protocol the patch relies on.
+- Delegating keeps the unwrap Django's own: an upstream body change flows through the call, the way it does for the delegating sibling patch modules, so the patch validates only the call shape and the method list's presence, and copies no upstream body.
+- The re-wrap restores the symmetry Django's own docstring claims: `_add_databases_failures` and `_remove_databases_failures` operate on the methods *they* wrapped, and the patched form leaves a method the pair never owned as it found it.
+- The `finally` delete is what keeps "as it found it" true for a class-level replacement: reading through the instance and writing back through Django's `setattr` would otherwise freeze the class-level value onto the instance, where it outlives the class-level patch.
 
 ### Alternatives considered (and rejected)
 
-- **Wrap and delegate to upstream's method instead of reimplementing it.** Rejected: the crash is *inside* the loop upstream runs, so a wrapper cannot intercept the individual `method.wrapped` access without re-running the loop itself. The rejection has a standing cost, and the spec states it as contract: because the module reimplements rather than delegates, an upstream body change does not flow through the patch, which is the entire reason [Decision 5](#decision-5--two-audited-upstream-bodies-discriminated-by-the-validated-source)'s body pin exists. The delegating sibling patch modules need only their call shape validated. The contrast is written into the source at `django_strawberry_framework/_django_patches.py #"WIDENING THIS SET IS AN AUDIT, NOT A VERSION BUMP"`'s surrounding comment and restated in `django_strawberry_framework/_django_patches.py::_validate_upstream_shape`'s docstring.
+- **Reimplement upstream's loop behind one `isinstance(method, _DatabaseFailure)` guard.** Rejected: a reimplementation copies Django's body, so an upstream body change does not flow through it, and keeping it honest needs every audited upstream body pinned as source text and compared at app load. That pin aborts on a comment-only upstream edit or a source-less install, and the copied body owes Django's license.
 - **Uninstall Django's wrapper and reinstall it around the risky window** — the `django-debug-toolbar` cache-panel owner-sentinel shape. Rejected because the package does not own `_DatabaseFailure`; the pattern needs the wrapper's owner. It remains the right answer for any future package-owned connection instrumentation, and the module docstring's ecosystem-precedent section names it as the pattern explicitly *not* available here.
 
 ## Decision 4 — Fail-closed upstream validation in three tiers
@@ -49,31 +51,28 @@ Spec text: [Decision 4][spec-024-d4].
 
 ### Derivation
 
-Two facts force the tiers. The module reads Django private symbols (`_DatabaseFailure`, a private classmethod), and it supersedes a body rather than delegating to one. Either can drift silently. Silently dropping a defensive patch leaves a consumer believing they have protection they do not have; refusing to install is loud, and is only tolerable because an explicit opt-out exists to recover from it ([Decision 6](#decision-6--apply_upstream_patches-is-the-escape-hatch)). That dependency is the reason the two Decisions cannot be read apart.
-
-Treating unreadable source as drift rather than as an exemption is the same judgement one tier down: an unverifiable body must not be silently superseded.
+Two facts force the tiers. The module reads Django private symbols (`_DatabaseFailure`, a private classmethod, the private list of disallowed connection methods), and it re-wraps the methods that list names before delegating. Any of them can drift silently. Silently dropping a defensive patch leaves a consumer believing they have protection they do not have; refusing to install is loud, and is only tolerable because an explicit opt-out exists to recover from it ([Decision 6](#decision-6--apply_upstream_patches-is-the-escape-hatch)). That dependency is the reason the two Decisions cannot be read apart.
 
 ### Alternatives considered (and rejected)
 
 - **Degrade gracefully on a missing private symbol — log one notice and return.** Rejected on the ground above: the consumer would keep a teardown they believe is hardened and is not.
-- **Validate only the signature, not the body.** Rejected: a shape-passing body change is exactly the case where the replacement would clobber a working teardown, which is the harm the patch exists to prevent.
-- **Pin a Django version range instead of body text.** Rejected: a version range is a proxy for the body and drifts from it. A patch release can reflow the method inside a "supported" version.
+- **Pin the upstream body's source text.** Rejected: the patch delegates, so a body change flows through the call and needs no audit; a text pin would abort on a comment-only upstream edit or a source-less install while protecting nothing.
+- **Pin a Django version range.** Rejected: a version range is a proxy for the shape and drifts from it; the three tiers read the shape itself.
 
-## Decision 5 — Two audited upstream bodies, discriminated by the validated source
+## Decision 5 — Two homes of the method list, discriminated by the feature flag
 
 Spec text: [Decision 5][spec-024-d5].
 
 ### Derivation
 
-The class-attribute body covers Django `5.2.16` - `6.0.x` and the connection-feature body covers `6.1`. Both resolve to the same four `(name, operation)` pairs, so one replacement can serve both provided the *read* differs.
+The class attribute is the home on Django `5.2.16` - `6.0.x` and the connection feature flag on `6.1`. Both resolve to the same four `(name, operation)` pairs, so one re-wrap step serves both provided the *read* differs.
 
-**Why the validated body and not `hasattr(cls, …)`, stated as mechanism because it is the part that gets "simplified" back:** a Django `6.1` subclass may still declare its own `_disallowed_connection_methods`, but upstream's `_add_databases_failures` ignores that attribute and wraps the **feature list**. Cleanup must read the same list setup wrote, or the two stop being symmetric and the patch unwraps a list nothing wrapped while leaving the wrapped list in place. The `hasattr` form looks more robust because it reads state off the class instead of a module global; that appearance is the trap.
+**Why the feature flag first and not `hasattr(cls, …)`, stated as mechanism because it is the part that gets "simplified" back:** a Django `6.1` subclass may still declare its own `_disallowed_connection_methods`, but upstream's `_add_databases_failures` ignores that attribute and wraps the **feature list**. The re-wrap must read the same list setup wrote, or it re-wraps names nothing wrapped while leaving a foreign replacement on a wrapped name unprotected. The flag's presence is read with a `None` default, never a truthiness test, so an empty flag list stays the flag's answer.
 
 ### Alternatives considered (and rejected)
 
 - **`hasattr(cls, "_disallowed_connection_methods")` as the discriminator.** Rejected for the reason above: on `6.1` it honours a subclass list that setup never wrapped.
-- **Branch on a Django version number.** Rejected: the body, not the version, is what the patch supersedes, and a version check would pass on a patch release that reflowed the method.
-- **Keep a single pinned body and raise the floor when it changes.** Rejected: a single pin plus a new Django release is an outage (`ready()` raises and the package refuses to boot), and the fix is an audited set, not a narrower support range.
+- **Branch on a Django version number.** Rejected: where the list lives, not the version, is what the read depends on, and a version check drifts from it.
 
 ## Decision 6 — `APPLY_UPSTREAM_PATCHES` is the escape hatch
 
@@ -81,9 +80,9 @@ Spec text: [Decision 6][spec-024-d6].
 
 ### Derivation
 
-A patch that can raise at `AppConfig.ready` ([Decision 4](#decision-4--fail-closed-upstream-validation-in-three-tiers)) can refuse to boot a consumer who upgraded Django ahead of the package, so the hatch is the documented recovery path, not optional polish. [`AGENTS.md`][agents] #"Add a settings key only when the feature that needs it lands" is satisfied: the feature that needs the key is the fail-closed validation. `_patched_remove_databases_failures`'s docstring calls the patch "strictly defensive"; that describes the installed replacement body, which leaves a foreign replacement untouched, not `apply()`, and it is no argument against the opt-out.
+A patch that can raise at `AppConfig.ready` ([Decision 4](#decision-4--fail-closed-upstream-validation-in-three-tiers)) can refuse to boot a consumer who upgraded Django ahead of the package, so the hatch is the documented recovery path, not optional polish. [`AGENTS.md`][agents] #"Add a settings key only when the feature that needs it lands" is satisfied: the feature that needs the key is the fail-closed validation. The installed replacement is defensive, leaving a foreign replacement as it found it; that describes teardown, not `apply()`, and it is no argument against the opt-out.
 
-That coupling is why the gate is `apply()`'s **first** statement, ahead of validation, and why `tests/test_django_patches.py::test_django_dependency_opt_out_silences_drifted_pin_abort` pins the pairing end to end rather than the two features separately. A gate placed after validation would be unreachable in the situation it exists for.
+That coupling is why the gate is `apply()`'s **first** statement, ahead of validation, and why `tests/test_django_patches.py::test_django_dependency_opt_out_silences_missing_method_list_abort` pins the pairing end to end rather than the two features separately. A gate placed after validation would be unreachable in the situation it exists for.
 
 ### Alternatives considered (and rejected)
 
@@ -99,12 +98,12 @@ Spec text: [Decision 7][spec-024-d7].
 
 `ready()` fires more than once under some Django test runners, and a third party can revert the class attribute between calls. Reading actual state satisfies both cases with one mechanism; a flag satisfies only the first.
 
-Reload safety is a second-order consequence of [Decision 4](#decision-4--fail-closed-upstream-validation-in-three-tiers): once the module validates a captured "original", the capture itself becomes a correctness surface. `importlib.reload()` re-executes the module while `SimpleTestCase` still points at the previous replacement, so a naive re-capture stores the package's own function as the original, and tier 3 then compares the package's source against the audited set and aborts against its own code. The owner stamp is what breaks that chain.
+Reload safety follows from delegation: once the patch calls a captured "original", the capture itself becomes a correctness surface. `importlib.reload()` re-executes the module while `SimpleTestCase` still points at the previous replacement, so a naive re-capture stores the package's own function as the original, and the still-installed replacement then delegates to itself instead of Django at the next teardown. The owner stamp is what breaks that chain.
 
 ### Alternatives considered (and rejected)
 
 - **A module-global first-call-wins bool.** Rejected: it makes re-entrant calls no-ops but never re-installs after a third party reverts.
-- **Refuse to support reload and document it.** Rejected: the failure mode is not a missing feature but a *false* upstream-drift abort against the package's own source, which is indistinguishable from real drift for whoever hits it.
+- **Refuse to support reload and document it.** Rejected: the failure mode is not a missing feature but a teardown that recurses into the package's own replacement instead of reaching Django, which nothing at the failure site attributes to the reload.
 
 ## Decision 8 — The wrap-time half degrades where the unwrap-time half aborts
 
@@ -174,9 +173,9 @@ Spec text: [Decision 11][spec-024-d11].
 [spec-024-d10]: ../spec-024-django_trac_37064_hardening-0_0_7.md#decision-10--coverage-lives-in-the-package-test-tree
 [spec-024-d11]: ../spec-024-django_trac_37064_hardening-0_0_7.md#decision-11--joint-007-cut
 [spec-024-d2]: ../spec-024-django_trac_37064_hardening-0_0_7.md#decision-2--the-patch-installs-on-simpletestcase
-[spec-024-d3]: ../spec-024-django_trac_37064_hardening-0_0_7.md#decision-3--the-replacement-reimplements-the-loop-behind-one-guard
+[spec-024-d3]: ../spec-024-django_trac_37064_hardening-0_0_7.md#decision-3--the-replacement-re-wraps-foreign-replacements-then-delegates
 [spec-024-d4]: ../spec-024-django_trac_37064_hardening-0_0_7.md#decision-4--fail-closed-upstream-validation-in-three-tiers
-[spec-024-d5]: ../spec-024-django_trac_37064_hardening-0_0_7.md#decision-5--two-audited-upstream-bodies-discriminated-by-the-validated-source
+[spec-024-d5]: ../spec-024-django_trac_37064_hardening-0_0_7.md#decision-5--two-homes-of-the-method-list-discriminated-by-the-feature-flag
 [spec-024-d6]: ../spec-024-django_trac_37064_hardening-0_0_7.md#decision-6--apply_upstream_patches-is-the-escape-hatch
 [spec-024-d7]: ../spec-024-django_trac_37064_hardening-0_0_7.md#decision-7--idempotent-self-healing-and-reload-safe
 [spec-024-d8]: ../spec-024-django_trac_37064_hardening-0_0_7.md#decision-8--the-wrap-time-half-degrades-where-the-unwrap-time-half-aborts

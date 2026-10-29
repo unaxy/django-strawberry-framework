@@ -83,10 +83,10 @@ From the full entries, 2026-10-21. Item numbers are that file's.
   - Research: reproduced on SQLite (`contains` matches across ASCII case; an accented `icontains` misses the other
     case). Nothing documents it. Add a "Text matching is the database's" paragraph to README "Filtering with
     `FilterSet`" and the `FilterSet` glossary entry; confirm `EnumLookupFilter` also defers to Django first. Size S
-- [ ] 19. `django_strawberry_framework/_strawberry_patches.py::_validate_upstream_shape` and
-  `django_strawberry_framework/_django_patches.py::_validate_upstream_shape` pin exact `inspect.getsource` text,
-  comments included, and abort startup on a mismatch: a comment-only upstream edit, or a source-less install, stops the
-  app booting until `APPLY_UPSTREAM_PATCHES` changes. Every published release in range matches today
+- [ ] 19. `django_strawberry_framework/_strawberry_patches.py::_validate_upstream_shape` pins exact
+  `inspect.getsource` text, comments included, and aborts startup on a mismatch: a comment-only upstream edit, or a
+  source-less install, stops the app booting until `APPLY_UPSTREAM_PATCHES` changes. Every published release in range
+  matches today
   - Research: reproduced (a comment-only edit and a `.pyc`-only install both raise). Fail-loud is the design: document
     in the "Upstream patches" glossary kill-switch paragraph. Also fix the stale "verbatim at strawberry-graphql 0.322.2
     and 0.324.0" comment in `_strawberry_patches.py` (0.327.7 matches). Size S
