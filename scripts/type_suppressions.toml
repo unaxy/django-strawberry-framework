@@ -72,8 +72,6 @@
 "django_strawberry_framework/filters/sets.py::FilterSet.get_fields" = { cast = 3, reportIncompatibleMethodOverride = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSetMetaclass.__new__" = { cast = 1 }
 "django_strawberry_framework/filters/sets.py::_admitted_rows" = { cast = 1 }
-"django_strawberry_framework/filters/sets.py::_reverse_o2o_extra" = { reportArgumentType = 1 }
-"django_strawberry_framework/filters/sets.py::_reverse_rel_extra" = { reportArgumentType = 1 }
 "django_strawberry_framework/forms/inputs.py::FormClass" = { reportExplicitAny = 1 }
 "django_strawberry_framework/forms/inputs.py::get_form_fields" = { cast = 1 }
 "django_strawberry_framework/forms/sets.py::_FormConstructionHooks.get_form_kwargs" = { reportExplicitAny = 1 }

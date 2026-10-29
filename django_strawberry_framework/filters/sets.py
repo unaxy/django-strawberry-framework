@@ -45,7 +45,6 @@ from django.db.models import Exists, Q
 from django.db.models import lookups as model_lookups
 from django.db.models.constants import LOOKUP_SEP
 from django.db.models.expressions import BaseExpression
-from django.db.models.fields.related import ManyToManyRel, ManyToOneRel, OneToOneRel
 from django.db.models.sql.query import Query
 from django.db.models.sql.where import WhereNode
 from django.utils.functional import Promise
@@ -67,7 +66,7 @@ from django_filters import (
     UUIDFilter,
     filterset,
 )
-from django_filters.conf import settings as _df_settings
+from django_filters import filters as _df_filters
 from django_filters.exceptions import FieldLookupError
 from django_filters.filterset import FilterSetOptions
 from django_filters.utils import get_model_field, resolve_field, try_dbfield
@@ -251,7 +250,7 @@ if TYPE_CHECKING:
 
     from django_strawberry_framework.types.base import DjangoType
     from django_strawberry_framework.types.definition import DjangoTypeDefinition
-    from django_strawberry_framework.utils.typing import ConcreteField, ForeignKeyField, ModelField
+    from django_strawberry_framework.utils.typing import ConcreteField, ModelField
 
     # ``(field_name, target_type, child_filterset, child_input, child_base)`` per active
     # related branch, as ``FilterSet._iter_visibility_steps`` yields it.
@@ -398,8 +397,8 @@ def _is_text_pattern_lookup(lookup: object) -> bool:
 def _is_text_column(field_class: type[ModelField]) -> bool:
     """Return whether the package's default filter for ``field_class`` is a ``CharFilter``.
 
-    Read off ``_PUBLIC_PACKAGE_FILTER_DEFAULTS`` (the package's own class-level
-    defaults table, matching django-filter's) by the field class's MRO, never off
+    Read off ``_PUBLIC_PACKAGE_FILTER_DEFAULTS`` (the package's class-level defaults
+    table, copied from django-filter's) by the field class's MRO, never off
     ``Meta.filter_overrides``: the text columns are ``CharField`` and its
     subclasses, ``TextField``, ``GenericIPAddressField``, ``FilePathField`` and
     ``CommaSeparatedIntegerField``.
@@ -491,149 +490,49 @@ def _strip_model_choice_extras(extra: Mapping[str, object]) -> dict[str, object]
     return {key: value for key, value in extra.items() if key not in _MODEL_CHOICE_ONLY_EXTRAS}
 
 
-# Package ownership must NOT be
-# derived from whatever happens to sit in django-filter's LIVE, mutable, process-shared
-# ``filterset.BaseFilterSet.FILTER_DEFAULTS`` at import time. Snapshotting (even
-# freezing) that global does not establish who AUTHORED its contents: any consumer,
-# reusable app, or init hook that mutated the global -- a ``filter_class`` swap OR an
-# ``extra`` provider swap -- BEFORE this module is imported would be frozen into the
-# "package" baseline and reclassified as trusted package policy. Import order is
-# realistic (installing the app imports the package root, which does NOT import
-# ``filters.sets``), so the snapshot cannot be the ownership anchor.
+# The generation-policy tables. django-filter's ``FILTER_FOR_DBFIELD_DEFAULTS`` is a
+# mutable, process-shared ``dict`` (``BaseFilterSet.FILTER_DEFAULTS`` by identity), so
+# this module separates THREE concepts:
 #
-# The durable architecture separates THREE concepts:
-#
-#   1. ``_PUBLIC_PACKAGE_FILTER_DEFAULTS`` -- a package-AUTHORED plain-``dict``
-#      generation-policy table that mirrors django-filter 25.2's
-#      ``FILTER_FOR_DBFIELD_DEFAULTS`` EXACTLY but is our OWN object graph, built
-#      from stable importable django-filter filter CLASSES and PACKAGE-OWNED,
-#      module-level ``extra`` provider functions -- never read from the mutable
-#      global. It is installed as the public ``FilterSet.FILTER_DEFAULTS``. Being a
-#      plain, deepcopyable ``dict`` keeps django-filter's inherited consumer
-#      customization seam (``copy.deepcopy(cls.FILTER_DEFAULTS)`` /
-#      ``dict(cls.FILTER_DEFAULTS)`` / ``[cls][key] = ...``), which a nested
-#      ``MappingProxyType`` would break on every Python version.
-#      django-filter reads ``FILTER_DEFAULTS`` only through
-#      ``dict(cls.FILTER_DEFAULTS)`` (a fresh shallow copy) plus entry ``.get`` and
-#      never mutates it (verified in the installed
-#      ``django_filters.filterset.BaseFilterSet.filter_for_lookup``), so a plain
-#      dict is a faithful drop-in.
+#   1. ``_PUBLIC_PACKAGE_FILTER_DEFAULTS`` -- django-filter's table, copied entry by
+#      entry when this module is imported and installed as the public
+#      ``FilterSet.FILTER_DEFAULTS``. The per-entry copy is a distinct object graph,
+#      so a later in-place mutation of upstream's dict (or of this table) never
+#      reaches the other. Being a plain, deepcopyable ``dict`` keeps django-filter's
+#      inherited consumer customization seam (``copy.deepcopy(cls.FILTER_DEFAULTS)``
+#      / ``dict(cls.FILTER_DEFAULTS)`` / ``[cls][key] = ...``), which a nested
+#      ``MappingProxyType`` would break on every Python version. django-filter reads
+#      ``FILTER_DEFAULTS`` only through ``dict(cls.FILTER_DEFAULTS)`` (a fresh
+#      shallow copy) plus entry ``.get`` and never mutates it
+#      (``django_filters.filterset.BaseFilterSet.filter_for_lookup``). A relation
+#      class upstream's table does not name (a bare ``ForeignObject``, its
+#      ``ForeignObjectRel`` reverse, a ``GenericRelation``) gets no entry either:
+#      ``FilterSet.filter_for_lookup`` gives its key the identity filters for
+#      ``exact`` / ``in`` and a ``ForeignKey``'s Boolean null test for ``isnull``.
 #
 #   2. ``_PACKAGE_POLICY_BASELINE`` -- a PRIVATE, immutable, NORMALIZED baseline
-#      (``MappingProxyType`` of ``_NormalizedPolicyEntry`` records) built from the
-#      package's OWN public table, never from the global. It is never installed as a
-#      class attr, never exposed, and never deepcopied by consumers, so
-#      ``MappingProxyType`` here is correct -- it is the immutable ownership anchor.
-#      Because every ``extra`` provider is a package-owned module-level function
-#      identity, a ``_NormalizedPolicyEntry`` equality (``==``) is a genuine
-#      ownership signal: a pristine selection re-derives the SAME (filter_class,
-#      provider) identities, while any consumer entry carries a different
-#      ``filter_class`` and/or a different (consumer) provider or ``None``.
+#      (``MappingProxyType`` of ``_NormalizedPolicyEntry`` records), one per public
+#      entry. Copying upstream's table does not establish who AUTHORED an entry: a
+#      consumer, reusable app or init hook that mutated django-filter's dict in place
+#      before this module was imported would otherwise be recorded as package policy.
+#      So an entry enters the baseline only when ``_upstream_authored`` proves it
+#      django-filter's own (its ``filter_class`` is the ``django_filters.filters``
+#      class of that name, its ``extra`` provider, if any, is defined in
+#      ``django_filters.filterset``); any other entry records ``_TAINTED_POLICY``,
+#      which no selection equals. The baseline is never installed as a class attr,
+#      exposed or deepcopied, so ``MappingProxyType`` is correct here.
 #
 #   3. Selection provenance -- the ownership oracle
 #      (``FilterSet._generation_origin_for_field``) compares the EFFECTIVE selection
 #      (``FILTER_DEFAULTS`` merged with ``Meta.filter_overrides``) to the baseline by
-#      normalized VALUE, not by object identity. The public dict and the
-#      private baseline are DISTINCT object graphs, so object identity between a
-#      selected raw entry and a baseline record can never hold; the anchor is a
-#      normalized value comparison. This is import-order-immune (the baseline derives
-#      from OUR table, never the global), catches ``filter_class`` AND
-#      ``extra``-provider overrides (whole entry), and treats a consumer entry whose
-#      (filter_class, extra) is byte-equal to the package policy as
-#      framework-equivalent (safe -- the generated filter is identical to the
-#      package's own).
-
-
-def _forward_relation_extra(field: ForeignKeyField) -> dict[str, object]:
-    """Package-owned mirror of upstream's ``OneToOneField`` / ``ForeignKey`` extra.
-
-    A forward single-valued relation resolves its choice queryset and joins on the
-    remote field name (``field.remote_field.field_name``); a nullable relation carries
-    the configured empty-choice label. Reading the field attributes exactly as
-    upstream's default lambda does keeps generation byte-identical to using
-    django-filter's own table.
-    """
-    return {
-        "queryset": filterset.remote_queryset(field),
-        "to_field_name": field.remote_field.field_name,
-        "null_label": read_attr(_df_settings, "NULL_CHOICE_LABEL") if field.null else None,
-    }
-
-
-def _forward_m2m_extra(
-    field: _ManyToManyFieldAny,
-) -> dict[str, object]:
-    """Package-owned mirror of upstream's ``ManyToManyField`` extra (queryset only)."""
-    return {"queryset": filterset.remote_queryset(field)}
-
-
-def _reverse_o2o_extra(field: OneToOneRel) -> dict[str, object]:
-    """Package-owned mirror of upstream's ``OneToOneRel`` extra.
-
-    A reverse one-to-one omits ``to_field_name`` (the reverse descriptor has no
-    remote field name to join on) but keeps the null label for a nullable relation.
-    """
-    return {
-        # basedpyright: typeshed narrows ``remote_queryset`` to ``Field``; upstream documents and
-        # calls it for a ``ForeignObjectRel`` too (``related_model`` + limit choices). It rejects a
-        # reverse relation for ``Field``
-        "queryset": filterset.remote_queryset(field),  # pyright: ignore[reportArgumentType]
-        "null_label": read_attr(_df_settings, "NULL_CHOICE_LABEL") if field.null else None,
-    }
-
-
-def _reverse_rel_extra(field: ManyToOneRel | ManyToManyRel) -> dict[str, object]:
-    """Package-owned mirror of upstream's ``ManyToOneRel`` / ``ManyToManyRel`` extra."""
-    # basedpyright: typeshed narrows ``remote_queryset`` to ``Field`` (see ``_reverse_o2o_extra``);
-    # it rejects a reverse relation for ``Field``
-    return {"queryset": filterset.remote_queryset(field)}  # pyright: ignore[reportArgumentType]
-
-
-# The package-AUTHORED public generation-policy table. Mirrors
-# django-filter 25.2 ``FILTER_FOR_DBFIELD_DEFAULTS`` exactly, but as OUR OWN plain
-# ``dict`` of plain ``dict`` entries referencing stable importable filter classes and
-# the package-owned ``extra`` providers above -- NOT a snapshot of the mutable global.
-# Installed as ``FilterSet.FILTER_DEFAULTS`` (deepcopyable + customizable, restoring
-# django-filter's inherited extension seam). A relation class upstream's table does not
-# name (a bare ``ForeignObject``, its ``ForeignObjectRel`` reverse, a ``GenericRelation``)
-# gets no entry here either: ``FilterSet.filter_for_lookup`` gives its key the identity
-# filters for ``exact`` / ``in`` and a ``ForeignKey``'s Boolean null test for ``isnull``.
-# A consumer entry for the class still selects the consumer's filter for ``exact`` /
-# ``in``; ``isnull`` follows the ``BooleanField`` selection, as on a ``ForeignKey``.
+#      normalized VALUE, not by object identity: the public dict and the private
+#      baseline are DISTINCT object graphs. A pristine selection re-derives the
+#      baseline's (filter_class, provider) pair, so it is ``framework_default``; a
+#      ``filter_class`` OR ``extra``-provider override (whole entry) diverges, as does
+#      every tainted entry, so each is ``override_generated``.
 _PUBLIC_PACKAGE_FILTER_DEFAULTS: dict[type[ModelField], dict[str, object]] = {
-    models.AutoField: {"filter_class": NumberFilter},
-    models.CharField: {"filter_class": CharFilter},
-    models.TextField: {"filter_class": CharFilter},
-    models.BooleanField: {"filter_class": BooleanFilter},
-    models.DateField: {"filter_class": DateFilter},
-    models.DateTimeField: {"filter_class": DateTimeFilter},
-    models.TimeField: {"filter_class": TimeFilter},
-    models.DurationField: {"filter_class": DurationFilter},
-    models.DecimalField: {"filter_class": NumberFilter},
-    models.SmallIntegerField: {"filter_class": NumberFilter},
-    models.IntegerField: {"filter_class": NumberFilter},
-    models.PositiveIntegerField: {"filter_class": NumberFilter},
-    models.PositiveSmallIntegerField: {"filter_class": NumberFilter},
-    models.FloatField: {"filter_class": NumberFilter},
-    models.NullBooleanField: {"filter_class": BooleanFilter},
-    models.SlugField: {"filter_class": CharFilter},
-    models.EmailField: {"filter_class": CharFilter},
-    models.FilePathField: {"filter_class": CharFilter},
-    models.URLField: {"filter_class": CharFilter},
-    models.GenericIPAddressField: {"filter_class": CharFilter},
-    models.CommaSeparatedIntegerField: {"filter_class": CharFilter},
-    models.UUIDField: {"filter_class": UUIDFilter},
-    # Forward relationships.
-    models.OneToOneField: {"filter_class": ModelChoiceFilter, "extra": _forward_relation_extra},
-    models.ForeignKey: {"filter_class": ModelChoiceFilter, "extra": _forward_relation_extra},
-    models.ManyToManyField: {
-        "filter_class": ModelMultipleChoiceFilter,
-        "extra": _forward_m2m_extra,
-    },
-    # Reverse relationships.
-    OneToOneRel: {"filter_class": ModelChoiceFilter, "extra": _reverse_o2o_extra},
-    ManyToOneRel: {"filter_class": ModelMultipleChoiceFilter, "extra": _reverse_rel_extra},
-    ManyToManyRel: {"filter_class": ModelMultipleChoiceFilter, "extra": _reverse_rel_extra},
+    field_class: dict(entry)
+    for field_class, entry in filterset.FILTER_FOR_DBFIELD_DEFAULTS.items()
 }
 
 
@@ -643,10 +542,10 @@ class _NormalizedPolicyEntry:
 
     The ownership-bearing content django-filter selects off a ``FILTER_DEFAULTS``
     entry: the ``filter_class`` (a class identity) and the ``extra`` provider (a
-    module-level function identity, or ``None``). Two entries are ownership-equal iff
-    both members are equal -- so a pristine re-derivation of the package table equals
-    the baseline, while any consumer ``filter_class`` swap OR ``extra``-provider swap
-    diverges. Frozen, so it is safe as an immutable baseline value.
+    function identity, or ``None``). Two entries are ownership-equal iff both members
+    are equal -- so a pristine selection from the package table equals the baseline,
+    while any consumer ``filter_class`` swap OR ``extra``-provider swap diverges.
+    Frozen, so it is safe as an immutable baseline value.
     """
 
     filter_class: object = None
@@ -666,16 +565,40 @@ def _normalize_policy_entry(entry: Mapping[str, object] | None) -> _NormalizedPo
     return _NormalizedPolicyEntry(entry.get("filter_class"), entry.get("extra"))
 
 
-# The PRIVATE, immutable, normalized ownership anchor. Built from the
-# package's OWN public table, never from the mutable global, so import order can never
-# taint it. Never installed as a class attr and never exposed to consumers, so the
-# ``MappingProxyType`` is correct here (unlike the public table, this is never
+def _upstream_authored(entry: Mapping[str, object]) -> bool:
+    """Return whether ``entry`` is django-filter's own, unmodified generation policy.
+
+    Its ``filter_class`` must be the class ``django_filters.filters`` exports under that
+    name (a consumer subclass reusing the name is a different object), and its
+    ``extra`` provider, when present, must be defined in ``django_filters.filterset``
+    (the module of ``BaseFilterSet``), where upstream's table defines every one.
+    """
+    filter_class = entry.get("filter_class")
+    extra = entry.get("extra")
+    return (
+        truth.is_type(filter_class)
+        and read_attr(_df_filters, truth.name(filter_class), None) is filter_class
+        and (extra is None or truth.module(extra) == truth.module(filterset.BaseFilterSet))
+    )
+
+
+# The baseline record of a public entry ``_upstream_authored`` rejects. Its fresh
+# members equal no selected entry, so every selection it governs is
+# ``override_generated``; it is truthy, so ``try_dbfield``'s MRO walk stops on it
+# exactly as on the public entry it stands for.
+_TAINTED_POLICY = _NormalizedPolicyEntry(object(), object())
+
+
+# The PRIVATE, immutable, normalized ownership anchor, one record per public entry:
+# the entry's normalized value when ``_upstream_authored`` accepts it, else
+# ``_TAINTED_POLICY``. Never installed as a class attr and never exposed to consumers,
+# so the ``MappingProxyType`` is correct here (unlike the public table, this is never
 # deepcopied or customized). The ownership oracle compares the effective selection
 # against this by normalized VALUE.
 _PACKAGE_POLICY_BASELINE: Mapping[type[ModelField], _NormalizedPolicyEntry | None] = (
     MappingProxyType(
         {
-            cls: _normalize_policy_entry(entry)
+            cls: _normalize_policy_entry(entry) if _upstream_authored(entry) else _TAINTED_POLICY
             for cls, entry in _PUBLIC_PACKAGE_FILTER_DEFAULTS.items()
         },
     )
@@ -2752,12 +2675,12 @@ class FilterSet(
     binding lands.
     """
 
-    # The package-AUTHORED public generation-policy table. Installed in place of django-filter's
-    # mutable, process-shared ``BaseFilterSet.FILTER_DEFAULTS`` -- but as our OWN
-    # plain, deepcopyable ``dict`` (``_PUBLIC_PACKAGE_FILTER_DEFAULTS``), NOT a
-    # snapshot of the global -- so package ownership derives from a table this module
-    # authored and the inherited django-filter customization seam (``deepcopy`` /
-    # ``dict(...)`` / ``[cls][key] = ...``) keeps working. An unmodified subclass
+    # The public generation-policy table. Installed in place of django-filter's
+    # mutable, process-shared ``BaseFilterSet.FILTER_DEFAULTS`` as the package's own
+    # per-entry copy of it (``_PUBLIC_PACKAGE_FILTER_DEFAULTS``), a plain, deepcopyable
+    # ``dict``, so a later mutation of upstream's dict never reaches it and the
+    # inherited django-filter customization seam (``deepcopy`` / ``dict(...)`` /
+    # ``[cls][key] = ...``) keeps working. An unmodified subclass
     # inherits this by identity (``_is_generation_capable`` checks it); ownership is
     # decided against the PRIVATE normalized ``_PACKAGE_POLICY_BASELINE`` by value, not
     # against this public object's identity.
@@ -3900,10 +3823,10 @@ class FilterSet(
            ``filter_class`` and/or a different (consumer) ``extra`` provider, so its
            normalized value diverges and it is ``override_generated``. Whole-entry
            normalization catches an ``extra``-only override (restricted queryset,
-           ``to_field_name``, requiredness), not just a ``filter_class`` change. This is
-           import-order-immune: the baseline derives from OUR table, so a consumer
-           mutation of django-filter's global before this module was imported cannot
-           taint it.
+           ``to_field_name``, requiredness), not just a ``filter_class`` change. An entry a consumer
+           mutation of django-filter's table put there before this module was imported
+           is not upstream-authored, so its baseline record is tainted and every
+           selection of it is ``override_generated``.
 
         This is the SINGLE ownership oracle both ``filter_for_lookup`` (which
         decides whether to convert a framework-owned relation key to a package
@@ -3955,10 +3878,11 @@ class FilterSet(
         #     copy carries the SAME (filter_class, provider) pair for every unchanged
         #     class, so those normalize equal to the baseline and stay
         #     ``framework_default``.
-        # The baseline is derived from the package's OWN ``_PUBLIC_PACKAGE_FILTER_DEFAULTS``
-        # table (never from django-filter's mutable global), and the comparison is by
-        # VALUE, so import order cannot taint it and the public table and baseline being
-        # distinct object graphs does not matter: a pristine selection re-derives
+        # The baseline records only upstream-authored entries of
+        # ``_PUBLIC_PACKAGE_FILTER_DEFAULTS`` (any other entry is tainted), and the
+        # comparison is by VALUE, so a pre-import mutation of django-filter's table never
+        # reads as package policy and the public table and baseline being distinct
+        # object graphs does not matter: a pristine selection re-derives
         # the baseline's (filter_class, provider) pair. The compared members are the
         # single ownership-bearing values django-filter selects (its ``filter_class`` AND
         # its ``extra`` provider -- a restricted relation queryset, a ``to_field_name``,
@@ -4049,13 +3973,13 @@ class FilterSet(
           package-generated.
         * ``FILTER_DEFAULTS`` override -- the class-level generation hook: a
           consumer shadowing ``FILTER_DEFAULTS`` changes which filter classes the
-          default path selects; an unmodified subclass inherits the package-authored
+          default path selects; an unmodified subclass inherits the package's
           public ``_PUBLIC_PACKAGE_FILTER_DEFAULTS`` table by identity, so any class
           that reassigned ``FILTER_DEFAULTS`` is non-capable and
-          nothing it generates is routable. Comparing against the package-authored
-          public table (not django-filter's mutable ``BaseFilterSet.FILTER_DEFAULTS``,
-          and not a snapshot of it) means capability tracks whether the class still
-          uses the exact table this module authored. Value-level ownership of an
+          nothing it generates is routable. Comparing against the package's public
+          table (not django-filter's mutable ``BaseFilterSet.FILTER_DEFAULTS``, which
+          it copied) means capability tracks whether the class still uses the exact
+          table this module installed. Value-level ownership of an
           individual entry is a separate concern handled by
           ``_generation_origin_for_field`` against the private normalized baseline;
           this identity check is the coarse whole-table-replacement gate.
