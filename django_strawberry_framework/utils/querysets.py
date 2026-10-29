@@ -235,16 +235,25 @@ if TYPE_CHECKING:
     class _JoiningRelation(Protocol):
         """A path step's ``join_field``: the relation (or reverse relation) a join follows."""
 
+        @property
+        def null(self) -> bool: ...
+
         def get_joining_fields(self) -> tuple[tuple[_JoinColumn, _JoinColumn], ...]: ...
 
     class _PathStep(Protocol):
-        """One ``PathInfo`` step of ``Query.names_to_path``, as the ordering expansion reads it."""
+        """One ``PathInfo`` step of ``Query.names_to_path``, as the order-name readers read it."""
 
         @property
         def to_opts(self) -> Options[models.Model]: ...
 
         @property
         def join_field(self) -> _JoiningRelation: ...
+
+        @property
+        def m2m(self) -> bool: ...
+
+        @property
+        def direct(self) -> bool: ...
 
     def is_manager(_value: object, /) -> TypeIs[BaseManager[models.Model]]:
         """Return whether the value is a model manager (a related manager included).

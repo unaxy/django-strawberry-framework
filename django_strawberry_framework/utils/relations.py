@@ -327,11 +327,9 @@ def classify_path(model: type[models.Model], field_path: str) -> ClassifiedPath:
     (``django_filters.utils.get_model_field``), whose answer there (``None``, a forward
     ``GenericForeignKey``, a lazy-relation ``RuntimeError``) is the one its callers read.
 
-    Four other ``_meta`` path walkers share the split-and-``get_field``
+    Three other ``_meta`` path walkers share the split-and-``get_field``
     mechanism under different contracts and stay separate:
-    ``optimizer/plans.py::_resolve_order_path_field`` answers the terminal
-    concrete column or ``None`` for cursor anchoring;
-    ``plans.py::_select_path_missing_connectors`` answers the connectors a
+    ``optimizer/plans.py::_select_path_missing_connectors`` answers the connectors a
     ``select_related`` path still needs under a ``.only()`` projection, or
     ``None`` when the path does not resolve;
     ``utils/querysets.py::_prefetch_relation_target_or_none`` answers the
