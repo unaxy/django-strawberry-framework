@@ -20,7 +20,8 @@ Resolver isolation and debug capture (per spec Goals item 3 + Test plan
   ``shard_b`` too.
 
 The suite also owns the alias pins that only a second database can prove: the
-row-preserving relational leaf predicate executing wholly on ``shard_b``, the write
+row-preserving relational leaf predicate executing wholly on ``shard_b``, a
+``GenericRelation`` branch filter matching ``shard_b``'s own content-type pk, the write
 alias for generated and serializer mutations, and the post-``OrderSet`` routing
 attestation. Four routing rows mount a consumer override on a ``.using("shard_b")``
 list field and cover an alias change, a hints change, an in-place rewrite of the
@@ -72,9 +73,10 @@ from apps.products import models as product_models
 from apps.products.services import create_users
 from config import schema as config_schema
 from django.contrib.auth.models import Permission, User
+from django.contrib.contenttypes.models import ContentType
 from django.db import connection as default_connection
 
-from django_strawberry_framework.filters import FilterInput
+from django_strawberry_framework.filters import FilterInput, FilterSet, RelatedFilter
 
 if os.environ.get("FAKESHOP_SHARDED") != "1":
     pytest.skip(
@@ -1080,6 +1082,105 @@ def test_row_preserving_relational_leaf_predicate_executes_on_shard_b_alias() ->
         for query in default_captured.captured_queries
         if "library_loan" in query["sql"].lower()
     ], default_captured.captured_queries
+
+
+@pytest.fixture
+def _build_branch_tag_filter_test_schema() -> Iterator[None]:
+    """Build a per-test schema whose ``.using('shard_b')`` Branch list filters through ``tags``.
+
+    ``tags`` is ``Branch``'s ``GenericRelation``; the branch-local ``RelatedFilter``
+    over it restricts the branches through ``optimizer/predicates.py::related_rows_exist``,
+    which reads ``TaggedItem`` rows through their registered type. The project schema
+    registers none, so the test runs on ``private_registry``.
+    """
+    make_django_type("ShardTaggedItemType", models.TaggedItem, ("id", "tag"), node=False)
+    branch_type = make_django_type("ShardBranchType", models.Branch, ("id", "name"), node=False)
+    finalize_django_types()
+
+    class _TaggedItemFilter(FilterSet):
+        class Meta:
+            model = models.TaggedItem
+            fields = {"tag": ["exact"]}
+
+    class _BranchTagFilter(FilterSet):
+        tags = RelatedFilter(_TaggedItemFilter, field_name="tags")
+
+        class Meta:
+            model = models.Branch
+            fields = {"name": ["exact"]}
+
+    @strawberry.type
+    class _BranchTagShardQuery:
+        def _branches_tagged_on_shard_b(
+            self,
+            info: Info[object, object],
+            tag: str,
+        ) -> QuerySet[models.Branch]:
+            queryset = models.Branch.objects.using("shard_b").order_by("id")
+            return _BranchTagFilter.apply_sync({"tags": {"tag": tag}}, queryset, info)
+
+        branches_tagged_on_shard_b: QuerySet[models.Branch] = strawberry.field(
+            resolver=_branches_tagged_on_shard_b,
+            graphql_type=list[branch_type],
+        )
+
+    optimizer = DjangoOptimizerExtension()
+    _current["schema"] = strawberry.Schema(
+        query=_BranchTagShardQuery,
+        config=strawberry_config(),
+        extensions=[lambda: optimizer],
+    )
+    ContentType.objects.clear_cache()
+    yield
+    ContentType.objects.clear_cache()
+    _current["schema"] = None
+
+
+@pytest.mark.usefixtures("private_registry", "_build_branch_tag_filter_test_schema")
+@pytest.mark.django_db(databases=["default", "shard_b"])
+def test_generic_relation_filter_matches_content_type_on_shard_b_alias() -> None:
+    """A ``GenericRelation`` branch filter matches ``shard_b``'s own ``Branch`` content type.
+
+    Content-type pks are per database: ``shard_b``'s ``library.branch`` row is
+    forced onto a pk ``default`` does not use. The restriction names the content
+    type by natural key and joins it on the statement's alias, so the branch
+    tagged under ``shard_b``'s pk comes back, and the branch whose tag sits on
+    a ``Shelf`` with the same ``object_id`` does not.
+    """
+    default_branch_type = ContentType.objects.db_manager("default").get_for_model(models.Branch)
+    shard_branch_type_pk = default_branch_type.id + 500
+    ContentType.objects.using("shard_b").filter(app_label="library", model="branch").delete()
+    ContentType.objects.using("shard_b").create(
+        pk=shard_branch_type_pk,
+        app_label="library",
+        model="branch",
+    )
+    ContentType.objects.clear_cache()
+    shelf_type = ContentType.objects.using("shard_b").get(app_label="library", model="shelf")
+    tagged = models.Branch.objects.using("shard_b").create(name="Shard Tagged")
+    other = models.Branch.objects.using("shard_b").create(name="Shard Other")
+    models.TaggedItem.objects.using("shard_b").create(
+        tag="a1",
+        content_type_id=shard_branch_type_pk,
+        object_id=saved_pk(tagged.pk),
+    )
+    models.TaggedItem.objects.using("shard_b").create(
+        tag="a1",
+        content_type_id=shelf_type.id,
+        object_id=saved_pk(other.pk),
+    )
+
+    client = Client()
+    with override_settings(ROOT_URLCONF=__name__):
+        clear_url_caches()
+        try:
+            data = _graphql_data('{ branchesTaggedOnShardB(tag: "a1") { name } }', client=client)
+        finally:
+            clear_url_caches()
+
+    assert [json_at(b, "name") for b in json_list(data, "branchesTaggedOnShardB")] == [
+        "Shard Tagged",
+    ]
 
 
 # ---------------------------------------------------------------------------

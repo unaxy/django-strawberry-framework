@@ -495,7 +495,7 @@ it lands with its tick.
       LATERAL/VALUES shell, about -300 lines). It replaces the recognizer's plan-time WHERE proof, changes the emitted
       SQL text, and lets multi-table and `Exists` visibility scopes ride lateral.
 
-- [ ] 24. (OPT-5) `_correlation_steps` hand-builds the GenericRelation content-type restriction
+- [x] 24. (OPT-5) `_correlation_steps` hand-builds the GenericRelation content-type restriction
   - Our code: the `kind == "generic"` arm of `optimizer/predicates.py::_correlation_steps` (~10 lines). It filters
     `content_type__app_label` / `content_type__model`, which joins `django_content_type`.
   - Upstream: `django/contrib/contenttypes/fields.py::GenericRelation.get_extra_restriction` /
@@ -506,6 +506,11 @@ it lands with its tick.
     deliberate, but undocumented.
   - Behaviour change: none on rows; one join fewer per EXISTS.
   - Risk / blockers: the ContentType cache is per `using`. Either swap, or document the reason at the site.
+  - Outcome: kept, with the reason at the site. `get_content_type()` / `get_extra_restriction` bake the default
+    alias's ContentType pk (`get_for_model` caches per alias and ignores `using`), which matched the wrong rows on a
+    shard with divergent content-type pks in 10 of 14 probe cases; the natural-key join resolves on the statement's
+    alias. The arm also runs at declaration time, where a lookup would be database I/O. Pinned by
+    `examples/fakeshop/test_query/test_multi_db.py::test_generic_relation_filter_matches_content_type_on_shard_b_alias`.
 
 - [ ] 25. (NET-2) The WebSocket Host projection re-derives `ASGIRequest.__init__`'s header-to-META mapping
   - Our code: `consumers.py::_host_validation_request` and `consumers.py #"_HOST_META_KEYS_BY_HEADER = "` (~16
