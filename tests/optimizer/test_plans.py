@@ -15,8 +15,14 @@ from apps.kanban.models import Card, Status
 from apps.library.models import Book, Issue, ReadingList, ReadingListEntry
 from apps.products.models import Category, Entry, Item, Property
 from apps.scalars.models import NullableScalarSpecimen
+from django.contrib.contenttypes.fields import GenericForeignKey
+from django.contrib.contenttypes.models import ContentType
+from django.db import models
 from django.db.models import F, FilteredRelation, Model, OrderBy, Prefetch, Q, QuerySet
+from django.db.models.expressions import Combinable
 from django.db.models.functions import Lower
+from django.test.utils import isolate_apps
+from typing_extensions import override
 
 from django_strawberry_framework.connection import _ends_in_unique_column
 from django_strawberry_framework.exceptions import OptimizerError
@@ -1773,6 +1779,37 @@ def test_apply_projection_leaves_a_filtered_relation_join_alone() -> None:
 
     assert applied.query.deferred_loading == (frozenset({"value"}), False)
     assert "public_item" in str(applied.query)
+
+
+class _RenamedKeyFK(models.ForeignKey[ContentType | Combinable, ContentType]):
+    """A content-type key whose column attribute is ``<name>_ref``, not ``<name>_id``."""
+
+    @override
+    def get_attname(self) -> str:
+        return f"{self.name}_ref"
+
+
+@isolate_apps("apps.library")
+def test_apply_projection_keeps_a_generic_foreign_key_carrier_by_its_key_attname() -> None:
+    """A consumer prefetch of a ``GenericForeignKey`` keeps its key field's own attname.
+
+    Django's generic prefetch reads the content type off each row by the key
+    field's ``attname``; a ``ForeignKey`` subclass may spell that attribute
+    other than ``<name>_id``, so the projection names the attname the field
+    reports, beside the object-id column ``fk_field`` names.
+    """
+
+    class _RenamedTag(models.Model):
+        ct: _RenamedKeyFK = _RenamedKeyFK(ContentType, on_delete=models.CASCADE, related_name="+")
+        obj_id: models.IntegerField[float | int | str | Combinable, int] = models.IntegerField()
+        target: GenericForeignKey = GenericForeignKey("ct", "obj_id")
+
+        class Meta:
+            app_label = "library"
+
+    applied = apply_projection(_RenamedTag.objects.prefetch_related("target"), ["id"])
+
+    assert applied.query.deferred_loading == (frozenset({"id", "ct_ref", "obj_id"}), False)
 
 
 @pytest.mark.parametrize(

@@ -370,15 +370,20 @@ it lands with its tick.
     rows), `tests/utils/test_typing.py::test_unwrap_non_null_peels_only_non_null_layers` and
     `tests/test_resource_policy.py`. The rows that pinned hand-built `of_type` stacks and cyclic chains are gone.
 
-- [ ] 19. (OPT-6) The GFK content-type carrier column is spelled as a string
-  - Our code: `optimizer/plans.py::_prefetch_carrier_attnames #"f\"{ct_field}_id\""` (1 line).
-  - Upstream: the same read `GenericForeignKeyDescriptor.get_prefetch_querysets` makes,
-    `model._meta.get_field(ct_field).attname`.
-  - Lines: 0.
-  - Status: SUSPECTED.
-  - Reason to keep ours: none (contenttypes.E004 forces a FK, so the attname is always `<name>_id` today).
-  - Behaviour change: none.
-  - Risk / blockers: none.
+- [x] 19. (OPT-6) The GFK content-type carrier column is spelled as a string
+  - Our code: `optimizer/plans.py::_prefetch_carrier_attnames` reads the content-type key's own `attname`
+    (`model._meta.get_field(ct_field)`); the object-id column stays the name `fk_field` gives.
+  - Upstream: the read Django's generic prefetch makes, `GenericForeignKey.get_prefetch_queryset` on 5.2.16 and
+    `GenericForeignKeyDescriptor.get_prefetch_querysets` on 6.1.2. `GenericForeignKey.ct_field_attname` is absent at
+    the 5.2 floor, so it is not used.
+  - Status: CONFIRMED (18 GFKs on fakeshop and module-level test models, identical attnames). contenttypes.E003/E004
+    constrain the key's class and target, not its attname.
+  - Behaviour change: fixes a content-type key that is a `ForeignKey` subclass overriding `get_attname`. The projection
+    named `<ct_field>_id`, a column the model does not have, and the query failed when it compiled.
+  - Tests: `tests/optimizer/test_plans.py::test_apply_projection_keeps_a_generic_foreign_key_carrier_by_its_key_attname`
+    failed on the old code; the live
+    `test_library_api.py::test_library_consumer_prefetch_keeps_its_link_columns[generic-foreign-key]` still pins the
+    plain shape. Fakeshop has no renamed key, so the fix row is package-tier.
 
 - [ ] 20. (WRT-5) The default write permission spells Django's codename grammar by hand
   - Our code: `mutations/permissions.py::DjangoModelPermission.has_permission #"codename = f"` (1 line).
