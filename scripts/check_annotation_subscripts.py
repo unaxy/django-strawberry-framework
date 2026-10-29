@@ -215,6 +215,10 @@ AUDITED_SITES: dict[tuple[str, str], int] = {
         "django.utils.functional.LazyObject",
     ): 1,
     (
+        "django_strawberry_framework/utils/lazy.py::unwrap_lazy_object",
+        "django.utils.functional.LazyObject",
+    ): 1,
+    (
         "django_strawberry_framework/utils/querysets.py::_PathStep.to_opts",
         "django.db.models.options.Options",
     ): 1,

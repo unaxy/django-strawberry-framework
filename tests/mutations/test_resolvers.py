@@ -144,7 +144,10 @@ from tests.optimizer import _link_models
 if TYPE_CHECKING:
     from django.db.models.expressions import Combinable
 
-    from django_strawberry_framework.mutations.resolvers import _ModelDecoded
+    from django_strawberry_framework.mutations.resolvers import (
+        _ModelDecoded,
+        _ModelDecodedWithExcluded,
+    )
 
     # Each field's descriptor types as django-stubs declares them (set type, get type), spelled
     # out because the checker runs without the django-stubs mypy plugin that would infer them.
@@ -3891,7 +3894,7 @@ def test_write_pipeline_opens_atomic_on_managed_write_alias(
             data=None,
             id_=None,
             decode_step=lambda _instance: ("decoded",),
-            write_step=lambda _instance, _decoded: MagicMock(pk=7),
+            write_step=lambda _instance, _decoded: product_models.Item(pk=7),
         )
 
     assert result == "ok"
@@ -4053,11 +4056,7 @@ def test_pipeline_publishes_authorized_pk_on_write_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The post-locate snapshot is published on the write-pipeline context for the flavors."""
-    located = SimpleNamespace(
-        pk=7,
-        get_deferred_fields=set,
-        _meta=SimpleNamespace(concrete_fields=[]),
-    )
+    located = product_models.Item(pk=7)
     seen: dict[str, object] = {}
 
     def probe_authorize(*_args: object, **_kwargs: object) -> None:
@@ -4103,11 +4102,7 @@ def test_pipeline_captures_target_state_only_when_asked(
     alone asks for the capture; every other flavor runs no value type's copy code
     at the locate and publishes no ``target_state``.
     """
-    located = SimpleNamespace(
-        pk=7,
-        get_deferred_fields=set,
-        _meta=SimpleNamespace(concrete_fields=[]),
-    )
+    located = product_models.Item(pk=7)
     snapshot = {"name": object()}
     calls: list[object] = []
     seen: dict[str, object] = {}
@@ -4212,6 +4207,31 @@ def test_delete_pipeline_pk_drift_hostile_repr_propagates(
         object_result(mutation_resolvers._run_delete, mutation_cls, info=None, id_="ignored")
 
 
+def test_delete_pipeline_refuses_a_located_row_that_is_not_a_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The delete write step takes only a model row; any other located value raises ``TypeError``.
+
+    ``locate_instance`` answers a model row or ``None``; the write step's guard holds that
+    contract after authorization, before any snapshot or delete runs.
+    """
+    located = SimpleNamespace(
+        pk=7,
+        get_deferred_fields=set,
+        _meta=SimpleNamespace(concrete_fields=[]),
+    )
+    mutation_cls = _pipeline_harness(monkeypatch, operation="delete")
+    mutation_cls.configure_mock(**{"_mutation_meta.permission_classes": []})
+    monkeypatch.setattr(mutation_resolvers, "locate_instance", _returning(located))
+
+    with (
+        patch.object(transaction, "atomic"),
+        managed_write_transaction("default"),
+        pytest.raises(TypeError, match="expected an instance of"),
+    ):
+        object_result(mutation_resolvers._run_delete, mutation_cls, info=None, id_="ignored")
+
+
 def test_delete_pipeline_rides_shared_write_skeleton(monkeypatch: pytest.MonkeyPatch) -> None:
     """Delete supplies a snapshot ``tail_step``; locate/auth/atomic live in the skeleton."""
     seen: dict[str, object] = {}
@@ -4254,6 +4274,26 @@ def test_delete_pipeline_rides_shared_write_skeleton(monkeypatch: pytest.MonkeyP
     assert seen["data"] is None
     assert seen["id"] == "gid"
     assert callable(seen["tail_step"])
+
+
+def test_bound_model_fields_refuses_a_delete_mutation() -> None:
+    """A delete has no input, so the bind stashes no model-field index for a decode to read."""
+
+    class ItemType(DjangoType):
+        class Meta:
+            model = product_models.Item
+            fields = ("id", "name")
+            primary = True
+
+    class DeleteItem(DjangoMutation):
+        class Meta:
+            model = product_models.Item
+            operation = "delete"
+
+    finalize_django_types()
+    assert DeleteItem._primary_type is ItemType
+    with pytest.raises(TypeError, match="DeleteItem holds no bound model-field index"):
+        mutation_resolvers._bound_model_fields(DeleteItem)
 
 
 def test_write_flavors_share_resolver_entry_factory() -> None:
@@ -4351,6 +4391,22 @@ def test_model_write_step_full_clean_error_keys_to_wire_name() -> None:
         failure = resolvers._model_write_step(CreateBookMutation, None, decoded, specs=specs)
     assert isinstance(failure, resolvers.StepFailure)
     assert [field_error.field for field_error in failure.errors] == ["circulationStatus"]
+
+
+def test_model_write_step_refuses_a_decode_carrying_excluded_values() -> None:
+    """A four-tuple decode (one carrying ``EXCLUDED`` values) raises ``ValueError``.
+
+    The shared model write tail cannot write an excluded value, so a bind that stashes an
+    ``EXCLUDED`` spec without a flavor write step consuming it fails loud.
+    """
+    decoded: _ModelDecodedWithExcluded = (
+        product_models.Item(),
+        [],
+        resolvers.CleanExcludes([], []),
+        {"password": "secret"},
+    )
+    with pytest.raises(ValueError, match=r"three-tuple; a decode carrying EXCLUDED values"):
+        resolvers._model_write_step(DjangoMutation, None, decoded, specs=())
 
 
 @pytest.mark.django_db

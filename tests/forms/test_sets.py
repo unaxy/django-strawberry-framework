@@ -40,7 +40,7 @@ import itertools
 import re
 import sys
 from collections.abc import Callable, Iterator
-from typing import NoReturn
+from typing import TYPE_CHECKING, ClassVar, NoReturn
 
 import pytest
 import strawberry
@@ -74,6 +74,7 @@ from django_strawberry_framework.forms.inputs import (
 )
 from django_strawberry_framework.forms.sets import (
     _cached_build_form_input,
+    _default_get_form,
     _default_mutation_get_form_fields,
     _form_kwargs_overridden,
     _form_mutation_registry,
@@ -90,8 +91,12 @@ from django_strawberry_framework.mutations.permissions import DenyAll
 from django_strawberry_framework.mutations.sets import iter_mutations
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.utils.typing import call_forwarded
+from django_strawberry_framework.write_mixins import _ValidatedMutationMeta
 from tests._idioms import ClassReadRaises, definition_raises, module_binding
 from tests._info import unread_info
+
+if TYPE_CHECKING:
+    from strawberry.types import Info
 
 
 @pytest.fixture(autouse=True)
@@ -1015,6 +1020,47 @@ def test_default_get_form_fields_uses_frozen_form_class_snapshot() -> None:
     } == {"alpha"}
     bound = Submit().get_form(unread_info(), data={"alpha": "ok"}, files={})
     assert isinstance(bound, FormA)
+
+
+class _FormlessHooks:
+    """Form construction hooks over a snapshot that carries no form class."""
+
+    _mutation_meta: ClassVar[_ValidatedMutationMeta] = _ValidatedMutationMeta(
+        model=None,
+        operation="create",
+        input_class=None,
+        partial_input_class=None,
+        fields=None,
+        exclude=None,
+        permission_classes=(),
+    )
+
+    def get_form_kwargs(
+        self,
+        info: Info[object, object],
+        *,
+        data: dict[str, object],
+        files: dict[str, object],
+        instance: models.Model | None = None,
+    ) -> dict[str, object]:
+        del info, instance
+        return {"data": data, "files": files}
+
+    def get_form(
+        self,
+        info: Info[object, object],
+        *,
+        data: dict[str, object],
+        files: dict[str, object],
+        instance: models.Model | None = None,
+    ) -> forms.BaseForm:
+        return _default_get_form(self, info, data=data, files=files, instance=instance)
+
+
+def test_default_get_form_refuses_a_snapshot_with_no_form_class() -> None:
+    """The form build reads only a form-flavor snapshot; one without a class is a typed error."""
+    with pytest.raises(TypeError, match="expected the type the source guarantees, got NoneType"):
+        _FormlessHooks().get_form(unread_info(), data={}, files={})
 
 
 def test_modelform_get_form_fields_hook_controls_input_basis() -> None:

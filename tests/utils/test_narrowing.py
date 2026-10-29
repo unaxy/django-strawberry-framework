@@ -23,6 +23,7 @@ from django_strawberry_framework.utils._narrowing import (
     is_concrete_field,
     is_exact_list_or_tuple,
     is_exact_set_or_frozenset,
+    is_exact_tuple_or_frozenset,
     is_queryset,
     is_real_collection,
     is_real_mapping,
@@ -160,6 +161,47 @@ def test_is_text_atom_never_evaluates_a_lazy_promise() -> None:
     assert calls == []
 
 
+class _TupleSubclass(tuple[object, ...]):
+    """A ``tuple`` subclass: an instance passes ``isinstance`` for ``tuple`` but is not one exactly."""
+
+
+class _FrozensetSubclass(frozenset[object]):
+    """A ``frozenset`` subclass, as ``_TupleSubclass`` is for ``tuple``."""
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ((), True),
+        (("alias",), True),
+        (frozenset[object](), True),
+        (frozenset({"alias"}), True),
+        (_TupleSubclass(), False),
+        (_FrozensetSubclass(), False),
+        (list[object](), False),
+        (set[object](), False),
+        ("alias", False),
+    ],
+    ids=[
+        "empty_tuple",
+        "tuple",
+        "empty_frozenset",
+        "frozenset",
+        "tuple_subclass",
+        "frozenset_subclass",
+        "list",
+        "set",
+        "str",
+    ],
+)
+def test_is_exact_tuple_or_frozenset_admits_exactly_the_two_builtins(
+    value: object,
+    expected: bool,  # noqa: FBT001 - the expected verdict
+) -> None:
+    """Only an exact ``tuple`` or ``frozenset`` passes; a subclass of either is refused."""
+    assert is_exact_tuple_or_frozenset(value) is expected
+
+
 class _ClaimsEveryClassMeta(type):
     """A metaclass whose ``__eq__`` claims equality with every class and records each call."""
 
@@ -179,8 +221,8 @@ class _ClaimsEveryClass(metaclass=_ClaimsEveryClassMeta):
 
 @pytest.mark.parametrize(
     "predicate",
-    [is_exact_list_or_tuple, is_exact_set_or_frozenset],
-    ids=["list_or_tuple", "set_or_frozenset"],
+    [is_exact_list_or_tuple, is_exact_set_or_frozenset, is_exact_tuple_or_frozenset],
+    ids=["list_or_tuple", "set_or_frozenset", "tuple_or_frozenset"],
 )
 def test_exact_container_predicate_refuses_a_class_whose_metaclass_eq_claims_a_builtin(
     predicate: Callable[[object], bool],

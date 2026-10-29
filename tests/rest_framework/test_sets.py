@@ -78,6 +78,7 @@ from django_strawberry_framework import (
 )
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.forms.sets import iter_form_mutations
+from django_strawberry_framework.mutations.inputs import CREATE
 from django_strawberry_framework.mutations.inputs import (
     _materialized_names as mutation_materialized_names,
 )
@@ -97,12 +98,15 @@ from django_strawberry_framework.rest_framework.sets import (
     SerializerMutation as SerializerMutationFromSets,
 )
 from django_strawberry_framework.rest_framework.sets import (
+    _checked_schema_field_map,
+    _serializer_input_shape_for,
     _validate_schema_field_map,
     _validate_serializer_nested_fields,
 )
 from django_strawberry_framework.types import base as types_base
 from django_strawberry_framework.utils._narrowing import dict_of, read_attr
 from django_strawberry_framework.utils.input_values import UNSET
+from django_strawberry_framework.write_mixins import _ValidatedMutationMeta
 from tests._idioms import (
     ClassReadRaises,
     ModelSerializerBase,
@@ -1083,6 +1087,134 @@ def test_update_over_only_the_primary_key_raises_at_class_creation() -> None:
                 serializer_class = serializer_cls
                 operation = "update"
                 permission_classes = []
+
+
+def test_serializer_input_shape_refuses_a_snapshot_with_no_serializer_class() -> None:
+    """The input build reads only a serializer-flavor snapshot; one without a class is a typed error."""
+    meta = _ValidatedMutationMeta(
+        model=None,
+        operation="create",
+        input_class=None,
+        partial_input_class=None,
+        fields=None,
+        exclude=None,
+        permission_classes=(),
+    )
+    with pytest.raises(TypeError, match="expected the type the source guarantees, got NoneType"):
+        _serializer_input_shape_for(meta, operation_kind=CREATE, field_map={})
+
+
+def _serializerless_meta(
+    *,
+    schema_fingerprint: tuple[tuple[object, ...], ...] | None = None,
+) -> _ValidatedMutationMeta:
+    """A create snapshot that carries no serializer class."""
+    return _ValidatedMutationMeta(
+        model=None,
+        operation="create",
+        input_class=None,
+        partial_input_class=None,
+        fields=None,
+        exclude=None,
+        permission_classes=(),
+        schema_fingerprint=schema_fingerprint,
+    )
+
+
+def _declared_item_mutation() -> type[SerializerMutation]:
+    """A valid create ``SerializerMutation`` over the products ``Item`` serializer."""
+    serializer_cls = _item_serializer()
+
+    class CreateItem(SerializerMutation):
+        class Meta:
+            serializer_class = serializer_cls
+            operation = "create"
+            permission_classes = []
+
+    return CreateItem
+
+
+def test_checked_schema_field_map_refuses_a_fingerprinted_snapshot_with_no_serializer_class() -> (
+    None
+):
+    """The fingerprint check reads only a serializer-flavor snapshot's class."""
+    mutation_cls = _declared_item_mutation()
+    with pytest.raises(TypeError, match="expected the type the source guarantees, got NoneType"):
+        _checked_schema_field_map(mutation_cls, _serializerless_meta(schema_fingerprint=()))
+
+
+def test_build_input_refuses_a_snapshot_with_no_serializer_class() -> None:
+    """The bind reads only a serializer-flavor snapshot's class."""
+    mutation_cls = _declared_item_mutation()
+    with pytest.raises(TypeError, match="expected the type the source guarantees, got NoneType"):
+        mutation_cls.build_input(_serializerless_meta(), DjangoType)
+
+
+def test_schema_hook_refuses_a_live_meta_serializer_class_that_is_not_a_serializer() -> None:
+    """Read before class validation, a non-``Serializer`` ``Meta.serializer_class`` is a typed error."""
+
+    class Undeclared(SerializerMutation):
+        pass
+
+    Undeclared.Meta = type("Meta", (), {"serializer_class": int})
+    with pytest.raises(TypeError, match="expected the type the source guarantees, got int"):
+        Undeclared.get_serializer_for_schema()
+
+
+def test_nested_serializer_with_a_non_class_meta_model_is_a_configuration_error() -> None:
+    """A nested serializer's lazy-reference ``Meta.model`` string fails as a configuration error."""
+
+    class PatronT(DjangoType):
+        class Meta:
+            model = library_models.Patron
+            fields = ("name",)
+            primary = True
+
+    class ProfileT(DjangoType):
+        class Meta:
+            model = library_models.PatronProfile
+            fields = ("address_2",)
+            primary = True
+
+    class LazyPatronSerializer(serializers.Serializer[library_models.Patron]):
+        name = serializers.CharField()
+
+        class Meta:
+            model = "library.Patron"
+
+    class ProfileNestingSerializer(ModelSerializerBase[library_models.PatronProfile]):
+        patron = LazyPatronSerializer()
+
+        class Meta:
+            model = library_models.PatronProfile
+            fields = ("patron", "address_2")
+
+        @override
+        def update(
+            self,
+            instance: library_models.PatronProfile,
+            validated_data: dict[str, object],
+        ) -> NoReturn:
+            raise AssertionError("the nested-write check reads this override; nothing calls it")
+
+    with pytest.raises(
+        ConfigurationError,
+        match=re.escape(
+            "Serializer LazyPatronSerializer resolved model must be a Django model class; "
+            "got 'library.Patron'.",
+        ),
+    ):
+
+        @definition_raises
+        class UpdateProfileNesting(SerializerMutation):
+            class Meta:
+                serializer_class = ProfileNestingSerializer
+                operation = "update"
+                nested_fields = {"patron": NestedSerializerConfig()}
+                permission_classes = []
+
+    assert registry.get(library_models.Patron) is PatronT
+    assert registry.get(library_models.PatronProfile) is ProfileT
 
 
 def test_update_keeps_a_nested_serializer_sourced_on_the_key_relation() -> None:

@@ -58,7 +58,7 @@ through ``_merged_serializer_kwargs`` (spec-039).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar
 
 from rest_framework import serializers
 from typing_extensions import override
@@ -68,7 +68,7 @@ from django_strawberry_framework.mutations.inputs import CREATE
 from django_strawberry_framework.mutations.operations import NON_DELETE_OPERATION_INPUT_KIND
 from django_strawberry_framework.mutations.sets import DjangoMutation
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import is_mapping, tuple_iter
+from django_strawberry_framework.utils._narrowing import is_mapping, require, tuple_iter
 from django_strawberry_framework.utils.inputs import (
     normalize_field_name_sequence,
     reject_unknown_meta_keys,
@@ -81,7 +81,6 @@ from django_strawberry_framework.write_mixins import (
     normalize_meta_field_selection,
     own_backing_class,
     require_backing_class,
-    require_model_class,
     require_non_delete_operation,
     require_subclass,
     resolve_backed_model_or_raise,
@@ -97,6 +96,7 @@ from .inputs import (
     SERIALIZER_INPUTS_MODULE_PATH,
     NestedSerializerConfig,
     SerializerInputShape,
+    _is_serializer_class,
     build_serializer_input_class,
     dedupe_serializer_input_shape,
     guard_create_required_serializer_fields,
@@ -125,7 +125,6 @@ from .serializer_converter import is_nested_serializer_field, nested_serializer_
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from django.db import models
     from strawberry.types import Info
 
     from django_strawberry_framework.types.base import DjangoType
@@ -250,7 +249,7 @@ def _checked_schema_field_map(
     if meta.schema_fingerprint is not None:
         effective = resolve_effective_serializer_fields(
             # The serializer flavor's ``_validate_meta`` stored a validated serializer class.
-            cast("type[DRFSerializer]", meta.serializer_class),
+            require(meta.serializer_class, _is_serializer_class),
             fields=meta.fields,
             exclude=meta.exclude,
             field_map=field_map,
@@ -279,7 +278,7 @@ def _serializer_input_shape_for(
     """Return the serializer input class + descriptor through the shared shape cache."""
     input_cls, shape = build_serializer_input_class(
         # The serializer flavor's ``_validate_meta`` stored a validated serializer class.
-        cast("type[DRFSerializer]", meta.serializer_class),
+        require(meta.serializer_class, _is_serializer_class),
         operation_kind=operation_kind,
         fields=meta.fields,
         exclude=meta.exclude,
@@ -487,7 +486,7 @@ class SerializerMutation(DjangoMutation):
 
     @classmethod
     @override
-    def _resolve_model(cls, meta: type[object]) -> type[models.Model] | None:
+    def _resolve_model(cls, meta: type[object]) -> object:
         """Resolve the model from ``Meta.serializer_class.Meta.model`` (the ``036`` seam override).
 
         Returns ``None`` for a missing ``serializer_class`` / a serializer with no
@@ -579,21 +578,15 @@ class SerializerMutation(DjangoMutation):
                 "serializers.Serializer has no backing model + no DjangoType to return.",
             )
 
-        # The "resolves no model" raise is the shared ``resolve_backed_model_or_raise``,
-        # run after the type-gates so ``Meta.serializer_class`` is a
-        # real class. ``require_model_class`` then type-gates
-        # the resolved value (a string / instance ``Meta.model``) so it cannot
-        # leak to bind.
-        model = require_model_class(
-            name,
-            resolve_backed_model_or_raise(
-                cls,
-                meta,
-                base_label="SerializerMutation",
-                key="serializer_class",
-                noun="ModelSerializer",
-            ),
+        # The "resolves no model" raise and the model-class type-gate are the shared
+        # ``resolve_backed_model_or_raise``, run after the type-gates so
+        # ``Meta.serializer_class`` is a real class.
+        model = resolve_backed_model_or_raise(
+            cls,
+            meta,
             base_label="SerializerMutation",
+            key="serializer_class",
+            noun="ModelSerializer",
         )
 
         operation = require_non_delete_operation("SerializerMutation", name, meta)
@@ -755,7 +748,10 @@ class SerializerMutation(DjangoMutation):
         never on the query path (the decode reads the bind-stashed reverse map).
         """
         # Both windows read the serializer class ``_validate_meta`` gated before this hook runs.
-        serializer_class = cast("type[DRFSerializer]", own_backing_class(cls, "serializer_class"))
+        serializer_class = require(
+            own_backing_class(cls, "serializer_class"),
+            _is_serializer_class,
+        )
         return _default_serializer_schema_fields(serializer_class)
 
     @classmethod
@@ -815,7 +811,7 @@ class SerializerMutation(DjangoMutation):
         del primary_type
         operation_kind = NON_DELETE_OPERATION_INPUT_KIND[meta.operation]
         # The serializer flavor's ``_validate_meta`` stored a validated serializer class.
-        serializer_class = cast("type[DRFSerializer]", meta.serializer_class)
+        serializer_class = require(meta.serializer_class, _is_serializer_class)
         # Read the schema hook through the ONE guarded path, so the determinism
         # fingerprint is checked before the build reads it. Then stash the schema-time
         # specs for ``Meta.injected_fields`` so the resolver can hold each injected field

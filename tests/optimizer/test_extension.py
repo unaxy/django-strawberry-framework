@@ -91,13 +91,16 @@ from django_strawberry_framework.optimizer._context import (
     converted_selections_memo,
     end_execution_frame,
     execution_plan_memo,
+    fk_id_elision_keys,
     get_context_value,
     optimizer_value,
+    planned_resolver_keys,
     publish_scoped_relations,
     publish_window_cursor_states,
     relation_is_optimizer_scoped,
     stash_for_optimizer,
     stash_on_context,
+    stashed_strictness,
     window_cursor_state,
 )
 from django_strawberry_framework.optimizer._context import (
@@ -3955,19 +3958,63 @@ def test_optimizer_context_all_exports() -> None:
         "converted_selections_memo",
         "end_execution_frame",
         "execution_plan_memo",
+        "fk_id_elision_keys",
         "get_context_value",
         "operation_publishes_to_context",
         "optimizer_value",
+        "planned_resolver_keys",
         "publish_scoped_relations",
         "publish_window_cursor_states",
         "relation_is_optimizer_scoped",
         "stash_for_optimizer",
         "stash_on_context",
+        "stashed_strictness",
         "window_cursor_state",
     }
     assert set(ctx_mod.__all__) == expected
     for name in expected:
         assert hasattr(ctx_mod, name)
+
+
+@pytest.mark.parametrize(
+    "stashed",
+    [{"ItemType.category@allItems.category"}, frozenset({"ItemType.category@allItems.category"})],
+    ids=["set", "frozenset"],
+)
+def test_stashed_key_sets_read_a_set_or_frozenset_stash_as_stashed(stashed: object) -> None:
+    """A ``set`` or ``frozenset`` under either key-set stash is the set the accessor returns."""
+    ctx = {DST_OPTIMIZER_PLANNED: stashed, DST_OPTIMIZER_FK_ID_ELISIONS: stashed}
+
+    assert planned_resolver_keys(ctx) is stashed
+    assert fk_id_elision_keys(ctx) is stashed
+
+
+def test_stashed_key_sets_read_an_absent_stash_as_no_keys() -> None:
+    """An absent stash plans nothing and elides nothing."""
+    assert planned_resolver_keys({}) is None
+    assert fk_id_elision_keys({}) == frozenset()
+
+
+@pytest.mark.parametrize("key", [DST_OPTIMIZER_PLANNED, DST_OPTIMIZER_FK_ID_ELISIONS])
+def test_stashed_key_sets_refuse_a_stash_that_is_not_a_set(key: str) -> None:
+    """A key-set stash that is not a set raises rather than reading as no keys."""
+    ctx: dict[str, object] = {key: ["ItemType.category@allItems.category"]}
+    read = planned_resolver_keys if key == DST_OPTIMIZER_PLANNED else fk_id_elision_keys
+
+    with pytest.raises(TypeError, match="expected the type the source guarantees, got list"):
+        _ = read(ctx)
+
+
+def test_stashed_strictness_reads_the_stashed_string_or_off_when_absent() -> None:
+    """The stashed strictness string answers; an absent stash reads as ``"off"``."""
+    assert stashed_strictness({DST_OPTIMIZER_STRICTNESS: "raise"}) == "raise"
+    assert stashed_strictness({}) == "off"
+
+
+def test_stashed_strictness_refuses_a_non_string_stash() -> None:
+    """A strictness stash that is not a string raises rather than reading as ``"off"``."""
+    with pytest.raises(TypeError, match="expected an instance of str, got int"):
+        stashed_strictness({DST_OPTIMIZER_STRICTNESS: 1})
 
 
 def test_publish_scoped_relations_handles_empty_and_generator_keys_when_active_and_inactive() -> (

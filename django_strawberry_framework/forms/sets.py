@@ -64,6 +64,7 @@ from django_strawberry_framework.utils.inputs import (
     make_shape_build_cache,
     reject_unknown_meta_keys,
 )
+from django_strawberry_framework.utils.typing import call_forwarded
 from django_strawberry_framework.write_mixins import (
     COMMON_WRITE_META_KEYS,
     MODEL_BACKED_WRITE_META_KEYS,
@@ -80,7 +81,6 @@ from django_strawberry_framework.write_mixins import (
     normalize_meta_field_selection,
     own_backing_class,
     require_backing_class,
-    require_model_class,
     require_non_delete_operation,
     require_subclass,
     resolve_backed_model_or_raise,
@@ -521,8 +521,12 @@ def _default_get_form(
     """
     # Both flavors' ``_validate_meta`` store a ``require_subclass``-checked form class. It is
     # called with the hook's kwargs mapping, which no static signature can check.
-    form_class = cast("Callable[..., forms.BaseForm]", type(self)._mutation_meta.form_class)
-    return form_class(**self.get_form_kwargs(info, data=data, files=files, instance=instance))
+    form_class = require(type(self)._mutation_meta.form_class, _is_form_class)
+    return call_forwarded(
+        form_class,
+        (),
+        self.get_form_kwargs(info, data=data, files=files, instance=instance),
+    )
 
 
 def _build_and_stash_form_input(
@@ -735,7 +739,7 @@ class DjangoModelFormMutation(_ModelFormMutationBase):
 
     @classmethod
     @override
-    def _resolve_model(cls, meta: type[object]) -> type[models.Model] | None:
+    def _resolve_model(cls, meta: type[object]) -> object:
         """Resolve the model from ``Meta.form_class._meta.model`` (the ``036`` seam override).
 
         Returns ``None`` for a missing ``form_class`` / a form with no ``_meta`` /
@@ -765,8 +769,9 @@ class DjangoModelFormMutation(_ModelFormMutationBase):
           ``form_class._meta.model``.
         - **no resolvable ``_meta.model``** - a ``ModelForm`` with no model raises
           (``_resolve_model`` returns ``None``). A non-model value is rejected by
-          ``require_model_class`` (the same class-creation gate the model flavor
-          uses, so a string / instance cannot leak to bind).
+          ``require_model_class`` inside ``resolve_backed_model_or_raise`` (the same
+          class-creation gate the model flavor uses, so a string / instance cannot
+          leak to bind).
         - **bad ``operation``** - missing or not in ``{"create", "update"}``
           (``"delete"`` is rejected - the form flavor has no delete pipeline,
           Decision 10) via ``require_non_delete_operation``.
@@ -801,16 +806,12 @@ class DjangoModelFormMutation(_ModelFormMutationBase):
             note="(A plain forms.Form belongs on DjangoFormMutation.)",
         )
 
-        model = require_model_class(
-            name,
-            resolve_backed_model_or_raise(
-                cls,
-                meta,
-                base_label="DjangoModelFormMutation",
-                key="form_class",
-                noun="ModelForm",
-            ),
+        model = resolve_backed_model_or_raise(
+            cls,
+            meta,
             base_label="DjangoModelFormMutation",
+            key="form_class",
+            noun="ModelForm",
         )
 
         operation = require_non_delete_operation("DjangoModelFormMutation", name, meta)

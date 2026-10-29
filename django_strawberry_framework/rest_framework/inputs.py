@@ -57,7 +57,7 @@ import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from types import GenericAlias
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from rest_framework import serializers
 from rest_framework.fields import empty
@@ -85,6 +85,7 @@ from django_strawberry_framework.utils.inputs import (
 from django_strawberry_framework.utils.relations import is_row_key_column, written_model_field
 from django_strawberry_framework.utils.strings import graphql_camel_name
 from django_strawberry_framework.utils.typing import object_result
+from django_strawberry_framework.write_mixins import require_model_class
 
 from .accessors import child_relation_of, choices_of
 from .serializer_converter import (
@@ -103,6 +104,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
     from django.db import models
+    from typing_extensions import TypeIs
 
     from .serializer_converter import DRFBaseSerializer, DRFField, DRFSerializer
 
@@ -112,6 +114,12 @@ if TYPE_CHECKING:
 # ``mutations.inputs`` / ``forms.inputs`` so the three ``<X>Input`` families never
 # share a module ``__dict__`` slot. Mirrors ``forms/inputs.py::INPUTS_MODULE_PATH``.
 SERIALIZER_INPUTS_MODULE_PATH: str = "django_strawberry_framework.rest_framework.inputs"
+
+
+def _is_serializer_class(value: object) -> TypeIs[type[DRFSerializer]]:
+    """Whether ``value`` is a DRF ``Serializer`` subclass, asked of its real MRO."""
+    return truth.is_subclass(value, serializers.Serializer)
+
 
 # The serializer-input namespace lifecycle trio, single-sited via
 # ``utils/inputs.py::make_input_namespace`` (spec-039 - the one-ledger shape
@@ -652,9 +660,14 @@ def serializer_model(serializer_class: type[DRFBaseSerializer]) -> type[models.M
     for the read-side ``models.Field``-keyed converters and what the write-source
     ownership guards resolve a ``source`` through (``write_source_key``). A plain
     ``Serializer`` (no ``Meta.model``) routes every field through the model-less path.
+    A declared ``Meta.model`` that is not a model class (a plain nested ``Serializer``
+    declaring one, which the mutation's own model gate never reads) raises
+    ``ConfigurationError``.
     """
-    # DRF's ``ModelSerializer`` contract: a declared ``Meta.model`` is the model class.
-    return cast("type[models.Model] | None", _serializer_meta_value(serializer_class, "model"))
+    model = _serializer_meta_value(serializer_class, "model")
+    if model is None:
+        return None
+    return require_model_class(truth.name(serializer_class), model, base_label="Serializer")
 
 
 def write_source_key(model: type[models.Model] | None, source: str) -> str:

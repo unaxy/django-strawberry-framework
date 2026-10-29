@@ -255,8 +255,8 @@ viewer cannot see.
   path walks a declared `RelatedFilter` or crosses a relation whose model a
   type scopes (`filters/sets.py::FilterSet._flat_leaf_walk`, over
   `utils/permissions.py::walk_declared_relation_path` with
-  `undeclared=True`: one `utils/permissions.py::RelationHop` per declared
-  branch, then one per relation segment
+  `undeclared=True`: one `utils/permissions.py::DeclaredHop` per declared
+  branch, then one `utils/permissions.py::UndeclaredHop` per relation segment
   `utils/relations.py::leading_relation_hops` reads past them, typed by
   `utils/querysets.py::relation_target_type`) answers as Django's ORM
   would if the rows each hop's target type hides did not exist
@@ -1006,9 +1006,9 @@ each hop's target type lets the request see:
 
 - **Hop resolution (finalize time, frozen in the plan).**
   `build_search_path_plan(definition, paths)` reads each relation path as
-  the filter side reads a flat leaf's path, one `RelationHop`
-  (`utils/permissions.py::RelationHop`) per relation it crosses, declared
-  or not:
+  the filter side reads a flat leaf's path, one hop
+  (`utils/permissions.py::RelationHop`: a `DeclaredHop` or an
+  `UndeclaredHop`) per relation it crosses:
   1. *Declared prefix.* When the declaring type has a `filterset_class`,
      the plan walks the path with
      `utils/permissions.py::walk_declared_relation_path` over that
@@ -1037,11 +1037,11 @@ each hop's target type lets the request see:
      relation is that relation), and each hop's type is
      `utils/querysets.py::relation_target_type` of the model the hop's
      join reaches. With a FilterSet the walk records them itself
-     (`RelationHop.target_type`); without one, the plan calls
+     (`UndeclaredHop.target_type`); without one, the plan calls
      `relation_target_type` per `leading_relation_hops` hop with
      `root=` the declaring type, so a hop re-entering the root's table
      (the same `_meta.concrete_model`) answers for the exact owner. A hop scopes only when that type
-     declares a `get_queryset` of its own (`RelationHop.scope`,
+     declares a `get_queryset` of its own (`UndeclaredHop.scope`,
      `utils/querysets.py::relation_visibility_type`): a model with no
      registered type, or a type keeping the identity default hook, reads
      the raw relation, since scoping would change no row. Search consumes

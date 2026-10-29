@@ -27,6 +27,7 @@ from django_strawberry_framework.types.finalizer import (
     _field_surface_names,
     _format_owner_model_mismatch_error,
     _format_owner_orderset_model_mismatch_error,
+    _warn_model_label_secondary_collapse,
 )
 from django_strawberry_framework.types.relations import PendingRelation
 
@@ -180,6 +181,26 @@ def test_incomplete_registry_registration_is_typed_at_finalize() -> None:
         match="registered DjangoType PrimaryType has no DjangoTypeDefinition",
     ):
         finalize_django_types()
+
+
+def test_model_label_collapse_warning_refuses_a_secondary_with_no_definition() -> None:
+    """A registered secondary carrying no definition is a typed error, not a strategy read."""
+
+    class GenrePrimaryType(DjangoType):
+        class Meta:
+            model = Genre
+            fields = ("id", "name")
+            primary = True
+
+    bare_secondary = type("BareGenreType", (DjangoType,), {})
+    registry.register(Genre, bare_secondary)
+
+    with pytest.raises(
+        ConfigurationError,
+        match="registered DjangoType BareGenreType has no DjangoTypeDefinition",
+    ):
+        _warn_model_label_secondary_collapse((Genre,))
+    assert registry.primary_for(Genre) is GenrePrimaryType
 
 
 def test_owner_model_mismatch_formatters_ride_shared_template() -> None:

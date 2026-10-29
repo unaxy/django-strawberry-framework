@@ -7,11 +7,13 @@ Channels scope adapters and hostile ``info.context`` reads have no HTTP mount
 """
 
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import NoReturn
 
 import pytest
 import pytest_django
 import strawberry
+from apps.products.models import Category, Entry, Item, Property
 from django.contrib.auth import get_user_model
 from django.db.models import Model
 from django.http import HttpRequest
@@ -25,6 +27,8 @@ from django_strawberry_framework.sets_mixins import ActiveInputPermissionMixin
 from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.permissions import (
     ChannelsRequestAdapter,
+    DeclaredHop,
+    UndeclaredHop,
     _channels_request_adapter,
     _fire_flat_relation_path_gates,
     _related_declarations,
@@ -39,6 +43,7 @@ from django_strawberry_framework.utils.permissions import (
     request_from_info,
     resolve_auth_aliases,
     run_active_input_permission_checks,
+    set_bound_definition,
     walk_declared_relation_path,
 )
 from django_strawberry_framework.utils.querysets import SyncMisuseError
@@ -581,14 +586,16 @@ def test_nested_branch_gate_denies_on_a_false_return() -> None:
     """A parent per-branch gate returning ``False`` denies the nested branch and is not recorded."""
     calls: list[str] = []
 
-    class _Child:
+    class _Child(ActiveInputPermissionMixin):
+        @override
         @classmethod
         def _run_permission_checks(
             cls,
-            _input_value: object,
-            _request: object,
+            input_value: object,
+            request: object,
             *,
             _fired: dict[type[object], set[str]] | None = None,
+            _bare: ActiveInputPermissionMixin | None = None,
             _depth: int = 0,
         ) -> None:
             calls.append("child._run")
@@ -726,6 +733,57 @@ def test_undeclared_walk_reads_no_relation_of_a_set_with_no_model() -> None:
         target_attr="filterset",
         undeclared=True,
     ) == ((), ("shelves", "code"))
+
+
+def test_undeclared_walk_reads_declared_hops_then_one_undeclared_hop_per_relation() -> None:
+    """Past the last declared hop the visibility reading walks each relation, recording its model.
+
+    The declared reading of the same path stops at the declared hop and hands
+    back every segment after it.
+    """
+
+    class EntrySet:
+        related_filters: dict[str, object] = {}
+        _meta = SimpleNamespace(model=Entry)
+
+    class ItemSet:
+        related_filters: dict[str, object] = {
+            "entries": _Rel("entries", EntrySet, target_attr="filterset"),
+        }
+        _meta = SimpleNamespace(model=Item)
+
+    path = "entries__property__category__name"
+    hops, remainder = walk_declared_relation_path(
+        ItemSet,
+        path,
+        related_attr="related_filters",
+        target_attr="filterset",
+        undeclared=True,
+    )
+    assert remainder == ("name",)
+    declared, *undeclared = hops
+    assert isinstance(declared, DeclaredHop)
+    assert (declared.owner, declared.declared_attr, declared.target) == (
+        ItemSet,
+        "entries",
+        EntrySet,
+    )
+    assert declared.related_obj is ItemSet.related_filters["entries"]
+    assert all(isinstance(hop, UndeclaredHop) for hop in undeclared)
+    assert [
+        (hop.owner, hop.declared_attr, hop.model)
+        for hop in undeclared
+        if isinstance(hop, UndeclaredHop)
+    ] == [(EntrySet, "property", Property), (None, "category", Category)]
+
+    declared_only, rest = walk_declared_relation_path(
+        ItemSet,
+        path,
+        related_attr="related_filters",
+        target_attr="filterset",
+    )
+    assert declared_only == (declared,)
+    assert rest == ("property", "category", "name")
 
 
 def test_walk_declared_relation_path_returns_the_hops_and_the_path_left_on_the_last_target() -> (
@@ -1099,14 +1157,16 @@ def test_run_active_input_permission_checks_double_dispatch_and_dedup() -> None:
     """Parent per-branch gate + child gate both fire once; child recurses via its own class."""
     calls: list[str] = []
 
-    class _Child:
+    class _Child(ActiveInputPermissionMixin):
+        @override
         @classmethod
         def _run_permission_checks(
             cls,
-            _input_value: object,
-            _request: object,
+            input_value: object,
+            request: object,
             *,
             _fired: dict[type[object], set[str]] | None = None,
+            _bare: ActiveInputPermissionMixin | None = None,
             _depth: int = 0,
         ) -> None:
             (_fired if _fired is not None else {}).setdefault(cls, set())
@@ -1319,17 +1379,19 @@ def test_related_depth_error_survives_hostile_child_qualname() -> None:
                 raise RuntimeError("qualname exploded")
             return object_result(super().__getattribute__, name)
 
-    class _Child(metaclass=_HostileMeta):
+    class _Child(ActiveInputPermissionMixin, metaclass=_HostileMeta):
         _MAX_LOGIC_DEPTH = 0
 
+        @override
         @classmethod
         def _run_permission_checks(
             cls,
-            _input_value: object,
-            _request: object,
+            input_value: object,
+            request: object,
             *,
-            _fired: dict[type[object], set[str]] | None,
-            _depth: int,
+            _fired: dict[type[object], set[str]] | None = None,
+            _bare: ActiveInputPermissionMixin | None = None,
+            _depth: int = 0,
         ) -> NoReturn:
             raise AssertionError("depth gate should fire before recursion")
 
@@ -1368,15 +1430,17 @@ def test_related_depth_error_survives_hostile_child_qualname() -> None:
 def test_run_active_input_permission_checks_falls_back_to_default_traversal_depth() -> None:
     """When child set defines no _MAX_LOGIC_DEPTH, traversal uses DEFAULT_SET_INPUT_TRAVERSAL_DEPTH."""
 
-    class _ChildWithoutDepthCap:
+    class _ChildWithoutDepthCap(ActiveInputPermissionMixin):
+        @override
         @classmethod
         def _run_permission_checks(
             cls,
-            _input_value: object,
-            _request: object,
+            input_value: object,
+            request: object,
             *,
-            _fired: dict[type[object], set[str]] | None,
-            _depth: int,
+            _fired: dict[type[object], set[str]] | None = None,
+            _bare: ActiveInputPermissionMixin | None = None,
+            _depth: int = 0,
         ) -> NoReturn:
             raise AssertionError("depth gate should fire before recursion")
 
@@ -1572,6 +1636,114 @@ def test_run_active_input_permission_checks_safely_handles_missing_target_attr()
         related_attr="related_filters",
     )
     assert fired.get(_SampleFilter) == {"check_duck_permission"}
+
+
+class _DuckChildSet:
+    """A class answering ``_run_permission_checks`` without the shared permission facade."""
+
+    ran: bool = False
+
+    @classmethod
+    def _run_permission_checks(cls, *_args: object, **_kwargs: object) -> None:
+        cls.ran = True
+
+
+class _FacadeSet(ActiveInputPermissionMixin):
+    """A set class carrying the facade, whose INSTANCE is not a set class."""
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        _DuckChildSet,
+        type("_Plain", (), {}),
+        _FacadeSet(),
+        "ChildFilter",
+    ],
+    ids=[
+        "duck-class",
+        "plain-class",
+        "facade-instance",
+        "unresolved-name",
+    ],
+)
+def test_a_related_target_that_is_not_a_permission_set_is_refused_before_the_branch_gate(
+    target: object,
+) -> None:
+    """A related target other than ``None`` or a facade set class raises; the branch gate never fires.
+
+    The leaf gates of the level have already run; the refusal comes before the
+    child dispatch and before the parent's per-branch gate, so nothing reads the
+    branch as checked.
+    """
+    calls: list[str] = []
+    related_obj = type("Rel", (), {"filterset": target})()
+
+    class _Parent(ActiveInputPermissionMixin):
+        @override
+        @classmethod
+        def _permission_walk_gates(
+            cls,
+            input_value: object,
+        ) -> tuple[tuple[type[object], str], ...]:
+            return ()
+
+        @override
+        @classmethod
+        def _active_permission_targets(
+            cls,
+            input_value: object,
+        ) -> tuple[list[str], list[tuple[str, object, object]]]:
+            return ["name"], [("child", related_obj, {"x": 1})]
+
+        @override
+        @staticmethod
+        def _invoke_permission_method(
+            bare_instance: ActiveInputPermissionMixin,
+            field_path: str,
+            request: object,
+            *,
+            fired: set[str] | None = None,
+        ) -> None:
+            invoke_permission_method(bare_instance, field_path, request, fired=fired)
+
+        def check_name_permission(self, _request: object) -> bool:
+            calls.append("parent.name")
+            return True
+
+        def check_child_permission(self, _request: object) -> bool:
+            calls.append("parent.child")
+            return True
+
+    _DuckChildSet.ran = False
+    fired: dict[type[object], set[str]] = {}
+    with pytest.raises(TypeError, match="expected the type the source guarantees"):
+        run_active_input_permission_checks(
+            _Parent,
+            {"name": "v", "child": {"x": 1}},
+            HttpRequest(),
+            fired=fired,
+            bare=object.__new__(_Parent),
+            target_attr="filterset",
+            related_attr="related_filters",
+        )
+    assert calls == ["parent.name"]
+    assert fired[_Parent] == {"check_name_permission"}
+    assert not _DuckChildSet.ran
+
+
+def test_set_bound_definition_refuses_an_owner_slot_that_is_not_a_definition() -> None:
+    """The class's own ``_owner_definition`` is a definition or ``None``; anything else raises."""
+
+    class _BoundToJunk(ActiveInputPermissionMixin):
+        _owner_definition = object()
+
+    class _Unbound(ActiveInputPermissionMixin):
+        _owner_definition = None
+
+    with pytest.raises(TypeError, match="expected an instance of DjangoTypeDefinition"):
+        set_bound_definition(_BoundToJunk)
+    assert set_bound_definition(_Unbound) is None
 
 
 def test_channels_request_adapter_idempotent_wrapping() -> None:

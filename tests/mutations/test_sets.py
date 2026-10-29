@@ -95,6 +95,7 @@ from django_strawberry_framework.types.base import (
 )
 from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.inputs import RELATION_SINGLE, SCALAR
+from django_strawberry_framework.write_mixins import resolve_backed_model_or_raise
 from tests._idioms import definition_raises, module_binding, pickle_roundtrip
 from tests.optimizer import _link_models
 
@@ -1764,8 +1765,10 @@ def test_model_and_form_validate_ride_shared_meta_helpers() -> None:
     assert "normalize_meta_field_selection" in model_names
     assert "model_backed_permission_and_lock" in model_names
 
+    # The backed flavors reach the model-class gate through the shared no-model raise.
+    assert "require_model_class" in resolve_backed_model_or_raise.__code__.co_names
     form_names = DjangoModelFormMutation._validate_meta.__code__.co_names
-    assert "require_model_class" in form_names
+    assert "resolve_backed_model_or_raise" in form_names
     assert "model_backed_permission_and_lock" in form_names
     assert "_normalized_form_field_selection" in form_names
 
@@ -1774,7 +1777,7 @@ def test_model_and_form_validate_ride_shared_meta_helpers() -> None:
     assert "require_model_class" not in plain_names
     assert "model_backed_permission_and_lock" not in plain_names
 
-    assert "require_model_class" in SerializerMutation._validate_meta.__code__.co_names
+    assert "resolve_backed_model_or_raise" in SerializerMutation._validate_meta.__code__.co_names
     assert (
         "model_backed_permission_and_lock"
         not in SerializerMutation._validate_meta.__code__.co_names

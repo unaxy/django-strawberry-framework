@@ -359,7 +359,7 @@ def _resolve_id_default(
     """
     del info  # Strawberry's Relay machinery passes it by keyword; the default id never reads it
     # A lazy proxy stands in for the row it wraps.
-    root = cast("models.Model", unwrap_lazy_object(root))
+    root = unwrap_lazy_object(root)
     id_attr = cls.resolve_id_attr()
     if id_attr == "pk":
         # The row's real class, read without asking the row.

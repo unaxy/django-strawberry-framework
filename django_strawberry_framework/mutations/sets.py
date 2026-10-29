@@ -44,7 +44,7 @@ never resolved.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, ClassVar, TypeGuard, cast, get_origin
+from typing import TYPE_CHECKING, Any, ClassVar, TypeGuard, get_origin
 
 import strawberry
 from strawberry.types.base import StrawberryList, StrawberryObjectDefinition
@@ -401,7 +401,7 @@ class DjangoMutation(_ModelResolverSeamsBase, metaclass=DjangoMutationMetaclass)
     _model_fields_by_attr: ClassVar[ModelFieldIndex | None] = None
 
     @classmethod
-    def _resolve_model(cls, meta: type[object]) -> type[models.Model] | None:
+    def _resolve_model(cls, meta: type[object]) -> object:
         """Resolve the mutation's Django model from ``Meta`` (the model-resolution seam).
 
         The model flavor's source is ``Meta.model``. This is the overridable hook
@@ -409,9 +409,10 @@ class DjangoMutation(_ModelResolverSeamsBase, metaclass=DjangoMutationMetaclass)
         serializer flavor (``Meta.serializer_class.Meta.model``) replace so they
         supply the model WITHOUT a literal ``Meta.model``, without re-opening the
         base validation (spec-036 Decision 5). A subclass overrides this
-        classmethod to change the resolved model.
+        classmethod to change the resolved model. The answer is the declaration
+        as written (``None`` when absent); ``_validate_meta`` type-gates it.
         """
-        return cast("type[models.Model] | None", truth.static_attr(meta, "model"))
+        return truth.static_attr(meta, "model")
 
     @classmethod
     def _validate_meta(cls, meta: object) -> _ValidatedMutationMeta:

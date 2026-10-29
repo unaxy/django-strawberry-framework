@@ -72,6 +72,7 @@ from django_strawberry_framework.types.base import (
     ALLOWED_META_KEYS,
     DEFERRED_META_KEYS,
     _is_auto_annotation,
+    _is_django_type_class,
     _meta_optimizer_hints,
     _select_fields,
     _validate_connection,
@@ -112,6 +113,21 @@ pytestmark = pytest.mark.usefixtures("isolate_global_registry")
 # ---------------------------------------------------------------------------
 # Registry behaviour
 # ---------------------------------------------------------------------------
+
+
+def test_is_django_type_class_answers_by_the_real_mro() -> None:
+    """Only a ``DjangoType`` subclass passes: not an instance claiming it, not another class."""
+
+    class CategoryType(DjangoType):
+        class Meta:
+            model = Category
+            fields = CATEGORY_SCALAR_FIELDS
+
+    assert _is_django_type_class(CategoryType)
+    assert _is_django_type_class(DjangoType)
+    assert not _is_django_type_class(Category)
+    assert not _is_django_type_class(None)
+    assert not _is_django_type_class(ClaimsClass(type))
 
 
 def test_registry_get_returns_none_for_unregistered_model() -> None:

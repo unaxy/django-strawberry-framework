@@ -210,6 +210,7 @@ from django_strawberry_framework.utils.relations import (
     is_single_column_foreign_key,
     written_model_field,
 )
+from django_strawberry_framework.utils.typing import call_forwarded
 from django_strawberry_framework.utils.write_transaction import (
     assert_no_target_drift,
     base_locked_queryset,
@@ -241,6 +242,7 @@ from .accessors import (
 )
 from .hook_context import SerializerHookContext, UploadMetadata
 from .inputs import (
+    _is_serializer_class,
     raise_writable_source_ownership_errors,
     runtime_validated_data_fields,
     serializer_canonical_input_name,
@@ -259,7 +261,7 @@ from .serializer_converter import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
+    from collections.abc import Generator, Iterable, Iterator, Mapping
     from typing import Protocol, TypeAlias
 
     from django.db import models
@@ -2728,12 +2730,8 @@ def _serializer_write_step(
     validation branch builds its key map on that failure path only; a successful
     write never builds one.
     """
-    # Class validation gated ``Meta.serializer_class`` to a ``ModelSerializer`` subclass; it is
-    # called with the merged kwargs mapping, which no static signature can check.
-    serializer_class = cast(
-        "Callable[..., DRFSerializer]",
-        mutation_cls._mutation_meta.serializer_class,
-    )
+    # Class validation gated ``Meta.serializer_class`` to a ``ModelSerializer`` subclass.
+    serializer_class = require(mutation_cls._mutation_meta.serializer_class, _is_serializer_class)
     pipeline = require_write_pipeline()
     alias = pipeline.alias
     # The authorized pk is an IMMUTABLE snapshot captured by the pipeline skeleton
@@ -2856,7 +2854,7 @@ def _guarded_serializer_write(
     instance: models.Model | None,
     provided_data: dict[str, object],
     *,
-    serializer_class: Callable[..., DRFSerializer],
+    serializer_class: type[DRFSerializer],
     alias: str,
     authorized_pk: object,
     hook_context: SerializerHookContext,
@@ -2903,7 +2901,9 @@ def _guarded_serializer_write(
         alias=alias,
         hook_context=hook_context,
     )
-    serializer = serializer_class(**kwargs)
+    # The merged mapping comes from the consumer-overridable ``get_serializer_kwargs``,
+    # whose keyword set no static signature can check.
+    serializer = call_forwarded(serializer_class, (), kwargs)
 
     # PROVE the schema-time write surface (GraphQL input + Meta.injected_fields)
     # and the runtime serializer AGREE before ``is_valid()`` runs, so a schema hook that

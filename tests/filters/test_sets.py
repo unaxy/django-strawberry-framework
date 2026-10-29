@@ -172,6 +172,7 @@ from django_strawberry_framework.utils._narrowing import (
     require,
 )
 from django_strawberry_framework.utils.input_values import UNSET
+from django_strawberry_framework.utils.permissions import DeclaredHop, UndeclaredHop
 from django_strawberry_framework.utils.relations import ClassifiedPath, classify_path
 from django_strawberry_framework.utils.typing import object_result
 from django_strawberry_framework.utils.widgets import multi_widget_keys
@@ -21151,13 +21152,132 @@ def test_undeclared_relation_to_a_hooked_type_walks_one_hop_per_relation() -> No
     walk = BranchPaths._flat_leaf_walk(filters["shelves__books__title"])
     assert walk is not None
     hops, rest = walk
-    assert [(hop.declared, hop.declared_attr, hop.model) for hop in hops] == [
-        (False, "shelves", library_models.Shelf),
-        (False, "books", library_models.Book),
+    assert all(isinstance(hop, UndeclaredHop) for hop in hops)
+    assert [(hop.declared_attr, hop.model) for hop in hops if isinstance(hop, UndeclaredHop)] == [
+        ("shelves", library_models.Shelf),
+        ("books", library_models.Book),
     ]
     assert [hop.owner for hop in hops] == [BranchPaths, None]
     assert rest == "title"
     assert BranchPaths._flat_leaf_walk(filters["by_pk"]) is None
+
+
+class _HopShelfFilter(FilterSet):
+    """A model-backed target set for the declared-hop reads below."""
+
+    class Meta:
+        model = library_models.Shelf
+        fields = ("code",)
+
+
+class _HopModellessFilter(FilterSet):
+    """A target set declaring no ``Meta.model``."""
+
+
+class _HopBranchFilter(FilterSet):
+    """The set declaring the ``shelves`` branch the declared-hop reads walk."""
+
+    shelves = RelatedFilter(_HopShelfFilter, field_name="shelves")
+
+    class Meta:
+        model = library_models.Branch
+        fields = ("name",)
+
+
+def _declared_hop(
+    *,
+    owner: type[object] = _HopBranchFilter,
+    related_obj: object = None,
+    target: type[object] | None = _HopShelfFilter,
+) -> DeclaredHop:
+    """A declared ``shelves`` hop, its declaration ``_HopBranchFilter``'s unless one is given."""
+    declaration = (
+        _HopBranchFilter.related_filters["shelves"] if related_obj is None else related_obj
+    )
+    return DeclaredHop(owner, "shelves", declaration, target)
+
+
+def test_a_declared_filter_hop_reads_its_declaring_set_and_relation() -> None:
+    """A declared hop answers for its owner set, its ``RelatedFilter``, its relation and its model."""
+    hop = _declared_hop()
+    owner, declaration = sets_module._filter_declaration(hop)
+    assert owner is _HopBranchFilter
+    assert declaration is _HopBranchFilter.related_filters["shelves"]
+    assert sets_module._hop_target_set(hop) is _HopShelfFilter
+    assert sets_module._hop_relation(hop) == "shelves"
+    assert sets_module._hop_model(hop) is library_models.Shelf
+    assert sets_module._hop_source_model((hop,), 0) is library_models.Branch
+
+
+@pytest.mark.parametrize(
+    "hop",
+    [
+        pytest.param(_declared_hop(owner=library_models.Branch), id="owner-not-a-filter-set"),
+        pytest.param(_declared_hop(related_obj=object()), id="declaration-not-a-related-filter"),
+    ],
+)
+def test_a_declared_filter_hop_off_the_filter_family_is_refused(hop: DeclaredHop) -> None:
+    """A filter set's walk reads only ``RelatedFilter`` declarations on ``FilterSet`` classes."""
+    with pytest.raises(TypeError):
+        sets_module._filter_declaration(hop)
+    with pytest.raises(TypeError):
+        sets_module._hop_relation(hop)
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        pytest.param(None, id="unresolved"),
+        pytest.param(library_models.Shelf, id="not-a-filter-set"),
+    ],
+)
+def test_a_declared_hop_with_no_target_set_is_refused(target: type[object] | None) -> None:
+    """A hop's target set is read only once the walk resolved it to a ``FilterSet``."""
+    hop = _declared_hop(target=target)
+    with pytest.raises(TypeError, match="expected the type the source guarantees"):
+        sets_module._hop_target_set(hop)
+    with pytest.raises(TypeError, match="expected the type the source guarantees"):
+        sets_module._hop_model(hop)
+
+
+def test_a_declared_hop_whose_target_set_has_no_model_is_refused() -> None:
+    """A resolved branch target declares ``Meta.model``; one declaring none reaches no model."""
+    hop = _declared_hop(target=_HopModellessFilter)
+    with pytest.raises(TypeError, match="expected the type the source guarantees"):
+        sets_module._hop_model(hop)
+
+
+@pytest.mark.parametrize(
+    "owner",
+    [
+        pytest.param(library_models.Branch, id="not-a-filter-set"),
+        pytest.param(_HopModellessFilter, id="filter-set-without-model"),
+    ],
+)
+def test_an_owner_of_a_walked_hop_with_no_model_is_refused(owner: type[object]) -> None:
+    """The model a hop starts on is its owner set's ``Meta.model``; an owner with none has none."""
+    hop = UndeclaredHop(owner, "shelves", library_models.Shelf, None)
+    with pytest.raises(TypeError, match="expected the type the source guarantees"):
+        sets_module._hop_source_model((hop,), 0)
+
+
+def test_a_leaf_walking_no_hop_has_no_chain_to_apply() -> None:
+    """Only a leaf ``_flat_leaf_walk`` reads or a projected copy reaches the relation-leaf path."""
+
+    class BranchLeaves(FilterSet):
+        by_pk = NumberFilter(field_name="pk")
+
+        class Meta:
+            model = library_models.Branch
+            fields = ("name",)
+
+    rows = library_models.Branch.objects.all()
+    instance = BranchLeaves(data={}, queryset=rows)
+    leaf = instance.filters["by_pk"]
+    with pytest.raises(TypeError, match="expected an instance of _LeafChain, got NoneType"):
+        instance._absent_leaf_applies(leaf, 1)
+    with pytest.raises(TypeError, match="expected an instance of _LeafChain, got NoneType"):
+        instance._apply_relation_leaf(rows, leaf, 1, supplied=True)
 
 
 @pytest.mark.django_db

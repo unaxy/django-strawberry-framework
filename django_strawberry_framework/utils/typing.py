@@ -186,8 +186,10 @@ def call_forwarded(
     The override that spells its parameters ``*args: object, **kwargs: object``
     takes whatever the installed upstream version accepts, so a parameter
     upstream adds later passes through, and the arguments are checked where they
-    belong: by ``method`` itself when it runs. Only for that verbatim forward: a
-    call the package composes itself spells its arguments, so the checker sees them.
+    belong: by ``method`` itself when it runs. The same holds for a keyword mapping a
+    consumer-overridable hook composes (``get_form_kwargs``, ``get_serializer_kwargs``)
+    for a consumer-supplied class. Only for those forwards: a call the package composes
+    itself spells its arguments, so the checker sees them.
     """
     return method(*args, **kwargs)
 

@@ -51,7 +51,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, Generic, TypeVar
 
 import strawberry
 from strawberry import relay
@@ -65,8 +65,10 @@ from django_strawberry_framework.registry import (
     iter_subsystem_clears,
     registry,
 )
+from django_strawberry_framework.sets_mixins import RelatedSetTargetMixin, declaration_map
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
+    is_dict,
     list_of,
     read_attr,
     require,
@@ -74,11 +76,12 @@ from django_strawberry_framework.utils._narrowing import (
 )
 from django_strawberry_framework.utils.imports import loaded_attr
 from django_strawberry_framework.utils.permissions import set_bound_definition
-from django_strawberry_framework.utils.relations import instance_accessor
+from django_strawberry_framework.utils.relations import instance_accessor, is_model_class
 from django_strawberry_framework.utils.typing import object_result
 
 from .base import DEFAULT_RELATION_SHAPE
 from .converters import resolved_relation_annotation
+from .definition import DjangoTypeDefinition
 from .relay import (
     _accepts_model_label_decode,
     _check_composite_pk_for_relay_node,
@@ -92,20 +95,17 @@ from .relay import (
 from .resolvers import _attach_file_resolvers, _attach_relation_resolvers
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Sequence
 
     from django.db import models
 
-    from django_strawberry_framework.filters.base import RelatedFilter
     from django_strawberry_framework.filters.sets import FilterSet
     from django_strawberry_framework.optimizer.field_meta import FieldMeta
-    from django_strawberry_framework.orders.base import RelatedOrder
     from django_strawberry_framework.orders.sets import OrderSet
     from django_strawberry_framework.utils.inputs import GeneratedInputArgumentsFactory
     from django_strawberry_framework.utils.typing import ModelField
 
     from .base import DjangoType
-    from .definition import DjangoTypeDefinition
     from .relations import PendingRelation
 
 # The sidecar family one phase-2.5 binding pass runs over: every hook in one
@@ -352,8 +352,9 @@ def _audit_model_label_routing(multi_type_models: tuple[type[models.Model], ...]
         if emitter is None:
             continue
         # ``_audit_primary_ambiguity`` already rejected every multi-type model
-        # without a declared primary, so ``primary`` is set.
-        primary = cast("type[DjangoType]", registry.primary_for(model))
+        # without a declared primary; a ``None`` primary has no definition either,
+        # so it would fail the raise below rather than slip through.
+        primary = registry.primary_for(model)
         primary_definition = registry.get_definition(primary)
         if primary_definition is None:
             raise ConfigurationError(
@@ -378,16 +379,28 @@ def _first_model_label_emitter(model: type[models.Model]) -> type[DjangoType] | 
     audit body stays readable.
     """
     for type_cls in registry.types_for(model):
-        definition = registry.get_definition(type_cls)
-        if definition is None:
-            raise ConfigurationError(
-                f"Cannot finalize {truth.name(model)}: registered DjangoType "
-                f"{truth.name(type_cls)} has no DjangoTypeDefinition.",
-            )
-        strategy = definition.effective_globalid_strategy
+        strategy = _definition_or_raise(model, type_cls).effective_globalid_strategy
         if _emits_model_label(strategy):
             return type_cls
     return None
+
+
+def _definition_or_raise(
+    model: type[models.Model],
+    type_cls: type[DjangoType],
+) -> DjangoTypeDefinition:
+    """Return ``type_cls``'s registered definition, raising when it has none.
+
+    ``registry.register()`` accepts a type without a definition, so a model-label
+    audit reading a registered type's strategy refuses that type by name.
+    """
+    definition = registry.get_definition(type_cls)
+    if definition is None:
+        raise ConfigurationError(
+            f"Cannot finalize {truth.name(model)}: registered DjangoType "
+            f"{truth.name(type_cls)} has no DjangoTypeDefinition.",
+        )
+    return definition
 
 
 def _warn_model_label_secondary_collapse(
@@ -420,11 +433,7 @@ def _warn_model_label_secondary_collapse(
             for type_cls in registry.types_for(model)
             if type_cls is not primary
             and _emits_model_label(
-                # Every registered type carries a definition (``register_with_definition``).
-                cast(
-                    "DjangoTypeDefinition",
-                    registry.get_definition(type_cls),
-                ).effective_globalid_strategy,
+                _definition_or_raise(model, type_cls).effective_globalid_strategy,
             )
         )
         if not secondaries:
@@ -526,9 +535,10 @@ def _register_relation_connection_teardown(
         # The class's own namespace on purpose: the three branches below key off the entry
         # being ABSENT (3.14+) and off dict IDENTITY (<= 3.13). ``inspect.get_annotations``
         # never returns ``None`` and hands back a fresh dict, collapsing both.
-        current_annotations = cast(
-            "dict[str, object] | None",
-            truth.class_dict(type_cls).get("__annotations__"),
+        # Python stores a class's own ``__annotations__`` entry as a dict.
+        raw_annotations = truth.class_dict(type_cls).get("__annotations__")
+        current_annotations = (
+            None if raw_annotations is None else require(raw_annotations, is_dict)
         )
         if current_annotations is None:
             # Python 3.14+ (PEP 649): the class ``__dict__`` never carries a
@@ -638,8 +648,8 @@ def _synthesize_relation_connections() -> None:
                 # naming a consumer-authored relation already raised at type
                 # creation (Decision 7).
                 continue
-            # A many-side relation always names its related model.
-            target_type = registry.get(cast("type[models.Model]", field.related_model))
+            # A many-side relation always names its related model class.
+            target_type = registry.get(require(field.related_model, is_model_class))
             if target_type is None or not implements_relay_node(target_type):
                 if shapes.get(name) in ("connection", "both"):
                     target_label = (
@@ -1178,7 +1188,10 @@ def _bind_set_owner_common(
         return
     before_second_owner_check(set_cls, previous, definition)
     # ``related_filters`` / ``related_orders``: the set metaclass's name-keyed declarations.
-    related = cast("Mapping[str, object]", truth.static_attr(set_cls, related_attr, {}) or {})
+    related: dict[str, RelatedSetTargetMixin[object]] = declaration_map(
+        truth.static_attr(set_cls, related_attr, {}),
+        RelatedSetTargetMixin,
+    )
     for field_name in related:
         prev_target = previous.related_target_for(field_name)
         new_target = definition.related_target_for(field_name)
@@ -1799,11 +1812,13 @@ def _expand_orderset(orderset_cls: type[OrderSet]) -> None:
     subpass-2 boundary -- so an unresolved ``RelatedOrder('...')`` rewraps as
     ``ConfigurationError`` with ``__cause__`` preserved here.
     """
+    from django_strawberry_framework.orders.base import RelatedOrder  # noqa: PLC0415 - binds only a subsystem the consumer imported
+
     _ = orderset_cls.get_fields()
     # The metaclass stores ``related_orders`` from ``collect_related_declarations``.
-    related_orders = cast(
-        "Mapping[str, RelatedOrder]",
+    related_orders = declaration_map(
         truth.static_attr(orderset_cls, "related_orders", {}),
+        RelatedOrder,
     )
     for related in related_orders.values():
         _ = related.orderset
@@ -1821,14 +1836,16 @@ def _audit_unregistered_related_filter_targets(wired: list[type[FilterSet]]) -> 
     sibling of this error). The walk is transitive with a visited set; cyclic
     cross-references (``BookFilter`` <-> ``ShelfFilter``) are legal.
     """
+    from django_strawberry_framework.filters.base import RelatedFilter  # noqa: PLC0415 - binds only a subsystem the consumer imported
+
     seen_filtersets: set[type[FilterSet]] = set(wired)
     pending_filtersets: list[type[FilterSet]] = list(wired)
     while pending_filtersets:
         filterset_cls = pending_filtersets.pop()
         # The metaclass stores ``related_filters`` from ``collect_related_declarations``.
-        related_filters = cast(
-            "Mapping[str, RelatedFilter]",
-            truth.static_attr(filterset_cls, "related_filters", {}) or {},
+        related_filters = declaration_map(
+            truth.static_attr(filterset_cls, "related_filters", {}),
+            RelatedFilter,
         )
         for field_name, related_filter in related_filters.items():
             child_filterset = related_filter.filterset
@@ -2022,7 +2039,7 @@ def _audit_globalid_filter_strategies(wired: list[type[FilterSet]]) -> None:
 
     for filterset_cls in wired:
         # Subpass 1 bound every wired filterset's owner before this audit runs.
-        owner = cast("DjangoTypeDefinition", set_bound_definition(filterset_cls))
+        owner = require_instance(set_bound_definition(filterset_cls), DjangoTypeDefinition)
         for field_name, filter_instance in filterset_cls._filter_table().items():
             if not isinstance(filter_instance, GlobalIDFilter | GlobalIDMultipleChoiceFilter):
                 continue

@@ -622,7 +622,7 @@ _active_budget: ContextVar[OperationLease[_RequestBudget] | None] = ContextVar(
 
 
 class _BudgetScope:
-    """One armed budget's lease, the token that restores the enclosing one, and who owns it.
+    """One armed budget's policy and lease, the token restoring the enclosing one, and its owner.
 
     The first two answer different questions. The lease is what every context
     holding it - this one and every copy taken from it - reads through, so
@@ -638,17 +638,28 @@ class _BudgetScope:
     come. Once that has happened this scope no longer has a binding of its own
     to end, and ending it again would be a used token rather than a restore.
 
+    ``policy`` is the private snapshot the lease's budget holds, kept here so
+    the arming caller charges the operation's own policy without a second read
+    of the variable it has just set.
+
     ``__slots__`` and not a ``NamedTuple``: ownership is settled after the scope
     is built, by whoever adopts it.
     """
 
-    __slots__: tuple[str, ...] = ("adopted", "lease", "token")
+    __slots__: tuple[str, ...] = (
+        "adopted",
+        "lease",
+        "policy",
+        "token",
+    )
 
     def __init__(
         self,
+        policy: ResourcePolicy,
         lease: OperationLease[_RequestBudget],
         token: Token[OperationLease[_RequestBudget] | None],
     ) -> None:
+        self.policy: ResourcePolicy = policy
         self.lease: OperationLease[_RequestBudget] = lease
         self.token: Token[OperationLease[_RequestBudget] | None] = token
         self.adopted: bool = False
@@ -728,7 +739,7 @@ def begin_resource_budget(context: object, policy: ResourcePolicy) -> _BudgetSco
     deadline = _absolute_deadline(armed)
     _publish_budget_mirror(context, armed, deadline)
     lease = OperationLease(_RequestBudget(armed, deadline, _AdmissionVerdict()))
-    return _BudgetScope(lease, _active_budget.set(lease))
+    return _BudgetScope(armed, lease, _active_budget.set(lease))
 
 
 def budget_resume_binding(
