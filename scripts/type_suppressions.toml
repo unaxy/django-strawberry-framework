@@ -4,8 +4,6 @@
 
 "django_strawberry_framework/__init__.py::__getattr__" = { reportAny = 1, reportExplicitAny = 1 }
 "django_strawberry_framework/_completion.py::CompletionExecutionContext.complete_list_value" = { cast = 1 }
-"django_strawberry_framework/_completion.py::_completion_method" = { cast = 1 }
-"django_strawberry_framework/_completion.py::_syntax_shape" = { cast = 1 }
 "django_strawberry_framework/_cross_web_patches.py::_captured_upstream_body_getter" = { cast = 1 }
 "django_strawberry_framework/_cross_web_patches.py::apply" = { reportAttributeAccessIssue = 1 }
 "django_strawberry_framework/_django_patches.py::_disallowed_connection_methods" = { cast = 1, reportAttributeAccessIssue = 1 }
@@ -271,15 +269,7 @@
 "examples/fakeshop/apps/products/serializers.py::RenamedRelationItemSerializer.Meta" = { reportIncompatibleVariableOverride = 1 }
 "examples/fakeshop/apps/products/services.py::discover_providers" = { reportAny = 1 }
 "examples/fakeshop/drf_serializers.py::ModelSerializerBase.Meta" = { reportIncompatibleVariableOverride = 1 }
-"examples/fakeshop/test_query/test_completion_lifecycle.py::Observe.get_results" = { cast = 1 }
-"examples/fakeshop/test_query/test_completion_lifecycle.py::Observe.on_operation" = { cast = 1 }
-"examples/fakeshop/test_query/test_completion_lifecycle.py::make_schema.ProbeBranch.names" = { cast = 2 }
-"examples/fakeshop/test_query/test_completion_lifecycle.py::make_schema.ProbeBranch.values" = { cast = 2 }
-"examples/fakeshop/test_query/test_completion_lifecycle.py::make_schema.Query.branch" = { cast = 2 }
-"examples/fakeshop/test_query/test_completion_lifecycle.py::make_schema.Query.branches" = { cast = 1 }
 "examples/fakeshop/test_query/test_completion_lifecycle.py::make_schema.Tracing.complete_list_value" = { cast = 1 }
-"examples/fakeshop/test_query/test_completion_lifecycle.py::test_live_late_errors" = { cast = 1 }
-"examples/fakeshop/test_query/test_completion_lifecycle.py::test_live_sync_bridge_mutation_orm" = { cast = 1 }
 "examples/fakeshop/test_query/test_connection_pagination_api.py::_TenantScopedGenreQuerySet.query" = { reportIncompatibleVariableOverride = 1 }
 "examples/fakeshop/test_query/test_debug_extension_api.py::install_probe_schema.Query.broken_non_null" = { reportReturnType = 1 }
 "examples/fakeshop/test_query/test_debug_toolbar_api.py::_debug_toolbar_cache_state" = { reportUnknownMemberType = 2 }
@@ -289,8 +279,6 @@
 "examples/fakeshop/test_query/test_extension_isolation_api.py::_ladder_schema" = { reportArgumentType = 1 }
 "examples/fakeshop/test_query/test_extension_isolation_api.py::_rebuild_the_box" = { reportCallIssue = 1 }
 "examples/fakeshop/test_query/test_globalid_naming_api.py::shadowing_child_schema.ChildCategoryNode.Meta" = { reportIncompatibleVariableOverride = 1 }
-"examples/fakeshop/test_query/test_library_api.py::_post_edition_locating_write" = { cast = 1 }
-"examples/fakeshop/test_query/test_library_api.py::_post_printing_write" = { cast = 1 }
 "examples/fakeshop/test_query/test_library_api.py::_unplanned_relation_holder_schema.HolderOwnLoanType.book" = { reportAny = 1 }
 "examples/fakeshop/test_query/test_library_api.py::test_library_unplanned_relations_keep_their_link_columns" = { cast = 1 }
 "examples/fakeshop/test_query/test_library_shapes_api.py::_hold.Query.parents" = { reportAny = 1 }
@@ -552,7 +540,6 @@
 "tests/rest_framework/test_sets.py::test_validate_nested_fields_rejects_malformed_entries.MalformedEntries.items" = { reportIncompatibleMethodOverride = 1 }
 "tests/rest_framework/test_sets.py::test_validate_nested_fields_rejects_non_plain_string_keys.HostileKeyEntries.items" = { reportIncompatibleMethodOverride = 1 }
 "tests/test_bench_common.py::test_bootstrap_refuses_an_unknown_mode_before_touching_django" = { reportArgumentType = 1 }
-"tests/test_completion.py::test_adapted_method_preserves_code_metadata_and_private_globals" = { cast = 2 }
 "tests/test_connection.py::_HostileConnQuerySet.__getitem__" = { reportIncompatibleMethodOverride = 1 }
 "tests/test_connection.py::_ListManager.all" = { reportIncompatibleMethodOverride = 1 }
 "tests/test_connection.py::_consumer_edge_schema" = { cast = 1 }
@@ -610,7 +597,6 @@
 "tests/test_relay_connection.py::_consumer_edge_book_connection_class" = { cast = 1 }
 "tests/test_relay_connection.py::test_consume_window_serves_the_connections_own_prefix_cursor" = { cast = 1 }
 "tests/test_relay_node_field.py::test_node_sync_async_get_queryset_raises_sync_misuse.AsyncCategoryNode.get_queryset" = { reportIncompatibleMethodOverride = 1 }
-"tests/test_relay_node_field.py::test_node_type_hint_from_a_lazy_resolve_node_return_does_not_poison_the_row.Query" = { reportAssignmentType = 1 }
 "tests/test_relay_node_field.py::test_stamp_node_type_passes_through_none_and_unstampable_objects" = { reportArgumentType = 1 }
 "tests/test_resource_policy.py::_AmountNoBoundCanExceed.__radd__" = { reportIncompatibleMethodOverride = 1 }
 "tests/test_resource_policy.py::_AmountNoBoundCanExceed.__rmul__" = { reportIncompatibleMethodOverride = 1 }
@@ -681,8 +667,6 @@
 "tests/types/test_definition_order.py::test_consumer_id_typo_lookalike_nodeid_string_on_relay_node_type_raises.CategoryNodeMy" = { reportUndefinedVariable = 1 }
 "tests/types/test_definition_order.py::test_consumer_id_typo_lookalike_nodeid_string_on_relay_node_type_raises.CategoryNodeNot" = { reportUndefinedVariable = 1 }
 "tests/types/test_definition_order.py::test_consumer_id_unresolved_non_nodeid_string_on_relay_node_type_raises.CategoryNode" = { reportUndefinedVariable = 1 }
-"tests/types/test_definition_order.py::test_explicit_graphql_field_name_collision_raises_at_schema_build.ExplicitNameCollisionType.custom" = { reportAny = 1 }
-"tests/types/test_definition_order.py::test_str_enum_graphql_field_name_collision_raises_naming_the_wire_text.EnumNameCollisionType.custom" = { reportAny = 1 }
 "tests/types/test_definition_relations.py::_malformed_definition" = { reportArgumentType = 2 }
 "tests/types/test_definition_relations.py::test_custom_id_detection_normalizes_the_resolve_id_attr_result_under_its_guard._Node.resolve_id_attr" = { cast = 1 }
 "tests/types/test_definition_relations.py::test_custom_id_detection_propagates_and_flags_consumer_relay_resolver._NonStringNode.resolve_id_attr" = { reportIncompatibleMethodOverride = 1 }

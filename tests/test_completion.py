@@ -15,7 +15,6 @@ import weakref
 from collections.abc import Iterator
 from contextvars import copy_context
 from types import FunctionType
-from typing import cast
 from unittest.mock import patch
 
 import pytest
@@ -87,14 +86,10 @@ def test_adapted_method_preserves_code_metadata_and_private_globals(site: str) -
     assert adapted.__globals__ is not original.__globals__
     assert adapted.__globals__["gather"] is completion._gather_with_cancel
     assert original.__globals__["gather"] is asyncio.gather
-    assert {
-        key: value
-        for key, value in cast("dict[str, object]", adapted.__globals__).items()
-        if key != "gather"
-    } == {
-        key: value
-        for key, value in cast("dict[str, object]", original.__globals__).items()
-        if key != "gather"
+    adapted_globals: dict[str, object] = dict(adapted.__globals__)
+    original_globals: dict[str, object] = dict(original.__globals__)
+    assert {key: value for key, value in adapted_globals.items() if key != "gather"} == {
+        key: value for key, value in original_globals.items() if key != "gather"
     }
 
 

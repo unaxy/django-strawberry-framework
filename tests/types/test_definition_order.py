@@ -743,10 +743,10 @@ def test_explicit_graphql_field_name_collision_raises_at_schema_build() -> None:
             managed = False
 
     class ExplicitNameCollisionType(DjangoType):
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(name="fooBar")  # pyright: ignore[reportAny]
-        def custom(self) -> int:
+        def _custom(self) -> int:
             return 1
+
+        custom: int = strawberry.field(resolver=_custom, name="fooBar")
 
         class Meta:
             model = ExplicitNameCollision
@@ -779,10 +779,10 @@ def test_str_enum_graphql_field_name_collision_raises_naming_the_wire_text() -> 
             managed = False
 
     class EnumNameCollisionType(DjangoType):
-        # basedpyright: strawberry.field's no-resolver overload (the decorator factory) returns Any
-        @strawberry.field(name=Spelling.FOO_BAR)  # pyright: ignore[reportAny]
-        def custom(self) -> int:
+        def _custom(self) -> int:
             return 1
+
+        custom: int = strawberry.field(resolver=_custom, name=Spelling.FOO_BAR)
 
         class Meta:
             model = EnumNameCollision
