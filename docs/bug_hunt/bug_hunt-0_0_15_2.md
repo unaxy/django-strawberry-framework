@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 385 done, 216 to do.
+Progress: 386 done, 215 to do.
 
 ## Done
 
@@ -2193,6 +2193,13 @@ Progress: 385 done, 216 to do.
   owner models, so the Django floor never reads an unconstrained decimal column there. README and spec-032 say so. Tests:
   `tests/utils/test_querysets.py`, `tests/test_relay_node_field.py`, `tests/mutations/test_resolvers.py`,
   `tests/rest_framework/test_resolvers.py`
+- [x] 682. FK-id elision fires into a type listing its relation primary key: for a target whose pk is a relation
+  (a one-to-one or `*_ptr` key), `types/definition.py::origin_has_custom_id_resolver` / `has_custom_id_resolver_for`
+  (`pk_is_relation`, threaded by `optimizer/walker.py::_plan_select_relation`) count only `resolve_id` and the NodeID
+  off-pk check, never the relation resolver the framework installs under the key's name, so `annotation { profile { id }
+  }` over a type listing `patron` reads the stored key with no JOIN. spec-015 and the `fk-id-elision` glossary term say
+  so. Tests: `tests/types/test_definition_relations.py`, `tests/optimizer/test_walker.py`,
+  `examples/fakeshop/test_query/test_library_api.py`
 
 ## Outside review of the fixes
 
@@ -2313,10 +2320,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   masked error, before the package's unstorable check runs (`forms/resolvers.py`). Found fact-finding 650
   The `forms/resolvers.py` docstrings describing the write-side check as "datetime or time" columns go stale with 650
   (DateField and DurationField columns are held too): fix them with this row.
-- [ ] 682. (robustness) `types/definition.py::origin_has_custom_id_resolver` counts any class-dict attribute named after
-  the primary key as a consumer `resolve_id`, including the relation resolver the framework installs for a listed
-  one-to-one pk, so FK-id elision never fires into such a type (fakeshop `annotation { profile { id } }` on
-  `PatronProfileType` keeps its JOIN). Found fixing 606
 - [ ] 683. (robustness) `nodes(ids:)` over a type selecting a to-one relation's `id` (`AnnotationType`, `profile { id }`)
   runs one query per row: the node fields dispatch without an optimizer pass, so the relation is never planned.
   Decide planning the node root fields or documenting the cost. Found fixing 606

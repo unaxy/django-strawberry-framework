@@ -1415,6 +1415,52 @@ def test_plan_elides_forward_fk_when_relay_target_id_reads_the_pk(shape: str) ->
     assert plan.fk_id_elisions == (f"{relation}@{relation}",)
 
 
+def _listed_one_to_one_pk_plan(
+    namespace_extra: dict[str, object] | None = None,
+) -> OptimizationPlan:
+    """Plan ``annotation { profile { id } }`` into a Relay type listing its one-to-one key."""
+    make_django_type("ListedPkPatronType", Patron, ("id", "name"))
+    make_django_type(
+        "ListedPkProfileType",
+        PatronProfile,
+        ("patron", "postal_code"),
+        namespace_extra=namespace_extra,
+    )
+    finalize_django_types()
+    return plan_optimizations([_sel("profile", selections=[_global_id()])], Annotation)
+
+
+def test_plan_elides_forward_fk_into_a_relay_target_listing_its_one_to_one_pk() -> None:
+    """B2: listing a one-to-one primary key keeps a Relay ``{ id }``-only child elided.
+
+    The relation resolver the framework installs under the listed key's name
+    builds the ``patron`` field, never the GlobalID, so the target counts no
+    custom id resolver and the stored ``profile_id`` column answers ``{ id }``.
+    """
+    plan = _listed_one_to_one_pk_plan()
+
+    assert plan.select_related == ()
+    assert plan.prefetch_related == ()
+    assert plan.only_fields == ("profile_id",)
+    assert plan.fk_id_elisions == ("profile@profile",)
+
+
+def _profile_postal_node_id(_cls: type[object], root: PatronProfile, *, info: object) -> str:
+    """A consumer ``resolve_id`` reading ``postal_code``, a column the stored key does not carry."""
+    del info
+    return f"P-{root.postal_code}"
+
+
+def test_plan_does_not_elide_into_a_listed_one_to_one_pk_target_with_custom_resolve_id() -> None:
+    """B2: a consumer ``resolve_id`` on a target keyed by a listed relation keeps the join."""
+    plan = _listed_one_to_one_pk_plan(
+        {"resolve_id": classmethod(_profile_postal_node_id)},
+    )
+
+    assert plan.select_related == ("profile",)
+    assert plan.fk_id_elisions == ()
+
+
 def _category_name_node_id(_cls: type[object], root: Category, *, info: object) -> str:
     """A consumer ``resolve_id`` reading ``name``, a column the stored key does not carry."""
     del info
@@ -1562,10 +1608,10 @@ def test_plan_uses_definition_custom_id_resolver_cache(monkeypatch: pytest.Monke
     _register_type_definition(Publisher, PublisherType)
     definition = registry.get_definition(PublisherType)
     assert definition is not None
-    calls: list[str] = []
+    calls: list[tuple[str, bool]] = []
 
-    def has_custom_id_resolver_for(pk_name: str) -> bool:
-        calls.append(pk_name)
+    def has_custom_id_resolver_for(pk_name: str, *, pk_is_relation: bool = False) -> bool:
+        calls.append((pk_name, pk_is_relation))
         return True
 
     monkeypatch.setattr(definition, "has_custom_id_resolver_for", has_custom_id_resolver_for)
@@ -1577,7 +1623,7 @@ def test_plan_uses_definition_custom_id_resolver_cache(monkeypatch: pytest.Monke
     finally:
         registry.clear()
 
-    assert calls == ["id"]
+    assert calls == [("id", False)]
     assert plan.select_related == ("publisher",)
     assert plan.fk_id_elisions == ()
     assert plan.only_fields == ("publisher_id", "publisher__id")
