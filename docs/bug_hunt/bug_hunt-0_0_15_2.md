@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 382 done, 218 to do.
+Progress: 383 done, 218 to do.
 
 ## Done
 
@@ -2172,6 +2172,13 @@ Progress: 382 done, 218 to do.
   answers the right rows, so the row's second half did not hold. Documented in README, spec-027, the `filterset`
   glossary term and `utils/errors.py::refuses_numeric_format`; pinned by `tests/filters/test_sets.py::
   test_decimal_filter_value_compares_as_a_double_on_sqlite`. No refusal rule: the value binds
+- [x] 666. `FilterSet.apply_async` awaits the hops of every absent walking leaf whose filter acts on its absent value:
+  its first sync boundary validates the form and probes each absent leaf with hops once (`_probe_absent_relation_leaves`,
+  verdicts cached by name), the async code awaits the acting leaves' hops into the request's hop map through the shared
+  `_await_hop_visibility_async`, and `.qs` runs in a second boundary only when hops were awaited; `_apply_relation_leaf`
+  reads the cached verdict, so a consumer filter body and an async-only `get_queryset` run as often as on `apply_sync`.
+  A relation-key leaf's probe reads the rows the set was built over on both colors, and a walking leaf a consumer `__init__` adds is probed too. spec-027 says so. Tests:
+  `tests/filters/test_sets.py`
 
 ## Outside review of the fixes
 
@@ -2272,11 +2279,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `ArrayField` itself (`types/converters.py::scalar_for_field` raises "Unsupported Django field type 'ArrayField'")
   instead of its element (`array_element_field`); only index / slice / `len` leaves publish (F11 area). Found
   fact-finding 389
-- [ ] 666. A declared hop-walking flat filter whose `filter` constrains on an absent or no-bound value raises
-  `SyncMisuseError` on `apply_async` when the hop target's `get_queryset` is async-only: the async pre-pass awaits only
-  the leaves the form data names, and the sync `.qs` absent-leaf probe then derives the hop inside the sync boundary
-  (spec-027: an async-only `get_queryset` never runs there). An omitted leaf raised before 562; a no-bound range joins
-  it. Await the hops of every declared walking leaf whose filter acts on an absent value. Found verifying 562
 - [ ] 673. (robustness) A generated `NumberFilter` leaf on an `IntegerField` / `FloatField` column cleans
   `"-1e1000000"` to a `Decimal` that reaches the bind as a huge int (integer column) or -inf (float column); the
   filter ask reads only temporal and decimal columns. Unmeasured: the client-visible answer per backend. Found fixing
@@ -2336,6 +2338,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
   reads every unstorable column of `form.instance`, so a model `save()` narrowed by `update_fields` away from the `None`
   column reports that column's `null` for another constraint; apply 668's `update_fields` filter there once
   `forms/resolvers.py` is free. Found fact-finding 668
+- [ ] 699. (robustness) `FilterSet.apply_async` leaks a raw `SyncMisuseError` whose recourse text names the Relay node
+  defaults ("The Relay node defaults only await async get_queryset hooks ..."): `filters/sets.py::_hop_visible_rows` and
+  `_scoped_rows` call `utils/querysets.py::apply_type_visibility_sync` without `async_recourse`, and `apply_async` does not
+  rewrite the error as `FilterSet.apply` does. Reachable after 666 through a hop whose at-turn probe inside an `or_` arm
+  acts where the top-level probe did not (a consumer filter branching on queryset state). Found verifying 666
 
 ## To do: holes found re-checking the fixes
 
