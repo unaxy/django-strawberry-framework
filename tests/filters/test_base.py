@@ -1200,6 +1200,37 @@ def test_integer_in_filter_binds_a_transform_members_uncoerced_by_the_column(
 
 @pytest.mark.django_db
 @pytest.mark.parametrize(("model", "column", "transform"), _INTEGER_TRANSFORMS)
+def test_integer_in_filter_drops_a_transform_fractional_member(
+    model: type[Model],
+    column: str,
+    transform: str,
+) -> None:
+    """A fractional member equals no integer transform output: dropped, never truncated.
+
+    A list whose every member is fractional matches nothing, never the empty-value skip.
+    """
+    qs = _RecordingQs()
+    f = _bound_integer_filter(
+        model,
+        IntegerInFilter(field_name=column, lookup_expr=f"{transform}__in"),
+    )
+
+    f.filter(
+        qs,
+        [
+            Decimal("2020.5"),
+            Decimal(3),
+            Decimal("3.0"),
+            Decimal("-0.5"),
+        ],
+    )
+    assert qs.captured == {f"{column}__{transform}__in": [Decimal(3), Decimal("3.0")]}
+    nothing = _RecordingQs()
+    assert f.filter(nothing, [Decimal("2020.5"), 0.9]) is nothing.nothing
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("model", "column", "transform"), _INTEGER_TRANSFORMS)
 def test_integer_range_filter_applies_its_bounds_through_the_transform(
     model: type[Model],
     column: str,
@@ -1227,6 +1258,33 @@ def test_integer_in_filter_coerces_an_integer_column_members() -> None:
 
     f.filter(qs, [Decimal(3), Decimal(2**70)])
     assert qs.captured == {"signed_big__in": [3]}
+
+
+@pytest.mark.django_db
+def test_integer_in_filter_drops_an_integer_column_fractional_member() -> None:
+    """A fractional member names no integer row: dropped, never truncated to one.
+
+    A list whose every member is fractional matches nothing, never the empty-value skip.
+    """
+    qs = _RecordingQs()
+    f = _bound_integer_filter(
+        scalar_models.ScalarSpecimen,
+        IntegerInFilter(field_name="signed_big", lookup_expr="in"),
+    )
+
+    f.filter(
+        qs,
+        [
+            Decimal("1.5"),
+            Decimal(2),
+            Decimal("0.9"),
+            Decimal("-1.5"),
+            1.0,
+        ],
+    )
+    assert qs.captured == {"signed_big__in": [2, 1]}
+    nothing = _RecordingQs()
+    assert f.filter(nothing, [Decimal("1.5"), -1.5]) is nothing.nothing
 
 
 # ---------------------------------------------------------------------------

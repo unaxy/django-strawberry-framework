@@ -9215,6 +9215,12 @@ def _specimens_in_years() -> dict[str, scalar_models.ScalarSpecimen]:
             id="date-iso-year-range",
         ),
         pytest.param({"occurred_at__year__in": "0,10000"}, [], id="years-no-row-holds"),
+        pytest.param({"occurred_at__year__in": "2020.5"}, [], id="fractional-year-names-none"),
+        pytest.param(
+            {"occurred_at__year__in": "2020.5,2022"},
+            ["mid-2022"],
+            id="fractional-year-dropped",
+        ),
     ],
 )
 def test_generated_year_leaves_match_the_rows_of_their_years(
@@ -11641,6 +11647,51 @@ def test_integer_column_value_is_not_asked() -> None:
 
         SignedBigFilter._validate_form_or_raise(filterset)
     assert router.asked == []
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("members", "labels"),
+    [
+        pytest.param("1.5,2", ["two"], id="fraction-dropped"),
+        pytest.param("0.9,-1.5", [], id="every-member-fractional"),
+        pytest.param("1.0,2", ["one", "two"], id="integral-spelling-kept"),
+    ],
+)
+def test_integer_column_in_drops_a_fractional_member(members: str, labels: list[str]) -> None:
+    """Raw form data's fractional member names no row; ``int()`` never truncates it to one.
+
+    The ``in`` form field cleans ``"1.5"`` to ``Decimal("1.5")``, which equals no integer a
+    ``signed_big`` row holds, so it never matches the row holding 1; a list whose every
+    member is fractional matches nothing.
+    """
+
+    class SignedBigFilter(FilterSet):
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = {"signed_big": ["in"]}
+
+    for label, number in (
+        ("zero", 0),
+        ("minus-one", -1),
+        ("one", 1),
+        ("two", 2),
+    ):
+        scalar_models.ScalarSpecimen.objects.create(
+            label=label,
+            signed_big=number,
+            occurred_on=datetime.date(2020, 1, 1),
+            occurred_at=datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc),
+            occurred_time=datetime.time(12),
+            external_id=uuid.uuid4(),
+        )
+    filterset = SignedBigFilter(
+        data={"signed_big__in": members},
+        queryset=scalar_models.ScalarSpecimen.objects.all(),
+    )
+
+    SignedBigFilter._validate_form_or_raise(filterset)
+    assert sorted(filterset.qs.values_list("label", flat=True)) == sorted(labels)
 
 
 def _default_range_operations(wrapper: BaseDatabaseWrapper) -> BaseDatabaseOperations:

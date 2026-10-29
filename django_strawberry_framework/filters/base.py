@@ -111,7 +111,11 @@ from django_strawberry_framework.utils.errors import (
     coded_error_extensions,
 )
 from django_strawberry_framework.utils.permissions import set_bound_definition
-from django_strawberry_framework.utils.querysets import base_queryset, coerce_field_value_or_none
+from django_strawberry_framework.utils.querysets import (
+    base_queryset,
+    coerce_field_value_or_none,
+    truncates_to_integer,
+)
 from django_strawberry_framework.utils.relations import (
     _classify_path_cached,
     is_model_class,
@@ -1214,7 +1218,8 @@ class ListFilter(_ElementCleanedFilter):
     made aware; an element off a choice column's choices is a value like any other.
     Over an integer column, an ``in`` drops each element outside the column's integer
     range on the queryset's database: it can identify no row, and bound raw it would
-    overflow the backend. A list whose every element drops matches nothing (every row
+    overflow the backend. A fractional element names no row and is dropped too, never
+    truncated to an integer. A list whose every element drops matches nothing (every row
     when excluding). The column's own validators are not applied, so an element they
     would refuse still matches a row that holds it. Raw form data (``DjangoFilterBackend``,
     a ``QueryDict``) reads as the generated ``in`` reads it (``_MembershipCSVWidget``):
@@ -1333,8 +1338,10 @@ class IntegerInFilter(MembershipInFilter, NumberFilter):
     - **Range coercion**: each member is coerced through the column against the
       queryset's database (`_identifying_members`) and one that database cannot bind or
       outside the column's integer range there is dropped, so it never reaches the backend
-      as a raw `OverflowError`. The column's own validators are not run, so a member they
-      would refuse still matches a row that holds it, as `exact` matches it.
+      as a raw `OverflowError`. A fractional member (raw form data cleans `"1.5"` to a
+      `Decimal`) names no row and is dropped, never truncated to an integer. The column's
+      own validators are not run, so a member they would refuse still matches a row that
+      holds it, as `exact` matches it.
     - **Empty-aware match-nothing**: a NON-empty input whose members ALL
       drop - every value is out of range and can identify no row - matches NOTHING,
       so it short-circuits to `qs.none()` rather than degrading to django-filter's
@@ -1352,7 +1359,7 @@ class IntegerInFilter(MembershipInFilter, NumberFilter):
     (`filters/sets.py::_unbindable_value_errors`) refuses an integer transform's member
     past the integer range the queryset's database stores for it, as it does for a
     declared `in` over the same transform. A member inside that range that no row holds
-    matches nothing.
+    matches nothing, and a fractional member equals no integer output and is dropped.
     """
 
     @override
@@ -1375,8 +1382,13 @@ class IntegerInFilter(MembershipInFilter, NumberFilter):
         if _reads_integer_transform(self):
             # A transform's output names no stored column: each member binds as the
             # lookup prepares it, so one past the integer range the database stores for
-            # the output is refused by the filter form's bind ask, never dropped.
-            return super().filter(qs, value)
+            # the output is refused by the filter form's bind ask, never dropped. A
+            # fractional member equals no integer output and is dropped.
+            output = _bound_value_field(self)
+            kept = [member for member in value if not truncates_to_integer(output, member)]
+            if not kept:
+                return _match_none_queryset(self, qs)
+            return super().filter(qs, kept)
         model_field = _bound_model_field(self)
         if model_field is not None:
             kept = _identifying_members(model_field, value, qs.db)

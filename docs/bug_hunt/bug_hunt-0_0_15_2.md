@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 388 done, 214 to do.
+Progress: 389 done, 214 to do.
 
 ## Done
 
@@ -2213,6 +2213,13 @@ Progress: 388 done, 214 to do.
   pass `_FILTER_ASYNC_RECOURSE`, so a `SyncMisuseError` there names `FilterSet.apply_async`, not the Relay node defaults.
   spec-027, spec-028 and the `syncmisuseerror` glossary term say so. Tests: `tests/filters/test_sets.py`. Arm-only
   absent leaves are row 700
+- [x] 685. A fractional number on an integer column names no row: `utils/querysets.py::truncates_to_integer` asks a
+  finite `float` / `Decimal` its own integrality (no cast), `coerce_field_value_or_none` answers None for it, and
+  `filters/base.py::IntegerInFilter`'s integer-transform branch drops it, so a generated or declared integer `in` leaf on
+  raw form data (`signed_big__in=1.5,2`, `occurred_at__year__in=2020.5`) drops the member instead of truncating it to a
+  matching integer. README, spec-027 and spec-032 say so. Tests: `tests/utils/test_querysets.py`,
+  `tests/filters/test_base.py`, `tests/filters/test_sets.py`. The comparison leaves are row 701; the cost of a huge
+  negative decimal is row 673
 
 ## Outside review of the fixes
 
@@ -2340,8 +2347,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   (`field_name="occurred_at", lookup_expr="year__in"`) cleans each member through the column's form field
   (`filters/base.py::_column_form_field` reads `_bound_model_field`), so `"2020"` answers "Enter a valid date/time."
   (F6 area). Found fact-finding 652
-- [ ] 685. (robustness) A fractional member of a generated integer `in` leaf truncates to a matching integer
-  (`signed_big__in="1.5"` matches 1; `IntegerField.to_python`), where the exact leaf refuses it. Found fact-finding 652
 - [ ] 688. (robustness) A declared `ListFilter(field_name="<col>__year", lookup_expr="in")` refuses an integral
   decimal member (`"2020.0"`, `"2.02e3"`) with "Enter a value the database can represent." where the generated
   `year__in` leaf matches the 2020 rows. Found verifying 652
@@ -2364,6 +2369,12 @@ tracker number are recorded there; open remainders and new defects are filed as 
   derives its hop inside the sync boundary, so an async-only `get_queryset` raises `SyncMisuseError` telling a caller
   already in `apply_async` to await it; ask each arm's unmapped or differing absent leaves inside the `_probed_filterset`
   boundary and await their hops before the `.qs` read. Found verifying 699
+- [ ] 701. (robustness) On raw form data (`FilterSet(data=...)`, `DjangoFilterBackend`) the integer comparison leaves
+  truncate a fractional value as Django's own lookups do: `signed_big=1.5` binds `= 1`, `signed_big__gte=1.5` binds
+  `>= 1` and answers a row holding 1, `signed_big__lt=1.5` binds `< 1` and drops it, and a `range` of fractions narrows
+  to the truncated bounds (the GraphQL `BigInt` / `Int` scalars refuse fractions, so the wire never reaches it). Decide
+  an integer-aware form field for the integer `NumberFilter` family or documenting the raw-form semantics. Found
+  fact-finding 685
 
 ## To do: holes found re-checking the fixes
 

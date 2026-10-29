@@ -86,6 +86,7 @@ import datetime
 import enum
 import functools
 import inspect
+import math
 import sys
 import uuid
 import zoneinfo
@@ -852,6 +853,28 @@ def column_python_value(field: ConcreteField, value: object) -> object:
     return datetime_django_binds(stamp, use_tz=bool(django_setting("USE_TZ")))
 
 
+def truncates_to_integer(field: ModelField | None, value: object) -> bool:
+    """Whether ``value`` is a fractional number the integer column ``field`` would truncate.
+
+    ``IntegerField.to_python`` is ``int(value)``, which turns ``Decimal("1.5")`` into ``1``
+    and ``-1.5`` into ``-1``: a fractional number equals no integer, so it names no row an
+    integer column (or an integer transform's output) holds. Raw form data reaches this as
+    a ``forms.DecimalField``'s cleaned ``Decimal``. The number answers for its own
+    integrality (``Decimal.to_integral_value``, ``float.is_integer``) and is never cast to
+    an integer to be compared with it: django-filter caps a decimal only from above, so a
+    ``Decimal`` such as ``-1E+1000000`` is a million-digit integer, and each cast or
+    comparison of it costs seconds. A number equal to its integer cast (``1.0``,
+    ``Decimal("1E+2")``) is the integer it spells; a ``bool``, a string, a non-finite
+    number and any other type is no fractional number. ``False`` for a non-integer
+    ``field``.
+    """
+    if not isinstance(field, models.IntegerField):
+        return False
+    if isinstance(value, Decimal):
+        return value.is_finite() and value != value.to_integral_value()
+    return isinstance(value, float) and math.isfinite(value) and not value.is_integer()
+
+
 #: Django's all-backend NUL rule; a text id holding a NUL names no row.
 _PROHIBIT_NULL_CHARACTERS = ProhibitNullCharactersValidator()
 
@@ -913,7 +936,9 @@ def coerce_field_value_or_none(field: ModelField | None, value: object, *, alias
     without a native interval, so a duration past 64 bits of microseconds names
     no row there). That column is the one ``relations.py::stored_value_column`` walks
     a key to, so a one-to-one primary key, a parent link or a ``ForeignKey`` is
-    held to its referenced column's range. A decimal on a ``DecimalField`` with
+    held to its referenced column's range. A fractional number on an integer column
+    (``Decimal("1.5")``, ``0.9``) names no row and is ``None`` (``truncates_to_integer``),
+    never the integer ``to_python`` truncates it to. A decimal on a ``DecimalField`` with
     ``max_digits`` is the value of the column it equals, quantized to
     ``decimal_places`` within ``max_digits``: a value no stored decimal equals
     (too many integer digits, a finer fraction) names no row, and an in-range
@@ -958,6 +983,8 @@ def coerce_field_value_or_none(field: ModelField | None, value: object, *, alias
     ):
         return None
     column = stored_value_column(field)
+    if truncates_to_integer(column, value):
+        return None
     if unbindable_temporal(column, coerced, lambda: alias):
         return None
     if (

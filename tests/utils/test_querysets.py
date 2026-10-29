@@ -190,6 +190,7 @@ from django_strawberry_framework.utils.querysets import (
     reject_async_iterable_in_sync_context,
     reject_awaitable_sync_source,
     run_in_one_sync_boundary,
+    truncates_to_integer,
     visible_related_object,
     visible_related_objects,
 )
@@ -441,6 +442,113 @@ def test_coerce_field_value_or_none_drops_an_infinite_float() -> None:
     assert (
         coerce_field_value_or_none(Category._meta.pk, float("inf"), alias=DEFAULT_DB_ALIAS) is None
     )
+
+
+_INTEGER_KEYS = [
+    pytest.param(Category, "id", id="integer-pk"),
+    pytest.param(Item, "category", id="fk-to-integer-pk"),
+]
+
+
+@pytest.mark.parametrize(("model", "name"), _INTEGER_KEYS)
+@pytest.mark.parametrize(
+    "value",
+    [
+        1.5,
+        Decimal("1.5"),
+        0.9,
+        -1.5,
+    ],
+)
+def test_coerce_field_value_or_none_drops_a_fractional_number(
+    model: type[models.Model],
+    name: str,
+    value: object,
+) -> None:
+    """A fractional number names no integer row; ``int()`` truncating it never binds."""
+    field = model._meta.get_field(name)
+    assert coerce_field_value_or_none(field, value, alias=DEFAULT_DB_ALIAS) is None
+
+
+@pytest.mark.parametrize(("model", "name"), _INTEGER_KEYS)
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(1.0, 1), (Decimal("1E+2"), 100), (Decimal("3.000"), 3)],
+)
+def test_coerce_field_value_or_none_keeps_an_integral_number(
+    model: type[models.Model],
+    name: str,
+    value: object,
+    expected: int,
+) -> None:
+    """A number equal to its integer cast is that integer, however it is spelled."""
+    field = model._meta.get_field(name)
+    assert coerce_field_value_or_none(field, value, alias=DEFAULT_DB_ALIAS) == expected
+
+
+def test_coerce_field_value_or_none_keeps_a_fractional_number_off_an_integer_column() -> None:
+    """Only an integer column holds no fraction: a float, decimal or text column keeps it."""
+    assert coerce_field_value_or_none(models.FloatField(), 1.5, alias=DEFAULT_DB_ALIAS) == 1.5
+    assert coerce_field_value_or_none(
+        _decimal_column(),
+        Decimal("1.5"),
+        alias=DEFAULT_DB_ALIAS,
+    ) == Decimal("1.5")
+    assert coerce_field_value_or_none(models.TextField(), 1.5, alias=DEFAULT_DB_ALIAS) == "1.5"
+
+
+def _integer_column() -> "models.BigIntegerField[int | float | str | Combinable, int]":
+    return models.BigIntegerField()
+
+
+class _CastRefusingDecimal(Decimal):
+    """A ``Decimal`` whose integer cast raises, so a test sees any check that casts it."""
+
+    @override
+    def __int__(self) -> int:
+        raise AssertionError("the number was cast to an integer")
+
+
+@pytest.mark.parametrize(
+    ("spelling", "fractional"),
+    [
+        pytest.param("1.5", True, id="fraction"),
+        pytest.param("-1E-1000000", True, id="tiny-fraction"),
+        pytest.param("1E+2", False, id="integral-exponent"),
+        pytest.param("-1E+1000000", False, id="million-digit-integer"),
+        pytest.param("-0", False, id="negative-zero"),
+        pytest.param("NaN", False, id="not-a-number"),
+        pytest.param("sNaN", False, id="signaling-not-a-number"),
+        pytest.param("Infinity", False, id="infinity"),
+    ],
+)
+def test_truncates_to_integer_asks_the_number_and_never_casts_it(
+    spelling: str,
+    *,
+    fractional: bool,
+) -> None:
+    """A decimal answers for its own integrality, however many digits its integer has.
+
+    Django-filter caps a decimal only from above, so ``-1E+1000000`` reaches the check; a
+    cast of it to an integer and the comparison back cost seconds each, so neither runs.
+    """
+    column = _integer_column()
+    assert truncates_to_integer(column, _CastRefusingDecimal(spelling)) is fractional
+
+
+def test_truncates_to_integer_reads_only_a_finite_non_integral_number() -> None:
+    """A finite non-integral float is fractional; a bool, a string, inf and NaN are not."""
+    column = _integer_column()
+    assert truncates_to_integer(column, 0.9) is True
+    assert truncates_to_integer(column, -1.5) is True
+    assert truncates_to_integer(column, 1.0) is False
+    assert truncates_to_integer(column, float("inf")) is False
+    assert truncates_to_integer(column, float("nan")) is False
+    assert truncates_to_integer(column, 7) is False
+    assert truncates_to_integer(column, value=True) is False
+    assert truncates_to_integer(column, "1.5") is False
+    assert truncates_to_integer(models.FloatField(), 1.5) is False
+    assert truncates_to_integer(None, 1.5) is False
 
 
 def _narrow_big_auto_range(internal_type: str) -> tuple[int, int]:
