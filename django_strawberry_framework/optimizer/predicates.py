@@ -317,6 +317,9 @@ def _correlation_steps(
                 declaring = generic.model
                 if generic.for_concrete_model:
                     declaring = require(declaring._meta.concrete_model, is_model_class)
+                # The content type by natural key, not ``get_extra_restriction``'s pk:
+                # pks differ per database and the join resolves on the statement's
+                # alias, and this also runs at declaration time, where a lookup is I/O.
                 restriction = (
                     (f"{content_type_field}__app_label", declaring._meta.app_label),
                     (f"{content_type_field}__model", declaring._meta.model_name),
