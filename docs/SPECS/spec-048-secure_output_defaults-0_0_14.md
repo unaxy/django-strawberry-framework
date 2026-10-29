@@ -922,13 +922,14 @@ construction: an already-masked error carries no `original_error`, so the classi
 it alone and no second id is minted. A plain `strawberry.Schema` carrying the exported
 extension has no such seam, so a hook failure is unmasked there.
 
-With the production policy active, `DjangoSchema` snapshots the error list at final
-return, after extension result collection. An ordinary async result hook can await
-I/O without admitting a late resolver error into the published list. Existing error
-objects, order and correlation identifiers are preserved; debug and disabled policies
-remain pass-through. The standalone `DjangoErrorPolicyExtension` on a plain
-`strawberry.Schema` snapshots at teardown instead, so errors arriving after teardown
-are absent from that result; its documented hook-failure limitation still applies.
+With the production policy active, `DjangoErrorPolicyExtension` snapshots the error
+list at operation teardown on both `DjangoSchema` and a plain `strawberry.Schema`.
+Errors appended later, during extension result collection or an awaiting HTTP result
+hook, are absent from the published list regardless of the earlier error's class.
+`DjangoSchema` also masks and snapshots at final return to cover hook-failure results.
+Existing error objects, order and correlation identifiers are preserved; debug and
+disabled policies remain pass-through. The standalone extension's documented
+hook-failure limitation still applies.
 
 *Alternatives rejected: see the [rationale][rationale] (the transport's frame writer, a
 schema subclass, accepting the gap for subscriptions, an upper strawberry version bound
@@ -1323,7 +1324,8 @@ Each risk's pre-planned fallback position, should a real consumer need appear, i
       rows drop from the tail, and both lists are always present.
 - [ ] `ErrorPolicy`, `resolve_error_policy`, `conf.py::error_policy_setting()`, and
       `DjangoErrorPolicyExtension` exist; active-policy publication snapshots exclude late
-      resolver appends while retaining managed result-collection errors; `DjangoSchema` resolves the policy once at
+      resolver appends from teardown onward, including during result collection;
+      `DjangoSchema` also masks hook-failure results at final return, resolves the policy once at
       construction, exposes `schema.error_policy` as a copy, and puts the extension FIRST in
       every operation's chain.
 - [ ] Under `DEBUG=False` with the policy enabled, an unexpected exception reaches the

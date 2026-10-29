@@ -44,10 +44,9 @@ every result built after teardown; until then a check moved to any one of
 them observes different state than the other two. A plain ``strawberry.Schema``
 that a consumer assembled themselves with ``DjangoErrorPolicyExtension`` in its
 extensions list has no schema seam, so on that schema a hook failure is the one
-case the masking does not cover. On that standalone schema, teardown snapshots
-its error list; late resolver errors cannot append into the published result.
-Managed schemas defer that snapshot until final return, after result collection,
-so errors observed during ``get_results`` are still classified and masked.
+case the masking does not cover. Teardown snapshots the error list on both schema
+shapes; late resolver errors cannot append into the published result during result
+collection. Managed schemas also snapshot at final return to cover hook failures.
 
 ``mask_execution_result`` RETURNS a masked value rather than editing the result
 it was handed, which is what lets the per-event seam leave the engine's own
@@ -93,7 +92,7 @@ from django_strawberry_framework.error_policy import (
 )
 from django_strawberry_framework.utils import truth
 
-from .operation_state import OperationState, _binds_operation_state, _OperationBoundExtension
+from .operation_state import OperationState, _OperationBoundExtension
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -422,7 +421,7 @@ class DjangoErrorPolicyExtension(_OperationBoundExtension[OperationState]):
         masked = mask_execution_result(
             result,
             policy,
-            snapshot=not _binds_operation_state(self._hook_context()),
+            snapshot=True,
         )
         if masked is not result:
             try:

@@ -641,13 +641,14 @@ The `SchemaExtension` that ENFORCES the [production error policy](#production-er
 
 The teardown is **one synchronous generator serving both execution colors** (the engine enters sync generator hooks on the async path too), handling both result shapes it can be handed — graphql-core's `ExecutionResult` and Strawberry's — and treating a `None` result or an absent error list as a no-op; an explicit publication snapshot also detaches an empty list. Each remaining entry is classified by [structural error classification](#structural-error-classification) and, when masked, **replaced** by a fresh `GraphQLError` carrying the policy message, a [correlation identifier](#correlation-identifier), the original `nodes` / `source` / `positions` / `path`, and `original_error=None`. Because both the deliberate rejections and the replacements are plain `GraphQLError`s, sync HTTP, async HTTP and both WebSocket protocols render them identically with no translation layer.
 
-With the production policy active, `DjangoSchema` snapshots the error list at final
-return, after extension result collection. An ordinary async result hook can await
-I/O without admitting a late resolver error into the published list. Existing error
-objects, order and correlation identifiers are preserved; debug and disabled policies
-remain pass-through. The standalone `DjangoErrorPolicyExtension` on a plain
-`strawberry.Schema` snapshots at teardown instead, so errors arriving after teardown
-are absent from that result; its documented hook-failure limitation still applies.
+With the production policy active, `DjangoErrorPolicyExtension` snapshots the error
+list at operation teardown on both `DjangoSchema` and a plain `strawberry.Schema`.
+Errors appended later, during extension result collection or an awaiting HTTP result
+hook, are absent from the published list regardless of the earlier error's class.
+`DjangoSchema` also masks and snapshots at final return to cover hook-failure results.
+Existing error objects, order and correlation identifiers are preserved; debug and
+disabled policies remain pass-through. The standalone extension's documented
+hook-failure limitation still applies.
 
 **See also:** [Production error policy](#production-error-policy) · [`ErrorPolicy`](#errorpolicy) · [Masking-extension ordering](#masking-extension-ordering) · [Strawberry extension lifecycle](#strawberry-extension-lifecycle).
 
@@ -870,22 +871,28 @@ The `strawberry.Schema` subclass every schema exposing generated mutations is bu
 
 **`DjangoMutationExecutionContext`** is the graphql-core `ExecutionContext` subclass the schema installs by default; it is root-exported so a consumer needing a custom execution context subclasses it and passes it as `execution_context_class=`. For each top-level field whose resolver carries the [`DjangoMutationField`](#djangomutationfield) marker it opens one `transaction.atomic(using=<write alias>)` before the resolver runs and exits it only after graphql-core has finished completing that field's value, and it publishes the managed write alias the [`DjangoMutation`](#djangomutation) pipeline requires. Any error added inside that window, resolver-raised or completion-raised, rolls the write back, so a payload that fails to serialize cannot leave a committed write behind a `data: null` response; a window whose connection was closed inside it cannot commit, so the field fails rather than report a write that was never stored. Under sync execution the window wraps the field on the calling thread; under async execution each window runs on a private thread and therefore a private connection, except under a sync caller blocked in `async_to_sync`, where the window runs on that caller's thread and nests in whatever transaction the caller holds, as sync execution does. A private connection stays private under an outer `ThreadSensitiveContext`, and a cancelled task exits the window's atomic, rolled back. Mutation root fields execute serially, so consecutive top-level generated mutations get independent transactions; every other field executes as stock graphql-core.
 
-Async generated-mutation completion cancels already-running engine-owned field
-and list-item siblings abandoned by a propagating failure, and drains their cleanup
-before the atomic exits. Repeated cancellation still waits for that cleanup. Nullable
-failures keep surviving siblings running under upstream semantics. This ownership is
-per execution context and mutation window; ordinary queries, unmarked mutations and
-application-created background tasks retain upstream behavior. The mandatory boundary
-is independent of `APPLY_UPSTREAM_PATCHES`, which still gates only the optional
-QuerySet/AsyncIterable adapter.
+Async generated-mutation completion joins already-running engine-owned field and
+list-item siblings before the atomic exits after a propagating failure. Ordinary
+exceptions let siblings finish, preserving shared DataLoader futures for surviving
+branches. Caller cancellation cancels the siblings once and drains their cleanup;
+repeated cancellation still waits for it. Nullable failures keep surviving siblings
+running under upstream semantics. This ownership is per execution context and mutation
+window; ordinary queries, unmarked mutations and application-created background tasks
+retain upstream behavior. The mandatory boundary is independent of
+`APPLY_UPSTREAM_PATCHES`, which still gates only the optional QuerySet/AsyncIterable
+adapter. Its upstream-method audit runs lazily when an async generated-mutation window
+opens and ignores docstrings, comments and formatting. Wrapped methods, unavailable
+source and unaudited executable changes refuse that window with an explicit runtime
+error; package imports, queries and synchronous execution do not require the audit.
 
-With the production policy active, `DjangoSchema` snapshots the error list at final
-return, after extension result collection. An ordinary async result hook can await
-I/O without admitting a late resolver error into the published list. Existing error
-objects, order and correlation identifiers are preserved; debug and disabled policies
-remain pass-through. The standalone `DjangoErrorPolicyExtension` on a plain
-`strawberry.Schema` snapshots at teardown instead, so errors arriving after teardown
-are absent from that result; its documented hook-failure limitation still applies.
+With the production policy active, `DjangoErrorPolicyExtension` snapshots the error
+list at operation teardown on both `DjangoSchema` and a plain `strawberry.Schema`.
+Errors appended later, during extension result collection or an awaiting HTTP result
+hook, are absent from the published list regardless of the earlier error's class.
+`DjangoSchema` also masks and snapshots at final return to cover hook-failure results.
+Existing error objects, order and correlation identifiers are preserved; debug and
+disabled policies remain pass-through. The standalone extension's documented
+hook-failure limitation still applies.
 
 **See also:** [Execution resource policy](#execution-resource-policy) · [Production error policy](#production-error-policy) · [`DjangoMutation`](#djangomutation) · [Per-operation extension isolation](#per-operation-extension-isolation).
 
@@ -1731,13 +1738,14 @@ Under `settings.DEBUG = False`, an unexpected resolver or hook exception is repl
 
 **Under `settings.DEBUG` the policy is a pass-through.** Development keeps its real messages; a masked stack trace in a developer's browser is a worse day for everyone and teaches the developer to disable the policy wholesale. The setting is read at operation time, for the same reason the [debug fail-closed gate](#debug-fail-closed-gate) reads it there.
 
-With the production policy active, `DjangoSchema` snapshots the error list at final
-return, after extension result collection. An ordinary async result hook can await
-I/O without admitting a late resolver error into the published list. Existing error
-objects, order and correlation identifiers are preserved; debug and disabled policies
-remain pass-through. The standalone `DjangoErrorPolicyExtension` on a plain
-`strawberry.Schema` snapshots at teardown instead, so errors arriving after teardown
-are absent from that result; its documented hook-failure limitation still applies.
+With the production policy active, `DjangoErrorPolicyExtension` snapshots the error
+list at operation teardown on both `DjangoSchema` and a plain `strawberry.Schema`.
+Errors appended later, during extension result collection or an awaiting HTTP result
+hook, are absent from the published list regardless of the earlier error's class.
+`DjangoSchema` also masks and snapshots at final return to cover hook-failure results.
+Existing error objects, order and correlation identifiers are preserved; debug and
+disabled policies remain pass-through. The standalone extension's documented
+hook-failure limitation still applies.
 
 **See also:** [`ErrorPolicy`](#errorpolicy) · [`DjangoErrorPolicyExtension`](#djangoerrorpolicyextension) · [Structural error classification](#structural-error-classification) · [Correlation identifier](#correlation-identifier) · [Masking-extension ordering](#masking-extension-ordering).
 
@@ -2266,14 +2274,19 @@ The package ships one defensive patch module per third-party dependency it has t
 
 **The switch scopes upstream defects only, never package policy.** The [UTF-8 wire contract](#utf-8-wire-contract) and the [request-body cap](#request-body-cap) are permanent policy on the package's own view: they do not consult this setting in either direction, and turning the patches off does not relax them.
 
-Async generated-mutation completion cancels already-running engine-owned field
-and list-item siblings abandoned by a propagating failure, and drains their cleanup
-before the atomic exits. Repeated cancellation still waits for that cleanup. Nullable
-failures keep surviving siblings running under upstream semantics. This ownership is
-per execution context and mutation window; ordinary queries, unmarked mutations and
-application-created background tasks retain upstream behavior. The mandatory boundary
-is independent of `APPLY_UPSTREAM_PATCHES`, which still gates only the optional
-QuerySet/AsyncIterable adapter.
+Async generated-mutation completion joins already-running engine-owned field and
+list-item siblings before the atomic exits after a propagating failure. Ordinary
+exceptions let siblings finish, preserving shared DataLoader futures for surviving
+branches. Caller cancellation cancels the siblings once and drains their cleanup;
+repeated cancellation still waits for it. Nullable failures keep surviving siblings
+running under upstream semantics. This ownership is per execution context and mutation
+window; ordinary queries, unmarked mutations and application-created background tasks
+retain upstream behavior. The mandatory boundary is independent of
+`APPLY_UPSTREAM_PATCHES`, which still gates only the optional QuerySet/AsyncIterable
+adapter. Its upstream-method audit runs lazily when an async generated-mutation window
+opens and ignores docstrings, comments and formatting. Wrapped methods, unavailable
+source and unaudited executable changes refuse that window with an explicit runtime
+error; package imports, queries and synchronous execution do not require the audit.
 
 **See also:** [Django Trac #37064 hardening](#django-trac-37064-hardening) · [Django `AppConfig`](#django-appconfig).
 

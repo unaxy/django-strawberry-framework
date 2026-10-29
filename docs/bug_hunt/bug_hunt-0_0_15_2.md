@@ -2025,9 +2025,10 @@ Progress: 379 done, 217 to do.
   useless field-keyed error, or a silent truncation. A `CharField`, a subclass overriding `to_python` / `clean`, and a
   Duration column pass. spec-038, README and the `djangomodelformmutation` glossary term say so. Tests:
   `tests/forms/test_inputs.py`
-- [x] 645. Async generated-mutation completion cancels and drains abandoned running field/list siblings inside
-  its atomic, including repeated-cancellation cleanup. Active production masking snapshots managed and standalone
-  result error lists before an awaiting result hook can publish late resolver errors. Tests:
+- [x] 645. Async generated-mutation completion drains running field/list siblings inside its atomic after
+  ordinary failures, preserving shared awaitables; caller cancellation cancels them once and drains cleanup across
+  repeated cancellation. Active production masking snapshots managed and standalone result error lists at teardown,
+  before result collection or an awaiting result hook can publish late resolver errors. Tests:
   `examples/fakeshop/test_query/test_completion_lifecycle.py`, `tests/test_completion.py`, `tests/test_error_policy.py`
 - [x] 662. The state-folder retry and duplicated text reader belong to repository workspace/proof tooling,
   with no supported package wire/configuration path or public contract row. Closed as tooling robustness outside

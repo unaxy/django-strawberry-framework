@@ -1,5 +1,6 @@
 """Join graphql-core-owned concurrent completion before returning to its owner."""
 
+import ast
 import asyncio
 import functools
 import hashlib
@@ -8,13 +9,14 @@ import textwrap
 from contextlib import contextmanager
 from contextvars import ContextVar
 from types import FunctionType, MappingProxyType
-from typing import TYPE_CHECKING, ParamSpec, TypeVar, cast
+from typing import TYPE_CHECKING, NamedTuple, ParamSpec, TypeVar, cast
 
 from graphql.execution.execute import ExecutionContext
 from typing_extensions import override
 
 from . import _graphql_core_patches as patches
 from .utils import truth
+from .utils._narrowing import is_list_or_tuple
 from .utils.operation_lease import OperationLease
 
 if TYPE_CHECKING:
@@ -25,6 +27,17 @@ if TYPE_CHECKING:
 
     from ._graphql_core_patches import _GraphQLOutputType
 
+    _ExecuteFields = Callable[
+        [
+            ExecutionContext,
+            GraphQLObjectType,
+            object,
+            Path | None,
+            dict[str, list[FieldNode]],
+        ],
+        AwaitableOrValue[dict[str, object]],
+    ]
+
 _owner: ContextVar[OperationLease[ExecutionContext] | None] = ContextVar(
     "completion_owner",
     default=None,
@@ -34,6 +47,7 @@ _owner: ContextVar[OperationLease[ExecutionContext] | None] = ContextVar(
 @contextmanager
 def owned_completion(context: ExecutionContext) -> "Generator[None]":
     """Mark only this generated-mutation context's async completion window."""
+    _ = _completion_methods()
     lease = OperationLease(context)
     token = _owner.set(lease)
     try:
@@ -46,49 +60,57 @@ def owned_completion(context: ExecutionContext) -> "Generator[None]":
 # Adapted from graphql-core 3.3.0, graphql/pyutils/gather_with_cancel.py (MIT).
 # The complete upstream license ships in LICENSE.graphql-core.
 async def _gather_with_cancel(*awaitables: "Awaitable[object]") -> list[object]:
-    """Cancel abandoned siblings and finish their cleanup before propagating failure.
+    """Join siblings before propagating failure; cancel them only on caller cancellation.
 
     Adapted from graphql-core 3.3.0 graphql.pyutils.gather_with_cancel (MIT).
-    BaseException includes caller cancellation; the shielded drain keeps repeated
-    cancellation from ending the owning mutation window before cleanup finishes.
+    Ordinary failures must not cancel a shared DataLoader future that a surviving
+    branch also awaits. The shielded drain keeps repeated caller cancellation from
+    ending the owning mutation window before cleanup finishes. GeneratorExit is
+    deliberately outside this handler: closing a coroutine cannot await cleanup.
     """
     futures = [asyncio.ensure_future(value) for value in awaitables]
+    running = asyncio.gather(*futures)
     try:
-        return await asyncio.gather(*futures)
-    except BaseException:
-        for future in futures:
-            if not future.done():
-                _ = future.cancel()
-        drain = asyncio.gather(*futures, return_exceptions=True)
-        cancelled = False
+        return await asyncio.shield(running)
+    except (Exception, asyncio.CancelledError) as error:
+        cancelled = isinstance(error, asyncio.CancelledError)
+        if cancelled:
+            for future in futures:
+                if not future.done():
+                    _ = future.cancel()
+        # Also observe the original gather if cancellation reached its shield
+        # before it delivered its own exception.
+        remaining: list[Awaitable[object]] = [running, *futures]
+        drain = asyncio.gather(*remaining, return_exceptions=True)
         while not drain.done():
             try:
                 _ = await asyncio.shield(drain)
             except asyncio.CancelledError:  # noqa: PERF203 - cleanup must outlast repeated cancellation
+                if not cancelled:
+                    for future in futures:
+                        if not future.done():
+                            _ = future.cancel()
                 cancelled = True
         if cancelled:
             raise asyncio.CancelledError from None
         raise
 
 
-# Complete stable support census (normalized source, not version-only approval):
+# Complete stable support census (docstring-free syntax, not version-only approval):
 # 3.2.0, 3.2.1, 3.2.2, 3.2.3, 3.2.4, 3.2.5, 3.2.6, 3.2.7, 3.2.8,
-# 3.2.9: b9ac004a / dfb41f48; 3.2.10, 3.2.11, 3.2.12: b9ac004a / c72c56c5
-# (CollectedErrors paths); 3.2.13: 10c99f6c / 262a0e64 (private docstrings).
-# Hash prefixes name field/list bodies below; all retain the two gather sites.
+# 3.2.9 share one pair; 3.2.10-3.2.13 share the CollectedErrors list body.
+# Comments, formatting and private docstrings do not affect the adapted dependency.
 _AUDITED = MappingProxyType(
     {
         "execute_fields": frozenset(
             {
-                "10c99f6c2a3610deb7989cb148a32fb4382667186d67e10a96db4278e88cdf95",
-                "b9ac004a5131ec1467c720889724deecd15c5f357248f8d383be9e6e0c6e785f",
+                "ac08e0c8950cb9e537af7ee8c0d3c19f022e94000de2631ecd6edd53f28e38e2",
             },
         ),
         "complete_list_value": frozenset(
             {
-                "262a0e644fd4b2d17000d7238860d29bf980deb05797cdc731e43814a33dbdb2",
-                "c72c56c5ad0968d85ff1d636602c0656c0326c6c49595d4580239888a5c7adf8",
-                "dfb41f48d4533ca92a1f216d29c28b06a1e31854ca5cf2052ff8d2d0dc39236e",
+                "a9b89d6f1051eb73f349bb2bd575871d895626c9205b313d82d496067968bb5c",
+                "0c89fe9a284dfc9edd7d0cb10a4190caadd7e1d1b90d08751a8be1fa2cfba0aa",
             },
         ),
     },
@@ -98,8 +120,28 @@ _P = ParamSpec("_P")
 _R = TypeVar("_R")
 
 
+def _syntax_shape(node: object) -> object:
+    """Serialize syntax consistently across supported Python AST schema versions."""
+    if isinstance(node, ast.AST):
+        # ast.iter_fields exposes arbitrary syntax values as Any; none is interpreted here.
+        fields = cast("Iterable[tuple[str, object]]", ast.iter_fields(node))
+        return (
+            truth.name(type(node)),
+            tuple(
+                (name, _syntax_shape(value))
+                for name, value in fields
+                # Python 3.12 adds this field; retain any actual type parameters.
+                if name != "type_params" or value
+            ),
+        )
+    if is_list_or_tuple(node):
+        return tuple(_syntax_shape(value) for value in node)
+    return node
+
+
 # Adapted graphql-core 3.2.0-3.2.13 graphql/execution/execute.py method bodies:
 # retain installed code and replace only their gather dependency, under the audited body allowlist.
+@functools.lru_cache(maxsize=8)
 def _completion_method(method: "Callable[_P, _R]") -> "Callable[_P, _R]":
     """Adapt the installed upstream method by replacing only its gather dependency.
 
@@ -108,19 +150,36 @@ def _completion_method(method: "Callable[_P, _R]") -> "Callable[_P, _R]":
     bodies originate in graphql-core 3.2.0-3.2.13 graphql.execution.execute (MIT).
     """
     if not isinstance(method, FunctionType):
-        raise TypeError("Cannot supervise graphql-core completion: expected a Python function")
+        raise TypeError(
+            "Cannot start async generated-mutation completion: expected a Python function",
+        )
+    if hasattr(method, "__wrapped__"):
+        raise RuntimeError(
+            "Cannot start async generated-mutation completion with a wrapped graphql-core method; "
+            "instrument the execution-context subclass instead of replacing the upstream method",
+        )
     try:
-        source = textwrap.dedent(inspect.getsource(method))
+        source = textwrap.dedent(inspect.getsource(method.__code__))
     except (OSError, TypeError) as error:
         raise RuntimeError(
-            "Cannot inspect graphql-core completion source; install a supported source-bearing release",
+            "Cannot start async generated-mutation completion without graphql-core source; "
+            "install a supported source-bearing release. Queries and synchronous execution "
+            "do not require this adapter",
         ) from error
     method_name = truth.name(method)
-    digest = hashlib.sha256(source.strip().encode()).hexdigest()
+    function = ast.parse(source).body[0]
+    for node in ast.walk(function):
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and ast.get_docstring(node) is not None
+        ):
+            del node.body[0]
+    digest = hashlib.sha256(repr(_syntax_shape(function)).encode()).hexdigest()
     if digest not in _AUDITED.get(method_name, frozenset()):
         raise RuntimeError(
-            f"Unaudited graphql-core {method_name} body; use a supported release "
-            "or audit its completion implementation before enabling generated mutations",
+            f"Cannot start async generated-mutation completion: unaudited graphql-core "
+            f"{method_name} implementation. Use a supported release or audit its completion "
+            "implementation. APPLY_UPSTREAM_PATCHES does not disable this transaction boundary",
         )
     namespace = dict(method.__globals__, gather=_gather_with_cancel)
     adapted = FunctionType(
@@ -136,8 +195,26 @@ def _completion_method(method: "Callable[_P, _R]") -> "Callable[_P, _R]":
     return cast("Callable[_P, _R]", adapted)
 
 
-_execute_fields = _completion_method(ExecutionContext.execute_fields)
-_complete_list_value = _completion_method(patches._upstream_captures().complete_list_value)
+class _CompletionMethods(NamedTuple):
+    """The two installed methods, audited lazily for an owned mutation window."""
+
+    execute_fields: "_ExecuteFields"
+    complete_list_value: "patches._CompleteListValue"
+
+
+def _completion_methods() -> _CompletionMethods:
+    try:
+        list_method = patches._upstream_captures().complete_list_value
+    except RuntimeError as error:
+        raise RuntimeError(
+            "Cannot start async generated-mutation completion: graphql-core completion "
+            "dependencies are unavailable. Use a supported graphql-core release; "
+            "APPLY_UPSTREAM_PATCHES does not disable this transaction boundary",
+        ) from error
+    return _CompletionMethods(
+        _completion_method(ExecutionContext.execute_fields),
+        _completion_method(list_method),
+    )
 
 
 class CompletionExecutionContext(ExecutionContext):
@@ -154,7 +231,13 @@ class CompletionExecutionContext(ExecutionContext):
         """Supervise concurrent completion only inside its generated mutation owner."""
         lease = _owner.get()
         if lease is not None and lease.held() is self:
-            return _execute_fields(self, parent_type, source_value, path, fields)
+            return _completion_methods().execute_fields(
+                self,
+                parent_type,
+                source_value,
+                path,
+                fields,
+            )
         return super().execute_fields(parent_type, source_value, path, fields)
 
     @override
@@ -170,8 +253,9 @@ class CompletionExecutionContext(ExecutionContext):
         lease = _owner.get()
         if lease is None or lease.held() is not self:
             # Upstream leaves GraphQLWrappingType bare; this is the same runtime signature.
-            upstream = cast("patches._CompleteListValue", ExecutionContext.complete_list_value)
-            return upstream(self, return_type, field_nodes, info, path, result)
+            upstream = cast("patches._BoundCompleteListValue", super().complete_list_value)
+            return upstream(return_type, field_nodes, info, path, result)
+        complete_list_value = _completion_methods().complete_list_value
         if patches._patch_is_installed():
             return patches._complete_list_value_with_adapter(
                 self,
@@ -180,6 +264,6 @@ class CompletionExecutionContext(ExecutionContext):
                 info,
                 path,
                 result,
-                _complete_list_value,
+                complete_list_value,
             )
-        return _complete_list_value(self, return_type, field_nodes, info, path, result)
+        return complete_list_value(self, return_type, field_nodes, info, path, result)
