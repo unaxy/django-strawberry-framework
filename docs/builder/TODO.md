@@ -160,7 +160,7 @@ From the full entries, 2026-10-21. Item numbers are that file's.
   - Research: `docs/builder/ARTIFACT.md`, `docs/review/REVIEW.md` and `docs/review/worker-2.md` already scope it. The
     repo-wide write form also appears in `docs/dry/worker-1.md`, `docs/dry/DRY.md`, `docs/bug_hunt/worker-1.md`,
     `docs/bug_hunt/HUNT.md`, the `scripts/bug_hunt.py` template, `examples/fakeshop/test_query/README.md`,
-    `CONTRIBUTING.md` and `MUSE.md`. Read-only `.` checks in CI stay. Decide how far the sweep goes
+    `CONTRIBUTING.md` and `docs/fleet/MUSE.md`. Read-only `.` checks in CI stay. Decide how far the sweep goes
   - Overlaps the KANBAN "Before a release" checklist (BoardDoc 11), whose repo-wide `ruff check --fix .` and
     `ruff format .` lines a touched-path rule rewrites
 

@@ -882,7 +882,6 @@ never pulls it from under another.
 <!-- Root -->
 [agents]: ../../AGENTS.md
 [kanban]: ../../KANBAN.md
-[muse]: ../../MUSE.md
 [security]: ../../SECURITY.md
 [start]: ../../START.md
 
@@ -891,6 +890,7 @@ never pulls it from under another.
 [dry]: ../dry/DRY.md
 [glossary]: ../GLOSSARY.md
 [hunt]: ../bug_hunt/HUNT.md
+[muse]: ../fleet/MUSE.md
 [tree]: ../TREE.md
 [worker-0]: worker-0.md
 [worker-1]: worker-1.md
