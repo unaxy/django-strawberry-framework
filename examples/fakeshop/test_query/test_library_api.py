@@ -6157,6 +6157,55 @@ def test_filter_text_no_database_can_bind_answers_filter_invalid(shape: str) -> 
     }
 
 
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("filter_text", "error_key"),
+    [
+        pytest.param(
+            "{ or: [{ shelf: { branch: { name: { exact: $v } } } }, { title: { exact: $v } }] }",
+            "or_0__shelf__branch__name",
+            id="branch-arm-first",
+        ),
+        pytest.param(
+            "{ or: [{ title: { exact: $v } }, { shelf: { branch: { name: { exact: $v } } } }] }",
+            "or_1__shelf__branch__name",
+            id="form-arm-first",
+        ),
+    ],
+)
+def test_an_arm_branch_error_answers_before_an_arm_form_error(
+    filter_text: str,
+    error_key: str,
+) -> None:
+    """Every arm's related branches derive before any arm's form validates.
+
+    Both arms refuse the lone surrogate, one in its own form (``title``) and one in
+    its ``shelf`` branch's ``branch`` branch; the branch derives first (spec-027
+    Decision 8, step 3), whichever arm holds it, so the error names the branch's key,
+    the one ``apply_async`` answers too.
+    """
+    _seed_north_shelf()
+    query = f"query($v: String) {{ allLibraryBooks(filter: {filter_text}) {{ title }} }}"
+
+    response = _post_graphql(query, variables={"v": f"a{_LONE_SURROGATE}"})
+
+    assert response.status_code == 200
+    payload = response_json(response)
+    assert payload["data"] is None, payload
+    (error,) = json_list(payload, "errors")
+    assert json_object(error, "extensions") == {
+        "code": "FILTER_INVALID",
+        "errors": {
+            error_key: [
+                {
+                    "message": "Text contains invalid Unicode (unpaired surrogate code points).",
+                    "code": "invalid",
+                },
+            ],
+        },
+    }
+
+
 def _seed_north_shelf() -> None:
     """Seed one shelf on ``North`` for the unstorable-filter rows."""
     north = models.Branch.objects.create(name="North", city="Boston")

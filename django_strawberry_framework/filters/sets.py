@@ -2841,14 +2841,15 @@ class FilterSet(
     # (they carry no related branches to re-derive).
     _apply_info: object = None
 
-    # Pre-derived nested-branch visibility map. Populated by ``apply_async``
-    # via ``_collect_nested_visibility_querysets_async``, which walks every
-    # ``and`` / ``or`` / ``not`` arm BEFORE the top-level ``.qs`` read and
-    # awaits each branch's target ``get_queryset``. ``_q_for_branch`` then
-    # looks up by ``id(child_input)`` instead of calling the sync derive,
-    # which would raise ``SyncMisuseError`` mid-``.qs`` if the target type's
-    # ``get_queryset`` is async-only. ``None`` for instances built by
-    # ``apply_sync`` or outside the apply pipeline (sync path stays sync).
+    # Pre-derived nested-branch visibility map, keyed by ``id(child_input)``.
+    # Populated by ``apply_sync`` / ``apply_async`` via
+    # ``_collect_nested_visibility_querysets_sync`` / ``_async``, which walk
+    # every ``and`` / ``or`` / ``not`` arm BEFORE the permission pass, form
+    # validation and the top-level ``.qs`` read, deriving each branch's target
+    # ``get_queryset`` (awaited on the async color, where the sync derive
+    # would raise ``SyncMisuseError`` mid-``.qs`` for an async-only one).
+    # ``_q_for_branch`` then looks the arm up instead of deriving it again.
+    # ``None`` for instances built outside the apply pipeline.
     _nested_qs_by_branch_id: dict[int, dict[str, models.QuerySet[models.Model]]] | None = None
 
     # The child filter set instances this instance's relation leaves run in at a
@@ -5087,10 +5088,10 @@ class FilterSet(
     def _assert_logic_depth(cls, _depth: int) -> None:
         """Fail closed when ``_depth`` passes this FilterSet's traversal budget.
 
-        The FilterSet-side binding of the shared depth-cap check: all five
-        enforcement sites (``_collect_nested_visibility_querysets_async``,
+        The FilterSet-side binding of the shared depth-cap check: every
+        enforcement site (``_iter_logic_arms``, ``_probe_logic_arms``,
         ``_check_permission_depth``, ``_evaluate_logic_tree``, ``apply_sync``,
-        ``apply_async``) compose this binding, which composes
+        ``apply_async``) composes this binding, which composes
         ``utils/input_values.py::assert_set_traversal_depth`` with the
         logical-branch triple, so the ``>`` boundary, the budget
         resolution, and the typed sentence each live in exactly one body.
@@ -5109,6 +5110,79 @@ class FilterSet(
             input_noun="filter",
             subject="FilterSet",
         )
+
+    @classmethod
+    def _iter_logic_arms(
+        cls,
+        input_value: object,
+        *,
+        _depth: int = 0,
+        _branch_path: str = "",
+    ) -> Iterator[tuple[object, str, int]]:
+        """Yield every ``and`` / ``or`` / ``not`` arm of ``input_value`` in tree order.
+
+        Each arm comes as ``(child_input, arm_path, depth)``: the arm's input
+        object (the identity ``_q_for_branch`` later receives from
+        ``_evaluate_logic_tree``, preserved by ``_normalize_input``), its path
+        from the request root (the arm segment ``_evaluate_logic_tree``
+        composes) and the depth of the set holding it. An arm is yielded before
+        the arms nested inside it, and each level checks the ``_MAX_LOGIC_DEPTH``
+        cap on entry, so a consumer acting on an arm at the yield runs before the
+        cap of the next level down is checked, as ``_evaluate_logic_tree`` reaches
+        them. Both the Strawberry-side keys (``and_`` / ``or_`` / ``not_``) and the
+        wire-side keys (``and`` / ``or`` / ``not``) are walked
+        (``_iter_logic_branches``). The one walk both arm pre-passes share
+        (``_collect_nested_visibility_querysets_sync`` /
+        ``_collect_nested_visibility_querysets_async``).
+        """
+        if is_inactive_value(input_value, unset_sentinel=UNSET):
+            return
+        cls._assert_logic_depth(_depth)
+        for op, children in cls._iter_logic_branches(input_value):
+            for index, child_input in enumerate(children):
+                arm_path = _branch_key(_branch_path, op.arm_key(index))
+                yield child_input, arm_path, _depth
+                yield from cls._iter_logic_arms(
+                    child_input,
+                    _depth=_depth + 1,
+                    _branch_path=arm_path,
+                )
+
+    @classmethod
+    def _collect_nested_visibility_querysets_sync(
+        cls,
+        input_value: object,
+        info: object,
+        *,
+        parent_db: str | None = None,
+        _depth: int = 0,
+        _branch_path: str = "",
+    ) -> dict[int, dict[str, models.QuerySet[models.Model]]]:
+        """Pre-walk logical branches and derive each branch's visibility map.
+
+        The sync twin of ``_collect_nested_visibility_querysets_async``: every arm
+        ``_iter_logic_arms`` yields gets its related branches derived
+        (``_derive_related_visibility_querysets_sync``) under its own arm path, in
+        tree order, and the map comes back keyed by ``id(child_input)``.
+        ``apply_sync`` calls it before the permission pass and form validation, as
+        ``apply_async`` calls its twin, so an input carrying an arm's branch error
+        beside a form error or a permission denial answers the same first error on
+        both colors (spec-027 Decision 8, step 3).
+        """
+        return {
+            id(child_input): cls._derive_related_visibility_querysets_sync(
+                child_input,
+                info,
+                parent_db=parent_db,
+                _depth=depth,
+                _branch_path=arm_path,
+            )
+            for child_input, arm_path, depth in cls._iter_logic_arms(
+                input_value,
+                _depth=_depth,
+                _branch_path=_branch_path,
+            )
+        }
 
     @classmethod
     async def _collect_nested_visibility_querysets_async(
@@ -5134,18 +5208,12 @@ class FilterSet(
         otherwise raise ``SyncMisuseError`` mid-``.qs`` when a nested
         branch's target ``get_queryset`` is async-only.
 
-        Both the Strawberry-side keys (``and_`` / ``or_`` / ``not_``) and
-        the normalized wire-side keys (``and`` / ``or`` / ``not``) are
-        walked via ``_extract_branch_value`` so a consumer who hands a
-        pre-normalized dict still gets pre-derived maps; the walker
-        recurses so deeper nesting (``or: [{or: [...]}]``) also lands in
-        the stash before the sync ``_q_for_branch`` ever runs.
-
-        Logical-branch nesting under ``apply_async`` is capped by the same
-        ``_MAX_LOGIC_DEPTH`` guard ``_evaluate_logic_tree`` enforces -- a
-        pre-walk that exceeds the cap signals the same consumer-side
-        misuse and surfaces the same typed ``ConfigurationError`` here
-        rather than waiting for the sync recursion to discover it.
+        The arms are ``_iter_logic_arms``'s, the walk the sync twin
+        (``_collect_nested_visibility_querysets_sync``) reads, so both colors
+        derive the same arms in the same order, deeper nesting
+        (``or: [{or: [...]}]``) included, under the same ``_MAX_LOGIC_DEPTH``
+        cap ``_evaluate_logic_tree`` enforces, surfacing its typed
+        ``ConfigurationError`` here rather than waiting for the ``.qs`` read.
 
         ``flat_hop_visibility``, when given, also receives the awaited target
         visibility of every hop a flat leaf of each arm the form data names walks
@@ -5157,41 +5225,25 @@ class FilterSet(
         here, answers the error key the sync pipeline answers.
         """
         result: dict[int, dict[str, models.QuerySet[models.Model]]] = {}
-        if is_inactive_value(input_value, unset_sentinel=UNSET):
-            return result
-        cls._assert_logic_depth(_depth)
-        # Walk each logical sub-branch via ``_iter_logic_branches``. Each
-        # child_input gets its OWN visibility derive plus a recursive walk so
-        # deeply-nested branches all carry pre-derived maps before the sync
-        # ``_q_for_branch`` ever runs.
-        for op, children in cls._iter_logic_branches(input_value):
-            for index, child_input in enumerate(children):
-                arm_path = _branch_key(_branch_path, op.arm_key(index))
-                result[id(child_input)] = await cls._derive_related_visibility_querysets_async(
+        for child_input, arm_path, depth in cls._iter_logic_arms(
+            input_value,
+            _depth=_depth,
+            _branch_path=_branch_path,
+        ):
+            result[id(child_input)] = await cls._derive_related_visibility_querysets_async(
+                child_input,
+                info,
+                parent_db=parent_db,
+                _depth=depth,
+                _branch_path=arm_path,
+            )
+            if flat_hop_visibility is not None:
+                await cls._derive_flat_hop_visibility_async(
                     child_input,
                     info,
+                    flat_hop_visibility,
                     parent_db=parent_db,
-                    _depth=_depth,
-                    _branch_path=arm_path,
                 )
-                if flat_hop_visibility is not None:
-                    await cls._derive_flat_hop_visibility_async(
-                        child_input,
-                        info,
-                        flat_hop_visibility,
-                        parent_db=parent_db,
-                    )
-                # Recurse so deeper nesting (``or: [{or: [...]}]``) also
-                # lands in the stash.
-                nested = await cls._collect_nested_visibility_querysets_async(
-                    child_input,
-                    info,
-                    parent_db=parent_db,
-                    _depth=_depth + 1,
-                    _branch_path=arm_path,
-                    flat_hop_visibility=flat_hop_visibility,
-                )
-                result.update(nested)
         return result
 
     @staticmethod
@@ -6537,11 +6589,11 @@ class FilterSet(
         # constraints; it is ``None`` for
         # instances built outside the apply pipeline, which carry no
         # related branches to re-derive. ``_nested_qs_by_branch_id`` is
-        # populated only under ``apply_async``; when present, every nested
-        # ``child_input`` already carries an awaited visibility map keyed by
-        # ``id(child_input)`` so ``_q_for_branch`` can skip the sync derive
-        # that would otherwise raise ``SyncMisuseError`` on an async-only
-        # target ``get_queryset``. The hop visibility map is shared with every
+        # populated by ``apply_sync`` / ``apply_async``; when present, every
+        # nested ``child_input`` already carries its derived visibility map
+        # keyed by ``id(child_input)`` so ``_q_for_branch`` skips the derive
+        # (on the async color, one that would raise ``SyncMisuseError`` on an
+        # async-only target ``get_queryset``). The hop visibility map is shared with every
         # sibling the logic tree builds (one per request), and so is the map of
         # the siblings the probe built (``_probed_arms``), which ``_q_for_branch``
         # reuses; a sibling it builds afresh starts from this set's absent-leaf
@@ -6589,9 +6641,9 @@ class FilterSet(
         ``qs.filter(...)`` and the no-op for an empty sub-branch list.
         ``_depth`` is the recursion-cap counter shared with
         ``_q_for_branch``; both helpers cap at ``cls._MAX_LOGIC_DEPTH``.
-        ``_nested_qs_by_branch_id`` carries the pre-derived async
-        visibility maps produced by ``_collect_nested_visibility_querysets_async``
-        (None on the sync path); ``_flat_hop_visibility`` is the request-wide hop
+        ``_nested_qs_by_branch_id`` carries the pre-derived visibility maps
+        produced by ``_collect_nested_visibility_querysets_sync`` / ``_async``
+        (``None`` outside the apply pipeline); ``_flat_hop_visibility`` is the request-wide hop
         visibility map every sibling's flat relation leaves read
         (``FilterSet._flat_hop_visibility``), ``_probed_arms`` the siblings the
         pipeline's probe built, by arm path (``FilterSet._probed_arms``), and
@@ -6671,14 +6723,15 @@ class FilterSet(
         form cannot validate the nested-dict shape), so without deriving
         and applying them here a related branch nested inside a logical
         clause -- ``or: [{shelves: {code: {iContains: "X"}}}]`` -- would
-        silently widen to the whole parent queryset. Under ``apply_async`` the nested visibility map is
-        pre-derived via ``_collect_nested_visibility_querysets_async`` and
-        threaded through ``_nested_qs_by_branch_id`` keyed by
-        ``id(child_input)``; that stash is consumed by ``.get(id(...))``
-        here so an async-only target ``get_queryset`` does not raise
-        ``SyncMisuseError`` mid-``.qs``. Under ``apply_sync`` the stash is
-        ``None`` and the helper falls back to the sync derive, which keeps
-        the documented sync-misuse error on the pure-sync path.
+        silently widen to the whole parent queryset. Under ``apply_sync`` and
+        ``apply_async`` the nested visibility map is pre-derived via
+        ``_collect_nested_visibility_querysets_sync`` / ``_async`` and threaded
+        through ``_nested_qs_by_branch_id`` keyed by ``id(child_input)``; that
+        stash is consumed by ``.get(id(...))`` here, so each arm's branches
+        derive once, before the permission pass and form validation, and an
+        async-only target ``get_queryset`` does not raise ``SyncMisuseError``
+        mid-``.qs``. Outside the pipeline the stash is ``None`` and the helper
+        derives synchronously, which keeps the documented sync-misuse error.
 
         ``_depth`` and ``_apply_info`` are stashed on the sibling instance
         so ``filter_queryset`` (upstream's one-argument signature) can carry the
@@ -6725,22 +6778,15 @@ class FilterSet(
         # identity if this helper is reached alone.
         if is_inactive_value(child_input, unset_sentinel=UNSET):
             return models.Q()
-        if _nested_qs_by_branch_id is not None:
-            child_qs_by_branch = _nested_qs_by_branch_id.get(id(child_input))
-            if child_qs_by_branch is None:
-                # Defensive fallback: the pre-pass walks every reachable
-                # logical branch, but a consumer who short-circuits past
-                # the walker (e.g. by calling ``_q_for_branch`` directly)
-                # still gets a correct result via the sync derive. Apply
-                # the same async/sync caveat the docstring names.
-                child_qs_by_branch = cls._derive_related_visibility_querysets_sync(
-                    child_input,
-                    info,
-                    parent_db=queryset.db,
-                    _depth=_depth,
-                    _branch_path=_branch_path,
-                )
-        else:
+        child_qs_by_branch = (
+            None
+            if _nested_qs_by_branch_id is None
+            else _nested_qs_by_branch_id.get(id(child_input))
+        )
+        if child_qs_by_branch is None:
+            # Outside the pipeline (no stash), or a caller short-circuiting past
+            # the pre-pass walker (an arm the stash misses): derive synchronously,
+            # with the sync-misuse caveat the docstring names.
             child_qs_by_branch = cls._derive_related_visibility_querysets_sync(
                 child_input,
                 info,
@@ -6877,9 +6923,9 @@ class FilterSet(
     ) -> Self:
         """Build a filterset over ``constrained`` and stash the per-request state it reads.
 
-        ``info`` lands as ``_apply_info``, and the async-only pre-derived
-        ``nested_qs_by_branch_id`` and ``flat_hop_visibility`` maps (``None`` on the
-        sync path) as ``_nested_qs_by_branch_id`` and ``_flat_hop_visibility``, so
+        ``info`` lands as ``_apply_info``, and the pre-derived
+        ``nested_qs_by_branch_id`` map and the request-wide ``flat_hop_visibility``
+        map as ``_nested_qs_by_branch_id`` and ``_flat_hop_visibility``, so
         ``filter_queryset`` (upstream's one-argument signature) reaches them, and
         ``branch_path`` as ``_branch_path`` so ``_validate_form_or_raise`` keys the
         form's errors under it. The one
@@ -6918,10 +6964,12 @@ class FilterSet(
         """Build the filterset, run the perm check + form validate + absent-leaf probe, read ``.qs``.
 
         The filterset is built over ``constrained`` with ``info`` stashed as
-        ``_apply_info`` and the async-only pre-derived
-        ``nested_qs_by_branch_id`` map and ``flat_hop_visibility`` map (both
-        ``None`` on the sync path) stashed as ``_nested_qs_by_branch_id`` and
-        ``_flat_hop_visibility``. Its ``.qs`` is
+        ``_apply_info`` and the pre-derived ``nested_qs_by_branch_id`` map (every
+        ``and`` / ``or`` / ``not`` arm's related branches, derived by either
+        color before this runs) and the request-wide ``flat_hop_visibility`` map
+        (pre-filled on the async color, filled on first use on the sync one)
+        stashed as ``_nested_qs_by_branch_id`` and ``_flat_hop_visibility``.
+        Its ``.qs`` is
         ``filter_queryset(constrained.all())`` (django-filter's
         ``BaseFilterSet.qs``), a filtered clone over ``constrained``'s own
         model, so the result keeps the model of the queryset passed in.
@@ -7052,7 +7100,9 @@ class FilterSet(
         """Sync resolver entry point (Decision 8).
 
         Steps run in the pinned order: derive visibility
-        querysets, resolve the request, apply related constraints
+        querysets, the root's and every ``and`` / ``or`` / ``not`` arm's, in tree
+        order (``_collect_nested_visibility_querysets_sync``, as ``apply_async``
+        does), resolve the request, apply related constraints
         BEFORE constructing the filterset (so the constraints land in
         `self.queryset` and propagate through to `.qs`), then permission
         check, form validate, the absent-leaf probe
@@ -7083,6 +7133,13 @@ class FilterSet(
             _depth=_depth,
             _branch_path=_branch_path,
         )
+        nested_qs_by_branch_id = cls._collect_nested_visibility_querysets_sync(
+            input_value,
+            info,
+            parent_db=queryset.db,
+            _depth=_depth,
+            _branch_path=_branch_path,
+        )
         hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]] = {}
         data, request, constrained = cls._apply_common_prelude(
             input_value,
@@ -7097,6 +7154,7 @@ class FilterSet(
             data,
             request,
             info,
+            nested_qs_by_branch_id=nested_qs_by_branch_id,
             flat_hop_visibility=hop_visibility,
             run_permissions=run_permissions,
             branch_path=_branch_path,
@@ -7133,9 +7191,8 @@ class FilterSet(
             4. Normalize the input and apply the related constraints via
                ``_apply_common_prelude`` (shared with ``apply_sync``).
             5. Route ``_probed_filterset`` (filterset build with the
-               nested-visibility and hop-visibility maps stashed - the
-               async-only step with no sync analog - then perm check + form
-               validate, then the absent-leaf probe)
+               nested-visibility and hop-visibility maps stashed, then perm
+               check + form validate, then the absent-leaf probe)
                through ``run_in_one_sync_boundary`` so a consumer's
                ``check_*_permission`` hook that performs a blocking ORM read
                does not block the event loop. The probe asks each absent
