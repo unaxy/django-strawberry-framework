@@ -62,7 +62,7 @@ from .lateral_fetch import (
     _deduplicate_parent_ids,
     _is_window_qual,
     _parent_in_values,
-    _select_columns,
+    _select_projection,
     window_predicate_signature,
 )
 from .nested_fetch import (
@@ -95,12 +95,12 @@ class SingleParentWindowSpec:
     in-branch ``LIMIT`` (the page size plus the one ``next_page_probe`` sentinel
     row, equal to the page size when the probe is off).
 
-    ``select_related`` (the planned child join graph) and ``select_columns`` (the
-    planned ``(attname, column)`` projection Django selects, or ``None`` for a
-    projection reaching a multi-table parent table or one Django refuses)
-    freeze the child projection at plan time so ``_fetch_single_parent_rows``
-    can prove the fetch-time query still loads exactly what the windowed body
-    would before trusting the pristine re-query.
+    ``select_related`` (the planned child join graph) and ``select_projection``
+    (the planned ``(table, attname, column)`` projection Django selects,
+    multi-table inheritance parent columns included, or ``None`` for one Django
+    refuses) freeze the child projection at plan time so
+    ``_fetch_single_parent_rows`` can prove the fetch-time query still loads
+    exactly what the windowed body would before trusting the pristine re-query.
 
     Eligibility pins ``with_total_count`` / ``reverse`` / ``offset`` and the
     keyset seek out (``single_parent_spec``), so no counted / reversed / offset /
@@ -114,7 +114,7 @@ class SingleParentWindowSpec:
     parent_link_table: str
     fetch_limit: int
     select_related: bool | dict[str, object]
-    select_columns: tuple[tuple[str, str], ...] | None
+    select_projection: tuple[tuple[str, str, str], ...] | None
 
 
 def single_parent_spec(request: NestedConnectionRequest) -> SingleParentWindowSpec | None:
@@ -171,7 +171,7 @@ def single_parent_spec(request: NestedConnectionRequest) -> SingleParentWindowSp
         parent_link_table=request.child_queryset.model._meta.db_table,
         fetch_limit=fetch_limit,
         select_related=request.child_queryset.query.select_related,
-        select_columns=_select_columns(request.child_queryset),
+        select_projection=_select_projection(request.child_queryset),
     )
 
 
@@ -272,12 +272,14 @@ def _fetch_single_parent_rows(queryset: SingleParentWindowQuerySet) -> list[mode
     # The synthesized rows come from ``spec.pristine_child_queryset``, so the
     # fetch-time projection and ``select_related`` join graph must still be the
     # planned ones - otherwise the pristine re-query would load a different set
-    # of columns / related objects than the windowed body would. Mirrors
-    # ``_recognize_lateral_fetch``'s projection guard (``_select_columns`` +
-    # ``select_related``); any drift falls back to the windowed body.
+    # of columns / related objects than the windowed body would. The projection
+    # is keyed by table, not by ``_recognize_lateral_fetch``'s base-table-only
+    # ``_select_columns``, because this re-query runs through Django and loads a
+    # multi-table child's parent columns too; any drift falls back to the
+    # windowed body.
     if query.select_related != spec.select_related:
         return None
-    if _select_columns(queryset) != spec.select_columns:
+    if _select_projection(queryset) != spec.select_projection:
         return None
     parent_ids = _single_parent_where_ids(query.where, spec)
     if parent_ids is None:

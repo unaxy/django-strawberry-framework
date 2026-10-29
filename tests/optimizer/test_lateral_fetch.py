@@ -56,6 +56,7 @@ from django_strawberry_framework.optimizer.lateral_fetch import (
     _recognize_lateral_fetch,
     _RecognizedLateralFetch,
     _select_columns,
+    _select_projection,
     build_lateral_sql,
     window_predicate_signature,
 )
@@ -532,6 +533,21 @@ def test_select_columns_reads_djangos_projection_of_an_inherited_child() -> None
         ("venue_ptr_id", "venue_ptr_id"),
         ("window_count", "window_count"),
     )
+
+
+def test_select_projection_keys_an_inherited_child_by_table() -> None:
+    """The single-parent fingerprint keeps a multi-table child's parent columns, keyed by table."""
+    assert _select_projection(LendingDesk.objects.defer("opened_on", "lead_ticket")) == (
+        ("library_venue", "id", "id"),
+        ("library_venue", "name", "name"),
+        ("library_lendingdesk", "venue_ptr_id", "venue_ptr_id"),
+        ("library_lendingdesk", "window_count", "window_count"),
+    )
+
+
+def test_select_projection_downgrades_a_projection_django_refuses() -> None:
+    """An unknown ``.defer()`` name fingerprints ``None``; the windowed body raises Django's error."""
+    assert _select_projection(Book.objects.defer("no_such_field")) is None
 
 
 def test_select_columns_downgrades_a_projection_django_refuses() -> None:

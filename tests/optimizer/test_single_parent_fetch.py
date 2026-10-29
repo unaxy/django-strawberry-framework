@@ -21,7 +21,7 @@ imported here, not re-tested.
 from collections.abc import Callable, Iterable
 
 import pytest
-from apps.library.models import Book, Branch, Genre, Shelf
+from apps.library.models import Book, Branch, Genre, LendingDesk, Shelf, Venue
 from django.db.models import Model, Prefetch, QuerySet, Value
 
 from django_strawberry_framework.keyset import (
@@ -213,6 +213,55 @@ def test_fetch_returns_none_for_projection_drift_from_a_planned_defer() -> None:
     drifted = queryset.defer("title")
     assert isinstance(drifted, SingleParentWindowQuerySet)
     assert _fetch_single_parent_rows(drifted) is None
+
+
+def _venue_desk_request() -> NestedConnectionRequest:
+    """``Venue.lendingdesk`` loading every ``LendingDesk`` column, count-free.
+
+    The child is a multi-table inheritance child whose own table holds the
+    ``venue_ptr`` link, so its full projection spans the ``Venue`` parent table
+    (``name``, ``opened_on``, ``lead_ticket_id``) and the child table alike.
+    """
+    return _request(
+        Venue,
+        "lendingdesk",
+        child_queryset=LendingDesk.objects.all(),
+        with_total_count=False,
+    )
+
+
+@pytest.mark.django_db
+def test_fetch_returns_none_for_projection_drift_on_a_multi_table_parent_column() -> None:
+    """A deferred parent-table column of a multi-table child is a projection drift.
+
+    The single-parent re-query runs through Django, which loads a multi-table
+    child's inherited columns from the parent table, so the planned projection
+    covers those columns too. Package tier: a fetch-time projection that differs
+    from the planned one comes only from a queryset altered after planning,
+    which no GraphQL input does. The ``Venue.lendingdesk`` link stands in for any
+    multi-table child keyed to its parent from its own table; the fast path
+    reads only that link, not the relation's cardinality.
+    """
+    venue = Venue.objects.create(name="annex")
+    LendingDesk.objects.create(venue_ptr=venue, name=venue.name)
+    queryset = _prefetch_filtered(_venue_desk_request(), "venue_ptr", [venue])
+    drifted = queryset.defer("name")
+    assert isinstance(drifted, SingleParentWindowQuerySet)
+    assert _fetch_single_parent_rows(drifted) is None
+
+
+@pytest.mark.django_db
+def test_fast_path_serves_an_undrifted_multi_table_child() -> None:
+    """A multi-table child whose projection still matches the plan takes the plain re-query."""
+    venue = Venue.objects.create(name="annex")
+    LendingDesk.objects.create(venue_ptr=venue, name=venue.name, window_count=3)
+    queryset = _prefetch_filtered(_venue_desk_request(), "venue_ptr", [venue])
+    rows = _fetch_single_parent_rows(queryset)
+    assert rows is not None
+    (desk,) = rows
+    assert isinstance(desk, LendingDesk)
+    assert (desk.pk, desk.name, desk.window_count) == (venue.pk, "annex", 3)
+    assert getattr(desk, WINDOW_ROW_NUMBER) == 1
 
 
 def test_fetch_returns_none_without_a_parent_filter() -> None:
