@@ -3407,8 +3407,8 @@ def test_products_items_filter_and_order_compose() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Nested relation-connection windowed-prefetch coverage (spec-033,
-# DoD item 10). The reverse-FK windowed nested-connection shape the M2M-only
+# Nested relation-connection windowed-prefetch coverage (the spec-033 live
+# fixed-count pin). The reverse-FK windowed nested-connection shape the M2M-only
 # library graph cannot express live: ``Category.items`` synthesizes an
 # ``itemsConnection`` (both ``CategoryType`` and ``ItemType`` are
 # Relay-Node-shaped, so the spec-032 synthesis covers it), and the

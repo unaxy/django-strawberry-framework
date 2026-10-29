@@ -9090,7 +9090,7 @@ def test_genre_connection_flat_leaf_total_count_is_row_preserving() -> None:
 
 
 def _seed_two_matching_genres_over_two_books_each() -> tuple[models.Branch, models.Shelf]:
-    """Seed the shared C.5 expanded-origin fixture and return the branch/shelf.
+    """Seed the shared expanded-origin fixture and return the branch/shelf.
 
     Two genres each match the ``booksTitle`` term "cardio" through TWO matching
     books (so a fan-out bug would duplicate each genre once per matching book,
@@ -13874,7 +13874,7 @@ def test_nested_books_connection_fixed_query_count() -> None:
 
     The literal N+1 disproof: the captured query count for the nested
     ``booksConnection`` window is INDEPENDENT of the number of parent genres
-    (spec-033 / Goal 5 / DoD item 8). The window is one prefetch over
+    (the spec-033 live fixed-query-count pin). The window is one prefetch over
     all parents, not one query per parent. ``totalCount`` is not selected -
     ``BookType`` has no ``Meta.connection`` opt-in, so the field does not exist.
     """
@@ -14064,8 +14064,8 @@ def test_nested_total_count_no_per_parent_count() -> None:
     shape ``test_book_genres_connection_sidecars_and_total_count`` established.
     The count comes from the window's ``_dst_total_count`` annotation, NOT a
     per-book ``COUNT``, so adding ``totalCount`` to the selection costs nothing
-    extra even with multiple parent books (spec-033 / Edge case;
-    DoD item 8).
+    extra even with multiple parent books (the spec-033 nested-``totalCount``
+    zero-extra-queries pin).
     """
     shelf = _seed_shelf()
     # Multiple parent books, each with the SAME set of >2 genres, strengthens
@@ -14162,8 +14162,8 @@ def test_nested_window_respects_book_visibility() -> None:
     count IS the visible count. The ``GenreType`` connection that DOES carry
     ``totalCount`` has no visibility filter, so a visibility-filtered
     ``totalCount`` field is unavailable live; the ``booksConnection`` edge set
-    is the correct live surface for ``BookType`` visibility (spec-033 /
-    Edge case "visibility-filtered targets" / DoD item 8).
+    is the correct live surface for ``BookType`` visibility (spec-033
+    Edge case "visibility-filtered targets").
     """
     # No ``orderBy:`` - the plain selection is window-planned (the deterministic
     # pk-terminal order the window appends yields seeded insertion order for
@@ -17084,24 +17084,24 @@ def test_create_shelf_via_metadata_serializer_expanded_input_type_system_over_ht
     The three are a ``ChoiceField`` enum, a ``DictField`` JSON, and a registry-mapped custom field.
 
     ``ShelfMetadataSerializer`` carries three serializer-only write-only fields:
-    ``priority`` (a ``ChoiceField`` -> a GENERATED GraphQL enum, #6), ``attributes`` (a
-    ``DictField`` -> ``JSON``, #7), and ``accent_color`` (a custom ``HexColorField`` mapped
-    ONLY via ``register_serializer_field_converter`` -> ``String``, #11). Introspection pins
+    ``priority`` (a ``ChoiceField`` -> a GENERATED GraphQL enum), ``attributes`` (a
+    ``DictField`` -> ``JSON``), and ``accent_color`` (a custom ``HexColorField`` mapped
+    ONLY via ``register_serializer_field_converter`` -> ``String``). Introspection pins
     each input field's GraphQL type; the create then posts through all three, proving the
     expanded input type system works end to end (the enum value round-trips into ``topic``,
     the JSON + custom field are decoded + validated then dropped).
     """
     branch = models.Branch.objects.create(name="MetadataBranch", city="Boston")
 
-    # #6: the serializer-only ChoiceField became a GENERATED enum (not a String).
+    # The serializer-only ChoiceField became a GENERATED enum (not a String).
     priority_type = _input_field_type("ShelfMetadataSerializerInput", "priority")
     assert priority_type["kind"] == "ENUM"
     assert priority_type["name"] == "ShelfMetadataSerializerInputPriorityEnum"
-    # #7: the DictField became strawberry JSON.
+    # The DictField became strawberry JSON.
     attributes_type = _input_field_type("ShelfMetadataSerializerInput", "attributes")
     assert attributes_type["kind"] == "SCALAR"
     assert attributes_type["name"] == "JSON"
-    # #11: the custom HexColorField mapped to String via the registered converter.
+    # The custom HexColorField mapped to String via the registered converter.
     accent_type = _input_field_type("ShelfMetadataSerializerInput", "accentColor")
     assert accent_type["kind"] == "SCALAR"
     assert accent_type["name"] == "String"

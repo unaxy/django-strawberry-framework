@@ -5991,7 +5991,7 @@ def test_flattened_related_filter_leaf_is_row_preserving() -> None:
 
 
 # ---------------------------------------------------------------------------
-# C.3 / C.3a - flat-leaf applicator + distinct-suppression invocation helper
+# Flat-leaf applicator + distinct-suppression invocation helper
 # ---------------------------------------------------------------------------
 
 
@@ -6459,7 +6459,7 @@ def test_qs_and_apply_sync_and_async_over_eligible_candidate() -> None:
 # row-preserving production behavior against the permanent test-local oracle.
 #
 # ---------------------------------------------------------------------------
-# C.4 - baseline-vs-rewritten equivalence matrix
+# Baseline-vs-rewritten equivalence matrix
 #
 # For every supported candidate shape, the production ``FilterSet`` path
 # (correlated ``EXISTS``) must return the SAME ordered primary-key sequence and
@@ -6501,7 +6501,7 @@ def test_qs_and_apply_sync_and_async_over_eligible_candidate() -> None:
 
 
 def _library_shelf() -> library_models.Shelf:
-    """Create a throwaway ``Branch`` + ``Shelf`` for library-model C.4 fixtures."""
+    """Create a throwaway ``Branch`` + ``Shelf`` for library-model fixtures."""
     branch = library_models.Branch.objects.create(name="C4 Branch")
     return library_models.Shelf.objects.create(branch=branch, code="C4-1")
 
@@ -7261,7 +7261,7 @@ def test_untouched_surfaces_attach_no_reserved_alias() -> None:
 
 
 # ---------------------------------------------------------------------------
-# C.4 - multiset contract
+# Multiset contract
 #
 # A framework-generated predicate is a SQL selection over the queryset it
 # receives: each existing root-row occurrence is retained exactly once or
@@ -7436,7 +7436,7 @@ def test_multiset_custom_filter_produced_input_multiplicity_survives(shape: str)
 
 
 # ---------------------------------------------------------------------------
-# C.4 - Medtrics deep-path adapter tier (package-tier SQL shape + pagination)
+# Medtrics deep-path adapter tier (package-tier SQL shape + pagination)
 #
 # The Medtrics deep path ``book__loans__patron__email`` as a ``Meta.fields``
 # traversal on a ``Loan`` filter set declaring no ``RelatedFilter``

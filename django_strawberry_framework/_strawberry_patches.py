@@ -48,8 +48,8 @@ inside its own property and the view's ``parse_json`` is never entered
 with bytes at all, which cost the sync transport its controlled ``400``. See
 :func:`django_strawberry_framework.conf.upstream_patches_enabled`.
 
-The bug
--------
+The decode-failure gap: undecodable and over-nested bodies
+----------------------------------------------------------
 
 A request body that is not valid UTF-8 (raw binary, an invalid-UTF-8
 JSON payload, etc.) makes Strawberry's view raise ``UnicodeDecodeError``
@@ -119,8 +119,8 @@ it: the original is called unchanged and only the otherwise-uncaught
 This keeps the patch robust to upstream changes in the body of
 ``parse_json``.
 
-A second gap: non-object JSON bodies
-------------------------------------
+The non-envelope-body gap: non-object JSON bodies
+-------------------------------------------------
 
 The same wrapper also closes a sibling gap. ``parse_http_body`` handles
 a request body that decodes to a JSON object (a single operation) and to
@@ -178,7 +178,7 @@ The two GET sites are therefore shielded: :func:`apply` also installs
 :func:`_patched_parse_query_params`, a source-pinned reimplementation
 of upstream's ``parse_query_params`` whose two nested parses call
 :func:`_translated_parse_json`, keeping the envelope guard off the GET
-path while the shared translator still owns gap 1's error channel;
+path while the shared translator still owns the decode-failure error channel;
 upstream's per-param handling keeps ownership of validity there while
 the wrapper keeps hardening the seven
 body/multipart sites. Because the shield is a *reimplementation* rather
@@ -191,8 +191,8 @@ silently superseded. The shield shares the envelope guard's lifecycle:
 retire both together once upstream guards both ``.get()`` sites (see
 "Upstream status" below).
 
-A third gap: structurally-invalid multipart maps
--------------------------------------------------
+The multipart-map gap: structurally-invalid multipart maps
+----------------------------------------------------------
 
 The generic guard cannot reject every JSON array: an array of objects is a
 valid batched operation document, including in multipart form. The multipart
@@ -238,7 +238,7 @@ patch can be retired once upstream broadens the catch to also cover
 ``UnicodeDecodeError`` and ``RecursionError``; a future upstream shape
 change fails loudly so that retirement is deliberate.
 
-The second gap (non-object body) is likewise unfixed through 0.327.7 (the
+The non-envelope-body gap is likewise unfixed through 0.327.7 (the
 same ``parse_http_body`` bodies in every published release from 0.322.2 on)
 and on ``main`` when last checked (2026-10-14, the 0.335.0 tag).
 ``parse_http_body`` still handles only the ``list`` (batch) branch and then
@@ -260,7 +260,7 @@ open upstream issue tracks them. Retire the envelope guard once upstream
 rejects a non-object ahead of both ``data.get("query")`` and each batch
 ``item.get(...)``.
 
-The third gap is present in the installed upstream multipart utility:
+The multipart-map gap is present in the installed upstream multipart utility:
 ``replace_placeholders_with_files`` calls ``files_map.items()`` and then
 ``path.split(".")`` without first validating those values' JSON shapes, and its
 unconditional ``copy.deepcopy`` of the operations document recurses per nesting
@@ -295,8 +295,8 @@ deliberately narrows wire decoding. Keeping a permanent policy in a module
 whose other concerns are scheduled for retirement would risk a security regression
 if the module were retired en bloc. The UTF-8 policy therefore lives in
 ``views.py::_RequestBodyBoundaryMixin.parse_json`` (see "Where the strict UTF-8
-wire contract lives" above). **This module can be deleted outright once 1, 2,
-and 3 all retire**.
+wire contract lives" above). **This module can be deleted outright once all three
+upstream-bug concerns retire**.
 
 Re-checking whether upstream fixed this
 ---------------------------------------
@@ -306,31 +306,31 @@ whether the three *upstream-bug* parts are still required (the wire
 contract is not an upstream question at all and is owned by ``views.py`` -
 see "Three lifecycles" above):
 
-1. End-to-end, for **gap 2 only**. Set ``DJANGO_STRAWBERRY_FRAMEWORK =
+1. End-to-end, for the **non-envelope-body gap only**. Set ``DJANGO_STRAWBERRY_FRAMEWORK =
    {"APPLY_UPSTREAM_PATCHES": False}`` and run the fakeshop scalar-body
    and non-object-batch rows::
 
        uv run pytest examples/fakeshop/test_query/test_products_api.py \
            -k non_object
 
-   If they still return 400 with the patch off, upstream has fixed gap 2;
+   If they still return 400 with the patch off, upstream has fixed that gap;
    if they do not (Django surfaces the raw ``AttributeError`` as a 500 and
    ``django.test.Client`` re-raises it), the guard is still needed. For
    the batch-element half, a 400 of "Batching is not enabled" with the
    patch off (fakeshop's default) is *not* proof of an upstream fix -
    enable ``batching_config`` and re-check that ``[1,2,3]`` still 500s.
 
-   **Gap 1 has no live diagnostic any more**, and reading one into the
+   **The decode-failure gap has no live diagnostic**, and reading one into the
    suite inverts the verdict. Every fakeshop body row posts to a *package*
    view, whose own strict UTF-8 decode (spec-046 Decision 9) rejects an
    undecodable body before ``parse_json`` is entered - so
    ``test_post_invalid_utf8_json_body_returns_400_not_500``,
    ``test_post_raw_binary_body_returns_400_not_500``, and the whole
    UTF-16 / UTF-32 / UTF-8-BOM set answer 400 with this patch on OR off.
-   That is the wire contract passing, not upstream. Use probe 2 for
-   gap 1, or mount ``strawberry.django.views.GraphQLView`` directly.
+   That is the wire contract passing, not upstream. Use the installed-version
+   probe for the decode-failure gap, or mount ``strawberry.django.views.GraphQLView`` directly.
 
-2. End-to-end, for **gap 3 only**. Run the live multipart-map rows with
+2. End-to-end, for the **multipart-map gap only**. Run the live multipart-map rows with
    the Strawberry patch disabled. A raw ``500`` for ``map=[{}]`` means
    the upstream utility still leaks its ``AttributeError``; a controlled
    upstream ``400`` means this wrapper can be considered for retirement::
@@ -344,32 +344,33 @@ see "Three lifecycles" above):
        from django_strawberry_framework import _strawberry_patches as p
        from strawberry.http.base import BaseView
 
-       # Gap 1 (UnicodeDecodeError / RecursionError): b'{' + an invalid
+       # Decode failure (UnicodeDecodeError / RecursionError): b'{' + an invalid
        # UTF-8 byte, or a pathologically nested document for the second.
        try:
            p._original_parse_json(BaseView(), bytes([0x7b, 0x80]))
        except (UnicodeDecodeError, RecursionError):
-           print("GAP 1 STILL NEEDED")  # upstream catch is still too narrow
+           print("DECODE-FAILURE PATCH STILL NEEDED")  # upstream catch is still too narrow
        except Exception as exc:  # noqa: BLE001
-           print("GAP 1 RETIRABLE:", type(exc).__name__)  # e.g. HTTPException
+           print("DECODE-FAILURE PATCH RETIRABLE:", type(exc).__name__)  # e.g. HTTPException
 
-       # Gap 2 (non-object body) lives in ``parse_http_body``, not
+       # The non-envelope-body gap lives in ``parse_http_body``, not
        # ``parse_json`` (which just returns the scalar), so probe end-to-end
        # via the live test above, or read the ``data.get("query")`` site in
        # sync_base_view.py / async_base_view.py and confirm a non-dict guard
        # now precedes it.
 
-       # Gap 3 (multipart map) needs ``map`` to be checked as a mapping
+       # The multipart-map gap needs ``map`` to be checked as a mapping
        # before the utility calls ``.items()`` and iterates string paths.
 
    To check a newer release without upgrading, re-read ``parse_json`` /
-   ``decode_json`` at the permalink above (gap 1) and ``parse_http_body``
-   (gap 2) plus ``replace_placeholders_with_files`` (gap 3) on the current
+   ``decode_json`` at the permalink above (decode failure) and
+   ``parse_http_body`` (non-envelope body) plus
+   ``replace_placeholders_with_files`` (multipart map) on the current
    ``main``. The latest published version is at
    ``https://pypi.org/pypi/strawberry-graphql/json`` (``info.version``).
 
 The ``parse_query_params`` shield has no upstream bug of its own to
-track - it exists purely to keep the gap-2 envelope guard off the GET
+track - it exists purely to keep the non-envelope-body guard off the GET
 path - so it retires in the same change that retires the envelope guard.
 
 Surface visibility
@@ -818,8 +819,8 @@ def _patched_parse_query_params(
       per-param ``400`` ("must be an object or null, if provided"),
       not the guard's request-body message on a bodyless GET;
     - malformed JSON still becomes upstream's ``HTTPException(400,
-      ...)``, raised inside the delegated original. Of gap 1's two
-      translated raises, the decode half is moot on this path - query
+      ...)``, raised inside the delegated original. Of the decode-failure
+      translator's two raises, the decode half is moot on this path - query
       params arrive as ``str`` (Django has already decoded the query
       string), so ``json.loads`` cannot raise ``UnicodeDecodeError``
       here - while the recursion half is real: a pathologically deep

@@ -4952,7 +4952,7 @@ def test_singleton_factory_extensions_form_emits_no_deprecation_warning() -> Non
     singleton-factory form passes a *callable*, so no such warning fires.
     ``simplefilter("always")`` is set inside the context so a warning that
     Strawberry already emitted-and-deduped earlier in the process cannot
-    produce a false green. Pins spec-029 DoD item 4.
+    produce a false green. Pins the spec-029 no-instance-form-warning contract.
     """
 
     @strawberry.type
@@ -5491,7 +5491,7 @@ def test_nested_connection_fallback_publish_unions_parent_planned_set_end_to_end
 # =============================================================================
 # Cascade <-> optimizer cooperation pins (spec-034). No optimizer source change is
 # involved: a type whose get_queryset CASCADES is, to the optimizer, just a type
-# with a custom hook, so the shipped rules fire unchanged (Decision 7 / Goal 3).
+# with a custom hook, so the shipped rules fire unchanged (spec-034 Decision 7).
 # =============================================================================
 
 

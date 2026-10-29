@@ -3762,7 +3762,7 @@ def test_restore_is_two_sided_and_the_present_path_works_again() -> None:
     The blocked-then-retried import re-executes ``routers.py`` and rebinds the
     parent attribute to a fresh module; a one-sided restore would leave two live
     modules with independent ``_router_class`` caches - the order-dependent
-    Test-6 identity flake under ``pytest-xdist``.
+    cached-router-class identity flake under ``pytest-xdist``.
 
     Absence / import-guard proof; a request cannot show what is not imported. Live
     HTTP sibling: ``examples/fakeshop/test_query/test_transport_api.py``.
