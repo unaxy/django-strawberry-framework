@@ -44,7 +44,12 @@ from graphql.language.ast import (
     VariableNode,
 )
 from graphql.language.printer import print_ast
-from graphql.type.definition import GraphQLInterfaceType, GraphQLObjectType
+from graphql.type.definition import (
+    GraphQLInterfaceType,
+    GraphQLObjectType,
+    GraphQLUnionType,
+    get_named_type,
+)
 from typing_extensions import override
 
 from django_strawberry_framework.extensions.operation_state import (
@@ -77,9 +82,9 @@ from django_strawberry_framework.utils.querysets import (
 from django_strawberry_framework.utils.typing import (
     MISSING_ATTRIBUTE,
     graphql_fields,
+    graphql_type_of,
     published_python_name,
     return_type_of,
-    unwrap_graphql_type,
 )
 from django_strawberry_framework.utils.typing import (
     strawberry_schema_from_info as _strawberry_schema_from_info,
@@ -153,12 +158,11 @@ from .selections import (
 from .walker import plan_optimizations
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
     from types import SimpleNamespace
     from typing import TypeAlias
 
     from graphql.language.ast import FragmentDefinitionNode, Node, OperationDefinitionNode
-    from graphql.type.definition import GraphQLResolveInfo
+    from graphql.type.definition import GraphQLResolveInfo, GraphQLType
     from graphql.type.schema import GraphQLSchema
     from strawberry.types.execution import ExecutionContext
     from strawberry.types.nodes import Selection
@@ -827,12 +831,11 @@ def _collect_schema_reachable_types(schema: object) -> "truth.IdentitySet[type[D
     strawberry_schema = _strawberry_schema_from_schema(schema)
     visited_type_names: set[str] = set()
 
-    def _walk_gql_type(gql_type: object) -> None:
+    def _walk_gql_type(gql_type: "GraphQLType") -> None:
         """Recursively collect DjangoType origins from a graphql-core type."""
-        gql_type = unwrap_graphql_type(gql_type)
-        # An unwrapped graphql-core type is a named type, whose ``name`` is a string.
-        type_name: str | None = getattr(gql_type, "name", None)
-        if type_name is None or type_name in visited_type_names:
+        named = get_named_type(gql_type)
+        type_name = named.name
+        if type_name in visited_type_names:
             return
         visited_type_names.add(type_name)
         # Check if this type is a DjangoType. The lookup is read by name: any schema
@@ -843,35 +846,17 @@ def _collect_schema_reachable_types(schema: object) -> "truth.IdentitySet[type[D
             registered = registry.get_definition(read_attr(definition, "origin", None))
             if registered is not None:
                 reachable.add(registered.origin)
-        # Recurse into fields.
-        # A graphql-core object / interface / input type's ``fields`` map names to fields.
-        fields: Mapping[str, object] | None = getattr(gql_type, "fields", None)
-        if fields is not None:
-            for field_obj in fields.values():
-                _walk_gql_type(getattr(field_obj, "type", None))
+        # Recurse into fields; an output walk reaches no input object type.
+        if isinstance(named, (GraphQLObjectType, GraphQLInterfaceType)):
+            for field_obj in graphql_fields(named).values():
+                _walk_gql_type(graphql_type_of(field_obj))
 
-        # Recurse into union types.
-        union_types: Iterable[object] | None = getattr(gql_type, "types", None)
-        if union_types is not None:
-            for u_type in union_types:
-                _walk_gql_type(u_type)
-
-        # Recurse into interface implementations so a ``DjangoType``
-        # reachable only via an interface-typed root field still
-        # participates in the audit. graphql-core 3.x exposes
-        # ``schema.get_implementations(interface_type) -> InterfaceImplementations``
-        # with an ``.objects`` tuple of concrete implementers. The
-        # ``hasattr`` guard keeps the call safe across graphql-core
-        # versions.
-        if isinstance(gql_type, GraphQLInterfaceType) and hasattr(
-            gql_schema,
-            "get_implementations",
-        ):
-            impls = gql_schema.get_implementations(gql_type)
-            impl_objects: Iterable[GraphQLObjectType] | None = getattr(impls, "objects", None)
-            if impl_objects is not None:
-                for impl_type in impl_objects:
-                    _walk_gql_type(impl_type)
+        # Recurse into a union's members and an interface's implementations, so a
+        # ``DjangoType`` reachable only via an abstract-typed root field (e.g. a
+        # ``relay.Node`` implementer) still participates in the audit.
+        if isinstance(named, (GraphQLUnionType, GraphQLInterfaceType)):
+            for possible_type in gql_schema.get_possible_types(named):
+                _walk_gql_type(possible_type)
 
     for root_type in (
         gql_schema.query_type,
@@ -905,22 +890,17 @@ def _resolve_model_from_return_type(info: "GraphQLResolveInfo") -> _OriginAndMod
     """Trace ``info.return_type`` through graphql-core wrappers to ``(origin, model)``.
 
     graphql-core wraps resolver return types in layers of
-    ``GraphQLNonNull`` and ``GraphQLList``. This function recursively
-    peels ``.of_type`` until it reaches a leaf carrying a ``.name``
-    attribute (a ``GraphQLObjectType``), then looks up the corresponding
-    Strawberry type definition via the schema and reverse-maps to the
-    Django model through the registry.
+    ``GraphQLNonNull`` and ``GraphQLList``. This function reads the named
+    type under them through graphql-core's ``get_named_type``, then looks
+    up the corresponding Strawberry type definition via the schema by its
+    name and reverse-maps to the Django model through the registry.
 
     Returns ``None`` when any step fails (non-object leaf, missing
     schema backref, missing schema type, unregistered origin). The
     caller treats ``None`` as "nothing to optimize" and passes the
     queryset through unchanged.
     """
-    rt = unwrap_graphql_type(return_type_of(info))
-    # An unwrapped graphql-core type is a named type, whose ``name`` is a string.
-    type_name: str | None = getattr(rt, "name", None)
-    if type_name is None:
-        return None
+    type_name = get_named_type(return_type_of(info)).name
     strawberry_schema = _strawberry_schema_from_info(info)
     if strawberry_schema is None:
         return None

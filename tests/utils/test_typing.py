@@ -20,7 +20,6 @@ from graphql import (
     GraphQLInt,
     GraphQLList,
     GraphQLNonNull,
-    GraphQLNullableType,
     GraphQLObjectType,
     GraphQLScalarType,
     GraphQLString,
@@ -46,7 +45,6 @@ from django_strawberry_framework.utils.typing import (
     strawberry_schema_from_info,
     strawberry_schema_from_schema,
     unwrap_container_type,
-    unwrap_graphql_type,
     unwrap_non_null,
     unwrap_return_type,
 )
@@ -74,7 +72,6 @@ def test_typing_exports_all() -> None:
         "strawberry_schema_from_info",
         "strawberry_schema_from_schema",
         "unwrap_container_type",
-        "unwrap_graphql_type",
         "unwrap_non_null",
         "unwrap_return_type",
     )
@@ -151,60 +148,11 @@ def test_unwrap_return_type_peels_only_one_layer() -> None:
     assert unwrap_return_type(Outer()) == list[Inner]
 
 
-def test_unwrap_graphql_type_peels_all_of_type_layers() -> None:
-    """The GraphQL helper recursively unwraps wrapper stacks to the leaf type."""
-
-    class Inner:
-        pass
-
-    class NonNull:
-        def __init__(self, of_type: object) -> None:
-            self.of_type = of_type
-
-    class List:
-        def __init__(self, of_type: object) -> None:
-            self.of_type = of_type
-
-    wrapped = NonNull(List(NonNull(Inner)))
-
-    assert unwrap_graphql_type(wrapped) is Inner
-
-
-def test_unwrap_graphql_type_peels_a_deep_but_finite_stack() -> None:
-    """A stack just under the ceiling still peels to the leaf (no false overrun)."""
-
-    class Inner:
-        pass
-
-    class Wrap:
-        def __init__(self, of_type: object) -> None:
-            self.of_type = of_type
-
-    wrapped = Inner
-    for _ in range(MAX_TYPE_WRAPPER_DEPTH - 1):
-        wrapped = Wrap(wrapped)
-
-    assert unwrap_graphql_type(wrapped) is Inner
-
-
-def test_unwrap_graphql_type_raises_on_cyclic_of_type_stack() -> None:
-    """A cyclic ``of_type`` chain hits the bound and fails loud instead of spinning."""
-
-    class Cyclic:
-        @property
-        def of_type(self) -> Self:
-            return self  # never bottoms out
-
-    with pytest.raises(RuntimeError, match="cyclic or corrupt"):
-        unwrap_graphql_type(Cyclic())
-
-
 def test_unwrap_container_type_peels_containers_but_not_a_leaf_with_of_type() -> None:
     """Only ``StrawberryContainer`` layers peel; a leaf exposing ``of_type`` is NOT descended.
 
-    The load-bearing distinction from ``unwrap_graphql_type``'s bare-``hasattr``
-    contract: an ``Edge`` subclass that happens to carry an
-    ``of_type`` attribute must be returned as the leaf, not peeled into.
+    An ``Edge`` subclass that happens to carry an ``of_type`` attribute must be
+    returned as the leaf, not peeled into.
     """
 
     class Edge:
@@ -230,17 +178,6 @@ def test_unwrap_return_type_returns_direct_class_when_unwrapped() -> None:
         pass
 
     assert unwrap_return_type(Inner) is Inner
-
-
-def test_unwrap_graphql_type_passes_through_none() -> None:
-    """``None`` carries no ``of_type`` attribute and passes through unchanged.
-
-    The optimizer's ``_walk_gql_type`` recursion at
-    ``optimizer/extension.py`` feeds ``getattr(field_obj, "type", None)``
-    into this helper; the post-peel ``type_name is None`` gate downstream
-    relies on the passthrough holding so the recursion terminates cleanly.
-    """
-    assert unwrap_graphql_type(None) is None
 
 
 # ---------------------------------------------------------------------------
@@ -419,23 +356,6 @@ def test_schema_config_from_info_explicit_none_wrapped_falls_back_to_direct() ->
     assert schema_config_from_info(no_config) is None
 
 
-def test_unwrap_graphql_type_accepts_exact_wrapper_depth() -> None:
-    """The configured depth is inclusive; only a longer chain is corrupt."""
-
-    class Inner:
-        pass
-
-    class Wrap:
-        def __init__(self, of_type: object) -> None:
-            self.of_type = of_type
-
-    wrapped = Inner
-    for _ in range(MAX_TYPE_WRAPPER_DEPTH):
-        wrapped = Wrap(wrapped)
-
-    assert unwrap_graphql_type(wrapped) is Inner
-
-
 def test_unwrap_container_type_accepts_exact_wrapper_depth() -> None:
     """The configured depth is inclusive for Strawberry containers too."""
 
@@ -568,11 +488,10 @@ def test_is_async_callable_ignores_the_metaclass_call_of_an_instance_class() -> 
 
 
 def test_unwrap_non_null_peels_only_non_null_layers() -> None:
-    """The narrow peel stops at the list wrapper its callers must still see.
+    """The peel stops at the list wrapper its callers must still see.
 
-    ``unwrap_graphql_type`` would peel the ``GraphQLList`` too, which is exactly
-    why the resource policy's list-vs-connection classification could not use it
-    and grew raw ``while isinstance`` loops instead.
+    ``get_named_type`` would peel the ``GraphQLList`` too, which the resource
+    policy's list-vs-connection classification must still read.
     """
     # graphql-core's ``GraphQLNamedType.__new__`` widens every built-in scalar to its base.
     assert isinstance(GraphQLString, GraphQLScalarType)
@@ -580,26 +499,6 @@ def test_unwrap_non_null_peels_only_non_null_layers() -> None:
     assert unwrap_non_null(GraphQLNonNull(inner)) is inner
     assert unwrap_non_null(inner) is inner
     assert unwrap_non_null(GraphQLString) is GraphQLString
-
-
-def test_unwrap_non_null_raises_on_a_cyclic_non_null_chain() -> None:
-    """A cyclic non-null chain raises instead of spinning the request thread.
-
-    graphql-core forbids ``NonNull(NonNull(x))``, so no genuine schema reaches
-    the ceiling - which is why the three unbounded ``while isinstance`` loops
-    this replaced looked safe. A hand-built or corrupted wrapper is the case the
-    bound exists for, and an unbounded loop on one hangs rather than failing.
-    """
-
-    class _CyclicNonNull(GraphQLNonNull[GraphQLNullableType]):
-        """A non-null wrapper built without its constructor, which refuses a non-null type."""
-
-    chain = _CyclicNonNull.__new__(_CyclicNonNull)
-    # basedpyright: a non-null wrapping a non-null is the malformed chain under test
-    chain.of_type = chain  # pyright: ignore[reportAttributeAccessIssue]
-
-    with pytest.raises(RuntimeError, match="unwrap_non_null"):
-        unwrap_non_null(chain)
 
 
 def _info_stand_in(stand_in: object) -> strawberry.Info[object, object]:

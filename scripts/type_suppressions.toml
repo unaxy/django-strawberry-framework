@@ -738,7 +738,6 @@
 "tests/utils/test_truth.py::test_callable_instance_without_a_declared_name_is_named_by_its_class" = { reportAttributeAccessIssue = 1 }
 "tests/utils/test_truth.py::test_planted_colliding_key_runs_its_eq_in_every_namespace_lookup" = { reportArgumentType = 1 }
 "tests/utils/test_typing.py::_info_stand_in" = { cast = 1 }
-"tests/utils/test_typing.py::test_unwrap_non_null_raises_on_a_cyclic_non_null_chain" = { reportAttributeAccessIssue = 1 }
 "tests/utils/test_typing.py::test_unwrap_return_type_handles_bare_typing_list" = { reportDeprecated = 1 }
 "tests/utils/test_write_values.py::_OMITTED" = { reportAny = 1 }
 "tests/utils/test_write_values.py::test_coerce_relation_pk_or_none_handles_non_models_and_uncoercible_values" = { reportArgumentType = 2 }

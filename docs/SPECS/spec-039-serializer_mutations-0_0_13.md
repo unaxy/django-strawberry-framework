@@ -2685,7 +2685,7 @@ reuse:
   serializer flavor consumes.
 - **`utils/typing.py`** — `is_async_callable` is unneeded (async dispatch is owned by
   [`DjangoMutationField`][glossary-djangomutationfield]'s `async_execution()` check, not
-  the serializer base); `unwrap_return_type` / `unwrap_graphql_type` apply only to a
+  the serializer base); `unwrap_return_type` applies only to a
   consumer `input_class` override, which the serializer flavor does not accept
   ([Decision 6](#decision-6--base-class-strategy-serializermutation-rides-the-djangomutation-base-modelserializer-driven)).
 - **`utils/strings.py::snake_case`** — the inverse of `graphql_camel_name`, not a

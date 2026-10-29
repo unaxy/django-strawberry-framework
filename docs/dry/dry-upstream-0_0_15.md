@@ -354,15 +354,21 @@ it lands with its tick.
     a nameless node, a `None` node list and a non-dict `fields`, inputs graphql-core never passes, are gone with their
     three suppressions); live `test_mutation_atomicity.py::test_mutation_root_typename_meta_field_resolves`.
 
-- [ ] 18. (TYP-10) `unwrap_non_null` / `unwrap_graphql_type` re-derive graphql-core's peels
-  - Our code: `utils/typing.py::unwrap_non_null` and `::unwrap_graphql_type` (~40 lines).
-  - Upstream: `graphql/type/definition.py::get_nullable_type` and `::get_named_type`. Public, 3.2.0.
-  - Lines: ~35.
-  - Status: CONFIRMED (10,312 fakeshop field and argument types, 0 diffs).
-  - Reason to keep ours: the bounded loop guards against cyclic chains. `GraphQLNonNull` refuses NonNull-of-NonNull at
-    construction, so a real schema cannot produce one.
-  - Behaviour change: none.
-  - Risk / blockers: `unwrap_graphql_type` also peels Strawberry `of_type`, and no caller uses that.
+- [x] 18. (TYP-10) `unwrap_non_null` / `unwrap_graphql_type` re-derive graphql-core's peels
+  - Our code: `unwrap_graphql_type` (and its `utils` re-export) was removed; `optimizer/extension.py` reads
+    `get_named_type`, and its reachable-type walker takes a typed `GraphQLType`, reads `graphql_fields` on object and
+    interface types and `GraphQLSchema.get_possible_types` for union members and interface implementations.
+    `utils/typing.py::unwrap_non_null` stays as one `GraphQLNonNull` peel: `get_nullable_type`'s overloads reject a
+    bare `GraphQLType` and its return reads partially Unknown, so calling it would grow suppressions.
+  - Upstream: `graphql/type/definition.py::get_named_type` and `::get_nullable_type`, and
+    `graphql/type/schema.py::GraphQLSchema.get_possible_types`. Public, the same at 3.2.0, 3.2.13 and 3.3.0a12.
+  - Status: CONFIRMED (12,187 fakeshop schema values, both peels, 0 diffs; the reachable `DjangoType` set is the same
+    91 types).
+  - Behaviour change: none. The bounded loops and their cyclic-chain errors are gone: graphql-core refuses a
+    `GraphQLNonNull` of a `GraphQLNonNull`, and a real schema holds no cyclic wrapper.
+  - Tests: existing pins in `tests/optimizer/test_extension.py` (`resolve_model`, `check_schema` union and interface
+    rows), `tests/utils/test_typing.py::test_unwrap_non_null_peels_only_non_null_layers` and
+    `tests/test_resource_policy.py`. The rows that pinned hand-built `of_type` stacks and cyclic chains are gone.
 
 - [ ] 19. (OPT-6) The GFK content-type carrier column is spelled as a string
   - Our code: `optimizer/plans.py::_prefetch_carrier_attnames #"f\"{ct_field}_id\""` (1 line).

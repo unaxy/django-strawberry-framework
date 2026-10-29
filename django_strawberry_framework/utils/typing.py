@@ -2,10 +2,10 @@
 
 Strawberry exposes list-shaped return types in two distinct forms across
 versions: native ``typing.list[T]`` (the modern path) and an internal
-wrapper object that carries an ``of_type`` attribute. graphql-core also
-uses ``of_type`` wrapper stacks for ``GraphQLNonNull`` and ``GraphQLList``.
-Both contracts live here so optimizer and schema factories do not grow
-parallel unwrap loops.
+wrapper object that carries an ``of_type`` attribute; that contract lives
+here so optimizer and schema factories do not grow parallel unwrap loops.
+graphql-core's own wrapper stacks are peeled by its ``get_named_type``;
+``unwrap_non_null`` is its ``get_nullable_type`` typed for the package's callers.
 
 Also home to the partial-aware async predicate the public field factories
 and the GlobalID-callable validator share:
@@ -145,7 +145,6 @@ __all__ = (
     "strawberry_schema_from_info",
     "strawberry_schema_from_schema",
     "unwrap_container_type",
-    "unwrap_graphql_type",
     "unwrap_non_null",
     "unwrap_return_type",
 )
@@ -413,36 +412,6 @@ def is_marked_coroutine_function(
     return iscoroutinefunction(value)  # pyright: ignore[reportDeprecated]
 
 
-def unwrap_graphql_type(gql_type: object) -> object:
-    """Peel all graphql-core / Strawberry ``of_type`` wrapper layers.
-
-    Returns the innermost type when ``gql_type`` is a
-    ``GraphQLNonNull``/``GraphQLList`` (or Strawberry ``of_type``)
-    wrapper stack, or returns ``gql_type`` itself when there is no
-    wrapper to peel (including ``None`` and any object that does not
-    expose ``of_type``).
-
-    The peel is bounded by ``MAX_TYPE_WRAPPER_DEPTH`` rather than looping
-    unconditionally: a chain longer than that ceiling can only be cyclic or
-    corrupt, so it raises ``RuntimeError`` instead of spinning forever.
-
-    Examples:
-        ``NonNull(List(NonNull(Inner)))`` -> ``Inner``;
-        ``Inner`` -> ``Inner`` (no wrapper to peel);
-        ``None`` -> ``None`` (no ``of_type`` attribute).
-
-    """
-    for _ in range(MAX_TYPE_WRAPPER_DEPTH + 1):
-        inner = read_attr(gql_type, "of_type", MISSING_ATTRIBUTE)
-        if inner is MISSING_ATTRIBUTE:
-            return gql_type
-        gql_type = inner
-    raise RuntimeError(
-        f"unwrap_graphql_type: `of_type` wrapper stack exceeded "
-        f"{MAX_TYPE_WRAPPER_DEPTH} layers; the type chain is likely cyclic or corrupt.",
-    )
-
-
 if TYPE_CHECKING:
 
     def is_graphql_list(_value: object, /) -> TypeIs[GraphQLList[GraphQLType]]:
@@ -491,45 +460,29 @@ def inline_fragment_type_condition(node: "InlineFragmentNode") -> "NamedTypeNode
 
 
 def unwrap_non_null(gql_type: _T) -> "_T | _GraphQLNullableType":
-    """Peel ONLY ``GraphQLNonNull`` layers, bounded; leave list wrappers in place.
+    """Peel one ``GraphQLNonNull`` layer; leave a list wrapper in place.
 
-    The narrow sibling of :func:`unwrap_graphql_type`, for the callers that must
-    still SEE the ``GraphQLList`` underneath - the resource policy's list-vs-
-    connection classification would answer wrong if the list layer were peeled
-    too, which is why those sites could not simply call the full peel and each
-    grew its own raw ``while isinstance(..., GraphQLNonNull)`` loop instead.
-
-    Bounded like every other peel in this module (Power-of-Ten Rule 2): a
-    genuine graphql-core ``GraphQLNonNull`` cannot wrap another, so a chain past
-    the ceiling can only be a hand-built or corrupt type, and an unbounded
-    ``while`` on one hangs the request thread rather than failing.
+    graphql-core's ``get_nullable_type``, typed for the package's callers: its
+    overloads reject a bare ``GraphQLType`` and its return reads as partially
+    Unknown. One peel is the whole peel, since ``GraphQLNonNull`` refuses to wrap
+    another ``GraphQLNonNull``. The resource policy's list-vs-connection
+    classification reads the ``GraphQLList`` this leaves in place.
     """
-    current: _T | _GraphQLNullableType = gql_type
-    for _ in range(MAX_TYPE_WRAPPER_DEPTH + 1):
-        if not _is_graphql_non_null(current):
-            return current
-        current = current.of_type
-    raise RuntimeError(
-        f"unwrap_non_null: GraphQLNonNull wrapper stack exceeded "
-        f"{MAX_TYPE_WRAPPER_DEPTH} layers; the type chain is likely cyclic or corrupt.",
-    )
+    if _is_graphql_non_null(gql_type):
+        return gql_type.of_type
+    return gql_type
 
 
 def unwrap_container_type(strawberry_type: _T) -> "_T | StrawberryType | type[object]":
     """Peel Strawberry ``StrawberryContainer`` layers only, bounded.
 
-    The container-scoped sibling of ``unwrap_graphql_type`` for resolved
-    Strawberry field types (``list[Edge[Node]]`` -> ``Edge``): the
+    For resolved Strawberry field types (``list[Edge[Node]]`` -> ``Edge``): the
     ``isinstance(StrawberryContainer)`` gate is load-bearing - a concrete leaf
     class that happens to expose an ``of_type`` attribute must NOT be peeled
-    (the bare-``hasattr`` contract would descend into it) - so the shared
+    (a bare ``of_type`` read would descend into it) - so the shared
     unbounded ``while isinstance`` loop lands here with the same
     ``MAX_TYPE_WRAPPER_DEPTH`` Power-of-Ten cap and loud cyclic-chain failure,
     instead of living raw at a call site.
-
-    The ``StrawberryContainer`` import is function-local so this module stays
-    importable without pulling Strawberry's type machinery at import time
-    (matching the module's stdlib-only header).
     """
     peeled: _T | StrawberryType | type[object] = strawberry_type
     for _ in range(MAX_TYPE_WRAPPER_DEPTH + 1):
