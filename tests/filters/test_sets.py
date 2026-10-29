@@ -11694,6 +11694,66 @@ def test_integer_column_in_drops_a_fractional_member(members: str, labels: list[
     assert sorted(filterset.qs.values_list("label", flat=True)) == sorted(labels)
 
 
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("data", "labels"),
+    [
+        pytest.param({"signed_big__gte": "1.5"}, ["one", "two", "three"], id="gte-truncates"),
+        pytest.param({"signed_big__lt": "1.5"}, ["minus-one", "zero"], id="lt-truncates"),
+        pytest.param({"signed_big": "1.5"}, ["one"], id="exact-truncates"),
+        pytest.param({"signed_big": "-1.5"}, ["minus-one"], id="exact-truncates-toward-zero"),
+        pytest.param({"signed_big__range": "1.5,2.5"}, ["one", "two"], id="range-truncates"),
+        pytest.param({"signed_big__in": "1.5"}, [], id="in-drops"),
+    ],
+)
+def test_integer_comparison_truncates_a_fractional_value(
+    data: dict[str, str],
+    labels: list[str],
+) -> None:
+    """Raw form data's fractional comparison value truncates toward zero; ``in`` drops it.
+
+    The comparison leaves are django-filter's ``NumberFilter``, whose ``DecimalField`` cleans
+    ``"1.5"`` to ``Decimal("1.5")``; Django's float ceiling (``IntegerFieldFloatRounding``)
+    reads only a ``float``, so the ``Decimal`` reaches ``IntegerField.get_prep_value``'s
+    ``int()``, as it does under a stock django-filter ``FilterSet``. An ``in`` member equal
+    to no integer names no row instead. The GraphQL ``Int`` / ``BigInt`` scalars refuse a
+    fraction before any of these binds.
+    """
+
+    class SignedBigFilter(FilterSet):
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = {
+                "signed_big": [
+                    "exact",
+                    "gte",
+                    "lt",
+                    "range",
+                    "in",
+                ],
+            }
+
+    for label, number in (
+        ("minus-one", -1),
+        ("zero", 0),
+        ("one", 1),
+        ("two", 2),
+        ("three", 3),
+    ):
+        scalar_models.ScalarSpecimen.objects.create(
+            label=label,
+            signed_big=number,
+            occurred_on=datetime.date(2020, 1, 1),
+            occurred_at=datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc),
+            occurred_time=datetime.time(12),
+            external_id=uuid.uuid4(),
+        )
+    filterset = SignedBigFilter(data=data, queryset=scalar_models.ScalarSpecimen.objects.all())
+
+    SignedBigFilter._validate_form_or_raise(filterset)
+    assert sorted(filterset.qs.values_list("label", flat=True)) == sorted(labels)
+
+
 def _default_range_operations(wrapper: BaseDatabaseWrapper) -> BaseDatabaseOperations:
     """``wrapper``'s own operations, reading Django's default integer ranges (PostgreSQL's)."""
 
