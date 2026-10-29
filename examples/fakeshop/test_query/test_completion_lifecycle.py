@@ -2,7 +2,7 @@
 
 import asyncio
 import inspect
-from collections.abc import AsyncIterable, AsyncIterator, Iterable
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Iterable
 from dataclasses import dataclass, field
 from typing import NoReturn, cast
 
@@ -12,6 +12,7 @@ import strawberry
 from apps.library.models import Branch
 from asgiref.sync import sync_to_async
 from django.db import connection
+from django.db.models import QuerySet
 from django.http import HttpRequest, HttpResponseBase
 from django.test import AsyncClient, Client, override_settings
 from django.urls import path
@@ -19,7 +20,13 @@ from graphql import ExecutionResult as CoreResult
 from graphql import FieldNode, GraphQLError, GraphQLObjectType
 from graphql.execution import ExecutionContext as CoreExecutionContext
 from graphql.pyutils import AwaitableOrValue, Path
-from graphql_client import JSONValue, json_at, middleware_without_debug_toolbar, response_json
+from graphql_client import (
+    JSONValue,
+    json_at,
+    json_list,
+    middleware_without_debug_toolbar,
+    response_json,
+)
 from strawberry.dataloader import DataLoader
 from strawberry.extensions import SchemaExtension
 from strawberry.http import GraphQLHTTPResponse
@@ -38,6 +45,7 @@ from django_strawberry_framework import _completion as completion
 from django_strawberry_framework import _graphql_core_patches as patches
 from django_strawberry_framework.schema import DjangoMutationExecutionContext
 from django_strawberry_framework.testing import AsyncTestClient
+from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.views import AsyncDjangoGraphQLView
 
 
@@ -150,8 +158,9 @@ class Observe(SchemaExtension):
     async def on_operation(self) -> AsyncIterator[None]:
         """Record upstream result and optionally perform async operation audit I/O."""
         yield
-        result = cast("CoreResult | None", self.execution_context.result)
-        assert result is not None
+        # Strawberry types the slot with graphql-core 3.3's incremental result, unknown on 3.2.
+        result = read_attr(self.execution_context, "result")
+        assert isinstance(result, CoreResult)
         CURRENT.state.engine_errors = result.errors or []
         CURRENT.state.operation_errors = messages(result)
         if CURRENT.state.view == "extension":
@@ -162,8 +171,8 @@ class Observe(SchemaExtension):
     async def get_results(self) -> dict[str, object]:
         """Collect asynchronous audit metadata after operation teardown."""
         if CURRENT.state.view == "results":
-            result = cast("CoreResult | None", self.execution_context.result)
-            assert result is not None
+            result = read_attr(self.execution_context, "result")
+            assert isinstance(result, CoreResult)
             CURRENT.state.result_collection_errors = messages(result)
             CURRENT.state.release.set()
             await CURRENT.state.drained.wait()
@@ -214,6 +223,21 @@ def make_schema(shape: str) -> tuple[strawberry.Schema, str]:
             assert CURRENT.state.loader is not None
             return await CURRENT.state.loader.load("k")
 
+    async def branch_names() -> "QuerySet[Branch, str]":
+        # The QuerySet itself, so list completion reaches the async QuerySet adapter.
+        return Branch.objects.order_by("name").values_list("name", flat=True)
+
+    async def awaitable_values() -> list[Awaitable[str]] | None:
+        # Unawaited items: graphql-core completes each list item as an awaitable.
+        if CURRENT.state.work == "success":
+
+            async def value(text: str) -> str:
+                await asyncio.sleep(0)
+                return text
+
+            return [value("first"), value("second")]
+        return [fast(), late()]
+
     class ProbeBranch(DjangoType):
         """A library branch with asynchronous computed fields."""
 
@@ -238,25 +262,14 @@ def make_schema(shape: str) -> tuple[strawberry.Schema, str]:
                 return "fine"
             return await late()
 
-        @strawberry.field
-        @staticmethod
-        async def names() -> list[str]:
-            return cast(
-                "list[str]",
-                cast("object", Branch.objects.order_by("name").values_list("name", flat=True)),
-            )
-
-        @strawberry.field
-        @staticmethod
-        async def values() -> list[str] | None:
-            if CURRENT.state.work == "success":
-
-                async def value(text: str) -> str:
-                    await asyncio.sleep(0)
-                    return text
-
-                return cast("list[str]", [value("first"), value("second")])
-            return cast("list[str]", [fast(), late()])
+        names: "QuerySet[Branch, str]" = strawberry.field(
+            resolver=branch_names,
+            graphql_type=list[str],
+        )
+        values: list[Awaitable[str]] | None = strawberry.field(
+            resolver=awaitable_values,
+            graphql_type=list[str] | None,
+        )
 
         @strawberry.field
         @staticmethod
@@ -329,13 +342,21 @@ def make_schema(shape: str) -> tuple[strawberry.Schema, str]:
         async def late(self) -> str | None:
             return await late()
 
-        @strawberry.field
-        async def branch(self) -> ProbeBranch | None:
-            return cast("ProbeBranch", cast("object", await Branch.objects.aget(name="early")))
+        async def _branch(self) -> Branch | None:
+            return await Branch.objects.aget(name="early")
 
-        @strawberry.field
-        async def branches(self) -> list[ProbeBranch] | None:
-            return cast("list[ProbeBranch]", [row async for row in Branch.objects.order_by("id")])
+        branch: Branch | None = strawberry.field(
+            resolver=_branch,
+            graphql_type=ProbeBranch | None,
+        )
+
+        async def _branches(self) -> list[Branch] | None:
+            return [row async for row in Branch.objects.order_by("id")]
+
+        branches: list[Branch] | None = strawberry.field(
+            resolver=_branches,
+            graphql_type=list[ProbeBranch] | None,
+        )
 
     @strawberry.type
     class Mutation:
@@ -476,8 +497,7 @@ async def test_live_late_errors(
             and tuple(int(part) for part in graphql.__version__.split(".")) < (3, 2, 10)
         )
         assert "mutation-created" not in names
-        errors = cast("list[object]", json_at(response_json(response), "errors"))
-        assert isinstance(errors, list)
+        errors = json_list(response_json(response), "errors")
         visible = [json_at(error, "message") for error in errors]
         expected = [
             "INITIAL_DELIBERATE" if initial == "deliberate" else "An unexpected error occurred.",
@@ -599,8 +619,7 @@ def test_live_sync_bridge_mutation_orm(
         assert CURRENT.state.orm_pk is not None
         assert CURRENT.state.cancelled is False
         assert not Branch.objects.exists()
-        errors = cast("list[object]", json_at(response_json(response), "errors"))
-        assert isinstance(errors, list)
+        errors = json_list(response_json(response), "errors")
         assert len(errors) == 1
         assert json_at(errors, 0, "message") == "INITIAL_DELIBERATE"
 

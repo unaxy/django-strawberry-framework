@@ -123,8 +123,9 @@ _R = TypeVar("_R")
 def _syntax_shape(node: object) -> object:
     """Serialize syntax consistently across supported Python AST schema versions."""
     if isinstance(node, ast.AST):
-        # ast.iter_fields exposes arbitrary syntax values as Any; none is interpreted here.
-        fields = cast("Iterable[tuple[str, object]]", ast.iter_fields(node))
+        # ast.iter_fields yields each syntax value as Any; the list holds them as object,
+        # since none is interpreted here.
+        fields: list[tuple[str, object]] = list(ast.iter_fields(node))
         return (
             truth.name(type(node)),
             tuple(
@@ -191,8 +192,9 @@ def _completion_method(method: "Callable[_P, _R]") -> "Callable[_P, _R]":
     )
     adapted.__kwdefaults__ = method.__kwdefaults__
     _ = functools.update_wrapper(adapted, method)
-    # FunctionType preserves the audited callable code and call signature exactly.
-    return cast("Callable[_P, _R]", adapted)
+    # FunctionType preserves the audited callable code and call signature exactly, so the
+    # rebuilt function takes the method's parameters and returns its result.
+    return adapted
 
 
 class _CompletionMethods(NamedTuple):

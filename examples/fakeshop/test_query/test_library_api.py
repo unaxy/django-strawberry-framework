@@ -17331,7 +17331,7 @@ def _post_printing_write(
     payload = response_json(response)
     assert "errors" not in payload, payload
     return (
-        cast("JSONObject", json_at(payload, "data", field)),
+        json_object(payload, "data", field),
         [query["sql"] for query in captured.captured_queries],
     )
 
@@ -17501,7 +17501,7 @@ def _post_edition_locating_write(write: str, lookup_id: str) -> tuple[JSONObject
     payload = response_json(response)
     assert "errors" not in payload, payload
     return (
-        cast("JSONObject", json_at(payload, "data", field)),
+        json_object(payload, "data", field),
         [query["sql"] for query in captured.captured_queries],
     )
 
