@@ -5,7 +5,7 @@ and `strawberry_django/utils/` converge on: focused submodules per
 concern rather than a single 500-line `utils.py`.
 
 This leaf re-exports a small, PINNED set of names (``__all__`` below) - the
-seven held for the short spelling, pinned by ``tests/utils/test_init.py``.
+six held for the short spelling, pinned by ``tests/utils/test_init.py``.
 It is deliberately not the union of the submodules' surfaces: the
 architecture notes below name what the architecturally notable submodules
 OWN, and for a submodule's full public surface you read its own ``__all__``
@@ -17,7 +17,7 @@ stays legible at every call site.
   (``relation_kind``, ``RelationKind``, ``is_many_side_relation_kind``).
 - ``strings`` - case conversion (``snake_case``, ``pascal_case``).
 - ``typing`` - Strawberry / Python / GraphQL type unwrapping
-  (``unwrap_graphql_type``, ``unwrap_return_type``), the partial-aware async
+  (``unwrap_return_type``), the partial-aware async
   predicate (``is_async_callable``),
   and the ``_strawberry_schema`` / config digs (``schema_config_from_info``).
 - ``connections`` - the connection window-bounds / sidecar-kwarg contracts.
@@ -44,7 +44,7 @@ stays legible at every call site.
 
 from .relations import RelationKind, is_many_side_relation_kind, relation_kind
 from .strings import pascal_case, snake_case
-from .typing import unwrap_graphql_type, unwrap_return_type
+from .typing import unwrap_return_type
 
 __all__ = (
     "RelationKind",
@@ -52,6 +52,5 @@ __all__ = (
     "pascal_case",
     "relation_kind",
     "snake_case",
-    "unwrap_graphql_type",
     "unwrap_return_type",
 )

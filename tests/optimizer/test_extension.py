@@ -945,15 +945,23 @@ def test_resolve_model_from_return_type_unwraps_nested_wrappers() -> None:
 
 
 def test_resolve_model_returns_none_for_non_object_leaf() -> None:
-    """When the leaf type has no name, returns None.
+    """A scalar under the wrappers names no registered ``DjangoType``, so returns None."""
 
-    Every graphql-core named type carries a name, so a nameless leaf is a defensive arm.
-    """
-    info = SimpleNamespace(
-        return_type=SimpleNamespace(),  # no of_type, no name
-        schema=None,
+    @strawberry.type
+    class Query:
+        @strawberry.field
+        def names(self) -> list[str]:
+            return []
+
+    schema = strawberry.Schema(query=Query)
+    # graphql-core's named-type constructor is typed to return any named type.
+    leaf = GraphQLString
+    assert isinstance(leaf, GraphQLScalarType)
+    info = make_info()._raw_info._replace(
+        return_type=GraphQLNonNull(GraphQLList(GraphQLNonNull(leaf))),
+        schema=schema._schema,
     )
-    assert _resolve_model_from_return_type(_as_partial_resolve_info(info)) is None
+    assert _resolve_model_from_return_type(info) is None
 
 
 def _object_type_outside_schema(name: str) -> GraphQLObjectType:

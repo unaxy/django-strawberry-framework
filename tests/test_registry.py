@@ -264,7 +264,7 @@ def test_register_same_class_against_two_models_raises(fresh_registry: TypeRegis
 def test_model_for_type_returns_none_for_none(fresh_registry: TypeRegistry) -> None:
     """Passing ``None`` short-circuits to ``None`` so the optimizer can pipeline.
 
-    ``DjangoOptimizerExtension`` resolves GraphQL return types with ``unwrap_graphql_type`` and
+    ``DjangoOptimizerExtension`` resolves GraphQL return types with ``get_named_type`` and
     then calls ``model_for_type``; the registry must accept a missing origin without raising.
 
     Registry lifecycle: isolated ``TypeRegistry`` maps. A live request cannot show map identity. No

@@ -1,7 +1,7 @@
 """Package-init tests pinning the ``utils`` package's re-export surface.
 
 ``django_strawberry_framework/utils/__init__.py`` re-exports a short spelling for
-seven submodule names. Two things have to be pinned, because each fails silently:
+six submodule names. Two things have to be pinned, because each fails silently:
 the SET (a name added here is a public-surface widening, one removed strands
 every consumer using the short spelling) and the IDENTITY (a re-export that
 rebinds rather than forwards would let the package root and the owning submodule
@@ -17,14 +17,13 @@ from django_strawberry_framework.utils import typing as typing_module
 
 
 def test_utils_package_reexport_surface_is_pinned() -> None:
-    """The short-spelling surface is exactly these seven names, in ``__all__`` order."""
+    """The short-spelling surface is exactly these six names, in ``__all__`` order."""
     assert utils.__all__ == (
         "RelationKind",
         "is_many_side_relation_kind",
         "pascal_case",
         "relation_kind",
         "snake_case",
-        "unwrap_graphql_type",
         "unwrap_return_type",
     )
 
@@ -36,7 +35,6 @@ def test_every_reexported_name_is_the_owning_submodules_object() -> None:
     assert utils.relation_kind is relations_module.relation_kind
     assert utils.pascal_case is strings_module.pascal_case
     assert utils.snake_case is strings_module.snake_case
-    assert utils.unwrap_graphql_type is typing_module.unwrap_graphql_type
     assert utils.unwrap_return_type is typing_module.unwrap_return_type
 
 
