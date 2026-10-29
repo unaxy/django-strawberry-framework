@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 377 done, 216 to do.
+Progress: 379 done, 217 to do.
 
 ## Done
 
@@ -2138,6 +2138,20 @@ Progress: 377 done, 216 to do.
   being dropped, and the leaf reads as supplied; a widget reading no key keeps its bare name. Range bounds keep the
   two-key `multi_widget_keys`. spec-027 and the `utils/widgets.py` module docstring say so. Tests:
   `tests/filters/test_sets.py`
+- [x] 654. The filter ask reads only the lookups a leaf binds for the user's value: `filters/sets.py::
+  _bound_value_lookups` skips every expression that is one of the queryset's own annotations (by identity, per query
+  and subquery), so a consumer annotation's out-of-range constant a leaf goes through never refuses an in-range value,
+  while a leaf filtering on an annotation is still asked; and `utils/errors.py::binds_integer` holds no range for an
+  `IntegerField` subclass whose internal type the backend states none for, instead of raising `KeyError` (the filter
+  ask and `utils/querysets.py::coerce_field_value_or_none`). spec-027, spec-032 and README say so. Tests:
+  `tests/filters/test_sets.py`, `tests/utils/test_errors.py`, `tests/utils/test_querysets.py`
+- [x] 657. An `ArrayField` of integers is asked like the temporal and decimal arrays: each integer a lookup over the
+  array or a slice of it binds for its right-hand side (an `ARRAY[...]` element, a slice element, a member of a list
+  parameter) is held to its element column's range (`utils/errors.py::refuses_integer_range`) and a member past it is
+  the field-keyed `FILTER_INVALID`, never dropped; a slice's bounds are no element, and an index `in` member or an
+  array's `len` is held to its transform's own output range. A flat integer column stays unasked. spec-027, README
+  and the `filterset` glossary term say so. Tests: `tests/filters/test_sets.py` (real `ArrayField` rows and a
+  prepared-element double that runs without psycopg), `tests/utils/test_errors.py`
 
 ## Outside review of the fixes
 
@@ -2233,17 +2247,10 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 538. (robustness) A `DateRangeFilter` declared on a `Choices` column builds and types as the column's enum, while
   its own form field accepts only its fixed date-range keys, so every enum member answers `FILTER_INVALID` "Select a
   valid choice"; the same filter on a plain column is refused at schema build. Found verifying 518
-- [ ] 654. (robustness) `filters/sets.py::_bound_value_lookups` also reads lookups inside a consumer annotation a leaf
-  goes through, so an out-of-range consumer constant refuses the user's value; and `utils/querysets.py::binds_integer`
-  raises `KeyError` for an `IntegerField` subclass whose `get_internal_type()` the backend's `integer_field_ranges`
-  lacks (Django's own exact lookup shares the limit). Found verifying 385
 - [ ] 656. A whole-array `ArrayFilter` over an `ArrayField` column (generated through `Meta.filter_overrides`, or
   declared) fails the schema build: `filters/inputs.py::_element_annotation` asks `_scalar_from_model_field` of the
   `ArrayField` itself (`types/converters.py::scalar_for_field` raises "Unsupported Django field type 'ArrayField'")
   instead of its element (`array_element_field`); only index / slice / `len` leaves publish (F11 area). Found
-  fact-finding 389
-- [ ] 657. Unprobed: the integer ask (385) on an `ArrayField(IntegerField)` filter leaf: the gate admits only
-  temporal / duration elements, so a list param of out-of-range integers reaches the driver unasked. Found
   fact-finding 389
 - [ ] 666. A declared hop-walking flat filter whose `filter` constrains on an absent or no-bound value raises
   `SyncMisuseError` on `apply_async` when the hop target's `get_queryset` is async-only: the async pre-pass awaits only
@@ -2302,12 +2309,25 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 688. (robustness) A declared `ListFilter(field_name="<col>__year", lookup_expr="in")` refuses an integral
   decimal member (`"2020.0"`, `"2.02e3"`) with "Enter a value the database can represent." where the generated
   `year__in` leaf matches the 2020 rows. Found verifying 652
+- [ ] 692. (robustness) A nested integer `ArrayField` filter (`ArrayField(ArrayField(IntegerField))`, `contains`)
+  cleans its members as text (`[["1", "9223372036854775808"]]`) and binds them as strings, so the integer ask never
+  reads them and PostgreSQL refuses the cast at execution (the element form field, `filters/base.py`). Found
+  verifying 657
+- [ ] 693. (robustness) `filters/sets.py::_unbindable_predicate`'s params-wide rules (`refuses_utc_offset`,
+  `refuses_numeric_format`, `psycopg_refuses_list_parameter`) read the compiled params of the whole clause, so a
+  constant inside a consumer annotation the leaf goes through (a `Value(Decimal(...))` past `numeric`'s format) can
+  refuse the user's in-range value; hold them to the leaf's own bound lookups as 654 does for integers. Found
+  verifying 654
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 694. CHANGELOG entry for items 654 and 657: an out-of-range integer member of an `ArrayField` of integers filter
+  is `FILTER_INVALID` instead of a masked database error; a consumer annotation's constant no longer refuses an
+  in-range filter value through it; an `IntegerField` subclass whose type the backend states no range for filters
+  instead of raising `KeyError`
 - [ ] 691. CHANGELOG entry for item 579: on a `FilterSet` used outside the schema (a django-filter view, a direct
   construction), a related child filter whose widget is a `SplitArrayWidget` or a nested `MultiWidget` filters by the
   keys the widget reads instead of being silently dropped

@@ -39,6 +39,10 @@ write flavors):
   needs more digits before or after the point than ``numeric`` stores, read over a
   compiled predicate's parameters and by the identity decode
   (``utils/querysets.py::coerce_field_value_or_none``);
+- ``refuses_integer_range`` - an integer the backend cannot bind as an element of an
+  integer ``ArrayField``: each integer a whole-array lookup binds for its right-hand
+  side, list parameters read at any nesting depth, held to ``binds_integer`` for the
+  element column;
 - ``unstorable_temporal`` - the write-side answer: a date, datetime, time or duration
   a temporal or duration column cannot store on the database a write runs on, asked
   of Django's own save-time preparation on that connection (``Field.get_db_prep_save``)
@@ -48,8 +52,9 @@ write flavors):
   flavor before the save (``utils/write_values.py::unstorable_temporal_error`` on the
   model flavor);
 - ``binds_integer`` - whether a backend binds an integer as a value of a column, held
-  to the range it stores for the column's internal type; shared with the filter bind
-  ask (``filters/sets.py::_unbindable_predicate``) and the identity decode
+  to the range it stores for the column's internal type (none where the backend states
+  no range for that type); shared with the filter bind ask
+  (``filters/sets.py::_unbindable_predicate``) and the identity decode
   (``utils/querysets.py::coerce_field_value_or_none``);
 - ``null_field_error`` / ``empty_validation_error`` - the two shared leaves
   for an explicit null on a non-nullable column (the column's own message) and a
@@ -139,6 +144,7 @@ __all__ = [
     "model_field_error_names",
     "null_field_error",
     "psycopg_refuses_list_parameter",
+    "refuses_integer_range",
     "refuses_numeric_format",
     "refuses_utc_offset",
     "rekey_error_segment",
@@ -889,6 +895,37 @@ def refuses_numeric_format(connection: BaseDatabaseWrapper, values: Iterable[obj
     return False
 
 
+def refuses_integer_range(
+    connection: BaseDatabaseWrapper,
+    element_field: ConcreteField,
+    values: Iterable[object],
+) -> bool:
+    """Whether ``connection`` cannot bind an integer in ``values`` as an ``element_field`` value.
+
+    ``values`` are what a lookup whose left-hand side is an ``ArrayField`` of
+    ``element_field`` binds for its right-hand side (``Lookup.process_rhs``): each element
+    a whole-array lookup binds is a parameter of its own (``ARRAY[%s, ...]``) or a member
+    of one list parameter (``gt`` binds the list whole). Every integer is held to
+    ``binds_integer`` for ``element_field``, so a member past the range
+    the backend stores for the element's type is refused: Django holds an element to that
+    range nowhere, and the driver (SQLite's, past 64 bits) or the server (PostgreSQL's
+    ``::integer[]`` cast) would refuse it at the query. A list or tuple among ``values``
+    is one list parameter, whose elements are read at any nesting depth. A ``bool`` and
+    every other value are not read.
+    """
+    for value in values:
+        if is_list_or_tuple(value):
+            if refuses_integer_range(connection, element_field, value):
+                return True
+        elif (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and not binds_integer(connection, element_field, value)
+        ):
+            return True
+    return False
+
+
 def _fits_numeric(number: Decimal) -> bool:
     """Whether ``number``'s spelling stays within PostgreSQL ``numeric``'s format."""
     exponent = number.adjusted() - len(number.as_tuple().digits) + 1
@@ -1066,11 +1103,19 @@ def binds_integer(connection: BaseDatabaseWrapper, field: object, number: int) -
     PostgreSQL, 64 bits for every integer type on SQLite. A field that is no
     ``IntegerField`` yet binds an integer, as a ``DurationField`` binds its microsecond
     count on a backend without a native interval, is held to ``BigIntegerField``'s range.
+    An internal type the backend states no range for (an ``IntegerField`` subclass naming
+    its own, absent from ``DatabaseOperations.integer_field_ranges``) holds no limit: the
+    lookup raises ``KeyError`` there, and Django holds an ``in`` member or a ``range``
+    bound to no range for it either.
     """
     internal_type = (
         field.get_internal_type() if isinstance(field, models.IntegerField) else "BigIntegerField"
     )
-    return _within_integer_range(number, connection.ops.integer_field_range(internal_type))
+    try:
+        bounds = connection.ops.integer_field_range(internal_type)
+    except KeyError:
+        return True
+    return _within_integer_range(number, bounds)
 
 
 def _within_integer_range(number: int, bounds: tuple[int | None, int | None]) -> bool:

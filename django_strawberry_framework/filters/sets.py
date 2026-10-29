@@ -121,6 +121,7 @@ from django_strawberry_framework.utils.errors import (
     binds_integer,
     coded_error_extensions,
     psycopg_refuses_list_parameter,
+    refuses_integer_range,
     refuses_numeric_format,
     refuses_utc_offset,
     unstorable_text,
@@ -2343,8 +2344,17 @@ def _unbindable_predicate(
     holds an integer to that range only in an integer comparison (``IntegerFieldOverflow``:
     ``exact``, ``gt``, ``gte``, ``lt``, ``lte``), never in an ``in`` list, a ``range``
     bound or a duration's microsecond count, so every lookup binding a value is read
-    (``_bound_value_lookups``). The compiled parameters are last held to the two rules no
-    Django call answers, a UTC offset PostgreSQL refuses
+    (``_bound_value_lookups``: the filter's own lookups, never one inside a queryset
+    annotation the leaf reads). A lookup whose left-hand side is an ``ArrayField`` of
+    integers (the column, or a slice of it) binds each element as a parameter of its own
+    or as a member of one list parameter, which no left-hand side types as an integer, so
+    every integer it binds for its right-hand side, list members at any depth included, is
+    held to the element column's range (``utils/errors.py::refuses_integer_range``) and a
+    member past it refuses the value, never dropped from it. A slice's bounds, which its
+    left-hand side binds, are no element, and a value compared with a transform's integer
+    output (an index's element, ``len``) is held to that output's range as any other
+    lookup's. The compiled parameters are last held to the two rules no Django call
+    answers, a UTC offset PostgreSQL refuses
     (``utils/errors.py::refuses_utc_offset``) and a decimal past PostgreSQL ``numeric``'s
     format (``utils/errors.py::refuses_numeric_format``: Django's decimal adapter passes
     the value through, and the server refuses its spelling), and each list parameter to
@@ -2385,9 +2395,15 @@ def _unbindable_predicate(
         except (EmptyResultSet, FullResultSet):
             continue
         column = read_attr(read_attr(lookup, "lhs"), "output_field")
+        bound_params = require(bound[1], is_list_or_tuple)
+        element, depth = array_leaf_field(column)
         if any(
             isinstance(param, int) and not binds_integer(connection, column, param)
-            for param in require(bound[1], is_list_or_tuple)
+            for param in bound_params
+        ) or (
+            depth > 0
+            and isinstance(element, models.IntegerField)
+            and refuses_integer_range(connection, element, bound_params)
         ):
             return True
     params = require(compiled[1], is_list_or_tuple)
@@ -2402,28 +2418,46 @@ def _bound_value_lookups(query: Query) -> Iterator[tuple[_LookupAny, Query]]:
     """Yield each lookup ``query``'s ``WHERE`` holds that binds a value, with the query it is in.
 
     A lookup binds a value when its right-hand side is one
-    (``Lookup.rhs_is_direct_value``), and what it binds for it is what Django's own
+    (``Lookup.rhs_is_direct_value``), or when its left-hand side is an ``ArrayField``,
+    whose whole-array lookups wrap a value's elements in an ``ARRAY[...]`` expression of
+    their own (``django.contrib.postgres``'s ``ArrayRHSMixin``), and what it binds for it is
+    what Django's own
     ``Lookup.process_rhs`` answers, read apart from its left-hand side, which may hold a
     subquery whose own lookups bind theirs; one whose right-hand side is an expression
     binds only what that expression's own lookups bind. The walk follows Django's own
     operand accessor (``get_source_expressions``) through every predicate and expression,
     and into the ``WHERE`` of each subquery it meets (the ``Exists`` an excluded
     multi-valued relation adds), so each lookup is paired with the query whose compiler
-    compiles it. A clause child that is no expression (an ``ExtraWhere``) has no lookup.
+    compiles it. An expression that is one of a query's own annotations (``annotate`` /
+    ``alias``, the very object ``Query.annotations`` holds, which Django's lookup reads in
+    place of a column) is not walked: what it binds is the queryset's own, fixed before
+    the filter applies, so a constant there never refuses the filter's value. A clause
+    child that is no expression (an ``ExtraWhere``) has no lookup.
     """
+    own_annotations = {id(annotation) for annotation in query.annotations.values()}
     pending: list[object] = [query.where]
     while pending:
         node = pending.pop()
+        if id(node) in own_annotations:
+            continue
         if isinstance(node, Query):
             yield from _bound_value_lookups(node)
             continue
-        if isinstance(node, model_lookups.Lookup) and node.rhs_is_direct_value():
+        if _is_lookup(node) and (
+            node.rhs_is_direct_value()
+            or array_leaf_field(read_attr(read_attr(node, "lhs"), "output_field"))[1] > 0
+        ):
             yield node, query
         if isinstance(node, BaseExpression | WhereNode):
             # A slot an expression leaves empty holds ``None``.
             pending.extend(
                 source for source in list_of(node.get_source_expressions()) if source is not None
             )
+
+
+def _is_lookup(value: object) -> TypeIs[_LookupAny]:
+    """Return whether ``value`` is a Django ``Lookup``, its result type unread."""
+    return isinstance(value, model_lookups.Lookup)
 
 
 def _unbindable_value_errors(filterset_instance: FilterSet) -> dict[str, object]:
@@ -2434,7 +2468,8 @@ def _unbindable_value_errors(filterset_instance: FilterSet) -> dict[str, object]
     ``field_name`` reaches over the filterset's queryset, as Django resolves the path,
     ``utils/querysets.py::lookup_target_fields``: a queryset annotation's output field, a
     ``FilteredRelation`` alias and ``pk`` included, or an ``ArrayField`` whose innermost
-    elements are stored through one, ``utils/_array_field.py::array_leaf_field``) is asked
+    elements are stored through one, ``utils/_array_field.py::array_leaf_field``), or to an
+    ``ArrayField`` whose innermost elements are stored through an ``IntegerField``, is asked
     of Django (``_unbindable_predicate``): the filter's own ``filter`` builds the predicate
     and it is compiled on the database the filterset's queryset runs on (``queryset.db``,
     resolved only for such a leaf). A transform of a temporal column (``year``, ``month``)
@@ -2448,7 +2483,8 @@ def _unbindable_value_errors(filterset_instance: FilterSet) -> dict[str, object]
     bound or member, a duration, each member of a list and each bound of a range,
     as the filter applies them, and on an ``ArrayField`` each element a whole-array lookup
     binds, the element an index or slice reaches and an array's length (an integer held
-    to its range), and on a decimal column each decimal it binds, whose spelling
+    to its range), on an integer ``ArrayField`` each integer element it binds (held to the
+    element column's range), and on a decimal column each decimal it binds, whose spelling
     PostgreSQL ``numeric``'s format holds whatever the column's ``max_digits`` (a
     ``NumberFilter`` caps only a positive value, at ``1e50``). Only a ``filter``
     django-filter or this package ships is run (``_runs_shipped_filter``): a ``filter``
@@ -2456,7 +2492,9 @@ def _unbindable_value_errors(filterset_instance: FilterSet) -> dict[str, object]
     ``filter`` override is consumer code, which owns what its value means and is not
     asked. A projected copy is
     asked through the child filter it runs (``_projected_terminal``), over its child filter
-    set's queryset.
+    set's queryset. A plain integer column is not asked: its generated ``in`` drops a
+    member past the column's range (``filters/base.py::_identifying_members``), and its
+    comparisons are Django's own range-aware ones.
     """
     # django-filter's ``BaseFilterSet.__init__`` stores the model's default queryset when
     # handed none; its stub types the attribute ``QuerySet[Any] | None``.
@@ -2471,15 +2509,19 @@ def _unbindable_value_errors(filterset_instance: FilterSet) -> dict[str, object]
         if not (
             any(
                 isinstance(
-                    array_leaf_field(column)[0],
+                    leaf,
                     models.DateField
                     | models.TimeField
                     | models.DurationField
                     | models.DecimalField,
                 )
-                for column in lookup_target_fields(
-                    queryset.query,
-                    _bound_field_name(filter_instance),
+                or (depth > 0 and isinstance(leaf, models.IntegerField))
+                for leaf, depth in (
+                    array_leaf_field(column)
+                    for column in lookup_target_fields(
+                        queryset.query,
+                        _bound_field_name(filter_instance),
+                    )
                 )
             )
             or _reads_integer_transform(terminal)

@@ -9291,6 +9291,116 @@ def test_project_integer_transform_member_is_asked(members: str, labels: list[st
         assert sorted(filterset.qs.values_list("label", flat=True)) == labels
 
 
+class _UnrangedInteger(dj_models.IntegerField[int, int]):
+    """An integer column type naming an internal type no backend states a range for."""
+
+    @override
+    def get_internal_type(self) -> str:
+        return "UnrangedIntegerField"
+
+
+class _PlusOneUnranged(Transform):
+    """A project transform whose integer output is of a type the backend states no range for."""
+
+    lookup_name = "plus_one_unranged"
+    template = "(%(expressions)s + 1)"
+
+    def __init__(self, expression: object) -> None:
+        """Wrap ``expression`` with an output of the unranged integer type."""
+        super().__init__(expression, output_field=_UnrangedInteger())
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("members", "labels"),
+    [
+        pytest.param("8", ["mid-2020", "new-year-2021"], id="in-range-matches"),
+        pytest.param(str(2**40), [], id="past-int32-matches-nothing"),
+    ],
+)
+def test_integer_transform_of_a_type_without_a_stated_range_binds_every_member(
+    monkeypatch: pytest.MonkeyPatch,
+    members: str,
+    labels: list[str],
+) -> None:
+    """A member through a transform whose output type the backend states no range for is not held.
+
+    The database reads Django's default ranges (PostgreSQL's), whose
+    ``integer_field_range`` raises ``KeyError`` for an internal type absent from them;
+    Django holds an ``in`` member to no range there, so neither is the bind ask: a member
+    inside 64 bits matches the rows it names, one past 32 bits included.
+    """
+    specimens = _specimens_in_years()
+    scalar_models.ScalarSpecimen.objects.filter(
+        pk__in=[specimens["mid-2020"].pk, specimens["new-year-2021"].pk],
+    ).update(signed_big=7)
+    monkeypatch.setattr(
+        connection.ops,
+        "integer_field_range",
+        _default_range_operations(connection).integer_field_range,
+    )
+    with register_lookup(dj_models.BigIntegerField, _PlusOneUnranged):
+
+        class PlusOneUnrangedFilter(FilterSet):
+            class Meta:
+                model = scalar_models.ScalarSpecimen
+                fields = {"signed_big": ["plus_one_unranged__in"]}
+
+        filterset = PlusOneUnrangedFilter(
+            data={"signed_big__plus_one_unranged__in": members},
+            queryset=scalar_models.ScalarSpecimen.objects.all(),
+        )
+        PlusOneUnrangedFilter._validate_form_or_raise(filterset)
+        assert sorted(filterset.qs.values_list("label", flat=True)) == labels
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("years", "labels"),
+    [
+        pytest.param(["2021"], ["new-year-2021"], id="in-range-matches"),
+        pytest.param([str(2**63)], None, id="own-member-past-int64-refused"),
+    ],
+)
+def test_annotation_constant_the_leaf_reads_never_refuses_its_value(
+    years: list[str],
+    labels: list[str] | None,
+) -> None:
+    """What a queryset annotation the leaf reads binds is the queryset's own, never asked.
+
+    The annotation picks ``occurred_on`` through a ``When`` whose ``in`` binds -1, past
+    the range the database stores for a ``PositiveBigIntegerField``. A year ``in`` over
+    the annotation holding 2021 answers the row dated in 2021, never ``FILTER_INVALID``
+    for the annotation's constant, while the leaf's own member past 64 bits is refused.
+    """
+    _specimens_in_years()
+
+    class AnnotatedYearFilter(FilterSet):
+        day_years_among = ListFilter(field_name="day__year", lookup_expr="in")
+
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = []
+
+    queryset = scalar_models.ScalarSpecimen.objects.annotate(
+        day=models.Case(
+            models.When(unsigned_big__in=[-1], then=models.F("occurred_on")),
+            default=models.F("occurred_on"),
+        ),
+    )
+    filterset = AnnotatedYearFilter(data={"day_years_among": years}, queryset=queryset)
+    if labels is not None:
+        AnnotatedYearFilter._validate_form_or_raise(filterset)
+        assert list(filterset.qs.values_list("label", flat=True)) == labels
+        return
+    with pytest.raises(GraphQLError) as excinfo:
+        AnnotatedYearFilter._validate_form_or_raise(filterset)
+    assert excinfo.value.extensions == {
+        "code": "FILTER_INVALID",
+        "errors": {"day_years_among": _UNBINDABLE},
+    }
+
+
 class _ElementCount(Length):
     """An array's element count under the ``len`` name a real ``ArrayField`` registers."""
 
@@ -10635,6 +10745,277 @@ def test_decimal_array_list_parameter_is_held_to_postgresql_numeric(
     assert excinfo.value.extensions == {
         "code": "FILTER_INVALID",
         "errors": {"prices_after": _UNBINDABLE},
+    }
+
+
+def _counted_shelf_filter_class(
+    array_of: Callable[[django_models.Field[object, object]], django_models.Field[object, object]],
+) -> tuple[type[django_models.Model], type[FilterSet]]:
+    """A model with arrays of integers, and a filterset through every shape they bind.
+
+    ``array_of`` builds the array column. The whole-array ``contains``, ``exact`` and
+    ``overlap``, each element wrapped in an ``ARRAY[...]`` of its own parameters on
+    PostgreSQL, an ``in`` over the first element (index ``0``), the first two (slice
+    ``0_2``, whose bounds bind beside its elements), and ``gt``, which binds the list as
+    one parameter. Query-build only (``managed = False``): the rule compiles the filter's
+    predicate and never runs it.
+    """
+
+    class CountedGrid(django_models.Model):
+        counts = array_of(django_models.IntegerField())
+
+        class Meta:
+            managed = False
+            app_label = "test_integer_array_bind_ask"
+
+    class CountedGridFilter(FilterSet):
+        counts_contain = ArrayFilter(field_name="counts", lookup_expr="contains")
+        counts_are = ArrayFilter(field_name="counts", lookup_expr="exact")
+        counts_overlap = ArrayFilter(field_name="counts", lookup_expr="overlap")
+        first_count_among = ListFilter(field_name="counts__0", lookup_expr="in")
+        first_two_counts = ArrayFilter(field_name="counts__0_2", lookup_expr="exact")
+        counts_after = ArrayFilter(field_name="counts", lookup_expr="gt")
+
+        class Meta:
+            model = CountedGrid
+            fields = []
+
+    return CountedGrid, CountedGridFilter
+
+
+#: Each integer-array leaf by its form key, holding one member past 64 bits either way.
+_INTEGER_ARRAY_PAST_INT64 = [
+    pytest.param("counts_contain", ["1", str(2**63)], id="contains"),
+    pytest.param("counts_are", ["1", str(2**63)], id="exact"),
+    pytest.param("counts_overlap", [str(-(2**63) - 1)], id="overlap"),
+    pytest.param("first_count_among", ["1", str(2**63)], id="index-in"),
+    pytest.param("first_two_counts", ["1", str(2**63)], id="slice-exact"),
+    pytest.param("counts_after", [str(2**63)], id="gt-list-param"),
+]
+
+
+@pytest.mark.parametrize("mode", list(BINDING_MODES))
+@pytest.mark.parametrize(("form_key", "members"), _INTEGER_ARRAY_PAST_INT64)
+def test_integer_array_element_the_database_cannot_bind_is_refused(
+    mode: str,
+    form_key: str,
+    members: list[str],
+) -> None:
+    """Each integer an ``ArrayField(IntegerField)`` leaf binds is held to the element's range.
+
+    Whichever shape binds it (an ``ARRAY[...]`` parameter of its own, an index ``in``
+    member, a slice's element, one list parameter, which no lookup types as an integer), a
+    member past 64 bits either way is refused keyed to its form field in every binding
+    mode, never dropped and never reaching the driver. Package-only: fakeshop declares no
+    ``ArrayField``.
+    """
+    model, counted_filter = _counted_shelf_filter_class(real_array_of)
+    driver, cursor_factory, _ = BINDING_MODES[mode]
+    with postgresql_stand_in(driver, cursor_factory) as alias:
+        filterset = counted_filter(
+            data={form_key: members},
+            queryset=model._default_manager.using(alias),
+        )
+        with pytest.raises(GraphQLError) as excinfo:
+            counted_filter._validate_form_or_raise(filterset)
+    assert excinfo.value.extensions == {
+        "code": "FILTER_INVALID",
+        "errors": {form_key: _UNBINDABLE},
+    }
+
+
+@pytest.mark.parametrize(
+    ("form_key", "members", "refused"),
+    [
+        pytest.param("counts_contain", ["1", str(2**31 - 1)], False, id="contains-max-int32"),
+        pytest.param("counts_contain", ["1", str(2**31)], True, id="contains-past-int32"),
+        pytest.param("counts_after", [str(-(2**31))], False, id="gt-min-int32"),
+        pytest.param("counts_after", [str(-(2**31) - 1)], True, id="gt-before-int32"),
+        pytest.param("first_two_counts", ["1", str(2**31 - 1)], False, id="slice-max-int32"),
+    ],
+)
+def test_integer_array_element_is_held_to_the_databases_integer_field_range(
+    form_key: str,
+    members: list[str],
+    refused: bool,  # noqa: FBT001
+) -> None:
+    """An integer element is held to the range the database stores for the element's type.
+
+    On a stand-in reading Django's default ranges (PostgreSQL's), an ``IntegerField``
+    element holds 32 bits, so each end binds and one past it is refused keyed to the form
+    field, whether bound as its own parameter or inside one list parameter.
+    """
+    model, counted_filter = _counted_shelf_filter_class(real_array_of)
+    driver, cursor_factory, _ = BINDING_MODES["psycopg3-client"]
+    with postgresql_stand_in(driver, cursor_factory) as alias:
+        stand_in = connections[alias]
+        stand_in.ops = _default_range_operations(stand_in)
+        filterset = counted_filter(
+            data={form_key: members},
+            queryset=model._default_manager.using(alias),
+        )
+        if not refused:
+            counted_filter._validate_form_or_raise(filterset)
+            return
+        with pytest.raises(GraphQLError) as excinfo:
+            counted_filter._validate_form_or_raise(filterset)
+    assert excinfo.value.extensions == {
+        "code": "FILTER_INVALID",
+        "errors": {form_key: _UNBINDABLE},
+    }
+
+
+@pytest.mark.parametrize(
+    ("form_key", "value", "refused"),
+    [
+        pytest.param("counts_contain", ["1", str(2**15)], True, id="element-past-int16"),
+        pytest.param("counts_contain", ["1", str(2**15 - 1)], False, id="element-max-int16"),
+        pytest.param("count_is", str(2**15), False, id="len"),
+        pytest.param("count_over", str(2**15), False, id="len-gt"),
+        pytest.param("count_named", str(2**15), False, id="len-in-field-name"),
+        pytest.param("wide_slice", ["1"], False, id="slice-bound-past-int16"),
+        pytest.param("joined_contain", ["1"], False, id="annotation-constant-past-int16"),
+    ],
+)
+def test_integer_array_leaf_holds_only_the_elements_it_binds_to_the_element_range(
+    form_key: str,
+    value: object,
+    refused: bool,  # noqa: FBT001
+) -> None:
+    """Only an element a lookup binds for an array of small integers is held to their range.
+
+    On a stand-in reading Django's default ranges (PostgreSQL's), a ``SmallIntegerField``
+    element holds 16 bits, and a member past them is refused. An array's length
+    (``len``'s ``IntegerField`` output, however the filter spells it), a slice's bound and
+    a constant of a queryset annotation the leaf reads are no element, and bind.
+    """
+
+    class SmallGrid(django_models.Model):
+        counts = real_array_of(django_models.SmallIntegerField())
+
+        class Meta:
+            managed = False
+            app_label = "test_small_integer_array_bind_ask"
+
+    class SmallGridFilter(FilterSet):
+        counts_contain = ArrayFilter(field_name="counts", lookup_expr="contains")
+        count_is = django_filters.NumberFilter(field_name="counts", lookup_expr="len")
+        count_over = django_filters.NumberFilter(field_name="counts", lookup_expr="len__gt")
+        count_named = django_filters.NumberFilter(field_name="counts__len", lookup_expr="exact")
+        wide_slice = ArrayFilter(field_name="counts__0_40000", lookup_expr="exact")
+        joined_contain = ArrayFilter(field_name="joined", lookup_expr="contains")
+
+        class Meta:
+            model = SmallGrid
+            fields = []
+
+    driver, cursor_factory, _ = BINDING_MODES["psycopg3-client"]
+    with postgresql_stand_in(driver, cursor_factory) as alias:
+        stand_in = connections[alias]
+        stand_in.ops = _default_range_operations(stand_in)
+        queryset = SmallGrid._default_manager.using(alias).annotate(
+            joined=django_models.Func(
+                F("counts"),
+                django_models.Value([2**20]),
+                function="array_cat",
+                output_field=real_array_of(django_models.SmallIntegerField()),
+            ),
+        )
+        filterset = SmallGridFilter(data={form_key: value}, queryset=queryset)
+        if not refused:
+            SmallGridFilter._validate_form_or_raise(filterset)
+            return
+        with pytest.raises(GraphQLError) as excinfo:
+            SmallGridFilter._validate_form_or_raise(filterset)
+    assert excinfo.value.extensions == {
+        "code": "FILTER_INVALID",
+        "errors": {form_key: _UNBINDABLE},
+    }
+
+
+class _PreparedCountedArrayField(_CountedArrayField):
+    """A ``len``-carrying ``ArrayField`` double that prepares each element as a real one does.
+
+    ``ArrayField.get_db_prep_value`` prepares a list element by element through its
+    ``base_field``, so an integer element a form cleans to a ``Decimal`` binds as an
+    ``int``.
+    """
+
+    @override
+    def get_db_prep_value(
+        self,
+        value: object,
+        connection: BaseDatabaseWrapper,
+        prepared: bool = False,
+    ) -> object:
+        if is_list_or_tuple(value):
+            return [
+                self.base_field.get_db_prep_value(element, connection, prepared=False)
+                for element in value
+            ]
+        return value
+
+
+class _SmallCountedShelf(django_models.Model):
+    """A table with an array of small integers, its ``len`` registered as a real one's is.
+
+    Query-build only (``managed = False``): the bind ask compiles, never runs, its clause.
+    """
+
+    counts = _PreparedCountedArrayField(django_models.SmallIntegerField())
+
+    class Meta:
+        managed = False
+        app_label = "test_small_integer_array_double"
+
+
+@pytest.mark.parametrize(
+    ("form_key", "value", "refused"),
+    [
+        pytest.param("counts_after", ["1", str(2**15)], True, id="gt-member-past-int16"),
+        pytest.param("counts_after", ["1", str(2**15 - 1)], False, id="gt-member-max-int16"),
+        pytest.param("counts__len__in", str(2**15), False, id="len-past-int16"),
+    ],
+)
+def test_integer_array_leaf_is_asked_wherever_django_contrib_postgres_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    form_key: str,
+    value: object,
+    refused: bool,  # noqa: FBT001
+) -> None:
+    """An integer array leaf is asked on the ``ArrayField`` double too.
+
+    A ``gt`` binds the list as one parameter, each integer of which is held to the
+    element's range the connection states (Django's default ranges, PostgreSQL's: 16 bits
+    for a ``SmallIntegerField``), while the array's ``len`` is held to its own
+    ``IntegerField`` output's.
+    """
+    patch_array_field(monkeypatch)
+
+    class SmallCountedShelfFilter(FilterSet):
+        counts_after = ArrayFilter(field_name="counts", lookup_expr="gt")
+
+        class Meta:
+            model = _SmallCountedShelf
+            fields = {"counts": ["len__in"]}
+
+    monkeypatch.setattr(
+        connection.ops,
+        "integer_field_range",
+        _default_range_operations(connection).integer_field_range,
+    )
+    filterset = SmallCountedShelfFilter(
+        data={form_key: value},
+        queryset=_SmallCountedShelf.objects.all(),
+    )
+    if not refused:
+        SmallCountedShelfFilter._validate_form_or_raise(filterset)
+        return
+    with pytest.raises(GraphQLError) as excinfo:
+        SmallCountedShelfFilter._validate_form_or_raise(filterset)
+    assert excinfo.value.extensions == {
+        "code": "FILTER_INVALID",
+        "errors": {form_key: _UNBINDABLE},
     }
 
 

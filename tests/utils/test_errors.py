@@ -19,6 +19,7 @@ over), and, on the Postgres tier, the real connection and ``ArrayField``.
 
 import ast
 import datetime
+import functools
 import importlib
 import uuid
 import warnings
@@ -35,6 +36,7 @@ from apps.products import models as product_models
 from apps.scalars import models as scalar_models
 from django.core.exceptions import ValidationError
 from django.db import DEFAULT_DB_ALIAS, DataError, connections, models, transaction
+from django.db.backends.base.base import BaseDatabaseWrapper
 from django.db.backends.base.operations import BaseDatabaseOperations
 from django.db.backends.mysql.operations import DatabaseOperations as MySQLOperations
 from django.db.backends.sqlite3.base import DatabaseWrapper as SQLiteDatabaseWrapper
@@ -64,6 +66,7 @@ from django_strawberry_framework.utils.errors import (
     GLOBALID_INVALID_ERROR_CODE,
     GLOBALID_UNVALIDATABLE_ERROR_CODE,
     PAGINATION_INVALID_ERROR_CODE,
+    binds_integer,
     build_error_key_map,
     coded_error_extensions,
     empty_validation_error,
@@ -71,6 +74,7 @@ from django_strawberry_framework.utils.errors import (
     join_error_path,
     model_field_error_names,
     null_field_error,
+    refuses_integer_range,
     refuses_numeric_format,
     refuses_utc_offset,
     rekey_error_segment,
@@ -1463,6 +1467,135 @@ def test_refuses_numeric_format_reads_each_element_of_a_list_parameter(
     driver, cursor_factory, _ = BINDING_MODES["psycopg3-client"]
     with postgresql_stand_in(driver, cursor_factory) as alias:
         assert refuses_numeric_format(connections[alias], [parameter]) is refused
+
+
+class _UnrangedIntegerField(models.IntegerField[int, int]):
+    """An integer column type naming an internal type no backend states a range for."""
+
+    @override
+    def get_internal_type(self) -> str:
+        return "UnrangedIntegerField"
+
+
+def _read_default_ranges(monkeypatch: pytest.MonkeyPatch) -> BaseDatabaseWrapper:
+    """The default connection, its operations reading Django's default integer ranges (PostgreSQL's)."""
+    wrapper = connections[DEFAULT_DB_ALIAS]
+    monkeypatch.setattr(
+        wrapper.ops,
+        "integer_field_range",
+        functools.partial(BaseDatabaseOperations.integer_field_range, wrapper.ops),
+    )
+    return wrapper
+
+
+@pytest.mark.parametrize(
+    ("field", "number", "bound"),
+    [
+        pytest.param(models.IntegerField[int, int](), 2**31 - 1, True, id="integer-max"),
+        pytest.param(models.IntegerField[int, int](), 2**31, False, id="integer-past-max"),
+        pytest.param(
+            models.PositiveIntegerField[int, int](),
+            -1,
+            False,
+            id="positive-below-min",
+        ),
+        pytest.param(
+            models.DurationField[object, object](),
+            2**40,
+            True,
+            id="non-integer-as-bigint",
+        ),
+        pytest.param(_UnrangedIntegerField(), 2**70, True, id="unranged-past-int64"),
+        pytest.param(_UnrangedIntegerField(), -(2**70), True, id="unranged-before-int64"),
+    ],
+)
+def test_binds_integer_holds_a_number_to_the_range_the_backend_states(
+    monkeypatch: pytest.MonkeyPatch,
+    field: models.Field[int, int],
+    number: int,
+    bound: bool,  # noqa: FBT001
+) -> None:
+    """An integer is held to the range the backend states for the field's internal type.
+
+    On a connection reading Django's default ranges (PostgreSQL's), an ``IntegerField``
+    holds 32 bits and a ``PositiveIntegerField`` no negative, a column that is no
+    ``IntegerField`` is held to ``BigIntegerField``'s range, and an internal type the
+    backend states no range for (``integer_field_range`` raises ``KeyError``) holds no
+    limit, as Django holds an ``in`` member or a ``range`` bound to none there.
+    """
+    assert binds_integer(_read_default_ranges(monkeypatch), field, number) is bound
+
+
+#: Each compiled parameter list an integer-array predicate binds, and whether it refuses.
+_INTEGER_ARRAY_PARAMS = [
+    pytest.param([1, 2**63 - 1, -(2**63)], False, id="64-bit-ends"),
+    pytest.param([1, 2**63], True, id="past-int64"),
+    pytest.param([-(2**63) - 1], True, id="before-int64"),
+    pytest.param([[1, 2**63]], True, id="list-parameter"),
+    pytest.param([(1, (2**63,))], True, id="nested-tuple"),
+    pytest.param(
+        [
+            "label",
+            1.5,
+            None,
+            True,
+            Decimal(2**70),
+            str(2**70),
+        ],
+        False,
+        id="non-integers-not-read",
+    ),
+]
+
+
+@pytest.mark.parametrize(("params", "refused"), _INTEGER_ARRAY_PARAMS)
+def test_refuses_integer_range_holds_each_integer_a_query_binds_to_the_element_range(
+    params: list[object],
+    refused: bool,  # noqa: FBT001
+) -> None:
+    """Each integer of a compiled predicate's parameters is held to the element's range.
+
+    A list or tuple is one list parameter, read at any nesting depth; a ``bool``, a text,
+    a float, a decimal and a ``None`` are not read. SQLite binds every integer type in 64
+    bits.
+    """
+    assert (
+        refuses_integer_range(
+            connections[DEFAULT_DB_ALIAS],
+            models.IntegerField[int, int](),
+            params,
+        )
+        is refused
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "params", "refused"),
+    [
+        pytest.param(
+            models.IntegerField[int, int](),
+            [2**31 - 1, [-(2**31)]],
+            False,
+            id="int32-ends",
+        ),
+        pytest.param(models.IntegerField[int, int](), [[1, 2**31]], True, id="past-int32"),
+        pytest.param(
+            models.SmallIntegerField[int, int](),
+            [2**15],
+            True,
+            id="small-past-int16",
+        ),
+        pytest.param(_UnrangedIntegerField(), [[2**70]], False, id="unranged"),
+    ],
+)
+def test_refuses_integer_range_reads_the_element_type_range(
+    monkeypatch: pytest.MonkeyPatch,
+    field: models.Field[int, int],
+    params: list[object],
+    refused: bool,  # noqa: FBT001
+) -> None:
+    """The range is the one the backend states for the element column's own internal type."""
+    assert refuses_integer_range(_read_default_ranges(monkeypatch), field, params) is refused
 
 
 @pytest.mark.parametrize(("raw", "_refused"), _NUMERIC_SPELLINGS)
