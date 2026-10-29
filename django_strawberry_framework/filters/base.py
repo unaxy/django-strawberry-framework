@@ -892,12 +892,13 @@ class ArrayFilter(_ElementCleanedFilter):
     def filter(self, qs: models.QuerySet[_M], value: object) -> models.QuerySet[_M]:
         """Apply the lookup; `[]` is a real value (not `EMPTY_VALUES`-ish).
 
-        The ``EMPTY_VALUES`` membership probe compares through the value's own
-        ``__eq__`` / ``__ne__``; whatever those raise propagates.
+        Every other value goes to django-filter's own ``Filter.filter``. The
+        ``value == []`` comparison runs the value's own ``__eq__``; whatever it
+        raises propagates.
         """
-        if value in EMPTY_VALUES and value != []:
-            return qs
-        return _apply_lookup_predicate(self, qs, value)
+        if value == []:
+            return _apply_lookup_predicate(self, qs, value)
+        return super().filter(qs, value)
 
 
 @dataclass(frozen=True)
