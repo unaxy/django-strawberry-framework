@@ -19074,12 +19074,24 @@ def test_an_arm_cleaning_an_absent_leaf_to_another_value_asks_it_again_on_both_c
     ``home`` cleans to ``"alpha"``, which the root never answered for, and the arm
     asks it over its own value and applies it, as django-filter applies each
     arm's cleaned value: the secret shelf's branch is ``beta``, so only the open
-    shelf matches, on ``apply_sync`` and ``apply_async`` alike.
+    shelf matches, on ``apply_sync`` and ``apply_async`` alike. The arm asks
+    before the ``.qs`` read, so under ``apply_async`` (whose
+    ``BranchType.get_queryset`` is async-only) the hop ``home`` walks is awaited
+    first; both colors run the hook once.
     """
     hook_calls: list[object] = []
     filter_calls: list[object] = []
 
     def _visible(
+        _cls: type[DjangoType],
+        queryset: QuerySet[library_models.Branch],
+        info: object,
+        **_kwargs: object,
+    ) -> QuerySet[library_models.Branch]:
+        hook_calls.append(info)
+        return queryset
+
+    async def _async_visible(
         _cls: type[DjangoType],
         queryset: QuerySet[library_models.Branch],
         info: object,
@@ -19107,7 +19119,7 @@ def test_an_arm_cleaning_an_absent_leaf_to_another_value_asks_it_again_on_both_c
         (DjangoType,),
         {
             "Meta": type("Meta", (), {"model": library_models.Branch}),
-            "get_queryset": classmethod(_visible),
+            "get_queryset": classmethod(_visible if mode == "sync" else _async_visible),
         },
     )
 
@@ -19151,6 +19163,289 @@ def test_an_arm_cleaning_an_absent_leaf_to_another_value_asks_it_again_on_both_c
         "alpha",
         "alpha",
     ]
+
+
+def _shelf_filter_adding_home_from_topic(
+    hook: Callable[..., object],
+    init_calls: list[object],
+    filter_calls: list[object],
+) -> type[FilterSet]:
+    """A ``Shelf`` set whose ``__init__`` adds an absent ``home`` leaf wherever ``topic`` is sent.
+
+    ``home`` walks the declared ``branch`` hop and reads its absent value as
+    ``"alpha"``, so it acts; ``BranchType.get_queryset`` is ``hook``.
+    """
+    type(
+        "BranchType",
+        (DjangoType,),
+        {
+            "Meta": type("Meta", (), {"model": library_models.Branch}),
+            "get_queryset": classmethod(hook),
+        },
+    )
+
+    class _ActingHome(CharFilter):
+        @override
+        def filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
+            filter_calls.append(value)
+            return super().filter(qs, value or "alpha")
+
+    class BranchOnly(FilterSet):
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"]}
+
+    class ShelfAddingHome(FilterSet):
+        branch = RelatedFilter(BranchOnly, field_name="branch")
+
+        class Meta:
+            model = library_models.Shelf
+            fields = {"topic": ["exact"]}
+
+        def __init__(
+            self,
+            data: QueryDict | dict[str, object] | None = None,
+            queryset: QuerySet[django_models.Model] | None = None,
+            *,
+            request: HttpRequest | None = None,
+            prefix: str | None = None,
+        ) -> None:
+            init_calls.append(data)
+            super().__init__(data=data, queryset=queryset, request=request, prefix=prefix)
+            if data and "topic" in data:
+                self.filters["home"] = _ActingHome(field_name="branch__name")
+
+    ShelfAddingHome.get_filters()
+    return ShelfAddingHome
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize(
+    ("filter_input", "inits"),
+    [
+        ({"or_": [{"topic": "secret"}, {"topic": "open"}]}, 3),
+        ({"or_": [{"and_": [{"topic": "secret"}]}, {"and_": [{"topic": "open"}]}]}, 5),
+    ],
+    ids=["arm", "nested-arm"],
+)
+def test_an_arm_only_absent_leaf_a_consumer_init_adds_is_awaited_on_both_colors(
+    filter_input: dict[str, object],
+    inits: int,
+    mode: str,
+) -> None:
+    """An absent leaf only an arm's ``__init__`` adds is asked before the ``.qs`` read.
+
+    The root set names no ``topic``, so it has no ``home``; each arm (or each arm
+    of an arm) naming one gets an acting ``home``, which the root's probe never
+    saw. The probe builds every arm as the ``.qs`` read will, asks its ``home``,
+    and under ``apply_async`` (whose ``BranchType.get_queryset`` is async-only)
+    awaits the ``branch`` hop before the ``.qs`` read, which reuses the arms: the
+    secret shelf's branch is ``beta``, so only the open shelf matches, and both
+    colors run the hook once, each arm's ``__init__`` once and each ``home``
+    twice (asked, then applied).
+    """
+    hook_calls: list[object] = []
+    init_calls: list[object] = []
+    filter_calls: list[object] = []
+
+    def _sync_visible(
+        _cls: type[DjangoType],
+        queryset: QuerySet[library_models.Branch],
+        info: object,
+        **_kwargs: object,
+    ) -> QuerySet[library_models.Branch]:
+        hook_calls.append(info)
+        return queryset
+
+    async def _async_visible(
+        _cls: type[DjangoType],
+        queryset: QuerySet[library_models.Branch],
+        info: object,
+        **_kwargs: object,
+    ) -> QuerySet[library_models.Branch]:
+        hook_calls.append(info)
+        return queryset
+
+    shelf_filter = _shelf_filter_adding_home_from_topic(
+        _sync_visible if mode == "sync" else _async_visible,
+        init_calls,
+        filter_calls,
+    )
+    _seed_open_and_secret_match_shelves()
+    base = library_models.Shelf.objects.order_by("topic")
+    if mode == "sync":
+        qs = shelf_filter.apply_sync(filter_input, base, _make_info())
+    else:
+        qs = asyncio.run(shelf_filter.apply_async(filter_input, base, _make_info()))
+    assert list(qs.values_list("topic", flat=True)) == ["open"]
+    assert len(hook_calls) == 1
+    assert len(init_calls) == inits
+    assert filter_calls == [
+        "",
+        "",
+        "",
+        "",
+    ]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_an_inert_arm_only_absent_leaf_over_an_unregistered_target_derives_nothing(
+    mode: str,
+) -> None:
+    """An arm-only absent leaf whose filter skips its value derives no hop, whatever its target.
+
+    ``own`` walks ``shelves``, whose target has no registered ``DjangoType``, so
+    deriving that hop raises; an ``__init__`` adds it only to an arm naming
+    ``name``. Its absent value cleans to ``""``, which django-filter's
+    ``CharFilter`` skips, so the probe derives nothing and the arm matches on
+    ``name`` alone, on both colors.
+    """
+    branch_filter = _shelf_and_branch_filters()
+
+    class InitAddsOwn(branch_filter):
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"]}
+
+        def __init__(
+            self,
+            data: QueryDict | dict[str, object] | None = None,
+            queryset: QuerySet[django_models.Model] | None = None,
+            *,
+            request: HttpRequest | None = None,
+            prefix: str | None = None,
+        ) -> None:
+            super().__init__(data=data, queryset=queryset, request=request, prefix=prefix)
+            if data and "name" in data:
+                self.filters["own"] = CharFilter(field_name="shelves__code")
+
+    InitAddsOwn.get_filters()
+    _seed_open_and_secret_match_shelves()
+    base = library_models.Branch.objects.order_by("name")
+    filter_input = {"or_": [{"name": "alpha"}]}
+    if mode == "sync":
+        qs = InitAddsOwn.apply_sync(filter_input, base, _make_info())
+    else:
+        qs = asyncio.run(InitAddsOwn.apply_async(filter_input, base, _make_info()))
+    assert list(qs.values_list("name", flat=True)) == ["alpha"]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_an_arm_whose_init_replaces_its_queryset_is_built_again_over_the_arm_rows(
+    mode: str,
+) -> None:
+    """A probed arm whose ``__init__`` replaced its queryset is built again for the ``.qs`` read.
+
+    The probe builds each arm over the rows the root set was built over; an arm
+    reusing it would have its ``queryset`` reset to the arm's rows, losing what
+    the ``__init__`` narrowed. This set's ``__init__`` drops ``beta``'s shelves
+    wherever ``topic`` is sent and its ``qs`` override reads ``self.queryset``,
+    so the ``secret`` arm matches nothing and only the open shelf survives. Each
+    arm is built twice (probe, then ``.qs`` read), keeping the probe's verdict
+    for ``home``: both colors run the hook once, ``__init__`` five times and
+    ``home`` four times.
+    """
+    hook_calls: list[object] = []
+    init_calls: list[object] = []
+    filter_calls: list[object] = []
+
+    def _sync_visible(
+        _cls: type[DjangoType],
+        queryset: QuerySet[library_models.Branch],
+        info: object,
+        **_kwargs: object,
+    ) -> QuerySet[library_models.Branch]:
+        hook_calls.append(info)
+        return queryset
+
+    async def _async_visible(
+        _cls: type[DjangoType],
+        queryset: QuerySet[library_models.Branch],
+        info: object,
+        **_kwargs: object,
+    ) -> QuerySet[library_models.Branch]:
+        hook_calls.append(info)
+        return queryset
+
+    adding_home = _shelf_filter_adding_home_from_topic(
+        _sync_visible if mode == "sync" else _async_visible,
+        init_calls,
+        filter_calls,
+    )
+
+    class NarrowingShelf(adding_home):
+        class Meta:
+            model = library_models.Shelf
+            fields = {"topic": ["exact"]}
+
+        def __init__(
+            self,
+            data: QueryDict | dict[str, object] | None = None,
+            queryset: QuerySet[django_models.Model] | None = None,
+            *,
+            request: HttpRequest | None = None,
+            prefix: str | None = None,
+        ) -> None:
+            if data and "topic" in data and queryset is not None:
+                queryset = queryset.exclude(branch__name="beta")
+            super().__init__(data=data, queryset=queryset, request=request, prefix=prefix)
+
+        @property
+        @override
+        def qs(self) -> QuerySet[django_models.Model]:
+            return super().qs
+
+    NarrowingShelf.get_filters()
+    _seed_open_and_secret_match_shelves()
+    base = library_models.Shelf.objects.order_by("topic")
+    filter_input = {"or_": [{"topic": "secret"}, {"topic": "open"}]}
+    if mode == "sync":
+        qs = NarrowingShelf.apply_sync(filter_input, base, _make_info())
+    else:
+        qs = asyncio.run(NarrowingShelf.apply_async(filter_input, base, _make_info()))
+    assert list(qs.values_list("topic", flat=True)) == ["open"]
+    assert len(hook_calls) == 1
+    assert len(init_calls) == 5
+    assert filter_calls == [
+        "",
+        "",
+        "",
+        "",
+    ]
+
+
+@pytest.mark.django_db
+def test_an_arm_a_filter_queryset_override_replaces_is_built_from_the_new_input() -> None:
+    """An arm input a consumer ``filter_queryset`` swaps in is built from that input, not the probed one.
+
+    The override swaps the ``OPEN`` arm for an ``open`` one before django-filter's
+    pipeline runs; the probe built the arm from the input sent, so the ``.qs``
+    read builds it from the swapped-in input instead of reusing it, and the arm
+    matches the ``open`` shelf.
+    """
+
+    class LoweringShelf(FilterSet):
+        class Meta:
+            model = library_models.Shelf
+            fields = {"topic": ["exact"]}
+
+        @override
+        def filter_queryset(self, queryset: QuerySet[_M]) -> QuerySet[_M]:
+            if self.data == {"or": [{"topic": "OPEN"}]}:
+                self.data = {"or": [{"topic": "open"}]}
+            return super().filter_queryset(queryset)
+
+    LoweringShelf.get_filters()
+    _seed_open_and_secret_match_shelves()
+    qs = LoweringShelf.apply_sync(
+        {"or_": [{"topic": "OPEN"}]},
+        library_models.Shelf.objects.order_by("topic"),
+        _make_info(),
+    )
+    assert list(qs.values_list("topic", flat=True)) == ["open"]
 
 
 @pytest.mark.django_db

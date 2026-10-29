@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 389 done, 214 to do.
+Progress: 390 done, 214 to do.
 
 ## Done
 
@@ -2220,6 +2220,13 @@ Progress: 389 done, 214 to do.
   matching integer. README, spec-027 and spec-032 say so. Tests: `tests/utils/test_querysets.py`,
   `tests/filters/test_base.py`, `tests/filters/test_sets.py`. The comparison leaves are row 701; the cost of a huge
   negative decimal is row 673
+- [x] 700. `FilterSet.apply_async` awaits the hops of an absent walking leaf only an arm asks about: both colors probe
+  every `and` / `or` / `not` arm inside `_probed_filterset` (`_probe_logic_arms`: each arm's sibling built over the rows
+  the set was built over, validated, and asked about each absent leaf its parent's verdicts miss or cleaned to another
+  value), the async code awaits those hops before the `.qs` read, and `_q_for_branch` reuses the probed sibling
+  (`_ProbedArm`), so a consumer `__init__`, form `clean` and filter body run once per arm on both colors; an arm whose
+  input a `filter_queryset` override swapped, or whose `__init__` replaced its queryset, is built again. spec-027 says so.
+  Tests: `tests/filters/test_sets.py`
 
 ## Outside review of the fixes
 
@@ -2364,17 +2371,17 @@ tracker number are recorded there; open remainders and new defects are filed as 
   reads every unstorable column of `form.instance`, so a model `save()` narrowed by `update_fields` away from the `None`
   column reports that column's `null` for another constraint; apply 668's `update_fields` filter there once
   `forms/resolvers.py` is free. Found fact-finding 668
-- [ ] 700. (robustness) Under `FilterSet.apply_async`, an absent walking leaf the root's probe never asked about (one a
-  consumer `__init__` adds from an arm's data, or one an arm's form `clean` gives a value other than the root's) still
-  derives its hop inside the sync boundary, so an async-only `get_queryset` raises `SyncMisuseError` telling a caller
-  already in `apply_async` to await it; ask each arm's unmapped or differing absent leaves inside the `_probed_filterset`
-  boundary and await their hops before the `.qs` read. Found verifying 699
 - [ ] 701. (robustness) On raw form data (`FilterSet(data=...)`, `DjangoFilterBackend`) the integer comparison leaves
   truncate a fractional value as Django's own lookups do: `signed_big=1.5` binds `= 1`, `signed_big__gte=1.5` binds
   `>= 1` and answers a row holding 1, `signed_big__lt=1.5` binds `< 1` and drops it, and a `range` of fractions narrows
   to the truncated bounds (the GraphQL `BigInt` / `Int` scalars refuse fractions, so the wire never reaches it). Decide
   an integer-aware form field for the integer `NumberFilter` family or documenting the raw-form semantics. Found
   fact-finding 685
+- [ ] 702. (robustness) A filter input carrying both an arm form error and an arm related-branch error answers a
+  different first `FILTER_INVALID` key on the two colors: `apply_sync` reports the arm forms first (they validate in the
+  probe), `apply_async` the related branches first (its pre-pass derives them before the probe), e.g.
+  `{"or_": [{"branch": {"name": "bad"}}, {"topic": "bad"}]}` answers `or_1__topic` sync and `or_0__branch__name` async.
+  Found verifying 700
 
 ## To do: holes found re-checking the fixes
 

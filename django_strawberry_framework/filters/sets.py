@@ -2062,6 +2062,24 @@ class _LeafChain:
         return _relation_key_value(value, self.key_attname)
 
 
+@dataclass(frozen=True)
+class _ProbedArm:
+    """A logical arm's sibling set the probe built, for the ``.qs`` read to reuse.
+
+    ``FilterSet._probe_logic_arms`` builds ``instance`` from ``child_input``
+    over ``rows`` (the rows the root set was built over), and
+    ``FilterSet._q_for_branch`` reuses it when it reaches the same input.
+    """
+
+    child_input: object
+    instance: FilterSet
+    rows: models.QuerySet[models.Model]
+
+
+#: The empty probed-arm map (``FilterSet._probed_arms``).
+_NO_ARMS: Mapping[str, _ProbedArm] = MappingProxyType({})
+
+
 def _hop_model(hop: RelationHop) -> type[models.Model]:
     """Return the model whose rows a resolved hop reaches.
 
@@ -2884,15 +2902,24 @@ class FilterSet(
     # cleaned to (``_absent_leaf_applies``), by name, beside that value: a verdict
     # is per (leaf, cleaned value). ``apply_sync`` and
     # ``apply_async`` record it on the request's root set once the form has
-    # cleaned (``_probe_absent_relation_leaves``; ``apply_async`` then awaits the
-    # hops of every leaf that does) and ``_q_for_branch`` hands the root's map to
-    # every logical-arm sibling, so the ``.qs`` read reads one verdict per leaf for
-    # the whole request instead of running the leaf's filter to learn it again
-    # (``_apply_relation_leaf``). Empty on an instance built outside the apply
-    # pipeline, whose ``.qs`` read asks each absent leaf as it reaches it, and a
-    # leaf absent only in an arm is not in the map and is asked there, as is one
-    # whose arm cleaned it to another value (a consumer form ``clean``).
+    # cleaned (``_probe_absent_relation_leaves``) and on each logical-arm sibling
+    # the probe builds (``_probe_logic_arms``), which starts from the map of the
+    # set holding the arm and asks only a leaf missing from it or cleaned to
+    # another value there (a leaf a consumer ``__init__`` adds from the arm's
+    # data, a consumer form ``clean``); ``apply_async`` then awaits the hops of
+    # every leaf that constrains. The ``.qs`` read reuses those siblings
+    # (``_q_for_branch``), so it reads one verdict per leaf and value instead of
+    # running the leaf's filter to learn it again (``_apply_relation_leaf``).
+    # Empty on an instance built outside the apply pipeline, whose ``.qs`` read
+    # asks each absent leaf as it reaches it.
     _absent_leaf_verdicts: Mapping[str, tuple[object, bool]] = _NO_VERDICTS
+
+    # The logical-arm siblings the probe built (``_probe_logic_arms``), by arm path
+    # (``_branch_key`` of ``LogicOperatorDescriptor.arm_key``): one map per request,
+    # shared by the root set and every arm. ``_q_for_branch`` reuses an arm's
+    # sibling at the ``.qs`` read, so a consumer ``__init__`` and form ``clean`` run
+    # once per arm. Empty on an instance built outside the apply pipeline.
+    _probed_arms: Mapping[str, _ProbedArm] = _NO_ARMS
 
     def __init__(
         self,
@@ -6007,11 +6034,14 @@ class FilterSet(
         hop), the rows this set was built over (``self.queryset``,
         ``_chain_base``), never the rows the leaves before it left, so the answer
         is the same whenever it is asked, on ``apply_sync`` and ``apply_async``
-        alike (``_probe_absent_relation_leaves``). A pipeline asks it once, on the
-        request's root set, and every logical arm whose leaf cleaned to the same
-        value reads that answer (``_absent_leaf_verdicts``: a verdict is per
-        (leaf, cleaned value)), so a filter reading queryset state never sees the
-        rows an arm's own constraints left. An inactive absent leaf runs no
+        alike (``_probe_absent_relation_leaves``). A pipeline asks it before the
+        ``.qs`` read, on the request's root set and on each logical arm's sibling
+        for a leaf the set holding the arm did not answer for the value it cleaned
+        to there, every arm built over the rows the root set was built over
+        (``_probe_logic_arms``); a leaf that cleaned to the same value reads the
+        answer (``_absent_leaf_verdicts``: a verdict is per (leaf, cleaned value)),
+        so a filter reading queryset state never sees the rows an arm's own
+        constraints left. An inactive absent leaf runs no
         ``get_queryset`` and an active one is never evaluated against a model its
         path does not resolve on (a child set on a multi-table-inheritance
         subclass of the relation's target). A walk reaching a hop whose target
@@ -6071,11 +6101,13 @@ class FilterSet(
         walk a hop (``_walks_relation_hops``) and that the request left absent
         (``_leaf_absent``), each asked with the value it cleaned to
         (``_absent_leaf_applies``, whose answer does not depend on when it is
-        asked). Each verdict is recorded by name beside the value it answers for
-        (``_absent_leaf_verdicts``: a verdict is per (leaf, cleaned value)) for
-        the ``.qs`` read and every logical-arm sibling it builds
-        (``_q_for_branch``). Both colors run it on the request's root set once
-        the form has validated (``_probed_filterset``); ``apply_async`` runs it
+        asked) unless this set's map already answers for that value (a logical
+        arm's sibling starts from the map of the set holding the arm;
+        ``_probe_logic_arms``). Each verdict is recorded by name beside the
+        value it answers for (``_absent_leaf_verdicts``: a verdict is per
+        (leaf, cleaned value)) for this set's ``.qs`` read. Both colors run it
+        on the request's root set once the form has validated and on every
+        logical-arm sibling (``_probed_filterset``); ``apply_async`` runs it
         inside the sync boundary and awaits the returned hops
         (``_visibility_hops`` of every leaf that constrains) into the
         request-wide hop map before the ``.qs`` read, so that read never derives
@@ -6085,7 +6117,7 @@ class FilterSet(
         ``.qs`` read, so a ``qs`` / ``filter_queryset`` override that skips the
         flat-leaf loop still sees the probe's one run, on either color.
         """
-        verdicts: dict[str, tuple[object, bool]] = {}
+        verdicts = dict(self._absent_leaf_verdicts)
         hops: list[RelationHop] = []
         for name, value in self._cleaned_leaf_items():
             filter_instance = self._filter_named(name)
@@ -6093,11 +6125,72 @@ class FilterSet(
                 name,
             ):
                 continue
+            if self._recorded_verdict(name, value) is not None:
+                continue
             applies = self._absent_leaf_applies(filter_instance, value)
             verdicts[name] = (value, applies)
             if applies:
                 hops.extend(type(self)._visibility_hops(filter_instance))
         self._absent_leaf_verdicts = verdicts
+        return tuple(hops)
+
+    def _recorded_verdict(self, name: str | None, value: object) -> bool | None:
+        """Return the recorded verdict of absent leaf ``name`` if it answers for ``value``, else ``None``."""
+        recorded = None if name is None else self._absent_leaf_verdicts.get(name)
+        if recorded is not None and recorded[0] == value:
+            return recorded[1]
+        return None
+
+    def _probe_logic_arms(
+        self,
+        arms: dict[str, _ProbedArm],
+        rows: models.QuerySet[models.Model],
+    ) -> tuple[RelationHop, ...]:
+        """Build each ``and`` / ``or`` / ``not`` arm's sibling as the ``.qs`` read will; probe its leaves.
+
+        Walks this set's logical keys as ``_evaluate_logic_tree`` does (the same
+        depth cap, the same arm paths), building each arm's sibling as
+        ``_q_for_branch`` does (``_build_stashed_instance`` over the arm's
+        normalized input, this set's request, resolver ``info``, pre-derived
+        maps and verdicts) and validating its form, then asks the arm's absent
+        walking leaves (``_probe_absent_relation_leaves``) and recurses into its
+        own arms. Each sibling lands in ``arms`` under its path, beside the input
+        it was built from (``_ProbedArm``), for the ``.qs`` read to reuse, so a
+        consumer ``__init__`` and form ``clean`` run once per arm on either
+        color. The ``.qs`` read builds an arm over the rows its parent's flat
+        leaves left, which it cannot know before it runs, so the probe builds
+        it over ``rows``, the rows the root set was built over: the rows an
+        absent leaf of the arm is asked over (``_absent_leaf_applies``), as the
+        root's own are. It runs before the ``.qs`` read, so a ``qs`` /
+        ``filter_queryset`` override that never composes the logical keys still
+        has every arm built, validated and probed. Returns the hops of every arm
+        leaf that constrains, which ``apply_async`` awaits before the ``.qs`` read.
+        """
+        cls = type(self)
+        hops: list[RelationHop] = []
+        tree = self.data
+        if not is_dict(tree) or not tree:
+            return ()
+        cls._assert_logic_depth(self._logic_depth)
+        for op, children in cls._iter_logic_branches(tree):
+            for index, child_input in enumerate(children):
+                path = _branch_key(self._branch_path, op.arm_key(index))
+                arm = cls._build_stashed_instance(
+                    cls._normalize_input(child_input),
+                    rows,
+                    self.request,
+                    self._apply_info,
+                    self._nested_qs_by_branch_id,
+                    self._hop_visibility(),
+                    branch_path=path,
+                )
+                arm._logic_depth = self._logic_depth + 1
+                arm._absent_leaf_verdicts = self._absent_leaf_verdicts
+                arm._probed_arms = arms
+                arms[path] = _ProbedArm(child_input, arm, rows)
+                cls._validate_form_or_raise(arm)
+                hops.extend(arm._probe_absent_relation_leaves())
+                hops.extend(arm._probe_logic_arms(arms, rows))
         return tuple(hops)
 
     def _chain_base(
@@ -6129,10 +6222,11 @@ class FilterSet(
         every row a hop's explicit ``RelatedFilter(queryset=...)`` excludes, does
         not exist. A leaf the request left absent (not ``supplied``) is first
         asked whether its cleaned value constrains anything
-        (``_absent_leaf_applies``), or read the answer the request's root set
-        recorded for leaf ``name`` of the flat-leaf loop when it cleaned to the
-        same ``value`` (``_absent_leaf_verdicts``), so its filter runs on absence as often on
-        both paths and in every logical arm; one that does not leaves
+        (``_absent_leaf_applies``), or reads the answer the pipeline's probe
+        recorded on this set for leaf ``name`` of the flat-leaf loop when it
+        cleaned to the same ``value`` (``_absent_leaf_verdicts``: the root's and
+        each logical arm's, ``_probe_logic_arms``), so its filter runs on absence
+        as often on both paths and in every logical arm; one that does not leaves
         ``queryset`` unchanged and derives nothing. Then every hop is derived
         (``_hop_visible_rows``) and the leaf's chain (``_leaf_chain``) runs its
         terminal once, over the last hop's visible rows: a supplied leaf's filter
@@ -6166,12 +6260,9 @@ class FilterSet(
         cannot be emptied by a ``NULL`` key the way ``NOT IN`` is.
         """
         if not supplied:
-            recorded = None if name is None else self._absent_leaf_verdicts.get(name)
-            applies = (
-                recorded[1]
-                if recorded is not None and recorded[0] == value
-                else self._absent_leaf_applies(filter_instance, value)
-            )
+            applies = self._recorded_verdict(name, value)
+            if applies is None:
+                applies = self._absent_leaf_applies(filter_instance, value)
             if not applies:
                 return queryset
         using = queryset.db
@@ -6450,9 +6541,11 @@ class FilterSet(
         # ``child_input`` already carries an awaited visibility map keyed by
         # ``id(child_input)`` so ``_q_for_branch`` can skip the sync derive
         # that would otherwise raise ``SyncMisuseError`` on an async-only
-        # target ``get_queryset``. The hop visibility map and the absent-leaf
-        # verdicts are shared with every sibling the logic tree builds (one of
-        # each per request).
+        # target ``get_queryset``. The hop visibility map is shared with every
+        # sibling the logic tree builds (one per request), and so is the map of
+        # the siblings the probe built (``_probed_arms``), which ``_q_for_branch``
+        # reuses; a sibling it builds afresh starts from this set's absent-leaf
+        # verdicts.
         depth = getattr(self, "_logic_depth", 0)
         info = getattr(self, "_apply_info", None)
         nested_map = getattr(self, "_nested_qs_by_branch_id", None)
@@ -6466,6 +6559,7 @@ class FilterSet(
             _nested_qs_by_branch_id=nested_map,
             _flat_hop_visibility=self._hop_visibility(),
             _absent_leaf_verdicts=self._absent_leaf_verdicts,
+            _probed_arms=self._probed_arms,
         )
         # An empty ``Q`` is the identity: the input queryset comes back BY IDENTITY when
         # no leaf and no logical key constrained anything, so ``_q_for_branch`` can tell
@@ -6486,6 +6580,7 @@ class FilterSet(
         _flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]]
         | None = None,
         _absent_leaf_verdicts: Mapping[str, tuple[object, bool]] = _NO_VERDICTS,
+        _probed_arms: Mapping[str, _ProbedArm] = _NO_ARMS,
     ) -> models.Q:
         """Build the ``Q`` expression for logical operator branches.
 
@@ -6498,9 +6593,11 @@ class FilterSet(
         visibility maps produced by ``_collect_nested_visibility_querysets_async``
         (None on the sync path); ``_flat_hop_visibility`` is the request-wide hop
         visibility map every sibling's flat relation leaves read
-        (``FilterSet._flat_hop_visibility``), and ``_absent_leaf_verdicts`` the
-        request root's absent-leaf verdicts every sibling reads
-        (``FilterSet._absent_leaf_verdicts``). ``_branch_path`` is the set's path from
+        (``FilterSet._flat_hop_visibility``), ``_probed_arms`` the siblings the
+        pipeline's probe built, by arm path (``FilterSet._probed_arms``), and
+        ``_absent_leaf_verdicts`` the calling set's absent-leaf verdicts, which a
+        sibling built afresh starts from (``FilterSet._absent_leaf_verdicts``).
+        ``_branch_path`` is the set's path from
         the request root; each arm's sibling applies under the arm's own path
         (``_branch_key`` of ``LogicOperatorDescriptor.arm_key``, the index the arm's
         position in the list sent), as ``_collect_nested_visibility_querysets_async``
@@ -6534,6 +6631,7 @@ class FilterSet(
                     _nested_qs_by_branch_id=_nested_qs_by_branch_id,
                     _flat_hop_visibility=_flat_hop_visibility,
                     _absent_leaf_verdicts=_absent_leaf_verdicts,
+                    _probed_arms=_probed_arms,
                 )
                 for index, child_input in enumerate(children)
             ]
@@ -6555,6 +6653,7 @@ class FilterSet(
         _flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]]
         | None = None,
         _absent_leaf_verdicts: Mapping[str, tuple[object, bool]] = _NO_VERDICTS,
+        _probed_arms: Mapping[str, _ProbedArm] = _NO_ARMS,
     ) -> models.Q:
         """Materialize one nested-branch input into a ``pk__in`` ``Q`` (``Q()`` if inert).
 
@@ -6596,14 +6695,21 @@ class FilterSet(
         the sibling's flat relation leaves read (and, under ``apply_async``, find
         pre-derived) the same hop visibility as the top level. ``_branch_path`` (the
         arm's path) is stashed too, keying the sibling's form errors and its nested
-        branches' under it, and so is ``_absent_leaf_verdicts``, the request root's
-        answer for each absent walking leaf and the value it cleaned to: an arm is
-        the same class, so a leaf absent at the root and in the arm, cleaned to the
-        same value, reads the root's verdict, asked once over
-        the rows the root set was built over, instead of asking again over the rows
-        the arm's own constraints left (a filter reading queryset state answers
+        branches' under it.
+
+        The sibling is the one the pipeline's probe built for this arm path from
+        this ``child_input`` (``_probed_arms``; ``_probe_logic_arms``), its form
+        already validated and its absent walking leaves already answered over the
+        rows the root set was built over, so a consumer ``__init__`` and form
+        ``clean`` run once per arm, and no leaf is asked again over the rows the
+        arm's own constraints left (a filter reading queryset state answers
         differently there, and under ``apply_async`` the hop it would then derive
-        was never awaited).
+        was never awaited); its ``queryset`` becomes ``constrained`` before it
+        runs. A sibling whose ``__init__`` replaced the queryset handed to it is
+        built again over ``constrained``, keeping the probe's verdicts, since
+        what it narrowed cannot be carried onto other rows. Outside the pipeline
+        (no probed sibling) it is built here and starts from
+        ``_absent_leaf_verdicts``, the calling set's.
 
         Perf note: constructing the
         sibling ``cls(...)`` per branch triggers django-filter's
@@ -6651,19 +6757,28 @@ class FilterSet(
             info,
             _flat_hop_visibility,
         )
-        child_data = cls._normalize_input(child_input)
-        child_set = cls._build_stashed_instance(
-            child_data,
-            constrained,
-            request,
-            info,
-            _nested_qs_by_branch_id,
-            _flat_hop_visibility,
-            branch_path=_branch_path,
-        )
-        child_set._logic_depth = _depth
-        child_set._absent_leaf_verdicts = _absent_leaf_verdicts
-        cls._validate_form_or_raise(child_set)
+        probed = _probed_arms.get(_branch_path)
+        if probed is not None and probed.child_input is not child_input:
+            probed = None
+        if probed is not None and probed.instance.queryset is probed.rows:
+            child_set = probed.instance
+            child_set.queryset = constrained
+        else:
+            child_set = cls._build_stashed_instance(
+                cls._normalize_input(child_input),
+                constrained,
+                request,
+                info,
+                _nested_qs_by_branch_id,
+                _flat_hop_visibility,
+                branch_path=_branch_path,
+            )
+            child_set._logic_depth = _depth
+            child_set._absent_leaf_verdicts = (
+                _absent_leaf_verdicts if probed is None else probed.instance._absent_leaf_verdicts
+            )
+            child_set._probed_arms = _probed_arms
+            cls._validate_form_or_raise(child_set)
         if truth.overrides(type(child_set), filterset.BaseFilterSet, "qs"):
             # A consumer ``qs`` override (django-filter's seam) runs inside the arm as it
             # does at the top level; its rows compose as ``pk__in`` like any other arm.
@@ -6812,11 +6927,12 @@ class FilterSet(
         model, so the result keeps the model of the queryset passed in.
 
         Sync ``apply_sync`` calls this directly: ``_probed_filterset`` records
-        the absent-leaf verdicts (``_probe_absent_relation_leaves``) the ``.qs``
-        read and every logical-arm sibling then read, and the hops of an absent
-        leaf that constrains are derived synchronously as the ``.qs`` read reaches
-        them. Async ``apply_async`` runs the same build, permission pass,
-        validation and probe through ``_probed_filterset`` in ``run_in_one_sync_boundary``
+        the absent-leaf verdicts of the root set and of every logical-arm sibling
+        it builds (``_probe_absent_relation_leaves``, ``_probe_logic_arms``),
+        which the ``.qs`` read reuses, and the hops of an absent leaf that
+        constrains are derived synchronously as the ``.qs`` read reaches them.
+        Async ``apply_async`` runs the same build, permission pass, validation
+        and probe through ``_probed_filterset`` in ``run_in_one_sync_boundary``
         (the neutral ``sync_to_async(thread_sensitive=True)`` owner in
         ``utils/querysets.py``) so a consumer's filterset constructor /
         ``check_*_permission`` hook / custom ``method=`` filter body /
@@ -6896,7 +7012,9 @@ class FilterSet(
         The work both colors run before the ``.qs`` read (``apply_async`` inside
         its sync boundary, ``apply_sync`` through ``_apply_common_finalize``): the
         hops of every absent walking leaf whose filter constrains on the value it
-        cleaned to (``_probe_absent_relation_leaves``). With none, the ``.qs`` read
+        cleaned to, the root set's (``_probe_absent_relation_leaves``) and every
+        ``and`` / ``or`` / ``not`` arm's, whose siblings the probe builds for the
+        ``.qs`` read to reuse (``_probe_logic_arms``). With none, the ``.qs`` read
         runs here and its rows come back; otherwise the rows are ``None`` and the
         caller reads ``.qs`` itself: ``apply_async`` awaits the hops first and
         reads it in a second worker.
@@ -6912,7 +7030,12 @@ class FilterSet(
             run_permissions=run_permissions,
             branch_path=branch_path,
         )
-        hops = filterset_instance._probe_absent_relation_leaves()
+        arms: dict[str, _ProbedArm] = {}
+        filterset_instance._probed_arms = arms
+        hops = (
+            *filterset_instance._probe_absent_relation_leaves(),
+            *filterset_instance._probe_logic_arms(arms, constrained),
+        )
         return filterset_instance, hops, None if hops else filterset_instance.qs
 
     @classmethod
@@ -7017,18 +7140,21 @@ class FilterSet(
                ``check_*_permission`` hook that performs a blocking ORM read
                does not block the event loop. The probe asks each absent
                walking leaf whether its filter constrains on the value it
-               cleaned to (``_probe_absent_relation_leaves``). When none does,
-               the same worker reads ``.qs``. Otherwise the hops of every leaf
-               that does are awaited into the hop map
-               (``_await_hop_visibility_async``) and a second worker reads
-               ``.qs``, which reads those verdicts instead of asking again. A
-               leaf the form data names had its hops awaited in step 2, and
-               every ``and`` / ``or`` / ``not`` arm reads the same verdict for
-               a leaf that cleaned to the same value there (``_q_for_branch``;
-               an arm is the same class, so a leaf absent there walks the same
-               hop keys), so the ``.qs`` read derives no hop on its own.
-               ``apply_sync`` runs the same probe and reads the same verdicts,
-               deriving the hops synchronously.
+               cleaned to (``_probe_absent_relation_leaves``), on the root set
+               and on every ``and`` / ``or`` / ``not`` arm's sibling, which it
+               builds as the ``.qs`` read will (``_probe_logic_arms``; an arm
+               asks only a leaf the set holding it did not answer for the value
+               it cleaned to there: one a consumer ``__init__`` adds from the
+               arm's data, or one a consumer form ``clean`` cleans to another
+               value). When none constrains, the same worker reads ``.qs``.
+               Otherwise the hops of every leaf that does are awaited into the
+               hop map (``_await_hop_visibility_async``) and a second worker
+               reads ``.qs``, which reuses those siblings and reads those
+               verdicts instead of asking again (``_q_for_branch``). A leaf the
+               form data names had its hops awaited in step 2 or 3, so the
+               ``.qs`` read derives no hop on its own. ``apply_sync`` runs the
+               same probe and reads the same verdicts, deriving the hops
+               synchronously.
 
         ``run_permissions`` defaults to ``True`` for consumer entry points;
         the related-visibility derivation passes ``False`` so a nested child
