@@ -28,6 +28,7 @@ import threading
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
+from decimal import Decimal
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Literal, NamedTuple, NoReturn, TypeAlias, TypeVar, cast
 from unittest import mock
@@ -10648,6 +10649,55 @@ def test_decimal_past_postgresql_numeric_is_refused_only_there(
         "code": "FILTER_INVALID",
         "errors": {form_key: _UNBINDABLE},
     }
+
+
+@pytest.mark.skipif(
+    connections["default"].vendor != "sqlite",
+    reason="pins how SQLite compares a decimal filter value, as a double",
+)
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("data", "labels"),
+    [
+        pytest.param({"price": _TINY}, ["zero"], id="exact-tiny"),
+        pytest.param({"price__in": f"5,{_TINY}"}, ["zero"], id="in-tiny"),
+        pytest.param({"price__range": f"{_TINY},0.2"}, ["zero"], id="range-start-tiny"),
+        pytest.param({"price__lt": _TINY}, [], id="lt-tiny"),
+        pytest.param(
+            {"price": "0.30000000000000000000001"},
+            ["tenths"],
+            id="exact-past-15-digits",
+        ),
+        pytest.param({"price": "0.30000000000001"}, [], id="exact-within-15-digits"),
+        pytest.param({"price__lt": _NEGATIVE_HUGE}, [], id="lt-negative-huge"),
+        pytest.param(
+            {"price__range": f"{_NEGATIVE_HUGE},0.5"},
+            ["tenths", "zero"],
+            id="range-start-negative-huge",
+        ),
+    ],
+)
+def test_decimal_filter_value_compares_as_a_double_on_sqlite(
+    data: dict[str, object],
+    labels: list[str],
+) -> None:
+    """On SQLite a decimal filter value is compared as a double, not refused for its spelling.
+
+    Django binds a ``Decimal`` as its text and the column's ``NUMERIC`` affinity reads it as
+    a double, so a non-zero value below the smallest double compares as zero (``exact``,
+    ``in`` and a ``range`` start match a stored zero, ``lt`` drops it) and a value differing
+    from a stored one only past a double's 15 to 17 significant digits can compare equal to
+    it, while a value past the largest double compares as an infinity and answers the rows it
+    orders.
+    """
+    for label, price in (("zero", "0"), ("tenths", "0.3"), ("one", "1")):
+        specimen = _make_scalar_specimen(label)
+        specimen.price = Decimal(price)
+        specimen.save(update_fields=["price"])
+    priced_filter = _priced_filter_class()
+    filterset = priced_filter(data=data, queryset=_specimens_priced())
+    priced_filter._validate_form_or_raise(filterset)
+    assert sorted(filterset.qs.values_list("label", flat=True)) == labels
 
 
 @pytest.mark.parametrize("mode", list(BINDING_MODES))
