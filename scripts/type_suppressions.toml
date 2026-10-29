@@ -5,6 +5,7 @@
 "django_strawberry_framework/__init__.py::__getattr__" = { reportAny = 1, reportExplicitAny = 1 }
 "django_strawberry_framework/_completion.py::CompletionExecutionContext.complete_list_value" = { cast = 1 }
 "django_strawberry_framework/_completion.py::_completion_method" = { cast = 1 }
+"django_strawberry_framework/_completion.py::_syntax_shape" = { cast = 1 }
 "django_strawberry_framework/_cross_web_patches.py::_captured_upstream_body_getter" = { cast = 1 }
 "django_strawberry_framework/_cross_web_patches.py::apply" = { reportAttributeAccessIssue = 1 }
 "django_strawberry_framework/_django_patches.py::_disallowed_connection_methods" = { cast = 1, reportAttributeAccessIssue = 1 }
@@ -276,6 +277,7 @@
 "examples/fakeshop/test_query/test_completion_lifecycle.py::make_schema.ProbeBranch.values" = { cast = 2 }
 "examples/fakeshop/test_query/test_completion_lifecycle.py::make_schema.Query.branch" = { cast = 2 }
 "examples/fakeshop/test_query/test_completion_lifecycle.py::make_schema.Query.branches" = { cast = 1 }
+"examples/fakeshop/test_query/test_completion_lifecycle.py::make_schema.Tracing.complete_list_value" = { cast = 1 }
 "examples/fakeshop/test_query/test_completion_lifecycle.py::test_live_late_errors" = { cast = 1 }
 "examples/fakeshop/test_query/test_completion_lifecycle.py::test_live_sync_bridge_mutation_orm" = { cast = 1 }
 "examples/fakeshop/test_query/test_connection_pagination_api.py::_TenantScopedGenreQuerySet.query" = { reportIncompatibleVariableOverride = 1 }

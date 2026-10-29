@@ -42,10 +42,14 @@ Execution-mode split:
   thread and nests in whatever transaction the caller holds, exactly as sync
   execution does.
 
-Already-running engine-owned field and list-item siblings abandoned by an async
-completion failure are cancelled and drained inside that same window. Cleanup
-outlasts repeated cancellation. Nullable errors preserve upstream surviving-sibling
-completion; queries, unmarked mutations and application-created jobs stay stock.
+Already-running engine-owned field and list-item siblings finish inside that same
+window after an ordinary async completion failure. Their shared awaitables remain
+available to surviving branches. Caller cancellation cancels those siblings once
+and drains cleanup across repeated cancellation; GeneratorExit propagates directly.
+Nullable errors preserve upstream surviving-sibling completion; queries, unmarked
+mutations and application-created jobs stay stock. The installed upstream methods
+are audited lazily when an async generated-mutation window opens, so a missing or
+changed source body refuses that window without preventing package import or queries.
 The revocable ownership lease identifies this execution context and this window.
 Optional upstream iterable patches do not control this mandatory transaction boundary.
 

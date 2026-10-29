@@ -339,14 +339,19 @@ Rationale companion — this Decision's justification and rejected alternatives:
 
 **Transaction and async boundary (AR-M4).** The pipeline opens **one `transaction.atomic()` spanning locate → authorize → decode → validate → write → relation assignment → re-fetch / snapshot** — the locate is inside it because that is where the row lock is taken (a lock outside the transaction is not a lock). That block is itself **nested inside the completion-spanning transaction the schema's execution context opens for the mutation field**, so a failure in relation assignment, in the snapshot, **or in GraphQL response completion** rolls the write back and a successful payload reflects a committed row. Every error-envelope return marks the transaction for rollback **before** building the payload, so a `FieldError` envelope can never commit a partial write.
 
-Async generated-mutation completion cancels already-running engine-owned field
-and list-item siblings abandoned by a propagating failure, and drains their cleanup
-before the atomic exits. Repeated cancellation still waits for that cleanup. Nullable
-failures keep surviving siblings running under upstream semantics. This ownership is
-per execution context and mutation window; ordinary queries, unmarked mutations and
-application-created background tasks retain upstream behavior. The mandatory boundary
-is independent of `APPLY_UPSTREAM_PATCHES`, which still gates only the optional
-QuerySet/AsyncIterable adapter.
+Async generated-mutation completion joins already-running engine-owned field and
+list-item siblings before the atomic exits after a propagating failure. Ordinary
+exceptions let siblings finish, preserving shared DataLoader futures for surviving
+branches. Caller cancellation cancels the siblings once and drains their cleanup;
+repeated cancellation still waits for it. Nullable failures keep surviving siblings
+running under upstream semantics. This ownership is per execution context and mutation
+window; ordinary queries, unmarked mutations and application-created background tasks
+retain upstream behavior. The mandatory boundary is independent of
+`APPLY_UPSTREAM_PATCHES`, which still gates only the optional QuerySet/AsyncIterable
+adapter. Its upstream-method audit runs lazily when an async generated-mutation window
+opens and ignores docstrings, comments and formatting. Wrapped methods, unavailable
+source and unaudited executable changes refuse that window with an explicit runtime
+error; package imports, queries and synchronous execution do not require the audit.
 
 **A generated mutation requires `DjangoSchema` (`ConfigurationError`, before any database work).** The completion-spanning transaction is the schema's to open, so the write pipeline refuses to run under a plain `strawberry.Schema`: reaching a generated mutation through one raises [`ConfigurationError`][glossary-configurationerror] naming the mutation class, before any database work. A schema exposing generated mutations is built as `DjangoSchema` ([Error shapes](#error-shapes), Slice 4).
 
@@ -434,9 +439,11 @@ Staged-but-not-implemented seams follow the [`AGENTS.md`][agents] design-doc anc
 ## Edge cases and constraints
 
 - **Abandoned async completion siblings.** Already-running engine field/list tasks are
-  cancelled and drained inside the generated mutation atomic, including awaited ORM
-  cleanup and repeated caller cancellation. Nullable failures leave surviving siblings
-  running. This does not start unstarted coroutines or supervise application background
+  joined inside the generated mutation atomic after an ordinary failure; shared
+  awaitables remain available to surviving branches. Caller cancellation cancels the
+  children once and drains awaited ORM cleanup across repeated cancellation. Nullable
+  failures leave surviving siblings running. This does not start unstarted coroutines
+  or supervise application background
   jobs; ordinary queries and unmarked mutations retain upstream behavior.
 
 - **Create over a uniquely-constrained model.** Products' `Item` has the `unique_item_per_category` `UniqueConstraint`. On the normal path a duplicate `(category, name)` is caught by step 4's `full_clean()` → `validate_constraints()` (which validates `Meta.constraints` `UniqueConstraint`s since Django 4.1; floor `>=5.2`) as a **`ValidationError`** *before* `save()` — `validate_constraints()` keys a single-field unique violation to that field and surfaces a multi-field one (the 2-field `(category, name)`) under `NON_FIELD_ERRORS`, which maps to a `FieldError` keyed to the `"__all__"` sentinel (AR-M3, [Decision 7](#decision-7--the-shared-fielderror-envelope-and-the-payload-wrapper)). That is the path the products live suite pins. An `IntegrityError` at `save()` only fires on a concurrent race that beats `validate_constraints()`; the pipeline keys it to the `"__all__"` sentinel as a best-effort fallback (`save()`'s `IntegrityError` carries no reliable cross-backend field mapping). A create over a client-assigned key (`library.Edition`'s ISBN, `PatronProfile`'s one-to-one `patron`) INSERTs, its multi-table parents included, so a row committed under that key after validation is that envelope rather than an UPDATE of the competing row; the live raced rows pin it (Major-2).

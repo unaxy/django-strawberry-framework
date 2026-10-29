@@ -1,7 +1,8 @@
 """Live HTTP acceptance for owned async mutation completion and stable error delivery."""
 
 import asyncio
-from collections.abc import AsyncIterator
+import inspect
+from collections.abc import AsyncIterable, AsyncIterator, Iterable
 from dataclasses import dataclass, field
 from typing import NoReturn, cast
 
@@ -19,6 +20,7 @@ from graphql import FieldNode, GraphQLError, GraphQLObjectType
 from graphql.execution import ExecutionContext as CoreExecutionContext
 from graphql.pyutils import AwaitableOrValue, Path
 from graphql_client import JSONValue, json_at, middleware_without_debug_toolbar, response_json
+from strawberry.dataloader import DataLoader
 from strawberry.extensions import SchemaExtension
 from strawberry.http import GraphQLHTTPResponse
 from strawberry.types.execution import ExecutionResult
@@ -32,7 +34,10 @@ from django_strawberry_framework import (
     DjangoType,
     finalize_django_types,
 )
+from django_strawberry_framework import _completion as completion
 from django_strawberry_framework import _graphql_core_patches as patches
+from django_strawberry_framework.schema import DjangoMutationExecutionContext
+from django_strawberry_framework.testing import AsyncTestClient
 from django_strawberry_framework.views import AsyncDjangoGraphQLView
 
 
@@ -63,6 +68,8 @@ class CompletionState:
     view_errors_before: list[str] = field(default_factory=list)
     view_errors_after: list[str] = field(default_factory=list)
     schema: strawberry.Schema | None = None
+    nested_shape: str = "root"
+    loader: DataLoader[str, str] | None = None
 
 
 @dataclass
@@ -83,12 +90,18 @@ def messages(result: ExecutionResult | CoreResult) -> list[str]:
 async def fast() -> NoReturn:
     """Fail only after the sibling is executing and held at its I/O barrier."""
     await CURRENT.state.started.wait()
+    if CURRENT.state.cleanup_started is not None:
+        await CURRENT.state.release.wait()
+    elif CURRENT.state.shape in {"mutation", "mutation_list"}:
+        # Model completion of independent I/O; transport hooks cannot release an
+        # owned child because the transaction must join it before reaching them.
+        asyncio.get_running_loop().call_soon(CURRENT.state.release.set)
     if CURRENT.state.initial == "deliberate":
         raise GraphQLError("INITIAL_DELIBERATE")
     raise ValueError("INITIAL_UNEXPECTED")
 
 
-async def late() -> NoReturn:
+async def late() -> str:
     """Finish normal asynchronous I/O after the early sibling completes."""
     task = asyncio.current_task()
     assert task is not None
@@ -125,6 +138,8 @@ async def late() -> NoReturn:
             raise
     if CURRENT.state.cancelled:
         raise asyncio.CancelledError
+    if CURRENT.state.work in {"orm", "cleanup"}:
+        return "late-completed"
     raise ValueError("LATE_SYNTHETIC_EXCEPTION")
 
 
@@ -184,6 +199,20 @@ urlpatterns = [path("graphql-async/", view)]
 
 def make_schema(shape: str) -> tuple[strawberry.Schema, str]:
     """Declare a model type and generated mutation using the package's Meta API."""
+
+    @strawberry.type
+    class SharedInner:
+        """A nullable branch sharing one loader key with its surviving sibling."""
+
+        @strawberry.field
+        async def fast(self) -> str:
+            await CURRENT.state.started.wait()
+            raise GraphQLError("SHARED_INNER_FAILURE")
+
+        @strawberry.field
+        async def late(self) -> str | None:
+            assert CURRENT.state.loader is not None
+            return await CURRENT.state.loader.load("k")
 
     class ProbeBranch(DjangoType):
         """A library branch with asynchronous computed fields."""
@@ -250,11 +279,28 @@ def make_schema(shape: str) -> tuple[strawberry.Schema, str]:
         @staticmethod
         async def nested() -> str:
             inner = DjangoSchema(query=Query)
-            result = await inner.execute("{ fast late }")
+            CURRENT.state.shape = CURRENT.state.nested_shape
+            document = (
+                "{ branches { value } }"
+                if CURRENT.state.nested_shape == "list_nonnull"
+                else "{ fast late }"
+            )
+            result = await inner.execute(document)
             assert result.errors is not None
             CURRENT.state.release.set()
             await CURRENT.state.drained.wait()
             return "nested-finished"
+
+        @strawberry.field
+        @staticmethod
+        async def inner() -> SharedInner | None:
+            return SharedInner()
+
+        @strawberry.field
+        @staticmethod
+        async def shared() -> str | None:
+            assert CURRENT.state.loader is not None
+            return await CURRENT.state.loader.load("k")
 
         class Meta:
             model = Branch
@@ -315,6 +361,26 @@ def make_schema(shape: str) -> tuple[strawberry.Schema, str]:
                 return super().execute_fields(parent_type, source_value, path, fields)
 
         context = CustomContext
+    elif CURRENT.state.context == "cooperative":
+
+        class Tracing(CoreExecutionContext):
+            @override
+            def complete_list_value(
+                self,
+                return_type: "graphql.GraphQLList[patches._GraphQLOutputType]",
+                field_nodes: list[FieldNode],
+                info: graphql.GraphQLResolveInfo,
+                path: Path,
+                result: AsyncIterable[object] | Iterable[object],
+            ) -> AwaitableOrValue[list[object]]:
+                CURRENT.state.custom_used = True
+                upstream = cast("patches._BoundCompleteListValue", super().complete_list_value)
+                return upstream(return_type, field_nodes, info, path, result)
+
+        class CooperativeContext(DjangoMutationExecutionContext, Tracing):
+            """An ordinary cooperative mixin following the mutation context."""
+
+        context = CooperativeContext
     if CURRENT.state.context == "plain":
         schema = strawberry.Schema(query=Query, extensions=[DjangoErrorPolicyExtension, Observe])
     else:
@@ -406,7 +472,7 @@ async def test_live_late_errors(
         names = [row.name async for row in Branch.objects.order_by("name")]
         assert response.status_code == 200
         assert ("LATE_SYNTHETIC_EXCEPTION" in after_drain) == (
-            shape not in {"mutation", "list_nonnull"}
+            shape != "list_nonnull"
             and tuple(int(part) for part in graphql.__version__.split(".")) < (3, 2, 10)
         )
         assert "mutation-created" not in names
@@ -417,12 +483,9 @@ async def test_live_late_errors(
             "INITIAL_DELIBERATE" if initial == "deliberate" else "An unexpected error occurred.",
         ]
         late_is_collected = (
-            shape not in {"mutation", "list_nonnull"}
+            shape != "list_nonnull"
             and tuple(int(part) for part in graphql.__version__.split(".")) < (3, 2, 10)
-            and (
-                view_kind == "extension"
-                or (view_kind == "results" and initial == "deliberate" and context_kind != "plain")
-            )
+            and (shape == "mutation" or view_kind == "extension")
         )
         if late_is_collected:
             expected.append("An unexpected error occurred.")
@@ -486,7 +549,11 @@ async def test_live_late_mutation_orm(
         await asyncio.wait_for(CURRENT.state.drained.wait(), timeout=15)
         names = [row.name async for row in Branch.objects.all()]
         assert response.status_code == 200
-        assert "mutation-created" not in names
+        assert names == []
+        assert CURRENT.state.orm_atomic is True
+        assert CURRENT.state.orm_pk is not None
+        assert CURRENT.state.orm_error is None
+        assert CURRENT.state.cancelled is False
 
 
 @pytest.mark.django_db(transaction=True)
@@ -527,9 +594,10 @@ def test_live_sync_bridge_mutation_orm(
         assert not Branch.objects.filter(name="mutation-created").exists()
         assert CURRENT.state.start_atomic is True
         assert CURRENT.state.start_rows == ["mutation-created"]
-        assert CURRENT.state.orm_atomic is (True if work_kind == "cleanup" else None)
+        assert CURRENT.state.orm_atomic is True
         assert CURRENT.state.orm_error is None
-        assert (CURRENT.state.orm_pk is not None) == (work_kind == "cleanup")
+        assert CURRENT.state.orm_pk is not None
+        assert CURRENT.state.cancelled is False
         assert not Branch.objects.exists()
         errors = cast("list[object]", json_at(response_json(response), "errors"))
         assert isinstance(errors, list)
@@ -630,10 +698,13 @@ async def test_live_cancellation_waits_for_payload_cleanup(
             ),
         )
         assert CURRENT.state.cleanup_started is not None
+        await asyncio.wait_for(CURRENT.state.started.wait(), timeout=15)
+        request.cancel()
         await asyncio.wait_for(CURRENT.state.cleanup_started.wait(), timeout=15)
-        for _ in range(cancels):
+        for _ in range(cancels - 1):
             request.cancel()
             await asyncio.sleep(0)
+        assert not request.done()
         CURRENT.state.cleanup_release.set()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(request, timeout=15)
@@ -760,10 +831,17 @@ async def test_live_completed_siblings_keep_upstream_results(
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_live_nested_query_keeps_its_own_completion_context(private_registry: None) -> None:
+@pytest.mark.parametrize("nested_shape", ["root", "list_nonnull"])
+async def test_live_nested_query_keeps_its_own_completion_context(
+    private_registry: None,
+    nested_shape: str,
+) -> None:
     """An inner query does not inherit its outer generated mutation's child supervision."""
     assert private_registry is None
-    CURRENT.state = CompletionState(shape="mutation")
+    if nested_shape == "list_nonnull":
+        await Branch.objects.acreate(name="early")
+        await Branch.objects.acreate(name="late")
+    CURRENT.state = CompletionState(shape="mutation", nested_shape=nested_shape)
     schema, _ = make_schema("mutation")
     CURRENT.state.schema = schema
     with override_settings(
@@ -784,3 +862,87 @@ async def test_live_nested_query_keeps_its_own_completion_context(private_regist
     }
     assert CURRENT.state.cancelled is False
     assert await Branch.objects.filter(name="outer").aexists()
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_live_nullable_failure_preserves_a_surviving_shared_loader_key(
+    private_registry: None,
+) -> None:
+    """A nulled inner object cannot cancel the surviving branch's cached future."""
+    assert private_registry is None
+    CURRENT.state = CompletionState(shape="mutation")
+
+    async def batch(keys: list[str]) -> list[str]:
+        CURRENT.state.started.set()
+        # Ordinary asynchronous I/O completes after the inner non-null failure.
+        await asyncio.sleep(0.2)
+        return ["loaded-" + key for key in keys]
+
+    CURRENT.state.loader = DataLoader(load_fn=batch)
+    schema, _ = make_schema("mutation")
+    CURRENT.state.schema = schema
+    with override_settings(
+        ROOT_URLCONF=__name__,
+        DEBUG=False,
+        MIDDLEWARE=middleware_without_debug_toolbar(),
+    ):
+        result = await asyncio.wait_for(
+            AsyncTestClient(path="/graphql-async/").query(
+                'mutation { create(data: {name: "shared"}) '
+                "{ result { inner { fast late } shared } } }",
+                assert_no_errors=False,
+            ),
+            timeout=15,
+        )
+    response = result.response
+    assert json_at(response_json(response), "data", "create", "result") == {
+        "inner": None,
+        "shared": "loaded-k",
+    }
+    assert json_at(response_json(response), "errors", 0, "message") == "SHARED_INNER_FAILURE"
+    assert json_at(response_json(response), "errors", 0, "path") == [
+        "create",
+        "result",
+        "inner",
+        "fast",
+    ]
+    assert not await Branch.objects.aexists()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("source_available", [False, True])
+async def test_live_unowned_list_uses_the_cooperative_context_without_an_audit(
+    private_registry: None,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    source_available: bool,
+) -> None:
+    """Queries preserve the next list override and need no mutation source audit."""
+    assert private_registry is None
+    await Branch.objects.acreate(name="query-only")
+    CURRENT.state = CompletionState(context="cooperative")
+    schema, _ = make_schema("root")
+    CURRENT.state.schema = schema
+
+    def source_unavailable(_value: object) -> str:
+        if source_available:
+            return "def execute_fields(self): pass"
+        raise OSError("sourceless deployment")
+
+    completion._completion_method.cache_clear()
+    monkeypatch.setattr(inspect, "getsource", source_unavailable)
+    with override_settings(
+        ROOT_URLCONF=__name__,
+        DEBUG=False,
+        MIDDLEWARE=middleware_without_debug_toolbar(),
+    ):
+        result = await asyncio.wait_for(
+            AsyncTestClient(path="/graphql-async/").query(
+                "{ branches { name } }",
+                assert_no_errors=False,
+            ),
+            timeout=15,
+        )
+    response = result.response
+    assert response_json(response) == {"data": {"branches": [{"name": "query-only"}]}}
+    assert CURRENT.state.custom_used is True

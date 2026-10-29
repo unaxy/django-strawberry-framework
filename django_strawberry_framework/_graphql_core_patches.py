@@ -21,7 +21,7 @@ The synchronous executor keeps upstream behavior. The arm moves the row fetch on
 a resolver body that evaluates a queryset still runs on the loop.
 
 The adapter can also wrap the owned generated-mutation completion method.
-That mandatory cancellation/drain boundary is independent of this optional patch.
+That mandatory completion join is independent of this optional patch.
 
 The patch has its own ``APPLY_UPSTREAM_PATCHES`` dependency key,
 ``"graphql_core"``; switched off, both upstream behaviors return. Each arm can be
@@ -72,6 +72,16 @@ if TYPE_CHECKING:
     _CompleteListValue = Callable[
         [
             _ExecutionContext,
+            GraphQLList[_GraphQLOutputType],
+            list[FieldNode],
+            GraphQLResolveInfo,
+            Path,
+            AsyncIterable[object] | Iterable[object],
+        ],
+        AwaitableOrValue[list[object]],
+    ]
+    _BoundCompleteListValue = Callable[
+        [
             GraphQLList[_GraphQLOutputType],
             list[FieldNode],
             GraphQLResolveInfo,
