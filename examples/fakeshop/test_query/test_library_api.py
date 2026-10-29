@@ -15157,11 +15157,11 @@ def test_malformed_nested_branch_form_raises_filter_invalid_live() -> None:
     """A malformed filter nested inside ``and`` is validated per-branch, not dropped.
 
     The live twin of ``test_q_for_branch_validates_child_form_and_raises_on_malformed_subbranch``:
-    ``_q_for_branch`` runs ``_validate_form_or_raise`` on every nested instance,
-    so a value failing the ``email_must_have_at_sign`` validator inside an
-    ``and`` branch surfaces ``FILTER_INVALID`` with the nested field error -
-    rather than ``BaseFilterSet.qs`` silently falling through to an empty
-    ``pk__in`` set. This differs from the top-level
+    the pipeline runs ``_validate_form_or_raise`` on every nested arm's instance
+    (``_probe_logic_arms``, which ``_q_for_branch`` then reuses), so a value
+    failing the ``email_must_have_at_sign`` validator inside an ``and`` branch
+    surfaces ``FILTER_INVALID`` with the nested field error - rather than
+    ``BaseFilterSet.qs`` silently falling through to an empty ``pk__in`` set. This differs from the top-level
     ``test_apply_raises_graphqlerror_on_invalid_filter_input`` by exercising the
     *nested* branch-validation path. A GraphQL-rejected literal (e.g. a bad
     integer) cannot reach the form, so the custom validator is used instead.
