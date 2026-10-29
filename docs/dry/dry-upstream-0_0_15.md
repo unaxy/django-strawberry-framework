@@ -440,8 +440,9 @@ it lands with its tick.
   - Maintainer decisions still open: the debug toolbar redesign onto the stock `djdt-request-id` header (drops the
     `debugToolbar` JSON key), moving the Strawberry and cross_web patches onto the package's own views, and moving the
     graphql-core list patch onto `CompletionExecutionContext`.
-  - After the extensions: drop each `LICENSE.*` that no copied block backs, and reword "port of" claims on blocks that
-    copy nothing to "same contract as".
+  - After the extensions (landed): `LICENSE.django` and `LICENSE.graphql-core` are dropped, since no copied block backs
+    them, and "port of" claims on blocks that copy nothing now read "same contract as". The strawberry-django debug
+    toolbar copy still ships without its license and waits on the redesign decision above.
 
 ## Maintainer decisions (a reason to keep exists)
 

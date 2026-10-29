@@ -1672,12 +1672,11 @@ def apply_window_pagination(
 ) -> QuerySet[_M]:
     """Annotate row-number / total-count windows and filter to the requested slice.
 
-    The mechanism port of
-    ``strawberry-django-main/strawberry_django/pagination.py::apply_window_pagination``
-    (itself based on Django's https://github.com/django/django/pull/15957),
-    namespaced ``_dst_*`` (spec-033 Decision 4). Diverges from upstream's
-    signature by taking ``partition_by`` and ``order_by`` EXPLICITLY (rather than
-    a ``related_field_id`` plus a compiler-derived order) so ``plans.py`` stays
+    The same window-slice contract as Django's sliced-prefetch path
+    (``django/db/models/fields/related_descriptors.py::_filter_prefetch_queryset``,
+    django/django#15957), namespaced ``_dst_*`` (spec-033 Decision 4). Diverges from
+    Django's by taking ``partition_by`` and ``order_by`` EXPLICITLY (rather than
+    a ``field_name`` plus a compiler-derived order) so ``plans.py`` stays
     free of queryset-compiler coupling and the deterministic order comes from the
     shared ``deterministic_order`` helper (the cursor-parity invariant).
 

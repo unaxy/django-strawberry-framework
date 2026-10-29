@@ -4,7 +4,7 @@ A Strawberry :class:`~strawberry.extensions.SchemaExtension` that captures the
 Django-recorded query-log SQL and the execution exceptions for the in-flight
 GraphQL operation and attaches them to the response's ``extensions`` map under
 the ``debug`` key - the in-response counterpart to the server-side
-debug-toolbar middleware (``middleware/debug_toolbar.py``), porting the
+debug-toolbar middleware (``middleware/debug_toolbar.py``), with the
 capability of graphene-django's ``DjangoDebug`` subsystem into the engine's
 native response-extensions seam.
 
@@ -124,7 +124,7 @@ if TYPE_CHECKING:
 __all__ = ["DjangoDebugExtension"]
 
 # graphene's slow-query threshold (``DjangoDebugSQL.is_slow`` is
-# ``duration > 10``), kept verbatim so a graphene migrant's tooling reads the
+# ``duration > 10``), kept equal so a graphene migrant's tooling reads the
 # same ``isSlow`` semantics.
 _SLOW_QUERY_SECONDS = 10
 

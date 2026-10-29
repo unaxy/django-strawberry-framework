@@ -14,7 +14,7 @@ Public surface:
   shared filter-input path (a ``FilterSet`` over a file column still yields a
   scalar ``str`` input).
 - ``DjangoFileType`` / ``DjangoImageType`` - the structured read-output
-  objects mirroring ``strawberry-graphql-django``. ``DjangoFileType`` carries
+  objects with the same public field names as ``strawberry-graphql-django``. ``DjangoFileType`` carries
   ``name`` / ``size`` / ``url``; ``DjangoImageType`` subclasses it and adds
   ``width`` / ``height``. Every nullable subfield delegates to the shared
   ``_safe_file_attr`` storage guard; ``name`` is read directly.

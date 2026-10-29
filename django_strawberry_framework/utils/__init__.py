@@ -1,6 +1,6 @@
 """Cross-cutting infrastructure shared across django-strawberry-framework subsystems.
 
-Subpackage structure mirrors the convention both `graphene_django/utils/`
+Subpackage structure follows the convention both `graphene_django/utils/`
 and `strawberry_django/utils/` converge on: focused submodules per
 concern rather than a single 500-line `utils.py`.
 

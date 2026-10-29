@@ -4,12 +4,12 @@ Layers 1 and 2 of the six-layer pipeline (spec-027 Decision 3) plus the
 five parity-floor primitives (spec-027 Decision 4):
 
 - `Filter` re-exported from `django_filters` for surface continuity.
-- `TypedFilter` -> `ArrayFilter` / `RangeFilter` / `ListFilter`: ports of
+- `TypedFilter` -> `ArrayFilter` / `RangeFilter` / `ListFilter`: same contract as
   the matching `graphene_django/filter/filters/*.py` primitive minus the
   Graphene `_input_type` constructor argument (the Strawberry-side
   annotation is derived later by `convert_filter_to_input_annotation`).
-- `GlobalIDFilter` / `GlobalIDMultipleChoiceFilter`: ports of the matching
-  Graphene primitive with the decode step substituted to
+- `GlobalIDFilter` / `GlobalIDMultipleChoiceFilter`: same contract as the
+  matching Graphene primitive with the decode step substituted to
   `strawberry.relay.GlobalID.from_id(value)` per spec-027 Decision 4.
 - `RelationPkFilter` / `RelationPkMultipleFilter`: their raw-primary-key
   siblings for a relation key whose target is not a Relay node (or has no
@@ -202,7 +202,7 @@ _M = TypeVar("_M", bound=models.Model)
 class TypedFilter(Filter):
     """Base marker for `ArrayFilter` / `RangeFilter` / `ListFilter`.
 
-    Port of `graphene_django/filter/filters/typed_filter.py::TypedFilter`
+    Same contract as `graphene_django/filter/filters/typed_filter.py::TypedFilter`
     with the Graphene-only `_input_type` constructor argument dropped.
     The Strawberry-side annotation derives from the resolved filter
     instance at materialization time via `convert_filter_to_input_annotation`;
@@ -251,7 +251,7 @@ def _install_empty_list_aware_method(
     """Install ``method_cls`` when a consumer ``method=`` is set.
 
     Single owner of the ArrayFilter / ListFilter ``method`` setter body: both
-    ports must swap django-filter's default ``FilterMethod`` (which treats ``[]``
+    filters must swap django-filter's default ``FilterMethod`` (which treats ``[]``
     as EMPTY) for an empty-list-aware wrapper. The named ``*FilterMethod``
     subclass remains a per-filter type identity (graphene-parity public names);
     only the install sequence is shared.
@@ -847,7 +847,7 @@ class ArrayFilterMethod(_EmptyListAwareFilterMethod):
 class ArrayFilter(_ElementCleanedFilter):
     """Filter shaped for PostgreSQL `ArrayField` columns.
 
-    Port of `graphene_django/filter/filters/array_filter.py::ArrayFilter`.
+    Same contract as `graphene_django/filter/filters/array_filter.py::ArrayFilter`.
     The custom `method` setter swaps in `ArrayFilterMethod` so a
     consumer-supplied `method=` callable does not short-circuit on
     empty-list input - the empty list is a valid filter value here, unlike
@@ -1209,7 +1209,7 @@ class ListFilterMethod(_EmptyListAwareFilterMethod):
 class ListFilter(_ElementCleanedFilter):
     """Filter that accepts a list-shaped input (e.g. `__in` lookups).
 
-    Port of `graphene_django/filter/filters/list_filter.py::ListFilter`:
+    Same contract as `graphene_django/filter/filters/list_filter.py::ListFilter`:
     an empty list short-circuits to `qs.none()` (or a new queryset over every
     row when `exclude=True`) instead of being normalized into a "no value
     supplied" pass-through. Each element is cleaned by the form field of the
@@ -1957,7 +1957,7 @@ def _globalid_predicate_path(
 class GlobalIDFilter(Filter):
     """Filter that decodes a Relay GlobalID before delegating to `Filter`.
 
-    Port of `graphene_django/filter/filters/global_id_filter.py::GlobalIDFilter`
+    Same contract as `graphene_django/filter/filters/global_id_filter.py::GlobalIDFilter`
     with the decode substituted to `strawberry.relay.GlobalID.from_id(value)`
     per spec-027 Decision 4. The Graphene-only
     `GlobalIDFormField` / `GlobalIDMultipleChoiceField` dependencies drop
@@ -2043,8 +2043,9 @@ class _GlobalIDMultipleChoiceField(MultipleChoiceField):
     decoded and type-checked in `GlobalIDMultipleChoiceFilter.filter`
     (per spec-027 #"validates every element of the list independently"), not against a
     fixed set, so this field accepts any submitted value and defers
-    validation to the filter. Mirrors graphene-django's
-    `GlobalIDMultipleChoiceField`.
+    validation to the filter. Same contract as
+    ``graphene_django/forms/forms.py::GlobalIDMultipleChoiceField`` minus its
+    per-value GlobalID check.
 
     The custom widget and field overrides preserve ``None`` for an omitted key:
     ``SelectMultiple`` otherwise maps an absent ``QueryDict`` key to ``[]``, and

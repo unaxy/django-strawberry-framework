@@ -222,7 +222,7 @@ def ast_to_converted_selections(
 ) -> list[Selection]:
     """Convert graphql-core ``field_nodes`` to converted selections, anonymous-safe.
 
-    Mirrors Strawberry's ``strawberry.types.nodes.convert_selections`` but builds
+    Same contract as ``strawberry/types/nodes.py::convert_selections``, but builds
     every inline-fragment shell with ``type_condition = None`` when the node has no
     ``on TypeName`` condition, instead of unguardedly reading
     ``node.type_condition.name.value`` (Strawberry's ``InlineFragment.from_node``
@@ -253,14 +253,14 @@ def ast_to_converted_selections(
     that the anonymous inline-fragment branch passes ``type_condition=None`` instead
     of dereferencing the missing condition.
 
-    This is a FAITHFUL MIRROR and must stay one: for every non-anonymous query
+    The output must stay identical to ``convert_selections``: for every non-anonymous query
     shape the output is byte-identical to ``convert_selections`` (verified
     field-by-field, including nested argument and directive values, against the
     stock converter). That identity is load-bearing because ``prime_selected_fields``
     seeds this list into ``info.selected_fields``; any divergence here would corrupt
     ``info.selected_fields`` for normal (non-anonymous) queries the moment a
-    connection primes it. Keep it a mirror - if Strawberry's ``convert_selections``
-    gains a field or changes a shape, mirror the change here rather than diverging.
+    connection primes it. If Strawberry's ``convert_selections`` gains a field or
+    changes a shape, change it here the same way.
 
     Memoized per execution on the execution frame (see the comment above):
     within one ``on_execute`` lifecycle the same field-node group converts once,
@@ -275,8 +275,8 @@ def ast_to_converted_selections(
     through ``selection_python_name``) and its arguments by Python name, coerced
     by graphql-core (``PYTHON_ARGUMENTS_ATTR``, read through
     ``python_arguments``). Those markers are attributes beside the dataclass
-    fields, so the fields Strawberry's consumers read stay the mirror described
-    above.
+    fields, so the fields Strawberry's consumers read stay identical to the output
+    described above.
     """
     memo = converted_selections_memo()
     memo_key: ConvertedMemoKey | None = None

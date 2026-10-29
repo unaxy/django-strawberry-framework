@@ -505,7 +505,7 @@ def _resolve_from_window(
     forward row numbers (``[d, e]`` numbered ``4, 5`` for ``last: 2`` of five
     rows). The forward absolute-offset cursor therefore matches the pipeline's
     ``ListConnection`` cursors directly - no ``_dst_total_count - row_number``
-    re-derivation (neither upstream ``strawberry-django`` nor this package's port
+    re-derivation (neither upstream ``strawberry-django`` nor this package's version
     overwrites the forward row number - both keep it forward and use a separate
     reversed annotation only for the plan-time ``__lte`` filter). The cursor
     PREFIX / base64 stay owned by the edge class - the fast path passes only the
