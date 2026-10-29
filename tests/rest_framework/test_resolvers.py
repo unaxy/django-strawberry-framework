@@ -7927,13 +7927,29 @@ class SerializerSpelledStampTarget(Model):
         db_table = "serializer_spelled_stamp_target"
 
 
-class SerializerSpelledKeyOwner(Model):
-    """A row relating to each spelled-key target by an M2M."""
+class SerializerSpelledDecimalOwner(Model):
+    """A row relating to the decimal-keyed target by an M2M."""
 
     name: models.TextField[str | Combinable, str] = models.TextField()
     decimal_targets: models.ManyToManyField[SerializerSpelledDecimalTarget, Model] = (
         models.ManyToManyField(SerializerSpelledDecimalTarget, related_name="+", blank=True)
     )
+
+    class Meta:
+        app_label = "products"
+        managed = False
+        db_table = "serializer_spelled_decimal_owner"
+
+
+class SerializerSpelledStampOwner(Model):
+    """A row relating to the datetime-keyed target by an M2M.
+
+    An owner of its own: the write attests every M2M on its surface, and Django reads a
+    ``DecimalField`` without ``decimal_places`` only from 6.1, so the datetime row runs
+    on every supported Django.
+    """
+
+    name: models.TextField[str | Combinable, str] = models.TextField()
     stamp_targets: models.ManyToManyField[SerializerSpelledStampTarget, Model] = (
         models.ManyToManyField(SerializerSpelledStampTarget, related_name="+", blank=True)
     )
@@ -7941,28 +7957,36 @@ class SerializerSpelledKeyOwner(Model):
     class Meta:
         app_label = "products"
         managed = False
-        db_table = "serializer_spelled_key_owner"
+        db_table = "serializer_spelled_stamp_owner"
 
 
-def _spelled_key_owner_schema() -> DjangoSchema:
-    """A create ``SerializerMutation`` writing both owner M2Ms by raw pk."""
-    for model in (SerializerSpelledDecimalTarget, SerializerSpelledStampTarget):
-        _ = type(
-            f"{model.__name__}T",
-            (DjangoType,),
-            {"Meta": type("Meta", (), {"model": model, "fields": "__all__", "primary": True})},
-        )
+def _spelled_key_models(stored: object) -> tuple[type[Model], type[Model]]:
+    """The M2M target keyed by ``stored``'s kind and the owner relating to it."""
+    if isinstance(stored, decimal.Decimal):
+        return SerializerSpelledDecimalTarget, SerializerSpelledDecimalOwner
+    return SerializerSpelledStampTarget, SerializerSpelledStampOwner
+
+
+def _spelled_key_owner_schema(stored: object) -> DjangoSchema:
+    """A create ``SerializerMutation`` writing the M2M of ``stored``'s owner by raw pk."""
+    target, owner = _spelled_key_models(stored)
+    prefix = "decimal" if isinstance(stored, decimal.Decimal) else "stamp"
+    _ = type(
+        f"{target.__name__}T",
+        (DjangoType,),
+        {"Meta": type("Meta", (), {"model": target, "fields": "__all__", "primary": True})},
+    )
 
     class SpelledKeyOwnerT(DjangoType):
         class Meta:
-            model = SerializerSpelledKeyOwner
+            model = owner
             fields = ("name",)
             primary = True
 
-    class SpelledKeyOwnerSerializer(ModelSerializerBase[SerializerSpelledKeyOwner]):
+    class SpelledKeyOwnerSerializer(ModelSerializerBase[Model]):
         class Meta:
-            model = SerializerSpelledKeyOwner
-            fields = ("name", "decimal_targets", "stamp_targets")
+            model = owner
+            fields = ("name", f"{prefix}_targets")
 
     class CreateSpelledKeyOwner(SerializerMutation):
         class Meta:
@@ -8026,20 +8050,15 @@ def test_serializer_m2m_ids_spelling_a_stored_key_differently_link_its_row(
     "Invalid id" error.
     """
     is_decimal = isinstance(stored, decimal.Decimal)
-    target = SerializerSpelledDecimalTarget if is_decimal else SerializerSpelledStampTarget
+    target, owner_model = _spelled_key_models(stored)
     prefix = "decimal" if is_decimal else "stamp"
-    models_created = (
-        SerializerSpelledDecimalTarget,
-        SerializerSpelledStampTarget,
-        SerializerSpelledKeyOwner,
-    )
     with contextlib.ExitStack() as tables:
-        for model in models_created:
+        for model in (target, owner_model):
             tables.enter_context(_synthetic_table(model))
         _ = target._default_manager.create(pk=stored)
         request = HttpRequest()
         request.user = User(username="u")
-        result = _spelled_key_owner_schema().execute_sync(
+        result = _spelled_key_owner_schema(stored).execute_sync(
             "mutation($d: SpelledKeyOwnerSerializerInput!){ createSpelledKeyOwner(data:$d){ "
             "errors{ field messages } } }",
             variable_values={"d": {"name": "owner", f"{prefix}Targets": [spelled]}},
@@ -8047,6 +8066,10 @@ def test_serializer_m2m_ids_spelling_a_stored_key_differently_link_its_row(
         )
         assert result.errors is None, result.errors
         assert result.data == {"createSpelledKeyOwner": {"errors": []}}
-        owner = SerializerSpelledKeyOwner.objects.get(name="owner")
-        linked = owner.decimal_targets.all() if is_decimal else owner.stamp_targets.all()
-        assert [pk_of(row) for row in linked] == [stored]
+        owner = owner_model._default_manager.get(name="owner")
+        if isinstance(owner, SerializerSpelledDecimalOwner):
+            linked = [pk_of(row) for row in owner.decimal_targets.all()]
+        else:
+            assert isinstance(owner, SerializerSpelledStampOwner)
+            linked = [pk_of(row) for row in owner.stamp_targets.all()]
+        assert linked == [stored]
