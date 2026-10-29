@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 387 done, 214 to do.
+Progress: 388 done, 214 to do.
 
 ## Done
 
@@ -2206,6 +2206,13 @@ Progress: 387 done, 214 to do.
   annotation the leaf goes through never refuses the user's value, while the user's own past-rule value is still
   refused. spec-027, the `filterset` glossary term and the `utils/errors.py` docstrings say so. Tests:
   `tests/filters/test_sets.py`
+- [x] 699. The absent-leaf verdict is request-wide and a filter-path sync misuse names the filter recourse: both colors
+  probe the root's absent walking leaves once (`FilterSet._probed_filterset`) and every `and` / `or` / `not` arm reads the
+  root's verdict for a leaf that cleaned to the same value (`_q_for_branch`), so an arm never derives an unawaited hop
+  for a leaf the root asked about; `_derive_related_visibility_querysets_sync`, `_hop_visible_rows` and `_scoped_rows`
+  pass `_FILTER_ASYNC_RECOURSE`, so a `SyncMisuseError` there names `FilterSet.apply_async`, not the Relay node defaults.
+  spec-027, spec-028 and the `syncmisuseerror` glossary term say so. Tests: `tests/filters/test_sets.py`. Arm-only
+  absent leaves are row 700
 
 ## Outside review of the fixes
 
@@ -2352,11 +2359,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
   reads every unstorable column of `form.instance`, so a model `save()` narrowed by `update_fields` away from the `None`
   column reports that column's `null` for another constraint; apply 668's `update_fields` filter there once
   `forms/resolvers.py` is free. Found fact-finding 668
-- [ ] 699. (robustness) `FilterSet.apply_async` leaks a raw `SyncMisuseError` whose recourse text names the Relay node
-  defaults ("The Relay node defaults only await async get_queryset hooks ..."): `filters/sets.py::_hop_visible_rows` and
-  `_scoped_rows` call `utils/querysets.py::apply_type_visibility_sync` without `async_recourse`, and `apply_async` does not
-  rewrite the error as `FilterSet.apply` does. Reachable after 666 through a hop whose at-turn probe inside an `or_` arm
-  acts where the top-level probe did not (a consumer filter branching on queryset state). Found verifying 666
+- [ ] 700. (robustness) Under `FilterSet.apply_async`, an absent walking leaf the root's probe never asked about (one a
+  consumer `__init__` adds from an arm's data, or one an arm's form `clean` gives a value other than the root's) still
+  derives its hop inside the sync boundary, so an async-only `get_queryset` raises `SyncMisuseError` telling a caller
+  already in `apply_async` to await it; ask each arm's unmapped or differing absent leaves inside the `_probed_filterset`
+  boundary and await their hops before the `.qs` read. Found verifying 699
 
 ## To do: holes found re-checking the fixes
 

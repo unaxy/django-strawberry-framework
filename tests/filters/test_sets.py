@@ -18650,7 +18650,7 @@ _ACTING_ABSENT_SHAPES: dict[str, tuple[str, dict[str, object], list[str], int]] 
         "text",
         {"or_": [{"name": "alpha"}, {"name": "beta"}]},
         ["alpha"],
-        6,
+        4,
     ),
     "undeclared-scoped-hop": (
         "alt",
@@ -18682,8 +18682,8 @@ def test_absent_walking_leaf_acting_on_its_absent_value_awaits_its_hops_under_ap
     ``apply_async`` the target type's ``get_queryset`` is async-only and the
     hop it scopes is awaited before the ``.qs`` read; under ``apply_sync`` it
     is sync. Both run the hook once and the consumer ``filter`` as often: once
-    to learn the absent value acts, once over the visible rows, per set or arm
-    the leaf is absent on. The hop is a declared ``shelves`` branch, or the
+    per request to learn the absent value acts, then once over the visible rows
+    per set or arm the leaf is absent on. The hop is a declared ``shelves`` branch, or the
     undeclared ``alt_shelves`` relation ``ShelfType`` scopes; at the nested
     child level the walking set is a ``RelatedFilter`` target on shelves.
     """
@@ -18923,6 +18923,236 @@ def test_absent_relation_key_leaf_on_one_forward_hop_answers_alike_on_both_color
     assert list(qs.values_list("topic", flat=True)) == visible
     assert len(hook_calls) == hook_runs
     assert len(filter_calls) == filter_runs
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_absent_leaf_verdict_holds_in_every_logical_arm_on_both_colors(mode: str) -> None:
+    """An absent walking leaf is asked once per request, over the rows the root set was built over.
+
+    ``home`` compares ``Shelf.branch``'s key and acts on its absent value only
+    over rows something already filtered. The root set is built over unfiltered
+    shelves, so ``home`` constrains nothing there, and the ``or`` arm reads that
+    answer instead of asking again over the rows its ``branch`` clause left:
+    ``apply_sync`` and ``apply_async`` (whose ``BranchType.get_queryset`` is
+    async-only) agree on rows, hook runs and filter runs, and the ``.qs`` read
+    derives no hop ``home`` walks.
+    """
+    hook_calls: list[object] = []
+    filter_calls: list[object] = []
+
+    def _sync_visible(
+        _cls: type[DjangoType],
+        queryset: QuerySet[library_models.Branch],
+        info: object,
+        **_kwargs: object,
+    ) -> QuerySet[library_models.Branch]:
+        hook_calls.append(info)
+        return queryset.exclude(name="beta")
+
+    async def _async_visible(
+        _cls: type[DjangoType],
+        queryset: QuerySet[library_models.Branch],
+        info: object,
+        **_kwargs: object,
+    ) -> QuerySet[library_models.Branch]:
+        hook_calls.append(info)
+        return await sync_to_async(lambda: queryset.exclude(name="beta"))()
+
+    _seed_open_and_secret_match_shelves()
+    alpha_pk = library_models.Branch.objects.get(name="alpha").pk
+
+    class _FilteredRowsHome(CharFilter):
+        @override
+        def filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
+            filter_calls.append(value)
+            if not value and qs.query.has_filters():
+                return qs.filter(branch=alpha_pk)
+            return super().filter(qs, value)
+
+    type(
+        "BranchType",
+        (DjangoType,),
+        {
+            "Meta": type("Meta", (), {"model": library_models.Branch}),
+            "get_queryset": classmethod(_sync_visible if mode == "sync" else _async_visible),
+        },
+    )
+
+    class BranchOnly(FilterSet):
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"]}
+
+    shelf_filter = type(
+        "ShelfOverBranch",
+        (FilterSet,),
+        {
+            "branch": RelatedFilter(BranchOnly, field_name="branch"),
+            "home": _FilteredRowsHome(field_name="branch"),
+            "Meta": type(
+                "Meta",
+                (),
+                {"model": library_models.Shelf, "fields": {"topic": ["exact"]}},
+            ),
+        },
+    )
+    assert issubclass(shelf_filter, FilterSet)
+    shelf_filter.get_filters()
+    base = library_models.Shelf.objects.order_by("topic")
+    filter_input = {"or_": [{"branch": {"name": "alpha"}}]}
+    if mode == "sync":
+        qs = shelf_filter.apply_sync(filter_input, base, _make_info())
+    else:
+        qs = asyncio.run(shelf_filter.apply_async(filter_input, base, _make_info()))
+    assert list(qs.values_list("topic", flat=True)) == ["open"]
+    assert len(hook_calls) == 1
+    assert len(filter_calls) == 1
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_an_arm_cleaning_an_absent_leaf_to_another_value_asks_it_again_on_both_colors(
+    mode: str,
+) -> None:
+    """A verdict is per (leaf, cleaned value): an arm cleaning the leaf to another value asks again.
+
+    The consumer ``Meta.form`` cleans the absent ``home`` to ``"alpha"`` wherever
+    ``topic`` is supplied. The root set names no ``topic``, so its ``home`` cleans
+    to ``""`` and constrains nothing; each ``or`` arm names a ``topic``, so its
+    ``home`` cleans to ``"alpha"``, which the root never answered for, and the arm
+    asks it over its own value and applies it, as django-filter applies each
+    arm's cleaned value: the secret shelf's branch is ``beta``, so only the open
+    shelf matches, on ``apply_sync`` and ``apply_async`` alike.
+    """
+    hook_calls: list[object] = []
+    filter_calls: list[object] = []
+
+    def _visible(
+        _cls: type[DjangoType],
+        queryset: QuerySet[library_models.Branch],
+        info: object,
+        **_kwargs: object,
+    ) -> QuerySet[library_models.Branch]:
+        hook_calls.append(info)
+        return queryset
+
+    class _TopicDefaultsHome(forms.Form):
+        @override
+        def clean(self) -> dict[str, object]:
+            cleaned: dict[str, object] = self.cleaned_data
+            if not cleaned.get("home") and cleaned.get("topic"):
+                cleaned["home"] = "alpha"
+            return cleaned
+
+    class _CountedHome(CharFilter):
+        @override
+        def filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
+            filter_calls.append(value)
+            return super().filter(qs, value)
+
+    type(
+        "BranchType",
+        (DjangoType,),
+        {
+            "Meta": type("Meta", (), {"model": library_models.Branch}),
+            "get_queryset": classmethod(_visible),
+        },
+    )
+
+    class BranchOnly(FilterSet):
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"]}
+
+    shelf_filter = type(
+        "ShelfDefaultingHome",
+        (FilterSet,),
+        {
+            "branch": RelatedFilter(BranchOnly, field_name="branch"),
+            "home": _CountedHome(field_name="branch__name"),
+            "Meta": type(
+                "Meta",
+                (),
+                {
+                    "model": library_models.Shelf,
+                    "fields": {"topic": ["exact"]},
+                    "form": _TopicDefaultsHome,
+                },
+            ),
+        },
+    )
+    assert issubclass(shelf_filter, FilterSet)
+    shelf_filter.get_filters()
+    _seed_open_and_secret_match_shelves()
+    base = library_models.Shelf.objects.order_by("topic")
+    filter_input = {"or_": [{"topic": "secret"}, {"topic": "open"}]}
+    if mode == "sync":
+        qs = shelf_filter.apply_sync(filter_input, base, _make_info())
+    else:
+        qs = asyncio.run(shelf_filter.apply_async(filter_input, base, _make_info()))
+    assert list(qs.values_list("topic", flat=True)) == ["open"]
+    assert len(hook_calls) == 1
+    assert filter_calls == [
+        "",
+        "alpha",
+        "alpha",
+        "alpha",
+        "alpha",
+    ]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("leaf", "filter_input"),
+    [
+        (None, {"shelves": {"code": "match"}}),
+        (None, {"shelves__code": "match"}),
+        ("alt_shelves__code", {"own": "match"}),
+    ],
+    ids=["nested-branch", "declared-hop", "undeclared-hop"],
+)
+def test_apply_sync_over_an_async_only_hop_hook_names_the_filter_recourse(
+    leaf: str | None,
+    filter_input: dict[str, object],
+) -> None:
+    """An async-only ``get_queryset`` a filter reads on ``apply_sync`` raises naming ``apply_async``.
+
+    The ``shelves`` branch, a flat leaf over its declared hop and a flat leaf over
+    the undeclared ``alt_shelves`` relation ``ShelfType`` scopes each read
+    ``ShelfType.get_queryset``; the ``SyncMisuseError`` points at
+    ``FilterSet.apply_async`` or a sync hook, never at the Relay node defaults.
+    """
+
+    async def _async_visible(
+        _cls: type[DjangoType],
+        queryset: QuerySet[library_models.Shelf],
+        _info: object,
+        **_kwargs: object,
+    ) -> QuerySet[library_models.Shelf]:
+        return queryset
+
+    applied = _shelf_and_branch_filters(_async_visible)
+    if leaf is not None:
+        walking = type(
+            "BranchOwn",
+            (applied,),
+            {
+                "own": CharFilter(field_name=leaf),
+                "Meta": type(
+                    "Meta",
+                    (),
+                    {"model": library_models.Branch, "fields": {"name": ["exact"]}},
+                ),
+            },
+        )
+        assert issubclass(walking, FilterSet)
+        walking.get_filters()
+        applied = walking
+    _seed_open_and_secret_match_shelves()
+    with pytest.raises(SyncMisuseError, match=r"await FilterSet\.apply_async") as raised:
+        list(applied.apply_sync(filter_input, library_models.Branch.objects.all(), _make_info()))
+    assert "Relay node defaults" not in str(raised.value)
 
 
 @pytest.mark.django_db
