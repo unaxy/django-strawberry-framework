@@ -385,7 +385,7 @@ it lands with its tick.
     `test_library_api.py::test_library_consumer_prefetch_keeps_its_link_columns[generic-foreign-key]` still pins the
     plain shape. Fakeshop has no renamed key, so the fix row is package-tier.
 
-- [ ] 20. (WRT-5) The default write permission spells Django's codename grammar by hand
+- [x] 20. (WRT-5) The default write permission spells Django's codename grammar by hand
   - Our code: `mutations/permissions.py::DjangoModelPermission.has_permission #"codename = f"` (1 line).
   - Upstream: `django/contrib/auth/__init__.py::get_permission_codename` (public; admin uses it).
   - Lines: 0.
