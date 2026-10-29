@@ -6,7 +6,7 @@
 "django_strawberry_framework/_completion.py::CompletionExecutionContext.complete_list_value" = { cast = 1 }
 "django_strawberry_framework/_cross_web_patches.py::_captured_upstream_body_getter" = { cast = 1 }
 "django_strawberry_framework/_cross_web_patches.py::apply" = { reportAttributeAccessIssue = 1 }
-"django_strawberry_framework/_django_patches.py::_disallowed_connection_methods" = { cast = 1, reportAttributeAccessIssue = 1 }
+"django_strawberry_framework/_django_patches.py::_disallowed_connection_methods" = { cast = 1 }
 "django_strawberry_framework/_django_patches.py::apply" = { reportAttributeAccessIssue = 1 }
 "django_strawberry_framework/_graphql_core_patches.py::_original_complete_list_value" = { cast = 1 }
 "django_strawberry_framework/_request_body.py::_measured_by_bounded_read" = { reportAttributeAccessIssue = 1 }

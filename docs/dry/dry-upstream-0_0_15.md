@@ -408,42 +408,40 @@ it lands with its tick.
   - Behaviour change: none.
   - Risk / blockers: none.
 
-## Attribution (required either way; removes nothing)
+## Attribution (extend upstream instead of shipping its license)
 
-- [ ] 22. (FLT-4, NET-4, TYP-11) Adapted upstream blocks lack origin comments, and no third-party license text ships
-  - Our code. The release ships only `LICENSE` (`pyproject.toml` `license-files = ["LICENSE"]`; `git ls-files`
-    tracks nothing else).
-    - Blocks with no origin comment:
-      - `filters/base.py::validate_range`: message and code verbatim from graphene-django.
-      - `filters/base.py::_EmptyListAwareFilterMethod.__call__` and `_install_empty_list_aware_method`: graphene's
-        `ListFilterMethod` / `ArrayFilterMethod` and the `.method` setters.
-      - `templates/django_strawberry_framework/debug_toolbar.html`: a hardened rewrite of strawberry-django's
-        template.
-      - `management/commands/export_schema.py::Command`: strawberry-django's command.
-    - Blocks named only in the module docstring: `filters/base.py::RangeField`, `RangeFilter` and
-      `GlobalIDMultipleChoiceFilter`.
-    - Blocks that name their origin but have no license file shipped:
-      - `_django_patches.py::_patched_remove_databases_failures` (Django);
-      - `_strawberry_patches.py::_patched_parse_query_params` (Strawberry);
-      - `middleware/debug_toolbar.py` (strawberry-django, "upstream verbatim");
-      - `extensions/debug.py` (graphene row shapes);
-      - the `types/relay.py` ports (strawberry-django);
-      - the `filters/sets.py` `_*_extra` builders (django-filter);
-      - the attributed `TypedFilter` / `ArrayFilter` / `ListFilter` / `GlobalIDFilter` (graphene-django).
-  - Upstream licenses owed:
-    - Django: BSD;
-    - django-filter: BSD;
-    - Strawberry: MIT;
-    - strawberry-graphql-django: MIT;
-    - graphene-django: MIT.
-
-    django-graphene-filters is the maintainer's own project and is excluded.
-  - Lines: 0.
-  - Status: CONFIRMED (both sides read).
-  - Reason to keep ours: n/a.
-  - Behaviour change: none.
-  - Risk / blockers: none. AGENTS.md line 6 says the license text ships "added with its first adapted block", so this
-    is overdue.
+- [ ] 22. (FLT-4, NET-4, TYP-11) Copied upstream blocks: extend upstream so no third-party license is owed
+  - Rule. MIT and BSD attach only to copied or adapted upstream source. Importing, subclassing or calling upstream owes
+    nothing, and neither does code that reproduces upstream behaviour in its own statements or shares a short
+    functional string. A license file ships only for a project with at least one block still copied.
+  - Audit at `339fdf91`, block against upstream source:
+    - Copied:
+      - Django: `_django_patches.py::_patched_remove_databases_failures` and its two pinned source strings;
+      - Strawberry: `_strawberry_patches.py::_patched_parse_query_params` and its pinned source string;
+      - strawberry-graphql-django: `templates/django_strawberry_framework/debug_toolbar.html`,
+        `middleware/debug_toolbar.py`, and the argparse body of `management/commands/export_schema.py::Command`;
+      - django-filter: `filters/sets.py::_PUBLIC_PACKAGE_FILTER_DEFAULTS`, the whole table in upstream's order.
+    - Borderline: `_completion.py::_gather_with_cancel`, which has graphql-core 3.3's skeleton but the opposite
+      cancel semantics, and `utils/errors.py::datetime_django_binds`, three lines of public calls.
+    - Not copied (behaviour or name match only): every graphene-django "port", `extensions/debug.py`,
+      `testing/client.py`, `types/relay.py::_order_nodes`, `optimizer/plans.py::apply_window_pagination`, and the
+      form and DRF converters.
+  - Extensions that keep behaviour (each lands with its own tick):
+    - [x] 22a. `_django_patches.py::_patched_remove_databases_failures` re-wraps a foreign replacement in a
+      `_DatabaseFailure` and then calls Django's own classmethod; both pinned Django bodies go.
+    - [ ] 22b. `_strawberry_patches.py::_patched_parse_query_params` delegates to upstream's own method under a
+      ContextVar flag instead of a pinned copy.
+    - [ ] 22c. `filters/sets.py::_PUBLIC_PACKAGE_FILTER_DEFAULTS` is built from django-filter's
+      `FILTER_FOR_DBFIELD_DEFAULTS` at import, with a provenance check for the baseline.
+    - [ ] 22d. `filters/base.py::ArrayFilter.filter` hands every value but `[]` to `Filter.filter`.
+    - [ ] 22e. `types/relay.py::_resolve_id_default` goes; types inherit `strawberry.relay.Node.resolve_id`.
+    - [ ] 22f. `utils/errors.py::datetime_django_binds` projects a date with `datetime.combine` and
+      `timezone.make_aware`, and no longer claims to adapt Django's code.
+  - Maintainer decisions still open: the debug toolbar redesign onto the stock `djdt-request-id` header (drops the
+    `debugToolbar` JSON key), moving the Strawberry and cross_web patches onto the package's own views, and moving the
+    graphql-core list patch onto `CompletionExecutionContext`.
+  - After the extensions: drop each `LICENSE.*` that no copied block backs, and reword "port of" claims on blocks that
+    copy nothing to "same contract as".
 
 ## Maintainer decisions (a reason to keep exists)
 

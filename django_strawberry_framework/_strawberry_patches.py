@@ -183,9 +183,7 @@ upstream's per-param handling keeps ownership of validity there while
 the wrapper keeps hardening the seven
 body/multipart sites. Because the shield is a *reimplementation* rather
 than a delegating wrapper, ``_validate_upstream_shape`` pins the
-superseded upstream body source (the reimplementer's contract
-established by
-``_django_patches._AUDITED_REMOVE_DATABASES_FAILURES_SOURCES``) so an
+superseded upstream body source so an
 upstream body change fails loudly at ``apply()`` time instead of being
 silently superseded. The shield shares the envelope guard's lifecycle:
 retire both together once upstream guards both ``.get()`` sites (see
@@ -639,7 +637,7 @@ def _validate_upstream_shape() -> _UpstreamCaptures:
     """Fail loudly when Strawberry no longer exposes the method shapes we patch.
 
     Four patched methods have two validation depths (delegators pin the call
-    shape, reimplementers pin the body - the ``_django_patches`` precedent):
+    shape, reimplementers pin the body):
 
     - ``parse_json`` is wrapped and delegated to, so only its presence and
       parameter signature are pinned; upstream body changes flow through the call.

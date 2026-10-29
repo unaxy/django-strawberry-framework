@@ -591,8 +591,7 @@ def test_apply_fails_loudly_when_parse_query_params_body_drifts(
 
     The shield *reimplements* upstream's ``parse_query_params`` body, so
     validation pins the captured original's source, not just the
-    ``(self, params)`` call shape (the ``_django_patches`` reimplementer
-    precedent). A future strawberry that keeps the signature but changes
+    ``(self, params)`` call shape. A future strawberry that keeps the signature but changes
     the body - new query params, changed falsy-skip semantics - would
     otherwise pass validation and have its behavior replaced by a stale
     reimplementation. ``apply()`` must raise the targeted ``RuntimeError``
