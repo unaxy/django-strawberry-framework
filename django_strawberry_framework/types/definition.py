@@ -13,7 +13,7 @@ from strawberry.relay.exceptions import NodeIDAnnotationError
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.utils import truth
 
-from .relay import _resolve_id_default
+from .relay import _STRAWBERRY_RESOLVE_ID
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -460,9 +460,5 @@ def _class_has_custom_id_resolver(type_cls: type[object], name: str) -> bool:
 
 
 def _is_framework_relay_id_resolver(value: object) -> bool:
-    """Return whether ``value`` is the framework-installed Relay id resolver."""
-    resolver_func = truth.stored_function(value)
-    node_default_func = truth.stored_function(truth.class_dict(relay.Node).get("resolve_id"))
-    return resolver_func is _resolve_id_default or (
-        node_default_func is not None and resolver_func is node_default_func
-    )
+    """Return whether ``value`` holds Strawberry's own ``Node.resolve_id`` (installed or re-exported)."""
+    return truth.stored_function(value) is _STRAWBERRY_RESOLVE_ID

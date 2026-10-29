@@ -213,7 +213,7 @@ sweep); `typing.cast` calls: 130 (432 at the start of the cast work).
   `planned_resolver_keys`, `fk_id_elision_keys` and `stashed_strictness` (a stash of any other shape than a
   `set` / `frozenset` or a `str` raises `TypeError` rather than reading as absent or `"off"`, so a wrong-shape stash
   never disarms the N+1 guard); `utils/lazy.py::unwrap_lazy_object` is overloaded checker-only, `LazyObject[_T]` to `_T` and `_T` to
-  itself, so `types/relay.py::_resolve_id_default` and `relay.py::_stamp_node_type` read the unwrapped row uncast; the
+  itself, so `relay.py::_stamp_node_type` reads the unwrapped row uncast; the
   async many-side reads (`types/resolvers.py::_visible_many_rows` and the many resolver) take the bound through
   `require(..., is_queryset)`, since `bounded_rows_async` honestly answers a `list` for an evaluated queryset and
   only the caller knows its source is unevaluated. Not taken: `optimizer/selections.py`'s `is_fragment` (its

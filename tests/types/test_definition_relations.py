@@ -479,8 +479,8 @@ def test_has_custom_id_resolver_for_caches_mro_result() -> None:
     assert definition._custom_id_resolver_cache == {("id", False): True, ("uuid", False): False}
 
 
-def test_has_custom_id_resolver_for_ignores_framework_relay_default() -> None:
-    """Framework-installed Relay ``resolve_id`` does not count as consumer custom."""
+def test_has_custom_id_resolver_for_ignores_the_installed_strawberry_resolve_id() -> None:
+    """The ``resolve_id`` finalize installs is Strawberry's own, not a consumer custom resolver."""
 
     class BookType(DjangoType):
         class Meta:
@@ -491,22 +491,7 @@ def test_has_custom_id_resolver_for_ignores_framework_relay_default() -> None:
     finalize_django_types()
     definition = BookType.__django_strawberry_definition__
 
-    assert definition.has_custom_id_resolver_for("id") is False
-    assert definition._custom_id_resolver_cache == {("id", False): False}
-
-
-def test_has_custom_id_resolver_for_ignores_inherited_relay_default() -> None:
-    """Inherited Strawberry Relay ``resolve_id`` does not count as consumer custom."""
-
-    class BookType(DjangoType):
-        class Meta:
-            model = Book
-            fields = ("id", "title")
-            interfaces = (relay.Node,)
-
-    finalize_django_types()
-    definition = BookType.__django_strawberry_definition__
-
+    assert "resolve_id" in vars(BookType)
     assert definition.has_custom_id_resolver_for("id") is False
     assert definition._custom_id_resolver_cache == {("id", False): False}
 

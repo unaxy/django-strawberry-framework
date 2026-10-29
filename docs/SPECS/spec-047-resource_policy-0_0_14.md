@@ -921,8 +921,8 @@ deadline is a seam the deadline does not cover:
 `utils/connections.py` was audited and needs none: every helper there is pure window
 arithmetic with no database access. Nor does the generated file resolver
 (`types/resolvers.py::_make_file_resolver`): it reads a column the row already loaded, and the
-storage I/O its subfields may do is not database work. Nor does the `resolve_id` default
-installed on every Relay `DjangoType` (`types/relay.py::_resolve_id_default`): it likewise reads
+storage I/O its subfields may do is not database work. Nor does Strawberry's `Node.resolve_id`,
+which every Relay `DjangoType` resolves its id through: it likewise reads
 the id column the row already loaded, and a consumer `.only()` that defers that column is
 application configuration. Nor does the completion-spanning
 transaction `schema.py::DjangoMutationExecutionContext` enters around a generated mutation field

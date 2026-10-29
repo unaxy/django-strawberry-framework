@@ -616,10 +616,10 @@ def _relay_id_field(node_type: type[_RelayDjangoType]) -> ConcreteField | None:
 def _relay_id_column(node_type: type[_RelayDjangoType]) -> str | None:
     """Return the column a Relay type's GlobalID is read from, for ``only()``.
 
-    ``types/relay.py::_resolve_id_default`` reads ``resolve_id_attr()`` off the
-    row's instance namespace and loads it lazily on a miss, so a row that did
-    not load that column pays one query per row for its id (spec-015
-    Decision 7). The ``_relay_id_field`` field is projected by ``attname`` (a
+    Strawberry's ``Node.resolve_id`` reads ``resolve_id_attr()`` off the row
+    with ``getattr``, which Django loads lazily when the column was deferred, so
+    a row that did not load that column pays one query per row for its id
+    (spec-015 Decision 7). The ``_relay_id_field`` field is projected by ``attname`` (a
     forward key named by its ``attname``, or a primary key that is a one-to-one
     key, projects its key column); ``None`` when that helper names no field.
     """
@@ -1081,8 +1081,9 @@ def _record_relation_access(
     MUST run before the FK-id elision check in ``_plan_select_relation``:
     the FK ``attname`` appended to ``plan.only_fields`` here is the column
     Django still needs to materialise the relation when the JOIN is elided
-    (``_resolve_id_default`` reads ``obj.<fk>_id`` directly instead of
-    triggering a lazy load through ``obj.<fk>.pk``). Moving this call
+    (the elided relation resolves to a pk-only stub built from ``obj.<fk>_id``,
+    whose ``resolve_id`` reads that pk instead of triggering a lazy load
+    through ``obj.<fk>``). Moving this call
     after the elision check would silently drop the FK column on the
     elided path and reintroduce the N+1.
 

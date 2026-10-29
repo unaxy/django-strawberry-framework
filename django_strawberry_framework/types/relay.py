@@ -1,8 +1,9 @@
 """Internal Relay helpers - interface injection, node resolver defaults, and GlobalID strategies.
 
 This module owns ``install_is_type_of``, the interface base-class injection
-step, and the three Relay node resolver defaults. The helpers split by
-lifecycle phase:
+step, and the Relay node resolver installs (the ``resolve_id_attr`` and
+``resolve_nodes`` defaults beside Strawberry's own ``Node.resolve_id``). The
+helpers split by lifecycle phase:
 
 - Class-creation time (``__init_subclass__``): ``install_is_type_of``.
   Discriminator: ``cls.__dict__`` membership.
@@ -97,7 +98,7 @@ def implements_relay_node(type_cls: type[DjangoType]) -> TypeGuard[type[_RelayDj
 
     Used by ``finalize_django_types()`` Phase 2.5 (after ``__bases__``
     mutation) to decide whether to run the composite-pk gate and the
-    three ``resolve_*`` defaults. Distinct from the tuple-membership
+    ``resolve_*`` installs. Distinct from the tuple-membership
     check (``relay.Node in interfaces`` at ``types/base.py``), which
     runs pre-base-injection at collection time against the validated
     ``Meta.interfaces`` tuple.
@@ -312,8 +313,8 @@ def _resolve_id_attr_default(cls: type[_RelayDjangoType]) -> str:
     direct call asks Strawberry's annotation scan the same question
     without traversing the MRO's method chain, so the default behaves
     identically at every inheritance depth. (Skipping installation on
-    the child is then harmless: all three defaults are stateless
-    classmethods that act on the runtime ``cls``.)
+    the child is then harmless: every installed resolver is a stateless
+    classmethod that acts on the runtime ``cls``.)
     """
     # Only ``_stamp_relay_id_attr`` writes the slot, with the scanned ``str``.
     stamped = optional_instance(truth.class_dict(cls).get(_RELAY_ID_ATTR_SLOT), str)
@@ -322,59 +323,13 @@ def _resolve_id_attr_default(cls: type[_RelayDjangoType]) -> str:
     return _stamp_relay_id_attr(cls)
 
 
-# Marks a column absent from a row's instance namespace (``None`` is a value a
-# loaded column can hold).
-_ID_NOT_CACHED = object()
-
-
-def _resolve_id_default(
-    cls: type[relay.Node],
-    root: models.Model,
-    *,
-    info: Info[object, object],
-) -> str:
-    """Default ``Node.resolve_id`` with a ``__dict__`` cache check.
-
-    Signature mirrors ``strawberry.relay.Node.resolve_id`` after
-    ``classmethod`` binding: ``(cls, root, *, info)``. ``info`` is
-    keyword-only so Strawberry's Relay machinery, which calls
-    ``cls.resolve_id(root, info=info)``, lands at the right slot without
-    a positional collision.
-
-    Calls ``cls.resolve_id_attr()`` to derive the column name (handles
-    consumer ``relay.NodeID[...]`` overrides and the ``"pk"`` fallback),
-    coerces the literal ``"pk"`` to the model's concrete pk ``attname``
-    so the dict-cache lookup keys on the real column, then reads from
-    ``root.__dict__`` first (avoids an extra ORM hit when the optimizer
-    already loaded the row) and falls back to ``getattr(root, id_attr)``
-    (spec-015 #"id_attr = cls.resolve_id_attr" / Decision 7's "no
-    avoidable lazy loads on ``resolve_id``").
-
-    Keying on ``type(root)._meta.pk.attname`` is deliberate: the
-    alternative ``cls.__django_strawberry_definition__.model._meta.pk.attname``
-    would mis-key the ``__dict__`` lookup for proxy-model rows whose actual
-    class differs from the declared DjangoType model. A Django lazy proxy
-    root (``request.user`` returned by a ``me``-style resolver) is unwrapped
-    first, so the class read and the cache check see the row it stands for.
-    """
-    del info  # Strawberry's Relay machinery passes it by keyword; the default id never reads it
-    # A lazy proxy stands in for the row it wraps.
-    root = unwrap_lazy_object(root)
-    id_attr = cls.resolve_id_attr()
-    if id_attr == "pk":
-        # The row's real class, read without asking the row.
-        id_attr = type(root)._meta.pk.attname
-    # The cache is the row's real instance namespace, read without asking the
-    # row for it; ``dict.get`` never runs a namespace subclass's ``__missing__``.
-    # A root with no instance namespace is refused the way reading its
-    # ``__dict__`` attribute refuses it.
-    namespace = truth.instance_dict(root)
-    if namespace is None:
-        raise AttributeError(f"{truth.name(root)!r} object has no attribute '__dict__'")
-    cached = dict[str, object].get(namespace, id_attr, _ID_NOT_CACHED)
-    if cached is not _ID_NOT_CACHED:
-        return str(cached)
-    return str(read_attr(root, id_attr))
+# Strawberry's own ``Node.resolve_id`` function (``getattr(root, cls.resolve_id_attr())``),
+# installed beside the package's defaults so a stale ``resolve_id = relay.Node.resolve_id``
+# re-export (a method bound to ``relay.Node``) is re-bound to the concrete type.
+_STRAWBERRY_RESOLVE_ID = require(
+    truth.stored_function(truth.class_dict(relay.Node)["resolve_id"]),
+    callable,
+)
 
 
 def _coerce_node_id(node_id: object) -> object:
@@ -801,8 +756,8 @@ def _consumer_overrode_resolve_typename(type_cls: type[relay.Node]) -> bool:
     """Return whether ``type_cls`` declares its own ``resolve_typename``.
 
     ``utils/truth.py::overrides`` against ``relay.Node`` (MRO-aware identity of
-    the stored functions) - the same discriminator ``install_relay_node_resolvers`` uses for the three
-    ``resolve_*`` defaults. Every declared shape counts: a ``classmethod``, a
+    the stored functions) - the same discriminator ``install_relay_node_resolvers`` uses for the
+    ``resolve_*`` installs. Every declared shape counts: a ``classmethod``, a
     ``staticmethod`` and a plain function taking ``(root, info)`` are all
     overrides, since Strawberry reads ``resolve_typename`` off the class and
     calls it with ``(root, info)``. A method inherited unchanged from
@@ -1255,19 +1210,20 @@ async def _resolve_nodes_async(
 
 
 # Single source of truth for the Relay resolver method names the package
-# defaults, plus the framework default implementation each one maps to.
+# defaults, plus the implementation each one maps to: the package's own for
+# ``resolve_id_attr`` and ``resolve_nodes``, Strawberry's for ``resolve_id``.
 # ``resolve_node`` is absent: Strawberry's ``Node.resolve_node`` delegates to
 # ``resolve_nodes``. Iterated by ``install_relay_node_resolvers``; appears
 # nowhere else.
 _RELAY_RESOLVER_DEFAULTS: tuple[tuple[str, Callable[..., object]], ...] = (
-    ("resolve_id", _resolve_id_default),
+    ("resolve_id", _STRAWBERRY_RESOLVE_ID),
     ("resolve_id_attr", _resolve_id_attr_default),
     ("resolve_nodes", _resolve_nodes_default),
 )
 
 
 def install_relay_node_resolvers(type_cls: type[relay.Node]) -> None:
-    """Inject the three ``resolve_*`` defaults via the stored-function identity test.
+    """Install the ``resolve_*`` resolvers via the stored-function identity test.
 
     Step 0 stamps the type's resolved Relay id attribute
     (``_stamp_relay_id_attr``) - the one-time scan whose result the

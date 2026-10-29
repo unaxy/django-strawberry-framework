@@ -390,9 +390,9 @@ class ResourcePolicy:
         Outside that list by audit: the generated file resolver
         (``types/resolvers.py::_make_file_resolver``), which reads a column the
         row already loaded; the storage I/O its subfields may do is not database
-        work. The ``resolve_id`` default installed on every Relay ``DjangoType``
-        (``types/relay.py::_resolve_id_default``) likewise reads the id column
-        the row already loaded; a consumer ``.only()`` that defers that column is
+        work. Strawberry's ``Node.resolve_id``, which every Relay ``DjangoType``
+        resolves its id through, likewise reads the id column the row already
+        loaded; a consumer ``.only()`` that defers that column is
         application configuration. The completion-spanning transaction
         ``schema.py::DjangoMutationExecutionContext`` enters around a generated
         mutation field before its resolver runs: it reads, locks and writes no
