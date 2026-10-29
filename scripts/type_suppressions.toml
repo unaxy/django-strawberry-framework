@@ -585,7 +585,6 @@
 "tests/test_schema.py::test_a_schema_that_cannot_be_hashed_is_still_constructible_and_bounded._UnhashableSchema" = { reportAssignmentType = 1 }
 "tests/test_schema.py::test_async_window_hostile_error_container_rolls_back_and_leaks_no_transaction" = { reportAttributeAccessIssue = 1 }
 "tests/test_schema.py::test_execution_errors_fallback" = { reportAttributeAccessIssue = 1 }
-"tests/test_schema.py::test_marked_mutation_class_safe_on_none_parent_and_malformed_nodes" = { reportArgumentType = 3 }
 "tests/test_schema.py::test_sync_window_hostile_error_container_rolls_back_and_leaks_no_transaction" = { reportAttributeAccessIssue = 1 }
 "tests/test_sets_mixins.py::test_a_longer_related_order_reaching_a_target_path_is_refused._ShelfOrder" = { reportArgumentType = 1 }
 "tests/test_sets_mixins.py::test_a_non_string_field_name_claims_no_relation._Owner" = { reportArgumentType = 2 }
