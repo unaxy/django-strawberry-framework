@@ -4272,10 +4272,10 @@ def test_get_query_with_object_variables_executes_like_upstream() -> None:
 
     The happy path of the shielded GET parse. The param IS a JSON object, which is
     exactly what upstream's per-param contract accepts, so the request executes and
-    returns data. Paired with the malformed-param row below, this pins that the
-    shield's two nested parses still route around the envelope guard through
-    the shared decode-failure translator: a shield that stopped parsing (or
-    started applying the request-body guard) would turn this 200 into a 400.
+    returns data. Paired with the malformed-param row below, this pins that
+    upstream's two nested parses still run with the envelope guard turned off: a
+    shield that stopped parsing (or started applying the request-body guard)
+    would turn this 200 into a 400.
     """
     client = Client()
 
@@ -4291,8 +4291,8 @@ def test_get_query_with_object_variables_executes_like_upstream() -> None:
 def test_get_query_with_malformed_variables_param_is_the_upstream_parse_400() -> None:
     """GET `?variables={not json` -> upstream's own malformed-JSON 400, byte for byte.
 
-    The shield adds no envelope guard of its own: the failure is raised inside the
-    delegated original `parse_json` via the shared decode-failure translator, so an
+    The shield adds no envelope guard of its own: the failure is raised inside
+    upstream's original `parse_json`, reached through the patched one, so an
     unparseable GET param answers with the same body an unparseable POST body does.
     A shield that swallowed or reworded the parse failure would change that one wire
     meaning.
@@ -4303,6 +4303,27 @@ def test_get_query_with_malformed_variables_param_is_the_upstream_parse_400() ->
 
     assert response.status_code == 400
     assert response.content == b"Unable to parse request body as JSON"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_post_scalar_body_is_still_rejected_after_a_malformed_get_param() -> None:
+    """A GET param's parse failure leaves the envelope guard on for the next POST body.
+
+    The shield turns the request-body guard off only while upstream parses the
+    query params, and the malformed param raises out of that parse. The next
+    request on the same thread, a POST of the scalar ``42``, must still meet the
+    guard's request-body ``400`` rather than slip through to upstream's
+    ``data.get("query")``.
+    """
+    client = Client()
+
+    get = client.get("/graphql/", {"query": "{ __typename }", "variables": "{not json"})
+    post = _post_graphql_raw(b"42")
+
+    assert get.status_code == 400
+    assert get.content == b"Unable to parse request body as JSON"
+    assert post.status_code == 400
+    assert b"request body must be a JSON object" in post.content
 
 
 @pytest.mark.django_db(transaction=True)
@@ -4351,8 +4372,8 @@ def test_get_query_with_pathologically_nested_param_returns_400_not_500(
 ) -> None:
     """GET ``?<param>=<deep>`` -> the shield translates the same escape.
 
-    The shield deliberately routes the GET parses around the envelope guard,
-    but it shares the decode-failure translation's error channel, so a deep param's
+    The shield deliberately turns the envelope guard off for the GET parses,
+    but they keep the decode-failure translation's error channel, so a deep param's
     ``RecursionError`` is translated to a ``400`` on the shielded path
     rather than escaping as a ``500``.
     """

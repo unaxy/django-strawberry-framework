@@ -429,7 +429,7 @@ it lands with its tick.
   - Extensions that keep behaviour (each lands with its own tick):
     - [x] 22a. `_django_patches.py::_patched_remove_databases_failures` re-wraps a foreign replacement in a
       `_DatabaseFailure` and then calls Django's own classmethod; both pinned Django bodies go.
-    - [ ] 22b. `_strawberry_patches.py::_patched_parse_query_params` delegates to upstream's own method under a
+    - [x] 22b. `_strawberry_patches.py::_patched_parse_query_params` delegates to upstream's own method under a
       ContextVar flag instead of a pinned copy.
     - [ ] 22c. `filters/sets.py::_PUBLIC_PACKAGE_FILTER_DEFAULTS` is built from django-filter's
       `FILTER_FOR_DBFIELD_DEFAULTS` at import, with a provenance check for the baseline.
@@ -505,12 +505,12 @@ it lands with its tick.
   - Risk / blockers: it feeds a synthesized HTTP-only key into a Django constructor. Revisit Decision 19, or close
     this as kept.
 
-- [ ] 26. (NET-3) The Strawberry patch shields `parse_query_params` with a pinned copy of upstream's body
+- [x] 26. (NET-3) The Strawberry patch shields `parse_query_params` with a pinned copy of upstream's body
   - Our code: `_strawberry_patches.py::_patched_parse_query_params` (~17 lines), `_UPSTREAM_PARSE_QUERY_PARAMS_SOURCE`
     (~20) and the body-source pin in `_validate_upstream_shape` (~12).
   - Upstream: `strawberry/http/base.py::BaseView.parse_query_params`, unchanged from 0.322.2 to 0.327.7.
   - Lines: ~40.
-  - Status: SUSPECTED.
+  - Status: landed as 22b (the ContextVar delegate).
   - Two ways to drop the copy:
     - a delegating wrapper that sets a ContextVar `_patched_parse_json` reads;
     - moving the gap-2 envelope guard off `parse_json` to a provenance-scoped translation around
