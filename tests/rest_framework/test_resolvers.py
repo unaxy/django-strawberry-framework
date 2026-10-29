@@ -2287,7 +2287,7 @@ async def test_async_entry_rejects_data_rewriting_hook_too() -> None:
 
 
 def test_flattener_preserves_error_detail_codes_and_path() -> None:
-    """A DRF ``ErrorDetail.code`` -> ``codes``; the dotted key -> structured ``path`` segments (#4 / #13)."""
+    """A DRF ``ErrorDetail.code`` -> ``codes``; the dotted key -> structured ``path`` segments."""
     errors = {
         "name": [ErrorDetail("This field is required.", code="required")],
         "items": [{"qty": [ErrorDetail("Not valid.", code="invalid")]}],
@@ -2299,7 +2299,7 @@ def test_flattener_preserves_error_detail_codes_and_path() -> None:
 
 
 def test_flattener_root_non_field_error_has_empty_path() -> None:
-    """A ROOT non-field error is ``field="__all__"`` with an EMPTY ``path`` (the documented rule, #13)."""
+    """A ROOT non-field error is ``field="__all__"`` with an EMPTY ``path`` (the documented rule)."""
     drf_key = api_settings.NON_FIELD_ERRORS_KEY
     errors = {drf_key: [ErrorDetail("Model-wide problem.", code="invalid")]}
     (fe,) = serializer_resolvers.serializer_errors_to_field_errors(errors, {})

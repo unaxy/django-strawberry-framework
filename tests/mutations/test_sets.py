@@ -1569,7 +1569,7 @@ def test_bind_skips_relation_lock_for_non_relay_target() -> None:
 
 # ---------------------------------------------------------------------------
 # Model-flavor seam defaults: the seams default to the model behavior
-# (spec-038 / DoD item 6). Validation lives in ``_validate_meta`` beside the
+# (spec-038). Validation lives in ``_validate_meta`` beside the
 # ``build_input`` / ``input_type_name`` / ``input_module_path`` / ``resolve_*``
 # seams; these pin the MODEL flavor's behavior through each seam.
 # ---------------------------------------------------------------------------

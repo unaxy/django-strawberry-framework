@@ -1799,7 +1799,7 @@ def test_fast_path_has_next_page_without_edges_on_window(
 ) -> None:
     """``hasNextPage`` is correct on the WINDOW path even when ``edges`` is unrequested.
 
-    The Relay invariant (spec-032 Goal 4 / DoD: "the connection MUST resolve
+    The Relay invariant (spec-032 Relay conformance; DoD: "the connection MUST resolve
     ``hasNextPage`` correctly even when the consumer didn't request ``edges``")
     asserted on the exact path spec-033 introduces - the others assert it only on
     the root field and the optimizer-less per-parent fallback. A nested

@@ -5055,7 +5055,7 @@ def _genre_books_connection_with_nested_relation_types(
     The node child ``shelf { id }`` is a nested RELATION, so the child plan
     generates a ``planned_resolver_keys`` / ``fk_id_elisions`` entry. A fallback
     connection must NOT leak that child metadata into the parent plan
-    (spec-033 Decision 6 / DoD-4). When ``distinct`` is set, ``BookType`` adds a
+    (spec-033 Decision 6). When ``distinct`` is set, ``BookType`` adds a
     ``.distinct()``-ing ``get_queryset`` (the DISTINCT fallback); otherwise the
     caller supplies a malformed cursor for the malformed-slice fallback.
     """

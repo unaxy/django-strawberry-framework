@@ -2564,7 +2564,7 @@ def test_nondeterministic_schema_hook_raises_at_bind() -> None:
 
 
 def test_deterministic_schema_hook_binds_without_drift_error() -> None:
-    """A stable ``get_serializer_for_schema()`` binds without the drift error (#10 happy path)."""
+    """A stable ``get_serializer_for_schema()`` binds without the drift error (its happy path)."""
     _declare_products_primaries()
     serializer_cls = _item_serializer()
 

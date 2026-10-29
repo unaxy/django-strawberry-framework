@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 392 done, 212 to do.
+Progress: 393 done, 212 to do.
 
 ## Done
 
@@ -2240,6 +2240,13 @@ Progress: 392 done, 212 to do.
   GraphQL `Int` / `BigInt` scalars refuse a fraction first, and an integer-aware filter would add a `NumberFilter`
   subclass to the seam under refactor. README, spec-027; pinned by `tests/filters/test_sets.py::
   test_integer_comparison_truncates_a_fractional_value`
+- [x] 679. Ordinal citations outside 629's six files restated by contract: `_strawberry_patches.py` names its three
+  gaps by content (decode failure, non-envelope body, multipart map) in its headings, shield comment, retirement
+  diagnostic and probe print literals, and its "probe 2 for gap 1" pointer names the installed-version probe; the
+  plan-section labels in `tests/filters/test_sets.py` and `test_library_api.py`, the `#N` tags in the
+  `rest_framework` tests and `test_library_api.py`, "Test-6" in `tests/test_routers.py`, and the "DoD item N" /
+  "Goal N" tags in eight more test files name the contract each pins (`spec-NNN Decision N` kept). Comments,
+  docstrings and docstring examples only: docstring-stripped ASTs and collected node ids unchanged
 
 ## Outside review of the fixes
 
@@ -2344,13 +2351,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `"-1e1000000"` to a `Decimal` that reaches the bind as a huge int (integer column) or -inf (float column); the
   filter ask reads only temporal and decimal columns. Unmeasured: the client-visible answer per backend. Found fixing
   529
-- [ ] 679. Ordinal citations outside 629's six files: `_strawberry_patches.py` names its shields "gap 1" / "gap 2"
-  (the shield comment, the retirement-diagnostic docstring, its "GAP 1 STILL NEEDED" print literals) where the tests
-  say "decode failure" / "non-envelope body"; plan-section labels "C.3 / C.3a", "C.4 -", "C.4 fixtures" in
-  `tests/filters/test_sets.py` and "C.5 expanded-origin" in `test_library_api.py`; `(#4 / #13)` /
-  `(#10 happy path)` tags in `tests/rest_framework/test_resolvers.py` / `test_sets.py`, `#6` / `#7` / `#11` in
-  `test_library_api.py`, "Test-6 identity flake" in `tests/test_routers.py`, and "DoD item N" / "Goal N" in about 12
-  test lines; restate each by its contract. Found fixing 629
 - [ ] 680. `filters/inputs.py::_is_declared_head`'s docstring says a set borrowing a copy "restamps" it; 596 copies an
   owned filter at declaration, so the clause is false (one-clause fix, held for the `filters/inputs.py` refactor).
   Found fixing 596
@@ -2384,6 +2384,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
   reads every unstorable column of `form.instance`, so a model `save()` narrowed by `update_fields` away from the `None`
   column reports that column's `null` for another constraint; apply 668's `update_fields` filter there once
   `forms/resolvers.py` is free. Found fact-finding 668
+- [ ] 703. Ordinal citations outside 679's files: `optimizer/nested_planner.py` "(Decision 6 / DoD-4 "no
+  planned_resolver_keys entry")" (spec-less Decision, DoD ordinal), `orders/sets.py`'s module docstring and one more
+  docstring "spec-028 DoD 4(c)", `_cross_web_patches.py` "gap (1)" / "Gap (2)" (the sibling of 679's
+  `_strawberry_patches.py` gap names), and `scripts/capture_pg_predicate_explain.py` "Slice C.3a" (docstring and a
+  runtime string); restate each by content (package files sit in the comment-sweep area). Found fixing 679
 
 ## To do: holes found re-checking the fixes
 

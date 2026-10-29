@@ -2355,7 +2355,7 @@ async def test_async_consumer_edge_prefix_pages_and_refuses_a_stock_cursor() -> 
 # root-connection planning pins here (edges { node } extraction ->
 # select_related / Prefetch on the pre-slice queryset) hold the ROOT half; the
 # shared helper (Decision 9) and the fast path (Decision 5) touch only the
-# NESTED half (DoD item 12, "no root-connection regression").
+# NESTED half (the spec-033 "no root-connection regression" contract).
 
 
 # =============================================================================
@@ -2413,7 +2413,8 @@ def test_connection_over_cascading_type_narrows_edges_and_total_count() -> None:
 
     Wrap a type whose ``get_queryset`` calls ``apply_cascade_permissions``; assert
     edges drop the cascade-hidden rows and ``totalCount`` (counted post-visibility)
-    matches the narrowed count, with cursors consistent. Decision 12 / DoD item 9.
+    matches the narrowed count, with cursors consistent. spec-034 Decision 12; the
+    cascade-composes-with-``DjangoConnectionField`` contract.
 
     Load-bearing (BUILD.md "Query-shape tests"): the seeding makes ``narrowed != raw``
     (3 items, 2 visible) so the ``totalCount == 2`` assertion is NOT vacuous - a
