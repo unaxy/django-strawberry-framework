@@ -24,8 +24,10 @@ branch is earned LIVE; this file holds the genuinely-unreachable internals:
 - the `IntegrityError` over a `blank=True, null=False` column on synthetic models: an
   integer and an integer-choice column (fakeshop's live `createItemHoldViaSerializer`
   pins the foreign key), a declared `allow_null` field's `null` on update, a model
-  `save()` that fills the value in, a `create()` that raises before saving a row, and a
-  second thread's attempted row left out of the diagnosis;
+  `save()` that fills the value in, a `create()` that raises before saving a row, a
+  second thread's attempted row left out of the diagnosis, a `None` column outside the
+  refused save's `update_fields` left out of it (a deferred one never loaded), and one
+  named there by field name or `attname` kept;
 - the `get_serializer_kwargs` / framework-merge / `partial` seams + the bare
   `HttpRequest` `request_from_info` fallback;
 - the config-assessment grep-guard + the post-finalization
@@ -95,6 +97,7 @@ from django.db.models.signals import post_save, pre_save
 from django.db.utils import OperationalError
 from django.http import HttpRequest
 from django.test import override_settings
+from django.test.utils import CaptureQueriesContext
 from django.utils.functional import SimpleLazyObject
 from rest_framework import serializers
 from rest_framework.exceptions import ErrorDetail
@@ -211,6 +214,7 @@ if TYPE_CHECKING:
     # An integer column's descriptor types as django-stubs declares them (set type, get type),
     # spelled out because the checker runs without the django-stubs mypy plugin.
     _Int: TypeAlias = models.IntegerField[float | int | str | Combinable, int]
+    _Text: TypeAlias = models.TextField[str | Combinable, str]
 
     # A declared ``PrimaryKeyRelatedField``: drf-stubs type its constructor as returning the
     # single relation or, under ``many=True``, a ``ManyRelatedField``.
@@ -1535,6 +1539,144 @@ def test_save_time_integrity_error_ignores_another_threads_attempted_row() -> No
         schema, create_input, _ = _blank_columns_schema(serializer_cls, model_class)
         payload = _run_row_write(schema, create_input, {})
         assert payload == {"result": None, "errors": _CONSTRAINT_ENVELOPE}
+
+
+@pytest.mark.django_db(transaction=True)
+def test_save_time_integrity_error_skips_a_column_outside_update_fields() -> None:
+    """A ``None`` column the refused save leaves out of ``update_fields`` is never the diagnosis.
+
+    The model ``save()`` narrows every update to ``update_fields=["label"]``, so the client's
+    ``null`` on ``amount`` never reaches the ``UPDATE``; the declared ``label`` field carries
+    no ``UniqueValidator``, so the database refuses the duplicate ``label`` instead. The
+    witness records the save's ``update_fields`` with its row, and the diagnosis reads only
+    the columns that save writes, so the failure is the ``"__all__"`` ``constraint``
+    envelope, not ``amount``'s ``null`` error. Nothing is written.
+    """
+
+    class NarrowedSaveRow(Model):
+        amount: _Int = models.IntegerField(blank=True)
+        label: _Text = models.TextField(unique=True)
+
+        class Meta:
+            app_label = "products"
+            managed = False
+
+        @override
+        def save(self, *args: object, **kwargs: object) -> None:
+            if not self._state.adding:
+                kwargs["update_fields"] = ["label"]
+            call_forwarded(super().save, args, kwargs)
+
+    serializer_cls = _serializer_over(
+        NarrowedSaveRow,
+        ("amount", "label"),
+        {
+            "amount": serializers.IntegerField(required=False, allow_null=True),
+            "label": serializers.CharField(),
+        },
+    )
+    with _synthetic_table(NarrowedSaveRow):
+        schema, _, update_input = _blank_columns_schema(serializer_cls, NarrowedSaveRow)
+        _ = NarrowedSaveRow._default_manager.create(amount=7, label="taken")
+        row = NarrowedSaveRow._default_manager.create(amount=8, label="mine")
+        payload = _run_row_write(
+            schema,
+            update_input,
+            {"amount": None, "label": "taken"},
+            saved_pk(row),
+        )
+        assert payload == {"result": None, "errors": _CONSTRAINT_ENVELOPE}
+        stored = NarrowedSaveRow._default_manager.order_by("pk").values_list("amount", "label")
+        assert list(stored) == [(7, "taken"), (8, "mine")]
+
+
+@pytest.mark.parametrize("update_field", ["category", "category_id"])
+@pytest.mark.django_db
+def test_save_time_null_inside_update_fields_by_name_or_attname_is_field_keyed(
+    update_field: str,
+) -> None:
+    """A ``None`` column the refused save names in ``update_fields`` keeps its ``null`` error.
+
+    Django accepts an ``update_fields`` entry by field name or by ``attname``; a custom
+    ``update()`` that saves the cleared foreign key under either spelling writes the column,
+    so the database's ``NOT NULL`` refusal is that column's field-keyed ``null`` error, and
+    the stored key is unchanged.
+    """
+    seed_data(1)
+    item = product_models.Item.objects.select_related("category").first()
+    assert item is not None
+    category_pk = item.category_id
+
+    class NarrowedUpdateSerializer(ModelSerializerBase[product_models.Item]):
+        category: _PkRelation[product_models.Category] = serializers.PrimaryKeyRelatedField(
+            queryset=product_models.Category.objects.all(),
+            allow_null=True,
+        )
+
+        class Meta:
+            model = product_models.Item
+            fields = ("category",)
+
+        @override
+        def update(
+            self,
+            instance: product_models.Item,
+            validated_data: dict[str, object],
+        ) -> product_models.Item:
+            for attr, value in validated_data.items():
+                setattr(instance, attr, value)
+            instance.save(update_fields=[update_field])
+            return instance
+
+    mutation_cls = _bind_item_serializer_mutation(NarrowedUpdateSerializer, operation="update")
+    with write_pipeline("default", lock=False):
+        result = serializer_resolvers._serializer_write_step(
+            mutation_cls,
+            _info(),
+            item,
+            {"category": None},
+        )
+    assert isinstance(result, StepFailure)
+    assert [(fe.field, fe.messages, fe.codes) for fe in result.errors] == [
+        ("categoryId", ["This field cannot be null."], ["null"]),
+    ]
+    stored = product_models.Item.objects.get(pk=item.pk)
+    assert stored.category_id == category_pk
+
+
+@pytest.mark.django_db
+def test_save_time_diagnosis_never_loads_a_deferred_column_the_save_left_out() -> None:
+    """A deferred column a refused save leaves out of ``update_fields`` is skipped unread.
+
+    Django saves a deferred-load row under ``update_fields`` naming only its loaded
+    columns, so the diagnosis skips every other column before reading it: reading the
+    deferred ``description`` would load it from the connection the ``IntegrityError`` left,
+    for a column the save never wrote. The refusal (a duplicate unique name) is the
+    ``"__all__"`` ``constraint`` envelope and no query runs.
+    """
+    seed_data(2)
+    first, second = product_models.Category.objects.order_by("pk")[:2]
+    loaded = product_models.Category.objects.defer("description").get(pk=first.pk)
+    key_map: ErrorKeyMap = {"name": ("name", None), "description": ("description", None)}
+    with serializer_resolvers._write_witness(
+        _as_serializer_mutation(type("DeferredWitnessMut", (), {})),
+        product_models.Category,
+        "default",
+    ) as witness:
+        loaded.name = second.name
+        with pytest.raises(IntegrityError), transaction.atomic():
+            loaded.save()
+        [(_, update_fields)] = witness.attempted
+        assert update_fields is not None
+        assert "name" in update_fields
+        assert "description" not in update_fields
+        with CaptureQueriesContext(connections["default"]) as queries:
+            errors = serializer_resolvers._attempted_row_integrity_errors(
+                witness.attempted,
+                key_map,
+            )
+    assert [(fe.field, fe.codes) for fe in errors] == [(NON_FIELD_ERROR_KEY, ["constraint"])]
+    assert len(queries) == 0
 
 
 # ===========================================================================
@@ -4913,7 +5055,7 @@ def test_write_witness_blocks_cross_alias_pre_save() -> None:
             instance=own_attempt,
             using="default",
         )
-        assert witness.attempted == [own_attempt]
+        assert witness.attempted == [(own_attempt, None)]
 
         # A DIFFERENT thread's cross-alias save is not this request's to police - and its
         # writes are not recorded on this request's witness either.
@@ -4940,7 +5082,7 @@ def test_write_witness_blocks_cross_alias_pre_save() -> None:
         # The other thread's save never lands on this witness, written or attempted.
         assert witness.written == []
         assert len(witness.attempted) == 1
-        assert witness.attempted[0] is own_attempt
+        assert witness.attempted[0][0] is own_attempt
 
         # This thread's save completing takes its row back out of the attempts.
         post_save.send(

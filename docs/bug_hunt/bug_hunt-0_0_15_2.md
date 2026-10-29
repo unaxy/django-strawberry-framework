@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 380 done, 217 to do.
+Progress: 381 done, 219 to do.
 
 ## Done
 
@@ -2159,6 +2159,12 @@ Progress: 380 done, 217 to do.
   zone ahead of the default stored an earlier day, also on an update omitting the field. A subclass overriding
   `to_python` or `clean` still builds. README, spec-038 and the `djangomodelformmutation` glossary term say so. Tests:
   `tests/forms/test_inputs.py`
+- [x] 668. A refused serializer save reports a field-keyed `null` only for a column the save writes:
+  `rest_framework/resolvers.py::_write_witness` records each attempted row with its `pre_save` `update_fields`, and
+  `utils/write_values.py::unstorable_columns` skips a column outside them (by name or attname) before reading it, so a
+  consumer save narrowed to other columns answers the constraint envelope and a deferred column the save left out is
+  never loaded. spec-039 says so. Tests: `tests/rest_framework/test_resolvers.py`. The swallowed-save half and the
+  ModelForm flavor are rows 695 and 696
 
 ## Outside review of the fixes
 
@@ -2264,11 +2270,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   the leaves the form data names, and the sync `.qs` absent-leaf probe then derives the hop inside the sync boundary
   (spec-027: an async-only `get_queryset` never runs there). An omitted leaf raised before 562; a no-bound range joins
   it. Await the hops of every declared walking leaf whose filter acts on an absent value. Found verifying 562
-- [ ] 668. (robustness) The save-time `null` diagnosis (serializer `_attempted_row_integrity_errors`, model
-  `_created_row_integrity_errors`) reads every unstorable column of the refused row, so a consumer save with
-  `update_fields` excluding the `None` column, or a refused save the consumer swallows before a different
-  `IntegrityError` escapes, reports that column's `null` for another constraint; read `update_fields` from the
-  `pre_save` kwargs and skip columns outside it. Found verifying 577
 - [ ] 672. (robustness) On SQLite a decimal filter value past float range or below its smallest subnormal binds as
   REAL: `"1e-1000000"` underflows to 0.0 (`exact` matches a stored 0, `lt` drops it) and `"-1e1000000"` becomes -inf,
   so the filter answers wrong rows without a word. Found fact-finding 529
@@ -2321,12 +2322,25 @@ tracker number are recorded there; open remainders and new defects are filed as 
   constant inside a consumer annotation the leaf goes through (a `Value(Decimal(...))` past `numeric`'s format) can
   refuse the user's in-range value; hold them to the leaf's own bound lookups as 654 does for integers. Found
   verifying 654
+- [ ] 695. (robustness) A refused save the consumer swallows before a different `IntegrityError` escapes is still
+  diagnosed as the swallowed row's `null` (serializer `_attempted_row_integrity_errors` reads `attempted[-1]`; model
+  `_created_row_integrity_errors` reads the create target; ModelForm `_modelform_save_or_field_errors` reads
+  `form.instance`): Django sends no signal for a failed save, so telling the escaping save apart needs the exception
+  passed to `mutations/resolvers.py::save_or_field_errors` and a seam naming the row whose save raised. Design call;
+  the ModelForm half waits on `forms/resolvers.py`. Found fact-finding 668
+- [ ] 696. (robustness) The ModelForm save-time `null` diagnosis (`forms/resolvers.py::_modelform_save_or_field_errors`)
+  reads every unstorable column of `form.instance`, so a model `save()` narrowed by `update_fields` away from the `None`
+  column reports that column's `null` for another constraint; apply 668's `update_fields` filter there once
+  `forms/resolvers.py` is free. Found fact-finding 668
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 697. CHANGELOG entry for item 668: a `SerializerMutation` save whose model `save()` narrows `update_fields` away
+  from a `None` column and hits another constraint answers the `"__all__"` constraint envelope instead of that
+  column's field-keyed `null`
 - [ ] 698. CHANGELOG entry for item 670 (breaking): a `DjangoModelFormMutation` form declaring `forms.DateTimeField`
   over a `DateField` column is refused at schema build instead of storing a different day when the
   request's time zone differs from the default
