@@ -1244,29 +1244,71 @@ def _order_columns(
     return tuple(columns) or None
 
 
-def _select_columns(queryset: QuerySet[models.Model]) -> tuple[tuple[str, str], ...] | None:
-    """Return the loaded ``(attname, column)`` projection in concrete-field order, or ``None``.
+def _selected_cols(queryset: QuerySet[models.Model]) -> tuple[Query, list[Col]] | None:
+    """Return Django's selected ``Col``s for ``queryset``'s model and the query that compiled them.
 
-    Django computes it: ``Query.get_select_mask`` reads the ``.only()`` /
+    Django computes them: ``Query.get_select_mask`` reads the ``.only()`` /
     ``.defer()`` state and ``SQLCompiler.get_default_columns`` turns the mask
-    into the model's selected ``Col``s, the columns the windowed body selects
-    for the same queryset (the pk included whatever the mask names). ``None``
-    when a selected column lives on a multi-table inheritance parent (its
-    ``Col`` carries the parent-link join's alias, which the lateral branch does
-    not join) or when Django refuses the projection (an unknown ``.only()`` /
-    ``.defer()`` name), so the windowed body runs and raises Django's own error.
+    into the model's selected ``Col``s in concrete-field order (the pk included
+    whatever the mask names), joining each multi-table inheritance parent the
+    mask reaches into the returned query's ``alias_map``. ``None`` when Django
+    refuses the projection (an unknown ``.only()`` / ``.defer()`` name), so the
+    windowed body runs and raises Django's own error, or when a selected
+    expression is not a plain ``Col``.
     """
     query = queryset.query.clone()
     try:
         select_mask = query.get_select_mask()
         selected = _query_compiler(query, queryset.db).get_default_columns(select_mask)
     except (FieldDoesNotExist, FieldError):
+        selected = None
+    cols = [column for column in selected or () if isinstance(column, Col)]
+    # A refused projection, or a selected expression that is not a plain ``Col``.
+    if selected is None or len(cols) != len(selected):
         return None
+    return query, cols
+
+
+def _select_columns(queryset: QuerySet[models.Model]) -> tuple[tuple[str, str], ...] | None:
+    """Return the loaded ``(attname, column)`` projection in concrete-field order, or ``None``.
+
+    The columns are ``_selected_cols``'s, the ones the windowed body selects for
+    the same queryset. ``None`` when Django refuses the projection or when a
+    selected column lives on a multi-table inheritance parent (its ``Col``
+    carries the parent-link join's alias, which the lateral branch does not
+    join).
+    """
+    compiled = _selected_cols(queryset)
+    if compiled is None:
+        return None
+    query, cols = compiled
     base_alias = query.get_initial_alias()
-    columns: list[tuple[str, str]] = []
-    for column in selected:
-        if not isinstance(column, Col) or column.alias != base_alias:
-            return None
-        # A column's target is a concrete field, whose ``column`` is its db column name.
-        columns.append((column.target.attname, require(column.target.column, is_str)))
-    return tuple(columns)
+    if any(column.alias != base_alias for column in cols):
+        return None
+    # A column's target is a concrete field, whose ``column`` is its db column name.
+    return tuple((column.target.attname, require(column.target.column, is_str)) for column in cols)
+
+
+def _select_projection(
+    queryset: QuerySet[models.Model],
+) -> tuple[tuple[str, str, str], ...] | None:
+    """Return the loaded ``(table, attname, column)`` projection in concrete-field order, or ``None``.
+
+    The fingerprint of what the windowed body loads for ``queryset``, multi-table
+    inheritance parent columns included: each ``Col`` is keyed by the table its
+    join alias names, since an alias is per-query state and a table is not.
+    ``None`` only when ``_selected_cols`` is.
+    """
+    compiled = _selected_cols(queryset)
+    if compiled is None:
+        return None
+    query, cols = compiled
+    return tuple(
+        (
+            query.alias_map[column.alias].table_name,
+            column.target.attname,
+            # A column's target is a concrete field, whose ``column`` is its db column name.
+            require(column.target.column, is_str),
+        )
+        for column in cols
+    )

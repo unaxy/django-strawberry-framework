@@ -270,7 +270,7 @@ it lands with its tick.
   - Risk / blockers: overriding upstream behaviour; it needs an origin comment if adapted. The item 2 vocabulary test
     keeps `pageInfo` unrenamed until this lands.
 
-- [ ] 36. (found landing item 23) The single-parent projection guard is blind for a multi-table child
+- [x] 36. (found landing item 23) The single-parent projection guard is blind for a multi-table child
   - Our code: `optimizer/single_parent_fetch.py` compares `lateral_fetch.py::_select_columns` at plan and fetch time.
   - Upstream: none; package behaviour.
   - Status: CONFIRMED by item 23's implementer. `_select_columns` answers `None` for any projection that selects a
@@ -279,6 +279,13 @@ it lands with its tick.
   - Fix: a single-parent fingerprint that keeps each column's alias instead of refusing parent-table columns.
   - Behaviour change: a drifted multi-table projection falls back instead of serving the planned columns.
   - Risk / blockers: robustness row, not a release blocker (GOAL.md trust boundary).
+  - Landed: `lateral_fetch.py::_select_projection` keys each selected `Col` by its join alias's table
+    (`(table, attname, column)`), and `single_parent_fetch.py` compares it at plan and fetch time.
+    `_select_columns` stays the lateral builder's base-table-only refusal wrapper; both read `_selected_cols`.
+  - Tests: package tier, since no GraphQL input alters a queryset after planning:
+    `tests/optimizer/test_single_parent_fetch.py::test_fetch_returns_none_for_projection_drift_on_a_multi_table_parent_column`
+    (failed on the old guard) and `::test_fast_path_serves_an_undrifted_multi_table_child`, over
+    `Venue.lendingdesk`; two `_select_projection` rows in `tests/optimizer/test_lateral_fetch.py`.
 
 ## Plain replacements (no behaviour change, no reason to keep)
 
