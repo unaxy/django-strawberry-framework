@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 379 done, 217 to do.
+Progress: 380 done, 217 to do.
 
 ## Done
 
@@ -2153,6 +2153,12 @@ Progress: 379 done, 217 to do.
   array's `len` is held to its transform's own output range. A flat integer column stays unasked. spec-027, README
   and the `filterset` glossary term say so. Tests: `tests/filters/test_sets.py` (real `ArrayField` rows and a
   prepared-element double that runs without psycopg), `tests/utils/test_errors.py`
+- [x] 670. A `DjangoModelFormMutation` form declaring `forms.DateTimeField` over a `DateField` column is refused at
+  schema build (`forms/inputs.py::_TEMPORAL_COLUMN_FORM_CLASSES`, `_require_temporal_reader`), as the serializer flavor
+  refuses the pair: the wire is the column's `Date`, and the form field made it midnight in the current time zone, so a
+  zone ahead of the default stored an earlier day, also on an update omitting the field. A subclass overriding
+  `to_python` or `clean` still builds. README, spec-038 and the `djangomodelformmutation` glossary term say so. Tests:
+  `tests/forms/test_inputs.py`
 
 ## Outside review of the fixes
 
@@ -2263,10 +2269,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `update_fields` excluding the `None` column, or a refused save the consumer swallows before a different
   `IntegrityError` escapes, reports that column's `null` for another constraint; read `update_fields` from the
   `pre_save` kwargs and skip columns outside it. Found verifying 577
-- [ ] 670. (robustness) A ModelForm `DateTimeField` over a `DateField` column (kept by 523) stores the previous day when
-  the request's current time zone differs from the default (`timezone.override("Asia/Tokyo")`: wire `2026-01-02` stores
-  `2026-01-01`): `forms.DateTimeField.to_python(date)` makes midnight in the current zone and `models.DateField`
-  converts in the default. Decide refusing the pair or normalizing. Found fact-finding 523
 - [ ] 672. (robustness) On SQLite a decimal filter value past float range or below its smallest subnormal binds as
   REAL: `"1e-1000000"` underflows to 0.0 (`exact` matches a stored 0, `lt` drops it) and `"-1e1000000"` becomes -inf,
   so the filter answers wrong rows without a word. Found fact-finding 529
@@ -2325,6 +2327,9 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 698. CHANGELOG entry for item 670 (breaking): a `DjangoModelFormMutation` form declaring `forms.DateTimeField`
+  over a `DateField` column is refused at schema build instead of storing a different day when the
+  request's time zone differs from the default
 - [ ] 694. CHANGELOG entry for items 654 and 657: an out-of-range integer member of an `ArrayField` of integers filter
   is `FILTER_INVALID` instead of a masked database error; a consumer annotation's constant no longer refuses an
   in-range filter value through it; an `IntegerField` subclass whose type the backend states no range for filters

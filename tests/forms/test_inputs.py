@@ -1189,8 +1189,21 @@ class _ValueReadingDateField(forms.DateField):
         return super().to_python(value) if isinstance(value, str) else value
 
 
-#: A built-in temporal form field over a temporal column of another kind, each failing or
-#: truncating every value the input carries for the column.
+class _ValueReadingDateTimeField(forms.DateTimeField):
+    """A ``DateTimeField`` subclass whose ``to_python`` keeps a date naive, out of any zone."""
+
+    @override
+    def to_python(
+        self,
+        value: str | datetime.datetime | datetime.date | None,
+    ) -> datetime.datetime | None:
+        if isinstance(value, datetime.date) and not isinstance(value, datetime.datetime):
+            return datetime.datetime.combine(value, datetime.time())
+        return super().to_python(value)
+
+
+#: A built-in temporal form field over a temporal column of another kind, each failing,
+#: truncating or shifting every value the input carries for the column.
 _UNREADABLE_TEMPORAL_PAIRS = [
     pytest.param("occurred_time", forms.DateField, "DateField", "TimeField", id="date-over-time"),
     pytest.param(
@@ -1237,6 +1250,13 @@ _UNREADABLE_TEMPORAL_PAIRS = [
         id="duration-over-date",
     ),
     pytest.param(
+        "occurred_on",
+        forms.DateTimeField,
+        "DateTimeField",
+        "DateField",
+        id="datetime-over-date",
+    ),
+    pytest.param(
         "occurred_at",
         forms.TimeField,
         "TimeField",
@@ -1280,16 +1300,18 @@ def test_temporal_field_over_a_temporal_column_it_cannot_read_is_refused(
     """A built-in temporal field reads only the kind it parses, whichever input carries it.
 
     The input carries the column's own temporal value, so a field of another temporal kind
-    fails every write that binds it or drops the time of day, and an update binds it on
-    every write.
+    fails every write that binds it, drops the time of day or shifts the date through the
+    current time zone, and an update binds it on every write.
     """
     form_class = _column_form(scalar_models.ScalarSpecimen, name, field_class(required=False))
     with pytest.raises(ConfigurationError) as excinfo:
         _ = build_form_input_class(form_class, operation_kind=operation_kind)
+    shifts = (field_class, column_class) == (forms.DateTimeField, "DateField")
     assert (
-        f"field {name!r} ({field_class.__name__}) cannot read the value of the "
-        f"{column_class} column ScalarSpecimen.{name}: the input carries the column's value "
-        f"and {reader} reads only the kind it parses."
+        f"field {name!r} ({field_class.__name__}) {'shifts the' if shifts else 'cannot read the'} "
+        f"value of the {column_class} column ScalarSpecimen.{name}: the input carries the "
+        f"column's value and {reader} "
+        f"{'reads the date as midnight' if shifts else 'reads only the kind it parses.'}"
     ) in str(excinfo.value)
 
 
@@ -1305,6 +1327,21 @@ def test_temporal_refusal_names_the_form_the_column_and_the_remedy() -> None:
         "SplitDateTimeField, a CharField, or a subclass that reads the value by overriding "
         "to_python or clean; an update binds every declared field, including those "
         "Meta.fields / Meta.exclude leave out of its input."
+    )
+
+
+def test_datetime_over_date_refusal_names_the_zone_shift_and_the_remedy() -> None:
+    """A date-time field over a date column is refused for the date the current zone shifts."""
+    form_class = _column_form(scalar_models.ScalarSpecimen, "occurred_on", forms.DateTimeField())
+    with pytest.raises(ConfigurationError) as excinfo:
+        _ = build_form_input_class(form_class, operation_kind=CREATE)
+    assert str(excinfo.value) == (
+        "Form KindForm field 'occurred_on' (DateTimeField) shifts the value of the DateField "
+        "column ScalarSpecimen.occurred_on: the input carries the column's value and "
+        "DateTimeField reads the date as midnight in the current time zone, so a current zone "
+        "ahead of the default stores an earlier day. Declare a DateField, a CharField, or a "
+        "subclass that reads the value by overriding to_python or clean; an update binds every "
+        "declared field, including those Meta.fields / Meta.exclude leave out of its input."
     )
 
 
@@ -1327,7 +1364,6 @@ def test_update_input_refuses_an_unreadable_temporal_field_on_a_narrowed_out_fie
     [
         pytest.param("occurred_time", forms.TimeField, id="time-over-time"),
         pytest.param("occurred_on", forms.DateField, id="date-over-date"),
-        pytest.param("occurred_on", forms.DateTimeField, id="datetime-over-date"),
         pytest.param("occurred_at", forms.DateTimeField, id="datetime-over-datetime"),
         pytest.param("occurred_at", forms.SplitDateTimeField, id="split-datetime-over-datetime"),
         pytest.param("occurred_time", forms.CharField, id="text-over-time"),
@@ -1337,6 +1373,11 @@ def test_update_input_refuses_an_unreadable_temporal_field_on_a_narrowed_out_fie
             "occurred_time",
             _ValueReadingDateField,
             id="reading-date-subclass-over-time",
+        ),
+        pytest.param(
+            "occurred_on",
+            _ValueReadingDateTimeField,
+            id="reading-datetime-subclass-over-date",
         ),
     ],
 )
@@ -1348,8 +1389,8 @@ def test_temporal_field_reading_its_column_builds(
 ) -> None:
     """A temporal column builds under every form field that reads its value.
 
-    The column's own form class, admin's split pairing, a date-time field over a date, text,
-    or a subclass that reads the value itself.
+    The column's own form class, admin's split pairing, text, or a subclass that reads the
+    value itself.
     """
     form_class = _column_form(scalar_models.ScalarSpecimen, name, field_class(required=False))
     _cls, specs = build_form_input_class(form_class, operation_kind=operation_kind)
