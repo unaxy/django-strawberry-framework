@@ -1069,11 +1069,14 @@ def _prefetch_carrier_attnames(queryset: QuerySet[_M]) -> list[str]:
             if instance_accessor(field_obj) != first:
                 continue
             # A ``GenericForeignKey`` (duck-typed, as everywhere in the package)
-            # links through its content-type key and its object-id column.
+            # links through its content-type key, read by that key field's own
+            # attname as Django's prefetch reads it, and its object-id column,
+            # which ``fk_field`` names.
             ct_field: object = getattr(field_obj, "ct_field", None)
             fk_field: object = getattr(field_obj, "fk_field", None)
             if isinstance(ct_field, str) and isinstance(fk_field, str):
-                append_unique_many(attnames, [f"{ct_field}_id", fk_field])
+                ct_key = require(model._meta.get_field(ct_field), is_concrete_field)
+                append_unique_many(attnames, [ct_key.attname, fk_field])
             else:
                 append_unique_many(
                     attnames,
