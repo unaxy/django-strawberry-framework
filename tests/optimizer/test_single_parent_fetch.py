@@ -200,6 +200,21 @@ def test_fetch_returns_none_for_unrecognized_shapes(
     assert _fetch_single_parent_rows(mutated) is None, reason
 
 
+@pytest.mark.django_db
+def test_fetch_returns_none_for_projection_drift_from_a_planned_defer() -> None:
+    """A ``defer()``-planned child is fingerprinted by the columns Django selects for it.
+
+    The fetch-time ``.defer("title")`` loads a narrower projection than the
+    planned ``.defer("subtitle")``, so the pristine re-query would not load what
+    the windowed body loads: the windowed body runs.
+    """
+    request = _shelf_books_request(child_queryset=Book.objects.defer("subtitle"))
+    queryset = _prefetch_filtered(request, "shelf", [Shelf(pk=1)])
+    drifted = queryset.defer("title")
+    assert isinstance(drifted, SingleParentWindowQuerySet)
+    assert _fetch_single_parent_rows(drifted) is None
+
+
 def test_fetch_returns_none_without_a_parent_filter() -> None:
     """The bare planned queryset (only the window qual) has no parent list."""
     queryset = _planned_single_parent_queryset(_shelf_books_request())

@@ -42,10 +42,11 @@ route - falls through to the superclass ``_fetch_all``, which executes the
 windowed body: a performance downgrade, never a correctness cliff.
 
 Plan-time shapes the lateral SQL cannot express (``select_related``, child
-annotations, expression ordering, a composite primary key, or selected/ordered
-columns from a multi-table inheritance parent) downgrade INSIDE the strategy to
-the windowed plan - the selection is still planned, so spec-033 Decision 6 strictness
-visibility is unaffected. A child ``get_queryset`` visibility scope is the one
+annotations, an order term Django does not compile to a bare child-table column,
+a composite primary key, or selected/ordered columns from a multi-table
+inheritance parent) downgrade INSIDE the strategy to the windowed plan - the
+selection is still planned, so spec-033 Decision 6 strictness visibility is
+unaffected. A child ``get_queryset`` visibility scope is the one
 filter it CAN express when it is a single-table plain-column WHERE on the
 DIRECT_FK non-keyset shape: that WHERE rides the spec, is compiled at fetch
 time against the real child table, and is spliced into the lateral branch (the
@@ -75,11 +76,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, cast
 
-from django.core.exceptions import EmptyResultSet, FullResultSet
+from django.core.exceptions import EmptyResultSet, FieldDoesNotExist, FieldError, FullResultSet
 from django.db import connections
 from django.db.models import QuerySet
-from django.db.models.expressions import Col, Window
-from django.db.models.options import Options
+from django.db.models.expressions import Col, OrderBy, Window
 from django.db.models.sql.where import AND, WhereNode
 from django.utils.tree import Node
 from typing_extensions import override
@@ -113,8 +113,7 @@ from .plans import (
     WINDOW_ROW_NUMBER_REVERSED,
     WINDOW_TOTAL_COUNT,
     OptimizationPlan,
-    deferred_loading_of,
-    order_entry_name_and_direction,
+    _query_compiler,
 )
 
 if TYPE_CHECKING:
@@ -139,11 +138,6 @@ if TYPE_CHECKING:
     CompiledSQL: TypeAlias = tuple[str, list[object]]
     #: A field's database-value adapter (``Field.get_db_prep_value`` bound to a connection).
     PrepareValue: TypeAlias = Callable[[ConcreteField, object], object]
-    #: Any model's ``Options``.
-    _OptionsAny: TypeAlias = Options[models.Model]
-else:
-    # ``Options`` has no ``__class_getitem__`` at runtime: the hint stays the class.
-    _OptionsAny = Options
 
 #: The stem prefix for synthesized lateral SQL table aliases and columns.
 #: Single root source of truth for the package-owned lateral SQL namespace.
@@ -668,7 +662,7 @@ def _recognize_lateral_fetch(
     # queryset was reordered after planning and no longer compiles the planned order.
     if tuple(query.order_by) != spec.query_order_by or not query.standard_ordering:
         return None
-    if _select_columns(queryset, queryset.model._meta) != spec.select_columns:
+    if _select_columns(queryset) != spec.select_columns:
         return None
     if set(query.annotations) - _WINDOW_ANNOTATIONS:
         return None
@@ -1070,13 +1064,14 @@ def _build_lateral_spec(request: NestedConnectionRequest) -> LateralWindowSpec |
       spliced at fetch time. A multi-table / ``Exists`` / ``Subquery`` /
       expression qual, an ``is_empty()`` hook, an M2M through filter, or a
       keyset shape's filter still downgrades;
-    - an ordering that is not plain local concrete columns (expressions,
-      ``__`` traversals, or multi-table parent columns), a relation name the
-      compiler orders by its model's ``Meta.ordering`` included: it arrives
-      expanded into those terms (``utils/querysets.py::expand_relation_order``);
-    - a ``defer()``-shaped projection (the ``.only()`` walker contract is
-      the supported shape), selected multi-table parent columns, or a
-      composite/columnless primary key.
+    - an ordering whose compiled terms are not bare child-table columns
+      (``_order_columns``: a non-column expression, explicit nulls placement, a
+      joined alias - a relation traversal or a multi-table parent column), a
+      relation name the compiler orders by its model's ``Meta.ordering``
+      included: it arrives expanded into those terms
+      (``utils/querysets.py::expand_relation_order``);
+    - a projection Django selects from a multi-table parent table or refuses
+      (``_select_columns``), or a composite/columnless primary key.
     """
     if request.keyset_seek is not None and request.with_total_count:
         # Counted keyset seek: the ORM's qualify-wrapped filtered-count window
@@ -1125,7 +1120,7 @@ def _build_lateral_spec(request: NestedConnectionRequest) -> LateralWindowSpec |
         return None  # composite primary key - no single default child join column.
     if type(child_queryset) is not QuerySet:
         return None  # custom subclass - the lateral class rebind would erase it.
-    order_columns = _order_columns(request.order_by, child_meta)
+    order_columns = _order_columns(request.order_by, child_queryset)
     if order_columns is None:
         return None
     if request.keyset_seek is not None:
@@ -1140,7 +1135,7 @@ def _build_lateral_spec(request: NestedConnectionRequest) -> LateralWindowSpec |
             # mismatch means the two drifted - downgrade rather than misalign
             # values against raw SQL columns.
             return None
-    select_columns = _select_columns(child_queryset, child_meta)
+    select_columns = _select_columns(child_queryset)
     if select_columns is None:
         return None
     fields_by_attname = {field.attname: field for field in child_meta.concrete_fields}
@@ -1204,77 +1199,74 @@ def _build_lateral_spec(request: NestedConnectionRequest) -> LateralWindowSpec |
 
 def _order_columns(
     order_by: tuple[OrderEntry, ...],
-    child_meta: _OptionsAny,
+    queryset: QuerySet[models.Model],
 ) -> tuple[tuple[str, bool], ...] | None:
-    """Map the deterministic order onto local concrete columns, or ``None``.
+    """Map the deterministic order onto the child table's own columns, or ``None``.
 
-    The lateral builder renders plain ``"column ASC/DESC"`` entries (matching
-    what Django emits on Postgres for string orderings, so window row numbers
-    cannot drift from the windowed body's). An EMPTY order, expression entries,
-    relation traversals, and names that are not local concrete fields
-    downgrade to windowed: the lateral branch cannot render ``OVER (ORDER BY
-    )`` (or an ``ORDER BY  LIMIT`` page), while the windowed body it mirrors
-    renders a valid orderless window for the same request. A relation name
-    arrives as the planner expanded it (``utils/querysets.py::expand_relation_order``):
-    its own key column when the compiler orders it so, else the related
-    ``Meta.ordering`` terms, which downgrade here. A random order never arrives:
-    the planner leaves it to the per-parent pipeline
+    The terms are compiled the way the windowed body compiles them:
+    ``SQLCompiler.get_order_by`` runs on a clone of ``queryset``'s query ordered
+    by ``order_by`` alone, so a name, an ``F``, an ``asc()`` / ``desc()``
+    expression and a trimmed relation key (``shelf__pk`` is ``shelf_id``) each
+    resolve to the ``Col`` Django orders by. The lateral builder renders plain
+    ``"column ASC/DESC"`` entries (what Django emits on Postgres for those
+    terms, so window row numbers cannot drift from the windowed body's); a term
+    that resolves to anything else downgrades to windowed: an expression that
+    is not a bare column, explicit ``nulls_first`` / ``nulls_last``, or a column
+    on a joined alias (a relation traversal, a multi-table inheritance parent
+    column). An EMPTY order downgrades too: the lateral branch cannot render
+    ``OVER (ORDER BY )`` (or an ``ORDER BY  LIMIT`` page), while the windowed
+    body it mirrors renders a valid orderless window for the same request. A
+    relation name arrives as the planner expanded it
+    (``utils/querysets.py::expand_relation_order``). An order the compiler
+    refuses (``FieldError``, or the ``AttributeError`` of a term with no
+    direction method, as ``plans.py::has_random_term`` reads them) downgrades,
+    and the windowed body raises Django's own error at execution. A random
+    order never arrives: the planner leaves it to the per-parent pipeline
     (``optimizer/plans.py::has_random_term``).
     """
-    if not order_by:
+    probe = queryset.query.clone()
+    probe.clear_ordering(force=True)
+    probe.order_by = order_by
+    try:
+        compiled = _query_compiler(probe, queryset.db).get_order_by()
+    except (FieldError, AttributeError):
         return None
+    base_alias = probe.get_initial_alias()
     columns: list[tuple[str, bool]] = []
-    for entry in order_by:
-        if not isinstance(entry, str):
+    for term, _sql in compiled:
+        if not isinstance(term, OrderBy) or term.nulls_first or term.nulls_last:
             return None
-        parsed = order_entry_name_and_direction(entry)
-        if parsed is None:
+        column = term.expression
+        if not isinstance(column, Col) or column.alias != base_alias:
             return None
-        name, descending = parsed
-        if "__" in name:
-            return None
-        if name == "pk":
-            name = child_meta.pk.attname
-        field = next(
-            (f for f in child_meta.concrete_fields if name in (f.name, f.attname)),
-            None,
-        )
-        if field is None or field.model._meta.db_table != child_meta.db_table:
-            return None
-        # A local concrete field's ``column`` is its db column name.
-        columns.append((require(field.column, is_str), descending))
-    return tuple(columns)
+        # A column's target is a concrete field, whose ``column`` is its db column name.
+        columns.append((require(column.target.column, is_str), term.descending))
+    return tuple(columns) or None
 
 
-def _select_columns(
-    queryset: QuerySet[models.Model],
-    child_meta: _OptionsAny,
-) -> tuple[tuple[str, str], ...] | None:
-    """Return the loaded ``(attname, column)`` projection in concrete-field order.
+def _select_columns(queryset: QuerySet[models.Model]) -> tuple[tuple[str, str], ...] | None:
+    """Return the loaded ``(attname, column)`` projection in concrete-field order, or ``None``.
 
-    Mirrors the ``.only()`` deferred-loading shape the walker plans (names
-    plus the pk); the full projection when nothing is deferred. A ``defer()``
-    shape (exclusion list) is not a walker product - downgrade rather than
-    re-implement Django's defer semantics. The Django-private
-    ``deferred_loading`` read goes through the shared
-    ``plans.py::deferred_loading_of``; unreadable shapes downgrade to the
-    windowed strategy instead of escaping a private-contract error.
+    Django computes it: ``Query.get_select_mask`` reads the ``.only()`` /
+    ``.defer()`` state and ``SQLCompiler.get_default_columns`` turns the mask
+    into the model's selected ``Col``s, the columns the windowed body selects
+    for the same queryset (the pk included whatever the mask names). ``None``
+    when a selected column lives on a multi-table inheritance parent (its
+    ``Col`` carries the parent-link join's alias, which the lateral branch does
+    not join) or when Django refuses the projection (an unknown ``.only()`` /
+    ``.defer()`` name), so the windowed body runs and raises Django's own error.
     """
-    loading = deferred_loading_of(queryset)
-    if loading is None:
+    query = queryset.query.clone()
+    try:
+        select_mask = query.get_select_mask()
+        selected = _query_compiler(query, queryset.db).get_default_columns(select_mask)
+    except (FieldDoesNotExist, FieldError):
         return None
-    names, defer = loading
-    if defer:
-        if names:
+    base_alias = query.get_initial_alias()
+    columns: list[tuple[str, str]] = []
+    for column in selected:
+        if not isinstance(column, Col) or column.alias != base_alias:
             return None
-        fields = tuple(child_meta.concrete_fields)
-    else:
-        fields = tuple(
-            field
-            for field in child_meta.concrete_fields
-            if field.primary_key or field.name in names or field.attname in names
-        )
-    if any(field.model._meta.db_table != child_meta.db_table for field in fields):
-        return None
-    # A concrete field's ``column`` is its db column name.
-    return tuple((field.attname, require(field.column, is_str)) for field in fields)
+        # A column's target is a concrete field, whose ``column`` is its db column name.
+        columns.append((column.target.attname, require(column.target.column, is_str)))
+    return tuple(columns)

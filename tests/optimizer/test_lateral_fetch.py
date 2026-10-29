@@ -20,7 +20,7 @@ from apps.library.models import Book, Branch, Genre, LendingDesk, Shelf
 from apps.scalars.models import ScalarSpecimen
 from django.db import connections, models
 from django.db.models import F, Prefetch, Q, QuerySet, Value
-from django.db.models.options import Options
+from django.db.models.functions import Lower
 from typing_extensions import Self
 
 from django_strawberry_framework.exceptions import OptimizerError
@@ -116,11 +116,6 @@ def _books(rows: Iterable[models.Model]) -> list[Book]:
         assert isinstance(row, Book)
         proven.append(row)
     return proven
-
-
-def _meta(model: type[models.Model]) -> "Options[models.Model]":
-    """``model``'s options read through the model base, as the strategy holds them."""
-    return model._meta
 
 
 def _built_spec(request: NestedConnectionRequest) -> LateralWindowSpec:
@@ -379,12 +374,9 @@ def test_plain_single_table_where_rejects_relation_and_expression_quals() -> Non
             {"child_queryset": Book.objects.extra(select={"marker": "1"})},
             "extra(select=...) is not reproduced",
         ),
-        (
-            {"child_queryset": Book.objects.defer("subtitle")},
-            "defer() projection shape (the walker only plans .only())",
-        ),
-        ({"order_by": (F("title").asc(), "id")}, "expression ordering"),
         ({"order_by": ("shelf__code", "id")}, "relation-traversal ordering"),
+        ({"order_by": (F("title").desc(nulls_last=True), "id")}, "explicit nulls placement"),
+        ({"order_by": (Lower("title"), "id")}, "a non-column order expression"),
     ],
 )
 def test_spec_downgrades_to_windowed(overrides: dict[str, object], reason: str) -> None:
@@ -398,17 +390,62 @@ def test_spec_downgrades_to_windowed(overrides: dict[str, object], reason: str) 
     assert WINDOW_ROW_NUMBER in entry.queryset.query.annotations
 
 
+@pytest.mark.parametrize(
+    ("overrides", "select_columns", "order_columns"),
+    [
+        pytest.param(
+            {"child_queryset": Book.objects.defer("subtitle")},
+            (
+                ("id", "id"),
+                ("title", "title"),
+                ("circulation_status", "circulation_status"),
+                ("shelf_id", "shelf_id"),
+            ),
+            (("title", False), ("id", False)),
+            id="defer-projection",
+        ),
+        pytest.param(
+            {"order_by": (F("title").asc(), F("id").desc())},
+            (("id", "id"), ("title", "title"), ("shelf_id", "shelf_id")),
+            (("title", False), ("id", True)),
+            id="expression-order",
+        ),
+        pytest.param(
+            {"order_by": ("shelf__pk", "id")},
+            (("id", "id"), ("title", "title"), ("shelf_id", "shelf_id")),
+            (("shelf_id", False), ("id", False)),
+            id="trimmed-relation-key-order",
+        ),
+    ],
+)
+def test_spec_plans_lateral_for_shapes_django_compiles_onto_the_child_table(
+    overrides: dict[str, object],
+    select_columns: tuple[tuple[str, str], ...],
+    order_columns: tuple[tuple[str, bool], ...],
+) -> None:
+    """A projection or order Django compiles to child-table columns plans lateral.
+
+    The projection is the one ``get_default_columns`` selects for the mask (a
+    ``defer()`` shape loads every other column), and each order term is the
+    ``Col`` ``get_order_by`` resolves (an ``asc()`` / ``desc()`` expression, a
+    relation key trimmed to the local ``shelf_id``).
+    """
+    spec = _lateral_spec(_planned_lateral_queryset(_shelf_books_request(**overrides)))
+    assert spec.select_columns == select_columns
+    assert spec.order_columns == order_columns
+
+
 def test_order_columns_reject_unresolvable_names() -> None:
     """The order mapper's defensive tail, pinned directly.
 
-    ``"?"``, empty entries, and names that resolve to nothing are not walker
-    products (``deterministic_order`` starts from a validated queryset
-    ordering), so they are pinned on the helper rather than through the
-    strategy - the windowed fallback could not ``order_by`` them either.
+    ``"?"`` and names that resolve to nothing are not walker products
+    (``deterministic_order`` starts from a validated queryset ordering, and the
+    planner leaves a random order to the per-parent pipeline), so they are
+    pinned on the helper rather than through the strategy - the windowed
+    fallback could not ``order_by`` them either.
     """
-    assert _order_columns(("no_such_field",), _meta(Book)) is None
-    assert _order_columns(("?",), _meta(Book)) is None
-    assert _order_columns(("",), _meta(Book)) is None
+    assert _order_columns(("no_such_field",), Book.objects.all()) is None
+    assert _order_columns(("?",), Book.objects.all()) is None
 
 
 def test_order_columns_reject_an_empty_order() -> None:
@@ -420,7 +457,7 @@ def test_order_columns_reject_an_empty_order() -> None:
     shape, so the downgrade keeps the request planned instead of crashing the
     lateral SQL at fetch time.
     """
-    assert _order_columns((), _meta(Book)) is None
+    assert _order_columns((), Book.objects.all()) is None
     plan = OptimizationPlan()
     assert LateralPrefetchStrategy().plan(_shelf_books_request(order_by=()), plan) is True
     (entry,) = plan.prefetch_related
@@ -451,13 +488,16 @@ def test_spec_downgrades_for_multi_table_inherited_order_column() -> None:
 
     ``LendingDesk.opened_on`` lives on the ``Venue`` table, one parent-link join
     away from the child table the lateral branch reads; the child-local
-    ``window_count`` beside it maps onto the child's own columns.
+    ``window_count`` beside it maps onto the child's own columns, and the
+    inherited ``id`` is ordered by the parent link Django trims it to.
     """
-    assert _order_columns(("window_count", "pk"), _meta(LendingDesk)) == (
+    desks = LendingDesk.objects.all()
+    assert _order_columns(("window_count", "pk"), desks) == (
         ("window_count", False),
         ("venue_ptr_id", False),
     )
-    assert _order_columns(("opened_on", "pk"), _meta(LendingDesk)) is None
+    assert _order_columns(("id",), desks) == (("venue_ptr_id", False),)
+    assert _order_columns(("opened_on", "pk"), desks) is None
     request = _shelf_books_request(
         child_queryset=LendingDesk.objects.only("window_count"),
         order_by=("opened_on", "pk"),
@@ -473,7 +513,7 @@ def test_spec_downgrades_for_selected_multi_table_parent_column() -> None:
     inherited ``name``, which lives on the ``Venue`` parent table.
     """
     child_queryset = LendingDesk.objects.only("name", "window_count")
-    assert _select_columns(child_queryset, _meta(LendingDesk)) is None
+    assert _select_columns(child_queryset) is None
     request = _shelf_books_request(
         child_queryset=child_queryset,
         order_by=("window_count", "pk"),
@@ -481,13 +521,22 @@ def test_spec_downgrades_for_selected_multi_table_parent_column() -> None:
     assert _build_lateral_spec(request) is None
 
 
-def test_spec_downgrades_on_unreadable_deferred_loading() -> None:
-    """Unreadable projection state downgrades instead of raising in the lateral path."""
-    queryset = Book.objects.all()
-    # basedpyright: the planted unreadable deferred_loading is the hostile input under test;
-    # django-stubs types the slot as a (field-name set, bool) pair
-    queryset.query.deferred_loading = (None, False)  # pyright: ignore[reportAttributeAccessIssue]
-    assert _build_lateral_spec(_request(Shelf, "books", child_queryset=queryset)) is None
+def test_select_columns_reads_djangos_projection_of_an_inherited_child() -> None:
+    """A child-local ``.only()`` on a multi-table child selects the parent link, not ``id``.
+
+    ``LendingDesk.only("window_count")`` loads the child table's own
+    ``venue_ptr_id`` (its pk) beside ``window_count``; the inherited
+    ``Venue.id`` stays on the parent table Django does not join.
+    """
+    assert _select_columns(LendingDesk.objects.only("window_count")) == (
+        ("venue_ptr_id", "venue_ptr_id"),
+        ("window_count", "window_count"),
+    )
+
+
+def test_select_columns_downgrades_a_projection_django_refuses() -> None:
+    """An unknown ``.only()`` name downgrades; the windowed body raises Django's own error."""
+    assert _select_columns(Book.objects.only("no_such_field")) is None
 
 
 # ---------------------------------------------------------------------------

@@ -406,7 +406,6 @@
 "tests/optimizer/test_hints.py::_prefetch_through_constructor" = { reportArgumentType = 1 }
 "tests/optimizer/test_hints.py::_prefetch_through_factory" = { reportArgumentType = 1 }
 "tests/optimizer/test_join_taxonomy.py::_as_field" = { reportReturnType = 1 }
-"tests/optimizer/test_lateral_fetch.py::test_spec_downgrades_on_unreadable_deferred_loading" = { reportAttributeAccessIssue = 1 }
 "tests/optimizer/test_nested_fetch.py::test_builtin_strategy_registry_is_cached_and_immutable" = { reportIndexIssue = 1 }
 "tests/optimizer/test_nested_fetch.py::test_resolve_strategy_rejects_hostile_type_and_class_name.HostileType.__name__" = { reportIncompatibleVariableOverride = 1 }
 "tests/optimizer/test_nested_fetch.py::test_unwindowable_child_queryset_reason_matrix" = { reportAttributeAccessIssue = 1 }

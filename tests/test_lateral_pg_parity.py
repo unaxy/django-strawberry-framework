@@ -12,10 +12,11 @@ show:
 - byte-identical data, identical query cost, and real ``CROSS JOIN LATERAL``
   versus the windowed body (reverse-FK pagination shapes, count-free
   ``hasNextPage``, reverse-M2M through-once, depth-two, divergent aliases,
-  ``last: 0`` as ``first: 0``, visibility-scoped lateral, request-varying
-  visibility on one extension instance, keyset seek/count/cursor parity,
-  keyset and offset pages 1 and 2 over a reverse FK and an M2M whose target
-  ``get_queryset`` orders the relation, forward or ``.reverse()``d);
+  ``last: 0`` as ``first: 0``, visibility-scoped lateral, a ``defer()``-shaped
+  child, request-varying visibility on one extension instance, keyset
+  seek/count/cursor parity, keyset and offset pages 1 and 2 over a reverse FK
+  and an M2M whose target ``get_queryset`` orders the relation, by name or
+  expression, forward or ``.reverse()``d);
 - LATERAL SQL-shape pins a generic live capture does not uniquely show
   (through-table join once, visibility predicate once, in-branch keyset seek,
   row-value comparison, JSONB field adapter, the ``ROW_NUMBER`` order and the
@@ -48,7 +49,7 @@ from apps.scalars.models import ScalarSpecimen
 from django.db import connection as db_connection
 from django.db import connections as django_connections
 from django.db import models
-from django.db.models import Model, Prefetch, QuerySet
+from django.db.models import F, Model, Prefetch, QuerySet
 from django.db.models.expressions import Combinable
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
@@ -1168,7 +1169,7 @@ _HOOK_SHAPES = {
 
 def _hook_ordered_schemas(
     shape: _HookShape,
-    hook_order: tuple[str, ...] | None,
+    hook_order: tuple[str | Combinable, ...] | None,
     *,
     reverse: bool,
     keyset: bool,
@@ -1303,18 +1304,28 @@ def _uniform_seek(shape: _HookShape, window_order: str) -> str:
         pytest.param(("-id",), False, "id DESC", (["3", "2"], ["1"]), id="-id"),
         pytest.param(("-id",), True, "id ASC", (["1", "2"], ["3"]), id="-id-reversed"),
         pytest.param(None, True, "id DESC", (["3", "2"], ["1"]), id="unordered-reversed"),
+        pytest.param(
+            (F("title").asc(),),
+            False,
+            "title ASC, id ASC",
+            (["2", "3"], ["1"]),
+            id="title-expression",
+        ),
     ],
 )
 def test_hook_ordered_window_pages_in_branch_with_parity(
     *,
     shape: str,
     keyset: bool,
-    hook_order: tuple[str, ...] | None,
+    hook_order: tuple[str | Combinable, ...] | None,
     reverse: bool,
     window_order: str,
     pages: tuple[list[str], list[str]],
 ) -> None:
     """A child ``get_queryset`` order, forward or ``.reverse()``d, is what the lateral window pages by.
+
+    The order may be names or the ``asc()`` expression Django compiles onto the
+    same column.
 
     Page 1 (``first: 2``) and page 2 (after page 1's ``endCursor``) each run
     real ``CROSS JOIN LATERAL`` SQL whose data and cursors equal the windowed
@@ -1515,6 +1526,68 @@ def test_keyset_lateral_seek_is_an_index_seek() -> None:
             cursor.execute("DROP INDEX keyset_seek_pin_idx")
     assert "keyset_seek_pin_idx" in explain_plan
     assert "Index" in explain_plan
+
+
+# =============================================================================
+# A deferring child get_queryset keeps its defer() shape on the lateral path
+# =============================================================================
+
+
+def _deferring_schemas() -> tuple[strawberry.Schema, strawberry.Schema]:
+    """A ``ShelfType.booksConnection`` whose child type's ``get_queryset`` defers ``subtitle``.
+
+    The query never selects ``subtitle``, so the plan keeps the hook's deferral
+    (``plans.py::apply_projection``) and the child queryset reaches the
+    strategy ``defer()``-shaped.
+    """
+
+    @classmethod
+    def _defer_subtitle(
+        _cls: type[DjangoType],
+        queryset: QuerySet[Book],
+        _info: object,
+    ) -> QuerySet[Book]:
+        return queryset.defer("subtitle")
+
+    make_django_type(
+        "DeferringBookType",
+        Book,
+        ("id", "title", "subtitle"),
+        meta_extra={"connection": {"total_count": True}},
+        namespace_extra={"get_queryset": _defer_subtitle},
+    )
+    shelf_type = make_django_type("DeferringShelfType", Shelf, ("id", "code", "books"))
+    finalize_django_types()
+    query_cls = strawberry.type(
+        type(
+            "Query",
+            (),
+            {
+                "__annotations__": {"shelves": list[shelf_type]},
+                "shelves": DjangoListField(shelf_type),
+            },
+        ),
+    )
+    return (
+        build_strategy_schema(query_cls, "windowed"),
+        build_strategy_schema(query_cls, "lateral"),
+    )
+
+
+def test_deferring_child_hook_takes_the_lateral_path_with_parity() -> None:
+    """A ``defer()``-shaped child runs ``CROSS JOIN LATERAL`` with the windowed body's data.
+
+    The lateral branch selects the columns Django selects for the deferral
+    (``lateral_fetch.py::_select_columns``), so the deferred ``subtitle``
+    column never reaches the lateral SQL.
+    """
+    _seed_library()
+    _data, captured = _assert_parity(
+        f"{{ shelves {{ id booksConnection(first: 2) {{ {_FULL_PAGE} }} }} }}",
+        schemas=_deferring_schemas(),
+    )
+    lateral_sql = next(entry["sql"] for entry in captured if "CROSS JOIN LATERAL" in entry["sql"])
+    assert "subtitle" not in lateral_sql
 
 
 # =============================================================================

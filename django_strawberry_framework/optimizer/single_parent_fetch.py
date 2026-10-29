@@ -96,11 +96,11 @@ class SingleParentWindowSpec:
     row, equal to the page size when the probe is off).
 
     ``select_related`` (the planned child join graph) and ``select_columns`` (the
-    planned ``(attname, column)`` projection, or ``None`` for a ``defer()`` shape
-    ``_select_columns`` declines to model) freeze the child projection at plan
-    time so ``_fetch_single_parent_rows`` can prove the fetch-time query still
-    loads exactly what the windowed body would before trusting the pristine
-    re-query.
+    planned ``(attname, column)`` projection Django selects, or ``None`` for a
+    projection reaching a multi-table parent table or one Django refuses)
+    freeze the child projection at plan time so ``_fetch_single_parent_rows``
+    can prove the fetch-time query still loads exactly what the windowed body
+    would before trusting the pristine re-query.
 
     Eligibility pins ``with_total_count`` / ``reverse`` / ``offset`` and the
     keyset seek out (``single_parent_spec``), so no counted / reversed / offset /
@@ -171,10 +171,7 @@ def single_parent_spec(request: NestedConnectionRequest) -> SingleParentWindowSp
         parent_link_table=request.child_queryset.model._meta.db_table,
         fetch_limit=fetch_limit,
         select_related=request.child_queryset.query.select_related,
-        select_columns=_select_columns(
-            request.child_queryset,
-            request.child_queryset.model._meta,
-        ),
+        select_columns=_select_columns(request.child_queryset),
     )
 
 
@@ -280,7 +277,7 @@ def _fetch_single_parent_rows(queryset: SingleParentWindowQuerySet) -> list[mode
     # ``select_related``); any drift falls back to the windowed body.
     if query.select_related != spec.select_related:
         return None
-    if _select_columns(queryset, queryset.model._meta) != spec.select_columns:
+    if _select_columns(queryset) != spec.select_columns:
         return None
     parent_ids = _single_parent_where_ids(query.where, spec)
     if parent_ids is None:

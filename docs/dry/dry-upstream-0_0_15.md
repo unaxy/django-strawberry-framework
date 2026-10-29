@@ -270,6 +270,16 @@ it lands with its tick.
   - Risk / blockers: overriding upstream behaviour; it needs an origin comment if adapted. The item 2 vocabulary test
     keeps `pageInfo` unrenamed until this lands.
 
+- [ ] 36. (found landing item 23) The single-parent projection guard is blind for a multi-table child
+  - Our code: `optimizer/single_parent_fetch.py` compares `lateral_fetch.py::_select_columns` at plan and fetch time.
+  - Upstream: none; package behaviour.
+  - Status: CONFIRMED by item 23's implementer. `_select_columns` answers `None` for any projection that selects a
+    multi-table parent column (lateral cannot join it), so a full multi-table child load fingerprints `None` at both
+    ends and a projection drift between plan and fetch goes unseen.
+  - Fix: a single-parent fingerprint that keeps each column's alias instead of refusing parent-table columns.
+  - Behaviour change: a drifted multi-table projection falls back instead of serving the planned columns.
+  - Risk / blockers: robustness row, not a release blocker (GOAL.md trust boundary).
+
 ## Plain replacements (no behaviour change, no reason to keep)
 
 - [x] 12. (NET-1) `_root_type` re-derives `GraphQLSchema.get_root_type`
@@ -446,7 +456,7 @@ it lands with its tick.
 
 ## Maintainer decisions (a reason to keep exists)
 
-- [ ] 23. (OPT-4 = O5, with ORM-1) The lateral builder and relation-order expansion are a second compiler
+- [x] 23. (OPT-4 = O5, with ORM-1) The lateral builder and relation-order expansion are a second compiler
   - Our code:
     - `optimizer/lateral_fetch.py::_select_columns` (~30 lines), `::_order_columns` (~40) and the raw SQL in
       `::build_lateral_sql` (~200).
@@ -473,6 +483,17 @@ it lands with its tick.
     today.
   - Risk / blockers: an EXPLAIN re-check on the Postgres tier; private compiler APIs. The two halves are entangled and
     land together or not at all.
+  - Outcome: split; the "entangled" claim held only for the expansion and the branch compile.
+    - Landed: `_select_columns` reads Django's `Query.get_select_mask` + `SQLCompiler.get_default_columns`, and
+      `_order_columns` compiles the expanded order with `SQLCompiler.get_order_by`. `defer()` shapes, a multi-table
+      child's own `.only()`, `F(...).asc()` / `.desc()` and trimmed relation-key orders now take the lateral path.
+    - Kept: the order expansion (`expand_relation_order` and its helpers, ~120 lines). Window order terms must resolve
+      against the window's own query, and Django's seam returns alias-bound `Col`s from a join-mutated query, so the
+      swap would move the plan and four consumers (window, scalar projection, index advisory, lateral map) onto `Col`
+      vocabulary for about -80 lines and change the Postgres ORDER BY text. The expansion is CONFIRMED faithful.
+    - Maintainer decision: compiling the whole lateral branch with Django (`as_sql()` plus a hand-written
+      LATERAL/VALUES shell, about -300 lines). It replaces the recognizer's plan-time WHERE proof, changes the emitted
+      SQL text, and lets multi-table and `Exists` visibility scopes ride lateral.
 
 - [ ] 24. (OPT-5) `_correlation_steps` hand-builds the GenericRelation content-type restriction
   - Our code: the `kind == "generic"` arm of `optimizer/predicates.py::_correlation_steps` (~10 lines). It filters
