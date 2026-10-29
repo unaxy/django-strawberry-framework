@@ -327,17 +327,18 @@ it lands with its tick.
   - Tests: existing pins, the `tests/mutations/test_resolvers.py` `unprovided_exclude_keeps_every_member`,
     check-constraint and unique-check rows. No fakeshop mutation reaches an expression or conditional constraint.
 
-- [ ] 16. (TYP-4) Choice-group flattening re-walks `Field.flatchoices`
-  - Our code: the `flatten_groups` branch of `types/converters.py::_normalize_choice_pairs`, and
-    `::choice_column_pairs` (~10 lines).
-  - Upstream: `django/db/models/fields/__init__.py::Field.flatchoices`, which calls
-    `django/utils/choices.py::flatten_choices`. Public, Django 5.0+.
-  - Lines: ~8. The malformed-entry `ConfigurationError` checks stay, because Django validates choices only in system
-    checks.
-  - Status: CONFIRMED (7 choice columns, 0 diffs). The grouped path was not exercised; fakeshop has none.
-  - Reason to keep ours: none, as long as we validate first and then flatten with Django.
-  - Behaviour change: none.
-  - Risk / blockers: none.
+- [x] 16. (TYP-4) Choice-group flattening re-walks `Field.flatchoices`: kept, nothing to replace
+  - Our code: the `flatten_groups` branch of `types/converters.py::_normalize_choice_pairs` is four lines inside the
+    validating walk; `::choice_column_pairs` is a wrapper over it.
+  - Upstream: `django/utils/choices.py::flatten_choices` (public; the same body at 5.2.16 and 6.1.2). It flattens one
+    level and yields each inner entry raw, unvalidated.
+  - Why it stays: our validation must unpack every top-level entry before Django's unpack runs (Django raises a raw
+    `ValueError`/`TypeError` on a malformed entry and reads a two-character string as a pair), and every inner entry
+    after it (Django yields `"bad"` or a nested group as is). Calling `flatten_choices` between the two passes saves
+    about two lines, unpacks every flat entry twice, and trades the real-class group test for `isinstance`, which
+    flattens a lazy-proxied list label.
+  - Status: probed (7 fakeshop columns and 23 synthetic shapes, strict and blank). The only behaviour diff is the
+    lazy-proxied list label.
 
 - [ ] 17. (TYP-8) The mutation-marker lookup indexes `parent_type.fields` by hand
   - Our code: the field lookup in `schema.py::DjangoMutationExecutionContext._marked_mutation_class` (~8 lines).
