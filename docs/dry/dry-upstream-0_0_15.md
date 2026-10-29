@@ -315,16 +315,17 @@ it lands with its tick.
   - Not in this change: `mutations/resolvers.py::_column_field_names` (the same seam changes the `exclude` it passes,
     46 of 287 models differ) and `forms/inputs.py::require_readable_choice_keys` (`dry-0_0_15_3.md` item 74).
 
-- [ ] 15. (WRT-3, the reducible part of F2) `_expression_references` hand-models `Model._get_expr_references`
-  - Our code: `mutations/resolvers.py::_expression_references` (~28 lines). Its docstring says it is "the public-API
-    walk of `Model._get_expr_references`".
-  - Upstream: `django/db/models/base.py::Model._get_expr_references`, a private classmethod whose body is
-    byte-identical in 5.2.16 and 6.1.2.
-  - Lines: ~20.
-  - Status: CONFIRMED (19 constraint expressions plus 3 synthetic trees, 0 multiset diffs).
-  - Reason to keep ours: none for the walk. The rest of `_constraint_groups` stays (see "Closed by this sweep").
+- [x] 15. (WRT-3, the reducible part of F2) `_expression_references` hand-models `Model._get_expr_references`
+  - Our code: `mutations/resolvers.py::_expression_references` takes the declarer model and reads the first segment
+    of each path Django's walk yields; the hand-written `Q` / `F` / source-expression walk is gone.
+  - Upstream: `django/db/models/base.py::Model._get_expr_references`, a private classmethod, byte-identical in
+    5.2.16, 6.0.9 and 6.1.2; Django's constraint checks, `_get_field_expression_map` and the autodetector call it.
+    Called through `utils/_narrowing.py::call_method`, so no suppression.
+  - Status: CONFIRMED (46 expressions, 28 real across 155 models plus 18 synthetic trees, 0 multiset diffs;
+    `_constraint_groups` for every model, 0 diffs).
   - Behaviour change: none.
-  - Risk / blockers: private Django API.
+  - Tests: existing pins, the `tests/mutations/test_resolvers.py` `unprovided_exclude_keeps_every_member`,
+    check-constraint and unique-check rows. No fakeshop mutation reaches an expression or conditional constraint.
 
 - [ ] 16. (TYP-4) Choice-group flattening re-walks `Field.flatchoices`
   - Our code: the `flatten_groups` branch of `types/converters.py::_normalize_choice_pairs`, and

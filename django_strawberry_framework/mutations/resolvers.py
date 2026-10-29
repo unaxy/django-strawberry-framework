@@ -106,11 +106,9 @@ from django.core.exceptions import NON_FIELD_ERRORS, ObjectDoesNotExist, Validat
 from django.db import IntegrityError, transaction
 from django.db.models import (
     BaseConstraint,
-    F,
     GeneratedField,
     Model,
     ProtectedError,
-    Q,
     RestrictedError,
 )
 from django.db.models.constants import LOOKUP_SEP
@@ -132,6 +130,7 @@ from django_strawberry_framework.utils._narrowing import (
     is_exact_dict,
     is_exact_pair,
     is_str,
+    is_tuple,
     list_of,
     pk_of,
     read_attr,
@@ -1096,40 +1095,23 @@ def _constraint_members(declarer: type[models.Model], constraint: BaseConstraint
         if is_str(expression):
             references.append(expression.split(LOOKUP_SEP, 1)[0])
         else:
-            references.extend(_expression_references(expression))
+            references.extend(_expression_references(declarer, expression))
     condition = read_attr(constraint, "condition", None)
     if condition is not None:
-        references.extend(_expression_references(condition))
+        references.extend(_expression_references(declarer, condition))
     return _member_field_names(declarer, references)
 
 
-def _expression_references(expression: object) -> list[str]:
-    """Return the first path segment of every column ``expression`` references.
+def _expression_references(model: type[models.Model], expression: object) -> list[str]:
+    """Return the first path segment of every name ``expression`` references on ``model``.
 
-    The public-API walk of ``Model._get_expr_references``: a ``Q`` contributes each
-    lookup's leading name and walks each lookup value and nested ``Q``; an ``F``
-    contributes its leading name; any other expression walks its source expressions.
+    Django's own walk, ``Model._get_expr_references``: the one constraint validation
+    and ``GeneratedField`` read.
     """
-    references: list[str] = []
-    pending: list[object] = [expression]
-    while pending:
-        node = pending.pop()
-        if truth.is_instance(node, Q):
-            for child in node.children:
-                if truth.is_instance(child, tuple):
-                    lookup, value = child
-                    references.append(str(lookup).split(LOOKUP_SEP, 1)[0])
-                    pending.append(value)
-                else:
-                    pending.append(child)
-        elif truth.is_instance(node, F):
-            name = require(read_attr(node, "name"), is_str)
-            references.append(name.split(LOOKUP_SEP, 1)[0])
-        else:
-            source = read_attr(node, "get_source_expressions", None)
-            if callable(source):
-                pending.extend(list_of(source()))
-    return references
+    return [
+        require(require(path, is_tuple)[0], is_str)
+        for path in list_of(call_method(model, "_get_expr_references", expression))
+    ]
 
 
 def _member_field_names(declarer: type[models.Model], names: Iterable[str]) -> set[str]:
@@ -1148,7 +1130,7 @@ def _member_field_names(declarer: type[models.Model], names: Iterable[str]) -> s
             continue
         members.add(field.name)
         if truth.is_instance(field, GeneratedField):
-            pending.extend(_expression_references(read_attr(field, "expression")))
+            pending.extend(_expression_references(declarer, read_attr(field, "expression")))
     return members
 
 
