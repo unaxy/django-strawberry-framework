@@ -14,7 +14,7 @@ from asgiref.sync import sync_to_async
 from django.db import connection
 from django.db.models import QuerySet
 from django.http import HttpRequest, HttpResponseBase
-from django.test import AsyncClient, Client, override_settings
+from django.test import override_settings
 from django.urls import path
 from graphql import ExecutionResult as CoreResult
 from graphql import FieldNode, GraphQLError, GraphQLObjectType
@@ -44,7 +44,7 @@ from django_strawberry_framework import (
 from django_strawberry_framework import _completion as completion
 from django_strawberry_framework import _graphql_core_patches as patches
 from django_strawberry_framework.schema import DjangoMutationExecutionContext
-from django_strawberry_framework.testing import AsyncTestClient
+from django_strawberry_framework.testing import AsyncTestClient, TestClient
 from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.views import AsyncDjangoGraphQLView
 
@@ -478,14 +478,11 @@ async def test_live_late_errors(
         DEBUG=False,
         MIDDLEWARE=middleware_without_debug_toolbar(),
     ):
-        response = await asyncio.wait_for(
-            AsyncClient().post(
-                "/graphql-async/",
-                data={"query": query},
-                content_type="application/json",
-            ),
+        result = await asyncio.wait_for(
+            AsyncTestClient(path="/graphql-async/").query(query, assert_no_errors=False),
             timeout=15,
         )
+        response = result.response
         response_bytes = response.content.decode()
         CURRENT.state.release.set()
         await asyncio.wait_for(CURRENT.state.drained.wait(), timeout=15)
@@ -557,14 +554,11 @@ async def test_live_late_mutation_orm(
         DEBUG=False,
         MIDDLEWARE=middleware_without_debug_toolbar(),
     ):
-        response = await asyncio.wait_for(
-            AsyncClient().post(
-                "/graphql-async/",
-                data={"query": query},
-                content_type="application/json",
-            ),
+        result = await asyncio.wait_for(
+            AsyncTestClient(path="/graphql-async/").query(query, assert_no_errors=False),
             timeout=15,
         )
+        response = result.response
         CURRENT.state.release.set()
         await asyncio.wait_for(CURRENT.state.drained.wait(), timeout=15)
         names = [row.name async for row in Branch.objects.all()]
@@ -604,10 +598,13 @@ def test_live_sync_bridge_mutation_orm(
         DEBUG=False,
         MIDDLEWARE=middleware_without_debug_toolbar(),
     ):
-        response = Client().post(
-            "/graphql-async/",
-            data={"query": query},
-            content_type="application/json",
+        response = (
+            TestClient(path="/graphql-async/")
+            .query(
+                query,
+                assert_no_errors=False,
+            )
+            .response
         )
         assert response.status_code == 200
         assert CURRENT.state.drained.is_set()
@@ -710,11 +707,7 @@ async def test_live_cancellation_waits_for_payload_cleanup(
         MIDDLEWARE=middleware_without_debug_toolbar(),
     ):
         request = asyncio.create_task(
-            AsyncClient().post(
-                "/graphql-async/",
-                data={"query": query},
-                content_type="application/json",
-            ),
+            AsyncTestClient(path="/graphql-async/").query(query, assert_no_errors=False),
         )
         assert CURRENT.state.cleanup_started is not None
         await asyncio.wait_for(CURRENT.state.started.wait(), timeout=15)
@@ -755,17 +748,16 @@ async def test_live_queryset_completion_inside_mutation(
         MIDDLEWARE=middleware_without_debug_toolbar(),
     ):
         if async_request == "direct":
-            response = await AsyncClient().post(
-                "/graphql-async/",
-                data={"query": query},
-                content_type="application/json",
+            result = await AsyncTestClient(path="/graphql-async/").query(
+                query,
+                assert_no_errors=False,
             )
         else:
-            response = await sync_to_async(Client().post)(
-                "/graphql-async/",
-                data={"query": query},
-                content_type="application/json",
+            result = await sync_to_async(TestClient(path="/graphql-async/").query)(
+                query,
+                assert_no_errors=False,
             )
+        response = result.response
     assert response_json(response) == {
         "data": {"create": {"result": {"names": ["queryset-created"]}}},
     }
@@ -830,11 +822,11 @@ async def test_live_completed_siblings_keep_upstream_results(
         DEBUG=False,
         MIDDLEWARE=middleware_without_debug_toolbar(),
     ):
-        response = await AsyncClient().post(
-            "/graphql-async/",
-            data={"query": query},
-            content_type="application/json",
+        result = await AsyncTestClient(path="/graphql-async/").query(
+            query,
+            assert_no_errors=False,
         )
+        response = result.response
     result = response_json(response)
     if shape == "success":
         assert result == {"data": {"create": {"result": {"values": ["first", "second"]}}}}
@@ -868,14 +860,14 @@ async def test_live_nested_query_keeps_its_own_completion_context(
         DEBUG=False,
         MIDDLEWARE=middleware_without_debug_toolbar(),
     ):
-        response = await asyncio.wait_for(
-            AsyncClient().post(
-                "/graphql-async/",
-                data={"query": 'mutation { create(data: {name: "outer"}) { result { nested } } }'},
-                content_type="application/json",
+        result = await asyncio.wait_for(
+            AsyncTestClient(path="/graphql-async/").query(
+                'mutation { create(data: {name: "outer"}) { result { nested } } }',
+                assert_no_errors=False,
             ),
             timeout=15,
         )
+        response = result.response
     assert response_json(response) == {
         "data": {"create": {"result": {"nested": "nested-finished"}}},
     }
