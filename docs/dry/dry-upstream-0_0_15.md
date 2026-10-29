@@ -272,14 +272,16 @@ it lands with its tick.
 
 ## Plain replacements (no behaviour change, no reason to keep)
 
-- [ ] 12. (NET-1) `_root_type` re-derives `GraphQLSchema.get_root_type`
-  - Our code: `extensions/resource_policy.py::_root_type` (~10 lines). Its one caller is `_DocumentWalk.operation`.
-  - Upstream: `graphql/type/schema.py::GraphQLSchema.get_root_type(operation)`. Public, present at 3.2.0.
-  - Lines: ~9.
-  - Status: CONFIRMED (all 3 operation types on fakeshop, 0 diffs).
-  - Reason to keep ours: none.
+- [x] 12. (NET-1) `_root_type` re-derives `GraphQLSchema.get_root_type`
+  - Our code: `_root_type` was removed. `extensions/resource_policy.py::_DocumentWalk.operation` calls
+    `graphql_schema.get_root_type(operation.operation)`.
+  - Upstream: `graphql/type/schema.py::GraphQLSchema.get_root_type(operation)`. Public; the body
+    `getattr(self, f"{operation.value}_type")` is the same at 3.2.0, 3.2.13 and 3.3.0a12.
+  - Status: CONFIRMED (3 operation types on 6 schemas, 0 diffs; an absent root is `None` on both).
   - Behaviour change: none.
-  - Risk / blockers: none.
+  - Tests: existing pins, `tests/test_resource_policy.py::test_an_operation_kind_the_schema_does_not_define_is_skipped`,
+    `::test_the_streaming_path_carries_the_same_admission_verdict` and the mutation rows of
+    `test_resource_policy_api.py`.
 
 - [ ] 13. (OPT-3, the plans.py half of O2) `_resolve_order_path_field` hand-walks order paths
   - Our code: `optimizer/plans.py::_resolve_order_path_field` (~28 lines).
