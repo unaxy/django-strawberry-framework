@@ -4819,8 +4819,8 @@ class SpelledStampTarget(models.Model):
         db_table = "mutations_spelled_stamp_target"
 
 
-class SpelledKeyOwner(models.Model):
-    """A row relating to each spelled-key target by a nullable FK and an M2M."""
+class SpelledDecimalOwner(models.Model):
+    """A row relating to the decimal-keyed target by a nullable FK and an M2M."""
 
     name: _Text = models.TextField()
     decimal_target: models.ForeignKey[
@@ -4835,6 +4835,22 @@ class SpelledKeyOwner(models.Model):
     decimal_targets: models.ManyToManyField[SpelledDecimalTarget, models.Model] = (
         models.ManyToManyField(SpelledDecimalTarget, related_name="+")
     )
+
+    class Meta:
+        app_label = "products"
+        managed = False
+        db_table = "mutations_spelled_decimal_owner"
+
+
+class SpelledStampOwner(models.Model):
+    """A row relating to the datetime-keyed target by a nullable FK and an M2M.
+
+    An owner of its own: a row also carrying the decimal key reads that column back
+    whenever it is fetched, and Django reads a ``DecimalField`` without
+    ``decimal_places`` only from 6.1, so the datetime rows run on every supported Django.
+    """
+
+    name: _Text = models.TextField()
     stamp_target: models.ForeignKey[
         SpelledStampTarget | Combinable | None,
         SpelledStampTarget | None,
@@ -4851,19 +4867,26 @@ class SpelledKeyOwner(models.Model):
     class Meta:
         app_label = "products"
         managed = False
-        db_table = "mutations_spelled_key_owner"
+        db_table = "mutations_spelled_stamp_owner"
+
+
+def _spelled_key_models(stored: object) -> tuple[type[models.Model], type[models.Model]]:
+    """The target keyed by ``stored``'s kind and the owner relating to it."""
+    if isinstance(stored, Decimal):
+        return SpelledDecimalTarget, SpelledDecimalOwner
+    return SpelledStampTarget, SpelledStampOwner
 
 
 @contextlib.contextmanager
 def _spelled_key_tables(stored: object) -> Generator[None, None, None]:
-    """Create the spelled-key tables; the target ``stored`` names holds one row keyed by it."""
+    """Create the tables of ``stored``'s kind; its target holds one row keyed by it."""
+    target, owner = _spelled_key_models(stored)
     created: list[type[models.Model]] = []
     try:
         with connection.schema_editor() as editor:
-            for model in (SpelledDecimalTarget, SpelledStampTarget, SpelledKeyOwner):
+            for model in (target, owner):
                 editor.create_model(model)
                 created.append(model)
-        target = SpelledDecimalTarget if isinstance(stored, Decimal) else SpelledStampTarget
         _ = target._default_manager.create(pk=stored)
         yield
     finally:
@@ -4872,25 +4895,21 @@ def _spelled_key_tables(stored: object) -> Generator[None, None, None]:
                 editor.delete_model(model)
 
 
-def _spelled_key_schema() -> strawberry.Schema:
-    """A create mutation writing every ``SpelledKeyOwner`` relation by raw pk."""
+def _spelled_key_schema(stored: object) -> strawberry.Schema:
+    """A create mutation writing both relations of ``stored``'s owner by raw pk."""
+    _, owner = _spelled_key_models(stored)
+    prefix = "decimal" if isinstance(stored, Decimal) else "stamp"
 
     class SpelledKeyOwnerT(DjangoType):
         class Meta:
-            model = SpelledKeyOwner
+            model = owner
             fields = ("name",)
 
     class CreateSpelledKeyOwner(DjangoMutation):
         class Meta:
-            model = SpelledKeyOwner
+            model = owner
             operation = "create"
-            fields = (
-                "name",
-                "decimal_target",
-                "decimal_targets",
-                "stamp_target",
-                "stamp_targets",
-            )
+            fields = ("name", f"{prefix}_target", f"{prefix}_targets")
             permission_classes = [_AllowAll]
 
     @strawberry.type
@@ -4952,9 +4971,10 @@ def test_relation_ids_spelling_a_stored_key_differently_link_its_row(
     """
     is_decimal = isinstance(stored, Decimal)
     prefix = "decimal" if is_decimal else "stamp"
+    _, owner_model = _spelled_key_models(stored)
     with _spelled_key_tables(stored):
-        result = _spelled_key_schema().execute_sync(
-            "mutation($d: SpelledKeyOwnerInput!) "
+        result = _spelled_key_schema(stored).execute_sync(
+            f"mutation($d: {owner_model.__name__}Input!) "
             "{ createSpelledKeyOwner(data: $d) { errors { field messages } } }",
             variable_values={
                 "d": {
@@ -4966,7 +4986,11 @@ def test_relation_ids_spelling_a_stored_key_differently_link_its_row(
         )
         assert result.errors is None, result.errors
         assert result.data == {"createSpelledKeyOwner": {"errors": []}}
-        owner = SpelledKeyOwner.objects.get(name="owner")
+        owner = owner_model._default_manager.get(name="owner")
         assert read_attr(owner, f"{prefix}_target_id") == stored
-        linked = owner.decimal_targets.all() if is_decimal else owner.stamp_targets.all()
-        assert [pk_of(row) for row in linked] == [stored]
+        if isinstance(owner, SpelledDecimalOwner):
+            linked = [pk_of(row) for row in owner.decimal_targets.all()]
+        else:
+            assert isinstance(owner, SpelledStampOwner)
+            linked = [pk_of(row) for row in owner.stamp_targets.all()]
+        assert linked == [stored]
