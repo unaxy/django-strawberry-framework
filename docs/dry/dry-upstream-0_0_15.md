@@ -395,7 +395,7 @@ it lands with its tick.
   - Behaviour change: none.
   - Risk / blockers: none.
 
-- [ ] 21. (ORM-2) `m2m_through_link_fields` re-reads through-FKs that `path_infos` already carries
+- [x] 21. (ORM-2) `m2m_through_link_fields` re-reads through-FKs that `path_infos` already carries
   - Our code: `utils/relations.py::m2m_through_link_fields` (~25 lines).
   - Upstream: `ManyToManyField.path_infos` / `ManyToManyRel.path_infos`:
     - `[0].join_field`, or `.field` when the hop is not `direct`;

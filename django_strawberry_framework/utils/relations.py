@@ -20,7 +20,6 @@ from django_strawberry_framework.exceptions import (
 from django_strawberry_framework.utils._narrowing import (
     is_class,
     is_list_or_tuple,
-    is_str,
     read_attr,
     require,
 )
@@ -825,33 +824,25 @@ def _is_foreign_key(value: object) -> TypeIs[ForeignKeyField]:
 def m2m_through_link_fields(
     field: object,
 ) -> tuple[ForeignKeyField | None, ForeignKeyField | None]:
-    """Return the M2M through table's (source-side FK, target-side FK) for one M2M hop.
+    """Return the M2M through table's (FK onto the source, FK onto the target) for one M2M hop.
 
-    Resolved from the forward ``ManyToManyField``'s own naming
-    (``m2m_field_name`` / ``m2m_reverse_field_name``, which honor
-    ``through_fields``), which stays correct for self-referential M2Ms where
-    scanning through-model FKs by target would be ambiguous. ``field`` is either
-    the forward field (the source owns it) or the ``ManyToManyRel`` (the source
-    is the target; the sides swap). ``(None, None)`` when the through model or
-    the naming API is missing.
+    Read off the hop's own ``path_infos`` (Django's join plan for the relation,
+    which honors ``through_fields`` and so stays exact for a self-referential
+    M2M, where scanning the through model's FKs by target would be ambiguous).
+    ``field`` is the forward ``ManyToManyField`` or the reverse
+    ``ManyToManyRel``; either way the first hop is the reverse of the through
+    FK onto the source and the last hop is the through FK onto the target, with
+    a parent-link hop between them when the two FKs sit on different
+    multi-table-inheritance levels of the through model. ``(None, None)`` for a
+    field that carries no ``path_infos`` (a ``FieldMeta`` snapshot).
     """
-    # Either the relation's own forward field or ``field`` itself.
-    forward_field: object = getattr(field, "field", None)
-    if not forward_field:
-        forward_field = field
-    through = m2m_through_model(field)
-    source_name: object = getattr(forward_field, "m2m_field_name", None)
-    target_name: object = getattr(forward_field, "m2m_reverse_field_name", None)
-    if through is None or not callable(source_name) or not callable(target_name):
+    if not _is_traversable_relation(field):
         return None, None
-    through_meta = through._meta
-    # ``m2m_field_name`` / ``m2m_reverse_field_name`` name the through table's
-    # two ``ForeignKey`` columns.
-    source_fk = require(through_meta.get_field(require(source_name(), is_str)), _is_foreign_key)
-    target_fk = require(through_meta.get_field(require(target_name(), is_str)), _is_foreign_key)
-    if forward_field is field:
-        return source_fk, target_fk
-    return target_fk, source_fk
+    infos = field.path_infos
+    return (
+        require(read_attr(infos[0].join_field, "field", None), _is_foreign_key),
+        require(infos[-1].join_field, _is_foreign_key),
+    )
 
 
 def is_single_column_foreign_key(field: object) -> TypeGuard[ForeignKeyField]:
