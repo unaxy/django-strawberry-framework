@@ -87,10 +87,11 @@ if TYPE_CHECKING:
 
 # Recourse text shared by every ``check_<field>_permission`` async-guard raise. A
 # filter / order permission gate is fired synchronously (on the async surface it
-# runs on the single ``sync_to_async`` worker that ``_apply_common_finalize``
-# wraps), so it can never await; an ``async def`` gate returns a TRUTHY, orphaned
-# coroutine and a naive call would treat that as a silent success -- an
-# authorization BYPASS. Mirrors ``mutations/permissions.py::_PERMISSION_ASYNC_RECOURSE``.
+# runs on a ``sync_to_async`` worker: for a filter set, the one that builds and
+# validates the set, ``_validated_filterset``), so it can never await; an
+# ``async def`` gate returns a TRUTHY, orphaned coroutine and a naive call would
+# treat that as a silent success -- an authorization BYPASS. Mirrors
+# ``mutations/permissions.py::_PERMISSION_ASYNC_RECOURSE``.
 _GATE_ASYNC_RECOURSE = (
     "A FilterSet / OrderSet permission gate runs synchronously, so it cannot await "
     "an async hook; redefine check_<field>_permission as a sync method (def, not "

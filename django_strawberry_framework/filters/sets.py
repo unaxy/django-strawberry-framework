@@ -221,6 +221,7 @@ if TYPE_CHECKING:
         Callable,
         Generator,
         ItemsView,
+        Iterable,
         Iterator,
         Mapping,
         Sequence,
@@ -2558,6 +2559,11 @@ def _is_related_filter_map(value: object) -> TypeIs[dict[str, RelatedFilter]]:
     )
 
 
+def _is_filterset_class(value: object) -> TypeIs[type[FilterSet]]:
+    """Whether ``value`` is a ``FilterSet`` subclass: a declared hop's owner, which declares the hop."""
+    return truth.is_subclass(value, FilterSet)
+
+
 def _reachable_filtersets(filterset: type[FilterSet], scope: _ExpansionScope) -> frozenset[int]:
     """Return the ids of ``filterset`` and every filter set its ``RelatedFilter`` declarations reach.
 
@@ -2854,6 +2860,15 @@ class FilterSet(
     # The flat copies a pipeline-built instance's data does not name: never on
     # its bound form (``get_form_class``) and never run (``_apply_flat_leaves``).
     _unnamed_copies: frozenset[str] = frozenset()
+
+    # Whether each absent leaf walking a hop constrains anything for the value it
+    # cleaned to (``_absent_leaf_applies``), by name. ``apply_async`` records it
+    # once the form has cleaned (``_probe_absent_relation_leaves``) and awaits the
+    # hops of every leaf that does before the ``.qs`` read, which reads the
+    # verdict instead of running the leaf's filter to learn it again
+    # (``_apply_relation_leaf``). Empty on every other instance, whose ``.qs``
+    # read asks each absent leaf as it reaches it.
+    _absent_leaf_verdicts: Mapping[str, bool] = MappingProxyType({})
 
     def __init__(
         self,
@@ -5617,20 +5632,50 @@ class FilterSet(
         the leaves the form runs as supplied. It runs before any form exists, so a
         named value the filter then skips (an empty string) costs one awaited
         ``get_queryset`` and constrains nothing, as a present-but-empty nested
-        branch does; a leaf the form data does not name (absent, or a range
-        naming no bound) costs nothing.
+        branch does. A leaf the form data does not name (absent, or a range
+        naming no bound) costs this pass nothing: once the form has cleaned it,
+        ``apply_async`` awaits its hops only when its filter acts on the absent
+        value (``_probe_absent_relation_leaves``).
         """
-        hops = (
-            hop
-            for _name, filter_instance in cls._named_leaf_filters(input_value)
-            for hop in cls._visibility_hops(filter_instance)
+        await cls._await_hop_visibility_async(
+            (
+                hop
+                for _name, filter_instance in cls._named_leaf_filters(input_value)
+                for hop in cls._visibility_hops(filter_instance)
+            ),
+            info,
+            into,
+            parent_db=parent_db,
         )
+        for _name, declaration, _child_input in cls._iter_active_related_branches(input_value):
+            # ``related_filters`` holds only ``RelatedFilter`` declarations.
+            for scope in cls._branch_via_types(require_instance(declaration, RelatedFilter)):
+                await cls._await_scoped_rows(scope, info, into, parent_db)
+
+    @classmethod
+    async def _await_hop_visibility_async(
+        cls,
+        hops: Iterable[RelationHop],
+        info: object,
+        into: dict[tuple[object, str | None], models.QuerySet[models.Model]],
+        *,
+        parent_db: str | None,
+    ) -> None:
+        """Await the target visibility of each of ``hops`` into the request-wide hop map ``into``.
+
+        The rows ``_hop_visible_rows`` reads: a declared hop's target type's
+        ``get_queryset`` over its seed (``_branch_visibility_seed``), keyed by
+        ``(id(<RelatedFilter declaration>), parent_db)``, after the rows of each
+        intermediate model its ``field_name`` crosses (``_branch_via_types``); an
+        undeclared hop's scoping type's (``_await_scoped_rows``). A key already in
+        ``into`` is not awaited again.
+        """
         for hop in hops:
             if not hop.declared:
                 await cls._await_scoped_rows(hop.scope, info, into, parent_db)
                 continue
-            owner = cast("type[FilterSet]", hop.owner)
-            related_filter = cast("RelatedFilter", hop.related_obj)
+            owner = require(hop.owner, _is_filterset_class)
+            related_filter = require_instance(hop.related_obj, RelatedFilter)
             for scope in owner._branch_via_types(related_filter):
                 await cls._await_scoped_rows(scope, info, into, parent_db)
             key = (id(related_filter), parent_db)
@@ -5642,10 +5687,6 @@ class FilterSet(
                 parent_db,
             )
             into[key] = await apply_type_visibility_async(target_type, child_base, info)
-        for _name, declaration, _child_input in cls._iter_active_related_branches(input_value):
-            # ``related_filters`` holds only ``RelatedFilter`` declarations.
-            for scope in cls._branch_via_types(require_instance(declaration, RelatedFilter)):
-                await cls._await_scoped_rows(scope, info, into, parent_db)
 
     @classmethod
     def _branch_via_types(
@@ -5912,12 +5953,7 @@ class FilterSet(
         via = owner._via_rows(related_filter, self._apply_info, self._hop_visibility(), outer.db)
         return _reaches_related(outer, _bound_field_name(related_filter), admitted, via)
 
-    def _absent_leaf_applies(
-        self,
-        queryset: models.QuerySet[_M],
-        filter_instance: Filter,
-        value: object,
-    ) -> bool:
+    def _absent_leaf_applies(self, filter_instance: Filter, value: object) -> bool:
         """Whether a leaf the request left absent constrains anything for the ``value`` it cleaned to.
 
         A filter that returns its input BY IDENTITY applied no constraint
@@ -5927,50 +5963,101 @@ class FilterSet(
         consumer ``filter`` reading an absent value as a default). The leaf's
         terminal (``_leaf_chain``) runs with the value it would receive over the
         rows of the model it was written for, unscoped: the last hop target's base
-        rows (``queryset`` when the chain walks no hop, ``_chain_base``), so an
-        inactive absent leaf runs no ``get_queryset`` and an active one is never
-        evaluated against a model its path does not resolve on (a child set on a
-        multi-table-inheritance subclass of the relation's target). A walk
-        reaching a hop whose target set does not resolve has no chain; the filter
-        it runs (``_projected_terminal``: a projected copy's child filter, never
-        the copy's own ``filter``, which would come back here) runs over
-        ``queryset``, or for a projected copy over its child model's base rows, and
-        an active one raises when ``_apply_relation_leaf`` derives the hop. A
+        rows, or, when the chain walks no hop (a relation-key leaf on one forward
+        hop), the rows this set was built over (``self.queryset``,
+        ``_chain_base``), never the rows the leaves before it left, so the answer
+        is the same whenever it is asked, on ``apply_sync`` and ``apply_async``
+        alike (``_probe_absent_relation_leaves``). An inactive absent leaf runs no
+        ``get_queryset`` and an active one is never evaluated against a model its
+        path does not resolve on (a child set on a multi-table-inheritance
+        subclass of the relation's target). A walk reaching a hop whose target
+        set does not resolve has no chain; the filter it runs
+        (``_projected_terminal``: a projected copy's child filter, never the
+        copy's own ``filter``, which would come back here) runs over the rows this
+        set was built over, or for a projected copy over its child model's base
+        rows, and an active one raises when ``_apply_relation_leaf`` derives the
+        hop. A
         terminal raising ``FieldError`` over the unscoped rows compiled a lookup
         those rows cannot resolve (a column the target type's ``get_queryset``
         annotates), so it is active; an identity-returning filter compiles no
         lookup and cannot raise it.
         """
+        built = require(self.queryset, is_queryset)
         if any(
             hop.declared and hop.target is None
             for hop in type(self)._visibility_hops(filter_instance)
         ):
             terminal = _projected_terminal(filter_instance)
-            rows: models.QuerySet[models.Model] = (
-                queryset
+            rows: models.QuerySet[models.Model, object] = (
+                built
                 if terminal is filter_instance
                 # ``BaseFilterSet.__init__`` stamps the set's model on every filter it binds.
                 else base_queryset(
                     require(read_attr(terminal, "model"), is_model_class),
-                    using=queryset.db,
+                    using=built.db,
                 )
             )
             return terminal.filter(rows, value) is not rows
         # A caller passes only a leaf ``_flat_leaf_walk`` reads or a ``ProjectedChildFilter``,
         # which always carries its projection hop.
         chain = cast("_LeafChain", self._leaf_chain(filter_instance))
-        rows = self._chain_base(chain, queryset)
+        rows = self._chain_base(chain, built)
         try:
             return chain.terminal.filter(rows, chain.terminal_value(value)) is not rows
         except FieldError:
             # Only a compiled lookup can raise it, so the leaf constrains something.
             return True
 
+    @classmethod
+    def _walks_relation_hops(cls, filter_instance: Filter) -> bool:
+        """Whether a leaf of this set takes the branch path (``_apply_relation_leaf``).
+
+        A leaf whose walk reads visibility (``_flat_leaf_walk``) and a
+        ``ProjectedChildFilter``, which always carries its projection hop.
+        """
+        return (
+            isinstance(filter_instance, ProjectedChildFilter)
+            or cls._flat_leaf_walk(filter_instance) is not None
+        )
+
+    def _probe_absent_relation_leaves(self) -> tuple[RelationHop, ...]:
+        """Ask each absent walking leaf whether it constrains; return the hops of those that do.
+
+        The leaves ``_apply_flat_leaves`` runs (``_cleaned_leaf_items``) that
+        walk a hop (``_walks_relation_hops``) and that the request left absent
+        (``_leaf_absent``), each asked with the value it cleaned to
+        (``_absent_leaf_applies``, whose answer does not depend on when it is
+        asked). Each verdict is recorded by name (``_absent_leaf_verdicts``)
+        for the ``.qs`` read. ``apply_async`` runs it inside the sync boundary
+        once the form has validated and awaits the returned hops
+        (``_visibility_hops`` of every leaf that constrains) into the
+        request-wide hop map before the ``.qs`` read, so that read never derives
+        a hop an async-only ``get_queryset`` scopes. A leaf whose filter returns
+        its rows by identity derives nothing, as on ``apply_sync``. The question
+        is asked before the ``.qs`` read, so a ``qs`` / ``filter_queryset``
+        override that skips the flat-leaf loop still sees the probe's one run
+        and awaited hook.
+        """
+        verdicts: dict[str, bool] = {}
+        hops: list[RelationHop] = []
+        for name, value in self._cleaned_leaf_items():
+            filter_instance = self._filter_named(name)
+            if not type(self)._walks_relation_hops(filter_instance) or not self._leaf_absent(
+                name,
+            ):
+                continue
+            applies = self._absent_leaf_applies(filter_instance, value)
+            verdicts[name] = applies
+            if applies:
+                hops.extend(type(self)._visibility_hops(filter_instance))
+        self._absent_leaf_verdicts = verdicts
+        return tuple(hops)
+
     def _chain_base(
         self,
         chain: _LeafChain,
-        queryset: models.QuerySet[_M],
-    ) -> models.QuerySet[models.Model]:
+        queryset: models.QuerySet[models.Model, object],
+    ) -> models.QuerySet[models.Model, object]:
         """Return the unscoped rows for ``chain``'s terminal: the last hop target's, else ``queryset``."""
         if not chain.hops:
             return queryset
@@ -5983,6 +6070,7 @@ class FilterSet(
         value: object,
         *,
         supplied: bool,
+        name: str | None = None,
     ) -> models.QuerySet[_M]:
         """Apply a flat leaf walking declared hops as Django answers it over the visible rows.
 
@@ -5994,8 +6082,11 @@ class FilterSet(
         every row a hop's explicit ``RelatedFilter(queryset=...)`` excludes, does
         not exist. A leaf the request left absent (not ``supplied``) is first
         asked whether its cleaned value constrains anything
-        (``_absent_leaf_applies``); one that does not leaves ``queryset``
-        unchanged and derives nothing. Then every hop is derived
+        (``_absent_leaf_applies``), or read the answer ``apply_async`` recorded for
+        leaf ``name`` of the flat-leaf loop before awaiting its hops
+        (``_absent_leaf_verdicts``), so its filter runs on absence as often on
+        both paths; one that does not leaves
+        ``queryset`` unchanged and derives nothing. Then every hop is derived
         (``_hop_visible_rows``) and the leaf's chain (``_leaf_chain``) runs its
         terminal once, over the last hop's visible rows: a supplied leaf's filter
         runs once per value. A terminal that returns its input BY IDENTITY
@@ -6027,8 +6118,12 @@ class FilterSet(
         no visible row without applying the filter twice. A ``NOT EXISTS``
         cannot be emptied by a ``NULL`` key the way ``NOT IN`` is.
         """
-        if not supplied and not self._absent_leaf_applies(queryset, filter_instance, value):
-            return queryset
+        if not supplied:
+            applies = None if name is None else self._absent_leaf_verdicts.get(name)
+            if applies is None:
+                applies = self._absent_leaf_applies(filter_instance, value)
+            if not applies:
+                return queryset
         using = queryset.db
         # A caller passes only a leaf ``_flat_leaf_walk`` reads or a ``ProjectedChildFilter``,
         # which always carries its projection hop. Derived before any target set is read:
@@ -6104,6 +6199,16 @@ class FilterSet(
         key = form.add_prefix(name)
         keys = widget_keys(read_attr(form.fields[name], "widget"), key) or [key]
         return all(read not in form.data for read in keys)
+
+    def _cleaned_leaf_items(self) -> list[tuple[str, object]]:
+        """Return ``(name, cleaned value)`` for each leaf the bound form cleaned, minus the unnamed copies.
+
+        In ``cleaned_data``'s insertion order (upstream's). A flat copy the
+        request did not name (``_unnamed_copies``) is skipped even when a
+        consumer form seam put it on the form.
+        """
+        unnamed = self._unnamed_copies
+        return [(name, value) for name, value in _cleaned_items(self.form) if name not in unnamed]
 
     def _apply_flat_leaves(self, queryset: models.QuerySet[_M]) -> models.QuerySet[_M]:
         """Apply flat leaves in ``BaseFilterSet.filter_queryset``'s order, each over the rows it may read.
@@ -6197,20 +6302,16 @@ class FilterSet(
         candidates: Mapping[str, CandidateFilterMetadata] = (
             snapshot.candidates if snapshot is not None else {}
         )
-        unnamed = self._unnamed_copies
-        named_items = [
-            (name, value) for name, value in _cleaned_items(self.form) if name not in unnamed
-        ]
-        for name, value in named_items:
+        for name, value in self._cleaned_leaf_items():
             candidate = candidates.get(name)
             filter_instance = self._filter_named(name)
-            walk = type(self)._flat_leaf_walk(filter_instance)
-            if walk is not None or isinstance(filter_instance, ProjectedChildFilter):
+            if type(self)._walks_relation_hops(filter_instance):
                 queryset = self._apply_relation_leaf(
                     queryset,
                     filter_instance,
                     value,
                     supplied=not self._leaf_absent(name),
+                    name=name,
                 )
                 continue
             routed = candidate is not None and candidate.routable
@@ -6645,9 +6746,10 @@ class FilterSet(
         ``BaseFilterSet.qs``), a filtered clone over ``constrained``'s own
         model, so the result keeps the model of the queryset passed in.
 
-        Sync ``apply_sync`` calls this directly; async ``apply_async``
-        wraps the single call in ``run_in_one_sync_boundary`` (the neutral
-        ``sync_to_async(thread_sensitive=True)`` owner in
+        Sync ``apply_sync`` calls this directly; async ``apply_async`` runs
+        the same build, permission pass and validation, then the absent-leaf
+        probe, through ``_probed_filterset`` in ``run_in_one_sync_boundary``
+        (the neutral ``sync_to_async(thread_sensitive=True)`` owner in
         ``utils/querysets.py``) so a consumer's filterset constructor /
         ``check_*_permission`` hook / custom ``method=`` filter body /
         leaf-clause ORM evaluation does not block the event loop.
@@ -6661,6 +6763,37 @@ class FilterSet(
         Form validation still runs so a malformed nested clause still raises
         ``FILTER_INVALID``.
         """
+        return cls._validated_filterset(
+            input_value,
+            constrained,
+            data,
+            request,
+            info,
+            nested_qs_by_branch_id=nested_qs_by_branch_id,
+            flat_hop_visibility=flat_hop_visibility,
+            run_permissions=run_permissions,
+            branch_path=branch_path,
+        ).qs
+
+    @classmethod
+    def _validated_filterset(
+        cls,
+        input_value: object,
+        constrained: models.QuerySet[_M],
+        data: dict[str, object],
+        request: object,
+        info: object,
+        *,
+        nested_qs_by_branch_id: dict[int, dict[str, models.QuerySet[models.Model]]] | None,
+        flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]] | None,
+        run_permissions: bool,
+        branch_path: str,
+    ) -> Self:
+        """Build the filterset (``_build_stashed_instance``), run the permission pass, validate the form.
+
+        ``_apply_common_finalize`` before its ``.qs`` read, and the start of
+        ``apply_async``'s sync-boundary work (``_probed_filterset``).
+        """
         filterset_instance = cls._build_stashed_instance(
             data,
             constrained,
@@ -6673,7 +6806,44 @@ class FilterSet(
         if run_permissions:
             cls._run_permission_checks(input_value, request)
         cls._validate_form_or_raise(filterset_instance)
-        return filterset_instance.qs
+        return filterset_instance
+
+    @classmethod
+    def _probed_filterset(
+        cls,
+        input_value: object,
+        constrained: models.QuerySet[_M],
+        data: dict[str, object],
+        request: object,
+        info: object,
+        *,
+        nested_qs_by_branch_id: dict[int, dict[str, models.QuerySet[models.Model]]],
+        flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]],
+        run_permissions: bool,
+        branch_path: str,
+    ) -> tuple[Self, tuple[RelationHop, ...], models.QuerySet[_M] | None]:
+        """Return the validated filterset (``_validated_filterset``), its absent leaves' hops, its rows.
+
+        ``apply_async``'s sync-boundary work: the hops of every absent walking
+        leaf whose filter constrains on the value it cleaned to
+        (``_probe_absent_relation_leaves``). With none, the ``.qs`` read runs in
+        the same worker and its rows come back; otherwise the rows are ``None``
+        and ``apply_async`` awaits the hops before reading ``.qs`` in a second
+        worker.
+        """
+        filterset_instance = cls._validated_filterset(
+            input_value,
+            constrained,
+            data,
+            request,
+            info,
+            nested_qs_by_branch_id=nested_qs_by_branch_id,
+            flat_hop_visibility=flat_hop_visibility,
+            run_permissions=run_permissions,
+            branch_path=branch_path,
+        )
+        hops = filterset_instance._probe_absent_relation_leaves()
+        return filterset_instance, hops, None if hops else filterset_instance.qs
 
     @classmethod
     def apply_sync(
@@ -6767,13 +6937,23 @@ class FilterSet(
                derive) would raise ``SyncMisuseError`` mid-``.qs``.
             4. Normalize the input and apply the related constraints via
                ``_apply_common_prelude`` (shared with ``apply_sync``).
-            5. Route ``_apply_common_finalize`` (filterset build with the
+            5. Route ``_probed_filterset`` (filterset build with the
                nested-visibility and hop-visibility maps stashed - the
                async-only step with no sync analog - then perm check + form
-               validate + ``.qs`` read)
+               validate, then the absent-leaf probe)
                through ``run_in_one_sync_boundary`` so a consumer's
                ``check_*_permission`` hook that performs a blocking ORM read
-               does not block the event loop.
+               does not block the event loop. The probe asks each absent
+               walking leaf whether its filter constrains on the value it
+               cleaned to (``_probe_absent_relation_leaves``). When none does,
+               the same worker reads ``.qs``. Otherwise the hops of every leaf
+               that does are awaited into the hop map
+               (``_await_hop_visibility_async``) and a second worker reads
+               ``.qs``, which reads those verdicts instead of asking again. A
+               leaf the form data names had its hops awaited in step 2, and an
+               absent leaf in an arm answers as the same leaf absent at the top
+               level (same class, same cleaned value, same hop keys), so the
+               ``.qs`` read derives no hop on its own.
 
         ``run_permissions`` defaults to ``True`` for consumer entry points;
         the related-visibility derivation passes ``False`` so a nested child
@@ -6814,8 +6994,8 @@ class FilterSet(
             child_qs_by_branch,
             flat_hop_visibility,
         )
-        return await run_in_one_sync_boundary(
-            cls._apply_common_finalize,
+        filterset_instance, absent_hops, rows = await run_in_one_sync_boundary(
+            cls._probed_filterset,
             input_value,
             constrained,
             data,
@@ -6826,6 +7006,15 @@ class FilterSet(
             run_permissions=run_permissions,
             branch_path=_branch_path,
         )
+        if rows is not None:
+            return rows
+        await cls._await_hop_visibility_async(
+            absent_hops,
+            info,
+            flat_hop_visibility,
+            parent_db=queryset.db,
+        )
+        return await run_in_one_sync_boundary(lambda: filterset_instance.qs)
 
     @classmethod
     def apply(

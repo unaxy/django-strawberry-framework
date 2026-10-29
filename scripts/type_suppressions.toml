@@ -69,7 +69,6 @@
 "django_strawberry_framework/filters/sets.py::FilterSet._apply_relation_leaf" = { cast = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSet._bound_terminal" = { cast = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSet._build_stashed_instance" = { reportArgumentType = 1 }
-"django_strawberry_framework/filters/sets.py::FilterSet._derive_flat_hop_visibility_async" = { cast = 2 }
 "django_strawberry_framework/filters/sets.py::FilterSet._filter_child_rows" = { cast = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSet._generation_origin_for_field" = { reportArgumentType = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSet._hop_visible_rows" = { cast = 2 }
