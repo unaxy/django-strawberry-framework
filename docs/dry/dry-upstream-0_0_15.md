@@ -531,6 +531,16 @@ it lands with its tick.
   - Behaviour change: none.
   - Risk / blockers: it feeds a synthesized HTTP-only key into a Django constructor. Revisit Decision 19, or close
     this as kept.
+  - Research at `6fb82b7d` (maintainer decision, left open):
+    - `ASGIRequest` on a copy of the handshake scope is unsafe. It parses `Content-Type` eagerly (`BadRequest` at
+      6.1.2, `LookupError` at 5.2.16 on a crafted value) and decodes `query_string` as UTF-8 (`UnicodeDecodeError`),
+      so a client-controlled handshake would raise past the `DisallowedHost`-only catch.
+    - `ASGIRequest` on a fresh minimal scope (synthesized `method` and `path`, only the `host` / `x-forwarded-host`
+      headers, the handshake's `server`) matches ours on a 16,512-case grid with 0 diffs at both versions. It saves
+      about 10 code lines and 20 docstring lines, but it is still Decision 19's synthesized HTTP scope, fed to a
+      constructor whose scope contract is undocumented.
+    - No smaller seam exists. Channels' validators read `Origin` only, and calling `validate_host` directly would
+      re-derive `_get_raw_host`.
 
 - [x] 26. (NET-3) The Strawberry patch shields `parse_query_params` with a pinned copy of upstream's body
   - Our code: `_strawberry_patches.py::_patched_parse_query_params` (~17 lines), `_UPSTREAM_PARSE_QUERY_PARAMS_SOURCE`
