@@ -9,10 +9,12 @@ Locked rules and the budget: `scripts/check_type_suppressions.py` (pre-commit an
 suppression left), every file-level `# pyright:` directive, and any per-site count off the generated ledger
 `scripts/type_suppressions.toml`: each site (`path::QualifiedName`) holds its `typing.cast` calls and its ignore
 comments per unlocked rule (199 casts in all), every count may only fall, and a suppression cannot move to new code by
-giving one up elsewhere. A rule whose last ignore is cleared leaves the ledger and gains the marker.
+giving one up elsewhere. A rule whose last ignore is cleared leaves the ledger and gains the marker. In CI, a commit that raises a
+total (casts, or one rule's ignores) fails unless it carries a `Suppression-Growth-Approved:` trailer, the
+maintainer's consent.
 
 Progress: 28 done, 6 closed (survey verdicts), 3 open (one waits on upstream, one is the cast sweep's second
-phase, one is a behavior change outside typing). Ignore comments: 717 lines (1897 at the start of 0.0.15's ignore
+phase, one is a behavior change outside typing). Ignore comments: 715 lines (1897 at the start of 0.0.15's ignore
 sweep); `typing.cast` calls: 199 (432 at the start of the cast work).
 
 ## Pre-commit (`uvx pre-commit run --all-files`, 4ce779e1, clean clone)
@@ -328,8 +330,8 @@ Checked against django-stubs 6.1.2 and master. Happy to send a PR if this is wel
 
 ## Ignore breakdown
 
-Lines carrying a `# pyright: ignore[...]` comment: 717 (785 rule hits): tests 534, package 125, examples 55,
-scripts 3. By rule and by file are measured at 717 lines; by cause at 881.
+Lines carrying a `# pyright: ignore[...]` comment: 715 (785 rule hits): tests 531, package 124, examples 57,
+scripts 3. By rule and by file are measured at 715 lines; by cause at 881.
 
 ### By cause
 
@@ -352,11 +354,11 @@ another rule evaluates to Unknown.
 
 | Rule | Hits | Package | Tests | Examples | Scripts | Root |
 | --- | --- | --- | --- | --- | --- | --- |
-| `reportArgumentType` | 279 | 24 | 243 | 12 | 0 | 0 |
+| `reportArgumentType` | 275 | 23 | 240 | 12 | 0 | 0 |
 | `reportAttributeAccessIssue` | 113 | 25 | 87 | 1 | 0 | 0 |
-| `reportIncompatibleVariableOverride` | 68 | 6 | 55 | 7 | 0 | 0 |
-| `reportIncompatibleMethodOverride` | 60 | 7 | 48 | 5 | 0 | 0 |
-| `reportAny` | 40 | 10 | 15 | 15 | 0 | 0 |
+| `reportIncompatibleVariableOverride` | 70 | 6 | 56 | 8 | 0 | 0 |
+| `reportIncompatibleMethodOverride` | 64 | 7 | 52 | 5 | 0 | 0 |
+| `reportAny` | 37 | 10 | 11 | 16 | 0 | 0 |
 | `reportUnknownMemberType` | 32 | 26 | 4 | 2 | 0 | 0 |
 | `reportAssignmentType` | 28 | 0 | 25 | 1 | 2 | 0 |
 | `reportExplicitAny` | 28 | 26 | 0 | 1 | 1 | 0 |
@@ -364,7 +366,7 @@ another rule evaluates to Unknown.
 | `reportUnknownVariableType` | 20 | 18 | 2 | 0 | 0 | 0 |
 | `reportCallIssue` | 14 | 1 | 12 | 1 | 0 | 0 |
 | `reportUnknownArgumentType` | 14 | 5 | 2 | 7 | 0 | 0 |
-| `reportUnsafeMultipleInheritance` | 12 | 6 | 4 | 2 | 0 | 0 |
+| `reportUnsafeMultipleInheritance` | 13 | 6 | 5 | 2 | 0 | 0 |
 | `reportIndexIssue` | 10 | 0 | 10 | 0 | 0 | 0 |
 | `reportGeneralTypeIssues` | 5 | 0 | 5 | 0 | 0 | 0 |
 | `reportInvalidTypeArguments` | 5 | 1 | 4 | 0 | 0 | 0 |
@@ -385,6 +387,16 @@ another rule evaluates to Unknown.
 
 | File | Lines |
 | --- | --- |
+| `tests/utils/test_querysets.py` | 51 |
+| `tests/test_resource_policy.py` | 20 |
+| `tests/filters/test_sets.py` | 18 |
+| `tests/optimizer/test_hints.py` | 17 |
+| `tests/rest_framework/test_resolvers.py` | 17 |
+| `tests/filters/test_inputs.py` | 16 |
+| `tests/test_list_field.py` | 16 |
+| `tests/types/test_relay_interfaces.py` | 16 |
+| `django_strawberry_framework/utils/_queryset_private.py` | 15 |
+| `django_strawberry_framework/filters/sets.py` | 14 |
 
 
 <!-- LINK DEFINITIONS -->

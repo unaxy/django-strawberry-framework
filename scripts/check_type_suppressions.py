@@ -26,6 +26,14 @@ moves its entries) is a deliberate, reviewable line in the ledger's diff. A rule
 last suppression is cleared leaves the ledger and gains the ``# Locked`` marker once it
 is on in every environment.
 
+``--since REV`` (CI passes the pushed-over commit, or a pull request's base) also walks
+the first-parent commits after ``REV`` up to ``--until`` (default ``HEAD``) and refuses
+each one whose ledger raises the total of any kind (``cast`` or a rule) over its parent's,
+unless its message carries a ``Suppression-Growth-Approved: <reason>`` trailer: the
+maintainer's consent, never written without it. A suppression moved between sites keeps
+the totals and needs no trailer. An empty ``REV`` (a scheduled or manual run) or one
+absent from the history (a force push) has no range to walk.
+
 Only comment tokens are read, so a docstring or string that quotes a comment is not a
 suppression; a ``cast`` call is one the AST resolves to ``typing.cast`` or
 ``typing_extensions.cast`` under any import alias.
@@ -34,9 +42,11 @@ Usage::
 
     uv run python scripts/check_type_suppressions.py
     uv run python scripts/check_type_suppressions.py --write [--allow-new]
+    uv run python scripts/check_type_suppressions.py --since REV [--until REV]
 
 Exit code ``1`` (each violation listed) on any violation, ``2`` when a file cannot be
-read or parsed, ``pyproject.toml`` locks no rule, or the ledger is invalid.
+read or parsed, ``pyproject.toml`` locks no rule, the ledger is invalid, or git cannot
+read the ``--since`` range.
 """
 
 from __future__ import annotations
@@ -46,6 +56,7 @@ import ast
 import io
 import json
 import re
+import subprocess
 import sys
 import tokenize
 from collections import Counter
@@ -68,6 +79,8 @@ if TYPE_CHECKING:
 REPO_ROOT = Path(__file__).resolve().parents[1]
 #: The generated site ledger, repo-relative.
 LEDGER = "scripts/type_suppressions.toml"
+#: The commit trailer that carries the maintainer's consent to a ledger total rising.
+TRAILER = "Suppression-Growth-Approved"
 
 #: ``report<Rule> = "<level>"  # Locked`` in ``[tool.basedpyright]``.
 _LOCKED_LINE = re.compile(r'^(report\w+)\s*=\s*"\w+"\s*#\s*Locked\b', re.MULTILINE)
@@ -94,6 +107,8 @@ class _Args(argparse.Namespace):
 
     write: bool
     allow_new: bool
+    since: str | None
+    until: str
 
 
 class LedgerError(ValueError):
@@ -144,16 +159,26 @@ def load_ledger(ledger: Path, locked: frozenset[str]) -> Counter[Entry]:
     """Read the site ledger; an absent file is an empty ledger.
 
     Raises:
-        LedgerError: A site is not a table, a count is not a positive integer, or an
-            entry names a locked rule.
+        LedgerError: As :func:`parse_ledger`.
 
     """
     if not ledger.exists():
         return Counter()
+    return parse_ledger(ledger.read_text(encoding="utf-8"), locked)
+
+
+def parse_ledger(text: str, locked: frozenset[str]) -> Counter[Entry]:
+    """Return the counts a ledger's ``text`` records.
+
+    Raises:
+        LedgerError: A site is not a table, a count is not a positive integer, or an
+            entry names a locked rule.
+
+    """
     # ``tomli.loads`` returns ``dict[str, Any]``; this alias hands the walk an ``object``.
     toml_loads: Callable[[str], dict[str, object]] = tomli.loads
     counts: Counter[Entry] = Counter()
-    for site, kinds in _table(toml_loads(ledger.read_text(encoding="utf-8"))).items():
+    for site, kinds in _table(toml_loads(text)).items():
         if not _is_toml_table(kinds):
             raise LedgerError(f"`{site}` must be a table of counts, not {kinds!r}")
         for kind, count in kinds.items():
@@ -285,6 +310,70 @@ def ledger_violations(
             )
 
 
+def kind_totals(counts: Counter[Entry]) -> Counter[str]:
+    """Return the ledger's total per kind (``cast`` and each rule) across every site."""
+    totals: Counter[str] = Counter()
+    for (_, kind), count in counts.items():
+        totals[kind] += count
+    return totals
+
+
+def _ledger_at(rev: str) -> Counter[Entry]:
+    """Return the ledger as commit ``rev`` recorded it; a commit without one is empty.
+
+    Locks are not applied: a rule locked since ``rev`` may still be listed there.
+    """
+    result = _git.run_git(REPO_ROOT, "show", f"{rev}:{LEDGER}")
+    return Counter() if result.returncode else parse_ledger(result.stdout, frozenset())
+
+
+def _approved(commit: str) -> bool:
+    """Return whether ``commit``'s message carries a non-empty consent trailer."""
+    result = _git.run_git(
+        REPO_ROOT,
+        "log",
+        "-1",
+        f"--format=%(trailers:key={TRAILER},valueonly)",
+        commit,
+        check=True,
+    )
+    return bool(result.stdout.strip())
+
+
+def growth_violations(since: str, until: str) -> Iterator[Violation]:
+    """Yield one violation per kind each unapproved commit after ``since`` raises.
+
+    The walk follows ``until``'s first parents back to ``since``, comparing each
+    commit's ledger totals with its parent's. ``since`` empty or not in the history
+    yields nothing.
+
+    Raises:
+        subprocess.CalledProcessError: git cannot list the range.
+
+    """
+    if not since or _git.run_git(REPO_ROOT, "cat-file", "-e", f"{since}^{{commit}}").returncode:
+        return
+    commits = _git.run_git(
+        REPO_ROOT,
+        "rev-list",
+        "--reverse",
+        "--first-parent",
+        f"{since}..{until}",
+        check=True,
+    ).stdout.split()
+    for commit in commits:
+        before, after = kind_totals(_ledger_at(f"{commit}^")), kind_totals(_ledger_at(commit))
+        grown = sorted(kind for kind in after if after[kind] > before[kind])
+        if grown and not _approved(commit):
+            for kind in grown:
+                yield Violation(
+                    LEDGER,
+                    1,
+                    f"{commit[:12]} raises `{kind}` from {before[kind]} to {after[kind]} "
+                    f"without a `{TRAILER}:` trailer (the maintainer's consent)",
+                )
+
+
 def tracked_python_files() -> list[str]:
     """Every git-tracked ``.py`` file, repo-relative.
 
@@ -308,6 +397,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--allow-new",
         action="store_true",
         help="with --write, also record new or larger entries",
+    )
+    _ = parser.add_argument(
+        "--since",
+        help=f"also refuse each commit after REV that raises a ledger total without `{TRAILER}:`",
+    )
+    _ = parser.add_argument(
+        "--until",
+        default="HEAD",
+        help="the last commit --since walks to (default HEAD)",
     )
     args = parser.parse_args(argv, namespace=_Args())
     ledger_path = REPO_ROOT / LEDGER
@@ -350,6 +448,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
     else:
         violations.extend(drift)
+        try:
+            violations.extend(growth_violations(args.since or "", args.until))
+        except (
+            OSError,
+            subprocess.CalledProcessError,
+            ValueError,
+            tomli.TOMLDecodeError,
+        ) as error:
+            print(f"cannot walk --since {args.since}: {error}", file=sys.stderr)
+            return 2
     for violation in violations:
         print(f"{violation.path}:{violation.line}: {violation.message}")
     casts = sum(entry[1] == CAST for _, _, entry in measured)

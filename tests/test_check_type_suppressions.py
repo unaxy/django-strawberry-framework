@@ -7,7 +7,9 @@ site the ledger does not list), what it leaves alone (an unlocked rule's ignore,
 ignore, which basedpyright's own ``reportIgnoreCommentWithoutRule`` refuses, comment text
 quoted in a string or docstring, a ``cast`` that is not ``typing``'s), how a suppression
 is keyed to its site, how the ledger is read and written (``--write`` only lowers it;
-``--allow-new`` records growth), the exit codes, and that the tree itself passes. The
+``--allow-new`` records growth), the ``--since`` walk (a commit raising a kind's total needs
+the consent trailer; a move between sites or a fall does not), the exit codes, and that the tree
+itself passes. The
 script inspects source files, not a GraphQL request, so there is no live sibling in
 ``examples/fakeshop/test_query/``.
 """
@@ -18,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts import _git
 from scripts import check_type_suppressions as cts
 
 _LOCKED = frozenset({"reportUnusedVariable", "reportRedeclaration"})
@@ -353,6 +356,100 @@ def test_main_exits_two_when_it_cannot_measure(
     _ = (tmp_path / cts.LEDGER).write_text(ledger)
 
     assert cts.main([]) == 2
+
+
+def _commit(root: Path, ledger: str, message: str) -> str:
+    """Commit ``ledger`` as the ledger of ``root``'s repository; return the new commit."""
+    _ = (root / cts.LEDGER).write_text(ledger)
+    _ = _git.run_git(root, "add", cts.LEDGER, check=True)
+    _ = _git.run_git(
+        root,
+        "-c",
+        "user.name=probe",
+        "-c",
+        "user.email=probe@example.com",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        message,
+        check=True,
+    )
+    return _git.run_git(root, "rev-parse", "HEAD", check=True).stdout.strip()
+
+
+def _repository(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cts, "REPO_ROOT", tmp_path)
+    _ = _git.run_git(tmp_path, "init", "-q", check=True)
+    _ = (tmp_path / "scripts").mkdir(exist_ok=True)
+
+
+_APPROVED = f"grow\n\n{cts.TRAILER}: the maintainer consented\n"
+
+
+def test_growth_walk_refuses_each_unapproved_rise_of_a_total(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rise needs the trailer on its own commit; a move between sites or a fall needs none."""
+    _repository(tmp_path, monkeypatch)
+    base = _commit(tmp_path, '"a.py" = { cast = 1 }\n', "base")
+    _ = _commit(tmp_path, '"b.py" = { cast = 1 }\n', "move")
+    grown = _commit(tmp_path, '"b.py" = { cast = 2, reportAny = 1 }\n', "grow")
+    _ = _commit(tmp_path, '"b.py" = { cast = 3, reportAny = 1 }\n', _APPROVED)
+    _ = _commit(tmp_path, '"b.py" = { cast = 1 }\n', "fall")
+
+    consent = f"without a `{cts.TRAILER}:` trailer (the maintainer's consent)"
+    assert [v.message for v in cts.growth_violations(base, "HEAD")] == [
+        f"{grown[:12]} raises `cast` from 1 to 2 {consent}",
+        f"{grown[:12]} raises `reportAny` from 0 to 1 {consent}",
+    ]
+
+
+@pytest.mark.parametrize("since", ["", "0" * 40], ids=["no-base", "unknown-base"])
+def test_growth_walk_has_no_range_without_a_known_base(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    since: str,
+) -> None:
+    """A scheduled run passes no base; a force push leaves the old head out of the history."""
+    _repository(tmp_path, monkeypatch)
+    _ = _commit(tmp_path, '"a.py" = { cast = 9 }\n', "grow")
+
+    assert list(cts.growth_violations(since, "HEAD")) == []
+
+
+def test_main_since_fails_on_an_unapproved_rise_and_passes_an_approved_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--since`` adds the walk to the check; consent on the commit clears it."""
+    _ = _tree(tmp_path, monkeypatch, {"good.py": _CASTING})
+    _repository(tmp_path, monkeypatch)
+    base = _commit(tmp_path, "", "base")
+    grown = _commit(tmp_path, '"good.py::f" = { cast = 1 }\n', "grow")
+
+    assert cts.main(["--since", base]) == 1
+    assert capsys.readouterr().out.splitlines()[0] == (
+        f"{cts.LEDGER}:1: {grown[:12]} raises `cast` from 0 to 1 without a "
+        f"`{cts.TRAILER}:` trailer (the maintainer's consent)"
+    )
+
+    _ = _git.run_git(
+        tmp_path,
+        "-c",
+        "user.name=probe",
+        "-c",
+        "user.email=probe@example.com",
+        "commit",
+        "-q",
+        "--amend",
+        "-m",
+        _APPROVED,
+        check=True,
+    )
+    assert cts.main(["--since", base]) == 0
 
 
 def test_the_tracked_tree_matches_its_ledger() -> None:
