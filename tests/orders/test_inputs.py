@@ -1258,7 +1258,7 @@ def test_get_concrete_field_names_for_order_direct() -> None:
     with pytest.raises(ConfigurationError) as excinfo:
         _get_concrete_field_names_for_order("InvalidModel")
     assert str(excinfo.value) == (
-        "Expected a Django Model class with '_meta.get_fields()'; got str ('InvalidModel')."
+        "Expected a Django Model class with '_meta.fields'; got str ('InvalidModel')."
     )
 
     with pytest.raises(ConfigurationError, match="Expected a Django Model class"):
@@ -1269,9 +1269,8 @@ def test_get_concrete_field_names_for_order_direct() -> None:
 def test_get_concrete_field_names_for_order_excludes_many_valued_relations(name: str) -> None:
     """A forward M2M and a reverse FK publish no ``"__all__"`` order leaf on every supported Django.
 
-    On the Django 5.2 floor a forward ``ManyToManyField`` reports its attname as ``column``,
-    so only the ``many_to_many`` clause keeps ``genres`` / ``archive_genres`` out; a reverse
-    FK accessor has no ``column`` at all.
+    ``Options.fields`` holds no many-to-many field and no reverse relation, so neither
+    ``genres`` / ``archive_genres`` nor a reverse FK accessor reaches the walk.
     """
     assert name not in _get_concrete_field_names_for_order(Book)
 

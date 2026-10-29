@@ -169,17 +169,12 @@ def _get_concrete_field_names_for_order(model: object) -> list[str]:
     """Return the field names ``Meta.fields = "__all__"`` publishes as order leaves for ``model``.
 
     Backs ``OrderSet._expand_meta_fields`` when ``Meta.fields = "__all__"``
-    per spec-028 Decision 3. The cookbook's ``get_concrete_field_names``
-    at ``django_graphene_filters/mixins.py`` uses ``hasattr(f, "column")``
-    alone, but Django's virtual ``GenericRelation`` and
-    ``GenericForeignKey`` descriptors also expose ``column = None``.
-    Requiring a real database column keeps those virtual fields out
-    alongside reverse relations; a forward ``ManyToManyField`` needs the
-    ``many_to_many`` clause, since it reports its attname as ``column`` on
-    the Django 5.2 floor (``None`` on 6.0+) though no such column exists. The one
-    column-less field kept is a forward ``ForeignObject`` that is not a
-    ``ForeignKey`` (``utils/relations.py::carrier_backed_link``), whose value
-    is its carrier columns and whose term orders by them
+    per spec-028 Decision 3. Django's ``Options.fields`` already holds only
+    the forward non-many-to-many fields, and ``Field.concrete`` keeps the
+    ones with a database column. The one column-less field kept is a
+    forward ``ForeignObject`` that is not a ``ForeignKey``
+    (``utils/relations.py::carrier_backed_link``), whose value is its
+    carrier columns and whose term orders by them
     (``utils/relations.py::order_column_paths``).
 
     Returned list includes scalar columns, forward ``ForeignKey`` /
@@ -188,17 +183,16 @@ def _get_concrete_field_names_for_order(model: object) -> list[str]:
     relations, M2M managers, ``GenericRelation`` and ``GenericForeignKey``.
     """
     meta = truth.static_attr(model, "_meta", None)
-    get_fields = read_attr(meta, "get_fields", None)
-    if meta is None or not callable(get_fields):
+    fields = read_attr(meta, "fields", None)
+    if fields is None:
         raise ConfigurationError(
-            f"Expected a Django Model class with '_meta.get_fields()'; "
+            f"Expected a Django Model class with '_meta.fields'; "
             f"got {truth.kind(model)} ({truth.render(model)}).",
         )
     return [
         require(read_attr(f, "name"), is_str)
-        for f in list_of(get_fields())
-        if (read_attr(f, "column", None) is not None and not relation_bool(f, "many_to_many"))
-        or carrier_backed_link(f) is not None
+        for f in list_of(fields)
+        if relation_bool(f, "concrete") or carrier_backed_link(f) is not None
     ]
 
 
