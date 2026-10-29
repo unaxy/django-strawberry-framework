@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 381 done, 219 to do.
+Progress: 382 done, 218 to do.
 
 ## Done
 
@@ -2165,6 +2165,13 @@ Progress: 381 done, 219 to do.
   consumer save narrowed to other columns answers the constraint envelope and a deferred column the save left out is
   never loaded. spec-039 says so. Tests: `tests/rest_framework/test_resolvers.py`. The swallowed-save half and the
   ModelForm flavor are rows 695 and 696
+- [x] 672. On SQLite a decimal filter value the form accepts is compared as a double, not refused for its spelling: a
+  non-zero value below the smallest double (`1e-1000000`) compares as zero (`exact`, an `in` member and a `range` start
+  match a stored `0`; `lt` leaves it out) and values differing only past a double's 15 to 17 significant digits can
+  compare equal, while PostgreSQL refuses a value its `numeric` cannot hold. `-1e1000000` compares as an infinity and
+  answers the right rows, so the row's second half did not hold. Documented in README, spec-027, the `filterset`
+  glossary term and `utils/errors.py::refuses_numeric_format`; pinned by `tests/filters/test_sets.py::
+  test_decimal_filter_value_compares_as_a_double_on_sqlite`. No refusal rule: the value binds
 
 ## Outside review of the fixes
 
@@ -2270,9 +2277,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   the leaves the form data names, and the sync `.qs` absent-leaf probe then derives the hop inside the sync boundary
   (spec-027: an async-only `get_queryset` never runs there). An omitted leaf raised before 562; a no-bound range joins
   it. Await the hops of every declared walking leaf whose filter acts on an absent value. Found verifying 562
-- [ ] 672. (robustness) On SQLite a decimal filter value past float range or below its smallest subnormal binds as
-  REAL: `"1e-1000000"` underflows to 0.0 (`exact` matches a stored 0, `lt` drops it) and `"-1e1000000"` becomes -inf,
-  so the filter answers wrong rows without a word. Found fact-finding 529
 - [ ] 673. (robustness) A generated `NumberFilter` leaf on an `IntegerField` / `FloatField` column cleans
   `"-1e1000000"` to a `Decimal` that reaches the bind as a huge int (integer column) or -inf (float column); the
   filter ask reads only temporal and decimal columns. Unmeasured: the client-visible answer per backend. Found fixing

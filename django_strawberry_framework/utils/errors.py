@@ -882,7 +882,11 @@ def refuses_numeric_format(connection: BaseDatabaseWrapper, values: Iterable[obj
     scale and its written exponent's own bound hold it (``0E+1000000`` binds as ``0``,
     ``0E-16384`` is refused). A list or tuple among ``values``
     is one list parameter, whose elements are read at any nesting depth. Every other
-    value, and every value on any other backend, is not read.
+    value, and every value on any other backend, is not read. SQLite is not asked since it
+    refuses no spelling: Django binds the decimal as its text, which the ``NUMERIC`` column
+    compares as a double, so a value past a double's range or precision compares as the
+    nearest double (zero, an infinity, or the double a longer spelling rounds to) rather
+    than failing the bind.
     """
     if connection.vendor != "postgresql":
         return False
