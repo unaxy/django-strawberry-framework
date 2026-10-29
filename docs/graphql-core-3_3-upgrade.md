@@ -28,10 +28,11 @@ change that raises the pin.
   `()`, so `for argument in node.arguments:` crashes every connection field queried with no arguments
   (`{ allItems { edges { node { name } } } }`). Make it `node.arguments or ()`. It is the only unguarded read of the
   19 AST collection reads audited.
-- **`extensions/resource_policy.py::_DocumentWalk.walk`.** It looks up each selection's field definition with
-  `graphql.utilities.type_info.get_field_def(schema, parent, node)`, which every 3.2.x release carries and 3.3.0a13
-  removes in favour of `GraphQLSchema.get_field(parent_type, field_name)` (same introspection meta-fields, `None` off a
-  composite type). Swap the call and the import.
+- **`extensions/resource_policy.py::_DocumentWalk.walk` and
+  `schema.py::DjangoMutationExecutionContext._marked_mutation_class`.** Each looks up a selection's field definition
+  with `graphql.utilities.type_info.get_field_def(schema, parent, node)`, which every 3.2.x release carries and
+  3.3.0a13 removes in favour of `GraphQLSchema.get_field(parent_type, field_name)` (same introspection meta-fields,
+  `None` off a composite type). Swap the call and the import at both sites.
 - **`DjangoConnection`.** strawberry 0.334 raises on it unless it carries `@strawberry.type`. Decorating it was
   rejected: the package exists to avoid decorators, so the port needs a route that adds none.
 

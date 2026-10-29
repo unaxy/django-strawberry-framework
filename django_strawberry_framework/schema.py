@@ -85,6 +85,7 @@ from asgiref.sync import AsyncToSync, async_to_sync, sync_to_async
 from django.db import DatabaseError, connections, transaction
 from django.db.transaction import TransactionManagementError
 from graphql import GraphQLError, located_error, parse
+from graphql.utilities.type_info import get_field_def
 from strawberry.exceptions import DuplicatedTypeName
 from strawberry.extensions.base_extension import SchemaExtension
 from strawberry.schema.schema_converter import GraphQLCoreConverter
@@ -125,7 +126,7 @@ if TYPE_CHECKING:
     from typing import Protocol, TypeAlias
 
     from django.db.transaction import Atomic
-    from graphql import FieldNode, GraphQLFieldMap, GraphQLObjectType
+    from graphql import FieldNode, GraphQLObjectType
     from graphql.execution.execute import ExecutionContext
     from graphql.pyutils import AwaitableOrValue, Path
     from strawberry.extensions.runner import SchemaExtensionsRunner
@@ -274,18 +275,10 @@ class DjangoMutationExecutionContext(CompletionExecutionContext):
             return None
         if not field_nodes:
             return None
-        field_node = field_nodes[0]
-        node_name = getattr(field_node, "name", None)
-        field_name: str | None = getattr(node_name, "value", None)
-        if not field_name:
+        field_def = get_field_def(self.schema, parent_type, field_nodes[0])
+        if field_def is None:
             return None
-        parent_fields: GraphQLFieldMap | None = getattr(parent_type, "fields", None)
-        if not isinstance(parent_fields, dict):
-            return None
-        field_def = parent_fields.get(field_name)
-        if field_def is None:  # introspection (``__typename``) has no field entry here.
-            return None
-        extensions: object = getattr(field_def, "extensions", None)
+        extensions: object = field_def.extensions
         strawberry_field = (
             mapping_get(extensions, GraphQLCoreConverter.DEFINITION_BACKREF)
             if is_mapping(extensions)

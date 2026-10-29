@@ -340,16 +340,19 @@ it lands with its tick.
   - Status: probed (7 fakeshop columns and 23 synthetic shapes, strict and blank). The only behaviour diff is the
     lazy-proxied list label.
 
-- [ ] 17. (TYP-8) The mutation-marker lookup indexes `parent_type.fields` by hand
-  - Our code: the field lookup in `schema.py::DjangoMutationExecutionContext._marked_mutation_class` (~8 lines).
-  - Upstream: `graphql/utilities/type_info.py::get_field_def(schema, parent_type, field_node)`, already used in
-    `extensions/resource_policy.py`.
-  - Lines: ~6.
-  - Status: SUSPECTED.
-  - Reason to keep ours: none.
-  - Behaviour change: none.
-  - Risk / blockers: removed in graphql-core 3.3, which the `<3.3` pin excludes. Record it in
-    `docs/graphql-core-3_3-upgrade.md` beside the S3 site.
+- [x] 17. (TYP-8) The mutation-marker lookup indexes `parent_type.fields` by hand
+  - Our code: `schema.py::DjangoMutationExecutionContext._marked_mutation_class` reads the root field through
+    `get_field_def(self.schema, parent_type, field_nodes[0])`; the name guards and the `fields` dict read are gone.
+  - Upstream: `graphql/utilities/type_info.py::get_field_def`, public at 3.2.x, the import
+    `extensions/resource_policy.py` already uses. `docs/graphql-core-3_3-upgrade.md` names both sites for the 3.3
+    swap to `GraphQLSchema.get_field`.
+  - Status: CONFIRMED (135 fakeshop mutation fields plus `__typename`, `__schema`, `__type` and a missing name,
+    plain and aliased, 0 diffs in the marker).
+  - Behaviour change: none for any document. Root `__typename` now reads the meta-field, which has no backref, so it
+    stays unmarked.
+  - Tests: `tests/test_schema.py::test_marked_mutation_class_is_none_off_a_marked_root_mutation_field` (the rows for
+    a nameless node, a `None` node list and a non-dict `fields`, inputs graphql-core never passes, are gone with their
+    three suppressions); live `test_mutation_atomicity.py::test_mutation_root_typename_meta_field_resolves`.
 
 - [ ] 18. (TYP-10) `unwrap_non_null` / `unwrap_graphql_type` re-derive graphql-core's peels
   - Our code: `utils/typing.py::unwrap_non_null` and `::unwrap_graphql_type` (~40 lines).

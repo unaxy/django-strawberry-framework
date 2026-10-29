@@ -306,7 +306,7 @@ def _field_node(name: str) -> FieldNode:
     return FieldNode(name=NameNode(value=name))
 
 
-def test_marked_mutation_class_safe_on_none_parent_and_malformed_nodes() -> None:
+def test_marked_mutation_class_is_none_off_a_marked_root_mutation_field() -> None:
     schema = DjangoSchema(query=DummyQuery)
     graphql_schema = schema._schema
 
@@ -315,9 +315,6 @@ def test_marked_mutation_class_safe_on_none_parent_and_malformed_nodes() -> None
 
     # parent_type is None when schema.mutation_type is None (query-only schema)
     assert ctx._marked_mutation_class(None, []) is None
-    # basedpyright: the None field-node list is the hostile input under test;
-    # _marked_mutation_class types the parameter as list[FieldNode]
-    assert ctx._marked_mutation_class(None, None) is None  # pyright: ignore[reportArgumentType]
 
     # Schema with mutation
     schema_with_mut = DjangoSchema(query=DummyQuery, mutation=DummyMutation)
@@ -328,14 +325,8 @@ def test_marked_mutation_class_safe_on_none_parent_and_malformed_nodes() -> None
     # parent_type is None when schema.mutation_type is present
     assert ctx_mut._marked_mutation_class(None, []) is None
 
-    # field_nodes is empty / None / malformed
+    # field_nodes is empty
     assert ctx_mut._marked_mutation_class(mut_type, []) is None
-    # basedpyright: the None field-node list is the hostile input under test;
-    # _marked_mutation_class types the parameter as list[FieldNode]
-    assert ctx_mut._marked_mutation_class(mut_type, None) is None  # pyright: ignore[reportArgumentType]
-    # basedpyright: the nameless node is the hostile input under test; _marked_mutation_class
-    # types the parameter as list[FieldNode]
-    assert ctx_mut._marked_mutation_class(mut_type, [object()]) is None  # pyright: ignore[reportArgumentType]
 
     # Introspection field (__typename)
     assert ctx_mut._marked_mutation_class(mut_type, [_field_node("__typename")]) is None
@@ -343,13 +334,8 @@ def test_marked_mutation_class_safe_on_none_parent_and_malformed_nodes() -> None
     # Plain strawberry mutation (unmarked)
     assert ctx_mut._marked_mutation_class(mut_type, [_field_node("plainMutation")]) is None
 
-    # Missing field from parent_type.fields
+    # A name the mutation root does not define
     assert ctx_mut._marked_mutation_class(mut_type, [_field_node("doesNotExist")]) is None
-
-    # parent_type with non-dict fields: the mutation root's cached ``fields`` replaced in place
-    vars(mut_type)["fields"] = ["not", "a", "dict"]
-    named_node = _field_node("some_mutation")
-    assert ctx_mut._marked_mutation_class(mut_type, [named_node]) is None
 
 
 def test_execution_errors_fallback() -> None:

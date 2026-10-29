@@ -20,7 +20,9 @@ value, the failing field and the rollback assertion are identical on both.
 The assertions encode the shipped contract (no 500, the completion error is surfaced, the
 write rolled back).
 The success-side contract (a serializable payload still commits, and serial
-top-level mutation fields keep independent transactions) is pinned alongside.
+top-level mutation fields keep independent transactions) is pinned alongside, as is the
+mutation root's ``__typename`` meta-field, which carries no mutation class and resolves
+as a plain field.
 Async colour uses a module-local ``/graphql-async/`` mount (``graphql_client.py``
 is sync-only).
 """
@@ -418,6 +420,15 @@ def test_serial_top_level_mutations_keep_independent_transactions() -> None:
     assert json_at(payload, "data", "first", "node", "name") == "serial-first-updated"
     assert _stored_item_name(first_pk) == "serial-first-updated"
     assert _stored_item_name(second_pk) == "serial-second-item"
+
+
+@pytest.mark.django_db
+def test_mutation_root_typename_meta_field_resolves() -> None:
+    """``mutation { __typename }`` resolves the root meta-field, which names no mutation class."""
+    res = TestClient(client=Client()).query("mutation { __typename }", assert_no_errors=False)
+
+    assert res.response.status_code == 200
+    assert response_json(res.response) == {"data": {"__typename": "Mutation"}}
 
 
 async def _async_shipped_graphql_view(request: HttpRequest) -> HttpResponseBase:
