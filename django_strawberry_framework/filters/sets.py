@@ -2350,15 +2350,19 @@ def _unbindable_predicate(
     member past it refuses the value, never dropped from it. A slice's bounds, which its
     left-hand side binds, are no element, and a value compared with a transform's integer
     output (an index's element, ``len``) is held to that output's range as any other
-    lookup's. The compiled parameters are last held to the two rules no Django call
-    answers, a UTC offset PostgreSQL refuses
+    lookup's. What each of those lookups binds for its right-hand side is also held to the
+    two rules no Django call answers, a UTC offset PostgreSQL refuses
     (``utils/errors.py::refuses_utc_offset``) and a decimal past PostgreSQL ``numeric``'s
     format (``utils/errors.py::refuses_numeric_format``: Django's decimal adapter passes
-    the value through, and the server refuses its spelling), and each list parameter to
-    psycopg's own dump of it (``utils/errors.py::psycopg_refuses_list_parameter``: one
-    element dumper for the whole list refuses a naive time beside an aware one). Building
-    the predicate warns as the query does (Django's naive-datetime ``RuntimeWarning``): the
-    warning state is never touched.
+    the value through, and the server refuses its spelling), and each list parameter it
+    binds to psycopg's own dump of it (``utils/errors.py::psycopg_refuses_list_parameter``:
+    one element dumper for the whole list refuses a naive time beside an aware one), so
+    a time, decimal or list a queryset annotation the leaf reads binds never refuses the
+    filter's value. A bound a lookup binds in its own ``as_sql`` rather than for its
+    right-hand side (a ``year`` comparison's first and last instant, aware in the current
+    time zone) is not read by them: no IANA time zone's offset reaches PostgreSQL's limit.
+    Building the predicate warns as the query does (Django's naive-datetime ``RuntimeWarning``):
+    the warning state is never touched.
     """
     base = queryset.all()
     base.query.clear_limits()
@@ -2374,9 +2378,9 @@ def _unbindable_predicate(
         return True
     alias = require(read_attr(filtered, "db"), is_str)
     try:
-        # django-stubs types the compiler ``Any``; ``compile`` answers ``(sql, params)``.
+        # Compiled only for what compiling refuses; the parameters are read per lookup below.
         compiler = call_method(filtered.query, "get_compiler", alias)
-        compiled = require(call_method(compiler, "compile", filtered.query.where), is_tuple)
+        _ = call_method(compiler, "compile", filtered.query.where)
     except (EmptyResultSet, FullResultSet):
         return False
     except (OverflowError, ValueError):
@@ -2394,21 +2398,22 @@ def _unbindable_predicate(
         column = read_attr(read_attr(lookup, "lhs"), "output_field")
         bound_params = require(bound[1], is_list_or_tuple)
         element, depth = array_leaf_field(column)
-        if any(
-            isinstance(param, int) and not binds_integer(connection, column, param)
-            for param in bound_params
-        ) or (
-            depth > 0
-            and isinstance(element, models.IntegerField)
-            and refuses_integer_range(connection, element, bound_params)
+        if (
+            any(
+                isinstance(param, int) and not binds_integer(connection, column, param)
+                for param in bound_params
+            )
+            or (
+                depth > 0
+                and isinstance(element, models.IntegerField)
+                and refuses_integer_range(connection, element, bound_params)
+            )
+            or refuses_utc_offset(connection, bound_params)
+            or refuses_numeric_format(connection, bound_params)
+            or psycopg_refuses_list_parameter(connection, bound_params)
         ):
             return True
-    params = require(compiled[1], is_list_or_tuple)
-    return (
-        refuses_utc_offset(connection, params)
-        or refuses_numeric_format(connection, params)
-        or psycopg_refuses_list_parameter(connection, params)
-    )
+    return False
 
 
 def _bound_value_lookups(query: Query) -> Iterator[tuple[model_lookups.Lookup, Query]]:

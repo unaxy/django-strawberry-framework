@@ -11109,6 +11109,164 @@ def test_time_array_list_parameter_psycopg_cannot_dump_is_refused(
     }
 
 
+#: A time whose UTC offset PostgreSQL refuses in every binding mode.
+_CLOCK_AT_PLUS_SIXTEEN = datetime.time(12, tzinfo=_PLUS_SIXTEEN)
+
+
+@pytest.mark.parametrize("mode", list(BINDING_MODES))
+@pytest.mark.parametrize(
+    ("clock", "refused"),
+    [
+        pytest.param(_AWARE_TIME, False, id="in-range-offset"),
+        pytest.param(_CLOCK_AT_PLUS_SIXTEEN, True, id="own-offset-16-00"),
+    ],
+)
+def test_annotation_offset_the_leaf_reads_never_refuses_its_time(
+    mode: str,
+    clock: datetime.time,
+    refused: bool,  # noqa: FBT001
+) -> None:
+    """A UTC offset a queryset annotation the leaf reads binds is the queryset's own, never asked.
+
+    The annotation picks ``occurred_time`` through a ``When`` comparing it with a time at
+    +16:00, an offset PostgreSQL refuses in every binding mode. A time over the annotation
+    whose own offset binds passes, never ``FILTER_INVALID`` for the annotation's constant,
+    while the leaf's own time at +16:00 is refused.
+    """
+
+    class AnnotatedClockFilter(FilterSet):
+        clocked = django_filters.TimeFilter(field_name="clocked_at")
+
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = []
+
+    driver, cursor_factory, _ = BINDING_MODES[mode]
+    with postgresql_stand_in(driver, cursor_factory) as alias:
+        queryset = scalar_models.ScalarSpecimen.objects.using(alias).annotate(
+            clocked_at=models.Case(
+                models.When(
+                    occurred_time__gt=models.Value(_CLOCK_AT_PLUS_SIXTEEN),
+                    then=models.F("occurred_time"),
+                ),
+                default=models.F("occurred_time"),
+            ),
+        )
+        filterset = AnnotatedClockFilter(data={"clocked": clock}, queryset=queryset)
+        if not refused:
+            AnnotatedClockFilter._validate_form_or_raise(filterset)
+            return
+        with pytest.raises(GraphQLError) as excinfo:
+            AnnotatedClockFilter._validate_form_or_raise(filterset)
+    assert excinfo.value.extensions == {
+        "code": "FILTER_INVALID",
+        "errors": {"clocked": _UNBINDABLE},
+    }
+
+
+@pytest.mark.parametrize("mode", list(BINDING_MODES))
+@pytest.mark.parametrize(
+    ("price", "refused"),
+    [
+        pytest.param("1.5", False, id="in-range"),
+        pytest.param(_PAST_FRACTION, True, id="own-16384-fraction-digits"),
+    ],
+)
+def test_annotation_decimal_the_leaf_reads_never_refuses_its_value(
+    mode: str,
+    price: str,
+    refused: bool,  # noqa: FBT001
+) -> None:
+    """A decimal a queryset annotation the leaf reads binds is the queryset's own, never asked.
+
+    The annotation picks ``price`` through a ``When`` comparing it with a ``Value`` whose
+    16384 fraction digits PostgreSQL ``numeric`` cannot hold. A decimal over the
+    annotation inside the format passes, never ``FILTER_INVALID`` for the annotation's
+    constant, while the leaf's own decimal past the format is refused.
+    """
+
+    class AnnotatedPriceFilter(FilterSet):
+        priced = django_filters.NumberFilter(field_name="priced_at")
+
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = []
+
+    driver, cursor_factory, _ = BINDING_MODES[mode]
+    with postgresql_stand_in(driver, cursor_factory) as alias:
+        queryset = scalar_models.ScalarSpecimen.objects.using(alias).annotate(
+            priced_at=models.Case(
+                models.When(
+                    price__gt=models.Value(Decimal(_PAST_FRACTION)),
+                    then=models.F("price"),
+                ),
+                default=models.F("price"),
+            ),
+        )
+        filterset = AnnotatedPriceFilter(data={"priced": price}, queryset=queryset)
+        if not refused:
+            AnnotatedPriceFilter._validate_form_or_raise(filterset)
+            return
+        with pytest.raises(GraphQLError) as excinfo:
+            AnnotatedPriceFilter._validate_form_or_raise(filterset)
+    assert excinfo.value.extensions == {
+        "code": "FILTER_INVALID",
+        "errors": {"priced": _UNBINDABLE},
+    }
+
+
+@pytest.mark.parametrize("client_side", [False, True], ids=["server-side", "client-side"])
+@pytest.mark.parametrize(
+    ("clocks", "refused"),
+    [
+        pytest.param([_AWARE_TIME], False, id="aware"),
+        pytest.param([_NAIVE_CLOCK, _AWARE_TIME], True, id="own-naive-aware"),
+    ],
+)
+def test_annotation_list_parameter_the_leaf_reads_never_refuses_its_list(
+    client_side: bool,  # noqa: FBT001
+    clocks: list[datetime.time],
+    refused: bool,  # noqa: FBT001
+) -> None:
+    """A list parameter a queryset annotation the leaf reads binds is the queryset's own, never asked.
+
+    The annotation picks the time array through a ``When`` whose ``gt`` binds a naive time
+    before an aware one, a list psycopg 3 cannot dump. A list over the annotation psycopg
+    dumps passes, never ``FILTER_INVALID`` for the annotation's constant, while the leaf's
+    own naive-then-aware list is refused. The alias stands in for PostgreSQL on the real
+    driver module, never connected.
+    """
+    pytest.importorskip("psycopg")
+    psycopg = importlib.import_module("psycopg")
+    shelf_model, _ = _stamped_shelf_filter_class(real_array_of)
+
+    class AnnotatedClocksFilter(FilterSet):
+        clocks_seen_after = ArrayFilter(field_name="clocks_seen", lookup_expr="gt")
+
+        class Meta:
+            model = shelf_model
+            fields = []
+
+    cursor_factory = require(read_attr(psycopg, "ClientCursor"), is_class) if client_side else None
+    with postgresql_stand_in(psycopg, cursor_factory) as alias:
+        queryset = shelf_model.objects.using(alias).annotate(
+            clocks_seen=models.Case(
+                models.When(clocks__gt=[_NAIVE_CLOCK, _AWARE_TIME], then=models.F("clocks")),
+                default=models.F("clocks"),
+            ),
+        )
+        filterset = AnnotatedClocksFilter(data={"clocks_seen_after": clocks}, queryset=queryset)
+        if not refused:
+            AnnotatedClocksFilter._validate_form_or_raise(filterset)
+            return
+        with pytest.raises(GraphQLError) as excinfo:
+            AnnotatedClocksFilter._validate_form_or_raise(filterset)
+    assert excinfo.value.extensions == {
+        "code": "FILTER_INVALID",
+        "errors": {"clocks_seen_after": _UNBINDABLE},
+    }
+
+
 _PAST_INT64 = str(2**63)
 _BEFORE_INT64 = str(-(2**63) - 1)
 _THIRTY_DIGITS = str(10**30)

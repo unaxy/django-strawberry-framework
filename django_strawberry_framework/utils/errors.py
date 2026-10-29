@@ -33,11 +33,11 @@ write flavors):
   (``utils/querysets.py::coerce_field_value_or_none``);
 - ``refuses_utc_offset`` - the one rule no Django call answers: an aware datetime
   or time whose UTC offset PostgreSQL refuses in the connection's binding mode (a
-  list parameter's elements by the text rule, as psycopg binds them), read over a
-  compiled predicate's parameters or a write's values;
+  list parameter's elements by the text rule, as psycopg binds them), read over what
+  each lookup of a filter's predicate binds for its right-hand side or a write's values;
 - ``refuses_numeric_format`` - PostgreSQL ``numeric``'s format: a decimal whose spelling
-  needs more digits before or after the point than ``numeric`` stores, read over a
-  compiled predicate's parameters and by the identity decode
+  needs more digits before or after the point than ``numeric`` stores, read over what
+  each lookup of a filter's predicate binds for its right-hand side and by the identity decode
   (``utils/querysets.py::coerce_field_value_or_none``);
 - ``refuses_integer_range`` - an integer the backend cannot bind as an element of an
   integer ``ArrayField``: each integer a whole-array lookup binds for its right-hand
@@ -805,13 +805,14 @@ def refuses_utc_offset(
 ) -> bool:
     """Whether PostgreSQL refuses any aware datetime or time in ``values`` for its UTC offset.
 
-    ``values`` are what a query or a write binds on ``connection``: a compiled predicate's
-    parameters, or a write's values. No Django call answers this: PostgreSQL's adapters pass
-    an aware datetime or time through, and the server refuses it (``DataError``) only once
-    the query runs. A list or tuple among ``values`` is one list parameter (an
-    ``ArrayField`` lookup's ``gt`` or ``in`` right-hand side): psycopg binds its elements
-    as text in either binding mode, so each, at any nesting depth, is held to the text
-    rule. Every other value, and every value on any other backend, is not read.
+    ``values`` are what a query or a write binds on ``connection``: what a filter
+    predicate's lookup binds for its right-hand side, or a write's values. No Django call
+    answers this: PostgreSQL's adapters pass an aware datetime or time through, and the
+    server refuses it (``DataError``) only once the query runs. A list or tuple among
+    ``values`` is one list parameter (an ``ArrayField`` lookup's ``gt`` or ``in``
+    right-hand side): psycopg binds its elements as text in either binding mode, so each,
+    at any nesting depth, is held to the text rule. Every other value, and every value on
+    any other backend, is not read.
     """
     for value in values:
         if is_list_or_tuple(value):
@@ -871,10 +872,10 @@ _POSTGRESQL_NUMERIC_EXPONENT_LIMIT = 1073741823
 def refuses_numeric_format(connection: BaseDatabaseWrapper, values: Iterable[object]) -> bool:
     """Whether PostgreSQL refuses any decimal in ``values`` as past ``numeric``'s format.
 
-    ``values`` are what a query binds on ``connection``: a compiled predicate's
-    parameters, or a decimal an identity decode is about to bind. psycopg sends a
-    ``Decimal`` as its own spelling (``str``), and ``numeric_in`` parses it into
-    ``numeric``'s format whatever the column's typmod: up to 131072 digits before the
+    ``values`` are what a query binds on ``connection``: what a filter predicate's lookup
+    binds for its right-hand side, or a decimal an identity decode is about to bind.
+    psycopg sends a ``Decimal`` as its own spelling (``str``), and ``numeric_in`` parses it
+    into ``numeric``'s format whatever the column's typmod: up to 131072 digits before the
     decimal point and up to 16383 after (PostgreSQL's documentation, "Numeric Types"),
     past either of which the server refuses the bind as "value overflows numeric format"
     (``DataError``). The spelling is read as written, trailing fractional zeros
@@ -1141,9 +1142,10 @@ def psycopg_refuses_list_parameter(
 ) -> bool:
     """Whether psycopg 3 refuses to dump any list parameter among ``params``.
 
-    ``params`` are a compiled predicate's parameters; a list or tuple among them is one
-    list parameter (an ``ArrayField`` lookup's ``gt`` or ``in`` right-hand side), which
-    psycopg dumps with one element dumper, so a naive time beside an aware one raises
+    ``params`` are what a filter predicate's lookup binds for its right-hand side
+    (``Lookup.process_rhs``); a list or tuple among them is one list parameter (an
+    ``ArrayField`` lookup's ``gt`` or ``in`` right-hand side), which psycopg dumps with
+    one element dumper, so a naive time beside an aware one raises
     the driver's ``DataError`` when the query binds it. Each is asked of the driver as
     it stands, nested lists included (``_psycopg_refuses_list``): Django has already
     prepared its elements for the lookup, so every one is dumped as the query dumps it.
