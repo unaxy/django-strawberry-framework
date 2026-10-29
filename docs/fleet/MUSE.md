@@ -5,18 +5,23 @@ that run Worker-0 for the three agentflows: [HUNT.md][hunt], [DRY.md][dry], [REV
 Everything here was learned by doing it on the 0.0.15 hunt and DRY cycles (2026-09-17 to
 2026-09-22). Read this before touching a `muse` process; do not rediscover the CLI.
 
+Muse runs on every machine in the fleet; [MACHINES.md][machines] says what each machine is for,
+what it has installed, and its house rules. Everything below holds on any of them unless a line
+names one machine. Run a Worker-0 where the maintainer says; heavy or multi-day runs belong on a
+machine whose row there says it takes them.
+
 The standing shape: Muse runs ONLY Worker-0. Worker-0 dispatches its own Worker-1 / Worker-2
 subagents inside Muse. Claude never plays a worker role for a Muse-run flow; Claude is the
 supervisor that launches, monitors, relays maintainer decisions, and reports.
 
-## 1. Harness facts (Muse Code 1.3.0, build R3401.1)
+## 1. Harness facts (learned on Muse Code 1.3.0; the fleet now runs 1.4.x)
 
 | Thing | Where / what |
 | --- | --- |
 | Launcher | `~/.local/bin/muse` (shell shim) → `~/.local/bin/muse-bin-<version>` (the real binary, ~289 MB). `ps` shows the `muse-bin-*` path, not `muse`. |
-| Version pin | `~/.local/bin/.muse-version`; `muse --version` prints `Muse Code 1.3.0 (1.3.0-R3401.1)`. A new binary appears beside the old one on update; pid files keep pointing at the old process. |
+| Version pin | `~/.local/bin/.muse-version`; `muse --version` prints e.g. `Muse Code 1.3.0 (1.3.0-R3401.1)`; versions differ per machine. A new binary appears beside the old one on update; pid files keep pointing at the old process. |
 | User config | `~/.config/muse/settings.json` (provider `meta`, model `muse-spark-1.3-contributor`, `reasoning_effort` `max`, permissions profile `:unrestricted`), `auth.json`, `trust.json`. |
-| Session store | `~/.local/share/muse/sessions/<YYYY>/<MM>/…` (durable JSONL per session), `session-index.db` (sqlite), `local-tracing/`, `model-catalog/`, `feature-config/` (server-pushed gate flags, 1 h TTL). Session names: `~/Library/Application Support/muse/session-name-authority/`. |
+| Session store | `~/.local/share/muse/sessions/<YYYY>/<MM>/…` (durable JSONL per session), `session-index.db` (sqlite), `local-tracing/`, `model-catalog/`, `feature-config/` (server-pushed gate flags, 1 h TTL). Session names on macOS: `~/Library/Application Support/muse/session-name-authority/`. |
 | Rules files | Muse loads `AGENTS.md` from the workspace root and IGNORES `CLAUDE.md` when both exist (stderr warning `rules file at …/CLAUDE.md is ignored … AGENTS.md takes precedence`). So the worktree's AGENTS.md is the whole rule set the agent sees; anything only in CLAUDE.md must go into the prompt. |
 | Provider | `meta` (subscription). Quota is a weekly window; the exhaustion text is `Subscription quota exhausted. Your usage window resets at <ISO>` with `(rate_limit_error)` and an `API error 429 [request_id=…]` prefix. The High Usage upgrade lifted the block immediately on 2026-09-22 without waiting for the reset. |
 
@@ -150,7 +155,7 @@ Preconditions: the maintainer said "restart"/"launch" AND named the flow(s), the
 rule: no branch work, so the target is always the existing worktree.
 
 ```bash
-WT=$HOME/.t3/worktrees/django-strawberry-framework/t3code-1cc21548
+WT=<the worktree the maintainer names, on the machine the run goes to>
 S=$SCRATCHPAD/muse            # session scratchpad, never the repo
 mkdir -p "$S"
 # one line per flow; rotate old logs first (mv hunt.jsonl hunt-runN.jsonl)
@@ -183,7 +188,9 @@ Notes:
   pid the moment the item's verdict line lands (DRY: `Outcome:` + row ticked; HUNT: the next
   `Fold … UTC` paragraph ending `In flight now: …`), then TERM+CONT and relaunch. HUNT always has
   a second dispatch in flight, so one worker is lost; DRY loses at most a seconds-old dispatch.
-- `timeout(1)` is not installed on this Mac ([START.md][start] says so too). Use the Bash tool's own timeout.
+- `timeout(1)` is not installed on the Mac ([START.md][start] says so too). Use the Bash tool's own timeout.
+- On a machine with house rules for long jobs (the Linux desktop's: run them in `tmux`, check
+  `pressure` first), follow them; [MACHINES.md][machines] points at each machine's rules.
 - Two Worker-0s (hunt + DRY) share one worktree fine IF each prompt names the other's ownership
   (§5). Three (with review) has not been tried; review edits production files, so expect more
   MIXED files and say so in all three prompts.
@@ -262,7 +269,7 @@ target check, but a send from our shell is refused `sender_unverified`, with or 
 sandbox and with `MUSE_SESSION_ID` set. Senders are verified by process identity
 (`verified_macos_cli` / `unverified_kernel_peer`); the CLI outside a Muse session does not qualify.
 The binary also ships a `daemon` skill (host-manager TUI, lanes in `tmux`/`herdr`, mailbox or Slack
-transport, `MUSE_DAEMON_*` env) built for exactly this; `tmux` is not installed here; untested.
+transport, `MUSE_DAEMON_*` env) built for exactly this; `tmux` is not installed on the Mac; untested.
 
 What DOES work: typing into the TUI. `screen -S <name> -p 0 -X stuff "<text>"`, then a SEPARATE
 `screen -S <name> -p 0 -X stuff $'\015'` (Enter). The echo session recorded it as a second
@@ -270,7 +277,7 @@ What DOES work: typing into the TUI. `screen -S <name> -p 0 -X stuff "<text>"`, 
 Worker-0 is the TUI under `screen`, not `exec`:
 
 ```bash
-WT=$HOME/.t3/worktrees/django-strawberry-framework/t3code-1cc21548
+WT=<the worktree the maintainer names>
 cd "$WT" && MUSE_EXPERIMENTAL_EXTERNAL_AGENT_INGRESS=on MUSE_EXPERIMENTAL_LOCAL_SESSION_MESSAGING=1 \
 screen -dmS muse-dry ~/.local/bin/muse --yolo --workspace "$WT" \
   --model muse-spark-1.3-contributor --reasoning-effort max "$(cat "$S/dry-prompt-N.md")"
@@ -282,7 +289,7 @@ Trade-offs, all untested on a real Worker-0: no `--json` stdout, so monitoring r
 `~/.local/share/muse/sessions/<YYYY>/<MM>/<DD>/<uuid>/session.jsonl`, whose vocabulary is
 `runtime.*` (`runtime.user_intent.accepted`, `runtime.session.task`, …), not §1.4's; the failure
 greps must be re-derived there; the TUI stays open after the run ends (quit the `screen` session);
-`screen -X hardcopy` printed nothing for the TUI's alternate screen. `screen` here is 4.00.03
+`screen -X hardcopy` printed nothing for the TUI's alternate screen. `screen` on the Mac is 4.00.03
 (no `-Logfile`). Until a real Worker-0 is launched this way, exec + signals (§4.1) + relaunch (§4.3)
 remain the proven path. The gates in §2 are harmless and stay.
 
@@ -401,8 +408,8 @@ prompts and vice versa.
 
 ## 6. Concurrency contract between the flows
 
-- All Muse agents run in the t3 worktree; the main checkout
-  `~/projects/django-strawberry-framework` is theirs to never touch. Claude's own
+- All Muse agents run in the t3 worktree the maintainer names; the main checkout
+  `~/projects/django-strawberry-framework` on that machine is theirs to never touch. Claude's own
   edits for the maintainer happen in whichever tree the maintainer names (guard deletions on
   2026-09-22 were in the worktree, uncommitted).
 - Nobody reverts. Dirty files at task start are concurrent work (AGENTS.md concurrent-work
@@ -430,13 +437,14 @@ prompts and vice versa.
 
 <!-- LINK DEFINITIONS -->
 <!-- Root -->
-[agents]: AGENTS.md
-[goal]: GOAL.md
-[start]: START.md
+[agents]: ../../AGENTS.md
+[goal]: ../../GOAL.md
+[start]: ../../START.md
 <!-- docs/ -->
-[dry]: docs/dry/DRY.md
-[hunt]: docs/bug_hunt/HUNT.md
-[review]: docs/review/REVIEW.md
+[dry]: ../dry/DRY.md
+[hunt]: ../bug_hunt/HUNT.md
+[machines]: MACHINES.md
+[review]: ../review/REVIEW.md
 <!-- docs/SPECS/ -->
 <!-- docs/builder/ -->
 <!-- django_strawberry_framework/ -->

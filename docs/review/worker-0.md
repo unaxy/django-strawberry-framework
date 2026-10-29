@@ -162,10 +162,10 @@ Beside a HUNT or DRY Worker-0 under [MUSE.md][muse]: REVIEW.md's last paragraph.
 
 <!-- Root -->
 [agents]: ../../AGENTS.md
-[muse]: ../../MUSE.md
 [start]: ../../START.md
 
 <!-- docs/ -->
+[muse]: ../fleet/MUSE.md
 [review]: REVIEW.md
 
 <!-- docs/SPECS/ -->
