@@ -2049,9 +2049,10 @@ The pipeline steps:
 6. **Write** via `serializer.save()`, **wrapped by the `036` `IntegrityError` → envelope
    mapper** (`utils/errors.py::integrity_error_field_errors` — no top-level error on a
    save-time race; a refusal over a `blank=True, null=False` input column the attempted
-   row holds `None` on, left out of a generated `required=False` field or sent `null`
-   through a declared `allow_null=True` field, is that column's field-keyed `null` error,
-   as in the model and `ModelForm` flavors:
+   row holds `None` on and the refused save writes (no `update_fields`, or the column
+   named there by field name or `attname`), left out of a generated `required=False`
+   field or sent `null` through a declared `allow_null=True` field, is that column's
+   field-keyed `null` error, as in the model and `ModelForm` flavors:
    `django_strawberry_framework/rest_framework/resolvers.py::_attempted_row_integrity_errors`); `serializer.save()` runs `create()` / `update()` and handles M2M
    assignment internally (DRF's `ModelSerializer.save()` writes the instance + its
    relations). Five guards bracket the write, in order:
@@ -2069,8 +2070,8 @@ The pipeline steps:
      actual writes through `post_save`, **with a pk snapshot taken at the signal**,
      because the model object is mutable and identity alone is forgeable; a `pre_save`
      arm blocks cross-alias writes, and a second records each backing-model save that
-     started and has not completed, the row a refused save leaves for the
-     `IntegrityError` diagnosis.
+     started and has not completed, with that save's `update_fields`: the row a refused
+     save leaves for the `IntegrityError` diagnosis, and the columns it wrote.
    - **`get_serializer_save_kwargs` runs inside the same value-preserving, error-mapped
      closure as `save()` itself**.
    - **After the save the returned top-level row is attested against the database**
@@ -2873,8 +2874,9 @@ co-clear block) — `clear_serializer_input_namespace` registers through the
   default (a generated `required=False` field left out, a declared `allow_null=True`
   field sent `null`) is that column's field-keyed `null` error instead, read from the
   backing-model row the write witness saw attempted on the request's own thread; a
-  `create()` / `update()` that raises without saving a backing-model row stays the
-  `"__all__"` envelope.
+  `create()` / `update()` that raises without saving a backing-model row, or a refused
+  save whose `update_fields` leaves the `None` column out, stays the `"__all__"`
+  envelope.
 - **Write-time disappearing row.** An update whose located row a concurrent transaction
   deleted after the locate (reachable under `Meta.select_for_update = False` or on a
   backend without `FOR UPDATE`) is re-inserted by DRF's update-else-insert save; the
@@ -3178,9 +3180,11 @@ same transport, different app.
     envelope (a monkeypatched `save()` race) stays the third branch, and one over a
     `blank=True, null=False` column the refused row holds `None` on is that column's
     `null` error (an omitted integer and integer-choice column, a declared `allow_null`
-    field's `null` on create and update; a model `save()` filling the value in writes, and
-    a `create()` raising before any row save or another thread's attempted row stays the
-    `"__all__"` envelope);
+    field's `null` on create and update, a cleared foreign key a custom `update()` saves
+    under `update_fields` by field name or `attname`; a model `save()` filling the value in
+    writes, and a `create()` raising before any row save, another thread's attempted row,
+    or a `None` column outside the refused save's `update_fields` stays the `"__all__"`
+    envelope);
     **the value-preserving save** — `serializer.save()` is called **exactly once** (a
     save spy) and the re-fetch uses the returned object (not a second save, not a stale
     `serializer.instance`); **`get_serializer_kwargs` precedence** — an override that

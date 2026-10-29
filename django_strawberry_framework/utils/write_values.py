@@ -736,6 +736,7 @@ def unstorable_columns(
     names: Container[str],
     *,
     also: Callable[[_FieldAny, object], bool] | None = None,
+    update_fields: Container[str] | None = None,
 ) -> list[_FieldAny]:
     """Return the declared columns of ``instance`` holding a value the column cannot store.
 
@@ -750,6 +751,11 @@ def unstorable_columns(
     value in still writes (django-trac 13776 / 20205); the exception is the trigger and
     this reading the diagnosis.
 
+    ``update_fields`` is the refused save's own ``update_fields`` (``None`` for a save of
+    every column): only a column it names counts, by field name or ``attname`` the way
+    ``Model.save()`` accepts either, and every other column is skipped before it is read,
+    so a deferred column the save left untouched never queries.
+
     Reads only the in-memory ``instance`` the save was attempted on, never the
     database, so it is safe on a connection the ``IntegrityError`` left unusable. Each
     column's ``attname`` is read, so a foreign key with no related row reads ``None``
@@ -758,6 +764,12 @@ def unstorable_columns(
     columns: list[models.Field[object, object]] = []
     for field in instance._meta.concrete_fields:
         if field.name not in names or not field.editable or field.primary_key:
+            continue
+        if (
+            update_fields is not None
+            and field.name not in update_fields
+            and field.attname not in update_fields
+        ):
             continue
         value = read_attr(instance, field.attname)
         if (value is None and not field.null) or (also is not None and also(field, value)):

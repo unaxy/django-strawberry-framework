@@ -283,6 +283,8 @@ if TYPE_CHECKING:
     _RelationSnapshot: TypeAlias = _RelationIdentity | list[_RelationIdentity]
     # One ``post_save`` witness record: (instance, pk at write, created, alias).
     _WrittenRow: TypeAlias = tuple[models.Model, object, bool, str | None]
+    # One ``pre_save`` witness record: (instance, the save's ``update_fields``).
+    _AttemptedSave: TypeAlias = tuple[models.Model, frozenset[str] | None]
     # A container the frozen hook view descends into (``_FROZEN_VIEW_CONTAINERS``), and the
     # mutable accumulator its frozen children land in before the container is finalized.
     _FrozenContainer: TypeAlias = (
@@ -2445,14 +2447,15 @@ class _Witness:
     """What ``_write_witness`` observed of the backing model's saves on the owning thread.
 
     ``written`` holds one ``(instance, pk_at_write, created, using)`` record per
-    completed save (its ``post_save``); ``attempted`` holds each instance whose save
-    started (its ``pre_save``) and has not completed, so after a failed
-    ``serializer.save()`` it names the row whose save the database refused
+    completed save (its ``post_save``); ``attempted`` holds one ``(instance,
+    update_fields)`` record per save that started (its ``pre_save``) and has not
+    completed, so after a failed ``serializer.save()`` it names the row whose save the
+    database refused and the columns that save wrote
     (``_attempted_row_integrity_errors``).
     """
 
     written: list[_WrittenRow]
-    attempted: list[models.Model]
+    attempted: list[_AttemptedSave]
 
 
 @contextmanager
@@ -2477,9 +2480,10 @@ def _write_witness(
       write-capable functions), so signal-less paths (``QuerySet.update()``,
       ``bulk_create``, raw cursor SQL) are covered there;
     - a ``pre_save`` recorder for the mutation's backing model: the yielded witness's
-      ``attempted`` list holds every instance whose save started and has not completed
-      (``post_save`` takes it back out), so a save the database refused leaves its row
-      there for the save-time ``IntegrityError`` diagnosis;
+      ``attempted`` list holds every instance whose save started and has not completed,
+      with that save's ``update_fields`` (``post_save`` takes it back out), so a save the
+      database refused leaves its row and the columns it wrote there for the save-time
+      ``IntegrityError`` diagnosis;
     - a ``post_save`` recorder for the mutation's backing model: the yielded witness's
       ``written`` list collects
       ``(instance, pk_at_write, created, using)`` for every row the ORM actually wrote.
@@ -2535,15 +2539,21 @@ def _write_witness(
         # (two saved instances of one row compare equal).
         attempted = witness.attempted
         for index in range(len(attempted) - 1, -1, -1):
-            if attempted[index] is instance:
+            if attempted[index][0] is instance:
                 del attempted[index]
                 break
 
-    def _attempt(sender: object, instance: models.Model, **kwargs: object) -> None:
+    def _attempt(
+        sender: object,
+        instance: models.Model,
+        *,
+        update_fields: frozenset[str] | None = None,
+        **kwargs: object,
+    ) -> None:
         del sender, kwargs
         if threading.get_ident() != owner:
             return
-        witness.attempted.append(instance)
+        witness.attempted.append((instance, update_fields))
 
     pre_save.connect(_block_cross_alias, weak=False)
     pre_save.connect(_attempt, sender=model, weak=False)
@@ -2806,7 +2816,7 @@ def _unstorable_temporal_errors(
 
 
 def _attempted_row_integrity_errors(
-    attempted: list[models.Model],
+    attempted: list[_AttemptedSave],
     error_key_map: ErrorKeyMap,
 ) -> list[FieldError]:
     """Map a failed ``serializer.save()``'s ``IntegrityError``, naming each input column left null.
@@ -2820,14 +2830,21 @@ def _attempted_row_integrity_errors(
     row holds ``None`` on (``utils/write_values.py::unstorable_columns``, read from the
     in-memory row, so no query runs on the failed connection) answers
     ``null_field_error`` under its published input name, the model flavor's answer
-    (``mutations/resolvers.py::_created_row_integrity_errors``). The columns and their
-    names are the save-time key map (``utils/errors.py::save_time_error_key_map``), keyed
-    by model field name. No attempted row (a custom ``create()`` / ``update()`` that
+    (``mutations/resolvers.py::_created_row_integrity_errors``). Only a column the refused
+    save writes counts: a save with ``update_fields`` (a consumer ``save()`` narrowing
+    its write, or a deferred-load row's loaded fields) leaves every column outside it
+    untouched, so its ``None`` cannot be what the database refused; Django accepts a
+    column there by its name or its ``attname``. The columns and their names are the
+    save-time key map (``utils/errors.py::save_time_error_key_map``), keyed by model field
+    name. No attempted row (a custom ``create()`` / ``update()`` that
     raised without saving the backing model), or one no such column explains, is the
     ``"__all__"`` ``constraint`` envelope. Read after the failed save, never before, so a
     consumer ``save()`` that fills the value in still writes.
     """
-    columns = unstorable_columns(attempted[-1], error_key_map) if attempted else []
+    if not attempted:
+        return integrity_error_field_errors()
+    row, update_fields = attempted[-1]
+    columns = unstorable_columns(row, error_key_map, update_fields=update_fields)
     if not columns:
         return integrity_error_field_errors()
     return [null_field_error(error_key_map[column.name][0], column) for column in columns]
@@ -2849,11 +2866,12 @@ def _guarded_serializer_write(
 
     A save-time ``IntegrityError`` is diagnosed from the row the database refused, the
     instance ``witness.attempted`` names (``_attempted_row_integrity_errors``): each
-    input column it holds ``None`` on with ``null=False`` (a ``ModelSerializer`` field
-    DRF generates ``required=False`` over a ``blank=True`` column with no default, left
-    out; a declared ``allow_null=True`` field sent ``null``) answers the field-keyed
-    ``null`` error the model and ``ModelForm`` flavors answer for the same column; any
-    other is the ``"__all__"`` ``constraint`` envelope. Create and update alike.
+    input column that save writes and the row holds ``None`` on with ``null=False`` (a
+    ``ModelSerializer`` field DRF generates ``required=False`` over a ``blank=True``
+    column with no default, left out; a declared ``allow_null=True`` field sent ``null``)
+    answers the field-keyed ``null`` error the model and ``ModelForm`` flavors answer for
+    the same column; any other is the ``"__all__"`` ``constraint`` envelope. Create and
+    update alike.
     """
     written = witness.written
     # The pre-save M2M membership snapshot (update only), taken at write-step
