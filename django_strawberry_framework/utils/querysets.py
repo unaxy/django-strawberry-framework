@@ -125,6 +125,7 @@ from django.db.models.query import (
 )
 from django.db.models.sql.where import ExtraWhere, WhereNode
 
+from django_strawberry_framework.conf import django_setting
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.registry import registry
 
@@ -155,7 +156,12 @@ from ._queryset_private import (
     set_queryset_prefetch_lookups,
     set_queryset_sticky_filter,
 )
-from .errors import binds_integer, refuses_numeric_format, unbindable_temporal
+from .errors import (
+    binds_integer,
+    datetime_django_binds,
+    refuses_numeric_format,
+    unbindable_temporal,
+)
 from .relations import (
     is_model_class,
     leading_relation_hops,
@@ -182,7 +188,7 @@ if TYPE_CHECKING:
     from django_strawberry_framework.orders.sets import OrderSet
     from django_strawberry_framework.types.base import DjangoType
 
-    from .typing import ModelField
+    from .typing import ConcreteField, ModelField
 
     #: A ``Prefetch`` as the seal rebuilds it: a string lookup over a model-row child.
     _SealedPrefetch: TypeAlias = Prefetch[str, models.QuerySet[models.Model], str]
@@ -793,8 +799,11 @@ def identity_key(field: ModelField | None, value: object) -> object:
     turns both sides into the column's Python value, which compares by value, not by
     spelling: an unconstrained decimal key ``2.50`` is the stored ``2.5`` (PostgreSQL
     keeps the written scale, so a row read back as ``1.50`` is the decoded ``1.5``), an
-    aware datetime key in any UTC offset is the row read back in UTC, ``"07"`` is the
-    integer pk ``7`` and an upper-case UUID is its lower-case form. Equality a database
+    aware datetime key in any UTC offset is the row read back in UTC (an aware key is its
+    instant, so a wall clock a DST fold repeats or a gap skips keys as that instant too),
+    ``"07"`` is the integer pk ``7`` and an upper-case UUID is its lower-case form. A naive
+    datetime on a ``DateTimeField`` column under ``USE_TZ`` is the aware value Django binds
+    for it (``column_python_value``), so it keys as the row read back. Equality a database
     collation adds (a case-insensitive key) is no part of the column's value, so an id
     the lookup matched only through it misses.
 
@@ -805,12 +814,42 @@ def identity_key(field: ModelField | None, value: object) -> object:
     """
     if not isinstance(field, models.Field):
         return str(value)
-    key = to_python_value(field, value)
+    key = column_python_value(field, value)
+    if isinstance(key, datetime.datetime):
+        offset = key.utcoffset()
+        if offset is not None:
+            # An aware datetime keys by its instant, a ``timedelta`` from ``datetime.min``
+            # that no instant overflows. PEP 495 makes a wall clock its zone repeats or
+            # skips (a DST fold or gap) unequal to the same instant in any other zone, so
+            # a naive id made aware in the default zone would never equal its UTC row.
+            utc = datetime.timezone.utc
+            origin = datetime.datetime.min.replace(tzinfo=utc)
+            return key.replace(tzinfo=utc) - origin - offset
     try:
         _ = hash(key)
     except TypeError:
         return str(key)
     return key
+
+
+def column_python_value(field: ConcreteField, value: object) -> object:
+    """Return ``field.to_python(value)``, a ``DateTimeField``'s naive value read as Django binds it.
+
+    A key casts through the column it references (``relations.py::stored_value_column``).
+    When that column is a ``DateTimeField``, a date or naive datetime (one ``to_python``
+    returns for a spelling without an offset, a date-only spelling as its midnight) is the
+    datetime Django's lookup and save bind for it: under ``USE_TZ``, aware in the default
+    time zone (``errors.py::datetime_django_binds``). Django makes that projection with a
+    ``RuntimeWarning``; reading it here is silent, so an identity decode neither warns nor
+    keys a naive request apart from the aware row it matched. Every other value is
+    ``to_python``'s.
+    """
+    if not isinstance(stored_value_column(field), models.DateTimeField):
+        return to_python_value(field, value)
+    stamp = value if isinstance(value, datetime.date) else to_python_value(field, value)
+    if not isinstance(stamp, datetime.date):
+        return stamp
+    return datetime_django_binds(stamp, use_tz=bool(django_setting("USE_TZ")))
 
 
 #: Django's all-backend NUL rule; a text id holding a NUL names no row.
@@ -844,7 +883,10 @@ def coerce_field_value_or_none(field: ModelField | None, value: object, *, alias
     ``bulk_create``, ``QuerySet.update`` and a migration all skip
     ``full_clean``), and an identity decode that ran them would miss it.
 
-    ``to_python`` casts the value and refuses a wrong shape. Most Django core
+    ``to_python`` casts the value and refuses a wrong shape (``column_python_value``: a
+    date or naive datetime for a ``DateTimeField`` column is the aware value Django binds
+    for it under ``USE_TZ``, made aware in the default time zone without Django's
+    naive-datetime warning, and is the value returned). Most Django core
     fields wrap that failure in ``ValidationError``; ``TypeError`` / ``ValueError``
     cover a field whose ``to_python`` raises one of those directly, and
     ``OverflowError`` is what ``DurationField.to_python`` raises for a well-formed
@@ -904,7 +946,7 @@ def coerce_field_value_or_none(field: ModelField | None, value: object, *, alias
         return None
     connection = connections[alias]
     try:
-        coerced = to_python_value(field, value)
+        coerced = column_python_value(field, value)
         if isinstance(coerced, str):
             _PROHIBIT_NULL_CHARACTERS(str.__str__(coerced))
         bound = object_result(field.get_db_prep_value, coerced, connection, prepared=False)

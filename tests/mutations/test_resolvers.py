@@ -49,6 +49,7 @@ import itertools
 import json
 import threading
 import time
+import zoneinfo
 from collections.abc import Callable, Generator, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
@@ -72,6 +73,7 @@ from django.db import IntegrityError, OperationalError, connection, models, tran
 from django.db.models import Model, QuerySet
 from django.db.models.functions import Lower
 from django.db.models.signals import m2m_changed, post_save, pre_save
+from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from graphql import GraphQLInputObjectType
@@ -4969,6 +4971,28 @@ def test_relation_ids_spelling_a_stored_key_differently_link_its_row(
     is the row stored in UTC: the write links the row through both relations, never the
     uniform "Invalid id" error.
     """
+    _assert_relation_ids_link(stored, spelled)
+
+
+#: A non-UTC default time zone, so a naive id read in UTC would name another instant.
+_NAIVE_ZONE = "America/New_York"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_relation_ids_spelling_a_datetime_key_naively_link_the_row_at_that_wall_clock() -> None:
+    """A naive datetime FK and M2M id names the row at its wall clock in ``TIME_ZONE``.
+
+    The id is made aware in the default zone, as Django's lookup binds it, without the
+    naive-datetime warning, so the membership check keys it as the aware row it found
+    and the write links that row through both relations.
+    """
+    stored = datetime.datetime(2024, 1, 1, 8, tzinfo=zoneinfo.ZoneInfo(_NAIVE_ZONE))
+    with override_settings(TIME_ZONE=_NAIVE_ZONE):
+        _assert_relation_ids_link(stored, "2024-01-01T08:00:00")
+
+
+def _assert_relation_ids_link(stored: object, spelled: str) -> None:
+    """Create an owner naming the ``stored`` key's row as ``spelled`` through its FK and M2M."""
     is_decimal = isinstance(stored, Decimal)
     prefix = "decimal" if is_decimal else "stamp"
     _, owner_model = _spelled_key_models(stored)
