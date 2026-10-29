@@ -35,7 +35,7 @@ jobs:
           # This job never pushes, so the checkout credential has no consumer.
           persist-credentials: false
       - name: Install uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           # A release build never restores a cache another workflow could have
           # written: what ships is built from the tagged tree alone.
