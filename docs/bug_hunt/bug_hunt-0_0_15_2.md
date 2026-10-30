@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 394 done, 213 to do.
+Progress: 395 done, 214 to do.
 
 ## Done
 
@@ -2259,6 +2259,14 @@ Progress: 394 done, 213 to do.
   test_modelform_optional_field_over_required_column_filled_in_by_model_save_writes`, `::
   test_modelform_optional_char_field_over_json_column_explicit_null_is_null_error` and `::
   test_is_unstorable_blank_names_only_a_column_that_stores_no_empty_string`
+- [x] 696. A refused `ModelForm` save reports a field-keyed `null` only for a column the save of `form.instance`
+  writes: the serializer witness's attempted-save recorder moved to `utils/write_values.py::attempted_saves` (a
+  thread-scoped `pre_save` record of `(instance, update_fields)`, removed at `post_save`), which
+  `rest_framework/resolvers.py::_write_witness` and `forms/resolvers.py::_modelform_save_or_field_errors` both use,
+  and `forms/resolvers.py::_unstorable_cleaned_fields` passes the latest attempt of `form.instance`'s `update_fields`
+  to `utils/write_values.py::unstorable_columns`, so a model `save()` narrowed away from the `None` column answers
+  the constraint envelope, and a consumer `save()` that raises before saving the row (or a failure after it saved)
+  is never diagnosed from it. spec-038 says so. Tests: `tests/forms/test_resolvers.py`
 
 ## Outside review of the fixes
 
@@ -2388,10 +2396,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `form.instance`): Django sends no signal for a failed save, so telling the escaping save apart needs the exception
   passed to `mutations/resolvers.py::save_or_field_errors` and a seam naming the row whose save raised. Design call;
   the ModelForm half waits on `forms/resolvers.py`. Found fact-finding 668
-- [ ] 696. (robustness) The ModelForm save-time `null` diagnosis (`forms/resolvers.py::_modelform_save_or_field_errors`)
-  reads every unstorable column of `form.instance`, so a model `save()` narrowed by `update_fields` away from the `None`
-  column reports that column's `null` for another constraint; apply 668's `update_fields` filter there once
-  `forms/resolvers.py` is free. Found fact-finding 668
 - [ ] 703. Ordinal citations outside 679's files: `optimizer/nested_planner.py` "(Decision 6 / DoD-4 "no
   planned_resolver_keys entry")" (spec-less Decision, DoD ordinal), `orders/sets.py`'s module docstring and one more
   docstring "spec-028 DoD 4(c)", `_cross_web_patches.py` "gap (1)" / "Gap (2)" (the sibling of 679's
@@ -2405,6 +2409,13 @@ tracker number are recorded there; open remainders and new defects are filed as 
   error envelope) describes the save-time `null` mapping for a `blank=True, null=False` column only; 574 extends it
   to a `blank=False` column behind a `required=False` consumer form field. Widen both entries in the DB source and
   re-render. Found verifying 574
+- [ ] 706. (robustness) A consumer `ModelForm.save()` override that saves and returns an instance other than
+  `form.instance` leaves no attempted-save record for `form.instance`, so a refused write of the returned row answers
+  the constraint envelope where its `None` column's `null` error applies: key the save-time diagnosis
+  (`forms/resolvers.py::_unstorable_cleaned_fields`) by the row the save attempted. Found verifying 696
+- [ ] 707. The two flavors pick the refused row by different rules: `rest_framework/resolvers.py` reads
+  `attempted[-1]` whichever row it is, `forms/resolvers.py::_unstorable_cleaned_fields` the latest attempt of
+  `form.instance`; give `utils/write_values.py` one rule both call. Found verifying 696
 
 ## To do: holes found re-checking the fixes
 

@@ -139,9 +139,10 @@ and the form-specific invariants this module owns:
   cannot store (``None``, refused by the database's ``NOT NULL`` ``IntegrityError``, or ``""`` on
   a column that stores no empty string: a non-text choice column, refused by
   ``save()`` with a ``ValueError`` / ``ValidationError``, or an ``ArrayField``,
-  refused by PostgreSQL with a ``DataError``) maps to that column's field-keyed
-  ``null`` error (``_modelform_save_or_field_errors``); any other ``ValueError`` or
-  ``DataError`` propagates. On a
+  refused by PostgreSQL with a ``DataError``) and written by the refused save (its
+  ``update_fields``) maps to that column's field-keyed ``null`` error
+  (``_modelform_save_or_field_errors``); any other ``ValueError`` or ``DataError``
+  propagates. On a
   ``ModelForm`` update, and a create over a
   client-assigned key, the form's ``save()`` is called with ``commit=False``, the
   package saves the row it returned and calls ``form.save_m2m()``, as Django's
@@ -232,6 +233,7 @@ from django_strawberry_framework.utils.write_transaction import (
     pipeline_write_phase,
 )
 from django_strawberry_framework.utils.write_values import (
+    attempted_saves,
     decode_field_handlers,
     decode_provided_fields,
     decode_visible_relation,
@@ -256,6 +258,7 @@ if TYPE_CHECKING:
     )
     from django_strawberry_framework.utils.errors import ErrorKeyMap, FieldError
     from django_strawberry_framework.utils.typing import ForeignKeyField
+    from django_strawberry_framework.utils.write_values import AttemptedSave
 
     from .sets import DjangoFormMutation, DjangoModelFormMutation
 
@@ -1266,8 +1269,19 @@ def _bound_form_or_field_errors(
 
 def _unstorable_cleaned_fields(
     form: _ModelFormAny,
+    attempted: list[AttemptedSave],
 ) -> list[_FieldAny]:
-    """Return the form's columns holding a value the column cannot store.
+    """Return the columns the refused save of ``form.instance`` wrote and cannot store.
+
+    ``attempted`` is the ``utils/write_values.py::attempted_saves`` record of the saves
+    that started and did not complete; the latest one of ``form.instance`` is the refused
+    save. Only a column that save writes counts: a save with ``update_fields`` (a model
+    ``save()`` narrowing its write, or a deferred-load row's loaded fields) leaves every
+    column outside it untouched, so its value cannot be what the database refused, and it
+    is never read (a deferred column is never loaded). No such record (a consumer
+    ``save()`` that raised before saving the row, a failure after its save completed, or a
+    write that sends no ``pre_save``: ``bulk_create``, ``QuerySet.update()``) names no
+    column.
 
     Reads the instance the save was attempted on, never the database, so it is safe
     after a failed write left the transaction unusable. An optional form field cleans an
@@ -1300,7 +1314,16 @@ def _unstorable_cleaned_fields(
     the ``None`` rule are the model flavor's too (``utils/write_values.py::unstorable_columns``);
     the ``""`` rule is this flavor's, since only a form field cleans to it.
     """
-    return unstorable_columns(form.instance, form.fields, also=_is_unstorable_blank)
+    instance = form.instance
+    for row, update_fields in reversed(attempted):
+        if row is instance:
+            return unstorable_columns(
+                instance,
+                form.fields,
+                also=_is_unstorable_blank,
+                update_fields=update_fields,
+            )
+    return []
 
 
 # ``django.contrib.postgres.fields.HStoreField``, or ``None`` without a PostgreSQL driver
@@ -1503,9 +1526,11 @@ def _modelform_save_or_field_errors(
     trigger, never the diagnosis: the failure is re-raised as that column's
     field-keyed ``ValidationError`` only when
     ``_unstorable_cleaned_fields`` finds such a column on the instance the save was
-    attempted on, so the error carries the field, code ``null``, path and message the
-    model flavor gives the same input (``mutations/resolvers.py::_explicit_null_error`` for
-    an explicit ``null`` scalar, ``mutations/resolvers.py::_decode_single_relation_id``
+    attempted on, among the columns that refused save writes (its ``update_fields``,
+    recorded at ``pre_save`` by ``utils/write_values.py::attempted_saves``), so the
+    error carries the field, code ``null``, path and message the model flavor gives the
+    same input (``mutations/resolvers.py::_explicit_null_error`` for an explicit
+    ``null`` scalar, ``mutations/resolvers.py::_decode_single_relation_id``
     for an explicit ``null`` foreign key, ``mutations/resolvers.py::_created_row_integrity_errors``
     for a column a create omitted): the column's Django ``error_messages["null"]``, so a
     custom or translated message is sent as is.
@@ -1522,25 +1547,26 @@ def _modelform_save_or_field_errors(
     """
 
     def save() -> None:
-        try:
-            if not creating:
-                save_located_row(form.save(commit=False))
-                form.save_m2m()
-            elif adds_by_update_first(form.instance):
-                save_new_row(form.save(commit=False))
-                form.save_m2m()
-            else:
-                _ = form.save()
-        except (
-            IntegrityError,
-            DataError,
-            ValueError,
-            ValidationError,
-        ):
-            unstorable_fields = _unstorable_cleaned_fields(form)
-            if not unstorable_fields:
-                raise
-            raise ValidationError(_column_null_errors(unstorable_fields)) from None
+        with attempted_saves(type(form.instance)) as attempted:
+            try:
+                if not creating:
+                    save_located_row(form.save(commit=False))
+                    form.save_m2m()
+                elif adds_by_update_first(form.instance):
+                    save_new_row(form.save(commit=False))
+                    form.save_m2m()
+                else:
+                    _ = form.save()
+            except (
+                IntegrityError,
+                DataError,
+                ValueError,
+                ValidationError,
+            ):
+                unstorable_fields = _unstorable_cleaned_fields(form, attempted)
+                if not unstorable_fields:
+                    raise
+                raise ValidationError(_column_null_errors(unstorable_fields)) from None
 
     def error_key_map() -> ErrorKeyMap:
         return save_time_error_key_map(

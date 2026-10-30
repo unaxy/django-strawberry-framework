@@ -224,6 +224,7 @@ from django_strawberry_framework.utils.write_transaction import (
     require_write_pipeline,
 )
 from django_strawberry_framework.utils.write_values import (
+    attempted_saves,
     decode_field_handlers,
     decode_provided_fields,
     decode_visible_relation,
@@ -275,6 +276,7 @@ if TYPE_CHECKING:
     from django_strawberry_framework.utils.errors import ErrorKeyMap
     from django_strawberry_framework.utils.inputs import InputFieldSpec
     from django_strawberry_framework.utils.typing import ForeignKeyField, ModelField
+    from django_strawberry_framework.utils.write_values import AttemptedSave
 
     from .serializer_converter import DRFField, DRFSerializer
     from .sets import SerializerMutation
@@ -285,8 +287,6 @@ if TYPE_CHECKING:
     _RelationSnapshot: TypeAlias = _RelationIdentity | list[_RelationIdentity]
     # One ``post_save`` witness record: (instance, pk at write, created, alias).
     _WrittenRow: TypeAlias = tuple[models.Model, object, bool, str | None]
-    # One ``pre_save`` witness record: (instance, the save's ``update_fields``).
-    _AttemptedSave: TypeAlias = tuple[models.Model, frozenset[str] | None]
     # A container the frozen hook view descends into (``_FROZEN_VIEW_CONTAINERS``), and the
     # mutable accumulator its frozen children land in before the container is finalized.
     _FrozenContainer: TypeAlias = (
@@ -2449,15 +2449,15 @@ class _Witness:
     """What ``_write_witness`` observed of the backing model's saves on the owning thread.
 
     ``written`` holds one ``(instance, pk_at_write, created, using)`` record per
-    completed save (its ``post_save``); ``attempted`` holds one ``(instance,
-    update_fields)`` record per save that started (its ``pre_save``) and has not
-    completed, so after a failed ``serializer.save()`` it names the row whose save the
-    database refused and the columns that save wrote
+    completed save (its ``post_save``); ``attempted`` is the
+    ``utils/write_values.py::attempted_saves`` record of the saves that started and have
+    not completed, so after a failed ``serializer.save()`` it names the row whose save
+    the database refused and the columns that save wrote
     (``_attempted_row_integrity_errors``).
     """
 
     written: list[_WrittenRow]
-    attempted: list[_AttemptedSave]
+    attempted: list[AttemptedSave]
 
 
 @contextmanager
@@ -2481,10 +2481,11 @@ def _write_witness(
       (lexical classification is bypassable via comments, ``EXPLAIN ANALYZE``, and
       write-capable functions), so signal-less paths (``QuerySet.update()``,
       ``bulk_create``, raw cursor SQL) are covered there;
-    - a ``pre_save`` recorder for the mutation's backing model: the yielded witness's
-      ``attempted`` list holds every instance whose save started and has not completed,
-      with that save's ``update_fields`` (``post_save`` takes it back out), so a save the
-      database refused leaves its row and the columns it wrote there for the save-time
+    - a ``pre_save`` recorder for the mutation's backing model
+      (``utils/write_values.py::attempted_saves``): the yielded witness's ``attempted``
+      list holds every instance whose save started and has not completed, with that
+      save's ``update_fields`` (``post_save`` takes it back out), so a save the database
+      refused leaves its row and the columns it wrote there for the save-time
       ``IntegrityError`` diagnosis;
     - a ``post_save`` recorder for the mutation's backing model: the yielded witness's
       ``written`` list collects
@@ -2506,7 +2507,7 @@ def _write_witness(
     the pipeline's statement guard sees them regardless of signals.
     """
     owner = threading.get_ident()
-    witness = _Witness(written=[], attempted=[])
+    written: list[_WrittenRow] = []
 
     # The cross-alias ``pre_save`` blocker is the shared
     # ``write_transaction.py::make_cross_alias_save_guard`` body; only the
@@ -2529,7 +2530,7 @@ def _write_witness(
         del sender, kwargs
         if threading.get_ident() != owner:
             return
-        witness.written.append(
+        written.append(
             (
                 instance,
                 pk_of(instance),
@@ -2537,34 +2538,16 @@ def _write_witness(
                 using,
             ),
         )
-        # The save completed, so its row leaves the attempts. Identity, never ``==``
-        # (two saved instances of one row compare equal).
-        attempted = witness.attempted
-        for index in range(len(attempted) - 1, -1, -1):
-            if attempted[index][0] is instance:
-                del attempted[index]
-                break
 
-    def _attempt(
-        sender: object,
-        instance: models.Model,
-        *,
-        update_fields: frozenset[str] | None = None,
-        **kwargs: object,
-    ) -> None:
-        del sender, kwargs
-        if threading.get_ident() != owner:
-            return
-        witness.attempted.append((instance, update_fields))
-
+    # The cross-alias blocker connects first, so a save it refuses is never recorded
+    # as attempted.
     pre_save.connect(_block_cross_alias, weak=False)
-    pre_save.connect(_attempt, sender=model, weak=False)
     post_save.connect(_record, sender=model, weak=False)
     try:
-        yield witness
+        with attempted_saves(model) as attempted:
+            yield _Witness(written=written, attempted=attempted)
     finally:
         _ = post_save.disconnect(_record, sender=model)
-        _ = pre_save.disconnect(_attempt, sender=model)
         _ = pre_save.disconnect(_block_cross_alias)
 
 
@@ -2814,7 +2797,7 @@ def _unstorable_temporal_errors(
 
 
 def _attempted_row_integrity_errors(
-    attempted: list[_AttemptedSave],
+    attempted: list[AttemptedSave],
     error_key_map: ErrorKeyMap,
 ) -> list[FieldError]:
     """Map a failed ``serializer.save()``'s ``IntegrityError``, naming each input column left null.

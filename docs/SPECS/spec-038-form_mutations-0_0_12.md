@@ -1752,7 +1752,9 @@ write flavor rides.
    any, wraps only a non-empty value) cleans to its `empty_value` `""` too, which PostgreSQL
    refuses at the save with a `DataError` (malformed array literal). After that failed save, a form-declared
    editable non-pk column holding `None` on a `null=False` column, or `""` on a column
-   that stores no empty string, is reported
+   that stores no empty string, that the refused save of the form's instance writes (no
+   `update_fields`, or the column named there by field name or `attname`, as recorded at
+   `pre_save` by `django_strawberry_framework/utils/write_values.py::attempted_saves`), is reported
    (`django_strawberry_framework/forms/resolvers.py::_unstorable_cleaned_fields`) as the
    field-keyed error with the same field, code `null` and path the model flavor answers
    the same input with (an explicit `null` on a non-nullable column or foreign key at
@@ -1762,7 +1764,9 @@ write flavor rides.
    (`django_strawberry_framework/utils/errors.py::null_field_error`), so a custom or
    translated message is sent as is. The check reads only the in-memory instance, so no query runs on a
    connection the `IntegrityError` / `DataError` left unusable. When no column explains the
-   exception, an `IntegrityError` is the `"__all__"` envelope above, a `ValueError` or
+   exception (a model `save()` narrowed by `update_fields` away from the column, one
+   that raised before saving the instance, or one writing the row through a path that sends
+   no `pre_save`, `bulk_create` or `QuerySet.update()`, included), an `IntegrityError` is the `"__all__"` envelope above, a `ValueError` or
    `DataError` propagates unchanged and a `ValidationError` is the consumer's own, mapped as above. The check runs on the instance after the
    save attempt, never before it, so a model `save()` that fills the blank value in
    (the reason Django keeps the shape) still writes. The returned envelope rolls the
@@ -2273,7 +2277,8 @@ Rationale companion: [Decision 14][rationale-d14].
   failure returns the null-object envelope keyed by that column with code `null`,
   nothing written. A consumer `save()` that fills the value in writes; any other
   `ValueError` or `DataError` out of `save()` propagates and any other `IntegrityError` is the
-  `"__all__"` envelope
+  `"__all__"` envelope, among them a refused save whose `update_fields` leaves the `None`
+  column out
   ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)
   step 5).
 - **Explicit `null` coerced to a storable value on a `null=False` column.** A
@@ -2594,7 +2599,18 @@ behavior reachable through `/graphql/`, package tests own internals.
     (`tests/forms/test_resolvers.py::test_modelform_blank_array_cleaned_to_empty_string_is_field_keyed_null_error`);
     a model `save()` filling the value in (`""` or `None`) writes; a
     consumer `save()` `ValueError`, or a `DataError` PostgreSQL raises for it, with no such
-    column propagates;
+    column propagates; a model `save()` narrowing an update's `update_fields` away from a
+    `None` column answers the `"__all__"` `constraint` envelope for the other column it
+    refuses
+    (`tests/forms/test_resolvers.py::test_modelform_save_time_null_skips_a_column_outside_update_fields`),
+    one naming the cleared foreign key by field name or `attname` keeps its `null` error,
+    a consumer `ValidationError` raised before the row saves maps as raised, a refused
+    save of a sibling row and a failure after the row saved (`save_m2m()`) name no column
+    of the form's row (the `"__all__"` envelope), and a retried save is read at its latest
+    attempt
+    (`tests/forms/test_resolvers.py::test_modelform_save_time_null_is_read_from_the_refused_row_only`,
+    `tests/forms/test_resolvers.py::test_modelform_failure_after_the_row_saved_names_no_column`,
+    `tests/forms/test_resolvers.py::test_modelform_save_time_null_reads_the_latest_attempt_of_the_row`);
     **explicit `null` coerced to a storable value** — `isPrivate: null` on create and on
     update over a `True` row, a `blank=True` text choice column sent `null` on create
     and update, and a consumer `CharField` over a `blank=True` or `blank=False`

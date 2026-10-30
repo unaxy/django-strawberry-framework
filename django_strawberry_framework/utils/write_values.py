@@ -23,16 +23,22 @@ mutation resolver is not the utility module for the other write flavors):
 - ``decode_provided_fields`` - the kind-routed walk over a bound write input;
 - ``unstorable_columns`` - the save-time diagnosis of an attempted row: the
   declared columns holding a value the column cannot store (``None`` on a
-  ``null=False`` column), read from the in-memory instance after a failed save.
+  ``null=False`` column), read from the in-memory instance after a failed save;
+- ``attempted_saves`` - the thread-scoped ``pre_save`` / ``post_save`` record of the
+  saves that started and have not completed, each with its ``update_fields``: the
+  row a refused save leaves and the columns it wrote, which that diagnosis reads.
 """
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterable, Mapping
+from contextlib import contextmanager
 from enum import Enum
 from typing import TYPE_CHECKING
 
 from django.db.models.fields import Field
+from django.db.models.signals import post_save, pre_save
 from strawberry import relay
 
 from django_strawberry_framework.registry import registry
@@ -67,7 +73,7 @@ from .querysets import (
 from .typing import strawberry_schema_from_info
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Container
+    from collections.abc import Callable, Container, Generator
     from typing import TypeAlias
 
     from django.db import models
@@ -86,6 +92,8 @@ if TYPE_CHECKING:
     _RelationDecoder: TypeAlias = Callable[..., tuple[object, FieldError | None]]
     #: Any model field, its set and get types unread.
     _FieldAny: TypeAlias = Field[object, object]
+    #: One ``attempted_saves`` record: (instance, the save's ``update_fields``).
+    AttemptedSave: TypeAlias = tuple[models.Model, frozenset[str] | None]
 else:
     # ``Field`` has no ``__class_getitem__`` at runtime: the hint stays the class.
     _FieldAny = Field
@@ -775,3 +783,49 @@ def unstorable_columns(
         if (value is None and not field.null) or (also is not None and also(field, value)):
             columns.append(field)
     return columns
+
+
+@contextmanager
+def attempted_saves(model: type[models.Model]) -> Generator[list[AttemptedSave], None, None]:
+    """Record the saves of ``model`` rows that start on this thread and do not complete.
+
+    The yielded list holds one ``(instance, update_fields)`` record per save whose
+    ``pre_save`` fired, with that save's ``update_fields`` (``None`` for a save of every
+    column); its ``post_save`` takes the record back out, by identity, never ``==`` (two
+    saved instances of one row compare equal). Django sends no signal for a failed save,
+    so after a refused write the list's records are the rows whose save the database
+    refused and the columns each wrote: the input ``unstorable_columns`` reads after the
+    failure. ``pre_save`` and ``post_save`` are global signals, so a save on another
+    thread (a concurrent request) is never recorded. ``model`` is the signals' sender,
+    the class of the instance saved.
+    """
+    owner = threading.get_ident()
+    attempted: list[AttemptedSave] = []
+
+    def _attempt(
+        sender: object,
+        instance: models.Model,
+        *,
+        update_fields: frozenset[str] | None = None,
+        **kwargs: object,
+    ) -> None:
+        del sender, kwargs
+        if threading.get_ident() == owner:
+            attempted.append((instance, update_fields))
+
+    def _complete(sender: object, instance: models.Model, **kwargs: object) -> None:
+        del sender, kwargs
+        if threading.get_ident() != owner:
+            return
+        for index in range(len(attempted) - 1, -1, -1):
+            if attempted[index][0] is instance:
+                del attempted[index]
+                break
+
+    pre_save.connect(_attempt, sender=model, weak=False)
+    post_save.connect(_complete, sender=model, weak=False)
+    try:
+        yield attempted
+    finally:
+        _ = post_save.disconnect(_complete, sender=model)
+        _ = pre_save.disconnect(_attempt, sender=model)

@@ -39,7 +39,12 @@ PostgreSQL ``ArrayField`` an optional single-value form field cleans (fakeshop c
 ``ArrayField``: it runs on SQLite), beside an unrelated ``DataError``, and ``None``
 where fakeshop's live ``createItemHoldViaForm`` does not reach it (a plain integer
 column sent ``null``, omitted or updated to ``null``, a filling-in model ``save()``,
-and an ``ItemHold`` update sending ``itemId: null``, which no fakeshop form offers), and
+and an ``ItemHold`` update sending ``itemId: null``, which no fakeshop form offers), a
+model ``save()`` narrowing an update's ``update_fields`` away from the ``None`` column
+(the ``"__all__"`` envelope) or naming it by field name or ``attname`` (its ``null``
+error), a consumer ``ValidationError`` raised before the row saves (mapped as raised), a
+refused save of a sibling row or a failure after the row saved (the ``"__all__"``
+envelope), a retried save (its latest attempt is read), and
 the keying of a save-time Django ``ValidationError`` by a name fakeshop's own
 ``Item.save()`` rule never raises (a relation ``attname``, a name only the form
 declares, a dotted name): the ``ModelForm`` reads it against the backing model, the
@@ -81,7 +86,7 @@ from asgiref.sync import async_to_sync
 from django import forms
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.db import DataError, connection, models
+from django.db import DataError, IntegrityError, connection, models, transaction
 from django.db.models.signals import pre_save
 from django.http import QueryDict
 from django.test.utils import CaptureQueriesContext
@@ -3933,6 +3938,310 @@ def test_modelform_update_null_on_not_null_foreign_key_is_field_keyed_null_error
         ],
     }
     assert list(product_models.ItemHold.objects.values_list("item", flat=True)) == [item.pk]
+
+
+_CONSTRAINT_ENVELOPE = [
+    {
+        "field": NON_FIELD_ERROR_KEY,
+        "messages": ["A database constraint was violated."],
+        "codes": ["constraint"],
+    },
+]
+
+
+def _narrowed_save_model(name: str, update_field: str) -> type[models.Model]:
+    """A synthetic model whose ``save()`` narrows every update to ``update_fields=[update_field]``.
+
+    ``amount`` is a ``blank=True, null=False`` integer, ``label`` a unique text column,
+    ``category`` a ``blank=True, null=False`` foreign key; a create saves every column.
+    """
+
+    def save(self: models.Model, *args: object, **kwargs: object) -> None:
+        if not self._state.adding:
+            kwargs["update_fields"] = [update_field]
+        call_forwarded(models.Model.save, (self, *args), kwargs)
+
+    return type(
+        name,
+        (models.Model,),
+        {
+            "__module__": __name__,
+            "amount": models.IntegerField(blank=True),
+            "label": models.TextField(unique=True),
+            "category": models.ForeignKey(
+                product_models.Category,
+                blank=True,
+                on_delete=models.CASCADE,
+            ),
+            "save": save,
+            "Meta": type("Meta", (), {"app_label": "products", "managed": False}),
+        },
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+def test_modelform_save_time_null_skips_a_column_outside_update_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``None`` column the refused save leaves out of ``update_fields`` is never the diagnosis.
+
+    The model ``save()`` narrows every update to ``update_fields=["label"]``, so the
+    client's ``null`` on ``amount`` never reaches the ``UPDATE``; the form's ``label``
+    uniqueness check is turned off, so the database refuses the duplicate ``label``
+    instead. The diagnosis reads only the columns that save writes, so the failure is the
+    ``"__all__"`` ``constraint`` envelope, not ``amount``'s ``null`` error. Nothing is
+    written.
+    """
+    seed_data(1)
+    category = product_models.Category.objects.earliest("pk")
+    model_class = _narrowed_save_model("NarrowedLabelRow", "label")
+    with _blank_choice_table(model_class):
+        schema, _, update_input = _blank_choice_schema(
+            model_class,
+            ("amount", "label"),
+            type_fields=("amount", "label"),
+        )
+        _ = model_class.objects.create(amount=7, label="taken", category=category)
+        row = model_class.objects.create(amount=8, label="mine", category=category)
+
+        def validate_unique(self: models.Model, exclude: object = None) -> None:
+            del self, exclude
+
+        monkeypatch.setattr(model_class, "validate_unique", validate_unique)
+        res = schema.execute_sync(
+            f"mutation($id: ID!, $d: {update_input}!){{ updateRow(id:$id, data:$d){{ "
+            "result{ id } errors{ field messages codes } } }",
+            variable_values={"id": str(saved_pk(row)), "d": {"amount": None, "label": "taken"}},
+        )
+        assert res.errors is None, res.errors
+        assert res.data == {"updateRow": {"result": None, "errors": _CONSTRAINT_ENVELOPE}}
+        stored = model_class.objects.order_by("pk").values_list("amount", "label")
+        assert list(stored) == [(7, "taken"), (8, "mine")]
+
+
+@pytest.mark.parametrize("update_field", ["category", "category_id"])
+@pytest.mark.django_db(transaction=True)
+def test_modelform_save_time_null_inside_update_fields_by_name_or_attname_is_field_keyed(
+    update_field: str,
+) -> None:
+    """A ``None`` column the refused save names in ``update_fields`` keeps its ``null`` error.
+
+    Django accepts an ``update_fields`` entry by field name or by ``attname``; a model
+    ``save()`` that narrows the update to the cleared foreign key under either spelling
+    writes the column, so the database's ``NOT NULL`` refusal is that column's
+    field-keyed ``null`` error under ``categoryId``, and the stored key is unchanged.
+    """
+    seed_data(1)
+    category = product_models.Category.objects.earliest("pk")
+    model_class = _narrowed_save_model("NarrowedCategoryRow", update_field)
+    with _blank_choice_table(model_class):
+        schema, _, update_input = _blank_choice_schema(
+            model_class,
+            ("label", "category"),
+            type_fields=("label",),
+        )
+        row = model_class.objects.create(amount=1, label="mine", category=category)
+        res = schema.execute_sync(
+            f"mutation($id: ID!, $d: {update_input}!){{ updateRow(id:$id, data:$d){{ "
+            "result{ id } errors{ field messages codes } } }",
+            variable_values={"id": str(saved_pk(row)), "d": {"categoryId": None}},
+        )
+        assert res.errors is None, res.errors
+        assert res.data == {
+            "updateRow": {
+                "result": None,
+                "errors": [
+                    {
+                        "field": "categoryId",
+                        "messages": ["This field cannot be null."],
+                        "codes": ["null"],
+                    },
+                ],
+            },
+        }
+        assert list(model_class.objects.values_list("category", flat=True)) == [category.pk]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_modelform_save_refused_before_the_row_saves_is_the_consumers_own_error() -> None:
+    """A model ``save()`` raising before its row saves is never diagnosed from the row.
+
+    The row's save never started, so no column was written and none can be what the
+    failure refused: the consumer's ``ValidationError`` maps as raised under ``label``,
+    though the client's ``null`` left ``amount`` holding ``None``. Nothing is written.
+    """
+
+    class RefusingRow(models.Model):
+        amount: _Int = models.IntegerField(blank=True)
+        label: _Text = models.TextField(blank=True)
+
+        class Meta:
+            app_label = "products"
+            managed = False
+
+        @override
+        def save(self, *args: object, **kwargs: object) -> None:
+            raise ValidationError({"label": ValidationError("Not this label.", code="taken")})
+
+    with _blank_choice_table(RefusingRow):
+        schema, create_input, _ = _blank_choice_schema(RefusingRow, ("amount", "label"))
+        res = schema.execute_sync(
+            f"mutation($d: {create_input}!){{ createRow(data:$d){{ "
+            "result{ id } errors{ field messages codes } } }",
+            variable_values={"d": {"amount": None, "label": "x"}},
+        )
+        assert res.errors is None, res.errors
+        assert res.data == {
+            "createRow": {
+                "result": None,
+                "errors": [
+                    {"field": "label", "messages": ["Not this label."], "codes": ["taken"]},
+                ],
+            },
+        }
+        assert not RefusingRow.objects.exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_modelform_save_time_null_is_read_from_the_refused_row_only() -> None:
+    """A refused save of another row never names the form's own ``None`` column.
+
+    The model ``save()`` first saves a sibling row of its class that holds ``None`` on
+    ``amount``: the database refuses the sibling, so the form's instance never starts its
+    save. The diagnosis reads only the refused saves of ``form.instance``, so the failure
+    is the ``"__all__"`` ``constraint`` envelope, not ``amount``'s ``null`` error read from
+    the form's row. Nothing is written.
+    """
+
+    class SiblingFirstRow(models.Model):
+        amount: _Int = models.IntegerField(blank=True)
+        label: _Text = models.TextField(blank=True)
+
+        class Meta:
+            app_label = "products"
+            managed = False
+
+        @override
+        def save(self, *args: object, **kwargs: object) -> None:
+            if self.label != "sibling":
+                type(self)(amount=None, label="sibling").save()
+            call_forwarded(super().save, args, kwargs)
+
+    with _blank_choice_table(SiblingFirstRow):
+        schema, create_input, _ = _blank_choice_schema(SiblingFirstRow, ("amount", "label"))
+        res = schema.execute_sync(
+            f"mutation($d: {create_input}!){{ createRow(data:$d){{ "
+            "result{ id } errors{ field messages codes } } }",
+            variable_values={"d": {"amount": None, "label": "x"}},
+        )
+        assert res.errors is None, res.errors
+        assert res.data == {"createRow": {"result": None, "errors": _CONSTRAINT_ENVELOPE}}
+        assert not SiblingFirstRow.objects.exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_modelform_save_time_null_reads_the_latest_attempt_of_the_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refused save the diagnosis reads is the row's latest attempt, not an earlier one.
+
+    The model ``save()`` first tries an update narrowed to ``update_fields=["label"]``
+    that the database refuses (a duplicate ``label``; the form's uniqueness check is turned
+    off) and swallows, then retries the whole row with a free ``label``, which the database
+    refuses for the client's ``null`` ``amount``. Both attempts are recorded and only the
+    latest writes ``amount``, so the failure is ``amount``'s field-keyed ``null`` error.
+    """
+
+    class RetryingRow(models.Model):
+        amount: _Int = models.IntegerField(blank=True)
+        label: _Text = models.TextField(unique=True)
+
+        class Meta:
+            app_label = "products"
+            managed = False
+
+        @override
+        def save(self, *args: object, **kwargs: object) -> None:
+            if not self._state.adding:
+                try:
+                    with transaction.atomic():
+                        call_forwarded(
+                            models.Model.save,
+                            (self, *args),
+                            {**kwargs, "update_fields": ["label"]},
+                        )
+                except IntegrityError:
+                    self.label = "free"
+            call_forwarded(models.Model.save, (self, *args), kwargs)
+
+    with _blank_choice_table(RetryingRow):
+        schema, _, update_input = _blank_choice_schema(RetryingRow, ("amount", "label"))
+        _ = RetryingRow.objects.create(amount=7, label="taken")
+        row = RetryingRow.objects.create(amount=8, label="mine")
+
+        def validate_unique(self: models.Model, exclude: object = None) -> None:
+            del self, exclude
+
+        monkeypatch.setattr(RetryingRow, "validate_unique", validate_unique)
+        res = schema.execute_sync(
+            f"mutation($id: ID!, $d: {update_input}!){{ updateRow(id:$id, data:$d){{ "
+            "result{ id } errors{ field messages codes } } }",
+            variable_values={"id": str(saved_pk(row)), "d": {"amount": None, "label": "taken"}},
+        )
+        assert res.errors is None, res.errors
+        assert res.data == {
+            "updateRow": {
+                "result": None,
+                "errors": [
+                    {
+                        "field": "amount",
+                        "messages": ["This field cannot be null."],
+                        "codes": ["null"],
+                    },
+                ],
+            },
+        }
+        stored = RetryingRow.objects.order_by("pk").values_list("amount", "label")
+        assert list(stored) == [(7, "taken"), (8, "mine")]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_modelform_failure_after_the_row_saved_names_no_column() -> None:
+    """A failure after the row's save completed never names a column read from the instance.
+
+    The model ``save()`` narrows the update to ``update_fields=["label"]`` and completes
+    while the client's ``null`` leaves ``amount`` holding ``None``; ``form.save_m2m()`` then
+    raises an ``IntegrityError``. The completed save is no longer an attempt, so no column is
+    named: the failure is the ``"__all__"`` ``constraint`` envelope and the update rolls back.
+    """
+    seed_data(1)
+    category = product_models.Category.objects.earliest("pk")
+    model_class = _narrowed_save_model("NarrowedThenM2MRow", "label")
+
+    class RefusingM2MForm(forms.ModelForm[models.Model]):
+        class Meta:
+            model = model_class
+            fields = ("amount", "label")
+
+        def _save_m2m(self) -> None:
+            raise IntegrityError("the m2m rows were refused")
+
+    with _blank_choice_table(model_class):
+        schema, _, update_input = _form_class_schema(
+            RefusingM2MForm,
+            model_class,
+            type_fields=("id", "amount", "label"),
+        )
+        row = model_class.objects.create(amount=8, label="mine", category=category)
+        res = schema.execute_sync(
+            f"mutation($id: ID!, $d: {update_input}!){{ updateRow(id:$id, data:$d){{ "
+            "result{ id } errors{ field messages codes } } }",
+            variable_values={"id": str(saved_pk(row)), "d": {"amount": None, "label": "other"}},
+        )
+        assert res.errors is None, res.errors
+        assert res.data == {"updateRow": {"result": None, "errors": _CONSTRAINT_ENVELOPE}}
+        stored = model_class.objects.values_list("amount", "label")
+        assert list(stored) == [(8, "mine")]
 
 
 # ---------------------------------------------------------------------------
