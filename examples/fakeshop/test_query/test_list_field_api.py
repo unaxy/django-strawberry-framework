@@ -1141,6 +1141,16 @@ class _ProjectQ(models.Q):
         return Random()
 
 
+class _ProjectPair(tuple[str, object]):
+    """A ``(lookup, value)`` child that unpacks to a random comparison through its own method."""
+
+    __slots__ = ()
+
+    @override
+    def __iter__(self) -> Iterator[object]:
+        return iter(("code__gt", Random()))
+
+
 class _ProjectName(str):
     """A string subclass Django reads as an expression because it carries the method."""
 
@@ -1208,8 +1218,12 @@ def test_holder_offset_reads_a_term_by_the_form_it_resolves_into(
 @pytest.mark.django_db
 @pytest.mark.parametrize(
     ("condition", "served"),
-    [(_ProjectQ(code__gt="A"), False), (models.Q(code__gt="A"), True)],
-    ids=["predicate-subclass", "predicate"],
+    [
+        (_ProjectQ(code__gt="A"), False),
+        (models.Q(_ProjectPair(("code__gt", "A"))), False),
+        (models.Q(code__gt="A"), True),
+    ],
+    ids=["predicate-subclass", "pair-subclass", "predicate"],
 )
 def test_holder_offset_reads_a_conditional_predicate_by_its_exact_type(
     monkeypatch: pytest.MonkeyPatch,
@@ -1222,9 +1236,10 @@ def test_holder_offset_reads_a_conditional_predicate_by_its_exact_type(
     ``Case`` / ``When`` is an approved composition, so the predicate inside it is
     the only thing standing between an approved wrapper and arbitrary SQL. A
     subclass of ``Q`` hands the compiler an expression of its own in place of the
-    children this package reads, which orders the rows by that expression - while
-    the same conditional ordering over ``Q`` itself pages as a comparison between
-    a column and a literal.
+    children this package reads, which orders the rows by that expression, and a
+    ``tuple`` subclass child unpacks into whatever lookup and value its own
+    ``__iter__`` yields - while the same conditional ordering over ``Q`` itself
+    pages as a comparison between a column and a literal.
     """
     _seed_three_shelves()
 
@@ -1377,8 +1392,12 @@ def test_holder_offset_accepts_a_predicate_chain_ending_in_a_transform(
 @pytest.mark.django_db
 @pytest.mark.parametrize(
     ("nested", "served"),
-    [(models.Q(code__lt="Z", coin__gt=0.5), False), (models.Q(code__lt="Z", code__gte="B"), True)],
-    ids=["nested-random", "nested-columns"],
+    [
+        (models.Q(code__lt="Z", coin__gt=0.5), False),
+        (_ProjectQ(code__lt="Z", code__gte="B"), False),
+        (models.Q(code__lt="Z", code__gte="B"), True),
+    ],
+    ids=["nested-random", "nested-predicate-subclass", "nested-columns"],
 )
 def test_holder_offset_reads_a_predicate_nested_inside_a_predicate(
     monkeypatch: pytest.MonkeyPatch,
@@ -1391,7 +1410,8 @@ def test_holder_offset_reads_a_predicate_nested_inside_a_predicate(
     Django keeps a combined ``Q`` whose own connector differs as a child node
     rather than flattening it, so a comparison written one bracket deeper is
     read at that depth - the random alias inside it orders the rows exactly as
-    it would at the top level, while columns inside it still page.
+    it would at the top level, and so does a predicate subclass, while columns
+    inside it still page.
     """
     _seed_three_shelves()
 
@@ -1577,6 +1597,86 @@ def test_shipped_branches_offset_rejects_a_desc_or_lookup_random_alias(
     assert json_at(err, "extensions", "reason") == "order_required"
     assert json_at(err, "extensions", "argument") == "offset"
     assert branch_sql == []
+
+
+@pytest.mark.django_db
+def test_shipped_branches_offset_refuses_a_name_through_a_filtered_relation_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A path only the query's ``FilteredRelation`` alias resolves is not a column it can name.
+
+    Django resolves ``stacked__code`` through the alias the hook queryset holds, so
+    the ordering is legal and compiles. The guard resolves an order name against
+    the model alone, where the alias names nothing, and a path that does not
+    resolve there is never certified.
+    """
+    _seed_three_branches()
+
+    def _filtered_relation_ordering(
+        _cls: type[BranchOrder],
+        _order_input: object,
+        queryset: models.QuerySet[library_models.Branch],
+        _info: object,
+    ) -> models.QuerySet[library_models.Branch]:
+        stacked = models.FilteredRelation("shelves", condition=models.Q(shelves__code__gte="B"))
+        return queryset.alias(stacked=stacked).order_by("stacked__code")
+
+    monkeypatch.setattr(BranchOrder, "apply_sync", classmethod(_filtered_relation_ordering))
+
+    payload, branch_sql = _branch_offset_page(_OFFSET_WITH_ACTIVE_ORDER)
+
+    err = json_object(payload, "errors", 0)
+    assert json_at(err, "extensions", "reason") == "order_required"
+    assert json_at(err, "extensions", "argument") == "offset"
+    assert branch_sql == []
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("nulls_modifier", [True, False], ids=["nulls-modifier", "emulated"])
+def test_shipped_branches_offset_reads_a_nulls_placed_reference_as_the_backend_orders_it(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    nulls_modifier: bool,
+) -> None:
+    """A reference naming an ``extra`` select orders by that select only where nulls can be said.
+
+    ``SQLCompiler._order_by_pairs`` turns ``F("isil")`` under
+    ``extra(select={"isil": "RANDOM()"})`` into a reference to the selected
+    ``RANDOM()``, unless the term places nulls on a backend without
+    ``supports_order_by_nulls_modifier`` (MySQL): there it resolves the term as
+    written, to the ``isil`` column, and emulates the placement with ``IS NULL``.
+    The same ordering is refused on the first backend and pages on the second.
+    """
+    _seed_three_branches()
+    monkeypatch.setattr(connection.features, "supports_order_by_nulls_modifier", nulls_modifier)
+
+    def _shadowed_column_ordering(
+        _cls: type[BranchOrder],
+        _order_input: object,
+        queryset: models.QuerySet[library_models.Branch],
+        _info: object,
+    ) -> models.QuerySet[library_models.Branch]:
+        return queryset.extra(select={"isil": "RANDOM()"}).order_by(
+            models.F("isil").asc(nulls_last=True),
+            "name",
+        )
+
+    monkeypatch.setattr(BranchOrder, "apply_sync", classmethod(_shadowed_column_ordering))
+
+    payload, branch_sql = _branch_offset_page(_OFFSET_WITH_ACTIVE_ORDER)
+
+    if nulls_modifier:
+        err = json_object(payload, "errors", 0)
+        assert json_at(err, "extensions", "reason") == "order_required"
+        assert json_at(err, "extensions", "argument") == "offset"
+        assert branch_sql == []
+        return
+    assert "errors" not in payload, payload
+    assert json_at(payload, "data", "allLibraryBranchesViaListField") == [{"name": "Bravo"}]
+    assert len(branch_sql) == 1
+    statement = branch_sql[0].upper()
+    assert "OFFSET 1" in statement, statement
+    assert '"LIBRARY_BRANCH"."ISIL" IS NULL' in statement, statement
 
 
 @pytest.mark.django_db

@@ -65,7 +65,7 @@ from django_strawberry_framework.types.relay import (
     implements_relay_node,
 )
 from django_strawberry_framework.utils import truth as real_truth
-from django_strawberry_framework.utils._narrowing import read_attr
+from django_strawberry_framework.utils._narrowing import is_exact_list, read_attr
 from tests._idioms import (
     FETCH_MODES,
     json_at,
@@ -611,6 +611,60 @@ def test_coerce_pk_or_none_passes_raw_string_for_non_field_node_id() -> None:
 
 
 @pytest.mark.django_db
+def test_refetch_finds_a_row_by_a_node_id_over_a_queryset_annotation() -> None:
+    """A NodeID naming a ``get_queryset`` annotation, no model field, refetches its row.
+
+    The slot has no column (``_node_id_slot`` answers ``None``), so the raw literal
+    filters the annotated queryset and the reorder keys the row's annotation value and
+    the requested id by ``str`` (``utils/querysets.py::identity_key``): ``node`` and
+    ``nodes`` answer the row, and a literal no row holds is ``null``.
+    """
+    services.seed_data(1)
+
+    class SlugNode(DjangoType):
+        slug: relay.NodeID[str]
+
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+            name = "SlugNode"
+
+        @classmethod
+        @override
+        def get_queryset(
+            cls,
+            queryset: QuerySet[Category],
+            info: object,
+            **kwargs: object,
+        ) -> QuerySet[Category]:
+            return queryset.annotate(slug=models.F("name"))
+
+    @strawberry.type
+    class Query:
+        node: relay.Node | None = DjangoNodeField()
+        nodes: list[relay.Node | None] = DjangoNodesField()
+
+    finalize_django_types()
+    schema = strawberry.Schema(query=Query, config=strawberry_config(), types=[SlugNode])
+    row = Category.objects.order_by("pk").first()
+    assert row is not None
+    found = _gid("products.category", row.name)
+    missing = _gid("products.category", "no-such-category-name")
+    result = schema.execute_sync(
+        "query ($id: ID!, $ids: [ID!]!) {"
+        " node(id: $id) { ... on SlugNode { id name } }"
+        " nodes(ids: $ids) { ... on SlugNode { name } } }",
+        variable_values={"id": found, "ids": [missing, found]},
+    )
+    assert result.errors is None, result.errors
+    assert result.data == {
+        "node": {"id": found, "name": row.name},
+        "nodes": [None, {"name": row.name}],
+    }
+
+
+@pytest.mark.django_db
 def test_batch_coercion_computes_id_slot_once_per_type(monkeypatch: pytest.MonkeyPatch) -> None:
     """The id slot is computed once per distinct type per call path.
 
@@ -781,6 +835,41 @@ class _SpelledStampKeyed(Model):
         db_table = "relay_spelled_stamp_keyed"
 
 
+# The stubs make ``TextField`` generic; the runtime class takes no subscript.
+if TYPE_CHECKING:
+    _CommaListBase = models.TextField[str | list[str] | Combinable, list[str]]
+else:
+    _CommaListBase = models.TextField
+
+
+class _CommaListField(_CommaListBase):
+    """A consumer column holding a list of words, stored as their comma-joined text."""
+
+    @override
+    def to_python(self, value: object) -> object:
+        return value.split(",") if isinstance(value, str) else value
+
+    def from_db_value(self, value: object, *_context: object) -> object:
+        """Read the stored text back as the list it holds; Django passes two more arguments."""
+        return self.to_python(value)
+
+    @override
+    def get_prep_value(self, value: object) -> object:
+        return ",".join(str(word) for word in value) if is_exact_list(value) else value
+
+
+class _SpelledListKeyed(Model):
+    """A Relay row keyed by a consumer column whose Python value is a list, never hashable."""
+
+    code: "_CommaListField" = _CommaListField(primary_key=True)
+    name: "models.TextField[str | Combinable, str]" = models.TextField()
+
+    class Meta:
+        app_label = "products"
+        managed = False
+        db_table = "relay_spelled_list_keyed"
+
+
 @contextlib.contextmanager
 def _spelled_key_table(model: type[Model], key: object) -> Generator[str, None, None]:
     """Create ``model``'s table holding one row keyed ``key``; yield its model-label prefix."""
@@ -888,6 +977,20 @@ def test_refetch_finds_an_aware_datetime_key_spelled_in_another_offset(root: str
             "2024-01-01T10:00:00+02:00",
             root,
         )
+    assert answer == _STORED_ANSWER[root]
+
+
+@pytest.mark.django_db(transaction=True)
+@_REFETCH_ROOTS
+def test_refetch_finds_a_row_whose_key_value_is_unhashable(root: str) -> None:
+    """A key column whose Python value is a list keys the reorder by its ``str``.
+
+    ``to_python`` turns the id and the row's key into lists, which cannot key the
+    reorder's index (``utils/querysets.py::identity_key``), so both sides key by the
+    list's ``str`` and ``node`` and ``nodes`` get the row instead of raising.
+    """
+    with _spelled_key_table(_SpelledListKeyed, ["ab", "cd"]) as label:
+        answer = _spelled_key_answer(_SpelledListKeyed, label, "ab,cd", root)
     assert answer == _STORED_ANSWER[root]
 
 

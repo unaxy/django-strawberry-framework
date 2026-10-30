@@ -1454,6 +1454,42 @@ def test_scalars_optimizer_no_fk_id_elision_when_extra_scalar_selected_in_http_q
 
 
 @pytest.mark.django_db
+def test_scalars_optimizer_no_fk_id_elision_when_typename_selected_in_http_query() -> None:
+    """A ``__typename`` beside ``id`` on a forward FK takes the JOIN, never the FK-id elision.
+
+    ``__typename`` is a meta field the schema publishes from no declaration, so it
+    resolves to no Python name, and the elision scan
+    (``optimizer/walker.py::_selected_scalar_names``) answers that the selection
+    is not ``{pk}`` alone: the optimizer plans ``select_related("parent")`` and
+    the parent resolves from the joined row.
+    """
+    root = _seed_specimen(label="root")
+    _seed_specimen(label="child", parent=root)
+
+    with CaptureQueriesContext(connection) as captured:
+        response = _post_graphql(
+            """
+            query {
+              allScalarSpecimens {
+                label
+                parent { id __typename }
+              }
+            }
+            """,
+        )
+
+    assert response.status_code == 200
+    body = response_json(response)
+    assert "errors" not in body, body
+    rows = {json_at(row, "label"): row for row in json_list(body, "data", "allScalarSpecimens")}
+    assert json_at(rows, "root", "parent") is None
+    assert json_at(rows, "child", "parent") == {"id": root.pk, "__typename": "ScalarSpecimenType"}
+    assert len(captured) == 1, [q["sql"] for q in captured]
+    sql = captured[0]["sql"]
+    assert "JOIN" in sql.upper(), sql
+
+
+@pytest.mark.django_db
 def test_scalars_optimizer_fk_id_elision_for_each_alias_in_http_query() -> None:
     """Duplicate aliases on an id-only forward FK both resolve from the source FK column.
 

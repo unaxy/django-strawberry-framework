@@ -62,6 +62,7 @@ class CompletionState:
     release: asyncio.Event = field(default_factory=asyncio.Event)
     drained: asyncio.Event = field(default_factory=asyncio.Event)
     cleanup_started: asyncio.Event | None = None
+    fail_before_cancel: bool = False
     cleanup_release: asyncio.Event = field(default_factory=asyncio.Event)
     start_atomic: bool | None = None
     start_rows: list[str] = field(default_factory=list)
@@ -98,7 +99,10 @@ def messages(result: ExecutionResult | CoreResult) -> list[str]:
 async def fast() -> NoReturn:
     """Fail only after the sibling is executing and held at its I/O barrier."""
     await CURRENT.state.started.wait()
-    if CURRENT.state.cleanup_started is not None:
+    if CURRENT.state.fail_before_cancel:
+        # Fail while the sibling is still held, so the caller cancels during the drain.
+        pass
+    elif CURRENT.state.cleanup_started is not None:
         await CURRENT.state.release.wait()
     elif CURRENT.state.shape in {"mutation", "mutation_list"}:
         # Model completion of independent I/O; transport hooks cannot release an
@@ -679,14 +683,50 @@ async def test_live_direct_cleanup(
     assert not await Branch.objects.aexists()
 
 
+def _draining_after_failure() -> bool:
+    """Whether an owned join is awaiting its drain after an ordinary sibling failure.
+
+    Reads the suspended ``_gather_with_cancel`` frames of every running task: one
+    that has created ``drain`` with ``cancelled`` still false took the
+    ordinary-failure path and is waiting only on its surviving siblings.
+    """
+    for task in asyncio.all_tasks():
+        awaited: object = task.get_coro()
+        while inspect.iscoroutine(awaited):
+            frame = awaited.cr_frame
+            if frame is not None and awaited.cr_code is completion._gather_with_cancel.__code__:
+                state = frame.f_locals
+                if "drain" in state and state.get("cancelled") is False:
+                    return True
+            awaited = awaited.cr_await
+    return False
+
+
+async def _until_draining_after_failure() -> None:
+    """Yield to the loop, never to the clock, until the failed join reaches its drain."""
+    for _ in range(1000):
+        if _draining_after_failure():
+            return
+        await asyncio.sleep(0)
+    pytest.fail("the owned join never drained after the sibling failure")
+
+
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("mutation_shape", ["mutation", "mutation_list"])
 @pytest.mark.parametrize("cancels", [1, 3])
+@pytest.mark.parametrize("first", ["cancel", "failure"])
 async def test_live_cancellation_waits_for_payload_cleanup(
     private_registry: None,
     mutation_shape: str,
     cancels: int,
+    first: str,
 ) -> None:
+    """Caller cancellation cancels the held sibling and waits out its cleanup.
+
+    ``first`` is what the join sees first: the cancellation itself, or an
+    ordinary failure of the early sibling, after which the join is draining the
+    held sibling when the cancellation arrives and must cancel it then.
+    """
     assert private_registry is None
     CURRENT.state = CompletionState(
         started=asyncio.Event(),
@@ -698,6 +738,7 @@ async def test_live_cancellation_waits_for_payload_cleanup(
         view="stock",
         work="cleanup",
         shape=mutation_shape,
+        fail_before_cancel=first == "failure",
     )
     schema, query = make_schema(mutation_shape)
     CURRENT.state.schema = schema
@@ -711,6 +752,9 @@ async def test_live_cancellation_waits_for_payload_cleanup(
         )
         assert CURRENT.state.cleanup_started is not None
         await asyncio.wait_for(CURRENT.state.started.wait(), timeout=15)
+        if first == "failure":
+            await _until_draining_after_failure()
+            assert not CURRENT.state.cancelled
         request.cancel()
         await asyncio.wait_for(CURRENT.state.cleanup_started.wait(), timeout=15)
         for _ in range(cancels - 1):
