@@ -1414,6 +1414,61 @@ def test_a_get_filters_override_reshapes_what_a_cycle_member_contributes(
         assert _kept_values(branch, {"shelves": {key: value}}, "name") == ["B1"]
 
 
+def test_a_cycle_of_projected_copies_publishes_each_set_once_and_reexpands_it_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Around a cycle of projected copies each set publishes once and re-expands once per build.
+
+    Every set overrides ``__init__``, so every flat copy is a ``ProjectedChildFilter``
+    whose form field reads its child set's table: publishing a set reads its copies'
+    widget keys, which read the next set's table around the ring and back to the set
+    publishing (served the table being published), and to a set still building (served
+    the surface the build's scope keeps for it).
+    """
+
+    class InitFilterSet(FilterSet):
+        @override
+        def __init__(
+            self,
+            data: QueryDict | dict[str, object] | None = None,
+            queryset: QuerySet[django_models.Model] | None = None,
+            *,
+            request: HttpRequest | None = None,
+            prefix: str | None = None,
+        ) -> None:
+            super().__init__(data=data, queryset=queryset, request=request, prefix=prefix)
+
+    ring = _desk_ring(InitFilterSet)
+    publishes: list[type[FilterSet]] = []
+    root_expansions: list[type[FilterSet]] = []
+    publish = FilterSet._publish_filters.__func__
+    expand_along = FilterSet._expand_along.__func__
+
+    def counting_publish(cls: type[FilterSet], expansion: Mapping[str, Filter]) -> None:
+        publishes.append(cls)
+        publish(cls, expansion)
+
+    def counting_expand_along(
+        cls: type[FilterSet],
+        path: tuple[type[FilterSet], ...],
+        scope: object,
+    ) -> object:
+        if path == (cls,):
+            root_expansions.append(cls)
+        return object_result(expand_along, cls, path, scope)
+
+    monkeypatch.setattr(FilterSet, "_publish_filters", classmethod(counting_publish))
+    monkeypatch.setattr(FilterSet, "_expand_along", classmethod(counting_expand_along))
+
+    table = ring["branch"]._filter_table()
+
+    assert isinstance(table["desks__shelf__code"], ProjectedChildFilter)
+    assert set(table) == _DESK_RING_FILTERS["branch"]
+    for member in ring.values():
+        assert publishes.count(member) == 1
+        assert root_expansions.count(member) <= 2  # its build, and every read re-entering it
+
+
 def test_a_set_read_while_it_builds_answers_its_unpublished_get_filters() -> None:
     """A captured-branch check re-entering the set being built reads its ``get_filters()``.
 
