@@ -9346,6 +9346,14 @@ def test_integer_transform_of_a_type_without_a_stated_range_binds_every_member(
         "integer_field_range",
         _default_range_operations(connection).integer_field_range,
     )
+    if connection.vendor == "postgresql":
+        # psycopg adapts an integer by its internal type, so the type needs a psycopg mapping.
+        from django.db.backends.postgresql.operations import (  # noqa: PLC0415 - psycopg is optional
+            DatabaseOperations,
+        )
+
+        type_map = DatabaseOperations.integerfield_type_map
+        monkeypatch.setitem(type_map, "UnrangedIntegerField", type_map["BigIntegerField"])
     with register_lookup(dj_models.BigIntegerField, _PlusOneUnranged):
 
         class PlusOneUnrangedFilter(FilterSet):
@@ -9574,6 +9582,9 @@ _HALF_SECOND_OFFSET = datetime.timezone(datetime.timedelta(hours=1, microseconds
 _AT_PLUS_SIXTEEN = datetime.datetime(2021, 6, 16, 1, 30, tzinfo=_PLUS_SIXTEEN)
 _AT_MINUS_SIXTEEN = datetime.datetime(2021, 6, 14, 17, 30, tzinfo=_MINUS_SIXTEEN)
 _AT_HALF_SECOND_OFFSET = datetime.datetime(2021, 6, 15, 10, 30, tzinfo=_HALF_SECOND_OFFSET)
+#: An hour past ``_BINDABLE_DATETIME``: Django's ``In`` drops a member equal to an earlier one,
+#: so an ``in`` list's refused member must name its own instant to reach the database.
+_HOUR_LATER_AT_PLUS_SIXTEEN = datetime.datetime(2021, 6, 16, 2, 30, tzinfo=_PLUS_SIXTEEN)
 
 
 @pytest.mark.django_db
@@ -9609,7 +9620,7 @@ _AT_HALF_SECOND_OFFSET = datetime.datetime(2021, 6, 15, 10, 30, tzinfo=_HALF_SEC
             id="declared-time-range",
         ),
         pytest.param(
-            {"taken_among": [_BINDABLE_DATETIME, _AT_PLUS_SIXTEEN]},
+            {"taken_among": [_BINDABLE_DATETIME, _HOUR_LATER_AT_PLUS_SIXTEEN]},
             "taken_among",
             False,
             id="list-element",
