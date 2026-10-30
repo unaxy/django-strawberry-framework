@@ -105,6 +105,7 @@ from .optimizer.plans import (
 )
 from .optimizer.selections import (
     connection_has_next_page_selected,
+    connection_page_selected,
     connection_total_count_selected,
     info_selections,
     prime_selected_fields,
@@ -1155,11 +1156,12 @@ def _resolve_keyset_connection(
     # the same fact in both domains.
     fetch_limit = page_size + NEXT_PAGE_PROBE_ROWS
 
-    if not should_resolve_list_connection_edges(info):
+    if not (should_resolve_list_connection_edges(info) or _page_requested(info)):
         # ``ListConnection`` parity: nothing under ``edges`` / ``pageInfo``
         # is selected, so no row is fetched and the placeholder flags are
         # inert. ``totalCount`` is its own sibling selection and still
-        # counts when requested.
+        # counts when requested. Upstream's wire-name check answers first;
+        # ``_page_requested`` catches the spellings it misses.
         conn = cls(
             edges=[],
             page_info=relay.PageInfo(
@@ -1310,6 +1312,24 @@ def _has_next_page_requested(info: Info[object, object]) -> bool:
     page-info / has-next-page fields by Python name rather than a wire literal.
     """
     return _connection_field_requested(info, connection_has_next_page_selected)
+
+
+def _page_requested(info: Info[object, object]) -> bool:
+    """Return whether the query selects the connection's ``edges`` or ``pageInfo``.
+
+    Matched by Python name through the shared per-selection primitive
+    ``optimizer/selections.py::connection_page_selected``, so the answer holds
+    under any wire names the schema publishes. Strawberry's
+    ``strawberry/relay/utils.py::should_resolve_list_connection_edges`` matches
+    the wire names ``edges`` / ``pageInfo`` and answers ``False`` when a
+    ``NameConverter`` respells both (``page_info`` under
+    ``auto_camel_case=False``), which serves an empty page with
+    ``hasNextPage: false``. Both callers ask upstream first and this second: the
+    keyset page (``_resolve_keyset_connection``) and the patched
+    ``ListConnection.resolve_connection`` check
+    (``_strawberry_patches.py::_patched_should_resolve_list_connection_edges``).
+    """
+    return _connection_field_requested(info, connection_page_selected)
 
 
 # basedpyright: a ``Meta.interfaces`` node type becomes a ``relay.Node`` only at run time, so the

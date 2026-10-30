@@ -555,7 +555,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_scalars.py               # Scalar tests for BigInt, Upload, and the framework StrawberryConfig helper.
 ├── test_schema.py                # Permanent behavioral tests for django_strawberry_framework.schema.
 ├── test_sets_mixins.py           # Pins for set-family mixins shared by ``FilterSet`` and ``OrderSet``.
-├── test_strawberry_patches.py    # Tests for the Strawberry request-body patch.
+├── test_strawberry_patches.py    # Tests for the Strawberry request-body and connection-page patches.
 ├── test_views.py                 # Package-tier contracts for the package's Django GraphQL views.
 ├── test_views_async_callback.py  # The async package view's ``as_view`` returns a coroutine view callback, or refuses.
 ├── test_workspace.py             # Repo-tooling tests for the agentflow workspace tool's copies, pool, evidence and cleanup.
@@ -858,7 +858,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_scalars.py               # Scalar tests for BigInt, Upload, and the framework StrawberryConfig helper.
 ├── test_schema.py                # Permanent behavioral tests for django_strawberry_framework.schema.
 ├── test_sets_mixins.py           # Pins for set-family mixins shared by ``FilterSet`` and ``OrderSet``.
-├── test_strawberry_patches.py    # Tests for the Strawberry request-body patch.
+├── test_strawberry_patches.py    # Tests for the Strawberry request-body and connection-page patches.
 ├── test_views.py                 # Package-tier contracts for the package's Django GraphQL views.
 ├── test_views_async_callback.py  # The async package view's ``as_view`` returns a coroutine view callback, or refuses.
 ├── test_workspace.py             # Repo-tooling tests for the agentflow workspace tool's copies, pool, evidence and cleanup.

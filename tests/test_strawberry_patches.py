@@ -1,4 +1,4 @@
-"""Tests for the Strawberry request-body patch.
+"""Tests for the Strawberry request-body and connection-page patches.
 
 System-under-test: :mod:`django_strawberry_framework._strawberry_patches`,
 applied at app-load time by
@@ -31,6 +31,13 @@ an array map through the generic JSON helper and then calls ``.items()`` on it,
 or lets malformed path values escape as low-level traversal errors. The delegates
 turn those client-input failures into Strawberry's controlled ``400`` while
 leaving accepted multipart behavior and non-structural consumer failures alone.
+
+And it rebinds the ``strawberry.relay.types`` connection-page check
+``ListConnection.resolve_connection`` calls, so a page whose ``edges`` /
+``pageInfo`` a ``NameConverter`` respells still reads its rows. That outcome is
+earned over real HTTP in ``examples/fakeshop/test_query/test_library_api.py``
+(``test_snake_case_page_info_only_page_reports_has_next_page``); the rows here
+pin its install lifecycle and the upstream call shape it refuses to run without.
 
 Because the non-envelope scalar guard is a request-*body* contract enforced from
 a generic JSON helper, ``apply()`` also installs
@@ -67,6 +74,7 @@ consumer mounting Strawberry's own view is entitled to.
 
 import functools
 import json
+import types
 from collections.abc import Callable, Mapping
 from unittest import mock
 
@@ -85,9 +93,11 @@ from django.test import RequestFactory
 from strawberry.http.async_base_view import AsyncBaseHTTPView
 from strawberry.http.base import BaseView
 from strawberry.http.sync_base_view import SyncBaseHTTPView
+from strawberry.relay import types as relay_types
 from typing_extensions import override
 
 from django_strawberry_framework import _strawberry_patches as patches
+from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 
 
@@ -116,6 +126,27 @@ def test_patch_is_installed_on_base_view() -> None:
     assert BaseView.__dict__["parse_query_params"] is patches._patched_parse_query_params
     assert SyncBaseHTTPView.__dict__["parse_multipart"] is patches._patched_sync_parse_multipart
     assert AsyncBaseHTTPView.__dict__["parse_multipart"] is patches._patched_async_parse_multipart
+    assert (
+        read_attr(relay_types, patches._EDGES_CHECK)
+        is patches._patched_should_resolve_list_connection_edges
+    )
+
+
+def test_apply_reinstalls_the_connection_page_check_when_reverted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A third party restoring upstream's connection-page check makes ``apply()`` rebind it."""
+    patches.apply()
+    monkeypatch.setattr(
+        relay_types,
+        "should_resolve_list_connection_edges",
+        patches._original_should_resolve_list_connection_edges,
+    )
+    assert patches._patch_is_installed() is False
+
+    patches.apply()
+
+    assert patches._patch_is_installed() is True
 
 
 def test_apply_reinstalls_pair_when_parse_query_params_reverted(
@@ -579,6 +610,61 @@ def test_apply_fails_loudly_when_parse_multipart_signature_changes(
     with (
         mock.patch.object(patches, name, method),
         pytest.raises(RuntimeError, match=r"expected \(self, request\) signature"),
+    ):
+        patches.apply()
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        pytest.param("relay_types", id="relay-module"),
+        pytest.param("_original_should_resolve_list_connection_edges", id="check"),
+    ],
+)
+def test_apply_fails_loudly_when_the_connection_page_check_moves(name: str) -> None:
+    """A moved or renamed check cannot leave the rebind silently uninstalled."""
+    with (
+        mock.patch.object(patches, name, None),
+        pytest.raises(RuntimeError, match="should_resolve_list_connection_edges"),
+    ):
+        patches.apply()
+
+
+def _info_and_more(_info: object, _more: object) -> bool:
+    """A check whose signature grew a second parameter."""
+    return False
+
+
+def test_apply_fails_loudly_when_the_connection_page_check_signature_changes() -> None:
+    """The rebind delegates ``(info)``, so a reshaped upstream check refuses to install."""
+    with (
+        mock.patch.object(
+            patches,
+            "_original_should_resolve_list_connection_edges",
+            _info_and_more,
+        ),
+        pytest.raises(RuntimeError, match=r"expected \(info\) signature"),
+    ):
+        patches.apply()
+
+
+class _InlinedCheckConnection:
+    """A ``ListConnection`` whose ``resolve_connection`` no longer calls the module global."""
+
+    @classmethod
+    def resolve_connection(cls) -> bool:
+        return False
+
+
+def test_apply_fails_loudly_when_resolve_connection_stops_calling_the_check() -> None:
+    """A release that inlines the check would leave the rebind installed and inert."""
+    module = types.SimpleNamespace(
+        should_resolve_list_connection_edges=patches._original_should_resolve_list_connection_edges,
+        ListConnection=_InlinedCheckConnection,
+    )
+    with (
+        mock.patch.object(patches, "relay_types", module),
+        pytest.raises(RuntimeError, match="no longer calls"),
     ):
         patches.apply()
 
