@@ -88,13 +88,17 @@ from django_strawberry_framework.optimizer.nested_planner import (
 from django_strawberry_framework.optimizer.plans import (
     WINDOW_ROW_NUMBER,
     WINDOW_TOTAL_COUNT,
+    PlannedWindow,
     _extend_only_projection,
     _keyset_order_ref,
     _resolve_order_path_field,
     deferred_loading_of,
 )
 from django_strawberry_framework.orders import Ordering, OrderSet, RelatedOrder
-from django_strawberry_framework.utils.connections import UnwindowableConnection
+from django_strawberry_framework.utils.connections import (
+    ConnectionWindowBounds,
+    UnwindowableConnection,
+)
 from tests._definition import make_definition
 from tests._idioms import json_at, json_list, json_object, saved_pk
 from tests._info import make_info
@@ -240,7 +244,10 @@ def test_backward_args_over_a_window_wrapper_fall_back_to_the_keyset_slicer() ->
     wrapper = _WindowedConnectionRows(
         rows=[],
         fallback=Issue.objects.all,
-        keyset_state=_keyset_connection_context(connection_type),
+        planned=PlannedWindow(
+            ConnectionWindowBounds(offset=0, limit=2, reverse=False),
+            _keyset_connection_context(connection_type),
+        ),
     )
     # ``edges`` selected so the slicer's edge-resolution gate
     # (``should_resolve_list_connection_edges``) actually slices.
