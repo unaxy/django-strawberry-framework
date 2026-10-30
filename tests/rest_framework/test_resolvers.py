@@ -7884,20 +7884,17 @@ def test_serializer_datetime_from_a_date_hook_is_held_to_its_default_zone_date(
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize(
-    ("sent", "stored"),
+    ("sent", "days", "fits_64_bits"),
     [
-        pytest.param("106751992 00:00:00", None, id="past-64-bits"),
-        pytest.param("-106751992 00:00:00", None, id="past-64-bits-negative"),
-        pytest.param(
-            "106751991 00:00:00",
-            datetime.timedelta(days=106_751_991),
-            id="fits-64-bits",
-        ),
+        pytest.param("106751992 00:00:00", 106_751_992, False, id="past-64-bits"),
+        pytest.param("-106751992 00:00:00", -106_751_992, False, id="past-64-bits-negative"),
+        pytest.param("106751991 00:00:00", 106_751_991, True, id="fits-64-bits"),
     ],
 )
 def test_serializer_duration_past_the_backend_integer_is_refused(
     sent: str,
-    stored: datetime.timedelta | None,
+    days: int,
+    fits_64_bits: bool,  # noqa: FBT001
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A duration whose microsecond count SQLite cannot bind is the field's ``invalid`` error.
@@ -7905,8 +7902,9 @@ def test_serializer_duration_past_the_backend_integer_is_refused(
     SQLite stores a duration as its microsecond count in a 64-bit integer, which a
     ``DurationField`` carries no validator for; past it the driver would raise
     ``OverflowError`` at the save. The refusal is keyed to the input field and nothing
-    is written; a duration that fits stores. The column's scalar is the consumer's
-    ``SCALAR_MAP`` entry, here DRF's own duration text.
+    is written; a duration that fits stores. PostgreSQL binds an ``interval``, so every
+    duration stores there. The column's scalar is the consumer's ``SCALAR_MAP`` entry,
+    here DRF's own duration text.
     """
     monkeypatch.setitem(SCALAR_MAP, models.DurationField, str)
     suffix = re.sub(r"\W", "", sent.replace("-", "Minus"))
@@ -7921,7 +7919,7 @@ def test_serializer_duration_past_the_backend_integer_is_refused(
         payload = _run_row_write(schema, create_input, {"span": sent})
         stored_spans = list(model_class._default_manager.values_list("span", flat=True))
 
-    if stored is None:
+    if not fits_64_bits and not connections["default"].features.has_native_duration_field:
         assert payload == {
             "result": None,
             "errors": [{"field": "span", "messages": _UNREPRESENTABLE, "codes": ["invalid"]}],
@@ -7929,7 +7927,7 @@ def test_serializer_duration_past_the_backend_integer_is_refused(
         assert stored_spans == []
     else:
         assert json_at(payload, "errors") == []
-        assert stored_spans == [stored]
+        assert stored_spans == [datetime.timedelta(days=days)]
 
 
 # A naive year-1 datetime made aware in Tokyo, and an aware one projected onto UTC under

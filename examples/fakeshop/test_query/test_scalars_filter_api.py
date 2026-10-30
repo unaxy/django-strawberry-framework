@@ -936,9 +936,12 @@ def test_year_integer_the_database_cannot_bind_is_filter_invalid(
 # UTC offsets PostgreSQL refuses (``time zone displacement out of range``) though the scalar
 # parse and the form clean accept them: 16:00 or more either way, and, bound as text (Django's
 # default psycopg cursor), an offset carrying a fraction of a second, which only the ``Time``
-# scalar parses. Both datetimes name alpha's instant, which SQLite binds projected onto UTC.
+# scalar parses. Both ``_ALPHA_AT_*`` datetimes name alpha's instant, which SQLite binds
+# projected onto UTC. Django's ``In`` drops a member equal to an earlier one, so an ``in``
+# list's refused member names its own instant, an hour past alpha's.
 _ALPHA_AT_PLUS_16 = "2021-06-16T01:30:00+16:00"
 _ALPHA_AT_MINUS_16 = "2021-06-14T17:30:00-16:00"
+_HOUR_AFTER_ALPHA_AT_PLUS_16 = "2021-06-16T02:30:00+16:00"
 _BEFORE_ALPHA_AT_MINUS_23_59 = "2021-06-14T00:00:00-23:59"
 _TIME_AT_PLUS_16 = "09:30:00+16:00"
 _TIME_AT_HALF_SECOND_OFFSET = "09:30:00+01:00:00.500000"
@@ -969,7 +972,7 @@ _TIME_AT_HALF_SECOND_OFFSET = "09:30:00+01:00:00.500000"
         ),
         pytest.param(
             _BY_FILTER,
-            {"occurredAt": {"in": [_BINDABLE_DATETIME, _ALPHA_AT_MINUS_16]}},
+            {"occurredAt": {"in": [_BINDABLE_DATETIME, _HOUR_AFTER_ALPHA_AT_PLUS_16]}},
             "occurred_at__in",
             ["alpha"],
             id="in-member",
