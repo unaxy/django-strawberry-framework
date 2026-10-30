@@ -2161,7 +2161,10 @@ class _ExpansionScope:
     ``surfaces`` holds each inner path's contribution (``FilterSet._filters_along``)
     by the set and the sets on its path (the result depends on nothing else), so a
     set reached along many paths through the same sets is expanded once; ``reached`` holds each
-    set's ``_reachable_filtersets`` id set; ``limit`` is the flat-filter limit,
+    set's ``_reachable_filtersets`` id set; ``reentered`` holds the surface of each set
+    read again while its own build runs (``FilterSet.get_filters``), a function of the
+    set and the declarations it reaches alone, so every such read in the build shares
+    one; ``limit`` is the flat-filter limit,
     read once per build. Keys are object ids: every class on a key stays alive
     for the scope, and an id never consults a consumer metaclass ``__eq__``.
     """
@@ -2169,6 +2172,7 @@ class _ExpansionScope:
     limit: int
     surfaces: dict[tuple[int, frozenset[int]], Mapping[str, Filter]]
     reached: dict[int, frozenset[int]]
+    reentered: dict[int, OrderedDict[str, Filter]]
 
 
 # Whether the ``FilterSet`` being constructed is one the package's own request
@@ -2202,6 +2206,28 @@ _reshape_var: ContextVar[tuple[type[FilterSet], Mapping[str, Filter]] | None] = 
 )
 
 
+# The tables of the sets publishing (``FilterSet._publish_filters``), by set id: a read
+# of a set's table while it publishes answers the table being published
+# (``FilterSet._filter_table``).
+_publishing_var: ContextVar[Mapping[int, Mapping[str, Filter]] | None] = ContextVar(
+    "_publishing_var",
+    default=None,
+)
+
+
+@contextmanager
+def _publishing(
+    filterset: type[FilterSet],
+    table: Mapping[str, Filter],
+) -> Generator[None, None, None]:
+    """Serve ``table`` as ``filterset``'s table to every read while the block publishes it."""
+    token = _publishing_var.set({**(_publishing_var.get() or {}), id(filterset): table})
+    try:
+        yield
+    finally:
+        _publishing_var.reset(token)
+
+
 @contextmanager
 def _expansion_scope() -> Generator[_ExpansionScope, None, None]:
     """Enter the outermost build's ``_ExpansionScope``, or reuse the one already entered."""
@@ -2209,7 +2235,7 @@ def _expansion_scope() -> Generator[_ExpansionScope, None, None]:
     if scope is not None:
         yield scope
         return
-    scope = _ExpansionScope(limit=_flat_filter_limit(), surfaces={}, reached={})
+    scope = _ExpansionScope(limit=_flat_filter_limit(), surfaces={}, reached={}, reentered={})
     token = _expansion_scope_var.set(scope)
     try:
         yield scope
@@ -2722,8 +2748,9 @@ class FilterSet(
     # object changes, so an inherited or pre-clear table is never read.
     _lookup_table: ClassVar[FilterLookupTable | None] = None
     # Reentry guard around `get_filters`'s build: a call reading this class
-    # again mid-build (a captured-branch check, a second thread) gets the
-    # surface built again, unpublished (`expanded_once`'s `on_reentry`).
+    # again mid-build (a captured-branch check, a projected copy's form field read
+    # while a parent publishes, a second thread) gets the surface built again once
+    # per build, unpublished (`expanded_once`'s `on_reentry`).
     _is_expanding_filters: ClassVar[bool] = False
 
     # Family binding-state descriptor: the single source for the lifecycle attr
@@ -3011,9 +3038,11 @@ class FilterSet(
           caching a half-built result.
 
         A call re-entering this method while the class is mid-build (a
-        captured-branch check whose target reaches back here, or a second
-        thread) returns the same surface, built again and not published
-        (``expanded_once``'s ``on_reentry``).
+        captured-branch check whose target reaches back here, a target
+        publishing first whose projected copies read this set's filters for
+        their form fields, or a second thread) returns the same surface, built
+        again once per build (``_ExpansionScope`` ``reentered``) and not
+        published (``expanded_once``'s ``on_reentry``).
 
         Each call returns a fresh map, as django-filter's does, so an override
         editing its ``super().get_filters()`` result edits its own copy. The
@@ -3045,6 +3074,15 @@ class FilterSet(
         def _surface() -> OrderedDict[str, Filter]:
             with _expansion_scope() as scope:
                 return cls._expand_along((cls,), scope)
+
+        # A read re-entering the build serves the surface the build's scope already
+        # holds for it: one target publishing reads it once per projected copy.
+        def _reentered() -> OrderedDict[str, Filter]:
+            with _expansion_scope() as scope:
+                kept = scope.reentered.get(id(cls))
+                if kept is None:
+                    kept = scope.reentered[id(cls)] = cls._expand_along((cls,), scope)
+                return kept
 
         # The whole build shares one scope: the targets it builds and the
         # captured-branch check below expand inside it too.
@@ -3103,7 +3141,7 @@ class FilterSet(
             cache_attr=cls._lifecycle.cache,
             guard_attr=cls._lifecycle.guard,
             build=_build,
-            on_reentry=_surface,
+            on_reentry=_reentered,
         )
         # The cached expansion (never a reentrant call's unpublished surface), not
         # yet published: publish it.
@@ -3127,7 +3165,8 @@ class FilterSet(
         published table: ``base_filters`` (every instance's copies), the
         snapshot's candidate rows, flat copies and form keys, and every package
         read (``_filter_table``). A projected copy the set does not hold is
-        refused first (``_reject_foreign_projection``).
+        refused first (``_reject_foreign_projection``). A read of the set's table
+        while it publishes answers the table being published.
         """
         table = OrderedDict(cls._reshape(expansion))
         for filter_name, filter_instance in table.items():
@@ -3173,13 +3212,19 @@ class FilterSet(
         # after the whole table classified: a failure above publishes nothing, so
         # stale metadata can never pair with a rebuilt ``base_filters``.
         deferred = frozenset(name for name, f in table.items() if _is_flat_copy(cls, f))
+        # The snapshot exposes a READ-ONLY view of the table; the mutable
+        # dict is what django-filter needs on ``base_filters``.
+        filters = MappingProxyType(table)
+        # A copy's form field may read this set's table back (a projected copy around
+        # a cycle reads its child's, whose own copies read this one's): it reads the
+        # table being published (``_publishing``), never publishes it again inside.
+        with _publishing(cls, filters):
+            copy_keys = _copy_form_keys(table, deferred)
         cls._expanded_snapshot = ExpansionSnapshot(
-            # The snapshot exposes a READ-ONLY view of the table; the mutable
-            # dict is what django-filter needs on ``base_filters``.
-            filters=MappingProxyType(table),
+            filters=filters,
             candidates=MappingProxyType(candidates),
             deferred_copies=deferred,
-            copy_keys=_copy_form_keys(table, deferred),
+            copy_keys=copy_keys,
         )
         cls.base_filters = table
 
@@ -3221,10 +3266,14 @@ class FilterSet(
         (a read re-entering its build, such as a captured-branch check walking
         back into it, or a set with no ``Meta.model`` whose ``RelatedFilter``
         target is still a lazy string) answers its ``get_filters()`` result,
-        unpublished.
+        unpublished; a read while the set publishes answers the table being
+        published (``_publishing``).
         """
         snapshot = cls._expansion_snapshot()
         if snapshot is None:
+            publishing = _publishing_var.get()
+            if publishing is not None and id(cls) in publishing:
+                return publishing[id(cls)]
             filters = cls.get_filters()
             snapshot = cls._expansion_snapshot()
             if snapshot is None:
