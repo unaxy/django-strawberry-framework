@@ -455,14 +455,15 @@ it lands with its tick.
     - Copied:
       - Django: `_django_patches.py::_patched_remove_databases_failures` and its two pinned source strings;
       - Strawberry: `_strawberry_patches.py::_patched_parse_query_params` and its pinned source string;
-      - strawberry-graphql-django: `templates/django_strawberry_framework/debug_toolbar.html`,
-        `middleware/debug_toolbar.py`, and the argparse body of `management/commands/export_schema.py::Command`;
+      - strawberry-graphql-django: `templates/django_strawberry_framework/debug_toolbar.html`
+        and `middleware/debug_toolbar.py`;
       - django-filter: `filters/sets.py::_PUBLIC_PACKAGE_FILTER_DEFAULTS`, the whole table in upstream's order.
     - Borderline: `_completion.py::_gather_with_cancel`, which has graphql-core 3.3's skeleton but the opposite
       cancel semantics, and `utils/errors.py::datetime_django_binds`, three lines of public calls.
     - Not copied (behaviour or name match only): every graphene-django "port", `extensions/debug.py`,
-      `testing/client.py`, `types/relay.py::_order_nodes`, `optimizer/plans.py::apply_window_pagination`, and the
-      form and DRF converters.
+      `testing/client.py`, `types/relay.py::_order_nodes`, `optimizer/plans.py::apply_window_pagination`, the
+      form and DRF converters, and `management/commands/export_schema.py::Command`, whose own argument handling
+      shares only the `print_schema` call and Strawberry's "must be an instance of strawberry.Schema" message.
   - Extensions that keep behaviour (each lands with its own tick):
     - [x] 22a. `_django_patches.py::_patched_remove_databases_failures` re-wraps a foreign replacement in a
       `_DatabaseFailure` and then calls Django's own classmethod; both pinned Django bodies go.
