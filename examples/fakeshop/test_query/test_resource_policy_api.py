@@ -2073,7 +2073,8 @@ def test_a_page_size_the_name_converter_renamed_narrows_the_collection_cost() ->
     ``take``. The budget reads each by the Python name Strawberry declared it
     under, so ``take: 2`` narrows both pages and the ``rows`` list under each
     connection is not charged as a second collection, exactly as on the
-    default-named twin above.
+    default-named twin above. The renamed ``rows`` page resolves to the two
+    categories ``take: 2`` asked for.
     """
     seed_data(1)
     query = """
@@ -2085,7 +2086,10 @@ def test_a_page_size_the_name_converter_renamed_narrows_the_collection_cost() ->
     """
     payload = _post("/rp-cost-renamed/", query)
     assert "errors" not in payload, payload
-    assert json_at(payload, "data", "allCategories", "rows") == [], payload
+    assert json_at(payload, "data", "allCategories", "rows") == [
+        {"entry": {"itemsConnection": {"rows": []}}},
+        {"entry": {"itemsConnection": {"rows": []}}},
+    ], payload
 
 
 def test_a_page_argument_other_than_first_or_last_does_not_narrow_the_collection_cost() -> None:
