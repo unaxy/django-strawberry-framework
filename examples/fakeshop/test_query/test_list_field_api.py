@@ -1681,7 +1681,8 @@ def test_shipped_branches_offset_reads_a_nulls_placed_reference_as_the_backend_o
     assert len(branch_sql) == 1
     statement = branch_sql[0].upper()
     assert "OFFSET 1" in statement, statement
-    assert '"LIBRARY_BRANCH"."ISIL" IS NULL' in statement, statement
+    # Django 5.2 leaves the emulated term's column unquoted (``"library_branch".isil``)
+    assert "LIBRARY_BRANCH.ISIL IS NULL" in statement.replace('"', ""), statement
 
 
 @pytest.mark.django_db
