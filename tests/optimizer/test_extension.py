@@ -95,13 +95,13 @@ from django_strawberry_framework.optimizer._context import (
     get_context_value,
     optimizer_value,
     planned_resolver_keys,
+    planned_window,
+    publish_planned_windows,
     publish_scoped_relations,
-    publish_window_cursor_states,
     relation_is_optimizer_scoped,
     stash_for_optimizer,
     stash_on_context,
     stashed_strictness,
-    window_cursor_state,
 )
 from django_strawberry_framework.optimizer._context import (
     active_optimizer as _active_optimizer,
@@ -120,7 +120,11 @@ from django_strawberry_framework.optimizer.extension import (
     clear_document_key_cache,
 )
 from django_strawberry_framework.optimizer.hints import hint_is_skip
-from django_strawberry_framework.optimizer.plans import OptimizationPlan, PrefetchSeal
+from django_strawberry_framework.optimizer.plans import (
+    OptimizationPlan,
+    PlannedWindow,
+    PrefetchSeal,
+)
 from django_strawberry_framework.optimizer.selections import PYTHON_NAME_ATTR
 from django_strawberry_framework.permissions import apply_cascade_permissions
 from django_strawberry_framework.registry import iter_subsystem_clears, registry
@@ -137,6 +141,7 @@ from django_strawberry_framework.utils._narrowing import (
 from django_strawberry_framework.utils._queryset_private import (
     queryset_prefetch_lookups,
 )
+from django_strawberry_framework.utils.connections import ConnectionWindowBounds
 from django_strawberry_framework.utils.querysets import (
     _AsyncQuerySetRows,
     run_in_one_sync_boundary,
@@ -3972,12 +3977,12 @@ def test_optimizer_context_all_exports() -> None:
         "optimizer_value",
         "planned_resolver_keys",
         "publish_scoped_relations",
-        "publish_window_cursor_states",
+        "publish_planned_windows",
         "relation_is_optimizer_scoped",
         "stash_for_optimizer",
         "stash_on_context",
         "stashed_strictness",
-        "window_cursor_state",
+        "planned_window",
     }
     assert set(ctx_mod.__all__) == expected
     for name in expected:
@@ -4049,29 +4054,29 @@ def test_publish_scoped_relations_handles_empty_and_generator_keys_when_active_a
         end_execution_frame(frame)
 
 
-def test_window_cursor_states_publish_read_and_clear_with_the_frame() -> None:
-    """The frame carries each window's vocabulary by resolver key, for this execution only."""
-    declared = declared_cursor_state_for_definition(make_definition(Issue, cursor_field=("id",)))
-    other = declared_cursor_state_for_definition(make_definition(Issue, cursor_field=("-id",)))
-    assert declared is not None
-    assert other is not None
+def test_planned_windows_publish_read_and_clear_with_the_frame() -> None:
+    """The frame carries each planned window by resolver key, for this execution only."""
+    state = declared_cursor_state_for_definition(make_definition(Issue, cursor_field=("id",)))
+    assert state is not None
+    declared = PlannedWindow(ConnectionWindowBounds(offset=0, limit=2, reverse=False), state)
+    other = PlannedWindow(ConnectionWindowBounds(offset=2, limit=2, reverse=False), None)
     # Inactive: nothing to record into and nothing to read.
-    publish_window_cursor_states({"Root.kids@roots.kids": declared})
-    assert window_cursor_state("Root.kids@roots.kids") is None
+    publish_planned_windows({"Root.kids@roots.kids": declared})
+    assert planned_window("Root.kids@roots.kids") is None
 
     scope = begin_execution_frame({}, nested=False)
     frame = scope.lease.held()
     assert frame is not None
     try:
-        publish_window_cursor_states({"Root.kids@roots.kids": declared})
-        publish_window_cursor_states({"Kid.kids@roots.kids.edges.node.kids": other})
-        assert window_cursor_state("Root.kids@roots.kids") is declared
-        assert window_cursor_state("Kid.kids@roots.kids.edges.node.kids") is other
-        assert window_cursor_state("Root.other@roots.other") is None
+        publish_planned_windows({"Root.kids@roots.kids": declared})
+        publish_planned_windows({"Kid.kids@roots.kids.edges.node.kids": other})
+        assert planned_window("Root.kids@roots.kids") is declared
+        assert planned_window("Kid.kids@roots.kids.edges.node.kids") is other
+        assert planned_window("Root.other@roots.other") is None
     finally:
         end_execution_frame(scope)
-    assert frame.window_cursor_states == {}
-    assert window_cursor_state("Root.kids@roots.kids") is None
+    assert frame.planned_windows == {}
+    assert planned_window("Root.kids@roots.kids") is None
 
 
 def test_relation_is_optimizer_scoped_unhashable_fail_closed() -> None:

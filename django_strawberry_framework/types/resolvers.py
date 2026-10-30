@@ -330,12 +330,14 @@ def _check_n1(
 
     Connection contract (spec-033 Decision 8): the synthesized
     relation-connection resolver calls this with ``kind="connection_to_attr"``
-    only on its per-parent branch, after it refused to serve whatever sits
-    under the windowed-prefetch ``to_attr`` (absent, not a list, rows without
-    the window row number, or a sidecar ``filter`` / ``order_by`` kwarg).
-    That branch always queries, so the access counts as lazy without
-    re-probing ``root``: an attribute that is present but refused is still a
-    per-parent query. ``reason`` (the per-parent-fallback cause, supplied by
+    on its per-parent branch, after it refused to serve whatever sits under
+    the windowed-prefetch ``to_attr`` (absent, not a list, rows without the
+    window row number, or a sidecar ``filter`` / ``order_by`` kwarg), and the
+    handed-off window's fallback calls it with ``force_unplanned`` when
+    ``resolve_connection`` refuses the window
+    (``connection.py::_build_windowed_fallback``). Both always query, so the
+    access counts as lazy without re-probing ``root``: an attribute that is
+    present but refused is still a per-parent query. ``reason`` (the per-parent-fallback cause, supplied by
     the connection call site) is appended to the ``"raise"`` / ``"warn"``
     message when present so a flagged fallback reads as actionable rather
     than as an optimizer defect; the list-relation calls pass no ``reason``

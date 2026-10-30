@@ -100,7 +100,10 @@ if TYPE_CHECKING:
 
     from django_strawberry_framework.keyset import KeysetSeek
     from django_strawberry_framework.utils._queryset_private import PrefetchLookup
-    from django_strawberry_framework.utils.connections import WindowRangePlan
+    from django_strawberry_framework.utils.connections import (
+        ConnectionWindowBounds,
+        WindowRangePlan,
+    )
     from django_strawberry_framework.utils.typing import ConcreteField
 
     #: One connection order entry both ``QuerySet.order_by`` and a ``Window``'s
@@ -266,6 +269,24 @@ class PrefetchSeal:
     ]
 
 
+@dataclass(frozen=True)
+class PlannedWindow:
+    """What one planned connection window was fetched under.
+
+    ``bounds`` is the window's ``(offset, limit, reverse)`` slice from
+    ``utils/connections.py::derive_connection_window_bounds`` (or its keyset
+    twin); ``cursor_state`` is the effective order's cursor vocabulary
+    (``effective_cursor_state``) for a keyset window, ``None`` for an offset
+    one. The relation-connection resolver derives its own bounds from the
+    arguments it receives and serves the window only when they equal
+    ``bounds``, so a window fetched under other arguments never reaches the
+    page (``connection.py::_consume_window``).
+    """
+
+    bounds: ConnectionWindowBounds
+    cursor_state: CursorState | None
+
+
 @dataclass
 class OptimizationPlan:
     """Immutable-ish bag of optimizer directives for one root queryset.
@@ -345,22 +366,22 @@ class OptimizationPlan:
     ``diff_plan_for_queryset`` when a consumer ``Prefetch`` on that path would
     otherwise win unscoped. Excluded from ``is_empty``.
     """
-    window_cursor_states: dict[str, CursorState] = field(default_factory=dict)
-    """Per planned keyset window, the cursor vocabulary it was built under.
+    planned_windows: dict[str, PlannedWindow] = field(default_factory=dict)
+    """Per planned connection window, the bounds and vocabulary it was fetched under.
 
     Keyed by the window's branch-sensitive resolver keys (``resolver_key``,
     the vocabulary of ``planned_resolver_keys``), so one relation name at
-    two depths or under two root fields keeps one vocabulary per window.
+    two depths or under two root fields keeps one entry per window.
     Written by ``nested_planner.py::plan_connection_relation`` for every
-    keyset window it plans: the ``effective_cursor_state`` of the window's
-    order, which the window's seek and ORDER BY already ran under. The
-    extension publishes it to the execution frame
-    (``_context.py::publish_window_cursor_states``) beside the planned
+    window it plans: the window's bounds and, for a keyset window, the
+    ``effective_cursor_state`` of its order, which the window's seek and
+    ORDER BY already ran under. The extension publishes it to the execution
+    frame (``_context.py::publish_planned_windows``) beside the planned
     resolver keys, and the relation-connection resolver reads it back under
-    its own resolver key and hands it to ``connection.py::_consume_window``
-    so the page's cursors are minted under the same vocabulary. Resolver
-    metadata (merged like ``planned_resolver_keys``), excluded from
-    ``is_empty``.
+    its own resolver key and hands it to ``connection.py::_consume_window``,
+    which serves the window only under the bounds it was fetched with and
+    mints the page's cursors under the same vocabulary. Resolver metadata
+    (merged like ``planned_resolver_keys``), excluded from ``is_empty``.
     """
 
     _FULL_MERGE_FIELDS: ClassVar[frozenset[str]] = frozenset(
@@ -378,7 +399,7 @@ class OptimizationPlan:
             "fk_id_elisions",
             "planned_resolver_keys",
             "cacheable",
-            "window_cursor_states",
+            "planned_windows",
         },
     )
     _DERIVED_FINALIZED_FIELDS: ClassVar[frozenset[str]] = frozenset(
@@ -546,7 +567,7 @@ class OptimizationPlan:
         self._assert_under_construction()
         append_unique_many(self.fk_id_elisions, other.fk_id_elisions)
         append_unique_many(self.planned_resolver_keys, other.planned_resolver_keys)
-        self.window_cursor_states.update(other.window_cursor_states)
+        self.planned_windows.update(other.planned_windows)
         if not other.cacheable:
             self.cacheable = False
 

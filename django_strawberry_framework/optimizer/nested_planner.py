@@ -73,6 +73,7 @@ from .nested_fetch import (
 from .plans import (
     JoinPrefix,
     OptimizationPlan,
+    PlannedWindow,
     _extend_only_projection,
     append_unique,
     append_unique_many,
@@ -1638,24 +1639,24 @@ def plan_connection_relation(
         if strategy.plan(request, strategy_plan):
             plan.merge_from(strategy_plan)
             planned_keys.append(resp_key)
-            if keyset_window_state is not None:
-                # The vocabulary this window's cursors must be minted under,
-                # published with the plan under each resolver key the window
-                # serves (the same keys ``planned_resolver_keys`` records), so
-                # the relation-connection resolver reads back its own window's
-                # vocabulary however its relation name repeats elsewhere.
-                plan.window_cursor_states.update(
-                    dict.fromkeys(
-                        resolver_identities
-                        if resp_key is None
-                        else _identities_for_response_keys(
-                            runtime_paths,
-                            resolver_identities,
-                            [resp_key],
-                        ),
-                        keyset_window_state,
+            # The bounds this window was fetched under (and, for a keyset
+            # window, the vocabulary its cursors must be minted under),
+            # published with the plan under each resolver key the window
+            # serves (the same keys ``planned_resolver_keys`` records), so the
+            # relation-connection resolver reads back its own window however
+            # its relation name repeats elsewhere.
+            plan.planned_windows.update(
+                dict.fromkeys(
+                    resolver_identities
+                    if resp_key is None
+                    else _identities_for_response_keys(
+                        runtime_paths,
+                        resolver_identities,
+                        [resp_key],
                     ),
-                )
+                    PlannedWindow(bounds, keyset_window_state),
+                ),
+            )
             if not advised:
                 # First accepted window: emit the field-static composite-index
                 # advisory exactly once (see the note above the loop).

@@ -46,6 +46,7 @@ from strawberry import relay
 from strawberry.relay.utils import from_base64, to_base64
 from strawberry.types import ExecutionResult
 from strawberry.types.field import StrawberryField
+from strawberry.utils.await_maybe import AwaitableOrValue
 from typing_extensions import override
 
 from django_strawberry_framework import (
@@ -69,7 +70,17 @@ from django_strawberry_framework.connection import (
 )
 from django_strawberry_framework.exceptions import ConfigurationError, OptimizerError
 from django_strawberry_framework.filters import FilterSet, filter_input_type
-from django_strawberry_framework.optimizer.plans import WINDOW_ROW_NUMBER, resolver_key
+from django_strawberry_framework.optimizer._context import (
+    DST_OPTIMIZER_STRICTNESS,
+    begin_execution_frame,
+    end_execution_frame,
+    publish_planned_windows,
+)
+from django_strawberry_framework.optimizer.plans import (
+    WINDOW_ROW_NUMBER,
+    PlannedWindow,
+    resolver_key,
+)
 from django_strawberry_framework.orders import OrderSet
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.types.finalizer import (
@@ -80,6 +91,7 @@ from django_strawberry_framework.types.relay import apply_interfaces
 from django_strawberry_framework.types.resolvers import _check_n1
 from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.utils.connections import (
+    ConnectionWindowBounds,
     PaginationArgumentError,
     UnwindowableConnection,
 )
@@ -1170,9 +1182,18 @@ def test_divergent_alias_per_key_window_preferred_over_shared() -> None:
         ),
     )
     schema = strawberry.Schema(query=query_cls, config=strawberry_config())
-    result = schema.execute_sync(
-        "{ objs { x: booksConnection(first: 2) { edges { node { title } } } } }",
-    )
+    # The window a plan would publish for the alias's ``first: 2``; no optimizer
+    # runs here, so the test publishes it into its own execution frame.
+    scope = begin_execution_frame({}, nested=False)
+    try:
+        publish_planned_windows(
+            {resolver_key(genre_type, "books", ("objs", "x")): _FIRST_TWO_WINDOW},
+        )
+        result = schema.execute_sync(
+            "{ objs { x: booksConnection(first: 2) { edges { node { title } } } } }",
+        )
+    finally:
+        end_execution_frame(scope)
     assert result.errors is None, result.errors
     assert result.data is not None
     titles = [json_at(e, "node", "title") for e in json_list(result.data, "objs", 0, "x", "edges")]
@@ -2121,6 +2142,64 @@ def test_fast_path_ignores_window_when_sidecar_kwargs_present() -> None:
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("strictness", ["off", "raise"])
+def test_fast_path_refuses_a_window_planned_under_other_bounds(strictness: str) -> None:
+    """A window fetched for other bounds than the page's own arguments is not served.
+
+    The rows here were fetched for ``first: 3`` (``planned``) while the page
+    asks ``first: 2``; serving them would hand back rows of a page nobody
+    asked for, so ``resolve_connection`` runs the carried per-parent fallback
+    instead. The relation is planned, so that per-parent query reaches
+    strictness through the fallback itself: ``"raise"`` refuses it.
+    """
+    _seed_library_books(["a", "b", "c"])
+    book_type = make_django_type("BookType", Book, ("id", "title"))
+    finalize_django_types()
+    definition = book_type.__django_strawberry_definition__
+    info = make_info(
+        context={DST_OPTIMIZER_STRICTNESS: strictness},
+        field_name="books",
+        selections="{ edges { node { title } } }",
+    )
+    window = _WindowedConnectionRows(
+        # Decoy rows (no title) standing for the first-three page.
+        rows=_window_rows(1, 2, 3),
+        fallback=_build_windowed_fallback(
+            book_type,
+            Book.objects.order_by("title").all,
+            info,
+            definition,
+            relation_field_name="books",
+            declaring_type=book_type,
+        ),
+        planned=PlannedWindow(ConnectionWindowBounds(offset=0, limit=3, reverse=False), None),
+    )
+
+    connection_cls = _connection_type_for(book_type, definition)
+
+    def _consume() -> AwaitableOrValue[DjangoConnection[DjangoType]]:
+        return _consume_window(
+            connection_cls,
+            window,
+            info=info,
+            before=None,
+            after=None,
+            first=2,
+            last=None,
+            max_results=100,
+            want_count=False,
+        )
+
+    if strictness == "raise":
+        with pytest.raises(OptimizerError, match="planned window unservable"):
+            _consume()
+        return
+    conn = _consume()
+    assert isinstance(conn, connection_cls)
+    assert [read_attr(edge.node, "title") for edge in conn.edges] == ["a", "b"]
+
+
+@pytest.mark.django_db
 def test_fallback_when_annotations_missing() -> None:
     """A ``to_attr`` list whose rows lack the window annotations is not consumed.
 
@@ -2821,6 +2900,9 @@ def _windowed_book_connection_class(
 #: drift guard).
 _COUNT_LESS_WINDOW_ROWS = _window_rows(1)
 
+#: The planned window of an offset ``first: 2`` page, the bounds the direct-call pins derive.
+_FIRST_TWO_WINDOW = PlannedWindow(ConnectionWindowBounds(offset=0, limit=2, reverse=False), None)
+
 
 @pytest.mark.django_db
 def test_consume_window_unservable_window_runs_the_sync_fallback() -> None:
@@ -2836,6 +2918,7 @@ def test_consume_window_unservable_window_runs_the_sync_fallback() -> None:
     window = _WindowedConnectionRows(
         rows=_COUNT_LESS_WINDOW_ROWS,
         fallback=Book.objects.none,
+        planned=_FIRST_TWO_WINDOW,
     )
     conn = _consume_window(
         connection_cls,
@@ -2864,6 +2947,7 @@ async def test_consume_window_unservable_window_runs_the_async_fallback() -> Non
     window = _WindowedConnectionRows(
         rows=_COUNT_LESS_WINDOW_ROWS,
         fallback=Book.objects.none,
+        planned=_FIRST_TWO_WINDOW,
     )
     pending = _consume_window(
         connection_cls,
@@ -2912,7 +2996,15 @@ async def test_consume_window_recovery_runs_the_async_pipeline_under_async_execu
     info = make_info()
     window = _WindowedConnectionRows(
         rows=_COUNT_LESS_WINDOW_ROWS,
-        fallback=_build_windowed_fallback(book_type, Book.objects.all, info, definition),
+        fallback=_build_windowed_fallback(
+            book_type,
+            Book.objects.all,
+            info,
+            definition,
+            relation_field_name="books",
+            declaring_type=book_type,
+        ),
+        planned=_FIRST_TWO_WINDOW,
     )
     pending = _consume_window(
         connection_cls,
@@ -3000,6 +3092,7 @@ def _consume_consumer_prefix_window(cursor_prefix: str) -> object:
         _WindowedConnectionRows(
             rows=_window_rows(1, 2, 3),
             fallback=Book.objects.none,
+            planned=PlannedWindow(ConnectionWindowBounds(offset=1, limit=2, reverse=False), None),
         ),
         info=make_info(),
         before=None,

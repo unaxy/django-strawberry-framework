@@ -42,12 +42,11 @@ if TYPE_CHECKING:
     from django.db import models
     from strawberry.types.nodes import Selection
 
-    from django_strawberry_framework.keyset import CursorState
     from django_strawberry_framework.types.base import DjangoType
 
     from .extension import DjangoOptimizerExtension
     from .nested_fetch import NestedConnectionStrategy
-    from .plans import OptimizationPlan
+    from .plans import OptimizationPlan, PlannedWindow
 
     #: One variable value frozen for the plan-cache key
     #: (``extension.py::_hashable_variable_value``): a ``(tag, type id, payload)``
@@ -89,13 +88,13 @@ __all__ = (
     "operation_publishes_to_context",
     "optimizer_value",
     "planned_resolver_keys",
+    "planned_window",
+    "publish_planned_windows",
     "publish_scoped_relations",
-    "publish_window_cursor_states",
     "relation_is_optimizer_scoped",
     "stash_for_optimizer",
     "stash_on_context",
     "stashed_strictness",
-    "window_cursor_state",
 )
 
 DST_OPTIMIZER_PLAN = "dst_optimizer_plan"
@@ -144,9 +143,10 @@ _NO_KEYS: frozenset[object] = frozenset()
 #:   a consumer populated with its own ``prefetch_related``. A mutable set
 #:   updated in place, so a nested connection's fallback publish adds to the
 #:   keys rather than replacing them.
-#: - ``window_cursor_states`` records, per planned keyset window's resolver
-#:   key, the cursor vocabulary (``plans.py::effective_cursor_state``) the
-#:   window was ordered, seeked and must be minted under, for the
+#: - ``planned_windows`` records, per planned connection window's resolver
+#:   key, the bounds it was fetched under and, for a keyset window, the cursor
+#:   vocabulary (``plans.py::effective_cursor_state``) it was ordered, seeked and
+#:   must be minted under (``plans.py::PlannedWindow``), for the
 #:   relation-connection resolver that hands the window's rows to
 #:   ``resolve_connection``. Published with the plan, like
 #:   ``scoped_relations``, and updated in place for the same reason.
@@ -204,13 +204,13 @@ class _ExecutionFrame:
         "converted",
         "key_parts",
         "optimizer",
+        "planned_windows",
         "plans",
         "publishes_to_context",
         "scoped_relations",
         "stashes",
         "strategy",
         "strictness",
-        "window_cursor_states",
     )
 
     def __init__(
@@ -228,7 +228,7 @@ class _ExecutionFrame:
         self.strategy: NestedConnectionStrategy | None = strategy
         self.strictness: str | None = strictness
         self.scoped_relations: set[str] = set()
-        self.window_cursor_states: dict[str, CursorState] = {}
+        self.planned_windows: dict[str, PlannedWindow] = {}
         self.plans: dict[PlanCacheKey, OptimizationPlan] = {}
         self.key_parts: dict[int, CacheKeyParts] = {}
         self.converted: dict[ConvertedMemoKey, list[Selection]] = {}
@@ -247,7 +247,7 @@ class _ExecutionFrame:
         collection still reads; it ends when the runner does.
         """
         self.scoped_relations.clear()
-        self.window_cursor_states.clear()
+        self.planned_windows.clear()
         self.plans.clear()
         self.key_parts.clear()
         self.converted.clear()
@@ -364,20 +364,20 @@ def publish_scoped_relations(keys: Iterable[str]) -> None:
         frame.scoped_relations.update(keys)
 
 
-def publish_window_cursor_states(states: Mapping[str, CursorState]) -> None:
-    """Record each planned keyset window's cursor vocabulary by resolver key (in-place update)."""
+def publish_planned_windows(windows: Mapping[str, PlannedWindow]) -> None:
+    """Record each planned connection window by resolver key (in-place update)."""
     frame = _active_frame()
     if frame is not None:
-        frame.window_cursor_states.update(states)
+        frame.planned_windows.update(windows)
 
 
-def window_cursor_state(key: str) -> CursorState | None:
-    """Return the cursor vocabulary the keyset window under resolver ``key`` was planned with.
+def planned_window(key: str) -> PlannedWindow | None:
+    """Return the bounds and vocabulary the window under resolver ``key`` was planned with.
 
     ``None`` outside an execution and for a key no published plan windowed.
     """
     frame = _active_frame()
-    return None if frame is None else frame.window_cursor_states.get(key)
+    return None if frame is None else frame.planned_windows.get(key)
 
 
 def relation_is_optimizer_scoped(key: str) -> bool:

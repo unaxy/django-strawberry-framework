@@ -37,6 +37,7 @@ from django_strawberry_framework.optimizer.plans import (
     WINDOW_ROW_NUMBER_REVERSED,
     WINDOW_TOTAL_COUNT,
     OptimizationPlan,
+    PlannedWindow,
     PrefetchSeal,
     _consumer_prefetch_lookups,
     _consumer_projection,
@@ -68,6 +69,7 @@ from django_strawberry_framework.optimizer.plans import (
 from django_strawberry_framework.utils._queryset_private import (
     queryset_prefetch_lookups,
 )
+from django_strawberry_framework.utils.connections import ConnectionWindowBounds
 from tests._definition import make_definition
 from tests.optimizer._spelling_models import SpBadge, SpCard, SpParent
 
@@ -1534,16 +1536,19 @@ class TestEffectiveCursorState:
 
 
 def test_metadata_merge_merges_the_window_vocabularies_by_resolver_key() -> None:
-    """Each window keeps its own vocabulary under its own resolver key."""
+    """Each window keeps its own bounds and vocabulary under its own resolver key."""
     state = _issue_cursor_state()
     derived, _annotations = effective_cursor_state(state, ("-id",))
-    target = OptimizationPlan(window_cursor_states={"Root.kids@roots.kids": state})
+    bounds = ConnectionWindowBounds(offset=0, limit=2, reverse=False)
+    root = PlannedWindow(bounds, state)
+    nested = PlannedWindow(bounds, derived)
+    target = OptimizationPlan(planned_windows={"Root.kids@roots.kids": root})
     target.merge_metadata_from(
-        OptimizationPlan(window_cursor_states={"Kid.kids@roots.kids.edges.node.kids": derived}),
+        OptimizationPlan(planned_windows={"Kid.kids@roots.kids.edges.node.kids": nested}),
     )
-    assert target.window_cursor_states == {
-        "Root.kids@roots.kids": state,
-        "Kid.kids@roots.kids.edges.node.kids": derived,
+    assert target.planned_windows == {
+        "Root.kids@roots.kids": root,
+        "Kid.kids@roots.kids.edges.node.kids": nested,
     }
 
 

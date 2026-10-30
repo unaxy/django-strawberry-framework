@@ -245,7 +245,7 @@ it lands with its tick.
   - Tests: `tests/filters/test_sets.py::test_filterset_get_fields_excludes_an_m2m_field_outside_many_to_many_field`,
     over a taggit-shaped `ForeignObject` with `many_to_many=True`. No query reaches a FilterSet that fails to build.
 
-- [ ] 34. (found landing item 1) The connection resolver serves a prefetched window without checking its bounds
+- [x] 34. (found landing item 1) The connection resolver serves a prefetched window without checking its bounds
   against its own arguments
   - Our code: the resolver's window probe (`connection.py::_resolve_from_window` and its prefetch read). Before item 1
     it consumed a window planned from different arguments and served wrong rows.
@@ -257,6 +257,13 @@ it lands with its tick.
   - Behaviour change: a drifted window falls back per parent (strictness-visible) instead of serving wrong rows.
   - Risk / blockers: robustness row, not a release blocker (GOAL.md trust boundary). It needs a way to make the
     planner drift in a test.
+  - Landed: every planned window publishes `optimizer/plans.py::PlannedWindow` (its bounds and keyset cursor state)
+    under its resolver key. `connection.py::_consume_window` serves the window only when the bounds its own arguments
+    derive equal the planned ones; a mismatch or an unpublished window falls back per parent, and the fallback now
+    reports itself to strictness (`types/resolvers.py::_check_n1` with `force_unplanned`), which no fallback did.
+  - Tests: package tier, since no wire input makes the planner and resolver disagree:
+    `tests/test_relay_connection.py::test_fast_path_refuses_a_window_planned_under_other_bounds[off|raise]`, which
+    failed on the old code (decoy rows served; no strictness error).
 
 - [x] 35. (found landing item 2) Strawberry decides whether to resolve a root `ListConnection`'s edges by wire name
   - Our code: `connection.py::DjangoConnection` calls `super().resolve_connection`, which reaches the upstream check.
