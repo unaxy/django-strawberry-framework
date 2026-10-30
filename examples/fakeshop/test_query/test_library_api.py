@@ -14418,12 +14418,10 @@ _PAGE_ARGUMENT_WIRES: dict[str, dict[str, str]] = {
     },
     "swapped": {"first": "last", "last": "first"},
     # The connection vocabulary itself, the connection fields and a node scalar.
-    # ``pageInfo`` keeps its name: Strawberry's ``ListConnection`` resolves a root
-    # page's edges only when a selection under it is spelled ``edges`` or ``pageInfo``
-    # on the wire (``strawberry.relay.utils.should_resolve_list_connection_edges``).
     "vocabulary": {
         "edges": "links",
         "node": "target",
+        "pageInfo": "pg",
         "hasNextPage": "hasMore",
         "totalCount": "tally",
         "booksConnection": "volumes",
@@ -14705,6 +14703,84 @@ def test_connection_vocabulary_renamed_by_the_name_converter_plans_what_the_defa
     default_sql = [query["sql"] for query in default_captured.captured_queries]
     assert len(default_sql) == 5, default_sql
     assert [query["sql"] for query in captured.captured_queries] == default_sql
+
+
+#: ``pageInfo { hasNextPage }`` alone under ``auto_camel_case=False``, on each page that
+#: asks whether its rows are selected, with the path to the flag in the response.
+_SNAKE_CASE_PAGE_INFO_DOCUMENTS: dict[str, tuple[str, tuple[str | int, ...]]] = {
+    "root-offset": (
+        "{ all_library_genres_connection(first: 1) { page_info { has_next_page } } }",
+        ("data", "all_library_genres_connection"),
+    ),
+    "root-keyset": (
+        "{ all_library_issues_connection(first: 1) { page_info { has_next_page } } }",
+        ("data", "all_library_issues_connection"),
+    ),
+    "nested-per-parent": (
+        (
+            "{ all_library_genres { books_connection(first: 1, order_by: [{title: DESC}]) "
+            "{ page_info { has_next_page } } } }"
+        ),
+        (
+            "data",
+            "all_library_genres",
+            0,
+            "books_connection",
+        ),
+    ),
+}
+
+
+def _snake_case_schema() -> DjangoSchema:
+    """The project's ``Query`` under ``auto_camel_case=False``: ``page_info`` on the wire."""
+    return DjangoSchema(query=config_schema.Query, config=strawberry_config(auto_camel_case=False))
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("page", list(_SNAKE_CASE_PAGE_INFO_DOCUMENTS))
+def test_snake_case_page_info_only_page_reports_has_next_page(page: str) -> None:
+    """A page selecting only ``page_info { has_next_page }`` still reads its rows.
+
+    Each page decides whether to fetch its rows by whether ``edges`` or the page
+    info is selected. Strawberry's check matches the wire names ``edges`` /
+    ``pageInfo``, so under ``auto_camel_case=False`` the package also matches them
+    by Python name: every page here has a second row, and reports it.
+    """
+    shelf = _seed_shelf()
+    _seed_genre_with_books("Alpha", shelf, ("a1", "a2"))
+    _seed_genre_with_books("Beta", shelf, ("b1", "b2"))
+    periodical = models.Periodical.objects.create(name="Morning Post")
+    models.Issue.objects.create(periodical=periodical, number=1, title="Spring")
+    models.Issue.objects.create(periodical=periodical, number=2, title="Summer")
+    document, path = _SNAKE_CASE_PAGE_INFO_DOCUMENTS[page]
+
+    payload = response_json(_post_holder(_snake_case_schema(), document))
+
+    assert "errors" not in payload, payload
+    assert json_at(payload, *path, "page_info", "has_next_page") is True, payload
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_snake_case_page_info_only_keyset_page_reports_has_next_page_async() -> None:
+    """The async keyset page asks the same two checks as the sync one."""
+    periodical = await models.Periodical.objects.acreate(name="Morning Post")
+    await models.Issue.objects.acreate(periodical=periodical, number=1, title="Spring")
+    await models.Issue.objects.acreate(periodical=periodical, number=2, title="Summer")
+    document, path = _SNAKE_CASE_PAGE_INFO_DOCUMENTS["root-keyset"]
+    _CURRENT["schema"] = _snake_case_schema()
+    try:
+        with override_settings(ROOT_URLCONF=__name__):
+            result = await AsyncTestClient().query(
+                document,
+                assert_no_errors=False,
+                url="/graphql-async-test/",
+            )
+    finally:
+        _CURRENT["schema"] = None
+    payload = response_json(result.response)
+
+    assert "errors" not in payload, payload
+    assert json_at(payload, *path, "page_info", "has_next_page") is True, payload
 
 
 @pytest.mark.django_db

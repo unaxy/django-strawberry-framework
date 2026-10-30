@@ -359,11 +359,10 @@ def prime_selected_fields(info: Info[object, object]) -> None:
     """Pre-seed Strawberry ``Info.selected_fields`` with the anonymous-safe conversion.
 
     ``Info.selected_fields`` is a ``functools.cached_property`` that lazily calls
-    Strawberry's crashing ``convert_selections`` on first read. Several consumers
-    on the connection resolve path read it - the package's own
-    ``connection.py::_total_count_requested`` AND Strawberry's own
-    ``relay.utils.should_resolve_list_connection_edges`` (reached via
-    ``ListConnection.resolve_connection``) - so an anonymous inline fragment on a
+    Strawberry's crashing ``convert_selections`` on first read. Strawberry's own
+    ``relay.utils.should_resolve_list_connection_edges`` reads it on the connection
+    resolve path (reached via ``ListConnection.resolve_connection``; the package's
+    own checks read ``info_selections``), so an anonymous inline fragment on a
     connection query crashes inside Strawberry's resolver before the package can
     intervene. Computing the conversion through ``ast_to_converted_selections`` and
     storing it in the cached-property slot makes every later read return the
@@ -806,6 +805,21 @@ def connection_total_count_selected(selection: ConvertedSelection) -> bool:
     """
     children: Iterable[ConvertedSelection] = getattr(selection, "selections", None) or []
     return direct_child_selected(children, _TOTAL_COUNT)
+
+
+def connection_page_selected(selection: ConvertedSelection) -> bool:
+    """Return whether ``selection`` (a connection field) selects ``edges`` or ``pageInfo``.
+
+    A direct edges or page-info child, through fragment wrappers
+    (``named_children``), matched by Python name. Both read the page's rows, so a
+    connection resolves its rows when either is selected and skips them when
+    neither is. ``strawberry/relay/utils.py::should_resolve_list_connection_edges``
+    asks the same question of the wire names ``edges`` / ``pageInfo`` and answers
+    ``False`` under a ``NameConverter`` that spells them otherwise (``page_info``
+    under ``auto_camel_case=False``), so ``connection.py::_page_requested`` asks
+    this one after it.
+    """
+    return bool(named_children(selection, _EDGES) or named_children(selection, _PAGE_INFO))
 
 
 def connection_has_next_page_selected(selection: ConvertedSelection) -> bool:

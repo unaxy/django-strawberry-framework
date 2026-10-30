@@ -258,7 +258,7 @@ it lands with its tick.
   - Risk / blockers: robustness row, not a release blocker (GOAL.md trust boundary). It needs a way to make the
     planner drift in a test.
 
-- [ ] 35. (found landing item 2) Strawberry decides whether to resolve a root `ListConnection`'s edges by wire name
+- [x] 35. (found landing item 2) Strawberry decides whether to resolve a root `ListConnection`'s edges by wire name
   - Our code: `connection.py::DjangoConnection` calls `super().resolve_connection`, which reaches the upstream check.
   - Upstream: `strawberry/relay/utils.py::should_resolve_list_connection_edges` hardcodes `{"edges", "pageInfo"}` as
     wire names.
@@ -269,6 +269,19 @@ it lands with its tick.
   - Behaviour change: fixes empty root edges and a wrong `hasNextPage` under those converters.
   - Risk / blockers: overriding upstream behaviour; it needs an origin comment if adapted. The item 2 vocabulary test
     keeps `pageInfo` unrenamed until this lands.
+  - Landed: `optimizer/selections.py::connection_page_selected` asks the same question by Python name, read through
+    `connection.py::_page_requested`.
+    - The keyset page (`_resolve_keyset_connection`), which called the check itself and was wrong on both executors,
+      asks upstream first and then `_page_requested`.
+    - The offset page's synchronous branch (`ListConnection.resolve_connection`, root and per-parent fallback) reaches
+      it through `_strawberry_patches.py::_patched_should_resolve_list_connection_edges`, a gated rebind of the
+      `strawberry.relay.types` global that delegates to upstream first; no upstream code is copied. The shape check
+      refuses a release whose `resolve_connection` stops calling the global. The body is the same from 0.322.2 to
+      0.339.0.
+    - Not reported upstream yet.
+  - Tests: live `test_library_api.py::test_snake_case_page_info_only_page_reports_has_next_page[root-offset|root-keyset|nested-per-parent]`
+    and `::test_snake_case_page_info_only_keyset_page_reports_has_next_page_async`; the vocabulary row now renames
+    `pageInfo` too. All five failed on the old code. Patch-shape rows in `tests/test_strawberry_patches.py`.
 
 - [x] 36. (found landing item 23) The single-parent projection guard is blind for a multi-table child
   - Our code: `optimizer/single_parent_fetch.py` compares `lateral_fetch.py::_select_columns` at plan and fetch time.

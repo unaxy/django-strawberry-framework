@@ -28,6 +28,7 @@ from graphql.execution.execute import ExecutionContext
 from strawberry.http.async_base_view import AsyncBaseHTTPView
 from strawberry.http.base import BaseView
 from strawberry.http.sync_base_view import SyncBaseHTTPView
+from strawberry.relay import types as relay_types
 
 from django_strawberry_framework import (
     _cross_web_patches,
@@ -36,7 +37,7 @@ from django_strawberry_framework import (
     _strawberry_patches,
 )
 from django_strawberry_framework.apps import DjangoStrawberryFrameworkConfig
-from django_strawberry_framework.utils._narrowing import class_dict
+from django_strawberry_framework.utils._narrowing import class_dict, read_attr
 
 
 def test_djangostrawberryframeworkconfig_importable_from_apps_module() -> None:
@@ -103,10 +104,10 @@ def test_djangostrawberryframeworkconfig_defines_ready_for_django_patches() -> N
     assert callable(class_dict(DjangoStrawberryFrameworkConfig)["ready"])
 
 
-# Every upstream class attribute the four patch modules replace. A test that
-# drives ``apply()`` (directly or through ``ready()``) mutates process-global
-# state at each of these slots, so a test that also perturbs the patch modules
-# themselves restores both halves from this one table.
+# Every upstream class attribute, then every upstream module global, the four patch
+# modules replace. A test that drives ``apply()`` (directly or through ``ready()``)
+# mutates process-global state at each of these slots, so a test that also perturbs the
+# patch modules themselves restores both halves from these two tables.
 _PATCHED_SLOTS = (
     (SimpleTestCase, "_remove_databases_failures"),
     (BaseView, "parse_json"),
@@ -116,6 +117,7 @@ _PATCHED_SLOTS = (
     (DjangoHTTPRequestAdapter, "body"),
     (ExecutionContext, "complete_list_value"),
 )
+_PATCHED_MODULE_SLOTS = ((relay_types, "should_resolve_list_connection_edges"),)
 
 
 def _all_patches_installed() -> tuple[bool, bool, bool, bool]:
@@ -155,6 +157,11 @@ def test_ready_dispatches_all_four_patch_appliers_and_refires_safely(
         BaseView,
         "parse_query_params",
         _strawberry_patches._original_parse_query_params,
+    )
+    monkeypatch.setattr(
+        relay_types,
+        "should_resolve_list_connection_edges",
+        _strawberry_patches._original_should_resolve_list_connection_edges,
     )
     monkeypatch.setattr(
         DjangoHTTPRequestAdapter,
@@ -202,6 +209,7 @@ def test_ready_dispatches_all_four_patch_appliers_and_refires_safely(
                 "_original_parse_query_params",
                 "_original_sync_parse_multipart",
                 "_original_async_parse_multipart",
+                "_original_should_resolve_list_connection_edges",
             ),
         ),
         (_cross_web_patches, ("_original_body_fget",)),
@@ -243,8 +251,12 @@ def test_ready_reinstalls_patches_after_their_modules_reload(
     """
     config = django.apps.apps.get_app_config("django_strawberry_framework")
     saved_namespace = dict(module.__dict__)
-    saved_slots = tuple(
-        (owner, attribute, class_dict(owner)[attribute]) for owner, attribute in _PATCHED_SLOTS
+    saved_slots = (
+        *((owner, attribute, class_dict(owner)[attribute]) for owner, attribute in _PATCHED_SLOTS),
+        *(
+            (module_owner, attribute, read_attr(module_owner, attribute))
+            for module_owner, attribute in _PATCHED_MODULE_SLOTS
+        ),
     )
     try:
         original_captures = tuple(getattr(module, name) for name in original_names)
