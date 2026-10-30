@@ -22,6 +22,7 @@ from apps.library.models import (
     MembershipCard,
     Patron,
     PatronProfile,
+    ProxyBranch,
     SelfServeDesk,
     TaggedItem,
     Venue,
@@ -29,11 +30,9 @@ from apps.library.models import (
 from apps.library.models import Branch as _Branch
 from apps.library.models import Shelf as _Shelf
 from apps.scalars.models import ScalarSpecimen
-from django.apps import AppConfig
+from django.apps import AppConfig, apps
 from django.apps.registry import Apps
 from django.contrib.admin.utils import lookup_spawns_duplicates
-from django.contrib.contenttypes.fields import GenericForeignKey, GenericRelation
-from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import FieldDoesNotExist
 from django.db import models
 from django.db.models import Model, TextField
@@ -49,6 +48,7 @@ from django_strawberry_framework.exceptions import (
     LookupValidationError,
     PathResolutionError,
 )
+from django_strawberry_framework.optimizer.field_meta import FieldMeta
 from django_strawberry_framework.utils import relations as relations_module
 from django_strawberry_framework.utils._narrowing import call_method, read_attr
 from django_strawberry_framework.utils.relations import (
@@ -64,9 +64,12 @@ from django_strawberry_framework.utils.relations import (
     instance_accessor,
     is_forward_concrete_relation,
     is_forward_many_to_many,
+    is_forward_single_relation,
     is_many_side_relation_kind,
     is_row_key_column,
     is_single_column_foreign_key,
+    is_source_carried_relation_kind,
+    is_stored_column,
     m2m_through_link_fields,
     m2m_through_model,
     non_pk_forward_link,
@@ -81,7 +84,12 @@ from django_strawberry_framework.utils.relations import (
     stored_value_column,
     validate_lookup_expr,
 )
-from tests._relation_fixtures import RpCompositeParent
+from tests._relation_fixtures import (
+    RpCompositeChild,
+    RpCompositeParent,
+    RpGenericHolder,
+    RpGenericTag,
+)
 from tests.optimizer._link_models import (
     LnkColumnChild,
     LnkPairChild,
@@ -219,7 +227,49 @@ def test_is_many_side_relation_kind_matches_list_valued_shapes() -> None:
     assert is_many_side_relation_kind("generic") is True
     assert is_many_side_relation_kind("reverse_one_to_one") is False
     assert is_many_side_relation_kind("forward_single") is False
+    assert is_many_side_relation_kind("reverse_generic") is False
     assert is_many_side_relation_kind(None) is False
+
+
+def test_is_source_carried_relation_kind_matches_the_kinds_whose_carriers_sit_on_the_source() -> (
+    None
+):
+    """A forward single relation and a reverse ``GenericRel`` carry their link on the source row."""
+    assert is_source_carried_relation_kind("forward_single") is True
+    assert is_source_carried_relation_kind("reverse_generic") is True
+    assert is_source_carried_relation_kind("reverse_one_to_one") is False
+    assert is_source_carried_relation_kind("reverse_many_to_one") is False
+    assert is_source_carried_relation_kind("many") is False
+    assert is_source_carried_relation_kind("generic") is False
+    assert is_source_carried_relation_kind(None) is False
+
+
+def test_relation_kind_classifies_a_visible_reverse_generic_rel_as_reverse_generic() -> None:
+    """The reverse ``GenericRel`` a ``related_query_name`` makes visible is its own kind.
+
+    It reports none of the cardinality flags and is ``auto_created`` without being
+    ``concrete``, so it is neither a forward single relation (no forward-edge predicate
+    claims it) nor many-valued: a path through it is a single-valued hop, and its
+    ``FieldMeta`` snapshot classifies the same, carrying the ``object_id`` link column
+    that sits on the generic-key row.
+    """
+    field = RpGenericTag._meta.get_field("holder")
+    snapshot = FieldMeta.from_django_field(field)
+
+    assert relation_kind(field) == "reverse_generic"
+    assert "reverse_generic" in typing.get_args(RelationKind)
+    assert is_forward_single_relation(field) is False
+    assert snapshot.relation_kind == "reverse_generic"
+    assert snapshot.is_many_side is False
+    assert snapshot.link_carrier_attnames == ("object_id",)
+    assert snapshot.source_link_attnames == ("object_id",)
+    hop = classify_path(RpGenericTag, "holder__title").hops[0]
+    assert (hop.kind, hop.many_side, hop.target_model) == (
+        "reverse_generic",
+        False,
+        RpGenericHolder,
+    )
+    assert path_traverses_to_many(RpGenericTag, "holder__title") is False
 
 
 def test_relation_kind_classifies_auto_created_one_to_one_as_reverse() -> None:
@@ -1665,32 +1715,7 @@ def _reverse_generic_relation() -> object:
     generic-key model's ``_meta.get_fields()``; its link pairs read the
     ``object_id`` column against the holder's primary key.
     """
-    meta = type("Meta", (), {"app_label": "products", "managed": False})
-    tag = type(
-        "CarrierProbeTag",
-        (models.Model,),
-        {
-            "__module__": __name__,
-            "content_type": models.ForeignKey(
-                ContentType,
-                on_delete=models.CASCADE,
-                related_name="+",
-            ),
-            "object_id": models.PositiveIntegerField(),
-            "content_object": GenericForeignKey("content_type", "object_id"),
-            "Meta": meta,
-        },
-    )
-    type(
-        "CarrierProbeHolder",
-        (models.Model,),
-        {
-            "__module__": __name__,
-            "tags": GenericRelation(tag, related_query_name="holder"),
-            "Meta": meta,
-        },
-    )
-    return tag._meta.get_field("holder")
+    return RpGenericTag._meta.get_field("holder")
 
 
 @pytest.mark.parametrize(
@@ -1740,6 +1765,7 @@ def test_carrier_backed_link_answers_only_a_forward_foreign_object(
         (lambda: LnkSlugObjectChild._meta.get_field("parent"), ("p_slug",)),
         (lambda: LnkSlugChild._meta.get_field("parent"), ("parent_id",)),
         (lambda: LnkColumnChild._meta.get_field("parent"), None),
+        (lambda: RpCompositeChild._meta.get_field("parent"), ("parent_tenant_id", "parent_code")),
         (lambda: Book._meta.get_field("shelf"), None),
         (lambda: MembershipCard._meta.get_field("patron"), None),
         (lambda: LnkParent._meta.get_field("pair_children"), None),
@@ -1752,6 +1778,7 @@ def test_carrier_backed_link_answers_only_a_forward_foreign_object(
         "one_column_fo_non_pk",
         "to_field_fk",
         "one_column_fo_pk",
+        "composite_pk_members_fo",
         "fk",
         "o2o",
         "reverse_fo",
@@ -1767,7 +1794,10 @@ def test_non_pk_forward_link_answers_only_links_keyed_by_other_columns(
     """Only a forward single-valued link whose targets are not the related pk answers its pairs.
 
     Django trims ``<relation>__pk`` to the carrier column of a link onto the
-    related pk, so only the others need a correlation of their own.
+    related pk, so only the others need a correlation of their own. A link over
+    every member of a ``CompositePrimaryKey`` is one of the others: its targets are
+    the members, never the single pk field, and Django keeps the join for
+    ``<relation>__pk``.
     """
     link = non_pk_forward_link(field())
     assert (None if link is None else link.carrier_attnames) == carriers
@@ -1989,3 +2019,150 @@ def test_stored_value_column_follows_each_key_to_the_column_storing_its_value(
 ) -> None:
     """A key resolves to the first non-key column down its chain; anything else is itself."""
     assert stored_value_column(field()) is column()
+
+
+_stored_column_apps = Apps([AppConfig("test_relations_stored_column", sys.modules[__name__])])
+
+
+class _ScGenerated(models.Model):
+    """A model with a generated column, a shape no fakeshop or shared fixture model has.
+
+    It lives in the private ``_stored_column_apps`` registry: ``migrate`` and the
+    system checks never see it, and no test creates its table (only model metadata
+    is read).
+    """
+
+    seats: "models.IntegerField[float | int | str | Combinable, int]" = models.IntegerField()
+    # Unannotated: django-stubs declares ``GeneratedField`` without type parameters, so it
+    # has no field generic to spell.
+    double_seats = models.GeneratedField(
+        expression=models.F("seats") * 2,
+        output_field=models.IntegerField(),
+        db_persist=True,
+    )
+
+    class Meta:
+        app_label = "test_relations_stored_column"
+        apps = _stored_column_apps
+
+
+def _every_field(model: type[Model]) -> list[object]:
+    """Every field ``model`` carries: forward, reverse (hidden included) and private."""
+    meta = model._meta
+    found: list[object] = []
+    for field in [*meta.get_fields(include_hidden=True), *meta.private_fields]:
+        if not any(field is seen for seen in found):
+            found.append(field)
+    return found
+
+
+#: Every model an installed app's ``models`` module declares (with the through models Django
+#: creates for them), a fixed population whatever test modules have been imported.
+_INSTALLED_MODELS = sorted(
+    (
+        model
+        for model in apps.get_models(include_auto_created=True)
+        if model.__module__.rpartition(".")[2] == "models"
+        and not model.__module__.startswith("tests.")
+    ),
+    key=lambda model: model._meta.label,
+)
+
+
+@pytest.mark.parametrize(
+    "model",
+    _INSTALLED_MODELS,
+    ids=[model._meta.label for model in _INSTALLED_MODELS],
+)
+def test_is_stored_column_is_membership_of_the_model_concrete_fields(model: type[Model]) -> None:
+    """``is_stored_column`` answers Django's ``Options.concrete_fields`` of the querying model.
+
+    Over every field of every installed model, read from the model that carries it (an
+    inherited field included): a column of the model's rows, and nothing else.
+    """
+    for field in _every_field(model):
+        expected = any(field is column for column in model._meta.concrete_fields)
+        assert is_stored_column(field) is expected, field
+
+
+@pytest.mark.parametrize(
+    ("model", "stored"),
+    [
+        (
+            RpGenericTag,
+            [
+                "content_type",
+                "id",
+                "name",
+                "object_id",
+            ],
+        ),
+        (RpGenericHolder, ["id", "title"]),
+        (RpCompositeParent, ["code", "label", "tenant_id"]),
+        (
+            LnkPairChild,
+            [
+                "id",
+                "name",
+                "p_code",
+                "p_tenant",
+            ],
+        ),
+        (
+            LnkParent,
+            [
+                "code",
+                "id",
+                "label",
+                "slug",
+                "tenant",
+            ],
+        ),
+        (
+            SelfServeDesk,
+            [
+                "id",
+                "kiosk_code",
+                "lead_ticket",
+                "lendingdesk_ptr",
+                "name",
+                "opened_on",
+                "venue_ptr",
+                "window_count",
+            ],
+        ),
+        (
+            ProxyBranch,
+            [
+                "city",
+                "id",
+                "isil",
+                "name",
+            ],
+        ),
+        (_ScGenerated, ["double_seats", "id", "seats"]),
+    ],
+    ids=[
+        "generic_key_and_visible_generic_rel",
+        "generic_relation",
+        "composite_pk",
+        "foreign_object",
+        "m2m_through",
+        "multi_table_grandchild",
+        "proxy",
+        "generated_column",
+    ],
+)
+def test_is_stored_column_keeps_only_the_columns_of_the_rows(
+    model: type[Model],
+    stored: list[str],
+) -> None:
+    """The edge shapes: only a column of the model's rows is a stored column.
+
+    Not a ``GenericForeignKey`` or ``GenericRelation`` (or the reverse ``GenericRel`` one
+    makes visible), a ``CompositePrimaryKey``, a column-less ``ForeignObject``, a
+    many-to-many (with a through model or not, on every supported Django), or a reverse
+    relation; the inherited columns and parent links of a multi-table child and a proxy's
+    concrete columns are, and so is a generated column.
+    """
+    assert sorted(field.name for field in _every_field(model) if is_stored_column(field)) == stored

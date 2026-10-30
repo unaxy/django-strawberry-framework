@@ -24,6 +24,7 @@ from typing import NoReturn, Protocol
 
 import pytest
 from django.db import models
+from django.utils.functional import SimpleLazyObject, lazy
 from typing_extensions import override
 
 from django_strawberry_framework.utils import truth
@@ -33,6 +34,8 @@ from django_strawberry_framework.utils._narrowing import (
     read_attr,
     require,
 )
+from django_strawberry_framework.utils.typing import object_result
+from tests._idioms import STR_ENUM
 
 DISPATCHED: list[str] = []
 #: ``object.__getattribute__``: the instance read past a class's own ``__getattribute__``.
@@ -752,10 +755,67 @@ def test_is_type_and_is_exact() -> None:
     assert truth.is_exact(true_value, int) is False
 
 
+def test_is_type_never_asks_a_hostile_metaclass_or_class_claim() -> None:
+    hostile_classes = (
+        _LyingChecks,
+        _EqualsEverything,
+        _LyingGetattribute,
+        _RaisingGetattribute,
+    )
+    assert all(truth.is_type(cls) for cls in hostile_classes)
+    assert truth.is_type(_LyingChecksMeta) is True
+    assert not any(truth.is_type(cls()) for cls in hostile_classes)
+    assert truth.is_type(_ClassRaiser()) is False
+    assert truth.is_type(_ClassClaimer()) is False
+    assert DISPATCHED == []
+
+
 def test_non_class_structure_reads_are_empty() -> None:
     assert truth.bases(3) == ()
     assert dict(truth.class_dict(3)) == {}
     assert truth.mro(3) == (int, object)
+
+
+def test_declared_meta_keys_are_the_sorted_public_keys_of_the_own_body() -> None:
+    class _BaseMeta:
+        inherited = 1
+
+    class _Meta(_BaseMeta):
+        zeta = 1
+        _private = 1
+        alpha = 1
+        __dunder__ = 1
+
+    assert truth.declared_meta_keys(_Meta) == ["alpha", "zeta"]
+
+
+@pytest.mark.parametrize(
+    "meta",
+    [
+        3,
+        "Meta",
+        None,
+        _Base(),
+    ],
+)
+def test_declared_meta_keys_of_a_non_class_are_empty(meta: object) -> None:
+    assert truth.declared_meta_keys(meta) == []
+
+
+@pytest.mark.filterwarnings("ignore:non-string key in the __dict__")
+def test_declared_meta_keys_keep_a_planted_non_str_key_after_the_str_keys() -> None:
+    meta = object_result(
+        type,
+        "_Meta",
+        (),
+        {
+            11: "x",
+            "model": 1,
+            2: "y",
+            "_private": 1,
+        },
+    )
+    assert truth.declared_meta_keys(meta) == ["model", 11, 2]
 
 
 def test_static_attr_on_a_class_falls_back_to_the_metaclass() -> None:
@@ -1275,6 +1335,55 @@ def test_text_matches_str_for_non_str_scalars() -> None:
 def test_text_fallback_for_an_empty_render() -> None:
     assert truth.text("", "<unknown>") == "<unknown>"
     assert truth.text("value", "<unknown>") == "value"
+
+
+def test_plain_str_returns_an_exact_str_as_the_same_object() -> None:
+    value = "title"
+    assert truth.plain_str(value) is value
+
+
+class _Flavor(models.TextChoices):
+    """A ``TextChoices`` enum whose members are ``str`` subclass instances."""
+
+    SWEET = "sweet", "Sweet"
+
+
+def test_plain_str_reads_a_str_subclass_member_as_its_exact_text() -> None:
+    """A ``StrEnum`` / ``TextChoices`` member comes back as the exact ``str`` it spells."""
+    members = (STR_ENUM("Names", {"TITLE": "title"})["TITLE"], _Flavor.SWEET)
+    for member, spelled in zip(members, ("title", "sweet"), strict=True):
+        plain = truth.plain_str(member)
+        assert type(plain) is str
+        assert plain == spelled
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(3, id="int"),
+        pytest.param(None, id="none"),
+        pytest.param(b"title", id="bytes"),
+        pytest.param(["title"], id="list"),
+        pytest.param(SimpleLazyObject(lambda: "title"), id="simple-lazy-object"),
+    ],
+)
+def test_plain_str_passes_a_non_str_through_unchanged(value: object) -> None:
+    """A value whose real class is no ``str`` comes back as itself, a lazy proxy included."""
+    assert truth.plain_str(value) is value
+
+
+def test_plain_str_never_evaluates_a_lazy_string() -> None:
+    """A lazy translation string is no ``str``: it comes back as itself, unevaluated."""
+    evaluations: list[str] = []
+
+    def _spell() -> str:
+        evaluations.append("title")
+        return "title"
+
+    declaration = lazy(_spell, str)()
+
+    assert truth.plain_str(declaration) is declaration
+    assert evaluations == []
 
 
 @pytest.mark.skipif(

@@ -76,6 +76,7 @@ from django_strawberry_framework import (
     DjangoListField,
     DjangoType,
     ErrorPolicy,
+    aapply_cascade_permissions,
     finalize_django_types,
     strawberry_config,
 )
@@ -386,6 +387,64 @@ async def test_async_get_queryset_is_awaited(monkeypatch: pytest.MonkeyPatch) ->
     assert "errors" not in payload, payload
     names = [json_at(row, "name") for row in json_list(payload, "data", "branches")]
     assert names == ["Alpha"]
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_async_get_queryset_awaits_a_scoped_cascade(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An ``async def get_queryset`` awaiting the async cascade walks only its ``fields=`` edges.
+
+    ``CirculationDesk`` carries a generic foreign key, which a full walk refuses
+    before any hook runs, so the anonymous request sees only the desk whose
+    ``branch`` (``BranchType`` hides ``city="restricted"``) and ``shelf``
+    (``ShelfType`` hides ``topic="secret"``) are both visible.
+    """
+
+    def _seed() -> None:
+        open_branch = library_models.Branch.objects.create(name="Open", city="Boston")
+        restricted = library_models.Branch.objects.create(name="Closed", city="restricted")
+        shelves = {
+            code: library_models.Shelf.objects.create(code=code, topic=topic, branch=open_branch)
+            for code, topic in (("A-1", "general"), ("B-2", "general"), ("C-3", "secret"))
+        }
+        for name, branch, code in (
+            ("Front", open_branch, "A-1"),
+            ("Annex", restricted, "B-2"),
+            ("Vault", open_branch, "C-3"),
+        ):
+            library_models.CirculationDesk.objects.create(
+                name=name,
+                branch=branch,
+                shelf=shelves[code],
+            )
+
+    await sync_to_async(_seed)()
+
+    async def _async_get_queryset(
+        cls: type[library_schema.CirculationDeskType],
+        queryset: models.QuerySet[library_models.CirculationDesk],
+        info: strawberry.Info[object, object],
+        **_kwargs: object,
+    ) -> models.QuerySet[library_models.CirculationDesk]:
+        return await aapply_cascade_permissions(cls, queryset, info, fields=["branch", "shelf"])
+
+    monkeypatch.setattr(
+        library_schema.CirculationDeskType,
+        "get_queryset",
+        classmethod(_async_get_queryset),
+    )
+
+    @strawberry.type
+    class _DeskQuery:
+        desks: list[library_schema.CirculationDeskType] = DjangoListField(
+            library_schema.CirculationDeskType,
+        )
+
+    payload = await _post_async(
+        DjangoSchema(query=_DeskQuery, config=strawberry_config()),
+        "{ desks { name } }",
+    )
+    assert "errors" not in payload, payload
+    assert json_list(payload, "data", "desks") == [{"name": "Front"}]
 
 
 async def _hide_hidden_genres(

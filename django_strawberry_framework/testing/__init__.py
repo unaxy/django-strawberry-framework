@@ -4,7 +4,7 @@ Currently exports
 -----------------
 
 - :class:`TestClient` / :class:`AsyncTestClient` - live ``/graphql/`` HTTP
-  test clients for consumer test suites (spec-043): thin wrappers over
+  test clients for consumer test suites: thin wrappers over
   ``django.test.Client`` / ``django.test.AsyncClient`` posting GraphQL
   operations (JSON, or multipart when ``files=`` is provided) and returning
   the typed :class:`Response`. Endpoint from

@@ -21,6 +21,12 @@ authoritative record differs by field origin:
   string for an annotated relation. A forward reference that ``finalize_django_types()``
   could not resolve surfaces as Strawberry's ``UNRESOLVED`` sentinel and raises
   ``CommandError`` rather than printing a bogus type.
+- **Consumer annotations Strawberry treats as private** (``relay.NodeID[...]``,
+  ``strawberry.Private[...]``, ``ClassVar[...]``) leave no field in
+  ``origin.__strawberry_definition__``. On a Relay-Node-shaped type's
+  non-relation primary key the schema still publishes the interface's
+  ``id: ID!``, so the row is the ``relay.Node id`` row; any other such column
+  prints ``-`` for type and nullability and ``(not a GraphQL field)``.
 
 The positional ``type`` argument dispatches by shape: a dotted object path
 (``apps.library.schema.BookType``) resolves via Django's ``import_string`` and a
@@ -58,7 +64,7 @@ from strawberry.types.object_type import StrawberryObjectDefinition
 from strawberry.types.scalar import ScalarDefinition
 from strawberry.types.union import StrawberryUnion
 from strawberry.utils.typing import is_union
-from typing_extensions import override
+from typing_extensions import TypeIs, override
 
 from django_strawberry_framework.management.commands._imports import (
     import_module_symbol_or_command_error,
@@ -91,6 +97,16 @@ if typing.TYPE_CHECKING:
     from django_strawberry_framework.utils.typing import ConcreteField, ModelField
 
 _RELAY_PK_CONVERTER = "relay.Node id"
+_NOT_A_FIELD_ROW = ("-", "-", "(not a GraphQL field)")
+_NO_CONSUMER_FIELDS: frozenset[str] = frozenset()
+
+
+class _NotPublished:
+    """Type of ``_NOT_PUBLISHED``: no finalized Strawberry field carries the name."""
+
+
+#: ``_strawberry_field_type``'s answer for a name Strawberry published no field for.
+_NOT_PUBLISHED = _NotPublished()
 _ScalarNamer = Callable[[object], str]
 
 #: ``GraphQLCoreConverter.from_scalar``: Strawberry annotates its parameter ``type``, yet
@@ -108,6 +124,7 @@ _RELATION_KIND_LABELS: dict[str, str] = {
     "reverse_many_to_one": "reverse FK",
     "reverse_one_to_one": "reverse O2O",
     "generic": "generic relation",
+    "reverse_generic": "reverse generic relation",
 }
 _UNFINALIZED_HINT = (
     "finalize_django_types() has not run - pass "
@@ -162,7 +179,7 @@ class Command(BaseCommand):
         if definition is None:
             raise CommandError(
                 f"{truth.name(target)} is not a registered DjangoType "
-                "(an abstract or no-Meta base never registers a definition)",
+                "(a Meta-less abstract base never registers a definition)",
             )
         if definition.finalized is False:
             raise CommandError(_UNFINALIZED_HINT)
@@ -263,7 +280,13 @@ class Command(BaseCommand):
            is next: ``_build_annotations`` deliberately skips auto-synthesis for
            it (the four-corner override contract in ``types/base.py``), so
            neither the relation auto-converter nor a ``SCALAR_MAP`` row produced
-           it - the consumer's annotation / ``strawberry.field`` did.
+           it - the consumer's annotation / ``strawberry.field`` did. When
+           Strawberry published no field for it (a ``relay.NodeID[...]``,
+           ``strawberry.Private[...]`` or ``ClassVar[...]`` annotation) and it is
+           the non-relation pk of a Relay-Node-shaped type, the schema's ``id``
+           is the interface's, so the row is the ``relay.Node id`` row of step 1;
+           a published consumer pk annotation (``isbn_13: str``) keeps its
+           consumer row.
         3. Only then do the auto-synthesized relation / scalar branches apply.
         """
         field_meta = definition.field_map[field.name]
@@ -277,13 +300,29 @@ class Command(BaseCommand):
             field,
             definition.consumer_authored_fields,
         ):
-            return f"{scalar_namer(GlobalID)}!", "no", _RELAY_PK_CONVERTER
+            return self._relay_pk_row(scalar_namer)
         if field.name in definition.consumer_authored_fields:
-            return self._consumer_authored_row(definition, field, scalar_namer)
+            field_type = _strawberry_field_type(definition, field.name)
+            # Asked without the consumer exemption: whether this is the non-relation
+            # pk of a Relay-Node-shaped type, whose ``id`` the interface publishes.
+            if field_type is _NOT_PUBLISHED and _is_suppressed_relay_pk(
+                definition.origin,
+                definition.interfaces,
+                definition.model,
+                field,
+                _NO_CONSUMER_FIELDS,
+            ):
+                return self._relay_pk_row(scalar_namer)
+            return self._consumer_authored_row(definition, field, field_type, scalar_namer)
         if field_meta.is_relation:
             return self._relation_row(definition, field, field_meta, scalar_namer)
         # Not a relation, so a concrete column: reverse ``ForeignObjectRel``s are relations.
         return self._scalar_row(definition, require(field, is_concrete_field), scalar_namer)
+
+    @staticmethod
+    def _relay_pk_row(scalar_namer: _ScalarNamer) -> tuple[str, str, str]:
+        """Build the row for a pk whose ``id`` the ``relay.Node`` interface publishes."""
+        return f"{scalar_namer(GlobalID)}!", "no", _RELAY_PK_CONVERTER
 
     @classmethod
     def _relation_row(
@@ -364,9 +403,10 @@ class Command(BaseCommand):
         ``origin.__annotations__`` entry. The connection field is non-null
         (``<Target>Connection!``); the converter column names both the relation
         cardinality and the connection-only shape so the operator sees that the
-        list form was deliberately dropped.
+        list form was deliberately dropped. The synthesizer attached the sibling
+        it recorded, so a name with no published field raises ``TypeError``.
         """
-        field_type = _strawberry_field_type(definition, generated)
+        field_type = require(_strawberry_field_type(definition, generated), _is_published)
         graphql_type = _render_strawberry_type(field_type, scalar_namer)
         kind = field_meta.relation_kind
         converter = f"relation: {_RELATION_KIND_LABELS.get(kind, kind)} (connection-only)"
@@ -400,6 +440,7 @@ class Command(BaseCommand):
     def _consumer_authored_row(
         definition: "DjangoTypeDefinition",
         field: "ModelField",
+        field_type: object,
         scalar_namer: _ScalarNamer,
     ) -> tuple[str, str, str]:
         """Build the row for a consumer-authored field (annotation / ``strawberry.field`` override).
@@ -412,7 +453,13 @@ class Command(BaseCommand):
         record for BOTH override kinds and already resolves forward references,
         whereas ``origin.__annotations__`` holds a ``StrawberryAnnotation`` for an
         assigned field and an unresolved forward-reference string for an annotated
-        relation - neither renderable here.
+        relation - neither renderable here. ``field_type`` is that read
+        (``_strawberry_field_type``), made once by ``_resolve_row``.
+
+        ``_NOT_PUBLISHED`` (Strawberry treats a ``relay.NodeID[...]``,
+        ``strawberry.Private[...]`` or ``ClassVar[...]`` annotation as private and
+        publishes no field) renders ``-`` for type and nullability and
+        ``(not a GraphQL field)`` as the converter.
 
         An annotation-only relation whose forward reference is not resolvable from
         the type's module namespace stays Strawberry's ``UNRESOLVED`` sentinel after
@@ -421,7 +468,8 @@ class Command(BaseCommand):
         a GraphQL type would be a lie - Strawberry itself raises on it at schema-build
         time - so it raises ``CommandError`` with a concrete recovery hint instead.
         """
-        field_type = _strawberry_field_type(definition, field.name)
+        if field_type is _NOT_PUBLISHED:
+            return _NOT_A_FIELD_ROW
         if field_type is UNRESOLVED:
             raise CommandError(
                 f"{truth.name(definition.origin)}.{field.name} is a consumer-authored field whose "
@@ -438,18 +486,26 @@ class Command(BaseCommand):
 
 
 def _strawberry_field_type(definition: "DjangoTypeDefinition", python_name: str) -> object:
-    """Return the finalized Strawberry field type for ``python_name``.
+    """Return the finalized Strawberry field type for ``python_name``, else ``_NOT_PUBLISHED``.
 
     Reads the finalized ``origin.__strawberry_definition__.fields`` record
-    and returns the ``.type`` of the field named ``python_name``. Both
-    callers name fields finalization necessarily attached (the synthesized
-    connection sibling, the consumer override), so a missing name raises
-    ``StopIteration`` rather than degrading to a guessed type.
+    and returns the ``.type`` of the field named ``python_name``. A consumer
+    annotation Strawberry treats as private (``relay.NodeID[...]``,
+    ``strawberry.Private[...]``, ``ClassVar[...]``) leaves no field under its
+    name, so the answer is ``_NOT_PUBLISHED`` rather than a guessed type.
     """
     # ``handle`` refused an unfinalized type, and finalization is what attaches
     # ``origin.__strawberry_definition__``; ``strict`` raises ``TypeError`` without it.
     strawberry_fields = get_object_definition(definition.origin, strict=True).fields
-    return next(sf.type for sf in strawberry_fields if sf.python_name == python_name)
+    return next(
+        (sf.type for sf in strawberry_fields if sf.python_name == python_name),
+        _NOT_PUBLISHED,
+    )
+
+
+def _is_published(field_type: object) -> TypeIs[object]:
+    """Return whether ``field_type`` is a published field's type, not ``_NOT_PUBLISHED``."""
+    return field_type is not _NOT_PUBLISHED
 
 
 def _yes_no(*, value: bool) -> str:

@@ -101,9 +101,8 @@ sweep); `typing.cast` calls: 130 (432 at the start of the cast work).
   payloads enter their `TypedDict`s through a `cast` per decoded list (three in `fetch_dashboard_data`, one in
   `fetch_glossary_data`), each tagged with the query that fixes the row shape. On for the package too (648 sites
   to 10 suppressions): an upstream ``Any`` read goes through a typed slot in `utils/_narrowing.py` (`read_attr` for
-  `getattr`, `pk_of`, `enum_value`, `dict_of` / `list_of`, `instance_dict`, `class_dict` / `type_mro` /
-  `type_attr`, `call_method`, `is_awaitable`) and is narrowed, or through `require_instance` / `require` when its
-  source guarantees the class; `strawberry.UNSET` is `utils/input_values.py::UNSET` typed `UnsetType`; settings
+  `getattr`, `pk_of`, `enum_value`, `dict_of` / `list_of`, `call_method`, `is_awaitable`) and is narrowed, or
+  through `require_instance` / `require` when its source guarantees the class; `strawberry.UNSET` is `utils/input_values.py::UNSET` typed `UnsetType`; settings
   reads go through `conf.py::django_setting`; a verbatim forward to an upstream method is `*args: object,
   **kwargs: object` and `utils/typing.py::call_forwarded`, and a call the package composes spells its arguments
   (`DjangoSchema.execute_sync` / `execute` spell Strawberry's parameters, unchanged from the floor to the latest

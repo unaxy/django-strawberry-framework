@@ -37,7 +37,6 @@ from django.db import connection as db_connection
 from django.db import models as db_models
 from django.db.models import Model, QuerySet
 from django.db.models.expressions import Combinable
-from django.db.models.functions import Length
 from django.forms import CharField, DecimalField, Field, Form, SelectMultiple
 from django.http import HttpRequest, QueryDict
 from django.test.utils import CaptureQueriesContext, isolate_apps
@@ -84,14 +83,15 @@ from django_strawberry_framework.filters.base import (
     RelationPkMultipleFilter,
     _accepted_globalid_type_names,
     _bound_field_name,
+    _coerce_relation_identity,
     _column_form_field,
     _decode_and_validate_global_id,
     _ElementField,
     _filter_schema,
     _filterset_model_field,
+    _filterset_value_field,
     _globalid_target,
     _marked_pk_field_name,
-    _relation_uses_non_pk_to_field,
     membership_in_filter_class,
     relation_identity_column,
     resolve_globalid_target_definition,
@@ -113,11 +113,19 @@ from django_strawberry_framework.utils.relations import is_model_class
 from django_strawberry_framework.utils.typing import object_result
 from tests._idioms import ModelSerializerBase, saved_pk
 from tests._postgres_fields import FakeArrayField, patch_array_field
+from tests._relation_fixtures import RpCompositeChild
 from tests.filters.fixtures.filtersets import (
     BranchFilter,
     BranchFilterByPath,
     BranchFilterByString,
     ShelfFilter,
+)
+from tests.optimizer._link_models import (
+    LnkPairChild,
+    LnkParent,
+    LnkSlugObjectChild,
+    LnkTag,
+    link_fixture_tables,
 )
 
 if TYPE_CHECKING:
@@ -1126,29 +1134,13 @@ def test_integer_range_filter_applies_distinct_when_flagged() -> None:
     assert qs.captured == {"signed_big__gte": 1, "signed_big__lte": 100}
 
 
-class _CountedElements(Length):
-    """An array's element count, an integer no column stores, as an ``ArrayField``'s ``len``.
-
-    Django's ``Length`` transform, whose output is an ``IntegerField``, under the name.
-    """
-
-    lookup_name = "len"
-
-
-class _CountedArrayField(FakeArrayField):
-    """A ``FakeArrayField`` carrying the ``len`` transform a real ``ArrayField`` registers."""
-
-
-_CountedArrayField.register_lookup(_CountedElements)
-
-
 class _TaggedSpecimen(db_models.Model):
     """A table with an array column whose ``len`` transform an integer filter compares.
 
     Query-build only (``managed = False``): the recording queryset never runs SQL.
     """
 
-    tags = _CountedArrayField(db_models.TextField())
+    tags = FakeArrayField(db_models.TextField())
 
     class Meta:
         managed = False
@@ -1933,7 +1925,7 @@ def test_to_field_relation_key_coerces_through_the_target_primary_key(
 
     Generation marks the leaf (``_GLOBALID_RELATION_PK_ATTR``), so it compiles against
     ``parent__pk`` and its key is coerced through the parent's primary key column
-    (``filters/base.py::_raw_identity_column``), never the ``code`` column the link
+    (``filters/base.py::_compared_columns``), never the ``code`` column the link
     stores: ``1234567`` is a primary key the ``Decimal(6, 2)`` code cannot hold, and it
     still matches the child of that parent. Package-only: every fakeshop ``to_field``
     relation stores a text key, which holds any primary key the ``Int`` leaf carries.
@@ -2176,7 +2168,8 @@ def test_many_to_many_key_through_a_to_field_link_compares_the_target_primary_ke
     (``filters/base.py::relation_identity_column``), and a through foreign key onto the
     target keyed by a non-pk ``to_field`` makes Django's own ``<relation>=<value>``
     compare that ``code`` instead; generation marks such a leaf
-    (``filters/base.py::_relation_uses_non_pk_to_field``) so it compiles against
+    (``filters/sets.py::FilterSet.filter_for_field``, through
+    ``utils/relations.py::non_pk_forward_link``) so it compiles against
     ``<relation>__pk``, unhopped or across a visibility hop
     (``filters/sets.py::FilterSet._leaf_chain``). Every code is another row's primary
     key, so comparing it would answer the swapped partner; a ``to_field`` on the through
@@ -2413,6 +2406,80 @@ def test_filterset_model_field_reads_pk_as_the_column_its_key_stores(
 def test_filterset_model_field_is_none_for_a_path_naming_no_field(field_name: str) -> None:
     """A path naming no field, ``pk`` alias included, is ``None``."""
     assert _declared_leaf_field(models.Shelf, field_name) is None
+
+
+def _declared_leaf_value_field(field_name: str, lookup_expr: str = "in") -> ModelField | None:
+    """Answer the value field of a declared ``ListFilter`` over a scalar specimen path."""
+    filterset = _pk_alias_set(
+        scalar_models.ScalarSpecimen,
+        leaf=ListFilter(field_name=field_name, lookup_expr=lookup_expr),
+    )
+    return _filterset_value_field(filterset, filterset.base_filters["leaf"])
+
+
+@pytest.mark.parametrize(
+    ("field_name", "lookup_expr", "output"),
+    [
+        pytest.param("occurred_on__year", "in", db_models.IntegerField, id="path-year"),
+        pytest.param("occurred_at__iso_year", "in", db_models.IntegerField, id="path-iso-year"),
+        pytest.param("occurred_at", "year", db_models.IntegerField, id="lookup-year"),
+        pytest.param("occurred_at", "year__gt", db_models.IntegerField, id="lookup-year-gt"),
+        pytest.param("occurred_at", "date", db_models.DateField, id="lookup-date"),
+        pytest.param("occurred_at__date", "gte", db_models.DateField, id="path-date"),
+    ],
+)
+def test_filterset_value_field_reads_the_transforms_ahead_of_the_lookup(
+    field_name: str,
+    lookup_expr: str,
+    output: type[db_models.Field[object, object]],
+) -> None:
+    """A transform in the path or the ``lookup_expr`` answers its output field, not the column."""
+    value_field = _declared_leaf_value_field(field_name, lookup_expr)
+
+    assert type(value_field) is output
+    assert value_field is not scalar_models.ScalarSpecimen._meta.get_field("occurred_at")
+
+
+@pytest.mark.parametrize(
+    "lookup_expr",
+    [
+        "exact",
+        "in",
+        "isnull",
+        "icontains",
+        "gte",
+    ],
+)
+def test_filterset_value_field_answers_the_column_for_a_lookup_applied_to_it(
+    lookup_expr: str,
+) -> None:
+    """A lookup applied to the column itself, a text pattern included, answers the column."""
+    assert _declared_leaf_value_field("occurred_at", lookup_expr) is (
+        scalar_models.ScalarSpecimen._meta.get_field("occurred_at")
+    )
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        pytest.param("nope__year", id="no-such-field"),
+        pytest.param("par__occurred_at", id="queryset-alias"),
+        pytest.param("occurred_on__nope", id="no-such-transform"),
+        pytest.param("tag__year", id="relation-end"),
+    ],
+)
+def test_filterset_value_field_is_none_where_django_reads_no_transform(field_name: str) -> None:
+    """A path Django refuses, or whose remainder is no transform of its column, answers ``None``.
+
+    A ``FilteredRelation`` alias exists only on the queryset a filter runs on, and a
+    relation takes its own lookups, never a column transform.
+    """
+    assert _declared_leaf_value_field(field_name) is None
+
+
+def test_filterset_value_field_is_none_without_a_filterset() -> None:
+    """No filterset has no model to walk."""
+    assert _filterset_value_field(None, ListFilter(field_name="occurred_on__year")) is None
 
 
 @isolate_apps("apps.library")
@@ -3250,80 +3317,6 @@ def test_filterset_model_field_walks_related_path() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_relation_uses_non_pk_to_field_true_for_to_field_fk() -> None:
-    """A forward FK on a non-pk ``to_field`` (``favorite_genre`` -> ``name``) is flagged."""
-    field = models.PatronProfile._meta.get_field("favorite_genre")
-    assert _relation_uses_non_pk_to_field(field) is True
-
-
-def test_relation_uses_non_pk_to_field_false_for_ordinary_fk_to_pk() -> None:
-    """An ordinary FK whose target field IS the related pk is not flagged."""
-    field = models.Book._meta.get_field("shelf")
-    assert _relation_uses_non_pk_to_field(field) is False
-
-
-def test_relation_uses_non_pk_to_field_false_for_m2m() -> None:
-    """A ``ManyToManyField`` whose through foreign key onto the target reads its pk is not flagged."""
-    field = models.Book._meta.get_field("genres")
-    assert _relation_uses_non_pk_to_field(field) is False
-
-
-@pytest.mark.parametrize(
-    ("model", "relation", "flagged"),
-    [
-        pytest.param(_CodedOwner, "targets", True, id="forward-through-target-to-field"),
-        pytest.param(
-            _CodedTarget,
-            "source_coded_owners",
-            True,
-            id="reverse-through-target-to-field",
-        ),
-        pytest.param(
-            _CodedOwner,
-            "source_coded_targets",
-            False,
-            id="forward-through-source-to-field",
-        ),
-        pytest.param(_CodedTarget, "owners", False, id="reverse-through-source-to-field"),
-    ],
-)
-def test_relation_uses_non_pk_to_field_reads_the_through_link_onto_the_target(
-    *,
-    model: type[Model],
-    relation: str,
-    flagged: bool,
-) -> None:
-    """A many-to-many is flagged exactly when its through key onto the target has a ``to_field``.
-
-    The leaf compares the target side of the through table; a ``to_field`` on the
-    foreign key onto the source never enters that comparison.
-    """
-    assert _relation_uses_non_pk_to_field(model._meta.get_field(relation)) is flagged
-
-
-def test_relation_uses_non_pk_to_field_false_for_reverse_relation() -> None:
-    """A reverse relation object (non-concrete) is not flagged."""
-    field = models.Book._meta.get_field("loans")
-    assert _relation_uses_non_pk_to_field(field) is False
-
-
-def test_relation_uses_non_pk_to_field_false_for_generic_foreign_key() -> None:
-    """A ``GenericForeignKey`` is forward-single but carries no link pairs, so it is not flagged."""
-    field = models.TaggedItem._meta.get_field("content_object")
-    assert _relation_uses_non_pk_to_field(field) is False
-
-
-def test_relation_uses_non_pk_to_field_false_for_unreadable_relation_flags() -> None:
-    """A descriptor whose relation flags are not booleans is not flagged (no raise)."""
-    assert _relation_uses_non_pk_to_field(SimpleNamespace(many_to_many="yes")) is False
-
-
-def test_relation_uses_non_pk_to_field_false_for_non_relation() -> None:
-    """A plain scalar column is not flagged."""
-    field = models.Book._meta.get_field("title")
-    assert _relation_uses_non_pk_to_field(field) is False
-
-
 def _seed_favorite_genre_profiles(*genre_names: str) -> list[models.Genre]:
     """Create one genre per name and one patron profile favoring each, in order."""
     genres: list[models.Genre] = []
@@ -3672,20 +3665,26 @@ def _owner(strategy: str | None = "model") -> DjangoTypeDefinition:
     return _definition(models.Book, "OwnerType", strategy)
 
 
-def _bound(filter_: _FilterT, owner: DjangoTypeDefinition | None) -> _FilterT:
+def _bound(
+    filter_: _FilterT,
+    owner: DjangoTypeDefinition | None,
+    *,
+    model: type[Model] = models.Book,
+) -> _FilterT:
     """Return ``filter_`` as a real ``FilterSet`` instance binds it, its class owned by ``owner``.
 
     Instantiating the filterset hands each declared filter a copy whose ``parent`` is the
     instance, the slot the GlobalID target resolution reads the owner through; ``None``
-    leaves the filterset unbound.
+    leaves the filterset unbound. The filterset filters ``model`` (``Book`` by default).
     """
+    filtered_model = model
 
     class OwnerFilter(FilterSet):
         bound = filter_
 
         class Meta:
-            model = models.Book
-            fields = {"title": ["exact"]}
+            model = filtered_model
+            fields = ()
 
     OwnerFilter._owner_definition = owner
     bound = OwnerFilter().filters["bound"]
@@ -3794,6 +3793,20 @@ def test_filter_model_strategy_accepts_model_label() -> None:
     assert _decode_and_validate_global_id(encoded, f, alias=DEFAULT_DB_ALIAS) == 42
 
 
+def test_filter_model_strategy_reads_the_model_name_case_insensitively() -> None:
+    """The slot names the target as decode reads it: model name any case, app label exact."""
+    owner = _owner("model")
+    f = _global_id_filter_with_owner("id", owner)
+    encoded = relay.to_base64("library.BOOK", "42")
+    assert _decode_and_validate_global_id(encoded, f, alias=DEFAULT_DB_ALIAS) == 42
+    with pytest.raises(GraphQLError, match="GlobalID type mismatch"):
+        _decode_and_validate_global_id(
+            relay.to_base64("Library.book", "42"),
+            f,
+            alias=DEFAULT_DB_ALIAS,
+        )
+
+
 def test_filter_model_strategy_accepts_predecoded_global_id() -> None:
     """The filter accepts Strawberry's already-coerced ``GlobalID`` value unchanged."""
     owner = _owner("model")
@@ -3897,10 +3910,436 @@ def test_multi_value_filter_encode_only_reject_names_index() -> None:
 
 
 def test_filter_unbound_owner_node_id_only() -> None:
-    """No bound owner -> node-id-only fallback (the existing `None`-definition path)."""
+    """No bound owner -> node-id-only fallback (the existing `None`-definition path).
+
+    The ``type_name`` guard is skipped; a filter on a FilterSet model still coerces the
+    node id through the column its path names, and a filter no FilterSet holds has no
+    column and passes the decoded node id through.
+    """
     f = _bound(GlobalIDFilter(field_name="id"), None)
     encoded = relay.to_base64("WhateverType", "5")
-    assert _decode_and_validate_global_id(encoded, f, alias=DEFAULT_DB_ALIAS) == "5"
+    assert _decode_and_validate_global_id(encoded, f, alias=DEFAULT_DB_ALIAS) == 5
+    loose = GlobalIDFilter(field_name="id")
+    assert _decode_and_validate_global_id(encoded, loose, alias=DEFAULT_DB_ALIAS) == "5"
+
+
+def _unresolved_relation_owner(kind: str) -> DjangoTypeDefinition | None:
+    """The owner of a filterset whose relation target no ``DjangoType`` resolves.
+
+    ``"unbound"`` leaves the filterset with no owner; ``"bound"`` owns it by a ``Book``
+    definition, whose ``shelf`` / ``genres`` targets nothing registers.
+    """
+    return None if kind == "unbound" else _owner()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("owner_kind", ["unbound", "bound"])
+@pytest.mark.parametrize(
+    (
+        "filter_class",
+        "relation",
+        "lookup",
+        "wrap",
+    ),
+    [
+        pytest.param(GlobalIDFilter, "shelf", "exact", False, id="fk-exact"),
+        pytest.param(GlobalIDMultipleChoiceFilter, "shelf", "in", True, id="fk-in"),
+        pytest.param(GlobalIDFilter, "genres", "exact", False, id="m2m-exact"),
+        pytest.param(GlobalIDMultipleChoiceFilter, "genres", "in", True, id="m2m-in"),
+    ],
+)
+def test_unresolved_relation_target_coerces_the_node_id_through_its_primary_key(
+    *,
+    owner_kind: str,
+    filter_class: type[GlobalIDFilter | GlobalIDMultipleChoiceFilter],
+    relation: str,
+    lookup: str,
+    wrap: bool,
+) -> None:
+    """A relation filter no target type resolves still coerces its node id through the target pk.
+
+    A consumer-declared GlobalID filter on a relation into an unregistered model skips the
+    ``type_name`` guard (no type to validate against), but the relation names the target
+    primary key the node id is compared on: an id that key cannot hold answers
+    ``GLOBALID_INVALID`` rather than Django's raw ``ValueError``, and a coercible one
+    filters, matching the row it names and nothing for a key no row holds.
+    """
+    branch = models.Branch.objects.create(name="UnresolvedBranch", city="Boston")
+    shelf = models.Shelf.objects.create(code="UR-1", branch=branch)
+    other = models.Shelf.objects.create(code="UR-2", branch=branch)
+    genre = models.Genre.objects.create(name="UnresolvedGenre")
+    kept = models.Book.objects.create(title="Kept", shelf=shelf)
+    _ = models.Book.objects.create(title="Other", shelf=other)
+    kept.genres.add(genre)
+    target_pk = saved_pk(shelf if relation == "shelf" else genre)
+    f = _bound(
+        filter_class(field_name=relation, lookup_expr=lookup),
+        _unresolved_relation_owner(owner_kind),
+    )
+    assert _globalid_target(f) is None
+    books = models.Book.objects.order_by("pk")
+
+    def apply(*node_ids: str) -> list[str]:
+        encoded = [relay.to_base64("Unregistered", node_id) for node_id in node_ids]
+        value = encoded if wrap else encoded[0]
+        return list(f.filter(books, value).values_list("title", flat=True))
+
+    assert apply(str(target_pk)) == ["Kept"]
+    assert apply("987654321") == []
+    with pytest.raises(GraphQLError, match=r"not a valid (Shelf|Genre) key value") as exc_info:
+        apply("abc")
+    assert exc_info.value.extensions == {"code": "GLOBALID_INVALID"}
+    if wrap:
+        with pytest.raises(GraphQLError, match="at index 1") as exc_info:
+            apply(str(target_pk), "abc")
+        assert exc_info.value.extensions == {"code": "GLOBALID_INVALID"}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "owner_kind",
+        "filter_class",
+        "path",
+        "lookup",
+        "wrap",
+    ),
+    [
+        pytest.param("unbound", GlobalIDFilter, "id", "exact", False, id="own-id-exact-unbound"),
+        pytest.param(
+            "unbound",
+            GlobalIDMultipleChoiceFilter,
+            "id",
+            "in",
+            True,
+            id="own-id-in-unbound",
+        ),
+        pytest.param(
+            "unbound",
+            GlobalIDFilter,
+            "shelf__id",
+            "exact",
+            False,
+            id="fk-id-exact-unbound",
+        ),
+        pytest.param("bound", GlobalIDFilter, "shelf__id", "exact", False, id="fk-id-exact-bound"),
+        pytest.param(
+            "unbound",
+            GlobalIDMultipleChoiceFilter,
+            "shelf__id",
+            "in",
+            True,
+            id="fk-id-in-unbound",
+        ),
+        pytest.param(
+            "bound",
+            GlobalIDMultipleChoiceFilter,
+            "shelf__id",
+            "in",
+            True,
+            id="fk-id-in-bound",
+        ),
+    ],
+)
+def test_unresolved_target_scalar_column_coerces_the_node_id_through_it(
+    *,
+    owner_kind: str,
+    filter_class: type[GlobalIDFilter | GlobalIDMultipleChoiceFilter],
+    path: str,
+    lookup: str,
+    wrap: bool,
+) -> None:
+    """A scalar-column filter no target type resolves coerces its node id through that column.
+
+    The own ``id`` under an unbound owner (a bound one resolves its own id), and a
+    declared ``shelf__id`` whose target no type registers, skip the ``type_name`` guard
+    but still compare the node id on a column: an id it cannot hold answers ``GLOBALID_INVALID`` rather than
+    Django's raw ``ValueError``, and a coercible one filters.
+    """
+    branch = models.Branch.objects.create(name="ScalarBranch", city="Boston")
+    shelf = models.Shelf.objects.create(code="SC-1", branch=branch)
+    other = models.Shelf.objects.create(code="SC-2", branch=branch)
+    kept = models.Book.objects.create(title="Kept", shelf=shelf)
+    _ = models.Book.objects.create(title="Other", shelf=other)
+    target_pk = saved_pk(kept if path == "id" else shelf)
+    f = _bound(
+        filter_class(field_name=path, lookup_expr=lookup),
+        _unresolved_relation_owner(owner_kind),
+    )
+    assert _globalid_target(f) is None
+    books = models.Book.objects.order_by("pk")
+
+    def apply(*node_ids: str) -> list[str]:
+        encoded = [relay.to_base64("Unregistered", node_id) for node_id in node_ids]
+        value = encoded if wrap else encoded[0]
+        return list(f.filter(books, value).values_list("title", flat=True))
+
+    assert apply(str(target_pk)) == ["Kept"]
+    assert apply("987654321") == []
+    with pytest.raises(GraphQLError, match=r"not a valid (Book|Shelf) key value") as exc_info:
+        apply("abc")
+    assert exc_info.value.extensions == {"code": "GLOBALID_INVALID"}
+    if wrap:
+        with pytest.raises(GraphQLError, match="at index 1") as exc_info:
+            apply(str(target_pk), "abc")
+        assert exc_info.value.extensions == {"code": "GLOBALID_INVALID"}
+
+
+_MULTI_COLUMN_LINKS = [
+    pytest.param(RpCompositeChild, "parent", id="composite-pk"),
+    pytest.param(LnkPairChild, "parent", id="two-column-fo"),
+    pytest.param(models.ShelfLabel, "shelf", id="fakeshop-two-column-fo"),
+]
+
+
+@pytest.mark.parametrize("owner_kind", ["unbound", "bound"])
+@pytest.mark.parametrize(("model", "relation"), _MULTI_COLUMN_LINKS)
+@pytest.mark.parametrize(
+    ("filter_class", "lookup", "wrap"),
+    [
+        pytest.param(GlobalIDFilter, "exact", False, id="exact"),
+        pytest.param(GlobalIDMultipleChoiceFilter, "in", True, id="in"),
+    ],
+)
+def test_unresolved_multi_column_link_refuses_every_node_id(
+    *,
+    owner_kind: str,
+    model: type[Model],
+    relation: str,
+    filter_class: type[GlobalIDFilter | GlobalIDMultipleChoiceFilter],
+    lookup: str,
+    wrap: bool,
+) -> None:
+    """A relation linked by more than one column, whose target no type resolves, refuses every id.
+
+    Django compares the relation on every column of its last join (a composite primary
+    key's members, or a two-column ``ForeignObject``'s targets), so no single node id can
+    name a row: the id answers ``GLOBALID_INVALID`` before Django's own refusal of a
+    scalar compared with a multi-column link ("must have 2 elements").
+    """
+    owner = None if owner_kind == "unbound" else _definition(model, "LinkOwnerType")
+    f = _bound(filter_class(field_name=relation, lookup_expr=lookup), owner, model=model)
+    assert _globalid_target(f) is None
+    encoded = relay.to_base64("Unregistered", "1")
+    with pytest.raises(GraphQLError, match="is linked by 2 columns") as exc_info:
+        _ = f.filter(model._default_manager.all(), [encoded] if wrap else encoded)
+    assert exc_info.value.extensions == {"code": "GLOBALID_INVALID"}
+
+
+@pytest.mark.parametrize(("model", "relation"), _MULTI_COLUMN_LINKS)
+def test_raw_key_on_a_multi_column_link_identifies_no_row(
+    *,
+    model: type[Model],
+    relation: str,
+) -> None:
+    """A declared raw-key leaf on a multi-column link coerces every value to no row.
+
+    No single value can name a row across every link column, so the leaf matches
+    nothing (``_coerce_relation_identity``) rather than handing Django a scalar it
+    refuses for the multi-column link.
+    """
+    f = _bound(RelationPkFilter(field_name=relation, lookup_expr="exact"), None, model=model)
+    assert _coerce_relation_identity(f, "1", DEFAULT_DB_ALIAS) is None
+
+
+@pytest.mark.parametrize(("model", "relation"), _MULTI_COLUMN_LINKS)
+@pytest.mark.parametrize("filter_class", [RelationPkFilter, RelationPkMultipleFilter])
+def test_raw_key_input_on_a_multi_column_link_is_refused_at_build(
+    *,
+    model: type[Model],
+    relation: str,
+    filter_class: type[RelationPkFilter | RelationPkMultipleFilter],
+) -> None:
+    """A declared raw-key leaf on a multi-column link has no scalar to publish.
+
+    Every value identifies no row at request time, and no single column types the
+    input, so the build refuses the filter naming its column count.
+    """
+    filtered_model = model
+
+    class LinkFilter(FilterSet):
+        leaf = filter_class(field_name=relation, lookup_expr="exact")
+
+        class Meta:
+            model = filtered_model
+            fields = ()
+
+    f = LinkFilter().filters["leaf"]
+    expected = (
+        f"LinkFilter: {filter_class.__name__} on '{relation}' names a relation linked by 2 "
+        "columns, so no single key value can name a related row"
+    )
+    with pytest.raises(ConfigurationError) as exc_info:
+        _ = convert_filter_to_input_annotation(
+            f,
+            model._meta.get_field(relation),
+            None,
+            LinkFilter,
+        )
+    assert str(exc_info.value).startswith(expected)
+
+
+@pytest.mark.parametrize(
+    (
+        "model",
+        "relation",
+        "filter_class",
+        "annotation",
+    ),
+    [
+        pytest.param(LnkSlugObjectChild, "parent", RelationPkFilter, str | None, id="fo-off-pk"),
+        pytest.param(
+            LnkSlugObjectChild,
+            "parent",
+            RelationPkMultipleFilter,
+            list[str] | None,
+            id="fo-off-pk-list",
+        ),
+        pytest.param(
+            LnkParent,
+            "tags",
+            RelationPkMultipleFilter,
+            list[str] | None,
+            id="m2m-to-field",
+        ),
+        pytest.param(
+            LnkTag,
+            "parents",
+            RelationPkMultipleFilter,
+            list[str] | None,
+            id="reverse-m2m",
+        ),
+        pytest.param(models.Book, "shelf", RelationPkFilter, int | None, id="fk-onto-pk"),
+        pytest.param(
+            models.InterlibraryLoan,
+            "lender",
+            RelationPkFilter,
+            str | None,
+            id="fk-text-to-field",
+        ),
+    ],
+)
+def test_raw_key_input_is_typed_from_the_column_the_predicate_compares(
+    *,
+    model: type[Model],
+    relation: str,
+    filter_class: type[RelationPkFilter | RelationPkMultipleFilter],
+    annotation: object,
+) -> None:
+    """A declared unmarked raw-key leaf publishes the scalar of the column it compares.
+
+    ``LnkSlugObjectChild.parent`` compares ``LnkParent.slug`` and a many-to-many through a
+    ``to_field`` compares that ``code`` / ``slug``, and an unmarked ``ForeignKey`` with a
+    text ``to_field`` (``InterlibraryLoan.lender`` -> ``Branch.isil``) compares that
+    column, so their inputs are strings, never the integer primary key the value is not
+    compared with; an ordinary key keeps the target's primary-key scalar.
+    """
+    f = _bound(filter_class(field_name=relation, lookup_expr="exact"), None, model=model)
+    model_field = model._meta.get_field(relation)
+    assert convert_filter_to_input_annotation(f, model_field, None, FilterSet) == annotation
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("owner_kind", ["unbound", "bound"])
+@pytest.mark.parametrize(
+    (
+        "model",
+        "relation",
+        "matching",
+        "rows",
+        "label",
+    ),
+    [
+        pytest.param(
+            LnkSlugObjectChild,
+            "parent",
+            "s-a",
+            ["a1", "a2", "a3"],
+            "name",
+            id="one-column-fo-off-pk",
+        ),
+        pytest.param(LnkParent, "tags", "c-t2", ["pa"], "label", id="m2m-through-to-field"),
+        pytest.param(
+            LnkTag,
+            "parents",
+            "s-b",
+            ["t1"],
+            "name",
+            id="reverse-m2m-through-to-field",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    ("filter_class", "lookup", "wrap"),
+    [
+        pytest.param(GlobalIDFilter, "exact", False, id="globalid-exact"),
+        pytest.param(GlobalIDMultipleChoiceFilter, "in", True, id="globalid-in"),
+        pytest.param(RelationPkFilter, "exact", False, id="raw-exact"),
+        pytest.param(RelationPkMultipleFilter, "in", True, id="raw-in"),
+    ],
+)
+def test_unresolved_link_column_compares_the_value_the_link_holds(
+    *,
+    owner_kind: str,
+    model: type[Model],
+    relation: str,
+    matching: str,
+    rows: list[str],
+    label: str,
+    filter_class: type[Filter],
+    lookup: str,
+    wrap: bool,
+) -> None:
+    """An unmarked relation compared on a link column coerces its value through that column.
+
+    A ``ForeignObject`` off the pk, and a many-to-many whose through foreign key onto the
+    target has a ``to_field``, compare the link's column (Django's own
+    ``<relation>=<value>``), never the target's primary key, so a value that column
+    holds matches its rows; a value it cannot hold (an embedded NUL in text) answers
+    ``GLOBALID_INVALID`` for a GlobalID and no row for a raw key.
+    """
+    owner = None if owner_kind == "unbound" else _definition(model, "LinkOwnerType")
+    f = _bound(filter_class(field_name=relation, lookup_expr=lookup), owner, model=model)
+    globalid = issubclass(filter_class, (GlobalIDFilter, GlobalIDMultipleChoiceFilter))
+    if globalid:
+        assert _globalid_target(f) is None
+
+    def apply(raw: str) -> list[str]:
+        item = relay.to_base64("Unregistered", raw) if globalid else raw
+        value = [item] if wrap else item
+        qs = f.filter(model._default_manager.order_by("pk"), value)
+        return list(qs.values_list(label, flat=True))
+
+    with link_fixture_tables(db_connection):
+        assert apply(matching) == rows
+        if globalid:
+            with pytest.raises(GraphQLError, match="key value") as exc_info:
+                _ = apply("a\x00b")
+            assert exc_info.value.extensions == {"code": "GLOBALID_INVALID"}
+        else:
+            assert apply("a\x00b") == []
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("owner_kind", ["unbound", "bound"])
+def test_unresolved_continued_path_lookup_passes_the_node_id_through(*, owner_kind: str) -> None:
+    """A ``lookup_expr`` continuing the path past the relation compares another column.
+
+    ``GlobalIDFilter(field_name="shelf", lookup_expr="code")`` compiles
+    ``shelf__code=<node id>``: ``code`` is no lookup the relation registers, so the node
+    id is not coerced through the shelf's key and reaches the ``code`` column as given.
+    """
+    branch = models.Branch.objects.create(name="PathBranch", city="Boston")
+    shelf = models.Shelf.objects.create(code="CP-1", branch=branch)
+    _ = models.Book.objects.create(title="Kept", shelf=shelf)
+    f = _bound(
+        GlobalIDFilter(field_name="shelf", lookup_expr="code"),
+        _unresolved_relation_owner(owner_kind),
+    )
+    assert _globalid_target(f) is None
+    encoded = relay.to_base64("Unregistered", "CP-1")
+    books = f.filter(models.Book.objects.all(), encoded)
+    assert list(books.values_list("title", flat=True)) == ["Kept"]
 
 
 def test_filter_wrong_model_rejected() -> None:
@@ -4148,10 +4587,6 @@ def test_integer_range_filter_malformed_values_pass_through() -> None:
 
 def test_filters_base_edge_cases() -> None:
     """Edge cases for the relation-pk marker helpers."""
-    # _relation_uses_non_pk_to_field: non-relation field or None
-    assert _relation_uses_non_pk_to_field(None) is False
-    assert _relation_uses_non_pk_to_field(object()) is False
-
     # _marked_pk_field_name: unmarked or missing field_name
     f = GlobalIDFilter()
     assert _marked_pk_field_name(f) is None
@@ -4312,8 +4747,8 @@ def test_related_filter_expansion_surfaces_the_gate_not_a_raw_attribute_error() 
 def test_related_filter_gate_rejects_mistyped_target_at_bfs_enqueue() -> None:
     """The BFS factory's enqueue hits the gate instead of enqueueing a mis-typed target.
 
-    ``getattr(related, 'filterset')`` raises the typed error rather than detonating inside
-    ``set_input_type_name``.
+    ``getattr(related, 'filterset')`` raises the typed error rather than detonating at the
+    BFS builder's ``target.type_name_for()``.
     """
 
     class Parent(FilterSet):

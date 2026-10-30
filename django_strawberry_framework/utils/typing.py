@@ -42,7 +42,7 @@ from asgiref.sync import iscoroutinefunction
 from graphql import GraphQLList, GraphQLNonNull
 from strawberry.schema import Schema
 from strawberry.schema.schema_converter import GraphQLCoreConverter
-from strawberry.types.base import StrawberryContainer
+from strawberry.types.base import StrawberryContainer, StrawberryList
 from typing_extensions import Never
 
 from django_strawberry_framework.exceptions import ConfigurationError
@@ -138,6 +138,7 @@ __all__ = (
     "is_graphql_list",
     "is_marked_coroutine_function",
     "object_result",
+    "peel_strawberry_containers",
     "published_argument",
     "published_python_name",
     "return_type_of",
@@ -473,27 +474,39 @@ def unwrap_non_null(gql_type: _T) -> "_T | _GraphQLNullableType":
     return gql_type
 
 
-def unwrap_container_type(strawberry_type: _T) -> "_T | StrawberryType | type[object]":
-    """Peel Strawberry ``StrawberryContainer`` layers only, bounded.
+def peel_strawberry_containers(
+    strawberry_type: _T,
+) -> "tuple[int, _T | StrawberryType | type[object]]":
+    """Peel Strawberry ``StrawberryContainer`` layers, bounded; return ``(list_depth, core)``.
 
-    For resolved Strawberry field types (``list[Edge[Node]]`` -> ``Edge``): the
-    ``isinstance(StrawberryContainer)`` gate is load-bearing - a concrete leaf
-    class that happens to expose an ``of_type`` attribute must NOT be peeled
-    (a bare ``of_type`` read would descend into it) - so the shared
-    unbounded ``while isinstance`` loop lands here with the same
-    ``MAX_TYPE_WRAPPER_DEPTH`` Power-of-Ten cap and loud cyclic-chain failure,
-    instead of living raw at a call site.
+    For resolved Strawberry field types (``list[Edge[Node]]`` -> ``(1, Edge)``,
+    ``list[strawberry.ID] | None`` -> ``(1, strawberry.ID)``): every
+    ``StrawberryList`` layer counts one level of list depth, while
+    ``StrawberryOptional`` (and its ``StrawberryMaybe`` subclass) is nullability and
+    peels without counting. The ``isinstance(StrawberryContainer)`` gate is
+    load-bearing - a concrete leaf class that happens to expose an ``of_type``
+    attribute must NOT be peeled (a bare ``of_type`` read would descend into it) -
+    and the peel carries the ``MAX_TYPE_WRAPPER_DEPTH`` Power-of-Ten cap with a loud
+    cyclic-chain failure, instead of an unbounded loop living raw at a call site.
     """
     peeled: _T | StrawberryType | type[object] = strawberry_type
+    depth = 0
     for _ in range(MAX_TYPE_WRAPPER_DEPTH + 1):
         if not isinstance(peeled, StrawberryContainer):
-            return peeled
+            return depth, peeled
+        if isinstance(peeled, StrawberryList):
+            depth += 1
         peeled = peeled.of_type
 
     raise RuntimeError(
-        f"unwrap_container_type: `of_type` container stack exceeded "
+        f"peel_strawberry_containers: `of_type` container stack exceeded "
         f"{MAX_TYPE_WRAPPER_DEPTH} layers; the type chain is likely cyclic or corrupt.",
     )
+
+
+def unwrap_container_type(strawberry_type: _T) -> "_T | StrawberryType | type[object]":
+    """Return the core type under Strawberry container layers (``peel_strawberry_containers``)."""
+    return peel_strawberry_containers(strawberry_type)[1]
 
 
 def unwrap_return_type(rt: object) -> object:

@@ -11,7 +11,7 @@ Opt-in at schema construction::
 
 The extension hooks Strawberry's ``resolve`` middleware. At the
 operation's **root resolver** (detected via ``info.path.prev is None``)
-it walks the entire selection tree once using the O2 walker, builds an
+it walks the entire selection tree once using the selection-tree walker, builds an
 ``OptimizationPlan``, and applies ``select_related`` /
 ``prefetch_related`` to the root queryset. Non-root resolvers pass
 through untouched - Django's ``prefetch_related`` with ``__``-chained
@@ -230,7 +230,7 @@ def _matched_strictness(strictness: object) -> str | None:
 # requests differing only in a nested ``first: $n`` value need distinct cached
 # plans -- spec-033 Decision 7). The document names them by the wire names the
 # executing schema published them under (``_pagination_wire_names``). Single
-# source of truth for the family; a future ``search:`` extension (spec-060)
+# source of truth for the family; a future ``search:`` extension
 # would extend it here, not re-spell it inline.
 _PAGINATION_PARAMETERS = frozenset(
     {
@@ -639,9 +639,8 @@ _MAX_DOC_KEY_CACHE_SIZE = 256
 # structurally identical ASTs, so the printed key and the ``@skip``/``@include``
 # plus nested-pagination name set are identical under one wire vocabulary. Caching them together means a
 # hot query neither ``print_ast``s NOR re-walks its full operation AST
-# (``_collect_cache_relevant_var_names`` was the last remaining per-request AST
-# descent on the plan-cache-hit path) after first sight. The per-execution
-# cache-key-parts memo only dedupes within ONE request (keyed on
+# (``_collect_cache_relevant_var_names`` is a full AST descent) after first sight.
+# The per-execution cache-key-parts memo only dedupes within ONE request (keyed on
 # ``id(operation)``); this module-level LRU carries the far more valuable
 # cross-request reuse. Correctness-neutral under concurrency exactly like
 # ``_plan_cache`` - the cached value is deterministic, so a dropped or double
@@ -983,8 +982,8 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
       as active for the operation's lifetime, and closes it at the end.
     - ``resolve`` - gates on ``info.path.prev is None`` (root resolver
       only). Calls ``_next``, checks ``isinstance(QuerySet)``, traces
-      the Django model from the graphql-core return type, runs the O2
-      walker, applies the plan.
+      the Django model from the graphql-core return type, runs the
+      selection-tree walker, applies the plan.
 
     Resolver-shape contract: a root resolver that returns a Django
     ``Manager`` (e.g. ``Model.objects`` shorthand) is coerced to a
@@ -1216,7 +1215,7 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         return self._optimize(result, info)
 
     def _optimize(self, result: object, info: "GraphQLResolveInfo") -> object:
-        """Apply the O2 walker's plan to a root-level ``QuerySet`` (middleware path).
+        """Apply the selection-tree walker's plan to a root-level ``QuerySet`` (middleware path).
 
         Steps:
 
@@ -1238,7 +1237,7 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
            :meth:`apply_to` clones the queryset to attach ``.only()`` /
            ``select_related``, and a clone of an evaluated queryset silently
            re-executes that SQL - a doubled query invisible to the consumer.
-           This extends the B8 "respect what the consumer already did" posture
+           This extends queryset diffing's "respect what the consumer already did" posture
            from optimization state to execution state.
         4. Trace the graphql-core return type to a Django ``(origin, model)``.
         5. Delegate the plan-build-and-apply tail to :meth:`apply_to`, passing
@@ -1373,7 +1372,7 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         *,
         selection_extractor: SelectionExtractor = _root_child_selections,
     ) -> "models.QuerySet[_M]":
-        """Build and apply the O2 plan to ``queryset`` given ``target_type`` / ``target_model``.
+        """Build and apply the plan to ``queryset`` given ``target_type`` / ``target_model``.
 
         The plan-build-and-apply tail extracted from ``_optimize``
         (spec-030 Decision 11). Takes the node type / model **directly** rather than
@@ -1416,7 +1415,7 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
             )
             return queryset
 
-        # The O2 walker expects the children of the root field, so we build
+        # The selection-tree walker expects the children of the root field, so we build
         # the Strawberry-shaped selection list from ``field_nodes`` via the
         # package-owned ``ast_to_converted_selections`` adapter rather than
         # Strawberry's ``convert_selections``: the latter's
@@ -1442,7 +1441,7 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
             info,
             target_type,
         )
-        # B8: reconcile against consumer queryset optimizations BEFORE
+        # Queryset diffing: reconcile against consumer queryset optimizations BEFORE
         # publishing sentinels. Consumer-wins drops must strip coupled
         # ``planned_resolver_keys`` / FK-id elisions (via
         # ``select_path_resolver_keys`` / ``prefetch_path_resolver_keys``)
@@ -1451,7 +1450,7 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         # the target type's ``get_queryset`` on rows the consumer's own
         # ``Prefetch`` loaded and ``_check_n1`` would stay silent for them.
         # Returns a fresh plan and (when an upgrade was applied) a
-        # rewritten queryset; B1's cached plan is never mutated.
+        # rewritten queryset; the cached plan is never mutated.
         if not plan.is_empty:
             plan, queryset = diff_plan_for_queryset(plan, queryset, info=info)
         self._publish_plan_to_context(plan, info)
@@ -1468,7 +1467,7 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
     ) -> "OptimizationPlan":
         """Return the cached plan for ``(info, target_model, origin)`` or build a new one.
 
-        B1: plan cache.  Cache hits increment ``_cache_hits`` and refresh
+        Plan cache: hits increment ``_cache_hits`` and refresh
         recency; misses run the walker, evict the least-recently-used quarter
         when full, insert iff the plan is ``cacheable``, and increment
         ``_cache_misses``.
@@ -1557,8 +1556,8 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
     ) -> None:
         """Stash the plan and (when strictness is active) the strictness sentinels on ``info.context``.
 
-        B5: introspection stash so consumers and tests can inspect the
-        optimizer's decisions.  B3: when ``strictness != "off"``, also
+        Plan introspection: the stash lets consumers and tests inspect the
+        optimizer's decisions.  Strictness: when ``strictness != "off"``, also
         stash the planned-resolver sentinel set, the lookup paths, and
         the strictness mode so per-relation resolvers can detect
         unplanned lazy loads.

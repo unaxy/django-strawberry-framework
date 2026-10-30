@@ -63,14 +63,23 @@ from django.db.models.constants import LOOKUP_SEP
 
 from django_strawberry_framework.exceptions import ConfigurationError, OptimizerError
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import call_method, list_of, read_attr, require
+from django_strawberry_framework.utils._narrowing import (
+    call_method,
+    is_concrete_field,
+    is_str,
+    list_of,
+    read_attr,
+    require,
+)
 from django_strawberry_framework.utils.querysets import VisibleRowExists
 from django_strawberry_framework.utils.relations import (
     is_model_class,
+    is_source_carried_relation_kind,
     m2m_through_link_fields,
     relation_bool,
     relation_kind,
     relation_link,
+    relation_name,
 )
 
 if TYPE_CHECKING:
@@ -139,10 +148,7 @@ def _effective_alias_names(queryset: QuerySet[models.Model]) -> set[str]:
     return names
 
 
-def _next_reserved_alias(
-    queryset: QuerySet[models.Model],
-    prefix: str = _RESERVED_ALIAS_PREFIX,
-) -> str:
+def _next_reserved_alias(queryset: QuerySet[models.Model]) -> str:
     """Advance a deterministic counter past every occupied effective alias name.
 
     Yields ``_dst_predicate_0``, ``_dst_predicate_1``, ... skipping any name
@@ -152,9 +158,9 @@ def _next_reserved_alias(
     """
     occupied = _effective_alias_names(queryset)
     index = 0
-    while f"{prefix}{index}" in occupied:
+    while f"{_RESERVED_ALIAS_PREFIX}{index}" in occupied:
         index += 1
-    return f"{prefix}{index}"
+    return f"{_RESERVED_ALIAS_PREFIX}{index}"
 
 
 def attach_exists(
@@ -222,8 +228,12 @@ class _CorrelationStep:
     """One link of a relation path: rows of ``model`` whose ``pairs`` columns equal the outer row's.
 
     ``pairs`` are ``(inner column, outer column)`` pairs, index for index;
-    ``restriction`` is the constant filter the link carries (a
-    ``GenericRelation``'s content type), empty for every other link.
+    ``restriction`` is the constant filter the link carries on the inner rows
+    (a ``GenericRelation``'s content type), empty for every other link.
+    ``outer_restriction`` is the content-type test the reverse ``GenericRel`` of
+    a ``GenericRelation`` puts on the OUTER row, whose own content-type column
+    must name the relation's declaring model: ``(content-type model, the outer
+    column's attname, app_label, model name)``; ``None`` for every other link.
     ``segment`` is the index of the path segment whose target rows the link
     reads, ``None`` for a many-to-many's join-table link. ``referenced`` marks a
     link whose outer columns are a foreign key onto the inner ones (a forward
@@ -236,6 +246,7 @@ class _CorrelationStep:
     restriction: tuple[tuple[str, object], ...] = ()
     segment: int | None = None
     referenced: bool = False
+    outer_restriction: tuple[type[models.Model], str, str, str] | None = None
 
 
 def _column_ref(field: ConcreteField) -> str:
@@ -257,9 +268,13 @@ def _correlation_steps(
     Each segment is read off its own link columns (``utils/relations.py::relation_link``),
     never a reverse query name, so a relation whose reverse side is hidden
     (``related_name="+"``) correlates like any other. A forward single relation
-    is one link whose carriers sit on the outer row; a reverse relation and a
+    (and the reverse ``GenericRel`` of a ``GenericRelation``, whose ``object_id``
+    carrier is an outer-row column) is one link whose carriers sit on the outer
+    row; a reverse relation and a
     ``GenericRelation`` are one link whose carriers sit on the related row (the
-    latter also restricted to the declaring model's content type); a
+    latter also restricted to the declaring model's content type, which the
+    reverse ``GenericRel`` instead requires of the outer row's content-type
+    column, as Django's own join does); a
     many-to-many in either direction is two links, through its join table.
     A segment that names no such link (a ``GenericForeignKey``) raises
     ``ConfigurationError``: an uncorrelated existence test would match every
@@ -289,9 +304,10 @@ def _correlation_steps(
             ]
         else:
             link = relation_link(field)
+            source_carried = is_source_carried_relation_kind(kind)
             pairs = (
                 zip(link.targets, link.carriers, strict=True)
-                if kind == "forward_single"
+                if source_carried
                 else zip(link.carriers, link.targets, strict=True)
             )
             links = [
@@ -299,7 +315,7 @@ def _correlation_steps(
                     field.related_model,
                     tuple(pairs),
                     index,
-                    kind == "forward_single",
+                    source_carried,
                 ),
             ]
         for link_model, pairs, link_segment, referenced in links:
@@ -310,19 +326,37 @@ def _correlation_steps(
                     "the outer row.",
                 )
             restriction: tuple[tuple[str, object], ...] = ()
+            outer_restriction: tuple[type[models.Model], str, str, str] | None = None
             if kind == "generic":
                 # ``relation_kind`` reads ``"generic"`` off ``GenericRelation``'s own slots.
                 generic = cast("GenericRelation", field)
                 content_type_field = generic.content_type_field_name
-                declaring = generic.model
-                if generic.for_concrete_model:
-                    declaring = require(declaring._meta.concrete_model, is_model_class)
+                declaring = _generic_declaring_model(generic)
                 # The content type by natural key, not ``get_extra_restriction``'s pk:
                 # pks differ per database and the join resolves on the statement's
                 # alias, and this also runs at declaration time, where a lookup is I/O.
                 restriction = (
                     (f"{content_type_field}__app_label", declaring._meta.app_label),
                     (f"{content_type_field}__model", declaring._meta.model_name),
+                )
+            elif kind == "reverse_generic":
+                # The ``GenericRel``'s ``field`` is the ``GenericRelation`` it reverses; the
+                # content-type column it names sits on ``current``, the outer row.
+                generic_relation = read_attr(field, "field")
+                declaring = _generic_declaring_model(generic_relation)
+                content_type_name = require(
+                    relation_name(generic_relation, "content_type_field_name"),
+                    is_str,
+                )
+                content_type_column = require(
+                    current._meta.get_field(content_type_name),
+                    is_concrete_field,
+                )
+                outer_restriction = (
+                    require(content_type_column.related_model, is_model_class),
+                    content_type_column.attname,
+                    declaring._meta.app_label,
+                    require(declaring._meta.model_name, is_str),
                 )
             steps.append(
                 _CorrelationStep(
@@ -331,19 +365,45 @@ def _correlation_steps(
                     restriction,
                     link_segment,
                     referenced,
+                    outer_restriction,
                 ),
             )
         current = steps[-1].model
     return tuple(steps)
 
 
+def _generic_declaring_model(generic: object) -> type[models.Model]:
+    """Return the model whose content type a ``GenericRelation``'s rows carry.
+
+    Its declaring model, or that model's concrete model under ``for_concrete_model``
+    (Django's ``GenericRelation.get_extra_restriction`` reads the same).
+    """
+    declaring = require(read_attr(generic, "model"), is_model_class)
+    if relation_bool(generic, "for_concrete_model"):
+        declaring = require(declaring._meta.concrete_model, is_model_class)
+    return declaring
+
+
 def _correlated(rows: QuerySet[models.Model], step: _CorrelationStep) -> QuerySet[models.Model]:
-    """Keep the ``rows`` whose ``step`` link columns equal the outer row's."""
+    """Keep the ``rows`` whose ``step`` link columns equal the outer row's.
+
+    A step with an ``outer_restriction`` also requires the outer row's content-type
+    column to name the restriction's model, by natural key through a nested
+    ``EXISTS`` on the content-type table (``OuterRef(OuterRef(...))`` is the outer row).
+    """
     lookups: dict[str, object] = {
         _column_ref(inner): OuterRef(_column_ref(outer)) for inner, outer in step.pairs
     }
     lookups.update(step.restriction)
-    return rows.filter(**lookups)
+    if step.outer_restriction is None:
+        return rows.filter(**lookups)
+    content_type_model, attname, app_label, model_name = step.outer_restriction
+    content_type = content_type_model._base_manager.filter(
+        pk=OuterRef(OuterRef(attname)),
+        app_label=app_label,
+        model=model_name,
+    )
+    return rows.filter(Exists(content_type), **lookups)
 
 
 def related_rows_exist(

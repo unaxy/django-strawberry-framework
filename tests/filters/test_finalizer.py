@@ -5,8 +5,8 @@ Covers:
 - ``Meta.filterset_class`` validation (positive + negative).
 - Four-subpass ordering (every owner bound BEFORE any
   ``get_filters()`` runs across the whole registry).
-- Strict multi-owner reuse: divergent
-  ``graphql_type_name`` rejected; identical target accepted; idempotent
+- Strict multi-owner reuse: divergent own-PK Relay identity or custom
+  ``get_queryset`` rejected; owners agreeing on every axis accepted; idempotent
   re-bind of the same ``(filterset, definition)`` pair accepted; owners over
   different tables (a multi-table-inheritance parent and child) rejected and
   owners over one model or its proxies accepted, in both declaration orders.
@@ -42,7 +42,19 @@ from typing import TYPE_CHECKING, ClassVar, NoReturn
 
 import pytest
 import strawberry
-from apps.library.models import Book, Branch, Genre, LendingDesk, ProxyBranch, Shelf, Venue
+from apps.kanban.models import Actor, Card, CardItem, CardPathLink
+from apps.library.models import (
+    Book,
+    Branch,
+    Genre,
+    LendingDesk,
+    Loan,
+    ProxyBranch,
+    Shelf,
+    TaggedItem,
+    Venue,
+)
+from django.contrib.contenttypes.models import ContentType
 from django.core.cache import caches
 from django.db.models import Model, QuerySet, TextField
 from django.forms import TextInput
@@ -87,15 +99,10 @@ from django_strawberry_framework.types.finalizer import (
     _bind_filterset_owner,
 )
 from django_strawberry_framework.types.relay import apply_interfaces
-from django_strawberry_framework.utils._narrowing import (
-    class_dict,
-    is_dict,
-    is_str,
-    read_attr,
-    require,
-)
+from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._narrowing import is_dict, is_str, read_attr, require
 from django_strawberry_framework.utils.typing import object_result
-from tests._idioms import json_at
+from tests._idioms import saved_pk
 from tests._subprocess import run_in_fresh_process
 
 
@@ -229,23 +236,13 @@ def test_globalid_strategy_audit_refuses_a_filterset_with_no_bound_owner() -> No
 def test_phase_2_5_rejects_multi_owner_with_diverging_pk_identity() -> None:
     """Two REAL owners diverging on own-PK Relay identity are rejected end-to-end.
 
-    Exercises the genuinely owner-dependent axis of the strict
-    multi-owner check: one Relay-shaped owner and one plain owner share a
+    Exercises the own-PK Relay-identity axis, one of the three owner-dependent
+    axes of the strict multi-owner check: one Relay-shaped owner and one plain owner share a
     single ``FilterSet``, so the shared filterset's own ``id`` filter
     would resolve to a GlobalID under one owner but a scalar under the
     other. ``finalize_django_types()`` must reject the second binding via
     ``_check_filterset_owner_pk_identity`` rather than silently pinning
     the first owner.
-
-    Divergence on the relation-TARGET axis (a ``FakeOwnerDefinition``
-    hand-planted on the filterset before finalize) is structurally
-    impossible: the finalizer's pre-bind reset (``clear_filter_input_namespace`` in
-    the before-bind loop) delattrs every FilterSet's ``_owner_definition``
-    back to the default ``None``, wiping any pre-seed; and relation
-    targets resolve via the process-global ``registry.primary_for(model)``
-    keyed on the TARGET model - not the owner - so two legitimate owners
-    (which share the filterset's ``Meta.model``) can never diverge there.
-    Own-PK Relay identity is the axis that CAN diverge for real owners.
     """
 
     class BookFilter(FilterSet):
@@ -283,8 +280,8 @@ def test_phase_2_5_rejects_multi_owner_with_diverging_pk_identity() -> None:
 def test_phase_2_5_rejects_multi_owner_with_diverging_get_queryset() -> None:
     """Two owners of one filterset with divergent ``get_queryset`` are rejected end-to-end.
 
-    ``get_queryset`` visibility is a second genuinely owner-dependent axis (beyond
-    own-PK Relay identity): when the shared filterset is a ``RelatedFilter``
+    ``get_queryset`` visibility is one of the three owner-dependent axes (beside
+    the table and own-PK Relay identity): when the shared filterset is a ``RelatedFilter``
     target, ``FilterSet._target_type_for_related_filter`` scopes the related
     branch through the BOUND owner's ``get_queryset``, but only the FIRST binding
     is stored. Two owners with different ``get_queryset`` hooks would therefore
@@ -470,6 +467,101 @@ def test_phase_2_5_accepts_multi_owner_reading_one_table(*, proxy_first: bool) -
     assert owners[1].__django_strawberry_definition__.filterset_class is BranchFilter
 
 
+@pytest.mark.django_db
+@pytest.mark.parametrize("proxy_first", [True, False], ids=["proxy-first", "concrete-first"])
+def test_phase_2_5_accepts_one_table_owners_sharing_a_proxy_named_related_filter(
+    *,
+    proxy_first: bool,
+) -> None:
+    """A ``Branch`` and a ``ProxyBranch`` owner share a set whose ``RelatedFilter`` attr only the proxy has.
+
+    ``proxy_tags = RelatedFilter(TagFilter, field_name="tags")`` is named like
+    ``ProxyBranch.proxy_tags`` but walks ``tags``, the relation both models share.
+    The declared attribute name is not an owner-dependent axis: the branch's target
+    is the shared relation's target model, so both declaration orders finalize, and
+    the set filters by tag through each owner's rows.
+    """
+
+    class TaggedItemType(DjangoType):
+        class Meta:
+            model = TaggedItem
+            fields = ("id", "tag")
+
+    class TagFilter(FilterSet):
+        class Meta:
+            model = TaggedItem
+            fields = {"tag": ["exact"]}
+
+    class BranchFilter(FilterSet):
+        proxy_tags = RelatedFilter(TagFilter, field_name="tags")
+
+        class Meta:
+            model = Branch
+            fields = {"name": ["exact"]}
+
+    def concrete() -> type[DjangoType]:
+        class BranchOwnerType(DjangoType):
+            class Meta:
+                model = Branch
+                fields = ("id", "name")
+                filterset_class = BranchFilter
+
+        return BranchOwnerType
+
+    def proxy() -> type[DjangoType]:
+        class ProxyOwnerType(DjangoType):
+            class Meta:
+                model = ProxyBranch
+                fields = ("id", "name")
+                filterset_class = BranchFilter
+
+        return ProxyOwnerType
+
+    declared = [declare() for declare in ((proxy, concrete) if proxy_first else (concrete, proxy))]
+    concrete_type, proxy_type = declared[::-1] if proxy_first else declared
+    finalize_django_types()
+    assert registry.get(TaggedItem) is TaggedItemType
+    assert BranchFilter._owner_definition is declared[0].__django_strawberry_definition__
+
+    def via_concrete(info: strawberry.Info, tag: str) -> list[Branch]:
+        rows = BranchFilter.apply_sync({"proxy_tags": {"tag": tag}}, Branch.objects.all(), info)
+        return list(rows.order_by("name"))
+
+    def via_proxy(info: strawberry.Info, tag: str) -> list[ProxyBranch]:
+        rows = BranchFilter.apply_sync(
+            {"proxy_tags": {"tag": tag}},
+            ProxyBranch.objects.all(),
+            info,
+        )
+        return list(rows.order_by("name"))
+
+    query = strawberry.type(
+        type(
+            "Query",
+            (),
+            {
+                "__annotations__": {
+                    "via_concrete": list[concrete_type],
+                    "via_proxy": list[proxy_type],
+                },
+                "via_concrete": strawberry.field(resolver=via_concrete),
+                "via_proxy": strawberry.field(resolver=via_proxy),
+            },
+        ),
+    )
+    tagged = Branch.objects.create(name="tagged")
+    other = Branch.objects.create(name="other")
+    branch_type = ContentType.objects.get_for_model(Branch)
+    TaggedItem.objects.create(tag="t", content_type=branch_type, object_id=saved_pk(tagged))
+    TaggedItem.objects.create(tag="u", content_type=branch_type, object_id=saved_pk(other))
+    result = strawberry.Schema(query=query, config=strawberry_config()).execute_sync(
+        '{ viaConcrete(tag: "t") { name } viaProxy(tag: "t") { name } }',
+        context_value=HttpRequest(),
+    )
+    assert result.errors is None, result.errors
+    assert result.data == {"viaConcrete": [{"name": "tagged"}], "viaProxy": [{"name": "tagged"}]}
+
+
 _SUBCLASS_OWNER_CASES = [
     pytest.param(hiding_first, base_on_hiding, id=f"{order}-{wiring}")
     for hiding_first, order in ((True, "hiding-declared-first"), (False, "plain-declared-first"))
@@ -569,8 +661,8 @@ def test_a_filterset_subclass_binds_its_own_owner_apart_from_its_base(
             interfaces = (relay.Node,)
 
     finalize_django_types()
-    shelf_owner = class_dict(ShelfFilter)["_owner_definition"]
-    sub_shelf_owner = class_dict(SubShelfFilter)["_owner_definition"]
+    shelf_owner = truth.class_dict(ShelfFilter)["_owner_definition"]
+    sub_shelf_owner = truth.class_dict(SubShelfFilter)["_owner_definition"]
     assert isinstance(shelf_owner, DjangoTypeDefinition)
     assert isinstance(sub_shelf_owner, DjangoTypeDefinition)
     assert shelf_owner.origin is (hiding_type if base_on_hiding else plain_type)
@@ -608,162 +700,6 @@ def test_a_filterset_subclass_binds_its_own_owner_apart_from_its_base(
     assert result.data["viaPlain"]["edges"] == [{"node": {"title": "on-hidden"}}]
 
 
-# Each row of ``test_an_unwired_filterset_subclass_answers_for_no_owner``: the
-# ``shelf`` branch input and the titles it returns, one row per owner-dependent
-# read the branch's target set answers with.
-_UNWIRED_TARGET_ROWS = [
-    pytest.param('{topic: {exact: "secret"}}', [], id="declared-branch-scope"),
-    pytest.param("{id: {exact: %(seen)d}}", ["on-seen"], id="own-pk-scalar"),
-    pytest.param('{back: {title: {exact: "on-hidden"}}}', [], id="via-type-re-entry"),
-    pytest.param('{branchShelvesTopic: {exact: "secret"}}', [], id="undeclared-hop-re-entry"),
-    pytest.param(
-        '{branch: {exact: "%(shelf_named_branch_id)s"}}',
-        ["on-seen"],
-        id="relation-globalid-node-id-only",
-    ),
-]
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize(("shelf_input", "titles"), _UNWIRED_TARGET_ROWS)
-@pytest.mark.parametrize(
-    "subclass_target",
-    [
-        pytest.param(True, id="unwired-subclass-of-a-bound-filterset"),
-        pytest.param(False, id="unrelated-unwired-filterset"),
-    ],
-)
-def test_an_unwired_filterset_subclass_answers_for_no_owner(
-    *,
-    subclass_target: bool,
-    shelf_input: str,
-    titles: list[str],
-) -> None:
-    """A ``RelatedFilter`` to an unwired ``SubShelfFilter(ShelfFilter)`` answers as an unwired set does.
-
-    ``ShelfFilter`` is bound to the non-primary ``PlainShelfType``, which hides
-    nothing; the primary ``HidingShelfType`` hides secret shelves. Both are Relay
-    nodes. A subclass no type wires is a separate set bound to no owner, so it
-    answers every row exactly as an unrelated unwired filterset over ``Shelf``
-    declaring the same filters does: its branch rows, and a path re-entering
-    ``Shelf``'s table through a multi-relation ``RelatedFilter`` or a flat leaf,
-    are scoped by the primary type (a secret shelf is not seen); its own key is
-    the scalar column, not its base's owner's GlobalID; and a relation GlobalID
-    is read node-id-only, so its type name is not checked against an owner.
-    """
-
-    class BackBookFilter(FilterSet):
-        class Meta:
-            model = Book
-            fields = {"title": ["exact"]}
-
-    target_fields = {
-        "topic": ["exact"],
-        "id": ["exact"],
-        "branch": ["exact"],
-        "branch__shelves__topic": ["exact"],
-    }
-
-    class ShelfFilter(FilterSet):
-        back = RelatedFilter(BackBookFilter, field_name="branch__shelves__books")
-
-        class Meta:
-            model = Shelf
-            fields = target_fields
-
-    class SubShelfFilter(ShelfFilter):
-        pass
-
-    class LoneShelfFilter(FilterSet):
-        back = RelatedFilter(BackBookFilter, field_name="branch__shelves__books")
-
-        class Meta:
-            model = Shelf
-            fields = target_fields
-
-    target = SubShelfFilter if subclass_target else LoneShelfFilter
-
-    class BranchType(DjangoType):
-        class Meta:
-            model = Branch
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
-
-    class HidingShelfType(DjangoType):
-        class Meta:
-            model = Shelf
-            fields = ("id", "topic")
-            primary = True
-            interfaces = (relay.Node,)
-
-        @classmethod
-        @override
-        def get_queryset(
-            cls,
-            queryset: QuerySet[Shelf],
-            info: object,
-            **kwargs: object,
-        ) -> QuerySet[Shelf]:
-            return queryset.exclude(topic="secret")
-
-    class PlainShelfType(DjangoType):
-        class Meta:
-            model = Shelf
-            fields = ("id", "topic")
-            interfaces = (relay.Node,)
-            filterset_class = ShelfFilter
-
-    class ViaTargetBookFilter(FilterSet):
-        shelf = RelatedFilter(target, field_name="shelf")
-
-        class Meta:
-            model = Book
-            fields = {"title": ["exact"]}
-
-    class ViaTargetBookType(DjangoType):
-        class Meta:
-            model = Book
-            fields = ("id", "title")
-            filterset_class = ViaTargetBookFilter
-            interfaces = (relay.Node,)
-
-    finalize_django_types()
-    assert read_attr(class_dict(ShelfFilter)["_owner_definition"], "origin") is PlainShelfType
-    assert "_owner_definition" not in class_dict(target)
-    assert registry.get(Shelf) is HidingShelfType
-    assert registry.get(Branch) is BranchType
-
-    # ``from __future__ import annotations`` leaves a class-body annotation a string
-    # naming a function local, so the root type is built with resolved annotations.
-    query = strawberry.type(
-        type(
-            "Query",
-            (),
-            {
-                "__annotations__": {"via_target": DjangoConnection[ViaTargetBookType]},
-                "via_target": DjangoConnectionField(ViaTargetBookType),
-            },
-        ),
-    )
-    branch = Branch.objects.create(name="b")
-    hidden = Shelf.objects.create(branch=branch, code="h", topic="secret")
-    seen = Shelf.objects.create(branch=branch, code="s", topic="zzz")
-    Book.objects.create(title="on-hidden", shelf=hidden)
-    Book.objects.create(title="on-seen", shelf=seen)
-    shelf_filter = shelf_input % {
-        "seen": seen.pk,
-        "shelf_named_branch_id": relay.to_base64("PlainShelfType", branch.pk),
-    }
-    result = strawberry.Schema(query=query, config=strawberry_config()).execute_sync(
-        f"{{ viaTarget(filter: {{shelf: {shelf_filter}}}) {{ edges {{ node {{ title }} }} }} }}",
-        context_value=HttpRequest(),
-    )
-    assert result.errors is None, result.errors
-    assert json_at(result.data, "viaTarget", "edges") == [
-        {"node": {"title": title}} for title in titles
-    ]
-
-
 @pytest.mark.parametrize(
     "subclass_target",
     [
@@ -775,15 +711,15 @@ def test_an_unwired_filterset_subclass_names_a_choice_enum_as_an_unbound_set(
     *,
     subclass_target: bool,
 ) -> None:
-    """An unwired subclass names a choice enum it builds first as an unbound set does.
+    """An unwired subclass names a choice enum it builds first after its own class.
 
     No ``DjangoType`` exposes ``Shelf.condition`` and ``HIDE_FLAT_FILTERS`` keeps
     the root from building the column as a flat leaf, so the ``RelatedFilter``
     target, built before ``PlainShelfType`` (declared last) builds its own
     ``ShelfFilter``, is the first to read the column, and the first builder names
-    the enum after its owner. A subclass of ``ShelfFilter`` no type wires has no
-    owner, so it names the enum exactly as an unrelated unwired filterset does,
-    with the unbound ``Filter`` prefix rather than its base's owner's type name.
+    the enum. A subclass of ``ShelfFilter`` no type wires has no owner, so it names
+    the enum exactly as an unrelated unwired filterset does: after its own class
+    name, never its base's owner's type name.
     """
     with override_settings(DJANGO_STRAWBERRY_FRAMEWORK={"HIDE_FLAT_FILTERS": True}):
 
@@ -823,8 +759,11 @@ def test_an_unwired_filterset_subclass_names_a_choice_enum_as_an_unbound_set(
                 filterset_class = ShelfFilter
 
         finalize_django_types()
-        assert read_attr(class_dict(ShelfFilter)["_owner_definition"], "origin") is PlainShelfType
-        assert "_owner_definition" not in class_dict(target)
+        assert (
+            read_attr(truth.class_dict(ShelfFilter)["_owner_definition"], "origin")
+            is PlainShelfType
+        )
+        assert "_owner_definition" not in truth.class_dict(target)
         query = strawberry.type(
             type(
                 "Query",
@@ -836,33 +775,159 @@ def test_an_unwired_filterset_subclass_names_a_choice_enum_as_an_unbound_set(
             ),
         )
         schema = strawberry.Schema(query=query, config=strawberry_config())
-    assert schema.get_type_by_name("FilterConditionEnum") is not None
+    expected = "SubShelfFilterConditionEnum" if subclass_target else "LoneShelfFilterConditionEnum"
+    assert schema.get_type_by_name(expected) is not None
     assert schema.get_type_by_name("PlainShelfTypeConditionEnum") is None
 
 
-def test_phase_2_5_accepts_multi_owner_with_identical_target() -> None:
-    """Two distinct owner definitions sharing one ``FilterSet`` succeed when targets match.
+@pytest.mark.parametrize(
+    "read_first",
+    [
+        pytest.param(True, id="column-in-meta-fields"),
+        pytest.param(False, id="column-filtered-only"),
+    ],
+)
+def test_a_meta_named_type_names_a_choice_enum_alike_whichever_side_reads_first(
+    *,
+    read_first: bool,
+) -> None:
+    """A ``Meta.name``'d type's choice enum carries its published name from either side.
 
-    Pins the strict-equality walk through ``related_filters`` (the companion to
-    `tests/filters/test_finalizer.py::test_phase_2_5_rejects_multi_owner_with_diverging_pk_identity`).
-    The pre-existing
+    With ``condition`` in ``Meta.fields`` the read annotation builds the enum when the
+    class is declared, before its filterset builds a leaf; without it the filterset's
+    owned leaf builds it at schema build. Both name it after the published ``Meta.name``,
+    never the Python class name, so the enum's name does not hang on which side reads
+    the column first.
+    """
+
+    class PublishedShelfFilter(FilterSet):
+        class Meta:
+            model = Shelf
+            fields = {"condition": ["exact"]}
+
+    class ShelfClassType(DjangoType):
+        class Meta:
+            model = Shelf
+            name = "PublishedShelf"
+            fields = ("id", "topic", "condition") if read_first else ("id", "topic")
+            filterset_class = PublishedShelfFilter
+            interfaces = (relay.Node,)
+
+    finalize_django_types()
+    query = strawberry.type(
+        type(
+            "Query",
+            (),
+            {
+                "__annotations__": {"shelves": DjangoConnection[ShelfClassType]},
+                "shelves": DjangoConnectionField(ShelfClassType),
+            },
+        ),
+    )
+    schema = strawberry.Schema(query=query, config=strawberry_config())
+    assert schema.get_type_by_name("PublishedShelfConditionEnum") is not None
+    assert schema.get_type_by_name("ShelfClassTypeConditionEnum") is None
+
+
+def test_two_unwired_targets_over_same_named_choice_columns_build_one_schema() -> None:
+    """Two unwired sets over same-named choice columns of two models mint two enums.
+
+    ``CardPathLink.kind`` and ``Actor.kind`` are choice columns no type exposes (their
+    types publish other columns), each reached only through a ``RelatedFilter`` target
+    no type wires, and
+    ``HIDE_FLAT_FILTERS`` keeps both roots from building them as flat leaves. Each
+    target names its enum after its own class, so the schema publishes both instead of
+    two enums under one name.
+    """
+    with override_settings(DJANGO_STRAWBERRY_FRAMEWORK={"HIDE_FLAT_FILTERS": True}):
+
+        class PathLinkFilter(FilterSet):
+            class Meta:
+                model = CardPathLink
+                fields = {"kind": ["exact"]}
+
+        class ActorFilter(FilterSet):
+            class Meta:
+                model = Actor
+                fields = {"kind": ["exact"]}
+
+        class LinkedCardFilter(FilterSet):
+            path_links = RelatedFilter(PathLinkFilter, field_name="path_links")
+
+            class Meta:
+                model = Card
+                fields = {"title": ["exact"]}
+
+        class VerifiedItemFilter(FilterSet):
+            verified_by = RelatedFilter(ActorFilter, field_name="verified_by")
+
+            class Meta:
+                model = CardItem
+                fields = {"text": ["exact"]}
+
+        class LinkedCardType(DjangoType):
+            class Meta:
+                model = Card
+                fields = ("id", "title")
+                filterset_class = LinkedCardFilter
+                interfaces = (relay.Node,)
+
+        class VerifiedItemType(DjangoType):
+            class Meta:
+                model = CardItem
+                fields = ("id", "text")
+                filterset_class = VerifiedItemFilter
+                interfaces = (relay.Node,)
+
+        class PathLinkType(DjangoType):
+            class Meta:
+                model = CardPathLink
+                fields = ("id",)
+
+        class ActorType(DjangoType):
+            class Meta:
+                model = Actor
+                fields = ("id", "key")
+
+        finalize_django_types()
+        assert registry.get(CardPathLink) is PathLinkType
+        assert registry.get(Actor) is ActorType
+        query = strawberry.type(
+            type(
+                "Query",
+                (),
+                {
+                    "__annotations__": {
+                        "cards": DjangoConnection[LinkedCardType],
+                        "items": DjangoConnection[VerifiedItemType],
+                    },
+                    "cards": DjangoConnectionField(LinkedCardType),
+                    "items": DjangoConnectionField(VerifiedItemType),
+                },
+            ),
+        )
+        schema = strawberry.Schema(query=query, config=strawberry_config())
+    assert schema.get_type_by_name("PathLinkFilterKindEnum") is not None
+    assert schema.get_type_by_name("ActorFilterKindEnum") is not None
+
+
+def test_phase_2_5_accepts_multi_owner_agreeing_on_every_axis() -> None:
+    """Two distinct owner definitions agreeing on every axis share one ``FilterSet``.
+
+    The accept companion to
+    `tests/filters/test_finalizer.py::test_phase_2_5_rejects_multi_owner_with_diverging_pk_identity`.
     ``test_phase_2_5_accepts_idempotent_rebind_of_same_filterset_owner_pair``
-    only exercises the ``previous is definition`` identity short-circuit
-    in ``_bind_filterset_owner``; this test forces two distinct
-    ``DjangoTypeDefinition`` instances to walk the strict-equality compare
-    and confirms the legitimate same-target case is accepted.
+    only exercises the ``previous is definition`` identity short-circuit in
+    ``_bind_filterset_owner``; this test binds two distinct
+    ``DjangoTypeDefinition`` instances, so the second runs
+    ``_check_filterset_owner_axes`` and passes it.
 
     Setup: two ``DjangoType``s registered against ``Book`` (one primary,
-    one secondary per ``Meta.primary``); both share one ``BookFilter``
-    whose ``shelf = RelatedFilter(ShelfFilter, field_name="shelf")``
-    declaration is a single ``RelatedFilter`` entry. Both owner
-    definitions consult ``Book._meta.get_field("shelf").related_model``,
-    which is the same ``Shelf``; ``registry.primary_for(Shelf)`` returns
-    ``ShelfType`` for both - so ``related_target_for("shelf")`` returns
-    ``(ShelfDefinition, <ForeignKey>)`` from both owner contexts, the
-    target ``DjangoTypeDefinition`` identity matches, and the
-    ``_graphql_type_name`` strings match. Assert: no raise, and the
-    ``_owner_definition`` slot stores the FIRST binding
+    one secondary per ``Meta.primary``), both plain, both with the identity
+    ``get_queryset``, sharing one ``BookFilter`` that declares
+    ``shelf = RelatedFilter(ShelfFilter, field_name="shelf")``. They share
+    the table, own-PK Relay identity and visibility. Assert: no raise, and
+    the ``_owner_definition`` slot stores the FIRST binding
     (`django_strawberry_framework/types/finalizer.py::_bind_filterset_owner`).
     """
 
@@ -915,18 +980,15 @@ def test_phase_2_5_accepts_multi_owner_with_identical_target() -> None:
             )
             filterset_class = BookFilter
 
-    # Two distinct definitions both bind the same BookFilter; the
-    # strict-equality walk through ``related_filters`` evaluates
-    # ``related_target_for("shelf")`` from each owner's context and
-    # accepts the match because both resolve to the same
-    # ``ShelfDefinition`` with the same ``graphql_type_name``.
+    # Two distinct definitions both bind the same BookFilter; the second
+    # passes every owner-dependent axis check.
     finalize_django_types()
 
     primary_definition = PrimaryBookType.__django_strawberry_definition__
     secondary_definition = SecondaryBookType.__django_strawberry_definition__
     # The two owner definitions are distinct (NOT the same identity);
-    # the strict-equality walk - not the ``previous is definition``
-    # short-circuit - is what accepted the second binding.
+    # the axis checks - not the ``previous is definition``
+    # short-circuit - are what accepted the second binding.
     assert primary_definition is not secondary_definition
     # The ``_owner_definition`` slot stores the FIRST binding
     # (`django_strawberry_framework/types/finalizer.py::_bind_filterset_owner`).
@@ -1611,10 +1673,6 @@ def _owner(model: type[Model]) -> DjangoTypeDefinition:
     return OwnerType.__django_strawberry_definition__
 
 
-def _resolves_nothing(_field_name: object) -> None:
-    """A ``related_target_for`` that resolves no relation."""
-
-
 def test_bind_filterset_owner_idempotent_for_same_definition() -> None:
     """Re-binding the SAME definition object short-circuits via identity."""
 
@@ -1627,31 +1685,6 @@ def test_bind_filterset_owner_idempotent_for_same_definition() -> None:
     _bind_filterset_owner(ShelfFilter, definition)  # previous None -> bind
     _bind_filterset_owner(ShelfFilter, definition)  # previous IS definition -> return
     assert ShelfFilter._owner_definition is definition
-
-
-def test_bind_filterset_owner_continues_when_both_targets_unresolved() -> None:
-    """A field neither owner can resolve is skipped (both-None continue)."""
-
-    class ShelfFilter(FilterSet):
-        class Meta:
-            model = Shelf
-            fields = {"code": ["exact"]}
-
-    class BookFilter(FilterSet):
-        shelf = RelatedFilter(ShelfFilter, field_name="shelf")
-
-        class Meta:
-            model = Book
-            fields = {"title": ["exact"]}
-
-    # No ``Shelf`` type is registered, so neither owner resolves ``shelf``.
-    first = _owner(Book)
-    second = _owner(Book)
-    _bind_filterset_owner(BookFilter, first)
-    # Second distinct owner: ``shelf`` resolves to None from both -> continue,
-    # no raise, and the first binding is preserved.
-    _bind_filterset_owner(BookFilter, second)
-    assert BookFilter._owner_definition is first
 
 
 def test_bind_filterset_owner_rejects_filterset_model_unrelated_to_owner() -> None:
@@ -1691,8 +1724,7 @@ def test_bind_filterset_owner_rejects_diverging_own_pk_relay_node_ness() -> None
     The filterset's own ``id`` resolves to a GlobalID under the Relay owner
     but a scalar under the plain owner - an own-PK ambiguity the binding
     must reject loudly rather than silently pinning to whichever bound
-    first. This is the genuine owner-dependent axis (relation targets
-    resolve globally by target model and cannot diverge).
+    first. Own-PK Relay identity is one of the three owner-dependent axes.
     """
 
     class ShelfFilter(FilterSet):
@@ -1760,35 +1792,6 @@ def test_bind_filterset_owner_rejects_diverging_own_pk_type_name() -> None:
     with pytest.raises(ConfigurationError) as exc_info:
         _bind_filterset_owner(ShelfFilter, SecondShelfType.__django_strawberry_definition__)
     assert "own-primary-key Relay identity" in str(exc_info.value)
-
-
-def test_bind_filterset_owner_raises_when_one_owner_resolves_and_other_does_not(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A field resolved by one owner but not the other is a hard mismatch."""
-
-    class ShelfFilter(FilterSet):
-        class Meta:
-            model = Shelf
-            fields = {"code": ["exact"]}
-
-    class BookFilter(FilterSet):
-        shelf = RelatedFilter(ShelfFilter, field_name="shelf")
-
-        class Meta:
-            model = Book
-            fields = {"title": ["exact"]}
-
-    _owner(Shelf)
-    first = _owner(Book)
-    second = _owner(Book)
-    # Two live owners resolve ``shelf`` through the one registry and so always agree; the first
-    # owner's lookup is forced to resolve nothing to reach the defensive divergence check.
-    monkeypatch.setattr(first, "related_target_for", _resolves_nothing)
-    _bind_filterset_owner(BookFilter, first)
-    with pytest.raises(ConfigurationError) as excinfo:
-        _bind_filterset_owner(BookFilter, second)
-    assert "shelf" in str(excinfo.value)
 
 
 def test_phase_2_5_configuration_error_from_get_filters_propagates_unwrapped() -> None:
@@ -1880,6 +1883,77 @@ def test_phase_2_5_rejects_globalid_filter_on_callable_strategy_target() -> None
         finalize_django_types()
     msg = str(exc_info.value)
     assert "GenreFilter" in msg
+    assert "encode-only" in msg
+    assert "callable" in msg
+
+
+@pytest.mark.parametrize(
+    ("set_model", "key"),
+    [
+        pytest.param(Book, "shelf__branch", id="untyped-hop"),
+        pytest.param(Loan, "book__shelf__branch", id="scoped-hop-then-untyped-hop"),
+    ],
+)
+def test_phase_2_5_rejects_a_callable_strategy_target_behind_an_untyped_hop(
+    set_model: type[Model],
+    key: str,
+) -> None:
+    """A relation key into a ``callable``-strategy type through a hop no type exposes fails at build.
+
+    No type registers ``Shelf``, so the audit's walk continues on the relation's model to
+    ``Branch``'s type, the target the request-time walk validates against once the
+    registry is finalized; build time refuses the encode-only target rather than leaving
+    every request to answer ``GLOBALID_UNVALIDATABLE``. The ``Loan`` key first crosses a
+    ``Book`` type carrying its own ``get_queryset``.
+    """
+
+    def encode(_type_cls: type[DjangoType], _model: type[Model], _root: object) -> str:
+        return "BranchType"
+
+    class BranchType(DjangoType):
+        class Meta:
+            model = Branch
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+            globalid_strategy = encode
+
+    class ScopedBookType(DjangoType):
+        class Meta:
+            model = Book
+            fields = ("id", "title")
+
+        @classmethod
+        @override
+        def get_queryset(
+            cls,
+            queryset: QuerySet[Book],
+            info: object,
+            **kwargs: object,
+        ) -> QuerySet[Book]:
+            return queryset.exclude(title="hidden")
+
+    class KeyFilter(FilterSet):
+        class Meta:
+            model = set_model
+            fields = {key: ["exact"]}
+
+    class OwnerType(DjangoType):
+        class Meta:
+            model = set_model
+            fields = ("id",)
+            interfaces = (relay.Node,)
+            filterset_class = KeyFilter
+            primary = True
+
+    assert registry.get(Shelf) is None
+    assert registry.get(Branch) is BranchType
+    assert registry.get(set_model) is OwnerType
+    assert ScopedBookType in registry.types_for(Book)
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        finalize_django_types()
+    msg = str(exc_info.value)
+    assert "KeyFilter" in msg
     assert "encode-only" in msg
     assert "callable" in msg
 

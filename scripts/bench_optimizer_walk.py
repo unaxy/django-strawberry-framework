@@ -187,7 +187,6 @@ def _capture_walk_inputs(
         model: type[models.Model],
         info: GraphQLResolveInfo | None = None,
         *,
-        runtime_prefixes: tuple[tuple[str, ...], ...] | None = None,
         source_type: type[DjangoType] | None = None,
     ) -> OptimizationPlan:
         if not captured:
@@ -196,7 +195,6 @@ def _capture_walk_inputs(
             selected_fields,
             model,
             info,
-            runtime_prefixes=runtime_prefixes,
             source_type=source_type,
         )
 

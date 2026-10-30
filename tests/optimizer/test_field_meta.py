@@ -523,6 +523,7 @@ def test_is_many_side_pins_every_relation_kind() -> None:
         auto_created=True,
     )
     forward_single = FieldMeta(name="forward_single", is_relation=True)
+    reverse_generic = FieldMeta(name="reverse_generic", is_relation=True, auto_created=True)
     generic = FieldMeta(
         name="generic",
         is_relation=True,
@@ -542,6 +543,9 @@ def test_is_many_side_pins_every_relation_kind() -> None:
 
     assert forward_single.relation_kind == "forward_single"
     assert forward_single.is_many_side is False
+
+    assert reverse_generic.relation_kind == "reverse_generic"
+    assert reverse_generic.is_many_side is False
 
     assert generic.relation_kind == "generic"
     assert generic.is_many_side is True

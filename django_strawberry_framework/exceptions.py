@@ -101,7 +101,7 @@ class PathResolutionError(ConfigurationError):
 
     The single named error for strict path classification. Distinct from the
     lenient boolean ``utils/relations.py::path_traverses_to_many`` walk (which
-    answers a ``PathResolutionError`` from the legacy lenient walk - ``True``
+    answers a ``PathResolutionError`` from the lenient walk - ``True``
     once a many-side hop precedes the failure, ``False`` otherwise) so strict
     callers never turn a malformed declaration into a lenient answer by
     accident.

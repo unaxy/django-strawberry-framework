@@ -75,6 +75,7 @@ from strawberry.types.unset import UnsetType
 from typing_extensions import NotRequired, TypedDict, override
 
 from django_strawberry_framework import (
+    DjangoModelPermission,
     DjangoMutation,
     DjangoSchema,
     DjangoType,
@@ -444,6 +445,100 @@ def test_conflict_key_compares_permission_classes_by_identity(
         ):
             login_mutation(permission_classes=repeat)
     assert calls == []
+
+
+class _InheritingModelPermission(DjangoModelPermission):
+    """A ``DjangoModelPermission`` subclass that keeps the base ``has_permission``."""
+
+
+class _OverridingModelPermission(DjangoModelPermission):
+    """A ``DjangoModelPermission`` subclass whose ``has_permission`` reads no model."""
+
+    @override
+    def has_permission(
+        self,
+        info: object,
+        mutation: object,
+        operation: str,
+        data: object,
+        instance: object = None,
+    ) -> bool:
+        return True
+
+
+# The model-less fixed auth factories, each with the site its refusals open with.
+_MODEL_LESS_AUTH_FACTORIES: dict[str, tuple[Callable[..., object], str]] = {
+    "login": (login_mutation, r"login_mutation\(\)"),
+    "logout": (logout_mutation, r"logout_mutation\(\)"),
+    "current_user": (current_user, r"current_user\(\)"),
+}
+
+
+@pytest.mark.parametrize("surface", list(_MODEL_LESS_AUTH_FACTORIES))
+@pytest.mark.parametrize(
+    "offending",
+    [
+        pytest.param(DjangoModelPermission, id="bare"),
+        pytest.param(_InheritingModelPermission, id="inheriting-subclass"),
+    ],
+)
+def test_model_less_auth_field_refuses_an_unoverridden_model_permission(
+    surface: str,
+    offending: type[DjangoModelPermission],
+) -> None:
+    """A model-less auth field refuses a ``DjangoModelPermission`` keeping the base hook.
+
+    That hook reads the mutation's model, which the permission holder never carries, so it
+    would raise per request instead of denying; the factory refuses it at declaration, the
+    message naming the factory keyword, and records no declaration.
+    """
+    factory, site = _MODEL_LESS_AUTH_FACTORIES[surface]
+    with pytest.raises(
+        ConfigurationError,
+        match=(
+            rf"^{site} permission_classes includes {offending.__name__}, a "
+            r"DjangoModelPermission that does not override has_permission; it requires a "
+            r"model and this surface has none\. Override has_permission without calling the "
+            r"base hook, omit permission_classes for this surface's default, or set \[\] to allow any\.$"
+        ),
+    ):
+        factory(permission_classes=[offending])
+    assert _declared_auth_surface(surface) is None
+
+
+@pytest.mark.parametrize("surface", list(_MODEL_LESS_AUTH_FACTORIES))
+def test_model_less_auth_field_admits_a_model_permission_overriding_has_permission(
+    surface: str,
+) -> None:
+    """A ``DjangoModelPermission`` subclass overriding ``has_permission`` is admitted."""
+    factory, _site = _MODEL_LESS_AUTH_FACTORIES[surface]
+    factory(permission_classes=[_OverridingModelPermission])
+    holder = _declared_holder(surface)
+    assert holder._mutation_meta.permission_classes == (_OverridingModelPermission,)
+
+
+def test_register_admits_model_permission() -> None:
+    """The model-backed ``register`` rider admits ``DjangoModelPermission`` (the ``add`` perm)."""
+    register_mutation(permission_classes=[DjangoModelPermission])
+    rider = _declared_auth_surface("register")
+    assert rider is not None
+    assert rider._mutation_meta.permission_classes == (DjangoModelPermission,)
+
+
+def test_auth_permission_classes_message_names_the_factory_keyword() -> None:
+    """A refused ``permission_classes`` names the factory keyword: auth has no ``Meta``."""
+
+    class NotAPermission:
+        pass
+
+    with pytest.raises(
+        ConfigurationError,
+        match=(
+            r"^register_mutation\(\) permission_classes entry .*NotAPermission.* is not a "
+            r"permission class exposing has_permission; "
+        ),
+    ):
+        register_mutation(permission_classes=[NotAPermission])
 
 
 def test_declarations_survive_the_pre_bind_reset() -> None:

@@ -27,18 +27,21 @@ from graphql import (
     OperationDefinitionNode,
     parse,
 )
-from strawberry.types.base import StrawberryList
+from strawberry.annotation import StrawberryAnnotation
+from strawberry.types.base import StrawberryList, StrawberryOptional
 from typing_extensions import Self, override
 
 import django_strawberry_framework.utils.typing as typing_module
 from django_strawberry_framework.exceptions import ConfigurationError
-from django_strawberry_framework.utils._narrowing import class_dict, require, require_instance
+from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._narrowing import require, require_instance
 from django_strawberry_framework.utils.typing import (
     MAX_TYPE_WRAPPER_DEPTH,
     _callable_inspection_target,
     inline_fragment_type_condition,
     is_async_callable,
     is_marked_coroutine_function,
+    peel_strawberry_containers,
     published_argument,
     published_python_name,
     schema_config_from_info,
@@ -65,6 +68,7 @@ def test_typing_exports_all() -> None:
         "is_graphql_list",
         "is_marked_coroutine_function",
         "object_result",
+        "peel_strawberry_containers",
         "published_argument",
         "published_python_name",
         "return_type_of",
@@ -171,6 +175,32 @@ def test_unwrap_container_type_raises_on_cyclic_container_stack() -> None:
         unwrap_container_type(cyclic)
 
 
+def test_peel_strawberry_containers_counts_list_layers_only() -> None:
+    """``list[list[ID] | None] | None`` peels to ``(2, ID)``: Optional is nullability, not depth."""
+    resolved = StrawberryAnnotation(list[list[strawberry.ID] | None] | None).resolve()
+    assert isinstance(resolved, StrawberryOptional)  # the outer Optional is a real layer
+
+    assert peel_strawberry_containers(resolved) == (2, strawberry.ID)
+
+
+def test_peel_strawberry_containers_does_not_descend_a_leaf_with_of_type() -> None:
+    """A leaf exposing ``of_type`` is the core at depth 0, not a wrapper to peel."""
+
+    class Edge:
+        of_type = "not a wrapper"
+
+    assert peel_strawberry_containers(Edge) == (0, Edge)
+
+
+def test_peel_strawberry_containers_raises_on_cyclic_container_stack() -> None:
+    """A cyclic container chain hits the Power-of-Ten bound and fails loud."""
+    cyclic = StrawberryList(of_type=str)
+    cyclic.of_type = cyclic  # never bottoms out
+
+    with pytest.raises(RuntimeError, match="cyclic or corrupt"):
+        peel_strawberry_containers(cyclic)
+
+
 def test_unwrap_return_type_returns_direct_class_when_unwrapped() -> None:
     """A bare class with no wrapper passes through unchanged."""
 
@@ -215,9 +245,9 @@ class _MethodHolder:
 # The RAW descriptor objects (as seen when a ``@staticmethod async def`` resolver
 # is referenced by name INSIDE its own class body, e.g. ``resolver=async_static``);
 # attribute access via the class would unwrap these to the underlying function.
-_async_static_obj = require(class_dict(_MethodHolder)["async_static"], callable)
-_sync_static_obj = class_dict(_MethodHolder)["sync_static"]
-_async_cls_obj = class_dict(_MethodHolder)["async_cls"]
+_async_static_obj = require(truth.class_dict(_MethodHolder)["async_static"], callable)
+_sync_static_obj = truth.class_dict(_MethodHolder)["sync_static"]
+_async_cls_obj = truth.class_dict(_MethodHolder)["async_cls"]
 _async_static_partial_obj = staticmethod(functools.partial(_AsyncCallable()))
 
 

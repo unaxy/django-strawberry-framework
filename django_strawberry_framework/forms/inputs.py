@@ -101,8 +101,8 @@ from django_strawberry_framework.utils.relations import (
     is_forward_many_to_many,
     is_model_class,
     is_row_key_column,
+    is_stored_column,
     non_pk_relation_key_attname,
-    relation_bool,
 )
 from django_strawberry_framework.utils.strings import graphql_camel_name
 
@@ -223,12 +223,12 @@ def clear_form_input_namespace() -> None:
     Like ``clear_mutation_input_namespace`` (and unlike the set families' clear),
     this resets only the module-level ledger it owns - the form subsystem has no
     arguments-factory cache and no per-set ``_lifecycle`` binding state. Wired
-    into ``registry.clear()`` (spec-038).
+    into ``registry.clear()``.
     """
     _clear_input_namespace()
 
 
-# Register the form input-namespace clear as a canonical PRE-BIND clear (spec-039):
+# Register the form input-namespace clear as a canonical PRE-BIND clear:
 # the ``finalize_django_types`` pre-bind reset AND ``TypeRegistry.clear()``
 # both iterate ``registry.iter_subsystem_clears()``. This owner registers the
 # executable callback once; the stable owner key makes reload replace it without
@@ -294,6 +294,8 @@ def _form_field_basis(form_class: FormClass, form_fields: object = None) -> dict
     # ``is_input_attribute_name`` refuses is reported here instead of failing the build.
     # ``base_fields`` keys are always identifiers (declared form attributes / model
     # columns), so this rejects only hook names that could never have built an input.
+    # A kept name is read as its text (``truth.plain_str``): a ``StrEnum`` / ``TextChoices``
+    # member publishes the exact ``str`` it spells, never the member, as the attribute name.
     invalid_names: list[object] = []
     invalid_fields: list[object] = []
     valid: dict[str, forms.Field] = {}
@@ -305,7 +307,7 @@ def _form_field_basis(form_class: FormClass, form_fields: object = None) -> dict
         if not truth.is_instance(field, forms.Field):
             invalid_fields.append(name)
         elif valid_name:
-            valid[name] = field
+            valid[truth.plain_str(name)] = field
     if invalid_names or invalid_fields:
         # The per-entry join keeps the benign ``['a', 'b']`` list-repr byte shape.
         raise ConfigurationError(
@@ -433,7 +435,7 @@ def resolve_effective_form_fields(
     The narrowing spine + the pinned error wording are single-sited in
     ``utils/inputs.py::resolve_effective_fields``, shared with the
     serializer flavor; this thin wrapper supplies the form basis (``base_fields``)
-    and the form-flavor message knobs (the ``seq_flavor`` arg - spec-039).
+    and the form-flavor message knobs (the ``seq_flavor`` arg).
     """
     return resolve_effective_fields(
         _form_field_basis(form_class, form_fields),
@@ -881,14 +883,7 @@ def require_readable_choice_keys(
         if model is None:
             continue
         target = choice_key_field(model, key)
-        # Django 5.2 counts a many-to-many field concrete (it carries a column name);
-        # 6.0 does not. Either way it is no column of the target's row.
-        if (
-            target is None
-            or not target.concrete
-            or relation_bool(target, "many_to_many")
-            or not _names_one_row(model, target)
-        ):
+        if target is None or not is_stored_column(target) or not _names_one_row(model, target):
             raise ConfigurationError(
                 f"DjangoFormMutation for {truth.name(form_class)}: field {name!r} sets "
                 f"to_field_name={key!r}, which is not a unique concrete field of "
@@ -915,7 +910,7 @@ def _model_less_relation_annotation(
     (multi) ``036`` scheme is reused so the wire contract is uniform across the
     model-backed and model-less relation paths. A missing primary still falls
     back to the raw pk scalar (unlike the serializer flavor, which raises when
-    the relation target has no registered primary ``DjangoType`` - spec-039).
+    the relation target has no registered primary ``DjangoType``).
 
     A ``ModelChoiceField`` whose ``queryset`` is assigned in ``__init__`` (a valid
     Django idiom) has ``queryset is None`` in the uninstantiated ``base_fields``
@@ -1534,7 +1529,7 @@ def guard_create_required_fields(
     not the built input shape (spec-038 Decision 7, the create-required guard).
 
     The drop-detection (``required - effective - waived``) is single-sited in
-    ``utils/inputs.py::guard_dropped_required`` (spec-039), shared with the
+    ``utils/inputs.py::guard_dropped_required``, shared with the
     serializer create guard; the form flavor passes no ``waived`` set (it has no
     injected-field mechanism) and keeps its own pinned error wording.
     """

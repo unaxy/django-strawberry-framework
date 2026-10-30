@@ -310,6 +310,34 @@ def test_inspect_relay_node_pk_row() -> None:
 
 
 @pytest.mark.usefixtures("reload_inspect_schema")
+def test_inspect_node_id_column_is_not_a_graphql_field() -> None:
+    """``PublisherType.house_code: relay.NodeID[str]`` is no GraphQL field; ``id`` is the Node's.
+
+    Strawberry treats the ``relay.NodeID`` annotation as private, so the type's
+    published fields carry no ``house_code`` (the SDL reads ``id: ID!``,
+    ``name: String!`` and the relations). The row names the column with ``-`` for
+    the GraphQL type and nullability rather than raising.
+    """
+    out = StringIO()
+    call_command("inspect_django_type", "PublisherType", stdout=out)
+    text = out.getvalue()
+    assert _field_row(text, "house_code") == (
+        f"  {'house_code':<20} {'TextField':<20} {'-':<32} {'-':<10} (not a GraphQL field)"
+    )
+    assert _field_row(text, "id") == (
+        f"  {'id':<20} {'BigAutoField':<20} {'ID!':<32} {'no':<10} relay.Node id"
+    )
+    assert [line.split()[0] for line in text.splitlines()[3:]] == [
+        "editions",
+        "editions_2",
+        "printings_2",
+        "id",
+        "name",
+        "house_code",
+    ]
+
+
+@pytest.mark.usefixtures("reload_inspect_schema")
 def test_inspect_reads_resolved_annotation_not_field_null() -> None:
     """The command reports the post-override nullability for the acceptance type.
 

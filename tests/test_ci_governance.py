@@ -40,6 +40,7 @@ import yaml
 import django_strawberry_framework
 from django_strawberry_framework.utils.imports import (
     CHANNELS_FLOOR,
+    CRYPTOGRAPHY_FLOOR,
     DEBUG_TOOLBAR_FLOOR,
     DRF_FLOOR,
     STRAWBERRY_FLOOR,
@@ -1741,10 +1742,10 @@ def test_channels_floor_constant_matches_the_pyproject_dependency_row() -> None:
     """The one Channels floor the install hints name is the one the project pins.
 
     ``CHANNELS_FLOOR`` is interpolated into every ``pip install
-    'channels>=...'`` hint, so the hints cannot drift from each other. What no
-    other test can see is the second place the floor is written: the
-    ``channels[daphne]`` dev-group row in ``pyproject.toml``. Nothing imports a
-    TOML dependency row, so a bump on either side is otherwise silent.
+    'channels>=...'`` hint, so the hints cannot drift from each other. This
+    row compares it to the ``channels[daphne]`` dev-group row in
+    ``pyproject.toml``. Nothing imports a TOML dependency row, so a bump on
+    either side is otherwise silent.
     """
     text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     rows = re.findall(r'"channels\[daphne\]>=([0-9][^"]*)"', text)
@@ -1791,6 +1792,19 @@ def test_drf_floor_constant_matches_the_pyproject_dependency_row() -> None:
     text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     rows = re.findall(r'"djangorestframework>=([0-9][^"]*)"', text)
     assert rows == [DRF_FLOOR], (rows, DRF_FLOOR)
+
+
+def test_cryptography_floor_constant_matches_the_pyproject_dependency_row() -> None:
+    """The cryptography floor the keyset cursor's hint names is the one the project pins.
+
+    The keyset cursor's install hint interpolates ``CRYPTOGRAPHY_FLOOR``, and
+    nothing else compares that constant to the ``cryptography`` dev-group row in
+    ``pyproject.toml``. A floor bump on either side would otherwise be silent.
+    Parsed exactly like the Channels row.
+    """
+    text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    rows = re.findall(r'"cryptography>=([0-9][^"]*)"', text)
+    assert rows == [CRYPTOGRAPHY_FLOOR], (rows, CRYPTOGRAPHY_FLOOR)
 
 
 #: The soft dependencies (START.md "Support matrix"), spelled as their dev-group rows are.

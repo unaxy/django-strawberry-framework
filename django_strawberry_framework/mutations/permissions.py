@@ -134,7 +134,7 @@ def run_permission_classes(
     bases (``DjangoMutation`` and the plain ``DjangoFormMutation``, which is not a
     ``DjangoMutation`` subclass; the serializer flavor inherits the model's).
     An authorization-seam fork is the exact "fix one side, miss the other" bug
-    class this promotion closes. Each entry's ``has_permission(info, mutation,
+    class this single body closes. Each entry's ``has_permission(info, mutation,
     operation, data, instance)`` result runs through
     ``_require_sync_bool_auth_result``: an ``async def has_permission`` returns a
     TRUTHY coroutine, so a naive bool test would silently treat an async

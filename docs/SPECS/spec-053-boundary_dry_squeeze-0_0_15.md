@@ -607,9 +607,10 @@ the Slice 4 bench runs ([Test plan](#test-plan)).
 mutation flavor — such declarations raise
 [`ConfigurationError`][glossary-configurationerror]. A lazy translation string (`gettext_lazy("name")`) and a bytes-like value are bare strings here, refused with the same message ([`utils/_narrowing.py::is_text_atom`][utils-narrowing]); every lazy `Promise` counts whatever result class it wraps, so a lazy list is refused too, while a `SimpleLazyObject` is judged as the object it stands for. This is a fail-loud
 improvement, pinned here as an accepted behavior change. The spine's
-`empty_message` knob is optional, and the mutation flavor passes none
-because it defers its empty-set raise to `build_mutation_input` (a
-consumer-`overrides` merge can empty the generated remainder).
+`empty_message` knob is required, and the mutation flavor passes its
+"has no fields" message there, so `editable_input_fields` is the one place
+it refuses an empty selection: a consumer `input_class` may name only
+members of that selection, so no override can fill an empty one.
 
 ### Decision 11 — Joint `0.0.15` cut — Slice 5 owns the version bump
 

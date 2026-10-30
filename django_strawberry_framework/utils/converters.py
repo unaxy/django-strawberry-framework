@@ -3,12 +3,9 @@
 The single owner of the ordered-precheck -> MRO-walk -> raising-fallthrough
 control flow ``forms/converter.py::convert_form_field``,
 ``rest_framework/serializer_converter.py::convert_serializer_field``, and
-the filter convert / normalize pair in ``filters/inputs.py`` run. Before
-spec-039 the form converter spelled this walk free-standing; the serializer
-converter would have been the second copy of the subtle no-silent-catch-all
-contract. Promoting the skeleton single-sites it so the GOAL-mandated
-"unmapped field RAISES, never silently becomes ``String``" contract is written
-once (spec-039 Decision 4). Filter convert/normalize share the same walk so
+the filter convert / normalize pair in ``filters/inputs.py`` run, so the
+GOAL-mandated "unmapped field RAISES, never silently becomes ``String``"
+contract is written once (spec-039 Decision 4). Filter convert/normalize share the same walk so
 their kind order cannot drift (spec-053 C3).
 
 What lives here is mechanics only. Each caller supplies its own flavor-specific

@@ -1166,7 +1166,10 @@ class DjangoSchema(strawberry.Schema):
                 sync=sync,
             )
         for member in resolved:
-            if not _is_extension(member, SchemaExtension):
+            # A resolved member is admitted as an extension by its real class; the
+            # same read decides in ``_claimed_authority`` whether it is a second
+            # authority.
+            if not truth.is_instance(member, SchemaExtension):
                 return _refused_chain(
                     _UNRESOLVED_CHAIN,
                     f"a resolved extension entry is {truth.describe(member)}, "
@@ -1386,26 +1389,10 @@ def _is_resolvable_extension_entry(entry: object) -> bool:
 
     Its resolution is ``entry if isinstance(entry, SchemaExtension) else
     entry()``, so an instance answers for itself and everything else has to be
-    callable - which a class and a factory both are. ``type()`` rather than
-    ``isinstance`` for the reason :func:`_is_extension` uses it: a consumer
-    object answers ``__class__`` with whatever it likes, and an object that only
-    CLAIMS to be an extension must still pass as a callable to be accepted.
+    callable - which a class and a factory both are. The instance test is
+    ``utils/truth.py::is_instance``, which reads the entry's real class.
     """
     return truth.is_instance(entry, SchemaExtension) or callable(entry)
-
-
-def _is_extension(extension: object, extension_type: type[SchemaExtension]) -> bool:
-    """Whether a RESOLVED entry is of ``extension_type``, by its type alone.
-
-    ``isinstance`` consults ``__class__``, which a consumer object answers with
-    whatever it likes. This predicate decides both whether a resolved member is
-    an extension at all and whether it is a second enforcement authority, so a
-    member whose ``__class__`` claims ``SchemaExtension`` would be handed to
-    upstream as one, and a member claiming an ordinary class would be admitted
-    beside the authority actually enforcing the request. ``type()`` cannot be
-    answered.
-    """
-    return truth.is_instance(extension, extension_type)
 
 
 def _claimed_authority(member: object) -> str | None:
@@ -1420,7 +1407,7 @@ def _claimed_authority(member: object) -> str | None:
         (DjangoResourcePolicyExtension, "resource-policy"),
         (DjangoErrorPolicyExtension, "error-policy"),
     ):
-        if _is_extension(member, extension_type):
+        if truth.is_instance(member, extension_type):
             return kind
     return None
 

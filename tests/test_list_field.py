@@ -138,12 +138,8 @@ from django_strawberry_framework.resource_policy import (
 )
 from django_strawberry_framework.types.definition import DjangoTypeDefinition
 from django_strawberry_framework.types.relay import SyncMisuseError
-from django_strawberry_framework.utils._narrowing import (
-    class_dict,
-    list_of,
-    read_attr,
-    require_instance,
-)
+from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._narrowing import list_of, read_attr, require_instance
 from django_strawberry_framework.utils._queryset_private import (
     set_queryset_hints,
 )
@@ -266,34 +262,6 @@ def test_djangolistfield_rejects_djangotype_without_definition() -> None:
         match=r"DjangoListField target AbstractBase is not a registered DjangoType",
     ):
         DjangoListField(AbstractBase)
-
-
-def test_djangolistfield_rejects_djangotype_subclass_without_own_meta() -> None:
-    """Subclass of a concrete ``DjangoType`` without its own ``Meta`` is rejected.
-
-    Pins the own-class registration invariant at ``list_field.py``'s
-    ``definition.origin is target_type`` guard.
-    ``__django_strawberry_definition__`` is assigned in
-    ``django_strawberry_framework/types/base.py::DjangoType.__init_subclass__`` (the
-    ``cls.__django_strawberry_definition__ = definition`` line) and inherited via MRO;
-    a subclass that omits ``Meta`` would otherwise pass the guard via the
-    parent's definition and bind the field to a target whose model, selected
-    fields, and ``Meta.primary`` state belong to the parent class.
-    """
-
-    class ParentCategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-
-    class ChildCategoryType(ParentCategoryType):
-        pass
-
-    with pytest.raises(
-        ConfigurationError,
-        match=r"DjangoListField target ChildCategoryType is not a registered DjangoType",
-    ):
-        DjangoListField(ChildCategoryType)
 
 
 def test_djangolistfield_rejects_non_callable_resolver() -> None:
@@ -2495,7 +2463,7 @@ def _swap_definition_attribute(
 ) -> Generator[None, None, None]:
     """Put ``replacement`` on ``target_type``'s definition attribute, restoring after."""
     original = require_instance(
-        class_dict(target_type)["__django_strawberry_definition__"],
+        truth.class_dict(target_type)["__django_strawberry_definition__"],
         DjangoTypeDefinition,
     )
     # basedpyright: the planted stand-in definition is the hostile input under test; DjangoType
@@ -2684,8 +2652,8 @@ def test_djangolistfield_never_reads_origin_off_a_replaced_definition(
         DjangoListField(ReplacedTarget)
     assert str(exc_info.value) == (
         "DjangoListField target ReplacedTarget is not a registered DjangoType. "
-        "This usually means ReplacedTarget's `Meta` is missing a `model` declaration, or it "
-        "inherits a definition from a parent without declaring its own `Meta`."
+        "This usually means ReplacedTarget declares no `class Meta` (a Meta-less abstract "
+        "base never registers a definition), or its definition was replaced or cleared."
     )
 
 

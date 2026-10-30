@@ -40,16 +40,42 @@ from tests._idioms import ClaimsClass, ClassReadRaises
 # ---------------------------------------------------------------------------
 
 
-def test_iter_input_items_handles_dict_dataclass_and_non_walkable() -> None:
-    assert iter_input_items({"a": 1}) == [("a", 1)]
-    assert iter_input_items({}) == []
-    assert iter_input_items(42) is None
+@strawberry.input
+class _OneFieldIn:
+    a: int | None = None
 
-    @strawberry.input
-    class _In:
-        a: int | None = None
 
-    assert iter_input_items(_In(a=3)) == [("a", 3)]
+@strawberry.input
+class _TwoFieldIn:
+    name: str = "x"
+    count: int = 3
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        pytest.param({"a": 1}, [("a", 1)], id="dict"),
+        pytest.param({"name": "x", "id": 1}, [("name", "x"), ("id", 1)], id="dict-order"),
+        pytest.param({}, [], id="empty-dict"),
+        pytest.param(_OneFieldIn(a=3), [("a", 3)], id="dataclass"),
+        pytest.param(
+            _TwoFieldIn(name="y", count=7),
+            [("name", "y"), ("count", 7)],
+            id="dataclass-order",
+        ),
+        pytest.param(42, None, id="int"),
+        pytest.param(object(), None, id="object"),
+        pytest.param("scalar", None, id="str"),
+        pytest.param([1, 2, 3], None, id="list"),
+        pytest.param(None, None, id="none"),
+    ],
+)
+def test_iter_input_items_handles_dict_dataclass_and_non_walkable(
+    value: object,
+    expected: list[tuple[str, object]] | None,
+) -> None:
+    """A dict or Strawberry-input dataclass walks to its pairs in order; any other shape is ``None``."""
+    assert iter_input_items(value) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -399,9 +425,9 @@ _FIELD_NAME_REFUSAL = (
 def test_field_name_asks_the_real_type_and_refuses_a_key_that_is_not_one(key: object) -> None:
     """A key that only claims ``str`` (or whose class read raises) is the typed refusal.
 
-    ``str.__str__`` accepts only a real ``str``, so a ``__class__``-based answer lets the
-    key through the check and into a raw ``TypeError`` / the key's own exception. Both
-    entry points share the check.
+    ``truth.text`` copies only a real ``str`` through the base slot, so a
+    ``__class__``-based answer would let the key through the check and render it through
+    its own ``__str__`` / raise the key's own exception. Both entry points share the check.
     """
     with pytest.raises(ConfigurationError) as walk:
         iter_input_items({key: "value"})

@@ -239,22 +239,20 @@ Reject nested arrays and outer `choices` at type creation with `ConfigurationErr
 # ``effective_null`` is the tri-state ``force_nullable`` override collapsed to
 # one boolean; see the nullability-override note below.
 if isinstance(route, ArrayRoute):
-    if array_element_field(route.element) is not None:
-        raise ConfigurationError(
-            f"Nested ArrayField on {_field_label(field)} is not supported.",
-        )
+    refuse_nested_array(field, route.element)
     if field.choices:
         raise ConfigurationError(
             f"ArrayField on {_field_label(field)} declares choices on the outer "
-            f"field; outer-array choices are ambiguous at the GraphQL boundary. Declare choices "
-            f"on base_field for element-level enum, or use FilterSet.",
+            "field; outer-array choices are ambiguous at the GraphQL boundary. Declare choices "
+            "on base_field for an element-level enum, or leave the field out with Meta.fields "
+            "/ Meta.exclude (a FilterSet's ArrayFilter can still filter it).",
         )
     inner = convert_scalar(route.element, type_name)
     result = GenericAlias(list, (inner,))
     return result | None if effective_null else result
 ```
 
-`django_strawberry_framework/types/converters.py::scalar_route` classifies the column before any `SCALAR_MAP` lookup: an `ArrayField` takes the `ArrayRoute` arm (carrying its `base_field` as `element`), an `HStoreField` the `HStoreRoute` arm, every other column the `MapRoute` arm. The arm's rejections stay in `convert_scalar`, in the order above. `django_strawberry_framework/utils/_array_field.py::array_element_field` is the package's one `ArrayField` test, asked by every reader of an `ArrayField` column (the read converter, the write inputs, the filter form fields, the write-side storability rule): it returns the `base_field` of an `ArrayField` (matched through `utils/truth.py::is_instance`, so a field class cannot claim to be one) and `None` for any other column or when `django.contrib.postgres` is unavailable. `_field_label(field)` renders `Model.field` for diagnostics from truthful reads of the bound model class and the field name; an unbound field reads `<unbound>`.
+`django_strawberry_framework/types/converters.py::scalar_route` classifies the column before any `SCALAR_MAP` lookup: an `ArrayField` takes the `ArrayRoute` arm (carrying its `base_field` as `element`), an `HStoreField` the `HStoreRoute` arm, every other column the `MapRoute` arm. The arm's rejections stay in `convert_scalar`, in the order above; the nested-array one is `django_strawberry_framework/types/converters.py::refuse_nested_array`, which the filter-input element read (`django_strawberry_framework/filters/inputs.py::_array_element_column`) raises too, so an `ArrayFilter` / `ListFilter` over a nested array is refused with the same message. Outer `choices` refuse only the read: a column carrying them stays off the type (`Meta.fields` / `Meta.exclude`), and a `FilterSet`'s `ArrayFilter` still filters it by its `base_field`, never reading the outer `choices`. `django_strawberry_framework/utils/_array_field.py::array_element_field` is the package's one `ArrayField` test, asked by every reader of an `ArrayField` column (the read converter, the write inputs, the filter form fields and filter-input element types, the write-side storability rule): it returns the `base_field` of an `ArrayField` (matched through `utils/truth.py::is_instance`, so a field class cannot claim to be one) and `None` for any other column or when `django.contrib.postgres` is unavailable. `_field_label(field)` renders `Model.field` for diagnostics from truthful reads of the bound model class and the field name; an unbound field reads `<unbound>`.
 
 **Choice handling on `base_field` is inherited automatically:** the recursive `convert_scalar(element, type_name)` call on the `base_field` re-enters and hits the existing choices branch, producing `list[<TypeName><FieldName>Enum]`. The outer-`choices` rejection only fires for the outer `ArrayField` itself.
 

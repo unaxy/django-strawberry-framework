@@ -525,9 +525,9 @@ class TypeRegistry:
         is ``type_cls``, and the class's ``__django_strawberry_definition__``,
         read from the real class namespaces (``truth.static_attr``), IS that
         object. ``DjangoType.__init_subclass__`` writes the entry and the
-        attribute from one value, so every concrete type passes; a subclass
-        without its own ``Meta`` (the attribute is inherited), a class dropped
-        by ``clear()`` / ``unregister``, a replaced attribute (a copy or a
+        attribute from one value, so every concrete type passes (and refuses a
+        ``Meta``-less subclass of a concrete type, so no class inherits another's
+        attribute); a class dropped by ``clear()`` / ``unregister``, a replaced attribute (a copy or a
         fabricated lookalike), a definition registered for another class, and
         any non-class probe each answer ``None``. ``origin`` is read only off the
         registry's own object, never off a replacement attribute.
@@ -643,7 +643,7 @@ class TypeRegistry:
         """Cache ``enum_cls`` for the ``(model, field_name)`` choice field.
 
         Two ``DjangoType``s pointing at the same choice column reuse the
-        same enum, even if their consumer-facing class names differ.
+        same enum, even if their published type names differ.
 
         Raises:
             ConfigurationError: an enum is already cached for

@@ -20,8 +20,8 @@ unwindowable child queryset is classified by
 only when the strategy returns ``True``; refusal and exceptions cannot mutate
 the planner result.
 
-The default strategy is ``WindowedPrefetchStrategy`` - the verbatim spec-033
-windowed prefetch: ``apply_window_pagination`` over the child queryset,
+The default strategy is ``WindowedPrefetchStrategy`` - the windowed prefetch
+(spec-033 Decision 4): ``apply_window_pagination`` over the child queryset,
 carried as a ``Prefetch(..., to_attr="_dst_<field>_connection")``. Any
 strategy that lands an ordered list of model instances carrying
 ``_dst_row_number`` (and ``_dst_total_count`` when the request wants it)
@@ -334,7 +334,7 @@ def attach_windowed_prefetch(
     """Window the request's child queryset and carry it as a ``to_attr`` Prefetch.
 
     The correctness FLOOR every strategy shares: ``apply_window_pagination``
-    over ``request.child_queryset`` (spec-033's windowed prefetch, verbatim),
+    over ``request.child_queryset`` (the spec-033 Decision 4 windowed prefetch),
     attached under ``request.lookup`` / ``request.to_attr``. The windowed
     strategy calls it bare; the lateral strategy passes ``wrap`` to rebind the
     windowed queryset as its ``LateralQuerySet`` (same ORM body, lateral spec
@@ -372,9 +372,9 @@ def attach_windowed_prefetch(
 
 
 class WindowedPrefetchStrategy:
-    """The default: spec-033's windowed prefetch, moved verbatim from the walker.
+    """The default: the windowed prefetch (spec-033 Decision 4).
 
-    The planned body is unchanged, but for the single-parent degenerate shape the
+    For the single-parent degenerate shape the
     windowed queryset is wrapped as a ``SingleParentWindowQuerySet`` (see
     ``optimizer/single_parent_fetch.py``): a RUNTIME-ONLY fast path that, when the
     Django-prefetch-injected parent ``IN`` list has length one, runs the plain

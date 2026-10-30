@@ -1,6 +1,6 @@
 """Order input-class BFS factory.
 
-Layer 5 of the spec-028 six-layer pipeline (the BFS that builds every
+Layer 5 of the spec-028 Decision 3 layer plan (the BFS that builds every
 reachable Strawberry input class via ``_build_input_fields`` from
 ``orders/inputs.py`` + the shared ``build_strawberry_input_class``
 from ``utils/inputs.py`` through the base). The factory consumes

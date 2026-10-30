@@ -80,7 +80,7 @@ Seekability, measured rather than assumed
   at 3.14.2), while ``tell()`` / ``seek()`` work and return positions on both.
   That is why :func:`_declares_seekable` believes ``seekable()`` when the method
   exists and otherwise defers to ``tell()``: anything narrower would silently drop
-  the ASGI spool onto the read branch at the exact floor the card protects.
+  the ASGI spool onto the read branch at the exact floor the boundary protects.
 - Neither production stream misbehaves, but neither is *constructed here*: the
   byte source is whatever the ASGI server, ``WSGIRequest``, or a consumer's
   middleware installed, so every capability call the probe makes is guarded and

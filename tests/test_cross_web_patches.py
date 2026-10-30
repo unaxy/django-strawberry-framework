@@ -43,7 +43,7 @@ from django.http import HttpRequest
 from django.test import RequestFactory
 
 from django_strawberry_framework import _cross_web_patches as patches
-from django_strawberry_framework.utils._narrowing import class_dict
+from django_strawberry_framework.utils import truth
 
 
 def _request(body: bytes) -> HttpRequest:
@@ -76,7 +76,7 @@ def test_apply_reinstalls_when_property_reverted(monkeypatch: pytest.MonkeyPatch
 
 def test_patch_is_installed_on_adapter() -> None:
     """By the time pytest collects, ``AppConfig.ready()`` has installed the wrapper."""
-    descriptor = class_dict(DjangoHTTPRequestAdapter)["body"]
+    descriptor = truth.class_dict(DjangoHTTPRequestAdapter)["body"]
     assert isinstance(descriptor, property)
     assert descriptor.fget is patches._patched_body
 

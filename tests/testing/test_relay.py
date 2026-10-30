@@ -268,18 +268,12 @@ def test_global_id_for_non_node_raises() -> None:
     )
 
 
-def test_global_id_for_rejects_inherited_replaced_or_stale_definitions(
+def test_global_id_for_rejects_replaced_or_stale_definitions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Only the active registry's own definition may mint a GlobalID."""
     type_cls = _make_node_type("CategoryNode")
     finalize_django_types()
-
-    class UnregisteredChild(type_cls):
-        pass
-
-    with pytest.raises(ConfigurationError, match="not a registered DjangoType subclass"):
-        global_id_for(UnregisteredChild, 1)
 
     with monkeypatch.context() as patch:
         patch.setattr(type_cls, "__django_strawberry_definition__", object())

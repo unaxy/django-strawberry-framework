@@ -243,6 +243,93 @@ def test_choice_field_generates_strawberry_enum(choice_fixture_model: type[model
     }
 
 
+def test_a_meta_named_type_names_its_choice_enum_after_its_published_name(
+    choice_fixture_model: type[models.Model],
+) -> None:
+    """A ``Meta.name``'d type prefixes its choice enum with ``Meta.name``, not its class name."""
+
+    class FixtureType(DjangoType):
+        class Meta:
+            model = choice_fixture_model
+            name = "PublishedFixture"
+            fields = ("status",)
+
+    enum_cls = FixtureType.__annotations__["status"]
+    assert isinstance(enum_cls, type)
+    assert enum_cls.__name__ == "PublishedFixtureStatusEnum"
+
+
+def test_a_class_name_outside_the_graphql_name_grammar_declares_without_meta_name() -> None:
+    """Declaring a type does not check its class name against the GraphQL Name grammar.
+
+    A non-ASCII class name is a valid Python identifier, and a schema's custom
+    ``NameConverter`` may publish it under a name the grammar accepts, so declaration
+    derives the choice-enum prefix without refusing it; the published name is checked
+    where ``DjangoTypeDefinition.graphql_type_name`` reads it.
+    """
+
+    class _Meta:
+        model = Category
+        fields = ("id", "name")
+
+    declared = type("Category\u00e9Type", (DjangoType,), {"Meta": _Meta})
+    assert registry.get(Category) is declared
+
+
+def _thing_type(row_model: type[models.Model], published: str) -> type[DjangoType]:
+    """Return a ``DjangoType`` class named ``ThingType`` over ``row_model``, published as ``published``."""
+
+    class ThingType(DjangoType):
+        class Meta:
+            model = row_model
+            name = published
+            fields = ("id", "status")
+
+    return ThingType
+
+
+def test_two_same_named_types_split_by_meta_name_build_one_schema() -> None:
+    """Two ``ThingType`` classes published as ``AlphaThing`` / ``BetaThing`` build one schema.
+
+    Each reads a ``status`` choice column of its own model, so each mints its own enum;
+    prefixed by the published name the two are ``AlphaThingStatusEnum`` and
+    ``BetaThingStatusEnum``, where the shared class name would publish both as
+    ``ThingTypeStatusEnum``.
+    """
+
+    class AlphaRow(models.Model):
+        status: "models.TextField[str | Combinable, str]" = models.TextField(
+            choices=(("on", "On"), ("off", "Off")),
+        )
+
+        class Meta:
+            managed = False
+            app_label = _unique_app_label("test_choice_enums")
+
+    class BetaRow(models.Model):
+        status: "models.TextField[str | Combinable, str]" = models.TextField(
+            choices=(("open", "Open"), ("shut", "Shut")),
+        )
+
+        class Meta:
+            managed = False
+            app_label = _unique_app_label("test_choice_enums")
+
+    alpha_type = _thing_type(AlphaRow, "AlphaThing")
+    beta_type = _thing_type(BetaRow, "BetaThing")
+    finalize_django_types()
+    query = strawberry.type(
+        type(
+            "Query",
+            (),
+            {"__annotations__": {"alpha": alpha_type | None, "beta": beta_type | None}},
+        ),
+    )
+    schema = strawberry.Schema(query=query)
+    assert schema.get_type_by_name("AlphaThingStatusEnum") is not None
+    assert schema.get_type_by_name("BetaThingStatusEnum") is not None
+
+
 def test_choice_enum_cached_in_registry_keyed_by_model_field(
     choice_fixture_model: type[models.Model],
 ) -> None:
@@ -1930,8 +2017,9 @@ def test_array_field_outer_choices_rejected_via_fake_sentinel(
 ) -> None:
     """Outer ``choices`` on ``ArrayField`` raises ``ConfigurationError``.
 
-    Spec-pinned error message mentions ``base_field`` and ``FilterSet`` as
-    the consumer recourse.
+    The spec-pinned message names the two recourses: element ``choices`` on
+    ``base_field``, or leaving the column off the type, where a ``FilterSet``'s
+    ``ArrayFilter`` can still filter it (with the element type).
 
     Exposing this column is what the package refuses to build (the package raises) and
     the column type is PostgreSQL-only besides, so no fakeshop model carries it; this
@@ -1950,13 +2038,20 @@ def test_array_field_outer_choices_rejected_via_fake_sentinel(
             managed = False
             app_label = "test_arrayfield"
 
-    with pytest.raises(ConfigurationError, match="declares choices on the outer"):
+    with pytest.raises(ConfigurationError) as exc_info:
 
         @definition_raises
         class ArrayOuterChoicesOwnerType(DjangoType):
             class Meta:
                 model = ArrayOuterChoicesOwner
                 fields = ("arr",)
+
+    assert str(exc_info.value) == (
+        "ArrayField on ArrayOuterChoicesOwner.arr declares choices on the outer field; "
+        "outer-array choices are ambiguous at the GraphQL boundary. Declare choices on "
+        "base_field for an element-level enum, or leave the field out with Meta.fields / "
+        "Meta.exclude (a FilterSet's ArrayFilter can still filter it)."
+    )
 
 
 def test_array_field_base_field_unsupported_type_raises(monkeypatch: pytest.MonkeyPatch) -> None:

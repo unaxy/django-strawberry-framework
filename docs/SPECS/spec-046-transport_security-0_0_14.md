@@ -567,8 +567,11 @@ DjangoGraphQLView.as_view(
 )
 ```
 
-`AsyncDjangoGraphQLView` is the async twin with an identical surface, for a project
-whose GraphQL view must be async (the shape ASGI deployments generally want).
+`AsyncDjangoGraphQLView` is the async twin with an identical surface. The choice between
+them follows the consumer's resolvers, not the transport: the async view for `async def`
+resolvers (it runs a plain `def` resolver on the event loop, where reading the database
+raises "You cannot call this from an async context"), the sync view for plain `def` ones (it
+fails an `async def` resolver).
 
 ### The setting
 
@@ -644,12 +647,16 @@ DJANGO_STRAWBERRY_FRAMEWORK = {
   ```
 
   ```diff
-  + from django_strawberry_framework.views import DjangoGraphQLView
+  + from django_strawberry_framework.views import AsyncDjangoGraphQLView
   +
     urlpatterns = [
-  +     path("graphql/", DjangoGraphQLView.as_view(schema=schema)),
+  +     path("graphql/", AsyncDjangoGraphQLView.as_view(schema=schema)),
     ]
   ```
+
+  The removed HTTP mode ran Strawberry's async consumer, so `AsyncDjangoGraphQLView` is its
+  like-for-like replacement for `async def` resolvers; a project whose resolvers are plain
+  `def` mounts `DjangoGraphQLView` instead.
 
 ### Error shapes
 
@@ -660,7 +667,8 @@ DJANGO_STRAWBERRY_FRAMEWORK = {
   at construction, naming the security reason and the fix: that a deployment
   which passed `None` (or omitted it) was serving GraphQL HTTP outside Django's
   middleware, that the mode is removed, and that the repair is
-  `get_asgi_application()` plus the `urlpatterns` entry. The explicit-`None` branch
+  `get_asgi_application()` plus the `urlpatterns` entry, naming `AsyncDjangoGraphQLView` for
+  `async def` resolvers and `DjangoGraphQLView` for plain `def` ones. The explicit-`None` branch
   exists precisely so a migrant who kept the old keyword gets prose instead of a
   `TypeError`.
 - **Body over the cap** — `413` with reason `"Request body exceeded the configured
@@ -3119,10 +3127,12 @@ Every generated doc is regenerated from its source, never hand-edited.
   global and a second way to wire a schema. The explicit
   `DjangoGraphQLView.as_view(schema=schema)` line stays the documented primary; the schema is a
   Python object the consumer passes, matching every other package surface.
-- **Async view adoption.** An ASGI deployment generally wants `AsyncDjangoGraphQLView`, but
-  the package's live tier is WSGI and its mutation pipeline is sync-first, so both views ship
-  and the migration note's default is the sync view; a consumer on ASGI chooses the async one
-  deliberately.
+- **Async view adoption.** Both views ship because the choice follows the consumer's
+  resolvers, not the transport: each fails the other's resolver shape (the sync view an
+  `async def` resolver, the async view a plain `def` resolver that reads the database). The
+  migration note names both by resolver shape, the async one first as the removed consumer's
+  like-for-like replacement; the package's own samples mount the sync view because its live
+  tier is WSGI and its mutation pipeline is sync-first.
 - **The revalidation's per-authorized-event cost is per process.** At the default window an
   authenticated subscription pays one session read **per emitted result**, and the ceiling is
   the single `thread_sensitive` executor thread every connection's actor read shares, not the
@@ -3190,7 +3200,8 @@ Every generated doc is regenerated from its source, never hand-edited.
       exact-matches by default; `/graphql-admin` and `/graphqlanything` match on neither
       protocol, and no `url_pattern` alias exists.
 - [ ] `django_strawberry_framework/views.py` ships `DjangoGraphQLView` /
-      `AsyncDjangoGraphQLView`; the documented `urlpatterns` entry uses it.
+      `AsyncDjangoGraphQLView`; the documented `urlpatterns` entry mounts one of them by the
+      consumer's resolver shape.
 - [ ] `AsyncDjangoGraphQLView` evaluates the lazy `request.user` in one sync boundary
       before execution, so a plain sync resolver or an `async def get_queryset` reading the
       actor on the event loop never raises `SynchronousOnlyOperation`, and `request.auser`'s

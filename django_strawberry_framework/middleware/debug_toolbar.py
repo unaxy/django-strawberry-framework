@@ -85,21 +85,8 @@ _load_json: Callable[..., object] = json.loads
 
 # The single django-debug-toolbar install-hint string (spec-042 Decision 5).
 # Every toolbar-absent raise routes through ``require_debug_toolbar()`` so the
-# hint lives in exactly one source location and names the verified floor,
-# interpolated from ``utils/imports.py::DEBUG_TOOLBAR_FLOOR``. The floor is
-# written in three gated places that must agree: that constant, the
-# ``[dependency-groups].dev`` row in ``pyproject.toml``, and the
-# ``_HINT_SUBSTRING`` literal re-typed in ``tests/middleware/test_debug_toolbar.py``
-# (the drift-catch). ``tests/test_ci_governance.py`` compares the constant to
-# the dependency row, and the toolbar tests compare the hint and the dependency
-# row to the literal, so none of the three can move alone. Those are the GATED
-# sites, not a census of where the floor is written: the CI floor cell and
-# BUILD.md "Floor verification" install the dependency row's bound under their
-# own gate, and anything else restating it, documentation included, is gated by
-# nothing, so a floor bump sweeps the tree for the package NAME and reads each
-# hit, rather than trusting this enumeration or sweeping for the
-# ``django-debug-toolbar>=`` specifier - a restatement that separates the name
-# from the constraint with a backtick or a space does not match it.
+# hint lives in exactly one source location. The hint interpolates the floor
+# constant ``utils/imports.py::DEBUG_TOOLBAR_FLOOR``.
 _DEBUG_TOOLBAR_INSTALL_HINT: str = (
     "DebugToolbarMiddleware requires django-debug-toolbar, which is not installed. Install it "
     f"with `pip install 'django-debug-toolbar>={DEBUG_TOOLBAR_FLOOR}'` (the package's verified "

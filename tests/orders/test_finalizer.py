@@ -9,8 +9,7 @@ Covers:
   state.
 - First-bind model compatibility per spec-028 (rejects orderset
   wired to unrelated owner model; message names all four entities).
-- Multi-owner reuse: identical-target accepted; diverging-target rejected;
-  idempotent re-bind of the same ``(orderset, definition)`` pair accepted;
+- Multi-owner reuse: idempotent re-bind of the same ``(orderset, definition)`` pair accepted;
   a second owner refused when either owner has a custom ``get_queryset``, or
   when the two owners read different tables (a multi-table-inheritance parent
   and child), in both declaration orders.
@@ -66,7 +65,8 @@ from django_strawberry_framework.registry import registry
 from django_strawberry_framework.types.definition import DjangoTypeDefinition
 from django_strawberry_framework.types.finalizer import _bind_orderset_owner
 from django_strawberry_framework.types.relay import apply_interfaces
-from django_strawberry_framework.utils._narrowing import class_dict, read_attr
+from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._narrowing import read_attr
 from tests._idioms import definition_raises, json_at, json_list
 
 
@@ -574,10 +574,6 @@ def _owner(model: type[models.Model]) -> DjangoTypeDefinition:
     return OwnerType.__django_strawberry_definition__
 
 
-def _resolves_nothing(_field_name: object) -> None:
-    """A ``related_target_for`` that resolves no relation."""
-
-
 def test_bind_orderset_owner_idempotent_for_same_definition() -> None:
     """Re-binding the SAME ``(orderset, definition)`` pair is a no-op."""
 
@@ -592,113 +588,7 @@ def test_bind_orderset_owner_idempotent_for_same_definition() -> None:
     assert ShelfOrder._owner_definition is definition
 
 
-def test_bind_orderset_owner_rejects_diverging_related_targets(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Two owners that resolve a shared ``RelatedOrder`` to different targets raise."""
-
-    class ShelfOrder(OrderSet):
-        class Meta:
-            model = Shelf
-            fields = ["code"]
-
-    class BookOrder(OrderSet):
-        shelf = RelatedOrder(ShelfOrder, field_name="shelf")
-
-        class Meta:
-            model = Book
-            fields = ["title"]
-
-    class PrevTargetType(DjangoType):
-        class Meta:
-            model = Shelf
-            fields = ("id",)
-
-    class NewTargetType(DjangoType):
-        class Meta:
-            model = Shelf
-            fields = ("id",)
-
-    prev_target = PrevTargetType.__django_strawberry_definition__
-    new_target = NewTargetType.__django_strawberry_definition__
-    shelf_field = Book._meta.get_field("shelf")
-    first = _owner(Book)
-    second = _owner(Book)
-
-    # Two live owners resolve ``shelf`` through the one registry and so always agree; each
-    # owner's lookup is forced to its own target to reach the defensive divergence check.
-    def prev_lookup(_field_name: object) -> tuple[object, object]:
-        return (prev_target, shelf_field)
-
-    def new_lookup(_field_name: object) -> tuple[object, object]:
-        return (new_target, shelf_field)
-
-    monkeypatch.setattr(first, "related_target_for", prev_lookup)
-    monkeypatch.setattr(second, "related_target_for", new_lookup)
-    _bind_orderset_owner(BookOrder, first)
-    with pytest.raises(ConfigurationError) as exc_info:
-        _bind_orderset_owner(BookOrder, second)
-    msg = str(exc_info.value)
-    assert "diverging targets" in msg
-    assert "shelf" in msg
-    assert "PrevTargetType" in msg
-    assert "NewTargetType" in msg
-
-
-def test_bind_orderset_owner_continues_when_both_targets_unresolved() -> None:
-    """A field neither owner can resolve is skipped (both-None continue)."""
-
-    class ShelfOrder(OrderSet):
-        class Meta:
-            model = Shelf
-            fields = ["code"]
-
-    class BookOrder(OrderSet):
-        shelf = RelatedOrder(ShelfOrder, field_name="shelf")
-
-        class Meta:
-            model = Book
-            fields = ["title"]
-
-    # No ``Shelf`` type is registered, so neither owner resolves ``shelf``.
-    first = _owner(Book)
-    second = _owner(Book)
-    _bind_orderset_owner(BookOrder, first)
-    _bind_orderset_owner(BookOrder, second)
-    # First binding preserved.
-    assert BookOrder._owner_definition is first
-
-
-def test_bind_orderset_owner_raises_when_one_owner_resolves_and_other_does_not(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A field resolved by one owner but not the other is a hard mismatch."""
-
-    class ShelfOrder(OrderSet):
-        class Meta:
-            model = Shelf
-            fields = ["code"]
-
-    class BookOrder(OrderSet):
-        shelf = RelatedOrder(ShelfOrder, field_name="shelf")
-
-        class Meta:
-            model = Book
-            fields = ["title"]
-
-    _owner(Shelf)
-    first = _owner(Book)
-    second = _owner(Book)
-    # Two live owners resolve ``shelf`` through the one registry and so always agree; the
-    # second owner's lookup is forced to resolve nothing to reach the defensive divergence check.
-    monkeypatch.setattr(second, "related_target_for", _resolves_nothing)
-    _bind_orderset_owner(BookOrder, first)
-    with pytest.raises(ConfigurationError) as exc_info:
-        _bind_orderset_owner(BookOrder, second)
-    assert "diverging targets" in str(exc_info.value)
-
-
-def test_bind_orderset_owner_does_not_check_axis_1_relay_identity() -> None:
+def test_bind_orderset_owner_does_not_check_own_pk_relay_identity() -> None:
     """Per spec-028 Decision 6 the order side does NOT enforce own-PK Relay identity.
 
     Two owners whose Relay-node-ness diverges still share one OrderSet
@@ -711,10 +601,10 @@ def test_bind_orderset_owner_does_not_check_axis_1_relay_identity() -> None:
             model = Shelf
             fields = ["code"]
 
-    # Both owners declare no ``RelatedOrder``s, so the Axis-2 walk is
-    # vacuously satisfied. The filter-side equivalent test would FAIL here
-    # because the filter side has Axis-1 (Relay-identity) check; the
-    # order-side equivalent must succeed.
+    # Both owners share one table and keep the identity ``get_queryset``, so
+    # only the Relay-identity divergence remains. The filter-side equivalent
+    # test FAILS here because the filter family checks own-PK Relay identity;
+    # the order-side equivalent must succeed.
     class RelayShelfType(DjangoType):
         class Meta:
             model = Shelf
@@ -1082,10 +972,10 @@ def test_an_orderset_subclass_binds_its_own_owner_apart_from_its_base(
             orderset_class = ViaPlainBookOrder
 
     finalize_django_types()
-    assert read_attr(class_dict(ShelfOrder)["_owner_definition"], "origin") is (
+    assert read_attr(truth.class_dict(ShelfOrder)["_owner_definition"], "origin") is (
         hiding_type if base_on_hiding else plain_type
     )
-    assert read_attr(class_dict(SubShelfOrder)["_owner_definition"], "origin") is (
+    assert read_attr(truth.class_dict(SubShelfOrder)["_owner_definition"], "origin") is (
         plain_type if base_on_hiding else hiding_type
     )
 
@@ -1126,136 +1016,6 @@ def test_an_orderset_subclass_binds_its_own_owner_apart_from_its_base(
         "on-hidden",
         "on-seen",
     ]
-
-
-# Each row of ``test_an_unwired_orderset_subclass_answers_for_no_owner``: the
-# ``shelf`` branch term and the titles it orders, one row per owner-dependent read
-# the branch's target set answers with.
-_UNWIRED_TARGET_ROWS = [
-    pytest.param(
-        "{topic: ASC_NULLS_LAST}",
-        ["seen-x", "seen-y", "on-hidden"],
-        id="declared-hop-term",
-    ),
-    pytest.param(
-        "{branchShelvesTopic: ASC_NULLS_LAST}",
-        ["seen-x", "seen-y", "on-hidden"],
-        id="re-entry-term",
-    ),
-]
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize(("shelf_term", "titles"), _UNWIRED_TARGET_ROWS)
-@pytest.mark.parametrize(
-    "subclass_target",
-    [
-        pytest.param(True, id="unwired-subclass-of-a-bound-orderset"),
-        pytest.param(False, id="unrelated-unwired-orderset"),
-    ],
-)
-def test_an_unwired_orderset_subclass_answers_for_no_owner(
-    *,
-    subclass_target: bool,
-    shelf_term: str,
-    titles: list[str],
-) -> None:
-    """A ``RelatedOrder`` to an unwired ``SubShelfOrder(ShelfOrder)`` answers as an unwired set does.
-
-    ``ShelfOrder`` is bound to the non-primary ``PlainShelfType``, which hides
-    nothing; the primary ``HidingShelfType`` hides secret shelves. A subclass no
-    type wires is a separate set bound to no owner, so it orders exactly as an
-    unrelated unwired orderset over ``Shelf`` declaring the same fields does: its
-    term reads the primary type, and so does a path from it re-entering
-    ``Shelf``'s table (``branch__shelves__topic``), so a secret shelf counts as a
-    missing one (last under ``ASC_NULLS_LAST``).
-    """
-    target_fields = ["topic", "branch__shelves__topic"]
-
-    class ShelfOrder(OrderSet):
-        class Meta:
-            model = Shelf
-            fields = target_fields
-
-    class SubShelfOrder(ShelfOrder):
-        pass
-
-    class LoneShelfOrder(OrderSet):
-        class Meta:
-            model = Shelf
-            fields = target_fields
-
-    target = SubShelfOrder if subclass_target else LoneShelfOrder
-
-    class HidingShelfType(DjangoType):
-        class Meta:
-            model = Shelf
-            fields = ("id", "topic")
-            primary = True
-
-        @classmethod
-        @override
-        def get_queryset(
-            cls,
-            queryset: QuerySet[Shelf],
-            info: object,
-            **kwargs: object,
-        ) -> QuerySet[Shelf]:
-            return queryset.exclude(topic="secret")
-
-    class PlainShelfType(DjangoType):
-        class Meta:
-            model = Shelf
-            fields = ("id", "topic")
-            orderset_class = ShelfOrder
-
-    class ViaTargetBookOrder(OrderSet):
-        shelf = RelatedOrder(target, field_name="shelf")
-
-        class Meta:
-            model = Book
-            fields = ["title"]
-
-    class ViaTargetBookType(DjangoType):
-        class Meta:
-            model = Book
-            fields = ("id", "title")
-            orderset_class = ViaTargetBookOrder
-
-    finalize_django_types()
-    assert read_attr(class_dict(ShelfOrder)["_owner_definition"], "origin") is PlainShelfType
-    assert "_owner_definition" not in class_dict(target)
-    assert registry.get(Shelf) is HidingShelfType
-
-    # ``from __future__ import annotations`` leaves a class-body annotation a string
-    # naming a function local, so the root type is built with resolved annotations.
-    query = strawberry.type(
-        type(
-            "Query",
-            (),
-            {
-                "__annotations__": {"via_target": list[ViaTargetBookType]},
-                "via_target": DjangoListField(ViaTargetBookType),
-            },
-        ),
-    )
-    # Branch ``x`` holds a seen shelf beside the secret one, branch ``y`` a seen shelf
-    # alone; every visible topic sorts after ``secret``.
-    branch_x = Branch.objects.create(name="x")
-    branch_y = Branch.objects.create(name="y")
-    hidden = Shelf.objects.create(branch=branch_x, code="h", topic="secret")
-    seen_x = Shelf.objects.create(branch=branch_x, code="sx", topic="x")
-    seen_y = Shelf.objects.create(branch=branch_y, code="sy", topic="y")
-    Book.objects.create(title="on-hidden", shelf=hidden)
-    Book.objects.create(title="seen-x", shelf=seen_x)
-    Book.objects.create(title="seen-y", shelf=seen_y)
-    result = strawberry.Schema(query=query).execute_sync(
-        f"{{ viaTarget(orderBy: [{{shelf: {shelf_term}}}]) {{ title }} }}",
-        context_value={"request": RequestFactory().get("/")},
-    )
-    assert result.errors is None, result.errors
-    assert result.data is not None
-    assert [json_at(row, "title") for row in json_list(result.data, "viaTarget")] == titles
 
 
 def test_bind_orderset_owner_rejects_orderset_model_unrelated_to_owner() -> None:

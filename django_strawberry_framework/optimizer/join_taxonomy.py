@@ -51,7 +51,10 @@ The planner classifies the RAW Django relation field (or rel descriptor): the
 forward-M2M reverse query name lives only on ``field.remote_field``. A
 ``FieldMeta`` classifies too (the projection writers hand one in), reading its
 precomputed ``link_carrier_attnames`` / ``link_target_attnames`` slots; it
-carries no link field, so its ``parent_link_field`` stays ``None``.
+carries no link field, so its ``parent_link_field`` stays ``None``. The field
+is Django's (or a synthetic test double), so its metadata is read plainly
+through ``read_attr(value, name, None)``: an attribute a shape omits reads as
+``None``, and nothing is guarded.
 """
 
 from __future__ import annotations
@@ -104,18 +107,6 @@ WINDOWABLE_RELATION_KINDS: frozenset[RelationKind] = frozenset(
         "generic",
     },
 )
-
-
-# The field is Django's (or a synthetic test double), so its metadata is read
-# plainly: an attribute a shape omits takes the default, and nothing is guarded.
-def _attr(value: object, name: str, default: object = None) -> object:
-    """Return ``value.<name>``, or ``default`` when the shape does not carry it."""
-    return read_attr(value, name, default)
-
-
-def _first_truthy(*values: object) -> object:
-    """Return the first value that tests true, or ``None``."""
-    return next((value for value in values if value), None)
 
 
 @dataclass(frozen=True)
@@ -192,19 +183,16 @@ def _partition_expr(field: object) -> str | None:
     target's reverse query name for a forward M2M (``"books"`` - NOT the
     accessor when ``related_name`` is absent).
     """
-    remote_field = _attr(field, "remote_field")
+    remote_field = read_attr(field, "remote_field", None)
     return optional_instance(
-        _first_truthy(
-            _attr(remote_field, "attname"),
-            _attr(remote_field, "name"),
-        ),
+        read_attr(remote_field, "attname", None) or read_attr(remote_field, "name", None),
         str,
     )
 
 
 def _precomputed_attnames(field: object, slot: str) -> tuple[str, ...]:
     """Return the ``FieldMeta`` link slot stamped from ``relation_link``; ``()`` if absent or malformed."""
-    precomputed = _attr(field, slot)
+    precomputed = read_attr(field, slot, None)
     if is_tuple(precomputed):
         attnames = tuple(attname for attname in precomputed if isinstance(attname, str))
         if len(attnames) == len(precomputed):
@@ -252,7 +240,7 @@ def _m2m_join_columns(field: object) -> tuple[str, ...]:
     and keys ``rel_obj_attr`` on those), so the related row contributes no link
     column of its own.
     """
-    related_model = _attr(field, "related_model")
+    related_model = read_attr(field, "related_model", None)
     if related_model is None:
         return ()
     # A model's pk ``attname`` is its column name, a string.
@@ -277,8 +265,8 @@ def _generic_child_attname(field: object, name_attr: str) -> str | None:
     ``get_field`` resolves for a genuine ``GenericRelation``, so no defensive
     ``FieldDoesNotExist`` swallow is needed once both inputs exist.
     """
-    related_model = _attr(field, "related_model")
-    child_field_name = _attr(field, name_attr)
+    related_model = read_attr(field, "related_model", None)
+    child_field_name = read_attr(field, name_attr, None)
     if related_model is None or child_field_name is None:
         return None
     # A resolved child field's ``attname`` is its column name, a string.
@@ -338,7 +326,7 @@ def classify_relation_join(field: ModelField | FieldMeta) -> RelationJoinDescrip
         lateral_shape = LateralJoinShape.DIRECT_FK
         # The child-side link (a reverse rel descriptor's ``.field``), kept only
         # when it is one column the correlated strategies can join and cast on.
-        link = _attr(field, "field")
+        link = read_attr(field, "field", None)
         if is_single_column_foreign_key(link):
             parent_link_field = link
     else:

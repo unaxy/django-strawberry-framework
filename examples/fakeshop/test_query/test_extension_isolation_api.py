@@ -12,9 +12,8 @@ back off the wire:
   the ones asking for an operation name no document can carry, and still bounds
   the document it is refusing;
 - a factory resolving to anything but an ordinary extension instance - one that
-  raises, returns a non-extension or a class, returns an object whose
-  ``__class__`` claims an extension or an authority it is not, or returns an
-  authority subclass or a hybrid of both - refuses every request with the
+  raises, returns a non-extension, a class or a lazily wrapped extension, or
+  returns an authority subclass or a hybrid of both - refuses every request with the
   stable configuration code, and the reason reaches the deployment's log only;
 - the optimizer entry every deployment is documented to write - one module-level
   singleton behind a factory - keeps its published plan on the request it
@@ -44,6 +43,7 @@ from django.http import HttpRequest
 from django.http.response import HttpResponseBase
 from django.test import AsyncClient, Client
 from django.urls import include, path
+from django.utils.functional import SimpleLazyObject
 from django.views.decorators.csrf import csrf_exempt
 from graphql import GraphQLError
 from graphql_client import (
@@ -144,28 +144,6 @@ class _ConsumerExtension(SchemaExtension):
     """An ordinary consumer extension: the thing an entry is still allowed to be."""
 
 
-class _ClaimsAnExtension:
-    """Not an extension, answering ``__class__`` with an ordinary one."""
-
-    @property
-    @override
-    # basedpyright: deliberately a read-only ``__class__``: the forged type is the guard's input
-    def __class__(self) -> type[_ConsumerExtension]:  # pyright: ignore[reportIncompatibleMethodOverride]
-        """Claim the ordinary consumer extension, which ``isinstance`` would believe."""
-        return _ConsumerExtension
-
-
-class _ClaimsAnAuthority:
-    """Not an extension, answering ``__class__`` with the masking authority."""
-
-    @property
-    @override
-    # basedpyright: deliberately a read-only ``__class__``: the forged type is the guard's input
-    def __class__(self) -> type[DjangoErrorPolicyExtension]:  # pyright: ignore[reportIncompatibleMethodOverride]
-        """Claim the masking extension, which ``isinstance`` would believe."""
-        return DjangoErrorPolicyExtension
-
-
 class _AuthoritySubclass(DjangoResourcePolicyExtension):
     """A consumer subclass of the bounding authority, which is not one."""
 
@@ -191,8 +169,10 @@ _LADDER_FACTORIES = {
     "raises": (_raise_sentinel, "raised"),
     "not-an-extension": (partial(object), "not a SchemaExtension instance"),
     "returns-the-class": (lambda: _ConsumerExtension, "not a SchemaExtension instance"),
-    "claims-to-be-an-extension": (partial(_ClaimsAnExtension), "not a SchemaExtension instance"),
-    "claims-to-be-an-authority": (partial(_ClaimsAnAuthority), "not a SchemaExtension instance"),
+    "lazy-wrapped-extension": (
+        lambda: SimpleLazyObject(_ConsumerExtension),
+        "not a SchemaExtension instance",
+    ),
     "authority-subclass": (partial(_AuthoritySubclass), "claims the resource-policy authority"),
     "hybrid": (partial(_HybridAuthority), "claims the resource-policy authority"),
 }
@@ -773,9 +753,10 @@ def test_a_factory_resolving_to_anything_but_an_ordinary_extension_refuses_every
 
     Upstream assigns ``execution_context`` on whatever came back, outside every
     seam the package masks at, so a raising factory, a non-extension and a class
-    would each escape as the consumer's own error. An object whose ``__class__``
-    claims an ordinary extension is the row ``isinstance`` would admit; an
-    authority subclass or hybrid is a second authority. The wire carries the
+    would each escape as the consumer's own error. A lazily wrapped extension
+    proxies ``__class__``, so ``isinstance`` would admit it while its real type
+    is the wrapper. An authority subclass or hybrid is a second authority. The
+    wire carries the
     stable code and nothing the factory said; the reason goes to the log.
     """
     _, reason = _LADDER_FACTORIES[shape]

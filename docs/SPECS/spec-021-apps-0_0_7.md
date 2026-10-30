@@ -253,7 +253,7 @@ Three slices aligned with the [Slice checklist](#slice-checklist); each maps to 
 | Slice | Files | Tests |
 | --- | --- | --- |
 | 1 — Module + `AppConfig` subclass | `django_strawberry_framework/apps.py` | 0 (tests land in Slice 2) |
-| 2 — Tests | `tests/test_apps.py` | 8 test functions (4 positive shape + 1 negative-shape over three forbidden keys + 3 pinning `ready()`), 14 collected items once parametrized; see [Test plan](#test-plan) |
+| 2 — Tests | `tests/test_apps.py` | the positive-shape tests, the negative-shape test over the three forbidden keys, and the `ready()` tests; see [Test plan](#test-plan) |
 | 3 — Docs | `docs/GLOSSARY.md`, `docs/README.md`, `docs/TREE.md`, `KANBAN.md`, `CHANGELOG.md` | 0 |
 
 Slice 2 depends on Slice 1 (the class must exist before tests import it); Slice 3 depends on Slice 2 (the docs describe a shipped, tested module).
@@ -275,7 +275,7 @@ Tests live in one tree, matching [`docs/TREE.md`][tree] and [`AGENTS.md`][agents
 
 ### `tests/test_apps.py`
 
-Package tests; system-under-test is `django_strawberry_framework`. The file is the flat module's mirror per [`docs/TREE.md #"## Test layout"`][tree]. Eight test functions, 14 collected items.
+Package tests; system-under-test is `django_strawberry_framework`. The file is the flat module's mirror per [`docs/TREE.md #"## Test layout"`][tree].
 
 Positive shape tests (Slice 2):
 
@@ -327,7 +327,7 @@ The card is complete when all of the following are true:
 1. `django_strawberry_framework/apps.py` defines `DjangoStrawberryFrameworkConfig(AppConfig)` per [Decision 1](#decision-1--module-location--public-export) and [Decision 2](#decision-2--name--label--verbose_name-pinning) — `name = "django_strawberry_framework"`, `verbose_name = "Django Strawberry Framework"`, a one-line **module docstring** (`D100`), a one-line **class docstring** (`D101`), no `label`, no `default_auto_field`, no `default` at any value.
 2. `django_strawberry_framework/__init__.py` does not re-export the class; `__all__` does not include it (per [Decision 3](#decision-3--no-public-export)).
 3. `tests/base/test_init.py::test_public_api_surface_is_pinned` pins an `__all__` without the AppConfig (per [Decision 3](#decision-3--no-public-export)).
-4. `tests/test_apps.py` contains the 8 test functions in the [Test plan](#test-plan) — 4 positive shape, 1 negative-shape (`test_djangostrawberryframeworkconfig_defines_no_extra_appconfig_attributes`) asserting `label`, `default_auto_field` and `default` are absent from `DjangoStrawberryFrameworkConfig.__dict__`, and 3 pinning `ready()`: its presence and callability, its four-applier dispatch plus safe re-fire, and its correctness across a patch-module reload.
+4. `tests/test_apps.py` contains the [Test plan](#test-plan) tests — the positive-shape tests, the negative-shape test (`test_djangostrawberryframeworkconfig_defines_no_extra_appconfig_attributes`) asserting `label`, `default_auto_field` and `default` are absent from `DjangoStrawberryFrameworkConfig.__dict__`, and the `ready()` tests pinning its presence and callability, its four-applier dispatch plus safe re-fire, and its correctness across a patch-module reload.
 5. `examples/fakeshop/config/settings.py::INSTALLED_APPS` keeps the package-name entry (per [Decision 7](#decision-7--no-fakeshop-installed_apps-entry-change)), resolving to the explicit class.
 6. The class overrides `ready()` with the four-applier dispatch and nothing else (per [Decision 4](#decision-4--ready-applies-the-upstream-patches)), and does not declare `label`, `default_auto_field`, or `default` (per [Decision 2](#decision-2--name--label--verbose_name-pinning), [Decision 5](#decision-5--no-default_auto_field-and-no-models), [Decision 8](#decision-8--no-default-attribute)). The absences are pinned by the negative-shape test; the `ready()` presence and behavior by the three `ready()` tests, all in `tests/test_apps.py`.
 7. The fakeshop live `/graphql/` tests (e.g. `examples/fakeshop/test_query/test_library_api.py`) pass through the existing `INSTALLED_APPS` entry with no AppConfig-specific code.

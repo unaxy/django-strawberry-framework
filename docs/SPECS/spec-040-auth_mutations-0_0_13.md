@@ -951,24 +951,24 @@ strings on isolated throwaway schemas — the gated variants cannot coexist with
 aggregate fakeshop default surface under the one-declaration-per-process rule
 ([Test plan](#test-plan)).
 
-**`DjangoModelPermission` is incompatible with the model-less auth fields — by
-documentation, not a factory-time guard.** Passing
-`login_mutation(permission_classes=[DjangoModelPermission])` (the *write* family's
-default class) raises at **request time**, not deny: its `has_permission` reads the
-model the mutation validated at declaration
+**`DjangoModelPermission` is refused on the model-less auth fields at factory time,
+unless the class overrides `has_permission`.** Its `has_permission` reads the model the
+mutation validated at declaration
 ([`write_mixins.py`][write-mixins]`::backing_model_of`) and
 `_OPERATION_PERMISSION_ACTION[operation]`
 ([`mutations/permissions.py`][mutations-permissions]), and the holder's snapshot
-carries no model and no `"login"` / `"logout"` action mapping. This is the exact
-hazard the package already documents for the model-less plain form
-([`DenyAll`][mutations-permissions] #"it would raise at request time, not deny"), so
-the auth surface follows the same posture: document the incompatibility (model-permission
-classes need a model + a create/update/delete operation; auth fields want a custom
-`has_permission` such as a rate-limit or invite gate), rather than adding a
-factory-time `issubclass` reject that would also refuse legitimate consumer
-subclasses of `DjangoModelPermission` that override `has_permission` for session
-verbs. (`register`, a real `DjangoMutation` with `operation = "create"` → the
-`add_<user>` perm, is unaffected — `DjangoModelPermission` works there.)
+carries no model and no `"login"` / `"logout"` action mapping, so on `login` /
+`logout` / `current_user` it would raise per request instead of denying. The fixed
+factories therefore validate `permission_classes` with `model_less=True`
+([`write_mixins.py`][write-mixins]`::_validate_permission_classes`, the guard the
+model-less plain form shares): `login_mutation(permission_classes=[DjangoModelPermission])`,
+or a subclass that inherits its `has_permission`, raises `ConfigurationError`
+(`"login_mutation() permission_classes includes DjangoModelPermission, a
+DjangoModelPermission that does not override has_permission; ..."`). A subclass that
+overrides `has_permission` for the session verbs (a rate-limit or invite gate) is
+admitted. (`register`, a real `DjangoMutation` with `operation = "create"` → the
+`add_<user>` perm, validates with `model_less=False` — `DjangoModelPermission` works
+there.)
 
 **This generalizes beyond `DjangoModelPermission`**.
 The incompatibility is not that one class's quirk — it is structural: `check_permission`
@@ -985,9 +985,11 @@ none of the create/update/delete shape a real mutation exposes. So [Goal 3](#goa
 check — the intended cases), but a gate that **introspects the `mutation` argument**
 (reads `mutation.Meta.model`, branches on the concrete class) raises at request time on
 the three model-less fields. The rule for those three, stated plainly: **key on `info` /
-`operation` / `data`, never on the mutation object.** This is documented, not
-factory-time guarded (the `DenyAll` request-time-raise precedent applied to the general
-case). `register`, a real `DjangoMutation`, carries the full shape and is unaffected.
+`operation` / `data`, never on the mutation object.** The factory guards only the shape
+it can read (a `DjangoModelPermission` that does not override `has_permission`); an
+override that calls `super().has_permission(...)`, or any other gate reading the
+mutation's model, is documented, not guarded, and still raises per request.
+`register`, a real `DjangoMutation`, carries the full shape and is unaffected.
 
 **Login skips both visibility AND the optimizer re-fetch — two distinct choices,
 each deliberate.** The payload's user is the raw object `authenticate()` returned —
@@ -1582,11 +1584,10 @@ async body reaches the boundary through the ONE generic
 `run_in_one_sync_boundary(fn, *args, **kwargs)` primitive
 ([`utils/querysets.py`][utils-querysets] — the neutral utils home, beside its sibling
 `reject_async_in_sync_context`, so read-side modules can reuse it without a
-root-into-subpackage import). The `036` wrapper
-`run_pipeline_async` ([`mutations/resolvers.py`][mutations-resolvers]) is
-mutation-shaped (it takes `mutation_cls` / `data` / `id`) and rides the same primitive
-as its boundary core. Each fixed auth field carries a real sync resolver
-body and a real *async* resolver body as separate seams — so a native async path can
+root-into-subpackage import). `make_resolver_entries`' async entry
+([`mutations/resolvers.py`][mutations-resolvers]) is the mutation-shaped caller of
+`run_in_one_sync_boundary` (it passes `mutation_cls` / `info` / `data` / `id`). Each fixed
+auth field carries a real sync resolver body and a real *async* resolver body as separate seams — so a native async path can
 be specialized per field without touching the dispatch seam — and the invariant the
 D17 directive pins is the **count, not the call site**: whichever body runs, one
 resolution enters the thread-sensitive boundary exactly once, and the register
@@ -2203,7 +2204,10 @@ schemas (below).
   `data` (and asserting the password is **not** in `data`); a gate reading only
   `info` / `operation` authorizing correctly while a gate that introspects the
   `mutation` argument (`mutation.Meta.model`) raises at request time on the
-  model-less fields;
+  model-less fields; `DjangoModelPermission` and a subclass that does not override
+  `has_permission` refused at declaration on `login` / `logout` / `current_user` (the
+  exact `<factory>() permission_classes includes ...` message), an overriding subclass
+  admitted, and `register` admitting `DjangoModelPermission`;
 - the register rider: factory cache identity and every-call re-record;
   `derive_register_fields(user_model)` called **directly** for the default AND a
   custom-`USERNAME_FIELD` / custom-`REQUIRED_FIELDS` model (a test-scoped model

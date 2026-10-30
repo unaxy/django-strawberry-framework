@@ -292,11 +292,20 @@ def test_cursor_crypto_cache_retains_every_rotation_key() -> None:
 
 
 def test_cursor_crypto_is_a_soft_dependency() -> None:
+    """The absence names the install command at the verified floor.
+
+    The floor is RE-TYPED here rather than imported: a row comparing
+    ``utils/imports.py::CRYPTOGRAPHY_FLOOR`` against itself could never notice the hint
+    re-hardcoding a different literal. The governance row in
+    ``tests/test_ci_governance.py`` gates the constant against the ``pyproject.toml``
+    dev row, so the three sites agree.
+    """
     with simulated_absence("cryptography", parent=framework, attr="keyset"):
         _cursor_aessiv.cache_clear()
         _cursor_crypto_types.cache_clear()
-        with pytest.raises(ImportError, match=r"Meta\.cursor_field requires cryptography"):
+        with pytest.raises(ImportError, match=r"Meta\.cursor_field requires cryptography") as exc:
             _cursor_aessiv("missing-crypto-secret")
+        assert "pip install 'cryptography>=44.0.0'" in str(exc.value)
     _cursor_aessiv.cache_clear()
     _cursor_crypto_types.cache_clear()
 

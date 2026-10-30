@@ -81,6 +81,7 @@ from django_strawberry_framework.utils.querysets import applied_order, resolve_o
 from django_strawberry_framework.utils.relations import (
     instance_accessor,
     is_model_class,
+    is_stored_column,
     respell_relation_path,
 )
 
@@ -331,7 +332,7 @@ class OptimizationPlan:
     fk_id_elisions: Sequence[str] = field(default_factory=_indexed_list)
     """Resolver keys elided because the source row already carries the target id."""
     planned_resolver_keys: Sequence[str] = field(default_factory=_indexed_list)
-    """Resolver keys for relations covered by this plan, used by B3 strictness."""
+    """Resolver keys for relations covered by this plan, used by strictness."""
     select_path_resolver_keys: dict[str, tuple[str, ...]] = field(default_factory=dict)
     """Resolver keys of the single-valued relation planned at each select path.
 
@@ -348,8 +349,8 @@ class OptimizationPlan:
 
     Written by ``walker.py::_plan_prefetch_relation`` (and the hinted-Prefetch
     branch) for the lookup path Django consumes. Includes the relation's own
-    resolver identities plus nested keys absorbed from the child plan. B8
-    ``diff_plan_for_queryset`` uses this when a consumer ``Prefetch`` wins and
+    resolver identities plus nested keys absorbed from the child plan. Queryset
+    diffing (``diff_plan_for_queryset``) uses this when a consumer ``Prefetch`` wins and
     the optimizer entry is dropped: those keys (and matching FK-id elisions)
     must leave the published strictness / elision sentinels, or nested N+1s
     under the dropped subtree are masked. When the consumer's queryset is sealed
@@ -425,7 +426,7 @@ class OptimizationPlan:
     cacheable: bool = True
     """Whether this plan can be reused from the extension's plan cache.
 
-    O6 ``Prefetch`` downgrades may embed querysets produced by
+    Visibility ``Prefetch`` downgrades may embed querysets produced by
     ``DjangoType.get_queryset(queryset, info)``. Those querysets can be
     request-dependent because ``info.context`` may carry the current
     user, tenant, or permissions. Plans containing such dynamic
@@ -1210,9 +1211,9 @@ def order_entry_has_explicit_nulls(entry: object) -> bool:
 def ends_in_unique_column(effective: tuple[object, ...], model: type[models.Model]) -> bool:
     """Return whether the effective ordering's terminal entry is a unique total order.
 
-    Hoisted from ``connection.py`` (spec-033 Decision 11 sites the hoist) so the
-    plan-time window order and the resolve-time pipeline order share ONE
-    implementation - Decision 4's cursor-parity invariant: window row numbers
+    Owned here (spec-033 Decision 11) so the plan-time window order and the
+    resolve-time pipeline order share ONE implementation - spec-033 Decision 4's
+    cursor-parity invariant: window row numbers
     must agree with the fallback path's offset cursors. ``connection.py``
     imports this back.
 
@@ -1566,7 +1567,7 @@ def _resolve_order_path_field(model: type[models.Model], path: str) -> ConcreteF
     ):
         return None
     field = resolved.final_field
-    if not is_concrete_field(field) or field.is_relation or not field.concrete:
+    if not is_stored_column(field) or field.is_relation:
         return None
     return field
 
@@ -2013,7 +2014,7 @@ def diff_plan_for_queryset(
     """Reconcile ``plan`` against optimizations already on ``queryset``.
 
     Returns ``(delta_plan, queryset_to_apply_against)``. The plan is
-    only ever copied (never mutated) so B1's cache stays intact. The
+    only ever copied (never mutated) so the plan cache stays intact. The
     queryset is rewritten only when a consumer prefetch lookup moves into
     the plan's prefetch list: a plain ``prefetch_related("path")`` string the
     optimizer replaces with a more specific ``Prefetch(path, queryset=...)``,
@@ -2387,7 +2388,7 @@ def _sealed_consumer_prefetch(
 
 
 def lookup_paths(plan: OptimizationPlan) -> set[str]:
-    """Return Django relation lookup paths covered by ``plan`` for B8/debugging."""
+    """Return Django relation lookup paths covered by ``plan`` (the strictness stash's set)."""
     if plan.finalized_lookup_paths is not None:
         return set(plan.finalized_lookup_paths)
     return _lookup_paths_from_parts(plan.select_related, plan.prefetch_related)

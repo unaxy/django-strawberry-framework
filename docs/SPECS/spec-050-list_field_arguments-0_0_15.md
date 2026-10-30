@@ -2014,11 +2014,13 @@ Where each part of the surface lives, keyed to the slice checklist:
   utility rather than met by a second clock check or a caller-local catch, which would leave
   every other caller of the shared seam uncovered.
 - `django_strawberry_framework/utils/querysets.py::selected_order` is the only place the
-  effective-ordering precedence is spelled; the list field reads it through
-  `django_strawberry_framework/list_field.py::_selected_ordering` and the connection order
-  ladder through `django_strawberry_framework/utils/querysets.py::applied_order`. Both
-  offset-guard predicates - the term-determinism check and the model-default eligibility
-  rule - read its answer; neither scans `query.order_by`, `query.extra_order_by` or
+  effective-ordering precedence is spelled; the list field's two offset-guard predicates,
+  `django_strawberry_framework/list_field.py::_has_deterministic_ordering` (the
+  term-determinism check) and
+  `django_strawberry_framework/list_field.py::_is_model_default_ordering_active` (the
+  model-default eligibility rule), read it directly, and the connection order ladder reads it
+  through `django_strawberry_framework/utils/querysets.py::applied_order`. Neither predicate
+  scans `query.order_by`, `query.extra_order_by` or
   `Meta.ordering` on its own, because a second scan could disagree with the first and with
   `SQLCompiler._order_by_pairs`. The guard does not reuse
   `django_strawberry_framework/optimizer/plans.py::effective_connection_order`: that helper

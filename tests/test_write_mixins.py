@@ -451,33 +451,36 @@ def test_validate_permission_classes_hostile_metaclass_never_runs() -> None:
         ConfigurationError,
         match=r"permission_classes entry .* is not a permission class exposing has_permission",
     ):
-        _validate_permission_classes("Probe", [HostilePerm])
+        _validate_permission_classes("Probe.Meta.permission_classes", [HostilePerm])
 
 
-def test_validate_permission_classes_custom_base_label_and_flavor_forwarding() -> None:
-    """_validate_permission_classes and model_backed_permission_and_lock format with base_label."""
+def test_validate_permission_classes_messages_open_with_the_site() -> None:
+    """Every message opens with ``site``; the model-backed pair builds its own from the flavor."""
     with pytest.raises(
         ConfigurationError,
         match=(
-            r"CustomFlavor BadPermsMutation\.Meta\.permission_classes must be a sequence "
-            r"of permission classes"
+            r"^login_mutation\(\) permission_classes must be a sequence of permission "
+            r"classes; got 'bad_sequence'\.$"
         ),
     ):
-        _validate_permission_classes("BadPermsMutation", "bad_sequence", base_label="CustomFlavor")
+        _validate_permission_classes("login_mutation() permission_classes", "bad_sequence")
 
     with pytest.raises(
         ConfigurationError,
         match=(
-            r"CustomFlavor BadPermsMutation\.Meta\.permission_classes entry 123 is not a "
+            r"^CustomFlavor BadPermsMutation\.Meta\.permission_classes entry 123 is not a "
             r"permission class exposing has_permission"
         ),
     ):
-        _validate_permission_classes("BadPermsMutation", [123], base_label="CustomFlavor")
+        _validate_permission_classes(
+            "CustomFlavor BadPermsMutation.Meta.permission_classes",
+            [123],
+        )
 
     with pytest.raises(
         ConfigurationError,
         match=(
-            r"DjangoModelFormMutation BadPermsMutation\.Meta\.permission_classes entry "
+            r"^DjangoModelFormMutation BadPermsMutation\.Meta\.permission_classes entry "
             r"123 is not a permission class exposing has_permission"
         ),
     ):
@@ -486,6 +489,61 @@ def test_validate_permission_classes_custom_base_label_and_flavor_forwarding() -
             _meta_class(permission_classes=[123]),
             flavor="DjangoModelFormMutation",
         )
+
+
+class _InheritingModelPermission(DjangoModelPermission):
+    """A ``DjangoModelPermission`` subclass that keeps the base ``has_permission``."""
+
+
+class _OverridingModelPermission(DjangoModelPermission):
+    """A ``DjangoModelPermission`` subclass whose ``has_permission`` reads no model."""
+
+    @override
+    def has_permission(
+        self,
+        info: object,
+        mutation: object,
+        operation: str,
+        data: object,
+        instance: object = None,
+    ) -> bool:
+        return True
+
+
+@pytest.mark.parametrize("model_less", [True, False], ids=["model-less", "model-backed"])
+@pytest.mark.parametrize(
+    ("entry", "refused_when_model_less"),
+    [
+        pytest.param(DjangoModelPermission, True, id="bare"),
+        pytest.param(_InheritingModelPermission, True, id="inheriting-subclass"),
+        pytest.param(_OverridingModelPermission, False, id="overriding-subclass"),
+    ],
+)
+def test_validate_permission_classes_model_less_refuses_an_unoverridden_model_permission(
+    entry: type[DjangoModelPermission],
+    *,
+    refused_when_model_less: bool,
+    model_less: bool,
+) -> None:
+    """``model_less=True`` refuses a ``DjangoModelPermission`` that keeps the base hook.
+
+    That hook reads the mutation's model, which a model-less surface never has; a subclass
+    overriding ``has_permission`` is admitted, and a model-backed surface admits all three.
+    """
+    site = "Probe.Meta.permission_classes"
+    if model_less and refused_when_model_less:
+        with pytest.raises(
+            ConfigurationError,
+            match=(
+                rf"^Probe\.Meta\.permission_classes includes {entry.__name__}, a "
+                r"DjangoModelPermission that does not override has_permission; it requires a "
+                r"model and this surface has none\. Override has_permission without calling the "
+                r"base hook, omit permission_classes for this surface's default, or set \[\] to allow any\.$"
+            ),
+        ):
+            _validate_permission_classes(site, [entry], model_less=model_less)
+    else:
+        assert _validate_permission_classes(site, [entry], model_less=model_less) == (entry,)
 
 
 @pytest.mark.parametrize(
@@ -514,15 +572,15 @@ def test_validate_permission_classes_refuses_a_text_atom_as_a_sequence(value: ob
     """
     with pytest.raises(
         ConfigurationError,
-        match=r"Probe\.Meta\.permission_classes must be a sequence of permission classes",
+        match=r"^Probe\.Meta\.permission_classes must be a sequence of permission classes",
     ):
-        _validate_permission_classes("Probe", value)
+        _validate_permission_classes("Probe.Meta.permission_classes", value)
 
 
 def test_validate_permission_classes_reads_a_simple_lazy_list_as_the_list() -> None:
     """A ``SimpleLazyObject`` over a list of classes is that list."""
     assert _validate_permission_classes(
-        "Probe",
+        "Probe.Meta.permission_classes",
         SimpleLazyObject(lambda: [DjangoModelPermission]),
     ) == (DjangoModelPermission,)
 

@@ -335,6 +335,47 @@ def test_generated_connection_name_uses_graphql_type_name_not_python_name() -> N
     assert "PublicItemEdge" in sdl
 
 
+@pytest.mark.parametrize("total_count", [None, True], ids=["bare", "total_count"])
+def test_generated_connection_name_keeps_an_underscore_in_meta_name(
+    *,
+    total_count: bool | None,
+) -> None:
+    """A ``Meta.name`` carrying an underscore publishes ``<Name>Connection`` verbatim.
+
+    Strawberry names a type given no ``name=`` ``to_camel_case(__name__)``, which
+    re-cases ``Cat_NodeConnection`` to ``CatNodeconnection``; the generator pins
+    ``name=`` so the SDL carries the spec-030 ``<TypeName>Connection`` beside the
+    ``<TypeName>Edge`` Strawberry already names from the node's GraphQL name.
+    """
+    node_type = _make_node_type("Cat_Node", total_count=total_count)
+    sdl = _schema_for(node_type).as_str()
+
+    assert "type Cat_NodeConnection " in sdl
+    assert "type Cat_NodeEdge " in sdl
+    assert "CatNodeconnection" not in sdl
+
+
+def test_generated_connection_name_follows_an_unnamed_underscore_class() -> None:
+    """An unnamed ``Cat_Node`` publishes ``CatNode``, and its connection ``CatNodeConnection``.
+
+    Strawberry re-cases an unnamed class's ``__name__``; the connection name is
+    derived from the same published name, not the raw class name, so node, edge
+    and connection agree.
+    """
+    meta = type(
+        "Meta",
+        (),
+        {"model": Category, "fields": ("id", "name"), "interfaces": (relay.Node,)},
+    )
+    node_type = declare_django_type("Cat_Node", {"Meta": meta})
+    sdl = _schema_for(node_type).as_str()
+
+    assert "type CatNode implements Node " in sdl
+    assert "type CatNodeEdge " in sdl
+    assert "type CatNodeConnection " in sdl
+    assert "Cat_Node" not in sdl
+
+
 def test_connection_type_for_returns_concrete_subclass_without_opt_in() -> None:
     """A non-opted Relay-Node type yields a generated concrete subclass without ``total_count``.
 
@@ -588,17 +629,6 @@ def test_connection_field_requires_djangotype_subclass() -> None:
 
     with pytest.raises(ConfigurationError, match="requires a DjangoType subclass"):
         DjangoConnectionField(Plain)
-
-
-def test_connection_field_requires_own_class_definition() -> None:
-    """A subclass without its own ``Meta`` (inherited definition) is rejected."""
-    parent = _make_sidecar_node_type("OwnClassParent")
-
-    class Child(parent):
-        pass
-
-    with pytest.raises(ConfigurationError, match="not a registered DjangoType"):
-        DjangoConnectionField(Child)
 
 
 def test_connection_field_rejects_non_callable_resolver() -> None:

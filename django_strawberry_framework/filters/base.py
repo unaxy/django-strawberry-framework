@@ -13,7 +13,8 @@ five parity-floor primitives (spec-027 Decision 4):
   `strawberry.relay.GlobalID.from_id(value)` per spec-027 Decision 4.
 - `RelationPkFilter` / `RelationPkMultipleFilter`: their raw-primary-key
   siblings for a relation key whose target is not a Relay node (or has no
-  `DjangoType`), typed and coerced through `relation_identity_column`.
+  `DjangoType`), typed and coerced through the column their predicate compares
+  (`_compared_columns`).
 - `EnumChoiceFilter` / `EnumLookupFilter`: the generated filters of a choice
   column, `exact` and every other single-value lookup on a text choice column.
   Each applies every member of the column's choice enum as a value, sent as an
@@ -36,14 +37,15 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import cache
 from typing import TYPE_CHECKING, NamedTuple, TypeVar, final
 
-from django.core.exceptions import ValidationError
+from django.core.exceptions import FieldError, ValidationError
 from django.core.files.uploadedfile import UploadedFile
 from django.db import models
 from django.db.models.constants import LOOKUP_SEP
 from django.db.models.options import Options
+from django.db.models.sql import Query
 from django.forms import (
     CharField,
     Field,
@@ -74,6 +76,7 @@ from strawberry import relay
 from typing_extensions import TypedDict, Unpack, override
 
 from django_strawberry_framework.exceptions import ConfigurationError, PathResolutionError
+from django_strawberry_framework.registry import registry
 from django_strawberry_framework.relay import _coerce_pk_or_none, _node_id_slot
 from django_strawberry_framework.sets_mixins import (
     LazyRelatedClassMixin as LazyRelatedClassMixin,  # noqa: PLC0414 - kept re-export path
@@ -85,12 +88,13 @@ from django_strawberry_framework.types.definition import DjangoTypeDefinition, _
 # ``types/relay.py`` module-top imports are stdlib/django/strawberry/``..exceptions``
 # only - it reaches into ``filters`` / ``registry`` solely via in-function imports -
 # so a module-top ``filters/base.py -> types/relay.py`` import does not close a load
-# cycle (spec-031). These are the single source of truth for the
+# cycle. These are the single source of truth for the
 # strategy->payload-shape mapping shared with the encoder and the decoder.
 from django_strawberry_framework.types.relay import (
     MODEL_LABEL_STRATEGIES,
     TYPE_NAME_STRATEGIES,
     implements_relay_node,
+    model_for_label_slot,
     node_definition_for_published_name,
     published_node_type_name,
 )
@@ -114,15 +118,13 @@ from django_strawberry_framework.utils.permissions import set_bound_definition
 from django_strawberry_framework.utils.querysets import (
     base_queryset,
     coerce_field_value_or_none,
+    lookup_target_fields,
     truncates_to_integer,
 )
 from django_strawberry_framework.utils.relations import (
     _classify_path_cached,
     is_model_class,
-    m2m_through_link_fields,
-    non_pk_forward_link,
-    relation_kind,
-    relation_link,
+    relation_bool,
     stored_value_column,
     stored_value_link,
 )
@@ -349,8 +351,9 @@ def _materialize_list_shaped_values(value: object, *, message: str, code: str) -
 # off the pk, a many-to-many whose through foreign key onto the target has a
 # ``to_field``). The raw-pk siblings (``RelationPkFilter`` /
 # ``RelationPkMultipleFilter``) carry the same flag, because their value is the
-# target's primary key too. ``filter_for_field`` stamps the flag via
-# ``_relation_uses_non_pk_to_field``; marked filters read it through
+# target's primary key too. ``filters/sets.py::FilterSet.filter_for_field`` stamps the
+# flag when ``utils/relations.py::non_pk_forward_link`` answers a link for the relation's
+# link onto the target; marked filters read it through
 # ``_marked_pk_field_name`` and DERIVE the pk-qualified path
 # ``f"{self.field_name}__pk"`` at filter time from the LIVE ``field_name``. Storing
 # a boolean flag (never a frozen absolute path) is what makes the marker immune to
@@ -366,53 +369,6 @@ def _materialize_list_shaped_values(value: object, *, message: str, code: str) -
 # whose target's id is another column (a consumer ``relay.NodeID[...]``) compiles
 # on that column and never reads the flag (``_globalid_predicate_path``).
 _GLOBALID_RELATION_PK_ATTR = "_dst_globalid_relation_pk"
-
-
-def _relation_uses_non_pk_to_field(model_field: object) -> bool:
-    """Return True iff ``model_field``'s link onto the leaf's target model reads non-pk columns.
-
-    A ``ForeignKey``/``OneToOneField`` declared with ``to_field="<col>"``, or a
-    ``ForeignObject`` whose ``to_fields`` are anything but the target's primary
-    key, stores and joins on those target columns, which are NOT the target's
-    primary key. A many-to-many (forward ``ManyToManyField`` or reverse
-    ``ManyToManyRel``) joins its target through the through table's foreign key
-    onto that target, so a ``to_field`` on that foreign key does the same. A raw
-    key, and a Relay GlobalID of a target whose id is its primary key, carry the
-    target's PK, so ``filter(<relation>=<node_id>)`` would compare the PK value
-    against those link columns and return wrong rows (Django's own
-    ``filter(<m2m>=<value>)`` compares the through foreign key's ``to_field``); the
-    relation filter must qualify with ``__pk`` in exactly this case.
-
-    A forward single relation's target columns come from
-    ``utils/relations.py::relation_link`` (a ``ForeignObject``'s ``attname`` /
-    ``column`` name no column, so the target cannot be read off the relation
-    itself); a many-to-many asks ``utils/relations.py::non_pk_forward_link`` of the
-    through table's foreign key onto the leaf's target, which
-    ``utils/relations.py::m2m_through_link_fields`` resolves for either side
-    (``relation_link`` answers the foreign key onto the SOURCE, a ``to_field`` on
-    which the leaf never compares). False for everything else -
-    non-relations, reverse foreign keys and one-to-ones (their link compares the
-    target's own primary key), a ``GenericForeignKey`` (no link pairs), and a link
-    whose targets are exactly the target's primary key (an ordinary FK-to-pk or
-    many-to-many, a ``ForeignObject`` over every ``CompositePrimaryKey`` member) -
-    so every other GlobalID relation predicate keeps its current shape unchanged.
-    """
-    try:
-        kind = relation_kind(model_field)
-    except ConfigurationError:
-        return False
-    if kind == "forward_single":
-        targets = relation_link(model_field).targets
-    elif kind == "many":
-        _source_link, target_link = m2m_through_link_fields(model_field)
-        return non_pk_forward_link(target_link) is not None
-    else:
-        return False
-    if not targets:
-        return False
-    related_model = getattr(model_field, "related_model", None)
-    target_pk_fields = getattr(truth.static_attr(related_model, "_meta", None), "pk_fields", None)
-    return list(targets) != list(target_pk_fields or ())
 
 
 def _marked_pk_field_name(filter_instance: Filter) -> str | None:
@@ -477,22 +433,11 @@ def _bound_model_field(filter_instance: Filter) -> ModelField | None:
 def _bound_value_field(filter_instance: Filter) -> ModelField | None:
     """Return the field each value a per-request filter applies is a value of.
 
-    The column ``_bound_model_field`` answers, read through the transforms the filter's
-    ``lookup_expr`` carries ahead of its lookup: a generated ``<column>__year__in`` leaf's
-    members are values of the ``year`` transform's ``IntegerField`` output, never of the
-    ``DateTimeField`` column. The output is django-filter's own answer
-    (``_lookup_value_field``), the field it chose the leaf's filter class off. A lookup
-    carrying no transform, a path naming no model field, or a ``lookup_expr`` that walk
-    cannot read as the column's transforms (a declared one continuing the path across a
-    relation, ``field_name="shelf", lookup_expr="topic__icontains"``, which the filter's
-    own ``filter`` hands Django whole) answers the column.
+    ``_filterset_value_field`` over the filterset django-filter's
+    ``BaseFilterSet.__init__`` stamps as ``filter_.parent``.
     """
-    column = _bound_model_field(filter_instance)
-    lookup_expr = filter_instance.lookup_expr
-    if not is_concrete_field(column) or LOOKUP_SEP not in lookup_expr:
-        return column
-    output_field = _lookup_value_field(column, lookup_expr)
-    return column if output_field is None else output_field
+    parent: BaseFilterSet | None = getattr(filter_instance, "parent", None)
+    return _filterset_value_field(parent, filter_instance)
 
 
 def _reads_integer_transform(filter_instance: Filter) -> bool:
@@ -510,15 +455,18 @@ def _reads_integer_transform(filter_instance: Filter) -> bool:
     )
 
 
-@lru_cache(maxsize=1024)
+@cache
 def _lookup_value_field(column: ConcreteField, lookup_expr: str) -> ModelField | None:
     """Return the output field of the transforms ``lookup_expr`` applies to ``column``.
 
     ``django_filters.utils.resolve_field``, the walk ``BaseFilterSet.filter_for_field``
     selects a generated leaf's filter class by; it builds a query per call, so the answer
-    is kept per ``(column, lookup_expr)``, both fixed when the FilterSet is defined.
-    ``None`` when that walk refuses the expression (upstream's ``FieldLookupError``): a
-    name that is no transform or lookup of the column, as a relation hop is not.
+    is kept per ``(column, lookup_expr)``, both fixed when the FilterSet is defined: every
+    key is kept, a set bounded by the columns and lookups the defined FilterSets name. No
+    entry is invalidated: Django registers lookups and transforms at startup, before any
+    FilterSet resolves one. ``None`` when that walk refuses the expression (upstream's
+    ``FieldLookupError``): a name that is no transform or lookup of the column, as a
+    relation hop is not.
     """
     try:
         output_field, _lookup_name = resolve_field(column, lookup_expr)
@@ -579,12 +527,14 @@ def _filterset_resolved_field(
     FilterSet used before Django's app registry is populated), surfaced rather than read
     as an unknown field.
     """
-    # django-filter's metaclass stores ``_meta = FilterSetOptions(...)`` on every filterset.
-    meta = optional_instance(truth.static_attr(filterset, "_meta", None), FilterSetOptions)
-    model: type[models.Model] | None = getattr(meta, "model", None)
+    model = _filterset_model(filterset)
     if model is None:
         return None
-    field_path = _bound_field_name(filter_instance)
+    return _model_resolved_field(model, _bound_field_name(filter_instance))
+
+
+def _model_resolved_field(model: type[models.Model], field_path: str) -> _ResolvedField:
+    """Resolve ``field_path`` on ``model``: ``_filterset_resolved_field`` once the model is read."""
     try:
         field: ModelField = _classify_path_cached(model, field_path).terminal
     except PathResolutionError:
@@ -595,10 +545,100 @@ def _filterset_resolved_field(
     return _ResolvedField(column, LOOKUP_SEP.join((field_path, *links)))
 
 
+def _filterset_model(
+    filterset: type[BaseFilterSet] | BaseFilterSet | None,
+) -> type[models.Model] | None:
+    """Return ``filterset``'s ``Meta.model``; ``None`` for no filterset or one without a model."""
+    # django-filter's metaclass stores ``_meta = FilterSetOptions(...)`` on every filterset.
+    meta = optional_instance(truth.static_attr(filterset, "_meta", None), FilterSetOptions)
+    return getattr(meta, "model", None)
+
+
+def _filterset_value_field(
+    filterset: type[BaseFilterSet] | BaseFilterSet | None,
+    filter_instance: Filter,
+) -> ModelField | None:
+    """Return the field each value ``filter_instance`` compares on ``filterset``'s model is a value of.
+
+    The value a lookup compares on its right-hand side belongs to the output of the
+    transforms between the column and the lookup, wherever they are spelled: in the
+    ``lookup_expr`` (a generated ``<column>__year`` / ``year__gt`` / ``year__in`` or
+    ``date`` leaf, a declared ``lookup_expr="date"``), in the ``field_name``
+    (``occurred_at__year``, an ``ArrayField``'s index ``counts__0`` or slice
+    ``counts__0_2``), or both. The output is django-filter's own answer
+    (``_lookup_value_field``, the walk ``BaseFilterSet.filter_for_field`` selects a
+    generated leaf's filter class by): ``year`` / ``len`` an ``IntegerField``, ``date`` a
+    ``DateField``, an index the array's ``base_field``, a slice the array. A lookup
+    applied to the column itself (``exact``, ``in``, ``isnull``, a text pattern such as
+    ``icontains``, an ``ArrayField``'s ``contains``) answers the column.
+
+    A ``field_name`` naming a model field is resolved by ``_filterset_resolved_field``
+    (``pk`` read as the column its key stores). One naming none is split as
+    ``Query.build_filter`` splits a filter argument (``Query.solve_lookup_type``), its
+    column the one the field part names (``utils/querysets.py::lookup_target_fields``)
+    and its transforms walked ahead of the ``lookup_expr``. ``None`` for a filterset with
+    no model, a path Django refuses (a name naming nothing, a ``FilteredRelation`` alias
+    only the queryset a filter runs on holds), or one whose remainder is no transform of
+    the column its field part reaches (a field part ending on a relation reaches its key,
+    so ``tag__year`` and a queryset annotation past a relation, ``series__handle``, read
+    none). A field the path names answers itself where the walk reads no transform: a
+    relation, or a ``lookup_expr`` that continues the path across a relation
+    (``field_name="shelf", lookup_expr="topic__icontains"``, which the filter's own
+    ``filter`` hands Django whole). A ``method=`` filter answers its model field: its own
+    method, not a lookup, receives the value, so it is published and cleaned by the column.
+    """
+    if read_attr(filter_instance, "method", None) is not None:
+        return _filterset_model_field(filterset, filter_instance)
+    model = _filterset_model(filterset)
+    if model is None:
+        return None
+    return _model_value_field(
+        model,
+        _bound_field_name(filter_instance),
+        filter_instance.lookup_expr,
+    )
+
+
+@cache
+def _model_value_field(
+    model: type[models.Model],
+    field_path: str,
+    lookup_expr: str,
+) -> ModelField | None:
+    """Return ``_filterset_value_field``'s answer for ``field_path`` and ``lookup_expr`` on ``model``.
+
+    The answer depends on the three keys alone (a fresh ``Query`` holds no annotation),
+    each fixed when the FilterSet is defined, so it is kept for every key, a set bounded
+    by the declared and generated filters: the per-request filter reads it on every form
+    build. A path naming no field is split as ``Query.build_filter`` splits it.
+    """
+    column = _model_resolved_field(model, field_path).field
+    if column is None:
+        query = Query(model)
+        try:
+            transforms, field_parts, _expression = query.solve_lookup_type(field_path)
+        except FieldError:
+            return None
+        # The field part is the one Django's split just walked, so it names a column.
+        path_column = require(
+            lookup_target_fields(query, LOOKUP_SEP.join(field_parts))[0],
+            is_concrete_field,
+        )
+        return _lookup_value_field(path_column, LOOKUP_SEP.join((*transforms, lookup_expr)))
+    if not is_concrete_field(column):
+        return column
+    output_field = _lookup_value_field(column, lookup_expr)
+    return column if output_field is None else output_field
+
+
 def _column_form_field(filter_instance: Filter, *, element: bool = False) -> Field | None:
     """Return the form field that cleans one value of a bound filter's column for a comparison.
 
-    The field is the one django-filter's own ``gte`` filter for the column builds
+    The column is the field each value the filter applies is a value of
+    (``_bound_value_field``): the column itself, or the output of the transforms between
+    it and the lookup (``year``'s ``IntegerField``, ``date``'s ``DateField``, an
+    ``ArrayField`` index's ``base_field``), so a value is cleaned as the type it is
+    published as. The field is the one django-filter's own ``gte`` filter for the column builds
     (``FilterSet._upstream_filter_for_lookup``: a ``NumberFilter``'s ``DecimalField`` for a
     decimal or integer column, a ``DateTimeFilter``'s ``DateTimeField`` for a datetime one,
     a ``CharFilter``'s ``CharField`` for text, ...), the owner of what one scalar value of
@@ -615,7 +655,7 @@ def _column_form_field(filter_instance: Filter, *, element: bool = False) -> Fie
     other django-filter ``FilterSet`` its own ``filter_for_lookup``, a consumer override
     honoured as its ``FILTER_DEFAULTS`` and ``Meta.filter_overrides`` are. ``None`` for a
     filter bound to no ``FilterSet`` (a class-level declaration, a standalone filter), a
-    path naming no model field, a relation, or a column django-filter builds no filter
+    path resolving to no column, a relation, or a column django-filter builds no filter
     for. A relation's form field is django-filter's
     ``ModelChoiceField``, which looks every value up in the target's default manager: a
     key no row holds would answer "Select a valid choice" where one the target's
@@ -628,7 +668,7 @@ def _column_form_field(filter_instance: Filter, *, element: bool = False) -> Fie
     parent = read_attr(filter_instance, "parent", None)
     if not isinstance(parent, BaseFilterSet):
         return None
-    model_field = _bound_model_field(filter_instance)
+    model_field = _bound_value_field(filter_instance)
     if model_field is None:
         return None
     if element:
@@ -1151,7 +1191,9 @@ class RangeFilter(_ColumnCleanedFilter):
         A range input with one bound left out (or ``null``) reaches here as ``[start, None]`` /
         ``[None, end]``. The declared ``range`` lookup would compile it to ``BETWEEN x AND NULL``,
         which matches no row, so the lone bound applies on its own through `_apply_lookups`
-        (``distinct`` and ``exclude`` honoured). ``[None, None]`` returns ``qs`` unchanged. Two
+        (``distinct`` and ``exclude`` honoured), through the transforms the ``lookup_expr``
+        carries ahead of ``range`` (a ``year__range`` bound is a ``year__gte`` / ``year__lte``).
+        ``[None, None]`` returns ``qs`` unchanged. Two
         bounds of a ``range`` over an integer column apply as ``gte`` + ``lte`` in one
         predicate (``IntegerRangeFilter.filter``), so a bound past the column's range never
         reaches the backend; any other two-bound range keeps the declared lookup. A lone bound
@@ -1167,11 +1209,14 @@ class RangeFilter(_ColumnCleanedFilter):
         if start is None and end is None:
             return qs
         resolved = _bound_resolved_field(self)
-        path = self.field_name if resolved is None else resolved.path
+        path = _bound_field_name(self) if resolved is None else resolved.path
+        # A lone bound compares what the range compares: the transforms ahead of its lookup
+        # (``year__range``'s ``year``) stay on the path.
+        bound_path = LOOKUP_SEP.join((path, *self.lookup_expr.split(LOOKUP_SEP)[:-1]))
         if end is None:
-            return _apply_lookups(self, qs, {f"{path}__gte": start})
+            return _apply_lookups(self, qs, {f"{bound_path}__gte": start})
         if start is None:
-            return _apply_lookups(self, qs, {f"{path}__lte": end})
+            return _apply_lookups(self, qs, {f"{bound_path}__lte": end})
         if self.lookup_expr == "range" and resolved is not None:
             if isinstance(resolved.field, models.IntegerField):
                 return _apply_lookups(self, qs, {f"{path}__gte": start, f"{path}__lte": end})
@@ -1507,7 +1552,15 @@ def _globalid_target(filter_instance: Filter) -> _GlobalIDTarget | None:
     the finalizer's phase 2.5 wires, spec-027 #"Bind the owner."), or the
     definition an undeclared hop's face carries, and resolves the LIVE
     ``field_name`` (a leaf ``_expand_related_filter`` rebased resolves its
-    rebased path). Two routing branches:
+    rebased path). Rows no definition answers for resolve from their model once
+    the registry is stable (``registry.is_finalized()``): an unbound set instance (a
+    ``RelatedFilter`` target no ``DjangoType`` wires, a subclass of a wired set
+    included) from its model's registry primary (``registry.get``), the type its
+    relation leaves are generated from, for the relation branch only (its own key
+    keeps the upstream scalar shape, so it is never validated as that primary's
+    GlobalID); an unbound set over a model no type exposes, and an undeclared hop's
+    face into one, walk from that model (``_resolve_globalid_target``'s
+    ``start_model``). Two routing branches:
 
     1. **Own-PK branch.** When ``filter_instance.field_name`` matches the
        owning model's PK name (``_meta.pk.name`` or ``"pk"``) and that PK is
@@ -1522,15 +1575,18 @@ def _globalid_target(filter_instance: Filter) -> _GlobalIDTarget | None:
        filter names like ``"genres__id"`` (Django ``__`` source paths per
        spec-027 #"rebuild ORM paths"); the relevant definition is the
        target ``DjangoType`` (spec-027
-       #"consult the bound owner's `related_target_for(field_name)`").
+       #"the relation target (`owner_definition.related_target_for(field_name)`)").
 
     Returns the ``_GlobalIDTarget`` (definition, row path from the walk, and the
     off-pk id slot ``_off_pk_id_slot`` reads), resolved once per ``filter()``
-    call and threaded through every element of a list. Returns ``None`` when no
-    owner is bound (unit-test contexts) or when the lookup cannot resolve a
-    target; the filter then decodes the GlobalID without type-name validation
-    (the node-id-only fallback, spec-031 Decision 13) and compiles on its own
-    ``field_name``. The resolution of WHICH definition (own-PK vs relation)
+    call and threaded through every element of a list. Returns ``None`` when
+    nothing resolves a definition (no ``parent`` or no model, an unbound set
+    before the registry is finalized), for an unbound set's own key, or when
+    the lookup cannot resolve a target; the filter then decodes the GlobalID
+    without type-name validation
+    (the node-id-only fallback, spec-031 Decision 13; a relation's node id is still
+    coerced through the column its path names, ``_unresolved_target_node_id``) and compiles on
+    its own ``field_name``. The resolution of WHICH definition (own-PK vs relation)
     stays single-sited in ``_resolve_globalid_target`` so the strategy-aware
     acceptance check in ``_decode_and_validate_global_id`` consumes a single
     definition (spec-031 Decision 13).
@@ -1540,18 +1596,33 @@ def _globalid_target(filter_instance: Filter) -> _GlobalIDTarget | None:
     # definition its rows answer for on itself; a filter set instance answers for its
     # class's own binding.
     face = truth.instance_dict(parent) or {}
-    owner = (
-        optional_instance(face["_owner_definition"], DjangoTypeDefinition)
-        if "_owner_definition" in face
-        else set_bound_definition(truth.class_of(parent))
-    )
+    relation_only = False
+    if "_owner_definition" in face:
+        owner = optional_instance(face["_owner_definition"], DjangoTypeDefinition)
+    else:
+        owner = set_bound_definition(truth.class_of(parent))
+        relation_only = owner is None
+    start_model: type[models.Model] | None = None
     if owner is None:
-        return None
+        # Rows no definition answers for (an unbound set, an undeclared hop into a model no
+        # type exposes) still carry relation leaves generated from the registry primary of
+        # their relation's model, so they validate from that primary once the registry is
+        # stable; an unbound set's own key stays the upstream scalar shape, never a
+        # GlobalID of its model's primary.
+        meta = optional_instance(truth.static_attr(parent, "_meta", None), FilterSetOptions)
+        model = getattr(meta, "model", None)
+        if not registry.is_finalized() or not is_model_class(model):
+            return None
+        start_model = model
+        if relation_only:
+            owner = registry.get_definition(registry.get(model))
     field_name: str | None = getattr(filter_instance, "field_name", None)
-    resolved = _resolve_globalid_target(owner, field_name)
+    resolved = _resolve_globalid_target(owner, field_name, start_model=start_model)
     if resolved is None:
         return None
     definition, row_path = resolved
+    if relation_only and not row_path:
+        return None
     return _GlobalIDTarget(definition, row_path, _off_pk_id_slot(definition))
 
 
@@ -1580,17 +1651,25 @@ def resolve_globalid_target_definition(
     Returns the owner itself for the own-PK branch, the terminal related target's
     definition for relation paths (including multi-hop relations like
     ``"shelf__branch__id"`` and paths through a relation primary key like
-    ``"pk__card"``), or ``None`` when any segment along the path does not
-    resolve to a registered target (a scalar segment before the end, an unknown
-    field, an unregistered target model).
+    ``"pk__card"``), or ``None`` when the path does not end on a registered
+    target (a scalar segment before the end, an unknown field, a terminal model no
+    ``DjangoType`` exposes). A hop whose model no type exposes does not end the
+    walk: a relation leaf is generated from its own relation's model, whatever the
+    hops before it expose. The audit calls this once every type is collected and
+    its strategy stamped, before ``registry.is_finalized()`` flips, so the walk reads
+    the registry as stable (``stable=True``) and resolves the target the request-time
+    walk resolves once the registry is finalized.
     """
-    resolved = _resolve_globalid_target(owner, field_name)
+    resolved = _resolve_globalid_target(owner, field_name, stable=True)
     return None if resolved is None else resolved[0]
 
 
 def _resolve_globalid_target(
-    owner: DjangoTypeDefinition,
+    owner: DjangoTypeDefinition | None,
     field_name: str | None,
+    *,
+    start_model: type[models.Model] | None = None,
+    stable: bool = False,
 ) -> tuple[DjangoTypeDefinition, str] | None:
     """Resolve ``field_name`` from ``owner`` to ``(target definition, row path)``.
 
@@ -1599,16 +1678,28 @@ def _resolve_globalid_target(
     reaches the target's rows, every segment before a terminal scalar primary
     key (``""`` for the owner's own id), or the whole path when it ends on a
     relation. It comes from the walk, never from trimming ``field_name``: a
-    relation may be named like the target's primary key.
+    relation may be named like the target's primary key. A hop into a model no
+    ``DjangoType`` exposes continues on that model, so the target is the terminal
+    relation's ``registry.get`` exactly as generation types the leaf (a
+    ``shelf__branch`` key with no ``Shelf`` type validates against ``Branch``'s);
+    a primary key ending on such a model resolves nothing. With no ``owner`` the
+    walk starts on ``start_model`` (rows no definition answers for). Continuing past a
+    hop no definition resolves waits for a stable registry: ``stable`` (the
+    finalizer's build-time audit, which runs once every type is collected and its
+    strategy stamped, before ``registry.is_finalized()`` flips) or a finalized
+    registry; before either the walk ends at that hop, so a filter set applied before
+    finalization reads such a leaf node-id-only.
     """
     if not isinstance(field_name, str) or not field_name:
         return None
 
-    current_def = owner
+    current_def: DjangoTypeDefinition | None = owner
+    current_model = owner.model if owner is not None else start_model
+    if current_model is None:
+        return None
     segments = field_name.split("__")
 
     for i, raw_segment in enumerate(segments):
-        current_model = read_attr(current_def, "model", None)
         pk_field = read_attr(truth.static_attr(current_model, "_meta", None), "pk", None)
         pk_name = read_attr(pk_field, "name", None)
         segment = raw_segment
@@ -1619,15 +1710,32 @@ def _resolve_globalid_target(
         # primary key (``OneToOneField(primary_key=True)``, an MTI ``<parent>_ptr``)
         # is a relation like any other and resolves to the definition it points at.
         if segment == pk_name and not getattr(pk_field, "is_relation", False):
-            if i == len(segments) - 1:
+            if i == len(segments) - 1 and current_def is not None:
                 return current_def, "__".join(segments[:i])
             return None
 
-        target = current_def.related_target_for(segment)
-        if target is None:
+        target = None if current_def is None else current_def.related_target_for(segment)
+        if target is not None:
+            current_def, _model_field = target
+            current_model = current_def.model
+            continue
+        # A hop whose model no ``DjangoType`` exposes still leads on: generation types a
+        # relation leaf from its own relation's model (``registry.get``), whatever the
+        # hops before it expose, so the walk continues on the relation's model once the
+        # registry is stable: ``stable`` from the finalizer's audit, which runs after every
+        # type is collected, else ``registry.is_finalized()``, the signal
+        # ``DjangoTypeDefinition.related_target_for`` caches on.
+        if not (stable or registry.is_finalized()):
             return None
-        current_def, _model_field = target
+        field = get_model_field(current_model, segment)
+        related_model = read_attr(field, "related_model", None)
+        if not relation_bool(field, "is_relation") or not is_model_class(related_model):
+            return None
+        current_model = related_model
+        current_def = registry.get_definition(registry.get(related_model))
 
+    if current_def is None:
+        return None
     return current_def, field_name
 
 
@@ -1654,7 +1762,8 @@ def _accepted_globalid_type_names(
       the target (no id of this schema can name it, so only its own spelling
       remains).
     - ``type+model`` -> either the model label or that type name.
-    - ``definition is None`` (unbound owner / unresolvable target) -> ``None``
+    - ``definition is None`` (no owner, an unbound set's own key, or no target
+      type) -> ``None``
       (node-id-only fallback; the ``type_name`` guard is skipped).
 
     ``_decode_and_validate_global_id`` calls this only after it has fail-closed
@@ -1684,7 +1793,9 @@ def _slot_names_target(
     """Return whether a decoded ``type_name`` slot names the filter target ``definition``.
 
     One authority with decode: a model-label slot (a dot) names the target when
-    its strategy emits model labels and the label is the target model's; a
+    its strategy emits model labels and the slot resolves to the target model through
+    ``types/relay.py::model_for_label_slot`` - the reading decode runs, so the app
+    label is exact and the model name case-insensitive; a
     type-name slot names it when the strategy decodes type names and the slot
     resolves to the target through ``types/relay.py::node_definition_for_published_name``
     - the same resolution ``node(id:)`` runs under the executing ``schema`` - so a
@@ -1696,7 +1807,8 @@ def _slot_names_target(
     strategy = definition.effective_globalid_strategy
     if "." in type_name:
         return (
-            strategy in MODEL_LABEL_STRATEGIES and type_name == definition.model._meta.label_lower
+            strategy in MODEL_LABEL_STRATEGIES
+            and model_for_label_slot(type_name) is definition.model
         )
     if strategy not in TYPE_NAME_STRATEGIES:
         return False
@@ -1756,14 +1868,14 @@ def _decode_and_validate_global_id(
     mismatch: filter expects <expected> but received <actual>")` when the
     decoded `type_name` does not name the target for the three framework
     strategies (spec-027 #"filter expects <expected> but received <actual>",
-    now strategy-aware per spec-031 Decision 13): `_slot_names_target` resolves a
+    strategy-aware, spec-031 Decision 13): `_slot_names_target` resolves a
     type-name slot through the executing schema's published names exactly as
     decode does, and `<expected>` is `_accepted_globalid_type_names`. A received
     slot equal to an expected spelling that this schema publishes for another type
-    reads `... but received <actual>, which this schema publishes for another type`. An unbound owner or an
-    unresolvable target (`definition is None`) falls back to node-id-only (the
-    `type_name` guard is skipped). A target on a `callable` / `custom`
-    (encode-only) strategy, or a known target whose
+    reads `... but received <actual>, which this schema publishes for another type`. No resolvable
+    target (`definition is None`, ``_globalid_target``) skips the `type_name` guard (the
+    node-id-only fallback, coerced below when the filter names a model field). A
+    target on a `callable` / `custom` (encode-only) strategy, or a known target whose
     `effective_globalid_strategy` is `None` (an unfinalized / non-Relay
     lifecycle defect), is a fail-closed reject with a coded
     `GraphQLError(..., extensions={"code": "GLOBALID_UNVALIDATABLE"})` - the
@@ -1797,10 +1909,18 @@ def _decode_and_validate_global_id(
     and the column's storage domain are the filtered queryset's database ``alias``'s,
     and the column's own validators are not run, so an id they would refuse still matches
     a row that holds it.
-    Unbound unit-test filters retain the node-id-only fallback because they have
-    no model field against which to coerce. ``target`` threads the filter's
-    ``_globalid_target`` through a list so it resolves once per call; when
-    omitted it is resolved here.
+    A filter with no resolvable target (no owner, an unbound set's own key, or a path
+    into a model no ``DjangoType`` resolves) skips the ``type_name`` guard; when its path names a model
+    field and its ``lookup_expr`` is a lookup that field registers, the node id is still
+    coerced through the column the predicate compares (``_unresolved_target_node_id``,
+    over ``_compared_columns``: a scalar column itself, the target's primary key or the
+    link's column for a relation), so an id that column cannot hold, and every id for a
+    relation linked by more than one column, answers ``GLOBALID_INVALID``. A filter
+    whose path names no model field (no FilterSet model, no field on it), or whose
+    ``lookup_expr`` continues the path or applies a transform, passes the decoded node
+    id through. ``target``
+    threads the filter's ``_globalid_target`` through a list so it resolves once per
+    call; when omitted it is resolved here.
     """
     if isinstance(value, relay.GlobalID):
         decoded = value
@@ -1808,16 +1928,8 @@ def _decode_and_validate_global_id(
         try:
             decoded = _global_id_from_filter_text(value)
         except ValueError as exc:
-            # A malformed GlobalID filter value (bad base64 / not a
-            # ``type_name:node_id`` payload) must surface as the uniform coded
-            # GraphQL error every OTHER decode site raises -
-            # ``types/relay.py::decode_global_id`` catches the same ``ValueError``
-            # superset and ``relay.py`` wraps it as ``GLOBALID_INVALID`` - rather
-            # than leaking Strawberry's raw ``GlobalIDValueError`` message
-            # ("Incorrect padding", "expected to contain only 2 items", a utf-8
-            # codec error) as an unhandled resolver exception. The wrong-``type_name``
-            # case below keeps its own (code-less) mismatch error; this is the
-            # malformed-payload sibling, mirroring the node-field contract.
+            # Malformed payload: ``ValueError`` is the superset
+            # ``types/relay.py::decode_global_id`` catches too.
             suffix = "" if index is None else f" at index {index}"
             raise GraphQLError(
                 f"Invalid GlobalID: {truth.render(value)} is not a valid GlobalID (malformed "
@@ -1830,13 +1942,7 @@ def _decode_and_validate_global_id(
     if definition is not None:
         strategy = definition.effective_globalid_strategy
         if strategy not in FRAMEWORK_GLOBALID_STRATEGIES:
-            # Fail closed: the target emits GlobalIDs a filter input cannot
-            # decode + validate. ``callable`` / ``custom`` are encode-only; a
-            # ``None`` strategy on a known definition is a lifecycle defect
-            # (the type was never finalized / is not Relay-shaped). Both are
-            # normally blocked at schema build by
-            # ``finalizer._audit_globalid_filter_strategies``; this backstop
-            # covers filtersets hand-built outside finalization.
+            # Fail closed: an encode-only or unfinalized target.
             suffix = "" if index is None else f" at index {index}"
             if strategy in ENCODE_ONLY_GLOBALID_STRATEGIES:
                 message = (
@@ -1889,13 +1995,7 @@ def _decode_and_validate_global_id(
             f"{expected} but received {decoded.type_name}{shadowed}{suffix}",
         )
     if decoded.node_id in EMPTY_VALUES:
-        # A well-typed GlobalID whose id part is empty decodes to ``""`` and clears
-        # decode + strategy + type-name validation, but an empty identifier is not a
-        # valid resource id. Accepting it would silently widen a restrictive filter
-        # (a scalar no-op, or a dropped list element turning ``{in: ["type:"]}`` into
-        # an unfiltered query), so reject it as the same class of bad input as a
-        # malformed payload -- the uniform coded GraphQL error shared with the
-        # node-refetch path -- naming the list index when present.
+        # Empty node id: accepting it would widen a restrictive filter.
         suffix = "" if index is None else f" at index {index}"
         raise GraphQLError(
             f"Invalid GlobalID: {truth.render(value)} decodes to an empty node id, which is not a "
@@ -1931,7 +2031,70 @@ def _decode_and_validate_global_id(
                 extensions=coded_error_extensions(GLOBALID_INVALID_ERROR_CODE),
             )
         return coerced_node_id
+    if target is None:
+        field = _bound_model_field(filter_instance)
+        if field is not None:
+            return _unresolved_target_node_id(
+                value,
+                decoded.node_id,
+                filter_instance,
+                field,
+                index=index,
+                alias=alias,
+            )
     return decoded.node_id
+
+
+def _unresolved_target_node_id(
+    value: object,
+    node_id: str,
+    filter_instance: Filter,
+    field: ModelField,
+    *,
+    index: int | None,
+    alias: str,
+) -> object:
+    """Coerce a node id a filter with no resolvable target type compares on ``field``.
+
+    A GlobalID filter whose path no ``DjangoType`` resolves (no owner, an unbound set's
+    own key, or a consumer-declared ``GlobalIDFilter(field_name="<relation>")`` /
+    ``GlobalIDFilter(field_name="<relation>__id")`` into an unregistered model) has no
+    type to validate the ``type_name`` against, but its predicate still compares the
+    node id on the columns ``_compared_columns`` reads off that field: the field itself
+    for a scalar column, the target's primary key for an ordinary relation, the link's
+    column for a ``ForeignObject`` off the pk or a many-to-many through a ``to_field``.
+    One column: the node id is coerced through it with ``coerce_field_value_or_none``,
+    the coercion the resolved path runs on its target's primary key, so an id that
+    column cannot hold answers ``GLOBALID_INVALID`` instead of the raw ``ValueError``
+    Django raises compiling the queryset. More than one (a multi-column link, a
+    composite primary key): no single node id can name a row, so every id answers
+    ``GLOBALID_INVALID`` too. A ``lookup_expr`` that is no lookup ``field`` registers
+    (one continuing the path, ``lookup_expr="code"``, or applying a transform) compares
+    another column, and a relation into a model that is not resolved has none; both pass
+    the node id through unchanged.
+    """
+    if field.get_lookup(filter_instance.lookup_expr) is None:
+        return node_id
+    columns = _compared_columns(filter_instance, field)
+    if columns is None:
+        return node_id
+    suffix = "" if index is None else f" at index {index}"
+    if len(columns) != 1:
+        raise GraphQLError(
+            f"Invalid GlobalID: {truth.render(value)} carries a node id, but "
+            f"{truth.kind(columns[0].model)} is linked by {len(columns)} columns no single "
+            f"node id can name{suffix}.",
+            extensions=coded_error_extensions(GLOBALID_INVALID_ERROR_CODE),
+        )
+    column = columns[0]
+    coerced = coerce_field_value_or_none(column, node_id, alias=alias)
+    if coerced is None:
+        raise GraphQLError(
+            f"Invalid GlobalID: {truth.render(value)} carries a node id that is not a valid "
+            f"{truth.kind(column.model)} key value{suffix}.",
+            extensions=coded_error_extensions(GLOBALID_INVALID_ERROR_CODE),
+        )
+    return coerced
 
 
 def _globalid_predicate_path(
@@ -2220,11 +2383,11 @@ def model_choice_identity_column(
     return _model_identity_column(model, filter_instance.extra.get("to_field_name"))
 
 
-def _raw_identity_column(
+def _compared_columns(
     filter_instance: Filter,
     field: ModelField | None,
-) -> ConcreteField | None:
-    """Return the column a raw relation identity compared on ``field`` is coerced through.
+) -> tuple[ConcreteField, ...] | None:
+    """Return the columns a raw identity compared on ``field`` meets, each the column it stores.
 
     ``field`` is what ``filter_instance``'s ORM path names (``_bound_model_field``). A
     key column compares the value it stores, so its identity is the column that value
@@ -2234,41 +2397,60 @@ def _raw_identity_column(
     own key and the target key column a to-many key leaf walking a visibility hop names
     on the hop's target rows (``filters/sets.py::FilterSet._leaf_chain``), a
     relation-valued primary key such as a one-to-one onto a non-pk ``to_field``
-    included. A relation compared as a relation (a reverse relation, a many-to-many, a
-    forward relation carrying the ``_GLOBALID_RELATION_PK_ATTR`` marker, which compiles
-    against ``<relation>__pk``) is the target's primary key
-    (``relation_identity_column``), ``None`` when that target is not a resolved model;
-    an unmarked forward key into an unresolved target raises the ``ValueError`` Django's
-    own query raises for it. ``None`` for a path naming no field.
+    included; an unmarked forward key into an unresolved target raises the
+    ``ValueError`` Django's own query raises for it.
+
+    A forward relation carrying the ``_GLOBALID_RELATION_PK_ATTR`` marker compiles
+    against ``<relation>__pk`` and meets the target's primary-key fields. Every other
+    relation compared as a relation (a ``ForeignObject``, a reverse relation, a
+    many-to-many) meets the target fields of the last join Django builds for it
+    (``path_infos[-1].target_fields``, Django's own answer): the target's primary
+    key for a reverse relation and an ordinary link, the link's column for a
+    ``ForeignObject`` off the pk and for a many-to-many whose through foreign key onto
+    the target has a ``to_field``, and every carrier's target for a multi-column link.
+    ``None`` for a path naming no field and for a relation whose target is not a
+    resolved model.
     """
     if field is None:
         return None
-    if field.is_relation and (
-        not isinstance(field, models.ForeignKey)
-        or getattr(filter_instance, _GLOBALID_RELATION_PK_ATTR, False)
+    marked = bool(getattr(filter_instance, _GLOBALID_RELATION_PK_ATTR, False))
+    if isinstance(field, models.ForeignKey) or not field.is_relation:
+        if field.is_relation and marked:
+            column = relation_identity_column(field)
+            return None if column is None else (column,)
+        column = stored_value_column(field)
+        return (column,) if isinstance(column, models.Field) else None
+    related = getattr(field, "related_model", None)
+    if not is_model_class(related) or not isinstance(
+        field,
+        (models.ForeignObject, models.ManyToManyField, models.ForeignObjectRel),
     ):
-        return relation_identity_column(field)
-    column = stored_value_column(field)
-    return column if isinstance(column, models.Field) else None
+        return None
+    targets = related._meta.pk_fields if marked else field.path_infos[-1].target_fields
+    return tuple(stored_value_column(target) for target in targets)
 
 
 def _coerce_relation_identity(filter_instance: Filter, value: object, alias: str) -> object:
     """Coerce one raw identity value through the target key column; ``None`` if it names no row.
 
-    The column is the one ``_raw_identity_column`` reads off the filter's ORM path, so a
+    The column is the one ``_compared_columns`` reads off the filter's ORM path, so a
     key leaf compared through its relation and one compared on the target's key column
     across a visibility hop coerce alike. A value the column cannot hold (one the
     queryset's database ``alias`` cannot bind, out of the column's range there, wrong
     shape) identifies no row, the same verdict ``_identifying_members`` gives an integer
     ``in`` member; the column's own validators are not run, so a key they would refuse
-    still matches a row that holds it. A filter whose path names no field
-    (``_bound_model_field``: no model to walk, or nothing on it) has no column and passes
-    the value through unchanged.
+    still matches a row that holds it. A relation linked by more than one column
+    (``_compared_columns``) has no single column one value can name, so every value
+    identifies no row. A filter whose path names no field (``_bound_model_field``: no
+    model to walk, or nothing on it) has no column and passes the value through
+    unchanged.
     """
-    column = _raw_identity_column(filter_instance, _bound_model_field(filter_instance))
-    if column is None:
+    columns = _compared_columns(filter_instance, _bound_model_field(filter_instance))
+    if columns is None:
         return value
-    return coerce_field_value_or_none(column, value, alias=alias)
+    if len(columns) != 1:
+        return None
+    return coerce_field_value_or_none(columns[0], value, alias=alias)
 
 
 @final
@@ -2306,7 +2488,8 @@ class RelationPkFilter(Filter):
     The non-Relay sibling of ``GlobalIDFilter``: ``FilterSet.filter_for_lookup`` selects
     it for ``exact`` on a single-valued relation (forward FK, one-to-one) when the target
     type is not a Relay node or no ``DjangoType`` exposes the target model. The input is
-    the target's primary key typed from its column (``relation_identity_column``). The
+    typed from the column its predicate compares (``_compared_columns``): the target's
+    primary key for a generated leaf, the link's column for a declared unmarked one. The
     form field is django-filter's plain ``Field``, never a ``ModelChoiceField``, so a key
     for a missing row and one ``get_queryset`` hides are indistinguishable: both reach the
     predicate and match by value.
@@ -2409,7 +2592,7 @@ class RelatedFilter(RelatedSetTargetMixin["FilterSet"], ModelChoiceFilter):
     -- raises ``ConfigurationError`` at the ``.filterset`` read. Without the
     gate the mis-wiring survives declaration, binding, and expansion and
     first detonates inside a consumer (``_expand_related_filter`` calling
-    ``target._filters_along(path, scope)``, or the BFS builder's ``set_input_type_name``)
+    ``target._filters_along(path, scope)``, or the BFS builder's ``target.type_name_for()``)
     as a raw ``AttributeError``, or -- for an OrderSet-shaped target --
     silently walks the ORDER family's fields through the filter input
     builder.
@@ -2466,8 +2649,8 @@ class RelatedFilter(RelatedSetTargetMixin["FilterSet"], ModelChoiceFilter):
             strict cross-owner mismatch detection runs later at
             finalize time in
             ``types/finalizer.py::_bind_filterset_owner`` (subpass 1 of
-            finalizer phase 2.5's ``_bind_filtersets`` umbrella's strict-equality
-            check), so a real divergent-owner reuse still surfaces a
+            finalizer phase 2.5's ``_bind_filtersets`` umbrella's multi-owner
+            axis checks), so a real divergent-owner reuse still surfaces a
             ``ConfigurationError`` with both owners named - just not at
             class-creation time.
 
@@ -2501,7 +2684,7 @@ class RelatedFilter(RelatedSetTargetMixin["FilterSet"], ModelChoiceFilter):
         permission traversal). Without the gate the mis-wiring survives
         declaration, binding, and expansion and first detonates inside a
         consumer (``target._filters_along(path, scope)`` or ``target._filter_table()``, or
-        the BFS builder's ``set_input_type_name``) as a raw ``AttributeError``, or -- for an
+        the BFS builder's ``target.type_name_for()``) as a raw ``AttributeError``, or -- for an
         OrderSet-shaped target -- silently walks the ORDER family's fields
         through the filter input builder. Mirrors the order twin's
         ``orders/base.py::RelatedOrder._validate_target``.

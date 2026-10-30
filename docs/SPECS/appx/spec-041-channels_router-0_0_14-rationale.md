@@ -129,8 +129,9 @@ Spec: [Decision 5][d5].
   its own.
 - **A literal floor inside the hint string, checked by a test that reads `pyproject.toml`.** A
   test that reads the metadata to check a string is a second place to maintain; interpolating
-  `CHANNELS_FLOOR` / `STRAWBERRY_FLOOR` from [`utils/imports.py`][utils-imports] removes the drift
-  entirely, leaving [`pyproject.toml`][pyproject] as the one other written copy.
+  `CHANNELS_FLOOR` / `STRAWBERRY_FLOOR` from [`utils/imports.py`][utils-imports] leaves the hint
+  nothing to drift from; a governance row gates each constant against its
+  [`pyproject.toml`][pyproject] row, and prose restatements are ungated.
 - **An unsynchronized class cache.** Two threads reaching for the symbol at once could build two
   router classes, and two class identities make `isinstance` lie; the module-global lock with a
   re-check inside it costs nothing after the first build and, being a module global, is dropped

@@ -34,7 +34,7 @@ sibling of ``_bind_filtersets`` / ``_bind_ordersets`` at the *placement* level
 The mutation ``Meta`` is its OWN validation namespace, disjoint from the
 ``DjangoType`` ``Meta`` (spec-036 Decision 12): this module defines its own
 allowed-key set and does NOT import / extend ``types/base.py``'s
-``ALLOWED_META_KEYS`` / ``DEFERRED_META_KEYS`` (which stay byte-unchanged).
+``ALLOWED_META_KEYS`` / ``DEFERRED_META_KEYS``.
 
 **No resolver, no ``DjangoMutationField``, no permission *enforcement* lands
 here.** Those live in ``resolvers.py`` + ``fields.py``. A ``DjangoMutation``
@@ -47,12 +47,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, ClassVar, TypeGuard, get_origin
 
 import strawberry
-from strawberry.types.base import StrawberryList, StrawberryObjectDefinition
+from strawberry.types.base import StrawberryObjectDefinition
 
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.registry import register_subsystem_clear, registry
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import read_attr, require, require_instance
+from django_strawberry_framework.utils._narrowing import require, require_instance
 from django_strawberry_framework.utils.inputs import (
     InputFieldSpec,
     get_or_store_shape_build,
@@ -60,6 +60,7 @@ from django_strawberry_framework.utils.inputs import (
     reject_unknown_meta_keys,
 )
 from django_strawberry_framework.utils.relations import is_model_class
+from django_strawberry_framework.utils.typing import peel_strawberry_containers
 from django_strawberry_framework.utils.write_values import relation_takes_global_id
 from django_strawberry_framework.write_mixins import (
     MODEL_BACKED_WRITE_META_KEYS,
@@ -100,7 +101,6 @@ if TYPE_CHECKING:
     from django.db import models
     from strawberry.types import Info
     from strawberry.types.base import WithStrawberryObjectDefinition
-    from strawberry.types.field import StrawberryField
 
     from django_strawberry_framework.types.base import DjangoType
     from django_strawberry_framework.write_mixins import DeclarationRegistry, _BoundDeclaration
@@ -511,24 +511,18 @@ class DjangoMutation(_ModelResolverSeamsBase, metaclass=DjangoMutationMetaclass)
 
         # Create / update materialize an input from the editable column set. Run the
         # SAME ``editable_input_fields`` walk the bind / generator use NOW so an
-        # unknown / non-editable name and an empty narrowing fail at class creation
-        # (the form flavor's posture via ``resolve_effective_form_fields``), not as a
-        # deferred finalize-time ``ConfigurationError`` after the class already
-        # registered. Delete is excluded above (it takes no input).
+        # unknown / non-editable name and an empty narrowing (the walk owns both
+        # refusals) fail at class creation (the form flavor's posture via
+        # ``resolve_effective_form_fields``), not as a deferred finalize-time
+        # ``ConfigurationError`` after the class already registered. Delete is
+        # excluded above (it takes no input).
         if operation != "delete":
-            selected = editable_input_fields(
+            _ = editable_input_fields(
                 model,
                 fields=fields,
                 exclude=exclude,
                 operation_kind=NON_DELETE_OPERATION_INPUT_KIND[operation],
             )
-            if not selected:
-                raise ConfigurationError(
-                    f"DjangoMutation {name}.Meta.fields / Meta.exclude narrowed the "
-                    f"editable column set to empty (or {truth.name(model)} declares no "
-                    f"editable columns). A {operation} mutation input must define at "
-                    "least one field.",
-                )
 
         # Reject consumer input overrides that the declared operation cannot use.
         # Delete has no input; create and update each read only their matching
@@ -631,7 +625,7 @@ class DjangoMutation(_ModelResolverSeamsBase, metaclass=DjangoMutationMetaclass)
         ``forms/inputs.py::form_input_type_name``.
 
         ``mutations/fields.py::_synthesized_mutation_signature`` consults this
-        seam (spec-038), so this is the single source for the model ``data:``
+        seam, so this is the single source for the model ``data:``
         lazy-ref name.
 
         A validated ``delete`` raises the typed ``ConfigurationError`` (never the
@@ -833,7 +827,7 @@ def _materialize_merged_input(
     operation_kind: str,
     consumer_input: type[WithStrawberryObjectDefinition],
 ) -> type[WithStrawberryObjectDefinition]:
-    """Merge a consumer ``input_class`` with the generated remainder (spec-010).
+    """Merge a consumer ``input_class`` with the generated remainder.
 
     The consumer-authored ``@strawberry.input`` declares only the field(s) it
     customizes (a custom scalar, validator, alias, description), using the
@@ -841,8 +835,8 @@ def _materialize_merged_input(
     expected``). Those python-attr names are passed to ``build_mutation_input`` as
     ``overrides`` so the generator emits every OTHER editable column and SKIPS the
     consumer-authored ones - the generated remainder. The two are combined by
-    **class inheritance** (``strawberry.input(type(name, (consumer, remainder),
-    {}))``): Strawberry collects the union of both bases' fields, the consumer base
+    **class inheritance** (``strawberry.input(type(name, (consumer, remainder), {}),
+    name=name)``): Strawberry collects the union of both bases' fields, the consumer base
     takes MRO precedence, and the consumer's field definitions are preserved
     EXACTLY (annotation, default / required-ness, ``name=`` alias, description,
     directives) rather than reconstructed from triples. Because ``overrides``
@@ -858,7 +852,10 @@ def _materialize_merged_input(
     ``_shape_build_cache`` (it is mutation-specific), and if two mutations resolve
     the same shape to two different representations they collide on that name and
     raise the ``ConfigurationError`` at ``materialize_mutation_input_class`` -
-    the same fail-loud the all-generated collision uses.
+    the same fail-loud the all-generated collision uses. The name is pinned with
+    ``name=`` because Strawberry re-cases a class ``__name__`` that carries an
+    underscore (a ``pascalize_token`` escape), so an unpinned shape would publish a
+    name its ledger entry does not hold, and two distinct shapes could re-case alike.
     """
     consumer_attrs = frozenset(
         field.python_name for field in consumer_input.__strawberry_definition__.fields
@@ -884,7 +881,10 @@ def _materialize_merged_input(
         overrides=consumer_attrs,
         shape=shape,
     )
-    merged = strawberry.input(type(shape.type_name, (consumer_input, remainder), {}))
+    merged = strawberry.input(
+        type(shape.type_name, (consumer_input, remainder), {}),
+        name=shape.type_name,
+    )
     materialize_mutation_input_class(shape.type_name, merged)
     return merged
 
@@ -965,7 +965,7 @@ def _validate_relation_override_types(
         if consumer_field is None:
             continue  # not overridden; the generated ID remainder is used.
         expected_depth = 1 if get_origin(annotation) is list else 0
-        consumer_depth, consumer_core = _strawberry_field_shape(consumer_field)
+        consumer_depth, consumer_core = peel_strawberry_containers(consumer_field.type)
         if consumer_core is not strawberry.ID or consumer_depth != expected_depth:
             expected = "list[strawberry.ID]" if expected_depth else "strawberry.ID"
             kind = "M2M" if expected_depth else "forward FK/OneToOne"
@@ -981,31 +981,6 @@ def _validate_relation_override_types(
                 "shape rejects every id as an invalid relation. "
                 f"Declare {python_attr!r} as {expected}.",
             )
-
-
-def _strawberry_field_shape(field: StrawberryField) -> tuple[int, object]:
-    """Return a consumer field's ``(list_depth, core_type)``, peeling Strawberry wrappers.
-
-    A consumer relation override resolves to nested ``StrawberryOptional`` /
-    ``StrawberryList`` wrappers around a core type: ``strawberry.ID | None`` is a
-    ``StrawberryOptional(ID)`` (depth 0), ``list[strawberry.ID]`` is a
-    ``StrawberryList(ID)`` (depth 1), ``list[list[strawberry.ID]]`` is depth 2.
-    Optional wrappers are nullability (ignored for the shape); each ``StrawberryList``
-    counts one level of list depth. Returning ``(depth, core)`` lets the shape-lock
-    compare BOTH the core identity (``is strawberry.ID``) and the list depth against
-    the generated relation annotation, so a wrong core (``int`` / ``relay.GlobalID``), a
-    scalar-for-M2M, a list-for-FK, or a nested list are all caught.
-    """
-    type_ = field.type
-    depth = 0
-    seen: set[int] = set()
-    while hasattr(type_, "of_type") and id(type_) not in seen:
-        seen.add(id(type_))
-        if isinstance(type_, StrawberryList):
-            depth += 1
-        # Read by name: the probe above admits any wrapper that carries ``of_type``.
-        type_ = read_attr(type_, "of_type")
-    return depth, type_
 
 
 def bind_mutations() -> None:

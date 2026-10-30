@@ -191,7 +191,7 @@ def test_glossary_documents_are_shared_board_docs_scoped_to_glossary_namespace()
 
 @pytest.mark.django_db
 def test_order_glossary_terms_by_title_desc() -> None:
-    """``orderBy: [{ title: DESC }]`` reorders the glossary terms list (DONE-028 order wiring)."""
+    """``orderBy: [{ title: DESC }]`` reorders the glossary terms list."""
     _seed_glossary()
     expected = [{"title": term.title} for term in models.GlossaryTerm.objects.order_by("-title")]
     assert _graphql_data(

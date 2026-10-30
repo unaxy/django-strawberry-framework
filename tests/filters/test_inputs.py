@@ -71,6 +71,7 @@ from typing_extensions import override
 from django_strawberry_framework import DjangoType
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.filters import (
+    ArrayFilter,
     FilterInput,
     FilterSet,
     GlobalIDFilter,
@@ -98,10 +99,8 @@ from django_strawberry_framework.filters.inputs import (
     _build_input_fields,
     _build_logic_fields,
     _build_range_input_class,
-    _camel_case,
     _field_specs,
     _filter_input_prechecks,
-    _iter_filterset_subclasses,
     _pascal_case,
     _scalar_from_form_field,
     _scalar_from_model_field,
@@ -130,6 +129,7 @@ from tests._idioms import (
     consumer_query,
     is_object_list,
 )
+from tests._postgres_fields import FakeArrayField, patch_array_field, real_array_of
 from tests._soft_dependency import blocked_modules
 
 if TYPE_CHECKING:
@@ -698,18 +698,18 @@ def test_hide_flat_filters_hides_a_copy_only_where_the_set_expands_its_branch(
 
 def test_convert_filter_to_input_annotation_handles_globalid_filter() -> None:
     f = GlobalIDFilter()
-    assert convert_filter_to_input_annotation(f, None) == str | None
+    assert convert_filter_to_input_annotation(f, None, None, FilterSet) == str | None
 
 
 def test_convert_filter_to_input_annotation_handles_globalid_multiple_choice_filter() -> None:
     f = GlobalIDMultipleChoiceFilter()
-    assert convert_filter_to_input_annotation(f, None) == list[str] | None
+    assert convert_filter_to_input_annotation(f, None, None, FilterSet) == list[str] | None
 
 
 def test_convert_filter_to_input_annotation_handles_range_filter() -> None:
     f = RangeFilter(field_name="value")
     model_field: _Int = models.IntegerField()
-    annotation = convert_filter_to_input_annotation(f, model_field)
+    annotation = convert_filter_to_input_annotation(f, model_field, None, FilterSet)
     non_none = [arg for arg in _args(annotation) if arg is not type(None)]
     assert len(non_none) == 1
     range_cls = non_none[0]
@@ -721,7 +721,7 @@ def test_convert_filter_to_input_annotation_handles_range_filter() -> None:
 def test_convert_filter_to_input_annotation_handles_list_filter() -> None:
     f = ListFilter(field_name="value")
     model_field: _Int = models.IntegerField()
-    annotation = convert_filter_to_input_annotation(f, model_field)
+    annotation = convert_filter_to_input_annotation(f, model_field, None, FilterSet)
     assert annotation == list[int] | None
 
 
@@ -754,7 +754,10 @@ def test_convert_filter_to_input_annotation_types_a_columnless_multiple_choice_m
     column the element comes from the form field, never from
     ``TypedMultipleChoiceFilter.coerce``.
     """
-    assert convert_filter_to_input_annotation(make_filter(), None) == list[str] | None
+    assert (
+        convert_filter_to_input_annotation(make_filter(), None, None, FilterSet)
+        == list[str] | None
+    )
 
 
 def test_convert_filter_to_input_annotation_handles_choice_filter_via_converter_pipeline() -> None:
@@ -762,7 +765,7 @@ def test_convert_filter_to_input_annotation_handles_choice_filter_via_converter_
     # ``Book.circulation_status`` is a TextChoices field on the example model.
     f = ChoiceFilter()
     model_field: ModelField = library_models.Book._meta.get_field("circulation_status")
-    annotation = convert_filter_to_input_annotation(f, model_field)
+    annotation = convert_filter_to_input_annotation(f, model_field, None, FilterSet)
     non_none = [arg for arg in _args(annotation) if arg is not type(None)]
     assert len(non_none) == 1
     enum_cls = non_none[0]
@@ -775,7 +778,7 @@ def test_convert_filter_to_input_annotation_rejects_non_choices_derived_enum() -
     f = ChoiceFilter()
     model_field: _Char = models.CharField()  # No `choices` attribute set.
     with pytest.raises(ConfigurationError):
-        convert_filter_to_input_annotation(f, model_field)
+        convert_filter_to_input_annotation(f, model_field, None, FilterSet)
 
 
 def test_convert_filter_to_input_annotation_rejects_unknown_method_filter() -> None:
@@ -804,7 +807,7 @@ def test_convert_filter_to_input_annotation_rejects_unknown_method_filter() -> N
     with pytest.raises(ConfigurationError):
         # basedpyright: a stand-in filter carrying only the slots the code under test reads;
         # convert_filter_to_input_annotation types the parameter as Filter
-        convert_filter_to_input_annotation(f, None)  # pyright: ignore[reportArgumentType]
+        convert_filter_to_input_annotation(f, None, None, FilterSet)  # pyright: ignore[reportArgumentType]
 
 
 def test_convert_filter_to_input_annotation_malformed_filter_diagnostics() -> None:
@@ -819,7 +822,7 @@ def test_convert_filter_to_input_annotation_malformed_filter_diagnostics() -> No
     with pytest.raises(ConfigurationError) as exc_info:
         # basedpyright: the duck-typed filter with no form field is the malformed input under
         # test; convert_filter_to_input_annotation types the parameter as Filter
-        convert_filter_to_input_annotation(NoFieldFilter(), None)  # pyright: ignore[reportArgumentType]
+        convert_filter_to_input_annotation(NoFieldFilter(), None, None, FilterSet)  # pyright: ignore[reportArgumentType]
     assert str(exc_info.value).startswith("NoFieldFilter(method='filter_custom') on <")
     assert "exposes no form field" in str(exc_info.value)
 
@@ -827,7 +830,7 @@ def test_convert_filter_to_input_annotation_malformed_filter_diagnostics() -> No
     # unbound it builds none; the refusal advises the two spellings that build one.
     unbound = AllValuesMultipleFilter(field_name="city", method="filter_custom")
     with pytest.raises(ConfigurationError) as exc_info:
-        convert_filter_to_input_annotation(unbound, None)
+        convert_filter_to_input_annotation(unbound, None, None, FilterSet)
     assert str(exc_info.value) == (
         f"AllValuesMultipleFilter(method='filter_custom') on {unbound!r} exposes no form "
         "field; put the method on a typed filter primitive (`CharFilter(method=...)`, "
@@ -868,11 +871,12 @@ def test_choice_filter_without_a_choices_column_names_the_declared_class(
     """
     choice_filter = make_filter()
     with pytest.raises(ConfigurationError) as exc_info:
-        convert_filter_to_input_annotation(choice_filter, model_field)
+        convert_filter_to_input_annotation(choice_filter, model_field, None, FilterSet)
     assert str(exc_info.value) == (
         f"{type(choice_filter).__name__} on {choice_filter!r} is backed by no model field "
-        "declaring `choices`; declare `choices` on the column it filters (a `TextChoices` / "
-        "`IntegerChoices` class), or filter that column through a non-choice filter "
+        "declaring `choices` (the filter's own `choices` never feed the enum); declare "
+        "`choices` on the column it filters (a `choices=` list of pairs, or a `TextChoices` / "
+        "`IntegerChoices` class's `.choices`), or filter that column through a non-choice filter "
         "(`CharFilter`, `NumberFilter`, `DateFromToRangeFilter`, its lookups in Meta.fields, "
         "or `CharFilter(method=...)` for a method filter)."
     )
@@ -881,13 +885,13 @@ def test_choice_filter_without_a_choices_column_names_the_declared_class(
 def test_convert_filter_to_input_annotation_wraps_nullable() -> None:
     """``extra['required']=False`` (the default) wraps the annotation in `T | None`."""
     f = CharFilter()
-    annotation = convert_filter_to_input_annotation(f, models.CharField())
+    annotation = convert_filter_to_input_annotation(f, models.CharField(), None, FilterSet)
     assert annotation == str | None
 
 
 def test_convert_filter_to_input_annotation_does_not_wrap_required() -> None:
     f = CharFilter(required=True)
-    annotation = convert_filter_to_input_annotation(f, models.CharField())
+    annotation = convert_filter_to_input_annotation(f, models.CharField(), None, FilterSet)
     # Required filters return the scalar without the `| None` wrap.
     assert annotation is str
 
@@ -1182,9 +1186,8 @@ _LEAF_REFUSAL_CASES = {
     ),
     "relation-pk": _LeafRefusalCase(
         lambda: RelationPkFilter(field_name="code", lookup_expr="exact"),
-        "RelationPkFilter on {declared} ({child}.leaf, reached through {parent}.shelf) "
-        "names 'code'",
-        "RelationPkFilter on {declared} names 'code'",
+        "{child}.leaf: RelationPkFilter on 'code' (reached through {parent}.shelf)",
+        "{child}: RelationPkFilter on 'code'",
         ", which is not a relation to a model on its FilterSet; name a relation key in "
         "Meta.fields, or filter the related row's own fields through a RelatedFilter.",
     ),
@@ -1200,10 +1203,12 @@ _LEAF_REFUSAL_CASES = {
         lambda: ChoiceFilter(field_name="topic", choices=[("a", "A")]),
         "ChoiceFilter on {declared} ({child}.leaf, reached through {parent}.shelf)",
         "ChoiceFilter on {declared}",
-        " is backed by no model field declaring `choices`; declare `choices` on the column it "
-        "filters (a `TextChoices` / `IntegerChoices` class), or filter that column through a "
-        "non-choice filter (`CharFilter`, `NumberFilter`, `DateFromToRangeFilter`, its lookups "
-        "in Meta.fields, or `CharFilter(method=...)` for a method filter).",
+        " is backed by no model field declaring `choices` (the filter's own `choices` never "
+        "feed the enum); declare `choices` on the column it filters (a `choices=` list of "
+        "pairs, or a `TextChoices` / `IntegerChoices` class's `.choices`), or filter that "
+        "column through a non-choice filter (`CharFilter`, `NumberFilter`, "
+        "`DateFromToRangeFilter`, its lookups in Meta.fields, or `CharFilter(method=...)` for "
+        "a method filter).",
     ),
     "range-widget": _LeafRefusalCase(
         lambda: DjangoRangeFilter(field_name="tier", widget=forms.TextInput()),
@@ -1745,8 +1750,10 @@ def test_a_consumer_class_pairing_multiple_choice_with_another_kind_keeps_that_k
     model_field: ModelField = library_models.Shelf._meta.get_field("condition")
     single = parent(field_name="condition")
 
-    assert _input_shape(convert_filter_to_input_annotation(both, model_field)) == _input_shape(
-        convert_filter_to_input_annotation(single, model_field),
+    assert _input_shape(
+        convert_filter_to_input_annotation(both, model_field, None, FilterSet),
+    ) == _input_shape(
+        convert_filter_to_input_annotation(single, model_field, None, FilterSet),
     )
     assert normalize_input_value(both, value, field_name="condition") == normalize_input_value(
         single,
@@ -2059,6 +2066,8 @@ def test_range_filter_whose_widget_does_not_read_two_keys_is_refused_when_the_sc
         convert_filter_to_input_annotation(
             DjangoRangeFilter(field_name="price_span", widget=widget),
             None,
+            None,
+            FilterSet,
         )
     assert str(excinfo.value) == (
         "RangeFilter consumes a range input for its 'price_span' input, but its form field's "
@@ -2652,7 +2661,7 @@ class Query:
 
 
 # ---------------------------------------------------------------------------
-# _pascal_case / _camel_case naming helpers
+# _pascal_case / type_name_for naming guards
 # ---------------------------------------------------------------------------
 
 
@@ -2705,16 +2714,6 @@ def test_type_name_for_raises_for_no_word_character_field_path(bad: str) -> None
     with pytest.raises(ConfigurationError) as excinfo:
         _Probe.type_name_for(bad)
     assert repr(bad) in str(excinfo.value)
-
-
-def test_camel_case_returns_input_when_no_word_characters() -> None:
-    """`_camel_case` returns the raw string when it has no word tokens."""
-    assert _camel_case("") == ""
-    assert _camel_case("_") == "_"
-
-
-def test_camel_case_lowercases_head_and_pascals_rest() -> None:
-    assert _camel_case("galaxy_name") == "galaxyName"
 
 
 # ---------------------------------------------------------------------------
@@ -2777,6 +2776,7 @@ def test_convert_filter_to_input_annotation_typed_filter_uses_model_scalar() -> 
         TypedFilter(field_name="lifetime_fines_cents"),
         models.IntegerField(),
         None,
+        FilterSet,
     )
     # Optional wrapper around the resolved scalar.
     assert annotation == (int | None)
@@ -2810,8 +2810,10 @@ def test_convert_raw_pk_relation_filters_type_from_the_target_key_column() -> No
     relation = library_models.Annotation._meta.get_field("profile")
     single = RelationPkFilter(field_name="profile", lookup_expr="exact")
     many = RelationPkMultipleFilter(field_name="profile", lookup_expr="in")
-    assert convert_filter_to_input_annotation(single, relation) == (int | None)
-    assert convert_filter_to_input_annotation(many, relation) == (list[int] | None)
+    assert convert_filter_to_input_annotation(single, relation, None, FilterSet) == (int | None)
+    assert convert_filter_to_input_annotation(many, relation, None, FilterSet) == (
+        list[int] | None
+    )
     assert normalize_input_value(many, (3, 4)) == [3, 4]
     with pytest.raises(ConfigurationError, match="primary-key list"):
         normalize_input_value(many, 3)
@@ -2824,7 +2826,12 @@ def test_convert_raw_pk_filter_on_a_non_relation_names_the_leaf_and_related_filt
     """
     leaf = RelationPkFilter(field_name="title", lookup_expr="exact")
     with pytest.raises(ConfigurationError) as exc_info:
-        convert_filter_to_input_annotation(leaf, library_models.Book._meta.get_field("title"))
+        convert_filter_to_input_annotation(
+            leaf,
+            library_models.Book._meta.get_field("title"),
+            None,
+            FilterSet,
+        )
     message = str(exc_info.value)
     assert "RelationPkFilter" in message
     assert "'title'" in message
@@ -2873,8 +2880,10 @@ def test_filter_overrides_model_choice_keys_keep_their_class_and_type_from_the_t
     snapshot = ItemFilter._expansion_snapshot()
     assert snapshot is not None
     assert not {"category", "category__in"} & set(snapshot.candidates)
-    assert convert_filter_to_input_annotation(exact, relation) == (int | None)
-    assert convert_filter_to_input_annotation(in_, relation) == (list[int] | None)
+    assert convert_filter_to_input_annotation(exact, relation, None, ItemFilter) == (int | None)
+    assert convert_filter_to_input_annotation(in_, relation, None, ItemFilter) == (
+        list[int] | None
+    )
     assert normalize_input_value(exact, 3) == 3
     assert normalize_input_value(in_, (3, 4)) == [3, 4]
     with pytest.raises(ConfigurationError, match="model-choice list"):
@@ -2902,7 +2911,9 @@ def test_declared_model_choice_filter_follows_a_relation_valued_primary_key() ->
     assert record is not None
     assert record.origin == "declared"
     relation = library_models.Annotation._meta.get_field("profile")
-    assert convert_filter_to_input_annotation(leaf, relation) == (int | None)
+    assert convert_filter_to_input_annotation(leaf, relation, None, AnnotationFilter) == (
+        int | None
+    )
 
 
 def test_model_choice_filter_with_no_column_source_names_the_filterset_and_the_fix() -> None:
@@ -2990,13 +3001,13 @@ def test_convert_filter_to_input_annotation_derives_enum_for_choice_fields_on_li
 
     # TypedFilter
     tf = TypedFilter(field_name="circulation_status")
-    tf_anno = convert_filter_to_input_annotation(tf, model_field)
+    tf_anno = convert_filter_to_input_annotation(tf, model_field, None, FilterSet)
     tf_cls = _class_arg(tf_anno)
     assert issubclass(tf_cls, Enum)
 
     # ListFilter
     lf = ListFilter(field_name="circulation_status")
-    lf_anno = convert_filter_to_input_annotation(lf, model_field)
+    lf_anno = convert_filter_to_input_annotation(lf, model_field, None, FilterSet)
     lf_list = next(arg for arg in _args(lf_anno) if arg is not type(None))
     assert get_origin(lf_list) is list
     lf_member = _args(lf_list)[0]
@@ -3008,7 +3019,7 @@ def test_convert_filter_to_input_annotation_derives_enum_for_choice_fields_on_li
         pass
 
     csv_f = CSVFilter(field_name="circulation_status")
-    csv_anno = convert_filter_to_input_annotation(csv_f, model_field)
+    csv_anno = convert_filter_to_input_annotation(csv_f, model_field, None, FilterSet)
     csv_list = next(arg for arg in _args(csv_anno) if arg is not type(None))
     assert get_origin(csv_list) is list
     csv_member = _args(csv_list)[0]
@@ -3030,10 +3041,15 @@ def test_element_annotation_fallback_branches_when_model_field_is_none() -> None
             return None
 
     # Form field present -> resolved via `_scalar_from_form_field`
-    assert convert_filter_to_input_annotation(IntTypedFilter(), None) == int | None
+    assert (
+        convert_filter_to_input_annotation(IntTypedFilter(), None, None, FilterSet) == int | None
+    )
 
     # Neither model field nor form field -> fallback to `_scalar_from_model_field(None)` (`str`)
-    assert convert_filter_to_input_annotation(NoFieldTypedFilter(), None) == str | None
+    assert (
+        convert_filter_to_input_annotation(NoFieldTypedFilter(), None, None, FilterSet)
+        == str | None
+    )
 
 
 def test_materialize_input_class_registers_in_module_globals() -> None:
@@ -3067,16 +3083,14 @@ def _range_owner() -> type[FilterSet]:
     return RangeOwnerFilter
 
 
-@pytest.mark.parametrize("owned", [False, True], ids=["unowned", "owned"])
-def test_range_input_class_for_a_filter_defining_eq_without_hash(*, owned: bool) -> None:
+def test_range_input_class_for_a_filter_defining_eq_without_hash() -> None:
     """An unhashable ``RangeFilter`` still gets its range input class.
 
     Owned names over HTTP:
     ``test_scalars_filter_api.py::test_range_input_types_are_scoped_per_filterset``.
     """
-    owner = _range_owner() if owned else None
-    cls = _build_range_input_class(_EqRangeFilter(field_name="id"), int, owner)
-    assert cls.__name__ == ("RangeOwnerFilterIdRangeInputType" if owned else "IdRangeInputType")
+    cls = _build_range_input_class(_EqRangeFilter(field_name="id"), int, _range_owner())
+    assert cls.__name__ == "RangeOwnerFilterIdRangeInputType"
     assert cls.__annotations__["start"] == (int | None)
 
 
@@ -3120,15 +3134,14 @@ def test_finalize_accepts_a_range_filter_defining_eq_without_hash() -> None:
     assert "UnhashableRangeFilterInputType" in FilterArgumentsFactory.input_object_types
 
 
-@pytest.mark.parametrize("owned", [False, True], ids=["unowned", "owned"])
-def test_range_input_class_retains_neither_filter_nor_filterset(*, owned: bool) -> None:
+def test_range_input_class_retains_neither_filter_nor_filterset() -> None:
     """Building a range input class keeps no reference to its filter or owning filterset."""
 
     def build() -> tuple[weakref.ref[type[FilterSet]], weakref.ref[RangeFilter]]:
         owner = _range_owner()
         f = RangeFilter(field_name="id")
         owner.base_filters["span"] = f
-        _build_range_input_class(f, int, owner if owned else None)
+        _build_range_input_class(f, int, owner)
         return weakref.ref(owner), weakref.ref(f)
 
     owner_ref, filter_ref = build()
@@ -3164,14 +3177,21 @@ def test_filterset_is_collectable_after_finalize_and_registry_clear() -> None:
     assert ref() is None
 
 
-def test_build_range_input_class_name_unqualified_without_filterset() -> None:
-    """No owning filterset -> the unqualified ``<Field>RangeInputType`` name (``PriceRangeInputType``).
+def test_build_range_input_class_qualifies_the_field_fallback_stem_by_its_set() -> None:
+    """A range with no ``field_name`` takes the ``Field`` stem, still qualified by its set.
 
     Live scoping of owned names:
     ``examples/fakeshop/test_query/test_scalars_filter_api.py::test_range_input_types_are_scoped_per_filterset``.
     """
-    f = RangeFilter(field_name="price")
-    assert _build_range_input_class(f, int).__name__ == "PriceRangeInputType"
+
+    class StemFilter(FilterSet):
+        class Meta:
+            model = library_models.Branch
+            fields = []
+
+    assert _build_range_input_class(RangeFilter(), int, StemFilter).__name__ == (
+        "StemFilterFieldRangeInputType"
+    )
 
 
 @pytest.mark.django_db
@@ -3245,7 +3265,7 @@ def test_range_input_type_name_is_scoped_per_filterset() -> None:
 
 @pytest.mark.django_db
 def test_direct_range_conversion_does_not_poison_owned_input_build() -> None:
-    """An earlier unowned conversion cannot defeat owner-qualified generation."""
+    """An earlier conversion under another set cannot defeat owner-qualified generation."""
 
     class OwnedPriceFilter(FilterSet):
         price = RangeFilter(field_name="price")
@@ -3256,9 +3276,9 @@ def test_direct_range_conversion_does_not_poison_owned_input_build() -> None:
 
     declared_filter = OwnedPriceFilter.base_filters["price"]
     model_field = scalar_models.ScalarSpecimen._meta.get_field("price")
-    direct = convert_filter_to_input_annotation(declared_filter, model_field)
+    direct = convert_filter_to_input_annotation(declared_filter, model_field, None, FilterSet)
     direct_cls = _class_arg(direct)
-    assert direct_cls.__name__ == "PriceRangeInputType"
+    assert direct_cls.__name__ == "FilterSetPriceRangeInputType"
 
     triples = _build_input_fields(OwnedPriceFilter)
     price_annotation = next(
@@ -3509,28 +3529,437 @@ def test_clear_filter_input_namespace_tolerates_unimportable_submodules() -> Non
 
 
 # ---------------------------------------------------------------------------
-# _iter_filterset_subclasses - diamond dedup
+# ArrayFilter / ListFilter over an ArrayField column: typed from its element column
 # ---------------------------------------------------------------------------
 
 
-def test_iter_filterset_subclasses_dedupes_diamond_inheritance() -> None:
-    """A diamond hierarchy surfaces each subclass once (the dedup `continue`)."""
+class _ArraySpecimen(models.Model):
+    """One ``ArrayField`` column per element shape an ``ArrayFilter`` / ``ListFilter`` reads.
 
-    class A(FilterSet):
+    Schema-build only (``managed = False``): no row is ever read. ``ints`` holds plain
+    integers, ``tiers`` integers with element ``choices``, ``flagged`` carries ``choices`` on
+    the array itself, and ``grid`` is an array of arrays.
+    """
+
+    ints = FakeArrayField(models.IntegerField())
+    tiers = FakeArrayField(models.IntegerField(choices=[(1, "Bronze"), (2, "Silver")]))
+    flagged = FakeArrayField(models.IntegerField(), choices=[(1, "one"), (2, "two")])
+    grid = FakeArrayField(FakeArrayField(models.IntegerField()))
+
+    class Meta:
+        managed = False
+        app_label = "test_filter_array_elements"
+
+
+_ARRAY_FILTER_CLASSES = [
+    pytest.param(ArrayFilter, id="array-filter"),
+    pytest.param(ListFilter, id="list-filter"),
+]
+_ARRAY_COLUMN_EXPOSURE = [
+    pytest.param(True, id="column-on-the-type"),
+    pytest.param(False, id="column-off-the-type"),
+]
+
+
+def _serve_array_filter(declared: Filter, *, exposed: bool) -> type[DjangoType]:
+    """Serve a set declaring ``declared`` as ``arr`` and return the serving type.
+
+    ``exposed`` puts the column ``declared`` filters on the serving ``DjangoType``'s
+    ``Meta.fields`` beside ``id``.
+    """
+    column = declared.field_name
+
+    class ArraySpecimenFilter(FilterSet):
+        arr = declared
+
         class Meta:
-            model = Category
-            fields = {"name": ["exact"]}
+            model = _ArraySpecimen
+            fields = []
 
-    class B(A):
-        pass
+    meta: dict[str, object] = {
+        "model": _ArraySpecimen,
+        "fields": ("id", column) if exposed else ("id",),
+        "filterset_class": ArraySpecimenFilter,
+    }
+    return type("ArraySpecimenType", (DjangoType,), {"Meta": type("Meta", (), meta)})
 
-    class C(A):
-        pass
 
-    class D(B, C):
-        pass
+def _list_member(annotation: object) -> object:
+    """The member type of ``list[X]`` / ``list[X] | None``, failing on any other shape."""
+    listed = annotation
+    if get_origin(annotation) is not list:
+        (listed,) = (arg for arg in _args(annotation) if arg is not type(None))
+    assert get_origin(listed) is list, annotation
+    (member,) = _args(listed)
+    return member
 
-    found = _iter_filterset_subclasses(A)
-    # ``D`` is reachable through both ``B`` and ``C`` but appears once.
-    assert found.count(D) == 1
-    assert {B, C, D}.issubset(set(found))
+
+def _served_arr_element(served: type[DjangoType]) -> object:
+    """Build the schema and return the element type of the served set's ``arr`` input."""
+    finalize_django_types()
+    assert registry.get(_ArraySpecimen) is served
+    input_cls = FilterArgumentsFactory.input_object_types["ArraySpecimenFilterInputType"]
+    bag = _class_arg(_annotations(input_cls)["arr"])
+    (annotation,) = _annotations(bag).values()
+    return _list_member(annotation)
+
+
+@pytest.mark.parametrize("exposed", _ARRAY_COLUMN_EXPOSURE)
+@pytest.mark.parametrize("filter_class", _ARRAY_FILTER_CLASSES)
+def test_an_array_column_filter_is_typed_from_its_element_column(
+    monkeypatch: pytest.MonkeyPatch,
+    filter_class: type[Filter],
+    *,
+    exposed: bool,
+) -> None:
+    """A list filter over ``ArrayField(IntegerField())`` takes ``list[int]``.
+
+    Each list member is one element of the array, so the input reads the element column
+    (``utils/_array_field.py::array_element_field``), never the array itself, which has no
+    ``SCALAR_MAP`` entry; the read side types the same column ``list[int]``.
+    """
+    patch_array_field(monkeypatch)
+    served = _serve_array_filter(filter_class(field_name="ints"), exposed=exposed)
+
+    assert _served_arr_element(served) is int
+
+
+@pytest.mark.parametrize("exposed", _ARRAY_COLUMN_EXPOSURE)
+@pytest.mark.parametrize("filter_class", _ARRAY_FILTER_CLASSES)
+def test_an_array_column_filter_shares_the_element_choice_enum(
+    monkeypatch: pytest.MonkeyPatch,
+    filter_class: type[Filter],
+    *,
+    exposed: bool,
+) -> None:
+    """Element ``choices`` type each member as the column's one enum, the read side's included.
+
+    The enum is cached per element column (its model and name), so the filter input and a
+    ``DjangoType`` reading ``tiers`` publish the same enum class.
+    """
+    patch_array_field(monkeypatch)
+    served = _serve_array_filter(filter_class(field_name="tiers"), exposed=exposed)
+
+    element = _served_arr_element(served)
+    enum_cls = registry.get_enum(_ArraySpecimen, "tiers")
+    assert enum_cls is not None
+    assert element is enum_cls
+    if exposed:
+        assert _list_member(_annotations(served)["tiers"]) is enum_cls
+
+
+@pytest.mark.parametrize("filter_class", _ARRAY_FILTER_CLASSES)
+def test_an_array_column_filter_never_reads_the_arrays_own_choices(
+    monkeypatch: pytest.MonkeyPatch,
+    filter_class: type[Filter],
+) -> None:
+    """``choices`` on the array column itself feed no enum: each member keeps the element type.
+
+    The read side refuses to publish such a column, so it stays off the type, and the
+    filter still filters it by element.
+    """
+    patch_array_field(monkeypatch)
+    served = _serve_array_filter(filter_class(field_name="flagged"), exposed=False)
+
+    assert _served_arr_element(served) is int
+    assert registry.get_enum(_ArraySpecimen, "flagged") is None
+
+
+@pytest.mark.parametrize("filter_class", _ARRAY_FILTER_CLASSES)
+def test_an_array_column_filter_refuses_a_nested_array_as_the_read_side_does(
+    monkeypatch: pytest.MonkeyPatch,
+    filter_class: type[Filter],
+) -> None:
+    """An array of arrays is refused with the read side's own message, column off the type."""
+    patch_array_field(monkeypatch)
+    _ = _serve_array_filter(filter_class(field_name="grid"), exposed=False)
+
+    assert _build_refusal() == "Nested ArrayField on _ArraySpecimen.grid is not supported."
+
+
+@pytest.mark.parametrize(
+    ("declare", "lookup"),
+    [
+        pytest.param(lambda: CharFilter(field_name="ints"), "exact", id="scalar-exact"),
+        pytest.param(
+            lambda: ListFilter(field_name="ints", lookup_expr="in"),
+            "in",
+            id="list-in",
+        ),
+        pytest.param(
+            lambda: ArrayFilter(field_name="ints", lookup_expr="gt"),
+            "gt",
+            id="array-gt",
+        ),
+        pytest.param(
+            lambda: DjangoRangeFilter(field_name="ints"),
+            "range",
+            id="range",
+        ),
+    ],
+)
+def test_an_array_column_filter_whose_lookup_takes_no_element_array_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+    declare: Callable[[], Filter],
+    lookup: str,
+) -> None:
+    """Only a list filter whose lookup takes one array of the column's elements builds.
+
+    A scalar filter hands the ORM one element where the column compares a whole array, and
+    ``in`` / ``gt`` / ``range`` compare the column with arrays, so an element-typed input
+    would build and then fail every value at the database.
+    """
+    patch_array_field(monkeypatch)
+    declared = declare()
+    _ = _serve_array_filter(declared, exposed=True)
+
+    assert _build_refusal() == (
+        f"{type(declared).__name__} on {declared!r} has no input type for "
+        f"lookup '{lookup}' on the ArrayField column _ArraySpecimen.ints: only exact, "
+        "contains, contained_by and overlap take one array of the column's elements. Declare "
+        "an ArrayFilter with one of those lookup_expr values."
+    )
+
+
+def test_a_choice_filter_over_an_outer_choices_array_column_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``ChoiceFilter`` over an array never builds its enum from the array's own ``choices``.
+
+    The read side refuses those choices as ambiguous, so the filter refuses the column too.
+    """
+    patch_array_field(monkeypatch)
+    declared = ChoiceFilter(field_name="flagged")
+    _ = _serve_array_filter(declared, exposed=False)
+
+    assert _build_refusal() == (
+        f"ChoiceFilter on {declared!r} has no input type for lookup 'exact' on the ArrayField "
+        "column _ArraySpecimen.flagged: only exact, contains, contained_by and overlap take one "
+        "array of the column's elements. Declare an ArrayFilter with one of those lookup_expr "
+        "values."
+    )
+    assert registry.get_enum(_ArraySpecimen, "flagged") is None
+
+
+def _served_arr_annotation(served: type[DjangoType]) -> object:
+    """Build the schema and return the served set's ``arr`` leaf annotation, ``None`` stripped."""
+    finalize_django_types()
+    assert registry.get(_ArraySpecimen) is served
+    input_cls = FilterArgumentsFactory.input_object_types["ArraySpecimenFilterInputType"]
+    bag = _class_arg(_annotations(input_cls)["arr"])
+    (annotation,) = _annotations(bag).values()
+    (member,) = (arg for arg in _args(annotation) if arg is not type(None))
+    return member
+
+
+@pytest.mark.parametrize(
+    "declare",
+    [
+        pytest.param(
+            lambda: ListFilter(field_name="ints__0", lookup_expr="in"),
+            id="index-in",
+        ),
+        pytest.param(
+            lambda: ArrayFilter(field_name="ints__0_2", lookup_expr="exact"),
+            id="slice-exact",
+        ),
+        pytest.param(
+            lambda: ArrayFilter(field_name="grid__0", lookup_expr="exact"),
+            id="nested-index-exact",
+        ),
+    ],
+)
+def test_a_list_filter_through_an_index_or_slice_is_typed_from_the_element_column(
+    monkeypatch: pytest.MonkeyPatch,
+    declare: Callable[[], Filter],
+) -> None:
+    """A declared path through an array's index or slice is typed from what it reaches.
+
+    The path names no model field, so each member is typed from the transform's output
+    (``filters/base.py::_filterset_value_field``), never the declared form field's
+    ``String``: an index of ``ArrayField(IntegerField())`` is one integer, a slice an
+    array of them, and an index of an array of arrays an array of integers.
+    """
+    patch_array_field(monkeypatch)
+    served = _serve_array_filter(declare(), exposed=False)
+
+    assert _served_arr_element(served) is int
+
+
+def test_a_list_filter_through_an_index_shares_the_element_choice_enum(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An index of an array whose elements declare ``choices`` takes the column's one enum."""
+    patch_array_field(monkeypatch)
+    served = _serve_array_filter(
+        ListFilter(field_name="tiers__0", lookup_expr="in"),
+        exposed=False,
+    )
+
+    element = _served_arr_element(served)
+    enum_cls = registry.get_enum(_ArraySpecimen, "tiers")
+    assert enum_cls is not None
+    assert element is enum_cls
+
+
+def test_a_scalar_filter_through_an_index_is_typed_from_the_element_column(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``NumberFilter`` through an index is the element's ``Int``, never its form's ``Decimal``."""
+    patch_array_field(monkeypatch)
+    declared = NumberFilter(field_name="ints__0", lookup_expr="gte")
+    served = _serve_array_filter(declared, exposed=False)
+
+    assert _served_arr_annotation(served) is int
+
+
+@pytest.mark.parametrize(
+    "declare",
+    [
+        pytest.param(lambda: NumberFilter(field_name="ints", lookup_expr="len"), id="lookup-len"),
+        pytest.param(lambda: NumberFilter(field_name="ints__len"), id="path-len"),
+    ],
+)
+def test_a_filter_through_an_array_len_is_typed_and_compares_the_length(
+    monkeypatch: pytest.MonkeyPatch,
+    declare: Callable[[], Filter],
+) -> None:
+    """``len``, in the ``lookup_expr`` or the path, is the transform's ``Int``, never refused.
+
+    The value is compared with the array's element count (``len``'s ``IntegerField``
+    output), so the input is typed from it and the predicate compares the length.
+    """
+    patch_array_field(monkeypatch)
+    declared = declare()
+    served = _serve_array_filter(declared, exposed=False)
+
+    assert _served_arr_annotation(served) is int
+    applied = declared.filter(_ArraySpecimen.objects.all(), 3)
+    assert 'LENGTH("test_filter_array_elements__arrayspecimen"."ints") = 3' in str(applied.query)
+
+
+@pytest.mark.parametrize(
+    ("transform", "bound"),
+    [pytest.param("year", int, id="year"), pytest.param("date", datetime.date, id="date")],
+)
+def test_two_ranges_over_one_column_mint_one_range_type_per_value_path(
+    transform: str,
+    bound: type,
+) -> None:
+    """A ``range`` and a ``<transform>__range`` over one column are two range types in one set.
+
+    Each is stemmed on the ``field_name`` plus the ``lookup_expr``'s transforms, so the
+    column's ``DateTime`` bounds and the transform's output bounds never claim one name.
+    """
+
+    class TwoRangeFilter(FilterSet):
+        stamps_span = RangeFilter(field_name="occurred_at", lookup_expr="range")
+        years_span = RangeFilter(field_name="occurred_at", lookup_expr=f"{transform}__range")
+
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = []
+
+    meta: dict[str, object] = {
+        "model": scalar_models.ScalarSpecimen,
+        "fields": ("id",),
+        "filterset_class": TwoRangeFilter,
+    }
+    _ = type("TwoRangeType", (DjangoType,), {"Meta": type("Meta", (), meta)})
+    finalize_django_types()
+    input_cls = FilterArgumentsFactory.input_object_types["TwoRangeFilterInputType"]
+    ranges: dict[str, object] = {}
+    for name in ("stamps_span", "years_span"):
+        (annotation,) = _annotations(_class_arg(_annotations(input_cls)[name])).values()
+        range_cls = _class_arg(annotation)
+        ranges[range_cls.__name__] = _class_arg(_annotations(range_cls)["start"])
+
+    assert ranges == {
+        "TwoRangeFilterOccurredAtRangeInputType": datetime.datetime,
+        f"TwoRangeFilterOccurredAt{transform.title()}RangeInputType": bound,
+    }
+
+
+@pytest.mark.parametrize(
+    ("declare", "lookup"),
+    [
+        pytest.param(lambda: NumberFilter(field_name="ints", lookup_expr="0"), "0", id="index"),
+        pytest.param(
+            lambda: ArrayFilter(field_name="ints", lookup_expr="0_2__exact"),
+            "0_2__exact",
+            id="slice",
+        ),
+    ],
+)
+def test_an_index_or_slice_opening_the_lookup_expr_is_refused_by_name(
+    monkeypatch: pytest.MonkeyPatch,
+    declare: Callable[[], Filter],
+    lookup: str,
+) -> None:
+    """A lookup that is no GraphQL field name is a ``ConfigurationError``, never a ``SyntaxError``.
+
+    The operator bag publishes each lookup as an input field named by it, which an index or
+    slice opening the ``lookup_expr`` cannot be; the refusal names the field_name spelling.
+    """
+    patch_array_field(monkeypatch)
+    declared = declare()
+    _ = _serve_array_filter(declared, exposed=False)
+
+    assert _build_refusal() == (
+        f"{type(declared).__name__} on {declared!r} publishes lookup '{lookup}', which is no "
+        "GraphQL field name. Spell an index or slice in field_name (`<column>__0`, "
+        "`<column>__0_2`) and name the lookup in lookup_expr."
+    )
+
+
+def test_a_list_filter_through_a_slice_of_nested_arrays_is_refused_as_the_read_side_does(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slice of an array of arrays reaches the nested array, refused with the read side's message."""
+    patch_array_field(monkeypatch)
+    _ = _serve_array_filter(
+        ArrayFilter(field_name="grid__0_2", lookup_expr="exact"),
+        exposed=False,
+    )
+
+    assert _build_refusal() == "Nested ArrayField on _ArraySpecimen.grid is not supported."
+
+
+def test_a_list_filter_through_a_real_array_index_or_slice_is_typed_from_the_element_column() -> (
+    None
+):
+    """A real ``ArrayField``'s index and slice type each member from ``base_field``.
+
+    Django's own ``IndexTransform`` and ``SliceTransform`` answer the output field: an
+    index ``in`` and a slice ``exact`` over ``ArrayField(IntegerField())`` both take
+    ``[Int!]``. Runs where ``django.contrib.postgres`` imports (the PostgreSQL tier).
+    """
+    counts = real_array_of(models.IntegerField())
+
+    class CountedRow(models.Model):
+        counts_column = counts
+
+        class Meta:
+            managed = False
+            app_label = "test_filter_real_array_paths"
+
+    class CountedRowFilter(FilterSet):
+        first_among = ListFilter(field_name="counts_column__0", lookup_expr="in")
+        first_two = ArrayFilter(field_name="counts_column__0_2", lookup_expr="exact")
+
+        class Meta:
+            model = CountedRow
+            fields = []
+
+    meta: dict[str, object] = {
+        "model": CountedRow,
+        "fields": ("id",),
+        "filterset_class": CountedRowFilter,
+    }
+    _ = type("CountedRowType", (DjangoType,), {"Meta": type("Meta", (), meta)})
+    finalize_django_types()
+    input_cls = FilterArgumentsFactory.input_object_types["CountedRowFilterInputType"]
+    for name in ("first_among", "first_two"):
+        bag = _class_arg(_annotations(input_cls)[name])
+        (annotation,) = _annotations(bag).values()
+        assert _list_member(annotation) is int, name

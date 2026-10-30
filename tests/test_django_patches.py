@@ -56,7 +56,8 @@ from django.test.testcases import SimpleTestCase, TestCase, TransactionTestCase
 
 from django_strawberry_framework import _django_patches
 from django_strawberry_framework._django_patches import _CLASS_METHODS, _FEATURE_METHODS
-from django_strawberry_framework.utils._narrowing import class_dict, read_attr
+from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._narrowing import read_attr
 from tests._idioms import call_remove_databases_failures, remove_databases_failures_function
 
 if TYPE_CHECKING:
@@ -498,7 +499,7 @@ def test_reload_preserves_the_installed_patch_teardown(monkeypatch: pytest.Monke
     monkeypatch.setattr(
         SimpleTestCase,
         "_remove_databases_failures",
-        class_dict(SimpleTestCase)["_remove_databases_failures"],
+        truth.class_dict(SimpleTestCase)["_remove_databases_failures"],
     )
     try:
         assert _django_patches._patch_is_installed() is True
@@ -508,7 +509,7 @@ def test_reload_preserves_the_installed_patch_teardown(monkeypatch: pytest.Monke
         # The reload re-executed the module: its module-level function object is
         # a NEW generation, while the app-load generation remains installed.
         assert (
-            read_attr(class_dict(SimpleTestCase)["_remove_databases_failures"], "__func__")
+            read_attr(truth.class_dict(SimpleTestCase)["_remove_databases_failures"], "__func__")
             is not _django_patches._patched_remove_databases_failures
         )
         assert _django_patches._patch_is_installed() is False
@@ -533,7 +534,7 @@ def test_reload_preserves_the_installed_patch_teardown(monkeypatch: pytest.Monke
         _django_patches.apply()
         assert _django_patches._patch_is_installed() is True
         assert (
-            read_attr(class_dict(SimpleTestCase)["_remove_databases_failures"], "__func__")
+            read_attr(truth.class_dict(SimpleTestCase)["_remove_databases_failures"], "__func__")
             is _django_patches._patched_remove_databases_failures
         )
     finally:

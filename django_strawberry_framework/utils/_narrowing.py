@@ -18,13 +18,13 @@ Two families of container check, kept apart because they answer different questi
 * ``is_exact_*`` are ``type(value) is C`` checks (subclasses fail) and
   ``TypeGuard`` predicates, since a negative answer says nothing about a subclass.
 
-``is_class``, ``is_str``, ``is_char_wise`` and ``is_text_atom`` stand apart from both:
+``is_str``, ``is_char_wise`` and ``is_text_atom`` stand apart from both:
 ``issubclass(type(value), C)`` checks (subclasses pass) that ask the value's real
 type. ``isinstance`` falls back to a ``__class__`` read when the real type does not
 match, and a ``__class__`` property can raise or claim a class the value is not;
 the real type can do neither, so these are the predicates for a value whose answer
 gates an operation that itself checks the real type (``str.__eq__`` refuses a value
-that is not really a ``str``, ``issubclass`` one that is not really a class).
+that is not really a ``str``). Whether a value is a class is ``utils/truth.py::is_type``.
 
 The typed slots (``dict_items``, ``list_iter``, ...) are the builtin base
 methods themselves at runtime, so a subclass override of ``items`` /
@@ -32,18 +32,18 @@ methods themselves at runtime, so a subclass override of ``items`` /
 declared generic over the container they read.
 
 The typed reads (``read_attr``, ``call_method``, ``pk_of``, ``enum_value``,
-``dict_of``, ``list_of``, ``instance_dict``) are, at runtime, ``getattr`` (read, or
-read and called), ``operator.attrgetter("pk")`` / ``("value")``, ``dict``, ``list``
-and ``utils/truth.py::instance_state``. Typeshed declares a ``getattr`` read and an
-enum member's ``value`` ``Any``, django-stubs declares ``Model.pk`` ``Any``, and ``dict`` / ``list`` of an
-``object`` match no overload; under the checker each answers in ``object`` terms,
-which the caller narrows like any other consumer value.
+``dict_of``, ``list_of``) are, at runtime, ``getattr`` (read, or read and called),
+``operator.attrgetter("pk")`` / ``("value")``, ``dict`` and ``list``. Typeshed
+declares a ``getattr`` read and an enum member's ``value`` ``Any``, django-stubs
+declares ``Model.pk`` ``Any``, and ``dict`` / ``list`` of an ``object`` match no
+overload; under the checker each answers in ``object`` terms, which the caller
+narrows like any other consumer value.
 
 ``is_concrete_field`` and ``is_queryset`` are ``isinstance`` checks (like ``is_dict``, each
 name IS the class's own ``__instancecheck__``) whose claim is only what the check proves:
 a model ``Field`` (never a reverse ``ForeignObjectRel``), and a ``QuerySet`` whose rows are
 ``object`` (a ``.values()`` queryset passes the same check, so no model-row claim is made).
-``is_real_mapping`` / ``is_real_collection`` stand with ``is_class`` / ``is_str``: the
+``is_real_mapping`` / ``is_real_collection`` stand with ``is_str``: the
 ``issubclass(type(value), ABC)`` check asked of the real type.
 
 ``optional_annotation``, ``get_item`` / ``set_item`` / ``del_item`` and ``iter_of`` are typed
@@ -91,10 +91,6 @@ if TYPE_CHECKING:
 
     def is_tuple(_value: object, /) -> TypeIs[tuple[object, ...]]:
         """Return whether the value is a ``tuple`` (subclasses included)."""
-        ...
-
-    def is_set(_value: object, /) -> TypeIs[set[object]]:
-        """Return whether the value is a ``set`` (subclasses included)."""
         ...
 
     def is_frozenset(_value: object, /) -> TypeIs[frozenset[object]]:
@@ -160,18 +156,6 @@ if TYPE_CHECKING:
 
     def mapping_get(_value: Mapping[_KeyT, _ValueT], _key: _KeyT, /) -> _ValueT | None:
         """``Mapping.get`` read through the ABC's own method."""
-        ...
-
-    def type_mro(_cls: type[object], /) -> tuple[type[object], ...]:
-        """Read the real ``__mro__`` (``utils/truth.py::mro``), past any metaclass."""
-        ...
-
-    def class_dict(_cls: type[object], /) -> Mapping[str, object]:
-        """Read the real own namespace (``utils/truth.py::class_dict``), past any metaclass."""
-        ...
-
-    def type_attr(_cls: type[object], _name: str, /) -> object:
-        """``type.__getattribute__``: an attribute read that skips a metaclass ``__getattribute__``."""
         ...
 
     def is_awaitable(_value: object, /) -> TypeIs[Awaitable[object]]:
@@ -243,14 +227,6 @@ if TYPE_CHECKING:
         """Return an enum member's ``value``, typed ``object`` (typeshed declares it ``Any``)."""
         ...
 
-    def instance_dict(_value: object, /) -> dict[str, object]:
-        """Return the value's own ``__dict__``, read past any ``__getattribute__`` its class defines.
-
-        ``utils/truth.py::instance_state``: a value whose class keeps no instance
-        ``__dict__`` is a ``TypeError``.
-        """
-        ...
-
 else:
     import inspect
     from operator import attrgetter, delitem, getitem, setitem
@@ -260,7 +236,6 @@ else:
     is_dict = dict.__instancecheck__
     is_list = list.__instancecheck__
     is_tuple = tuple.__instancecheck__
-    is_set = set.__instancecheck__
     is_frozenset = frozenset.__instancecheck__
     is_mapping = Mapping.__instancecheck__
     is_iterable = Iterable.__instancecheck__
@@ -275,16 +250,12 @@ else:
     set_iter = set.__iter__
     frozenset_iter = frozenset.__iter__
     mapping_get = Mapping.get
-    type_mro = truth.mro
-    class_dict = truth.class_dict
-    type_attr = type.__getattribute__
     is_awaitable = inspect.isawaitable
     read_attr = getattr
     pk_of = attrgetter("pk")
     enum_value = attrgetter("value")
     dict_of = dict
     list_of = list
-    instance_dict = truth.instance_state
     get_item = getitem
     set_item = setitem
     del_item = delitem
@@ -299,7 +270,6 @@ else:
 
 __all__ = (
     "call_method",
-    "class_dict",
     "del_item",
     "dict_get",
     "dict_items",
@@ -307,11 +277,9 @@ __all__ = (
     "enum_value",
     "frozenset_iter",
     "get_item",
-    "instance_dict",
     "is_abstract_set",
     "is_awaitable",
     "is_char_wise",
-    "is_class",
     "is_concrete_field",
     "is_dict",
     "is_exact_dict",
@@ -330,7 +298,6 @@ __all__ = (
     "is_queryset",
     "is_real_collection",
     "is_real_mapping",
-    "is_set",
     "is_set_or_frozenset",
     "is_str",
     "is_text_atom",
@@ -348,8 +315,6 @@ __all__ = (
     "set_item",
     "set_iter",
     "tuple_iter",
-    "type_attr",
-    "type_mro",
 )
 
 
@@ -361,15 +326,6 @@ def is_list_or_tuple(value: object) -> TypeIs[list[object] | tuple[object, ...]]
 def is_set_or_frozenset(value: object) -> TypeIs[set[object] | frozenset[object]]:
     """Return whether ``value`` is a ``set`` or a ``frozenset`` (subclasses included)."""
     return isinstance(value, (set, frozenset))
-
-
-def is_class(value: object) -> TypeIs[type[object]]:
-    """Return whether ``value`` IS a class, asked of its real type.
-
-    ``issubclass(type(value), type)`` rather than ``isinstance(value, type)``: the real
-    type cannot be restated by a ``__class__`` property on the value.
-    """
-    return issubclass(type(value), type)
 
 
 def is_real_mapping(value: object) -> TypeIs[Mapping[object, object]]:

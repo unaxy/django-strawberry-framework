@@ -346,7 +346,7 @@ class CardType(DjangoType):
     is_blocked: bool
     is_ready: bool
     card_id: str
-    # ``milestone`` is derived from ``target_version`` (the FK was removed);
+    # ``milestone`` is derived from ``target_version``;
     # ``dependencies`` / ``dependents`` resolve from CardReference edges via the
     # model's queryset properties. All three are resolver-backed relation fields
     # (the same "declare-but-resolve-from-attribute" idiom as ``slug`` above).

@@ -218,10 +218,10 @@ genuinely-unreachable-live case, not a live-first weakening
         pinned `strawberry-graphql` floor ([`pyproject.toml`][pyproject], with
         channels installed); if it is missing at the floor, bump the project's
         Strawberry floor instead. The floor itself is single-sited as
-        [`utils/imports.py::STRAWBERRY_FLOOR`][utils-imports], with
-        [`pyproject.toml`][pyproject] the one other written copy and
-        `tests/test_routers.py`'s re-typed `_STRAWBERRY_FLOOR_SUBSTRING` the
-        drift-catch. The command and
+        [`utils/imports.py::STRAWBERRY_FLOOR`][utils-imports], gated against its
+        [`pyproject.toml`][pyproject] row, with `tests/test_routers.py`'s re-typed
+        `_STRAWBERRY_FLOOR_SUBSTRING` the drift-catch; prose restatements are
+        ungated. The command and
         outcome are recorded in the build artifact
         ([Definition of done](#definition-of-done)).
   - [ ] `utils/imports.py` carries
@@ -692,9 +692,9 @@ Consumer-visible behavior:
     `strawberry.channels` consumer importable.
 
   Both messages interpolate their floors from
-  [`utils/imports.py`][utils-imports] (`CHANNELS_FLOOR`, `STRAWBERRY_FLOOR`), so the
-  only other written copy of either is its own [`pyproject.toml`][pyproject]
-  dependency row.
+  [`utils/imports.py`][utils-imports] (`CHANNELS_FLOOR`, `STRAWBERRY_FLOOR`), each
+  gated against its own [`pyproject.toml`][pyproject] dependency row, with
+  `tests/test_routers.py`'s re-typed literals the drift-catch.
   This is a **separate** message from `_CHANNELS_INSTALL_HINT` (which is for
   true top-level `channels` absence only); the Strawberry-floor gate exists
   precisely because Strawberry is part of the dependency boundary, so the
@@ -846,9 +846,9 @@ the same three-part architecture ([`spec-039`][spec-039] Decision 12, generalize
    passes its hint the same way). The wrapper passes the single
    `_CHANNELS_INSTALL_HINT` string, which stays defined in `routers.py` (D2: one
    hint, one module constant) and **interpolates** the floor from
-   [`utils/imports.py::CHANNELS_FLOOR`][utils-imports] rather than re-typing it, so
-   the version has exactly one other written copy — its own
-   [`pyproject.toml`][pyproject] dependency row. No memoization: each access
+   [`utils/imports.py::CHANNELS_FLOOR`][utils-imports] rather than re-typing it; a
+   governance row compares the constant to its [`pyproject.toml`][pyproject]
+   dependency row, and prose restatements are ungated. No memoization: each access
    re-fires the guard so the absence test can evict modules and re-hit it, exactly
    the [`require_drf()`][rf-init] contract.
 2. **A lazy class, materialized on first access.** The class body subclasses
@@ -1197,8 +1197,9 @@ carries its reason.
   (`_CHANNELS_INSTALL_HINT`), matched by substring in tests — the
   [`rf-init`][rf-init] `_DRF_INSTALL_HINT` shape. The **floor inside it is
   interpolated, never re-typed**: `CHANNELS_FLOOR` / `STRAWBERRY_FLOOR` live in
-  [`utils/imports.py`][utils-imports] and each has exactly one other written copy,
-  its own [`pyproject.toml`][pyproject] dependency row. A hard literal in a hint
+  [`utils/imports.py`][utils-imports], each gated against its own
+  [`pyproject.toml`][pyproject] dependency row; prose restatements are ungated.
+  A hard literal in a hint
   string is compared against nothing, so it drifts silently away from the metadata
   it is telling the consumer to install
   ([Decision 5](#decision-5--soft-channels-dependency-a-lazy-module-__getattr__--one-require_channels-guard)).

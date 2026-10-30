@@ -1,6 +1,6 @@
 """Filter input-class BFS factory.
 
-Layer 5 of the spec-027 six-layer pipeline: the BFS that builds every
+Layer 5 of the six-layer pipeline (spec-027 Decision 3): the BFS that builds every
 reachable Strawberry input class via the named converter
 ``convert_filter_to_input_annotation``. ``DjangoConnectionField`` reads the
 wrapped type's already-resolved ``Meta.filterset_class`` sidecar directly;

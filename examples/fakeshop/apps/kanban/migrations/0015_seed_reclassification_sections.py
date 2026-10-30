@@ -1,14 +1,9 @@
 """Seed the four net-new ``Section`` rows for the ``other`` reclassification.
 
-The signed-off Phase 0.5 reclassification moved 378 ``other`` card items into
-eleven target sections in the committed board snapshot. Four target sections
-did not yet exist, so this data-only migration seeds those four keys, appended
-after the then-current max ``order`` of 8 (``other``). The exact resulting item
-UUID-to-section assignments remain in the kanban tables of the committed
-``examples/fakeshop/db.sqlite3`` (the retired ``KANBAN.json`` export that once
-mirrored them was removed with the export itself);
-the one-shot command and review report were retired after the empty ``other``
-section was removed.
+This data-only migration seeds the four target sections the reclassification
+of ``other`` card items needs, at orders 9-12, the slots after ``other``
+(order 8, removed by 0016). The item-to-section assignments live in the kanban tables of
+``examples/fakeshop/db.sqlite3``.
 
 * ``test_plan`` -> "Test plan" / 9
 * ``decision`` -> "Decision" / 10

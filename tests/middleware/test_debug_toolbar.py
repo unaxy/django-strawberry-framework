@@ -54,21 +54,9 @@ _PARENT = "django_strawberry_framework.middleware"
 
 # The verified debug-toolbar floor, RE-TYPED here rather than imported (the
 # ``_HINT_SUBSTRING`` drift-catch discipline: a test comparing the imported
-# constant against itself could never notice the hint drifting). The floor is
-# GATED in three places that must agree - this literal,
-# ``utils/imports.py::DEBUG_TOOLBAR_FLOOR`` (which ``_DEBUG_TOOLBAR_INSTALL_HINT``
-# interpolates), and the ``[dependency-groups].dev`` specifier in
-# ``pyproject.toml``. This file compares the hint and the dependency row to the
-# literal (the hint-matching rows below,
-# ``test_install_hint_floor_matches_the_pyproject_dev_group_row``), and
-# ``tests/test_ci_governance.py`` compares the constant to the dependency row,
-# which is what makes the three-places-that-must-agree rule a gate rather than
-# a note. Those are the GATED sites, not a census of where the floor is
-# written: anything else restating it, documentation included, is gated by
-# nothing, so a floor bump sweeps the tree for the package NAME and reads each
-# hit, rather than trusting this enumeration or sweeping for the
-# ``django-debug-toolbar>=`` specifier - a restatement that separates the name
-# from the constraint with a backtick or a space does not match it.
+# constant against itself could never notice the hint drifting). The hint
+# interpolates ``utils/imports.py::DEBUG_TOOLBAR_FLOOR``; the rows below match
+# the hint and the ``pyproject.toml`` dev-group row against this literal.
 _HINT_SUBSTRING = "django-debug-toolbar>=7.0.0"
 
 

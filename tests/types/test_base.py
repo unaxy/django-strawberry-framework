@@ -94,7 +94,14 @@ from django_strawberry_framework.types.relay import (
     _validated_globalid_setting,
 )
 from django_strawberry_framework.utils._narrowing import read_attr
-from tests._idioms import ClaimsClass, ClassReadRaisesBase, definition_raises, is_object_dict
+from django_strawberry_framework.utils.typing import object_result
+from tests._idioms import (
+    ClaimsClass,
+    ClassReadRaisesBase,
+    declare_django_type,
+    definition_raises,
+    is_object_dict,
+)
 from tests.optimizer import _link_models
 
 CATEGORY_SCALAR_FIELDS = (
@@ -210,8 +217,10 @@ def test_meta_model_must_be_django_model_class() -> None:
     [
         ("fields", 123, "Meta.fields must be '__all__' or a non-string sequence"),
         ("fields", "name", "Meta.fields must be '__all__' or a non-string sequence"),
+        ("fields", b"name", "Meta.fields must be '__all__' or a non-string sequence"),
         ("exclude", 123, "Meta.exclude must be a non-string sequence"),
         ("exclude", "name", "Meta.exclude must be a non-string sequence"),
+        ("exclude", b"name", "Meta.exclude must be a non-string sequence"),
     ],
 )
 def test_meta_field_selectors_must_have_valid_shapes(
@@ -1656,6 +1665,19 @@ def test_meta_rejects_unknown_key() -> None:
                 bogus_key = "value"
 
 
+@pytest.mark.filterwarnings("ignore:non-string key in the __dict__")
+def test_meta_rejects_a_non_str_key_as_unknown() -> None:
+    """A non-``str`` key a hand-built ``Meta`` namespace plants is an unknown key, not a crash."""
+    meta = object_result(
+        type,
+        "Meta",
+        (),
+        {"model": Category, "fields": CATEGORY_SCALAR_FIELDS, 7: "value"},
+    )
+    with pytest.raises(ConfigurationError, match=r"Unknown Meta keys: \[7\]"):
+        declare_django_type("T", {"Meta": meta})
+
+
 def test_meta_fields_unknown_name_raises() -> None:
     """A typo in ``Meta.fields`` raises ``ConfigurationError`` rather than silently dropping."""
     with pytest.raises(ConfigurationError, match="unknown fields"):
@@ -2170,11 +2192,51 @@ def test_has_custom_get_queryset_inherits_through_abstract_base_without_meta() -
     assert CategoryType.has_custom_get_queryset() is True
 
 
-def test_meta_less_subclass_override_of_a_concrete_parent_reports_custom() -> None:
-    """A ``Meta``-less subclass that overrides ``get_queryset`` reports its own hook.
+@pytest.mark.parametrize("moment", ["before_finalize", "after_finalize"])
+@pytest.mark.parametrize("parent_shape", ["plain", "relay_node"])
+def test_meta_less_subclass_of_a_concrete_type_is_refused_at_class_creation(
+    moment: str,
+    parent_shape: str,
+) -> None:
+    """A ``Meta``-less subclass of a concrete ``DjangoType`` raises where it is written.
 
-    The concrete parent's hook is the identity, so its answer is ``False``; the
-    subclass inherits the parent's definition but not its verdict.
+    It registers nothing and inherits its parent's definition, so an annotation or
+    resolver naming it would publish the parent (its own fields and ``get_queryset``
+    dropped); refusing it at class creation leaves no class for a field factory,
+    ``global_id_for`` or ``inspect_django_type`` to receive, before or after
+    finalization, and the registry keeps only the parent.
+    """
+
+    class ParentCategoryType(DjangoType):
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+            interfaces = (relay.Node,) if parent_shape == "relay_node" else ()
+
+    if moment == "after_finalize":
+        finalize_django_types()
+    with pytest.raises(ConfigurationError) as exc_info:
+
+        @definition_raises
+        class ChildCategoryType(ParentCategoryType):
+            pass
+
+    assert str(exc_info.value) == (
+        "ChildCategoryType subclasses the concrete DjangoType ParentCategoryType without "
+        "declaring its own `class Meta`, so it would publish as ParentCategoryType. Declare "
+        "`class Meta` (with `model`) on ChildCategoryType for a second type of the model, or "
+        "make the shared base a Meta-less abstract subclass of DjangoType."
+    )
+    assert registry.types_for(Category) == (ParentCategoryType,)
+
+
+def test_a_scoping_meta_less_subclass_of_a_concrete_parent_is_refused() -> None:
+    """A ``Meta``-less subclass that scopes rows through ``get_queryset`` is refused at class creation.
+
+    Published as its parent, its hook would never be consulted (fail-open). The
+    supported scoping shape, a ``Meta``-less abstract base directly under
+    ``DjangoType``, is
+    ``test_has_custom_get_queryset_inherits_through_abstract_base_without_meta``.
     """
 
     class CategoryType(DjangoType):
@@ -2182,19 +2244,25 @@ def test_meta_less_subclass_override_of_a_concrete_parent_reports_custom() -> No
             model = Category
             fields = CATEGORY_SCALAR_FIELDS
 
-    class ScopedCategoryType(CategoryType):
-        @classmethod
-        @override
-        def get_queryset(
-            cls,
-            queryset: models.QuerySet[Category],
-            info: object,
-            **kwargs: object,
-        ) -> models.QuerySet[Category]:
-            return queryset.filter(is_private=False)
+    with pytest.raises(
+        ConfigurationError,
+        match="subclasses the concrete DjangoType CategoryType",
+    ):
+
+        @definition_raises
+        class ScopedCategoryType(CategoryType):
+            @classmethod
+            @override
+            def get_queryset(
+                cls,
+                queryset: models.QuerySet[Category],
+                info: object,
+                **kwargs: object,
+            ) -> models.QuerySet[Category]:
+                return queryset.filter(is_private=False)
 
     assert CategoryType.has_custom_get_queryset() is False
-    assert ScopedCategoryType.has_custom_get_queryset() is True
+    assert registry.types_for(Category) == (CategoryType,)
 
 
 # ---------------------------------------------------------------------------

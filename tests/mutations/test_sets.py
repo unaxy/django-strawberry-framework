@@ -34,12 +34,14 @@ import importlib
 import re
 import sys
 from collections.abc import Iterator
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 import pytest
 import strawberry
 from apps.library import models as library_models
 from apps.products import models as product_models
+from apps.scalars import models as scalar_models
+from django.db import models
 from django.db.models import Model
 from django.utils.translation import gettext_lazy
 from strawberry import relay
@@ -50,6 +52,8 @@ import django_strawberry_framework
 from django_strawberry_framework import (
     DjangoModelPermission,
     DjangoMutation,
+    DjangoMutationField,
+    DjangoSchema,
     DjangoType,
     finalize_django_types,
 )
@@ -96,8 +100,23 @@ from django_strawberry_framework.types.base import (
 from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.inputs import RELATION_SINGLE, SCALAR
 from django_strawberry_framework.write_mixins import resolve_backed_model_or_raise
-from tests._idioms import definition_raises, module_binding, pickle_roundtrip
+from tests._idioms import (
+    canonical_order,
+    definition_raises,
+    module_binding,
+    pickle_roundtrip,
+    scrambled,
+)
 from tests.optimizer import _link_models
+
+if TYPE_CHECKING:
+    from typing import TypeAlias
+
+    from django.db.models.expressions import Combinable
+
+    # The field's descriptor types as django-stubs declares them (set type, get type), spelled
+    # out because the checker runs without the django-stubs mypy plugin that would infer them.
+    _Int: TypeAlias = models.IntegerField[float | int | str | Combinable, int]
 
 
 @pytest.fixture(autouse=True)
@@ -234,6 +253,37 @@ def test_meta_duplicate_exclude_raises() -> None:
                 exclude = ("description", "description")
 
 
+@pytest.mark.parametrize("kind", [set, frozenset])
+def test_meta_exclude_accepts_an_unordered_set_stored_in_canonical_order(
+    kind: type[set[str] | frozenset[str]],
+) -> None:
+    """A set-valued ``Meta.exclude`` builds, and its stored tuple ignores the hash order.
+
+    ``exclude`` only names columns to drop (the input keeps the model's column order), so
+    a set is a natural spelling; it is stored sorted by ``canonical_sort_key``, so the
+    snapshot is the same under every ``PYTHONHASHSEED``. ``scrambled`` iterates out of that
+    order in this process, so storing the declared iteration order fails the row.
+    """
+    declared = scrambled(
+        kind,
+        (
+            "flag",
+            "score",
+            "price",
+            "occurred_on",
+            "payload",
+        ),
+    )
+
+    class UpdateSpecimen(DjangoMutation):
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            operation = "update"
+            exclude = declared
+
+    assert UpdateSpecimen._mutation_meta.exclude == tuple(canonical_order(declared))
+
+
 def test_meta_unknown_fields_raises_at_class_creation() -> None:
     """An unknown ``Meta.fields`` name raises at class creation (not finalize).
 
@@ -318,7 +368,7 @@ def test_meta_fields_naming_a_foreign_object_raises_at_class_creation() -> None:
 
 def test_meta_empty_fields_raises_at_class_creation() -> None:
     """``Meta.fields = ()`` on create/update raises at class creation (empty input)."""
-    with pytest.raises(ConfigurationError, match="narrowed the editable column set to empty"):
+    with pytest.raises(ConfigurationError) as exc:
 
         @definition_raises
         class CreateItem(DjangoMutation):
@@ -326,6 +376,12 @@ def test_meta_empty_fields_raises_at_class_creation() -> None:
                 model = product_models.Item
                 operation = "create"
                 fields = ()
+
+    assert str(exc.value) == (
+        "DjangoMutation create input for Item has no fields; Meta.fields / Meta.exclude "
+        "narrowed the editable column set to empty (or the model declares no editable "
+        "columns). A mutation input must define at least one field."
+    )
 
 
 def test_meta_fields_non_string_entry_raises() -> None:
@@ -917,6 +973,35 @@ def test_bind_merges_consumer_input_class_with_generated_remainder() -> None:
     assert spec_by_attr["category_id"].related_model is product_models.Category
 
 
+def test_bind_merges_an_input_class_that_overrides_every_selected_column() -> None:
+    """An ``input_class`` naming every selected column leaves an empty remainder; it still binds.
+
+    The generated half of the merge carries no field, and the merged input is the
+    consumer's alone, so an empty generated remainder is a valid build, never the
+    empty-input refusal (that belongs to an empty selection).
+    """
+    _declare_products_primaries()
+
+    @strawberry.input
+    class CustomCategoryName:
+        name: str = strawberry.field(description="custom name")
+
+    class CreateCategory(DjangoMutation):
+        class Meta:
+            model = product_models.Category
+            operation = "create"
+            fields = ("name",)
+            input_class = CustomCategoryName
+
+    finalize_django_types()
+
+    merged = _materialized_names["CategoryNameInput"]
+    assert CreateCategory._input_class is merged
+    assert {
+        f.python_name: f.description for f in get_object_definition(merged, strict=True).fields
+    } == {"name": "custom name"}
+
+
 def test_bind_merges_consumer_partial_input_class_for_update() -> None:
     """A consumer ``partial_input_class`` is likewise merged on the update side."""
     _declare_products_primaries()
@@ -1161,6 +1246,61 @@ def test_bind_rejects_fk_relation_override_as_id_list() -> None:
         finalize_django_types()
 
 
+def test_bind_accepts_optional_fk_relation_override() -> None:
+    """A forward-FK override declared as ``strawberry.ID | None`` binds clean (positive control).
+
+    The shape-lock compares the ``strawberry.ID`` core and the list depth only; an
+    Optional wrapper is nullability, so the nullable scalar keeps depth 0 and the
+    merged input honors the consumer's field.
+    """
+    _declare_products_primaries()
+
+    @strawberry.input
+    class NullableItemInput:
+        category_id: strawberry.ID | None = strawberry.field(description="nullable category ref")
+
+    class CreateItem(DjangoMutation):
+        class Meta:
+            model = product_models.Item
+            operation = "create"
+            input_class = NullableItemInput
+
+    finalize_django_types()
+
+    merged = _materialized_names["ItemInput"]
+    assert CreateItem._input_class is merged
+    fields = {f.python_name: f for f in get_object_definition(merged, strict=True).fields}
+    assert fields["category_id"].description == "nullable category ref"
+
+
+def test_bind_accepts_optional_m2m_relation_override() -> None:
+    """An M2M override declared as ``list[strawberry.ID] | None`` binds clean (positive control).
+
+    The Optional wrapper around the one-level list is nullability, not list depth, so
+    the shape-lock reads depth 1 with the ``strawberry.ID`` core and the merged input
+    honors the consumer's field.
+    """
+    _declare_book_m2m_primaries()
+
+    @strawberry.input
+    class NullableBookInput:
+        genres: list[strawberry.ID] | None = strawberry.field(description="nullable genres ref")
+
+    class CreateBook(DjangoMutation):
+        class Meta:
+            model = library_models.Book
+            operation = "create"
+            fields = ("title", "shelf", "genres")
+            input_class = NullableBookInput
+
+    finalize_django_types()
+
+    assert CreateBook._input_class is not None
+    merged = _materialized_names[CreateBook._input_class.__name__]
+    fields = {f.python_name: f for f in get_object_definition(merged, strict=True).fields}
+    assert fields["genres"].description == "nullable genres ref"
+
+
 def test_bind_accepts_m2m_relation_override_as_id_list() -> None:
     """The contract-compliant M2M override - ``list[strawberry.ID]`` - binds clean (positive control).
 
@@ -1318,6 +1458,108 @@ def test_bind_merged_and_generated_same_shape_distinct_representations_raise() -
 
     with pytest.raises(ConfigurationError, match="ItemInput"):
         finalize_django_types()
+
+
+@strawberry.type
+class _PingQuery:
+    @strawberry.field
+    def ping(self) -> int:
+        return 1
+
+
+def test_bind_merged_narrowed_input_publishes_the_canonical_shape_name() -> None:
+    """A merged narrowed input publishes ``shape.type_name`` verbatim, escapes and all.
+
+    ``pascalize_token`` escapes the ``is_private`` underscore as ``_u``, so the shape
+    name is ``ItemIs_uprivateNameInput``; Strawberry names a type given no ``name=``
+    ``to_camel_case(__name__)``, which would publish ``ItemIsUprivatenameinput`` while
+    the ledger holds the canonical name. The merge pins ``name=shape.type_name``.
+    """
+    _declare_products_primaries()
+
+    @strawberry.input
+    class CustomItemInput:
+        name: str = strawberry.field(description="custom")
+
+    class CreateNarrowItem(DjangoMutation):
+        class Meta:
+            model = product_models.Item
+            operation = "create"
+            fields = ("name", "is_private")
+            input_class = CustomItemInput
+
+    @strawberry.type
+    class Mutation:
+        create_narrow_item = DjangoMutationField(CreateNarrowItem)
+
+    finalize_django_types()
+    shape = mutation_input_shape(product_models.Item, CREATE, fields=("name", "is_private"))
+    assert shape.type_name == "ItemIs_uprivateNameInput"
+    merged = CreateNarrowItem._input_class
+    assert merged is not None
+    assert get_object_definition(merged, strict=True).name == shape.type_name
+    assert shape.type_name in _materialized_names
+
+    sdl = DjangoSchema(query=_PingQuery, mutation=Mutation).as_str()
+    assert "input ItemIs_uprivateNameInput " in sdl
+
+
+def test_bind_merged_narrowed_shapes_recased_alike_stay_distinct() -> None:
+    """Two narrowed merged shapes Strawberry would re-case alike publish both names.
+
+    Columns ``a_b`` + ``c`` and ``a_bc`` name the distinct shapes ``CollA_ubCInput`` and
+    ``CollA_ubcInput``; ``to_camel_case`` maps both to ``CollAUbcinput``, so an unpinned
+    merge fails the schema build with Strawberry's ``DuplicatedTypeName``, past the
+    package's own name-collision guard. ``Coll`` stays synthetic: no fakeshop model
+    carries the column pair.
+    """
+
+    class Coll(models.Model):
+        a_b: _Int = models.IntegerField()
+        c: _Int = models.IntegerField()
+        a_bc: _Int = models.IntegerField()
+
+        class Meta:
+            app_label = "test_mutation_sets_naming"
+
+    class CollNode(DjangoType, relay.Node):
+        class Meta:
+            model = Coll
+            fields = ("id",)
+            primary = True
+
+    @strawberry.input
+    class CustomCInput:
+        c: int = strawberry.field(description="custom")
+
+    @strawberry.input
+    class CustomABCInput:
+        a_bc: int = strawberry.field(description="custom")
+
+    class CreateCollPair(DjangoMutation):
+        class Meta:
+            model = Coll
+            operation = "create"
+            fields = ("a_b", "c")
+            input_class = CustomCInput
+
+    class CreateCollJoined(DjangoMutation):
+        class Meta:
+            model = Coll
+            operation = "create"
+            fields = ("a_bc",)
+            input_class = CustomABCInput
+
+    @strawberry.type
+    class Mutation:
+        create_coll_pair = DjangoMutationField(CreateCollPair)
+        create_coll_joined = DjangoMutationField(CreateCollJoined)
+
+    finalize_django_types()
+    assert registry.get(Coll) is CollNode
+    sdl = DjangoSchema(query=_PingQuery, mutation=Mutation).as_str()
+    assert "input CollA_ubCInput " in sdl
+    assert "input CollA_ubcInput " in sdl
 
 
 def test_bind_duplicate_payload_name_distinct_shapes_raises() -> None:

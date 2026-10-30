@@ -1,6 +1,6 @@
 """DRF serializer-field -> Strawberry input conversion + the per-input-field reverse map.
 
-The serializer-flavor analog of ``forms/converter.py`` (spec-038): a DRF
+The serializer-flavor analog of ``forms/converter.py``: a DRF
 ``serializers.Field``-keyed registry mapping each supported serializer field to
 its Strawberry annotation + required-ness, in the graphene-django
 ``convert_serializer_field`` parity shape, raised through the package's own
@@ -648,7 +648,8 @@ def _unsupported_serializer_field(field: DRFField) -> ConfigurationError:
         f"Unsupported serializer field type {truth.name(type(field))!r} on serializer "
         f"field {truth.render(getattr(field, 'field_name', None))}. convert_serializer_field has "
         "no mapping for it "
-        "and no supported ancestor; register a supported base class, or drop it via "
+        "and no supported ancestor; register a converter for it with "
+        "register_serializer_field_converter, or drop it via "
         "Meta.fields / Meta.exclude.",
     )
 
@@ -963,7 +964,7 @@ def _require_relation_primary(
     field + target model. A serializer relation is meaningless without a typed
     target (the resolver must decode the id to a row of a known ``DjangoType``), so
     a missing primary is a build-time configuration error, not a silent raw-pk
-    degrade. The form fallback is left byte-unchanged (its own non-goal).
+    degrade.
     """
     primary = registry.get(related_model)
     if primary is None:
@@ -1533,8 +1534,6 @@ def resolve_serializer_field(
             )
         python_attr, graphql_name = serializer_field_graphql_name(field_name, kind)
     else:
-        # Column-less serializer field: the model-less converter owns the kind;
-        # relation / file annotations are finalized here.
         conversion = convert_serializer_field(field)
         kind = conversion.kind
         if kind == FILE:

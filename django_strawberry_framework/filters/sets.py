@@ -1,13 +1,13 @@
 """``FilterSet`` + ``FilterSetMetaclass`` - declaration, validation, and the apply pipeline.
 
-Layers 3 and 4 of the spec-027 six-layer pipeline plus the
+Layers 3 and 4 of the six-layer pipeline (spec-027 Decision 3) plus the
 Decision-8 named-helper decomposition of `apply_sync` /
 `apply_async` / `apply`. The metaclass is a verbatim port of
 `django_graphene_filters/filterset.py::FilterSetMetaclass`; `FilterSet`
 mixes the cookbook's cycle-safe `get_filters` into a
 `django_filters.filterset.BaseFilterSet` subclass per spec-027 Decision 5.
 
-The Decision-4 owner-aware Relay-vs-scalar conditional lives only inside
+The Decision-4 Relay-vs-scalar conditional lives only inside
 `filter_for_field` / `filter_for_lookup` to keep the runtime override as
 the single source of truth (the factory derives shape from the
 resolved filter instances, not from a parallel map).
@@ -92,6 +92,7 @@ from django_strawberry_framework.sets_mixins import (
     reject_captured_branches,
     reject_unknown_exclude_names,
     require_field_name,
+    require_lookup_names,
     require_re_readable_field_declaration,
     require_sweep_model,
     should_cache_expansion,
@@ -149,7 +150,6 @@ from django_strawberry_framework.utils.permissions import (
     RelationHop,
     UndeclaredHop,
     relation_path_gates,
-    set_bound_definition,
     set_bound_type,
     walk_declared_relation_path,
 )
@@ -169,6 +169,8 @@ from django_strawberry_framework.utils.relations import (
     is_many_side_relation_kind,
     is_model_class,
     leading_relation_hops,
+    m2m_through_link_fields,
+    non_pk_forward_link,
     path_traverses_to_many,
     relation_kind,
 )
@@ -192,7 +194,6 @@ from .base import (
     TextPatternFilter,
     _bound_field_name,
     _reads_integer_transform,
-    _relation_uses_non_pk_to_field,
     copied_declared_filter,
     copied_form_field,
     membership_in_filter_class,
@@ -937,10 +938,10 @@ _ALL_FAMILY_PROFILES: tuple[_FilterFamilyProfile, ...] = (
 # Exact-class supported-family -> profile registry. Resolution is by EXACT type
 # (``_family_profile_for`` never walks the MRO), so mapping ORDER is cosmetic. ``Filter``
 # itself is DELIBERATELY absent (an exact bare ``Filter`` is not a supported family), and
-# so are ``BaseInFilter`` / ``BaseRangeFilter``: their ONLY job was to feed the retired
-# MRO walk for django-filter's dynamic ``in`` / ``range`` CSV classes; that job now
-# belongs to the structural validator in ``_family_profile_for``, which references those
-# two bases directly. An arbitrary subclass of any key below is NOT audited (it may
+# so are ``BaseInFilter`` / ``BaseRangeFilter``: django-filter's dynamic ``in`` / ``range``
+# CSV classes are recognised structurally by ``_dynamic_csv_profile_for`` (reached
+# through ``_family_profile_for``), which references those two bases directly. An
+# arbitrary subclass of any key below is NOT audited (it may
 # override ``.filter`` or add state this package never reviewed) and therefore resolves
 # to NO profile.
 _FILTER_FAMILY_REGISTRY: truth.IdentityMap[type[object], _FilterFamilyProfile] = truth.IdentityMap(
@@ -1020,7 +1021,7 @@ def _dynamic_csv_profile_for(klass: type[object]) -> _FilterFamilyProfile | None
     ``BaseRangeFilter`` variant) per consumer ``in`` / ``range`` lookup on a scalar field
     -- a NEW class object each call, so it can never be a ``_FILTER_FAMILY_REGISTRY`` key,
     yet it is genuine framework machinery and must still route. Rather than trust every
-    descendant of ``BaseInFilter`` / ``BaseRangeFilter`` (the retired MRO walk -- an open
+    descendant of ``BaseInFilter`` / ``BaseRangeFilter`` (an open
     ancestry allowlist), this validates the EXACT MRO and class body, so anything a
     future django-filter release or a consumer adds fails closed:
 
@@ -2205,6 +2206,18 @@ _reshape_var: ContextVar[tuple[type[FilterSet], Mapping[str, Filter]] | None] = 
     default=None,
 )
 
+# The set django-filter is building a filter for, and the ``Meta.fields`` key. Upstream
+# calls ``filter_for_lookup`` with the field and lookup alone, so
+# ``FilterSet.filter_for_lookup`` reads the key here to tell this set's own primary key
+# (its single-segment key) from a dotted key ending on the same column; a consumer
+# override's ``super().filter_for_lookup()`` sees the same key. The key is read only by
+# the set that published it, so another set's ``filter_for_lookup`` called meanwhile is
+# a direct call. ``None`` outside generation: the field asked about by itself.
+_generating_key_var: ContextVar[tuple[type[FilterSet], str] | None] = ContextVar(
+    "_generating_key_var",
+    default=None,
+)
+
 
 # The tables of the sets publishing (``FilterSet._publish_filters``), by set id: a read
 # of a set's table while it publishes answers the table being published
@@ -2694,11 +2707,10 @@ class FilterSet(
     `_owner_definition` is the binding seam populated by
     `finalize_django_types` phase 2.5 and read only as the class's own slot
     (`utils/permissions.py::set_bound_definition`), so a subclass is unbound
-    until a `DjangoType` wires it. The slot declared `None` and the fallback
-    branch in `filter_for_field` / `filter_for_lookup` that consults
-    `registry.get(...)` while the class is unbound keep package-internal
-    tests able to exercise the Relay-vs-scalar conditional before owner
-    binding lands.
+    until a `DjangoType` wires it. A relation key's Relay-vs-scalar
+    conditional reads no binding (its target is `registry.get(...)` of the
+    key's own relation's model); the own-PK branch reads it and keeps the
+    upstream shape while the class is unbound.
     """
 
     # The public generation-policy table. Installed in place of django-filter's
@@ -2753,10 +2765,9 @@ class FilterSet(
     # per build, unpublished (`expanded_once`'s `on_reentry`).
     _is_expanding_filters: ClassVar[bool] = False
 
-    # Family binding-state descriptor: the single source for the lifecycle attr
-    # names `get_filters` (via `expanded_once`) and `registry.clear()` (via
-    # `clear_filter_input_namespace`'s `binding_attrs`) reference, instead of
-    # re-spelling the tuple.
+    # The single source for the lifecycle attr names `get_filters` (via
+    # `expanded_once`) and `registry.clear()` (via `clear_filter_input_namespace`'s
+    # `binding_attrs`) reference, instead of re-spelling the tuple.
     _lifecycle: ClassVar[SetLifecycleAttrs] = SetLifecycleAttrs(
         owner="_owner_definition",
         cache="_expanded_filters",
@@ -2766,10 +2777,10 @@ class FilterSet(
         extra=("_expanded_snapshot",),
     )
 
-    # Family permission-facade config: the single source ``ActiveInputPermissionMixin``
-    # reads instead of re-spelling related_attr / UNSET / logic keys on every
-    # thin wrapper. Shared with ``OrderSet`` through the mixin; apply pipelines
-    # stay family-owned.
+    # The single source ``ActiveInputPermissionMixin`` reads instead of
+    # re-spelling related_attr / UNSET / logic keys on every thin wrapper.
+    # Shared with ``OrderSet`` through the mixin; apply pipelines stay
+    # family-owned.
     _permission: ClassVar[ActiveInputPermissionAttrs] = ActiveInputPermissionAttrs(
         family_label="FilterSet",
         target_attr="filterset",
@@ -2849,8 +2860,9 @@ class FilterSet(
     # ``_q_for_branch`` hands this instance's map to every sibling it builds.
     # ``apply_async`` pre-fills it (``_derive_flat_hop_visibility_async``) so an
     # async-only ``get_queryset`` never runs inside the sync ``.qs`` read; the
-    # sync path derives each entry on first use. ``None`` until first read
-    # (``_hop_visibility``).
+    # sync path derives each entry on first use. ``None`` only on a set built
+    # directly, not by the apply pipeline (``_hop_visibility`` creates it on
+    # first read).
     _flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]] | None = (
         None
     )
@@ -3448,7 +3460,10 @@ class FilterSet(
         ``_expand_meta_fields`` through
         ``sets_mixins.py::require_re_readable_field_declaration``,
         applied here before the first consumption so the declaration fails
-        closed at class creation.
+        closed at class creation. A lookup-bag dict's per-field value is walked
+        by upstream as that field's lookups, so it is gated beside its key
+        (``sets_mixins.py::require_lookup_names``): ``"__all__"`` or a
+        re-readable collection of lookup-name strings.
 
         Before all three, every name is read as plain ``str`` text
         (``utils/inputs.py::plain_set_meta_fields``): django-filter hashes and
@@ -3511,6 +3526,12 @@ class FilterSet(
                     ),
                 )
             ]
+            if is_dict(meta_fields):
+                # A lookup-bag value is django-filter's to walk as the field's lookups, so it
+                # is gated beside its key: ``"__all__"`` or re-readable lookup-name strings.
+                # Every key passed ``require_field_name`` above, so its text is the key.
+                for name, lookups in dict_items(meta_fields):
+                    require_lookup_names(cls, truth.text(name), lookups)
         exclude = options.exclude
         if exclude is not None:
             # No ``str`` exemption: upstream reads ``exclude`` only by membership, so a
@@ -3575,7 +3596,7 @@ class FilterSet(
                         package_default=cls._origin_for_selection_class(type(model_field))
                         == "framework_default",
                     )
-                    if cls._is_own_pk_under_relay_owner(model_field):
+                    if cls._is_own_pk_under_relay_owner(model_field, field_name):
                         # A Relay node's own PK is a GlobalID over the wire, so
                         # only equality / membership / null are meaningful.
                         # Ordering and pattern lookups (``range`` / ``gt`` /
@@ -3606,7 +3627,7 @@ class FilterSet(
         return fields
 
     # ------------------------------------------------------------------
-    # spec-027 Decision 4 owner-aware Relay-vs-scalar conditional.
+    # spec-027 Decision 4 Relay-vs-scalar conditional.
     # ------------------------------------------------------------------
 
     @classmethod
@@ -3620,16 +3641,21 @@ class FilterSet(
 
         Typed as the upstream body returns it: ``None`` for a field with no ``FILTER_DEFAULTS``
         entry under ``Meta.unknown_field_behavior`` ``WARN`` / ``IGNORE``, which typeshed's
-        stub leaves out.
+        stub leaves out. ``(cls, field_name)`` is published in ``_generating_key_var`` while
+        upstream runs, so the ``filter_for_lookup`` it calls knows the key it is building.
         """
-        # basedpyright: typeshed narrows ``field`` to ``Field``; upstream ``get_filters`` passes
-        # the ``ForeignObjectRel`` of a reverse relation too. It rejects ``ModelField``'s
-        # ``ForeignObjectRel`` arm
-        return super().filter_for_field(
-            field,  # pyright: ignore[reportArgumentType]
-            field_name,
-            lookup_expr,
-        )
+        token = _generating_key_var.set((cls, field_name))
+        try:
+            # basedpyright: typeshed narrows ``field`` to ``Field``; upstream ``get_filters``
+            # passes the ``ForeignObjectRel`` of a reverse relation too. It rejects
+            # ``ModelField``'s ``ForeignObjectRel`` arm
+            return super().filter_for_field(
+                field,  # pyright: ignore[reportArgumentType]
+                field_name,
+                lookup_expr,
+            )
+        finally:
+            _generating_key_var.reset(token)
 
     # basedpyright: typeshed types ``filter_for_field`` as never ``None``; upstream returns
     # ``None`` for an unrecognized field under ``WARN`` / ``IGNORE`` (see the first branch below).
@@ -3644,10 +3670,10 @@ class FilterSet(
     ) -> Filter | None:
         """Pick the Relay-aware filter for Relay-Node-shaped relation targets.
 
-        Decision-4 conditional. Resolves the relation target via the
-        bound owner's `related_target_for(field_name)`
-        (`_resolve_relation_target_type`) and falls back to
-        `registry.get(target_model)` while this class is unbound. A target type implementing
+        Decision-4 conditional. The relation target type is
+        `registry.get(target_model)` of the key's own relation (the terminal
+        field upstream resolved from the dotted path, so a leaf on a hop is read
+        on the hop's model), bound or not. A target type implementing
         `relay.Node` produces `GlobalIDMultipleChoiceFilter` for
         multi-valued relations (M2M / reverse FK / reverse M2M) and
         `GlobalIDFilter` for single-valued relations (forward FK /
@@ -3656,9 +3682,10 @@ class FilterSet(
         `RelationPkFilter` on the same cardinality split. Non-relation
         fields defer to the upstream default unchanged.
 
-        Own-PK branch (spec-027 Decision 4): when ``field`` is the
-        owning model's primary key AND the owning ``DjangoType`` itself
-        implements ``relay.Node``, the field becomes ``GlobalIDFilter`` -
+        Own-PK branch (spec-027 Decision 4): when ``field_name`` is the
+        single-segment key naming the owning model's primary key AND the
+        owning ``DjangoType`` itself implements ``relay.Node``, the field
+        becomes ``GlobalIDFilter`` -
         the OWNER is the Relay node so its PK column is a GlobalID over
         the wire.
 
@@ -3701,7 +3728,8 @@ class FilterSet(
         # class capability gate still refuses optimization, while the candidate
         # row remains available for the fail-closed metadata contract.
         lookup_seam_overridden = truth.overrides(cls, FilterSet, "filter_for_lookup")
-        identity_policy_field = cls._is_own_pk_under_relay_owner(field) or getattr(
+        own_pk = cls._is_own_pk_under_relay_owner(field, field_name)
+        identity_policy_field = own_pk or getattr(
             field,
             "is_relation",
             False,
@@ -3741,7 +3769,7 @@ class FilterSet(
         _stamp(default, effective_origin)
         if not generation_shape_capable or effective_origin != "framework_default":
             return default
-        if cls._is_own_pk_under_relay_owner(field):
+        if own_pk:
             # The owner's own PK is a GlobalID over the wire. Honor the
             # lookup cardinality: an ``in`` lookup consumes a LIST of
             # GlobalIDs (multi-choice), every other lookup a single one.
@@ -3813,15 +3841,22 @@ class FilterSet(
         # but a raw-pk leaf, and a Relay GlobalID of a target whose id is its primary
         # key, both carry the target's PK. Set the BOOLEAN pk-qualification flag so the
         # filter DERIVES the ``<relation>__pk`` path from its LIVE ``field_name`` at
-        # filter time (see ``base.py::_relation_uses_non_pk_to_field`` /
-        # ``_GLOBALID_RELATION_PK_ATTR``); a GlobalID whose target's id is another
-        # column compiles on that column instead (``base.py::_globalid_predicate_path``).
-        # A boolean (not a frozen absolute path) survives ``_expand_related_filter``'s
-        # deepcopy + ``field_name`` rebase, so an expanded leaf compiles against the
-        # rebased relation path instead of a stale absolute ``"<relation>__pk"``. The
-        # common FK-to-pk / M2M-to-pk / reverse case is not marked and keeps the raw
-        # ``{field_name__lookup_expr: node_id}`` predicate byte-identical.
-        if _relation_uses_non_pk_to_field(field):
+        # filter time (``base.py::_GLOBALID_RELATION_PK_ATTR``); a GlobalID whose
+        # target's id is another column compiles on that column instead
+        # (``base.py::_globalid_predicate_path``). The link onto the target is the
+        # relation itself for a forward single relation and the through model's foreign
+        # key onto the target for a many-to-many, either side
+        # (``utils/relations.py::m2m_through_link_fields``; a ``to_field`` on the foreign
+        # key onto the source never enters); ``utils/relations.py::non_pk_forward_link``
+        # answers whether it is keyed off the target's primary key, and ``None`` for
+        # every other relation kind. A boolean (not a frozen absolute path) survives
+        # ``_expand_related_filter``'s deepcopy + ``field_name`` rebase, so an expanded
+        # leaf compiles against the rebased relation path instead of a stale absolute
+        # ``"<relation>__pk"``. The common FK-to-pk / M2M-to-pk / reverse case is not
+        # marked and keeps the raw ``{field_name__lookup_expr: node_id}`` predicate
+        # byte-identical.
+        link_field = m2m_through_link_fields(field)[1] if relation_kind(field) == "many" else field
+        if non_pk_forward_link(link_field) is not None:
             setattr(identity_replacement, _GLOBALID_RELATION_PK_ATTR, True)
         return identity_replacement
 
@@ -4041,7 +4076,7 @@ class FilterSet(
 
         ``FilterSet`` is referenced by name (not ``super()`` / ``__class__``)
         because this runs after class definition, when the module global is
-        bound. ``filterset`` is the imported ``django_filters.filterset``.
+        bound.
         """
         return (
             not truth.overrides(cls, FilterSet, *FilterSet._GENERATION_SEAMS)
@@ -4134,8 +4169,9 @@ class FilterSet(
         """Mirror `filter_for_field`'s Relay-vs-scalar conditional per-lookup.
 
         Non-relation fields defer to the upstream pair-return shape unless
-        the field is the owner's own PK and the owner is Relay-Node-shaped
-        (own-PK branch per spec-027 Decision 4), the lookup is a text-pattern
+        the field is the owner's own PK, named by the single-segment key
+        ``_upstream_filter_for_field`` publishes in ``_generating_key_var``, and
+        the owner is Relay-Node-shaped (own-PK branch per spec-027 Decision 4), the lookup is a text-pattern
         lookup (``iexact`` / ``contains`` / ``startswith`` / ``regex`` / ...) on a
         non-text column with the framework's default filter (``CharFilter``: the
         operand is a string matched against the column's text rendering, as
@@ -4187,7 +4223,7 @@ class FilterSet(
         built.
         """
         default_class, params = cls._upstream_filter_for_lookup(field, lookup_type)
-        if cls._is_own_pk_under_relay_owner(field):
+        if cls._is_own_pk_under_relay_owner(field, cls._generating_key()):
             if cls._generation_origin_for_field(field, lookup_type) != "framework_default":
                 return default_class, params
             # Own-PK GlobalID. A Relay node's wire id supports only equality
@@ -4302,13 +4338,20 @@ class FilterSet(
         # ineligible). Only the proven framework default is converted below.
         if cls._generation_origin_for_field(field, lookup_type) != "framework_default":
             return default_class, params
-        # The identity a relation key filters by: a GlobalID when the owner-aware
+        # The identity a relation key filters by: a GlobalID when the relation's
         # target type is a Relay node, otherwise the raw target primary key. The raw
         # pair also covers a target model no ``DjangoType`` exposes, and replaces
         # django-filter's model-choice default, whose ``ModelChoiceField`` would
         # validate existence against the target's default manager (an existence
         # oracle for rows ``get_queryset`` hides) and has no GraphQL input shape.
-        target_type = cls._resolve_relation_target_type(field, getattr(field, "name", None))
+        # The target is the key's own relation's ``related_model``: upstream resolved the
+        # dotted path to its terminal field, so a leaf on a hop is read on the hop's model,
+        # never by its bare name on this set's model. ``registry.get`` owns the
+        # primary-first precedence. A relation with no model behind it (a
+        # ``GenericForeignKey``, whose ``related_model`` is ``None``) has no target type;
+        # ``filter_for_field`` then refuses its path by name.
+        related_model = read_attr(field, "related_model", None)
+        target_type = registry.get(related_model) if is_model_class(related_model) else None
         relay_target = target_type is not None and implements_relay_node(target_type)
         many_side = is_many_side_relation_kind(relation_kind(field))
         if lookup_type == "in":
@@ -4345,7 +4388,19 @@ class FilterSet(
         )
 
     @classmethod
-    def _is_own_pk_under_relay_owner(cls, field: object) -> bool:
+    def _generating_key(cls) -> str | None:
+        """Return the ``Meta.fields`` key this set is generating, or ``None``.
+
+        ``None`` outside generation and while another set's generation published the
+        key, so a call made then reads as the field asked about by itself.
+        """
+        generating = _generating_key_var.get()
+        if generating is None or generating[0] is not cls:
+            return None
+        return generating[1]
+
+    @classmethod
+    def _is_own_pk_under_relay_owner(cls, field: object, field_name: str | None) -> bool:
         """Return True iff ``field`` is the owning model's PK and owner is Relay.
 
         Own-PK branch per spec-027 Decision 4: when a ``FilterSet``
@@ -4356,6 +4411,13 @@ class FilterSet(
         (finalizer phase-2.5 binding, ``set_bound_type``): a set no
         ``DjangoType`` wires, a subclass of a bound set included, keeps the
         upstream shape.
+
+        The own PK is the single-segment key naming it: a dotted ``field_name``
+        ending on the same column (``shelf__books__id`` on a book set) filters the
+        hop's row and is the plain column filter with every lookup. ``None`` is the
+        field asked about by itself (a direct call), read as the own key; a consumer
+        ``filter_for_field`` override that bypasses ``super()`` and calls
+        ``filter_for_lookup`` itself publishes no key and so keeps that reading.
         """
         owner_type = set_bound_type(cls)
         if owner_type is None:
@@ -4369,6 +4431,8 @@ class FilterSet(
             return False
         pk = getattr(model._meta, "pk", None)
         if pk is None or field is not pk:
+            return False
+        if field_name is not None and LOOKUP_SEP in field_name:
             return False
         return implements_relay_node(owner_type)
 
@@ -4399,51 +4463,9 @@ class FilterSet(
             return GlobalIDMultipleChoiceFilter
         return GlobalIDFilter
 
-    @classmethod
-    def _resolve_relation_target_type(
-        cls,
-        field: object,
-        field_name: str | None,
-    ) -> type[DjangoType] | None:
-        """Look up the registered target `DjangoType` for a relation field.
-
-        Consults the bound owner's `related_target_for(...)` when this class
-        is bound (finalizer phase-2.5 binding, `set_bound_definition`);
-        otherwise falls back to `registry.get(field.related_model)`. The caller
-        (`filter_for_lookup`) passes relation fields only; a field with no
-        `related_model` resolves to `None`.
-        """
-        owner = set_bound_definition(cls)
-        if owner is not None and field_name is not None:
-            # The pair's first member is the target's `DjangoTypeDefinition`, whose
-            # registered `DjangoType` class is its `origin`.
-            pair = owner.related_target_for(field_name)
-            if pair is not None:
-                return pair[0].origin
-        related_model = read_attr(field, "related_model", None)
-        if not is_model_class(related_model):
-            return None
-        # ``registry.get`` owns the primary-first precedence (its first
-        # return state IS the declared primary; the lone-type fallback is
-        # the common shape today) - do not re-derive it by composing
-        # ``primary_for`` / ``get`` here.
-        return registry.get(related_model)
-
     # ------------------------------------------------------------------
     # spec-027 Decision 8 apply pipeline.
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _iter_input_items(input_value: object) -> list[tuple[str, object]] | None:
-        """Walk a dict or Strawberry-input dataclass into ``(name, value)`` pairs.
-
-        Thin delegate to ``utils/input_values.py::iter_input_items`` (the
-        package owner; ``utils/permissions.py`` re-exports the same symbol for
-        historical import paths). Returns ``None`` for an input that is neither
-        a dict nor a Strawberry-input dataclass, ``[]`` for a walkable-but-empty
-        input.
-        """
-        return iter_input_items(input_value)
 
     @classmethod
     def _iter_logic_branches(
@@ -4605,7 +4627,7 @@ class FilterSet(
         """
         if is_inactive_value(input_value, unset_sentinel=UNSET):
             return {}
-        items = cls._iter_input_items(input_value)
+        items = iter_input_items(input_value)
         if items is None:
             # A non-walkable input (scalar / list / arbitrary object) would
             # contribute ZERO predicates AND fire ZERO ``check_*`` gates,
@@ -4856,14 +4878,14 @@ class FilterSet(
         if is_dict(raw_value):
             pairs: list[tuple[str, object]] = []
             for key, value in dict_items(raw_value):
-                if not isinstance(key, str):
+                if not truth.is_instance(key, str):
                     return None
-                lookup_attr = str.__str__(key)
+                lookup_attr = truth.text(key)
                 if lookup_attr not in _LOOKUP_PYTHON_ATTRS:
                     return None
                 pairs.append((lookup_attr, value))
             return pairs or None
-        return FilterSet._iter_input_items(raw_value)
+        return iter_input_items(raw_value)
 
     @classmethod
     @override
@@ -5191,8 +5213,7 @@ class FilterSet(
         parent_db: str | None = None,
         _depth: int = 0,
         _branch_path: str = "",
-        flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]]
-        | None = None,
+        flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]],
     ) -> dict[int, dict[str, models.QuerySet[models.Model]]]:
         """Pre-walk logical branches and derive each branch's visibility map.
 
@@ -5213,7 +5234,7 @@ class FilterSet(
         cap ``_evaluate_logic_tree`` enforces, surfacing its typed
         ``ConfigurationError`` here rather than waiting for the ``.qs`` read.
 
-        ``flat_hop_visibility``, when given, also receives the awaited target
+        ``flat_hop_visibility`` also receives the awaited target
         visibility of every hop a flat leaf of each arm the form data names walks
         (``_derive_flat_hop_visibility_async``), so this one walk of the
         logical arms pre-derives both kinds of relational scoping.
@@ -5235,13 +5256,12 @@ class FilterSet(
                 _depth=depth,
                 _branch_path=arm_path,
             )
-            if flat_hop_visibility is not None:
-                await cls._derive_flat_hop_visibility_async(
-                    child_input,
-                    info,
-                    flat_hop_visibility,
-                    parent_db=parent_db,
-                )
+            await cls._derive_flat_hop_visibility_async(
+                child_input,
+                info,
+                flat_hop_visibility,
+                parent_db=parent_db,
+            )
         return result
 
     @staticmethod
@@ -5261,9 +5281,8 @@ class FilterSet(
         ``origin=cls``), so both branches hand ``apply_type_visibility_*`` an object
         exposing ``get_queryset``.
 
-        This mirrors ``_resolve_relation_target_type`` (already owner-aware); the
-        registry lookup is the fallback for the unbound / single-type-per-model
-        case.
+        The registry lookup is the fallback for the unbound /
+        single-type-per-model case.
         """
         child_filterset = related_filter.filterset
         owner_type = set_bound_type(child_filterset)
@@ -5277,8 +5296,8 @@ class FilterSet(
         child_model: type[models.Model] | None = getattr(child_meta, "model", None)
         if child_model is None:
             return None
-        # ``registry.get`` owns the primary-first precedence; see
-        # ``_resolve_relation_target_type`` for the same collapse.
+        # ``registry.get`` owns the primary-first precedence, as it does for a
+        # relation key's target in ``filter_for_lookup``.
         return registry.get(child_model)
 
     @classmethod
@@ -6624,8 +6643,7 @@ class FilterSet(
         _depth: int = 0,
         _branch_path: str = "",
         _nested_qs_by_branch_id: dict[int, dict[str, models.QuerySet[models.Model]]] | None = None,
-        _flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]]
-        | None = None,
+        _flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]],
         _absent_leaf_verdicts: Mapping[str, tuple[object, bool]] = _NO_VERDICTS,
         _probed_arms: Mapping[str, _ProbedArm] = _NO_ARMS,
     ) -> models.Q:
@@ -6697,8 +6715,7 @@ class FilterSet(
         _depth: int = 0,
         _branch_path: str = "",
         _nested_qs_by_branch_id: dict[int, dict[str, models.QuerySet[models.Model]]] | None = None,
-        _flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]]
-        | None = None,
+        _flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]],
         _absent_leaf_verdicts: Mapping[str, tuple[object, bool]] = _NO_VERDICTS,
         _probed_arms: Mapping[str, _ProbedArm] = _NO_ARMS,
     ) -> models.Q:
@@ -6789,8 +6806,6 @@ class FilterSet(
                 _depth=_depth,
                 _branch_path=_branch_path,
             )
-        if _flat_hop_visibility is None:
-            _flat_hop_visibility = {}
         constrained = cls._apply_related_constraints(
             child_input,
             queryset,
@@ -6912,7 +6927,7 @@ class FilterSet(
         request: object,
         info: object,
         nested_qs_by_branch_id: dict[int, dict[str, models.QuerySet[models.Model]]] | None,
-        flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]] | None,
+        flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]],
         *,
         branch_path: str = "",
     ) -> Self:
@@ -6951,8 +6966,7 @@ class FilterSet(
         info: object,
         *,
         nested_qs_by_branch_id: dict[int, dict[str, models.QuerySet[models.Model]]] | None = None,
-        flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]]
-        | None = None,
+        flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]],
         run_permissions: bool = True,
         branch_path: str = "",
     ) -> models.QuerySet[_M]:
@@ -7013,7 +7027,7 @@ class FilterSet(
         info: object,
         *,
         nested_qs_by_branch_id: dict[int, dict[str, models.QuerySet[models.Model]]] | None,
-        flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]] | None,
+        flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]],
         run_permissions: bool,
         branch_path: str,
     ) -> Self:
@@ -7046,7 +7060,7 @@ class FilterSet(
         info: object,
         *,
         nested_qs_by_branch_id: dict[int, dict[str, models.QuerySet[models.Model]]] | None,
-        flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]] | None,
+        flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]],
         run_permissions: bool,
         branch_path: str,
     ) -> tuple[Self, tuple[RelationHop, ...], models.QuerySet[_M] | None]:

@@ -78,6 +78,7 @@ from urllib.parse import urlencode
 
 import pytest
 import strawberry
+from apps.glossary import models as glossary_models
 from apps.library import models as library_models
 from apps.products import models as product_models
 from apps.products.services import seed_data
@@ -132,7 +133,7 @@ from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.querysets import SyncMisuseError, visible_related_object
 from django_strawberry_framework.utils.typing import call_forwarded, object_result
 from tests._generated_inputs import keyword_constructor as _keyword_constructor
-from tests._idioms import is_object_dict, is_object_list, saved_pk
+from tests._idioms import TEST_ASYNC_RECOURSE, is_object_dict, is_object_list, saved_pk
 from tests._info import make_info, unread_info
 from tests._postgres_fields import FakeArrayField, FakeSplitArrayWidget, patch_array_field
 
@@ -1967,8 +1968,24 @@ def test_visible_related_object_no_primary_uses_default_manager() -> None:
     serializer relation decoders share one object-returning visibility query.
     """
     genre = library_models.Genre.objects.create(name=_uniq("G"))
-    assert visible_related_object(library_models.Genre, saved_pk(genre), None) == genre
-    assert visible_related_object(library_models.Genre, saved_pk(genre) + 9999, None) is None
+    assert (
+        visible_related_object(
+            library_models.Genre,
+            saved_pk(genre),
+            None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
+        == genre
+    )
+    assert (
+        visible_related_object(
+            library_models.Genre,
+            saved_pk(genre) + 9999,
+            None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
+        is None
+    )
 
 
 @pytest.mark.django_db
@@ -6976,3 +6993,426 @@ def test_omitted_initial_binds_under_the_split_widget_keys(
         result = None if errors else {"title": "New"}
         assert payload == {"result": result, "errors": errors}
         assert list(model_class._base_manager.values_list("title", "tags")) == [kept]
+
+
+# ---------------------------------------------------------------------------
+# The ModelForm flavor writes only its own model's table (``_require_backing_row``)
+# ---------------------------------------------------------------------------
+
+
+class _PatronNameForm(forms.ModelForm[library_models.Patron]):
+    class Meta:
+        model = library_models.Patron
+        fields = ("name",)
+
+
+class _VenueNameForm(forms.ModelForm[library_models.Venue]):
+    class Meta:
+        model = library_models.Venue
+        fields = ("name",)
+
+
+class _LendingDeskNameForm(forms.ModelForm[library_models.LendingDesk]):
+    class Meta:
+        model = library_models.LendingDesk
+        fields = ("name",)
+
+
+class _BranchNameForm(forms.ModelForm[library_models.Branch]):
+    class Meta:
+        model = library_models.Branch
+        fields = ("name",)
+
+
+class _ProxyBranchNameForm(forms.ModelForm[library_models.ProxyBranch]):
+    class Meta:
+        model = library_models.ProxyBranch
+        fields = ("name",)
+
+
+class _VisibleBranchNameForm(forms.ModelForm[library_models.VisibleBranch]):
+    class Meta:
+        model = library_models.VisibleBranch
+        fields = ("name",)
+
+
+class _GlossaryAliasLabelForm(forms.ModelForm[glossary_models.GlossaryAlias]):
+    class Meta:
+        model = glossary_models.GlossaryAlias
+        fields = ("label",)
+
+
+class _PlainNameForm(forms.Form):
+    name = forms.CharField()
+
+
+class _SwappingGenreForm(forms.ModelForm[models.Model]):
+    """A ``Genre`` form whose ``save()`` writes a ``Patron`` and leaves it on ``instance``."""
+
+    class Meta:
+        model = library_models.Genre
+        fields = ("name",)
+
+    @override
+    def save(self, commit: bool = True) -> models.Model:
+        self.instance = library_models.Patron.objects.create(name=self.cleaned_data["name"])
+        return self.instance
+
+
+#: Builds the form a ``get_form`` override returns from the bound data and located row.
+_BuildForm: TypeAlias = "Callable[[dict[str, object], models.Model | None], forms.BaseForm]"
+
+
+def _row_model_refusal(held: str, model_name: str) -> str:
+    """The pre-validation refusal of a ``WriteRow`` form holding ``held`` over ``model_name``."""
+    return (
+        f"WriteRow: get_form() returned {held}, not a {model_name} instance; the form's "
+        f"instance must be a {model_name} row (or a subclass's): a ModelForm over "
+        f"{model_name}, given the located row on update, or its save would write another table."
+    )
+
+
+def _row_model_schema(
+    backing: type[models.Model],
+    build_form: _BuildForm,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    op: str,
+) -> tuple[strawberry.Schema, type[DjangoType]]:
+    """A ``writeRow`` mutation over ``backing`` whose ``get_form`` returns ``build_form``'s form."""
+
+    class RowT(DjangoType, relay.Node):
+        class Meta:
+            model = backing
+            fields = ("name",)
+            primary = True
+
+    class WriteRow(DjangoModelFormMutation):
+        class Meta:
+            form_class = forms.modelform_factory(backing, fields=("name",))
+            operation = op
+            permission_classes = [_AllowAll]
+
+    def get_form(
+        _self: object,
+        _info: object,
+        *,
+        data: dict[str, object],
+        files: dict[str, object],
+        instance: models.Model | None = None,
+    ) -> forms.BaseForm:
+        del files
+        return build_form(data, instance)
+
+    monkeypatch.setattr(WriteRow, "get_form", get_form)
+
+    @strawberry.type
+    class Mutation:
+        write_row = DjangoMutationField(WriteRow)
+
+    finalize_django_types()
+    return _schema(Mutation), RowT
+
+
+def _write_row(
+    schema: strawberry.Schema,
+    backing: type[models.Model],
+    name: str,
+    *,
+    located: tuple[type[DjangoType], models.Model] | None = None,
+) -> ExecutionResult:
+    """Send ``writeRow`` a ``name``: a create, or an update of ``located``'s row."""
+    selection = "{ node{ name } errors{ field messages } }"
+    model_name = backing.__name__
+    if located is None:
+        document = f"mutation($d: {model_name}FormInput!){{ writeRow(data:$d){selection} }}"
+        return schema.execute_sync(document, variable_values={"d": {"name": name}})
+    row_type, row = located
+    document = (
+        f"mutation($id: ID!, $d: {model_name}FormPartialInput!){{ "
+        f"writeRow(id:$id, data:$d){selection} }}"
+    )
+    variables = {"id": global_id_for(row_type, saved_pk(row)), "d": {"name": name}}
+    return schema.execute_sync(document, variable_values=variables)
+
+
+def _row_names(*model_classes: type[models.Model]) -> list[list[str]]:
+    """Every stored ``name`` of each model, sorted (no row written shows as no change)."""
+    return [
+        sorted(str(read_attr(row, "name")) for row in model_class._base_manager.all())
+        for model_class in model_classes
+    ]
+
+
+def _next_free_pk(*model_classes: type[models.Model]) -> int:
+    """A pk no row of any of ``model_classes`` holds."""
+    taken = [
+        saved_pk(row) for model_class in model_classes for row in model_class._base_manager.all()
+    ]
+    return max([0, *taken]) + 1
+
+
+@pytest.mark.django_db
+def test_create_through_a_form_over_another_model_with_a_coincident_pk_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``Genre`` create whose ``get_form`` builds a ``Patron`` form writes no ``Patron``.
+
+    The new patron would take the pk the genre already holds, so the re-fetch would answer
+    success with that genre's data while the patron row commits. The form's instance is
+    read before ``is_valid()``: a ``ConfigurationError``, and neither table changes.
+    """
+    schema, _ = _row_model_schema(
+        library_models.Genre,
+        lambda data, _instance: _PatronNameForm(data=data),
+        monkeypatch,
+        op="create",
+    )
+    anchor = library_models.Patron.objects.create(name=_uniq("Pa"))
+    library_models.Genre.objects.create(pk=saved_pk(anchor) + 1, name="Coincident")
+    before = _row_names(library_models.Genre, library_models.Patron)
+    res = _write_row(schema, library_models.Genre, "New")
+    assert res.errors is not None
+    message = _row_model_refusal("a form whose instance is a Patron", "Genre")
+    assert [error.message for error in res.errors] == [message]
+    assert _row_names(library_models.Genre, library_models.Patron) == before
+
+
+def _patron_over_located_genre(
+    data: dict[str, object],
+    instance: models.Model | None,
+) -> forms.BaseForm:
+    located = require_instance(instance, library_models.Genre)
+    return _PatronNameForm(
+        data=data,
+        instance=library_models.Patron.objects.get(pk=saved_pk(located)),
+    )
+
+
+def _venue_over_located_desk(
+    data: dict[str, object],
+    instance: models.Model | None,
+) -> forms.BaseForm:
+    located = require_instance(instance, library_models.LendingDesk)
+    return _VenueNameForm(
+        data=data,
+        instance=library_models.Venue.objects.get(pk=saved_pk(located)),
+    )
+
+
+def _plain_name_form(data: dict[str, object], _instance: models.Model | None) -> forms.BaseForm:
+    return _PlainNameForm(data=data)
+
+
+def _branch_form(data: dict[str, object], _instance: models.Model | None) -> forms.BaseForm:
+    return _BranchNameForm(data=data)
+
+
+def _lending_desk_form(data: dict[str, object], _instance: models.Model | None) -> forms.BaseForm:
+    return _LendingDeskNameForm(data=data)
+
+
+def _proxy_branch_form(data: dict[str, object], _instance: models.Model | None) -> forms.BaseForm:
+    return _ProxyBranchNameForm(data=data)
+
+
+def _visible_branch_form(
+    data: dict[str, object],
+    _instance: models.Model | None,
+) -> forms.BaseForm:
+    return _VisibleBranchNameForm(data=data)
+
+
+def _glossary_alias_form(
+    data: dict[str, object],
+    _instance: models.Model | None,
+) -> forms.BaseForm:
+    # An unsaved alias's ``__str__`` reads its ``term``, which it does not hold yet.
+    return _GlossaryAliasLabelForm(data=data)
+
+
+@pytest.mark.parametrize(
+    (
+        "backing",
+        "op",
+        "build_form",
+        "held",
+    ),
+    [
+        pytest.param(
+            library_models.Genre,
+            "update",
+            _patron_over_located_genre,
+            "a form whose instance is a Patron",
+            id="update-coincident-pk",
+        ),
+        pytest.param(
+            library_models.Genre,
+            "create",
+            _plain_name_form,
+            "a form with no instance",
+            id="plain-form",
+        ),
+        pytest.param(
+            library_models.LendingDesk,
+            "update",
+            _venue_over_located_desk,
+            "a form whose instance is a Venue",
+            id="mti-parent-form",
+        ),
+        pytest.param(
+            library_models.ProxyBranch,
+            "create",
+            _branch_form,
+            "a form whose instance is a Branch",
+            id="concrete-base-form",
+        ),
+        pytest.param(
+            library_models.ProxyBranch,
+            "create",
+            _visible_branch_form,
+            "a form whose instance is a VisibleBranch",
+            id="sibling-proxy-form",
+        ),
+        pytest.param(
+            library_models.Genre,
+            "create",
+            _glossary_alias_form,
+            "a form whose instance is a GlossaryAlias",
+            id="unsaved-instance-str-reads-a-relation",
+        ),
+    ],
+)
+@pytest.mark.django_db
+def test_get_form_over_another_row_model_is_refused_before_validation(
+    backing: type[models.Model],
+    op: str,
+    build_form: _BuildForm,
+    held: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A form whose instance is no row of the mutation's model refuses the request.
+
+    The save writes the instance's table: a ``Patron`` form over the located genre's pk
+    would rename that patron and answer success, a plain ``Form`` has no row at all, an
+    MTI parent's form writes only the parent table, and a concrete base's or a sibling
+    proxy's form under a proxy-backed mutation writes a row the mutation's model is not. The
+    message names the instance's class, never the row: an unsaved ``GlossaryAlias``'s
+    ``__str__`` reads a ``term`` it does not hold yet. Each is a ``ConfigurationError``
+    before ``is_valid()``, and no table changes.
+    """
+    schema, row_type = _row_model_schema(backing, build_form, monkeypatch, op=op)
+    located: tuple[type[DjangoType], models.Model] | None = None
+    if op == "update":
+        pk = _next_free_pk(backing, library_models.Venue, library_models.Patron)
+        row = backing._base_manager.create(pk=pk, name="Orig")
+        library_models.Patron.objects.create(pk=pk, name="Coincident")
+        located = (row_type, row)
+    watched = (
+        backing,
+        library_models.Venue,
+        library_models.Patron,
+        library_models.Branch,
+    )
+    before = _row_names(*watched)
+    aliases = glossary_models.GlossaryAlias.objects.count()
+    res = _write_row(schema, backing, "New", located=located)
+    assert res.errors is not None
+    message = _row_model_refusal(held, backing.__name__)
+    assert [error.message for error in res.errors] == [message]
+    assert _row_names(*watched) == before
+    assert glossary_models.GlossaryAlias.objects.count() == aliases
+
+
+@pytest.mark.django_db
+def test_save_that_swaps_the_form_instance_rolls_its_write_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``save()`` leaving another model's row on ``form.instance`` is refused after it.
+
+    The form is over ``Genre``, so the pre-validation read admits it; its ``save()``
+    writes a ``Patron`` and leaves it as the instance. The saved instance is read again
+    inside the pipeline transaction: a ``ConfigurationError``, and the patron rolls back.
+    """
+    schema, _ = _row_model_schema(
+        library_models.Genre,
+        lambda data, _instance: _SwappingGenreForm(data=data),
+        monkeypatch,
+        op="create",
+    )
+    before = _row_names(library_models.Genre, library_models.Patron)
+    res = _write_row(schema, library_models.Genre, "New")
+    assert res.errors is not None
+    message = (
+        "WriteRow: the form's save() left its instance a Patron, not a Genre instance; "
+        "the save must write the mutation's model (or a subclass) and leave the written row "
+        "on form.instance."
+    )
+    assert [error.message for error in res.errors] == [message]
+    assert _row_names(library_models.Genre, library_models.Patron) == before
+
+
+def _patron_form_on_the_located_row(
+    data: dict[str, object],
+    instance: models.Model | None,
+) -> forms.BaseForm:
+    # A ``Patron`` form handed the located genre: its instance, the table it writes, is a genre.
+    return call_forwarded(_PatronNameForm, (), {"data": data, "instance": instance})
+
+
+@pytest.mark.parametrize(
+    (
+        "backing",
+        "op",
+        "build_form",
+        "written",
+    ),
+    [
+        pytest.param(
+            library_models.Venue,
+            "create",
+            _lending_desk_form,
+            library_models.LendingDesk,
+            id="mti-child-form",
+        ),
+        pytest.param(
+            library_models.Branch,
+            "create",
+            _proxy_branch_form,
+            library_models.ProxyBranch,
+            id="proxy-subclass-form",
+        ),
+        pytest.param(
+            library_models.Genre,
+            "update",
+            _patron_form_on_the_located_row,
+            library_models.Genre,
+            id="other-model-form-on-the-located-row",
+        ),
+    ],
+)
+@pytest.mark.django_db
+def test_get_form_whose_instance_is_a_row_of_the_model_writes(
+    backing: type[models.Model],
+    op: str,
+    build_form: _BuildForm,
+    written: type[models.Model],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A form whose instance is a row of the mutation's model, or a subclass's, writes.
+
+    An MTI child's form under a parent-backed mutation and a proxy subclass's form under
+    its concrete model write rows of the mutation's model; a ``Patron`` form handed the
+    located genre writes the genre, so the rule reads the instance, never the form's
+    ``Meta.model``. No patron is written.
+    """
+    schema, row_type = _row_model_schema(backing, build_form, monkeypatch, op=op)
+    located: tuple[type[DjangoType], models.Model] | None = None
+    if op == "update":
+        located = (row_type, backing._base_manager.create(name="Orig"))
+    patrons = _row_names(library_models.Patron)
+    res = _write_row(schema, backing, "New", located=located)
+    assert res.errors is None, res.errors
+    assert res.data == {"writeRow": {"node": {"name": "New"}, "errors": []}}
+    assert _row_names(written) == [["New"]]
+    assert _row_names(library_models.Patron) == patrons

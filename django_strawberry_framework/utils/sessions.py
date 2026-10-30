@@ -135,8 +135,8 @@ def scope_key(name: str) -> str:
 
     An ASGI scope is a shared namespace: Channels, Django, and any consumer
     middleware write into the same mapping, so every key this package stores is
-    namespaced with the distribution name. That namespacing was hand-spelled at
-    each key, which is a convention nothing enforced - one key written without
+    namespaced with the distribution name. Built here rather than hand-spelled at
+    each key, since a convention nothing enforces fails open - one key written without
     the prefix collides silently, and the collision surfaces as corrupted state
     on a security path rather than as an error.
     """

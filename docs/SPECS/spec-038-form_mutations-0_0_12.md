@@ -1228,7 +1228,14 @@ counting as one column
 (`django_strawberry_framework/forms/resolvers.py::_assert_bound_choice_agreement`, run
 after `get_form` and before `is_valid()` over every bound name, an update's
 reconstructed relations included). A disagreeing field is a `ConfigurationError` on the
-request with nothing written; reassigning the queryset over the same model and key (the
+request with nothing written. The bound `ModelForm`'s `instance` must likewise be a row of
+the mutation's model or a subclass of it (an MTI child or a proxy subclass), the table its
+save writes, never another model's, a concrete base of a proxy-backed mutation's model, a
+sibling proxy or an MTI parent
+(`django_strawberry_framework/forms/resolvers.py::_require_backing_row`, run after
+`get_form` and before any bind or `is_valid()`, and again on the saved instance inside the
+pipeline transaction); a form with no instance or an instance of another model is a
+`ConfigurationError` on the request with nothing written. Reassigning the queryset over the same model and key (the
 request-scoped choices idiom) agrees, and a bound field that is no longer a model-choice
 field or has no queryset is left to the form. Where the bound field is certain to be the
 class-level one (a `ModelForm` that resolves `__init__` and `order_fields` to Django's own,
@@ -1333,7 +1340,7 @@ flavor has the early-`ConfigurationError`-not-late-Strawberry-error posture. The
 creation** through the narrowing spine it shares with the serializer flavor
 ([`utils/inputs.py`][utils-inputs]`::resolve_effective_fields`): a bare string
 (`fields = "name"`) is rejected (it
-would iterate as characters; a lazy translation string (`gettext_lazy("name")`) and a bytes-like value are bare strings here, refused with the same message ([`utils/_narrowing.py::is_text_atom`][utils-narrowing]); every lazy `Promise` counts whatever result class it wraps, so a lazy list is refused too, while a `SimpleLazyObject` is judged as the object it stands for), duplicate names are rejected, `fields` and `exclude`
+would iterate as characters; a lazy translation string (`gettext_lazy("name")`) and a bytes-like value are bare strings here, refused with the same message ([`utils/_narrowing.py::is_text_atom`][utils-narrowing]); every lazy `Promise` counts whatever result class it wraps, so a lazy list is refused too, while a `SimpleLazyObject` is judged as the object it stands for), duplicate names are rejected, a `set` / `frozenset` `fields` is rejected (its order is the generated input's field order) while a set `exclude` is accepted and stored sorted by `utils/canonical.py::canonical_sort_key` (`utils/inputs.py::normalize_field_name_sequence`'s `ordered` switch), `fields` and `exclude`
 are mutually exclusive, and a name in neither `form_class.base_fields` raises
 [`ConfigurationError`][glossary-configurationerror] naming the unknown field (a typo
 like `fields = ("emial",)` fails loud, never silently shrinks the input). An
@@ -1399,7 +1406,9 @@ needs **no instantiation**, so a form whose `__init__` requires constructor kwar
 `__init__` by request could not be a stable GraphQL input anyway). An overridable
 classmethod **`get_form_fields(cls) -> dict[str, forms.Field]`** (default:
 `form_class.base_fields`) lets a consumer customize the discovered set; whatever it
-returns must be stable across requests. Instantiating `form_class()` no-arg to read
+returns must be stable across requests. A returned key is read as its text: a `StrEnum` /
+`TextChoices` member names the input attribute by the exact `str` it spells, and a
+non-string key is refused with a `ConfigurationError`. Instantiating `form_class()` no-arg to read
 `form.fields` is **not** an option: it breaks for exactly the kwarg-requiring forms
 this rule exists to serve.
 
@@ -1486,7 +1495,11 @@ write flavor rides.
    because a missing non-nullable FK raises `IntegrityError` too and maps to the same
    `"__all__"` envelope. A `get_form(self, info, *, data, files,
    instance=None)` hook (default: `form_class(**self.get_form_kwargs(...))`) is the
-   coarser override for full control. This **does not replace** the relation-visibility
+   coarser override for full control, within the row-model rule: on the `ModelForm`
+   flavor the form it returns must hold a row of the mutation's model (or a subclass) as
+   its `instance`, since the save writes the instance's table, or the request is a
+   `ConfigurationError` before `is_valid()` with nothing written
+   (`django_strawberry_framework/forms/resolvers.py::_require_backing_row`). This **does not replace** the relation-visibility
    gate (step 3, which runs before the form regardless) — `get_form_kwargs` adds
    request-scoping on top of, not instead of, the visibility check. A form reads each
    field from the keys its widget reads under `form.add_prefix(<field>)`: a prefixed form
@@ -1906,16 +1919,20 @@ consumer's explicit `Meta.permission_classes` and a **public** plain-form write 
 explicit opt-in (`Meta.permission_classes = []`, the `036` AllowAny opt-out). An unset
 key is never a configuration error.
 
-The plain base additionally **rejects a `DjangoModelPermission` subclass** in
-`Meta.permission_classes` at class creation. That class checks the model the mutation
+The plain base additionally **rejects a `DjangoModelPermission` that does not override
+`has_permission`** (the class itself or a subclass inheriting its hook) in
+`Meta.permission_classes` at class creation. That hook checks the model the mutation
 validated at declaration and maps the operation to an `add` / `change` / `delete`
 codename; a model-less `DjangoFormMutation` supplies neither (its validated snapshot
-carries no model, and its operation is the `"form"` sentinel). The generic
-permission-class validation accepts it — it *is* a class with a callable
-`has_permission` — so without the targeted reject the misconfiguration finalizes
-cleanly and surfaces only as a raw error at request time, never a deny. The error names
-[`DjangoModelFormMutation`][glossary-djangomodelformmutation] as the model-backed base
-and the two valid plain-form postures.
+carries no model, and its operation is the `"form"` sentinel), so it would surface only
+as a raw error at request time, never a deny. The reject is the shared
+`model_less=True` guard of
+[`write_mixins.py`][write-mixins]`::_validate_permission_classes` (the model-less auth
+fields pass it too); its message names the site, the class, and the remedies (override
+`has_permission`, omit `permission_classes` for the deny-by-default, or set `[]` to allow
+any). A subclass that overrides `has_permission` decides without the model and is
+admitted; an override that calls `super().has_permission(...)` is not guarded and still
+raises per request.
 
 Rationale companion: [Decision 11][rationale-d11].
 
@@ -2060,6 +2077,18 @@ Rationale companion: [Decision 14][rationale-d14].
   `form.errors[NON_FIELD_ERRORS]`, mapped to the `"__all__"` sentinel `036` defined —
   the same key a model-driven multi-field-constraint `ValidationError` uses, so the
   client contract is identical across flavors.
+- **A `get_form` form over another row model.** A `ModelForm` saves the row its
+  `instance` holds, so the form `get_form` returns must hold a row of the mutation's model
+  or a subclass's (an MTI child, a proxy subclass); a form over another model (a coincident
+  pk would otherwise answer success with another row's data), a plain `Form` with no
+  instance, an MTI parent's form, and a concrete base's or a sibling proxy's form under a
+  proxy-backed mutation are a request-time `ConfigurationError` before `is_valid()`, nothing
+  written. A `ModelForm` over another model handed the located row writes the located row's
+  table and is admitted. A `save()` that leaves another model's row on `form.instance` is the
+  same refusal after the save, its write rolled back with the pipeline transaction
+  (`django_strawberry_framework/forms/resolvers.py::_require_backing_row`). The message names
+  the instance's class, never the row, whose `__str__` may read a relation an unsaved row
+  does not hold.
 - **`update` partial-update preservation.** The resolver reconstructs the full
   bound payload from the located row's values over the form's **full declared** field
   set, overlaid by the provided fields, with `files = provided_files`, before
@@ -2326,9 +2355,9 @@ Rationale companion: [Decision 14][rationale-d14].
   [`DjangoModelPermission`][glossary-djangomodelpermission] default cannot apply, so an
   unset `Meta.permission_classes` resolves to `(DenyAll,)` — deny by default, with a
   public write the explicit `Meta.permission_classes = []` opt-in. An entry that is a
-  [`DjangoModelPermission`][glossary-djangomodelpermission] subclass is **rejected** at
-  class creation, since it resolves its codename from a model a model-less mutation
-  never supplies ([Decision 11](#decision-11--write-authorization-reuse-the-036-seam-djangomodelpermission-for-the-modelform-explicit-classes-for-the-plain-form)).
+  [`DjangoModelPermission`][glossary-djangomodelpermission] that does not override
+  `has_permission` is **rejected** at class creation, since that hook resolves its
+  codename from a model a model-less mutation never supplies ([Decision 11](#decision-11--write-authorization-reuse-the-036-seam-djangomodelpermission-for-the-modelform-explicit-classes-for-the-plain-form)).
 - **No `DjangoType` `Meta` key added.** [`DEFERRED_META_KEYS`][types-base] /
   `ALLOWED_META_KEYS` carry no form key
   ([Decision 13](#decision-13--finalization-seam-reuse-the-mutation-phase-25-bind-no-deferred_meta_keys-change)).
@@ -2574,6 +2603,16 @@ behavior reachable through `/graphql/`, package tests own internals.
     (`tests/forms/test_resolvers.py::test_bound_choice_disagreeing_with_the_decode_is_refused_before_validation`,
     `::test_bound_choice_agreeing_with_the_decode_links_the_decoded_row`,
     `::test_queryset_less_bound_choice_is_left_to_the_form`);
+    a `get_form` form whose instance is no row of the mutation's model (another model on a
+    coincident-pk create and update, a plain `Form`, an MTI parent, a concrete base and a
+    sibling proxy under a proxy-backed mutation, an unsaved instance whose `__str__` reads a
+    relation) is a request-time `ConfigurationError` with no table written, a `save()` that
+    swaps `form.instance` rolls its write back, and an MTI child's form, a proxy subclass's
+    form and another model's form handed the located row write
+    (`tests/forms/test_resolvers.py::test_create_through_a_form_over_another_model_with_a_coincident_pk_is_refused`,
+    `::test_get_form_over_another_row_model_is_refused_before_validation`,
+    `::test_save_that_swaps_the_form_instance_rolls_its_write_back`,
+    `::test_get_form_whose_instance_is_a_row_of_the_model_writes`);
     a row whose stored key is `NULL` is the relation error, single and multi
     (`tests/forms/test_resolvers.py::test_decode_form_relation_refuses_a_row_whose_stored_key_is_null`);
     **write-time `IntegrityError`** — a valid

@@ -122,6 +122,7 @@ from django_strawberry_framework.utils.write_transaction import (
     write_pipeline,
 )
 from tests._idioms import (
+    TEST_ASYNC_RECOURSE,
     ClaimsClass,
     ClassReadRaises,
     definition_raises,
@@ -1493,8 +1494,24 @@ def test_relation_reads_drop_a_locked_row_the_fresh_read_no_longer_sees(
     assert present == {saved_pk(kept): saved_pk(kept)}
     keyed = pks_present(categories, [saved_pk(kept), saved_pk(dropped)], "name")
     assert keyed == {saved_pk(kept): "relock-kept"}
-    assert visible_related_object(product_models.Category, saved_pk(kept), None) == kept
-    assert visible_related_object(product_models.Category, saved_pk(dropped), None) is None
+    assert (
+        visible_related_object(
+            product_models.Category,
+            saved_pk(kept),
+            None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
+        == kept
+    )
+    assert (
+        visible_related_object(
+            product_models.Category,
+            saved_pk(dropped),
+            None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
+        is None
+    )
 
 
 def test_pipeline_scoped_queryset_fails_closed_on_a_cross_alias_queryset() -> None:
@@ -1926,9 +1943,10 @@ def test_is_read_only_sql_fails_closed_on_a_statement_that_is_not_really_a_strin
 ) -> None:
     """The statement's REAL type decides, never a ``__class__`` the object supplies.
 
-    ``str.__str__`` refuses anything that is not a real ``str``, so an ``isinstance``
-    answer taken from ``__class__`` turns the documented ``False`` into a raw
-    ``TypeError`` (a claim) or the object's own exception (a raising read).
+    ``truth.text`` copies only a real ``str`` through the base slot, so an ``isinstance``
+    answer taken from ``__class__`` would classify the object's own ``__str__`` render (a
+    claim) or raise the object's own exception (a raising read) instead of the documented
+    ``False``.
     """
     assert is_read_only_sql(statement) is False
 

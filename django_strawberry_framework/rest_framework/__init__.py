@@ -8,19 +8,8 @@ import behind one guard so every ``rest_framework/`` module + the root
 ``__getattr__`` route a DRF-absent build through the SAME install-hint
 ``ImportError``.
 
-The install hint names the verified floor, interpolated from
-``utils/imports.py::DRF_FLOOR``. The floor is written in three gated places
-that must agree: that constant, the ``[dependency-groups].dev`` row in
-``pyproject.toml``, and the ``_HINT_SUBSTRING`` literal re-typed in
-``tests/rest_framework/test_soft_dependency.py``. ``tests/test_ci_governance.py``
-compares the constant to the dependency row and the soft-dependency tests
-compare the hint to the literal, so none of the three can move alone. The CI
-floor cell and BUILD.md "Floor verification" install the dependency row's
-bound, each gated against that row.
-spec-039 Decision 12 records why the floor is where it is; it is the
-rationale, not a gated site, and like any other restatement it is gated by
-nothing, so a floor bump sweeps the tree for the package name and reads each
-hit. Importing THIS package runs ``require_drf()`` as its guard, so ``import
+The install hint interpolates the floor constant ``utils/imports.py::DRF_FLOOR``.
+Importing THIS package runs ``require_drf()`` as its guard, so ``import
 django_strawberry_framework.rest_framework`` raises the guarded ``ImportError``
 when DRF is absent. Generalizes the ``types/converters.py`` soft-import
 precedent (return-``None``) to a RAISING guard.

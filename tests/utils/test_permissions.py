@@ -12,7 +12,6 @@ from typing import NoReturn
 
 import pytest
 import pytest_django
-import strawberry
 from apps.products.models import Category, Entry, Item, Property
 from django.contrib.auth import get_user_model
 from django.db.models import Model
@@ -39,7 +38,6 @@ from django_strawberry_framework.utils.permissions import (
     auth_aliases_for_permission_classes,
     extract_branch_value,
     invoke_permission_method,
-    iter_input_items,
     request_from_info,
     resolve_auth_aliases,
     run_active_input_permission_checks,
@@ -289,19 +287,8 @@ def test_unresolvable_request_context_message_is_pinned() -> None:
 
 
 # ---------------------------------------------------------------------------
-# iter_input_items / extract_branch_value
+# extract_branch_value
 # ---------------------------------------------------------------------------
-
-
-def test_iter_input_items_handles_dict_dataclass_and_non_walkable() -> None:
-    assert iter_input_items({"a": 1}) == [("a", 1)]
-    assert iter_input_items(42) is None
-
-    @strawberry.input
-    class _In:
-        a: int | None = None
-
-    assert iter_input_items(_In(a=3)) == [("a", 3)]
 
 
 def test_extract_branch_value_collapses_only_the_configured_sentinel() -> None:

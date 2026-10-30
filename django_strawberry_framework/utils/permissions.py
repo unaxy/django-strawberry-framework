@@ -66,7 +66,6 @@ from .input_values import (
     input_field_value,
     is_inactive_value,
     iter_active_fields,
-    iter_input_items,
     related_declaration_mapping,
 )
 from .querysets import reject_async_in_sync_context, relation_target_type
@@ -120,9 +119,6 @@ def _check_method_name(field_path: str) -> str:
     return f"check_{flatten_lookup_path(field_path)}_permission"
 
 
-# ``iter_input_items`` is single-sited in ``utils/input_values.py``.
-# Re-exported here so the existing ``from ..utils.permissions import
-# iter_input_items`` consumers (the permission test suite) keep their import path.
 __all__ = [
     "ChannelsRequestAdapter",
     "active_permission_targets",
@@ -130,7 +126,6 @@ __all__ = [
     "auth_aliases_for_permission_classes",
     "extract_branch_value",
     "invoke_permission_method",
-    "iter_input_items",
     "request_from_info",
     "resolve_auth_aliases",
     "run_active_input_permission_checks",
@@ -725,7 +720,7 @@ def walk_declared_relation_path(
 
 
 def _set_model(set_cls: type[object]) -> type[models.Model] | None:
-    """Return the ``Meta.model`` a filter / order set class carries, ``None`` when it has none."""
+    """Return the ``Meta.model`` a set class carries, ``None`` when it has none."""
     model: object = getattr(getattr(set_cls, "_meta", None), "model", None)
     return model if isinstance(model, type) else None
 

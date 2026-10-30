@@ -326,8 +326,8 @@ fields are connections, and `seed_data` filled them:
 ```
 
 `relation_shapes = {"books": "both"}` on `GenreType` is the opt-in for a raw list
-beside the connection. Since `0.0.14` a many-side relation on a Relay node renders as
-a connection only, so `genre { books { title } }` and `genre { booksConnection { ... } }`
+beside the connection. A many-side relation on a Relay node renders as a connection
+only, so `genre { books { title } }` and `genre { booksConnection { ... } }`
 coexist here because the type asked for both
 ([`Meta.relation_shapes`][glossary-metarelation_shapes]).
 

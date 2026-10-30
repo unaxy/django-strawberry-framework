@@ -37,7 +37,8 @@ from django_strawberry_framework import (
     _strawberry_patches,
 )
 from django_strawberry_framework.apps import DjangoStrawberryFrameworkConfig
-from django_strawberry_framework.utils._narrowing import class_dict, read_attr
+from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._narrowing import read_attr
 
 
 def test_djangostrawberryframeworkconfig_importable_from_apps_module() -> None:
@@ -101,7 +102,7 @@ def test_djangostrawberryframeworkconfig_defines_ready_for_django_patches() -> N
     ``test_ready_dispatches_all_four_patch_appliers_and_refires_safely``.
     """
     assert "ready" in DjangoStrawberryFrameworkConfig.__dict__
-    assert callable(class_dict(DjangoStrawberryFrameworkConfig)["ready"])
+    assert callable(truth.class_dict(DjangoStrawberryFrameworkConfig)["ready"])
 
 
 # Every upstream class attribute, then every upstream module global, the four patch
@@ -252,7 +253,10 @@ def test_ready_reinstalls_patches_after_their_modules_reload(
     config = django.apps.apps.get_app_config("django_strawberry_framework")
     saved_namespace = dict(module.__dict__)
     saved_slots = (
-        *((owner, attribute, class_dict(owner)[attribute]) for owner, attribute in _PATCHED_SLOTS),
+        *(
+            (owner, attribute, truth.class_dict(owner)[attribute])
+            for owner, attribute in _PATCHED_SLOTS
+        ),
         *(
             (module_owner, attribute, read_attr(module_owner, attribute))
             for module_owner, attribute in _PATCHED_MODULE_SLOTS
