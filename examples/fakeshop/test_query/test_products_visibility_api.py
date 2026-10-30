@@ -9,7 +9,8 @@ applies the hook per parent. Planned, and the resolver stands down
 (``django_strawberry_framework/types/resolvers.py::_optimizer_scoped_relation``)
 because the plan already applied it to the child queryset, which makes the plan
 the sole authority for those rows. Both halves are covered here, each against the
-staff branch that must NOT be scoped.
+staff branch that must NOT be scoped. An unplanned relation on the sync view refuses
+an ``async def`` target hook with the relation resolver's own recourse.
 
 Authority over WHICH ROWS is not authority over WHICH CONNECTION: the last two
 rows pin the planned child's hook to the connection the walker seeded it on, so a
@@ -184,6 +185,83 @@ async def test_async_unoptimized_relation_hides_private_child_over_http() -> Non
     payload = response_json(response)
     assert payload.get("errors") is None, payload
     assert payload["data"] == {"categories": [{"items": []}]}
+
+
+def _relation_root_schema() -> strawberry.Schema:
+    """A no-optimizer schema whose two roots list every seeded category and item.
+
+    With no optimizer mounted no relation is planned, so each selected relation
+    is read by its generated resolver through the target type's hook.
+    """
+
+    @strawberry.type
+    class Query:
+        def _categories(self) -> QuerySet[Category]:
+            return Category.objects.all()
+
+        def _items(self) -> QuerySet[Item]:
+            return Item.objects.all()
+
+        categories: QuerySet[Category] = strawberry.field(
+            resolver=_categories,
+            graphql_type=list[products_schema.CategoryType],
+        )
+        items: QuerySet[Item] = strawberry.field(
+            resolver=_items,
+            graphql_type=list[products_schema.ItemType],
+        )
+
+    return strawberry.Schema(query=Query)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("query", "target_name"),
+    [
+        ("{ categories { items { name } } }", "ItemType"),
+        ("{ items { category { name } } }", "CategoryType"),
+    ],
+    ids=["many_side", "forward_fk"],
+)
+def test_unplanned_relation_sync_http_rejects_an_async_get_queryset(
+    monkeypatch: pytest.MonkeyPatch,
+    query: str,
+    target_name: str,
+) -> None:
+    """A relation read on the sync view refuses an async target hook with its own recourse.
+
+    The generated relation resolver reads its target's ``get_queryset`` under
+    ``schema.execute_sync()``, so the message points at ``await schema.execute()``
+    or the async view, never at the Relay node defaults this read never reaches.
+    """
+    services.seed_data(1)
+
+    async def _async_get_queryset(
+        _cls: type[DjangoType],
+        queryset: QuerySet[Category],
+        _info: strawberry.Info[object, object],
+        **_kwargs: object,
+    ) -> QuerySet[Category]:
+        return queryset
+
+    # Read at run time: a schema reload between collection and the run rebinds the
+    # module attribute to the class the registry holds.
+    target_types: dict[str, type[DjangoType]] = {
+        "CategoryType": products_schema.CategoryType,
+        "ItemType": products_schema.ItemType,
+    }
+    target_type = target_types[target_name]
+    monkeypatch.setattr(target_type, "get_queryset", classmethod(_async_get_queryset))
+    payload = _post_visibility_query(_relation_root_schema(), query)
+
+    assert payload["data"] is None
+    assert json_str(payload, "errors", 0, "message") == (
+        f"{target_name}.get_queryset returned a coroutine in a sync resolver context. "
+        "A generated relation resolver reads its target type's get_queryset under "
+        "schema.execute_sync(), which cannot await an async get_queryset hook; run the "
+        "operation with await schema.execute() (or the async view), or redefine "
+        "get_queryset as a sync method."
+    )
 
 
 def _post_visibility_query(

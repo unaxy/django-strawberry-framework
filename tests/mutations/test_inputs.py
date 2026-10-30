@@ -58,8 +58,6 @@ from apps.library import models as library_models
 from apps.products import models as product_models
 from apps.products.schema import CategoryType, ItemType
 from apps.scalars.models import MediaSpecimen
-from django.contrib.contenttypes.fields import GenericForeignKey, GenericRelation
-from django.contrib.contenttypes.models import ContentType
 from django.db import models
 from django.db.models import Value
 from django.db.models.fields import AutoFieldMixin
@@ -123,7 +121,7 @@ from django_strawberry_framework.utils.inputs import (
 )
 from django_strawberry_framework.utils.strings import graphql_camel_name
 from tests._idioms import module_binding
-from tests._relation_fixtures import RpCompositeParent
+from tests._relation_fixtures import RpCompositeParent, RpGenericTag
 from tests.optimizer import _link_models
 
 if TYPE_CHECKING:
@@ -1304,14 +1302,23 @@ def test_type_name_other_legal_boundaries_do_not_collide() -> None:
         assert left != right
 
 
+def _empty_input_message(kind: str, model_name: str) -> str:
+    """Return the model flavor's empty-selection ``ConfigurationError`` text."""
+    return (
+        f"DjangoMutation {kind} input for {model_name} has no fields; Meta.fields / "
+        "Meta.exclude narrowed the editable column set to empty (or the model declares no "
+        "editable columns). A mutation input must define at least one field."
+    )
+
+
 def test_build_empty_field_set_raises_configuration_error() -> None:
     """An empty effective field set fails loud as ``ConfigurationError``.
 
     ``Meta.fields = ()`` (or an ``exclude`` covering every editable column) would
     build an empty ``@strawberry.input``, which Strawberry rejects only at
     ``Schema(...)`` build with a raw ``ValueError: Input Object type ... must define
-    one or more fields.`` The generator rejects it at the framework boundary first,
-    naming the model.
+    one or more fields.`` The generator's selection (``editable_input_fields``)
+    rejects it at the framework boundary first, naming the model.
     """
     with pytest.raises(ConfigurationError) as exc:
         build_mutation_input(
@@ -1325,6 +1332,51 @@ def test_build_empty_field_set_raises_configuration_error() -> None:
         "narrowed the editable column set to empty (or the model declares no editable "
         "columns). A mutation input must define at least one field."
     )
+
+
+@pytest.mark.parametrize(
+    ("operation_kind", "kind"),
+    [(CREATE, "create"), (PARTIAL, "update")],
+    ids=["create", "update"],
+)
+@pytest.mark.parametrize("narrowing", ["fields", "exclude"])
+def test_editable_fields_refuse_an_empty_selection(
+    operation_kind: str,
+    kind: str,
+    narrowing: str,
+) -> None:
+    """An empty selection raises the flavor's "has no fields" error at the selection.
+
+    ``fields=()`` and an ``exclude`` naming every editable column both leave nothing
+    to generate; the error names the input's kind (an update reads "update input")
+    and the model.
+    """
+    model = product_models.Category
+    every = tuple(
+        field.name for field in editable_input_fields(model, operation_kind=operation_kind)
+    )
+    narrowed: dict[str, tuple[str, ...]] = {narrowing: () if narrowing == "fields" else every}
+    with pytest.raises(ConfigurationError) as exc:
+        editable_input_fields(model, operation_kind=operation_kind, **narrowed)
+    assert str(exc.value) == _empty_input_message(kind, "Category")
+
+
+def test_build_empty_selection_raises_whatever_the_overrides() -> None:
+    """``overrides`` cannot fill an empty selection: the selection refuses it first.
+
+    A consumer ``input_class`` may name only members of the selection, so a
+    non-empty ``overrides`` beside ``fields=()`` names columns the input never
+    carries.
+    """
+    with pytest.raises(ConfigurationError) as exc:
+        build_mutation_input(
+            product_models.Category,
+            operation_kind=CREATE,
+            primary_type=CategoryType,
+            fields=(),
+            overrides=("name",),
+        )
+    assert str(exc.value) == _empty_input_message("create", "Category")
 
 
 # ---------------------------------------------------------------------------
@@ -1606,6 +1658,29 @@ def test_payload_model_less_shape() -> None:
     assert "result" not in fields
 
 
+def test_payload_type_name_keeps_an_underscore_in_the_mutation_name() -> None:
+    """A mutation class named with an underscore publishes ``<Name>Payload`` verbatim.
+
+    Strawberry names a type given no ``name=`` ``to_camel_case(__name__)``, which
+    re-cases ``Create_CategoryPayload`` to ``CreateCategorypayload``; the builder pins
+    the spec-036 Decision 7 ``payload_type_name`` so the definition and the SDL
+    carry the name every lazy return ref resolves by.
+    """
+    payload = build_payload_type("Create_Category", object_type=None)
+    assert payload.__strawberry_definition__.name == "Create_CategoryPayload"
+
+    # The ``object`` return is replaced below; Strawberry reads the field type from there.
+    def _probe() -> object:
+        return None
+
+    _probe.__annotations__ = {"return": payload | None}
+    query = strawberry.type(type("Query", (), {"probe": strawberry.field(resolver=_probe)}))
+
+    sdl = strawberry.Schema(query=query, config=strawberry_config()).as_str()
+    assert "type Create_CategoryPayload " in sdl
+    assert "CreateCategorypayload" not in sdl
+
+
 def test_payload_slot_is_the_uniform_one_for_the_object_type() -> None:
     """The object slot is the one ``payload_object_slot`` names, never model-derived.
 
@@ -1757,10 +1832,37 @@ def test_editable_fields_offer_only_carriers_that_are_inputs(
 
     ``Meta.fields`` takes field names, so a ``ForeignKey`` carrier is offered as
     ``owner``, never its ``owner_id`` column; a primary-key carrier is never an
-    input, so it is reported as one instead of offered. Each offered name is
-    accepted by ``editable_input_fields``.
+    input, so it is reported as one instead of offered. Each offered name is an
+    input ``editable_input_fields`` keeps.
     """
-    model = type(
+    model = _carrier_probe_model(from_fields, to_fields)
+    targets = ", ".join(to_fields)
+    with pytest.raises(
+        ConfigurationError,
+        match=_carrier_backed_link_message("LnkCarrierProbe", "fields", targets, carriers, remedy),
+    ):
+        editable_input_fields(model, fields=("parent",), operation_kind=PARTIAL)
+    offered = {name for name in ("owner", "p_code") if f"({name})" in remedy}
+    assert offered <= {
+        field.name for field in editable_input_fields(model, operation_kind=PARTIAL)
+    }
+
+
+def test_editable_fields_refuse_the_empty_selection_a_pk_carrier_remedy_leaves() -> None:
+    """A link whose only carrier is the primary key offers nothing; ``fields=()`` is refused.
+
+    Dropping the link from ``fields`` leaves an empty selection, which the selection
+    refuses with the flavor's empty-input error naming the update input.
+    """
+    model = _carrier_probe_model(["id"], ["id"])
+    with pytest.raises(ConfigurationError) as exc:
+        editable_input_fields(model, fields=(), operation_kind=PARTIAL)
+    assert str(exc.value) == _empty_input_message("update", "LnkCarrierProbe")
+
+
+def _carrier_probe_model(from_fields: list[str], to_fields: list[str]) -> type[models.Model]:
+    """Return an unmanaged model whose ``parent`` ``ForeignObject`` rides ``from_fields``."""
+    return type(
         "LnkCarrierProbe",
         (models.Model,),
         {
@@ -1781,17 +1883,6 @@ def test_editable_fields_offer_only_carriers_that_are_inputs(
             "Meta": type("Meta", (), {"app_label": "products", "managed": False}),
         },
     )
-    targets = ", ".join(to_fields)
-    with pytest.raises(
-        ConfigurationError,
-        match=_carrier_backed_link_message("LnkCarrierProbe", "fields", targets, carriers, remedy),
-    ):
-        editable_input_fields(model, fields=("parent",), operation_kind=PARTIAL)
-    offered = [name for name in ("owner", "p_code") if f"({name})" in remedy]
-    assert [
-        field.name
-        for field in editable_input_fields(model, fields=tuple(offered), operation_kind=PARTIAL)
-    ] == offered
 
 
 def test_editable_fields_report_fields_and_exclude_together_before_a_foreign_object() -> None:
@@ -1816,32 +1907,7 @@ def test_editable_fields_reject_a_reverse_generic_relation_as_an_unknown_name(ke
     never the forward ``ForeignObject`` error that offers ``object_id`` as its
     carrier.
     """
-    meta = type("Meta", (), {"app_label": "products", "managed": False})
-    tag = type(
-        "MutationProbeTag",
-        (models.Model,),
-        {
-            "__module__": __name__,
-            "name": models.TextField(),
-            "content_type": models.ForeignKey(
-                ContentType,
-                on_delete=models.CASCADE,
-                related_name="+",
-            ),
-            "object_id": models.PositiveIntegerField(),
-            "content_object": GenericForeignKey("content_type", "object_id"),
-            "Meta": meta,
-        },
-    )
-    type(
-        "MutationProbeHolder",
-        (models.Model,),
-        {
-            "__module__": __name__,
-            "tags": GenericRelation(tag, related_query_name="holder"),
-            "Meta": meta,
-        },
-    )
+    tag = RpGenericTag
 
     assert [field.name for field in editable_input_fields(tag, operation_kind=PARTIAL)] == [
         "name",
@@ -1851,7 +1917,7 @@ def test_editable_fields_reject_a_reverse_generic_relation_as_an_unknown_name(ke
     with pytest.raises(
         ConfigurationError,
         match=re.escape(
-            f"DjangoMutation for MutationProbeTag declares `{key}` naming non-editable or "
+            f"DjangoMutation for RpGenericTag declares `{key}` naming non-editable or "
             "unknown field(s): ['holder'].",
         ),
     ):
@@ -2050,9 +2116,8 @@ def test_build_mutation_input_rejects_bare_string_overrides(
 
     ``overrides`` freezes through ``frozenset``, so an unchecked bare string
     would iterate as CHARACTERS (bytes-like values as byte INTEGERS) - silently
-    matching no input attr, so the caller's override would never apply and, while
-    non-empty, the garbage set would satisfy the ``not overrides`` half of the
-    empty-input guard. A lazy translation string walks its text the same way, a
+    matching no input attr, so the caller's override would never apply. A lazy
+    translation string walks its text the same way, a
     ``SimpleLazyObject`` is read as the object it stands for, and every lazy
     ``Promise`` is text whatever result class it wraps. The same iterate-as-characters
     defect class ``normalize_field_name_sequence`` rejects loudly for ``fields`` /

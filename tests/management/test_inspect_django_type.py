@@ -24,11 +24,11 @@ from collections.abc import Iterator
 from enum import Enum
 from functools import partial
 from io import StringIO
-from typing import NewType
+from typing import ClassVar, NewType
 
 import pytest
 import strawberry
-from apps.library.models import Edition, LendingDesk, Patron, PatronProfile, Venue
+from apps.library.models import Edition, LendingDesk, Patron, PatronProfile, Publisher, Venue
 from apps.products.models import Category, Item
 from apps.scalars.models import MediaSpecimen
 from django.core.management import CommandError, call_command
@@ -41,6 +41,7 @@ from typing_extensions import override
 
 from django_strawberry_framework import DjangoType, finalize_django_types, strawberry_config
 from django_strawberry_framework.management.commands.inspect_django_type import (
+    _NOT_PUBLISHED,
     Command,
     _render_annotation,
     _scalar_converter,
@@ -241,24 +242,6 @@ def test_abstract_base_without_definition_raises_command_error(
     _make_test_module(monkeypatch, AbstractBase=AbstractBase)
     with pytest.raises(CommandError, match="not a registered DjangoType"):
         call_command("inspect_django_type", "test_module.AbstractBase")
-
-
-def test_meta_less_child_of_a_concrete_type_raises_command_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # A Meta-less child inherits its parent's definition attribute but registers none of its own.
-    class ConcreteParent(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-
-    class MetaLessChild(ConcreteParent):
-        pass
-
-    finalize_django_types()
-    _make_test_module(monkeypatch, MetaLessChild=MetaLessChild)
-    with pytest.raises(CommandError, match="MetaLessChild is not a registered DjangoType"):
-        call_command("inspect_django_type", "test_module.MetaLessChild")
 
 
 def test_unfinalized_type_raises_command_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -634,9 +617,9 @@ def _mirror_check(type_cls: type[DjangoType], field_name: str, *, expected: bool
 def test_inspect_suppressed_pk_mirror_matches_synthesis() -> None:
     """Predictor agrees with the build-time record on the covered population.
 
-    Mirror-consistency gate for Family ``relay-pk-suppression-read-mirror``:
-    ``_is_suppressed_relay_pk`` must equal the build-time fact (pk
-    name absent from ``origin.__annotations__``) for every selected field.
+    Mirror-consistency gate: ``_is_suppressed_relay_pk`` must equal the
+    build-time fact (pk name absent from ``origin.__annotations__``) for every
+    selected field.
     Population: Relay scalar pk (True/absent, both the default-``id`` and
     the non-``id`` ``Edition.isbn_13`` spellings), non-Relay scalar pk
     (False/present control), direct ``relay.Node`` inheritance
@@ -749,6 +732,162 @@ def test_inspect_consumer_authored_pk_on_relay_type_reports_consumer_row() -> No
     assert " ID! " not in pk_row
     assert "relay.Node id" not in pk_row
     assert "consumer annotation (scalar)" in pk_row
+
+
+def _table(text: str) -> list[str]:
+    """Return the title and field rows of a printed table, each with its whitespace collapsed.
+
+    The two header lines (column names and rule) are fixed text and are skipped.
+    """
+    lines = [" ".join(line.split()) for line in text.splitlines()]
+    return [lines[0], *lines[3:]]
+
+
+def test_inspect_node_id_over_relay_pk_reports_the_interface_id_row() -> None:
+    """``id: relay.NodeID[int]`` publishes no field of its own; the schema's ``id`` is ``ID!``.
+
+    Strawberry treats a ``relay.NodeID`` annotation as private, so the consumer
+    pk override leaves ``__strawberry_definition__`` without an ``id`` field and
+    the ``relay.Node`` interface supplies ``id: ID!``.
+    """
+
+    class InspNodeIdPkType(DjangoType):
+        id: relay.NodeID[int]
+
+        class Meta:
+            model = Publisher
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+
+    assert registry.get(Publisher) is InspNodeIdPkType
+
+    finalize_django_types()
+    assert _table(_inspect_text("InspNodeIdPkType")) == [
+        "InspNodeIdPkType (model: apps.library.models.Publisher)",
+        "id BigAutoField ID! no relay.Node id",
+        "name TextField String! no SCALAR_MAP[TextField]",
+    ]
+
+
+def test_inspect_node_id_over_text_relay_pk_reports_the_interface_id_row() -> None:
+    """A ``relay.NodeID[str]`` over a text pk not named ``id`` reports the interface's ``ID!``."""
+
+    class InspNodeIdTextPkType(DjangoType):
+        isbn_13: relay.NodeID[str]
+
+        class Meta:
+            model = Edition
+            fields = ("isbn_13", "isbn_10")
+            interfaces = (relay.Node,)
+
+    assert registry.get(Edition) is InspNodeIdTextPkType
+
+    finalize_django_types()
+    assert _table(_inspect_text("InspNodeIdTextPkType")) == [
+        "InspNodeIdTextPkType (model: apps.library.models.Edition)",
+        "isbn_13 TextField ID! no relay.Node id",
+        "isbn_10 TextField String! no SCALAR_MAP[TextField]",
+    ]
+
+
+def test_inspect_node_id_over_pk_without_node_interface_is_not_a_field() -> None:
+    """Without the ``relay.Node`` interface nothing publishes an ``id``, so the pk is no field."""
+
+    class InspNodeIdPlainPkType(DjangoType):
+        id: relay.NodeID[int]
+
+        class Meta:
+            model = Publisher
+            fields = ("id", "name")
+
+    assert registry.get(Publisher) is InspNodeIdPlainPkType
+
+    finalize_django_types()
+    assert _table(_inspect_text("InspNodeIdPlainPkType")) == [
+        "InspNodeIdPlainPkType (model: apps.library.models.Publisher)",
+        "id BigAutoField - - (not a GraphQL field)",
+        "name TextField String! no SCALAR_MAP[TextField]",
+    ]
+
+
+def test_inspect_private_column_on_a_plain_type_is_not_a_field() -> None:
+    """A ``strawberry.Private`` column override publishes no field."""
+
+    class InspPrivatePlainType(DjangoType):
+        house_code: strawberry.Private[str]
+
+        class Meta:
+            model = Publisher
+            fields = ("id", "name", "house_code")
+
+    assert registry.get(Publisher) is InspPrivatePlainType
+
+    finalize_django_types()
+    assert _table(_inspect_text("InspPrivatePlainType")) == [
+        "InspPrivatePlainType (model: apps.library.models.Publisher)",
+        "id BigAutoField Int! no SCALAR_MAP[BigAutoField]",
+        "name TextField String! no SCALAR_MAP[TextField]",
+        "house_code TextField - - (not a GraphQL field)",
+    ]
+
+
+def test_inspect_private_column_on_a_relay_type_is_not_a_field() -> None:
+    """On a Relay-shaped type a private non-pk column is no field; the pk keeps its ``ID!`` row."""
+
+    class InspPrivateRelayType(DjangoType):
+        house_code: strawberry.Private[str]
+
+        class Meta:
+            model = Publisher
+            fields = ("id", "name", "house_code")
+            interfaces = (relay.Node,)
+
+    assert registry.get(Publisher) is InspPrivateRelayType
+
+    finalize_django_types()
+    assert _table(_inspect_text("InspPrivateRelayType")) == [
+        "InspPrivateRelayType (model: apps.library.models.Publisher)",
+        "id BigAutoField ID! no relay.Node id",
+        "name TextField String! no SCALAR_MAP[TextField]",
+        "house_code TextField - - (not a GraphQL field)",
+    ]
+
+
+def test_inspect_class_var_column_is_not_a_field() -> None:
+    """A ``ClassVar`` column annotation publishes no field."""
+
+    class InspClassVarType(DjangoType):
+        house_code: ClassVar[str]
+
+        class Meta:
+            model = Publisher
+            fields = ("id", "name", "house_code")
+
+    assert registry.get(Publisher) is InspClassVarType
+
+    finalize_django_types()
+    assert _table(_inspect_text("InspClassVarType")) == [
+        "InspClassVarType (model: apps.library.models.Publisher)",
+        "id BigAutoField Int! no SCALAR_MAP[BigAutoField]",
+        "name TextField String! no SCALAR_MAP[TextField]",
+        "house_code TextField - - (not a GraphQL field)",
+    ]
+
+
+def test_strawberry_field_type_answers_not_published_for_a_dropped_name() -> None:
+    """A name Strawberry published no field for reads ``_NOT_PUBLISHED``, a published one its type."""
+
+    class InspDroppedType(DjangoType):
+        house_code: strawberry.Private[str]
+
+        class Meta:
+            model = Publisher
+            fields = ("id", "name", "house_code")
+
+    finalize_django_types()
+    definition = InspDroppedType.__django_strawberry_definition__
+    assert _strawberry_field_type(definition, "house_code") is _NOT_PUBLISHED
+    assert _strawberry_field_type(definition, "name") is str
 
 
 def test_inspect_uses_sdl_names_for_renamed_relation_and_consumer_enum() -> None:

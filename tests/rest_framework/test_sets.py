@@ -60,6 +60,7 @@ from django.contrib.auth.models import AnonymousUser
 from django.db import models
 from django.http import HttpRequest
 from django.utils.functional import SimpleLazyObject
+from django.utils.translation import gettext_lazy
 from rest_framework import serializers
 from strawberry.types.base import get_object_definition
 from strawberry.types.enum import StrawberryEnumDefinition
@@ -111,10 +112,13 @@ from tests._idioms import (
     ClassReadRaises,
     ModelSerializerBase,
     bind_unparented,
+    canonical_order,
     comparing_metaclass,
     definition_raises,
     is_object_dict,
     module_binding,
+    scrambled,
+    str_subclass_name,
 )
 from tests._info import unread_info
 
@@ -346,6 +350,26 @@ def test_permission_classes_accepted_as_known_key() -> None:
     assert CreateItem._mutation_meta.permission_classes == ()
 
 
+def test_invalid_permission_classes_message_names_the_serializer_site() -> None:
+    """A refused ``permission_classes`` names the serializer flavor and the mutation's ``Meta`` key."""
+    serializer_cls = _item_serializer()
+
+    with pytest.raises(
+        ConfigurationError,
+        match=(
+            r"^SerializerMutation CreateItem\.Meta\.permission_classes entry 123 is not a "
+            r"permission class exposing has_permission; "
+        ),
+    ):
+
+        @definition_raises
+        class CreateItem(SerializerMutation):
+            class Meta:
+                serializer_class = serializer_cls
+                operation = "create"
+                permission_classes = [123]
+
+
 def test_fields_and_exclude_both_raises() -> None:
     """Declaring both ``fields`` and ``exclude`` raises."""
     serializer_cls = _item_serializer()
@@ -377,6 +401,117 @@ def test_optional_fields_bare_string_rejected_at_class_creation() -> None:
                 serializer_class = serializer_cls
                 operation = "create"
                 optional_fields = "__all__"
+
+
+@pytest.mark.parametrize("label", ["optional_fields", "injected_fields"])
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        pytest.param(
+            "x",
+            "SerializerMutation Meta.{label} must be a sequence of field names, not a bare "
+            "string: 'x'.",
+            id="bare-string",
+        ),
+        pytest.param(
+            ("description", "description"),
+            "SerializerMutation Meta.{label} declares duplicate field name(s): "
+            "['description']. Each field may appear at most once.",
+            id="duplicate",
+        ),
+    ],
+)
+def test_name_key_shape_refusal_names_its_own_slot(
+    label: str,
+    value: object,
+    message: str,
+) -> None:
+    """A malformed ``optional_fields`` / ``injected_fields`` refusal names the key at fault.
+
+    Both keys normalize through the shared shape gate under their own ``label``, so the
+    message never reports ``Meta.fields`` / ``Meta.exclude`` for them.
+    """
+    serializer_cls = _item_serializer()
+    meta = type(
+        "Meta",
+        (),
+        {
+            "serializer_class": serializer_cls,
+            "operation": "create",
+            "fields": ("name", "category", "is_private"),
+            label: value,
+        },
+    )
+    with pytest.raises(ConfigurationError) as excinfo:
+        _ = type("CreateItem", (SerializerMutation,), {"Meta": meta})
+    assert str(excinfo.value) == message.format(label=label)
+
+
+@pytest.mark.parametrize("kind", [set, frozenset])
+def test_unordered_name_keys_are_stored_in_canonical_order(
+    kind: type[set[str] | frozenset[str]],
+) -> None:
+    """Set-valued ``optional_fields`` / ``injected_fields`` build, stored hash-seed independent.
+
+    Neither key's order reaches the generated shape (``optional_fields`` is read as a
+    ``frozenset``; ``injected_fields`` is read as a set of names, its specs walked in
+    stored order), so a set is accepted and stored sorted by ``canonical_sort_key``, which
+    keeps that walk hash-seed independent too. ``scrambled`` iterates out of that order in this
+    process, so storing the declared iteration order fails the row.
+    """
+    optional = scrambled(
+        kind,
+        (
+            "name",
+            "description",
+            "category",
+            "attachment",
+            "is_private",
+        ),
+    )
+    injected = scrambled(
+        kind,
+        (
+            "description",
+            "category",
+            "attachment",
+            "is_private",
+            "confirm",
+        ),
+    )
+
+    class ItemSerializer(ModelSerializerBase[product_models.Item]):
+        confirm = serializers.CharField()
+
+        class Meta:
+            model = product_models.Item
+            fields = (
+                "name",
+                "description",
+                "category",
+                "attachment",
+                "is_private",
+                "confirm",
+            )
+
+    serializer_cls = ItemSerializer
+
+    class CreateItem(SerializerMutation):
+        class Meta:
+            serializer_class = serializer_cls
+            operation = "create"
+            exclude = ("confirm",)
+            optional_fields = optional
+
+    class CreateNamedItem(SerializerMutation):
+        class Meta:
+            serializer_class = serializer_cls
+            operation = "create"
+            fields = ("name",)
+            injected_fields = injected
+
+    assert CreateItem._mutation_meta.optional_fields == tuple(canonical_order(optional))
+    assert CreateNamedItem._mutation_meta.injected_fields == tuple(canonical_order(injected))
 
 
 def test_unknown_meta_key_raises() -> None:
@@ -2023,12 +2158,10 @@ def test_schema_hook_rejects_invalid_field_map_at_class_creation(
 
 
 def test_schema_hook_mapping_iteration_error_propagates() -> None:
-    """The hook mapping's own ``items()`` is consumer code: what it raises propagates."""
+    """The hook mapping's own iteration is consumer code: what it raises propagates."""
 
-    class BrokenMapping(dict[str, object]):
-        @override
-        def items(self) -> NoReturn:
-            raise RuntimeError("mapping iteration exploded")
+    class BrokenMapping(_RaisingIterationMapping):
+        error = "mapping iteration exploded"
 
     serializer_cls = _item_serializer()
     with pytest.raises(RuntimeError, match="mapping iteration exploded"):
@@ -2101,43 +2234,95 @@ def test_schema_field_map_non_mapping_message_is_exact() -> None:
     )
 
 
-def test_schema_field_map_reports_malformed_entries() -> None:
-    """An entry that is not a ``(name, field)`` pair is reported as a configuration error."""
+class _NameChoices(models.TextChoices):
+    """A ``TextChoices`` class whose members spell field-map keys."""
 
-    class MalformedEntries(dict[str, object]):
-        @override
-        # basedpyright: deliberately yields malformed entries, the input the validator refuses
-        def items(self) -> list[tuple[str] | tuple[str, serializers.CharField]]:  # pyright: ignore[reportIncompatibleMethodOverride]
-            return [("name",), ("title", serializers.CharField())]
-
-    with pytest.raises(ConfigurationError, match="could not be unpacked"):
-        _validate_schema_field_map("BrokenEntries", MalformedEntries())
+    NAME = "name"
+    ITEMS = "items"
 
 
-def test_schema_field_map_rejects_str_subclass_key() -> None:
-    """A ``str``-subclass key is rejected before any comparison or dict-set dispatch.
+_MEMBER_KEY_KINDS = ("str-enum-mixin", "str-enum", "text-choices")
 
-    Keys become input field names, so the plain-string gate lets only an exact ``str``
-    reach the downstream key-hashing consumers, never an overridable ``__hash__`` /
-    ``__ne__`` a ``str`` subclass could carry.
+
+def _member_key(kind: str, text: str) -> str:
+    """``text`` as a ``(str, Enum)``, ``StrEnum`` or ``TextChoices`` member (``kind``)."""
+    if kind == "text-choices":
+        return _NameChoices(text)
+    return str_subclass_name(kind, text, [])
+
+
+class _RaisingIterationMapping(Mapping[object, object]):
+    """A mapping whose own iteration raises ``error``."""
+
+    error = "iteration exploded"
+
+    @override
+    def __getitem__(self, key: object) -> NoReturn:
+        raise KeyError(key)
+
+    @override
+    def __iter__(self) -> NoReturn:
+        raise RuntimeError(self.error)
+
+    @override
+    def __len__(self) -> int:
+        return 0
+
+
+class _UnhashableKeyMapping(Mapping[object, object]):
+    """A mapping whose one key is an unhashable list, so ``dict()`` cannot copy it."""
+
+    def __init__(self, value: object) -> None:
+        self._value = value
+
+    @override
+    def __getitem__(self, key: object) -> object:
+        return self._value
+
+    @override
+    def __iter__(self) -> Iterator[object]:
+        return iter([["boom"]])
+
+    @override
+    def __len__(self) -> int:
+        return 1
+
+
+@pytest.mark.parametrize("kind", _MEMBER_KEY_KINDS)
+def test_schema_field_map_admits_a_member_key_rekeyed_by_its_text(kind: str) -> None:
+    """A ``str``-enum / ``TextChoices`` member key is read as its text and re-keyed by it.
+
+    The returned map is keyed by the exact ``str``, so the downstream key-hashing consumers
+    run ``str``'s own hash and equality.
     """
+    field = bind_unparented(serializers.CharField(), "name")
+    result = _validate_schema_field_map("M", {_member_key(kind, "name"): field})
+    assert result == {"name": field}
+    assert [type(key) for key in result] == [str]
 
-    class RaisingHashStr(str):
-        @override
-        def __hash__(self) -> NoReturn:
-            raise RuntimeError("hash exploded")
 
-    field = serializers.CharField()
-    field.field_name = "name"
-
-    class OneSubclassKey(dict[str, object]):
-        @override
-        # basedpyright: deliberately yields a str-subclass key, the input the validator refuses
-        def items(self) -> list[tuple[object, serializers.CharField]]:  # pyright: ignore[reportIncompatibleMethodOverride]
-            return [(RaisingHashStr("name"), field)]
-
+@pytest.mark.parametrize(
+    "key",
+    [b"name", gettext_lazy("name")],
+    ids=["bytes", "lazy"],
+)
+def test_schema_field_map_refuses_a_non_string_key(key: object) -> None:
+    """A ``bytes`` or lazy-translation key is not read as text: it is refused typed."""
+    field = bind_unparented(serializers.CharField(), "name")
     with pytest.raises(ConfigurationError, match="key must be a plain string"):
-        _validate_schema_field_map("M", OneSubclassKey())
+        _validate_schema_field_map("M", {key: field})
+
+
+def test_schema_field_map_refuses_a_mapping_dict_cannot_copy() -> None:
+    """An unhashable key ``dict()`` refuses is the typed field-map error, chained."""
+    field = bind_unparented(serializers.CharField(), "name")
+    with pytest.raises(ConfigurationError, match="key must be a plain string") as excinfo:
+        _validate_schema_field_map("M", _UnhashableKeyMapping(field))
+    assert str(excinfo.value) == (
+        "SerializerMutation M.get_serializer_for_schema() returned a mapping dict() could not "
+        "copy; a field-map key must be a plain string."
+    )
+    assert type(excinfo.value.__cause__) is TypeError
 
 
 _CLASS_READ_RAISES_FACTORIES: list[Callable[[type[BaseException]], object]] = [
@@ -2882,13 +3067,11 @@ def test_validate_nested_fields_materializes_one_shot_selectors() -> None:
 
 
 def test_validate_nested_fields_mapping_iteration_error_propagates() -> None:
-    """A ``Meta.nested_fields`` mapping's own ``items()`` error propagates unchanged."""
+    """A ``Meta.nested_fields`` mapping's own iteration error propagates unchanged."""
     serializer_cls, field_map = _category_field_map()
 
-    class BrokenMapping(dict[str, object]):
-        @override
-        def items(self) -> NoReturn:
-            raise RuntimeError("nested iteration exploded")
+    class BrokenMapping(_RaisingIterationMapping):
+        error = "nested iteration exploded"
 
     with pytest.raises(RuntimeError, match="nested iteration exploded"):
         _validate_serializer_nested_fields(
@@ -2900,65 +3083,48 @@ def test_validate_nested_fields_mapping_iteration_error_propagates() -> None:
         )
 
 
-def test_validate_nested_fields_rejects_malformed_entries() -> None:
-    """Entries that do not unpack as ``(field_name, NestedSerializerConfig)`` fail typed."""
-    serializer_cls, field_map = _category_field_map()
-
-    class MalformedEntries(dict[str, object]):
-        @override
-        # basedpyright: deliberately yields malformed entries, the input the validator refuses
-        def items(self) -> list[tuple[str, NestedSerializerConfig, str]]:  # pyright: ignore[reportIncompatibleMethodOverride]
-            return [("items", NestedSerializerConfig(), "extra")]
-
-    with pytest.raises(ConfigurationError, match="could not be unpacked"):
-        _validate_serializer_nested_fields(
-            "M",
-            serializer_cls,
-            "create",
-            field_map,
-            MalformedEntries(),
-        )
-
-
-class RaisingHashNestedKey(str):
-    """A ``str`` key whose own hash raises."""
-
-    @override
-    def __hash__(self) -> NoReturn:
-        raise RuntimeError("hash exploded")
-
-
 @pytest.mark.parametrize(
-    "key_factory",
+    "nested_factory",
     [
-        # Unhashable: would detonate ``field_map.get()`` with a raw TypeError.
-        lambda: ["boom"],
-        # A str subclass carrying its own ``__hash__``: would dispatch it in the dict-set.
-        RaisingHashNestedKey,
+        # Unhashable: ``dict()`` cannot copy the mapping.
+        lambda: _UnhashableKeyMapping(NestedSerializerConfig()),
         # Not a string at all.
-        lambda: 7,
+        lambda: {7: NestedSerializerConfig()},
+        # A lazy translation string is not read as text.
+        lambda: {gettext_lazy("items"): NestedSerializerConfig()},
     ],
+    ids=["unhashable-list", "int", "lazy"],
 )
 def test_validate_nested_fields_rejects_non_plain_string_keys(
-    key_factory: Callable[[], object],
+    nested_factory: Callable[[], object],
 ) -> None:
-    """Only an exact ``str`` key may reach ``field_map.get()`` or the ``normalized`` dict-set."""
+    """Only a key read as an exact ``str`` may reach ``field_map.get()`` or the dict-set."""
     serializer_cls, field_map = _category_field_map()
-
-    class HostileKeyEntries(dict[str, object]):
-        @override
-        # basedpyright: deliberately yields a non-str key, the input the validator refuses
-        def items(self) -> list[tuple[object, NestedSerializerConfig]]:  # pyright: ignore[reportIncompatibleMethodOverride]
-            return [(key_factory(), NestedSerializerConfig())]
-
     with pytest.raises(ConfigurationError, match="keys must be plain strings"):
         _validate_serializer_nested_fields(
             "M",
             serializer_cls,
             "create",
             field_map,
-            HostileKeyEntries(),
+            nested_factory(),
         )
+
+
+@pytest.mark.parametrize("kind", _MEMBER_KEY_KINDS)
+def test_validate_nested_fields_admits_a_member_key_rekeyed_by_its_text(kind: str) -> None:
+    """A ``str``-enum / ``TextChoices`` member key is read as its text and re-keyed by it."""
+    serializer_cls, field_map = _category_field_map()
+    config = NestedSerializerConfig()
+    result = _validate_serializer_nested_fields(
+        "M",
+        serializer_cls,
+        "create",
+        field_map,
+        {_member_key(kind, "items"): config},
+    )
+    assert result is not None
+    assert result == {"items": config}
+    assert [type(key) for key in result] == [str]
 
 
 def test_validate_nested_fields_empty_mapping_requires_no_write_override() -> None:
@@ -3780,14 +3946,7 @@ def test_schema_field_map_non_identifier_key_fails_typed_once_kept(bad_key: str)
     any name); the kept-set gate in ``resolve_effective_serializer_fields`` rejects it.
     """
     field = bind_unparented(serializers.CharField(), bad_key)
-
-    class BadKeyEntries(dict[str, object]):
-        @override
-        # basedpyright: deliberately yields a non-identifier key, the input the gate refuses
-        def items(self) -> list[tuple[str, DRFField]]:  # pyright: ignore[reportIncompatibleMethodOverride]
-            return [(bad_key, field)]
-
-    field_map = _validate_schema_field_map("M", BadKeyEntries())
+    field_map = _validate_schema_field_map("M", {bad_key: field})
     assert field_map == {bad_key: field}
     with pytest.raises(
         ConfigurationError,

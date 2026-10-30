@@ -95,6 +95,7 @@ from django.http import HttpRequest
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
+from django.utils.functional import SimpleLazyObject
 from django.utils.safestring import SafeString
 from django.utils.translation import gettext_lazy
 from typing_extensions import Self, override
@@ -107,7 +108,6 @@ from django_strawberry_framework.utils import querysets as querysets_module
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     call_method,
-    instance_dict,
     is_dict,
     is_exact_dict,
     is_iterable,
@@ -205,6 +205,7 @@ from tests._django_private import (
 from tests._idioms import (
     FETCH_MODES,
     STR_ENUM,
+    TEST_ASYNC_RECOURSE,
     ClaimsClassBase,
     ClassReadRaisesBase,
     is_object_list,
@@ -377,6 +378,21 @@ def test_initial_queryset_uses_default_manager() -> None:
 def test_coerce_field_value_or_none_returns_coerced_value() -> None:
     """A well-formed literal coerces through ``to_python``."""
     assert coerce_field_value_or_none(Category._meta.pk, "3", alias=DEFAULT_DB_ALIAS) == 3
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [pytest.param("title", "title", id="text"), pytest.param("a\x00b", None, id="embedded-nul")],
+)
+def test_coerce_field_value_or_none_reads_a_lazy_value_as_its_text(
+    text: str,
+    expected: object,
+) -> None:
+    """A ``SimpleLazyObject`` coerces as the text it stands for; an embedded NUL names no row."""
+    lazy_text = SimpleLazyObject(lambda: text)
+    field = Category._meta.get_field("name")
+
+    assert coerce_field_value_or_none(field, lazy_text, alias=DEFAULT_DB_ALIAS) == expected
 
 
 def test_coerce_field_value_or_none_drops_non_numeric_literal() -> None:
@@ -1211,7 +1227,12 @@ def test_relation_write_visibility_boundary_is_controlled_by_type_registration()
     registry.clear()
     category = Category.objects.create(name="VisibilityBoundary")
     try:
-        assert visible_related_objects(Category, [saved_pk(category)], info=None) == {
+        assert visible_related_objects(
+            Category,
+            [saved_pk(category)],
+            info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        ) == {
             saved_pk(category): saved_pk(category),
         }
 
@@ -1231,7 +1252,15 @@ def test_relation_write_visibility_boundary_is_controlled_by_type_registration()
                 return queryset.exclude(pk=saved_pk(category))
 
         del CategoryType
-        assert visible_related_objects(Category, [saved_pk(category)], info=None) == {}
+        assert (
+            visible_related_objects(
+                Category,
+                [saved_pk(category)],
+                info=None,
+                async_recourse=TEST_ASYNC_RECOURSE,
+            )
+            == {}
+        )
     finally:
         registry.clear()
 
@@ -1255,13 +1284,16 @@ def test_visible_related_objects_reads_a_non_pk_key_beside_the_pk_in_one_query()
                 pks,
                 info=None,
                 key_attname="label",
+                async_recourse=TEST_ASYNC_RECOURSE,
             )
         assert present == {keyed.pk: "Keyed"}
         assert len(ctx.captured_queries) == 1
-        assert visible_related_objects(NullableScalarSpecimen, pks, info=None) == {
-            keyed.pk: keyed.pk,
-            unkeyed.pk: unkeyed.pk,
-        }
+        assert visible_related_objects(
+            NullableScalarSpecimen,
+            pks,
+            info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        ) == {keyed.pk: keyed.pk, unkeyed.pk: unkeyed.pk}
     finally:
         registry.clear()
 
@@ -1298,6 +1330,7 @@ def test_visible_related_object_answers_none_for_a_null_key_in_one_query() -> No
                 unkeyed.pk,
                 None,
                 key_attname="label",
+                async_recourse=TEST_ASYNC_RECOURSE,
             )
         assert refused is None
         assert len(ctx.captured_queries) == 1
@@ -1307,10 +1340,19 @@ def test_visible_related_object_answers_none_for_a_null_key_in_one_query() -> No
                 keyed.pk,
                 None,
                 key_attname="label",
+                async_recourse=TEST_ASYNC_RECOURSE,
             )
             == keyed
         )
-        assert visible_related_object(NullableScalarSpecimen, unkeyed.pk, None) == unkeyed
+        assert (
+            visible_related_object(
+                NullableScalarSpecimen,
+                unkeyed.pk,
+                None,
+                async_recourse=TEST_ASYNC_RECOURSE,
+            )
+            == unkeyed
+        )
     finally:
         registry.clear()
 
@@ -1323,7 +1365,12 @@ def test_visible_related_object_answers_none_for_a_null_key_in_one_query() -> No
 def test_apply_type_visibility_sync_runs_sync_get_queryset() -> None:
     """The sync path invokes ``get_queryset`` and returns its queryset."""
     base = Category.objects.all()
-    result = apply_type_visibility_sync(_sync_type(), base, info=None)
+    result = apply_type_visibility_sync(
+        _sync_type(),
+        base,
+        info=None,
+        async_recourse=TEST_ASYNC_RECOURSE,
+    )
     assert isinstance(result, models.QuerySet)
 
 
@@ -1336,7 +1383,12 @@ def test_apply_type_visibility_sync_rejects_async_hook_loudly() -> None:
     """
     base = Category.objects.all()
     with pytest.raises(SyncMisuseError, match="returned a coroutine in a sync"):
-        apply_type_visibility_sync(_AsyncType, base, info=None)
+        apply_type_visibility_sync(
+            _AsyncType,
+            base,
+            info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
     assert issubclass(SyncMisuseError, ConfigurationError)
     assert issubclass(SyncMisuseError, RuntimeError)
 
@@ -1480,13 +1532,23 @@ def test_visibility_source_must_be_a_queryset() -> None:
     with pytest.raises(ConfigurationError, match="requires a QuerySet of Category rows"):
         # basedpyright: the plain list is the hostile input under test; apply_type_visibility_sync
         # types the parameter as QuerySet[Model, object]
-        apply_type_visibility_sync(_stub_type(Category, _boom), [1, 2], info=None)  # pyright: ignore[reportArgumentType]
+        apply_type_visibility_sync(
+            _stub_type(Category, _boom),
+            [1, 2],  # pyright: ignore[reportArgumentType]
+            info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
 
 
 def test_visibility_source_must_use_registered_concrete_table() -> None:
     """A source over the wrong model fails closed - the hook would narrow the wrong table."""
     with pytest.raises(ConfigurationError, match="concrete table"):
-        apply_type_visibility_sync(_sync_type(), Item.objects.all(), info=None)
+        apply_type_visibility_sync(
+            _sync_type(),
+            Item.objects.all(),
+            info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
 
 
 @pytest.mark.django_db
@@ -1514,7 +1576,12 @@ def test_evaluated_source_is_refreshed_before_hook(
     evaluated = Category.objects.all()
     list(evaluated)  # materialize the cache
     with django_assert_num_queries(0):
-        result = apply_type_visibility_sync(_stub_type(Category, _capture), evaluated, info=None)
+        result = apply_type_visibility_sync(
+            _stub_type(Category, _capture),
+            evaluated,
+            info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
     assert seen["qs"] is not evaluated
     assert isinstance(seen["qs"], models.QuerySet)
     assert seen["qs"]._result_cache is None
@@ -1525,7 +1592,12 @@ def test_active_write_pipeline_pins_source_and_repins_result() -> None:
     """Under an active write pipeline the source is pre-pinned and an unpinned result repinned."""
     hook = _stub_type(Category, lambda _cls, _qs, _info: Category.objects.filter(name="x"))
     with write_pipeline("default", lock=False):
-        result = apply_type_visibility_sync(hook, Category.objects.all(), info=None)
+        result = apply_type_visibility_sync(
+            hook,
+            Category.objects.all(),
+            info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
     assert queryset_db(result) == "default"
 
 
@@ -1535,7 +1607,12 @@ def test_active_write_pipeline_rejects_divergent_source_alias() -> None:
         write_pipeline("default", lock=False),
         pytest.raises(ConfigurationError, match="routed to alias 'other'"),
     ):
-        apply_type_visibility_sync(_sync_type(), Category.objects.using("other"), info=None)
+        apply_type_visibility_sync(
+            _sync_type(),
+            Category.objects.using("other"),
+            info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
 
 
 class _ProjectCategoryQuerySet(models.QuerySet[Category]):
@@ -1574,6 +1651,7 @@ def test_hook_receives_the_sources_own_queryset_class() -> None:
         _stub_type(Category, _project_method_hook(seen)),
         source,
         info=None,
+        async_recourse=TEST_ASYNC_RECOURSE,
     )
     assert type(seen["qs"]) is _ProjectCategoryQuerySet
     assert seen["qs"] is not source
@@ -1610,7 +1688,12 @@ def test_exact_queryset_source_reaches_the_hook_as_an_exact_queryset() -> None:
         seen["qs"] = queryset
         return queryset
 
-    apply_type_visibility_sync(_stub_type(Category, _capture), Category.objects.all(), info=None)
+    apply_type_visibility_sync(
+        _stub_type(Category, _capture),
+        Category.objects.all(),
+        info=None,
+        async_recourse=TEST_ASYNC_RECOURSE,
+    )
     assert type(seen["qs"]) is models.QuerySet
 
 
@@ -1621,6 +1704,7 @@ def test_hook_returning_its_project_class_input_is_sealed_plain() -> None:
         _stub_type(Category, lambda _cls, queryset, _info: queryset),
         source,
         info=None,
+        async_recourse=TEST_ASYNC_RECOURSE,
     )
     assert type(result) is models.QuerySet
     assert "= visible" in str(result.query)
@@ -1646,7 +1730,12 @@ def test_project_class_rebuild_keeps_the_sources_query_state() -> None:
         .order_by("-name")
         .prefetch_related("items")
     )
-    apply_type_visibility_sync(_stub_type(Category, _capture), source, info=None)
+    apply_type_visibility_sync(
+        _stub_type(Category, _capture),
+        source,
+        info=None,
+        async_recourse=TEST_ASYNC_RECOURSE,
+    )
     received = require_instance(seen["qs"], _ProjectCategoryQuerySet)
     assert "flag" in received.query.annotations
     assert received.query.order_by == ("-name",)
@@ -1662,6 +1751,7 @@ def test_project_class_projection_source_still_fails_closed() -> None:
             _sync_type(),
             _ProjectCategoryQuerySet(model=Category).values("id"),
             info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
         )
 
 
@@ -1682,6 +1772,7 @@ def test_active_write_pipeline_pins_a_project_class_source() -> None:
             _stub_type(Category, _capture),
             _ProjectCategoryQuerySet(model=Category),
             info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
         )
     received = require_instance(seen["qs"], _ProjectCategoryQuerySet)
     assert queryset_db(received) == "default"
@@ -1743,7 +1834,12 @@ def test_hostile_source_all_override_is_neutralized_by_sealing() -> None:
             return Category.objects.all()
 
     sticky = models.QuerySet[Category].filter(_StickySource(model=Category), name="visible")
-    result = apply_type_visibility_sync(_sync_type(), sticky, info=None)
+    result = apply_type_visibility_sync(
+        _sync_type(),
+        sticky,
+        info=None,
+        async_recourse=TEST_ASYNC_RECOURSE,
+    )
     assert type(result) is models.QuerySet  # sealed - not the hostile subclass
     assert "visible" in str(result.query)  # the source predicate survived sealing
 
@@ -1769,7 +1865,12 @@ def test_unsealable_source_fails_closed() -> None:
     # types the slot as one of Django's BaseIterable classes
     source._iterable_class = list  # pyright: ignore[reportAttributeAccessIssue]
     with pytest.raises(ConfigurationError, match="cannot be sealed"):
-        apply_type_visibility_sync(_stub_type(Category, _boom), source, info=None)
+        apply_type_visibility_sync(
+            _stub_type(Category, _boom),
+            source,
+            info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
 
 
 class _ConsumerUpper(models.Func):
@@ -1795,7 +1896,12 @@ def test_a_source_carrying_a_consumer_expression_names_the_state_the_seal_rebuil
 
     source = Category.objects.annotate(u=_ConsumerUpper(F("name")))
     with pytest.raises(ConfigurationError) as excinfo:
-        apply_type_visibility_sync(_stub_type(Category, _boom), source, info=None)
+        apply_type_visibility_sync(
+            _stub_type(Category, _boom),
+            source,
+            info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
     message = str(excinfo.value)
     assert "cannot be sealed into a framework-owned execution queryset" in message
     assert "a consumer-defined expression, lookup" in message
@@ -1818,6 +1924,7 @@ def test_hook_manager_result_is_coerced_sync() -> None:
         _sync_hook_type(Category.objects),
         Category.objects.all(),
         info=None,
+        async_recourse=TEST_ASYNC_RECOURSE,
     )
     assert isinstance(result, models.QuerySet)
     assert result.model is Category
@@ -1869,7 +1976,12 @@ def test_invalid_hook_results_fail_closed(bad: object, detail: str) -> None:
         ConfigurationError,
         match=f"must return a QuerySet or Manager.*got {detail}",
     ):
-        apply_type_visibility_sync(_sync_hook_type(bad), Category.objects.all(), info=None)
+        apply_type_visibility_sync(
+            _sync_hook_type(bad),
+            Category.objects.all(),
+            info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
 
 
 def test_wrong_model_hook_result_fails_closed() -> None:
@@ -1879,6 +1991,7 @@ def test_wrong_model_hook_result_fails_closed() -> None:
             _sync_hook_type(Item.objects.all()),
             Category.objects.all(),
             info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
         )
 
 
@@ -1890,7 +2003,12 @@ def test_mti_child_hook_result_fails_closed() -> None:
     """
     hook = _stub_type(Venue, lambda _cls, _qs, _info: LendingDesk.objects.all())
     with pytest.raises(ConfigurationError, match="concrete table"):
-        apply_type_visibility_sync(hook, Venue.objects.all(), info=None)
+        apply_type_visibility_sync(
+            hook,
+            Venue.objects.all(),
+            info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
 
 
 def test_combined_query_branch_over_another_model_fails_closed() -> None:
@@ -1905,7 +2023,12 @@ def test_combined_query_branch_over_another_model_fails_closed() -> None:
     """
     hostile = Category.objects.all().union(Item.objects.all())
     with pytest.raises(ConfigurationError, match="concrete table"):
-        apply_type_visibility_sync(_sync_hook_type(hostile), Category.objects.all(), info=None)
+        apply_type_visibility_sync(
+            _sync_hook_type(hostile),
+            Category.objects.all(),
+            info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
 
 
 def test_mutable_public_model_disagreeing_with_query_model_fails_closed() -> None:
@@ -1919,7 +2042,12 @@ def test_mutable_public_model_disagreeing_with_query_model_fails_closed() -> Non
     hostile = Category.objects.all()
     hostile.query.model = Item
     with pytest.raises(ConfigurationError, match="concrete table"):
-        apply_type_visibility_sync(_sync_hook_type(hostile), Category.objects.all(), info=None)
+        apply_type_visibility_sync(
+            _sync_hook_type(hostile),
+            Category.objects.all(),
+            info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
 
 
 def test_proxy_hook_result_is_accepted() -> None:
@@ -1929,7 +2057,12 @@ def test_proxy_hook_result_is_accepted() -> None:
     whose concrete ``LendingDesk`` child the test above refuses.
     """
     hook = _stub_type(Venue, lambda _cls, _qs, _info: OpenVenue.objects.all())
-    result = apply_type_visibility_sync(hook, Venue.objects.all(), info=None)
+    result = apply_type_visibility_sync(
+        hook,
+        Venue.objects.all(),
+        info=None,
+        async_recourse=TEST_ASYNC_RECOURSE,
+    )
     assert result.model is OpenVenue
 
 
@@ -1940,7 +2073,12 @@ def test_unpinned_result_is_repinned_to_explicit_source_alias() -> None:
     database is needed.
     """
     hook = _stub_type(Category, lambda _cls, _qs, _info: Category.objects.filter(name="x"))
-    result = apply_type_visibility_sync(hook, Category.objects.using("other"), info=None)
+    result = apply_type_visibility_sync(
+        hook,
+        Category.objects.using("other"),
+        info=None,
+        async_recourse=TEST_ASYNC_RECOURSE,
+    )
     assert queryset_db(result) == "other"
 
 
@@ -1950,6 +2088,7 @@ def test_matching_explicit_result_alias_is_accepted() -> None:
         _sync_type(),
         Category.objects.using("other").all(),
         info=None,
+        async_recourse=TEST_ASYNC_RECOURSE,
     )
     assert queryset_db(result) == "other"
 
@@ -1961,13 +2100,23 @@ def test_divergent_explicit_result_alias_fails_closed() -> None:
         ConfigurationError,
         match=r"routed to alias 'elsewhere'.*pinned to alias 'other'",
     ):
-        apply_type_visibility_sync(hook, Category.objects.using("other"), info=None)
+        apply_type_visibility_sync(
+            hook,
+            Category.objects.using("other"),
+            info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
 
 
 def test_unpinned_read_hook_keeps_documented_alias_routing() -> None:
     """With no required alias, an unpinned read hook may still choose ``.using(alias)`` itself."""
     hook = _stub_type(Category, lambda _cls, qs, _info: qs.using("other"))
-    result = apply_type_visibility_sync(hook, Category.objects.all(), info=None)
+    result = apply_type_visibility_sync(
+        hook,
+        Category.objects.all(),
+        info=None,
+        async_recourse=TEST_ASYNC_RECOURSE,
+    )
     assert queryset_db(result) == "other"
 
 
@@ -1983,6 +2132,7 @@ def test_evaluated_hook_result_is_refreshed(
             _sync_hook_type(evaluated),
             Category.objects.all(),
             info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
         )
     assert result is not evaluated
     assert result._result_cache is None
@@ -2006,7 +2156,12 @@ def test_normalization_preserves_lazy_query_state() -> None:
         .annotate(flag=models.Value(1))
         .order_by("-name")
     )
-    result = apply_type_visibility_sync(_sync_hook_type(shaped), Category.objects.all(), info=None)
+    result = apply_type_visibility_sync(
+        _sync_hook_type(shaped),
+        Category.objects.all(),
+        info=None,
+        async_recourse=TEST_ASYNC_RECOURSE,
+    )
     assert type(result) is models.QuerySet  # sealed - the subclass identity is dropped
     assert result is not shaped
     assert "flag" in result.query.annotations
@@ -2031,7 +2186,12 @@ def test_hostile_result_all_override_is_neutralized_by_sealing() -> None:
             return Category.objects.all()
 
     sticky = models.QuerySet[Category].filter(_StickyResult(model=Category), name="visible")
-    result = apply_type_visibility_sync(_sync_hook_type(sticky), Category.objects.all(), info=None)
+    result = apply_type_visibility_sync(
+        _sync_hook_type(sticky),
+        Category.objects.all(),
+        info=None,
+        async_recourse=TEST_ASYNC_RECOURSE,
+    )
     assert type(result) is models.QuerySet
     assert "visible" in str(result.query)
 
@@ -2050,7 +2210,12 @@ def test_hostile_result_using_override_repin_is_neutralized_by_sealing() -> None
             return self
 
     hook = _stub_type(Category, lambda _cls, _qs, _info: _PinDodger(model=Category))
-    result = apply_type_visibility_sync(hook, Category.objects.using("other"), info=None)
+    result = apply_type_visibility_sync(
+        hook,
+        Category.objects.using("other"),
+        info=None,
+        async_recourse=TEST_ASYNC_RECOURSE,
+    )
     assert type(result) is models.QuerySet
     # Pinned at construction, not via the override.
     assert queryset_db(result) == "other"
@@ -2072,7 +2237,12 @@ def test_predicate_dropping_all_override_source_is_neutralized_by_sealing() -> N
             return Category.objects.all()  # would drop whatever WHERE the source carried
 
     hostile = models.QuerySet[Category].filter(_DropFilter(model=Category), name="visible")
-    result = apply_type_visibility_sync(_sync_type(), hostile, info=None)
+    result = apply_type_visibility_sync(
+        _sync_type(),
+        hostile,
+        info=None,
+        async_recourse=TEST_ASYNC_RECOURSE,
+    )
     assert type(result) is models.QuerySet
     assert "visible" in str(result.query)
 
@@ -2093,14 +2263,24 @@ def test_foreign_query_class_result_fails_closed() -> None:
     set_queryset_query(result, _ForeignQuery(Category))
     hook = _sync_hook_type(result)
     with pytest.raises(ConfigurationError, match="cannot be sealed"):
-        apply_type_visibility_sync(hook, Category.objects.all(), info=None)
+        apply_type_visibility_sync(
+            hook,
+            Category.objects.all(),
+            info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
 
 
 def test_a_hook_result_carrying_a_consumer_expression_names_the_state_the_seal_rebuilds() -> None:
     """A hook result refused as ``untrusted`` gets the same cause list as a source."""
     hook = _sync_hook_type(Category.objects.annotate(u=_ConsumerUpper(F("name"))))
     with pytest.raises(ConfigurationError) as excinfo:
-        apply_type_visibility_sync(hook, Category.objects.all(), info=None)
+        apply_type_visibility_sync(
+            hook,
+            Category.objects.all(),
+            info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
     message = str(excinfo.value)
     assert "cannot be sealed into a framework-owned execution queryset" in message
     assert "a consumer-defined expression, lookup" in message
@@ -2125,7 +2305,12 @@ def test_a_subclass_result_with_a_pending_deferred_filter_seals_with_it_baked() 
     result = _DeferredSub(model=Category)
     set_queryset_deferred_filter(result, (False, (), {"name": "later"}))
     hook = _sync_hook_type(result)
-    sealed = apply_type_visibility_sync(hook, Category.objects.all(), info=None)
+    sealed = apply_type_visibility_sync(
+        hook,
+        Category.objects.all(),
+        info=None,
+        async_recourse=TEST_ASYNC_RECOURSE,
+    )
     assert type(sealed) is models.QuerySet
     sql_str, params = _compiled_sql(sealed.query)
     assert "name" in sql_str
@@ -2533,7 +2718,12 @@ def test_values_projection_result_fails_closed_on_read_surface() -> None:
     """
     hook = _sync_hook_type(Category.objects.values("name"))
     with pytest.raises(ConfigurationError, match="the visibility contract composes over"):
-        apply_type_visibility_sync(hook, Category.objects.all(), info=None)
+        apply_type_visibility_sync(
+            hook,
+            Category.objects.all(),
+            info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
 
 
 def test_injected_custom_iterable_result_fails_closed() -> None:
@@ -2552,7 +2742,12 @@ def test_injected_custom_iterable_result_fails_closed() -> None:
     # types the slot as one of Django's BaseIterable classes
     injected._iterable_class = list  # pyright: ignore[reportAttributeAccessIssue]
     with pytest.raises(ConfigurationError, match="cannot be sealed"):
-        apply_type_visibility_sync(_sync_hook_type(injected), Category.objects.all(), info=None)
+        apply_type_visibility_sync(
+            _sync_hook_type(injected),
+            Category.objects.all(),
+            info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
 
 
 @requires_fetch_modes
@@ -2668,7 +2863,12 @@ def test_a_source_carrying_a_project_fetch_mode_is_refused_before_the_hook() -> 
 
     source = Category.objects.filter(name="visible").fetch_mode(FETCH_MODES["project"])
     with pytest.raises(ConfigurationError) as excinfo:
-        apply_type_visibility_sync(_stub_type(Category, _boom), source, info=None)
+        apply_type_visibility_sync(
+            _stub_type(Category, _boom),
+            source,
+            info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
     assert str(excinfo.value) == (
         "apply_type_visibility for _StubType got a source queryset that cannot be sealed "
         "into a framework-owned execution queryset (QuerySet._fetch_mode is a "
@@ -2706,7 +2906,12 @@ def test_a_prefetch_child_carrying_a_project_fetch_mode_names_it() -> None:
 def test_values_projection_source_fails_closed_on_read_surface() -> None:
     """A ``.values()`` SOURCE is rejected on a read surface before the hook runs."""
     with pytest.raises(ConfigurationError, match="the visibility contract composes over"):
-        apply_type_visibility_sync(_sync_type(), Category.objects.values("name"), info=None)
+        apply_type_visibility_sync(
+            _sync_type(),
+            Category.objects.values("name"),
+            info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
 
 
 def test_spoofed_base_table_over_frozen_alias_map_fails_closed() -> None:
@@ -2735,7 +2940,12 @@ def test_spoofed_base_table_over_frozen_alias_map_fails_closed() -> None:
         return hostile
 
     with pytest.raises(ConfigurationError, match=Item._meta.db_table):
-        apply_type_visibility_sync(_stub_type(Category, _spoof), Category.objects.all(), info=None)
+        apply_type_visibility_sync(
+            _stub_type(Category, _spoof),
+            Category.objects.all(),
+            info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
 
 
 def test_baked_alias_map_matching_table_is_accepted() -> None:
@@ -2747,7 +2957,12 @@ def test_baked_alias_map_matching_table_is_accepted() -> None:
     """
     baked = Category.objects.all()
     baked.query.get_initial_alias()  # freeze the alias map against Category's table
-    result = apply_type_visibility_sync(_sync_hook_type(baked), Category.objects.all(), info=None)
+    result = apply_type_visibility_sync(
+        _sync_hook_type(baked),
+        Category.objects.all(),
+        info=None,
+        async_recourse=TEST_ASYNC_RECOURSE,
+    )
     assert result.model is Category
 
 
@@ -2775,6 +2990,7 @@ def test_malformed_non_model_query_model_fails_closed_typed() -> None:
             _stub_type(Category, _malformed),
             Category.objects.all(),
             info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
         )
 
 
@@ -2786,7 +3002,12 @@ def test_cross_model_union_source_fails_closed() -> None:
     """
     hostile = Category.objects.all().union(Item.objects.all())
     with pytest.raises(ConfigurationError, match="concrete table"):
-        apply_type_visibility_sync(_sync_type(), hostile, info=None)
+        apply_type_visibility_sync(
+            _sync_type(),
+            hostile,
+            info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
 
 
 def test_manager_result_degrading_to_list_fails_closed() -> None:
@@ -2802,7 +3023,12 @@ def test_manager_result_degrading_to_list_fails_closed() -> None:
     manager.model = Category
     manager._db = None
     with pytest.raises(ConfigurationError, match="must produce a QuerySet"):
-        apply_type_visibility_sync(_sync_hook_type(manager), Category.objects.all(), info=None)
+        apply_type_visibility_sync(
+            _sync_hook_type(manager),
+            Category.objects.all(),
+            info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
 
 
 def _alias_drift_manager(explicit: str | None) -> models.Manager[Category]:
@@ -2828,7 +3054,12 @@ def test_manager_result_alias_drift_fails_closed_sync() -> None:
     """
     manager = _alias_drift_manager("other")
     with pytest.raises(ConfigurationError, match="preserve the manager's explicit routing"):
-        apply_type_visibility_sync(_sync_hook_type(manager), Category.objects.all(), info=None)
+        apply_type_visibility_sync(
+            _sync_hook_type(manager),
+            Category.objects.all(),
+            info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
 
 
 def test_hostile_foreign_query_type_name_cannot_escape_typed_defect() -> None:
@@ -2875,7 +3106,12 @@ def test_unrouted_manager_result_self_routing_fails_closed() -> None:
     """An UNROUTED hook Manager whose ``.all()`` self-routes fails closed (must stay unrouted)."""
     manager = _alias_drift_manager(None)
     with pytest.raises(ConfigurationError, match="preserve the manager's explicit routing"):
-        apply_type_visibility_sync(_sync_hook_type(manager), Category.objects.all(), info=None)
+        apply_type_visibility_sync(
+            _sync_hook_type(manager),
+            Category.objects.all(),
+            info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
 
 
 async def test_manager_result_alias_drift_fails_closed_async() -> None:
@@ -2954,6 +3190,7 @@ def test_instance_shadowed_all_hook_serves_only_visible_rows_sync() -> None:
         _stub_type(Category, _shadowed_all_hook),
         Category.objects.all(),
         info=None,
+        async_recourse=TEST_ASYNC_RECOURSE,
     )
     assert set(result.values_list("is_private", flat=True)) == {False}
     assert sorted(result.values_list("name", flat=True)) == ["visible_row"]
@@ -2988,6 +3225,7 @@ def test_query_chain_shadow_hook_fails_closed_sync() -> None:
             _stub_type(Category, _shadowed_chain_hook),
             Category.objects.all(),
             info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
         )
 
 
@@ -3018,6 +3256,7 @@ def test_clean_queryset_transforms_after_seal() -> None:
         _sync_hook_type(Category.objects.filter(is_private=False)),
         Category.objects.all(),
         info=None,
+        async_recourse=TEST_ASYNC_RECOURSE,
     )
     assert "is_private" in str(result.values_list("name").query)
     assert sorted(result.values_list("name", flat=True)) == ["visible_row"]
@@ -3038,7 +3277,12 @@ def test_additive_only_subclass_result_is_sealed_to_plain_queryset() -> None:
             return self.filter(name="published")
 
     shaped = _AddOnly(model=Category).filter(name="ok")
-    result = apply_type_visibility_sync(_sync_hook_type(shaped), Category.objects.all(), info=None)
+    result = apply_type_visibility_sync(
+        _sync_hook_type(shaped),
+        Category.objects.all(),
+        info=None,
+        async_recourse=TEST_ASYNC_RECOURSE,
+    )
     assert type(result) is models.QuerySet  # sealed: the _AddOnly class is dropped
     assert not isinstance(result, _AddOnly)
     assert "ok" in str(result.query)
@@ -3054,7 +3298,12 @@ def test_hook_exception_propagates_unchanged() -> None:
         raise _BoomError("consumer bug")
 
     with pytest.raises(_BoomError, match="consumer bug"):
-        apply_type_visibility_sync(_stub_type(Category, _raise), Category.objects.all(), info=None)
+        apply_type_visibility_sync(
+            _stub_type(Category, _raise),
+            Category.objects.all(),
+            info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -3088,7 +3337,12 @@ def test_hostile_prefetch_queryset_is_neutralized_to_plain() -> None:
 
     hostile = _HostileItemQS(model=Item).filter(name="real")
     source = Category.objects.all().prefetch_related(Prefetch("items", queryset=hostile))
-    sealed = apply_type_visibility_sync(_identity_hook_type(), source, info=None)
+    sealed = apply_type_visibility_sync(
+        _identity_hook_type(),
+        source,
+        info=None,
+        async_recourse=TEST_ASYNC_RECOURSE,
+    )
     (entry,) = queryset_prefetch_lookups(sealed)
     assert type(entry) is Prefetch  # rebuilt wrapper, subclass identity dropped
     assert type(entry.queryset) is models.QuerySet  # plain child - hostile subclass dropped
@@ -3117,9 +3371,14 @@ def test_hostile_prefetch_synthetic_row_never_materializes() -> None:
     source = Category.objects.filter(pk=saved_pk(category)).prefetch_related(
         Prefetch("items", queryset=hostile, to_attr="pf"),
     )
-    sealed = apply_type_visibility_sync(_identity_hook_type(), source, info=None)
+    sealed = apply_type_visibility_sync(
+        _identity_hook_type(),
+        source,
+        info=None,
+        async_recourse=TEST_ASYNC_RECOURSE,
+    )
     (materialized,) = list(sealed)
-    prefetched = instance_dict(materialized)["pf"]  # Prefetch(to_attr=...) sets it per row
+    prefetched = truth.instance_state(materialized)["pf"]  # Prefetch(to_attr=...) sets it per row
     assert is_object_list(prefetched)
     assert [item.name if isinstance(item, Item) else item for item in prefetched] == ["item-real"]
 
@@ -3132,7 +3391,12 @@ def test_string_and_default_prefetch_lookups_pass_through() -> None:
     ``Prefetch(queryset=None)`` carry no consumer code, so they pass through.
     """
     source = Category.objects.all().prefetch_related("items", Prefetch("items"))
-    sealed = apply_type_visibility_sync(_identity_hook_type(), source, info=None)
+    sealed = apply_type_visibility_sync(
+        _identity_hook_type(),
+        source,
+        info=None,
+        async_recourse=TEST_ASYNC_RECOURSE,
+    )
     string_lookup, default_prefetch = queryset_prefetch_lookups(sealed)
     assert string_lookup == "items"
     assert isinstance(default_prefetch, Prefetch)
@@ -3150,7 +3414,12 @@ def test_prefetch_with_non_queryset_queryset_fails_closed() -> None:
     # types Prefetch's queryset as a QuerySet
     source = Category.objects.all().prefetch_related(Prefetch("items", queryset=object()))  # pyright: ignore[reportArgumentType]
     with pytest.raises(ConfigurationError, match="cannot be sealed"):
-        apply_type_visibility_sync(_sync_type(), source, info=None)
+        apply_type_visibility_sync(
+            _sync_type(),
+            source,
+            info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
 
 
 def test_prefetch_with_foreign_inner_query_fails_closed() -> None:
@@ -3169,7 +3438,12 @@ def test_prefetch_with_foreign_inner_query_fails_closed() -> None:
     set_queryset_query(inner, _ForeignQuery(Item))
     source = Category.objects.all().prefetch_related(prefetch)
     with pytest.raises(ConfigurationError, match="cannot be sealed"):
-        apply_type_visibility_sync(_sync_type(), source, info=None)
+        apply_type_visibility_sync(
+            _sync_type(),
+            source,
+            info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
 
 
 def test_combined_query_foreign_branch_subclass_fails_closed() -> None:
@@ -3187,7 +3461,12 @@ def test_combined_query_foreign_branch_subclass_fails_closed() -> None:
     result = Category.objects.filter(name="a").union(Category.objects.filter(name="b"))
     result.query.combined_queries = (_HostileBranch(Category),)
     with pytest.raises(ConfigurationError, match="cannot be sealed"):
-        apply_type_visibility_sync(_sync_hook_type(result), Category.objects.all(), info=None)
+        apply_type_visibility_sync(
+            _sync_hook_type(result),
+            Category.objects.all(),
+            info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
 
 
 def test_sliced_source_fails_closed_with_typed_error() -> None:
@@ -3199,14 +3478,24 @@ def test_sliced_source_fails_closed_with_typed_error() -> None:
     contract (the cascade already rejects a sliced target subquery).
     """
     with pytest.raises(ConfigurationError, match="sliced"):
-        apply_type_visibility_sync(_sync_type(), Category.objects.all()[:5], info=None)
+        apply_type_visibility_sync(
+            _sync_type(),
+            Category.objects.all()[:5],
+            info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
 
 
 def test_sliced_hook_result_fails_closed_with_typed_error() -> None:
     """A hook returning a pre-sliced queryset fails closed with a typed error."""
     hook = _sync_hook_type(Category.objects.filter(name="visible")[:3])
     with pytest.raises(ConfigurationError, match="sliced"):
-        apply_type_visibility_sync(hook, Category.objects.all(), info=None)
+        apply_type_visibility_sync(
+            hook,
+            Category.objects.all(),
+            info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
 
 
 def test_seal_copies_hints_into_a_fresh_dict() -> None:
@@ -3219,7 +3508,12 @@ def test_seal_copies_hints_into_a_fresh_dict() -> None:
     source = Category.objects.all()
     hints = {"instance": object()}
     set_queryset_hints(source, hints)
-    sealed = apply_type_visibility_sync(_identity_hook_type(), source, info=None)
+    sealed = apply_type_visibility_sync(
+        _identity_hook_type(),
+        source,
+        info=None,
+        async_recourse=TEST_ASYNC_RECOURSE,
+    )
     assert queryset_hints(sealed) == hints
     assert queryset_hints(sealed) is not hints
 
@@ -3248,6 +3542,7 @@ def test_identity_hook_result_is_resealed_dropping_injected_cache_sync() -> None
         _stub_type(Category, _hook),
         Category.objects.filter(is_private=False),
         info=None,
+        async_recourse=TEST_ASYNC_RECOURSE,
     )
     assert result._result_cache is None
     assert sorted(row.name for row in _rows_of(Category, result)) == ["visible_row"]
@@ -3519,7 +3814,12 @@ def test_sync_boundary_rejects_custom_awaitable_hook() -> None:
     """A custom awaitable at the sync boundary raises ``SyncMisuseError`` (not a coroutine)."""
     hook = _stub_type(Category, lambda _cls, qs, _info: _AwaitableOf(qs))
     with pytest.raises(SyncMisuseError, match="returned an awaitable in a sync"):
-        apply_type_visibility_sync(hook, Category.objects.all(), info=None)
+        apply_type_visibility_sync(
+            hook,
+            Category.objects.all(),
+            info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
 
 
 async def test_async_custom_awaitable_hook_is_awaited_once() -> None:
@@ -5922,12 +6222,12 @@ def test_reconstruction_drops_exactly_the_caches_a_django_copy_drops(expression:
     queryset = Loan.objects.annotate(n=_SELECTED_EXPRESSIONS[expression]())
     assert list(queryset) == []
     node = queryset.query.annotations["n"]
-    copied = set(instance_dict(copy.copy(node)) or ())
-    assert set(instance_dict(node) or ()) - copied == _EXPRESSION_COPY_DROPPED
+    copied = set(truth.instance_state(copy.copy(node)) or ())
+    assert set(truth.instance_state(node) or ()) - copied == _EXPRESSION_COPY_DROPPED
     query = queryset.query
-    cloned = set(instance_dict(sql.Query.clone(query)) or ())
+    cloned = set(truth.instance_state(sql.Query.clone(query)) or ())
     assert (
-        _EXPRESSION_COPY_DROPPED | (set(instance_dict(query) or ()) - cloned)
+        _EXPRESSION_COPY_DROPPED | (set(truth.instance_state(query) or ()) - cloned)
         == _QUERY_CLONE_DROPPED
     )
 
@@ -5971,13 +6271,13 @@ def test_a_converter_planted_on_a_candidate_node_is_never_carried(site: str, fet
         assert len(queryset) == 2
     node = queryset.query.annotations["n"]
     assert (type(node) is sql.Query) is (site == "embedded-query")
-    planted = instance_dict(node)
+    planted = truth.instance_state(node)
     assert planted is not None
     planted["convert_value"] = _planted_converter
     sealed, defect = _seal_or_defect(queryset, Loan, None)
     assert defect is None
     assert sealed is not None
-    assert "convert_value" not in (instance_dict(sealed.query.annotations["n"]) or {})
+    assert "convert_value" not in (truth.instance_state(sealed.query.annotations["n"]) or {})
     assert len(list(sealed.values_list("n", flat=True))) == 2
     assert planted["convert_value"] is _planted_converter
 
@@ -5992,7 +6292,7 @@ def test_a_converter_planted_on_the_candidate_query_itself_is_refused() -> None:
     """
     _seed_two_loans()
     queryset = Loan.objects.annotate(n=models.Count("pk"))
-    planted = instance_dict(queryset.query)
+    planted = truth.instance_state(queryset.query)
     assert planted is not None
     planted["convert_value"] = _planted_converter
     sealed, defect = _seal_or_defect(queryset, Loan, None)
@@ -6827,10 +7127,15 @@ def test_visible_related_object_resolution() -> None:
     cat = Category.objects.create(name="Electronics")
     info = SimpleNamespace(context=SimpleNamespace(request=None))
 
-    resolved = visible_related_object(Category, saved_pk(cat), info)
+    resolved = visible_related_object(
+        Category,
+        saved_pk(cat),
+        info,
+        async_recourse=TEST_ASYNC_RECOURSE,
+    )
     assert resolved == cat
 
-    missing = visible_related_object(Category, 999999, info)
+    missing = visible_related_object(Category, 999999, info, async_recourse=TEST_ASYNC_RECOURSE)
     assert missing is None
 
 
@@ -7610,7 +7915,7 @@ def test_seal_carry_result_cache_carries_the_rows_the_source_holds() -> None:
     """
     qs = Category.objects.all()
     list(qs)
-    held = instance_dict(qs)["_result_cache"]
+    held = truth.instance_state(qs)["_result_cache"]
 
     sealed, defect = _seal_or_defect(
         qs,
@@ -7737,7 +8042,12 @@ def test_apply_type_visibility_sync_serves_a_combined_result_as_its_pk_set() -> 
 
     CombinedType = _declared_type(Category, "CombinedType", _union_hook)
 
-    sealed = apply_type_visibility_sync(CombinedType, Category.objects.all(), SimpleNamespace())
+    sealed = apply_type_visibility_sync(
+        CombinedType,
+        Category.objects.all(),
+        SimpleNamespace(),
+        async_recourse=TEST_ASYNC_RECOURSE,
+    )
     assert sealed.query.combinator is None
     assert sorted(row.name for row in _rows_of(Category, sealed)) == [first, second]
     second_only = sealed.filter(name=second).only("name")

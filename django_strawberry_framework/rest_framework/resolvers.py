@@ -14,9 +14,8 @@ visibility by id (a write-auth denial ``GraphQLError`` vs an in-band relation
 ``FieldError`` is an observable distinction). The ``transaction.atomic()``
 boundary + the locate preamble + the authorize-before-decode ordering + the
 optimizer re-fetch tail are NOT re-hand-rolled here: they are single-sited in the
-promoted ``mutations/resolvers.py::run_write_pipeline_sync`` skeleton
-(spec-039), and this flavor supplies only the serializer ``decode_step`` /
-``write_step`` callbacks.
+shared ``mutations/resolvers.py::run_write_pipeline_sync`` skeleton, and this
+flavor supplies only the serializer ``decode_step`` / ``write_step`` callbacks.
 
 The serializer-specific invariants this module owns:
 
@@ -35,10 +34,10 @@ The serializer-specific invariants this module owns:
   pk, by target - is type-checked against the relation's **target model**, which is recorded on
   the bind-stashed reverse map (``InputFieldSpec.related_model``, resolved once at
   build from the backing FK via the serializer field's ``source``, or
-  ``field.queryset.model`` for a serializer-only relation (spec-039), so the
+  ``field.queryset.model`` for a serializer-only relation, so the
   query path never re-discovers the serializer field set), then **resolved to the
   visible object through
-  the related primary ``DjangoType.get_queryset``** via the promoted
+  the related primary ``DjangoType.get_queryset``** via the shared
   ``utils/querysets.py::visible_related_object`` (the SAME object-returning
   visibility query the form decoder re-keys over), reduced to the pk a
   ``PrimaryKeyRelatedField`` expects. A hidden / wrong-model / uncoercible id is a
@@ -120,17 +119,17 @@ The serializer-specific invariants this module owns:
   ``.only(...)`` on a queryset that carries none - no new optimizer code.
 
 - **One ``transaction.atomic()`` boundary; the async path runs the sync body in
-  one ``sync_to_async(thread_sensitive=True)`` call** - the shared
-  ``run_pipeline_async`` boundary both the model and form flavors already delegate
-  to, so the three flavors cannot drift on the boundary contract.
+  one ``sync_to_async(thread_sensitive=True)`` call** - ``make_resolver_entries``'
+  async entry, which runs the body through ``run_in_one_sync_boundary`` for the model
+  and form flavors too, so the three flavors cannot drift on the boundary contract.
 
 Single-sourced: the locate / authorize / id-decode / re-fetch / payload / atomic
-boundary are the promoted ``036`` skeleton; the shared save-time wrapper
+boundary are the model flavor's shared skeleton; the shared save-time wrapper
 (``save_or_field_errors``: the flat Django mapper + the integrity mapper), the
 shared ``field_error`` leaf ctor, the ``NON_FIELD_ERROR_KEY`` sentinel, the
 raw-pk coercion, and the
 object-returning ``visible_related_object`` visibility query are all CALLED, not
-re-implemented (the spec-039 import manifest). The genuinely net-new code is the
+re-implemented (the spec-039 import manifest). The serializer-specific code is the
 serializer-field-keyed relation decoder and the recursive serializer-error
 flattener.
 """
@@ -353,7 +352,7 @@ _OMITTED: Final = _Omitted.OMITTED
 # ``036`` / ``038`` recourse wording: the whole pipeline runs synchronously (under
 # one ``sync_to_async`` worker on the async surface), so an ``async def
 # get_queryset`` can never be awaited here. Single-sourced across the three write
-# flavors via ``sync_pipeline_recourse`` (spec-039).
+# flavors via ``sync_pipeline_recourse``.
 _SERIALIZER_ASYNC_RECOURSE = sync_pipeline_recourse("serializer mutation")
 
 
@@ -435,7 +434,7 @@ def _decode_serializer_data(
     data: object,
     info: Info[object, object],
 ) -> tuple[dict[str, object], FieldError | None]:
-    """Decode the bound input dataclass into a serializer-field-keyed ``provided_data`` (NET-NEW).
+    """Decode the bound input dataclass into a serializer-field-keyed ``provided_data``.
 
     The top entry: decodes ``data`` against the bind-stashed top-level reverse map
     (``mutation_cls._input_field_specs``) via the recursive ``_decode_input_object`` (which
@@ -581,13 +580,8 @@ def _decode_nested(
     return item_data, None
 
 
-def serializer_errors_to_field_errors(
-    errors: object,
-    key_map: ErrorKeyMap,
-    *,
-    prefix: str = "",
-) -> list[FieldError]:
-    """Depth-first flatten DRF nested ``serializer.errors`` into the ``FieldError`` envelope (NET-NEW).
+def serializer_errors_to_field_errors(errors: object, key_map: ErrorKeyMap) -> list[FieldError]:
+    """Depth-first flatten DRF nested ``serializer.errors`` into the ``FieldError`` envelope.
 
     The recursive analog of the flat ``036``
     ``utils/errors.py::validation_error_to_field_errors`` - both terminate in
@@ -625,9 +619,9 @@ def serializer_errors_to_field_errors(
     caps pathological fan-out - when exceeded, the flattened list ends with one ``"__all__"``
     ``truncated`` marker instead of unbounded work.
     """
-    children = _error_node_children(errors, key_map, prefix)
+    children = _error_node_children(errors, key_map, "")
     if children is None:
-        return [_error_leaf(errors, prefix)]
+        return [_error_leaf(errors, "")]
     flattened: list[FieldError] = []
     budget = _ERROR_FLATTEN_NODE_BUDGET
     active: set[int] = {id(errors)}
@@ -665,8 +659,8 @@ def serializer_errors_to_field_errors(
         if not descended:
             active.discard(id(node))
             _ = frames.pop()
-    if not flattened and not prefix:
-        return [empty_validation_error(prefix)]
+    if not flattened:
+        return [empty_validation_error()]
     return flattened
 
 
@@ -1097,8 +1091,8 @@ def _merged_serializer_kwargs(
       metadata - mutation is structurally impossible), and the returned ``data``
       must be either OMITTED or the exact frozen object the hook received
       (identity, checked via an omission sentinel) - anything else, including an
-      explicit ``None``, is a ``ConfigurationError`` (the old
-      replace-the-decoded-data bypass). Identity rather than equality: a deep
+      explicit ``None``, is a ``ConfigurationError`` (a replaced ``data`` would
+      bypass the decoded data). Identity rather than equality: a deep
       comparison of two independently built structures would recurse (deep valid
       payloads crash it), and equality cannot see a semantically different
       reordering of exotic mappings.
@@ -1765,7 +1759,7 @@ def _scope_specs_over_serializer(
             owner=(f"{truth.name(type(serializer))}.{spec.target_name} relation queryset"),
         )
         # ``related_visibility_queryset`` single-sites the ``registry.get`` resolve +
-        # the visibility-scoping call (spec-039); ``None`` = raw-pk relation with
+        # the visibility-scoping call; ``None`` = raw-pk relation with
         # no primary type (no visibility contract to AND on - the pin + lock still apply).
         visible = related_visibility_queryset(
             # A relation spec always records its target model.
@@ -2396,11 +2390,6 @@ def _attest_saved_relations(
                 .get(pk=pk_of(saved)),
             )
         except model.DoesNotExist:
-            # The saved row vanished between the save and this read (a concurrent
-            # delete this transaction could not see): there is no database state
-            # left to attest, and the pipeline tail's pk re-fetch maps the vanished
-            # row to the in-band ``conflict`` envelope. Skip the attestation so the
-            # tail owns the verdict.
             return
         for target_name, model_field, expected_key in fk_checks:
             db_value = row[model_field.attname]
@@ -2516,7 +2505,6 @@ def _write_witness(
         alias,
         actor=(f"SerializerMutation {truth.name(mutation_cls)}: the serializer write phase"),
         recourse="context['write_alias']",
-        guard_thread=owner,
     )
 
     def _record(
@@ -2690,7 +2678,7 @@ def _serializer_write_step(
     instance: models.Model | None,
     provided_data: dict[str, object],
 ) -> models.Model | StepFailure:
-    """Run the serializer ``write_step``: construct -> validate -> save (spec-039 callback).
+    """Run the serializer ``write_step`` callback: construct -> validate -> save.
 
     Constructs the serializer through the ``get_serializer_kwargs`` hook + the
     framework merge (``_merged_serializer_kwargs``), runs ``is_valid()`` (a failure
@@ -3063,7 +3051,7 @@ def _serializer_decode_step(
     data: object,
     info: Info[object, object],
 ) -> dict[str, object] | StepFailure:
-    """Run the serializer ``decode_step``: serializer-field-keyed decode (spec-039 callback).
+    """Run the serializer ``decode_step`` callback: serializer-field-keyed decode.
 
     Decodes the bound input into a serializer-field-keyed ``provided_data`` (the
     ``_decode_serializer_data`` contract: type-check + visibility on every relation
@@ -3110,7 +3098,7 @@ def _run_serializer_pipeline_sync(
     )
 
 
-# The serializer module entries, via the shared factory (spec-039). The
+# The serializer module entries, via the shared factory. The
 # full pair is taken so the three write flavors cannot drift on the UNSET-kwargs
 # or async-boundary contract.
 resolve_serializer_sync: _SyncResolverEntry[type[SerializerMutation]]

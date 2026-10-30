@@ -47,7 +47,6 @@ from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     call_method,
     is_str,
-    optional_instance,
     read_attr,
     require,
     require_instance,
@@ -55,10 +54,9 @@ from django_strawberry_framework.utils._narrowing import (
 from django_strawberry_framework.utils.execution_mode import async_execution
 from django_strawberry_framework.utils.lazy import unwrap_lazy_object
 
-# ``SyncMisuseError`` moved to ``utils/querysets.py``; the
-# redundant ``as`` alias re-exports it from this module so ``from
-# ...types.relay import SyncMisuseError`` and the ``types/__init__.py`` re-export
-# keep working unchanged.
+# ``SyncMisuseError`` is owned by ``utils/querysets.py``; the redundant ``as``
+# alias re-exports it from this module so ``from ...types.relay import
+# SyncMisuseError`` and the ``types/__init__.py`` re-export resolve here.
 from django_strawberry_framework.utils.querysets import SyncMisuseError as SyncMisuseError  # noqa: PLC0414 - kept re-export path
 from django_strawberry_framework.utils.querysets import (
     apply_type_visibility_async,
@@ -171,11 +169,8 @@ def apply_interfaces(type_cls: type[DjangoType], definition: DjangoTypeDefinitio
             (spec-015 Decision 1 #"never as a raw layout error").
 
     """
-    # Identity scan, not ``not in``: ``tuple.__contains__`` over the MRO would dispatch a
-    # consumer metaclass ``__eq__``.
-    mro = truth.mro(type_cls)
     additions = tuple(
-        iface for iface in definition.interfaces if not any(iface is base for base in mro)
+        iface for iface in definition.interfaces if not truth.is_subclass(type_cls, iface)
     )
     if not additions:
         return
@@ -202,8 +197,7 @@ def _check_composite_pk_for_relay_node(type_cls: type[_RelayDjangoType]) -> None
     combining ``relay.Node`` with a composite-primary-key model is explicitly out of scope.
     Detection is
     ``django_strawberry_framework/utils/relations.py::has_composite_pk``
-    (Django's ``Options.is_composite_pk``), the same read the FK-id-elision
-    eligibility test uses.
+    (Django's ``Options.is_composite_pk``).
 
     The error message proposes "declare an explicit ``id: relay.NodeID[...]``
     annotation" as a remediation; honor that here so a consumer who
@@ -271,9 +265,8 @@ def _stamp_relay_id_attr(type_cls: type[relay.Node]) -> str:
     and filters on the pk); that case is a ``ConfigurationError`` here,
     raised at finalize. Stamped
     unconditionally for every Relay-Node-shaped type at finalize (when the
-    consumer overrode ``resolve_id_attr`` the stamp is simply never read) and
-    by ``_resolve_id_attr_default`` on its first read of a class finalize
-    never saw. Idempotent across partial-finalize reruns.
+    consumer overrode ``resolve_id_attr`` the stamp is simply never read).
+    Idempotent across partial-finalize reruns.
     """
     type_cls._id_attr = None
     try:
@@ -292,36 +285,34 @@ def _stamp_relay_id_attr(type_cls: type[relay.Node]) -> str:
 
 
 def _resolve_id_attr_default(cls: type[_RelayDjangoType]) -> str:
-    """Default ``Node.resolve_id_attr`` - stamped at finalize, ``"pk"`` fallback.
+    """Default ``Node.resolve_id_attr`` - the finalize-time stamp, one dict read per call.
 
-    Reads the ``_stamp_relay_id_attr`` slot from the class's OWN
-    ``__dict__`` first - every registered Relay type is stamped at
-    Phase 2.5, so this is the steady-state path: one dict read per call,
-    deterministic at any inheritance depth (each chain class carries its
-    own stamp; nothing is inherited).
-
-    An unstamped class (a subclass defined AFTER finalization, or a direct
-    unit call) is stamped on its first read by the same
-    ``_stamp_relay_id_attr`` call finalize makes, never answered by a bare
-    scan: Strawberry's inherited ``_id_attr`` cache would give a late
-    subclass its parent's ``relay.NodeID[...]`` column.
+    Reads the ``_stamp_relay_id_attr`` slot from the class's OWN ``__dict__``:
+    ``install_relay_node_resolvers`` stamps every class before installing this
+    default on it, so the read is deterministic at any inheritance depth (each
+    chain class carries its own stamp; nothing is inherited). Package readers
+    run after the finalize loop has stamped every Relay class. The one unstamped
+    caller is a direct call on a class registered after a finalize that failed
+    part-way (it inherits a stamped parent's installed default): that class has
+    no id attribute until the rerun stamps it, so the call raises
+    ``ConfigurationError`` naming ``finalize_django_types()``.
 
     Deliberately NOT ``super(cls, cls).resolve_id_attr()``: with ``cls``
     bound at runtime, a relay-shaped DjangoType subclassing another
     relay-shaped DjangoType inherits the parent's installed copy of this
     default, and the MRO walk from the child lands back on that copy
-    re-bound to the child - infinite recursion. The stamp's
-    direct call asks Strawberry's annotation scan the same question
-    without traversing the MRO's method chain, so the default behaves
-    identically at every inheritance depth. (Skipping installation on
-    the child is then harmless: every installed resolver is a stateless
-    classmethod that acts on the runtime ``cls``.)
+    re-bound to the child - infinite recursion. The stamp is the answer
+    Strawberry's annotation scan gave for this class itself, so the default
+    behaves identically at every inheritance depth.
     """
     # Only ``_stamp_relay_id_attr`` writes the slot, with the scanned ``str``.
-    stamped = optional_instance(truth.class_dict(cls).get(_RELAY_ID_ATTR_SLOT), str)
-    if stamped is not None:
+    stamped = truth.class_dict(cls).get(_RELAY_ID_ATTR_SLOT)
+    if truth.is_instance(stamped, str):
         return stamped
-    return _stamp_relay_id_attr(cls)
+    raise ConfigurationError(
+        f"{truth.name(cls)} has no Relay id attribute yet: finalize_django_types() has not "
+        "finished for it. Run finalize_django_types() before reading its ids.",
+    )
 
 
 # Strawberry's own ``Node.resolve_id`` function (``getattr(root, cls.resolve_id_attr())``),
@@ -507,8 +498,8 @@ def _resolve_globalid_strategy(
     return DEFAULT_GLOBALID_STRATEGY
 
 
-# Single source of truth for the "strategy -> payload shape" mapping
-# (spec-031): the payload-shape memberships read wherever a strategy's emitted
+# Single source of truth for the "strategy -> payload shape" mapping:
+# the payload-shape memberships read wherever a strategy's emitted
 # or accepted shape is decided, rather than re-typing ``{"model", "type+model"}``
 # / ``{"type", "type+model"}``. The configurable string vocabulary
 # (``STRING_GLOBALID_STRATEGIES`` / ``DEFAULT_GLOBALID_STRATEGY`` in
@@ -912,7 +903,25 @@ def _plain_globalid_slot(slot: object) -> str | None:
     """
     if not truth.is_instance(slot, str):
         return None
-    return str.__str__(slot)
+    return truth.text(slot)
+
+
+def model_for_label_slot(label: str) -> type[models.Model] | None:
+    """Return the installed model a model-label ``type_name`` slot names, or ``None``.
+
+    The one reading of a model-label slot (``"app_label.modelname"``), shared by
+    ``decode_global_id`` and the GlobalID filter's target check
+    (``filters/base.py::_slot_names_target``). It asks ``apps.get_model``, so Django's
+    own rule holds: the app label is exact, the model name case-insensitive
+    (``library.BOOK`` and ``library.Book`` name ``library.book``; ``Library.book``
+    names nothing). Ids this package emits always carry ``label_lower``
+    (``encode_typename``). A slot naming no installed model is ``None``.
+    """
+    app_label, _, model_name = label.partition(".")
+    try:
+        return apps.get_model(app_label, model_name)
+    except LookupError:
+        return None
 
 
 def decode_global_id(
@@ -951,10 +960,11 @@ def decode_global_id(
       emits an empty type-name slot and the package has no blank-string pks).
     - **Step 1 - resolve a candidate.** A model-label slot (the ``type_name``
       contains a dot, ``"app_label.modelname"``) resolves via
-      ``apps.get_model`` -> ``registry.get(model)`` (the primary / lone type,
-      honoring ``Meta.primary``). A GraphQL-type-name slot (no dot) is the name
-      the EMITTING SCHEMA published for the type (what Strawberry's default
-      ``resolve_typename`` reads off ``info.path.typename``), so it resolves
+      ``model_for_label_slot`` (app label exact, model name case-insensitive) ->
+      ``registry.get(model)`` (the primary / lone type, honoring ``Meta.primary``).
+      A GraphQL-type-name slot (no dot) is the name the EMITTING SCHEMA
+      published for the type (what Strawberry's default ``resolve_typename``
+      reads off ``info.path.typename``), so it resolves
       through that schema: ``node_definition_for_published_name(schema, name)``
       (``schema.get_type_by_name``, the converter-keyed type map Strawberry's own
       ``GlobalID.resolve_type`` reads), falling back to the default spelling
@@ -1019,14 +1029,12 @@ def decode_global_id(
 
     is_model_label = "." in type_name
     if is_model_label:
-        app_label, model_name = type_name.split(".", 1)
-        try:
-            model = apps.get_model(app_label, model_name)
-        except LookupError as exc:
+        model = model_for_label_slot(type_name)
+        if model is None:
             raise ConfigurationError(
                 f"decode_global_id: model label {type_name!r} resolves to no installed "
                 "Django model.",
-            ) from exc
+            )
         target_type = registry.get(model)
         if target_type is None:
             raise ConfigurationError(
@@ -1130,6 +1138,16 @@ def _row_id_value(obj: models.Model, id_attr: str, field: ModelField | None) -> 
     return read_attr(obj, id_attr)
 
 
+#: The ``SyncMisuseError`` recourse ``_resolve_nodes_default`` appends when the type's
+#: ``get_queryset`` is ``async def`` on the sync branch: the Relay node defaults await
+#: the same hook on the async branch.
+_RELAY_ASYNC_RECOURSE = (
+    "The Relay node defaults only await async get_queryset hooks on the async "
+    "branch; either invoke the Relay node default from an async resolver, or "
+    "redefine get_queryset as a sync method."
+)
+
+
 def _resolve_nodes_default(
     cls: type[_RelayDjangoType],
     *,
@@ -1179,9 +1197,9 @@ def _resolve_nodes_default(
     if async_execution():
         return _resolve_nodes_async(cls, id_attr, node_ids, info=info, required=required)
     if node_ids is None:
-        return apply_type_visibility_sync(cls, initial_queryset(cls), info)
+        return apply_type_visibility_sync(cls, initial_queryset(cls), info, _RELAY_ASYNC_RECOURSE)
     values, field = _node_values(cls, id_attr, node_ids, required=required)
-    qs = apply_type_visibility_sync(cls, initial_queryset(cls), info)
+    qs = apply_type_visibility_sync(cls, initial_queryset(cls), info, _RELAY_ASYNC_RECOURSE)
     qs = _apply_nodes_filter(qs, id_attr, [value for value in values if value is not None])
     return _order_nodes(cls, list(qs), values, id_attr, field=field, required=required)
 

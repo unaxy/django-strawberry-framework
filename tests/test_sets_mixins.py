@@ -32,7 +32,6 @@ from apps.library.filters import BookFilter
 from apps.library.models import Book
 from django.db.models import Model
 from django.utils.functional import SimpleLazyObject
-from django.utils.translation import gettext_lazy
 from typing_extensions import override
 
 import django_strawberry_framework.filters.sets as filter_sets
@@ -53,7 +52,6 @@ from django_strawberry_framework.sets_mixins import (
     SetLifecycleAttrs,
     collect_related_declarations,
     expanded_once,
-    is_re_readable_field_declaration,
     require_re_readable_field_declaration,
     should_cache_expansion,
 )
@@ -700,6 +698,39 @@ def test_collect_related_declarations_diamond_tombstone() -> None:
     assert "shared_rel" not in collected
 
 
+def test_collect_related_declarations_tombstone_on_a_bases_ancestor() -> None:
+    """A tombstone an earlier base inherits from its own ancestor still removes the declaration.
+
+    The tombstone read walks the base's real MRO, not only its own namespace.
+    """
+
+    class _Decl(RelatedSetTargetMixin[object]):
+        _target_attr = "_t"
+        _owner_attr = "_o"
+
+    class _TombstoneAncestor:
+        shared_rel = "tombstone_attribute"
+
+    class _BaseLeft(_TombstoneAncestor):
+        related_items = {}
+
+    class _BaseRight:
+        related_items = {"shared_rel": _Decl()}
+
+    class _DiamondSubclass(OrderSet):
+        pass
+
+    collected = collect_related_declarations(
+        _DiamondSubclass,
+        (_BaseLeft, _BaseRight),
+        own_items=[],
+        declaration_type=_Decl,
+        collection_attr="related_items",
+        inherit_from_bases=True,
+    )
+    assert "shared_rel" not in collected
+
+
 def test_collect_related_declarations_base_declarations_precedence() -> None:
     """A non-related entry in ``base_declarations_attr`` shadows a related declaration."""
 
@@ -936,98 +967,6 @@ def test_filter_normalizer_honors_a_subclass_unset_sentinel_override() -> None:
 # ---------------------------------------------------------------------------
 # The shared ``Meta.fields`` re-readability gate
 # ---------------------------------------------------------------------------
-
-
-def test_re_readable_gate_accepts_every_sized_collection() -> None:
-    """The contract is ``Collection``, not a hardcoded builtin allow-list.
-
-    A consumer legitimately computes ``Meta.fields`` from a mapping
-    (``spec.keys()`` / ``spec.values()``), from a ``range``, or from a project
-    container of their own: all of those hold their members, so the expansion
-    re-runs to the same field names. Pinning the accepted set to
-    ``(dict, list, tuple, set, frozenset)`` would reject them for a property they
-    have. Class-creation only; a request never sees the declaration object.
-    """
-
-    class _NameSet:
-        """A minimal ``Collection`` that is none of the builtin containers."""
-
-        def __init__(self, *names: str) -> None:
-            self._names = names
-
-        def __iter__(self) -> Iterator[str]:
-            return iter(self._names)
-
-        def __len__(self) -> int:
-            return len(self._names)
-
-        def __contains__(self, item: object) -> bool:
-            return item in self._names
-
-    accepted = (
-        ["code"],
-        ("code",),
-        {"code"},
-        frozenset({"code"}),
-        {"code": ["exact"]},
-        {"code": ["exact"]}.keys(),
-        {"exact": "code"}.values(),
-        range(3),
-        _NameSet("code"),
-    )
-    for value in accepted:
-        assert is_re_readable_field_declaration(value) is True
-
-
-def test_re_readable_gate_rejects_one_shot_and_text_atoms() -> None:
-    """One-shot producers, text atoms, and non-collections are the three rejected shapes.
-
-    A generator / ``iter(...)`` / ``map`` object is exhausted by the first
-    expansion; a ``str`` / lazy translation string / ``bytes`` / ``bytearray`` /
-    ``memoryview`` is a collection of CHARACTERS, not of field names, and
-    satisfies ``Collection`` structurally, so it needs the explicit exclusion. Plain
-    non-collections (``123``, ``object()``, ``None``) fail the ``Collection`` check
-    outright.
-    Rejected at class creation (``ConfigurationError``), never as a GraphQL
-    error.
-    """
-    rejected = (
-        (name for name in ["code"]),
-        iter(["code"]),
-        map(str, ["code"]),
-        "code",
-        gettext_lazy("code"),
-        b"code",
-        bytearray(b"code"),
-        memoryview(b"code"),
-        123,
-        object(),
-        None,
-    )
-    for value in rejected:
-        assert is_re_readable_field_declaration(value) is False
-
-
-def test_re_readable_gate_never_iterates_the_declaration() -> None:
-    """The gate is structural, so a hostile ``__iter__`` is never entered.
-
-    An object defining only ``__iter__`` is not a ``Collection``, so it is
-    rejected before the walk and its body cannot raise into class creation.
-    """
-
-    class _Boom:
-        def __iter__(self) -> NoReturn:
-            raise RuntimeError("boom")  # never entered
-
-    assert is_re_readable_field_declaration(_Boom()) is False
-
-
-@pytest.mark.parametrize("escape", [RuntimeError, KeyboardInterrupt])
-def test_re_readable_gate_rejects_a_value_whose_class_read_raises(
-    escape: type[BaseException],
-) -> None:
-    """A ``__class__`` that raises is "not a container", so the typed rejection can name it."""
-    assert is_re_readable_field_declaration(ClassReadRaises(escape)) is False
 
 
 def test_re_readable_gate_rejection_names_a_value_whose_class_read_raises() -> None:

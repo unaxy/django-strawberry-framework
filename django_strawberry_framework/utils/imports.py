@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import importlib
 import sys
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING
 
 from ._narrowing import read_attr
 
@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CHANNELS_FLOOR",
+    "CRYPTOGRAPHY_FLOOR",
     "DEBUG_TOOLBAR_FLOOR",
     "DRF_FLOOR",
     "STRAWBERRY_FLOOR",
@@ -41,51 +42,27 @@ __all__ = [
 ]
 
 
-# The verified Channels floor, interpolated into every install hint that names
-# it, so no hint carries a bare literal nothing compares against. The
-# ``channels[daphne]`` row in ``pyproject.toml`` is the second place the floor
-# is written and must be bumped with this one. The CI floor cell's install in
-# ``.github/workflows/django.yml`` and BUILD.md "Floor verification" are
-# test-gated restatements of that row; any other restatement is gated by nothing.
+# Verified soft-dependency and Strawberry floors. Each ``*_FLOOR`` is the version
+# its install hint interpolates, so no hint carries a bare literal;
+# ``tests/test_ci_governance.py`` compares it to its ``pyproject.toml`` row. The
+# CI floor cell and BUILD.md carry their own gates against that row, and each
+# test re-types its hint literal; prose restatements (docs, specs, glossary) are
+# ungated, so a bump sweeps the tree for the package name and reads each hit.
+
+# The ``routers.py`` and ``auth/sessions.py`` Channels hints.
 CHANNELS_FLOOR = "4.3.2"
 
-# The verified Strawberry floor, interpolated into the one install hint that
-# names it (the router's broken-``strawberry.channels`` message). It lives here
-# beside ``CHANNELS_FLOOR`` for the same reason: a hard literal in a hint string
-# is compared against nothing, so it drifts silently away from the
-# ``strawberry-graphql`` row in ``pyproject.toml``. That row is the only other
-# source of the floor and must be bumped with this one; the CI floor cell and
-# BUILD.md "Floor verification" restate it, each gated against that row.
+# ``routers.py``'s broken-``strawberry.channels`` hint.
 STRAWBERRY_FLOOR = "0.322.2"
 
-# The verified django-debug-toolbar floor, interpolated into the toolbar
-# middleware's one install hint (``middleware/debug_toolbar.py``). It is one of
-# three gated sites that must agree, with the ``django-debug-toolbar`` dev-group
-# row in ``pyproject.toml`` and the ``_HINT_SUBSTRING`` literal in
-# ``tests/middleware/test_debug_toolbar.py``; that module's comment names all
-# three and the gates. A governance row compares this constant to the dev row,
-# as it does for the Channels and Strawberry floors above; the CI floor cell and
-# BUILD.md "Floor verification" install the dev row's bound, each gated against it.
+# ``middleware/debug_toolbar.py``'s toolbar-absent hint.
 DEBUG_TOOLBAR_FLOOR = "7.0.0"
 
-# The verified ``djangorestframework`` floor, interpolated into the
-# serializer-mutation guard's one install hint (``rest_framework/__init__.py``).
-# It is one of three gated sites that must agree, with the
-# ``djangorestframework`` dev-group row in ``pyproject.toml`` and the
-# ``_HINT_SUBSTRING`` literal in ``tests/rest_framework/test_soft_dependency.py``;
-# that package's docstring names all three and the gates. A governance row
-# compares this constant to the dev row; the CI floor cell and BUILD.md "Floor
-# verification" install the dev row's bound, each gated against it.
+# ``rest_framework/__init__.py``'s ``require_drf()`` hint.
 DRF_FLOOR = "3.17.0"
 
-_T = TypeVar("_T")
-
-
-def _plain_text(value: _T) -> _T | str:
-    """Normalize a string subclass before handing it to import machinery."""
-    if not isinstance(value, str) or type(value) is str:
-        return value
-    return str.__str__(value)
+# ``keyset.py``'s ``Meta.cursor_field`` hint (the AES-SIV floor).
+CRYPTOGRAPHY_FLOOR = "44.0.0"
 
 
 def import_attr_if_importable(module_path: str, attr_name: str) -> object | None:
@@ -101,8 +78,6 @@ def import_attr_if_importable(module_path: str, attr_name: str) -> object | None
     and fails loud (``AttributeError``), matching the registry co-clear
     semantics.
     """
-    module_path = _plain_text(module_path)
-    attr_name = _plain_text(attr_name)
     try:
         module = importlib.import_module(module_path)
     except ImportError:
@@ -119,8 +94,6 @@ def loaded_attr(module_path: str, attr_name: str) -> object | None:
     ``getattr`` has NO default and fails loud on a missing attribute, same
     as ``import_attr_if_importable``.
     """
-    module_path = _plain_text(module_path)
-    attr_name = _plain_text(attr_name)
     module = sys.modules.get(module_path)
     if module is None:
         return None
@@ -140,8 +113,6 @@ def import_attr(module_path: str, attr_name: str) -> object:
     attribute are the package's own and any failure is a real bug that must
     fail loud. The ``getattr`` has NO default for the same reason.
     """
-    module_path = _plain_text(module_path)
-    attr_name = _plain_text(attr_name)
     return read_attr(importlib.import_module(module_path), attr_name)
 
 
@@ -162,8 +133,7 @@ def require_optional_module(module_name: str, *, install_hint: str) -> ModuleTyp
     text lives entirely in the caller's ``install_hint`` (the ``require_drf()``
     shape), and hint strings stay single-sited at the feature owner.
     """
-    module_name = _plain_text(module_name)
     try:
         return importlib.import_module(module_name)
     except ImportError as exc:
-        raise ImportError(_plain_text(install_hint)) from exc
+        raise ImportError(install_hint) from exc

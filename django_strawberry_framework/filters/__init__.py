@@ -39,7 +39,7 @@ from .base import (
     TypedFilter,
     validate_range,
 )
-from .inputs import INPUTS_MODULE_PATH, _input_type_name_for
+from .inputs import INPUTS_MODULE_PATH
 from .sets import FilterSet, FilterSetMetaclass
 
 # Ledger of `FilterSet`s referenced through the spec-027 Decision 11
@@ -68,7 +68,6 @@ def _filter_input_annotation(filterset_class: object, *, helper_spelling: str) -
         helper_spelling=helper_spelling,
         expected_label="a FilterSet",
         ledger=_helper_referenced_filtersets,
-        input_type_name_for=_input_type_name_for,
         module_path=INPUTS_MODULE_PATH,
     )
 

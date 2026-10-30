@@ -585,14 +585,14 @@ class Card(TimeStampedModel):
         """The development phase, derived from the card's target version.
 
         A card's milestone is a pure function of its ``target_version`` (the
-        version's ``milestone`` FK), so it is derived here rather than stored --
-        removing a denormalized column that could drift out of sync.
+        version's ``milestone`` FK), so it is derived here rather than stored and
+        no denormalized column can drift out of sync.
         """
         return self.target_version.milestone
 
     @property
     def milestone_id(self) -> int | None:
-        """The derived milestone's pk (mirrors the former FK's ``milestone_id``)."""
+        """The derived milestone's pk, ``None`` when the card has no target version."""
         return self.target_version.milestone_id if self.target_version_id else None
 
     @property
@@ -633,9 +633,8 @@ class Card(TimeStampedModel):
             outgoing_references__kind__key__in=DEPENDENCY_REFERENCE_KIND_KEYS,
         ).distinct()
 
-    # GraphQL-facing aliases (the ``dependencies`` / ``dependents`` fields on
-    # CardType resolve from these) so existing queries keep their field names
-    # after the ``dependencies`` M2M was replaced by CardReference edges.
+    # GraphQL-facing aliases: the ``dependencies`` / ``dependents`` fields on
+    # CardType resolve from these CardReference-edge querysets.
     @property
     def dependencies(self) -> models.QuerySet[Card]:
         """Alias of :attr:`dependency_cards` for the GraphQL ``dependencies`` field."""
@@ -783,11 +782,9 @@ class CardReference(TimeStampedModel):
     def save(self, **kwargs: Unpack[_SaveOptions]) -> None:
         """Assign a per-``source_card`` sequential ``order`` on insert.
 
-        Replaces the former ``(source_card, source, order)`` DB unique
-        constraint with app-level logic: ``order`` stays unique within a card
-        by construction, so references keep a stable, collision-free display
-        order without a database constraint (and without a per-card renumber
-        migration when ``source`` was dropped).
+        Assign ``order`` one past the card's current maximum on insert, so
+        references keep a stable display order;
+        ``unique_card_reference_position`` is the database backstop.
         """
         if self._state.adding:
             manager = CardReference.objects

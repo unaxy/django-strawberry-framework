@@ -524,11 +524,14 @@ def test_unknown_custom_field_subclass_raises() -> None:
         def to_representation(self, value: object) -> object:  # never called in conversion.
             return value
 
-    with pytest.raises(
-        ConfigurationError,
-        match="Unsupported serializer field type 'CustomField'",
-    ):
+    with pytest.raises(ConfigurationError) as exc_info:
         convert_serializer_field(bind_unparented(CustomField(), "x"))
+    assert str(exc_info.value) == (
+        "Unsupported serializer field type 'CustomField' on serializer field 'x'. "
+        "convert_serializer_field has no mapping for it and no supported ancestor; register a "
+        "converter for it with register_serializer_field_converter, or drop it via "
+        "Meta.fields / Meta.exclude."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -3116,11 +3119,14 @@ def test_unsupported_serializer_field_without_field_name_raises_cleanly() -> Non
         pass
 
     field = CustomUnsupported()
-    with pytest.raises(
-        ConfigurationError,
-        match="Unsupported serializer field type 'CustomUnsupported'",
-    ):
+    with pytest.raises(ConfigurationError) as exc_info:
         convert_serializer_field(field)
+    assert str(exc_info.value) == (
+        "Unsupported serializer field type 'CustomUnsupported' on serializer field None. "
+        "convert_serializer_field has no mapping for it and no supported ancestor; register a "
+        "converter for it with register_serializer_field_converter, or drop it via "
+        "Meta.fields / Meta.exclude."
+    )
 
 
 def test_backing_model_field_nonexistent_column_returns_none() -> None:

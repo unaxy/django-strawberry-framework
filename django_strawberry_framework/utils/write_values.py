@@ -1,8 +1,7 @@
 """Neutral write-value primitives shared by the model, form, and serializer flavors.
 
 The flavor-neutral owner of the per-value write checks every write flavor
-runs at decode time (promoted from ``mutations/resolvers.py`` so the model
-mutation resolver is not the utility module for the other write flavors):
+runs at decode time:
 
 - ``unstorable_text_error`` - the text storability preflight (lone surrogate, NUL);
 - ``unstorable_temporal_error`` - the temporal storability preflight (a date, datetime,
@@ -196,7 +195,7 @@ def raw_choice_value(value: object) -> object:
 def _raw_choice_scalar(value: object) -> object:
     """Unwrap one non-list value: an enum member to its value, a ``str`` to the base ``str``."""
     raw_value = enum_value(value) if isinstance(value, Enum) else value
-    return str.__str__(raw_value) if isinstance(raw_value, str) else raw_value
+    return truth.plain_str(raw_value)
 
 
 def coerce_relation_pk_or_none(related_model: type[models.Model], pk: object) -> object:
@@ -258,12 +257,12 @@ def type_check_relation_id(
 
     The "Relay target -> ``decode_model_global_id`` (non-``OK`` -> uniform relation
     error) | raw-pk target -> ``coerce_relation_pk_or_none`` (``None`` -> uniform
-    relation error)" two-branch structural check the three write flavors share. Promoted here
-    (from the serializer's cleanly-factored ``_type_check_relation_id``) so the
-    single definition of "what counts as a well-formed relation id" is shared: the
-    serializer single decoder and the form single decoder call it (the form keeping
-    only its ``empty_values`` pass-through + ``to_field_name`` reduction on
-    top), and the batched set decoder calls it per raw-pk element. The raw-pk
+    relation error)" two-branch structural check every write flavor shares: the
+    single definition of "what counts as a well-formed relation id". Its callers are
+    ``decode_visible_relation`` (the single spine the form and serializer decoders run,
+    each adding its own ``skip`` and ``project``) and the raw-pk branch of
+    ``decode_visible_relation_ids`` (every model relation decoder and the serializer set
+    decoder), which calls it per element. The raw-pk
     branch touches no DB; the GlobalID branch resolves a non-pk NodeID value to
     its real pk with a query (batched per set by ``decode_visible_relation_ids``)
     - visibility is confirmed separately by the caller in both branches.

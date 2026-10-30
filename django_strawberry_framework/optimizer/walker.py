@@ -31,7 +31,6 @@ from django_strawberry_framework.utils._queryset_private import (
     queryset_hints,
     queryset_prefetch_lookups,
 )
-from django_strawberry_framework.utils.connections import relay_max_results_from_info
 from django_strawberry_framework.utils.querysets import (
     _COMBINED_WHAT,
     _LIST_RELATION_CHILD_POLICY,
@@ -45,12 +44,12 @@ from django_strawberry_framework.utils.relations import (
     instance_accessor,
     is_many_side_relation_kind,
     is_model_class,
+    is_source_carried_relation_kind,
     relation_kind,
 )
 from django_strawberry_framework.utils.typing import graphql_fields, schema_config_from_info
 
 from . import logger
-from . import nested_planner as _nested_planner
 from .field_meta import FieldMeta
 from .hints import OptimizerHint, _PrefetchAny, hint_is_skip
 from .join_taxonomy import classify_relation_join
@@ -79,7 +78,6 @@ from .selections import (
     response_key,
     response_keys,
     selection_python_name,
-    should_include,
 )
 
 if TYPE_CHECKING:
@@ -99,23 +97,11 @@ if TYPE_CHECKING:
 
 # The selection-traversal primitives live in ``optimizer/selections.py`` so the
 # walker and the AST seam in ``extension.py`` share ONE
-# fragment/directive/response-key implementation. Readers of the underscore
-# aliases below: ``_is_fragment``, ``_response_key``, ``_response_keys`` and
-# ``_included_field_selections`` are consumed by this module's own bodies;
-# ``_should_include`` and ``_is_fragment`` are imported from
-# ``optimizer.walker`` by ``tests/optimizer/test_walker.py``.
-_should_include = should_include
-_is_fragment = is_fragment
+# fragment/directive/response-key implementation. The underscore aliases below
+# are consumed by this module's own bodies.
 _response_key = response_key
 _response_keys = response_keys
 _included_field_selections = included_field_selections
-# Two underscore aliases with live test readers (both imported from
-# ``optimizer.walker`` by ``tests/optimizer/test_walker.py``):
-# ``_concrete_order_columns`` is implemented in ``optimizer/nested_planner.py``;
-# ``_relay_max_results_from_info`` binds ``utils/connections.py``'s
-# ``relay_max_results_from_info``.
-_concrete_order_columns = _nested_planner._concrete_order_columns
-_relay_max_results_from_info = relay_max_results_from_info
 
 
 def _record_path_resolver_keys(
@@ -149,7 +135,7 @@ def _introduces_projection_for_operation(info: GraphQLResolveInfo | None) -> boo
     gains a deferred-field set of the optimizer's making.
 
     Defensive by design (the package's ``getattr`` posture, mirroring
-    ``runtime_path_from_info`` and ``_relay_max_results_from_info``): a
+    ``runtime_path_from_info`` and ``relay_max_results_from_info``): a
     ``None`` ``info`` *or* a partial test-double whose ``operation`` (or
     ``operation.operation``) is absent falls to the introducing default rather
     than raising. During real execution ``info.operation`` is always present
@@ -165,7 +151,6 @@ def plan_optimizations(
     model: type[models.Model],
     info: GraphQLResolveInfo | None = None,
     *,
-    runtime_prefixes: tuple[tuple[str, ...], ...] | None = None,
     source_type: type[DjangoType] | None = None,
 ) -> OptimizationPlan:
     """Walk the selection tree and produce an ``OptimizationPlan``.
@@ -188,9 +173,7 @@ def plan_optimizations(
         model,
         plan,
         info=info,
-        runtime_prefixes=(
-            runtime_prefixes if runtime_prefixes is not None else (runtime_path_from_info(info),)
-        ),
+        runtime_prefixes=(runtime_path_from_info(info),),
         source_type=source_type,
     )
     # Finalise at handoff: list fields become tuples so post-walker
@@ -632,9 +615,9 @@ def _walk_selections(
     model: type[models.Model],
     plan: OptimizationPlan,
     prefix: str = "",
-    info: GraphQLResolveInfo | None = None,
-    runtime_prefixes: tuple[tuple[str, ...], ...] = ((),),
     *,
+    info: GraphQLResolveInfo | None,
+    runtime_prefixes: tuple[tuple[str, ...], ...],
     lookup_prefix: str = "",
     source_type: type[DjangoType] | None = None,
 ) -> None:
@@ -658,11 +641,6 @@ def _walk_selections(
     ``_build_prefetch_child_queryset`` below) intentionally omit it so
     nested relation targets keep routing through ``registry.get(model)``
     and resolve to the primary type.
-
-    The default ``runtime_prefixes=((),)`` encodes "one empty-path
-    prefix" for direct or test-only callers without ``info``;
-    ``plan_optimizations`` always passes an explicit single-tuple via
-    ``runtime_path_from_info(info)``.
 
     Every writer records its columns whatever the operation; whether the plan
     may introduce a projection is ``plan.introduce_projection``, read where the
@@ -942,9 +920,9 @@ def _plan_select_relation(
         # (``__typename`` only, say) leaves nothing projected under the path:
         # Django's select mask then reads it as deferred and refuses the JOIN
         # (``cannot be both deferred and traversed using select_related``). The
-        # target pk is the narrowest column that keeps it valid. A forward join
-        # needs no floor: its FK column, recorded above, loads the row whole.
-        if django_field.relation_kind != "forward_single" and not any(
+        # target pk is the narrowest column that keeps it valid. A join carried by
+        # this row (a forward relation's FK column, recorded above) needs no floor.
+        if not is_source_carried_relation_kind(django_field.relation_kind) and not any(
             f.startswith(child_prefix) for f in plan.only_fields
         ):
             append_unique(
@@ -995,8 +973,8 @@ def _plan_prefetch_relation(
         return
 
     # Snapshot before the child absorb so nested PLANNED keys that land on
-    # the parent are attributed to THIS prefetch lookup (B8 consumer-wins
-    # must strip them with the dropped Prefetch, so strictness re-sees the
+    # the parent are attributed to THIS prefetch lookup (queryset diffing's
+    # consumer-wins drop must strip them with the dropped Prefetch, so strictness re-sees the
     # now-lazy relation). Nested FK-id elisions are deliberately NOT recorded
     # here: an elision reads a column already on the parent row (``obj.<fk>_id``)
     # and adds no query whether or not this prefetch survives, so it must
@@ -1191,7 +1169,11 @@ def _build_prefetch_child_queryset_from_base(
     # absorbs them, and ``apply`` writes the union of the hook's projection and
     # the child selection's.
     child_plan, base_queryset = diff_plan_for_queryset(child_plan, base_queryset, info=info)
-    _absorb_child_plan(parent_plan, child_plan)
+    # Absorb the ACCEPTED child plan
+    # (``optimizer/plans.py::OptimizationPlan.merge_metadata_from``): a non-cacheable
+    # child must poison the parent's cacheability or the plan cache could serve one
+    # request's child queryset to the next.
+    parent_plan.merge_metadata_from(child_plan)
     return child_plan.apply(base_queryset)
 
 
@@ -1300,7 +1282,7 @@ def _apply_hint(
         # the plan non-cacheable so the plan cache cannot serve one
         # request's queryset to the next.
         plan.cacheable = False
-        # B8 coupling: attribute the relation's resolver keys to the rebased
+        # Queryset-diffing coupling: attribute the relation's resolver keys to the rebased
         # lookup so a later consumer-wins drop strips them from strictness.
         hinted_lookup = rebased_prefetch.prefetch_to or rebased_prefetch.prefetch_through
         _record_prefetch_path_keys(plan, hinted_lookup, resolver_identities)
@@ -1482,24 +1464,6 @@ def _prefetch_hint_for_path(
     )
 
 
-def _absorb_child_plan(parent_plan: OptimizationPlan, child_plan: OptimizationPlan) -> None:
-    """Absorb an ACCEPTED child queryset plan's metadata into the parent plan.
-
-    Resolver metadata (``fk_id_elisions`` / ``planned_resolver_keys``) plus
-    the ``cacheable`` propagation: a non-cacheable child (request-scoped
-    consumer queryset, custom hook) must poison the parent's cacheability, or
-    the plan cache could serve one request's child queryset to the next.
-    Folded in here so the absorb cannot be forgotten (the cache-poisoning
-    hazard the plan docstring warns about).
-
-    Pure delegation to ``OptimizationPlan.merge_metadata_from``: the planner
-    keeps its own direct merge line while the absorb is one call. If the
-    absorb gains logic beyond delegation, the planner site routes through
-    the (injected) wrapper or this wrapper dies.
-    """
-    parent_plan.merge_metadata_from(child_plan)
-
-
 def _selected_scalar_names(
     selections: Iterable[ConvertedSelection],
     model: type[models.Model] | None,
@@ -1665,7 +1629,7 @@ def _merge_aliased_selections(selections: Sequence[FieldSelection]) -> Sequence[
     """
     seen_names: set[str] = set()
     for sel in selections:
-        if _is_fragment(sel):
+        if is_fragment(sel):
             break
         key = sel.name
         if key in seen_names:
@@ -1676,7 +1640,7 @@ def _merge_aliased_selections(selections: Sequence[FieldSelection]) -> Sequence[
     seen: dict[str, _MergedSelection] = {}
     result: list[FieldSelection] = []
     for sel in selections:
-        if _is_fragment(sel):
+        if is_fragment(sel):
             result.append(sel)
             continue
         key = sel.name

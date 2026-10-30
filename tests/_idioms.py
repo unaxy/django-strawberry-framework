@@ -175,12 +175,8 @@ from strawberry import relay
 from typing_extensions import override
 
 from django_strawberry_framework import DjangoType
-from django_strawberry_framework.utils._narrowing import (
-    instance_dict,
-    is_awaitable,
-    pk_of,
-    read_attr,
-)
+from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._narrowing import is_awaitable, pk_of, read_attr
 from django_strawberry_framework.utils.canonical import canonical_sort_key
 from django_strawberry_framework.utils.querysets import model_for
 from django_strawberry_framework.utils.typing import object_result
@@ -268,6 +264,11 @@ def comparing_metaclass(
     assert isinstance(meta, type)
     assert issubclass(meta, base)
     return meta
+
+
+#: The ``SyncMisuseError`` recourse a test hands the visibility helpers, which require one
+#: per surface; the tests that pass it never assert on its wording.
+TEST_ASYNC_RECOURSE = "Test recourse: redefine get_queryset as a sync method."
 
 
 #: The ``str`` subclass kinds ``str_subclass_name`` builds, as parametrize values.
@@ -549,7 +550,7 @@ def definition_raises(cls: _ClassT) -> _ClassT:
 
 def module_binding(module: ModuleType, name: str) -> object:
     """Return ``module``'s own binding for ``name`` (its ``__dict__`` entry)."""
-    return instance_dict(module)[name]
+    return truth.instance_state(module)[name]
 
 
 def stub_module(name: str, **attributes: object) -> ModuleType:

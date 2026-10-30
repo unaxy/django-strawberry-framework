@@ -215,9 +215,13 @@ def __init_subclass__(cls, **kwargs):
     cls._is_default_get_queryset = not has_custom_get_queryset
     # 2. Resolve Meta; intermediate abstract bases without Meta opt out.
     #    This branch stays reachable AFTER finalization so abstract bases
-    #    never trip the post-finalization guard below.
+    #    never trip the post-finalization guard below. A Meta-less class
+    #    under a concrete type would publish as that type, so it is refused.
     meta = cls.__dict__.get("Meta")
     if meta is None:
+        inherited = truth.static_attr(cls, "__django_strawberry_definition__")
+        if isinstance(inherited, DjangoTypeDefinition):
+            raise ConfigurationError(f"{cls.__name__} subclasses the concrete DjangoType ...")
         return
     # 3. Post-finalization registration guard.
     if registry.is_finalized():

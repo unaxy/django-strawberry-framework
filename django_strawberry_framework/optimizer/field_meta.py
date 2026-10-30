@@ -31,6 +31,7 @@ from django_strawberry_framework.utils.relations import (
     has_composite_pk,
     instance_accessor,
     is_many_side_relation_kind,
+    is_source_carried_relation_kind,
     relation_bool,
     relation_kind,
     relation_link,
@@ -126,7 +127,9 @@ class FieldMeta:
             read from its link (``utils/relations.py::relation_link``): for a
             forward FK / one-to-one / ``ForeignObject``, its own carriers on the
             source row (``("category_id",)``, a one-column ``ForeignObject``'s
-            ``("p_id",)`` although its ``attname`` is the relation name); for a
+            ``("p_id",)`` although its ``attname`` is the relation name), and
+            for the reverse ``GenericRel`` of a ``GenericRelation``, the source
+            row's ``object_id`` column; for a
             reverse FK / reverse one-to-one, the child's carriers (one entry per
             ``from_fields`` member of a reverse ``ForeignObject``). ``()`` for
             every other shape. Django's prefetch attach reads every one of them.
@@ -142,8 +145,9 @@ class FieldMeta:
             columns the link targets that are not part of the source's primary
             key (a non-pk ``to_field``, a ``ForeignObject``'s ``to_fields``, a
             through FK's ``to_field``); ``()`` when every target is a
-            primary-key member (always loaded) and for a forward single
-            relation. Django's prefetch attach and per-parent filter read them
+            primary-key member (always loaded) and for a relation carried
+            by the source row (a forward single relation, a reverse
+            ``GenericRel``). Django's prefetch attach and per-parent filter read them
             on each source row.
         auto_created: Django's auto-created flag. ``True`` for reverse
             descriptors and concrete MTI parent links.
@@ -211,12 +215,13 @@ class FieldMeta:
     def source_link_attnames(self) -> tuple[str, ...]:
         """Columns the SOURCE row must carry so traversing this relation reads no deferred field.
 
-        A forward single relation's own carrier columns
-        (``link_carrier_attnames``); for every other relation, the non-pk source
-        columns its link targets (``source_target_attnames``). ``()`` for every
-        relation that needs only the source pk.
+        A relation carried by the source row (a forward single relation, a
+        reverse ``GenericRel``): its own carrier columns (``link_carrier_attnames``);
+        for every other relation, the non-pk source columns its link targets
+        (``source_target_attnames``). ``()`` for every relation that needs only
+        the source pk.
         """
-        if self.relation_kind == "forward_single":
+        if is_source_carried_relation_kind(self.relation_kind):
             return self.link_carrier_attnames
         return self.source_target_attnames
 
@@ -288,13 +293,14 @@ class FieldMeta:
             )
         kind = relation_kind(field)
         link = relation_link(field) if is_relation else RelationLink()
-        # A forward link's target column comes from the link itself: Django's
+        # A source-carried link's target column (a forward relation's, a reverse
+        # ``GenericRel``'s related pk) comes from the link itself: Django's
         # single-target ``target_field`` accessor raises on a multi-column
         # ``ForeignObject``, which has no single target column (``None`` here).
         # Every other shape keeps Django's ``target_field``, which names one
         # column for each of them (a reverse rel's child pk, an M2M's target pk).
         target_field: object
-        if kind == "forward_single" and link.targets:
+        if is_source_carried_relation_kind(kind) and link.targets:
             target_field = link.targets[0] if len(link.targets) == 1 else None
         else:
             target_field = read_attr(field, "target_field", None)
@@ -348,16 +354,18 @@ class FieldMeta:
         else:
             nullable = relation_bool(field, "null")
 
-        # A forward single relation's carriers sit on the source row; every other
+        # A source-carried relation's carriers (a forward single relation's, a
+        # reverse ``GenericRel``'s ``object_id``) sit on the source row; every other
         # link (reverse FK / one-to-one, M2M through its through table's source
         # FK, ``GenericRelation``) targets the source row instead.
         link_carrier_attnames: tuple[str, ...] = ()
         link_target_attnames: tuple[str, ...] = ()
         source_target_attnames: tuple[str, ...] = ()
-        if kind in ("forward_single", "reverse_many_to_one", "reverse_one_to_one"):
+        source_carried = is_source_carried_relation_kind(kind)
+        if source_carried or kind in ("reverse_many_to_one", "reverse_one_to_one"):
             link_carrier_attnames = link.carrier_attnames
             link_target_attnames = link.target_attnames
-        if kind != "forward_single":
+        if not source_carried:
             source_target_attnames = _non_pk_attnames(link.targets)
 
         accessor_name = instance_accessor(field)

@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Annotated
 import strawberry
 from django import forms
 from django.db import models
+from django.db.models.constants import LOOKUP_SEP
 from django_filters import (
     ChoiceFilter,
     Filter,
@@ -47,8 +48,13 @@ from django_strawberry_framework.conf import hide_flat_filters_setting
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.registry import register_subsystem_clear
 from django_strawberry_framework.sets_mixins import declaration_map
-from django_strawberry_framework.types.converters import scalar_for_field
+from django_strawberry_framework.types.converters import (
+    _field_label,
+    refuse_nested_array,
+    scalar_for_field,
+)
 from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._array_field import array_element_field
 from django_strawberry_framework.utils._narrowing import (
     dict_of,
     enum_value,
@@ -69,14 +75,11 @@ from django_strawberry_framework.utils.inputs import (
     GeneratedInputFieldSpec,
     build_strawberry_input_class,
     emit_set_input_field_triples,
-    iter_set_subclasses,
     make_set_input_namespace,
     optional_field_kwargs,
-    set_input_type_name,
 )
 from django_strawberry_framework.utils.strings import (
     flatten_lookup_path,
-    graphql_camel_name,
     pascal_case_or_raise,
 )
 from django_strawberry_framework.utils.widgets import multi_widget_keys, widget_keys
@@ -95,11 +98,11 @@ from .base import (
     TextPatternFilter,
     TypedFilter,
     _bound_field_name,
+    _compared_columns,
     _EnumMemberFilterMixin,
-    _filterset_model_field,
+    _filterset_value_field,
     copied_form_field,
     model_choice_identity_column,
-    relation_identity_column,
 )
 
 # Domain-local aliases for the shared generated-input substrate (the mechanics
@@ -107,9 +110,6 @@ from .base import (
 # addressable from this module.
 FieldSpec = GeneratedInputFieldSpec
 build_input_class = build_strawberry_input_class
-_camel_case = graphql_camel_name
-_iter_filterset_subclasses = iter_set_subclasses
-_input_type_name_for = set_input_type_name
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
@@ -126,8 +126,8 @@ if TYPE_CHECKING:
 INPUTS_MODULE_PATH: str = "django_strawberry_framework.filters.inputs"
 
 
-# Search-prefix vocabulary for the future `Meta.search_fields` card per
-# spec-027 Decision 2; consumed by `construct_search` below.
+# Search-prefix vocabulary for the planned `Meta.search_fields` surface
+# (spec-027 Decision 2); consumed by `construct_search` below.
 LOOKUP_PREFIXES: dict[str, str] = {
     "^": "istartswith",
     "=": "iexact",
@@ -302,10 +302,9 @@ def _pascal_case(name: str) -> str:
     word-character tokens (e.g. ``"_"``, ``""``, ``"__"``) would silently
     collide on the downstream ``RangeInputType`` naming, so it raises
     ``ConfigurationError`` instead. Direct caller today:
-    ``_build_range_input_class`` only. Indirect callers
-    (``_input_type_name_for``, ``_build_input_fields``'s operator-bag class
-    naming) route through
-    ``sets_mixins.py::ClassBasedTypeNameMixin.type_name_for`` and trip the
+    ``_build_range_input_class`` only. The indirect caller, ``_build_input_fields``'s
+    operator-bag class naming, routes through
+    ``sets_mixins.py::ClassBasedTypeNameMixin.type_name_for(field_path)`` and trips the
     same shared guard with its own error - so the error message below names
     the ``RangeFilter`` consumer specifically.
     """
@@ -405,25 +404,44 @@ def _relation_identity_annotation(
     model_field: ModelField | None,
     filterset_cls: type[FilterSet] | None = None,
 ) -> object:
-    """Type a raw-pk relation leaf from the target's primary-key column.
+    """Type a raw-pk relation leaf from the column its predicate compares.
 
-    The scalar comes from ``filters/base.py::relation_identity_column`` through the
-    shared ``SCALAR_MAP`` lookup, so the input agrees with how a ``DjangoType`` types
-    that key (``Int``, ``UUID``, ``BigInt``, ...). A raw-pk filter whose ``field_name``
-    resolves no relation on its ``FilterSet`` model has no column to type from; the
-    refusal names the filter as declared (``_declaration_of``).
+    The column is the one the filter's value is coerced through at request time
+    (``filters/base.py::_compared_columns``): the target's primary key for a leaf marked
+    for ``<relation>__pk`` and an ordinary link, the link's column for a declared
+    unmarked ``ForeignObject`` off the pk or a many-to-many through a ``to_field``. The
+    scalar comes from it through the shared ``SCALAR_MAP`` lookup, so the input agrees
+    with how a ``DjangoType`` types that column (``Int``, ``UUID``, ``BigInt``,
+    ``String``, ...). A relation linked by more than one column has no single column a
+    value can name, so no scalar can type it and the build refuses it naming the column
+    count. A raw-pk filter whose ``field_name`` resolves no relation on its ``FilterSet``
+    model has no column to type from; both refusals name the filter as declared
+    (``_declaration_of``).
     """
-    column = relation_identity_column(model_field)
-    if column is None:
+    columns = (
+        _compared_columns(filter_instance, model_field)
+        if getattr(model_field, "is_relation", False)
+        else None
+    )
+    if columns is not None and len(columns) > 1:
         declaration = _declaration_of(filter_instance, filterset_cls)
         declared = declaration.declared
         raise ConfigurationError(
-            f"{declaration.kind} on {truth.render(declared)}{declaration.site} names "
-            f"{truth.render(getattr(declared, 'field_name', None))}, which is not a "
+            f"{declaration.owner(filterset_cls)}: {declaration.kind} on "
+            f"{truth.render(declared.field_name)}{declaration.route} names a relation linked "
+            f"by {len(columns)} columns, so no single key value can name a related row; "
+            "filter the related row's own fields through a RelatedFilter.",
+        )
+    if not columns:
+        declaration = _declaration_of(filter_instance, filterset_cls)
+        declared = declaration.declared
+        raise ConfigurationError(
+            f"{declaration.owner(filterset_cls)}: {declaration.kind} on "
+            f"{truth.render(declared.field_name)}{declaration.route}, which is not a "
             "relation to a model on its FilterSet; name a relation key in Meta.fields, or "
             "filter the related row's own fields through a RelatedFilter.",
         )
-    return _scalar_from_model_field(column)
+    return _scalar_from_model_field(columns[0])
 
 
 def _model_choice_takes_list(filter_instance: Filter) -> bool:
@@ -507,31 +525,132 @@ def _choice_enum_from_filter(
         declaration = _declaration_of(filter_instance, filterset_cls)
         raise ConfigurationError(
             f"{declaration.kind} on {truth.render(declaration.declared)}{declaration.site} "
-            "is backed by no model field declaring `choices`; declare `choices` on the column "
-            "it filters (a `TextChoices` / `IntegerChoices` class), or filter that column "
-            "through a non-choice filter (`CharFilter`, `NumberFilter`, "
+            "is backed by no model field declaring `choices` (the filter's own `choices` never "
+            "feed the enum); declare `choices` on the column it filters (a `choices=` list of "
+            "pairs, or a `TextChoices` / `IntegerChoices` class's `.choices`), or filter that "
+            "column through a non-choice filter (`CharFilter`, `NumberFilter`, "
             "`DateFromToRangeFilter`, its lookups in Meta.fields, or `CharFilter(method=...)` "
             "for a method filter).",
         )
     return convert_choices_to_enum(model_field, type_name)
 
 
+def _unnameable_lookup_refusal(
+    filter_instance: Filter,
+    lookup: str,
+    filterset_cls: type[FilterSet],
+) -> ConfigurationError:
+    """Build the refusal for a leaf whose lookup is no GraphQL field name.
+
+    Each lookup of an operator bag is published as an input field named by it, so a
+    ``lookup_expr`` opening on an ``ArrayField`` index (``0``) or slice (``0_2``) names
+    none. The same transform spelled in the ``field_name`` (``<column>__0``) is published
+    under the filter's own name.
+    """
+    declaration = _declaration_of(filter_instance, filterset_cls)
+    return ConfigurationError(
+        f"{declaration.kind} on {truth.render(declaration.declared)}{declaration.site} "
+        f"publishes lookup {truth.render(lookup)}, which is no GraphQL field name. Spell an "
+        "index or slice in field_name (`<column>__0`, `<column>__0_2`) and name the lookup "
+        "in lookup_expr.",
+    )
+
+
+#: The ``ArrayField`` lookups whose operand is an array of the column's elements, so a list
+#: input of the element type carries it (``_array_element_column``).
+_ARRAY_ELEMENT_LIST_LOOKUPS = frozenset(
+    {
+        "exact",
+        "contains",
+        "contained_by",
+        "overlap",
+    },
+)
+
+
+def _array_column_refusal(
+    filter_instance: Filter,
+    model_field: object,
+    filterset_cls: type[FilterSet] | None,
+    lookup: str | None = None,
+) -> ConfigurationError:
+    """Build the refusal for a filter whose input cannot carry its ``ArrayField`` lookup's operand.
+
+    A scalar, typed, choice-list or catch-all filter hands the ORM one element where the
+    column compares a whole array, and an ``in`` compares the column with each of several
+    arrays, so an element-typed input would build and then fail every value at the
+    database. A transform spelled in the ``field_name`` (``<column>__len``, an index
+    ``<column>__0``, a slice ``<column>__0_2``) or a ``len`` in the ``lookup_expr`` never
+    reaches it: its leaf is typed from the transform's output
+    (``filters/base.py::_filterset_value_field``); an index or slice opening the
+    ``lookup_expr`` names no input field (``_unnameable_lookup_refusal``). ``lookup``
+    names what the filter applies when its ``lookup_expr`` does not (a ``RangeFilter``'s
+    ``range``).
+    """
+    declaration = _declaration_of(filter_instance, filterset_cls)
+    applied = lookup if lookup is not None else getattr(filter_instance, "lookup_expr", None)
+    return ConfigurationError(
+        f"{declaration.kind} on {truth.render(declaration.declared)}{declaration.site} "
+        f"has no input type for lookup {truth.render(applied)} on the ArrayField column "
+        f"{_field_label(model_field)}: only exact, contains, contained_by and overlap take one "
+        "array of the column's elements. Declare an ArrayFilter with one of those lookup_expr "
+        "values.",
+    )
+
+
+def _array_element_column(
+    filter_instance: Filter,
+    model_field: ModelField | None,
+    filterset_cls: type[FilterSet] | None,
+) -> ModelField | None:
+    """Return the column a list arm types each member from: an ``ArrayField``'s element.
+
+    A list input carries an ``ArrayField`` lookup only when the lookup's operand is an
+    array of the column's elements (``_ARRAY_ELEMENT_LIST_LOOKUPS``); then each member is a
+    value of ``base_field`` (``utils/_array_field.py::array_element_field``), the column it is
+    cleaned by (``filters/base.py::_column_form_field``) and the read side converts
+    (``types/converters.py::convert_scalar``), so element ``choices`` give the enum the column's
+    ``DjangoType`` shares and the array's own ``choices`` are never read. A nested array is
+    refused by ``types/converters.py::refuse_nested_array``; any other lookup by
+    ``_array_column_refusal``. Every other column is returned as given.
+    """
+    element = array_element_field(model_field)
+    if element is None:
+        return model_field
+    if getattr(filter_instance, "lookup_expr", None) not in _ARRAY_ELEMENT_LIST_LOOKUPS:
+        raise _array_column_refusal(filter_instance, model_field, filterset_cls)
+    refuse_nested_array(model_field, element)
+    return element
+
+
 def _element_annotation(
     filter_instance: Filter,
     model_field: ModelField | None,
     owner_definition: DjangoTypeDefinition | None,
-    filterset_cls: type[FilterSet] | None = None,
+    filterset_cls: type[FilterSet],
 ) -> object:
     """Single-element Strawberry type with the MODEL FIELD as source of truth.
 
     A backing model field's choices become the shared GraphQL enum and its
     column type becomes the scalar (including the ``BigInt`` scalar for 64-bit
-    columns). The ``django-filter`` form field is consulted ONLY as the
-    fallback for a custom ``method=`` filter with no backing model field --
+    columns). Where a transform stands between the column and the lookup, in the
+    ``lookup_expr`` (a generated ``year`` / ``year__in`` / ``date`` leaf) or the
+    ``field_name`` (``occurred_at__year``, an ``ArrayField`` index ``counts__0``), the
+    field is the last transform's output the leaf builder passes
+    (``filters/base.py::_filterset_value_field``). The ``django-filter`` form
+    field is consulted ONLY as the fallback for a custom ``method=`` filter with no
+    backing model field, or a path that resolves to no column of the FilterSet model
+    (a ``FilteredRelation`` alias only the filter's queryset holds) --
     otherwise ``django-filter``'s ``NumberFilter`` form (a ``DecimalField``)
     mis-types integer columns and a CSV ``in`` over a choice column collapses
     to ``str``. Callers that need a different shape for a specific lookup (e.g.
     ``isnull`` is always boolean) handle that before calling this.
+
+    An ``ArrayField`` column reaches this only as its element column, which the list arms
+    pass after ``_array_element_column`` admits the lookup; any other arm or lookup over an
+    ``ArrayField`` column is refused here (``_array_column_refusal``), as the choice and range
+    arms refuse it before their own reads, since no input of the element type, or a list of
+    it, carries that lookup's operand. ``isnull`` never reaches it (``bool``).
 
     One lookup-driven arm comes first: a generated text-pattern leaf on a
     non-text column (``FilterSet.filter_for_lookup`` gives it ``TextPatternFilter``)
@@ -548,8 +667,10 @@ def _element_annotation(
     """
     if truth.is_instance(filter_instance, TextPatternFilter):
         return str
+    if array_element_field(model_field) is not None:
+        raise _array_column_refusal(filter_instance, model_field, filterset_cls)
     if model_field is not None and getattr(model_field, "choices", None):
-        type_name = _owner_type_name(owner_definition) or "Filter"
+        type_name = _enum_prefix(owner_definition, filterset_cls)
         return _choice_enum_from_filter(filter_instance, type_name, model_field, filterset_cls)
     if model_field is not None:
         return _scalar_from_model_field(model_field)
@@ -700,8 +821,8 @@ def _refuse_widget_reading_other_keys(
 def convert_filter_to_input_annotation(
     filter_instance: Filter,
     model_field: ModelField | None,
-    owner_definition: DjangoTypeDefinition | None = None,
-    filterset_cls: type[FilterSet] | None = None,
+    owner_definition: DjangoTypeDefinition | None,
+    filterset_cls: type[FilterSet],
 ) -> object:
     """Return the Strawberry annotation for a resolved ``django-filter`` filter.
 
@@ -721,12 +842,11 @@ def convert_filter_to_input_annotation(
     Dispatch rides ``utils/converters.py::convert_with_mro`` with the same
     kind table ``normalize_input_value`` uses.
 
-    ``filterset_cls`` (the owning ``FilterSet`` for a leaf built through
-    ``_build_input_fields``) qualifies the nested ``RangeFilter`` sub-input
-    class name so two filtersets sharing a ``field_name`` mint two distinct
-    GraphQL type names (spec-027 forward path; see ``_build_range_input_class``,
-    which also covers the set/field splits that still meet). ``None`` (direct
-    converter callers) keeps the unqualified ``<Field>RangeInputType`` name.
+    ``filterset_cls`` (the ``FilterSet`` whose leaf this is) qualifies the nested
+    ``RangeFilter`` sub-input class name so two filtersets sharing a ``field_name``
+    mint two distinct GraphQL type names (spec-027 forward path; see
+    ``_build_range_input_class``, which also covers the set/field splits that still
+    meet), and names a choice enum when no type owns the set (``_enum_prefix``).
 
     A ``LookupChoiceFilter`` raises ``ConfigurationError`` before anything reads it:
     it filters by a value and a lookup read from two form-data keys (``<name>`` and
@@ -774,7 +894,8 @@ def convert_filter_to_input_annotation(
         # subclasses) whose form field consumes a LIST of values, not a
         # scalar. The element type is model-field-driven so a CSV ``in`` over
         # a choice column keeps its enum and a 64-bit column keeps ``BigInt``.
-        element = _element_annotation(matched, model_field, owner_definition, filterset_cls)
+        column = _array_element_column(matched, model_field, filterset_cls)
+        element = _element_annotation(matched, column, owner_definition, filterset_cls)
         return GenericAlias(list, (element,))
 
     def _multiple_choice(matched: Filter) -> object:
@@ -787,18 +908,24 @@ def convert_filter_to_input_annotation(
     def _range(matched: Filter) -> object:
         # Refuse a widget the patch cannot address when the schema is built, not per request.
         _ = range_form_keys(matched, matched.field_name or "range", filterset_cls)
+        if array_element_field(model_field) is not None:
+            raise _array_column_refusal(matched, model_field, filterset_cls, "range")
         inner = _scalar_from_model_field(model_field)
         return _build_range_input_class(matched, inner, filterset_cls)
 
     def _list(matched: Filter) -> object:
-        element = _element_annotation(matched, model_field, owner_definition, filterset_cls)
+        column = _array_element_column(matched, model_field, filterset_cls)
+        element = _element_annotation(matched, column, owner_definition, filterset_cls)
         return GenericAlias(list, (element,))
 
     def _typed(matched: Filter) -> object:
         return _element_annotation(matched, model_field, owner_definition, filterset_cls)
 
     def _choice(matched: Filter) -> object:
-        type_name = _owner_type_name(owner_definition) or "Filter"
+        # The array's own ``choices`` are ambiguous (the read side refuses them too).
+        if array_element_field(model_field) is not None:
+            raise _array_column_refusal(matched, model_field, filterset_cls)
+        type_name = _enum_prefix(owner_definition, filterset_cls)
         return _choice_enum_from_filter(matched, type_name, model_field, filterset_cls)
 
     def _catchall(matched: Filter) -> object:
@@ -1036,7 +1163,7 @@ def _unwrap_enum_member(value: object) -> object:
 def _build_range_input_class(
     filter_instance: Filter,
     inner: object,
-    filterset_cls: type[FilterSet] | None = None,
+    filterset_cls: type[FilterSet],
 ) -> type[object]:
     """Return a Strawberry input dataclass with ``start: T | None`` and ``end: T | None``.
 
@@ -1044,9 +1171,14 @@ def _build_range_input_class(
     only on the owning filterset, the Django field path and the inner scalar, and
     the arguments factory builds each filterset's input once per generation.
 
-    The class name is qualified by the owning ``FilterSet`` when one is
-    supplied -- ``f"{filterset_cls.__name__}{Pascal(field_name)}RangeInputType"``
-    -- mirroring the per-field operator-bag naming
+    The class name is qualified by the owning ``FilterSet`` and stemmed on the value path,
+    the ``field_name`` followed by the transforms the ``lookup_expr`` carries ahead of its
+    lookup -- ``f"{filterset_cls.__name__}{Pascal(value_path)}RangeInputType"``, so
+    ``RangeFilter(field_name="occurred_at", lookup_expr="year__range")`` and
+    ``RangeFilter(field_name="occurred_at__year", lookup_expr="range")`` both spell
+    ``OccurredAtYear`` and a ``range`` over the column itself ``OccurredAt``, two types
+    whose axes differ (``Int`` and ``DateTime``); a ``method=`` filter's bounds are its
+    column's, so its stem is the ``field_name`` -- mirroring the per-field operator-bag naming
     (``ClassBasedTypeNameMixin.type_name_for``). Without this qualifier the name
     derived from ``field_name`` alone, so two filtersets that share a
     ``field_name`` for a ``RangeFilter`` (e.g. both filter a ``price`` column)
@@ -1061,12 +1193,17 @@ def _build_range_input_class(
     through ``utils/inputs.py::claim_generated_type_name`` when it claims its
     set's root: two ranges of different axes under one name reached from one set
     raise ``ConfigurationError`` at finalize, and a pair from two sets fails only
-    a schema serving both. ``None`` (direct converter callers that build no
-    schema) keeps the unqualified ``<Field>RangeInputType`` name.
+    a schema serving both.
     """
     field_name = getattr(filter_instance, "field_name", "field") or "field"
-    prefix = truth.name(filterset_cls) if filterset_cls is not None else ""
-    cls_name = f"{prefix}{_pascal_case(field_name)}RangeInputType"
+    # A ``method=`` filter's bounds are its column's (``_filterset_value_field``).
+    transforms = (
+        filter_instance.lookup_expr.split(LOOKUP_SEP)[:-1]
+        if read_attr(filter_instance, "method", None) is None
+        else []
+    )
+    value_path = LOOKUP_SEP.join((field_name, *transforms))
+    cls_name = f"{truth.name(filterset_cls)}{_pascal_case(value_path)}RangeInputType"
     return build_input_class(
         cls_name,
         [
@@ -1192,15 +1329,21 @@ def range_form_keys(
     return keys[0], keys[1]
 
 
-def _owner_type_name(owner_definition: DjangoTypeDefinition | None) -> str | None:
-    """Return the GraphQL type name for ``owner_definition`` (or ``None``).
+def _enum_prefix(
+    owner_definition: DjangoTypeDefinition | None,
+    filterset_cls: type[FilterSet],
+) -> str:
+    """Return the prefix a choice enum built for a leaf of ``filterset_cls`` carries.
 
-    Delegates to ``DjangoTypeDefinition.graphql_type_name`` so the three
-    callers (this helper, ``filters/base.py::_accepted_globalid_type_names``
-    for its schema-less spelling, ``types/finalizer.py::_bind_filterset_owner``)
-    share one derivation rule and cannot drift across renames.
+    The owning type's published name when the set is bound to one
+    (``DjangoTypeDefinition.graphql_type_name``, the rule the read side names the
+    same column's enum by), else the set's own class name: two unbound sets over
+    same-named choice columns of different models (``RelatedFilter`` targets no
+    type serves) mint two names, never one literal.
     """
-    return owner_definition.graphql_type_name if owner_definition is not None else None
+    if owner_definition is not None:
+        return owner_definition.graphql_type_name
+    return truth.name(filterset_cls)
 
 
 # ---------------------------------------------------------------------------
@@ -1487,7 +1630,11 @@ def _build_input_fields(
         bag_specs: list[tuple[str, object, dict[str, object]]] = []
         for lookup, (_form_key, leaf_filter) in lookup_bag.items():
             lookup_python_attr, lookup_graphql_name = LOOKUP_NAME_MAP.get(lookup, (lookup, lookup))
-            model_field = _filterset_model_field(filterset_cls, leaf_filter)
+            if not lookup_python_attr.isidentifier():
+                raise _unnameable_lookup_refusal(leaf_filter, lookup, filterset_cls)
+            # A leaf is typed by the field each value is cleaned as: the output of any
+            # transform between column and lookup (``year``'s int, an index's element).
+            model_field = _filterset_value_field(filterset_cls, leaf_filter)
             annotation = convert_filter_to_input_annotation(
                 leaf_filter,
                 model_field,
@@ -1515,7 +1662,6 @@ def _build_input_fields(
         _visible_entries(),
         related_of=_related_of,
         leaf_of=_leaf_of,
-        input_type_name_for=_input_type_name_for,
         module_path=INPUTS_MODULE_PATH,
         field_specs=_field_specs,
     )

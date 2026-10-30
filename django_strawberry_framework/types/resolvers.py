@@ -167,7 +167,7 @@ def _fk_attname_is_deferred(root: object, attname: str) -> bool:
 
 
 def _build_fk_id_stub(root: object, field_meta: FieldMeta) -> object:
-    """Build a target-model stub from ``root.<attname>`` for B2 id-only selections.
+    """Build a target-model stub from ``root.<attname>`` for FK-id elision's id-only selections.
 
     Returns ``_FK_ELISION_UNSAFE`` when ``field_meta.attname`` is deferred on
     ``root`` (spec-035 Decision 5): a row the plan did not project, such as one a
@@ -306,7 +306,7 @@ def _check_n1(
     force_unplanned: bool = False,
     strictness: str | None = None,
 ) -> None:
-    """B3: warn or raise if the relation is not planned and would lazy-load.
+    """Strictness: warn or raise if the relation is not planned and would lazy-load.
 
     ``kind`` is required (keyword-only) and accepts the ``relation_kind``
     of the field being resolved. ``"many"`` and ``"reverse_many_to_one"``
@@ -341,7 +341,7 @@ def _check_n1(
     the connection call site) is appended to the ``"raise"`` / ``"warn"``
     message when present so a flagged fallback reads as actionable rather
     than as an optimizer defect; the list-relation calls pass no ``reason``
-    and produce the byte-identical pre-slice message.
+    and produce the message without a reason clause.
 
     ``planned`` / ``precomputed_key`` / ``strictness`` (keyword-only): a caller
     that already read the ``DST_OPTIMIZER_PLANNED`` sentinel, computed the resolver
@@ -467,6 +467,17 @@ def _custom_visibility_type(field_meta: FieldMeta) -> "type[DjangoType] | None":
     return target_type
 
 
+#: The ``SyncMisuseError`` recourse ``_visible_related_object`` / ``_visible_many_rows``
+#: append when a relation target's ``get_queryset`` is ``async def``: the relation is read
+#: by the synchronous executor, and the asynchronous one awaits the same hook.
+_RELATION_ASYNC_RECOURSE = (
+    "A generated relation resolver reads its target type's get_queryset under "
+    "schema.execute_sync(), which cannot await an async get_queryset hook; run the "
+    "operation with await schema.execute() (or the async view), or redefine "
+    "get_queryset as a sync method."
+)
+
+
 def _visible_related_object(
     related: object,
     target_type: "type[DjangoType]",
@@ -488,7 +499,7 @@ def _visible_related_object(
             return await visible.afirst()
 
         return _resolve()
-    return apply_type_visibility_sync(target_type, source, info).first()
+    return apply_type_visibility_sync(target_type, source, info, _RELATION_ASYNC_RECOURSE).first()
 
 
 def _visible_many_rows(
@@ -515,7 +526,7 @@ def _visible_many_rows(
             return [row async for row in bounded]
 
         return _resolve()
-    visible = apply_type_visibility_sync(target_type, source, info)
+    visible = apply_type_visibility_sync(target_type, source, info, _RELATION_ASYNC_RECOURSE)
     return list(bounded_rows(visible, info))
 
 
@@ -639,8 +650,8 @@ def _make_relation_resolver(
       graphql-core's non-null completion guard, so a real absence stays an
       error, never a silent empty answer.
 
-    B3: all resolvers now accept ``info`` (Strawberry injects it
-    automatically) and call ``_check_n1`` whenever a strictness other
+    Strictness: every resolver accepts ``info`` (Strawberry injects it
+    automatically) and calls ``_check_n1`` whenever a strictness other
     than ``"off"`` is in force for the execution. ``_check_n1`` receives a
     ``FieldMeta``-derived relation-kind key so the many-side dispatch uses
     ``_prefetched_objects_cache`` exclusively and does not mis-classify

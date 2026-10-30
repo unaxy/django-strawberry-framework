@@ -99,8 +99,10 @@ from tests._idioms import (
     ClassReadRaises,
     ModelSerializerBase,
     bind_unparented,
+    canonical_order,
     definition_raises,
     module_binding,
+    scrambled,
 )
 from tests._relation_fixtures import RpCompositeParent
 
@@ -180,16 +182,19 @@ def _build_serializer_inputs(
         fields,
         label="fields",
         flavor="SerializerMutation",
+        ordered=True,
     )
     normalized_exclude = normalize_field_name_sequence(
         exclude,
         label="exclude",
         flavor="SerializerMutation",
+        ordered=False,
     )
     normalized_optional = normalize_field_name_sequence(
         optional_fields,
         label="optional_fields",
         flavor="SerializerMutation",
+        ordered=False,
     )
     normalized_nested_configs = normalize_nested_serializer_configs(nested_configs)
     effective = resolve_effective_serializer_fields(
@@ -1826,6 +1831,39 @@ def test_nested_serializer_config_defaults_and_root_import() -> None:
     assert config.exclude is None
     assert config.optional_fields is None
     assert config.nested_fields is None
+
+
+@pytest.mark.parametrize("kind", [set, frozenset])
+def test_nested_serializer_config_sorts_unordered_name_keys_and_refuses_unordered_fields(
+    kind: type[set[str] | frozenset[str]],
+) -> None:
+    """A nested config's ``exclude`` / ``optional_fields`` accept a set; its ``fields`` refuses one.
+
+    ``exclude`` and ``optional_fields`` only name fields, so a set is stored sorted by
+    ``canonical_sort_key`` (``scrambled`` iterates out of that order in this process, so
+    storing the hash order fails the row). ``fields`` order is the nested input's field
+    order, so a set there raises.
+    """
+    declared = scrambled(
+        kind,
+        (
+            "name",
+            "description",
+            "category",
+            "attachment",
+            "is_private",
+        ),
+    )
+
+    normalized = normalize_nested_serializer_configs(
+        {"child": NestedSerializerConfig(exclude=declared, optional_fields=declared)},
+    )
+
+    assert normalized is not None
+    assert normalized["child"].exclude == tuple(canonical_order(declared))
+    assert normalized["child"].optional_fields == tuple(canonical_order(declared))
+    with pytest.raises(ConfigurationError, match="ordered sequence of field name strings"):
+        normalize_nested_serializer_configs({"child": NestedSerializerConfig(fields=declared)})
 
 
 def test_nested_serializer_config_normalization_handles_cycles_and_passthrough_values() -> None:

@@ -597,7 +597,7 @@ class _RequestBodyBoundaryMixin(_BoundaryMixinBase):
     materialized it, the one shape named at the end of this paragraph - and that
     the rejection is a tested ``413``.
 
-    For a **multipart** request the declared gate is what runs, and what it now
+    For a **multipart** request the declared gate is what runs, and what it
     genuinely precedes is stated exactly: the ``413`` is raised before
     ``request.POST``, ``request.FILES``, ``MultiPartParser``, or any upload
     handler is entered - because
@@ -1131,12 +1131,14 @@ class DjangoGraphQLView(_RequestBodyBoundaryMixin, GraphQLView[Context, RootValu
 class AsyncDjangoGraphQLView(_RequestBodyBoundaryMixin, AsyncGraphQLView[Context, RootValue]):
     """The asynchronous twin, with an identical surface.
 
-    The shape an ASGI deployment generally wants: ``AsyncGraphQLView.as_view``
-    marks the returned view as a coroutine function, so Django dispatches it on
-    the event loop rather than an executor thread. Resolvers then run in async
-    context, which is why the migration note keeps ``DjangoGraphQLView`` as its
-    default recommendation - adopting the async view is a decision about the
-    consumer's own resolvers, not about the transport.
+    ``AsyncGraphQLView.as_view`` marks the returned view as a coroutine function,
+    so Django dispatches it on the event loop rather than an executor thread, and
+    resolvers run there. Which view to mount therefore follows the consumer's
+    resolvers, not the transport: this one for ``async def`` resolvers (a plain
+    ``def`` resolver that reads the database raises Django's "You cannot call
+    this from an async context" here), ``DjangoGraphQLView`` for plain ``def``
+    ones (it cannot run an ``async def`` resolver). The documented sample
+    mounts the sync view because the package's live tier runs under WSGI.
 
     It carries the same ``max_request_body_bytes=`` keyword, the same cap
     contract, and the same strict UTF-8 wire contract - all three from the one

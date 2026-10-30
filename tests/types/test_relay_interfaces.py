@@ -52,10 +52,11 @@ from django_strawberry_framework.types.relay import (
     encode_typename,
     implements_relay_node,
     install_relay_node_resolvers,
+    model_for_label_slot,
     published_node_type_name,
 )
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import class_dict, require
+from django_strawberry_framework.utils._narrowing import require
 from django_strawberry_framework.utils.querysets import model_for
 from django_strawberry_framework.utils.typing import call_forwarded, object_result
 from tests._idioms import async_relay_hooks, comparing_metaclass, relay_hooks, saved_pk
@@ -72,7 +73,7 @@ def _is_classmethod(value: object) -> "TypeIs[classmethod[object, ..., object]]"
 
 def _classmethod_func(cls: type, attr: str) -> object:
     """The function behind the ``classmethod`` ``cls`` declares in its own namespace as ``attr``."""
-    return require(class_dict(cls)[attr], _is_classmethod).__func__
+    return require(truth.class_dict(cls)[attr], _is_classmethod).__func__
 
 
 pytestmark = pytest.mark.usefixtures("isolate_global_registry")
@@ -386,7 +387,7 @@ def test_is_type_of_injected_for_all_djangotypes() -> None:
         (ItemNode, Item, Category),
     ):
         assert "is_type_of" in type_cls.__dict__
-        is_type_of = class_dict(type_cls)["is_type_of"]
+        is_type_of = truth.class_dict(type_cls)["is_type_of"]
         assert callable(is_type_of)
         assert is_type_of(model_cls(), None) is True
         assert is_type_of(other_model_cls(), None) is False
@@ -434,7 +435,7 @@ def test_is_type_of_hostile_cast_lookup_falls_back_to_instance_check() -> None:
             model = Category
             fields = ("id", "name")
 
-    is_type_of = class_dict(CategoryNode)["is_type_of"]
+    is_type_of = truth.class_dict(CategoryNode)["is_type_of"]
     assert callable(is_type_of)
     assert is_type_of(Category(), None) is True
     assert is_type_of(HostileObject(), None) is False
@@ -474,6 +475,7 @@ def test_relay_node_strips_django_id_annotation() -> None:
         _Host,
         fields,
         source_model=Category,
+        meta_name=None,
         interfaces=(relay.Node,),
     )
     assert "id" not in synthesized
@@ -516,6 +518,7 @@ def test_extended_node_interface_subclass_suppresses_id_annotation() -> None:
         _Host,
         fields,
         source_model=Category,
+        meta_name=None,
         interfaces=(CustomNode,),
     )
     assert "id" not in synthesized
@@ -540,6 +543,7 @@ def test_non_relay_type_keeps_id_int() -> None:
         _Host,
         fields,
         source_model=Category,
+        meta_name=None,
         interfaces=(),
     )
     assert "id" in synthesized
@@ -568,7 +572,7 @@ def test_relay_node_injects_default_resolvers() -> None:
     assert relay.Node in CategoryNode.__mro__
     for attr in ("resolve_id", "resolve_id_attr", "resolve_nodes"):
         assert attr in CategoryNode.__dict__, f"{attr} was not injected"
-        descriptor = class_dict(CategoryNode)[attr]
+        descriptor = truth.class_dict(CategoryNode)[attr]
         assert isinstance(descriptor, classmethod)
     assert "resolve_node" not in CategoryNode.__dict__
     assert not truth.overrides(CategoryNode, relay.Node, "resolve_node")
@@ -991,7 +995,7 @@ def test_resolve_node_sync_with_async_get_queryset_raises() -> None:
 
     finalize_django_types()
     hooks = relay_hooks(CategoryNode, Category)
-    with pytest.raises(ConfigurationError, match="returned a coroutine"):
+    with pytest.raises(ConfigurationError, match=r"returned a coroutine.*Relay node defaults"):
         hooks.resolve_node(1, info=None)
 
 
@@ -1029,7 +1033,7 @@ def test_sync_misuse_raises_sync_misuse_error_subclass() -> None:
 
     finalize_django_types()
     hooks = relay_hooks(CategoryNode, Category)
-    with pytest.raises(SyncMisuseError, match="returned a coroutine"):
+    with pytest.raises(SyncMisuseError, match=r"returned a coroutine.*Relay node defaults"):
         hooks.resolve_node(1, info=None)
 
 
@@ -1061,7 +1065,7 @@ def test_resolve_nodes_sync_with_async_get_queryset_raises() -> None:
 
     finalize_django_types()
     hooks = relay_hooks(CategoryNode, Category)
-    with pytest.raises(ConfigurationError, match="returned a coroutine"):
+    with pytest.raises(ConfigurationError, match=r"returned a coroutine.*Relay node defaults"):
         hooks.resolve_nodes(info=None)
 
 
@@ -1340,6 +1344,30 @@ def test_relay_chain_distinct_node_ids_resolve_independently_any_call_order() ->
     assert ChildNode.resolve_id_attr() == "created_date"
 
 
+def test_resolve_id_attr_default_refuses_a_class_finalize_has_not_stamped() -> None:
+    """An unstamped class has no id attribute yet: the default names finalize, never guesses ``"pk"``.
+
+    The reachable shape is a class registered after a finalize that failed part-way,
+    inheriting a stamped parent's installed default; a direct call on a registered,
+    unfinalized type reads the same empty slot. Finalizing stamps it.
+    """
+
+    class CategoryNode(DjangoType, relay.Node):
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+
+    assert implements_relay_node(CategoryNode)
+    with pytest.raises(ConfigurationError) as exc_info:
+        _resolve_id_attr_default(CategoryNode)
+    assert str(exc_info.value) == (
+        "CategoryNode has no Relay id attribute yet: finalize_django_types() has not finished "
+        "for it. Run finalize_django_types() before reading its ids."
+    )
+    finalize_django_types()
+    assert _resolve_id_attr_default(CategoryNode) == "pk"
+
+
 def test_resolve_id_attr_reads_stamp_without_rescanning(monkeypatch: pytest.MonkeyPatch) -> None:
     """Post-finalize ``resolve_id_attr`` is a dict read, not an annotation scan.
 
@@ -1365,69 +1393,6 @@ def test_resolve_id_attr_reads_stamp_without_rescanning(monkeypatch: pytest.Monk
     monkeypatch.setattr(relay.Node, "resolve_id_attr", classmethod(_boom))
     assert implements_relay_node(CategoryNode)
     assert CategoryNode.resolve_id_attr() == "pk"
-
-
-def test_resolve_id_attr_live_scan_fallback_for_post_finalize_subclasses() -> None:
-    """An UNSTAMPED class (defined after finalize) resolves via a live scan.
-
-    A subclass created post-finalization inherits the installed default but
-    was never stamped; the default stamps it from Strawberry's scan on its
-    first read - a declared ``NodeID`` wins, no annotation maps to ``"pk"``.
-    """
-
-    class CategoryNode(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
-
-    finalize_django_types()
-
-    class LatePlain(CategoryNode):
-        pass
-
-    class LateWithNodeID(CategoryNode):
-        name: relay.NodeID[str]
-
-    assert implements_relay_node(LatePlain)
-    assert implements_relay_node(LateWithNodeID)
-    assert "_dsf_relay_id_attr" not in LatePlain.__dict__
-    assert _resolve_id_attr_default(LatePlain) == "pk"
-    assert _resolve_id_attr_default(LateWithNodeID) == "name"
-
-
-def test_late_subclass_with_a_different_node_id_than_a_stamped_parent_resolves_its_own(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A subclass defined after finalize resolves its OWN ``NodeID``, scanned once.
-
-    Finalize leaves the parent's declared column in Strawberry's ``_id_attr``
-    cache, which subclasses inherit, so a bare scan of the late subclass
-    answers with the parent's column. Its first read stamps it from its own
-    annotations instead, and later reads never rescan.
-    """
-
-    class ParentNode(DjangoType):
-        name: relay.NodeID[str]
-
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
-
-    finalize_django_types()
-
-    class LateChild(ParentNode):
-        created_date: relay.NodeID[str]
-
-    assert implements_relay_node(LateChild)
-    assert LateChild.resolve_id_attr() == "created_date"
-
-    def _boom(_cls: type[relay.Node]) -> NoReturn:
-        raise AssertionError("upstream scan must not run for a stamped type")
-
-    monkeypatch.setattr(relay.Node, "resolve_id_attr", classmethod(_boom))
-    assert LateChild.resolve_id_attr() == "created_date"
 
 
 def test_relay_chain_composite_pk_child_still_gated(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1680,6 +1645,7 @@ def test_direct_relay_node_inheritance_suppresses_id_annotation() -> None:
         _Host,
         fields,
         source_model=Category,
+        meta_name=None,
         interfaces=(),
     )
     assert "id" not in synthesized
@@ -2485,7 +2451,7 @@ def test_plain_or_static_resolve_typename_is_classified_override(shape: str) -> 
     stored = _plant_resolve_typename(CategoryNode, shape)
     finalize_django_types()
     assert _definition_of(CategoryNode).effective_globalid_strategy == "custom"
-    assert class_dict(CategoryNode)["resolve_typename"] is stored
+    assert truth.class_dict(CategoryNode)["resolve_typename"] is stored
     assert _emitted_typename(CategoryNode) == "ConsumerOwned"
 
 
@@ -2507,7 +2473,7 @@ def test_resolve_typename_declared_none_is_not_an_override() -> None:
 
     finalize_django_types()
     assert _definition_of(CategoryNode).effective_globalid_strategy == "model"
-    installed = truth.stored_function(class_dict(CategoryNode)["resolve_typename"])
+    installed = truth.stored_function(truth.class_dict(CategoryNode)["resolve_typename"])
     assert truth.static_attr(installed, types_relay._FRAMEWORK_CLOSURE_MARKER) is True
     assert _emitted_typename(CategoryNode) == "products.category"
 
@@ -2548,12 +2514,12 @@ def test_relay_node_default_re_export_is_not_an_override() -> None:
         resolve_id = relay.Node.resolve_id
         resolve_typename = relay.Node.resolve_typename
 
-    assert type(class_dict(CategoryNode)["resolve_id"]) is MethodType
-    assert type(class_dict(CategoryNode)["resolve_typename"]) is MethodType
+    assert type(truth.class_dict(CategoryNode)["resolve_id"]) is MethodType
+    assert type(truth.class_dict(CategoryNode)["resolve_typename"]) is MethodType
     assert origin_has_custom_id_resolver(CategoryNode, "id") is False
     finalize_django_types()
     assert _classmethod_func(CategoryNode, "resolve_id") is truth.stored_function(
-        class_dict(relay.Node)["resolve_id"],
+        truth.class_dict(relay.Node)["resolve_id"],
     )
     assert relay_hooks(CategoryNode, Category).resolve_id(Category(id=5), info=None) == 5
     assert _definition_of(CategoryNode).effective_globalid_strategy == "model"
@@ -2579,7 +2545,7 @@ def test_relay_node_resolve_id_re_export_on_a_mixin_is_re_bound_to_the_type() ->
     assert origin_has_custom_id_resolver(CategoryNode, "id") is False
     finalize_django_types()
     assert _classmethod_func(CategoryNode, "resolve_id") is truth.stored_function(
-        class_dict(relay.Node)["resolve_id"],
+        truth.class_dict(relay.Node)["resolve_id"],
     )
     assert relay_hooks(CategoryNode, Category).resolve_id(Category(id=5), info=None) == 5
 
@@ -3015,6 +2981,26 @@ def _emitted_type_name_slot(type_cls: type[DjangoType]) -> str:
 def _encoded_id(type_cls: type[DjangoType], *, node_id: str = "1") -> str:
     """Return the base64 ``GlobalID`` string a finalized Relay type emits."""
     return str(relay.GlobalID(_emitted_type_name_slot(type_cls), node_id))
+
+
+@pytest.mark.parametrize(
+    ("label", "expected"),
+    [
+        pytest.param("products.item", Item, id="label_lower"),
+        pytest.param("products.ITEM", Item, id="upper_model_name"),
+        pytest.param("products.Item", Item, id="class_name_casing"),
+        pytest.param("Products.item", None, id="app_label_case_is_exact"),
+        pytest.param("nosuchapp.item", None, id="unknown_app"),
+        pytest.param("products.nosuchmodel", None, id="unknown_model"),
+        pytest.param("products.", None, id="empty_model_name"),
+    ],
+)
+def test_model_for_label_slot_reads_the_label_the_way_apps_get_model_does(
+    label: str,
+    expected: type[Model] | None,
+) -> None:
+    """The app label is exact, the model name case-insensitive; a label naming no model is None."""
+    assert model_for_label_slot(label) is expected
 
 
 def test_decode_model_label_routes_to_primary() -> None:

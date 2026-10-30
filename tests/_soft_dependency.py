@@ -29,7 +29,7 @@ import sys
 from collections.abc import Generator
 from types import ModuleType
 
-from django_strawberry_framework.utils._narrowing import instance_dict
+from django_strawberry_framework.utils import truth
 
 
 def _matches(name: str, prefixes: tuple[str, ...]) -> bool:
@@ -49,7 +49,7 @@ def evicted_modules(
     the saved ``{name: module}`` mapping so a caller can reinstate individual real modules
     for a broken-install simulation. ``parent``/``attr`` name the framework attribute a
     blocked-then-retried import would rebind to a fresh module object; presence is
-    tracked with a ``missing`` sentinel via ``instance_dict(parent).get(attr, missing)`` and
+    tracked with a ``missing`` sentinel via ``truth.instance_state(parent).get(attr, missing)`` and
     restored on exit through ``vars(parent).pop`` / ``setattr`` - every read and write
     goes through ``__dict__`` directly so a package ``__getattr__`` never fires, not even
     on teardown (a ``hasattr(parent, attr)`` probe there would). This two-sided restore
@@ -57,7 +57,7 @@ def evicted_modules(
     object under ``pytest-xdist``.
     """
     missing = object()
-    saved_attr = instance_dict(parent).get(attr, missing)
+    saved_attr = truth.instance_state(parent).get(attr, missing)
     saved = {name: sys.modules.pop(name) for name in list(sys.modules) if _matches(name, prefixes)}
     try:
         yield saved

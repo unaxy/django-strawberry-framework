@@ -15,7 +15,6 @@ import sys
 import types
 
 import pytest
-from typing_extensions import override
 
 from django_strawberry_framework.utils.imports import (
     import_attr,
@@ -23,25 +22,9 @@ from django_strawberry_framework.utils.imports import (
     loaded_attr,
     require_optional_module,
 )
-from tests._idioms import module_binding, stub_module
+from tests._idioms import stub_module
 
 _HINT = "TestFeature requires somepackage. Install it with `pip install somepackage`."
-
-
-class _HostileString(str):
-    @override
-    def __hash__(self) -> int:
-        raise RuntimeError("hostile hash")
-
-    @override
-    def __str__(self) -> str:
-        raise RuntimeError("hostile string")
-
-
-class _HostileHint(str):
-    @override
-    def __str__(self) -> str:
-        raise RuntimeError("hostile hint")
 
 
 def test_require_optional_module_returns_the_real_module_on_success() -> None:
@@ -152,29 +135,3 @@ def test_import_attr_raises_attribute_error_on_missing_attribute() -> None:
 
 def test_import_attr_if_importable_returns_none_on_absent_module() -> None:
     assert import_attr_if_importable("definitely_not_an_installed_module_dsf", "Anything") is None
-
-
-def test_import_helpers_normalize_hostile_string_subclass_names(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A hostile name must not escape through ``sys.modules`` hashing or getattr."""
-    module_path = "dsf_hostile_name_module"
-    fake = stub_module(module_path, Marker=object())
-    monkeypatch.setitem(sys.modules, module_path, fake)
-    hostile_path = _HostileString(module_path)
-    hostile_attr = _HostileString("Marker")
-
-    marker = module_binding(fake, "Marker")
-    assert loaded_attr(hostile_path, hostile_attr) is marker
-    assert import_attr_if_importable(hostile_path, hostile_attr) is marker
-    assert import_attr(hostile_path, hostile_attr) is marker
-
-
-def test_require_optional_module_normalizes_a_hostile_install_hint() -> None:
-    with pytest.raises(ImportError) as exc_info:
-        require_optional_module(
-            "dsf_missing_module_for_hostile_hint",
-            install_hint=_HostileHint(_HINT),
-        )
-
-    assert str(exc_info.value) == _HINT

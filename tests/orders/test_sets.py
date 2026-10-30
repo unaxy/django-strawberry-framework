@@ -39,6 +39,7 @@ from apps.library.models import (
 )
 from asgiref.sync import sync_to_async
 from django.contrib.auth.models import AnonymousUser, User
+from django.db import connection
 from django.db.models import F, Min, Model, QuerySet
 from django.http import HttpRequest
 from django.utils.functional import SimpleLazyObject
@@ -85,6 +86,7 @@ from tests._idioms import (
     run_capturing,
     str_subclass_name,
 )
+from tests._relation_fixtures import RpGenericTag, generic_fixture_rows
 
 _M = TypeVar("_M", bound=Model)
 
@@ -3701,3 +3703,33 @@ def test_reentering_path_orders_by_the_rows_the_sets_bound_type_shows() -> None:
         _make_info(),
     )
     assert list(ordered.values_list("code", flat=True)) == ["S2", "S1"]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_orders_over_a_visible_reverse_generic_relation_order_by_the_one_holder() -> None:
+    """The reverse ``GenericRel`` orders as the single-valued relation it is.
+
+    The relation orders by the holder's key and a path through it by that one holder's
+    column, as Django's own ``order_by("holder")`` does, with no aggregate; the stray
+    tag, which belongs to no holder, orders as Django orders a missing holder.
+    """
+
+    class RpGenericTagOrder(OrderSet):
+        class Meta:
+            model = RpGenericTag
+            fields = ["holder", "holder__title"]
+
+    with generic_fixture_rows(connection):
+        rows = RpGenericTag.objects.all()
+        by_holder = RpGenericTagOrder.apply_sync({"holder": Ordering.DESC}, rows, _make_info())
+        by_title = RpGenericTagOrder.apply_sync(
+            {"holder_title": Ordering.ASC},
+            rows,
+            _make_info(),
+        )
+        titled = list(by_title.values_list("name", flat=True))
+        assert list(by_holder.values_list("name", flat=True)) == list(
+            rows.order_by("-holder").values_list("name", flat=True),
+        )
+        assert titled == list(rows.order_by("holder__title").values_list("name", flat=True))
+        assert titled.index("t2") < titled.index("t1")

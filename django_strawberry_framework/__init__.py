@@ -69,7 +69,7 @@ __version__ = "0.0.15"
 # ``SerializerFieldConversion`` are the public serializer-field converter-registry
 # surface (a consumer registers a converter returning a ``SerializerFieldConversion``);
 # ``NestedSerializerConfig`` is the explicit opt-in for nested serializer inputs
-# (``Meta.nested_fields = {"items": NestedSerializerConfig(...)}``, spec-039).
+# (``Meta.nested_fields = {"items": NestedSerializerConfig(...)}``).
 _DRF_SOFT_EXPORTS: dict[str, tuple[str, str]] = {
     "SerializerMutation": (".rest_framework.sets", "SerializerMutation"),
     "register_serializer_field_converter": (
@@ -116,7 +116,7 @@ def __getattr__(name: str) -> Any:  # pyright: ignore[reportExplicitAny, reportA
 
     PEP 562 module-level ``__getattr__``: ``from django_strawberry_framework import
     SerializerMutation`` (and ``register_serializer_field_converter`` /
-    ``SerializerFieldConversion``, spec-039) resolves by NAME through
+    ``SerializerFieldConversion``) resolves by NAME through
     ``rest_framework.require_drf()`` (the shared DRF guard), so a DRF-absent consumer
     gets the install-hint ``ImportError`` only when they reach for one of these names -
     ``import django_strawberry_framework`` itself never eagerly imports

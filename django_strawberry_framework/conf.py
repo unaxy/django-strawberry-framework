@@ -59,7 +59,7 @@ DJANGO_SETTINGS_KEY = "DJANGO_STRAWBERRY_FRAMEWORK"
 _DISPATCH_UID = "django_strawberry_framework.conf.reload_settings"
 
 # Toggle for the defensive patches the package ships for upstream bugs
-# (see the four dependency-owned ``_*_patches`` modules).
+# (see the dependency-owned ``_*_patches`` modules).
 # Accepts a ``bool`` (the global toggle) or a ``Mapping[str, bool]`` keyed by
 # ``UPSTREAM_PATCH_DEPENDENCIES`` names (per-dependency opt-out; missing names
 # stay enabled). Opt-out: defaults to ``True`` so consumers get the fixes
@@ -448,11 +448,10 @@ def upstream_patches_enabled(dependency: str) -> bool:
     fails loud at the first gate regardless of which patch module reads
     first.
 
-    Internal API (not exported from the package ``__init__``): the only
-    callers are the four patch modules' ``apply()`` gates, each passing
-    its own canonical name. A ``dependency`` outside
-    ``UPSTREAM_PATCH_DEPENDENCIES`` raises ``ValueError`` so the
-    constant and the gate call sites cannot drift apart.
+    Internal API (not exported from the package ``__init__``): each patch
+    module's ``apply()`` gates on its own canonical name; a ``dependency``
+    outside ``UPSTREAM_PATCH_DEPENDENCIES`` raises ``ValueError``, so the
+    constant and the gate names cannot drift.
 
     Read once per patch ``apply()`` (i.e. at app load). A *malformed*
     (non-mapping) ``DJANGO_STRAWBERRY_FRAMEWORK`` value still fails loud

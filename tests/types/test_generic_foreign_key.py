@@ -5,20 +5,31 @@ payloads over HTTP live in
 ``examples/fakeshop/test_query/test_library_api.py``
 (``test_generic_relation_tags_resolve_over_http_with_optimizer``). This module
 keeps the GFK auto-map refusal, exclude-and-finalize field set, and the
-``list[TaggedItemType]`` annotation rewrite.
+``list[TaggedItemType]`` annotation rewrite, and the refusal of the reverse
+``GenericRel`` a ``related_query_name`` makes visible on the generic-key model.
 """
 
+import re
 from collections.abc import Iterator
 
 import pytest
 from apps.library.models import Branch, TaggedItem
 from django.contrib.contenttypes.models import ContentType
+from strawberry import relay
 from strawberry.types import get_object_definition
 
 from django_strawberry_framework import DjangoType, finalize_django_types
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.registry import registry
 from tests._idioms import definition_raises
+from tests._relation_fixtures import RpGenericTag
+
+_REVERSE_GENERIC_REFUSAL = (
+    "RpGenericTag.holder is the reverse side of a GenericRelation (its related_query_name). "
+    "Django can neither select_related it nor read it as a related object, so it cannot be "
+    "auto-mapped to a GraphQL type. Exclude it via Meta.exclude, or supply an explicit "
+    "annotation or resolver."
+)
 
 
 @pytest.fixture(autouse=True)
@@ -37,6 +48,57 @@ def test_generic_foreign_key_raises_configuration_error() -> None:
             class Meta:
                 model = TaggedItem
                 fields = "__all__"
+
+
+@pytest.mark.parametrize(
+    ("fields", "exclude"),
+    [(("id", "holder"), None), (None, ("content_object", "content_type"))],
+    ids=["named_in_fields", "left_in_by_exclude"],
+)
+def test_visible_reverse_generic_relation_is_refused_at_declaration(
+    fields: tuple[str, ...] | None,
+    exclude: tuple[str, ...] | None,
+) -> None:
+    """The reverse ``GenericRel`` is no related object Django can join or read.
+
+    ``select_related`` refuses it and its instance accessor is the holder's
+    manager, so a type that selects it is refused when it is declared, never
+    published as a single related object that fails every query reading it.
+    """
+    meta_attrs = {"model": RpGenericTag, "fields": fields, "exclude": exclude}
+    meta = type("Meta", (), {k: v for k, v in meta_attrs.items() if v is not None})
+    with pytest.raises(ConfigurationError, match=re.escape(_REVERSE_GENERIC_REFUSAL)):
+        type("RpGenericTagType", (DjangoType,), {"__module__": __name__, "Meta": meta})
+    assert registry.get(RpGenericTag) is None
+
+
+def test_visible_reverse_generic_relation_names_its_shape_in_relation_shapes() -> None:
+    """A ``relation_shapes`` entry over it is the single-valued refusal, naming the shape."""
+    with pytest.raises(
+        ConfigurationError,
+        match=re.escape("names single-valued relation 'holder' (reverse GenericRelation)"),
+    ):
+
+        @definition_raises
+        class RpGenericTagType(DjangoType):
+            class Meta:
+                model = RpGenericTag
+                fields = ("id", "holder")
+                interfaces = (relay.Node,)
+                relation_shapes = {"holder": "connection"}
+
+
+def test_consumer_authored_reverse_generic_relation_is_exempt() -> None:
+    """A consumer-authored field over it owns its shape, so the declaration stands."""
+
+    class RpGenericTagType(DjangoType):
+        holder: str
+
+        class Meta:
+            model = RpGenericTag
+            fields = ("id", "holder")
+
+    assert registry.get(RpGenericTag) is RpGenericTagType
 
 
 def test_generic_foreign_key_works_if_excluded() -> None:

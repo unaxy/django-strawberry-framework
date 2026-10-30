@@ -519,7 +519,7 @@ def _sql_statement_token(sql: object) -> str:
     # ``execute_wrapper`` receives the object handed to ``cursor.execute``.
     # A consumer can supply a ``str`` subclass whose indexing / slicing methods
     # lie about the statement while the database adapter still executes the
-    # subclass's base string content. Normalize through ``str.__str__`` before
+    # subclass's base string content. Normalize through ``truth.text`` before
     # lexical inspection so the phase guard classifies exactly the text the
     # adapter sees, never consumer-controlled string behavior.
     if not truth.is_instance(sql, str):
@@ -563,13 +563,7 @@ def is_read_only_sql(sql: object) -> bool:
     return _sql_statement_token(sql) in _READ_ONLY_SQL_PREFIXES
 
 
-def make_cross_alias_save_guard(
-    alias: str,
-    *,
-    actor: str,
-    recourse: str,
-    guard_thread: int | None = None,
-) -> _PreSaveReceiver:
+def make_cross_alias_save_guard(alias: str, *, actor: str, recourse: str) -> _PreSaveReceiver:
     """Build the thread-scoped ``pre_save`` receiver rejecting a cross-alias save.
 
     The one body behind the two ``pre_save`` cross-alias blockers: the
@@ -580,10 +574,10 @@ def make_cross_alias_save_guard(
     earlier error than the connection-level statement guard. ``actor`` and
     ``recourse`` are the per-site message halves (who attempted the save; where
     to route it); the sentence between them is spelled once here. The receiver
-    is thread-scoped explicitly (``pre_save`` is a global signal) -
-    ``guard_thread`` defaults to the creating thread.
+    is thread-scoped explicitly (``pre_save`` is a global signal) - scoped to
+    the creating thread.
     """
-    owner_thread = threading.get_ident() if guard_thread is None else guard_thread
+    owner_thread = threading.get_ident()
 
     def _block_cross_alias_save(sender: type[models.Model], using: str, **kwargs: object) -> None:
         del kwargs
@@ -644,7 +638,6 @@ def pipeline_alias_guard(owner: str, alias: str) -> Generator[None, None, None]:
     a clearer, earlier error - before Django even opens the cross-alias
     connection.
     """
-    guard_thread = threading.get_ident()
     pipeline = _WRITE_PIPELINE.get()
 
     def _reject_writes_outside_write_phase(
@@ -702,7 +695,6 @@ def pipeline_alias_guard(owner: str, alias: str) -> Generator[None, None, None]:
         alias,
         actor=f"{owner}: the mutation pipeline",
         recourse="the pinned write alias",
-        guard_thread=guard_thread,
     )
 
     with ExitStack() as stack:
@@ -1136,14 +1128,7 @@ def _field_fingerprint(value: object) -> str:
                 "consumer-controlled data whose structure has no end.",
             )
         active.add(container_id)
-        # Every container is read through its BASE iterator
-        # (``utils/canonical.py::base_container_values``) and every unordered
-        # one is ordered by the canonical sort key, never a bare ``repr``: a subclass
-        # that reports different contents per call, or a ``__repr__`` that
-        # returns a constant, would otherwise let two structurally different
-        # values fingerprint the SAME - and a drift check that cannot tell
-        # them apart is the fail-open this walk exists to prevent. Each branch reads
-        # its own container, so a ``dict`` answers its ``(key, value)`` pairs.
+        # Each branch reads its own container, so a ``dict`` answers its ``(key, value)`` pairs.
         if truth.is_instance(item, dict):
             parts.append("{")
             stack.append(_SnapshotClose("}", container_id))
@@ -1152,9 +1137,6 @@ def _field_fingerprint(value: object) -> str:
                 key=lambda pair: canonical_sort_key(pair[0]),
                 reverse=True,
             ):
-                # The KEY is walked as a node (the same treatment a
-                # value gets), with a fixed divider between key and value - never
-                # a ``repr`` label, which a lying key could forge.
                 stack.append(member)
                 stack.append(_SnapshotClose("=v"))
                 stack.append(key)

@@ -147,9 +147,9 @@ from django_strawberry_framework.rest_framework.serializer_converter import (
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.types import relay as relay_module
 from django_strawberry_framework.types.converters import SCALAR_MAP
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     call_method,
-    is_class,
     is_list,
     is_mapping,
     is_tuple,
@@ -5915,7 +5915,7 @@ def _nested_child_input_cls(top_cls: type[object]) -> Callable[..., object]:
     field = next(f for f in definition.fields if f.python_name == "detail")
     field_type = field.type
     child_cls = field_type.of_type if isinstance(field_type, StrawberryContainer) else field_type
-    assert is_class(child_cls)
+    assert truth.is_type(child_cls)
     return _keyword_constructor(child_cls)
 
 

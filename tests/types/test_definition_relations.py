@@ -3,9 +3,8 @@
 Three surfaces, all reached through a directly constructed or
 registry-resolved ``DjangoTypeDefinition``:
 
-- ``related_target_for``: the lookup powering the spec-027 Decision 4 owner-aware
-  FK/PK conditional in ``FilterSet.filter_for_field`` /
-  ``filter_for_lookup``. Covers forward FK, forward M2M, reverse FK (via
+- ``related_target_for``: the per-segment lookup the GlobalID filter's
+  request-time path walk and the optimizer walker consult. Covers forward FK, forward M2M, reverse FK (via
   ``Book.loans`` -> ``Loan.book`` with ``related_name="loans"``),
   OneToOne in both directions, scalar non-relation field, missing field,
   ``GenericForeignKey``, unregistered target, primary-wins target
@@ -220,10 +219,10 @@ def test_graphql_type_name_reads_the_origin_name_past_a_hostile_metaclass() -> N
                 raise RuntimeError("name exploded")
             return object_result(super().__getattribute__, name)
 
-    class _HostileOrigin(metaclass=_HostileMeta):
+    class HostileOrigin(metaclass=_HostileMeta):
         pass
 
-    assert _malformed_definition(origin=_HostileOrigin).graphql_type_name == "_HostileOrigin"
+    assert _malformed_definition(origin=HostileOrigin).graphql_type_name == "HostileOrigin"
 
 
 def test_related_target_lookup_propagates_malformed_model_and_relation_metadata(
@@ -661,8 +660,8 @@ def test_related_target_for_resolves_to_primary_when_two_types_share_target_mode
     chain. The single call is safe only because ``registry.get`` itself
     honors ``_primaries`` as its first return state; this test pins
     that end-to-end so a future change that breaks the primary-first
-    rule in ``registry.get`` surfaces here before the spec-027 Decision 4
-    owner-aware FK/PK lookup silently swings to the wrong target.
+    rule in ``registry.get`` surfaces here before a relation's resolved
+    target silently swings to the wrong type.
     """
 
     class ShelfType(DjangoType):

@@ -224,8 +224,6 @@
 "examples/fakeshop/test_query/test_connection_pagination_api.py::_TenantScopedGenreQuerySet.query" = { reportIncompatibleVariableOverride = 1 }
 "examples/fakeshop/test_query/test_debug_extension_api.py::install_probe_schema.Query.broken_non_null" = { reportReturnType = 1 }
 "examples/fakeshop/test_query/test_debug_toolbar_api.py::_debug_toolbar_cache_state" = { reportUnknownMemberType = 2 }
-"examples/fakeshop/test_query/test_extension_isolation_api.py::_ClaimsAnAuthority.__class__" = { reportIncompatibleMethodOverride = 1 }
-"examples/fakeshop/test_query/test_extension_isolation_api.py::_ClaimsAnExtension.__class__" = { reportIncompatibleMethodOverride = 1 }
 "examples/fakeshop/test_query/test_extension_isolation_api.py::_HybridAuthority" = { reportUnsafeMultipleInheritance = 1 }
 "examples/fakeshop/test_query/test_extension_isolation_api.py::_ladder_schema" = { reportArgumentType = 1 }
 "examples/fakeshop/test_query/test_extension_isolation_api.py::_rebuild_the_box" = { reportCallIssue = 1 }
@@ -479,16 +477,11 @@
 "tests/rest_framework/test_sets.py::test_nested_fields_cycle_raises_configuration_error_at_class_creation.RecursiveCategorySerializer" = { reportAssignmentType = 1 }
 "tests/rest_framework/test_sets.py::test_nested_request_reading_child_fails_at_class_creation_naming_the_override.Parent.Meta" = { reportIncompatibleVariableOverride = 1 }
 "tests/rest_framework/test_sets.py::test_request_reading_serializer_without_schema_hook_fails_at_class_creation.RequestItemSerializer.Meta" = { reportIncompatibleVariableOverride = 1 }
-"tests/rest_framework/test_sets.py::test_schema_field_map_non_identifier_key_fails_typed_once_kept.BadKeyEntries.items" = { reportIncompatibleMethodOverride = 1 }
-"tests/rest_framework/test_sets.py::test_schema_field_map_rejects_str_subclass_key.OneSubclassKey.items" = { reportIncompatibleMethodOverride = 1 }
-"tests/rest_framework/test_sets.py::test_schema_field_map_reports_malformed_entries.MalformedEntries.items" = { reportIncompatibleMethodOverride = 1 }
 "tests/rest_framework/test_sets.py::test_schema_hook_mapping_iteration_error_propagates.InvalidSchemaMapMutation.get_serializer_for_schema" = { reportIncompatibleMethodOverride = 1 }
 "tests/rest_framework/test_sets.py::test_schema_hook_rejects_invalid_field_map_at_class_creation.InvalidSchemaMapMutation.get_serializer_for_schema" = { reportIncompatibleMethodOverride = 1 }
 "tests/rest_framework/test_sets.py::test_subclass_redefining_serializer_validates_against_child_serializer.CreateItemViaSubclass.Meta" = { reportIncompatibleVariableOverride = 1 }
 "tests/rest_framework/test_sets.py::test_validate_nested_fields_child_serializer_errors.BrokenConfigChild.fields" = { reportIncompatibleVariableOverride = 1 }
 "tests/rest_framework/test_sets.py::test_validate_nested_fields_child_serializer_errors.BrokenExcChild.fields" = { reportIncompatibleVariableOverride = 1 }
-"tests/rest_framework/test_sets.py::test_validate_nested_fields_rejects_malformed_entries.MalformedEntries.items" = { reportIncompatibleMethodOverride = 1 }
-"tests/rest_framework/test_sets.py::test_validate_nested_fields_rejects_non_plain_string_keys.HostileKeyEntries.items" = { reportIncompatibleMethodOverride = 1 }
 "tests/test_bench_common.py::test_bootstrap_refuses_an_unknown_mode_before_touching_django" = { reportArgumentType = 1 }
 "tests/test_connection.py::_HostileConnQuerySet.__getitem__" = { reportIncompatibleMethodOverride = 1 }
 "tests/test_connection.py::_ListManager.all" = { reportIncompatibleMethodOverride = 1 }

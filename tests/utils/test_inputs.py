@@ -42,10 +42,7 @@ from django_strawberry_framework.orders.factories import OrderArgumentsFactory
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.rest_framework import inputs as ser_inputs
 from django_strawberry_framework.rest_framework import sets as ser_sets
-from django_strawberry_framework.sets_mixins import (
-    ClassBasedTypeNameMixin,
-    is_re_readable_field_declaration,
-)
+from django_strawberry_framework.sets_mixins import ClassBasedTypeNameMixin
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     is_dict,
@@ -74,6 +71,7 @@ from django_strawberry_framework.utils.inputs import (
     get_or_store_shape_build,
     graphql_camel_name,
     is_input_attribute_name,
+    is_re_readable_field_declaration,
     iter_input_field_collisions,
     iter_provided_input_fields,
     iter_set_subclasses,
@@ -92,7 +90,6 @@ from django_strawberry_framework.utils.inputs import (
     reject_unknown_meta_keys,
     resolve_effective_fields,
     resolve_set_meta_fields,
-    set_input_type_name,
 )
 from tests._idioms import (
     STR_ENUM,
@@ -169,7 +166,6 @@ def test_builder_pins_names_so_digit_boundary_fields_do_not_silently_collide() -
         entries,
         related_of=lambda _t, _e: None,
         leaf_of=lambda _t, _pa, _e: (int | None, _t),
-        input_type_name_for=lambda cls: cls.__name__,
         module_path=__name__,
         field_specs=field_specs,
     )
@@ -309,17 +305,12 @@ def test_filter_and_order_families_share_one_substrate() -> None:
     """Both ``inputs`` modules re-export the SAME shared mechanics by identity.
 
     This is the single-substrate contract guard: if a future change re-introduces a
-    family-local copy of the builder / field-spec / camel-name / subclass
-    iterator, these identity assertions fail.
+    family-local copy of the builder or the field-spec, these identity assertions fail.
     """
     assert filter_inputs.FieldSpec is GeneratedInputFieldSpec
     assert order_inputs.FieldSpec is GeneratedInputFieldSpec
     assert filter_inputs.build_input_class is build_strawberry_input_class
     assert order_inputs.build_input_class is build_strawberry_input_class
-    assert filter_inputs._camel_case is graphql_camel_name
-    assert order_inputs._camel_case is graphql_camel_name
-    assert filter_inputs._iter_filterset_subclasses is iter_set_subclasses
-    assert order_inputs._iter_orderset_subclasses is iter_set_subclasses
 
 
 # ---------------------------------------------------------------------------
@@ -487,15 +478,6 @@ def test_make_input_namespace_returns_ledger_materialize_clear_trio() -> None:
     delattr(module, "ProbeNamespaceInputType")
 
 
-def test_set_input_type_name_delegates_to_type_name_for() -> None:
-    """``set_input_type_name`` is the one ``<Class>InputType`` derivation site."""
-
-    class _Named(OrderSet):
-        pass
-
-    assert set_input_type_name(_Named) == "_NamedInputType"
-
-
 def test_make_set_input_namespace_returns_heavy_ledger_field_specs_materialize_clear() -> None:
     """Heavy quartet: materialize writes the ledger; clear empties ledger AND field_specs.
 
@@ -549,9 +531,7 @@ def test_make_set_input_namespace_returns_heavy_ledger_field_specs_materialize_c
 
 
 def test_filter_and_order_input_namespaces_ride_make_set_input_namespace() -> None:
-    """Both set families unpack the same factory closures and naming helper."""
-    assert filter_inputs._input_type_name_for is set_input_type_name
-    assert order_inputs._input_type_name_for is set_input_type_name
+    """Both set families unpack the same factory closures."""
     assert read_attr(filter_inputs._materialize_input, "__code__") is read_attr(
         order_inputs._materialize_input,
         "__code__",
@@ -570,31 +550,72 @@ def test_base_container_values_reads_builtin_dict_items() -> None:
 def test_normalize_field_name_sequence_rejects_a_non_iterable_value() -> None:
     """A value ``tuple()`` cannot iterate takes the readable-sequence rejection."""
     with pytest.raises(ConfigurationError) as excinfo:
-        normalize_field_name_sequence(5, flavor="Probe")
+        normalize_field_name_sequence(5, flavor="Probe", ordered=True)
     assert str(excinfo.value) == (
         "Probe Meta.fields must be a readable sequence of field name strings; got int."
     )
 
 
-def test_normalize_field_name_sequence_rejects_unordered_sets() -> None:
-    """A set / frozenset is rejected: its iteration order varies per process.
+def test_normalize_field_name_sequence_rejects_unordered_sets_for_an_ordered_key() -> None:
+    """A set / frozenset is rejected where the key's order reaches the generated shape.
 
-    The serializer flavor folds the DECLARED order into the generated input
-    type name (``rest_framework/inputs.py::serializer_input_type_name``
-    concatenates per-field tokens in walk order), so an unordered container
-    would make the same declaration produce different type names - and SDL
-    field orders - under different ``PYTHONHASHSEED`` values. The model / form
-    flavors sort their name sets (``name_set_input_type_name``); the shape
-    contract is owned once, here.
+    ``Meta.fields`` order is the generated input's field order, and the serializer
+    flavor also folds it into the input type name
+    (``rest_framework/inputs.py::serializer_input_type_name``), so an unordered container
+    would make one declaration produce different SDL under different ``PYTHONHASHSEED``
+    values.
     """
-    with pytest.raises(ConfigurationError, match="ordered sequence of field name strings"):
-        normalize_field_name_sequence({"b", "a"}, label="fields", flavor="SerializerMutation")
-    with pytest.raises(ConfigurationError, match="ordered sequence of field name strings"):
+    declared: tuple[set[str] | frozenset[str], ...] = ({"b", "a"}, frozenset(("b", "a")))
+    for value in declared:
+        with pytest.raises(ConfigurationError, match="ordered sequence of field name strings"):
+            normalize_field_name_sequence(
+                value,
+                label="fields",
+                flavor="SerializerMutation",
+                ordered=True,
+            )
+
+
+@pytest.mark.parametrize("kind", [set, frozenset])
+@pytest.mark.parametrize("label", ["exclude", "optional_fields", "injected_fields"])
+def test_normalize_field_name_sequence_sorts_an_unordered_name_key(
+    kind: type[set[str]] | type[frozenset[str]],
+    label: str,
+) -> None:
+    """A key whose order never reaches the shape accepts a set, stored in canonical order.
+
+    ``scrambled`` iterates out of ``canonical_sort_key`` order in this process, so the row
+    fails under every ``PYTHONHASHSEED`` if the stored tuple follows the hash order.
+    """
+    declared = scrambled(kind, (*_BOOK_NAMES, "publisher"))
+
+    normalized = normalize_field_name_sequence(
+        declared,
+        label=label,
+        flavor="SerializerMutation",
+        ordered=False,
+    )
+
+    assert normalized == tuple(canonical_order(declared))
+    assert list(normalized or ()) != list(declared)
+
+
+@pytest.mark.parametrize("label", ["optional_fields", "injected_fields"])
+def test_normalize_field_name_sequence_refuses_a_duplicate_in_an_unordered_name_key(
+    label: str,
+) -> None:
+    """Accepting a set for a name key keeps the duplicate refusal for a sequence."""
+    with pytest.raises(ConfigurationError) as excinfo:
         normalize_field_name_sequence(
-            frozenset(("b", "a")),
-            label="exclude",
+            ["name", "name"],
+            label=label,
             flavor="SerializerMutation",
+            ordered=False,
         )
+    assert str(excinfo.value) == (
+        f"SerializerMutation Meta.{label} declares duplicate field name(s): ['name']. "
+        "Each field may appear at most once."
+    )
 
 
 def test_input_builder_rejects_malformed_field_specifications() -> None:
@@ -665,7 +686,7 @@ def test_normalize_field_name_sequence_rejects_a_value_whose_class_read_raises(
     Such a value is neither, so it reaches the tuple read, which it fails typed.
     """
     with pytest.raises(ConfigurationError) as excinfo:
-        normalize_field_name_sequence(ClassReadRaises(escape), flavor="Probe")
+        normalize_field_name_sequence(ClassReadRaises(escape), flavor="Probe", ordered=True)
     assert str(excinfo.value) == (
         "Probe Meta.fields must be a readable sequence of field name strings; got ClassReadRaises."
     )
@@ -694,7 +715,7 @@ def test_normalize_field_name_sequence_rejects_an_entry_that_is_not_really_a_str
     non-string entry before it gets there.
     """
     with pytest.raises(ConfigurationError) as excinfo:
-        normalize_field_name_sequence(["name", entry], flavor="Probe")
+        normalize_field_name_sequence(["name", entry], flavor="Probe", ordered=True)
     assert str(excinfo.value) == (
         "Probe Meta.fields must be a sequence of field name strings; "
         f"got non-string entry(ies): [{rendered}]."
@@ -728,7 +749,12 @@ def test_normalize_field_name_sequence_judges_a_lazy_whole_value_by_its_class(
     character (or one integer per byte), a silent no-op as ``exclude``.
     """
     with pytest.raises(ConfigurationError) as excinfo:
-        normalize_field_name_sequence(make_value(), label="exclude", flavor="Probe")
+        normalize_field_name_sequence(
+            make_value(),
+            label="exclude",
+            flavor="Probe",
+            ordered=False,
+        )
     assert str(excinfo.value) == (
         f"Probe Meta.exclude must be a sequence of field names, not a bare string: {rendered}."
     )
@@ -737,14 +763,16 @@ def test_normalize_field_name_sequence_judges_a_lazy_whole_value_by_its_class(
 def test_normalize_field_name_sequence_refuses_a_memoryview_as_a_bare_string() -> None:
     """A ``memoryview`` iterates into byte integers, so it takes the bare-string refusal too."""
     with pytest.raises(ConfigurationError, match=r"Meta\.fields must be .*not a bare string"):
-        normalize_field_name_sequence(memoryview(b"ab"), flavor="Probe")
+        normalize_field_name_sequence(memoryview(b"ab"), flavor="Probe", ordered=True)
 
 
 def test_normalize_field_name_sequence_reads_a_simple_lazy_list_as_the_list() -> None:
     """A ``SimpleLazyObject`` over a list is that list, never a text atom."""
-    assert normalize_field_name_sequence(SimpleLazyObject(lambda: ["name"]), flavor="Probe") == (
-        "name",
-    )
+    assert normalize_field_name_sequence(
+        SimpleLazyObject(lambda: ["name"]),
+        flavor="Probe",
+        ordered=True,
+    ) == ("name",)
 
 
 def test_resolve_set_meta_fields_promotes_the_alias_on_a_meta_class() -> None:
@@ -1076,6 +1104,122 @@ def test_plain_set_meta_fields_reads_a_custom_lazy_object_as_the_object_it_stand
     assert plain == ["title", "isbn"]
 
 
+def test_plain_set_meta_fields_never_evaluates_a_lazy_string() -> None:
+    """A lazy translation string is a text atom: it comes back as itself, never evaluated.
+
+    Its proxy forwards the ``str`` protocol, so a walk would evaluate it and read
+    characters; the family gate (``sets_mixins.py::require_re_readable_field_declaration``)
+    refuses it as a bare string after this read.
+    """
+    evaluations: list[str] = []
+
+    def _spell() -> str:
+        evaluations.append("title")
+        return "title"
+
+    declaration = lazy(_spell, str)()
+
+    assert plain_set_meta_fields(declaration) is declaration
+    assert evaluations == []
+
+
+# ---------------------------------------------------------------------------
+# The shared ``Meta.fields`` re-readability gate
+# ---------------------------------------------------------------------------
+
+
+def test_re_readable_gate_accepts_every_sized_collection() -> None:
+    """The contract is ``Collection``, not a hardcoded builtin allow-list.
+
+    A consumer legitimately computes ``Meta.fields`` from a mapping
+    (``spec.keys()`` / ``spec.values()``), from a ``range``, or from a project
+    container of their own: all of those hold their members, so the expansion
+    re-runs to the same field names. Pinning the accepted set to
+    ``(dict, list, tuple, set, frozenset)`` would reject them for a property they
+    have. Class-creation only; a request never sees the declaration object.
+    """
+
+    class _NameSet:
+        """A minimal ``Collection`` that is none of the builtin containers."""
+
+        def __init__(self, *names: str) -> None:
+            self._names = names
+
+        def __iter__(self) -> Iterator[str]:
+            return iter(self._names)
+
+        def __len__(self) -> int:
+            return len(self._names)
+
+        def __contains__(self, item: object) -> bool:
+            return item in self._names
+
+    accepted = (
+        ["code"],
+        ("code",),
+        {"code"},
+        frozenset({"code"}),
+        {"code": ["exact"]},
+        {"code": ["exact"]}.keys(),
+        {"exact": "code"}.values(),
+        range(3),
+        _NameSet("code"),
+    )
+    for value in accepted:
+        assert is_re_readable_field_declaration(value) is True
+
+
+def test_re_readable_gate_rejects_one_shot_and_text_atoms() -> None:
+    """One-shot producers, text atoms, and non-collections are the three rejected shapes.
+
+    A generator / ``iter(...)`` / ``map`` object is exhausted by the first
+    expansion; a ``str`` / lazy translation string / ``bytes`` / ``bytearray`` /
+    ``memoryview`` is a collection of CHARACTERS, not of field names, and
+    satisfies ``Collection`` structurally, so it needs the explicit exclusion. Plain
+    non-collections (``123``, ``object()``, ``None``) fail the ``Collection`` check
+    outright.
+    Rejected at class creation (``ConfigurationError``), never as a GraphQL
+    error.
+    """
+    rejected = (
+        (name for name in ["code"]),
+        iter(["code"]),
+        map(str, ["code"]),
+        "code",
+        gettext_lazy("code"),
+        b"code",
+        bytearray(b"code"),
+        memoryview(b"code"),
+        123,
+        object(),
+        None,
+    )
+    for value in rejected:
+        assert is_re_readable_field_declaration(value) is False
+
+
+def test_re_readable_gate_never_iterates_the_declaration() -> None:
+    """The gate is structural, so a hostile ``__iter__`` is never entered.
+
+    An object defining only ``__iter__`` is not a ``Collection``, so it is
+    rejected before the walk and its body cannot raise into class creation.
+    """
+
+    class _Boom:
+        def __iter__(self) -> NoReturn:
+            raise RuntimeError("boom")  # never entered
+
+    assert is_re_readable_field_declaration(_Boom()) is False
+
+
+@pytest.mark.parametrize("escape", [RuntimeError, KeyboardInterrupt])
+def test_re_readable_gate_rejects_a_value_whose_class_read_raises(
+    escape: type[BaseException],
+) -> None:
+    """A ``__class__`` that raises is "not a container", so the typed rejection can name it."""
+    assert is_re_readable_field_declaration(ClassReadRaises(escape)) is False
+
+
 def test_make_shape_build_cache_returns_dict_and_clear() -> None:
     """``make_shape_build_cache`` returns a ``(dict, clear)`` pair; clear empties the dict."""
     cache_pair: tuple[dict[tuple[str, str, frozenset[str]], object], Callable[[], None]] = (
@@ -1336,7 +1480,6 @@ def test_emit_rejects_graphql_name_collision_across_distinct_python_attrs() -> N
             [("foo_bar", object()), ("fooBar", object())],
             related_of=lambda _t, _e: None,
             leaf_of=lambda _t, _pa, _e: (int | None, _t),
-            input_type_name_for=lambda cls: cls.__name__,
             module_path=__name__,
             field_specs=field_specs,
         )
@@ -1355,14 +1498,9 @@ def test_emit_rejects_flatten_collision_between_traversal_and_declared_member() 
             [("a_b", object()), ("a__b", object())],
             related_of=lambda _t, _e: None,
             leaf_of=lambda _t, _pa, _e: (int | None, _t),
-            input_type_name_for=lambda cls: cls.__name__,
             module_path=__name__,
             field_specs={},
         )
-
-
-def _class_name(cls: type) -> str:
-    return cls.__name__
 
 
 def test_emit_stages_field_specs_atomically_across_a_clean_walk_then_collision() -> None:
@@ -1386,7 +1524,6 @@ def test_emit_stages_field_specs_atomically_across_a_clean_walk_then_collision()
             entries,
             related_of=lambda _t, _e: None,
             leaf_of=lambda _t, _pa, _e: (int | None, _t),
-            input_type_name_for=_class_name,
             module_path=__name__,
             field_specs=field_specs,
         )
@@ -1830,10 +1967,10 @@ def test_lazy_annotation_and_factory_subclass_messages_are_pinned() -> None:
 def test_normalize_sequence_unordered_rejection_names_the_set_type() -> None:
     """A ``frozenset`` declaration is rejected naming its real class."""
     with pytest.raises(ConfigurationError) as excinfo:
-        normalize_field_name_sequence(frozenset({"a"}), flavor="Probe")
+        normalize_field_name_sequence(frozenset({"a"}), flavor="Probe", ordered=True)
     assert str(excinfo.value) == (
         "Probe Meta.fields must be an ordered sequence of field name strings (a list or "
-        "tuple), not an unordered frozenset: frozenset({'a'}). A set's iteration order "
-        "varies between processes, which would make the generated input type names and "
-        "SDL field order nondeterministic."
+        "tuple), not an unordered frozenset: frozenset({'a'}). The order of Meta.fields is "
+        "the generated input's field order, and a set's iteration order varies between "
+        "processes."
     )

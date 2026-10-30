@@ -90,6 +90,11 @@ if TYPE_CHECKING:
     from django_strawberry_framework.resource_policy import ResourcePolicy
 
 
+# The surface-specific SyncMisuseError recourse the visibility helpers require; these
+# tests never assert on its wording.
+_TEST_ASYNC_RECOURSE = "Test recourse: redefine get_queryset as a sync method."
+
+
 _ListResolver: TypeAlias = Callable[[object, strawberry.Info[object, object]], object]
 
 
@@ -4552,7 +4557,12 @@ def _legacy_reference_resolver(
     """
 
     def resolver(info: strawberry.Info[object, object]) -> models.QuerySet[models.Model]:
-        queryset = apply_type_visibility_sync(library_schema.BranchType, source_factory(), info)
+        queryset = apply_type_visibility_sync(
+            library_schema.BranchType,
+            source_factory(),
+            info,
+            async_recourse=_TEST_ASYNC_RECOURSE,
+        )
         bounded = bounded_rows(queryset, info, None)
         assert isinstance(bounded, models.QuerySet)
         _PARITY_CAPTURE["legacy_marks"] = _query_marks(bounded)

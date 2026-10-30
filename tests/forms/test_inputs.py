@@ -66,7 +66,7 @@ from strawberry.types.enum import StrawberryEnumDefinition
 from strawberry.types.field import StrawberryField
 from typing_extensions import override
 
-from django_strawberry_framework import DjangoType
+from django_strawberry_framework import DjangoFormMutation, DjangoType, finalize_django_types
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.forms.converter import (
     FILE,
@@ -105,7 +105,7 @@ from django_strawberry_framework.utils._narrowing import enum_value, list_of, re
 from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.inputs import InputFieldSpec
 from django_strawberry_framework.utils.relations import is_model_class
-from tests._idioms import ClassReadRaises, module_binding
+from tests._idioms import ClassReadRaises, module_binding, str_subclass_name
 from tests._postgres_fields import FakeArrayField, patch_array_field
 from tests._relation_fixtures import RpCompositeParent
 
@@ -355,6 +355,53 @@ def test_normalize_form_field_basis_valid_mapping() -> None:
     normalized = normalize_form_field_basis(ProbeForm, custom)
     assert normalized == custom
     assert normalized is not custom
+
+
+class _MessageChoices(models.TextChoices):
+    """A ``TextChoices`` class whose member spells a hook field name."""
+
+    MESSAGE = "message"
+
+
+def _member_key(kind: str) -> str:
+    """``"message"`` as a ``(str, Enum)``, ``StrEnum`` or ``TextChoices`` member (``kind``)."""
+    if kind == "text-choices":
+        return _MessageChoices.MESSAGE
+    return str_subclass_name(kind, "message", [])
+
+
+@pytest.mark.parametrize("kind", ["str-enum-mixin", "str-enum", "text-choices"])
+def test_hook_member_key_finalizes_to_the_plain_key_input(kind: str) -> None:
+    """A member key a ``get_form_fields`` hook returns publishes its text as the python_name.
+
+    The basis re-keys a member by the exact ``str`` it spells, so a ``(str, Enum)`` member's
+    own ``__repr__`` never reaches the generated ``__init__`` source (a raw ``SyntaxError``
+    before) and no ``StrEnum`` / ``TextChoices`` member is published as the attribute name.
+    """
+    key = _member_key(kind)
+
+    class ContactForm(forms.Form):
+        message = forms.CharField()
+
+    class Submit(DjangoFormMutation):
+        @classmethod
+        @override
+        def get_form_fields(cls) -> dict[str, forms.Field]:
+            return {key: forms.CharField()}
+
+        class Meta:
+            form_class = ContactForm
+            permission_classes = []
+
+    finalize_django_types()
+
+    assert Submit._input_class is not None
+    names = [
+        field.python_name
+        for field in get_object_definition(Submit._input_class, strict=True).fields
+    ]
+    assert names == ["message"]
+    assert [type(name) for name in names] == [str]
 
 
 def test_build_form_input_class_with_custom_form_fields_basis() -> None:

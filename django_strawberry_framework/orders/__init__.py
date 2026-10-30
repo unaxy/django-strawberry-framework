@@ -9,10 +9,8 @@ finalizer's phase 2.5 wires
 the orphan check that compares ``_helper_referenced_ordersets``
 against the set of ``Meta.orderset_class``-wired ordersets.
 
-``INPUTS_MODULE_PATH`` and ``_input_type_name_for`` are re-exported at
-module scope for consumers but NOT listed in
-``__all__`` -- the leading ``_`` flags them private to consumers.
-Mirrors ``django_strawberry_framework/filters/__init__.py``'s
+``INPUTS_MODULE_PATH`` is re-exported at module scope for consumers but
+NOT listed in ``__all__``. Mirrors ``django_strawberry_framework/filters/__init__.py``'s
 convention. ``OrderArgumentsFactory`` is **not** re-exported from this
 entry point: advanced consumers import it from
 ``django_strawberry_framework.orders.factories`` directly, exactly as
@@ -31,7 +29,7 @@ from django_strawberry_framework.registry import register_subsystem_clear
 from django_strawberry_framework.utils.inputs import build_lazy_input_annotation
 
 from .base import RelatedOrder
-from .inputs import INPUTS_MODULE_PATH, Ordering, _input_type_name_for
+from .inputs import INPUTS_MODULE_PATH, Ordering
 from .sets import OrderSet, OrderSetMetaclass
 
 # Ledger of ``OrderSet``s referenced through the spec-028 Decision 11
@@ -61,7 +59,6 @@ def _order_input_annotation(orderset_class: object, *, helper_spelling: str) -> 
         helper_spelling=helper_spelling,
         expected_label="an OrderSet",
         ledger=_helper_referenced_ordersets,
-        input_type_name_for=_input_type_name_for,
         module_path=INPUTS_MODULE_PATH,
     )
 

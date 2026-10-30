@@ -7,8 +7,7 @@ consume ``logger`` via ``from . import logger`` through this re-export
 as the canonical intra-subpackage logger handle, and the optimizer
 pass-through tests reach it via
 ``from django_strawberry_framework.optimizer import logger`` to pin
-the re-export contract after the flat ``optimizer.py`` module was
-promoted to a subpackage. Removing the re-export would silently break
+the re-export contract. Removing the re-export would silently break
 those production siblings, not just the tests.
 
 ``OptimizationPlan`` and ``plan_optimizations`` live at their dotted

@@ -189,7 +189,7 @@ def _lazy_ref(type_name: str, module_path: str) -> object:
     ``mutations.inputs`` (both flavors materialize their payload there - spec-038
     Decision 5, the load-bearing namespace divergence).
 
-    Promoted to shared field-factory machinery (spec-040 Helper-reuse D12):
+    Shared field-factory machinery (spec-040 Helper-reuse D12):
     the auth fixed-field factories (``login_mutation`` / ``logout_mutation`` /
     ``current_user``) build their ``strawberry.lazy`` payload / alias return refs
     through THIS helper rather than re-spelling ``Annotated[..., strawberry.lazy(...)]``
@@ -204,7 +204,7 @@ def build_lazy_field_signature(
 ) -> tuple[inspect.Signature, dict[str, object]]:
     """Build the ``(__signature__, __annotations__)`` a fixed root-field dispatcher needs.
 
-    The signature-injection idiom promoted to shared machinery (spec-040 Helper-reuse
+    The signature-injection idiom as shared machinery (spec-040 Helper-reuse
     D12 / P1 / P2): a root field whose return type only materializes at phase 2.5
     cannot annotate its class attribute, so its synthesized resolver carries an
     injected ``inspect.Signature`` + ``__annotations__`` with a ``strawberry.lazy``
@@ -246,7 +246,7 @@ def _synthesized_mutation_signature(
     - ``update``: ``id: ID!`` + ``data: <Model>PartialInput!``.
     - ``delete``: ``id: ID!`` only.
 
-    For a form flavor (spec-038): a plain ``DjangoFormMutation`` (the ``"form"``
+    For a form flavor: a plain ``DjangoFormMutation`` (the ``"form"``
     operation sentinel) has ``data:`` but NO ``id``; a ``DjangoModelFormMutation``
     create / update follows the model create / update shape. So ``id`` is built for
     ``operation in ("update", "delete")`` and ``data`` for every operation that is

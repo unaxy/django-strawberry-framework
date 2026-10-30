@@ -132,10 +132,9 @@ from django_strawberry_framework.resource_policy import (
     validate_trusted_flag,
 )
 from django_strawberry_framework.schema import _consumer_extension_entries
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     call_method,
-    class_dict,
-    instance_dict,
     is_exact_pair,
     is_list_or_tuple,
     read_attr,
@@ -275,7 +274,7 @@ def test_the_package_default_policy_is_bounded_on_every_axis() -> None:
     There is no spelling of a bound that disables it, so the default policy must
     carry a positive integer on every axis except the deadline.
     """
-    for name, value in instance_dict(DEFAULT_RESOURCE_POLICY).items():
+    for name, value in truth.instance_state(DEFAULT_RESOURCE_POLICY).items():
         if name == "execution_deadline_seconds":
             assert value is None
             continue
@@ -2521,7 +2520,7 @@ def _evaluated(queryset_cls: type[QuerySet[Category]]) -> QuerySet[Category]:
 
 def _held_rows(source: QuerySet[Category]) -> list[object]:
     """The list a source holds, read the way the seal reads it."""
-    held = instance_dict(source)["_result_cache"]
+    held = truth.instance_state(source)["_result_cache"]
     assert is_object_list(held), held
     return held
 
@@ -3026,7 +3025,7 @@ def test_argument_less_directives_are_read_once_however_often_their_fragment_exp
         f"{{ {spreads} }} fragment F on Query @a @include(if: true) @b {{ echo @c @d }}",
     )
     reads: list[str] = []
-    slot = class_dict(DirectiveNode)["arguments"]
+    slot = truth.class_dict(DirectiveNode)["arguments"]
 
     def read_arguments(directive: DirectiveNode) -> object:
         reads.append(directive.name.value)
@@ -3906,7 +3905,7 @@ class _DriftingPolicy(ResourcePolicy):
 
     @override
     def __getattribute__(self, name: str) -> object:
-        state = instance_dict(self)
+        state = truth.instance_state(self)
         if name == "max_document_tokens" and state.get("_armed"):
             reads = require_instance(state.get("_reads", 0), int) + 1
             state["_reads"] = reads

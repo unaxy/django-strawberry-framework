@@ -190,12 +190,9 @@ if TYPE_CHECKING:
         def __call__(self, selection: ConvertedSelection) -> bool: ...
 
 
-# Re-export the hoisted deterministic-order predicate under its original
-# private name so the spec-030 ``tests/test_connection.py`` pins keep importing
-# ``_ends_in_unique_column`` from here unchanged. The canonical implementation
-# now lives in ``optimizer/plans.py`` (spec-033 Decision 11 sites the hoist;
-# Decision 4 states the cursor-parity invariant it serves - one source for
-# plan-time and resolve-time order).
+# ``ends_in_unique_column`` is owned by ``optimizer/plans.py`` (spec-033 Decision 4:
+# one source for plan-time and resolve-time order); this alias keeps the private
+# name ``tests/test_connection.py`` and ``tests/optimizer/test_plans.py`` import.
 _ends_in_unique_column = ends_in_unique_column
 
 NodeType = TypeVar("NodeType")
@@ -1356,10 +1353,8 @@ def _page_requested(info: Info[object, object]) -> bool:
     the wire names ``edges`` / ``pageInfo`` and answers ``False`` when a
     ``NameConverter`` respells both (``page_info`` under
     ``auto_camel_case=False``), which serves an empty page with
-    ``hasNextPage: false``. Both callers ask upstream first and this second: the
-    keyset page (``_resolve_keyset_connection``) and the patched
-    ``ListConnection.resolve_connection`` check
-    (``_strawberry_patches.py::_patched_should_resolve_list_connection_edges``).
+    ``hasNextPage: false``. A caller asks upstream first and this second, so a
+    page is resolved when either answers ``True``.
     """
     return _connection_field_requested(info, connection_page_selected)
 
@@ -1571,7 +1566,9 @@ def _generate_connection_class(
     SAME SDL type name, which Strawberry collapses into one - cross-wiring the
     two fields' ``edges`` / node types.
     ``graphql_type_name`` is the same surface-name source the finalizer and the
-    filter / order input types derive from.
+    filter / order input types derive from. The name is pinned with ``name=``:
+    Strawberry re-cases a class ``__name__`` that carries an underscore, so an
+    unpinned ``Meta.name = "Cat_Node"`` would publish ``CatNodeconnection``.
 
     ``definition`` is the caller's captured read, never a fresh one: the name
     this class is generated under and the sidecar arguments the field publishes
@@ -1588,12 +1585,9 @@ def _generate_connection_class(
         if populate is not None:
             populate(namespace)
 
-    generated = types.new_class(
-        f"{definition.graphql_type_name}Connection",
-        (DjangoConnection[target_type],),
-        exec_body=_populate,
-    )
-    return strawberry.type(generated, description=description)
+    name = f"{definition.graphql_type_name}Connection"
+    generated = types.new_class(name, (DjangoConnection[target_type],), exec_body=_populate)
+    return strawberry.type(generated, name=name, description=description)
 
 
 def _build_total_count_connection(
@@ -2009,10 +2003,9 @@ def _sidecar_steps(
     """Return the ``(kind, set_class, input)`` sidecar steps this call actually applies.
 
     The gate is one rule - supplied AND declared - and the ORDER is contractual
-    (filter narrows, then orderBy sorts). Both were spelled out twice, once per
-    colored pipeline, so a change to either was a two-site edit with no gate
-    between the halves. The colored ``apply_sync`` / ``apply_async`` dispatch
-    deliberately stays at each caller: the ``await`` is written where it
+    (filter narrows, then orderBy sorts). Both are written once here for both
+    colored pipelines, so the halves cannot drift. The colored ``apply_sync`` /
+    ``apply_async`` dispatch deliberately stays at each caller: the ``await`` is written where it
     happens, never hidden behind a maybe-await.
 
     ``kind`` is ``"filter"`` or ``"order"`` so each caller can hand the step to

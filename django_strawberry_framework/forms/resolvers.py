@@ -34,7 +34,7 @@ and the form-specific invariants this module owns:
   branch, ``coerce_relation_pk_or_none`` for the raw-pk branch), then **resolved
   to the visible object through the related primary ``DjangoType.get_queryset``**
   (``apply_type_visibility_sync(initial_queryset(...))``). The model flavor's
-  batched set decoder now shares ``decode_visible_relation_ids`` (visibility on
+  batched set decoder shares ``decode_visible_relation_ids`` (visibility on
   every branch, including raw pk); the form still maps per element because it
   needs the related object for ``to_field_name``. A hidden / wrong-model /
   uncoercible id is a field-keyed ``FieldError`` (hidden and missing
@@ -178,8 +178,8 @@ and the form-specific invariants this module owns:
   raises.
 
 Single-sourced: the locate / authorize / id-decode / re-fetch / payload /
-validation-mapper / save-mapper are the promoted ``036`` public helpers, CALLED
-not re-implemented. The genuinely net-new code is the visibility-on-every-branch
+validation-mapper / save-mapper are the model flavor's public helpers, CALLED
+not re-implemented. The form-specific code is the visibility-on-every-branch
 relation decoder, the ``kind``-split decode, and the partial-update
 reconstruction.
 """
@@ -211,7 +211,6 @@ from django_strawberry_framework.utils._narrowing import (
     list_of,
     read_attr,
     require,
-    require_instance,
 )
 from django_strawberry_framework.utils.errors import (
     FIELD_ERROR_CODE_INVALID,
@@ -465,7 +464,7 @@ def _decode_form_relation_multi(
     form_field: forms.Field,
     info: Info[object, object],
 ) -> tuple[list[object] | None, FieldError | None]:
-    """Decode an M2M ``list[<id>]`` to a list of form-key values, visibility-checked (NET-NEW).
+    """Decode an M2M ``list[<id>]`` to a list of form-key values, visibility-checked.
 
     Runs the shared ``decode_visible_relation`` spine over each element (so every member
     is type-checked, visibility-checked on its own branch, and ``to_field_name``
@@ -526,7 +525,7 @@ def _decode_form_data(
     data: object,
     info: Info[object, object],
 ) -> tuple[dict[str, object], dict[str, object], FieldError | None]:
-    """Decode the bound input dataclass into ``(provided_data, provided_files, error)`` (NET-NEW).
+    """Decode the bound input dataclass into ``(provided_data, provided_files, error)``.
 
     Walks the provided input fields (``UNSET`` stripped) and, using the
     bind-stashed per-field reverse map (``mutation_cls._input_field_specs``,
@@ -577,7 +576,7 @@ def _reconstruct_partial_data(
     instance: models.Model,
     provided_data: dict[str, object],
 ) -> tuple[dict[str, object], dict[str, list[ValidationError]]]:
-    """Reconstruct the full bound ``data=`` for a partial ``ModelForm`` update (NET-NEW).
+    """Reconstruct the full bound ``data=`` for a partial ``ModelForm`` update.
 
     For every non-file declared form field NOT overridden by ``provided_data``,
     supply the located row's value under the form field name, then overlay
@@ -662,7 +661,7 @@ def _reconstruct_partial_data(
     from the located row. A file field's ``model_to_dict`` value
     is the stored relative path, not a re-bindable ``data=`` value, so file fields
     are excluded (``forms.ImageField`` subclasses ``forms.FileField``, so the one
-    ``isinstance`` catches both). Net-new vs. ``036``: the model update does
+    ``isinstance`` catches both). The model flavor's update instead does
     ``setattr`` on the located instance, not a bound-data reconstruction.
 
     Returns ``(data, unresolved)``: ``unresolved`` maps each form field whose stored key
@@ -1234,6 +1233,55 @@ def _rekeyed_multi_value_dict(
     return rekeyed
 
 
+def _require_backing_row(
+    mutation_cls: _FormMutationClass,
+    form: forms.BaseForm,
+    *,
+    saved: bool,
+) -> models.Model:
+    """Return the ``ModelForm`` flavor's form instance, refusing one of another model.
+
+    A ``ModelForm`` saves whatever row its ``instance`` holds, so a form ``get_form``
+    builds over another model would write that model's table: a coincident pk then
+    answers success with another row's data. The instance must be an instance of the
+    mutation's backing model (``truth.is_instance``: an MTI child or a proxy subclass
+    passes; a concrete base of a proxy-backed mutation, a sibling proxy and an MTI parent
+    do not), the truth the save writes by, never the form class's ``Meta.model`` (a
+    ``ModelForm`` over another model handed the located row writes the located row's
+    table). Read before ``is_valid()`` (``saved=False``), so a wrong form is a
+    ``ConfigurationError`` with nothing written; and after the save (``saved=True``), the
+    serializer flavor's post-save model check
+    (``rest_framework/resolvers.py::_checked_saved_result``), so a consumer ``save()``
+    that swapped ``form.instance`` fails inside the pipeline transaction and its write
+    rolls back.
+    """
+    model = backing_model_of(mutation_cls._mutation_meta)
+    instance = read_attr(form, "instance", None)
+    if truth.is_instance(instance, model):
+        return instance
+    # The class names the refused instance, never the row: an unsaved row's ``__str__``
+    # may read a relation it does not hold yet and raise.
+    model_name = truth.name(model)
+    if saved:
+        held = "no instance" if instance is None else f"its instance a {truth.name(instance)}"
+        raise ConfigurationError(
+            f"{truth.name(mutation_cls)}: the form's save() left {held}, not a "
+            f"{model_name} instance; the save must write the mutation's model (or a "
+            "subclass) and leave the written row on form.instance.",
+        )
+    held = (
+        "a form with no instance"
+        if instance is None
+        else f"a form whose instance is a {truth.name(instance)}"
+    )
+    raise ConfigurationError(
+        f"{truth.name(mutation_cls)}: get_form() returned {held}, not a {model_name} "
+        f"instance; the form's instance must be a {model_name} row (or a subclass's): a "
+        f"ModelForm over {model_name}, given the located row on update, or its save would "
+        "write another table.",
+    )
+
+
 def _bound_form_or_field_errors(
     mutation_cls: _FormMutationClass,
     holder: _FormBuilder[_FormT],
@@ -1249,13 +1297,19 @@ def _bound_form_or_field_errors(
     form's widget cannot read (a list longer than a ``SplitArrayWidget``'s ``size``, sent,
     reconstructed from the located row, or an omitted field's initial) is that field's
     ``max_length`` error before ``is_valid()`` runs (``_bind_under_form_keys``). ``holder``
-    is the ``mutation_cls`` instance whose ``get_form`` hook builds the form. The
+    is the ``mutation_cls`` instance whose ``get_form`` hook builds the form. On the
+    ``ModelForm`` flavor the built form's ``instance`` must be a row of the mutation's
+    model (or a subclass), or the request is a ``ConfigurationError`` before any bind or
+    ``is_valid()``, nothing written (``_require_backing_row``). The
     persist hook (``form.save`` vs ``perform_mutate``) stays at the caller so
     ModelForm can return ``form.instance`` while a plain ``Form`` has no instance
     slot.
     """
     form_data, provided_files = decoded
     form = holder.get_form(info, data=form_data, files=provided_files, instance=instance)
+    # ``_primary_type is None`` is the plain flavor, whose form has no row to write.
+    if mutation_cls._primary_type is not None:
+        _ = _require_backing_row(mutation_cls, form, saved=False)
     unbindable = _bind_under_form_keys(form)
     if instance is not None:
         unbindable |= _bind_omitted_shape_disagreeing_initials(mutation_cls, form, form_data)
@@ -1594,20 +1648,23 @@ def _modelform_write_step(
     """Run the ``ModelForm`` ``write_step``: ``get_form`` -> ``is_valid`` -> ``form.save``.
 
     Constructs the form via the overridable ``get_form`` hook over the decoded bound
-    data, runs ``is_valid()`` once (a failure maps ``form.errors`` onto the envelope
-    via the reused ``validation_error_to_field_errors``), answers an update's explicit
-    ``null`` on a required file field with its ``required`` error
-    (``_required_file_clears``), refuses an explicit ``null`` a
-    ``null=False`` column's own form field cleaned to a storable value as that column's
-    field-keyed ``null`` error (``_coerced_null_fields``), refuses a datetime or time the
-    write alias cannot store as that column's ``invalid`` error
+    data (its ``instance`` a row of the mutation's model or a subclass, else a
+    ``ConfigurationError``: ``_require_backing_row``), runs ``is_valid()`` once (a failure
+    maps ``form.errors`` onto the envelope via the reused
+    ``validation_error_to_field_errors``), answers an update's explicit ``null`` on a
+    required file field with its ``required`` error (``_required_file_clears``), refuses
+    an explicit ``null`` a ``null=False`` column's own form field cleaned to a storable
+    value as that column's field-keyed ``null`` error (``_coerced_null_fields``), refuses a
+    datetime or time the write alias cannot store as that column's ``invalid`` error
     (``_unstorable_temporal_errors``), then writes through
     ``_modelform_save_or_field_errors`` (the form's save, split around
     ``commit=False`` on an update and a client-assigned-key create; the reused
     ``IntegrityError`` / ``ValidationError`` mappers, the update's ``conflict``, plus
     the unstorable ``null=False`` column ``null`` mapping). Returns the saved instance
     (the skeleton's ``refetch_optimized`` re-fetches it by pk under the optimizer plan) or a
-    ``StepFailure`` on a validation / write failure.
+    ``StepFailure`` on a validation / write failure. The saved instance is checked again as
+    a row of the mutation's model: a ``save()`` that swapped ``form.instance`` is a
+    ``ConfigurationError`` raised inside the pipeline transaction, so its write rolls back.
     """
     if instance is not None:
         decoded = (decoded[0], _file_clears(decoded[1]))
@@ -1644,9 +1701,8 @@ def _modelform_write_step(
         )
     if write_error is not None:
         return StepFailure(write_error)
-    # ``get_form`` returns a ``ModelForm[Any]`` (its model parameter is invariant),
-    # whose ``instance`` is the saved row.
-    return require_instance(read_attr(form, "instance"), models.Model)
+    # The form's ``instance`` is the saved row, read again after the save.
+    return _require_backing_row(mutation_cls, form, saved=True)
 
 
 def _plain_form_write_step(
@@ -1753,9 +1809,9 @@ def _run_form_pipeline_sync(
 # (spec-039 - single-sourced with the model flavor). ``resolve_form_sync``
 # normalizes the ``UNSET``-default kwargs to ``_run_form_pipeline_sync`` (the plain
 # flavor never passes ``id``, so it defaults to ``UNSET`` and the plain body ignores
-# it); ``resolve_form_async`` runs the same body through the shared
-# ``run_pipeline_async`` boundary (one ``sync_to_async(thread_sensitive=True)`` call,
-# so the ``transaction.atomic()`` + every ORM call run on one worker thread). Both
+# it); ``resolve_form_async`` is ``make_resolver_entries``' async entry, which runs the
+# same body through ``run_in_one_sync_boundary`` (one ``sync_to_async(thread_sensitive=True)``
+# call, so the ``transaction.atomic()`` + every ORM call run on one worker thread). Both
 # form bases' ``resolve_sync`` / ``resolve_async`` seams delegate here by name.
 resolve_form_sync: _SyncResolverEntry[_FormMutationClass]
 resolve_form_async: _AsyncResolverEntry[_FormMutationClass]

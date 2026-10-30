@@ -476,13 +476,9 @@ def decode_model_global_id(
 ) -> DecodeResult:
     """Decode a typed ``GlobalID`` against ``expected_model``, non-raising.
 
-    The single-id entry of the mutation typed-id contract the root ``id:``
-    decode (``mutations/resolvers.py::coerce_lookup_id``) and the relation
-    ``<field>_id`` single decode
-    (``utils/write_values.py::type_check_relation_id``) both consume; the
-    batched set decode (``utils/write_values.py::decode_visible_relation_ids``)
-    shares the decode/coerce half (``_decode_and_coerce``) with the batched pk
-    mapping beside it: decode the value via ``decode_global_id`` (shape-only,
+    The single-id entry of the mutation typed-id contract; the batched set
+    decode shares its query-free half (``_decode_and_coerce``) and swaps the
+    real-pk step for ``_resolve_real_pks_batched``. Decode the value via ``decode_global_id`` (shape-only,
     under ``schema`` - the executing schema whose published type names a
     ``type``-strategy slot carries; every write path threads it from its
     resolver ``info``), verify the resolved type's model **is**
@@ -500,10 +496,9 @@ def decode_model_global_id(
     (this helper never raises a ``GraphQLError`` - the node-field raising behavior
     stays in the node field).
 
-    Reconsideration triggers (Family ``typed-globalid-decode``): a write ``id``
-    decode bypassing this primitive (T-pipeline), a fifth ``GlobalIDDecode``
-    status (T-status: both status mappers add arms), or a new GlobalID wire
-    shape (T-shape: ``decode_global_id`` owns the parse).
+    Reconsideration triggers: a write ``id`` decode bypassing this
+    primitive, a fifth ``GlobalIDDecode`` status (both status mappers add
+    arms), or a new GlobalID wire shape (``decode_global_id`` owns the parse).
     """
     slots: dict[type[_RelayDjangoType], tuple[str, ModelField | None]] = {}
     intermediate = _decode_and_coerce(value, expected_model, slots=slots, schema=schema)

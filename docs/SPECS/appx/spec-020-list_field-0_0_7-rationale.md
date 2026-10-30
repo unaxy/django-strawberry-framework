@@ -59,7 +59,7 @@ Companion to [`spec-020-list_field-0_0_7.md`][spec-020]. The spec is the contrac
 
 **Why the constructor.** The rules are local and need no cross-class state, and failing at construction puts the error on the line that wrote `DjangoListField(...)`, which is easier to localize than a later `finalize_django_types()` error.
 
-**Why own-origin plus registry identity, not `hasattr`.** `__django_strawberry_definition__` is inherited via MRO, so `hasattr` would accept a subclass with no `Meta` of its own and bind the field to the parent's definition, `Meta.primary` state and model. The registry-identity check closes a definition object that merely claims the origin. A guard documented as looser than it is invites a later reader to simplify it back.
+**Why own-origin plus registry identity, not `hasattr`.** `__django_strawberry_definition__` is read through the MRO, so `hasattr` alone proves only that some class in the chain registered; a `Meta`-less subclass of a concrete type, which would answer with its parent's definition, is refused at class creation, and the own-origin check keeps the field from accepting any class whose attribute is not its own. The registry-identity check closes a definition object that merely claims the origin. A guard documented as looser than it is invites a later reader to simplify it back.
 
 **Why the row-bound guards run first.** They inspect only the field's own arguments, so they report before any target introspection.
 

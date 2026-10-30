@@ -70,17 +70,16 @@ from django_strawberry_framework.optimizer.field_meta import FieldMeta
 from django_strawberry_framework.optimizer.hints import OptimizerHint
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import dict_of, is_str, list_of
+from django_strawberry_framework.utils._narrowing import dict_of, is_str, is_text_atom, list_of
 from django_strawberry_framework.utils.querysets import (
     _concrete_or_none,
-    _normalized_str,
     _prefetch_relation_target_or_none,
 )
-from django_strawberry_framework.utils.relations import is_single_column_foreign_key
+from django_strawberry_framework.utils.relations import is_single_column_foreign_key, relation_kind
 from django_strawberry_framework.utils.typing import is_async_callable, object_result
 
 from .converters import _field_output_type_for, convert_field_output
-from .definition import DjangoTypeDefinition, _check_graphql_name
+from .definition import DjangoTypeDefinition, _check_graphql_name, surface_type_name
 from .relations import PendingRelation, PendingRelationAnnotation
 from .relay import install_is_type_of
 
@@ -127,9 +126,8 @@ ALLOWED_META_KEYS: frozenset[str] = frozenset(
 # ``connection`` (spec-030 Decision 8), ``globalid_strategy`` (spec-031
 # Decision 6), ``relation_shapes`` (spec-032 Decision 7), and
 # ``cursor_field`` (the spec-030 ``## Keyset cursors``
-# opt-in) are net-new ALLOWED keys, NOT DEFERRED_META_KEYS promotions -
-# each one's feature ships in the same card that adds it, so they were
-# never reserved-but-nonfunctional. DEFERRED_META_KEYS stays unchanged.
+# opt-in) are ALLOWED keys whose features are live, NOT DEFERRED_META_KEYS
+# entries: none of them is reserved-but-nonfunctional.
 
 # The valid relation-shape vocabulary and the package default: the single
 # source of both (spec-032 Decision 7). Mirrors the
@@ -338,7 +336,7 @@ def _validate_cursor_field(
     if value is None:
         return None
     owner = f"{truth.name(model)}.Meta.cursor_field"
-    is_sequence = not truth.is_instance(value, str) and issubclass(truth.class_of(value), Sequence)
+    is_sequence = not is_text_atom(value) and issubclass(truth.class_of(value), Sequence)
     # ``is_sequence`` read the value's real class as a ``Sequence``.
     entries = tuple(list_of(value)) if is_sequence else ()
     if not entries or not _is_str_tuple(entries):
@@ -568,7 +566,7 @@ def _id_annotation_is_relay_node_id(cls: "type[DjangoType]") -> bool:
        non-NodeID typos (``"MissingType"``) are rejected. Downstream
        Strawberry schema construction is responsible for resolving the
        string to a real ``NodeID[T]`` annotation; this function only
-       confirms the shape so the H1 collision guard can accept the
+       confirms the shape so the id-field collision guard can accept the
        escape hatch at class-creation time.
     2. **Resolved-object form** (``id: relay.NodeID[int]``, evaluated at
        class-creation time). Delegated to ``_has_node_id_marker`` which
@@ -698,6 +696,20 @@ class DjangoType:
         # ``Meta`` does not make an intermediate base concrete.
         meta: object = truth.class_dict(cls).get("Meta")
         if meta is None:
+            # A ``Meta``-less class registers nothing, so it is an abstract base only
+            # while no concrete type sits above it. Under a concrete type it inherits that
+            # type's definition: every annotation or resolver naming it would publish the
+            # parent, dropping its own fields and never consulting its own
+            # ``get_queryset`` (graphene-django refuses the same shape at class creation).
+            inherited = truth.static_attr(cls, "__django_strawberry_definition__")
+            if truth.is_instance(inherited, DjangoTypeDefinition):
+                parent = truth.name(inherited.origin)
+                raise ConfigurationError(
+                    f"{truth.name(cls)} subclasses the concrete DjangoType {parent} without "
+                    f"declaring its own `class Meta`, so it would publish as {parent}. Declare "
+                    f"`class Meta` (with `model`) on {truth.name(cls)} for a second type of the "
+                    "model, or make the shared base a Meta-less abstract subclass of DjangoType.",
+                )
             return
         # Identity facts about ``cls`` are read once, here, from the
         # interpreter; every message below names the class by this value.
@@ -868,6 +880,7 @@ class DjangoType:
             cls,
             fields,
             source_model=model,
+            meta_name=validated.name,
             consumer_authored_fields=consumer_authored_fields,
             interfaces=validated.interfaces,
             nullable_overrides=validated.nullable_overrides,
@@ -993,7 +1006,7 @@ def _normalize_fields_spec(value: object) -> tuple[str, ...] | Literal["__all__"
         raise ConfigurationError(
             "Meta.fields must be '__all__' or a non-string sequence of field names",
         )
-    if not issubclass(truth.class_of(value), Sequence):
+    if is_text_atom(value) or not issubclass(truth.class_of(value), Sequence):
         raise ConfigurationError(
             "Meta.fields must be '__all__' or a non-string sequence of field names",
         )
@@ -1020,13 +1033,14 @@ def _normalize_sequence_spec(value: object, key: str = "exclude") -> tuple[str, 
     field names whose declaration order carries no meaning, and three of the four
     are normalized to a ``frozenset`` immediately after this call. Rejecting the
     literal a consumer would reasonably write for a set of names would be a
-    shape gate that contradicts its own semantics. A ``str`` stays refused - it
-    is iterable, so accepting it would silently read one field name as a
-    sequence of single-character names.
+    shape gate that contradicts its own semantics. A text atom
+    (``utils/_narrowing.py::is_text_atom``: a ``str``, bytes-like value or lazy
+    translation string) stays refused - it is iterable, so accepting it would
+    silently read one field name as a sequence of single characters or bytes.
     """
     if value is None:
         return None
-    if truth.is_instance(value, str) or not issubclass(
+    if is_text_atom(value) or not issubclass(
         truth.class_of(value),
         (Sequence, AbstractSet),
     ):
@@ -1368,7 +1382,8 @@ def _validate_meta(cls: type[DjangoType], meta: object) -> _ValidatedMeta:
     1. ``Meta.model`` is required and must be a Django model class.
     2. ``fields`` and ``exclude`` are mutually exclusive.
     3. Any key in ``DEFERRED_META_KEYS`` raises with a clear message.
-    4. Any non-dunder key on ``meta`` not in ``ALLOWED_META_KEYS |
+    4. Any key ``meta`` declares in its own body (``truth.declared_meta_keys``:
+       underscore-prefixed keys skipped) not in ``ALLOWED_META_KEYS |
        DEFERRED_META_KEYS`` raises (typo guard).
     5. ``fields``, ``exclude``, and ``optimizer_hints`` have supported
        declaration shapes before field selection or hint validation uses
@@ -1442,7 +1457,7 @@ def _validate_meta(cls: type[DjangoType], meta: object) -> _ValidatedMeta:
     # already-validated keys are not re-flagged on every subclass. This is the
     # intentional counterpart to the MRO-walking ``_meta_attr`` check just
     # below; the two differ on purpose -- do not "unify" them.
-    declared = {k for k in truth.class_dict(meta) if not k.startswith("_")}
+    declared = truth.declared_meta_keys(meta)
 
     # Use the MRO-walking ``_meta_attr`` rather than own-namespace membership
     # so a child Meta inheriting ``fields`` from a base Meta still trips the
@@ -1459,13 +1474,13 @@ def _validate_meta(cls: type[DjangoType], meta: object) -> _ValidatedMeta:
     if not truth.is_exact(primary, bool):
         raise ConfigurationError("Meta.primary must be a bool")
 
-    deferred = sorted(declared & DEFERRED_META_KEYS)
+    deferred = [key for key in declared if key in DEFERRED_META_KEYS]
     if deferred:
         raise ConfigurationError(
             f"Meta keys not supported yet: {deferred}. The feature that owns them has not shipped.",
         )
 
-    unknown = sorted(declared - ALLOWED_META_KEYS - DEFERRED_META_KEYS)
+    unknown = [key for key in declared if key not in ALLOWED_META_KEYS]
     if unknown:
         raise ConfigurationError(f"Unknown Meta keys: {unknown}")
 
@@ -1590,8 +1605,7 @@ def _validate_optimizer_hints(
         model: The Django model whose ``_meta.get_fields()`` defines the
             valid hint key surface. Threaded from the validated
             ``Meta.model`` so the empty-``fields`` shape (e.g. ``Meta.exclude`` covering every
-            field) is not fatal - earlier shapes inferred the model from
-            ``fields[0].model`` and ``IndexError``'d here.
+            field) is not fatal.
         type_name: The type's class name, named in the ``prefetch(obj)``
             seed-model refusal.
 
@@ -1674,10 +1688,10 @@ def _hinted_prefetch_seed_defect(model: type[models.Model], prefetch: object) ->
     prefetch_state = truth.instance_state(prefetch)
     queryset = prefetch_state.get("queryset")
     to_attr = prefetch_state.get("to_attr")
-    if queryset is None or (is_str(to_attr) and _normalized_str(to_attr) != ""):
+    if queryset is None or (is_str(to_attr) and truth.text(to_attr) != ""):
         return None
     through = prefetch_state.get("prefetch_through")
-    lookup = _normalized_str(through) if is_str(through) else None
+    lookup = truth.text(through) if is_str(through) else None
     if lookup is None:
         return None
     target = _prefetch_relation_target_or_none(model, lookup)
@@ -1979,8 +1993,11 @@ def _validate_relation_shape_targets(
                 "connection shape.",
             )
         if not field_map[name].is_many_side:
-            if field_map[name].relation_kind == "reverse_one_to_one":
+            kind = field_map[name].relation_kind
+            if kind == "reverse_one_to_one":
                 shape = "reverse OneToOne"
+            elif kind == "reverse_generic":
+                shape = "reverse GenericRelation"
             elif is_single_column_foreign_key(selected_by_name[name]):
                 shape = "forward FK / OneToOne"
             else:
@@ -2112,10 +2129,10 @@ def _is_suppressed_relay_pk(
     int`` and the interface-supplied ``id: GlobalID!`` and the schema build
     would blow up with ``NodeIDAnnotationError``.
 
-    Reconsideration triggers: T-population (a new suppressed member extends
-    this body; both callers follow); T-identity (a pk-identity change lands
-    on the ``_meta.pk.name`` read); T-exemption (a new suppression
-    exemption lands here, never as a second predicate at a caller).
+    Reconsideration triggers: a new suppressed member extends this body (every
+    caller follows); a pk-identity change lands on the ``_meta.pk.name``
+    read; a new suppression exemption lands here, never as a second predicate
+    at a caller.
     """
     if field.is_relation:
         return False
@@ -2131,6 +2148,7 @@ def _build_annotations(
     fields: "tuple[ModelField, ...]",
     *,
     source_model: type[models.Model],
+    meta_name: str | None,
     consumer_authored_fields: frozenset[str] = _NO_FIELD_NAMES,
     interfaces: tuple[type[object], ...] = (),
     nullable_overrides: frozenset[str] = _NO_FIELD_NAMES,
@@ -2166,13 +2184,17 @@ def _build_annotations(
     connector column (spec-015 Decision 7 #"keeps every selected Django field including the primary key").
 
     Args:
-        cls: The consumer-facing ``DjangoType`` subclass (its ``__name__``
-            threads into ``convert_field_output`` (and on to
-            ``convert_scalar``) so generated choice enums carry a stable
-            name).
+        cls: The consumer-facing ``DjangoType`` subclass.
         fields: The Meta-filtered list of Django field objects.
         source_model: The Django model the type wraps. The primary-key name
             is resolved from it when ``relay.Node`` suppression is active.
+        meta_name: The validated ``Meta.name`` (``None`` when unset). With
+            ``cls`` it gives the published type name
+            (``types/definition.py::surface_type_name``) that threads into
+            ``convert_field_output`` (and on to ``convert_scalar``) as the
+            generated choice enums' prefix, so a ``Meta.name``'d type's enum
+            carries the name the type publishes, whichever of its read or its
+            filterset reaches the column first.
         consumer_authored_fields: Names of fields whose annotation /
             ``StrawberryField`` assignment is owned by the consumer. The
             synthesized annotation is skipped for these names so consumer
@@ -2205,13 +2227,15 @@ def _build_annotations(
 
     Raises:
         ConfigurationError: an unsupported scalar field type is encountered
-            (raised by ``convert_scalar`` via ``convert_field_output``), or a
+            (raised by ``convert_scalar`` via ``convert_field_output``), a
             selected relation has no concrete related model to map to a
-            GraphQL type.
+            GraphQL type, or a selected relation is the reverse ``GenericRel``
+            of a ``GenericRelation`` (``relation_kind`` ``"reverse_generic"``).
 
     """
     annotations: dict[str, object] = {}
     pending: list[PendingRelation] = []
+    type_name = surface_type_name(cls, meta_name)
     for field in fields:
         # Every ``ForeignObjectRel`` is a relation, so the ``else`` branch is a column.
         if isinstance(field, models.ForeignObjectRel) or field.is_relation:
@@ -2225,16 +2249,17 @@ def _build_annotations(
                     "a single GraphQL type. Exclude it via Meta.exclude, or supply an "
                     "explicit annotation or resolver.",
                 )
-            # Always defer auto-synthesized relation annotations: the
-            # consumer_authored short-circuit above leaves consumer overrides
-            # alone, and every other relation field becomes a pending record
-            # that ``finalize_django_types()`` resolves through
-            # ``registry.get(...)`` (which returns the primary post-finalize,
-            # or the single registered type when no primary was declared).
-            # The earlier eager-bind branch froze the relation against
-            # whichever type was already registered at ``__init_subclass__``
-            # time, which mis-bound when a secondary was registered before
-            # the primary (the import-order trap closed by spec-018).
+            if relation_kind(field) == "reverse_generic":
+                raise ConfigurationError(
+                    f"{truth.name(source_model)}.{field.name} is the reverse side of a "
+                    "GenericRelation (its related_query_name). Django can neither "
+                    "select_related it nor read it as a related object, so it cannot be "
+                    "auto-mapped to a GraphQL type. Exclude it via Meta.exclude, or supply an "
+                    "explicit annotation or resolver.",
+                )
+            # Deferred, never bound here: binding at ``__init_subclass__`` would freeze the
+            # relation against whichever type is registered at that moment, which mis-binds
+            # when a secondary registers before the primary (spec-018 Decision 6).
             pending.append(
                 PendingRelation(
                     source_type=cls,
@@ -2247,11 +2272,8 @@ def _build_annotations(
             annotations[field.name] = PendingRelationAnnotation
         else:
             if field.name in consumer_authored_fields:
-                # A consumer-assigned ``StrawberryField`` (or annotation) on a
-                # scalar column wins over the auto-synthesized annotation so
-                # ``strawberry.field(resolver=...)`` overrides survive
-                # collection. Relation override symmetry: see the
-                # ``field.is_relation`` branch above.
+                # A consumer-assigned ``StrawberryField`` (or annotation) on a scalar column
+                # wins over the auto-synthesized annotation, as on the relation branch.
                 continue
             if _is_suppressed_relay_pk(
                 cls,
@@ -2260,40 +2282,21 @@ def _build_annotations(
                 field,
                 consumer_authored_fields,
             ):
-                # ``relay.Node`` supplies ``id: GlobalID!`` via the interface;
-                # dropping the synthesized scalar annotation here keeps the
-                # Strawberry surface clean. The pk field stays in ``fields``
-                # so the optimizer's field map still sees it as a connector
-                # column (spec-015 Decision 7 #"keeps every selected Django field including the primary key").
                 continue
-            # Per-field nullability override tri-state (spec-029 Decision 7):
-            # membership in ``nullable_overrides`` forces nullable, membership in
-            # ``required_overrides`` forces required, and absence from both leaves
-            # ``None`` so ``convert_field_output`` applies the column's own default
-            # (``field.null`` for a scalar, nullable-by-default for a file/image
-            # object). The two sets are validated to be disjoint and non-relation
-            # (relation targets rejected) in ``_validate_nullability_override_targets``
-            # before this loop runs, so the elif is exhaustive and unambiguous.
+            # Nullability tri-state (spec-029 Decision 7): ``None`` leaves the column's own
+            # default; the two sets are disjoint (``_validate_nullability_override_targets``
+            # runs before this loop), so the elif is exhaustive.
             if field.name in nullable_overrides:
                 force_nullable: bool | None = True
             elif field.name in required_overrides:
                 force_nullable = False
             else:
                 force_nullable = None
-            # ``convert_field_output`` owns the file/image branch: it routes a
-            # FileField / ImageField to the structured DjangoFileType /
-            # DjangoImageType output object (nullable by default as ``| None`` to
-            # match the parent resolver's empty-file ``None``) and delegates
-            # every other column to ``convert_scalar`` unchanged. A
-            # ``required_overrides`` (``force_nullable=False``) entry is the
-            # opt-in for a stronger non-empty invariant. The ``force_nullable`` tri-state
-            # computed above is passed through unchanged; a consumer
-            # ``attachment: str`` override is already skipped by the
-            # ``consumer_authored_fields`` short-circuit above, so it receives
-            # no generated object type (spec-037 Decision 3 / Decision 4).
+            # File / image output is nullable by default to match the parent resolver's
+            # empty-file ``None`` (spec-037 Decision 4).
             annotations[field.name] = convert_field_output(
                 field,
-                truth.name(cls),
+                type_name,
                 force_nullable=force_nullable,
                 expose_filesystem_path=field.name in filesystem_path_fields,
             )

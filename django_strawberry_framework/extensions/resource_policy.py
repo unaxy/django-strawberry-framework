@@ -1266,10 +1266,6 @@ def _declared_input_type(graphql_schema: GraphQLSchema, type_node: TypeNode) -> 
     return declared if is_input_type(declared) else None
 
 
-# The fragment-spread path a root's walk starts from: no spread entered yet.
-_NO_SPREAD_PATH: frozenset[str] = frozenset()
-
-
 class _DocumentWalk:
     """One request's walk over its document: both budgets, and the fragments it expanded.
 
@@ -1466,7 +1462,6 @@ class _DocumentWalk:
         root: GraphQLNamedType | None,
         *,
         shape: bool,
-        path: frozenset[str] = _NO_SPREAD_PATH,
     ) -> None:
         """Walk one root's selections, charging values everywhere and shape where ``shape``."""
         graphql_schema = self.graphql_schema
@@ -1476,7 +1471,7 @@ class _DocumentWalk:
                 selection,
                 parent,
                 1,
-                path,
+                frozenset(),  # no spread entered yet
                 shape,
             )
             for selection in reversed(selections)

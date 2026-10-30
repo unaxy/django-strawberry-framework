@@ -55,7 +55,7 @@ def _plain_text(value: object) -> str:
 
     A string is a value whose real type is one: a lazy proxy, or an object whose
     ``__class__`` raises or claims ``str``, is a non-string. A ``str`` subclass is
-    copied through ``str.__str__`` so its overridden ``__hash__`` / ``split`` /
+    copied through the base slot (``truth.text``) so its overridden ``__hash__`` / ``split`` /
     ``replace`` never run inside these helpers or the ``lru_cache``. The
     exact-``str`` test runs first: it is every call the optimizer walker makes.
     """
@@ -65,7 +65,7 @@ def _plain_text(value: object) -> str:
         raise ConfigurationError(
             f"String helper input must be a string; got {truth.kind(value)}.",
         )
-    return str.__str__(value)
+    return truth.text(value)
 
 
 @functools.lru_cache(maxsize=2048)

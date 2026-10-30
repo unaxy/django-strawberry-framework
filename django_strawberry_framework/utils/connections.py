@@ -185,11 +185,8 @@ def is_backward_shape(first: object, last: object) -> bool:
     """Return whether the pagination arguments describe a BACKWARD (``last``-only) page.
 
     The core Relay shape test: ``last`` was given as an ``int`` and ``first``
-    was not. Three sites read it: the window derivation ANDs
-    ``not before_supplied`` onto the core, the keyset resolver and the keyset
-    bounds add nothing. That extra term is a real per-site difference and stays
-    explicit at its call site; what is shared is only this core, so a change to
-    the core is one edit and the variation between the sites stays visible.
+    was not. A site that reads ``before`` differently adds that term at its own
+    call site; only this core is shared.
     """
     return isinstance(last, int) and not isinstance(first, int)
 

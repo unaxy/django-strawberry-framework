@@ -32,6 +32,7 @@ from django import forms
 from django.contrib.auth.models import Permission, User
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import SynchronousOnlyOperation
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import connection, transaction
 from django.db.backends.utils import CursorWrapper
 from django.db.models import Model, Prefetch, QuerySet, TextField, Value
@@ -104,10 +105,12 @@ from django_strawberry_framework.filters import (
     ListFilter,
     RelatedFilter,
 )
+from django_strawberry_framework.orders import OrderSet, RelatedOrder
 from django_strawberry_framework.permissions import apply_cascade_permissions
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing import AsyncTestClient, TestClient
 from django_strawberry_framework.testing.relay import decode_global_id, global_id_for
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import is_list_or_tuple, pk_of, read_attr
 from django_strawberry_framework.utils._queryset_private import (
     set_queryset_hints,
@@ -3842,6 +3845,83 @@ def test_library_genres_filter_by_relay_own_pk_global_id_in_list() -> None:
     )
 
 
+def _post_genre_label_spellings(label: str, genre: models.Genre) -> dict[str, JSONObject]:
+    """Post one ``label``-slot genre id to ``node(id:)``, both id filters and the serializer write."""
+    gid = str(relay.GlobalID(type_name=label, node_id=str(genre.pk)))
+    patron = models.Patron.objects.create(name=f"LabelPatron {label}")
+    payloads: dict[str, JSONObject] = {}
+    for surface, query in (
+        ("node", f'query {{ node(id: "{gid}") {{ ... on GenreType {{ name }} }} }}'),
+        (
+            "exact",
+            f'query {{ allLibraryGenres(filter: {{ id: {{ exact: "{gid}" }} }}) {{ name }} }}',
+        ),
+        ("in", f'query {{ allLibraryGenres(filter: {{ id: {{ in: ["{gid}"] }} }}) {{ name }} }}'),
+    ):
+        response = _post_graphql(query)
+        assert response.status_code == 200
+        payloads[surface] = response_json(response)
+    response = _post_graphql(
+        "mutation($d: PatronProfileSerializerInput!) { "
+        f"createPatronProfileViaSerializer(data: $d) {{ {_PROFILE_SELECTION} }} }}",
+        variables={"d": {"patronId": patron.pk, "favoriteGenreId": gid}},
+    )
+    assert response.status_code == 200
+    payloads["write"] = response_json(response)
+    return payloads
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("label", ["library.GENRE", "library.Genre"])
+def test_genre_model_label_slot_reads_its_model_name_case_insensitively(label: str) -> None:
+    """A model-label slot names its model the way ``apps.get_model`` reads it, on every surface.
+
+    The model-name half of ``app_label.modelname`` is case-insensitive (Django's own rule,
+    read through ``types/relay.py::model_for_label_slot``), so ``node(id:)``, the own-pk
+    GlobalID filter (``exact`` and ``in``) and the serializer's relation decode all accept a
+    ``library.GENRE`` / ``library.Genre`` id for the genre the emitted ``library.genre`` id
+    names.
+    """
+    genre = models.Genre.objects.create(name="LabelCase")
+    models.Genre.objects.create(name="OtherGenre")
+    payloads = _post_genre_label_spellings(label, genre)
+    assert payloads["node"] == {"data": {"node": {"name": "LabelCase"}}}
+    assert payloads["exact"] == {"data": {"allLibraryGenres": [{"name": "LabelCase"}]}}
+    assert payloads["in"] == {"data": {"allLibraryGenres": [{"name": "LabelCase"}]}}
+    write = json_object(payloads["write"], "data", "createPatronProfileViaSerializer")
+    assert write["errors"] == []
+    assert json_at(write, "node", "favoriteGenre") == {"name": "LabelCase"}
+
+
+@pytest.mark.django_db
+def test_genre_model_label_slot_with_a_wrong_app_label_case_is_refused_everywhere() -> None:
+    """The app-label half is exact: a ``Library.genre`` id names no model on any surface."""
+    genre = models.Genre.objects.create(name="LabelCase")
+    payloads = _post_genre_label_spellings("Library.genre", genre)
+    assert json_at(payloads["node"], "data", "node") is None
+    assert json_str(payloads["node"], "errors", 0, "message") == (
+        "Invalid GlobalID: decode_global_id: model label 'Library.genre' resolves to no "
+        "installed Django model."
+    )
+    assert json_str(payloads["node"], "errors", 0, "extensions", "code") == "GLOBALID_INVALID"
+    for surface, suffix in (("exact", ""), ("in", " at index 0")):
+        assert json_at(payloads[surface], "data") is None
+        assert json_str(payloads[surface], "errors", 0, "message") == (
+            f"GlobalID type mismatch: filter expects library.genre but received Library.genre{suffix}"
+        )
+    write = json_object(payloads["write"], "data", "createPatronProfileViaSerializer")
+    assert write == {
+        "node": None,
+        "errors": [
+            {
+                "field": "favoriteGenreId",
+                "messages": ["Invalid id for relation 'favoriteGenreId'."],
+            },
+        ],
+    }
+    assert not models.PatronProfile.objects.exists()
+
+
 @pytest.mark.django_db
 def test_library_genres_filter_by_relay_own_pk_global_id_in_rejects_wrong_type() -> None:
     """A wrong-type GlobalID in the ``in`` list is rejected before the query.
@@ -6771,6 +6851,698 @@ def test_relay_global_id_filter_multihop_leaf_validates_against_the_terminal_mod
     # head), in that order.
     assert models.Book._meta.label_lower in message
     assert models.Genre._meta.label_lower in message
+
+
+def _colliding_leaf_holder_schema() -> strawberry.Schema:
+    """Holder schema whose dotted ``Meta.fields`` key ends on a leaf named like a root relation.
+
+    ``branch__notes__branch`` on a ``Shelf`` set ends on ``BranchNote.branch``, a key
+    into ``ProxyBranch``; the set's own model also has a ``branch`` relation, into
+    ``Branch``. The proxy's type is a Relay node and the concrete branch's is not, so
+    the leaf's identity is a GlobalID only when it is read off the key's own relation.
+    """
+
+    class HolderCollidingBranchType(DjangoType):
+        class Meta:
+            model = models.Branch
+            fields = ("id", "name")
+            name = "HolderCollidingBranchType"
+
+    class HolderCollidingProxyBranchType(DjangoType):
+        class Meta:
+            model = models.ProxyBranch
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+            name = "HolderCollidingProxyBranchType"
+
+    class HolderCollidingBranchNoteType(DjangoType):
+        class Meta:
+            model = models.BranchNote
+            fields = ("id", "body")
+            name = "HolderCollidingBranchNoteType"
+
+    assert registry.get(models.Branch) is HolderCollidingBranchType
+    assert registry.get(models.ProxyBranch) is HolderCollidingProxyBranchType
+    assert registry.get(models.BranchNote) is HolderCollidingBranchNoteType
+
+    class HolderCollidingShelfFilter(FilterSet):
+        class Meta:
+            model = models.Shelf
+            fields = {"branch__notes__branch": ["exact"]}
+
+    class HolderCollidingShelfType(DjangoType):
+        class Meta:
+            model = models.Shelf
+            fields = ("id", "code")
+            filterset_class = HolderCollidingShelfFilter
+            name = "HolderCollidingShelfType"
+
+    @strawberry.type
+    class Query:
+        def _shelves(
+            self,
+            info: Info,
+            filter: FilterInput[HolderCollidingShelfFilter] | None = None,  # noqa: A002
+        ) -> QuerySet[models.Shelf]:
+            queryset = models.Shelf.objects.order_by("code")
+            if filter is not None:
+                queryset = HolderCollidingShelfFilter.apply_sync(filter, queryset, info)
+            return queryset
+
+        shelves: QuerySet[models.Shelf] = strawberry.field(
+            resolver=_shelves,
+            graphql_type=list[HolderCollidingShelfType],
+        )
+
+    finalize_django_types()
+    return strawberry.Schema(query=Query, config=strawberry_config())
+
+
+@pytest.mark.django_db
+def test_relation_key_leaf_named_like_a_root_relation_resolves_its_own_target() -> None:
+    """A dotted relation key's target is its own relation's, whatever the leaf is named.
+
+    ``branchNotesBranch`` ends on ``BranchNote.branch`` (into the Relay
+    ``ProxyBranch`` type), never on the ``Shelf.branch`` its bare name matches on the
+    set's model (into the non-Relay ``Branch`` type): the leaf takes a
+    ``library.proxybranch`` GlobalID and selects the shelf whose branch carries the
+    note; a ``library.branch`` GlobalID is a type mismatch and a raw integer primary
+    key is refused at coercion.
+    """
+    noted = models.Branch.objects.create(name="Noted", city="Boston")
+    bare = models.Branch.objects.create(name="Bare", city="Boston")
+    proxy = models.ProxyBranch.objects.get(pk=noted.pk)
+    models.BranchNote.objects.create(branch=proxy, body="Note")
+    models.Shelf.objects.create(code="A-1", branch=noted)
+    models.Shelf.objects.create(code="B-1", branch=bare)
+    proxy_id = str(
+        relay.GlobalID(type_name=models.ProxyBranch._meta.label_lower, node_id=str(proxy.pk)),
+    )
+    branch_id = str(
+        relay.GlobalID(type_name=models.Branch._meta.label_lower, node_id=str(noted.pk)),
+    )
+
+    registry.clear()
+    try:
+        schema = _colliding_leaf_holder_schema()
+        accepted = _post_holder(
+            schema,
+            f'{{ shelves(filter: {{ branchNotesBranch: {{ exact: "{proxy_id}" }} }}) {{ code }} }}',
+        )
+        mismatched = _post_holder(
+            schema,
+            f'{{ shelves(filter: {{ branchNotesBranch: {{ exact: "{branch_id}" }} }}) {{ code }} }}',
+        )
+        refused = _post_holder(
+            schema,
+            f"{{ shelves(filter: {{ branchNotesBranch: {{ exact: {proxy.pk} }} }}) {{ code }} }}",
+        )
+    finally:
+        registry.clear()
+
+    assert accepted.status_code == 200
+    accepted_payload = response_json(accepted)
+    assert "errors" not in accepted_payload, accepted_payload
+    assert accepted_payload["data"] == {"shelves": [{"code": "A-1"}]}
+    assert mismatched.status_code == 200
+    mismatched_payload = response_json(mismatched)
+    assert mismatched_payload.get("data") is None, mismatched_payload
+    assert "GlobalID type mismatch" in json_str(mismatched_payload, "errors", 0, "message")
+    assert refused.status_code == 200
+    refused_payload = response_json(refused)
+    assert refused_payload.get("data") is None, refused_payload
+    assert "String cannot represent a non string value" in json_str(
+        refused_payload,
+        "errors",
+        0,
+        "message",
+    )
+
+
+def _untyped_hop_relation_key_holder_schema() -> strawberry.Schema:
+    """Holder schema whose dotted relation key crosses a hop no ``DjangoType`` exposes.
+
+    ``shelf__branch`` on a ``Book`` set reaches ``Branch`` through ``Shelf``, which no
+    type registers; ``Branch``'s type is a Relay node, so the leaf is generated as a
+    GlobalID of it.
+    """
+
+    class HolderUntypedHopBranchType(DjangoType):
+        class Meta:
+            model = models.Branch
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+            name = "HolderUntypedHopBranchType"
+
+    class HolderUntypedHopBookFilter(FilterSet):
+        class Meta:
+            model = models.Book
+            fields = {"shelf__branch": ["exact"]}
+
+    class HolderUntypedHopBookType(DjangoType):
+        class Meta:
+            model = models.Book
+            fields = ("id", "title")
+            interfaces = (relay.Node,)
+            filterset_class = HolderUntypedHopBookFilter
+            name = "HolderUntypedHopBookType"
+
+    assert registry.get(models.Branch) is HolderUntypedHopBranchType
+    assert registry.get(models.Shelf) is None
+
+    @strawberry.type
+    class Query:
+        books: DjangoConnection[HolderUntypedHopBookType] = DjangoConnectionField(
+            HolderUntypedHopBookType,
+        )
+
+    finalize_django_types()
+    return strawberry.Schema(query=Query, config=strawberry_config())
+
+
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.django_db
+def test_relation_key_through_an_untyped_hop_validates_its_terminal_target() -> None:
+    """A relation key's GlobalID names its own relation's target, whatever the hops before it expose.
+
+    ``shelfBranch`` validates against ``Branch``'s type, the type it is generated
+    from, though no type exposes ``Shelf``: a ``library.branch`` id selects the book
+    on that branch and a ``library.shelf`` id carrying the same key is a type mismatch.
+    """
+    branch = models.Branch.objects.create(name="Main", city="Boston")
+    other = models.Branch.objects.create(name="Annex", city="Boston")
+    models.Book.objects.create(
+        title="on-main",
+        shelf=models.Shelf.objects.create(code="M-1", branch=branch),
+    )
+    models.Book.objects.create(
+        title="on-annex",
+        shelf=models.Shelf.objects.create(code="A-1", branch=other),
+    )
+    schema = _untyped_hop_relation_key_holder_schema()
+    query = '{ books(filter: { shelfBranch: { exact: "%s" } }) { edges { node { title } } } }'
+    accepted = _post_holder(
+        schema,
+        query % relay.to_base64(models.Branch._meta.label_lower, branch.pk),
+    )
+    mismatched = _post_holder(
+        schema,
+        query % relay.to_base64(models.Shelf._meta.label_lower, branch.pk),
+    )
+
+    accepted_payload = response_json(accepted)
+    assert "errors" not in accepted_payload, accepted_payload
+    assert json_at(accepted_payload, "data", "books", "edges") == [
+        {"node": {"title": "on-main"}},
+    ]
+    mismatched_payload = response_json(mismatched)
+    assert mismatched_payload.get("data") is None, mismatched_payload
+    assert json_str(mismatched_payload, "errors", 0, "message") == (
+        "GlobalID type mismatch: filter expects library.branch but received library.shelf"
+    )
+
+
+def _undeclared_hop_relation_key_holder_schema() -> strawberry.Schema:
+    """Holder schema whose relation key is walked over an undeclared hop into an untyped model.
+
+    ``book__shelf__branch`` on a ``Loan`` set crosses ``Book``, whose type carries its own
+    ``get_queryset`` (so the leaf runs over the hop's visible rows), then ``Shelf``, which
+    no type registers, into the Relay ``Branch`` type.
+    """
+
+    class HolderHopBranchType(DjangoType):
+        class Meta:
+            model = models.Branch
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+            name = "HolderHopBranchType"
+
+    class HolderHopBookType(DjangoType):
+        class Meta:
+            model = models.Book
+            fields = ("id", "title")
+            name = "HolderHopBookType"
+
+        @classmethod
+        @override
+        def get_queryset(
+            cls,
+            queryset: QuerySet[models.Book],
+            info: object,
+            **kwargs: object,
+        ) -> QuerySet[models.Book]:
+            return queryset.exclude(title="hidden")
+
+    class HolderHopLoanFilter(FilterSet):
+        class Meta:
+            model = models.Loan
+            fields = {"book__shelf__branch": ["exact"]}
+
+    class HolderHopLoanType(DjangoType):
+        class Meta:
+            model = models.Loan
+            fields = ("id", "note")
+            interfaces = (relay.Node,)
+            filterset_class = HolderHopLoanFilter
+            name = "HolderHopLoanType"
+
+    assert registry.get(models.Branch) is HolderHopBranchType
+    assert registry.get(models.Book) is HolderHopBookType
+    assert registry.get(models.Shelf) is None
+
+    @strawberry.type
+    class Query:
+        loans: DjangoConnection[HolderHopLoanType] = DjangoConnectionField(HolderHopLoanType)
+
+    finalize_django_types()
+    return strawberry.Schema(query=Query, config=strawberry_config())
+
+
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.django_db
+def test_relation_key_walked_over_an_undeclared_hop_validates_its_terminal_target() -> None:
+    """A relation key walked over an undeclared hop into an untyped model names its own target.
+
+    ``bookShelfBranch`` runs over ``Book``'s visible rows and then ``Shelf``, which no
+    type exposes; it still validates against ``Branch``'s type: a ``library.branch`` id
+    selects the loan on that branch and a ``library.shelf`` id carrying the same key is a
+    type mismatch.
+    """
+    branch = models.Branch.objects.create(name="Main", city="Boston")
+    other = models.Branch.objects.create(name="Annex", city="Boston")
+    patron = models.Patron.objects.create(name="Ada")
+    for note, home in (("main-loan", branch), ("annex-loan", other)):
+        shelf = models.Shelf.objects.create(code=note, branch=home)
+        book = models.Book.objects.create(title=note, shelf=shelf)
+        models.Loan.objects.create(book=book, patron=patron, note=note)
+    schema = _undeclared_hop_relation_key_holder_schema()
+    query = '{ loans(filter: { bookShelfBranch: { exact: "%s" } }) { edges { node { note } } } }'
+    accepted = _post_holder(
+        schema,
+        query % relay.to_base64(models.Branch._meta.label_lower, branch.pk),
+    )
+    mismatched = _post_holder(
+        schema,
+        query % relay.to_base64(models.Shelf._meta.label_lower, branch.pk),
+    )
+
+    accepted_payload = response_json(accepted)
+    assert "errors" not in accepted_payload, accepted_payload
+    assert json_at(accepted_payload, "data", "loans", "edges") == [
+        {"node": {"note": "main-loan"}},
+    ]
+    mismatched_payload = response_json(mismatched)
+    assert mismatched_payload.get("data") is None, mismatched_payload
+    assert json_str(mismatched_payload, "errors", 0, "message") == (
+        "GlobalID type mismatch: filter expects library.branch but received library.shelf"
+    )
+
+
+def _unwired_target_holder_schema(*, subclass_target: bool) -> strawberry.Schema:
+    """Holder schema whose ``Book`` sets reach ``Shelf`` through a set no ``DjangoType`` wires.
+
+    ``HolderUnwiredShelfFilter`` / ``HolderUnwiredShelfOrder`` are bound to the
+    non-primary ``HolderUnwiredPlainShelfType``, which hides nothing; the primary
+    ``HolderUnwiredHidingShelfType`` hides secret shelves. Both are Relay nodes, as is
+    ``Branch``'s type. The ``shelf`` branch of the ``Book`` filter set and order set
+    targets a set no type wires: an unwired subclass of the bound set
+    (``subclass_target``), or an unrelated unwired set over ``Shelf`` declaring the same
+    filters and fields. ``books`` is a connection, ``bookList`` a list.
+    """
+
+    class HolderUnwiredBackBookFilter(FilterSet):
+        class Meta:
+            model = models.Book
+            fields = {"title": ["exact"]}
+
+    shelf_filter_fields = {
+        "topic": ["exact"],
+        "id": ["exact"],
+        "branch": ["exact"],
+        "branch__shelves__topic": ["exact"],
+    }
+
+    class HolderUnwiredShelfFilter(FilterSet):
+        back = RelatedFilter(HolderUnwiredBackBookFilter, field_name="branch__shelves__books")
+        gid = GlobalIDFilter(field_name="id")
+
+        class Meta:
+            model = models.Shelf
+            fields = shelf_filter_fields
+
+    class HolderUnwiredSubShelfFilter(HolderUnwiredShelfFilter):
+        pass
+
+    class HolderUnwiredLoneShelfFilter(FilterSet):
+        back = RelatedFilter(HolderUnwiredBackBookFilter, field_name="branch__shelves__books")
+        gid = GlobalIDFilter(field_name="id")
+
+        class Meta:
+            model = models.Shelf
+            fields = shelf_filter_fields
+
+    shelf_order_fields = ["topic", "branch__shelves__topic"]
+
+    class HolderUnwiredShelfOrder(OrderSet):
+        class Meta:
+            model = models.Shelf
+            fields = shelf_order_fields
+
+    class HolderUnwiredSubShelfOrder(HolderUnwiredShelfOrder):
+        pass
+
+    class HolderUnwiredLoneShelfOrder(OrderSet):
+        class Meta:
+            model = models.Shelf
+            fields = shelf_order_fields
+
+    target_filter = (
+        HolderUnwiredSubShelfFilter if subclass_target else HolderUnwiredLoneShelfFilter
+    )
+    target_order = HolderUnwiredSubShelfOrder if subclass_target else HolderUnwiredLoneShelfOrder
+
+    class HolderUnwiredBranchType(DjangoType):
+        class Meta:
+            model = models.Branch
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+            name = "HolderUnwiredBranchType"
+
+    class HolderUnwiredHidingShelfType(DjangoType):
+        class Meta:
+            model = models.Shelf
+            fields = ("id", "topic")
+            primary = True
+            interfaces = (relay.Node,)
+            name = "HolderUnwiredHidingShelfType"
+
+        @classmethod
+        @override
+        def get_queryset(
+            cls,
+            queryset: QuerySet[models.Shelf],
+            info: object,
+            **kwargs: object,
+        ) -> QuerySet[models.Shelf]:
+            return queryset.exclude(topic="secret")
+
+    class HolderUnwiredPlainShelfType(DjangoType):
+        class Meta:
+            model = models.Shelf
+            fields = ("id", "topic")
+            interfaces = (relay.Node,)
+            filterset_class = HolderUnwiredShelfFilter
+            orderset_class = HolderUnwiredShelfOrder
+            name = "HolderUnwiredPlainShelfType"
+
+    class HolderUnwiredBookFilter(FilterSet):
+        shelf = RelatedFilter(target_filter, field_name="shelf")
+
+        class Meta:
+            model = models.Book
+            fields = {"title": ["exact"]}
+
+    class HolderUnwiredBookOrder(OrderSet):
+        shelf = RelatedOrder(target_order, field_name="shelf")
+
+        class Meta:
+            model = models.Book
+            fields = ["title"]
+
+    class HolderUnwiredBookType(DjangoType):
+        class Meta:
+            model = models.Book
+            fields = ("id", "title")
+            interfaces = (relay.Node,)
+            filterset_class = HolderUnwiredBookFilter
+            orderset_class = HolderUnwiredBookOrder
+            name = "HolderUnwiredBookType"
+
+    @strawberry.type
+    class Query:
+        books: DjangoConnection[HolderUnwiredBookType] = DjangoConnectionField(
+            HolderUnwiredBookType,
+        )
+        book_list: list[HolderUnwiredBookType] = DjangoListField(HolderUnwiredBookType)
+
+    finalize_django_types()
+    assert registry.get(models.Shelf) is HolderUnwiredHidingShelfType
+    assert registry.get(models.Branch) is HolderUnwiredBranchType
+    for bound, target in (
+        (HolderUnwiredShelfFilter, target_filter),
+        (HolderUnwiredShelfOrder, target_order),
+    ):
+        owner = read_attr(truth.class_dict(bound)["_owner_definition"], "origin")
+        assert owner is HolderUnwiredPlainShelfType
+        assert "_owner_definition" not in truth.class_dict(target)
+    return strawberry.Schema(query=Query, config=strawberry_config())
+
+
+_UNWIRED_TARGET_FLAVORS = [
+    pytest.param(True, id="unwired-subclass-of-a-bound-set"),
+    pytest.param(False, id="unrelated-unwired-set"),
+]
+
+
+def _seed_unwired_target_filter_rows() -> dict[str, object]:
+    """One branch holding a secret and a seen shelf, a book on each; the ids the rows send."""
+    branch = models.Branch.objects.create(name="b", city="Boston")
+    hidden = models.Shelf.objects.create(branch=branch, code="h", topic="secret")
+    seen = models.Shelf.objects.create(branch=branch, code="s", topic="zzz")
+    models.Book.objects.create(title="on-hidden", shelf=hidden)
+    models.Book.objects.create(title="on-seen", shelf=seen)
+    return {
+        "seen": seen.pk,
+        "branch_id": relay.to_base64(models.Branch._meta.label_lower, branch.pk),
+        "shelf_named_branch_id": relay.to_base64(models.Shelf._meta.label_lower, branch.pk),
+        "branch_named_seen_id": relay.to_base64(models.Branch._meta.label_lower, seen.pk),
+    }
+
+
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("shelf_input", "titles"),
+    [
+        pytest.param('{topic: {exact: "secret"}}', [], id="declared-branch-scope"),
+        pytest.param("{id: {exact: %(seen)d}}", ["on-seen"], id="own-pk-scalar"),
+        pytest.param('{back: {title: {exact: "on-hidden"}}}', [], id="via-type-re-entry"),
+        pytest.param('{branchShelvesTopic: {exact: "secret"}}', [], id="undeclared-hop-re-entry"),
+        pytest.param(
+            '{branch: {exact: "%(branch_id)s"}}',
+            ["on-seen"],
+            id="relation-globalid-validated",
+        ),
+        pytest.param(
+            '{gid: {exact: "%(branch_named_seen_id)s"}}',
+            ["on-seen"],
+            id="own-key-globalid-node-id-only",
+        ),
+    ],
+)
+@pytest.mark.parametrize("subclass_target", _UNWIRED_TARGET_FLAVORS)
+def test_an_unwired_target_filterset_answers_for_no_owner(
+    *,
+    subclass_target: bool,
+    shelf_input: str,
+    titles: list[str],
+) -> None:
+    """A ``RelatedFilter`` to an unwired set answers for no owner, whatever set it subclasses.
+
+    A subclass no type wires is a separate set bound to no owner, so it answers every
+    row exactly as an unrelated unwired filterset over ``Shelf`` declaring the same
+    filters does: its branch rows, and a path re-entering ``Shelf``'s table through a
+    multi-relation ``RelatedFilter`` or a flat leaf, are scoped by the primary type (a
+    secret shelf is not seen); its own key is the scalar column, not its base's owner's
+    GlobalID, and a ``GlobalIDFilter`` declared on it reads the node id whatever type
+    the id names; and a relation GlobalID names the relation's registry primary.
+    """
+    ids = _seed_unwired_target_filter_rows()
+    response = _post_holder(
+        _unwired_target_holder_schema(subclass_target=subclass_target),
+        f"{{ books(filter: {{shelf: {shelf_input % ids}}}) {{ edges {{ node {{ title }} }} }} }}",
+    )
+
+    payload = response_json(response)
+    assert "errors" not in payload, payload
+    assert json_at(payload, "data", "books", "edges") == [
+        {"node": {"title": title}} for title in titles
+    ]
+
+
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.django_db
+@pytest.mark.parametrize("subclass_target", _UNWIRED_TARGET_FLAVORS)
+def test_an_unwired_target_filterset_refuses_a_wrong_type_relation_globalid(
+    *,
+    subclass_target: bool,
+) -> None:
+    """An unwired set's relation GlobalID of another type is a type mismatch, as on a wired set.
+
+    The ``branch`` leaf is generated from ``Branch``'s registry primary, so a
+    ``library.shelf`` id carrying the branch's key is refused rather than read as that
+    key.
+    """
+    ids = _seed_unwired_target_filter_rows()
+    response = _post_holder(
+        _unwired_target_holder_schema(subclass_target=subclass_target),
+        f'{{ books(filter: {{shelf: {{branch: {{exact: "{ids["shelf_named_branch_id"]}"}}}}}}) '
+        "{ edges { node { title } } } }",
+    )
+
+    payload = response_json(response)
+    assert payload.get("data") is None, payload
+    assert json_str(payload, "errors", 0, "message") == (
+        "GlobalID type mismatch: filter expects library.branch but received library.shelf"
+    )
+
+
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("shelf_term", "titles"),
+    [
+        pytest.param(
+            "{topic: ASC_NULLS_LAST}",
+            ["seen-x", "seen-y", "on-hidden"],
+            id="declared-hop-term",
+        ),
+        pytest.param(
+            "{branchShelvesTopic: ASC_NULLS_LAST}",
+            ["seen-x", "seen-y", "on-hidden"],
+            id="re-entry-term",
+        ),
+    ],
+)
+@pytest.mark.parametrize("subclass_target", _UNWIRED_TARGET_FLAVORS)
+def test_an_unwired_target_orderset_answers_for_no_owner(
+    *,
+    subclass_target: bool,
+    shelf_term: str,
+    titles: list[str],
+) -> None:
+    """A ``RelatedOrder`` to an unwired set orders for no owner, whatever set it subclasses.
+
+    A subclass no type wires orders exactly as an unrelated unwired orderset over
+    ``Shelf`` declaring the same fields does: its term reads the primary type, and so
+    does a path from it re-entering ``Shelf``'s table (``branch__shelves__topic``), so
+    a secret shelf counts as a missing one (last under ``ASC_NULLS_LAST``).
+    """
+    # Branch ``x`` holds a seen shelf beside the secret one, branch ``y`` a seen shelf
+    # alone; every visible topic sorts after ``secret``.
+    branch_x = models.Branch.objects.create(name="x", city="Boston")
+    branch_y = models.Branch.objects.create(name="y", city="Boston")
+    hidden = models.Shelf.objects.create(branch=branch_x, code="h", topic="secret")
+    seen_x = models.Shelf.objects.create(branch=branch_x, code="sx", topic="x")
+    seen_y = models.Shelf.objects.create(branch=branch_y, code="sy", topic="y")
+    models.Book.objects.create(title="on-hidden", shelf=hidden)
+    models.Book.objects.create(title="seen-x", shelf=seen_x)
+    models.Book.objects.create(title="seen-y", shelf=seen_y)
+    response = _post_holder(
+        _unwired_target_holder_schema(subclass_target=subclass_target),
+        f"{{ bookList(orderBy: [{{shelf: {shelf_term}}}]) {{ title }} }}",
+    )
+
+    payload = response_json(response)
+    assert "errors" not in payload, payload
+    assert [json_at(row, "title") for row in json_list(payload, "data", "bookList")] == titles
+
+
+def _own_pk_hop_key_holder_schema() -> strawberry.Schema:
+    """Holder schema whose dotted ``Meta.fields`` key ends on the set model's own primary key.
+
+    ``archive_genres__books__id`` on a ``Book`` set walks to another book (through an
+    archive genre and that genre's ``books``) and ends on ``Book.id``, the column the
+    set's own ``id`` key names. The book type is a Relay node, so only the
+    single-segment ``id`` key is a GlobalID; the hop key filters the hop's book.
+    """
+
+    class HolderHopBookFilter(FilterSet):
+        class Meta:
+            model = models.Book
+            fields = {"archive_genres__books__id": ["exact", "gt"]}
+
+    class HolderHopBookType(DjangoType):
+        class Meta:
+            model = models.Book
+            fields = ("id", "title")
+            interfaces = (relay.Node,)
+            filterset_class = HolderHopBookFilter
+            name = "HolderHopBookType"
+
+    @strawberry.type
+    class Query:
+        def _books(
+            self,
+            info: Info,
+            filter: FilterInput[HolderHopBookFilter] | None = None,  # noqa: A002
+        ) -> QuerySet[models.Book]:
+            queryset = models.Book.objects.order_by("title")
+            if filter is not None:
+                queryset = HolderHopBookFilter.apply_sync(filter, queryset, info)
+            return queryset
+
+        books: QuerySet[models.Book] = strawberry.field(
+            resolver=_books,
+            graphql_type=list[HolderHopBookType],
+        )
+
+    finalize_django_types()
+    return strawberry.Schema(query=Query, config=strawberry_config())
+
+
+@pytest.mark.django_db
+def test_dotted_key_ending_on_the_own_pk_filters_the_hop_row_as_a_plain_column() -> None:
+    """``archiveGenresBooksId`` is the hop book's ``Int`` column, never the set's own GlobalID.
+
+    The key ends on ``Book.id`` through an archive genre, so it filters by the hop
+    book's primary key: an integer selects the book archived under a genre that book
+    carries, ``gt`` is a comparison like any column's, and a ``library.book``
+    GlobalID is refused at coercion.
+    """
+    branch = models.Branch.objects.create(name="Branch", city="Boston")
+    shelf = models.Shelf.objects.create(code="A-1", branch=branch)
+    genre = models.Genre.objects.create(name="SciFi")
+    archived = models.Book.objects.create(title="Archived", shelf=shelf)
+    shelved = models.Book.objects.create(title="Shelved", shelf=shelf)
+    archived.archive_genres.add(genre)
+    shelved.genres.add(genre)
+    book_id = str(
+        relay.GlobalID(type_name=models.Book._meta.label_lower, node_id=str(shelved.pk)),
+    )
+
+    registry.clear()
+    try:
+        schema = _own_pk_hop_key_holder_schema()
+        exact = _post_holder(
+            schema,
+            f"{{ books(filter: {{ archiveGenresBooksId: {{ exact: {shelved.pk} }} }}) {{ title }} }}",
+        )
+        greater = _post_holder(
+            schema,
+            "{ books(filter: { archiveGenresBooksId: { gt: 0 } }) { title } }",
+        )
+        refused = _post_holder(
+            schema,
+            f'{{ books(filter: {{ archiveGenresBooksId: {{ exact: "{book_id}" }} }}) {{ title }} }}',
+        )
+    finally:
+        registry.clear()
+
+    for response in (exact, greater):
+        assert response.status_code == 200
+        payload = response_json(response)
+        assert "errors" not in payload, payload
+        assert payload["data"] == {"books": [{"title": "Archived"}]}
+    assert refused.status_code == 200
+    refused_payload = response_json(refused)
+    assert refused_payload.get("data") is None, refused_payload
+    assert "Int cannot represent non-integer value" in json_str(
+        refused_payload,
+        "errors",
+        0,
+        "message",
+    )
 
 
 def _relation_pk_global_id_rows() -> tuple[models.Patron, models.MembershipCard]:
@@ -19930,6 +20702,129 @@ def test_model_create_edition_takes_its_isbn_key_from_the_client_over_http(key: 
     else:
         assert result == {"createEdition": {"errors": _KEYED_CREATE_ERRORS["taken_isbn"]}}
     assert stored == [("9780000000001", "Kept")]
+
+
+_EDITION_SAVE_REFUSAL_DISPATCH_UID = "test_query.library.edition_save_refusal"
+
+
+@contextlib.contextmanager
+def _edition_save_refused() -> Generator[None, None, None]:
+    """Refuse every ``Edition`` save inside the block with a Django error keyed ``isbn_10``.
+
+    A ``pre_save`` receiver runs after ``full_clean()`` passed, so its ``ValidationError``
+    is the save-time one the write step keys by the input's published names.
+    """
+
+    def _refuse(**_kwargs: object) -> None:
+        raise DjangoValidationError(
+            {"isbn_10": DjangoValidationError("Refused at save.", code="refused")},
+        )
+
+    pre_save.connect(
+        _refuse,
+        sender=models.Edition,
+        weak=False,
+        dispatch_uid=_EDITION_SAVE_REFUSAL_DISPATCH_UID,
+    )
+    try:
+        yield
+    finally:
+        _ = pre_save.disconnect(
+            sender=models.Edition,
+            dispatch_uid=_EDITION_SAVE_REFUSAL_DISPATCH_UID,
+        )
+
+
+#: The ``isbn_10`` error per refusal: the ``isbn10`` value sent, and the error's messages and codes.
+_ISBN10_REFUSALS: dict[str, tuple[str | None, JSONObject]] = {
+    "null": (None, {"messages": ["This field cannot be null."], "codes": ["null"]}),
+    "save-time": ("0-00", {"messages": ["Refused at save."], "codes": ["refused"]}),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("refusal", list(_ISBN10_REFUSALS))
+def test_model_create_edition_keys_isbn_10_errors_to_the_published_isbn10_over_http(
+    refusal: str,
+) -> None:
+    """``createEdition`` keys every ``isbn_10`` error to ``isbn10``, the name ``EditionInput`` publishes.
+
+    ``EditionLegacyIsbn`` declares ``isbn_10`` without ``name=``, so the schema's own
+    converter names it ``isbn10`` while the package caser spells it ``isbn_10``. An
+    explicit ``null`` (``full_clean()``'s error) and a save-time ``ValidationError`` keyed
+    ``isbn_10`` each answer ``field`` / ``path`` ``isbn10``, a name the client could have
+    sent, and nothing is written.
+    """
+    isbn_10, expected = _ISBN10_REFUSALS[refusal]
+    publisher = models.Publisher.objects.create(name="LegacyIsbnPress", house_code="LI")
+    data = {
+        "isbn_13": "9780000000003",
+        "isbn10": isbn_10,
+        "publisherId": global_id_for(library_schema.PublisherType, publisher.house_code),
+    }
+
+    with _edition_save_refused() if refusal == "save-time" else contextlib.nullcontext():
+        result = _post_keyed_create("createEdition", "EditionInput", data)
+
+    assert result == {
+        "createEdition": {"errors": [{"field": "isbn10", **expected, "path": ["isbn10"]}]},
+    }
+    assert not models.Edition.objects.exists()
+
+
+@pytest.mark.django_db
+def test_model_create_edition_writes_isbn10_to_its_isbn_10_column_over_http() -> None:
+    """``isbn10`` on ``EditionInput`` creates the edition and stores the ``isbn_10`` column."""
+    publisher = models.Publisher.objects.create(name="LegacyIsbnPress", house_code="LI")
+
+    result = _post_keyed_create(
+        "createEdition",
+        "EditionInput",
+        {
+            "isbn_13": "9780000000003",
+            "isbn10": "0-00",
+            "publisherId": global_id_for(library_schema.PublisherType, publisher.house_code),
+        },
+    )
+
+    assert result == {"createEdition": {"errors": []}}
+    assert list(models.Edition.objects.values_list("isbn_13", "isbn_10")) == [
+        ("9780000000003", "0-00"),
+    ]
+
+
+@pytest.mark.django_db
+def test_model_create_edition_refuses_the_model_spelling_isbn_10_over_http() -> None:
+    """``isbn_10`` is not an ``EditionInput`` field: variable coercion refuses it, nothing written."""
+    publisher = models.Publisher.objects.create(name="LegacyIsbnPress", house_code="LI")
+
+    payload = _graphql_payload(
+        f"mutation($d: EditionInput!) {{ createEdition(data: $d) {{ {_KEYED_CREATE_SELECTION} }} }}",
+        variables={
+            "d": {
+                "isbn_13": "9780000000003",
+                "isbn_10": "0-00",
+                "publisherId": global_id_for(library_schema.PublisherType, publisher.house_code),
+            },
+        },
+    )
+
+    assert payload.get("data") is None, payload
+    message = json_str(payload, "errors", 0, "message")
+    assert "Field 'isbn_10' is not defined by type 'EditionInput'." in message, message
+    assert not models.Edition.objects.exists()
+
+
+@pytest.mark.django_db
+def test_model_create_edition_input_publishes_the_unnamed_isbn10_over_http() -> None:
+    """``EditionInput`` publishes the unnamed ``isbn_10`` as ``isbn10`` beside the generated fields."""
+    assert _input_field_names("EditionInput") == {
+        "isbn10",
+        "isbn_13",
+        "imprint",
+        "publisherId",
+        "publisher_2Id",
+    }
 
 
 #: The flag-gated serializer creates whose key field is renamed onto Django's ``pk`` alias:

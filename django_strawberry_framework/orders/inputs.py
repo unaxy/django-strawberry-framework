@@ -43,12 +43,9 @@ from django_strawberry_framework.utils.inputs import (
     GeneratedInputFieldSpec,
     build_strawberry_input_class,
     emit_set_input_field_triples,
-    iter_set_subclasses,
     make_set_input_namespace,
-    set_input_type_name,
 )
-from django_strawberry_framework.utils.relations import carrier_backed_link, relation_bool
-from django_strawberry_framework.utils.strings import graphql_camel_name
+from django_strawberry_framework.utils.relations import carrier_backed_link, is_stored_column
 
 from .base import RelatedOrder
 
@@ -65,9 +62,6 @@ if TYPE_CHECKING:
 # module.
 FieldSpec = GeneratedInputFieldSpec
 build_input_class = build_strawberry_input_class
-_camel_case = graphql_camel_name
-_iter_orderset_subclasses = iter_set_subclasses
-_input_type_name_for = set_input_type_name
 
 
 # Module path the ``strawberry.lazy(...)`` marker references; pinned as a
@@ -170,8 +164,9 @@ def _get_concrete_field_names_for_order(model: object) -> list[str]:
 
     Backs ``OrderSet._expand_meta_fields`` when ``Meta.fields = "__all__"``
     per spec-028 Decision 3. Django's ``Options.fields`` already holds only
-    the forward non-many-to-many fields, and ``Field.concrete`` keeps the
-    ones with a database column. The one column-less field kept is a
+    the forward non-many-to-many fields, and ``utils/relations.py::is_stored_column``
+    (Django's ``Options.concrete_fields``) keeps the ones with a database
+    column. The one column-less field kept is a
     forward ``ForeignObject`` that is not a ``ForeignKey``
     (``utils/relations.py::carrier_backed_link``), whose value is its
     carrier columns and whose term orders by them
@@ -192,7 +187,7 @@ def _get_concrete_field_names_for_order(model: object) -> list[str]:
     return [
         require(read_attr(f, "name"), is_str)
         for f in list_of(fields)
-        if relation_bool(f, "concrete") or carrier_backed_link(f) is not None
+        if is_stored_column(f) or carrier_backed_link(f) is not None
     ]
 
 
@@ -272,7 +267,6 @@ def _build_input_fields(
             None if entry is None else (entry.orderset, entry.field_name or top_name)
         ),
         leaf_of=_leaf_of,
-        input_type_name_for=_input_type_name_for,
         module_path=INPUTS_MODULE_PATH,
         field_specs=_field_specs,
     )

@@ -19,8 +19,8 @@ The form-mutation write surface, riding the ``036`` mutation seams
   materializes its form-derived input + the pinned ``{ ok errors }`` payload
   (Decision 6 - no object slot).
 
-The two ``_validate_meta`` overrides are disjoint matrices (Decision 6 / Decision
-10 / spec-038): both require ``Meta.form_class``; the plain base checks
+The two ``_validate_meta`` overrides are disjoint matrices (spec-038 Decision 6 /
+Decision 10): both require ``Meta.form_class``; the plain base checks
 ``issubclass(form_class, forms.ModelForm)`` FIRST and rejects it naming
 ``DjangoModelFormMutation`` (the targeted Edge-case message), then requires a
 ``forms.Form``, and rejects ANY ``Meta.operation``; the ``ModelForm`` base
@@ -53,7 +53,6 @@ from django_strawberry_framework.mutations.inputs import PARTIAL
 from django_strawberry_framework.mutations.operations import NON_DELETE_OPERATION_INPUT_KIND
 from django_strawberry_framework.mutations.permissions import (
     DenyAll,
-    DjangoModelPermission,
     run_permission_classes,
 )
 from django_strawberry_framework.mutations.sets import DjangoMutation
@@ -178,7 +177,7 @@ register_subsystem_clear(clear_form_mutation_registry, owner="forms.declarations
 # producing identical bases dedupe, while a stateful hook returning different
 # content builds separately and stays loud at the materialize ledger. The cache
 # VALUE is the
-# ``(input_cls, field_specs)`` pair (spec-038): the reverse-map
+# ``(input_cls, field_specs)`` pair: the reverse-map
 # ``field_specs`` MUST survive the dedupe so the bind can stash them on the mutation
 # (``_input_field_specs``) for the decode - caching only ``input_cls`` would
 # discard the load-bearing decode reverse map. Cleared at the start of
@@ -186,7 +185,7 @@ register_subsystem_clear(clear_form_mutation_registry, owner="forms.declarations
 # from a prior (failed or re-run) finalize never leaks. Both flavors' ``build_input``
 # consult it via ``_cached_build_form_input``.
 #
-# The ``(cache, clear)`` pair rides the promoted ``utils/inputs.py::make_shape_build_cache``
+# The ``(cache, clear)`` pair rides the shared ``utils/inputs.py::make_shape_build_cache``
 # plumbing, the SAME factory the serializer cache uses, so the
 # form + serializer + mutation caches share one dict-plus-clear shape while staying
 # disjoint (separate dicts, registered + cleared separately). ``clear_form_shape_build_cache``
@@ -484,7 +483,7 @@ def _default_get_form_kwargs(
     """
     del info  # the default ignores ``info``; an override may consult it.
     # The "add ``instance`` only on update" clause is single-sited in
-    # ``write_mixins.py::construction_kwargs`` (spec-039), shared with the
+    # ``write_mixins.py::construction_kwargs``, shared with the
     # serializer ``get_serializer_kwargs`` default.
     return construction_kwargs(data=data, files=files, instance=instance)
 
@@ -509,7 +508,11 @@ def _default_get_form(
     ``prefix=`` an override passes, and the keys a multi-key widget reads) is re-keyed
     under them, while one an override keyed itself is left as bound
     (``forms/resolvers.py::_bind_under_form_keys``).
-    Whatever builds it, the form's model-choice fields must
+    Whatever builds it, a ``ModelForm`` flavor's form must hold a row of the mutation's
+    model (or a subclass) as its ``instance``, or the request is a ``ConfigurationError``
+    before ``is_valid()``, nothing written (``forms/resolvers.py::_require_backing_row``):
+    the save writes the instance's table, so a form over another model would write that
+    table. The form's model-choice fields must
     look a relation key up as the class-level fields ``get_form_fields`` returns do: the
     same model (or a subclass) and the same key column, or the request is a
     ``ConfigurationError`` before ``is_valid()``
@@ -543,7 +546,7 @@ def _build_and_stash_form_input(
     ``FORM`` sentinel for the plain flavor) and their waiver ``base`` (the framework
     base whose default ``get_form_kwargs`` / ``get_form`` an override is detected
     against). Routes through ``_cached_build_form_input`` (per-shape dedupe +
-    per-declaration create-required guard) and the promoted
+    per-declaration create-required guard) and the shared
     ``write_mixins.py::build_and_stash_input``, which materializes
     the class into ``forms.inputs`` and stashes the reverse-map ``field_specs`` on
     the mutation (``cls._input_field_specs``) for the decode. The form's
@@ -877,7 +880,7 @@ class DjangoModelFormMutation(_ModelFormMutationBase):
         set reuse one class object and dedupe idempotently at materialize.
 
         ``guard_required`` is waived (``False``) when the concrete mutation
-        overrides ``get_form_kwargs`` / ``get_form`` (spec-038 waiver): the
+        overrides ``get_form_kwargs`` / ``get_form``: the
         override injects whatever fields a narrowing dropped, so the guard trusts it.
         The reverse-map ``field_specs`` are stashed on the mutation
         (``cls._input_field_specs``) so the decode can produce a
@@ -1033,7 +1036,10 @@ class DjangoFormMutation(_FormMutationBase, metaclass=DjangoFormMutationMetaclas
           ``_validate_permission_classes`` with ``unset_default=(DenyAll,)``: a
           model-less form cannot inherit the model-permission default, so an unset
           ``permission_classes`` denies by default and a public write is the
-          explicit ``permission_classes = []`` opt-out (Decision 11).
+          explicit ``permission_classes = []`` opt-out (Decision 11). With
+          ``model_less=True`` it refuses a ``DjangoModelPermission`` that does not
+          override ``has_permission`` (that hook reads the model a plain form never
+          has); a subclass overriding it is admitted.
 
         The snapshot carries ``model=None`` + the ``"form"`` operation sentinel +
         ``form_class`` (spec-038 Decision 7 - the fixed shape-identity component a plain
@@ -1055,7 +1061,7 @@ class DjangoFormMutation(_FormMutationBase, metaclass=DjangoFormMutationMetaclas
         # targeted message naming the reason, so a
         # consumer who copied a ``DjangoModelFormMutation`` ``Meta`` sees
         # "operation is not supported" rather than a generic
-        # "unknown keys: ['operation']" - then run the promoted typo guard over the
+        # "unknown keys: ['operation']" - then run the shared typo guard over the
         # genuinely-unknown remainder (``operation`` is added to the allowed set
         # passed there so a stray own-key ``operation`` cannot double-report; it is
         # already rejected above by the key-presence check).
@@ -1110,35 +1116,15 @@ class DjangoFormMutation(_FormMutationBase, metaclass=DjangoFormMutationMetaclas
         # which a model-less mutation never provides - it would crash at request
         # time, not deny). An unset ``permission_classes`` therefore defaults to
         # ``[DenyAll]`` (deny-by-default); a public plain-form write is the explicit
-        # ``permission_classes = []`` opt-out (spec-038 Decision 11).
+        # ``permission_classes = []`` opt-out (spec-038 Decision 11). ``model_less``
+        # refuses a declared ``DjangoModelPermission`` that does not override
+        # ``has_permission`` at class creation for the same reason.
         permission_classes = _validate_permission_classes(
-            name,
+            f"DjangoFormMutation {name}.Meta.permission_classes",
             truth.static_attr(meta, "permission_classes", None),
             unset_default=(DenyAll,),
+            model_less=True,
         )
-        # A model-less plain form cannot carry a model-requiring permission class.
-        # ``DjangoModelPermission`` (and any subclass) reads the model the mutation
-        # validated at declaration and maps the operation to an ``add`` / ``change`` /
-        # ``delete`` codename - neither of which a plain ``DjangoFormMutation``
-        # provides (its snapshot's model is ``None``, and its operation is the
-        # ``"form"`` sentinel).
-        # ``_validate_permission_classes`` accepts it (it IS a class with a callable
-        # ``has_permission``), so without this guard the misconfiguration finalizes
-        # cleanly and only surfaces as a raw error at REQUEST time (never a deny) - the
-        # exact model-permission incompatibility ``DenyAll`` documents and the default
-        # avoids. Reject it at class creation (the package's fail-loud contract), naming
-        # the model-backed base + the two valid plain-form postures.
-        for entry in permission_classes:
-            # ``_validate_permission_classes`` returns classes only.
-            if truth.is_subclass(entry, DjangoModelPermission):
-                raise ConfigurationError(
-                    f"DjangoFormMutation {name}.Meta.permission_classes includes "
-                    f"{truth.name(entry)}, which requires a model to resolve the write "
-                    "permission; a model-less DjangoFormMutation has no model. Use "
-                    "DjangoModelFormMutation for a model-backed form, or on a plain form "
-                    "omit permission_classes (deny-by-default) / set permission_classes = [] "
-                    "(allow any).",
-                )
 
         return _ValidatedMutationMeta(
             model=None,
@@ -1169,7 +1155,7 @@ class DjangoFormMutation(_FormMutationBase, metaclass=DjangoFormMutationMetaclas
         ``None`` here and is deliberately unused.
 
         ``guard_required`` is waived when the concrete mutation overrides
-        ``get_form_kwargs`` / ``get_form`` (spec-038 waiver). The
+        ``get_form_kwargs`` / ``get_form``. The
         reverse-map ``field_specs`` are stashed on the mutation for the
         decode.
         """

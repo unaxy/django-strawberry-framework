@@ -125,11 +125,13 @@ def normalize_meta_field_selection(
         truth.static_attr(meta, "fields"),
         label="fields",
         flavor=flavor,
+        ordered=True,
     )
     exclude = normalize_field_name_sequence(
         truth.static_attr(meta, "exclude"),
         label="exclude",
         flavor=flavor,
+        ordered=False,
     )
     return fields, exclude
 
@@ -143,7 +145,7 @@ def cached_build_input(
 ) -> tuple[type[object], _PayloadT]:
     """Run the per-declaration guard, THEN the per-shape cache lookup.
 
-    The promoted guard-before-cache-lookup core for flavors whose cache key is
+    The shared guard-before-cache-lookup core for flavors whose cache key is
     known BEFORE the build (today: the form ``build_input`` seam). The
     load-bearing ordering (spec-038 Decision 7 / spec-039 Decision 7): the
     create-required-narrowing ``guard`` runs PER declaration, BEFORE the
@@ -201,7 +203,7 @@ def construction_kwargs(
     instance: models.Model | None = None,
     **base: object,
 ) -> dict[str, object]:
-    """Build a construction-hook kwargs dict, adding ``instance`` only when non-``None`` (spec-039).
+    """Build a construction-hook kwargs dict, adding ``instance`` only when non-``None``.
 
     The default construction-kwargs hooks share the ``{...base...}`` +
     ``if instance is not None: kwargs["instance"] = instance`` shape: the form
@@ -715,20 +717,18 @@ class _ValidatedMutationMeta:
         self.fields: tuple[str, ...] | None = fields
         self.exclude: tuple[str, ...] | None = exclude
         self.permission_classes: tuple[WritePermissionClass, ...] = permission_classes
-        # The form-flavor snapshot (spec-038): a ``DjangoModelFormMutation``
+        # The form-flavor snapshot: a ``DjangoModelFormMutation``
         # / ``DjangoFormMutation`` records its ``Meta.form_class`` here so the form
         # ``build_input`` / resolver read one snapshot shape. The model flavor
-        # leaves it ``None`` (it has no ``form_class``), so the model path is
-        # byte-unchanged - the slot is net-new state never read by the model
-        # bind/resolver.
+        # leaves it ``None`` (it has no ``form_class``); the model path never
+        # reads this slot.
         self.form_class: FormClass | None = form_class
-        # The serializer-flavor snapshot (spec-039): a ``SerializerMutation``
+        # The serializer-flavor snapshot: a ``SerializerMutation``
         # records its ``Meta.serializer_class`` here so the serializer ``build_input``
         # / resolver read one snapshot shape (mirroring ``form_class``). The model +
-        # form flavors leave it ``None`` (net-new state, never read off the model /
-        # form paths), so they stay byte-unchanged.
+        # form flavors leave it ``None``; neither path reads it.
         self.serializer_class: type[DRFSerializer] | None = serializer_class
-        # The serializer-flavor ``Meta.optional_fields`` (spec-039): the
+        # The serializer-flavor ``Meta.optional_fields``: the
         # create-only force-optional override lives on the MUTATION's ``Meta`` (the
         # documented public key), NOT the serializer's own ``Meta``. Normalized at
         # class creation and stored here as the validated tuple (``None`` when unset);
@@ -739,7 +739,7 @@ class _ValidatedMutationMeta:
         # The serializer-flavor schema-hook fingerprint: a stable digest of
         # the ``get_serializer_for_schema()`` field shape captured at class validation, so the
         # phase-2.5 bind can raise on a NONDETERMINISTIC hook that drifted. The model + form
-        # flavors leave it ``None`` (net-new state, never read off their paths).
+        # flavors leave it ``None``; neither path reads it.
         self.schema_fingerprint: tuple[tuple[object, ...], ...] | None = schema_fingerprint
         # The serializer-flavor ``Meta.injected_fields``: the auditable,
         # per-field replacement for the blanket ``get_serializer_kwargs``-override waiver -
@@ -784,13 +784,17 @@ class _ValidatedMutationMeta:
 
 
 def _validate_permission_classes(
-    mutation_name: str,
+    site: str,
     value: object,
     *,
     unset_default: tuple[WritePermissionClass, ...] = (DjangoModelPermission,),
-    base_label: str = "DjangoMutation",
+    model_less: bool = False,
 ) -> tuple[WritePermissionClass, ...]:
-    """Validate + normalize ``Meta.permission_classes`` at class creation.
+    """Validate + normalize a write surface's ``permission_classes`` at class creation.
+
+    ``site`` opens every message and names where the value was declared: a
+    ``Meta`` key on a declared class (``"DjangoFormMutation Submit.Meta.permission_classes"``)
+    or an auth factory's keyword (``"login_mutation() permission_classes"``).
 
     An invalid ``permission_classes`` entry is rejected at
     class-creation, not deferred to a request-time ``TypeError`` /
@@ -814,6 +818,18 @@ def _validate_permission_classes(
       shape ``check_permission`` instantiates + calls); an instance, a non-class
       value, or a class without ``has_permission`` -> ``ConfigurationError``
       naming the offending entry.
+    - ``model_less=True`` (the plain ``DjangoFormMutation`` and the model-less
+      auth fields ``login`` / ``logout`` / ``current_user``): an entry that is a
+      ``DjangoModelPermission`` not overriding ``has_permission`` (the class
+      itself or a subclass that inherits its hook) -> ``ConfigurationError``.
+      That hook reads the model the mutation validated at declaration and maps
+      the operation to an ``add`` / ``change`` / ``delete`` codename; a
+      model-less surface has neither, so the class would raise per request
+      instead of denying. A subclass overriding ``has_permission`` decides
+      without the model and is admitted. What stays unguardable is code the
+      class creation cannot read: an override that calls ``super()``, or any
+      gate reading the mutation's model, still raises per request on a
+      model-less surface.
 
     Returns the normalized IMMUTABLE tuple the snapshot stores, so the live
     authorization walk (``mutations/permissions.py::run_permission_classes``)
@@ -835,18 +851,28 @@ def _validate_permission_classes(
         or truth.mro_attr(truth.class_of(value), "__iter__") is None
     ):
         raise ConfigurationError(
-            f"{base_label} {mutation_name}.Meta.permission_classes must be a sequence of "
-            f"permission classes (e.g. [DjangoModelPermission]); got {truth.render(value)}.",
+            f"{site} must be a sequence of permission classes; got {truth.render(value)}.",
         )
     classes = list_of(value)
     validated: list[WritePermissionClass] = []
     for entry in classes:
         if not is_permission_class(entry):
             raise ConfigurationError(
-                f"{base_label} {mutation_name}.Meta.permission_classes entry "
-                f"{truth.render(entry)} is not a permission class exposing has_permission; "
-                "each entry must be a class with a "
+                f"{site} entry {truth.render(entry)} is not a permission class exposing "
+                "has_permission; each entry must be a class with a "
                 "has_permission(info, mutation, operation, data, instance) method.",
+            )
+        if (
+            model_less
+            and truth.is_subclass(entry, DjangoModelPermission)
+            and not truth.overrides(entry, DjangoModelPermission, "has_permission")
+        ):
+            raise ConfigurationError(
+                f"{site} includes {truth.name(entry)}, a DjangoModelPermission that does not "
+                "override has_permission; it requires a model and this surface has none. "
+                "Override has_permission without calling the base hook, omit permission_classes "
+                "for this surface's "
+                "default, or set [] to allow any.",
             )
         validated.append(entry)
     # The validated snapshot is stored IMMUTABLE: a mutable list reachable from
@@ -896,14 +922,13 @@ def model_backed_permission_and_lock(
     Every model-backed ``_validate_meta`` (model / ModelForm) pairs the
     ``DjangoModelPermission`` default with the ``FOR UPDATE`` lock validator.
     The model-less plain form does NOT call this (DenyAll default, no row to
-    lock, plus the extra model-permission reject). The serializer flavor
+    lock, plus the ``model_less`` model-permission reject). The serializer flavor
     interleaves other Meta keys between the lock and the permission walk, so
     it keeps calling the two primitives in that order rather than this pair.
     """
     permission_classes = _validate_permission_classes(
-        name,
+        f"{flavor} {name}.Meta.permission_classes",
         truth.static_attr(meta, "permission_classes"),
-        base_label=flavor,
     )
     return permission_classes, validate_select_for_update(flavor, name, meta)
 

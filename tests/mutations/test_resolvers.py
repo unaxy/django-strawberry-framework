@@ -25,8 +25,9 @@ renamed ``Meta.input_class`` input, a relation ``attname`` and a dotted name
 (fakeshop's ``Item.save()`` rule raises only ``name``), the error keys and the
 relation bound of a ``Meta.input_class`` field declared without ``name=`` under the
 default config, ``auto_camel_case=False`` and a custom ``NameConverter`` (the live
-schema is one config, and no shipped override leaves such a field unnamed over a
-column the casers disagree on, which adding one would change the published SDL), and
+schema is one config: ``createEdition``'s unnamed ``isbn_10`` under the default config
+is pinned in ``examples/fakeshop/test_query/test_library_api.py``; the other two
+configs and the unnamed ``isbn_13`` / ``publisher_2_id`` shapes stay here), and
 ``ScalarSpecimen`` writes (no shipped mutation; rung 1
 would add ``CreateScalarSpecimen`` to the scalars schema, rung 3 is the same
 late-declaration reject). Consumer-visible create/update/delete, empty-name
@@ -132,6 +133,7 @@ from django_strawberry_framework.utils.write_transaction import (
 )
 from tests._idioms import (
     FETCH_MODES,
+    TEST_ASYNC_RECOURSE,
     is_object_dict,
     is_object_list,
     requires_fetch_modes,
@@ -3762,7 +3764,12 @@ def test_visible_related_object_misses_a_target_hidden_while_its_lock_waited() -
         transaction.atomic(),
         write_pipeline("default", lock=True),
     ):
-        found = visible_related_object(product_models.Category, saved_pk(category), unread_info())
+        found = visible_related_object(
+            product_models.Category,
+            saved_pk(category),
+            unread_info(),
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
 
     assert found is None
 

@@ -2,7 +2,7 @@
 
 Covers the metaclass (`FilterSetMetaclass`), `FilterSet`'s class-creation
 behavior (cycle-safe `get_filters` expansion + `_get_fields` narrowing),
-the spec-027 Decision 4 owner-aware Relay-vs-scalar conditional in
+the spec-027 Decision 4 Relay-vs-scalar conditional in
 `filter_for_field`, and the spec-027 Decision 8 apply pipeline
 (`apply_sync` / `apply_async` / `apply` + the five named helpers).
 
@@ -62,7 +62,6 @@ from django.db.backends.base.base import BaseDatabaseWrapper
 from django.db.backends.base.operations import BaseDatabaseOperations
 from django.db.backends.sqlite3.operations import DatabaseOperations as SQLiteOperations
 from django.db.models import F, Lookup, Q, QuerySet, Transform
-from django.db.models.functions import Length
 from django.forms import ModelChoiceField, ModelMultipleChoiceField
 from django.http import HttpRequest, QueryDict
 from django.test import override_settings
@@ -162,8 +161,6 @@ from django_strawberry_framework.types.relay import SyncMisuseError, apply_inter
 from django_strawberry_framework.utils import truth, widgets
 from django_strawberry_framework.utils._narrowing import (
     call_method,
-    class_dict,
-    is_class,
     is_dict,
     is_exact_pair,
     is_list_or_tuple,
@@ -196,6 +193,12 @@ from tests._postgres_fields import (
     real_array_of,
 )
 from tests._postgresql_stand_in import BINDING_MODES, postgresql_stand_in
+from tests._relation_fixtures import (
+    RpGenericHolder,
+    RpGenericProxyHolder,
+    RpGenericTag,
+    generic_fixture_rows,
+)
 from tests._subprocess import run_in_fresh_process
 from tests.optimizer import _link_models
 
@@ -1854,7 +1857,7 @@ def _path_walk(filterset: type[FilterSet], path: tuple[type[FilterSet], ...] = (
     """
     path = (*path, filterset)
     names = dict.fromkeys(filterset._unexpanded_filters())
-    declarations = class_dict(filterset)["related_filters"]
+    declarations = truth.class_dict(filterset)["related_filters"]
     assert is_dict(declarations)
     for declaration_name, declaration in declarations.items():
         assert isinstance(declaration, RelatedFilter)
@@ -4002,6 +4005,64 @@ def test_filterset_meta_refuses_a_non_string_field_name_entry(
     )
 
 
+_MALFORMED_LOOKUP_VALUE_PREFIX = "FilterSet MetaProbeFilter.Meta.fields['name']"
+_NOT_A_LOOKUP_BAG = " must be '__all__' or a re-readable collection of lookup-name strings; got "
+_NOT_A_LOOKUP_NAME = " entries must be lookup-name strings; got "
+
+
+@pytest.mark.parametrize(
+    ("lookups", "message"),
+    [
+        pytest.param([1], f"{_NOT_A_LOOKUP_NAME}int (1).", id="int-member"),
+        pytest.param([None], f"{_NOT_A_LOOKUP_NAME}NoneType (None).", id="none-member"),
+        pytest.param([b"exact"], f"{_NOT_A_LOOKUP_NAME}bytes (b'exact').", id="bytes-member"),
+        pytest.param([["exact"]], f"{_NOT_A_LOOKUP_NAME}list (['exact']).", id="list-member"),
+        pytest.param(None, f"{_NOT_A_LOOKUP_BAG}NoneType (None).", id="none"),
+        pytest.param("exact", f"{_NOT_A_LOOKUP_BAG}str ('exact').", id="bare-str"),
+        pytest.param(
+            gettext_lazy("exact"),
+            f"{_NOT_A_LOOKUP_BAG}__proxy__ ('exact').",
+            id="bare-lazy",
+        ),
+        pytest.param(
+            [gettext_lazy("exact")],
+            f"{_NOT_A_LOOKUP_NAME}__proxy__ ('exact').",
+            id="lazy-member",
+        ),
+        # A one-shot value's repr carries its address, so only its kind is pinned.
+        pytest.param(
+            (lookup for lookup in ["exact"]),
+            f"{_NOT_A_LOOKUP_BAG}generator (",
+            id="generator",
+        ),
+        pytest.param(iter(["exact"]), f"{_NOT_A_LOOKUP_BAG}list_iterator (", id="iterator"),
+    ],
+)
+def test_filterset_meta_refuses_a_malformed_lookup_value(lookups: object, message: str) -> None:
+    """A lookup-bag value that is no ``"__all__"`` or lookup-name collection fails closed by name.
+
+    django-filter walks the value as the field's lookups: a bare string letter by letter
+    (``"exact"`` becomes the unsupported lookup ``"e"``), a non-string member into a raw
+    ``TypeError``, and a one-shot iterator once, publishing no filters on every later
+    expansion.
+    """
+    with pytest.raises(ConfigurationError) as excinfo:
+        _category_filter_with_meta(fields={"name": lookups})
+    expected = _MALFORMED_LOOKUP_VALUE_PREFIX + message
+    if message.endswith("."):
+        assert str(excinfo.value) == expected
+    else:
+        assert str(excinfo.value).startswith(expected)
+
+
+def test_filterset_meta_admits_a_lazy_all_lookup_value() -> None:
+    """A lazy translation string spelling ``"__all__"`` is the per-field shorthand it spells."""
+    lazy_filter = _category_filter_with_meta(fields={"name": gettext_lazy("__all__")})
+    plain_filter = _category_filter_with_meta(fields={"name": "__all__"})
+    assert list(lazy_filter.get_filters()) == list(plain_filter.get_filters())
+    assert "name" in lazy_filter.get_filters()
+
+
 _META_KEY_REFUSALS: dict[str, tuple[object, str]] = {
     "unknown key": (
         type("Meta", (), {"model": Category, "fields": ["name"], "bogus": True}),
@@ -4782,14 +4843,14 @@ def test_generated_forward_fk_in_is_multiple_choice_over_fk_to_pk() -> None:
 
     in_leaf = generated["shelf__in"]
     assert isinstance(in_leaf, GlobalIDMultipleChoiceFilter)
-    assert convert_filter_to_input_annotation(in_leaf, field) == list[str] | None
+    assert convert_filter_to_input_annotation(in_leaf, field, None, BookFilter) == list[str] | None
     # An ordinary FK-to-pk relation carries no pk-qualification marker.
     assert getattr(in_leaf, _GLOBALID_RELATION_PK_ATTR, False) is not True
 
     exact_leaf = generated["shelf"]
     assert isinstance(exact_leaf, GlobalIDFilter)
     assert not isinstance(exact_leaf, GlobalIDMultipleChoiceFilter)
-    assert convert_filter_to_input_annotation(exact_leaf, field) == str | None
+    assert convert_filter_to_input_annotation(exact_leaf, field, None, BookFilter) == str | None
 
 
 @pytest.mark.django_db
@@ -4877,7 +4938,9 @@ def test_generated_forward_fk_to_field_in_is_pk_qualified_multiple_choice() -> N
     in_leaf = generated["favorite_genre__in"]
     assert isinstance(in_leaf, GlobalIDMultipleChoiceFilter)
     assert getattr(in_leaf, _GLOBALID_RELATION_PK_ATTR, None) is True
-    assert convert_filter_to_input_annotation(in_leaf, field) == list[str] | None
+    assert (
+        convert_filter_to_input_annotation(in_leaf, field, None, ChildFilter) == list[str] | None
+    )
 
     exact_leaf = generated["favorite_genre"]
     assert isinstance(exact_leaf, GlobalIDFilter)
@@ -5156,9 +5219,9 @@ def _register_relay_target(model: type[django_models.Model]) -> type[DjangoType]
     """Register ``model`` as a Relay-Node-shaped ``DjangoType`` for relation resolution.
 
     Mirrors the inline pattern in the ``filter_for_field`` relation tests above:
-    ``_resolve_relation_target_type`` falls back to the registry (owner unbound in
-    package tests), so a relation to ``model`` resolves to a Relay node and the
-    Relay wire-shape policy applies.
+    a relation key's target type is ``registry.get`` of its related model, so a
+    relation to ``model`` resolves to a Relay node and the Relay wire-shape policy
+    applies.
     """
     django_type = type(
         f"{model.__name__}RelayType",
@@ -5463,7 +5526,8 @@ def test_traversal_to_field_in_leaf_routes_through_correlated_exists() -> None:
     assert getattr(expanded_leaf, _GLOBALID_RELATION_PK_ATTR, None) is True
     child_target_field = library_models.PatronProfile._meta.get_field("favorite_genre")
     assert (
-        convert_filter_to_input_annotation(expanded_leaf, child_target_field) == list[str] | None
+        convert_filter_to_input_annotation(expanded_leaf, child_target_field, None, ParentFilter)
+        == list[str] | None
     )
 
     t1 = library_models.Genre.objects.create(name="C1")
@@ -5836,10 +5900,12 @@ def test_filter_for_field_picks_scalar_filter_for_non_relay_target() -> None:
     field = library_models.Book._meta.get_field("shelf")
     resolved = BookFilter.filter_for_field(field, "shelf")
     assert isinstance(resolved, RelationPkFilter)
-    assert convert_filter_to_input_annotation(resolved, field) == (int | None)
+    assert convert_filter_to_input_annotation(resolved, field, None, BookFilter) == (int | None)
     resolved_in = BookFilter.filter_for_field(field, "shelf", "in")
     assert isinstance(resolved_in, RelationPkMultipleFilter)
-    assert convert_filter_to_input_annotation(resolved_in, field) == (list[int] | None)
+    assert convert_filter_to_input_annotation(resolved_in, field, None, BookFilter) == (
+        list[int] | None
+    )
 
 
 def test_filter_for_field_types_raw_pk_when_target_model_not_registered() -> None:
@@ -5853,7 +5919,7 @@ def test_filter_for_field_types_raw_pk_when_target_model_not_registered() -> Non
     field = library_models.Book._meta.get_field("shelf")
     resolved = BookFilter.filter_for_field(field, "shelf")
     assert isinstance(resolved, RelationPkFilter)
-    assert convert_filter_to_input_annotation(resolved, field) == (int | None)
+    assert convert_filter_to_input_annotation(resolved, field, None, BookFilter) == (int | None)
 
 
 @pytest.mark.parametrize(
@@ -9233,6 +9299,49 @@ def _specimens_in_years() -> dict[str, scalar_models.ScalarSpecimen]:
 @pytest.mark.parametrize(
     ("data", "labels"),
     [
+        pytest.param({"years_among": [2020, 2022]}, ["mid-2020", "mid-2022"], id="list-in"),
+        pytest.param({"days_among": [datetime.date(2021, 1, 1)]}, ["new-year-2021"], id="date-in"),
+        pytest.param(
+            {"years_span_0": 2019, "years_span_1": 2020},
+            ["mid-2019", "mid-2020"],
+            id="range",
+        ),
+    ],
+)
+def test_declared_filter_through_a_lookup_expr_transform_cleans_values_as_its_output(
+    data: dict[str, object],
+    labels: list[str],
+) -> None:
+    """A ``ListFilter`` / ``RangeFilter`` whose ``lookup_expr`` carries a transform cleans its output.
+
+    Each member or bound is a value of the transform's output (``year``'s ``IntegerField``,
+    ``date``'s ``DateField``), the type its input is published as, so it is cleaned as one
+    and filters by it, never refused by the datetime column's own form field.
+    """
+
+    class TransformLookupFilter(FilterSet):
+        years_among = ListFilter(field_name="occurred_at", lookup_expr="year__in")
+        days_among = ListFilter(field_name="occurred_at", lookup_expr="date__in")
+        years_span = RangeFilter(field_name="occurred_at", lookup_expr="year__range")
+
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = []
+
+    _ = _specimens_in_years()
+    filterset = TransformLookupFilter(
+        data=data,
+        queryset=scalar_models.ScalarSpecimen.objects.order_by("occurred_at"),
+    )
+
+    TransformLookupFilter._validate_form_or_raise(filterset)
+    assert list(filterset.qs.values_list("label", flat=True)) == labels
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("data", "labels"),
+    [
         pytest.param(
             {"occurred_at__year__in": "2020,2022"},
             ["mid-2020", "mid-2022"],
@@ -9471,26 +9580,13 @@ def test_annotation_constant_the_leaf_reads_never_refuses_its_value(
     }
 
 
-class _ElementCount(Length):
-    """An array's element count under the ``len`` name a real ``ArrayField`` registers."""
-
-    lookup_name = "len"
-
-
-class _CountedArrayField(FakeArrayField):
-    """A ``FakeArrayField`` carrying the ``len`` transform a real ``ArrayField`` registers."""
-
-
-_CountedArrayField.register_lookup(_ElementCount)
-
-
 class _TaggedShelf(django_models.Model):
     """A table with an array of text whose ``len`` an integer filter compares.
 
     Query-build only (``managed = False``): the bind ask compiles, never runs, its clause.
     """
 
-    tags = _CountedArrayField(django_models.TextField())
+    tags = FakeArrayField(django_models.TextField())
 
     class Meta:
         managed = False
@@ -11055,7 +11151,7 @@ def test_integer_array_leaf_holds_only_the_elements_it_binds_to_the_element_rang
     }
 
 
-class _PreparedCountedArrayField(_CountedArrayField):
+class _PreparedCountedArrayField(FakeArrayField):
     """A ``len``-carrying ``ArrayField`` double that prepares each element as a real one does.
 
     ``ArrayField.get_db_prep_value`` prepares a list element by element through its
@@ -11167,7 +11263,9 @@ def test_time_array_list_parameter_psycopg_cannot_dump_is_refused(
     pytest.importorskip("psycopg")
     psycopg = importlib.import_module("psycopg")
     model, shelf_filter = _stamped_shelf_filter_class(real_array_of)
-    cursor_factory = require(read_attr(psycopg, "ClientCursor"), is_class) if client_side else None
+    cursor_factory = (
+        require(read_attr(psycopg, "ClientCursor"), truth.is_type) if client_side else None
+    )
     with postgresql_stand_in(psycopg, cursor_factory) as alias:
         filterset = shelf_filter(data=data, queryset=model.objects.using(alias))
         if not refused:
@@ -11319,7 +11417,9 @@ def test_annotation_list_parameter_the_leaf_reads_never_refuses_its_list(
             model = shelf_model
             fields = []
 
-    cursor_factory = require(read_attr(psycopg, "ClientCursor"), is_class) if client_side else None
+    cursor_factory = (
+        require(read_attr(psycopg, "ClientCursor"), truth.is_type) if client_side else None
+    )
     with postgresql_stand_in(psycopg, cursor_factory) as alias:
         queryset = shelf_model.objects.using(alias).annotate(
             clocks_seen=models.Case(
@@ -11438,8 +11538,8 @@ def test_temporal_transform_integer_the_database_cannot_bind_is_refused(
     ``IntegerField`` output, so 2**63, -2**63-1 and a thirty-digit year are refused keyed
     to the form field, an excluded multi-valued relation's member inside its ``Exists``
     subquery included. Package-only: the date column and ``iso_year`` leaves are declared
-    by no fakeshop filterset (``occurredYearAmong`` / ``occurredYearSpan`` hold the
-    datetime column's ``year`` live).
+    by no fakeshop filterset, and the live ``occurredYearAmong`` / ``occurredYearSpan`` take
+    an ``Int``, which carries no such integer.
     """
     specimen_filter = _year_integer_filter_class()
     filterset = specimen_filter(data=data, queryset=scalar_models.ScalarSpecimen.objects.all())
@@ -12032,6 +12132,7 @@ def test_evaluate_logic_tree_caps_recursion_depth() -> None:
             Category.objects.all(),
             {"and": [{"name": "x"}]},
             _depth=CategoryFilter._MAX_LOGIC_DEPTH + 1,
+            _flat_hop_visibility={},
         )
     assert "_MAX_LOGIC_DEPTH" in str(excinfo.value)
 
@@ -12062,6 +12163,7 @@ def test_evaluate_logic_tree_caps_a_non_int_knob_at_the_neutral_default() -> Non
             Category.objects.all(),
             {"and": [{"name": "x"}]},
             _depth=FilterSet._MAX_LOGIC_DEPTH + 1,
+            _flat_hop_visibility={},
         )
 
 
@@ -12109,8 +12211,11 @@ def test_evaluate_logic_tree_and_direct_branch_treat_inactive_values_as_identity
             fields = {"name": ["exact"]}
 
     queryset = Category.objects.all()
-    assert CategoryFilter._evaluate_logic_tree(queryset, {"and": [None]}) == Q()
-    assert CategoryFilter._q_for_branch(queryset, UNSET) == Q()
+    assert (
+        CategoryFilter._evaluate_logic_tree(queryset, {"and": [None]}, _flat_hop_visibility={})
+        == Q()
+    )
+    assert CategoryFilter._q_for_branch(queryset, UNSET, _flat_hop_visibility={}) == Q()
 
 
 def test_collect_nested_visibility_querysets_async_caps_recursion_depth() -> None:
@@ -12133,6 +12238,7 @@ def test_collect_nested_visibility_querysets_async_caps_recursion_depth() -> Non
                 {"and_": [{"name": "x"}]},
                 _make_info(),
                 _depth=CategoryFilter._MAX_LOGIC_DEPTH + 1,
+                flat_hop_visibility={},
             ),
         )
     assert "_MAX_LOGIC_DEPTH" in str(excinfo.value)
@@ -12171,7 +12277,7 @@ def test_is_own_pk_under_relay_owner_false_for_relation_field() -> None:
     # teardown) strips the binding afterward.
     BookFilter._owner_definition = BookType.__django_strawberry_definition__
     relation_field = library_models.Book._meta.get_field("genres")
-    assert BookFilter._is_own_pk_under_relay_owner(relation_field) is False
+    assert BookFilter._is_own_pk_under_relay_owner(relation_field, "genres") is False
 
 
 def test_is_own_pk_under_relay_owner_false_when_model_missing() -> None:
@@ -12194,7 +12300,192 @@ def test_is_own_pk_under_relay_owner_false_when_model_missing() -> None:
     # ``_meta.model`` does not leak into other tests.
     CategoryFilter._meta.model = None
     non_relation = SimpleNamespace(is_relation=False)
-    assert CategoryFilter._is_own_pk_under_relay_owner(non_relation) is False
+    assert CategoryFilter._is_own_pk_under_relay_owner(non_relation, "name") is False
+
+
+def _relay_bound_book_filter(fields: dict[str, object]) -> type[FilterSet]:
+    """A ``Book`` set with ``fields``, bound to a Relay-Node ``BookType``."""
+
+    class BookType(DjangoType):
+        class Meta:
+            model = library_models.Book
+            interfaces = (strawberry.relay.Node,)
+
+    apply_interfaces(BookType, BookType.__django_strawberry_definition__)
+    meta = type("Meta", (), {"model": library_models.Book, "fields": fields})
+    book_filter = type("BookFilter", (FilterSet,), {"__module__": __name__, "Meta": meta})
+    assert issubclass(book_filter, FilterSet)
+    book_filter._owner_definition = BookType.__django_strawberry_definition__
+    return book_filter
+
+
+def test_is_own_pk_under_relay_owner_false_for_a_dotted_key() -> None:
+    """Only the single-segment key names the own PK; a hop key ending on it does not."""
+    book_filter = _relay_bound_book_filter({"title": ["exact"]})
+    pk_field = library_models.Book._meta.pk
+
+    assert book_filter._is_own_pk_under_relay_owner(pk_field, "id") is True
+    assert book_filter._is_own_pk_under_relay_owner(pk_field, None) is True
+    assert book_filter._is_own_pk_under_relay_owner(pk_field, "archive_genres__books__id") is False
+
+
+def test_hop_key_ending_on_own_pk_is_a_plain_column_filter() -> None:
+    """``archive_genres__books__id`` filters the hop's book: the column filter, every lookup."""
+    book_filter = _relay_bound_book_filter({"archive_genres__books__id": ["exact", "in", "gt"]})
+
+    leaves = book_filter.get_filters()
+
+    assert type(leaves["archive_genres__books__id"]) is NumberFilter
+    assert isinstance(leaves["archive_genres__books__id__in"], IntegerInFilter)
+    assert type(leaves["archive_genres__books__id__gt"]) is NumberFilter
+
+
+def test_dict_all_narrows_the_own_pk_but_not_a_hop_key_ending_on_it() -> None:
+    """The dict ``"__all__"`` GlobalID narrowing applies to the own ``id`` key only."""
+    book_filter = _relay_bound_book_filter(
+        {"id": "__all__", "archive_genres__books__id": "__all__"},
+    )
+
+    fields = book_filter.get_fields()
+
+    assert set(require(fields["id"], is_list_or_tuple)) == {"exact", "in", "isnull"}
+    assert "gt" in require(fields["archive_genres__books__id"], is_list_or_tuple)
+
+
+def test_delegating_filter_for_lookup_override_keeps_the_own_pk_global_id() -> None:
+    """An override answering ``super().filter_for_lookup()`` keeps the own-PK GlobalID policy."""
+
+    class CategoryType(DjangoType):
+        class Meta:
+            model = Category
+            interfaces = (strawberry.relay.Node,)
+
+    apply_interfaces(CategoryType, CategoryType.__django_strawberry_definition__)
+
+    class DelegatingFilter(FilterSet):
+        class Meta:
+            model = Category
+            fields = {"id": ["exact", "in"]}
+
+        @classmethod
+        @override
+        def filter_for_lookup(
+            cls,
+            field: ModelField,
+            lookup_type: str,
+        ) -> tuple[type[Filter] | None, dict[str, object]]:
+            return super().filter_for_lookup(field, lookup_type)
+
+    DelegatingFilter._owner_definition = CategoryType.__django_strawberry_definition__
+
+    leaves = DelegatingFilter.get_filters()
+    assert type(leaves["id"]) is GlobalIDFilter
+    assert type(leaves["id__in"]) is GlobalIDMultipleChoiceFilter
+    with pytest.raises(ConfigurationError, match="'gt' is not supported"):
+        DelegatingFilter.filter_for_field(Category._meta.pk, "id", "gt")
+
+
+def test_another_sets_filter_for_lookup_during_generation_reads_as_a_direct_call() -> None:
+    """A set's ``filter_for_lookup`` called inside another set's generation sees no key.
+
+    ``BookFilter`` builds the dotted ``archive_genres__books__id`` key, and its override
+    asks ``CategoryFilter`` about Category's primary key meanwhile; the published key
+    is Book's, so Category's own pk keeps its GlobalID.
+    """
+
+    class CategoryType(DjangoType):
+        class Meta:
+            model = Category
+            interfaces = (strawberry.relay.Node,)
+
+    apply_interfaces(CategoryType, CategoryType.__django_strawberry_definition__)
+
+    class CategoryFilter(FilterSet):
+        class Meta:
+            model = Category
+            fields = {"name": ["exact"]}
+
+    CategoryFilter._owner_definition = CategoryType.__django_strawberry_definition__
+    asked: list[type[Filter] | None] = []
+
+    class AskingBookFilter(FilterSet):
+        class Meta:
+            model = library_models.Book
+            fields = {"archive_genres__books__id": ["exact"]}
+
+        @classmethod
+        @override
+        def filter_for_lookup(
+            cls,
+            field: ModelField,
+            lookup_type: str,
+        ) -> tuple[type[Filter] | None, dict[str, object]]:
+            asked.append(CategoryFilter.filter_for_lookup(Category._meta.pk, "exact")[0])
+            return super().filter_for_lookup(field, lookup_type)
+
+    asked.clear()
+    _ = AskingBookFilter.get_filters()
+
+    assert asked
+    assert all(answer is GlobalIDFilter for answer in asked)
+
+
+def test_generic_foreign_key_key_is_refused_by_path() -> None:
+    """A ``GenericForeignKey`` key (no ``related_model``) is refused naming its path."""
+
+    def declare() -> type[FilterSet]:
+        class TaggedItemFilter(FilterSet):
+            class Meta:
+                model = library_models.TaggedItem
+                fields = {"content_object": ["exact"]}
+
+        _ = TaggedItemFilter.get_filters()
+        return TaggedItemFilter
+
+    with pytest.raises(ConfigurationError, match="content_object"):
+        declare()
+
+
+def test_dotted_relation_key_targets_its_own_relation_not_a_root_relation_of_the_leaf_name() -> (
+    None
+):
+    """``branch__notes__branch`` on a bound Shelf set targets ``ProxyBranch``, not ``Branch``.
+
+    The leaf ``BranchNote.branch`` is named like ``Shelf.branch``; the Relay
+    ``ProxyBranch`` type makes the key a GlobalID, where the non-Relay ``Branch`` type
+    behind the root relation of that name would make it a raw primary key.
+    """
+
+    class BranchType(DjangoType):
+        class Meta:
+            model = library_models.Branch
+            fields = ("id", "name")
+
+    class ProxyBranchType(DjangoType):
+        class Meta:
+            model = library_models.ProxyBranch
+            fields = ("id", "name")
+            interfaces = (strawberry.relay.Node,)
+
+    apply_interfaces(ProxyBranchType, ProxyBranchType.__django_strawberry_definition__)
+
+    class ShelfFilter(FilterSet):
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+    class ShelfType(DjangoType):
+        class Meta:
+            model = library_models.Shelf
+            fields = ("id", "code")
+
+    assert registry.get(library_models.Branch) is BranchType
+    ShelfFilter._owner_definition = ShelfType.__django_strawberry_definition__
+    leaf = library_models.BranchNote._meta.get_field("branch")
+
+    resolved = ShelfFilter.filter_for_field(leaf, "branch__notes__branch", "exact")
+
+    assert isinstance(resolved, GlobalIDFilter)
 
 
 def test_filter_for_lookup_rejects_unsupported_lookup_on_relay_owner_pk() -> None:
@@ -12240,65 +12531,16 @@ def test_filter_for_lookup_rejects_unsupported_lookup_on_relay_owner_pk() -> Non
     assert isnull_class is not GlobalIDFilter
 
 
-def test_resolve_relation_target_type_uses_owner_related_target_for() -> None:
-    """When the owner resolves the relation, its target type is returned.
+def test_relation_key_target_type_prefers_declared_primary() -> None:
+    """A relation key's target type is the declared primary when two types share a model.
 
-    The owner's ``related_target_for`` pair carries a ``DjangoTypeDefinition``,
-    whose registered ``DjangoType`` class is ``.origin`` -- NOT ``.type`` /
-    ``.type_cls``; reading those nonexistent attrs would drop every owner-aware
-    resolution to the registry fallback. The field's ``related_model`` has no
-    registered type, so only the owner path can answer.
-    """
-
-    class ShelfType(DjangoType):
-        class Meta:
-            model = library_models.Shelf
-            fields = ("id",)
-
-    class BookType(DjangoType):
-        class Meta:
-            model = library_models.Book
-            fields = ("id",)
-
-    class CategoryFilter(FilterSet):
-        class Meta:
-            model = Category
-            fields = {"name": ["exact"]}
-
-    CategoryFilter._owner_definition = BookType.__django_strawberry_definition__
-    relation_field = SimpleNamespace(is_relation=True, related_model=Category)
-    assert registry.get(Category) is None
-    resolved = CategoryFilter._resolve_relation_target_type(relation_field, "shelf")
-    assert resolved is ShelfType
-
-
-def test_resolve_relation_target_type_returns_none_without_related_model() -> None:
-    """A relation field with no ``related_model`` and no owner resolves to ``None``."""
-
-    class CategoryFilter(FilterSet):
-        class Meta:
-            model = Category
-            fields = {"name": ["exact"]}
-
-    field = SimpleNamespace(is_relation=True, related_model=None)
-    assert CategoryFilter._resolve_relation_target_type(field, None) is None
-
-
-def test_resolve_relation_target_type_registry_fallback_prefers_declared_primary() -> None:
-    """The registry fallback resolves the declared primary when two types share a model.
-
-    Pins the contract relied upon at
-    ``django_strawberry_framework/filters/sets.py``
-    ``FilterSet._resolve_relation_target_type`` - the fallback is
-    ``target_type = registry.get(related_model)``, NOT a
-    ``registry.primary_for(related_model) or registry.get(related_model)``
-    chain. The single call is safe only because ``registry.get`` itself
-    honors ``_primaries`` as its first return state; this test pins
-    that end-to-end so a future change that breaks the primary-first
-    rule in ``registry.get`` surfaces here before the Relay-aware
-    filter selection silently swings to the wrong target (the
-    ``tests/types/test_definition_relations.py`` twin pins the same
-    contract for ``DjangoTypeDefinition.related_target_for``).
+    ``FilterSet.filter_for_lookup`` reads the target as ``registry.get(related_model)``,
+    NOT a ``registry.primary_for(related_model) or registry.get(related_model)`` chain.
+    The single call is safe only because ``registry.get`` itself honors ``_primaries``
+    as its first return state; the Relay-shaped primary over a non-Relay sibling makes
+    the pick visible as the generated class. The
+    ``tests/types/test_definition_relations.py`` twin pins the same contract for
+    ``DjangoTypeDefinition.related_target_for``.
     """
 
     class ShelfType(DjangoType):
@@ -12313,23 +12555,25 @@ def test_resolve_relation_target_type_registry_fallback_prefers_declared_primary
             model = library_models.Shelf
             fields = ("id", "code")
             primary = True
+            interfaces = (strawberry.relay.Node,)
 
-    class CategoryFilter(FilterSet):
+    apply_interfaces(AdminShelfType, AdminShelfType.__django_strawberry_definition__)
+
+    class BookFilter(FilterSet):
         class Meta:
-            model = Category
-            fields = {"name": ["exact"]}
+            model = library_models.Book
+            fields = {"title": ["exact"]}
 
-    relation_field = SimpleNamespace(is_relation=True, related_model=library_models.Shelf)
-    resolved = CategoryFilter._resolve_relation_target_type(relation_field, "shelf")
-    assert resolved is AdminShelfType
+    shelf_field = library_models.Book._meta.get_field("shelf")
+    resolved = BookFilter.filter_for_field(shelf_field, "shelf", "exact")
+    assert isinstance(resolved, GlobalIDFilter)
 
 
 def test_target_type_for_related_filter_registry_fallback_prefers_declared_primary() -> None:
     """The unbound-child fallback resolves the declared primary for the child model.
 
-    Twin of
-    ``test_resolve_relation_target_type_registry_fallback_prefers_declared_primary``
-    for ``FilterSet._target_type_for_related_filter``: with no bound child
+    Twin of ``test_relation_key_target_type_prefers_declared_primary`` for
+    ``FilterSet._target_type_for_related_filter``: with no bound child
     owner the method resolves via ``registry.get(child_model)`` - NOT a
     ``registry.primary_for(child_model) or registry.get(child_model)``
     chain - so a shared-target primary wins here exactly as it does for every
@@ -13462,6 +13706,7 @@ def test_apply_async_collect_nested_visibility_querysets_pre_derives_or_branch()
         BranchFilter._collect_nested_visibility_querysets_async(
             {"or_": [inner]},
             _make_info(),
+            flat_hop_visibility={},
         ),
     )
     assert id(inner) in result
@@ -13551,50 +13796,6 @@ def test_lookups_for_field_returns_concrete_lookups_and_excludes_transforms() ->
     assert _lookups_for_field(None) == []
 
 
-# ---------------------------------------------------------------------
-# Shared-walker pins: ``FilterSet._iter_input_items``
-# ---------------------------------------------------------------------
-#
-# Two sites (``_normalize_input``, ``_operator_bag_items``) route through a
-# single shared staticmethod that walks dicts AND Strawberry-input dataclasses
-# into ``(name, value)`` pairs. The helper returns ``None`` for non-walkable
-# shapes and ``[]`` for walkable-but-empty inputs. ``_operator_bag_items``
-# keeps its scalar/collection/dict pre-rejection above the helper call so
-# operator bags remain dataclass-only at the call boundary while
-# ``_normalize_input`` accepts both dict and dataclass shapes.
-
-
-def test_iter_input_items_returns_pairs_for_plain_dict() -> None:
-    """Dict input walks to ``list(input.items())`` verbatim."""
-    assert FilterSet._iter_input_items({"name": "x", "id": 1}) == [("name", "x"), ("id", 1)]
-
-
-def test_iter_input_items_returns_empty_list_for_empty_dict() -> None:
-    """Walkable-but-empty dict returns ``[]`` (sentinel-distinct from None)."""
-    assert FilterSet._iter_input_items({}) == []
-
-
-def test_iter_input_items_walks_strawberry_input_dataclass_via_attribute_sniff() -> None:
-    """``__dataclass_fields__`` sniff unpacks Strawberry-input shapes."""
-
-    @strawberry.input
-    class FooInput:
-        name: str = "x"
-        count: int = 3
-
-    items = FilterSet._iter_input_items(FooInput(name="y", count=7))
-    assert items == [("name", "y"), ("count", 7)]
-
-
-def test_iter_input_items_returns_none_for_non_walkable_shapes() -> None:
-    """Non-dict / non-dataclass shapes return ``None`` (not ``[]``)."""
-    assert FilterSet._iter_input_items(object()) is None
-    assert FilterSet._iter_input_items("scalar") is None
-    assert FilterSet._iter_input_items(42) is None
-    assert FilterSet._iter_input_items([1, 2, 3]) is None
-    assert FilterSet._iter_input_items(None) is None
-
-
 # ---------------------------------------------------------------------------
 # Async-path coverage. These branches live in the apply_async pipeline
 # (the nested-visibility pre-walk and the _q_for_branch stash-miss
@@ -13620,7 +13821,11 @@ def test_collect_nested_visibility_querysets_async_returns_empty_for_none_input(
             fields = {"name": ["exact"]}
 
     result = asyncio.run(
-        BranchFilter._collect_nested_visibility_querysets_async(None, _make_info()),
+        BranchFilter._collect_nested_visibility_querysets_async(
+            None,
+            _make_info(),
+            flat_hop_visibility={},
+        ),
     )
     assert result == {}
 
@@ -13639,7 +13844,11 @@ def test_collect_nested_visibility_querysets_async_skips_none_child_branch() -> 
             fields = {"name": ["exact"]}
 
     result = asyncio.run(
-        BranchFilter._collect_nested_visibility_querysets_async({"or": [None]}, _make_info()),
+        BranchFilter._collect_nested_visibility_querysets_async(
+            {"or": [None]},
+            _make_info(),
+            flat_hop_visibility={},
+        ),
     )
     assert result == {}
 
@@ -13683,6 +13892,7 @@ def test_collect_nested_visibility_querysets_async_rejects_malformed_logical_bra
             BranchFilter._collect_nested_visibility_querysets_async(
                 {"or": {"shelves": {"code": {"exact": "A"}}}},
                 _make_info(),
+                flat_hop_visibility={},
             ),
         )
     assert visibility_called == []
@@ -13693,6 +13903,7 @@ def test_collect_nested_visibility_querysets_async_rejects_malformed_logical_bra
             BranchFilter._collect_nested_visibility_querysets_async(
                 {"and": ["bad_scalar"]},
                 _make_info(),
+                flat_hop_visibility={},
             ),
         )
     assert visibility_called == []
@@ -13703,6 +13914,7 @@ def test_collect_nested_visibility_querysets_async_rejects_malformed_logical_bra
             BranchFilter._collect_nested_visibility_querysets_async(
                 {"not": [{"shelves": {"code": {"exact": "A"}}}]},
                 _make_info(),
+                flat_hop_visibility={},
             ),
         )
     assert visibility_called == []
@@ -13744,6 +13956,7 @@ def test_q_for_branch_falls_back_to_sync_derive_on_stash_miss() -> None:
         child_input,
         info=_make_info(),
         _nested_qs_by_branch_id={},  # present but empty -> stash miss -> sync fallback
+        _flat_hop_visibility={},
     )
     assert isinstance(q, Q)
 
@@ -15334,10 +15547,10 @@ def test_is_generation_capable_true_for_a_classmethod_rewrap_of_the_package_seam
 
 
 def test_is_generation_capable_false_for_plain_function_seam_override() -> None:
-    """A plain-function ``filter_for_field`` (no ``__func__``) -> False, never raises.
+    """A ``filter_for_field`` shadowed by a plain function is an override -> False.
 
-    A consumer that shadows the generation seam with a plain function stores no
-    wrapper to unwrap; that function is not the one ``FilterSet``'s
+    ``truth.overrides`` compares the function each class stores for the seam: a
+    plain function is its own stored function, which is not the one ``FilterSet``'s
     ``classmethod`` holds, so ``_is_generation_capable`` reports the seam
     overridden without binding or calling it. Empty ``fields`` keeps class
     creation from invoking the shadowed seam during ``get_filters``.
@@ -15359,7 +15572,7 @@ def test_is_generation_capable_false_for_plain_function_seam_override() -> None:
             model = library_models.Book
             fields = []
 
-    # A plain function carries no ``__func__``: there is no wrapper to unwrap.
+    # A plain function, not a ``classmethod`` or bound method: it has no ``__func__``.
     assert not hasattr(PlainSeamFilter.filter_for_field, "__func__")
     assert PlainSeamFilter._is_generation_capable() is False
 
@@ -24649,3 +24862,172 @@ def test_each_arm_branch_derives_once_on_both_colors(mode: str) -> None:
         rows = asyncio.run(filter_set.apply_async(filter_input, base, _make_info()))
     assert list(rows) == []
     assert hook_runs == ["branch"] * 4
+
+
+@pytest.mark.django_db(transaction=True)
+def test_filters_over_a_visible_reverse_generic_relation_compare_the_one_holder() -> None:
+    """The reverse ``GenericRel`` filters as the single-valued relation it is.
+
+    A key naming the holder matches the tag that holder carries, and a path through it
+    compares that one holder's column, as Django's own ``filter(holder=...)`` does; a
+    tag whose ``object_id`` matches under another content type belongs to no holder.
+    """
+
+    class RpGenericTagFilter(FilterSet):
+        class Meta:
+            model = RpGenericTag
+            fields = {"holder": ["exact"], "holder__title": ["exact"]}
+
+    with generic_fixture_rows(connection) as (first, _second):
+        rows = RpGenericTag.objects.all()
+        by_holder = RpGenericTagFilter({"holder": first.pk}, queryset=rows).qs
+        by_title = RpGenericTagFilter({"holder__title": "a"}, queryset=rows).qs
+        assert list(by_holder.values_list("name", flat=True)) == ["t1"]
+        assert list(by_title.values_list("name", flat=True)) == ["t2"]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_related_filter_over_a_visible_reverse_generic_relation_requires_the_tag_content_type() -> (
+    None
+):
+    """A ``RelatedFilter`` branch through the reverse ``GenericRel`` reads Django's own join.
+
+    The branch correlates the holder to the tag's ``object_id`` AND requires the tag's
+    content type to be the holder's, as ``filter(holder__title=...)`` does, so the stray
+    tag storing holder ``"a"``'s pk under another content type never matches.
+    """
+
+    class RpGenericHolderType(DjangoType):
+        class Meta:
+            model = RpGenericHolder
+            fields = ("id", "title")
+
+    class RpGenericHolderFilter(FilterSet):
+        class Meta:
+            model = RpGenericHolder
+            fields = {"title": ["exact"]}
+
+    class RpGenericTagBranchFilter(FilterSet):
+        holder = RelatedFilter(RpGenericHolderFilter, field_name="holder")
+
+        class Meta:
+            model = RpGenericTag
+            fields = {"name": ["exact"]}
+
+    assert registry.get(RpGenericHolder) is RpGenericHolderType
+    with generic_fixture_rows(connection):
+        rows = RpGenericTag.objects.order_by("name")
+        filtered = RpGenericTagBranchFilter.apply_sync(
+            {"holder": {"title": {"exact": "a"}}},
+            rows,
+            _make_info(),
+        )
+        django_answer = list(rows.filter(holder__title="a").values_list("name", flat=True))
+        assert django_answer == ["t2"]
+        assert list(filtered.values_list("name", flat=True)) == django_answer
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("relation", "title"),
+    [("proxy_holder", "a"), ("proxy_only_holder", "b")],
+    ids=["for_concrete_model", "proxy_content_type"],
+)
+def test_related_filter_over_a_proxy_reverse_generic_relation_reads_its_content_type(
+    relation: str,
+    title: str,
+) -> None:
+    """The reverse ``GenericRel`` of a proxy's ``GenericRelation`` reads Django's content type.
+
+    With the default ``for_concrete_model=True`` the tag's content type must be the
+    concrete holder's; with ``for_concrete_model=False`` the proxy's own. Each branch
+    returns exactly the rows Django's own ``filter(<relation>__title=...)`` does.
+    """
+
+    class RpGenericProxyHolderType(DjangoType):
+        class Meta:
+            model = RpGenericProxyHolder
+            fields = ("id", "title")
+
+    class RpGenericProxyHolderFilter(FilterSet):
+        class Meta:
+            model = RpGenericProxyHolder
+            fields = {"title": ["exact"]}
+
+    branch_filter = type(
+        "RpGenericTagProxyBranchFilter",
+        (FilterSet,),
+        {
+            "__module__": __name__,
+            relation: RelatedFilter(RpGenericProxyHolderFilter, field_name=relation),
+            "Meta": type("Meta", (), {"model": RpGenericTag, "fields": {"name": ["exact"]}}),
+        },
+    )
+    assert registry.get(RpGenericProxyHolder) is RpGenericProxyHolderType
+    with generic_fixture_rows(connection):
+        rows = RpGenericTag.objects.order_by("name")
+        filtered = branch_filter.apply_sync(
+            {relation: {"title": {"exact": title}}},
+            rows,
+            _make_info(),
+        )
+        django_answer = list(
+            rows.filter(**{f"{relation}__title": title}).values_list("name", flat=True),
+        )
+        assert django_answer
+        assert list(filtered.values_list("name", flat=True)) == django_answer
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("relation", "name"),
+    [("proxy_tags", "t2"), ("proxy_only_tags", "p1")],
+    ids=["for_concrete_model", "proxy_content_type"],
+)
+def test_related_filter_over_a_proxy_generic_relation_reads_its_content_type(
+    relation: str,
+    name: str,
+) -> None:
+    """A proxy's ``GenericRelation`` branch restricts the tags to Django's content type.
+
+    With the default ``for_concrete_model=True`` the concrete holder's content type,
+    with ``for_concrete_model=False`` the proxy's own: each branch returns exactly the
+    holders Django's own ``filter(<relation>__name=...)`` does.
+    """
+
+    class RpGenericTagType(DjangoType):
+        class Meta:
+            model = RpGenericTag
+            fields = ("id", "name")
+
+    class RpGenericTagNameFilter(FilterSet):
+        class Meta:
+            model = RpGenericTag
+            fields = {"name": ["exact"]}
+
+    branch_filter = type(
+        "RpGenericProxyHolderBranchFilter",
+        (FilterSet,),
+        {
+            "__module__": __name__,
+            relation: RelatedFilter(RpGenericTagNameFilter, field_name=relation),
+            "Meta": type(
+                "Meta",
+                (),
+                {"model": RpGenericProxyHolder, "fields": {"title": ["exact"]}},
+            ),
+        },
+    )
+    assert registry.get(RpGenericTag) is RpGenericTagType
+    with generic_fixture_rows(connection):
+        rows = RpGenericProxyHolder.objects.order_by("title")
+        filtered = branch_filter.apply_sync(
+            {relation: {"name": {"exact": name}}},
+            rows,
+            _make_info(),
+        )
+        django_answer = list(
+            rows.filter(**{f"{relation}__name": name}).values_list("title", flat=True),
+        )
+        assert django_answer
+        assert list(filtered.values_list("title", flat=True)) == django_answer

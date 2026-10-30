@@ -807,33 +807,74 @@ def test_plain_form_permission_classes_explicit_opt_out() -> None:
     assert Submit._mutation_meta.permission_classes == ()
 
 
-def test_plain_form_rejects_model_permission_at_class_creation() -> None:
-    """``DjangoModelPermission`` on a model-less plain form is rejected at class creation.
+class _InheritingModelPermission(DjangoModelPermission):
+    """A ``DjangoModelPermission`` subclass that keeps the base ``has_permission``."""
 
-    ``DjangoModelPermission.has_permission`` reads the model the mutation validated
-    at declaration and maps the operation to an ``add`` / ``change`` / ``delete``
-    codename. A plain ``DjangoFormMutation`` validates no model (its snapshot's
-    ``model`` is ``None``) and carries the ``"form"`` operation sentinel, so the
-    class would only surface the mismatch as a raw error at REQUEST time (never a
-    deny) - the exact incompatibility ``DenyAll``
-    documents and the default avoids. The plain-form ``_validate_meta`` rejects it at
-    class creation instead (the package's fail-loud contract), naming the model-backed
-    base and the two valid plain-form postures. A subclass of ``DjangoModelPermission``
-    is rejected too (the ``issubclass`` guard).
+
+class _OverridingModelPermission(DjangoModelPermission):
+    """A ``DjangoModelPermission`` subclass whose ``has_permission`` reads no model."""
+
+    @override
+    def has_permission(
+        self,
+        info: object,
+        mutation: object,
+        operation: str,
+        data: object,
+        instance: object = None,
+    ) -> bool:
+        return True
+
+
+@pytest.mark.parametrize(
+    "offending",
+    [
+        pytest.param(DjangoModelPermission, id="bare"),
+        pytest.param(_InheritingModelPermission, id="inheriting-subclass"),
+    ],
+)
+def test_plain_form_rejects_model_permission_at_class_creation(
+    offending: type[DjangoModelPermission],
+) -> None:
+    """A ``DjangoModelPermission`` keeping the base ``has_permission`` is refused at class creation.
+
+    That hook reads the model the mutation validated at declaration and maps the operation
+    to an ``add`` / ``change`` / ``delete`` codename. A plain ``DjangoFormMutation``
+    validates no model (its snapshot's ``model`` is ``None``) and carries the ``"form"``
+    operation sentinel, so the class would only surface the mismatch as a raw error at
+    REQUEST time (never a deny). The shared ``model_less`` guard refuses the class itself
+    and a subclass inheriting its hook, naming the plain-form site and the remedies.
     """
     form_cls = _contact_form()
 
-    class CustomModelPermission(DjangoModelPermission):
-        pass
+    with pytest.raises(
+        ConfigurationError,
+        match=(
+            rf"^DjangoFormMutation Submit\.Meta\.permission_classes includes "
+            rf"{offending.__name__}, a DjangoModelPermission that does not override "
+            r"has_permission; it requires a model and this surface has none\. Override "
+            r"has_permission without calling the base hook, omit permission_classes for this "
+            r"surface's default, or set \[\] to allow any\.$"
+        ),
+    ):
 
-    for offending in (DjangoModelPermission, CustomModelPermission):
-        with pytest.raises(ConfigurationError, match="requires a model"):
+        @definition_raises
+        class Submit(DjangoFormMutation):
+            class Meta:
+                form_class = form_cls
+                permission_classes = [offending]
 
-            @definition_raises
-            class Submit(DjangoFormMutation):
-                class Meta:
-                    form_class = form_cls
-                    permission_classes = [offending]
+
+def test_plain_form_admits_a_model_permission_overriding_has_permission() -> None:
+    """A ``DjangoModelPermission`` subclass overriding ``has_permission`` decides without a model."""
+    form_cls = _contact_form()
+
+    class Submit(DjangoFormMutation):
+        class Meta:
+            form_class = form_cls
+            permission_classes = [_OverridingModelPermission]
+
+    assert Submit._mutation_meta.permission_classes == (_OverridingModelPermission,)
 
 
 # ---------------------------------------------------------------------------

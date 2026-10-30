@@ -69,16 +69,15 @@ is the package's ``RangeFilter`` with the same widget installed by ``FieldBoxWid
 a ``field`` override that follows it in the MRO, so it too is sent under ``_low`` / ``_high``.
 
 ``occurred_day_of`` on ``ScalarSpecimenFilter`` is a declared ``DateTimeFilter`` through the
-``occurred_at`` column's ``date`` transform (``occurredDayOf: { date: <DateTime> }``): the
-acceptance surface for a value whose kind differs from the predicate's, a datetime Django
-makes naive in the default time zone (``TIME_ZONE``) and reads as its date before
-binding it.
+``occurred_at`` column's ``date`` transform (``occurredDayOf: { date: <Date> }``): the
+acceptance surface for a ``lookup_expr`` transform, typed by the transform's ``DateField``
+output, never by the column or the declared form field.
 
 ``occurred_year_among`` / ``occurred_year_span`` on ``ScalarSpecimenFilter`` are a declared
 ``ListFilter`` (``in``) and ``RangeFilter`` (``range``) through the ``occurred_at`` column's
 ``year`` transform (``occurredYearAmong: { in: [...] }``, ``occurredYearSpan: { range: {
-start, end } }``): the acceptance surface for an integer the transform binds as sent, held to
-the range the database stores for the transform's ``IntegerField`` output.
+start, end } }``): the acceptance surface for a declared path through a column's transform,
+typed by the transform's ``IntegerField`` output (``Int``), never by the declared form field.
 
 ``ScalarSpecimenParentStampFilter`` filters through a ``FilteredRelation`` alias rather than
 a field: ``parent_day_of`` is a declared ``DateTimeFilter`` whose ``field_name``

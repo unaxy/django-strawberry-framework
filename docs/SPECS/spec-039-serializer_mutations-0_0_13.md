@@ -1322,7 +1322,10 @@ never a request-shaped object at schema time); the **runtime**
 ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--serializererrors--save--optimizer-re-fetch--payload))
 is a **distinct** seam — it shapes the *runtime* serializer (`data` / `instance` /
 `context`) and cannot substitute for schema-time discovery, because finalization
-precedes the first request.
+precedes the first request. A field-map key (and a `Meta.nested_fields` key) is read as its
+text: a `StrEnum` / `TextChoices` member is re-keyed by the exact `str` it spells, and a
+non-string key (`int`, `bytes`, a lazy translation string) is refused with a
+`ConfigurationError`.
 
 **The converter is fail-loud (the [`forms/converter.py`][forms-converter] discipline,
 diverging from graphene).** Dispatch is a `type(field).__mro__` walk over an
@@ -1712,7 +1715,7 @@ descriptor** (a stable suffix), so two same-name-set-but-different-shape inputs 
 / `Meta.exclude` / `Meta.optional_fields` are normalized + fail-loud against the
 serializer's field set — a **bare string (including `"__all__"`)**, a duplicate, an
 unknown name, or an empty effective set raises
-[`ConfigurationError`][glossary-configurationerror]. There is **no `"__all__"`
+[`ConfigurationError`][glossary-configurationerror]. A `set` / `frozenset` `Meta.fields` raises too, since its order is the generated input's field order and folds into the input type name; `Meta.exclude`, `Meta.optional_fields` and `Meta.injected_fields` (and a `NestedSerializerConfig`'s `exclude` / `optional_fields`) accept one, stored sorted by `utils/canonical.py::canonical_sort_key` so the snapshot is the same under every `PYTHONHASHSEED` (`utils/inputs.py::normalize_field_name_sequence`'s `ordered` switch). There is **no `"__all__"`
 sentinel** for these keys: the package's `"__all__"` is the non-field-error envelope key
 alone, never a field selector, so an all-optional create input is expressed by listing
 the fields in `optional_fields`, not by `optional_fields = "__all__"` (rejected as a
@@ -2542,10 +2545,10 @@ held by the identity ratchet where a symbol is shared:
 - **By call from [`mutations/resolvers.py`][mutations-resolvers]** (Decision 8):
   `run_write_pipeline_sync` and `make_resolver_entries`. The `036` locate / authorize /
   re-fetch / payload helpers (`locate_instance`, `coerce_lookup_id`, `authorize_or_raise`,
-  `refetch_optimized`, `build_payload`, `not_found_error`, `payload_cls_for`,
-  `run_pipeline_async`) are reached **through** that skeleton rather than called directly —
-  which is the point of the shared skeleton: the serializer flavor cannot re-order the
-  security preamble because it does not own it.
+  `refetch_optimized`, `build_payload`, `not_found_error`, `payload_cls_for`) are reached
+  **through** that skeleton rather than called directly — which is the point of the shared
+  skeleton: the serializer flavor cannot re-order the security preamble because it does
+  not own it.
 - **By call from [`utils/`][utils-permissions]:**
   `utils/permissions.py::request_from_info(info, family_label="SerializerMutation")`
   (it accepts a family label); `utils/inputs.py::build_strawberry_input_class`
@@ -2575,7 +2578,7 @@ held by the identity ratchet where a symbol is shared:
 
 | Shared helper | Home | Serializer obligation | Pin |
 | --- | --- | --- | --- |
-| **Relation-decode core** | `visible_related_object(related_model, pk, info, async_recourse=_RELAY_ASYNC_RECOURSE, key_attname=None) -> models.Model \| None` (plus the batched `visible_related_objects(related_model, pks, info, async_recourse=_RELAY_ASYNC_RECOURSE, key_attname=None) -> dict[object, object]`, which maps each visible pk, keyed by its column value (`utils/querysets.py::identity_key`, so `"3"` and `3`, or a decimal `2.50` and a stored `2.5`, are one pk), to the key the relation stores for that row: the pk itself, or the `key_attname` column) in [`utils/querysets.py`][utils-querysets], beside `visibility_scoped_related_queryset`, whose composition it uses; the form decoder and the model flavor's `decode_visible_relation_ids` ride the same visibility composition | The serializer relation decoder re-keys over `visible_related_object` / `visible_related_objects`; it does **not** re-implement the visibility / membership check. The serializer is **stricter on the no-primary-type case** — it guards at class creation (a relation target with no registered primary `DjangoType` is a `ConfigurationError`), so it never reaches the helper's default-manager fallback, which stays the **form flavor's** behavior | [Decision 7](#decision-7--serializer-field--strawberry-input-mapping-the-serializer-is-the-input-source-of-truth) + [Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--serializererrors--save--optimizer-re-fetch--payload) + Slice 3 resolver checklist |
+| **Relation-decode core** | `visible_related_object(related_model, pk, info, async_recourse, key_attname=None) -> models.Model \| None` (plus the batched `visible_related_objects(related_model, pks, info, async_recourse, key_attname=None) -> dict[object, object]`, which maps each visible pk, keyed by its column value (`utils/querysets.py::identity_key`, so `"3"` and `3`, or a decimal `2.50` and a stored `2.5`, are one pk), to the key the relation stores for that row: the pk itself, or the `key_attname` column) in [`utils/querysets.py`][utils-querysets], beside `visibility_scoped_related_queryset`, whose composition it uses; the form decoder and the model flavor's `decode_visible_relation_ids` ride the same visibility composition | The serializer relation decoder re-keys over `visible_related_object` / `visible_related_objects`; it does **not** re-implement the visibility / membership check. The serializer is **stricter on the no-primary-type case** — it guards at class creation (a relation target with no registered primary `DjangoType` is a `ConfigurationError`), so it never reaches the helper's default-manager fallback, which stays the **form flavor's** behavior | [Decision 7](#decision-7--serializer-field--strawberry-input-mapping-the-serializer-is-the-input-source-of-truth) + [Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--serializererrors--save--optimizer-re-fetch--payload) + Slice 3 resolver checklist |
 | **Non-delete operation set** | `NON_DELETE_WRITE_OPERATIONS` plus its reject message `non_delete_operation_error` in `mutations/operations.py` (the `{create, update, delete}` superset is `_VALID_OPERATIONS` there), reached from both flavors through `write_mixins.py::require_non_delete_operation` | Call `require_non_delete_operation`; the "no serializer/form delete" message is single-sited | [Decision 10](#decision-10--operations-create--update-no-serializer-delete) + Slice 2 `_validate_meta` |
 | **Shape-build cache** | `utils/inputs.py::make_shape_build_cache()`, returning the per-flavor dict + a `clear()` registered through `register_subsystem_clear` (the model flavor's `_shape_build_cache`, the form flavor's `_form_shape_build_cache` and the serializer's cache are three instances) | The `SerializerInputShape` descriptor identity is serializer-specific; only the cache **+ clear plumbing** is shared | [Decision 7](#decision-7--serializer-field--strawberry-input-mapping-the-serializer-is-the-input-source-of-truth) + Slice 2 finalizer-reset checklist |
 | **Converter dispatch skeleton** | `(field, isinstance_prechecks, scalar_registry, fallthrough_error_factory) → conversion` in `utils/converters.py` (`convert_with_mro`, `make_kind_converter`, `make_scalar_converter`, `finish_field_conversion`), with the shared conversion base `FieldConversionBase` + `InputFieldSpec` in [`utils/inputs.py`][utils-inputs]; [`forms/converter.py`][forms-converter] rides it too | `convert_serializer_field` supplies only its precheck table + scalar registry; the **GOAL-mandated fail-loud contract** (no silent `String` catch-all) is single-sited across both converters | [Decision 7](#decision-7--serializer-field--strawberry-input-mapping-the-serializer-is-the-input-source-of-truth) (converter) + [Decision 4](#decision-4--module-and-test-locations-rest_framework-subpackage-mirroring-forms) (skeleton home) + Slice 1 |
@@ -3730,7 +3733,7 @@ non-shadow allowed).
 
 Two moves keep the security win (authorize-before-decode + visibility-checked ids) while cutting
 the query cost. (a) A batched `utils/querysets.py::visible_related_objects(related_model, pks,
-info, async_recourse=_RELAY_ASYNC_RECOURSE, key_attname=None) -> dict[object, object]` confirms a
+info, async_recourse, key_attname=None) -> dict[object, object]` confirms a
 MULTI relation's whole set in ONE visibility-scoped `pk__in` query instead of one per id, mapping
 each visible pk, keyed by its column value (`utils/querysets.py::identity_key`), to the key the relation stores for that row: the multi decoder (shared with the model FK / M2M set decoder) type-checks +
 coerces every id first (`utils/write_values.py::type_check_relation_id`, no DB), then

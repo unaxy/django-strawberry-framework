@@ -1130,7 +1130,7 @@ def test_select_labels_m2m() -> None:
 
 @pytest.mark.django_db
 def test_order_kanban_statuses_by_key_desc() -> None:
-    """``orderBy: [{ key: DESC }]`` reorders the statuses list (DONE-028 order wiring)."""
+    """``orderBy: [{ key: DESC }]`` reorders the statuses list."""
     _seed_board()
     expected = [{"key": status.key} for status in models.Status.objects.order_by("-key")]
     _assert_graphql_data(

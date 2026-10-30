@@ -21,16 +21,25 @@ same column whose elements are cleaned the same way. A temporal value the databa
 query runs on cannot bind (on SQLite an aware datetime whose UTC projection leaves years
 1..9999, an aware time) is ``FILTER_INVALID`` keyed to its form field on each adapter-bound
 leaf, member and bound, under ``not`` and through ``partner``; PostgreSQL binds those
-values, so there the same input filters. A datetime sent through the declared
-``occurredDayOf`` ``date`` transform is read as Django binds it, its date in the default
-time zone (``TIME_ZONE``), so one whose date leaves years 1..9999 is ``FILTER_INVALID``
-on every backend, and so is one sent through ``parentDayOf`` on
-``allScalarSpecimensByParentStamp``, whose path crosses the ``FilteredRelation`` alias that
-root field's queryset holds. A year sent to the declared ``occurredYearAmong`` (``in``) or
-``occurredYearSpan`` (``range``) through ``occurred_at``'s ``year`` transform binds as an
-integer, so a member or bound outside the range the database stores for the transform's
-``IntegerField`` output (2**63, -2**63-1, a thirty-digit year) is ``FILTER_INVALID`` on
-every backend, flat, under ``not`` and through ``partner`` nested and flat.
+values, so there the same input filters. The declared ``occurredDayOf`` (``lookup_expr``
+``date``) compares the ``date`` transform's output, so it takes a ``Date`` and filters by
+that day, flat, under ``not`` and through ``partner`` nested and flat. ``parentDayOf`` on
+``allScalarSpecimensByParentStamp`` crosses the ``FilteredRelation`` alias that root
+field's queryset holds, a path the schema build cannot resolve, so it keeps its declared
+``DateTime``: one whose date in the default time zone (``TIME_ZONE``) leaves years
+1..9999 is ``FILTER_INVALID`` on every backend. The declared ``occurredYearAmong`` (``in``) and
+``occurredYearSpan`` (``range``) over ``occurred_at__year``, a path through the column's
+``year`` transform, are typed by the transform's ``IntegerField`` output (``[Int!]``,
+``Int`` bounds) and filter by the year sent, flat, under ``not`` and through ``partner``
+nested and flat; a text year or one past ``Int``'s 32 bits is the scalar's own refusal.
+A holder schema (``generated_year_schema``) serves ``Meta.fields`` ``year`` / ``year__gt`` /
+``year__in`` leaves on ``occurred_at``, which no shipped set generates: each takes the
+transform's ``Int`` and filters by it, and a ``year`` / ``year__gt`` of 0 or 10000, whose
+datetime bound Django cannot form, is ``FILTER_INVALID`` keyed to its form field, flat,
+under ``not`` and through ``partner`` nested and flat. Its declared ``ListFilter``
+(``year__in``) and ``RangeFilter`` (``year__range``, a lone bound included) take and filter
+by an ``Int`` year, and the same shapes with a ``method=`` keep the column's ``DateTime``,
+which reaches the method; the two ranges mint two range types.
 On PostgreSQL a UTC offset the server refuses (16:00 or more either way, or, bound as
 text as Django's default psycopg cursor binds, a fraction of a second) is
 ``FILTER_INVALID`` the same way, where SQLite projects the datetime onto UTC and filters.
@@ -52,14 +61,41 @@ rendering of the column, on SQLite and PostgreSQL alike.
 
 import datetime
 import uuid
+from collections.abc import Iterator, Mapping
 from decimal import Decimal
 
 import pytest
+import strawberry
 from apps.scalars import models
 from django.db import connection
+from django.db.models import QuerySet
+from django.http import HttpRequest
+from django.http.response import HttpResponseBase
+from django.test import override_settings
+from django.urls import path
+from graphql_client import (
+    JSONObject,
+    json_at,
+    json_list,
+    json_object,
+    json_str,
+    post_graphql,
+    response_json,
+)
 from graphql_client import assert_graphql_data as _assert_graphql_data
 from graphql_client import assert_graphql_success as _assert_graphql_success
-from graphql_client import json_at, json_list, json_object, json_str, post_graphql, response_json
+from strawberry import relay
+
+from django_strawberry_framework import (
+    DjangoConnection,
+    DjangoConnectionField,
+    DjangoSchema,
+    DjangoType,
+    finalize_django_types,
+    strawberry_config,
+)
+from django_strawberry_framework.filters import FilterSet, ListFilter, RangeFilter, RelatedFilter
+from django_strawberry_framework.views import DjangoGraphQLView
 
 _DATE = datetime.date(2021, 6, 15)
 _DATETIME = datetime.datetime(2021, 6, 15, 9, 30, tzinfo=datetime.timezone.utc)
@@ -164,7 +200,7 @@ def test_scalars_filter_by_related_tag_label() -> None:
 
 @pytest.mark.django_db
 def test_scalars_order_by_label_desc() -> None:
-    """``orderBy: [{ label: DESC }]`` sorts specimens by label descending (DONE-028 wiring)."""
+    """``orderBy: [{ label: DESC }]`` sorts specimens by label descending."""
     _seed_specimen("alpha")
     _seed_specimen("gamma")
     _seed_specimen("beta")
@@ -693,85 +729,54 @@ def test_temporal_value_the_database_cannot_bind_is_filter_invalid(
 
 @pytest.mark.django_db
 @pytest.mark.parametrize(
-    (
-        "query",
-        "unbindable",
-        "form_key",
-        "bindable",
-        "labels",
-    ),
+    ("query", "day_filter", "labels"),
     [
-        pytest.param(
-            _BY_FILTER,
-            {"occurredDayOf": {"date": _BEFORE_YEAR_ONE}},
-            "occurred_day_of",
-            {"occurredDayOf": {"date": _BINDABLE_DATETIME}},
-            ["alpha"],
-            id="before-year-one",
-        ),
-        pytest.param(
-            _BY_FILTER,
-            {"occurredDayOf": {"date": "9999-12-31T23:59:00-05:00"}},
-            "occurred_day_of",
-            {"occurredDayOf": {"date": "2021-06-15T23:59:00-05:00"}},
-            [],
-            id="past-year-9999",
-        ),
-        pytest.param(
-            _BY_FILTER,
-            {"not": {"occurredDayOf": {"date": _BEFORE_YEAR_ONE}}},
-            "not__occurred_day_of",
-            {"not": {"occurredDayOf": {"date": _BINDABLE_DATETIME}}},
-            [],
-            id="not",
-        ),
+        pytest.param(_BY_FILTER, {"occurredDayOf": {"date": "2021-06-15"}}, ["alpha"], id="flat"),
+        pytest.param(_BY_FILTER, {"occurredDayOf": {"date": "2021-06-16"}}, [], id="other-day"),
+        pytest.param(_BY_FILTER, {"not": {"occurredDayOf": {"date": "2021-06-15"}}}, [], id="not"),
         pytest.param(
             _BY_NULLABLE_FILTER,
-            {"partner": {"occurredDayOf": {"date": _PAST_YEAR_9999}}},
-            "partner__occurred_day_of",
-            {"partner": {"occurredDayOf": {"date": _BINDABLE_DATETIME}}},
+            {"partner": {"occurredDayOf": {"date": "2021-06-15"}}},
             ["of-alpha"],
             id="nested-partner",
         ),
         pytest.param(
             _BY_NULLABLE_FILTER,
-            {"partnerOccurredDayOf": {"date": _BEFORE_YEAR_ONE}},
-            "partner__occurred_day_of",
-            {"partnerOccurredDayOf": {"date": _BINDABLE_DATETIME}},
+            {"partnerOccurredDayOf": {"date": "2021-06-15"}},
             ["of-alpha"],
             id="flat-partner",
         ),
     ],
 )
-def test_datetime_through_the_date_transform_outside_years_one_to_9999_is_filter_invalid(
+def test_date_through_the_declared_date_transform_filters_by_that_date(
     query: str,
-    unbindable: dict[str, object],
-    form_key: str,
-    bindable: dict[str, object],
+    day_filter: dict[str, object],
     labels: list[str],
 ) -> None:
-    """A datetime whose date leaves years 1..9999 is ``FILTER_INVALID`` through the ``date`` transform.
+    """``occurredDayOf`` compares the ``date`` transform's output, so it takes a ``Date``.
 
-    ``occurredDayOf`` is a declared ``DateTimeFilter`` through ``occurred_at``'s ``date``
-    transform: Django makes the datetime naive in the default time zone (``TIME_ZONE``,
-    UTC) and reads its date before binding it, which for ``0001-01-01T00:00:00+05:00`` falls in year 0
-    and for ``9999-12-31T23:59:00-05:00`` in year 10000, on every backend. Each is refused
-    keyed to its form field, flat, under ``not`` and through ``partner`` nested and flat,
-    never the conversion's error; a datetime whose date binds filters by that date.
+    It is a declared ``DateTimeFilter`` over ``occurred_at`` with ``lookup_expr="date"``: the
+    value is compared with the column's date in the default time zone (``TIME_ZONE``), a
+    ``DateField`` output, so the input is a ``Date`` and filters by that day, flat, under
+    ``not`` and through ``partner`` nested and flat. A datetime is the ``Date`` scalar's own
+    refusal.
     """
     alpha = _seed_specimen("alpha")
     models.NullableScalarSpecimen.objects.create(label="of-alpha", partner=alpha)
     root = "allScalarSpecimens" if query == _BY_FILTER else "allNullableScalarSpecimens"
-    control = response_json(post_graphql(query, variables={"filter": bindable}))
-    payload = response_json(post_graphql(query, variables={"filter": unbindable}))
+    refused = response_json(
+        post_graphql(
+            _BY_FILTER,
+            variables={"filter": {"occurredDayOf": {"date": _BINDABLE_DATETIME}}},
+        ),
+    )
 
-    assert control == {"data": {root: [{"label": label} for label in labels]}}
-    assert payload["data"] is None, payload
-    (error,) = json_list(payload, "errors")
-    assert json_at(error, "extensions") == {
-        "code": "FILTER_INVALID",
-        "errors": {form_key: [_UNBINDABLE]},
+    assert response_json(post_graphql(query, variables={"filter": day_filter})) == {
+        "data": {root: [{"label": label} for label in labels]},
     }
+    assert refused.get("data") is None, refused
+    (error,) = json_list(refused, "errors")
+    assert "Date" in json_str(error, "message")
 
 
 _BY_PARENT_STAMP = """
@@ -821,110 +826,453 @@ def test_datetime_crossing_a_filtered_relation_alias_outside_years_one_to_9999_i
     }
 
 
-_PAST_INT64 = str(2**63)
-_BEFORE_INT64 = str(-(2**63) - 1)
+_YEAR_LEAF_TYPES_QUERY = """
+query {
+  among: __type(name: "ScalarSpecimenFilterOccurredYearAmongFilterInputType") {
+    inputFields { name type { kind ofType { kind ofType { name } } } }
+  }
+  span: __type(name: "ScalarSpecimenFilterOccurredAtYearRangeInputType") {
+    inputFields { name type { name } }
+  }
+}
+"""
+
+
+@pytest.mark.django_db
+def test_year_through_a_declared_transform_path_is_typed_by_the_transforms_output() -> None:
+    """A declared path through ``occurred_at``'s ``year`` publishes the transform's ``Int``.
+
+    ``occurredYearAmong`` / ``occurredYearSpan`` are a declared ``ListFilter`` (``in``) and
+    ``RangeFilter`` (``range``) over ``occurred_at__year``, a path naming no model field:
+    each member and bound is a value of the ``year`` transform's ``IntegerField`` output,
+    never of the declared form field (``String``) or the ``DateTimeField`` column.
+    """
+    data = _assert_graphql_success(_YEAR_LEAF_TYPES_QUERY)
+
+    assert json_list(data, "among", "inputFields") == [
+        {
+            "name": "in",
+            "type": {"kind": "LIST", "ofType": {"kind": "NON_NULL", "ofType": {"name": "Int"}}},
+        },
+    ]
+    assert json_list(data, "span", "inputFields") == [
+        {"name": "start", "type": {"name": "Int"}},
+        {"name": "end", "type": {"name": "Int"}},
+    ]
 
 
 @pytest.mark.django_db
 @pytest.mark.parametrize(
-    (
-        "query",
-        "unbindable",
-        "form_key",
-        "bindable",
-        "labels",
-    ),
+    ("query", "year_filter", "labels"),
     [
+        pytest.param(_BY_FILTER, {"occurredYearAmong": {"in": [2021]}}, ["alpha"], id="in"),
+        pytest.param(_BY_FILTER, {"occurredYearAmong": {"in": [2019]}}, [], id="in-no-row"),
         pytest.param(
             _BY_FILTER,
-            {"occurredYearAmong": {"in": ["2021", _PAST_INT64]}},
-            "occurred_year_among",
-            {"occurredYearAmong": {"in": ["2021"]}},
-            ["alpha"],
-            id="in-member-past-int64",
+            {"occurredYearSpan": {"range": {"start": 2020, "end": 2020}}},
+            ["beta"],
+            id="range",
         ),
         pytest.param(
             _BY_FILTER,
-            {"occurredYearAmong": {"in": [_BEFORE_INT64]}},
-            "occurred_year_among",
-            {"occurredYearAmong": {"in": ["2020", "2021"]}},
-            ["alpha"],
-            id="in-member-before-int64",
-        ),
-        pytest.param(
-            _BY_FILTER,
-            {"occurredYearAmong": {"in": [str(10**30)]}},
-            "occurred_year_among",
-            {"occurredYearAmong": {"in": ["2021"]}},
-            ["alpha"],
-            id="in-member-thirty-digits",
-        ),
-        pytest.param(
-            _BY_FILTER,
-            {"occurredYearSpan": {"range": {"start": _BEFORE_INT64, "end": "2021"}}},
-            "occurred_year_span",
-            {"occurredYearSpan": {"range": {"start": "2021", "end": "2021"}}},
-            ["alpha"],
-            id="range-start",
-        ),
-        pytest.param(
-            _BY_FILTER,
-            {"occurredYearSpan": {"range": {"start": "2020", "end": _PAST_INT64}}},
-            "occurred_year_span",
-            {"occurredYearSpan": {"range": {"start": "2020", "end": "2022"}}},
-            ["alpha"],
-            id="range-end",
-        ),
-        pytest.param(
-            _BY_FILTER,
-            {"not": {"occurredYearAmong": {"in": [_PAST_INT64]}}},
-            "not__occurred_year_among",
-            {"not": {"occurredYearAmong": {"in": ["2020"]}}},
+            {"not": {"occurredYearAmong": {"in": [2020]}}},
             ["alpha"],
             id="not",
         ),
         pytest.param(
             _BY_NULLABLE_FILTER,
-            {"partner": {"occurredYearAmong": {"in": [_PAST_INT64]}}},
-            "partner__occurred_year_among",
-            {"partner": {"occurredYearAmong": {"in": ["2021"]}}},
+            {"partner": {"occurredYearAmong": {"in": [2021]}}},
             ["of-alpha"],
             id="nested-partner",
         ),
         pytest.param(
             _BY_NULLABLE_FILTER,
-            {"partnerOccurredYearSpan": {"range": {"start": "2020", "end": _PAST_INT64}}},
-            "partner__occurred_year_span",
-            {"partnerOccurredYearSpan": {"range": {"start": "2020", "end": "2022"}}},
-            ["of-alpha"],
+            {"partnerOccurredYearSpan": {"range": {"start": 2020, "end": 2020}}},
+            ["of-beta"],
             id="flat-partner",
         ),
     ],
 )
-def test_year_integer_the_database_cannot_bind_is_filter_invalid(
+def test_year_through_a_declared_transform_path_filters_by_the_integer_sent(
     query: str,
-    unbindable: dict[str, object],
-    form_key: str,
-    bindable: dict[str, object],
+    year_filter: dict[str, object],
     labels: list[str],
 ) -> None:
-    """A year ``in`` member or ``range`` bound past the database's integer range is ``FILTER_INVALID``.
+    """An ``Int`` year sent to ``occurredYearAmong`` / ``occurredYearSpan`` filters by that year.
 
-    ``occurredYearAmong`` / ``occurredYearSpan`` are a declared ``ListFilter`` and
-    ``RangeFilter`` through ``occurred_at``'s ``year`` transform: each integer binds as
-    sent, held to the range the database stores for the transform's ``IntegerField``
-    output (64 bits on SQLite, 32 on PostgreSQL). 2**63, -2**63-1 and a thirty-digit year
-    lie past both, so each is refused keyed to its form field, flat, under ``not`` and
-    through ``partner`` nested and flat, never the driver's overflow; a year inside the
-    range filters by it.
+    Flat, under ``not`` and through ``partner`` nested and flat, the integer reaches the
+    ``year`` transform's predicate as sent.
     """
     alpha = _seed_specimen("alpha")
+    beta = _seed_specimen("beta", occurred_at=_DATETIME.replace(year=2020))
     models.NullableScalarSpecimen.objects.create(label="of-alpha", partner=alpha)
+    models.NullableScalarSpecimen.objects.create(label="of-beta", partner=beta)
     root = "allScalarSpecimens" if query == _BY_FILTER else "allNullableScalarSpecimens"
-    control = response_json(post_graphql(query, variables={"filter": bindable}))
-    payload = response_json(post_graphql(query, variables={"filter": unbindable}))
 
-    assert control == {"data": {root: [{"label": label} for label in labels]}}
+    assert response_json(post_graphql(query, variables={"filter": year_filter})) == {
+        "data": {root: [{"label": label} for label in labels]},
+    }
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("member", "refusal"),
+    [
+        pytest.param("2021", "Int cannot represent non-integer value: '2021'", id="string"),
+        pytest.param(
+            2**63,
+            f"Int cannot represent non 32-bit signed integer value: {2**63}",
+            id="past-int32",
+        ),
+    ],
+)
+def test_year_member_off_the_int_scalar_is_refused_before_the_filter_runs(
+    member: object,
+    refusal: str,
+) -> None:
+    """A text year or one past ``Int``'s 32 bits is refused by the ``Int`` scalar itself.
+
+    No such member reaches the filter, so none is a database bind question: every ``Int``
+    year binds on SQLite (64 bits) and PostgreSQL (the transform's 32 bits).
+    """
+    _seed_specimen("alpha")
+    payload = response_json(
+        post_graphql(_BY_FILTER, variables={"filter": {"occurredYearAmong": {"in": [member]}}}),
+    )
+
+    assert payload.get("data") is None, payload
+    (error,) = json_list(payload, "errors")
+    assert refusal in json_str(error, "message")
+
+
+_HOLDER: dict[str, DjangoSchema | None] = {"schema": None}
+
+
+def _holder_view(request: HttpRequest) -> HttpResponseBase:
+    schema = _HOLDER["schema"]
+    assert schema is not None
+    return DjangoGraphQLView.as_view(schema=schema)(request)
+
+
+urlpatterns = [path("graphql-test/", _holder_view)]
+
+
+@pytest.fixture
+def generated_year_schema(private_registry: None) -> Iterator[DjangoSchema]:
+    """Serve sets whose leaves reach ``occurred_at``'s ``year`` through the ``lookup_expr``.
+
+    No shipped fakeshop set spells a transform in a ``lookup_expr``, so the holder declares
+    one over ``ScalarSpecimen``: ``Meta.fields`` ``year`` / ``year__gt`` / ``year__in``;
+    a ``ListFilter`` (``year__in``) and a ``RangeFilter`` (``year__range``); and the same
+    list and range shapes with a ``method=``, whose method receives the column's values.
+    A ``NullableScalarSpecimen`` set reaches it through ``partner``, nested and flat.
+    """
+    del private_registry
+
+    class GeneratedYearFilter(FilterSet):
+        years_among = ListFilter(field_name="occurred_at", lookup_expr="year__in")
+        years_span = RangeFilter(field_name="occurred_at", lookup_expr="year__range")
+        years_of_stamps = ListFilter(
+            field_name="occurred_at",
+            lookup_expr="year__in",
+            method="filter_years_of_stamps",
+        )
+        year_span_of_stamps = RangeFilter(
+            field_name="occurred_at",
+            lookup_expr="year__range",
+            method="filter_year_span_of_stamps",
+        )
+
+        def filter_years_of_stamps(
+            self,
+            queryset: QuerySet[models.ScalarSpecimen],
+            name: str,
+            value: list[datetime.datetime],
+        ) -> QuerySet[models.ScalarSpecimen]:
+            """Keep the rows in the year of any datetime sent."""
+            return queryset.filter(**{f"{name}__year__in": [stamp.year for stamp in value]})
+
+        def filter_year_span_of_stamps(
+            self,
+            queryset: QuerySet[models.ScalarSpecimen],
+            name: str,
+            value: list[datetime.datetime],
+        ) -> QuerySet[models.ScalarSpecimen]:
+            """Keep the rows from the first datetime's year through the second's."""
+            start, end = value
+            return queryset.filter(**{f"{name}__year__range": (start.year, end.year)})
+
+        class Meta:
+            model = models.ScalarSpecimen
+            fields = {"occurred_at": ["year", "year__gt", "year__in"]}
+
+    class GeneratedYearSpecimenType(DjangoType):
+        class Meta:
+            model = models.ScalarSpecimen
+            fields = ("id", "label")
+            interfaces = (relay.Node,)
+            filterset_class = GeneratedYearFilter
+
+    class GeneratedYearPartnerFilter(FilterSet):
+        partner = RelatedFilter(GeneratedYearFilter, field_name="partner")
+
+        class Meta:
+            model = models.NullableScalarSpecimen
+            fields = {"label": ["exact"]}
+
+    class GeneratedYearPartnerType(DjangoType):
+        class Meta:
+            model = models.NullableScalarSpecimen
+            fields = ("id", "label")
+            interfaces = (relay.Node,)
+            filterset_class = GeneratedYearPartnerFilter
+
+    @strawberry.type
+    class Query:
+        specimens: DjangoConnection[GeneratedYearSpecimenType] = DjangoConnectionField(
+            GeneratedYearSpecimenType,
+        )
+        partners: DjangoConnection[GeneratedYearPartnerType] = DjangoConnectionField(
+            GeneratedYearPartnerType,
+        )
+
+    finalize_django_types()
+    schema = DjangoSchema(query=Query, config=strawberry_config())
+    _HOLDER["schema"] = schema
+    try:
+        with override_settings(ROOT_URLCONF=__name__):
+            yield schema
+    finally:
+        _HOLDER["schema"] = None
+
+
+def _holder_payload(root: str, year_filter: Mapping[str, object]) -> JSONObject:
+    query = (
+        f"query ($filter: {'GeneratedYearFilter' if root == 'specimens' else 'GeneratedYearPartnerFilter'}"
+        f"InputType) {{ {root}(filter: $filter) {{ edges {{ node {{ label }} }} }} }}"
+    )
+    return response_json(
+        post_graphql(query, variables={"filter": year_filter}, url="/graphql-test/"),
+    )
+
+
+def _seed_year_partners() -> None:
+    """``alpha`` in 2021 and ``beta`` in 2020, each with a nullable partner row."""
+    alpha = _seed_specimen("alpha")
+    beta = _seed_specimen("beta", occurred_at=_DATETIME.replace(year=2020))
+    models.NullableScalarSpecimen.objects.create(label="of-alpha", partner=alpha)
+    models.NullableScalarSpecimen.objects.create(label="of-beta", partner=beta)
+
+
+_GENERATED_YEAR_TYPES_QUERY = """
+query {
+  exact: __type(name: "GeneratedYearFilterOccurredAtFilterInputType") {
+    inputFields { name type { name } }
+  }
+  among: __type(name: "GeneratedYearFilterOccurredAtYearInFilterInputType") {
+    inputFields { name type { kind ofType { kind ofType { name } } } }
+  }
+}
+"""
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("generated_year_schema")
+def test_generated_year_leaf_is_typed_by_the_transforms_output() -> None:
+    """A ``Meta.fields`` ``year`` / ``year__in`` leaf takes the transform's ``Int``, not ``DateTime``."""
+    payload = response_json(post_graphql(_GENERATED_YEAR_TYPES_QUERY, url="/graphql-test/"))
+
+    assert payload == {
+        "data": {
+            "exact": {"inputFields": [{"name": "year", "type": {"name": "Int"}}]},
+            "among": {
+                "inputFields": [
+                    {
+                        "name": "year_In",
+                        "type": {
+                            "kind": "LIST",
+                            "ofType": {"kind": "NON_NULL", "ofType": {"name": "Int"}},
+                        },
+                    },
+                ],
+            },
+        },
+    }
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("generated_year_schema")
+@pytest.mark.parametrize(
+    ("root", "year_filter", "labels"),
+    [
+        pytest.param("specimens", {"occurredAt": {"year": 2021}}, ["alpha"], id="exact"),
+        pytest.param("specimens", {"occurredAtYearGt": {"year_Gt": 2020}}, ["alpha"], id="gt"),
+        pytest.param("specimens", {"occurredAtYearIn": {"year_In": [2020]}}, ["beta"], id="in"),
+        pytest.param("specimens", {"not": {"occurredAt": {"year": 2021}}}, ["beta"], id="not"),
+        pytest.param(
+            "partners",
+            {"partner": {"occurredAtYearIn": {"year_In": [2021]}}},
+            ["of-alpha"],
+            id="nested-partner",
+        ),
+        pytest.param(
+            "partners",
+            {"partnerOccurredAt": {"year": 2020}},
+            ["of-beta"],
+            id="flat-partner",
+        ),
+    ],
+)
+def test_generated_year_leaf_filters_by_the_integer_sent(
+    root: str,
+    year_filter: dict[str, object],
+    labels: list[str],
+) -> None:
+    """An ``Int`` year sent to a generated ``year`` leaf filters by that year."""
+    _seed_year_partners()
+
+    assert _holder_payload(root, year_filter) == {
+        "data": {root: {"edges": [{"node": {"label": label}} for label in labels]}},
+    }
+
+
+_LOOKUP_EXPR_RANGE_TYPES_QUERY = """
+query {
+  years: __type(name: "GeneratedYearFilterOccurredAtYearRangeInputType") {
+    inputFields { name type { name } }
+  }
+  stamps: __type(name: "GeneratedYearFilterOccurredAtRangeInputType") {
+    inputFields { name type { name } }
+  }
+}
+"""
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("generated_year_schema")
+def test_two_ranges_over_one_column_are_named_by_what_each_compares() -> None:
+    """A ``year__range`` and a ``method=`` ``year__range`` over ``occurred_at`` are two types.
+
+    Each is stemmed on its value path: ``OccurredAtYear`` with the ``year`` transform's
+    ``Int`` bounds, and ``OccurredAt`` with the column's ``DateTime`` bounds for the
+    ``method=`` range, whose method receives the column's values.
+    """
+    payload = response_json(post_graphql(_LOOKUP_EXPR_RANGE_TYPES_QUERY, url="/graphql-test/"))
+
+    assert payload == {
+        "data": {
+            "years": {
+                "inputFields": [
+                    {"name": "start", "type": {"name": "Int"}},
+                    {"name": "end", "type": {"name": "Int"}},
+                ],
+            },
+            "stamps": {
+                "inputFields": [
+                    {"name": "start", "type": {"name": "DateTime"}},
+                    {"name": "end", "type": {"name": "DateTime"}},
+                ],
+            },
+        },
+    }
+
+
+_ALPHA_YEAR_STAMP = "2021-03-01T00:00:00+00:00"
+_BETA_YEAR_STAMP = "2020-03-01T00:00:00+00:00"
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("generated_year_schema")
+@pytest.mark.parametrize(
+    ("year_filter", "labels"),
+    [
+        pytest.param({"yearsAmong": {"year_In": [2020]}}, ["beta"], id="list-in"),
+        pytest.param(
+            {"yearsSpan": {"year_Range": {"start": 2020, "end": 2021}}},
+            ["alpha", "beta"],
+            id="range",
+        ),
+        pytest.param({"yearsSpan": {"year_Range": {"start": 2021}}}, ["alpha"], id="range-start"),
+        pytest.param({"yearsSpan": {"year_Range": {"end": 2020}}}, ["beta"], id="range-end"),
+        pytest.param(
+            {"yearsOfStamps": {"year_In": [_ALPHA_YEAR_STAMP]}},
+            ["alpha"],
+            id="method-list",
+        ),
+        pytest.param(
+            {
+                "yearSpanOfStamps": {
+                    "year_Range": {"start": _BETA_YEAR_STAMP, "end": _BETA_YEAR_STAMP},
+                },
+            },
+            ["beta"],
+            id="method-range",
+        ),
+    ],
+)
+def test_lookup_expr_transform_leaf_filters_by_its_output_and_a_method_by_its_column(
+    year_filter: dict[str, object],
+    labels: list[str],
+) -> None:
+    """A transform in the ``lookup_expr`` is published and cleaned as its output; a method's not.
+
+    ``yearsAmong`` / ``yearsSpan`` take the ``year`` transform's ``Int`` and filter by it,
+    a lone bound through ``year`` too. The ``method=`` shapes keep the column's
+    ``DateTime``, cleaned as one, so each datetime reaches the method.
+    """
+    _seed_year_partners()
+
+    assert _holder_payload("specimens", year_filter) == {
+        "data": {"specimens": {"edges": [{"node": {"label": label}} for label in sorted(labels)]}},
+    }
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("generated_year_schema")
+@pytest.mark.parametrize(
+    ("root", "year_filter", "form_key"),
+    [
+        pytest.param("specimens", {"occurredAt": {"year": 0}}, "occurred_at__year", id="year-0"),
+        pytest.param(
+            "specimens",
+            {"occurredAtYearGt": {"year_Gt": 10000}},
+            "occurred_at__year__gt",
+            id="gt-10000",
+        ),
+        pytest.param(
+            "specimens",
+            {"not": {"occurredAt": {"year": 10000}}},
+            "not__occurred_at__year",
+            id="not",
+        ),
+        pytest.param(
+            "partners",
+            {"partner": {"occurredAt": {"year": 0}}},
+            "partner__occurred_at__year",
+            id="nested-partner",
+        ),
+        pytest.param(
+            "partners",
+            {"partnerOccurredAt": {"year": 10000}},
+            "partner__occurred_at__year",
+            id="flat-partner",
+        ),
+    ],
+)
+def test_generated_year_comparison_outside_years_one_to_9999_is_filter_invalid(
+    root: str,
+    year_filter: dict[str, object],
+    form_key: str,
+) -> None:
+    """An ``Int`` year whose first or last instant leaves years 1..9999 is ``FILTER_INVALID``.
+
+    Django compares ``year`` / ``year__gt`` as a datetime bound on the column, which year 0
+    and year 10000 cannot form, so the value the ``Int`` scalar accepts is refused keyed to
+    its form field, flat, under ``not`` and through ``partner`` nested and flat.
+    """
+    _seed_year_partners()
+    payload = _holder_payload(root, year_filter)
+
     assert payload["data"] is None, payload
     (error,) = json_list(payload, "errors")
     assert json_at(error, "extensions") == {

@@ -7,9 +7,7 @@ predicted to touch (unknown paths under an approved root become planned
 ``TrackedPath`` rows). The command resolves cards through the kanban service
 layer and replaces each card's linked file set exactly.
 
-This single command supersedes the former ``import_card_changed_files`` /
-``import_card_predicted_files`` pair (retired). The merged JSON key is
-``files``.
+Both kinds read the same JSON key, ``files``.
 
 Usage::
 

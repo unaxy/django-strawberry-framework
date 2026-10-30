@@ -66,6 +66,7 @@ from django_strawberry_framework.optimizer.nested_fetch import (
     unwindowable_child_queryset_reason,
 )
 from django_strawberry_framework.optimizer.nested_planner import (
+    _concrete_order_columns,
     _divergent_key_windows,
     _record_accounted_keys,
 )
@@ -79,6 +80,8 @@ from django_strawberry_framework.optimizer.plans import (
 from django_strawberry_framework.optimizer.selections import (
     PYTHON_ARGUMENTS_ATTR,
     PYTHON_NAME_ATTR,
+    is_fragment,
+    should_include,
 )
 from django_strawberry_framework.optimizer.walker import (
     _RELAY_ID_PYTHON_NAME,
@@ -86,20 +89,16 @@ from django_strawberry_framework.optimizer.walker import (
     _apply_hint,
     _build_child_queryset,
     _build_connection_child_queryset,
-    _concrete_order_columns,
     _ensure_connector_only_fields,
     _has_custom_id_resolver,
     _introduces_projection_for_operation,
-    _is_fragment,
     _merge_aliased_selections,
     _merge_runtime_prefixes,
     _plan_connection_relation,
     _prefetch_hint_for_path,
     _record_prefetch_path_keys,
-    _relay_max_results_from_info,
     _response_key_arguments_conflict,
     _selected_scalar_names,
-    _should_include,
     plan_optimizations,
 )
 from django_strawberry_framework.registry import registry
@@ -110,7 +109,10 @@ from django_strawberry_framework.utils._queryset_private import (
     queryset_db,
     queryset_prefetch_lookups,
 )
-from django_strawberry_framework.utils.connections import ConnectionWindowBounds
+from django_strawberry_framework.utils.connections import (
+    ConnectionWindowBounds,
+    relay_max_results_from_info,
+)
 from django_strawberry_framework.utils.querysets import _COMBINED_WHAT
 from django_strawberry_framework.utils.strings import snake_case
 from tests._definition import make_definition
@@ -877,37 +879,37 @@ def test_plan_empty_selections_produces_empty_plan() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _should_include - @skip / @include directives
+# should_include - @skip / @include directives
 # ---------------------------------------------------------------------------
 
 
 def test_should_include_returns_true_by_default() -> None:
     """No directives -> included."""
-    assert _should_include(_sel("name")) is True
+    assert should_include(_sel("name")) is True
 
 
 def test_should_include_skips_when_skip_true() -> None:
     """``@skip(if: true)`` -> excluded."""
     sel = _sel("name", directives={"skip": {"if": True}})
-    assert _should_include(sel) is False
+    assert should_include(sel) is False
 
 
 def test_should_include_includes_when_skip_false() -> None:
     """``@skip(if: false)`` -> included."""
     sel = _sel("name", directives={"skip": {"if": False}})
-    assert _should_include(sel) is True
+    assert should_include(sel) is True
 
 
 def test_should_include_skips_when_include_false() -> None:
     """``@include(if: false)`` -> excluded."""
     sel = _sel("name", directives={"include": {"if": False}})
-    assert _should_include(sel) is False
+    assert should_include(sel) is False
 
 
 def test_should_include_includes_when_include_true() -> None:
     """``@include(if: true)`` -> included."""
     sel = _sel("name", directives={"include": {"if": True}})
-    assert _should_include(sel) is True
+    assert should_include(sel) is True
 
 
 def test_should_include_treats_unresolved_variable_as_selected() -> None:
@@ -915,7 +917,7 @@ def test_should_include_treats_unresolved_variable_as_selected() -> None:
     # Strawberry normally resolves variables, but if one slips through
     # as None the walker treats it as "selected" defensively.
     sel = _sel("name", directives={"skip": {"if": None}})
-    assert _should_include(sel) is True
+    assert should_include(sel) is True
 
 
 def test_should_include_skip_true_beats_include_true() -> None:
@@ -924,7 +926,7 @@ def test_should_include_skip_true_beats_include_true() -> None:
         "name",
         directives={"skip": {"if": True}, "include": {"if": True}},
     )
-    assert _should_include(sel) is False
+    assert should_include(sel) is False
 
 
 def test_should_include_works_on_fragment_nodes() -> None:
@@ -933,7 +935,7 @@ def test_should_include_works_on_fragment_nodes() -> None:
         "CategoryType",
         directives={"skip": {"if": True}},
     )
-    assert _should_include(frag) is False
+    assert should_include(frag) is False
 
 
 def test_plan_excludes_skip_true_relation() -> None:
@@ -946,23 +948,23 @@ def test_plan_excludes_skip_true_relation() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _is_fragment - fragment detection
+# is_fragment - fragment detection
 # ---------------------------------------------------------------------------
 
 
 def test_is_fragment_returns_false_for_selected_field() -> None:
     """A regular ``SelectedField`` is not a fragment."""
-    assert _is_fragment(_sel("name")) is False
+    assert is_fragment(_sel("name")) is False
 
 
 def test_is_fragment_returns_true_for_inline_fragment() -> None:
     """An ``InlineFragment`` is detected as a fragment."""
-    assert _is_fragment(_inline_fragment("CategoryType")) is True
+    assert is_fragment(_inline_fragment("CategoryType")) is True
 
 
 def test_is_fragment_returns_true_for_fragment_spread() -> None:
     """A ``FragmentSpread`` is detected as a fragment."""
-    assert _is_fragment(_fragment_spread("CategoryFields", "CategoryType")) is True
+    assert is_fragment(_fragment_spread("CategoryFields", "CategoryType")) is True
 
 
 # ---------------------------------------------------------------------------
@@ -3744,7 +3746,7 @@ def test_window_slice_from_first_after_arguments() -> None:
 
 
 def test_relay_max_results_from_optimizer_info_shapes() -> None:
-    """``_relay_max_results_from_info`` reads the strawberry-wrapped schema config.
+    """``relay_max_results_from_info`` reads the strawberry-wrapped schema config.
 
     The walker runs at the optimizer middleware layer where ``info.schema`` is a
     bare graphql-core ``GraphQLSchema`` with NO ``.config``; the config lives on
@@ -3755,13 +3757,13 @@ def test_relay_max_results_from_optimizer_info_shapes() -> None:
     dereference ``info.schema.config`` and raise ``AttributeError`` in production.
     """
     # Production shape: a bare GraphQLSchema with the Strawberry schema filed on it.
-    assert _relay_max_results_from_info(_fake_info(relay_max_results=7)) == 7
+    assert relay_max_results_from_info(_fake_info(relay_max_results=7)) == 7
     # Resolve-time shape: ``schema.config`` directly on the Strawberry ``Schema``.
     resolve_time = make_info(config=StrawberryConfig(relay_max_results=42))
-    assert _relay_max_results_from_info(resolve_time) == 42
+    assert relay_max_results_from_info(resolve_time) == 42
     # No config anywhere -> None (engine default applies downstream).
     configless = _as_partial_resolve_info(SimpleNamespace(schema=SimpleNamespace()))
-    assert _relay_max_results_from_info(configless) is None
+    assert relay_max_results_from_info(configless) is None
 
 
 def test_window_slice_from_variables() -> None:

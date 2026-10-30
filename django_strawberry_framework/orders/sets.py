@@ -12,7 +12,7 @@ cookbook's cycle-safe ``get_fields`` (the Layer-4 expansion) over
 On top of that skeleton the module carries:
 
 - The ``"__all__"`` expansion via the
-  ``_get_concrete_field_names_for_order`` walk per spec-028, narrowed by
+  ``_get_concrete_field_names_for_order`` walk, narrowed by
   ``Meta.exclude`` as the filter family narrows it.
 - The order-expression builder (``_resolve_order_expressions``): a term
   ending on a forward ``ForeignObject`` orders by each of its carrier
@@ -491,8 +491,8 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
     # ``RelatedOrder`` target -- so the order side passes no ``on_reentry``.
     _is_expanding_fields: ClassVar[bool] = False
 
-    # Family binding-state descriptor: the single source for the lifecycle attr
-    # names ``get_fields`` (via ``expanded_once``) and ``registry.clear()`` (via
+    # The single source for the lifecycle attr names ``get_fields`` (via
+    # ``expanded_once``) and ``registry.clear()`` (via
     # ``clear_order_input_namespace``'s ``binding_attrs``) reference, instead of
     # re-spelling the tuple.
     # Mirrors ``FilterSet._lifecycle`` with the order-side slot names.
@@ -502,7 +502,7 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
         guard="_is_expanding_fields",
     )
 
-    # Family permission-facade config: shared with ``FilterSet`` through
+    # The permission-facade config, shared with ``FilterSet`` through
     # ``ActiveInputPermissionMixin``. Order inputs are a top-level list with
     # ``UNSET`` / ``None`` for omitted fields, no operator-bag logic keys.
     _permission: ClassVar[ActiveInputPermissionAttrs] = ActiveInputPermissionAttrs(
@@ -633,18 +633,13 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
         """
         fields: OrderedDict[str, RelatedOrder | None] = OrderedDict()
         meta = truth.static_attr(cls, "Meta", None)
-        # Shared reader: synonym resolve + every name read as plain ``str`` text +
-        # unordered ``set`` / ``frozenset`` canonicalization. No write-back here -- the
-        # metaclass owns alias promotion; expansion must not mutate class Meta.
+        # No write-back: the metaclass owns alias promotion; expansion must not mutate class Meta.
         meta_fields = read_set_meta_fields(meta)
         excluded = cls._read_meta_exclude(meta)
         if meta_fields is None and excluded is None:
             return fields
         if meta_fields == "__all__" or meta_fields is None:
-            # ``Meta.exclude`` with no ``Meta.fields`` is the same whole-set
-            # sweep, as in the filter family ("exclude with no fields implies
-            # all other fields"). ``_get_concrete_field_names_for_order`` is
-            # imported at module level with the other ``.inputs`` symbols;
+            # ``_get_concrete_field_names_for_order`` is a module-level import:
             # ``inputs.py`` only TYPE_CHECKING-imports ``OrderSet``, so the
             # runtime cycle stays inert without a deferred local import.
             model = require_sweep_model(
@@ -667,15 +662,6 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
                 if excluded is None or name not in excluded:
                     fields[name] = None
             return fields
-        # Re-readability is a declaration contract shared with the filter
-        # family, so the gate is theirs jointly
-        # (``sets_mixins.py::require_re_readable_field_declaration``): this
-        # expansion re-runs whenever a lazy ``RelatedOrder`` keeps the
-        # two-condition cache gate in ``get_fields`` from writing, and a
-        # one-shot declaration would expand correctly once and then silently
-        # rebuild to an EMPTY or partial field set. Dict-shaped fields iterate
-        # their keys (the django-filter lookup-bag shape degrades to its field
-        # names).
         names = require_re_readable_field_declaration(
             cls,
             meta_fields,
@@ -683,13 +669,6 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
             accepted="'__all__' or a re-readable collection of field names",
         )
         model = truth.static_attr(meta, "model", None)
-        # Entry-TYPE validation is unconditional: a model-less related-only
-        # set defers path validation to the concrete ``queryset.model`` at
-        # apply time, but every entry is a path TOKEN here regardless, so a
-        # non-string entry is a declaration error at this gate instead of a
-        # silent ``{None: None}`` / ``{b'title': None}`` expansion (or a raw
-        # ``TypeError: unhashable type`` from the ``fields[...]`` write
-        # below) when ``Meta.model`` is absent.
         listed = [
             require_field_name(cls, field_path, subject="OrderSet", meta_attr="fields")
             for field_path in names
@@ -1063,10 +1042,6 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
             flat_orders,
             model=model,
         ):
-            # A path ending on a relation keyed by columns other than the related
-            # pk is valued by its carriers; its own hop's test correlates on them,
-            # never adding the join that would drop a row whose carriers match
-            # nothing.
             link = non_pk_forward_link(terminal)
             tests = [
                 visible_row_exists(
@@ -1077,9 +1052,6 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
                 for joined, scope in cls._scoped_hops(model, field_path)
             ]
             to_many = _path_traverses_to_many(model, field_path)
-            # A term names one value; a carrier-backed relation holds it in
-            # several columns (``utils/relations.py::order_column_paths``), each
-            # ordered under the term's direction and the same visibility tests.
             for column_path in order_column_paths(field_path, terminal):
                 value = visible_value(column_path, tests) if tests else column_path
                 if to_many:

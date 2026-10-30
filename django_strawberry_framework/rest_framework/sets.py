@@ -53,7 +53,7 @@ deliberately has **no** coarse ``get_serializer`` constructor hook (unlike the f
 flavor's ``get_form``): its framework-owned invariants - ``partial`` and the
 authorized-actor ``context["request"]`` - cannot be entrusted to a
 consumer-overridable constructor, so construction is framework-owned
-through ``_merged_serializer_kwargs`` (spec-039).
+through ``_merged_serializer_kwargs``.
 """
 
 from __future__ import annotations
@@ -68,7 +68,7 @@ from django_strawberry_framework.mutations.inputs import CREATE
 from django_strawberry_framework.mutations.operations import NON_DELETE_OPERATION_INPUT_KIND
 from django_strawberry_framework.mutations.sets import DjangoMutation
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import is_mapping, require, tuple_iter
+from django_strawberry_framework.utils._narrowing import dict_of, is_mapping, require
 from django_strawberry_framework.utils.inputs import (
     normalize_field_name_sequence,
     reject_unknown_meta_keys,
@@ -145,14 +145,9 @@ _ALLOWED_SERIALIZER_META_KEYS: frozenset[str] = MODEL_BACKED_WRITE_META_KEYS | f
 )
 
 # ``operation`` -> input-generator kind: the shared
-# ``mutations/sets.py::NON_DELETE_OPERATION_INPUT_KIND`` map (spec-039), which
-# replaced the byte-identical ``_SERIALIZER_OPERATION_INPUT_KIND`` /
-# ``_modelform_operation_kind`` copies. ``create`` -> the required-aware
-# ``<Serializer>Input`` (``CREATE``); ``update`` -> the all-optional
+# ``mutations/operations.py::NON_DELETE_OPERATION_INPUT_KIND`` map. ``create`` ->
+# the required-aware ``<Serializer>Input`` (``CREATE``); ``update`` -> the all-optional
 # ``<Serializer>PartialInput`` (``PARTIAL``).
-
-# A mapping entry unpacks as exactly a ``(key, value)`` pair.
-_MAPPING_ENTRY_ARITY = 2
 
 
 def _validate_schema_field_map(name: str, field_map: object) -> dict[str, DRFField]:
@@ -163,39 +158,36 @@ def _validate_schema_field_map(name: str, field_map: object) -> dict[str, DRFFie
     assumes a mapping whose keys are the bound field names and whose values are DRF fields;
     validating that contract here turns malformed hook values into the package's typed
     configuration error instead of leaking ``AttributeError`` / ``TypeError`` during class
-    creation or finalization. The mapping's own ``items()`` is its behaviour and runs
-    untouched; each entry is classified by its real class (``utils/truth.py``).
+    creation or finalization. The mapping is copied by ``dict()`` (its own iteration runs
+    untouched), and a copy ``dict()`` refuses (an unhashable key) is the same typed error.
 
     The map and each value are class-tested with ``isinstance``, so a ``Mapping`` /
     ``serializers.Field`` subclass and a faithful proxy (``SimpleLazyObject``) pass. A key is
-    not held to the identifier rule here: only the KEPT input set is
-    (``rest_framework/inputs.py::resolve_effective_serializer_fields``), so a read-only or
-    narrowed-away field may carry any name.
+    read as its text (``truth.plain_str``): a ``StrEnum`` / ``TextChoices`` member is admitted
+    and re-keyed by the exact ``str`` it spells; any other non-string key (``int``, ``bytes``,
+    a lazy translation string) is refused. A key is not held to the identifier rule here:
+    only the KEPT input set is (``rest_framework/inputs.py::resolve_effective_serializer_fields``),
+    so a read-only or narrowed-away field may carry any name.
     """
     if not is_mapping(field_map):
         raise ConfigurationError(
             f"SerializerMutation {name}.get_serializer_for_schema() must return a mapping of "
             f"field name -> DRF serializers.Field; got {truth.render(field_map)}.",
         )
-    # ``items()`` is the mapping's own behaviour, so an entry may be anything.
-    entries: tuple[object, ...] = tuple(field_map.items())
+    try:
+        snapshot = dict_of(field_map)
+    except TypeError as exc:
+        raise ConfigurationError(
+            f"SerializerMutation {name}.get_serializer_for_schema() returned a mapping dict() "
+            "could not copy; a field-map key must be a plain string.",
+        ) from exc
 
     normalized: dict[str, DRFField] = {}
     errors: list[str] = []
-    for entry in entries:
-        # Read through the base iterator, so a tuple subclass's own ``__iter__`` /
-        # ``__len__`` / ``__getitem__`` never decides the entry's shape.
-        pair = tuple(tuple_iter(entry)) if truth.is_instance(entry, tuple) else ()
-        if len(pair) != _MAPPING_ENTRY_ARITY:
-            errors.append(
-                "an entry could not be unpacked as (field_name, serializers.Field) "
-                f"({truth.render(entry)})",
-            )
-            continue
-        field_name, field = pair
-        # The PLAIN-string gate: only an exact ``str`` key may proceed to the downstream
-        # ``normalized[...] = field`` dict-set and comparisons, which then run ``str``'s own
-        # hash and equality.
+    for key, field in snapshot.items():
+        # A member key is read as its text, so the downstream ``normalized[...] = field``
+        # dict-set and comparisons run ``str``'s own hash and equality.
+        field_name = truth.plain_str(key)
         if type(field_name) is not str:
             errors.append(
                 f"a field-map key must be a plain string; got {truth.render(field_name)}",
@@ -304,9 +296,10 @@ def _validate_serializer_nested_fields(
     ``Meta.nested_fields`` is the explicit opt-in for nested serializer writes: a
     ``{field_name: NestedSerializerConfig}`` map. Validated all at class creation:
 
-    - it must be a mapping of plain ``str -> NestedSerializerConfig`` (a wrong container /
-      wrong value type fails loud; the plain-string gate keeps the downstream key-hashing
-      consumers on ``str``'s own hash and equality);
+    - it must be a mapping of ``str -> NestedSerializerConfig`` (a wrong container /
+      wrong value type fails loud); a key is read as its text (``truth.plain_str``), so a
+      ``StrEnum`` / ``TextChoices`` member is re-keyed by the exact ``str`` it spells and any
+      other non-string key is refused;
     - each key must name a field in the schema-time ``field_map`` that IS a nested
       ``Serializer`` / ``ListSerializer`` (a typo / non-nested field fails loud - the deeper
       per-level key validation runs in the recursive build);
@@ -324,20 +317,20 @@ def _validate_serializer_nested_fields(
     if nested_fields is None:
         return None
     nested_mapping = require_nested_fields_mapping(name, nested_fields)
-    # The SAME entry shape check the schema field map applies: the mapping's own
-    # ``items()`` runs untouched, and each entry is accepted only as a real 2-tuple.
-    entries: tuple[object, ...] = tuple(nested_mapping.items())
+    # The SAME copy the schema field map takes: ``dict()`` runs the mapping's own iteration
+    # untouched, and a copy it refuses (an unhashable key) is a typed error.
+    try:
+        snapshot = dict_of(nested_mapping)
+    except TypeError as exc:
+        raise ConfigurationError(
+            f"SerializerMutation {name}.Meta.nested_fields could not be copied by dict(); "
+            "Meta.nested_fields keys must be plain strings.",
+        ) from exc
     normalized: dict[str, NestedSerializerConfig] = {}
-    for entry in entries:
-        pair = tuple(tuple_iter(entry)) if truth.is_instance(entry, tuple) else ()
-        if len(pair) != _MAPPING_ENTRY_ARITY:
-            raise ConfigurationError(
-                f"SerializerMutation {name}.Meta.nested_fields has an entry that could not be "
-                f"unpacked as (field_name, NestedSerializerConfig) ({truth.render(entry)}).",
-            )
-        field_name, config = pair
-        # The PLAIN-string gate: only an exact ``str`` key may proceed to ``field_map.get()``
-        # and the ``normalized`` dict-set, which then run ``str``'s own hash and equality.
+    for key, config in snapshot.items():
+        # A member key is read as its text, so ``field_map.get()`` and the ``normalized``
+        # dict-set run ``str``'s own hash and equality.
+        field_name = truth.plain_str(key)
         if type(field_name) is not str:
             raise ConfigurationError(
                 f"SerializerMutation {name}.Meta.nested_fields keys must be plain strings; "
@@ -508,7 +501,7 @@ class SerializerMutation(DjangoMutation):
         The serializer matrix (raising ``ConfigurationError`` naming the offending
         key), all at class creation:
 
-        - **unknown ``Meta`` key** - the promoted ``reject_unknown_meta_keys`` typo
+        - **unknown ``Meta`` key** - the shared ``reject_unknown_meta_keys`` typo
           guard over ``_ALLOWED_SERIALIZER_META_KEYS``.
         - **missing ``serializer_class``** - a clean error naming the key.
         - **``serializer_class`` not a DRF ``serializers.Serializer``** - the broad
@@ -528,8 +521,7 @@ class SerializerMutation(DjangoMutation):
           ``resolve_effective_serializer_fields``, which calls the shared
           ``utils/inputs.py::normalize_field_name_sequence(flavor="SerializerMutation")``
           DIRECTLY - the required keyword-only ``flavor`` arg exists for exactly this.
-          All three flavors now call that shared helper directly (the former model /
-          form re-binding wrappers are gone), so there is no
+          All three flavors call that shared helper directly, so there is no
           per-flavor wrapper on any side.
 
         ``permission_classes`` is validated + normalized by the shared
@@ -604,7 +596,7 @@ class SerializerMutation(DjangoMutation):
         # exclusion, bare-string incl. ``"__all__"`` / duplicate / unknown-name /
         # empty-set guard), which calls the shared
         # ``normalize_field_name_sequence(flavor="SerializerMutation")`` is
-        # single-sited by ``normalize_meta_field_selection`` above (spec-039). The
+        # single-sited by ``normalize_meta_field_selection`` above. The
         # snapshot stores the normalized tuples so the bind cannot consume a
         # one-shot declaration a second time.
         effective = resolve_effective_serializer_fields(
@@ -626,6 +618,7 @@ class SerializerMutation(DjangoMutation):
             truth.static_attr(meta, "optional_fields"),
             label="optional_fields",
             flavor="SerializerMutation",
+            ordered=False,
         )
         _ = resolve_optional_fields(serializer_class, optional_fields, tuple(effective))
         # ``Meta.injected_fields``: the auditable, per-field server-data contract.
@@ -636,6 +629,7 @@ class SerializerMutation(DjangoMutation):
             truth.static_attr(meta, "injected_fields"),
             label="injected_fields",
             flavor="SerializerMutation",
+            ordered=False,
         )
         # An injected field must be a real WRITABLE SCHEMA-TIME field (a required
         # field the input narrowed away), validated at class creation so a typo or non-writable
@@ -698,7 +692,7 @@ class SerializerMutation(DjangoMutation):
         )
 
         permission_classes = _validate_mutation_permission_classes(
-            name,
+            f"SerializerMutation {name}.Meta.permission_classes",
             truth.static_attr(meta, "permission_classes"),
         )
 
@@ -767,14 +761,14 @@ class SerializerMutation(DjangoMutation):
         materializes the ``CREATE``-shaped ``<Serializer>Input``, an ``update``
         materializes the ``PARTIAL``-shaped ``<Serializer>PartialInput``. The schema-time
         field set comes from the OVERRIDABLE ``get_serializer_for_schema()`` classmethod
-        hook (spec-039), consulted ONCE here and threaded into the
+        hook, consulted ONCE here and threaded into the
         generator so the bind honors a consumer override (a context-requiring serializer)
         rather than re-discovering through the module default. ``Meta.optional_fields``
         (the mutation's own key) is threaded from the snapshot so the create
         input's requiredness + the descriptor identity reflect it.
 
         The per-shape build cache is keyed on the FULL ``SerializerInputShape``
-        descriptor (spec-039), NOT a pre-build ``(class, op, names)`` tuple:
+        descriptor, NOT a pre-build ``(class, op, names)`` tuple:
         two declarations on the same serializer + effective names but different
         hook-returned field specs or ``optional_fields`` produce DISTINCT descriptors, so
         neither reuses the other's stale cached class; identical descriptors reuse ONE
@@ -784,8 +778,8 @@ class SerializerMutation(DjangoMutation):
         read DjangoType's choice enums are cached per (model, field)), so building a shape
         that then dedupes is harmless.
 
-        **The promoted build/stash seam is reused only partly here, by necessity
-        (spec-039).** This seam rides the promoted ``build_and_stash_input``
+        **The shared build/stash seam is reused only partly here, by necessity.**
+        This seam rides the shared ``build_and_stash_input``
         (the materialize-then-stash-``_input_field_specs`` tail,
         shared with the form flavor) but does NOT route the cache lookup through
         ``cached_build_input``: that helper looks up its key BEFORE building, which the
@@ -794,7 +788,7 @@ class SerializerMutation(DjangoMutation):
         DESCRIPTOR - only knowable AFTER the build's pure walk produces it. Forcing this
         path through ``cached_build_input`` would mean building the shape TWICE (once to
         derive the key, once inside ``build_fn`` on a miss), the exact waste the
-        promotion avoids; so the descriptor-keyed dedupe routes through
+        descriptor-keyed dedupe avoids; so the descriptor-keyed dedupe routes through
         ``inputs.dedupe_serializer_input_shape`` after the build (shared with nested
         opt-in builds), while the guard-before-dedupe ordering is preserved here
         directly. The per-declaration guard discipline ``cached_build_input``
@@ -915,8 +909,8 @@ class SerializerMutation(DjangoMutation):
         longer possible.
         """
         del info, hook_context  # the default ignores them; an override may consult them.
-        # Shared with the form default via ``write_mixins.py::construction_kwargs``
-        # (spec-039): create has no ``instance`` key; update injects it from the
+        # Shared with the form default via ``write_mixins.py::construction_kwargs``:
+        # create has no ``instance`` key; update injects it from the
         # framework merge, never from this constructor-only hook.
         return construction_kwargs(data=data)
 
@@ -974,7 +968,7 @@ class SerializerMutation(DjangoMutation):
 
     # The sync / async serializer resolver seams (delegate to the serializer
     # pipeline: locate -> authorize -> decode -> construct -> validate -> save ->
-    # optimizer re-fetch -> payload, riding the promoted shared write skeleton), via
+    # optimizer re-fetch -> payload, riding the shared write skeleton), via
     # the shared ``resolver_seams`` factory. The generated seams'
     # function-local import of ``rest_framework/resolvers.py`` keeps this module free
     # of a load-time edge to the resolver module (the ``forms/sets.py`` precedent). A

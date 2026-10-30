@@ -1,6 +1,6 @@
 """Form-field -> Strawberry annotation conversion + the decode kinds the form resolver reads.
 
-This module is the genuinely net-new machinery for the **model-less case**
+This module is the machinery for the **model-less case**
 (spec-038 Decision 7): a plain ``forms.Form`` field (a ``captcha``, a
 ``confirm_email``) has no Django model column and so no read-side equivalent in
 ``types/converters.py``. ``convert_form_field`` is the ``forms.Field``-keyed

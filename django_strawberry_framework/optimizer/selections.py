@@ -28,12 +28,9 @@ contracts cannot drift:
   ``named_children`` / ``with_runtime_prefix`` /
   ``node_children_with_runtime_prefix`` / ``connection_node_children`` /
   ``direct_child_selected``) - operates on Strawberry converted selections
-  (and the ``SimpleNamespace`` shapes the walker synthesizes) for three
-  consumers: ``optimizer/walker.py`` / ``nested_planner.py`` (nested
-  connection windows), ``optimizer/extension.py``'s root-connection seam
-  (both call ``connection_node_children`` for the ``edges { node }`` unwrap),
-  and ``connection.py``'s ``totalCount`` detection (``direct_child_selected``
-  only).
+  (and the ``SimpleNamespace`` shapes the walker synthesizes). The fragment,
+  include and response-key rules for converted selections live here and
+  nowhere else, so none can drift.
 
 Cycle-safe: ``walker.py`` and ``extension.py`` both import from here; this
 module imports neither. Beyond graphql-core and the stdlib it reaches
@@ -522,9 +519,7 @@ def is_fragment(selection: object) -> bool:
     ``InlineFragment`` / ``FragmentSpread`` and the ``SimpleNamespace`` fragment
     shells the walker clones - a regular field selection has no
     ``type_condition``. This is the SINGLE fragment-vs-field discriminator for
-    converted selections, shared by the walker, the connection ``edges { node }``
-    unwrap, and the connection ``totalCount`` detection (``direct_child_selected``)
-    so the three cannot drift on what counts as a fragment.
+    converted selections, so no reader can drift on what counts as a fragment.
     """
     return hasattr(selection, "type_condition")
 
@@ -593,8 +588,8 @@ def included_field_selections(
     (the overwhelmingly common query shape), the flatten/filter loop would
     rebuild an identical list - so the input list is returned unchanged
     instead, mirroring ``walker._merge_aliased_selections``'s passthrough.
-    Both callers (the walker's level descent and the FK-id-elision scalar
-    scan) only iterate the result, so sharing the caller's list is safe.
+    The result may be the input list itself; callers only iterate it, so
+    sharing it is safe.
 
     Non-``list``/``tuple`` iterables are materialized once at entry. The
     fast-path probe loop and the rebuild loop below BOTH iterate the
@@ -644,10 +639,8 @@ def named_children(selection: ConvertedSelection, name: str) -> list[FieldSelect
             # Recurse into the fragment directly: its own ``selections`` are the
             # children to search, so re-entering ``named_children`` on the
             # fragment iterates them (and descends nested fragments) with the
-            # same ``should_include`` / name-match rules. This avoids allocating
-            # a throwaway single-child ``SimpleNamespace`` shell per fragment
-            # child - the former shape, which wrapped each child only to give the
-            # recursion a ``.selections`` to walk.
+            # same ``should_include`` / name-match rules, with no throwaway
+            # single-child shell allocated per fragment child.
             children.extend(named_children(child, name))
             continue
         if selection_python_name(child) == name:
@@ -763,14 +756,11 @@ def direct_child_selected(selection_roots: Iterable[ConvertedSelection], name: s
     A selection matches by ``selection_python_name``, never by its wire name.
     Recurses ONLY through fragment wrappers (``is_fragment``), NOT into a regular
     field's sub-selections, so a field named ``name`` nested deeper in the tree
-    does NOT count. The connection field's ``totalCount`` detection
-    (``connection.py::_total_count_requested``) uses this so a fragment-wrapped
-    direct ``totalCount`` still fires the count while a node-level nested
-    connection's ``totalCount`` deep inside ``edges { node { ... } }`` does not
-    trip the OUTER connection's predicate. Sharing the ``is_fragment``
-    discriminator with the walker / edge-node unwrap keeps the "recurse through
-    fragments only" rule from drifting between the count detection and the
-    selection planning.
+    does NOT count: a fragment-wrapped direct child matches, while a same-named
+    field deep inside ``edges { node { ... } }`` (a nested connection's
+    ``totalCount``) does not trip the outer connection's predicate. The
+    fragment test is ``is_fragment``, so the "recurse through fragments only"
+    rule cannot drift from the selection planning.
 
     Gated on ``should_include`` like ``included_field_selections`` and
     ``named_children``: converted selections carry live, already-evaluated
@@ -796,11 +786,9 @@ def connection_total_count_selected(selection: ConvertedSelection) -> bool:
 
     The count field as a DIRECT child of the connection, through fragment
     wrappers only (``direct_child_selected``). The single implementation of
-    the count-observability walk: the plan-time
-    ``nested_planner.py::plan_connection_relation`` and the resolve-time
-    ``connection.py::_total_count_requested`` both call it, so the two
-    halves of the conditional ``_dst_total_count`` contract share one walk
-    by construction - and match the field by its Python name ``total_count``,
+    the count-observability walk, so the plan-time and resolve-time halves of
+    the conditional ``_dst_total_count`` contract share one walk by
+    construction - and match the field by its Python name ``total_count``,
     so neither depends on the wire name the schema publishes it under.
     """
     children: Iterable[ConvertedSelection] = getattr(selection, "selections", None) or []
@@ -827,9 +815,8 @@ def connection_has_next_page_selected(selection: ConvertedSelection) -> bool:
 
     The ``hasNextPage`` sibling of ``connection_total_count_selected``: a
     direct page-info child (through fragment wrappers, alias-merged via
-    ``named_children``), then a direct has-next-page child under it. Shared by
-    the plan-time ``nested_planner.py::plan_connection_relation`` and the
-    resolve-time ``connection.py::_has_next_page_requested``.
+    ``named_children``), then a direct has-next-page child under it. The one
+    has-next-page walk, so plan time and resolve time cannot disagree on it.
     """
     return any(
         direct_child_selected(

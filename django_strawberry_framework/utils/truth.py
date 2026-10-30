@@ -43,12 +43,14 @@ spellings of ``render`` / ``text`` / ``describe``. The reads that consult no
 namespace (``class_of``, ``is_type``, ``is_instance``, ``is_one_of``,
 ``is_mapping_dict``, ``is_subclass``, ``is_exact``, ``is_exact_one_of``, ``is_among``,
 ``IdentitySet`` / ``IdentityMap`` membership, ``mro``, ``bases``, ``class_dict``, ``kind``,
-``stored_function``, and ``name`` / ``qualname`` of a class, function, builtin
-or C descriptor) never raise and run no consumer code for any object. ``render`` /
+``stored_function``, ``plain_str``, and ``name`` / ``qualname`` of a class, function,
+builtin or C descriptor) never raise and run no consumer code for any object. ``render`` /
 ``text`` / ``describe`` spell a builtin scalar through the builtin's own slot only
 while its class still resolves that slot; any other object renders through its own ``__repr__`` /
 ``__str__``, which is consumer behaviour, and its exceptions propagate to the
-schema's error policy like any other consumer hook's. ``mro_entry`` reads no
+schema's error policy like any other consumer hook's. ``declared_meta_keys`` reads
+``class_dict`` and spells each key through ``text``, so a planted non-``str`` key
+shares that rule. ``mro_entry`` reads no
 namespace and scans its key map by identity; its one copy of that map inserts
 each key under its stored hash, so it shares the namespace reads' exception for
 two keys whose hashes collide, and any map but an exact ``dict`` may be read
@@ -86,6 +88,7 @@ __all__ = (
     "bases",
     "class_dict",
     "class_of",
+    "declared_meta_keys",
     "describe",
     "instance_dict",
     "instance_state",
@@ -105,6 +108,7 @@ __all__ = (
     "mro_entry",
     "name",
     "overrides",
+    "plain_str",
     "qualname",
     "render",
     "static_attr",
@@ -252,8 +256,15 @@ def mro(cls: object) -> tuple[type, ...]:
 
 
 def is_type(obj: object) -> TypeIs[type[object]]:
-    """Whether ``obj`` is a class, decided by its real metaclass chain."""
-    return is_among(type, _get_mro(type(obj)))
+    """Whether ``obj`` is a class, decided by its real metaclass chain.
+
+    ``type(obj)`` reads the real class past any ``__class__`` property, and
+    ``issubclass(..., type)`` with the exact ``type`` as the second argument is the
+    interpreter's own type-slot MRO check: the metaclass of ``obj`` is the probed
+    argument, never the one asked, so its ``__subclasscheck__``, ``__eq__`` or
+    ``__mro__`` override is never consulted.
+    """
+    return issubclass(type(obj), type)
 
 
 # The checker solves ``type[_T]`` from a bare generic class (``dict``, ``list``,
@@ -384,6 +395,23 @@ def class_dict(cls: object) -> types.MappingProxyType[str, object]:
         _get_dict(cls) if is_type(cls) else types.MappingProxyType({})
     )
     return found
+
+
+def declared_meta_keys(meta: object) -> list[object]:
+    """Return the public keys a ``Meta`` class declares in its own body; ``[]`` for a non-class.
+
+    The own namespace (``class_dict``) is deliberate: an inherited ``Meta`` base's
+    keys are that base's declaration, already checked where it was declared, not
+    this class's. Every ``str`` key starting with ``_`` is skipped (dunders and
+    private names alike); a non-``str`` key a hand-built namespace plants is kept.
+    The order is stable: ``str`` keys by text, then the rest by ``text``.
+    """
+    keys: list[object] = [
+        key
+        for key in class_dict(meta)
+        if not (is_instance(key, str) and text(key).startswith("_"))
+    ]
+    return sorted(keys, key=lambda key: (not is_instance(key, str), text(key)))
 
 
 def _nonempty(value: str, fallback: str) -> str:
@@ -839,6 +867,21 @@ def text(value: object, fallback: str = "") -> str:
         else:
             rendered = str(value)
     return _nonempty(rendered, fallback)
+
+
+def plain_str(value: _T) -> _T | str:
+    """Return a ``str`` subclass as the exact ``str`` it spells; any other value unchanged.
+
+    The pass-through spelling of ``text``: an exact ``str`` comes back as the same
+    object, a ``str`` subclass (a ``StrEnum`` / ``TextChoices`` member) as its
+    base-slot text, so its own ``__str__`` / ``__eq__`` / ``__hash__`` never run
+    downstream; anything else (a lazy translation string included, which stays
+    unevaluated) comes back as itself for the caller's own typed handling. Both
+    tests read the real class.
+    """
+    if is_exact(value, str) or not is_instance(value, str):
+        return value
+    return text(value)
 
 
 def describe(value: object) -> str:

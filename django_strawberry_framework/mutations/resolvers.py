@@ -77,7 +77,7 @@ and the load-bearing invariants this module owns:
   ``_delete_or_field_errors``) through the flavor's error key map, and the
   envelope rolls back whatever the save wrote first. Any other exception (a
   ``ValueError`` included) propagates.
-- **The post-write re-fetch is by pk WITHOUT the visibility filter** (spec-036)
+- **The post-write re-fetch is by pk WITHOUT the visibility filter** (spec-036 Decision 9)
   and routes through ``apply_connection_optimization``: the plan keeps
   ``select_related`` / ``prefetch_related`` and, under the mutation operation,
   introduces no ``.only(...)`` deferral on a queryset that carries none while it
@@ -287,10 +287,10 @@ if TYPE_CHECKING:
 # The async-pipeline recourse appended to a ``SyncMisuseError`` raised when an
 # async ``get_queryset`` is met inside the (sync) ORM pipeline. The whole
 # pipeline runs synchronously even on the async surface (it executes inside one
-# ``sync_to_async`` worker thread - spec-036), so an ``async def
+# ``sync_to_async`` worker thread), so an ``async def
 # get_queryset`` can never be awaited here regardless of operation context; the
 # recourse is to make the target hook sync. The sentence is single-sourced across
-# the three write flavors via ``sync_pipeline_recourse`` (spec-039).
+# the three write flavors via ``sync_pipeline_recourse``.
 _MUTATION_ASYNC_RECOURSE = sync_pipeline_recourse("DjangoMutation")
 
 
@@ -400,8 +400,9 @@ def run_write_pipeline_sync(
     partial write; the error envelope is the no-effect outcome. On a located
     row (update / delete) a failed step, or a ``DoesNotExist`` escaping one, is
     first checked against the row (``located_row_vanished``): a row a concurrent
-    transaction removed is the ``conflict`` envelope on ``id`` in place of the
-    step's answer, and a row still present keeps it (the exception re-raised).
+    transaction removed is the ``conflict`` envelope on ``id`` (the answer the save itself
+    gives such a row) in place of the step's answer, and a row still present keeps it
+    (the exception re-raised).
     A step that already answered ``conflict`` is not probed again, a create has no
     located row (its ``DoesNotExist`` propagates unprobed), and a success runs no
     probe.
@@ -412,7 +413,7 @@ def run_write_pipeline_sync(
     drift, and the capture deep-copies field values, which runs a value type's own
     ``__deepcopy__`` / ``__eq__``.
     """
-    # The cooperative deadline (spec-047) BEFORE the pipeline's own transaction
+    # The cooperative deadline (spec-047 Decision 9) BEFORE the pipeline's own transaction
     # opens: a write pipeline locates, locks, and writes rows, so an operation
     # already past its budget must not start one - and refusing before
     # ``open_write_pipeline`` means the refusal never has a partial write to
@@ -480,10 +481,7 @@ def run_write_pipeline_sync(
         # locate, BEFORE the permission hook (the first consumer-controlled code)
         # can touch the mutable located instance. Everything downstream that
         # claims "the authorized row" compares against THIS value, never against
-        # the live ``instance.pk`` a hook could have re-pointed. The companion
-        # ``target_state`` snapshot (the loaded concrete field values) backs the
-        # serializer flavor's pre-save in-memory drift rejection, so only that
-        # flavor (``snapshot_target``) captures it.
+        # the live ``instance.pk`` a hook could have re-pointed.
         authorized_pk = None if instance is None else pk_of(instance)
         pipeline_context = require_write_pipeline()
         pipeline_context.authorized_pk = authorized_pk
@@ -504,10 +502,6 @@ def run_write_pipeline_sync(
         # raises before it executes, so a hook cannot write (or probe) through
         # another database and escape the pinned transaction.
         with pipeline_alias_guard(truth.name(mutation_cls), using):
-            # Authorize exactly once - AFTER the target is located + locked, BEFORE
-            # the flavor decode (the security invariant): the decode issues
-            # visibility-scoped ``get_queryset`` queries, so running it pre-auth
-            # would let an unauthorized caller probe related-object visibility by id.
             # The authorization phase permits read-only auth-alias queries for
             # exactly this call, then closes: decode / hooks / validation cannot
             # reach the auth alias, and resolving permissions here fills the
@@ -536,13 +530,7 @@ def run_write_pipeline_sync(
             # A located row a concurrent transaction removed after the locate makes
             # every later read answer about a row that no longer exists: an omitted
             # M2M re-read as empty, a stored key whose target cascaded away with the
-            # row, a validator reading the row's relation through its descriptor. So
-            # a step failure on a located row - its field errors, or a
-            # ``DoesNotExist`` escaping the step - is checked against the row first:
-            # a row demonstrably gone is the ``conflict`` envelope, the answer the
-            # save itself gives such a row. A row still present keeps the step's own
-            # answer (the exception re-raised), a step that already answered
-            # ``conflict`` is not probed again, and a success runs no extra query.
+            # row, a validator reading the row's relation through its descriptor.
             try:
                 decoded = decode_step(instance)
                 saved = (
@@ -1025,7 +1013,7 @@ def _unprovided_exclude(model: type[models.Model], provided_attrs: set[str]) -> 
 
 
 def _constraint_groups(model: type[models.Model]) -> list[set[str]]:
-    """Return the field-name set of every check ``full_clean`` runs for a row (spec-036).
+    """Return the field-name set of every check ``full_clean`` runs for a row.
 
     A group is the set of fields that participate in one check: each constraint
     (``UniqueConstraint``, ``CheckConstraint``, or any ``BaseConstraint`` reading the
@@ -1348,8 +1336,8 @@ def _model_decode_step(
     ``EXCLUDED``); a mutation whose specs include any ``EXCLUDED`` kind returns
     the extended tuple
     ``(target, m2m_assignments, exclude, excluded_values)``. The default
-    no-exclusion bind keeps the exact historical three-tuple, so the model
-    flavor's ``_model_write_step`` contract is byte-unchanged.
+    no-exclusion bind returns the three-tuple
+    ``(target, m2m_assignments, exclude)`` that ``_model_write_step`` consumes.
     """
     scalar_and_fk_attrs, m2m_assignments, excluded_values, decode_error = _decode_relations(
         data,
@@ -1386,9 +1374,9 @@ def _model_write_step(
 ) -> models.Model | StepFailure:
     """Run the model ``write_step``: ``full_clean`` -> ``save`` -> M2M.
 
-    From validation onward create and update run an IDENTICAL tail (the prior
-    ``_validate_save_assign_refetch_payload``): the two-exclude ``full_clean`` sequence mapped to
-    the envelope, ``save()`` (a race ``IntegrityError`` or a consumer save-time
+    From validation onward create and update run an IDENTICAL tail: the two-exclude
+    ``full_clean`` sequence mapped to the envelope, ``save()`` (a race
+    ``IntegrityError`` or a consumer save-time
     ``ValidationError`` into the envelope), then the M2M ``.set(...)`` assignment
     (the same two mappings). ``specs`` are the request's published specs
     (``_published_input_specs``) every error of the step is keyed through, beside
@@ -2085,11 +2073,11 @@ def payload_cls_for(mutation_cls: _AuthorizedClass) -> type[_GeneratedPayload]:
     field's lazy ref resolves to and the type the resolver instantiates are the
     same object.
 
-    Promoted (underscore-dropped) so the form pipeline reuses it BY CALL rather than
+    Public so the form pipeline reuses it BY CALL rather than
     re-spelling it: both form flavors materialize their ``<Name>Payload`` into
-    ``mutations.inputs`` too (the ``ModelForm`` via the ``036`` ``bind_mutations``,
+    ``mutations.inputs`` too (the ``ModelForm`` via the model-flavor ``bind_mutations``,
     the plain via ``bind_form_mutations``), so this one ``getattr`` serves the model,
-    ``ModelForm``, and plain-form pipelines alike (spec-038).
+    ``ModelForm``, and plain-form pipelines alike.
     """
     # An auth permission holder reaching a pipeline is a bound ``login`` / ``logout``
     # holder, whose payload name the auth bind stashed; the bind materialized that
@@ -2098,36 +2086,6 @@ def payload_cls_for(mutation_cls: _AuthorizedClass) -> type[_GeneratedPayload]:
         "type[_GeneratedPayload]",
         getattr(inputs, require_instance(mutation_cls._payload_type_name, str)),
     )
-
-
-async def run_pipeline_async(
-    sync_body: Callable[
-        [
-            _MutationClassT,
-            Info[object, object],
-            object,
-            object,
-        ],
-        object,
-    ],
-    mutation_cls: _MutationClassT,
-    info: Info[object, object],
-    data: object,
-    id_: object,
-) -> object:
-    """Run a sync mutation/form pipeline body in one ``sync_to_async(thread_sensitive=True)`` call.
-
-    The shared async boundary both the model (``resolve_mutation_async``) and form
-    (``forms/resolvers.py::resolve_form_async``) entries delegate to - the
-    byte-identical ``sync_to_async(..., thread_sensitive=True)(mutation_cls, info,
-    data, id)`` wrapper, single-sourced so the two flavors cannot drift on the
-    boundary contract. ``sync_body`` is the flavor's ``_run_*_pipeline_sync``: it
-    runs on ONE worker thread so its ``transaction.atomic()`` + every ORM call never
-    interleave with ``await``s; a sync ``get_queryset`` runs
-    synchronously inside that thread, while an ``async def get_queryset`` raises
-    ``SyncMisuseError`` there (no awaiting context - the standing discipline).
-    """
-    return await run_in_one_sync_boundary(sync_body, mutation_cls, info, data, id_)
 
 
 def make_resolver_entries(
@@ -2141,13 +2099,18 @@ def make_resolver_entries(
         object,
     ],
 ) -> tuple[_SyncResolverEntry[_MutationClassT], _AsyncResolverEntry[_MutationClassT]]:
-    """Return the ``(resolve_sync, resolve_async)`` module-entry pair for a write flavor (spec-039).
+    """Return the ``(resolve_sync, resolve_async)`` module-entry pair for a write flavor.
 
     The two byte-parallel module-level entries every dispatcher-backed write flavor
     exposes: a sync entry normalizing the ``UNSET``-default ``data`` / ``id`` kwargs
     to ``sync_body``'s positional args, and an async entry running the SAME
-    ``sync_body`` through the shared ``run_pipeline_async`` boundary (one
-    ``sync_to_async(thread_sensitive=True)`` call). The model flavor
+    ``sync_body`` through ``utils/querysets.py::run_in_one_sync_boundary`` (one
+    ``sync_to_async(thread_sensitive=True)`` call). That boundary is single-sourced
+    here so the flavors cannot drift on it: ``sync_body`` (the flavor's
+    ``_run_*_pipeline_sync``) runs on ONE worker thread, so its
+    ``transaction.atomic()`` and every ORM call never interleave with an ``await``; a
+    sync ``get_queryset`` runs synchronously inside that thread, while an ``async def
+    get_queryset`` raises ``SyncMisuseError`` there (no awaiting context). The model flavor
     (``sync_body=_run_pipeline_sync``), the form flavor
     (``_run_form_pipeline_sync``), and the serializer flavor
     (``_run_serializer_pipeline_sync``) all take the full pair. Each factory call
@@ -2173,13 +2136,13 @@ def make_resolver_entries(
         id: object = UNSET,  # noqa: A002
     ) -> object:
         """Run ``sync_body`` in one ``sync_to_async(thread_sensitive=True)`` call."""
-        return await run_pipeline_async(sync_body, mutation_cls, info, data, id)
+        return await run_in_one_sync_boundary(sync_body, mutation_cls, info, data, id)
 
     return resolve_sync, resolve_async
 
 
-# The model-flavor module entry points (spec-036 Decision 8), via the shared factory
-# (spec-039). ``resolve_mutation_sync`` normalizes the ``UNSET`` kwargs to
+# The model-flavor module entry points (spec-036 Decision 8), via the shared factory.
+# ``resolve_mutation_sync`` normalizes the ``UNSET`` kwargs to
 # ``_run_pipeline_sync``; ``resolve_mutation_async`` runs it through the shared async
 # boundary. The field factory (``mutations/fields.py``) reads both by name.
 resolve_mutation_sync: _SyncResolverEntry[type[DjangoMutation]]

@@ -201,7 +201,7 @@ def clear_serializer_input_namespace() -> None:
     holder. Like ``clear_mutation_input_namespace`` (and unlike the set families'
     clear), this resets only the module-level ledger it owns - the serializer
     subsystem has no arguments-factory cache and no per-set ``_lifecycle`` binding
-    state. Wired into ``registry.clear()`` (spec-039). Also resets the
+    state. Wired into ``registry.clear()``. Also resets the
     shape debug registry (same build lifecycle).
     """
     _clear_input_namespace()
@@ -321,16 +321,19 @@ def normalize_nested_serializer_configs(
                 config.fields,
                 label="fields",
                 flavor="SerializerMutation",
+                ordered=True,
             ),
             exclude=normalize_field_name_sequence(
                 config.exclude,
                 label="exclude",
                 flavor="SerializerMutation",
+                ordered=False,
             ),
             optional_fields=normalize_field_name_sequence(
                 config.optional_fields,
                 label="optional_fields",
                 flavor="SerializerMutation",
+                ordered=False,
             ),
             nested_fields=normalize_nested_serializer_configs(
                 config.nested_fields,
@@ -646,8 +649,8 @@ def _serializer_meta_value(serializer_class: type[DRFBaseSerializer], name: str)
 
     DRF serializers carry their own ``Meta`` (``model`` / ``fields`` / ``exclude``);
     the package reads only the backing ``model`` from it (the narrowing /
-    ``optional_fields`` keys are the MUTATION's ``Meta``, not the serializer's -
-    spec-039). A serializer with no ``Meta`` (a bare ``Serializer``)
+    ``optional_fields`` keys are the MUTATION's ``Meta``, not the serializer's).
+    A serializer with no ``Meta`` (a bare ``Serializer``)
     yields ``None`` for every key.
     """
     return truth.static_attr(truth.static_attr(serializer_class, "Meta"), name)
@@ -953,7 +956,7 @@ def resolve_optional_fields(
     ``field.required``. ``optional_fields`` is the consumer value (or the
     ``_ValidatedMutationMeta``-stored normalized tuple); it is normalized + fail-loud
     via the shared ``normalize_field_name_sequence(flavor="SerializerMutation")`` (called
-    directly, no per-flavor wrapper - spec-039) (a bare string incl. ``"__all__"`` -
+    directly, no per-flavor wrapper) (a bare string incl. ``"__all__"`` -
     no ``"__all__"`` sentinel for field SELECTORS - and a duplicate are rejected),
     then an unknown name (not in the effective field set) raises. ``None`` (unset)
     yields the empty set.
@@ -962,6 +965,7 @@ def resolve_optional_fields(
         optional_fields,
         label="optional_fields",
         flavor="SerializerMutation",
+        ordered=False,
     )
     if names is None:
         return frozenset()
@@ -1158,7 +1162,7 @@ def _related_model_token(related_model: type[models.Model] | None) -> str:
     produce DISTINCT descriptor-derived names. The descriptor cache key already
     separates them (``InputFieldSpec.related_model`` is part of the frozen
     ``field_specs`` tuple), so the generated NAME must separate them too, or two
-    distinct descriptors collide on one materialized name (spec-039). ``None`` (a
+    distinct descriptors collide on one materialized name. ``None`` (a
     non-relation field) yields the literal ``"None"``; the module + qualname pair
     is deterministic across processes (unlike ``id()`` / the salted builtin
     ``hash``), load-bearing for the materialize-ledger dedupe.
@@ -1185,10 +1189,9 @@ def _shape_token(
     ``graphql_name``, ``source``, the relation ``related_model``, AND the generated SDL
     ``description``. This keeps the deterministic name aligned with the descriptor cache key.
 
-    The ``description`` discriminant is appended ONLY when it is non-``None``, so a field
-    that emits NO description contributes nothing to the digest - the common case keeps a
-    byte-identical token to the pre-fold derivation (only a genuinely-described shape's
-    name reflects the description).
+    The ``description`` discriminant is appended ONLY when it is non-``None``: a field
+    that emits NO description contributes nothing to the digest, and only a
+    genuinely-described shape's name reflects the description.
 
     The digest is collision-RESISTANT, not provably injective: a hash of arbitrary
     discriminants cannot be injective into a fixed-width hex string. The materialize
@@ -1209,8 +1212,8 @@ def _shape_token(
         str(spec.source),
         _related_model_token(spec.related_model),
     ]
-    # The description is appended only when present, so an undescribed field's token is
-    # byte-identical to the pre-fold derivation (no name churn for the common case).
+    # The description is appended only when present: an undescribed field contributes
+    # nothing to the digest.
     if description is not None:
         parts.append(f"description={description}")
     discriminant = "|".join(parts)
@@ -1351,7 +1354,7 @@ def guard_create_required_serializer_fields(
     ``forms/inputs.py::guard_create_required_fields`` per-declaration precedent).
     """
     # The drop-detection (``required - effective - injected``) is single-sited in
-    # ``utils/inputs.py::guard_dropped_required`` (spec-039), shared with the form
+    # ``utils/inputs.py::guard_dropped_required``, shared with the form
     # create guard; the serializer passes ``Meta.injected_fields`` through the shared
     # subtraction parameter and keeps its own pinned error wording.
     guard_dropped_required(
@@ -1465,7 +1468,7 @@ def _walk_serializer_fields(
     list[bool],
     list[tuple[str, object, dict[str, object]]],
 ]:
-    """Resolve an effective field dict to the per-field build state (spec-039).
+    """Resolve an effective field dict to the per-field build state.
 
     Returns ``(field_specs, annotation_reprs, descriptions, required_state, triples)``:
 
@@ -1556,8 +1559,8 @@ def _walk_serializer_fields(
         descriptions.append(description)
         if description is not None:
             field_kwargs["description"] = description
-        # Record the EMITTED (post-widening) annotation repr - NOT the base annotation
-        # (spec-039). The descriptor identity + the name token must reflect the
+        # Record the EMITTED (post-widening) annotation repr - NOT the base annotation.
+        # The descriptor identity + the name token must reflect the
         # GraphQL nullability actually generated: two same-name hook shapes differing ONLY
         # in ``allow_null`` (``required=True, allow_null=False`` -> ``T`` vs
         # ``required=True, allow_null=True`` -> ``T | None``) emit DIFFERENT nullability,
@@ -1784,7 +1787,7 @@ def _default_full_shape_identity(
 
     The canonical ``<Serializer>Input`` / ``<Serializer>PartialInput`` name is reserved
     for the shape the DEFAULT module-level discovery produces with no narrowing and no
-    ``optional_fields`` (spec-039). A schema hook returning a "full" shape that DIFFERS
+    ``optional_fields``. A schema hook returning a "full" shape that DIFFERS
     from this default (e.g. the same ``target`` relation pointed at a different model)
     must NOT also claim the canonical name, or two distinct descriptors collide on it at
     materialize - so the caller grants the canonical name only when the current shape's
@@ -1917,7 +1920,7 @@ def build_serializer_input_class(
     # The per-field walk resolves each field, threads DRF metadata into descriptions,
     # and AGGREGATES every per-field conversion error + input-attr / GraphQL-name
     # / source collision into ONE ``ConfigurationError`` - the collision guard is
-    # now folded into the walk (no separate call).
+    # part of the walk.
     field_specs, annotation_reprs, descriptions, required_state, triples = _walk_serializer_fields(
         effective,
         model,
@@ -1930,7 +1933,7 @@ def build_serializer_input_class(
     )
 
     # The canonical ``<Serializer>Input`` name is reserved for the DEFAULT full shape
-    # ONLY (spec-039): compare this shape's per-field identity against the identity the
+    # ONLY: compare this shape's per-field identity against the identity the
     # DEFAULT module-level discovery produces for the full shape. A hook returning a
     # "full" shape that DIFFERS from the default (e.g. a relation pointed at a different
     # model, or a field with a different description) must NOT also claim the canonical

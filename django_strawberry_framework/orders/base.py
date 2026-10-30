@@ -1,13 +1,13 @@
 """``RelatedOrder`` - the nested-path ordering primitive.
 
-Layer 1 of the spec-028 six-layer plan. ``RelatedOrder`` is the collapsed
+Layer 1 of the spec-028 Decision 3 layer plan. ``RelatedOrder`` is the collapsed
 port of the cookbook's ``django_graphene_filters/orders.py::BaseRelatedOrder``
 + ``::RelatedOrder`` pair (per spec-028 Decision 2 - single-symbol public
 surface). ``LazyRelatedClassMixin`` is reused from the neutral
-``django_strawberry_framework.sets_mixins`` module via sibling import per
-spec-028 (importing through ``filters.base`` would load the
-entire filter subsystem just to build orders, and would re-couple sibling
-Layer-3 packages after the neutral module was extracted).
+``django_strawberry_framework.sets_mixins`` module via sibling import
+(importing through ``filters.base`` would load the
+entire filter subsystem just to build orders, and would couple sibling
+Layer-3 packages).
 
 The cookbook signature makes ``field_name`` required positional on the
 ``RelatedOrder`` subclass; this port makes it optional as a purely
@@ -80,8 +80,8 @@ class RelatedOrder(RelatedSetTargetMixin["OrderSet"]):
     cross-family twin), a plain class, or a factory returning a non-class
     -- raises ``ConfigurationError`` at the ``.orderset`` read. Without the
     gate the mis-wiring survives declaration, binding, and expansion and
-    first detonates inside the BFS input builder (``set_input_type_name``
-    calling ``target.type_name_for()``) -- at finalize subpass 4, OUTSIDE
+    first detonates inside the BFS input builder (its
+    ``target.type_name_for()`` call) -- at finalize subpass 4, OUTSIDE
     the uniform subpass-2 rewrap, leaking a raw ``AttributeError`` (or,
     for a structurally FilterSet-shaped target, silently walking the
     filter family's fields through the order input builder).
@@ -124,7 +124,7 @@ class RelatedOrder(RelatedSetTargetMixin["OrderSet"]):
         ``normalize_input_value`` recursion, permission-branch recursion).
         Without the gate the mis-wiring survives declaration, binding, and
         expansion and first detonates inside the BFS input builder
-        (``set_input_type_name`` calling ``target.type_name_for()``) -- at
+        (its ``target.type_name_for()`` call) -- at
         finalize subpass 4, OUTSIDE the uniform subpass-2 rewrap, leaking a raw
         ``AttributeError`` (or, for a structurally FilterSet-shaped target,
         silently walking the filter family's fields through the order input

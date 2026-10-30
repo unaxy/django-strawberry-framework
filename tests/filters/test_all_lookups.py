@@ -290,7 +290,7 @@ def _leaf(
     column = model._meta.get_field(leaf.field_name.split("__")[0])
     record = filter_generation_provenance(leaf)
     assert record is not None
-    return leaf, (record.origin, convert_filter_to_input_annotation(leaf, column))
+    return leaf, (record.origin, convert_filter_to_input_annotation(leaf, column, None, filterset))
 
 
 def test_explicit_text_pattern_on_non_text_columns_is_a_string_text_pattern_filter() -> None:
@@ -379,6 +379,8 @@ def test_consumer_selected_pattern_filters_keep_their_class_and_column_type() ->
     plain = convert_filter_to_input_annotation(
         django_filters.DateTimeFilter(field_name="occurred_at"),
         scalar_models.ScalarSpecimen._meta.get_field("occurred_at"),
+        None,
+        FilterSet,
     )
     assert type(overridden) is ConsumerDateTimeFilter
     assert overridden_typed == ("override_generated", plain)

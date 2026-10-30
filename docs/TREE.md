@@ -493,7 +493,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── _info.py                      # Real Strawberry ``Info`` objects for tests that call a resolver-side entry point directly.
 ├── _postgres_fields.py           # Shared PostgreSQL container-field doubles that run without ``django.contrib.postgres``.
 ├── _postgresql_stand_in.py       # Shared database alias that reads as PostgreSQL on every test tier, never opened.
-├── _relation_fixtures.py         # Shared TEST-ONLY composite-primary-key relation fixture models.
+├── _relation_fixtures.py         # Shared TEST-ONLY relation fixture models.
 ├── _soft_dependency.py           # Shared soft-dependency absence simulation for the optional-import guards.
 ├── _subprocess.py                # Shared fresh-interpreter isolation for tests whose claim is about a clean process.
 ├── conftest.py                   # Shared pytest fixtures and test-suite instrumentation.
@@ -796,7 +796,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── _info.py                      # Real Strawberry ``Info`` objects for tests that call a resolver-side entry point directly.
 ├── _postgres_fields.py           # Shared PostgreSQL container-field doubles that run without ``django.contrib.postgres``.
 ├── _postgresql_stand_in.py       # Shared database alias that reads as PostgreSQL on every test tier, never opened.
-├── _relation_fixtures.py         # Shared TEST-ONLY composite-primary-key relation fixture models.
+├── _relation_fixtures.py         # Shared TEST-ONLY relation fixture models.
 ├── _soft_dependency.py           # Shared soft-dependency absence simulation for the optional-import guards.
 ├── _subprocess.py                # Shared fresh-interpreter isolation for tests whose claim is about a clean process.
 ├── conftest.py                   # Shared pytest fixtures and test-suite instrumentation.

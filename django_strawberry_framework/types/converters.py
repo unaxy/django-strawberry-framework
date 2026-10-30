@@ -38,6 +38,9 @@ Public surface:
   (the matched ``SCALAR_MAP`` key class, its scalar, and whether the choice
   enum replaces it). ``inspect_django_type`` names its converter column from
   the same route.
+- ``refuse_nested_array(field, element)`` - the one nested-``ArrayField``
+  refusal, asked by ``convert_scalar``'s array arm and by the filter-input
+  element read (``filters/inputs.py::_array_element_column``).
 - ``convert_choices_to_enum(field, type_name)`` - generate (or fetch
   cached) Strawberry ``Enum`` from a Django choice field; called from
   ``convert_scalar`` when ``field.choices`` is set and also importable
@@ -436,6 +439,20 @@ def scalar_route(field: "ConcreteField") -> ScalarRoute:
     return MapRoute(key, scalar, choices=bool(field.choices))
 
 
+def refuse_nested_array(field: object, element: object) -> None:
+    """Refuse an ``ArrayField`` whose element column ``element`` is itself an ``ArrayField``.
+
+    ``element`` is ``field``'s ``base_field`` (``utils/_array_field.py::array_element_field``).
+    Multi-dimensional arrays have no GraphQL shape on either side: ``convert_scalar``'s array
+    arm and the filter-input element read (``filters/inputs.py::_array_element_column``) both
+    raise this one ``ConfigurationError``.
+    """
+    if array_element_field(element) is not None:
+        raise ConfigurationError(
+            f"Nested ArrayField on {_field_label(field)} is not supported.",
+        )
+
+
 def convert_scalar(
     field: "ConcreteField",
     type_name: str,
@@ -470,16 +487,17 @@ def convert_scalar(
 
     Args:
         field: A bound Django model field.
-        type_name: The consumer-facing ``DjangoType`` class name. Threaded
-            through so the choice-enum path can build a stable
+        type_name: The choice-enum prefix: the published GraphQL name of the
+            ``DjangoType`` reading the column (``Meta.name``, else the class
+            name; ``types/definition.py::surface_type_name``), or what a filter
+            leaf names (``filters/inputs.py::_enum_prefix``). Threaded through so
+            the choice-enum path can build a stable
             ``<TypeName><FieldName>Enum`` GraphQL name. Also threaded into
             the recursive ``base_field`` call on ``ArrayField``, so an
             inner choice-bearing element resolves under the outer field's
             name.
         force_nullable: Keyword-only nullability override tri-state.
-            ``None`` (default) honors ``field.null`` - identical to the
-            pre-override behavior, so every existing call site is
-            unaffected. ``True`` emits ``T | None`` regardless of the
+            ``None`` (default) honors ``field.null``. ``True`` emits ``T | None`` regardless of the
             column (force nullable). ``False`` emits ``T`` regardless (force
             required). Sourced per field from ``Meta.nullable_overrides`` /
             ``Meta.required_overrides`` by ``types/base.py::_build_annotations``.
@@ -521,15 +539,13 @@ def convert_scalar(
     # nullability follows ``base_field.null`` and is NOT affected by the
     # outer override.
     if isinstance(route, ArrayRoute):
-        if array_element_field(route.element) is not None:
-            raise ConfigurationError(
-                f"Nested ArrayField on {_field_label(field)} is not supported.",
-            )
+        refuse_nested_array(field, route.element)
         if field.choices:
             raise ConfigurationError(
                 f"ArrayField on {_field_label(field)} declares choices on the outer "
-                f"field; outer-array choices are ambiguous at the GraphQL boundary. Declare choices "
-                f"on base_field for element-level enum, or use FilterSet.",
+                "field; outer-array choices are ambiguous at the GraphQL boundary. Declare choices "
+                "on base_field for an element-level enum, or leave the field out with Meta.fields "
+                "/ Meta.exclude (a FilterSet's ArrayFilter can still filter it).",
             )
         inner = convert_scalar(route.element, type_name)
         result = GenericAlias(list, (inner,))
@@ -579,7 +595,7 @@ def convert_field_output(
     """Map a non-relation Django column to its read-output annotation.
 
     The read-output entry point ``types/base.py::_build_annotations`` calls for
-    every non-relation column (spec-037). Routing, not an expansion of
+    every non-relation column. Routing, not an expansion of
     ``convert_scalar``:
 
     - A ``FileField`` / ``ImageField`` resolves through ``FIELD_OUTPUT_TYPE_MAP``
@@ -611,16 +627,8 @@ def convert_field_output(
         return convert_scalar(field, type_name, force_nullable=force_nullable)
     if expose_filesystem_path:
         output_type = FILESYSTEM_PATH_OUTPUT_TYPE_MAP[output_type]
-    # File/image output is nullable by DEFAULT, independent of ``null`` /
-    # ``blank``: the generated parent resolver (``resolvers._make_file_resolver``)
-    # returns ``None`` for an empty / falsy ``FieldFile``, and an empty value is
-    # reachable even on a ``null=False, blank=False`` column (legacy rows, direct
-    # ``Model.objects.create()``, fixtures, manual SQL all store ``""``). A
-    # non-null SDL would turn that ``None`` into a top-level "Cannot return null
-    # for non-nullable field" error, so the annotation must be ``<object> | None``
-    # to match what the resolver can actually return (spec-037 Decision 4).
-    # ``Meta.required_overrides`` (``force_nullable=False``) is the explicit
-    # opt-in for a caller asserting a stronger non-empty invariant.
+    # A non-null SDL would turn the generated resolver's empty-file ``None`` into a top-level
+    # "Cannot return null for non-nullable field" error (``resolvers._make_file_resolver``).
     file_effective_null = True if force_nullable is None else force_nullable
     return output_type | None if file_effective_null else output_type
 
@@ -716,8 +724,8 @@ def build_enum_from_choices(
     The shared choices -> enum CORE reused by the read-side model-choice path
     (``convert_choices_to_enum``, keyed + cached per ``(model, field_name)``), the
     serializer-only ``ChoiceField`` / ``MultipleChoiceField`` path
-    (``rest_framework/serializer_converter.py``, keyed by the descriptor-derived name -
-    spec-039), and a ``ModelForm`` choice field admitting fewer of its column's values
+    (``rest_framework/serializer_converter.py``, keyed by the descriptor-derived name),
+    and a ``ModelForm`` choice field admitting fewer of its column's values
     (``forms/inputs.py::_form_choice_annotation``, one enum per input class). All build a
     GraphQL-safe enum from the SAME rules, so the grouped-form rejection, the
     value-not-label sanitization, and the sanitize-collision guard cannot drift between
@@ -792,7 +800,7 @@ def _is_choice_group(label: object) -> TypeGuard[list[object] | tuple[object, ..
     load-bearing distinction: in the grouped form the first slot is the human-readable group
     name (a string), so testing it produces a false negative.
     """
-    return issubclass(truth.class_of(label), (list, tuple))
+    return truth.is_one_of(label, (list, tuple))
 
 
 def _unpack_choice_entry(entry: object, *, source_label: str) -> tuple[object, object]:
@@ -963,6 +971,10 @@ def choice_column_is_grouped(field: "ConcreteField") -> bool:
 def choice_enum_name(type_name: str, field_name: str) -> str:
     """Return the generated choice-enum name ``<TypeName><FieldName>Enum``.
 
+    ``<TypeName>`` is the prefix the caller names: a model column's is the published
+    name of the type that reads it (``Meta.name``, else the class name), or, for a
+    filter leaf no type owns, its set's class name.
+
     Every flavor (read-side model column, serializer choice field, form choice field) publishes
     its generated choice enum into the one schema namespace under this name, so enums for the
     same type and field name collide or dedupe by the same rule.
@@ -980,12 +992,13 @@ def convert_choices_to_enum(field: "ConcreteField", type_name: str) -> type[Enum
        sanitization, sanitize-collision guard, ``Enum`` build).
     4. Cache via ``registry.register_enum`` and return the enum class.
 
-    The first ``DjangoType`` to read a given ``(model, field_name)`` wins
-    the enum's GraphQL name; sibling types pointing at the same column
-    receive the cached enum unchanged. The build rules are single-sited in
-    ``build_enum_from_choices`` so the serializer-only ``ChoiceField`` path
-    applies the identical grouped-form / sanitization / collision
-    contract.
+    The first caller to read a given ``(model, field_name)`` (a ``DjangoType``
+    under its published name, or a ``FilterSet`` leaf under its owner's published
+    name, else its set's class name) wins the enum's GraphQL name; sibling types
+    and filters pointing at the same column receive the cached enum unchanged.
+    The build rules are single-sited in ``build_enum_from_choices`` so the
+    serializer-only ``ChoiceField`` path applies the identical grouped-form /
+    sanitization / collision contract.
 
     Raises:
         ConfigurationError: empty ``field.choices``, Django's grouped-choices form, or

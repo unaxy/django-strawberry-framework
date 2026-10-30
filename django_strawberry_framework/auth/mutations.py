@@ -72,9 +72,7 @@ from django_strawberry_framework.types.base import _is_django_type_class
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     is_concrete_field,
-    is_list,
     is_str,
-    is_tuple,
     list_iter,
     read_attr,
     require,
@@ -327,8 +325,11 @@ def _make_permission_holder(
     guard are all reused **by call**. A custom ``has_permission``
     receives the holder itself as its ``mutation`` positional - it carries no
     ``Meta.model`` / ``_resolve_model``, so gates must key on ``info`` /
-    ``operation`` / ``data``, never on the mutation object (Decision 5's
-    documented, not factory-guarded, constraint).
+    ``operation`` / ``data``, never on the mutation object (spec-040 Decision 5).
+    The factory refuses the one shape it can read, a ``DjangoModelPermission``
+    that does not override ``has_permission`` (``_declare_auth_surface`` passes
+    ``model_less=True`` for these surfaces); any other gate reading the model
+    raises per request.
     """
     return _SealedAuthHolderMeta(
         holder_name,
@@ -396,9 +397,10 @@ def _reject_conflicting_permission_classes(
 
 def _declare_auth_surface(
     surface: str,
-    label: str,
     permission_classes: Iterable[type[object]] | None,
     synthesize: Callable[[tuple[type[object], ...]], _AuthDeclarationT],
+    *,
+    model_less: bool,
 ) -> _AuthDeclarationT:
     """Resolve one auth surface's declaration class (cached, conflict-checked, or fresh).
 
@@ -406,7 +408,10 @@ def _declare_auth_surface(
     ``permission_classes`` via the standard ``_validate_permission_classes`` with
     the explicit empty-list default (the AllowAny semantics - the documented
     inversion of the write family's deny-by-default; no ``AllowAny`` class exists,
-    spec-040 Decision 5), then either return the ledger-cached class (a
+    spec-040 Decision 5) and the factory's name as the message site; ``model_less``
+    (``True`` for the fixed fields, ``False`` for the model-backed ``register``)
+    refuses a ``DjangoModelPermission`` that does not override ``has_permission``.
+    Then either return the ledger-cached class (a
     same-``permission_classes`` repeat call), raise on a conflicting repeat, or
     mint a fresh class via ``synthesize(normalized)`` (a permission holder for the
     fixed fields; the ``Register`` rider for ``register_mutation``). Ledger
@@ -414,7 +419,12 @@ def _declare_auth_surface(
     only, while ``register_mutation`` appends to BOTH ledgers - so the every-call
     re-record semantics (the reload contract) are explicit where they differ.
     """
-    normalized = _validate_permission_classes(label, permission_classes, unset_default=())
+    normalized = _validate_permission_classes(
+        f"{_SURFACE_FACTORY_NAMES[surface]} permission_classes",
+        permission_classes,
+        unset_default=(),
+        model_less=model_less,
+    )
     declared_cls = _declared_auth_surface(surface)
     if declared_cls is not None:
         _reject_conflicting_permission_classes(surface, declared_cls, normalized)
@@ -442,9 +452,9 @@ def _declare_fixed_auth_surface(
     """
     holder_cls = _declare_auth_surface(
         surface,
-        holder_name,
         permission_classes,
         lambda normalized: _make_permission_holder(surface, holder_name, normalized),
+        model_less=True,
     )
     register_auth_mutation(holder_cls)
     return holder_cls
@@ -497,7 +507,7 @@ def _make_auth_field(
     are the per-surface injection points later stages specialize per transport; the
     dispatch seam itself does not change. The injected ``__signature__`` /
     ``__annotations__`` (the keyword-only GraphQL args + the ``strawberry.lazy``
-    return forward-ref, unresolved at class-body time) ride the promoted
+    return forward-ref, unresolved at class-body time) ride the shared
     ``mutations/fields.py`` machinery - ``build_lazy_field_signature`` over
     ``_lazy_ref``-built refs - never a re-spelled copy. ``arguments`` is the ordered
     ``(name, annotation)`` list of keyword-only GraphQL args (empty for ``logout`` /
@@ -1165,9 +1175,9 @@ def derive_register_fields(user_model: type[AbstractBaseUser]) -> tuple[str, ...
             f"name string; got {truth.render(username_field)}.",
         )
     required_fields = read_attr(user_model, "REQUIRED_FIELDS")
-    if issubclass(type(required_fields), list) and is_list(required_fields):
+    if truth.is_instance(required_fields, list):
         entries = list_iter(required_fields)
-    elif issubclass(type(required_fields), tuple) and is_tuple(required_fields):
+    elif truth.is_instance(required_fields, tuple):
         entries = tuple_iter(required_fields)
     else:
         raise ConfigurationError(
@@ -1482,9 +1492,9 @@ def register_mutation(
     """
     rider_cls = _declare_auth_surface(
         "register",
-        "Register",
         permission_classes,
         _synthesize_register_rider,
+        model_less=False,
     )
     # The every-call re-record on BOTH ledgers (identity-deduped): a live ledger
     # is a no-op; a drained one re-appends, so the rider - and its auth-specific

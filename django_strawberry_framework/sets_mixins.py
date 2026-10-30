@@ -52,23 +52,23 @@ sets.
 from __future__ import annotations
 
 from collections import OrderedDict
-from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, Generic, TypeGuard, TypeVar, cast
+from typing import TYPE_CHECKING, ClassVar, Generic, TypeVar, cast
 
 from django.db.models.constants import LOOKUP_SEP
+from django.utils.functional import Promise
 from django.utils.module_loading import import_string
 
 from .exceptions import ConfigurationError
 from .utils import truth
 from .utils._narrowing import (
     is_mapping,
-    is_text_atom,
     read_attr,
     require,
     require_instance,
 )
 from .utils.input_values import SetInputTraversal, is_inactive_value
+from .utils.inputs import is_re_readable_field_declaration
 from .utils.permissions import (
     active_permission_targets,
     active_related_branches,
@@ -86,6 +86,8 @@ from .utils.strings import pascal_case_or_raise
 _import_object: Callable[[str], object] = import_string
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Collection, Iterable, Mapping
+
     from .filters.sets import FilterSetMetaclass
     from .orders.sets import OrderSetMetaclass
     from .utils.input_values import RelatedBranch
@@ -400,15 +402,7 @@ def collect_related_declarations(
                 else:
                     del collected[name]
                 break
-            inherited_value = next(
-                (
-                    truth.class_dict(ancestor)[name]
-                    for ancestor in truth.mro(base)
-                    if name in truth.class_dict(ancestor)
-                ),
-                missing,
-            )
-            if inherited_value is not missing:
+            if truth.mro_attr(base, name, missing) is not missing:
                 del collected[name]
                 break
     _reject_shared_relations(new_class, collected)
@@ -651,33 +645,6 @@ RE_READABLE_FIELDS_HELP = (
 )
 
 
-def is_re_readable_field_declaration(value: object) -> TypeGuard[Collection[object]]:
-    """Return whether ``value`` is a container a set expansion may walk repeatedly.
-
-    ``collections.abc.Collection`` IS the contract: ``__len__`` + ``__iter__`` +
-    ``__contains__`` together mean the object holds its members rather than
-    producing them, so a second walk yields the same field names as the first.
-    That admits every shipped collection declaration shape (list / tuple / set / frozenset
-    / dict) plus the view and range shapes a consumer legitimately computes
-    (``some_dict.keys()``, ``some_dict.values()``, ``range(...)``, any custom
-    ``Collection``), and rejects the one-shot shapes (generators, ``iter(...)``,
-    ``map`` / ``filter`` objects) that expand correctly ONCE and silently to
-    nothing afterwards. Text atoms (``utils/_narrowing.py::is_text_atom``: text,
-    bytes-like values with ``memoryview`` included, and a lazy translation string
-    such as ``gettext_lazy("title")``, whose proxy class forwards the ``str``
-    protocol) are ``Collection``s of characters or bytes, never of field names, so
-    they are refused even though they satisfy the protocol structurally. The
-    check is structural, so the value's ``__iter__`` is never entered: an object
-    that only defines ``__iter__`` is not a ``Collection``. The protocol is asked
-    of the value's real class, so an instance-level ``__class__`` is never
-    consulted (a value whose ``__class__`` read raises is judged by what it really
-    is, never by the raise). Both callers pass the declaration
-    ``utils/inputs.py::plain_set_meta_fields`` already read, which reads a
-    ``SimpleLazyObject`` as the object it stands for.
-    """
-    return issubclass(truth.class_of(value), Collection) and not is_text_atom(value)
-
-
 def require_re_readable_field_declaration(
     set_cls: type[object],
     value: object,
@@ -746,6 +713,40 @@ def require_field_name(
     raise ConfigurationError(
         f"{subject} {truth.qualname(set_cls)}.Meta.{meta_attr} entries must be field-name "
         f"strings; got {truth.kind(value)} ({truth.render(value)}).",
+    )
+
+
+def require_lookup_names(set_cls: type[object], field_name: str, lookups: object) -> None:
+    """Refuse a lookup-bag ``Meta.fields`` value that is no ``"__all__"`` or lookup-name list.
+
+    The value gate beside ``require_field_name``'s key gate in a FilterSet's dict
+    declaration (``{"name": ["exact", "icontains"]}``). django-filter walks the value
+    as the field's lookups, so a bare string is read letter by letter (``"exact"``
+    becomes the lookup ``"e"``), ``None`` / a number / bytes or a non-string member
+    reach a raw ``TypeError``, and a one-shot iterator is consumed by the first
+    expansion and publishes no filters on every later one. The value must be the
+    per-field ``"__all__"`` shorthand (a lazy translation string spelling it
+    included, which upstream compares as the text it stands for) or a re-readable
+    collection (``utils/inputs.py::is_re_readable_field_declaration``) of exact
+    ``str`` lookup names; ``utils/inputs.py::plain_set_meta_fields`` has already
+    read every ``str`` subclass member (a ``StrEnum`` lookup) as its text.
+    """
+    if truth.is_exact(lookups, str) or truth.is_instance(lookups, Promise):
+        if lookups == "__all__":
+            return
+    elif is_re_readable_field_declaration(lookups):
+        for lookup in lookups:
+            if not truth.is_exact(lookup, str):
+                raise ConfigurationError(
+                    f"FilterSet {truth.qualname(set_cls)}.Meta.fields[{field_name!r}] entries "
+                    f"must be lookup-name strings; got {truth.kind(lookup)} "
+                    f"({truth.render(lookup)}).",
+                )
+        return
+    raise ConfigurationError(
+        f"FilterSet {truth.qualname(set_cls)}.Meta.fields[{field_name!r}] must be '__all__' or "
+        "a re-readable collection of lookup-name strings; got "
+        f"{truth.kind(lookups)} ({truth.render(lookups)}).",
     )
 
 
@@ -1133,10 +1134,10 @@ __all__ = (
     "collect_related_declarations",
     "declaration_map",
     "expanded_once",
-    "is_re_readable_field_declaration",
     "reject_captured_branches",
     "reject_unknown_exclude_names",
     "require_field_name",
+    "require_lookup_names",
     "require_re_readable_field_declaration",
     "require_sweep_model",
     "should_cache_expansion",

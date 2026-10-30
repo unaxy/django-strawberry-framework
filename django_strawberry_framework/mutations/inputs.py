@@ -1,6 +1,6 @@
 """Generated mutation-input namespace, the public ``FieldError`` envelope, and the payload wrapper.
 
-This is the generation substrate for the write side (spec-036). It is
+This is the generation substrate for the write side. It is
 pure, finalizer-free machinery: given a Django model + an operation kind + an
 effective field set + the resolved primary ``DjangoType``, it produces the
 ``<Model>Input`` / ``<Model>PartialInput`` ``@strawberry.input`` classes and a
@@ -86,6 +86,7 @@ from django_strawberry_framework.utils.relations import (
     is_many_side_relation_kind,
     is_model_class,
     is_row_key_column,
+    is_stored_column,
     non_pk_relation_key_attname,
     relation_bool,
     relation_kind,
@@ -135,7 +136,7 @@ def _operation_kind_display_word(operation_kind: str) -> str:
     reads ``"update"``. Single-sites the mapping both configuration-error
     subjects use (the collision subject in
     ``_reject_generated_input_collisions`` and the empty-input message in
-    ``build_mutation_input``), so a new generator kind updates one body
+    ``editable_input_fields``), so a new generator kind updates one body
     instead of two message sites.
     """
     return "create" if operation_kind == CREATE else "update"
@@ -152,8 +153,7 @@ def _frozenset_of_attr_names(value: Iterable[str] | None, *, parameter: str) -> 
     (``utils/_narrowing.py::is_text_atom``: a ``str``, a bytes-like value whose
     items are byte INTEGERS, or a lazy translation ``Promise`` such as
     ``gettext_lazy("name")``) is the one shape that would iterate as CHARACTERS,
-    silently matching no input attribute - and, while non-empty, satisfying the
-    ``not overrides`` half of the empty-input guard - so it fails loud instead,
+    silently matching no input attribute, so it fails loud instead,
     mirroring ``utils/inputs.py::normalize_field_name_sequence``'s bare-string
     rejection for the ``fields`` / ``exclude`` sequences. Every ``Promise``
     counts whatever result class it wraps, so a ``lazy(..., list)`` value is
@@ -270,10 +270,9 @@ def editable_input_fields(
     ``ForeignObject`` link, and INCLUDE M2M, where the order side does the
     reverse. So this is a genuinely new selector, not a duplication; this one
     walks ``model._meta.get_fields()`` and the order side ``model._meta.fields``,
-    both recognize a forward ``ForeignObject`` through
-    ``utils/relations.py::carrier_backed_link``, and this one keeps any field
-    with a ``column`` attribute (the cookbook's ``hasattr(f, "column")`` idiom)
-    where the order side requires ``Field.concrete``.
+    and both recognize a forward ``ForeignObject`` through
+    ``utils/relations.py::carrier_backed_link`` and a stored column of the
+    model's table through ``utils/relations.py::is_stored_column``.
 
     Kept (in declaration order): concrete editable columns whose ``editable``
     flag is ``True`` and that are not the primary key, plus forward M2M fields,
@@ -292,7 +291,7 @@ def editable_input_fields(
     naming it in ``exclude`` is accepted),
     every ``editable=False`` column (the ``auto_now`` / ``auto_now_add``
     timestamps and any consumer ``editable=False`` column), reverse
-    relations (no ``column`` attribute: a reverse FK, OneToOne or M2M accessor), and a forward
+    relations (no stored column: a reverse FK, OneToOne or M2M accessor), and a forward
     ``ForeignObject`` that is not a ``ForeignKey`` (one carrier column or
     several): its value lives in its carrier fields, so the relation has no
     column of its own to write. Each carrier is an input exactly when this
@@ -306,10 +305,13 @@ def editable_input_fields(
     be supplied; ``ConfigurationError`` names any unknown field so a typo fails
     loud rather than silently dropping a column). Only the BASIS - which columns
     are editable at all - is this flavor's own; the narrowing rules are the same
-    ones the form and serializer flavors run.
+    ones the form and serializer flavors run, the empty-selection refusal included:
+    an empty result (``fields=()``, an ``exclude`` naming every editable column, or
+    a model with no editable columns) raises the flavor's "has no fields"
+    ``ConfigurationError`` here, the one place the model flavor decides emptiness.
 
-    Routing through the spine also means this generator now normalizes its
-    sequences the way the metaclass path already did: a bare string and a
+    Routing through the spine also means this generator normalizes its
+    sequences the way the metaclass path does: a bare string and a
     duplicate name are rejected here too. That matters because this is a PUBLIC
     generator the auth and form adapters call directly, bypassing
     ``mutations/sets.py::DjangoMutation._validate_meta`` - so without this check a
@@ -324,18 +326,17 @@ def editable_input_fields(
             continue
         if is_forward_many_to_many(field):
             # A forward ``ManyToManyField`` is writable when ``editable``; a reverse
-            # M2M accessor has no ``column`` and falls out below.
+            # M2M accessor stores no column and falls out below.
             if getattr(field, "editable", False):
                 selected.append(field)
             continue
-        # Concrete column-backed fields only (``hasattr(f, "column")`` is the
-        # cookbook idiom); reverse FKs have no ``column``. Drop every
-        # ``editable=False`` column (the ``auto_now`` / ``auto_now_add`` timestamps
-        # among them) and a pk Django assigns itself (``is_row_key_column`` - the auto
+        # Stored columns of the model's table only; a reverse relation stores none.
+        # Drop every ``editable=False`` column (the ``auto_now`` / ``auto_now_add``
+        # timestamps among them) and a pk Django assigns itself (``is_row_key_column`` - the auto
         # ``AutoField`` is ``editable=True``); a client-assigned pk, each member of a
         # composite one included, stays in the basis for the row-identity rule below
         # to keep (create) or drop (update).
-        if not is_concrete_field(field) or not getattr(field, "editable", False):
+        if not is_stored_column(field) or not getattr(field, "editable", False):
             continue
         if not is_row_key_column(field) or _client_assigned_primary_key(field):
             selected.append(field)
@@ -347,8 +348,18 @@ def editable_input_fields(
         if operation_kind == CREATE
         else frozenset(name for name, column in by_name.items() if is_row_key_column(column))
     )
-    fields = normalize_field_name_sequence(fields, label="fields", flavor="DjangoMutation")
-    exclude = normalize_field_name_sequence(exclude, label="exclude", flavor="DjangoMutation")
+    fields = normalize_field_name_sequence(
+        fields,
+        label="fields",
+        flavor="DjangoMutation",
+        ordered=True,
+    )
+    exclude = normalize_field_name_sequence(
+        exclude,
+        label="exclude",
+        flavor="DjangoMutation",
+        ordered=False,
+    )
     if fields is None or exclude is None:
         for key, names in (("fields", fields), ("exclude", exclude)):
             for name in names or ():
@@ -361,9 +372,13 @@ def editable_input_fields(
                         input_names=[name for name in by_name if name not in row_identity],
                     )
 
-    # No ``empty_message``: the model flavor's empty-input rejection is
-    # override-aware (a consumer ``input_class`` may supply the fields), so it
-    # stays downstream at the build site where the overrides are known.
+    # The one empty-input rule of the model flavor: an empty selection would build
+    # an empty ``@strawberry.input``, which Strawberry refuses only at ``Schema(...)``
+    # with a raw ``ValueError`` naming the generated type (spec-036 - empty input
+    # fails at the framework boundary). A consumer ``input_class`` cannot fill an
+    # empty selection: its accepted names are this same selection
+    # (``mutations/sets.py::_expected_input_attr_names``), so the class-creation walk
+    # in ``DjangoMutation._validate_meta`` and the generator both refuse here.
     effective = resolve_effective_fields(
         by_name,
         fields=fields,
@@ -371,6 +386,12 @@ def editable_input_fields(
         subject=f"DjangoMutation for {truth.name(model)}",
         seq_flavor="DjangoMutation",
         unknown_noun="non-editable or unknown field(s)",
+        empty_message=(
+            f"DjangoMutation {_operation_kind_display_word(operation_kind)} input for "
+            f"{truth.name(model)} has no fields; Meta.fields / Meta.exclude narrowed the "
+            "editable column set to empty (or the model declares no editable columns). "
+            "A mutation input must define at least one field."
+        ),
         row_identity=row_identity,
     )
     return list(effective.values())
@@ -440,7 +461,7 @@ def _carrier_backed_link_error(
 
 
 def input_field_required(field: ConcreteField) -> bool:
-    """Return whether a create-input field is required (spec-036 rule).
+    """Return whether a create-input field is required.
 
     A field is required **only when it has no usable default**: no Django
     ``default`` (``field.has_default()`` is ``False``), no database default
@@ -598,7 +619,7 @@ def relation_input_annotation(
 
     The python attr is ``<field.name>_id`` for FK / OneToOne so the
     resolver maps it back to the column with no per-field declaration (and a
-    custom ``input_class`` must follow the same scheme - spec-036). The
+    custom ``input_class`` must follow the same scheme). The
     GraphQL alias camel-cases that attr (``category_id`` -> ``categoryId``). M2M
     keeps the plain field name (``genres``) - it is already a collection of ids.
 
@@ -790,7 +811,7 @@ def model_column_input_annotation(
     ``FileField`` / ``ImageField`` via ``Upload`` (spec-037; a file column is a
     SCALAR input so the python attr is the plain field name, never
     ``<name>_id``). File columns then ride the same override-skip / requiredness
-    / ``| None``-widening tail as any scalar (spec-037). Else
+    / ``| None``-widening tail as any scalar. Else
     ``convert_scalar(..., force_nullable=False)`` so the generator owns
     nullability (spec-036 Decision 6). ``primary_of`` is the flavor's
     related-primary lookup (``registry.get`` for model and form). Serializer
@@ -980,11 +1001,14 @@ def build_mutation_input(
     honored, not clobbered. ``mutations/sets.py`` wires it from
     ``Meta.input_class`` / ``Meta.partial_input_class``; a direct caller may pass
     it explicitly. File/image columns participate in this skip like any
-    scalar (spec-037). A bare text atom (a ``str``, a bytes-like value, or a
+    scalar. A bare text atom (a ``str``, a bytes-like value, or a
     lazy translation ``Promise``)
     is rejected (``ConfigurationError``): a string would iterate as characters,
-    silently overriding nothing - and, while non-empty, bypassing the
-    empty-input guard below.
+    silently overriding nothing. ``overrides`` never decides emptiness: an empty
+    selection is refused by ``editable_input_fields`` (through ``shape``) before
+    any override is read, and a consumer ``input_class`` can only name members of
+    that selection, so an empty generated remainder here means every selected
+    column is overridden.
 
     ``shape`` is the precomputed ``MutationInputShape``: the bind passes
     the one it already computed for the cache key so the selected fields + type
@@ -1040,27 +1064,6 @@ def build_mutation_input(
         triples.append((python_attr, annotation, field_kwargs))
         emitted_names.append(field_name)
 
-    if not triples and not overrides:
-        # An empty effective field set (``Meta.fields = ()``, an ``exclude`` that
-        # drops every editable column, or a model with no editable columns) would
-        # build an empty ``@strawberry.input``, which Strawberry rejects only at
-        # ``Schema(...)`` build with a raw ``ValueError: Input Object type
-        # <Name> must define one or more fields.`` Fail loud here as a framework
-        # ``ConfigurationError`` naming the mutation's model, before the schema
-        # build (spec-036 - empty input must fail at the framework boundary). A
-        # consumer ``input_class`` supplying field(s) keeps ``overrides`` non-empty,
-        # so a merged input whose generated remainder is empty is NOT rejected -
-        # which is exactly why this guard stays here rather than moving onto
-        # ``build_strawberry_input_class``'s ``empty_message`` seam like the
-        # set-family factory's did: the construction site sees only the generated
-        # triples and cannot know an override half is coming.
-        kind = _operation_kind_display_word(operation_kind)
-        raise ConfigurationError(
-            f"DjangoMutation {kind} input for {truth.name(model)} has no fields; "
-            "Meta.fields / Meta.exclude narrowed the editable column set to empty "
-            "(or the model declares no editable columns). A mutation input must "
-            "define at least one field.",
-        )
     # An attr collision is ambiguous even when a consumer override hides both
     # generated fields; GraphQL-name collisions are checked only across the
     # generated remainder because a consumer alias may legitimately replace one.
@@ -1119,11 +1122,15 @@ def build_payload_type(
       (the genuine import-time forward-ref hazard is the ``DjangoMutationField``
       resolver return).
     - **model-less** (``object_type`` is ``None``, the plain ``DjangoFormMutation``
-      flavor, spec-038 Decision 6): NO object slot at all - a model-less mutation
-      has no ``DjangoType`` to return. Fields: ``ok: bool`` (``Boolean!`` - the
+      flavor, spec-038 Decision 6, and auth ``logout``): NO object slot at all - a
+      model-less mutation has no ``DjangoType`` to return. Fields: ``ok: bool`` (``Boolean!`` - the
       success flag) and the SAME ``errors: list[FieldError]`` envelope. The None
-      branch is net-new and never reached by the model flavor (which always passes
-      a non-``None`` ``object_type``), so the model payload is byte-unchanged.
+      branch serves the model-less payloads (the plain form flavor and auth
+      ``logout``); every model-backed flavor passes a non-``None`` ``object_type``.
+
+    The class is published under ``payload_type_name`` verbatim (``name=`` pinned):
+    Strawberry re-cases a class ``__name__`` that carries an underscore, so an
+    unpinned ``Create_Category`` would publish ``CreateCategorypayload``.
     """
     if object_type is None:
         namespace: dict[str, object] = {
@@ -1138,7 +1145,8 @@ def build_payload_type(
             slot: None,
             "errors": strawberry.field(default_factory=list),
         }
-    cls = type(payload_type_name(mutation_name), (), namespace)
+    type_name = payload_type_name(mutation_name)
+    cls = type(type_name, (), namespace)
     # basedpyright: strawberry.type's signature returns its argument's type unchanged, so the
     # __strawberry_definition__ the decorator attaches is invisible without the cast
-    return cast("type[WithStrawberryObjectDefinition]", strawberry.type(cls))
+    return cast("type[WithStrawberryObjectDefinition]", strawberry.type(cls, name=type_name))

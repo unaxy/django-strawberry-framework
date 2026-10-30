@@ -164,6 +164,7 @@ from .errors import (
     refuses_numeric_format,
     unbindable_temporal,
 )
+from .lazy import unwrap_lazy_object
 from .relations import (
     is_model_class,
     leading_relation_hops,
@@ -916,6 +917,8 @@ def coerce_field_value_or_none(field: ModelField | None, value: object, *, alias
     ``bulk_create``, ``QuerySet.update`` and a migration all skip
     ``full_clean``), and an identity decode that ran them would miss it.
 
+    A lazy value (a ``SimpleLazyObject``) is read as the object it stands for
+    (``utils/lazy.py::unwrap_lazy_object``), so the checks below see its real text.
     ``to_python`` casts the value and refuses a wrong shape (``column_python_value``: a
     date or naive datetime for a ``DateTimeField`` column is the aware value Django binds
     for it under ``USE_TZ``, made aware in the default time zone without Django's
@@ -981,9 +984,9 @@ def coerce_field_value_or_none(field: ModelField | None, value: object, *, alias
         return None
     connection = connections[alias]
     try:
-        coerced = column_python_value(field, value)
-        if isinstance(coerced, str):
-            _PROHIBIT_NULL_CHARACTERS(str.__str__(coerced))
+        coerced = column_python_value(field, unwrap_lazy_object(value))
+        if truth.is_instance(coerced, str):
+            _PROHIBIT_NULL_CHARACTERS(truth.text(coerced))
         bound = object_result(field.get_db_prep_value, coerced, connection, prepared=False)
     except (
         ValidationError,
@@ -1066,21 +1069,14 @@ def _unconstrained_decimal_or_none(
     return None if refuses_numeric_format(connection, (stripped,)) else stripped
 
 
-_RELAY_ASYNC_RECOURSE = (
-    "The Relay node defaults only await async get_queryset hooks on the async "
-    "branch; either invoke the Relay node default from an async resolver, or "
-    "redefine get_queryset as a sync method."
-)
-
-
 def sync_pipeline_recourse(flavor_noun: str) -> str:
-    """Build the ``SyncMisuseError`` recourse a sync write pipeline appends (spec-039).
+    """Build the ``SyncMisuseError`` recourse a sync write pipeline appends.
 
     Every write flavor raises a ``SyncMisuseError`` naming the SAME recourse when an
     ``async def get_queryset`` is met inside its (synchronous) ORM pipeline -
     byte-identical except the flavor subject - so the sentence lives here and each
     flavor's own ``*_ASYNC_RECOURSE`` constant is computed from it. NOT used for the
-    Relay recourse (``_RELAY_ASYNC_RECOURSE`` - async IS possible there) or the
+    Relay recourse (``types/relay.py::_RELAY_ASYNC_RECOURSE`` - async IS possible there) or the
     permission recourses (about the permission hooks, not ``get_queryset``), which
     are genuinely different wordings.
     """
@@ -1301,14 +1297,14 @@ def _base_table_defect(query: object, concrete: type[models.Model]) -> str | Non
     # Django stores ``Meta.db_table`` as given, so a ``TextChoices`` / ``StrEnum`` member
     # names the table it spells; both sides compare as their exact text, and canonical
     # reconstruction rebinds the baked name as that text.
-    table = _normalized_str(table)
+    table = truth.text(table)
     # ``Meta.db_table`` is the model's own option, typed ``str``; one a project assigns
     # as anything else is not a table name the baked one can equal, so it names the
     # defect the same way a non-text baked name does.
     db_table = read_attr(concrete._meta, "db_table")
     if not is_str(db_table):
         return truth.kind(db_table)
-    if table != _normalized_str(db_table):
+    if table != truth.text(db_table):
         return table
     return None
 
@@ -1535,10 +1531,7 @@ def _template_params_defect(node_dict: Mapping[str, object], label: str) -> tupl
             and not truth.is_exact_one_of(value, _TEMPLATE_PARAM_VALUE_TYPES)
             and not _is_text_term(value)
         ):
-            return (
-                "untrusted",
-                f"{label} extra[{_normalized_str(key)!r}] is a {truth.kind(value)}",
-            )
+            return ("untrusted", f"{label} extra[{truth.text(key)!r}] is a {truth.kind(value)}")
     return None
 
 
@@ -2301,7 +2294,7 @@ def _query_payload_defect(query: object) -> tuple[str, str] | None:
 
     A key or alias may be a ``str`` subclass (a ``StrEnum`` member naming a
     ``FilteredRelation`` alias is stored as itself), so a defect label reads it through
-    ``_normalized_str`` and never runs the subclass's ``__repr__``; canonical
+    ``truth.text`` and never runs the subclass's ``__repr__``; canonical
     reconstruction rebinds every such name as its exact text.
     - ``_filtered_relations`` maps an alias to a ``FilteredRelation`` the compiler
       dispatches; it must be a genuine, unshadowed Django object like any other
@@ -2314,25 +2307,25 @@ def _query_payload_defect(query: object) -> tuple[str, str] | None:
         if type(count) is not int:
             return (
                 "untrusted",
-                f"query alias_refcount[{_normalized_str(alias)!r}] is a {truth.kind(count)}",
+                f"query alias_refcount[{truth.text(alias)!r}] is a {truth.kind(count)}",
             )
     external: dict[str, object] = getattr(query, "external_aliases", None) or {}
     for alias, flag in external.items():
         if type(flag) is not bool:
             return (
                 "untrusted",
-                f"query external_aliases[{_normalized_str(alias)!r}] is a {truth.kind(flag)}",
+                f"query external_aliases[{truth.text(alias)!r}] is a {truth.kind(flag)}",
             )
     table_map: dict[str, object] = getattr(query, "table_map", None) or {}
     for table, aliases in table_map.items():
         if not is_exact_list(aliases):
             return (
                 "untrusted",
-                f"query table_map[{_normalized_str(table)!r}] is a {truth.kind(aliases)}",
+                f"query table_map[{truth.text(table)!r}] is a {truth.kind(aliases)}",
             )
         for table_alias in aliases:
             if not is_str(table_alias):
-                table_label = _normalized_str(table)
+                table_label = truth.text(table)
                 return (
                     "untrusted",
                     f"query table_map[{table_label!r}] carries a {truth.kind(table_alias)}",
@@ -2341,7 +2334,7 @@ def _query_payload_defect(query: object) -> tuple[str, str] | None:
     for alias, relation in filtered_relations.items():
         relation_defect = _genuine_node_defect(
             relation,
-            f"query _filtered_relations[{_normalized_str(alias)!r}]",
+            f"query _filtered_relations[{truth.text(alias)!r}]",
         )
         if relation_defect is not None:
             return relation_defect
@@ -2463,19 +2456,6 @@ def _is_reconstructable_node(node_type: type[object]) -> bool:
     return True
 
 
-if TYPE_CHECKING:
-
-    def _normalized_str(_value: object, /) -> str:
-        """Return the exact ``str`` content of a ``str`` subclass instance.
-
-        The base slot itself refuses a value that is not a ``str`` with ``TypeError``.
-        """
-        ...
-
-else:
-    _normalized_str = str.__str__
-
-
 def _normalized_bytes(value: bytes) -> bytes:
     """Return the exact ``bytes`` content of a ``bytes`` subclass instance."""
     return bytes.__getitem__(value, slice(None))
@@ -2583,7 +2563,7 @@ def _normalized_uuid(value: uuid.UUID) -> uuid.UUID:
 # basedpyright: each normalizer takes its own pair's base, so no one Callable parameter type
 # admits them all (parameters are contravariant); the issubclass test is the pairing proof
 _BOUND_VALUE_NORMALIZERS: tuple[tuple[type[object], Callable[[Any], object]], ...] = (  # pyright: ignore[reportExplicitAny]
-    (str, _normalized_str),
+    (str, truth.text),
     (bytes, _normalized_bytes),
     (bytearray, _normalized_bytearray),
     (int, _normalized_int),
@@ -2971,7 +2951,7 @@ def _query_container_defect(query: object) -> tuple[str, str] | None:
     included: Django stores the ``TextChoices`` / ``StrEnum`` member a consumer passes to
     ``annotate`` / ``alias`` / ``extra(select=...)`` / ``FilteredRelation`` as itself.
     The check reads the real type (``is_str``), a label reads the name through
-    ``_normalized_str``, and canonical reconstruction rebinds every such name as its
+    ``truth.text``, and canonical reconstruction rebinds every such name as its
     exact text, so the sealed query holds only exact ``str`` names.
     """
     for attr in _EXACT_DICT_QUERY_ATTRS:
@@ -3004,7 +2984,7 @@ def _query_container_defect(query: object) -> tuple[str, str] | None:
         for raw_alias, payload in extra.items():
             if not is_str(raw_alias):
                 return ("untrusted", f"query {attr} has a non-string key")
-            alias = _normalized_str(raw_alias)
+            alias = truth.text(raw_alias)
             if not is_exact_pair(payload):
                 return ("untrusted", f"query {attr}[{alias!r}] has a malformed payload")
             statement, params = payload
@@ -3050,13 +3030,13 @@ def _query_ast_defect(query: object, walk: _GraphWalk) -> tuple[str, str] | None
             return having_defect
     # ``_query_container_defect`` proved ``annotations`` and ``alias_map`` exact ``dict``s
     # with ``str`` keys (or absent) before this walk runs; a key that is a ``str`` subclass
-    # (a ``StrEnum`` alias) is read through ``_normalized_str`` before it is formatted.
+    # (a ``StrEnum`` alias) is read through ``truth.text`` before it is formatted.
     annotations: dict[str, object] = getattr(query, "annotations", None) or {}
     for name, expr in annotations.items():
         annotation_defect = _expr_graph_defect(
             expr,
             walk,
-            f"annotation {_normalized_str(name)!r}",
+            f"annotation {truth.text(name)!r}",
         )
         if annotation_defect is not None:
             return annotation_defect
@@ -3076,7 +3056,7 @@ def _query_ast_defect(query: object, walk: _GraphWalk) -> tuple[str, str] | None
             return raw_defect
     alias_map: dict[str, object] = getattr(query, "alias_map", None) or {}
     for alias, join in alias_map.items():
-        join_defect = _join_defect(join, _normalized_str(alias), walk)
+        join_defect = _join_defect(join, truth.text(alias), walk)
         if join_defect is not None:
             return join_defect
     return _select_related_defect(getattr(query, "select_related", False))
@@ -3241,7 +3221,7 @@ def _prefetch_path_or_defect(
     The path state is what ``Prefetch.__init__`` stores from the consumer's lookup and
     ``to_attr``: a ``str``, the ``TextChoices`` / ``StrEnum`` member itself when the
     consumer named the relation with one, and ``None`` for an absent ``to_attr``. Each is
-    admitted by its real type (``is_str``) and read through ``_normalized_str`` ONCE,
+    admitted by its real type (``is_str``) and read through ``truth.text`` ONCE,
     here, so the relation-target guard (``_prefetch_relation_target_or_none``), every
     defect label and the rebuilt ``Prefetch`` all read the same exact text. Anything
     else fails closed as ``untrusted``.
@@ -3254,9 +3234,9 @@ def _prefetch_path_or_defect(
     if to_attr is not None and not is_str(to_attr):
         return None, ("untrusted", f"{cls_name} prefetch to_attr is not a str or None")
     return (
-        _normalized_str(through),
-        _normalized_str(prefetch_to),
-        None if to_attr is None else _normalized_str(to_attr),
+        truth.text(through),
+        truth.text(prefetch_to),
+        None if to_attr is None else truth.text(to_attr),
     ), None
 
 
@@ -3427,7 +3407,7 @@ def _sealed_prefetch_related_lookups(
             # (spec-045 Decision 4).
             if not is_str(entry):
                 return None, ("untrusted", f"{cls_name} prefetch lookup is a {truth.kind(entry)}")
-            sealed_entries.append(_normalized_str(entry))
+            sealed_entries.append(truth.text(entry))
             continue
         entry_state = truth.instance_state(entry)
         # The path is read as exact text BEFORE the relation-target guard below, so a
@@ -3733,7 +3713,7 @@ def _queryset_state_defect(state: Mapping[str, object], cls_name: str) -> tuple[
     The ``_db`` alias and the ``_fields`` names are the values a consumer passed to
     ``using(...)`` / ``values(...)`` / ``values_list(...)``, which Django stores as
     given, so a ``TextChoices`` / ``StrEnum`` member is admitted by its real type
-    (``is_str``); the seal reads each through ``_normalized_str`` before any comparison
+    (``is_str``); the seal reads each through ``truth.text`` before any comparison
     and carries the exact text forward (``_normalized_db`` / ``_normalized_fields``).
     """
     db = state.get("_db")
@@ -3766,7 +3746,7 @@ def _queryset_state_defect(state: Mapping[str, object], cls_name: str) -> tuple[
 def _normalized_db(state: Mapping[str, object]) -> str | None:
     """Return the ``_db`` alias ``_queryset_state_defect`` proved, as its exact text."""
     db = state.get("_db")
-    return None if db is None else _normalized_str(db)
+    return None if db is None else truth.text(db)
 
 
 def _normalized_fields(state: Mapping[str, object]) -> tuple[str, ...] | None:
@@ -3774,7 +3754,7 @@ def _normalized_fields(state: Mapping[str, object]) -> tuple[str, ...] | None:
     fields = state.get("_fields")
     if fields is None:
         return None
-    return tuple([_normalized_str(name) for name in iter_of(fields)])
+    return tuple([truth.text(name) for name in iter_of(fields)])
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -3983,7 +3963,7 @@ def _snapshot_routing_intent(queryset: object, method_name: str) -> _RoutingInte
     the hint values still hold the state the source intended. Django takes any
     ``str`` a router answers as the alias it names, so a ``TextChoices`` /
     ``StrEnum`` member is admitted by its real type (``is_str``) and frozen as its
-    exact text (``_normalized_str``), the alias the seal pins; any other answer
+    exact text (``truth.text``), the alias the seal pins; any other answer
     raises ``ConfigurationError``.
 
     Reads come from the instance ``__dict__`` without attribute dispatch,
@@ -4018,7 +3998,7 @@ def _snapshot_routing_intent(queryset: object, method_name: str) -> _RoutingInte
             f"alias: the database router answered {truth.render(alias)} for "
             f"{truth.name(model)}; an alias must be a string.",
         )
-    return _RoutingIntent(db=None, hints=hints, effective_alias=_normalized_str(alias))
+    return _RoutingIntent(db=None, hints=hints, effective_alias=truth.text(alias))
 
 
 _ROUTING_SCALAR_TYPES: truth.IdentitySet[type[object]] = truth.IdentitySet(
@@ -4611,9 +4591,8 @@ def _seal_or_defect(
       carries the fetched rows forward, a populated ``_result_cache`` that is not
       an exact ``list`` (a ``list`` subclass would answer the windowing subscript
       with its own ``__getitem__``, which is the ceiling back inside consumer
-      code). This REPLACES the old
-      class-level method inventory: ``untrusted`` now means "cannot be sealed",
-      not "overrides a listed method".
+      code). ``untrusted`` means "cannot be sealed", not "overrides a listed
+      method".
     - ``routing`` -- an OrderSet result changed the source queryset's database alias or
       router hints. The comparison is performed against the same extracted state the seal
       consumes, before any reconstructed queryset is returned.
@@ -5042,7 +5021,11 @@ def normalized_row_source(
     source_type = type(value)
     if source_type is models.QuerySet or not truth.is_subclass(source_type, models.QuerySet):
         return value
-    model = _row_source_model(_readable_queryset_state(value), origin)
+    # The subclass's state is read through ``truth.instance_state`` for the reason the
+    # seal gives: neither a custom ``__getattribute__`` nor a subclass that redefines
+    # ``__dict__`` can run code or return a lie during the read, and every ``QuerySet``
+    # carries the genuine slot Django's base class declares.
+    model = _row_source_model(truth.instance_state(value), origin)
     sealed = _seal_or_defect(value, model, None, _RAW_LIST_SOURCE_POLICY)
     if sealed[1] is not None:
         raise ConfigurationError(
@@ -5071,25 +5054,12 @@ def materialized_rows(value: object) -> list[object] | None:
     if not _is_exact_queryset(value):
         return None
     # An exact ``QuerySet``'s ``_result_cache`` slot: its fetched rows, or ``None``.
-    return cast("list[object] | None", _readable_queryset_state(value).get("_result_cache"))
+    return cast("list[object] | None", truth.instance_state(value).get("_result_cache"))
 
 
 def _is_exact_queryset(value: object) -> TypeGuard[models.QuerySet[models.Model, object]]:
     """Return whether ``value`` is EXACTLY Django's ``QuerySet`` (never a subclass)."""
     return type(value) is models.QuerySet
-
-
-def _readable_queryset_state(value: object) -> dict[str, object]:
-    """Return the real instance dictionary of ``value``, read without dispatching consumer code.
-
-    ``truth.instance_dict`` is the only read here for the reason the seal gives:
-    neither a custom ``__getattribute__`` nor a subclass that redefines
-    ``__dict__`` itself can run code or return a lie during extraction. Every
-    ``QuerySet`` instance carries the genuine slot Django's base class declares.
-    """
-    # Every caller hands in a ``QuerySet`` instance, which always carries the genuine
-    # ``__dict__`` slot.
-    return truth.instance_state(value)
 
 
 def _sentence_start(phrase: str) -> str:
@@ -5519,7 +5489,7 @@ def apply_type_visibility_sync(
     type_cls: type[DjangoType],
     queryset: models.QuerySet[models.Model, object],
     info: object,
-    async_recourse: str = ...,
+    async_recourse: str,
     *,
     model: type[models.Model] | None = ...,
     render_error: Callable[[str, str], str] | None = ...,
@@ -5529,7 +5499,7 @@ def apply_type_visibility_sync(
     type_cls: type[DjangoType],
     queryset: models.QuerySet[models.Model, object],
     info: object,
-    async_recourse: str = ...,
+    async_recourse: str,
     *,
     model: type[models.Model] | None = ...,
     render_error: Callable[[str, str], str] | None = ...,
@@ -5539,7 +5509,7 @@ def apply_type_visibility_sync(
     type_cls: type[DjangoType],
     queryset: models.QuerySet[models.Model, object],
     info: object,
-    async_recourse: str = _RELAY_ASYNC_RECOURSE,
+    async_recourse: str,
     *,
     model: type[models.Model] | None = None,
     render_error: Callable[[str, str], str] | None = None,
@@ -5569,9 +5539,8 @@ def apply_type_visibility_sync(
     boundary; every other defect is a plain ``ConfigurationError``.
 
     ``async_recourse`` is the surface-specific guidance appended to the
-    error. It defaults to the Relay node-defaults wording; callers whose
-    recourse differs pass their own (the cascade, for instance, has no
-    async-native walk -- its twin wraps this same sync walk -- so it tells
+    error; every caller passes its own recourse (the cascade, for instance, has
+    no async-native walk -- its twin wraps this same sync walk -- so it tells
     the consumer to make the target hook sync or scope ``fields=`` rather
     than reach for an async resolver that cannot help).
     ``render_error`` is the result-normalization error seam
@@ -5624,7 +5593,7 @@ def apply_type_visibility_sync(
 def visibility_scoped_related_queryset(
     related_type: type[DjangoType],
     info: object,
-    async_recourse: str = _RELAY_ASYNC_RECOURSE,
+    async_recourse: str,
 ) -> models.QuerySet[models.Model]:
     """Return a related type's base queryset scoped by its ``get_queryset`` visibility hook.
 
@@ -5634,8 +5603,8 @@ def visibility_scoped_related_queryset(
     (``mutations/resolvers.py``) and the form relation decode
     (``forms/resolvers.py``) provably apply the SAME related-type ``get_queryset``
     (the cross-flavor security invariant spec-038 claims), rather than re-spelling
-    the composition at each site. ``async_recourse`` stays a parameter: the model
-    and form paths pass their own surface-specific wording.
+    the composition at each site. ``async_recourse`` is required: every caller passes
+    its own surface-specific wording.
     """
     return apply_type_visibility_sync(
         related_type,
@@ -5648,7 +5617,7 @@ def visibility_scoped_related_queryset(
 def related_visibility_queryset(
     related_model: type[models.Model],
     info: object,
-    async_recourse: str = _RELAY_ASYNC_RECOURSE,
+    async_recourse: str,
 ) -> models.QuerySet[models.Model] | None:
     """Return the related model's visibility-scoped queryset, or ``None`` when it has no primary.
 
@@ -5663,7 +5632,7 @@ def related_visibility_queryset(
     explicit (default-manager existence, an existence-only check, or skip), because
     that tail genuinely diverges per surface. Single-sites only the resolve + the
     visibility-scoping call, so the ONE place a drift is a data-leak bug class is
-    written once (spec-039). An ``async def get_queryset`` met here raises
+    written once. An ``async def get_queryset`` met here raises
     ``SyncMisuseError`` (inherited from ``apply_type_visibility_sync``).
     """
     related_type = registry.get(related_model)
@@ -5675,13 +5644,13 @@ def related_visibility_queryset(
 def related_visibility_queryset_or_default(
     related_model: type[models.Model],
     info: object,
-    async_recourse: str = _RELAY_ASYNC_RECOURSE,
+    async_recourse: str,
 ) -> models.QuerySet[models.Model]:
     """Return the visibility-scoped queryset, falling back to the default manager.
 
     The "no primary ``DjangoType`` => default-manager, no visibility contract"
     fallback ``visible_related_object`` and ``visible_related_objects`` both
-    opened with - a security-adjacent rule, now single-bodied: a related model
+    opened with - a security-adjacent rule written once: a related model
     with a registered primary is scoped through its ``get_queryset`` visibility
     hook; one without gets its plain ``_default_manager.all()`` (existence
     semantics only). Each caller keeps its own tail (``.filter(pk=pk).first()``
@@ -5768,8 +5737,8 @@ def pks_present(
 ) -> dict[object, object]:
     """Map the ``identity_key`` of each pk among ``query_pks`` present in ``queryset`` to its key.
 
-    The ``queryset.filter(pk__in=...)`` lookup the relation membership checks share
-    (spec-039): the model ``utils/write_values.py::decode_visible_relation_ids`` and the
+    The ``queryset.filter(pk__in=...)`` lookup the relation membership checks share:
+    the model ``utils/write_values.py::decode_visible_relation_ids`` and the
     serializer ``visible_related_objects`` both build this present-map in one query,
     keyed by each present pk's ``identity_key`` through ``queryset``'s pk field, the
     basis ``pks_all_present`` keys the requested pks by (the keys are the present set),
@@ -5792,7 +5761,7 @@ def pks_present(
     the write before the transaction commits. The locked rows are then confirmed
     by a fresh visibility read (``pipeline_rows_visible_after_lock``): a row a
     concurrent commit hid while this read waited on its lock is absent. Read
-    surfaces run with no pipeline context and are byte-unchanged.
+    surfaces run with no pipeline context, so the lock and re-read are skipped.
     """
     scoped = linkable_rows(
         pipeline_scoped_queryset(queryset, queryset.model),
@@ -5837,7 +5806,7 @@ def pks_all_present(
     declared_pks: Iterable[object],
     present: AbstractSet[object],
 ) -> bool:
-    """Return whether every ``declared_pks`` member's ``identity_key`` is in ``present`` (spec-039).
+    """Return whether every ``declared_pks`` member's ``identity_key`` is in ``present``.
 
     The subset-membership test the model relation guard
     (``utils/write_values.py::decode_visible_relation_ids``) and the serializer M2M
@@ -5855,7 +5824,7 @@ def visible_related_object(
     related_model: type[models.Model],
     pk: object,
     info: object,
-    async_recourse: str = _RELAY_ASYNC_RECOURSE,
+    async_recourse: str,
     key_attname: str | None = None,
 ) -> models.Model | None:
     """Resolve the VISIBLE related object by pk through the related primary's ``get_queryset``.
@@ -5878,8 +5847,8 @@ def visible_related_object(
     The related model has a primary type only when a typed relation input was
     generated for it; a raw-pk relation's primary is resolved the same way
     (``registry.get``), and a model with no primary still resolves via the default
-    manager (no visibility contract to apply). ``async_recourse`` stays a parameter:
-    the form and serializer paths pass their own surface-specific wording, matching
+    manager (no visibility contract to apply). ``async_recourse`` is required: the
+    form and serializer paths pass their own surface-specific wording, matching
     ``visibility_scoped_related_queryset``.
 
     The helper accepts a raw pk AFTER a flavor-specific decoder has chosen that
@@ -5913,7 +5882,7 @@ def visible_related_objects(
     related_model: type[models.Model],
     pks: Iterable[object],
     info: object,
-    async_recourse: str = _RELAY_ASYNC_RECOURSE,
+    async_recourse: str,
     key_attname: str | None = None,
 ) -> dict[object, object]:
     """Map the VISIBLE pks among ``pks`` to their stored keys in ONE visibility-scoped query.
@@ -5972,10 +5941,9 @@ async def apply_type_visibility_async(
     database (``user.has_perm``, an ``.exists()``, a cascade walk) and Django
     refuses that on the loop thread. The identity default runs inline, because it
     is package code that does no I/O. An ``async def`` hook is called here and
-    its coroutine awaited before the caller's tail runs - the Decision 9 contract
-    that an earlier implementation broke (it called the hook synchronously then
-    invoked ``.filter`` on a coroutine) - and a synchronous hook that returns an
-    awaitable has it awaited here after its worker returns.
+    its coroutine awaited before the caller's tail runs (spec-015 Decision 9), so
+    no caller invokes ``.filter`` on a coroutine - and a synchronous hook that
+    returns an awaitable has it awaited here after its worker returns.
 
     The hook is invoked once and AT MOST ONE returned awaitable is awaited;
     a second-level awaitable after that await is malformed (an ``async def``
@@ -6005,12 +5973,8 @@ async def apply_type_visibility_async(
         keep_class=True,
     )
     hook = type_cls.get_queryset
-    # A synchronous hook runs in ONE thread-sensitive worker, never on the event
-    # loop: it may read the database (``user.has_perm``, an ``.exists()``, a
-    # cascade walk), which Django refuses on the loop thread. Only the identity
-    # default, stamped at class creation (``DjangoType.has_custom_get_queryset``),
-    # is known to do no I/O and runs inline; an ``async def`` hook is called here
-    # and awaited on the loop.
+    # ``_is_default_get_queryset`` is stamped at class creation
+    # (``DjangoType.has_custom_get_queryset`` reads it): the identity default does no I/O.
     identity = truth.static_attr(type_cls, "_is_default_get_queryset", default=False)
     result: object = (
         hook(queryset, info)

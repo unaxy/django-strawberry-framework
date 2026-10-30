@@ -113,7 +113,8 @@ from django_strawberry_framework.middleware.request_body import (
     GraphQLRequestBodyBoundaryMiddleware,
     _package_view_instance,
 )
-from django_strawberry_framework.utils._narrowing import instance_dict, is_awaitable, read_attr
+from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._narrowing import is_awaitable, read_attr
 from django_strawberry_framework.utils.typing import (
     call_forwarded,
     is_marked_coroutine_function,
@@ -169,14 +170,14 @@ SCHEMA = strawberry.Schema(query=Query)
 
 def _view_class_of(view: Callable[..., object]) -> type[object]:
     """Django's ``view_class`` bookkeeping, read out of the ``as_view`` callback's namespace."""
-    view_class = instance_dict(view)["view_class"]
+    view_class = truth.instance_state(view)["view_class"]
     assert isinstance(view_class, type)
     return view_class
 
 
 def _view_initkwargs_of(view: Callable[..., object]) -> dict[str, object]:
     """Django's ``view_initkwargs`` bookkeeping, read out of the ``as_view`` callback's namespace."""
-    initkwargs = instance_dict(view)["view_initkwargs"]
+    initkwargs = truth.instance_state(view)["view_initkwargs"]
     assert is_object_dict(initkwargs)
     named = {key: value for key, value in initkwargs.items() if isinstance(key, str)}
     assert len(named) == len(initkwargs)
@@ -2750,7 +2751,7 @@ def test_the_view_callback_of_both_views_carries_the_csrf_exempt_mark(
 
     boundary_view.assert_called_once()
     assert vars(view)["csrf_exempt"] is _CSRF_ORDERING_EXEMPTION
-    assert bool(instance_dict(view)["csrf_exempt"]) is True
+    assert bool(truth.instance_state(view)["csrf_exempt"]) is True
     assert getattr(view, _BOUNDARY_MARKER) is True
     assert _view_class_of(view) is view_class
     assert _view_initkwargs_of(view) == {"schema": SCHEMA}

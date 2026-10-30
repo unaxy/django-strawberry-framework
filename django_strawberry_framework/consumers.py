@@ -385,7 +385,7 @@ from .extensions.error_policy import (
     schema_error_policy,
 )
 from .utils import truth
-from .utils._narrowing import is_class, optional_instance, read_attr, require
+from .utils._narrowing import optional_instance, read_attr, require
 from .utils.sessions import (
     actor_lease,
     connection_was_authenticated,
@@ -1491,7 +1491,7 @@ def _declares_hooks(base: object, hooks: tuple[str, ...]) -> bool:
     from one through ``__mro_entries__``, so the proof reads the alias's origin class.
     """
     origin: object = get_origin(base) or base
-    return is_class(origin) and all(callable(getattr(origin, hook, None)) for hook in hooks)
+    return truth.is_type(origin) and all(callable(getattr(origin, hook, None)) for hook in hooks)
 
 
 def _is_consumer_base(base: object) -> TypeIs[type[RevalidatingGraphQLWSConsumer]]:

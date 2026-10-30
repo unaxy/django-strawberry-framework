@@ -190,11 +190,8 @@ from django_strawberry_framework.error_policy import DEFAULT_ERROR_POLICY
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.utils import sessions as session_store_module
-from django_strawberry_framework.utils._narrowing import (
-    class_dict,
-    list_of,
-    read_attr,
-)
+from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._narrowing import list_of, read_attr
 from django_strawberry_framework.utils.permissions import ChannelsRequestAdapter, request_from_info
 from django_strawberry_framework.utils.typing import call_forwarded, object_result
 from tests._idioms import (
@@ -1628,7 +1625,12 @@ def test_construction_rejects_an_omitted_or_unusable_django_application() -> Non
         assert "ALLOWED_HOSTS" in message
         assert "REMOVED" in message
         assert "get_asgi_application" in message
-        assert "DjangoGraphQLView" in message
+        # Both mounts, each by its resolver shape; a word boundary keeps the async view's
+        # name from satisfying the sync view's row.
+        assert re.findall(
+            r"\b(\w*DjangoGraphQLView)\.as_view\(schema=schema\)\)` when",
+            message,
+        ) == ["AsyncDjangoGraphQLView", "DjangoGraphQLView"]
 
 
 def test_graphql_http_consumer_left_the_router_module_entirely() -> None:
@@ -6097,7 +6099,7 @@ def _wrapped_schema_reads() -> frozenset[str]:
     """
     return frozenset(
         name
-        for name, value in class_dict(consumers_module._StopAwareSchema).items()
+        for name, value in truth.class_dict(consumers_module._StopAwareSchema).items()
         if not name.startswith("_") and callable(value)
     )
 

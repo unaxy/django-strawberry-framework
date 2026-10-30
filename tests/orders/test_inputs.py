@@ -2,7 +2,6 @@
 
 Covers ``INPUTS_MODULE_PATH``, the ``Ordering`` enum (members +
 bare ``ASC`` / ``DESC`` ``resolve`` into ``OrderBy`` flags),
-``_input_type_name_for`` (the ``ClassBasedTypeNameMixin`` delegate),
 and ``materialize_input_class`` (write-to-module-global, idempotent
 re-write on the same pair, ``ConfigurationError`` on collision against
 a different class). Consumer ``NULLS_*`` payload order lives in
@@ -44,11 +43,8 @@ from django_strawberry_framework.orders.inputs import (
     INPUTS_MODULE_PATH,
     FieldSpec,
     _build_input_fields,
-    _camel_case,
     _field_specs,
     _get_concrete_field_names_for_order,
-    _input_type_name_for,
-    _iter_orderset_subclasses,
     _materialized_names,
     build_input_class,
     clear_order_input_namespace,
@@ -82,20 +78,6 @@ pytestmark = pytest.mark.usefixtures("isolate_global_registry")
 def test_inputs_module_path_constant() -> None:
     """The module constant matches the actual dotted path of ``inputs.py``."""
     assert INPUTS_MODULE_PATH == "django_strawberry_framework.orders.inputs"
-
-
-# ---------------------------------------------------------------------------
-# _input_type_name_for delegate
-# ---------------------------------------------------------------------------
-
-
-def test_input_type_name_for_returns_classname_inputtype() -> None:
-    """The delegate flows through ``ClassBasedTypeNameMixin.type_name_for``."""
-
-    class BookOrder(OrderSet):
-        pass
-
-    assert _input_type_name_for(BookOrder) == "BookOrderInputType"
 
 
 # ---------------------------------------------------------------------------
@@ -971,19 +953,6 @@ def test_registry_clear_works_without_orders_imported() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_camel_case_returns_input_when_split_yields_no_parts() -> None:
-    """Covers the all-underscore passthrough behind the ``_camel_case`` alias.
-
-    The guard is ``utils/strings.py::graphql_camel_name`` #"if not core:".
-    ``_camel_case`` strips the surrounding underscores before splitting;
-    a name that strips to an empty core (``""`` / ``"_"`` / ``"__"``)
-    returns ``name`` unchanged.
-    """
-    assert _camel_case("") == ""
-    assert _camel_case("_") == "_"
-    assert _camel_case("__") == "__"
-
-
 def test_build_input_class_threads_description_through_strawberry_field() -> None:
     """Covers the ``description`` kwarg threading through ``strawberry.field``.
 
@@ -1193,37 +1162,6 @@ def test_normalize_input_value_skips_related_branch_when_child_orderset_is_none(
     # leaf entry (title=None) would emit, and it's skipped by the value-
     # is-None guard above the spec check.
     assert all(not path.startswith("shelf") for path, _ in result)
-
-
-def test_iter_orderset_subclasses_dedupes_diamond_inheritance() -> None:
-    """Covers ``utils/inputs.py::iter_set_subclasses`` #"if cls in seen:".
-
-    The dedup runs behind the ``orders/inputs.py``
-    ``_iter_orderset_subclasses`` alias. Mirror of
-    ``tests/filters/test_inputs.py::test_iter_filterset_subclasses_dedupes_diamond_inheritance``.
-    A diamond inheritance hierarchy (``B(A)``, ``C(A)``, ``D(B, C)``)
-    walks ``D`` twice through ``__subclasses__()`` -- once via ``B`` and
-    once via ``C`` -- and the dedup guard collapses both visits to one
-    entry in the returned list.
-    """
-
-    class _DiamondA(OrderSet):
-        class Meta:
-            model = None
-            fields = ["code"]
-
-    class _DiamondB(_DiamondA):
-        pass
-
-    class _DiamondC(_DiamondA):
-        pass
-
-    class _DiamondD(_DiamondB, _DiamondC):
-        pass
-
-    found = _iter_orderset_subclasses(_DiamondA)
-    assert found.count(_DiamondD) == 1
-    assert {_DiamondB, _DiamondC, _DiamondD}.issubset(set(found))
 
 
 def test_clear_order_input_namespace_tolerates_unimportable_submodules() -> None:

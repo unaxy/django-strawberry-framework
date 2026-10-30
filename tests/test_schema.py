@@ -76,15 +76,10 @@ from django_strawberry_framework.schema import (
     _consumer_extension_entries,
     _entry_type,
     _extension_entry_matches,
-    _is_extension,
     _refuse_operation_document,
 )
-from django_strawberry_framework.utils._narrowing import (
-    call_method,
-    instance_dict,
-    is_tuple,
-    read_attr,
-)
+from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._narrowing import call_method, is_tuple, read_attr
 from django_strawberry_framework.utils.querysets import run_in_one_sync_boundary
 from django_strawberry_framework.utils.typing import object_result
 from tests._idioms import (
@@ -608,8 +603,8 @@ def test_get_extensions_resolves_one_authority_of_each_kind_for_a_bare_class_ent
     resolved = schema.get_extensions(sync=True)
 
     assert schema.extensions == ()
-    assert sum(_is_extension(e, DjangoResourcePolicyExtension) for e in resolved) == 1
-    assert sum(_is_extension(e, DjangoErrorPolicyExtension) for e in resolved) == 1
+    assert sum(truth.is_instance(e, DjangoResourcePolicyExtension) for e in resolved) == 1
+    assert sum(truth.is_instance(e, DjangoErrorPolicyExtension) for e in resolved) == 1
 
 
 def test_get_extensions_sync_and_async() -> None:
@@ -1044,7 +1039,7 @@ def test_no_name_on_a_schema_answers_with_a_policy() -> None:
     """
     schema = DjangoSchema(query=DummyQuery, resource_policy=ResourcePolicy(max_list_rows=1))
 
-    held = list(instance_dict(schema).values())
+    held = list(truth.instance_state(schema).values())
     assert held
     for value in held:
         assert not isinstance(value, (ResourcePolicy, ErrorPolicy))
@@ -1786,8 +1781,8 @@ def test_every_supported_entry_spelling_still_resolves_into_one_chain(entry: obj
     resolved = schema.get_extensions(sync=True)
 
     assert schema.execute_sync("{ hello }").data == {"hello": "world"}
-    assert sum(_is_extension(e, DjangoErrorPolicyExtension) for e in resolved) == 1
-    assert sum(_is_extension(e, DjangoResourcePolicyExtension) for e in resolved) == 1
+    assert sum(truth.is_instance(e, DjangoErrorPolicyExtension) for e in resolved) == 1
+    assert sum(truth.is_instance(e, DjangoResourcePolicyExtension) for e in resolved) == 1
     assert len(resolved) == 5
 
 

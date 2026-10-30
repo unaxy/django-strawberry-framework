@@ -186,9 +186,8 @@ def _validate_djangotype_target(
     passed. The class and subclass gates read the real metaclass chain and MRO
     (``utils/truth.py``); the registration check accepts only the target's own
     registered definition (``registry.py::TypeRegistry.registered_own_definition``),
-    so a subclass that omits its own ``Meta`` is not bound to its parent's
-    definition, ``Meta.primary`` state and model, and a fabricated or copied
-    definition is rejected here, at the line that constructed the field, instead
+    so a Meta-less abstract base, a class the registry dropped, and a fabricated or
+    copied definition are rejected here, at the line that constructed the field, instead
     of surfacing later as a Strawberry runtime-type error over an unrelated
     model. Rejection messages render the target through ``truth.render`` /
     ``truth.name``.
@@ -211,8 +210,9 @@ def _validate_djangotype_target(
     if definition is None:
         raise ConfigurationError(
             f"{field} target {truth.name(target_type)} is not a registered DjangoType. "
-            f"This usually means {truth.name(target_type)}'s `Meta` is missing a `model` "
-            "declaration, or it inherits a definition from a parent without declaring its own `Meta`.",
+            f"This usually means {truth.name(target_type)} declares no `class Meta` "
+            "(a Meta-less abstract base never registers a definition), or its definition "
+            "was replaced or cleared.",
         )
     if resolver is not None and not callable(resolver):
         raise ConfigurationError(f"{field} resolver must be callable.")
@@ -241,13 +241,13 @@ def _validate_relay_djangotype_target(
     its own wording, and the same single definition read is returned onward so a
     factory can build its whole field from it without a second read.
 
-    Reconsideration triggers (Family ``relay-node-target-guard``): a new
-    Relay-shape arm (T-shape: ``types/base.py::_is_relay_shaped`` owns the
-    predicate), a registration-canonicality change (T-canonical:
-    ``registry.py::TypeRegistry.registered_own_definition`` owns it), or a guard
-    reading ``DecodeResult`` statuses (T-lifecycle: row existence lives in
-    the ``types/relay.py`` resolve defaults, relation-target existence in
-    the finalizer audit - construction answers registered + shaped only).
+    Reconsideration triggers: a new Relay-shape arm
+    (``types/base.py::_is_relay_shaped`` owns the predicate), a
+    registration-canonicality change
+    (``registry.py::TypeRegistry.registered_own_definition`` owns it), or a
+    guard reading ``DecodeResult`` statuses (row existence lives in the
+    ``types/relay.py`` resolve defaults, relation-target existence in the
+    finalizer audit - construction answers registered + shaped only).
     """
     # The definition comes back from the base validator's one read; the Relay
     # guard and the field build consume that same object.
@@ -1189,20 +1189,6 @@ def _is_deterministic_order_value(value: object) -> bool:
     return True
 
 
-def _selected_ordering(queryset: models.QuerySet[models.Model]) -> tuple[str, tuple[object, ...]]:
-    """Return the ordering Django will compile for ``queryset``, as ``(source, terms)``.
-
-    The compiler's own one-collection selection
-    (``utils/querysets.py::selected_order``, the read the connection order
-    ladder shares). Both questions the offset guard asks - is the order this
-    request will run under deterministic, and is the model's own ordering that
-    order - are this one selection read two ways, so they come from one
-    classification of the already-sealed queryset rather than from separate
-    collection scans that can disagree with each other and with the compiler.
-    """
-    return selected_order(queryset.query, queryset.model)
-
-
 def _has_deterministic_ordering(queryset: models.QuerySet[models.Model]) -> bool:
     """Return True when every term of the order Django will compile is deterministic.
 
@@ -1211,8 +1197,16 @@ def _has_deterministic_ordering(queryset: models.QuerySet[models.Model]) -> bool
     supersedes it never reaches SQL, while a ``"?"`` the model brought in
     through ``Meta.ordering`` does. Either way the verdict has to be about the
     collection Django is going to run.
+
+    The selection is ``utils/querysets.py::selected_order``, the compiler's own
+    one-collection choice (the read the connection order ladder shares). Both
+    questions the offset guard asks - this one and
+    ``_is_model_default_ordering_active`` - read that one selection of the
+    already-sealed queryset, rather than scanning ``order_by``,
+    ``extra_order_by`` and ``Meta.ordering`` separately in ways that can
+    disagree with each other and with the compiler.
     """
-    _source, terms = _selected_ordering(queryset)
+    _source, terms = selected_order(queryset.query, queryset.model)
     return _are_deterministic_order_terms(queryset, terms)
 
 
@@ -1225,10 +1219,11 @@ def _is_model_default_ordering_active(queryset: models.QuerySet[models.Model]) -
     exactly ``True`` - a merely truthy stand-in is a shape the queryset pipeline
     does not produce, and an offset window is not granted on one. Grouping
     suppresses the default for the same reason ``QuerySet.ordered`` does: an
-    aggregate query does not carry the model's row order.
+    aggregate query does not carry the model's row order. The selection is the
+    one ``_has_deterministic_ordering`` reads.
     """
     query = queryset.query
-    source, terms = _selected_ordering(queryset)
+    source, terms = selected_order(query, queryset.model)
     if source != ORDER_FROM_MODEL_DEFAULT:
         return False
     if query.default_ordering is not True or query.group_by:

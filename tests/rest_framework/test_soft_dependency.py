@@ -39,9 +39,8 @@ from tests._subprocess import run_in_fresh_process
 
 # The verified DRF floor, RE-TYPED here rather than imported: a test comparing
 # ``utils/imports.py::DRF_FLOOR`` against itself could never notice the hint
-# drifting. This literal is one of the floor's three gated places, beside that
-# constant and the ``pyproject.toml`` dev-group row (compared to each other in
-# ``tests/test_ci_governance.py``); the tests match the hint against it.
+# drifting. The hint interpolates the constant; the tests match the hint
+# against this literal.
 _HINT_SUBSTRING = "djangorestframework>=3.17.0"
 
 

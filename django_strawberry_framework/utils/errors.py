@@ -88,7 +88,6 @@ from ._array_field import array_leaf_field
 from ._narrowing import (
     call_method,
     dict_items,
-    is_class,
     is_dict,
     is_iterable,
     is_list,
@@ -390,14 +389,12 @@ def null_field_error(path: str, column: ConcreteField) -> FieldError:
 
 
 def relation_field_error(graphql_name: str) -> FieldError:
-    """Build the uniform invalid / hidden / wrong-model relation ``FieldError`` (spec-039 integration).
+    """Build the uniform invalid / hidden / wrong-model relation ``FieldError``.
 
     The single leaf constructor for the relation-decode error all three write
-    flavors raise - the ``036`` model path (``decode_visible_relation_ids``),
-    the ``038`` form decoder, and the ``039`` serializer decoder all route
-    through the shared ``utils/write_values.py`` decode spine to reach it
-    (spec-039 folded away the former per-flavor ``_relation_error`` /
-    ``_relation_field_error`` aliases). A wrong-model, hidden, missing, or
+    flavors raise - the model path (``decode_visible_relation_ids``), the form
+    decoder, and the serializer decoder all route through the shared
+    ``utils/write_values.py`` decode spine to reach it. A wrong-model, hidden, missing, or
     uncoercible id all collapse to this one field-keyed shape (no existence
     leak), keyed to the GraphQL wire name the client sent (``categoryId``). Siblings
     the ``field_error`` leaf ctor above so the ``"Invalid id for relation ..."`` message
@@ -942,8 +939,8 @@ def _binds_client_side(connection: BaseDatabaseWrapper) -> bool:
     client_cursor = read_attr(read_attr(connection, "Database"), "ClientCursor", None)
     params: dict[str, object] = connection.get_connection_params()
     factory = params.get("cursor_factory")
-    return not is_class(client_cursor) or (
-        is_class(factory) and issubclass(factory, client_cursor)
+    return not truth.is_type(client_cursor) or (
+        truth.is_type(factory) and issubclass(factory, client_cursor)
     )
 
 
@@ -1176,7 +1173,7 @@ def _psycopg_refuses_list(
     if (
         adapters is None
         or not callable(transformer_cls)
-        or not (is_class(refusal) and issubclass(refusal, Exception))
+        or not (truth.is_type(refusal) and issubclass(refusal, Exception))
     ):
         return False
     try:

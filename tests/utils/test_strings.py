@@ -230,9 +230,10 @@ def test_string_helpers_reject_a_value_that_is_not_really_a_string(
 ) -> None:
     """A value is a string only if its real type is: its ``__class__`` is never consulted.
 
-    ``str.__str__`` refuses an object that is not really a ``str`` with a bare ``TypeError``, so
-    a value whose ``__class__`` raises or claims ``str`` (or a lazy proxy of a string) has to meet
-    the typed rejection before that slot, without its ``__class__`` being read.
+    ``truth.text`` copies only a real ``str`` through the base slot and renders anything else
+    through its own ``__str__``, so a value whose ``__class__`` raises or claims ``str`` (or a
+    lazy proxy of a string) has to meet the typed rejection before that read, without its
+    ``__class__`` being read.
     """
     with pytest.raises(ConfigurationError) as excinfo:
         # basedpyright: a non-string input is the bad value the helper must reject

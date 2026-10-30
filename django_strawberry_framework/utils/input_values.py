@@ -106,9 +106,7 @@ def iter_input_items(input_value: object) -> list[tuple[str, object]] | None:
     shape upstream uses to introspect input classes). Returns ``[]`` for a
     walkable-but-empty input.
 
-    Single-sited here as the lowest-level traversal primitive; re-exported from
-    ``utils/permissions.py`` so the existing
-    ``from ..utils.permissions import iter_input_items`` consumers keep working.
+    Single-sited here as the lowest-level traversal primitive.
     """
     if truth.is_instance(input_value, dict):
         pairs = base_container_values(input_value)

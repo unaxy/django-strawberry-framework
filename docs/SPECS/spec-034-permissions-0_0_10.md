@@ -433,6 +433,7 @@ Then the remaining contract:
 - `tests/test_permissions.py::test_fields_empty_list_cascades_nothing` — `fields=[]` validates clean and cascades zero edges (a defined no-op, distinct from `fields=None` cascading all); no raise.
 - `tests/test_permissions.py::test_sync_helper_raises_syncmisuseerror_on_async_target_hook` — coroutine closed (no `RuntimeWarning`), message names the type and both recourses.
 - `tests/test_permissions.py::test_aapply_runs_walk_off_event_loop` — the walk runs off the event loop, and the `ContextVar` state installed inside the wrapped thread does not leak back into the calling async context (asgiref copies the context into the worker thread) — `::test_aapply_async_target_hook_still_raises` (the documented [Decision 10](#decision-10--syncasync-contract-syncmisuseerror-on-async-hooks-from-the-sync-walk-the-async-variant-wraps-the-walk-in-sync_to_async) consequence).
+- [`test_list_field_async_api.py`][test-list-field-async-api]`::test_async_get_queryset_awaits_a_scoped_cascade` — live async HTTP: an `async def get_queryset` on `CirculationDeskType` awaiting `aapply_cascade_permissions(..., fields=["branch", "shelf"])` serves only the desk whose branch and shelf are both visible; the async variant forwards `fields=` to the walk, so the generic foreign key a full walk refuses is never reached.
 - `tests/test_permissions.py::test_self_referential_cascading_hook_fails_closed` — a self-edge into a cascading hook raises the path-rich cycle error; `::test_self_referential_fields_scoping_breaks_recursion` pins the documented `fields=` recourse.
 - Export pins in [`tests/base/test_init.py`][test-base-init]: both symbols importable from the package root and present in `__all__`.
 
@@ -643,6 +644,7 @@ The completion contract the card is built against. Items are grouped by slice; t
 [fakeshop-settings]: ../../examples/fakeshop/config/settings.py
 [products-schema]: ../../examples/fakeshop/apps/products/schema.py
 [products-services]: ../../examples/fakeshop/apps/products/services.py
+[test-list-field-async-api]: ../../examples/fakeshop/test_query/test_list_field_async_api.py
 [test-products]: ../../examples/fakeshop/test_query/test_products_api.py
 [test-query-readme]: ../../examples/fakeshop/test_query/README.md
 

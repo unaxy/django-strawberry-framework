@@ -50,9 +50,7 @@ from django_strawberry_framework.utils.connections import (
     window_range_plan,
 )
 
-# Imported under its historical private name, which the walker binds to the
-# same function (``optimizer/walker.py::_relay_max_results_from_info``, imported by
-# ``tests/optimizer/test_walker.py``). The dig itself has one owner in
+# Imported under a private alias. The dig itself has one owner in
 # ``utils/connections.py``, shared with the resolve-time cap.
 from django_strawberry_framework.utils.connections import (
     relay_max_results_from_info as _relay_max_results_from_info,
@@ -203,7 +201,7 @@ def _order_entry_field_name(entry: object) -> str | None:
     A thin shim over the shared entry parser
     (``plans.py::order_entry_name_and_direction`` - one dash rule, one
     expression unwrap for every consumer of the ``deterministic_order``
-    entry vocabulary), kept under the historical name for its caller and
+    entry vocabulary), kept under this name for its caller and
     test pins; this projection needs only the name half.
     """
     parsed = order_entry_name_and_direction(entry)
@@ -1003,7 +1001,7 @@ def _divergent_key_windows(
       caller records ONLY its identities (per-key error locality: the
       per-parent pipeline raises that alias's own validation error). A
       ``None`` key is the shared-window scheme: the caller records every
-      identity, matching the pre-fold single-window write;
+      identity, matching the single-window write;
     - otherwise the key's ``ConnectionWindowBounds`` window joins ``planned``.
 
     ``keyset_context`` - the cursor vocabulary of the window's effective
@@ -1221,7 +1219,7 @@ def plan_connection_relation(
     seal validates against, and fixes the declared cursor vocabulary each
     window's effective-order vocabulary derives from. A synthesized relation
     connection's resolver already takes its definition from the registry at
-    finalization; planning the same field at request time now reads the same
+    finalization; planning the same field at request time reads the same
     one answer, so a target whose metadata changed after acceptance cannot
     answer the plan differently from the resolver - including on the
     ``has_custom_get_queryset`` verdict that decides whether the child's

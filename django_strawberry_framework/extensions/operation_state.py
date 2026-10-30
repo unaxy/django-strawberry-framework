@@ -455,10 +455,8 @@ def _mark_package_managed(extension: object) -> None:
 def _is_operation_bound(extension: object) -> TypeIs[_OperationBoundExtension[OperationState]]:
     """Whether ``extension`` is one of this package's operation-bound extensions.
 
-    ``type()`` rather than ``isinstance``, for the reason
-    ``schema.py::_is_extension`` uses it: a consumer object answers
-    ``__class__`` with whatever it likes, and this predicate decides whose
-    state the runner binds.
+    The class test is ``utils/truth.py::is_subclass`` of the real
+    ``type()``, since this predicate decides whose state the runner binds.
     """
     return truth.is_subclass(type(extension), _OperationBoundExtension)
 

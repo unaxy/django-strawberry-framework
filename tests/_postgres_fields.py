@@ -18,6 +18,10 @@ same class.
 ``real_array_of`` builds a real ``django.contrib.postgres`` ``ArrayField`` and skips the
 test where the module is unimportable (no PostgreSQL driver).
 
+``FakeArrayField`` reads an index (``<column>__0``), a slice (``<column>__0_2``) and ``len``
+as a real ``ArrayField`` does: an index's output is ``base_field``, a slice's the array,
+``len``'s an ``IntegerField``.
+
 A model hosting either double declares ``class Meta: managed = False``.
 
 ``FakeSplitArrayWidget`` stands in for ``django.contrib.postgres.forms.SplitArrayWidget``
@@ -33,6 +37,8 @@ from typing import TYPE_CHECKING
 import pytest
 from django import forms
 from django.db import models
+from django.db.models.functions import Length
+from django.utils.functional import cached_property
 from typing_extensions import Never, override
 
 from django_strawberry_framework.utils import _array_field
@@ -68,6 +74,45 @@ class FakeArrayField(models.Field[object, object]):
         super().contribute_to_class(cls, name, private_only=private_only)
         self.base_field.set_attributes_from_name(name)
         self.base_field.model = cls
+
+    @override
+    def get_transform(self, lookup_name: str) -> type[models.Transform] | None:
+        """Read an index (``0``) or a slice (``0_2``) as a real ``ArrayField`` reads them.
+
+        Adapted from ``django/contrib/postgres/fields/array.py::ArrayField.get_transform``
+        (Django, BSD): a registered transform wins, an index's output is the element
+        column (``base_field``) and a slice's the array itself. Typing only: neither
+        compiles to SQL.
+        """
+        transform = super().get_transform(lookup_name)
+        if transform is not None:
+            return transform
+        start, separator, end = lookup_name.partition("_")
+        if not start.isdigit() or (separator and not end.isdigit()):
+            return None
+        output: models.Field[Never, object] = self if separator else self.base_field
+
+        class _ArrayItemTransform(models.Transform):
+            """One element (an index) or a sub-array (a slice) of the array."""
+
+            @cached_property
+            def output_field(self) -> models.Field[Never, object]:
+                return output
+
+        return _ArrayItemTransform
+
+
+class FakeArrayLength(Length):
+    """An array's element count under the ``len`` name a real ``ArrayField`` registers.
+
+    Django's ``Length`` transform, whose output is an ``IntegerField``: an integer no
+    column stores.
+    """
+
+    lookup_name = "len"
+
+
+FakeArrayField.register_lookup(FakeArrayLength)
 
 
 def patch_array_field(

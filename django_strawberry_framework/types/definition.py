@@ -9,6 +9,7 @@ from django.core.exceptions import FieldDoesNotExist
 from graphql import GraphQLError, assert_name
 from strawberry import relay
 from strawberry.relay.exceptions import NodeIDAnnotationError
+from strawberry.utils.str_converters import to_camel_case
 
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.utils import truth
@@ -52,6 +53,25 @@ def _check_graphql_name(name: str, subject: str) -> None:
         raise ConfigurationError(message) from exc
     if name.startswith("__"):
         raise ConfigurationError(message)
+
+
+def surface_type_name(origin: type, name: str | None) -> str:
+    """Return the GraphQL type name ``origin`` publishes: ``name`` when set, else its re-cased class name.
+
+    ``name`` is the type's ``Meta.name`` (``_validate_meta`` checks it when declared).
+    Strawberry derives the surface name the same way under the default
+    ``NameConverter``: an unnamed class publishes ``to_camel_case(__name__)``
+    (``strawberry/types/object_type.py``), so ``Cat_Node`` publishes ``CatNode`` and
+    the connection, filter inputs and enums named from it follow. Derivation only:
+    the class-name fallback is not checked against the GraphQL Name grammar here,
+    since a schema's converter may publish
+    another name for a class name the grammar refuses;
+    ``DjangoTypeDefinition.graphql_type_name`` checks the result. It and the
+    read-side choice-enum prefix (``types/base.py::_build_annotations``, which runs
+    before the definition exists) both derive the name here, so a ``Meta.name``'d
+    type names its enums after the name it publishes.
+    """
+    return name if name is not None else to_camel_case(truth.name(origin))
 
 
 @dataclass
@@ -106,7 +126,7 @@ class DjangoTypeDefinition:
         - ``fields_class`` is the forward-reserved ``FieldSet`` sidecar
           slot for spec-059. It intentionally stays
           ``None`` while ``Meta.fields_class`` remains in
-          ``DEFERRED_META_KEYS``; the FieldSet card promotes the key and
+          ``DEFERRED_META_KEYS``; spec-059 promotes the key and
           populates this slot when resolver binding applies end-to-end.
         - ``connection`` is the normalized ``Meta.connection`` value
           (``{"total_count": bool} | None``) populated by
@@ -168,12 +188,13 @@ class DjangoTypeDefinition:
           ``GLOBALID_UNVALIDATABLE`` error at request time
           (``filters/base.py::_decode_and_validate_global_id``, the runtime
           backstop behind the build-time audit). The only surviving
-          node-id-only path is the unbound-owner / unresolvable-target case,
-          where no definition - and therefore no strategy - exists at all
-          (spec-031 Decision 13).
+          node-id-only paths are those with no target definition - and
+          therefore no strategy - at all: no owner, an unbound set's own key,
+          or a path into a model no ``DjangoType`` exposes (spec-031
+          Decision 13).
         - ``related_target_for(field_name)`` resolves the
-          ``(target_definition, model_field)`` pair the Decision-4
-          owner-aware FK/PK conditional consults; the lookup walks
+          ``(target_definition, model_field)`` pair the GlobalID filter's
+          request-time path walk consults segment by segment; the lookup walks
           ``self.model._meta`` and resolves the target ``DjangoType``
           via ``registry.get(target_model)`` (which itself honors
           ``Meta.primary`` as its first return state, then falls back
@@ -271,20 +292,21 @@ class DjangoTypeDefinition:
         That is the name under the default ``NameConverter``; a schema's converter
         can publish another name (``types/relay.py::published_node_type_name``).
         Strawberry derives the surface name as ``self.name`` when set,
-        falling back to the origin class's declared name. Centralized here so
-        every call site that needs the same derivation rule reads from
-        one source - the alternative was three inline copies in
-        ``finalizer.py``, ``filters/base.py``, and ``filters/inputs.py``
-        which would silently diverge across renames.
+        falling back to the origin class's re-cased name; the derivation is
+        ``surface_type_name``, which every call site needing it reads
+        (``finalizer.py``, ``filters/base.py``, ``filters/inputs.py`` through
+        this property, ``types/base.py::_build_annotations`` directly) so the
+        copies cannot diverge across renames. This property also checks the
+        name is a non-empty string and a GraphQL Name.
         """
-        name = self.name if self.name is not None else truth.name(self.origin)
+        published = surface_type_name(self.origin, self.name)
         label = truth.kind(self.origin)
-        if not truth.is_instance(name, str):
+        if not truth.is_instance(published, str):
             raise ConfigurationError(
                 f"GraphQL type name for {label} must be a non-empty string; "
-                f"got {truth.render(name)}.",
+                f"got {truth.render(published)}.",
             )
-        normalized = truth.text(name)
+        normalized = truth.text(published)
         if not normalized:
             raise ConfigurationError(
                 f"GraphQL type name for {label} must be a non-empty string; got an empty name.",
@@ -322,9 +344,9 @@ class DjangoTypeDefinition:
         from django_strawberry_framework.registry import registry  # noqa: PLC0415
 
         # Memoize the lookup per field name. ``_meta.get_field`` is
-        # cheap but not free, and the registry lookup involves two
-        # dict probes (``primary_for`` + ``get``) plus a third
-        # (``get_definition``); on the filter-evaluation hot path this
+        # cheap but not free, and the registry lookup is two calls
+        # (``registry.get`` for the target type, then
+        # ``get_definition``); on the filter-evaluation hot path this
         # adds up. Cache only valid post-finalize: pre-finalize the
         # registry can still mutate (consumer declares more
         # DjangoTypes), so populating the cache with a transient

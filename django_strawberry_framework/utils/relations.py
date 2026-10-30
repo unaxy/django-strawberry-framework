@@ -18,7 +18,7 @@ from django_strawberry_framework.exceptions import (
     PathResolutionError,
 )
 from django_strawberry_framework.utils._narrowing import (
-    is_class,
+    is_concrete_field,
     is_list_or_tuple,
     read_attr,
     require,
@@ -55,6 +55,8 @@ __all__ = [
     "is_model_class",
     "is_row_key_column",
     "is_single_column_foreign_key",
+    "is_source_carried_relation_kind",
+    "is_stored_column",
     "m2m_through_link_fields",
     "m2m_through_model",
     "non_pk_forward_link",
@@ -74,7 +76,7 @@ __all__ = [
 
 def is_model_class(value: object) -> TypeIs[type[models.Model]]:
     """Return whether ``value`` is a Django model class, asked of its real type."""
-    return is_class(value) and issubclass(value, models.Model)
+    return truth.is_type(value) and issubclass(value, models.Model)
 
 
 RelationKind: TypeAlias = Literal[
@@ -83,6 +85,7 @@ RelationKind: TypeAlias = Literal[
     "reverse_one_to_one",
     "forward_single",
     "generic",
+    "reverse_generic",
 ]
 
 MANY_SIDE_RELATION_KINDS: frozenset[RelationKind] = frozenset(
@@ -154,7 +157,7 @@ class _TraversableRelationLike(_RelationFieldLike, Protocol):
 def relation_kind(field: object) -> RelationKind:
     """Classify a Django relation field by GraphQL/runtime cardinality.
 
-    Five shapes are distinguished:
+    Six shapes are distinguished:
 
     - ``"many"`` - a many-to-many relation from either side (``many_to_many=True``:
       a forward ``ManyToManyField`` or the reverse ``ManyToManyRel``), and no other shape.
@@ -179,15 +182,28 @@ def relation_kind(field: object) -> RelationKind:
       ``one_to_one=True`` + ``auto_created=True`` + ``concrete=False``).
       ``concrete`` distinguishes it from Django's auto-created MTI parent
       link, which is a forward ``OneToOneField`` with the same other flags.
+    - ``"reverse_generic"`` - the reverse ``GenericRel`` of a ``GenericRelation``,
+      which a ``related_query_name`` makes visible on the generic-key model. It
+      reports none of the cardinality flags above (Django's
+      ``ForeignObjectRel.many_to_one`` mirrors the ``GenericRelation``'s own
+      ``one_to_many``), and is ``auto_created`` without being ``concrete``: every
+      other relation either reports a cardinality flag read above or is
+      ``concrete`` (a forward ``ForeignKey`` / ``OneToOneField``, the MTI parent
+      link) or not ``auto_created`` (a ``ForeignObject``, a ``GenericForeignKey``).
+      It is single-valued, with its ``object_id`` carrier on the source row, so
+      filters, orders and paths read it like a forward relation; Django can
+      neither ``select_related`` it nor read it as a related object (its instance
+      accessor is the ``GenericRelation``'s manager on the other model).
     - ``"forward_single"`` - every other forward single-row relation
-      (``ForeignKey``, forward ``OneToOneField``, and the concrete
-      auto-created MTI parent link).
+      (``ForeignKey``, forward ``OneToOneField``, ``ForeignObject``,
+      ``GenericForeignKey``, and the concrete auto-created MTI parent link).
 
     Examples:
         ``ManyToManyField``-like -> ``"many"``;
         ``GenericRelation``-like -> ``"generic"``;
         ``ManyToOneRel``-like -> ``"reverse_many_to_one"``;
         ``OneToOneRel``-like -> ``"reverse_one_to_one"``;
+        ``GenericRel``-like -> ``"reverse_generic"``;
         ``ForeignKey``-like -> ``"forward_single"``;
         MTI ``<parent>_ptr``-like -> ``"forward_single"``.
 
@@ -214,12 +230,25 @@ def relation_kind(field: object) -> RelationKind:
         return "reverse_many_to_one"
     if one_to_one and auto_created and not concrete:
         return "reverse_one_to_one"
+    if auto_created and not concrete:
+        return "reverse_generic"
     return "forward_single"
 
 
 def is_many_side_relation_kind(kind: RelationKind | None) -> bool:
     """Return ``True`` for relation kinds represented as GraphQL lists."""
     return kind in MANY_SIDE_RELATION_KINDS
+
+
+def is_source_carried_relation_kind(kind: RelationKind | None) -> bool:
+    """Return ``True`` for the single-valued kinds whose link carriers sit on the source row.
+
+    A forward single relation, and the reverse ``GenericRel`` of a ``GenericRelation``, whose
+    ``object_id`` carrier is a column of the generic-key row it is read from. Their link targets
+    are the related row's columns; every other kind's link carriers sit on the related row (or
+    on an M2M's through row).
+    """
+    return kind in ("forward_single", "reverse_generic")
 
 
 @dataclass(frozen=True)
@@ -464,15 +493,15 @@ def validate_lookup_expr(terminal: ModelField, lookup_expr: str) -> type[models.
 
 
 def _lenient_traverses_to_many(model: type[models.Model], field_path: str) -> bool:
-    """Legacy lenient to-many walk, retained verbatim as a fail-open fallback.
+    """Return whether ``field_path`` reaches a many-side relation (lenient fail-open fallback).
 
     Walks the ``__``-separated path swallowing any resolution failure into a
     ``False`` answer, returning ``True`` the instant a many-side relation is
     reached - even if garbage follows it. ``path_traverses_to_many`` runs this
-    ONLY when strict ``classify_path`` raises ``PathResolutionError``, which
-    preserves the pre-refactor answer on every path the classifier REJECTS: a
-    many-then-garbage path (e.g. ``genres__nonexistent``) still answers
-    ``True`` here, whereas plain ``False`` on the raise would have regressed it.
+    ONLY when strict ``classify_path`` raises ``PathResolutionError``: on a path
+    the classifier REJECTS, a many-then-garbage path (e.g.
+    ``genres__nonexistent``) still answers ``True`` here; plain ``False`` on the
+    raise would be wrong.
     On paths the classifier RESOLVES the answer comes from ``PathInfo.m2m``
     instead; see ``path_traverses_to_many`` for the one deliberate divergence
     from this lenient walk's cardinality rule.
@@ -655,19 +684,11 @@ def is_forward_single_relation(field: object) -> bool:
     """Return whether ``field`` is a forward relation to one row, whatever its shape.
 
     A ``ForeignKey`` / ``OneToOneField`` (the MTI parent link included), a
-    ``ForeignObject`` of any width and a ``GenericForeignKey``. ``relation_kind``
-    reads ``"forward_single"`` for every field that is neither many-valued nor a
-    reverse one-to-one, so the answer needs more than the kind: ``is_relation``
-    (a plain column is ``"forward_single"`` too) and no ``ForeignObjectRel`` (the
-    reverse ``GenericRel`` a ``GenericRelation(related_query_name=...)`` makes
-    visible on the generic-key model reports ``many_to_one`` and no cardinality
-    flag ``relation_kind`` reads, so it classifies ``"forward_single"``).
+    ``ForeignObject`` of any width and a ``GenericForeignKey``: exactly the
+    relations ``relation_kind`` reads ``"forward_single"``. ``is_relation`` is read
+    too, since a plain column also classifies ``"forward_single"``.
     """
-    return (
-        relation_bool(field, "is_relation")
-        and not isinstance(field, ForeignObjectRel)
-        and relation_kind(field) == "forward_single"
-    )
+    return relation_bool(field, "is_relation") and relation_kind(field) == "forward_single"
 
 
 @overload
@@ -1149,20 +1170,27 @@ def has_composite_pk(model: type[models.Model]) -> bool:
     Reads Django's own ``Options.is_composite_pk`` property, which checks the
     live ``_meta.pk`` on every call (``Options.pk_fields`` is a cached
     property and would keep reporting a pk shape that has since been
-    rebound). Two consumers share this one detection:
-
-    - The FK-id-elision eligibility test (a forward single relation
-      satisfying an id-only child selection from the source row's local FK
-      column) must fail closed for a composite primary key: the source-row
-      ``attname`` carries a single-column id, but the target's ``pk`` is a
-      tuple, so eliding would compare the wrong shapes and surface wrong
-      data. ``FieldMeta.from_django_field`` stamps ``fk_id_elision_eligible``
-      through it the same way for registered types and the walker's
-      unregistered fallback map.
-    - ``django_strawberry_framework/types/relay.py::_check_composite_pk_for_relay_node``
-      rejects a Relay-declared type over a composite-pk model.
+    rebound). This is the one composite-pk detection. FK-id elision (a
+    forward single relation satisfying an id-only child selection from the
+    source row's local FK column) must fail closed for it: the source-row
+    ``attname`` carries a single-column id, but the target's ``pk`` is a
+    tuple, so eliding would compare the wrong shapes and surface wrong data.
     """
     return model._meta.is_composite_pk
+
+
+def is_stored_column(field: object) -> TypeGuard[ConcreteField]:
+    """Return whether ``field`` is a stored column of the table its model's rows live in.
+
+    Django's own answer: membership of ``Options.concrete_fields`` of the model that holds the
+    field (``field.model``: the declaring parent for a field a multi-table child or a proxy
+    inherits). That list is the forward fields carrying a database column, so it holds no
+    many-to-many field on any supported Django (``Field.concrete`` alone differs: Django 5.2
+    reports a forward ``ManyToManyField`` concrete, 6.0 does not), no reverse descriptor, no
+    ``GenericRelation`` / ``GenericForeignKey`` and no column-less forward ``ForeignObject``;
+    a forward ``ForeignKey`` / ``OneToOneField`` (its ``<name>_id`` column) is in it.
+    """
+    return is_concrete_field(field) and field in field.model._meta.concrete_fields
 
 
 def is_row_key_column(column: ConcreteField) -> bool:

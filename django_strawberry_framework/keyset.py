@@ -105,8 +105,8 @@ from .exceptions import ConfigurationError
 from .utils import truth
 from .utils._narrowing import is_concrete_field, is_dict, is_list, list_of, read_attr, require
 from .utils.connections import PaginationArgumentError
-from .utils.imports import require_optional_module
-from .utils.relations import _resolve_segment_field
+from .utils.imports import CRYPTOGRAPHY_FLOOR, require_optional_module
+from .utils.relations import _resolve_segment_field, is_stored_column
 from .utils.typing import object_result
 
 if TYPE_CHECKING:
@@ -127,7 +127,8 @@ _CURSOR_ENCRYPTION_SALT = "django_strawberry_framework.keyset_cursor"
 _CURSOR_ENCRYPTION_CONTEXT = b"django-strawberry-framework keyset cursor v1"
 _CRYPTOGRAPHY_INSTALL_HINT = (
     "Meta.cursor_field requires cryptography, which is not installed. Install it "
-    "with `pip install 'cryptography>=44.0.0'` (the package's verified AES-SIV floor)."
+    f"with `pip install 'cryptography>={CRYPTOGRAPHY_FLOOR}'` (the package's verified AES-SIV "
+    "floor)."
 )
 
 
@@ -255,31 +256,24 @@ def validate_cursor_field_references(
     return tuple(parsed)
 
 
-def _resolve_cursor_field_column(model: type[models.Model], name: str) -> ConcreteField:
-    """Resolve one validated cursor column name to its model ``Field``.
-
-    The ``pk`` alias and the ``FieldDoesNotExist`` vocabulary are owned by
-    ``utils/relations.py::_resolve_segment_field``. ``validate_cursor_field_columns``
-    rejected every entry naming a reverse relation (its ``ForeignObjectRel``) at
-    finalization, so one here is a ``TypeError``.
-    """
-    return require(_resolve_segment_field(model, name), is_concrete_field)
-
-
 def cursor_columns_for(
     model: type[models.Model],
     order_refs: tuple[str, ...],
 ) -> tuple[CursorColumn, ...]:
     """Resolve validated ``cursor_field`` entries into ``CursorColumn`` specs.
 
-    Assumes ``validate_cursor_field_columns`` passed at finalization; a
+    Assumes ``validate_cursor_field_columns`` passed at finalization. Each
+    name resolves through ``utils/relations.py::_resolve_segment_field``, which
+    owns the ``pk`` alias and the ``FieldDoesNotExist`` vocabulary, so a
     resolution failure here (a model change after finalize) surfaces as the
-    loud ``FieldDoesNotExist`` it is.
+    loud ``FieldDoesNotExist`` it is. Finalization refused every entry naming a
+    reverse relation (its ``ForeignObjectRel``), so the ``require`` raises
+    ``TypeError`` only when the model changed after finalize.
     """
     columns: list[CursorColumn] = []
     for order_ref in order_refs:
         name, descending = split_order_ref(order_ref)
-        field = _resolve_cursor_field_column(model, name)
+        field = require(_resolve_segment_field(model, name), is_concrete_field)
         columns.append(
             CursorColumn(
                 order_ref=order_ref,
@@ -366,7 +360,7 @@ def validate_cursor_field_columns(
             raise ConfigurationError(
                 f"{lead} entry {truth.render(order_ref)} does not resolve to a field on {truth.name(model)}.",
             ) from None
-        if not is_concrete_field(field) or field.is_relation or not field.concrete:
+        if not is_stored_column(field) or field.is_relation:
             raise ConfigurationError(
                 f"{lead} entry {truth.render(order_ref)} must be a local concrete column; "
                 "relation and reverse fields cannot anchor a keyset cursor.",

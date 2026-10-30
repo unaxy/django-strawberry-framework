@@ -87,7 +87,6 @@ from apps.products.models import Category, Entry, Item, Property
 from apps.scalars.models import ScalarSpecimen
 from asgiref.sync import sync_to_async
 from django.contrib.auth.models import User
-from django.contrib.contenttypes.fields import GenericForeignKey, GenericRelation
 from django.contrib.contenttypes.models import ContentType
 from django.db import connection as db_connection
 from django.db import models, transaction
@@ -146,6 +145,7 @@ from tests._idioms import (
     requires_fetch_modes,
     saved_pk,
 )
+from tests._relation_fixtures import RpGenericTag
 from tests.optimizer import _link_models
 
 #: A ``get_queryset`` hook as ``_make_type`` installs it (``classmethod``-wrapped).
@@ -656,40 +656,15 @@ def test_a_visible_reverse_generic_relation_stays_skippable() -> None:
     """The reverse ``GenericRel`` of ``GenericRelation(related_query_name=...)`` is no forward edge.
 
     The generic-key model's ``_meta.get_fields()`` then carries it by that query name. It
-    reports ``many_to_one`` and no flag ``relation_kind`` reads, so it classifies
-    ``"forward_single"``: only the reverse-descriptor guard keeps it out of the unsupported
-    set, and the generic-key model's one unsupported edge stays its ``GenericForeignKey``.
+    classifies ``"reverse_generic"``, not ``"forward_single"``, so it stays out of the
+    unsupported set, and the generic-key model's one unsupported edge stays its
+    ``GenericForeignKey``.
     """
-    meta = type("Meta", (), {"app_label": "products", "managed": False})
-    tag = type(
-        "CascadeProbeTag",
-        (models.Model,),
-        {
-            "__module__": __name__,
-            "content_type": models.ForeignKey(
-                ContentType,
-                on_delete=models.CASCADE,
-                related_name="+",
-            ),
-            "object_id": models.PositiveIntegerField(),
-            "content_object": GenericForeignKey("content_type", "object_id"),
-            "Meta": meta,
-        },
-    )
-    type(
-        "CascadeProbeHolder",
-        (models.Model,),
-        {
-            "__module__": __name__,
-            "tags": GenericRelation(tag, related_query_name="holder"),
-            "Meta": meta,
-        },
-    )
-    reverse = tag._meta.get_field("holder")
+    reverse = RpGenericTag._meta.get_field("holder")
 
     assert _is_cascadable_edge(reverse) is False
     assert _is_unsupported_forward_edge(reverse) is False
-    assert _edge_plan(tag).unsupported == ("content_object",)
+    assert _edge_plan(RpGenericTag).unsupported == ("content_object",)
 
 
 @pytest.mark.parametrize(

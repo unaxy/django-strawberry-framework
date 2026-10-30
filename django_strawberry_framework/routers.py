@@ -107,8 +107,7 @@ else:
 # The one public symbol is resolved lazily via the PEP 562 module ``__getattr__``
 # below, so at run time it is never a module global; the ``TYPE_CHECKING``
 # declaration above gives checkers its type. Listing it is deliberate: ``from
-# ...routers import *`` should opt into the router and thus the channels guard
-# (spec-041).
+# ...routers import *`` should opt into the router and thus the channels guard.
 __all__ = ("DjangoGraphQLProtocolRouter",)
 
 # This module's single channels-ABSENT install hint (spec-041 Decision 5). The
@@ -122,7 +121,7 @@ _CHANNELS_INSTALL_HINT = (
 )
 
 # Present-but-incompatible builder failures get their OWN actionable messages
-# (spec-041), split by which half of the import boundary broke so a
+# (spec-041 Error shapes), split by which half of the import boundary broke so a
 # broken Strawberry install is never misreported as a missing-channels problem.
 _CHANNELS_BROKEN_HINT = (
     "DjangoGraphQLProtocolRouter could not import its Channels composition pieces even "
@@ -140,7 +139,7 @@ _STRAWBERRY_CHANNELS_BROKEN_HINT = (
 # (spec-046 Decision 3 / Error shapes). Names all three facts a migrant needs:
 # what the removed mode was actually doing, that it is REMOVED rather than
 # flagged, and the two-place repair (the asgi.py argument AND the URLconf
-# entry). Omitting the argument entirely is
+# entry, the async or sync view by the consumer's resolver shape). Omitting the argument entirely is
 # Python's own ``TypeError``, deliberately, so a required parameter fails as one.
 _MISSING_DJANGO_APPLICATION_HINT = (
     "DjangoGraphQLProtocolRouter requires a usable Django ASGI application for its `http` "
@@ -150,8 +149,12 @@ _MISSING_DJANGO_APPLICATION_HINT = (
     "the one route that accepts session credentials. That mode is REMOVED, not flagged. "
     "Repair it in two places: pass "
     "`django_application=django.core.asgi.get_asgi_application()` from your asgi.py, and "
-    "serve GraphQL HTTP from your URLconf with `path('graphql/', "
-    "django_strawberry_framework.views.DjangoGraphQLView.as_view(schema=schema))`."
+    "serve GraphQL HTTP from your URLconf: `path('graphql/', "
+    "django_strawberry_framework.views.AsyncDjangoGraphQLView.as_view(schema=schema))` when "
+    "your resolvers are `async def` (as the removed consumer ran them; it fails a plain `def` "
+    "resolver that reads the database), or `path('graphql/', "
+    "django_strawberry_framework.views.DjangoGraphQLView.as_view(schema=schema))` when they "
+    "are plain `def` (it fails an `async def` resolver)."
 )
 
 # The construction-time failure for an unusable ``websocket_consumer_class``
