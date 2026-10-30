@@ -1805,6 +1805,14 @@ _HIDDEN = object()
             id="stamp-not-below-range",
         ),
         pytest.param(_StampHopKey, [_STAMP_VISIBLE], False, ["alpha"], id="stamp-visible"),
+        pytest.param(_StampHopKey, [None], False, [], id="stamp-null"),
+        pytest.param(
+            _StampHopKey,
+            [None, _STAMP_VISIBLE],
+            False,
+            ["alpha"],
+            id="stamp-null-beside-visible",
+        ),
         pytest.param(_StampHopKey, [_STAMP_HIDDEN], False, _HIDDEN, id="stamp-hidden"),
         pytest.param(
             _StampHopKey,
@@ -1862,7 +1870,8 @@ def test_to_many_relation_key_coerces_through_the_target_key_across_a_visibility
     (``filters/sets.py::FilterSet._leaf_chain``), and coerces every member through that
     column as the unhopped leaf coerces it through the relation
     (``filters/base.py::_coerce_relation_identity``): a decimal ``NaN`` / ``Infinity`` or
-    an aware datetime the backend cannot hold names no row, so it matches nothing (every
+    an aware datetime the backend cannot hold names no row, as does a ``None`` member
+    (a Python caller's; the wire's ``[ID!]`` admits none), so it matches nothing (every
     row under ``not``) and drops out beside a key that matches, a missing key and one the
     hop hides match nothing, a visible key matches its rows. A target keyed by a
     one-to-one primary key onto a non-pk ``to_field`` (decimal or text) is compared and
