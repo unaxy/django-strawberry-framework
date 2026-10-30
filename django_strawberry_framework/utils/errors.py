@@ -27,10 +27,10 @@ write flavors):
 - ``UNBINDABLE_TEMPORAL_MESSAGE`` - the message a temporal, duration or decimal value
   the database cannot bind answers, on a filter (``filters/sets.py::_unbindable_value_errors``,
   which asks Django to build and compile the filter's own predicate) and on a write;
-- ``unbindable_temporal`` - whether a datetime or time bound into a column is one
-  the database cannot bind, asked of that connection's own adapters; the base of
-  ``unstorable_temporal`` and of the identity decode
-  (``utils/querysets.py::coerce_field_value_or_none``);
+- ``unbindable_temporal`` - whether PostgreSQL refuses a datetime or time bound into a
+  ``DateTimeField`` / ``TimeField`` column for its UTC offset (``refuses_utc_offset``),
+  past the adapter Django's own ``Field.get_db_prep_value`` asks; the identity decode's
+  last temporal check (``utils/querysets.py::coerce_field_value_or_none``);
 - ``refuses_utc_offset`` - the one rule no Django call answers: an aware datetime
   or time whose UTC offset PostgreSQL refuses in the connection's binding mode (a
   list parameter's elements by the text rule, as psycopg binds them), read over what
@@ -753,24 +753,18 @@ def unbindable_temporal(
 ) -> bool:
     """Return whether the database ``using()`` names refuses to bind ``value`` into ``column``.
 
-    ``column`` is the model field a write stores ``value`` in, or an identity decode binds it
-    against; ``value`` is the value itself, or a list of them (an ``ArrayField``'s flattened
-    elements). A value the scalar parse and the field's own clean accept can still be one
-    the backend's adapter cannot bind; the driver's error would then escape as an
-    unexpected one. The answer asks the connection's own operations, so it refuses exactly
-    what that backend refuses (an ``OverflowError`` or ``ValueError`` from the adapter),
-    and nothing else:
-
-    - a ``datetime`` in a ``DateTimeField``: ``adapt_datetimefield_value``. SQLite, MySQL
-      and Oracle project an aware value onto the connection's time zone, which fails when
-      the projection leaves years 1..9999, and refuse any aware value when ``USE_TZ`` is
-      false.
-    - a ``time`` in a ``TimeField``: ``adapt_timefield_value``, which refuses an aware time
-      on SQLite, MySQL and Oracle.
-    - on PostgreSQL, whose adapters pass both through, an aware one whose UTC offset the
-      server refuses (``refuses_utc_offset``). ``bound_as_text`` holds the value to the
-      text rule whatever the connection's binding mode: psycopg binds the elements of a
-      list parameter (an ``ArrayField`` write) as text even under server-side binding.
+    ``column`` is the model field an identity decode binds ``value`` against; ``value`` is
+    a ``datetime`` for a ``DateTimeField``, a ``time`` for a ``TimeField``, or a list of
+    them. What the backend's adapter refuses (``adapt_datetimefield_value`` /
+    ``adapt_timefield_value``: on SQLite, MySQL and Oracle an aware value whose projection
+    onto the connection's time zone leaves years 1..9999, any aware datetime when
+    ``USE_TZ`` is false, an aware time) is not asked here: the caller has already prepared
+    the value through Django's own ``Field.get_db_prep_value``, which calls that adapter
+    and raises its ``OverflowError`` / ``ValueError``. What remains is the refusal no
+    Django call makes: on PostgreSQL, whose adapters pass both through, an aware one
+    whose UTC offset the server refuses (``refuses_utc_offset``). ``bound_as_text`` holds
+    the value to the text rule whatever the connection's binding mode: psycopg binds the
+    elements of a list parameter as text even under server-side binding.
 
     A ``None`` member binds. Any other column answers ``False`` without calling ``using``
     or touching ``django.db.connections``. A filter's value is not read here: the filter
@@ -783,19 +777,9 @@ def unbindable_temporal(
         bound_type = datetime.time
     else:
         return False
-    connection = connections[using()]
-    operations = connection.ops
     members = list(value) if is_list_or_tuple(value) else [value]
     bound = [member for member in members if isinstance(member, bound_type)]
-    try:
-        for member in bound:
-            if isinstance(member, datetime.datetime):
-                _ = operations.adapt_datetimefield_value(member)
-            else:
-                _ = operations.adapt_timefield_value(member)
-    except (OverflowError, ValueError):
-        return True
-    return refuses_utc_offset(connection, bound, bound_as_text=bound_as_text)
+    return refuses_utc_offset(connections[using()], bound, bound_as_text=bound_as_text)
 
 
 def refuses_utc_offset(
