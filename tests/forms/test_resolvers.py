@@ -3239,8 +3239,257 @@ def test_modelform_unrelated_save_value_error_propagates() -> None:
         assert not FailingPickRow.objects.exists()
 
 
+def _optional_pick_form(model_class: type[models.Model], kind: str) -> type[forms.BaseForm]:
+    """A ``ModelForm`` declaring an optional ``pick`` field of ``kind`` beside ``note``.
+
+    Django's ``_get_validation_exclusions`` leaves a column out of ``full_clean`` when its
+    form field is optional and the cleaned value is empty, whatever the column's
+    ``blank``, so the field's ``empty_value`` ``""`` reaches the instance unchecked.
+    """
+    form_fields: dict[str, Callable[[], forms.Field]] = {
+        "typed-choice": lambda: forms.TypedChoiceField(
+            choices=[(1, "One"), (2, "Two")],
+            coerce=int,
+            required=False,
+        ),
+        "char": lambda: forms.CharField(required=False),
+    }
+    return type(
+        "OptionalPickForm",
+        (forms.ModelForm,),
+        {
+            "pick": form_fields[kind](),
+            "Meta": type("Meta", (), {"model": model_class, "fields": ("pick", "note")}),
+        },
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize(
+    ("kind", "operation", "pick_input"),
+    [
+        pytest.param("typed-choice", "create", {}, id="typed-choice-create-omitted"),
+        pytest.param("typed-choice", "create", {"pick": None}, id="typed-choice-create-null"),
+        pytest.param("typed-choice", "update", {"pick": None}, id="typed-choice-update-null"),
+        pytest.param("char", "create", {}, id="char-create-omitted"),
+        pytest.param("char", "create", {"pick": None}, id="char-create-null"),
+        pytest.param("char", "update", {"pick": None}, id="char-update-null"),
+    ],
+)
+def test_modelform_optional_field_over_required_column_cleaned_to_empty_string_is_null_error(
+    kind: str,
+    operation: str,
+    pick_input: dict[str, object],
+    mode: str,
+) -> None:
+    """An optional form field cleaning ``""`` onto a ``blank=False`` integer column is ``null``.
+
+    The consumer form declares ``pick`` optional over a column Django would make required:
+    the field cleans an omitted value or an explicit ``null`` to its ``empty_value``
+    ``""``, ``_get_validation_exclusions`` keeps the column out of
+    ``Model.clean_fields`` and the integer column's ``get_prep_value`` refuses the save
+    with a ``ValueError``. The envelope is keyed by the column with Django's ``null``
+    message and code, the shape a ``blank=True`` column answers, on a create and an
+    update, sync and async; nothing is written. The omitted ``note`` holds ``""`` on a
+    text column that stores it, so it is never reported.
+    """
+    model_class = _blank_choice_model(
+        "RequiredPickRow",
+        models.IntegerField(),
+    )
+    with _blank_choice_table(model_class):
+        schema, create_input, update_input = _form_class_schema(
+            _optional_pick_form(model_class, kind),
+            model_class,
+            type_fields=("id", "note"),
+        )
+        stored: list[object] = []
+        if operation == "update":
+            row = model_class.objects.create(pick=2)
+            stored = [2]
+            query = (
+                f"mutation($id: ID!, $d: {update_input}!){{ updateRow(id:$id, data:$d){{ "
+                "result{ id } errors{ field messages codes } } }"
+            )
+            res = _execute_in_mode(
+                schema,
+                query,
+                {"id": str(saved_pk(row)), "d": pick_input},
+                mode=mode,
+            )
+            payload = res.data and res.data["updateRow"]
+        else:
+            query = (
+                f"mutation($d: {create_input}!){{ createRow(data:$d){{ "
+                "result{ id } errors{ field messages codes } } }"
+            )
+            res = _execute_in_mode(schema, query, {"d": pick_input}, mode=mode)
+            payload = res.data and res.data["createRow"]
+        assert res.errors is None, res.errors
+        assert payload == {"result": None, "errors": [_NULL_PICK_ERROR]}
+        assert list(model_class.objects.values_list("pick", flat=True)) == stored
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    "pick_input",
+    [pytest.param({}, id="omitted"), pytest.param({"pick": None}, id="null")],
+)
+def test_modelform_optional_field_over_required_column_filled_in_by_model_save_writes(
+    pick_input: dict[str, object],
+) -> None:
+    """A model ``save()`` that fills a ``blank=False`` column in writes, whatever the input.
+
+    The optional form field cleans an omitted value or an explicit ``null`` to ``""``,
+    which only ``save()`` could refuse; the mapping runs after a failed save and the
+    pre-save guard leaves the ``""`` to it, so an override that stores ``2`` writes the
+    row.
+    """
+
+    class FilledRequiredPickRow(models.Model):
+        pick: _Int = models.IntegerField()
+        note: _Text = models.TextField(blank=True)
+
+        class Meta:
+            app_label = "products"
+            managed = False
+
+        @override
+        def save(self, *args: object, **kwargs: object) -> None:
+            if vars(self)["pick"] == "":
+                self.pick = 2
+            call_forwarded(super().save, args, kwargs)
+
+    with _blank_choice_table(FilledRequiredPickRow):
+        schema, create_input, _ = _form_class_schema(
+            _optional_pick_form(FilledRequiredPickRow, "typed-choice"),
+            FilledRequiredPickRow,
+            type_fields=("id", "note"),
+        )
+        res = schema.execute_sync(
+            f"mutation($d: {create_input}!){{ createRow(data:$d){{ "
+            "result{ id } errors{ field messages codes } } }",
+            variable_values={"d": pick_input},
+        )
+        assert res.errors is None, res.errors
+        assert res.data is not None
+        assert res.data["createRow"]["errors"] == []
+        assert list(FilledRequiredPickRow.objects.values_list("pick", flat=True)) == [2]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("blank", [True, False], ids=["blank", "not-blank"])
+@pytest.mark.parametrize(
+    (
+        "operation",
+        "pick_input",
+        "errors",
+        "stored",
+    ),
+    [
+        pytest.param("create", {"pick": None}, [_NULL_PICK_ERROR], [], id="create-null"),
+        pytest.param("update", {"pick": None}, [_NULL_PICK_ERROR], [{"a": 1}], id="update-null"),
+        pytest.param("create", {}, [], [""], id="create-omitted"),
+    ],
+)
+def test_modelform_optional_char_field_over_json_column_explicit_null_is_null_error(
+    *,
+    blank: bool,
+    operation: str,
+    pick_input: dict[str, object],
+    errors: list[dict[str, object]],
+    stored: list[object],
+) -> None:
+    """An explicit ``null`` a ``CharField`` cleans to ``""`` over a ``JSONField`` is refused.
+
+    A ``JSONField`` stores ``""`` as the JSON string although Django marks it
+    ``empty_strings_allowed = False``, so the column is no unstorable blank: the
+    pre-save check names the explicit ``null`` the form field read as ``""`` (the answer
+    a text column gets), on a create and an update, and nothing is written. An omitted
+    create is the form's own resolution of the field, so its ``""`` is stored.
+    """
+    model_class = _blank_choice_model("JsonPickRow", models.JSONField(blank=blank))
+    with _blank_choice_table(model_class):
+        schema, create_input, update_input = _form_class_schema(
+            _optional_pick_form(model_class, "char"),
+            model_class,
+            type_fields=("id", "note"),
+        )
+        if operation == "update":
+            row = model_class.objects.create(pick={"a": 1})
+            res = schema.execute_sync(
+                f"mutation($id: ID!, $d: {update_input}!){{ updateRow(id:$id, data:$d){{ "
+                "result{ id } errors{ field messages codes } } }",
+                variable_values={"id": str(saved_pk(row)), "d": pick_input},
+            )
+            payload = res.data and res.data["updateRow"]
+        else:
+            res = schema.execute_sync(
+                f"mutation($d: {create_input}!){{ createRow(data:$d){{ "
+                "result{ id } errors{ field messages codes } } }",
+                variable_values={"d": pick_input},
+            )
+            payload = res.data and res.data["createRow"]
+        assert res.errors is None, res.errors
+        assert payload is not None
+        assert payload["errors"] == errors
+        assert (payload["result"] is None) == bool(errors)
+        assert list(model_class.objects.values_list("pick", flat=True)) == stored
+
+
+_UNSTORABLE_BLANK_COLUMNS: list[tuple[models.Field[object, object], bool]] = [
+    (models.IntegerField(), True),
+    (models.DecimalField(max_digits=4, decimal_places=2), True),
+    (models.DateField(), True),
+    (models.UUIDField(), True),
+    (models.BooleanField(), True),
+    (models.TextField(), False),
+    (models.JSONField(), False),
+]
+
+
+@pytest.mark.parametrize(
+    ("column", "refused"),
+    _UNSTORABLE_BLANK_COLUMNS,
+    ids=[
+        "integer",
+        "decimal",
+        "date",
+        "uuid",
+        "boolean",
+        "text",
+        "json",
+    ],
+)
+def test_is_unstorable_blank_names_only_a_column_that_stores_no_empty_string(
+    *,
+    column: models.Field[object, object],
+    refused: bool,
+) -> None:
+    """Only the ``""`` a column cannot store is an unstorable blank; any other value is not."""
+    assert form_resolvers._is_unstorable_blank(column, "") is refused
+    assert form_resolvers._is_unstorable_blank(column, None) is False
+    assert form_resolvers._is_unstorable_blank(column, 0) is False
+
+
+@pytest.mark.pg
+def test_is_unstorable_blank_on_postgres_columns() -> None:
+    """An ``ArrayField`` refuses ``""`` (malformed array literal); an ``HStoreField`` stores it.
+
+    PostgreSQL reads the empty string as the empty hstore, so neither the pre-save check
+    nor the save-time diagnosis names an ``HStoreField`` column.
+    """
+    from django.contrib.postgres import fields as postgres_fields  # noqa: PLC0415 - needs the Postgres driver
+
+    array: models.Field[object, object] = postgres_fields.ArrayField(models.TextField())
+    hstore: models.Field[object, object] = postgres_fields.HStoreField()
+    assert form_resolvers._is_unstorable_blank(array, "") is True
+    assert form_resolvers._is_unstorable_blank(hstore, "") is False
+
+
 # ---------------------------------------------------------------------------
-# Save-time ``""`` on a ``blank=True, null=False`` ``ArrayField`` (PostgreSQL ``DataError``)
+# Save-time ``""`` on a ``null=False`` ``ArrayField`` (PostgreSQL ``DataError``)
 # ---------------------------------------------------------------------------
 
 _TAG_CHOICES = [("x", "X"), ("y", "Y")]
@@ -3253,8 +3502,8 @@ _NULL_TAGS_ERROR = {
 }
 
 
-def _blank_tags_model(*, client_key: bool) -> type[models.Model]:
-    """A synthetic model: a ``title`` and a ``blank=True, null=False`` text ``ArrayField`` ``tags``.
+def _blank_tags_model(*, client_key: bool, blank: bool = True) -> type[models.Model]:
+    """A synthetic model: a ``title`` and a ``null=False`` text ``ArrayField`` ``tags`` of ``blank``.
 
     With ``client_key`` the row is keyed by a client-assigned text ``code``, so a create
     saves through ``save(commit=False)`` and ``save_new_row``'s INSERT.
@@ -3263,7 +3512,7 @@ def _blank_tags_model(*, client_key: bool) -> type[models.Model]:
 
     tags: ArrayField[list[str], list[str]] = postgres_fields.ArrayField(
         models.TextField(),
-        blank=True,
+        blank=blank,
     )
     key: dict[str, models.Field[object, object]] = (
         {"code": models.TextField(primary_key=True)} if client_key else {}
@@ -3314,24 +3563,24 @@ def _blank_tags_form(
     return type("BlankTagsForm", (forms.ModelForm,), attrs)
 
 
-def _blank_tags_schema(
+def _form_class_schema(
     form_class: type[forms.BaseForm],
     model_class: type[models.Model],
     *,
-    key: str,
+    type_fields: tuple[str, ...],
 ) -> tuple[strawberry.Schema, str, str]:
     """A non-Relay primary + create / update mutations over ``form_class``, with the input names.
 
-    The primary type over ``model_class`` selects its primary key ``key`` and ``title``.
+    The primary type over ``model_class`` selects ``type_fields``.
     """
     type(
-        "BlankTagsT",
+        f"{model_class.__name__}T",
         (DjangoType,),
         {
             "Meta": type(
                 "Meta",
                 (),
-                {"model": model_class, "fields": (key, "title")},
+                {"model": model_class, "fields": type_fields},
             ),
         },
     )
@@ -3419,30 +3668,34 @@ _BLANK_TAGS_INPUTS = [
     ],
 )
 @pytest.mark.parametrize(("operation", "data"), _BLANK_TAGS_INPUTS)
+@pytest.mark.parametrize("column", ["blank", "not-blank"])
 def test_modelform_blank_array_cleaned_to_empty_string_is_field_keyed_null_error(
     operation: str,
     data: dict[str, object],
     kind: str,
     mode: str,
+    column: str,
 ) -> None:
-    """An optional single-value field cleaning ``""`` onto a ``blank=True, null=False`` array is ``null``.
+    """An optional single-value field cleaning ``""`` onto a ``null=False`` array is ``null``.
 
     The form field cleans ``""``, an explicit ``null`` or an omitted create value to its
-    ``empty_value`` ``""``; ``ModelForm._post_clean`` writes it onto the instance and
-    ``Model.clean_fields`` skips the blank column, so PostgreSQL refuses the save with a
-    ``DataError`` (malformed array literal). The ``ModelForm`` save diagnoses the column
+    ``empty_value`` ``""``; ``ModelForm._post_clean`` writes it onto the instance and no
+    model validation reads it (``Model.clean_fields`` skips a ``blank=True`` column's
+    empty value, and ``_get_validation_exclusions`` leaves a ``blank=False`` column whose
+    optional form field cleaned empty out of ``full_clean``), so PostgreSQL refuses the
+    save with a ``DataError`` (malformed array literal). The ``ModelForm`` save diagnoses the column
     from the instance it attempted: the envelope is keyed by ``tags`` with Django's
     ``null`` message and code, on a create, a client-assigned-key create and an update,
     sync and async. Nothing is written, and the connection still answers the query that
     reads the table afterwards.
     """
     client_key = operation == "keyed-create"
-    model_class = _blank_tags_model(client_key=client_key)
+    model_class = _blank_tags_model(client_key=client_key, blank=column == "blank")
     with _blank_choice_table(model_class):
-        schema, create_input, update_input = _blank_tags_schema(
+        schema, create_input, update_input = _form_class_schema(
             _blank_tags_form(model_class, kind, client_key=client_key),
             model_class,
-            key="code" if client_key else "id",
+            type_fields=("code" if client_key else "id", "title"),
         )
         stored: list[tuple[object, object]] = []
         if operation == "update":
@@ -3508,10 +3761,10 @@ def test_modelform_unrelated_save_data_error_propagates(operation: str, mode: st
             return _wrap_a_present_tag(self)
 
     with _blank_choice_table(CastingTagsRow):
-        schema, create_input, update_input = _blank_tags_schema(
+        schema, create_input, update_input = _form_class_schema(
             WrappingTagsForm,
             CastingTagsRow,
-            key="id",
+            type_fields=("id", "title"),
         )
         if operation == "update":
             [row] = CastingTagsRow._base_manager.bulk_create(

@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 393 done, 212 to do.
+Progress: 394 done, 213 to do.
 
 ## Done
 
@@ -2247,6 +2247,18 @@ Progress: 393 done, 212 to do.
   `rest_framework` tests and `test_library_api.py`, "Test-6" in `tests/test_routers.py`, and the "DoD item N" /
   "Goal N" tags in eight more test files name the contract each pins (`spec-NNN Decision N` kept). Comments,
   docstrings and docstring examples only: docstring-stripped ASTs and collected node ids unchanged
+- [x] 574. fixed: a `DjangoModelFormMutation` whose consumer form declares a `required=False` field over a
+  `blank=False, null=False` column that stores no empty string (an integer / decimal / date / UUID / boolean column,
+  an `ArrayField`) answers that column's field-keyed `null` error when the field cleans to `""`, as the
+  `blank=True` shape does, instead of the masked save error: Django's `_get_validation_exclusions` leaves such a
+  column out of `full_clean`, so `_is_unstorable_blank` keys on the column's storage alone, not on `blank`. A
+  `JSONField` and an `HStoreField` (which store `""` despite `empty_strings_allowed=False`) are never named, so an
+  explicit `null` a consumer `CharField` cleans to `""` over a JSON column is the pre-save `null` error, blank or
+  not. README, spec-038; pinned by `tests/forms/test_resolvers.py::
+  test_modelform_optional_field_over_required_column_cleaned_to_empty_string_is_null_error`, `::
+  test_modelform_optional_field_over_required_column_filled_in_by_model_save_writes`, `::
+  test_modelform_optional_char_field_over_json_column_explicit_null_is_null_error` and `::
+  test_is_unstorable_blank_names_only_a_column_that_stores_no_empty_string`
 
 ## Outside review of the fixes
 
@@ -2299,10 +2311,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   package (`optimizer/extension.py`, `optimizer/plans.py`, `optimizer/walker.py`, `types/resolvers.py`) and most in
   `tests/optimizer/test_extension.py` and `test_walker.py`; the clause after each label already states the behaviour,
   so drop the label. Found fact-finding 500
-- [ ] 574. (robustness) A `blank=False` column a `required=False` form field cleans to `""` (Django's
-  `_get_validation_exclusions` leaves it out of `full_clean`) answers the masked error at save (a raw `DataError` on
-  an `ArrayField`, measured); `_is_unstorable_blank` needs `blank=True`, so no column that stores no empty string is
-  named in this shape. Found fixing 541
 - [ ] 620. **SKIP for now** (upstream-seam refactor in flight: F4, partial-update rebinding in `forms/resolvers.py`). (robustness) On a `null=True` `ArrayField`, a `ModelForm` explicit `null`, or an update omitting the field
   over a stored NULL, writes `[]` instead of NULL, with the default `SimpleArrayField` and a `SplitArrayField` alike.
   Found verifying 553
@@ -2389,6 +2397,14 @@ tracker number are recorded there; open remainders and new defects are filed as 
   docstring "spec-028 DoD 4(c)", `_cross_web_patches.py` "gap (1)" / "Gap (2)" (the sibling of 679's
   `_strawberry_patches.py` gap names), and `scripts/capture_pg_predicate_explain.py` "Slice C.3a" (docstring and a
   runtime string); restate each by content (package files sit in the comment-sweep area). Found fixing 679
+- [ ] 704. (robustness) A `DjangoModelFormMutation` whose optional form field cleans to `""` over a `null=True`
+  non-text column (`IntegerField(null=True)` behind a consumer `CharField(required=False)`) answers "This field
+  cannot be null." for a column that accepts null: the save-time diagnosis names every `""` the column cannot store
+  under the `null` error, though the refusal is that `""` is not the column's type. Found verifying 574
+- [ ] 705. `docs/GLOSSARY.md` (rendered from the fakeshop glossary DB: the ModelForm mutation entry and the shared
+  error envelope) describes the save-time `null` mapping for a `blank=True, null=False` column only; 574 extends it
+  to a `blank=False` column behind a `required=False` consumer form field. Widen both entries in the DB source and
+  re-render. Found verifying 574
 
 ## To do: holes found re-checking the fixes
 

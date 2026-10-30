@@ -131,11 +131,12 @@ and the form-specific invariants this module owns:
   field by for the ``ModelForm`` (``save_time_error_key_map``). Before the save, an
   explicit ``null`` on a ``null=False`` column that the column's own form field cleaned
   to a storable value instead of ``None`` (a ``BooleanField``'s ``False``, a ``blank=True``
-  text or text-choice column's ``""``) is that column's field-keyed ``null`` error, as on
-  the model flavor, and nothing is written (``_coerced_null_fields``). The ``ModelForm``
+  text or text-choice column's ``""``, a ``JSONField``'s ``""``) is that column's
+  field-keyed ``null`` error, as on the model flavor, and nothing is written
+  (``_coerced_null_fields``). The ``ModelForm``
   save adds the one failure a valid ``ModelForm`` reaches on its own: a
-  ``blank=True, null=False`` column cleaned to an empty value it cannot store
-  (``None``, refused by the database's ``NOT NULL`` ``IntegrityError``, or ``""`` on
+  ``null=False`` column cleaned to an empty value no model validation reads and it
+  cannot store (``None``, refused by the database's ``NOT NULL`` ``IntegrityError``, or ``""`` on
   a column that stores no empty string: a non-text choice column, refused by
   ``save()`` with a ``ValueError`` / ``ValidationError``, or an ``ArrayField``,
   refused by PostgreSQL with a ``DataError``) maps to that column's field-keyed
@@ -219,6 +220,7 @@ from django_strawberry_framework.utils.errors import (
     unstorable_temporal,
     validation_error_to_field_errors,
 )
+from django_strawberry_framework.utils.imports import import_attr_if_importable
 from django_strawberry_framework.utils.querysets import sync_pipeline_recourse
 from django_strawberry_framework.utils.relations import (
     is_model_class,
@@ -1268,38 +1270,60 @@ def _unstorable_cleaned_fields(
     """Return the form's columns holding a value the column cannot store.
 
     Reads the instance the save was attempted on, never the database, so it is safe
-    after a failed write left the transaction unusable. Two values qualify, both on a
-    concrete, editable, non-primary-key column the form declares:
+    after a failed write left the transaction unusable. An optional form field cleans an
+    omitted or explicit ``null`` to its empty value, ``ModelForm._post_clean`` writes it
+    onto ``form.instance``, and no model validation reads it: ``Model.clean_fields`` skips
+    every ``blank=True`` column whose value is an empty value ("the developer is
+    responsible for making sure they have a valid value"), and
+    ``BaseModelForm._get_validation_exclusions`` leaves a ``blank=False`` column out of
+    ``full_clean`` when its form field is optional and cleaned to one of its
+    ``empty_values`` (a consumer form declaring the field ``required=False``). Two values
+    qualify, both on a concrete, editable, non-primary-key column the form declares:
 
-    - ``None`` on a ``null=False`` column. A ``blank=True`` column's optional form field
-      cleans an omitted or explicit ``null`` to ``None`` (``ModelChoiceField``,
-      ``IntegerField``, ``DateField``, ...), ``ModelForm._post_clean`` writes it onto
-      ``form.instance``, and ``Model.clean_fields`` skips every ``blank=True`` column
-      whose value is an empty value ("the developer is responsible for making sure they
-      have a valid value"), so the database refuses it with a ``NOT NULL``
-      ``IntegrityError``. The column's ``attname`` is read, so a foreign key with no
-      related row reads ``None`` instead of raising.
-    - ``""`` on a ``blank=True`` column that stores no empty string. Django's
-      ``Field.formfield`` keeps ``TypedChoiceField(empty_value="")`` on a ``null=False``
-      choice column whatever the column type, so a non-text choice column carries a
-      value only ``save()`` refuses, for example the ``ValueError`` of an integer /
-      float column's ``get_prep_value`` ("expected a number but got ''") or the
-      ``ValidationError`` of a decimal / date / UUID / boolean column's ``to_python``.
-      An optional single-value form field over an ``ArrayField`` (a ``ChoiceField``,
-      ``TypedChoiceField`` or ``CharField`` whose ``clean_<field>``, if any, wraps only a
-      non-empty value) cleans to its ``empty_value`` ``""`` too, which PostgreSQL refuses
-      at the save with a ``DataError`` (malformed array literal).
+    - ``None`` on a ``null=False`` column, from a ``ModelChoiceField``, ``IntegerField``,
+      ``DateField``, ...: the database refuses it with a ``NOT NULL`` ``IntegrityError``.
+      The column's ``attname`` is read, so a foreign key with no related row reads
+      ``None`` instead of raising.
+    - ``""`` on a column that stores no empty string (``_is_unstorable_blank``).
+      Django's ``Field.formfield`` keeps ``TypedChoiceField(empty_value="")`` on a
+      ``null=False`` choice column whatever the column type, and a ``ChoiceField``,
+      ``TypedChoiceField`` or ``CharField`` a consumer form declares cleans to ``""`` too
+      (over an ``ArrayField``, with a ``clean_<field>``, if any, that wraps only a
+      non-empty value), so a non-text column carries a value only ``save()`` refuses,
+      for example the ``ValueError`` of an integer / float column's ``get_prep_value``
+      ("expected a number but got ''"), the ``ValidationError`` of a decimal / date /
+      UUID / boolean column's ``to_python``, or PostgreSQL's ``DataError`` (malformed
+      array literal) on an ``ArrayField``.
 
-    A text column storing ``""`` is a legitimate clear and is never named. The walk and
+    A column that stores ``""`` is never named: a text column (a legitimate clear), a
+    ``JSONField`` (the JSON string) or an ``HStoreField`` (the empty hstore). The walk and
     the ``None`` rule are the model flavor's too (``utils/write_values.py::unstorable_columns``);
     the ``""`` rule is this flavor's, since only a form field cleans to it.
     """
     return unstorable_columns(form.instance, form.fields, also=_is_unstorable_blank)
 
 
+# ``django.contrib.postgres.fields.HStoreField``, or ``None`` without a PostgreSQL driver
+# (``types/converters.py`` resolves it the same way for its read-side arm).
+_HSTORE_FIELD = import_attr_if_importable("django.contrib.postgres.fields", "HStoreField")
+
+
 def _is_unstorable_blank(field: _FieldAny, value: object) -> bool:
-    """Whether ``value`` is the ``""`` a ``blank=True`` column storing no empty string refuses."""
-    return field.blank and value == "" and not field.empty_strings_allowed
+    """Whether ``value`` is the ``""`` a column storing no empty string refuses.
+
+    Django's ``empty_strings_allowed`` is that answer for a numeric, temporal, UUID,
+    boolean, foreign-key or array column, but a ``JSONField`` and an ``HStoreField`` set
+    it ``False`` for their default alone: a ``JSONField`` stores ``""`` as the JSON string
+    and an ``HStoreField`` as the empty hstore, so neither refuses it. No upstream seam
+    separates them from an ``ArrayField`` (PostgreSQL's ``DataError`` on a malformed array
+    literal): ``get_db_prep_save`` accepts ``""`` on all three.
+    """
+    return (
+        value == ""
+        and not field.empty_strings_allowed
+        and not truth.is_instance(field, models.JSONField)
+        and not (truth.is_type(_HSTORE_FIELD) and truth.is_instance(field, _HSTORE_FIELD))
+    )
 
 
 def _coerced_null_fields(form: _ModelFormAny) -> list[_FieldAny]:
@@ -1311,7 +1335,8 @@ def _coerced_null_fields(form: _ModelFormAny) -> list[_FieldAny]:
     reconstructs an omitted field from the located row, which never stores ``NULL`` there,
     and an upload is bound through ``files=``, never ``data=``. The column's form field may
     clean that ``None`` to a value instead of ``None``: ``CheckboxInput`` reads it as
-    ``False``, and the ``CharField`` / ``TypedChoiceField`` of a ``blank=True`` text column
+    ``False``, and the ``CharField`` / ``TypedChoiceField`` of a text column (a consumer
+    ``CharField`` over a ``JSONField`` or ``HStoreField`` column, which store ``""`` too)
     clean it to its ``empty_value`` ``""``. ``ModelForm._post_clean`` writes that value onto
     ``form.instance`` and the save would succeed, storing a value the client never sent.
     Such a column is named here, from the instance the save would write, so the write never
@@ -1322,11 +1347,12 @@ def _coerced_null_fields(form: _ModelFormAny) -> list[_FieldAny]:
     written; a ``disabled`` field ignores the bound value; a form field that
     ``Meta.fields`` / ``Meta.exclude`` leaves out of ``construct_instance`` never writes
     the column. A ``None`` on the instance is left to the save-time diagnosis
-    (``_unstorable_cleaned_fields``), as is a ``""`` the column cannot store: a consumer
-    ``save()`` may still fill either in (django-trac 13776 / 20205). A ``null=True``
-    column stores the clear, and an M2M is not a concrete column (an empty value
-    clears it), so neither is named. A form field required by the form never gets here:
-    its own ``required`` error fails ``is_valid()`` first.
+    (``_unstorable_cleaned_fields``), as is a ``""`` the column cannot store
+    (``_is_unstorable_blank``), whatever the column's ``blank``: a consumer ``save()`` may
+    still fill either in (django-trac 13776 / 20205), and the diagnosis answers the same
+    ``null`` error. A ``null=True`` column stores the clear, and an M2M is not a concrete
+    column (an empty value clears it), so neither is named. A form field required by the
+    form never gets here: its own ``required`` error fails ``is_valid()`` first.
     """
     instance = form.instance
     options = form._meta
@@ -1464,11 +1490,13 @@ def _modelform_save_or_field_errors(
     ``ModelForm`` field is named after its model field, and a model ``save()`` or
     signal receiver keys its error by the model field name or a forward relation's
     ``attname``, so both reach the GraphQL input name. On top, the one failure a
-    VALID ``ModelForm`` can reach at ``save()`` on its own: a ``blank=True,
-    null=False`` column the form cleaned to an empty value the column cannot store
-    (an omitted or explicitly ``null`` optional field with no default to fall back
-    on), which Django's ``clean_fields`` skipped. ``None`` reaches the database's
-    ``NOT NULL`` ``IntegrityError``; ``""`` on a non-text choice column is refused by
+    VALID ``ModelForm`` can reach at ``save()`` on its own: a ``null=False`` column
+    the form cleaned to an empty value the column cannot store (an omitted or
+    explicitly ``null`` optional field with no default to fall back on), which no
+    model validation read (``Model.clean_fields`` skips a ``blank=True`` column's empty
+    value, ``_get_validation_exclusions`` excludes a ``blank=False`` column whose
+    optional form field cleaned empty). ``None`` reaches the database's
+    ``NOT NULL`` ``IntegrityError``; ``""`` on a non-text column is refused by
     the column's ``get_prep_value`` / ``to_python`` with a ``ValueError`` or
     ``ValidationError``, and on an ``ArrayField`` (an optional single-value form
     field's ``empty_value``) by PostgreSQL with a ``DataError``. The exception is the
@@ -1551,7 +1579,7 @@ def _modelform_write_step(
     ``_modelform_save_or_field_errors`` (the form's save, split around
     ``commit=False`` on an update and a client-assigned-key create; the reused
     ``IntegrityError`` / ``ValidationError`` mappers, the update's ``conflict``, plus
-    the unstorable ``blank=True, null=False`` column ``null`` mapping). Returns the saved instance
+    the unstorable ``null=False`` column ``null`` mapping). Returns the saved instance
     (the skeleton's ``refetch_optimized`` re-fetches it by pk under the optimizer plan) or a
     ``StepFailure`` on a validation / write failure.
     """
