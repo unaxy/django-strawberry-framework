@@ -103,13 +103,12 @@ def _choice_model(
     choices: list[tuple[str | None, str]],
     *,
     blank: bool = False,
-    nullable: bool = False,
 ) -> type[models.Model]:
     class ChoiceCarrier(models.Model):
-        status: "models.TextField[str | Combinable | None, str | None]" = models.TextField(
+        status: "models.TextField[str | Combinable | None, str | None]" = models.TextField(  # noqa: DJ001 - NULL is the fixture input
             choices=choices,
             blank=blank,
-            null=nullable,
+            null=True,
         )
 
         class Meta:
@@ -181,7 +180,7 @@ def test_an_outbound_bigint_rejects_bool_beside_its_integer_control(raw_value: i
 
 def test_a_nullable_empty_label_choice_reads_null_blank_and_a_declared_member() -> None:
     """The empty-option label is not an enum value; null, BLANK and good stay distinct on the wire."""
-    model = _choice_model(_EMPTY_LABEL_CHOICES, blank=True, nullable=True)
+    model = _choice_model(_EMPTY_LABEL_CHOICES, blank=True)
     schema = _choice_schema(model, [None, "", "good"])
     payload = _post(
         schema,
@@ -227,7 +226,7 @@ def test_a_nullable_empty_label_choice_write_preserves_the_three_stored_values(
     stored: str | None,
 ) -> None:
     """Valid nullable/blank/member values persist exactly; the empty-option spelling stores no row."""
-    owner_model = _choice_model(_EMPTY_LABEL_CHOICES, blank=True, nullable=True)
+    owner_model = _choice_model(_EMPTY_LABEL_CHOICES, blank=True)
 
     class NullableChoiceType(DjangoType):
         class Meta:
@@ -603,7 +602,7 @@ def test_a_blank_enum_member_applies_its_predicate_and_excludes_null_on_every_te
     expected: tuple[str, ...],
 ) -> None:
     """BLANK applies the chosen lookup to an empty string; the NULL row distinguishes it from omission."""
-    model = _choice_model(_EMPTY_LABEL_CHOICES, blank=True, nullable=True)
+    model = _choice_model(_EMPTY_LABEL_CHOICES, blank=True)
     schema = _filtered_choice_schema(model, [lookup])
     where_type, enum_type = _choice_filter_types(schema, wire_lookup)
     with _choice_table(model):
@@ -643,7 +642,7 @@ def test_a_null_spelled_enum_member_selects_the_literal_value_instead_of_sql_nul
     wire_lookup: str,
 ) -> None:
     """The enum's literal null spelling selects that stored text while the SQL NULL row stays out."""
-    model = _choice_model([("null", "Null"), ("other", "Other")], nullable=True)
+    model = _choice_model([("null", "Null"), ("other", "Other")])
     schema = _filtered_choice_schema(model, [lookup])
     where_type, enum_type = _choice_filter_types(schema, wire_lookup)
     with _choice_table(model):
@@ -670,7 +669,7 @@ def test_a_padded_enum_member_selects_its_untrimmed_value_over_the_trimmed_decoy
     wire_lookup: str,
 ) -> None:
     """A whitespace-bearing enum member selects its complete stored value, never its stripped decoy."""
-    model = _choice_model([(" padded ", "Padded"), ("padded", "Trimmed")], nullable=True)
+    model = _choice_model([(" padded ", "Padded"), ("padded", "Trimmed")])
     schema = _filtered_choice_schema(model, [lookup])
     where_type, enum_type = _choice_filter_types(schema, wire_lookup)
     with _choice_table(model):
@@ -705,7 +704,7 @@ def test_a_raw_empty_form_string_keeps_the_upstream_skip_on_every_text_choice_lo
     wire_lookup: str,
 ) -> None:
     """A consumer String argument keeps raw empty form data distinct from the BLANK enum member."""
-    model = _choice_model(_EMPTY_LABEL_CHOICES, blank=True, nullable=True)
+    model = _choice_model(_EMPTY_LABEL_CHOICES, blank=True)
     schema = _filtered_choice_schema(model, [lookup])
     _where_type, enum_type = _choice_filter_types(schema, wire_lookup)
     with _choice_table(model):
@@ -733,7 +732,7 @@ def test_a_raw_empty_form_string_keeps_the_upstream_skip_on_every_text_choice_lo
 @pytest.mark.django_db(transaction=True)
 def test_a_raw_null_form_string_keeps_the_upstream_null_choice_meaning() -> None:
     """A consumer's raw null sentinel selects SQL NULL while the literal text remains a decoy."""
-    model = _choice_model([("null", "Null"), ("other", "Other")], nullable=True)
+    model = _choice_model([("null", "Null"), ("other", "Other")])
     schema = _filtered_choice_schema(model, ["exact"])
     _where_type, enum_type = _choice_filter_types(schema, "exact")
     with _choice_table(model):
@@ -753,7 +752,7 @@ def test_a_raw_null_form_string_keeps_the_upstream_null_choice_meaning() -> None
 @pytest.mark.django_db(transaction=True)
 def test_a_raw_text_choice_pattern_accepts_text_outside_the_enum_members() -> None:
     """A consumer String argument can search a choice column by a partial raw form value."""
-    model = _choice_model(_EMPTY_LABEL_CHOICES, blank=True, nullable=True)
+    model = _choice_model(_EMPTY_LABEL_CHOICES, blank=True)
     schema = _filtered_choice_schema(model, ["icontains"])
     _where_type, enum_type = _choice_filter_types(schema, "iContains")
     with _choice_table(model):
@@ -770,10 +769,12 @@ def test_a_raw_empty_integer_choice_argument_keeps_the_unfiltered_rows() -> None
     """An empty raw String skips an integer-choice predicate instead of binding an empty integer."""
 
     class IntegerChoiceCarrier(models.Model):
-        status: "models.IntegerField[int | Combinable | None, int | None]" = models.IntegerField(
-            choices=[(1, "Low"), (2, "High")],
-            blank=True,
-            null=True,
+        status: "models.IntegerField[float | int | str | Combinable | None, int | None]" = (
+            models.IntegerField(
+                choices=[(1, "Low"), (2, "High")],
+                blank=True,
+                null=True,
+            )
         )
 
         class Meta:
