@@ -47,6 +47,7 @@ from __future__ import annotations
 import re
 import sys
 from collections.abc import Callable, Iterator, Mapping
+from dataclasses import MISSING
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Literal, NoReturn
 
@@ -106,7 +107,6 @@ from django_strawberry_framework.rest_framework.sets import (
 )
 from django_strawberry_framework.types import base as types_base
 from django_strawberry_framework.utils._narrowing import dict_of, read_attr
-from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.write_mixins import _ValidatedMutationMeta
 from tests._idioms import (
     ClassReadRaises,
@@ -2062,7 +2062,7 @@ def test_serializer_meta_optional_fields_is_not_the_public_api() -> None:
     assert input_cls is not None
     fields = _input_fields(input_cls)
     # ``name`` stays REQUIRED: the serializer-level optional_fields has no effect.
-    assert fields["name"].default_value is not UNSET
+    assert fields["name"].default_value is MISSING
 
 
 def test_mutation_optional_fields_unknown_name_raises_at_class_creation() -> None:

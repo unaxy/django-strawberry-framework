@@ -140,6 +140,7 @@ __all__ = (
     "object_result",
     "peel_strawberry_containers",
     "published_argument",
+    "published_argument_wire_name",
     "published_python_name",
     "return_type_of",
     "schema_config_from_info",
@@ -261,6 +262,15 @@ def published_argument(
     differently, so the answer belongs to the executing schema and is never
     stored.
 
+    The entry is matched by the back-referenced argument's Python name, never by
+    identity with ``Info.get_argument_definition``: a field object outlives a
+    schema build, and Strawberry's ``ConnectionExtension.apply`` appends
+    ``before`` / ``after`` / ``first`` / ``last`` to ``field.arguments`` on every
+    build, so after a second build over the same types that lookup returns the
+    first build's argument while the executing schema's map back-references its
+    own. The map belongs to the executing schema and holds one argument per
+    Python name.
+
     ``None`` when ``info`` carries no executable-schema metadata (a direct-call
     stub) or its field declares no ``parameter_name``, so the caller keeps the
     spelling it already has. A declared parameter the executable schema did not
@@ -271,8 +281,7 @@ def published_argument(
         get_arg_def = info.get_argument_definition
     except AttributeError:
         return None
-    arg_def = get_arg_def(parameter_name)
-    if arg_def is None:
+    if get_arg_def(parameter_name) is None:
         return None
     try:
         raw_info = info._raw_info
@@ -280,12 +289,30 @@ def published_argument(
         return None
     published_args = graphql_fields(raw_info.parent_type)[raw_info.field_name].args
     for wire_name, graphql_argument in published_args.items():
-        if _definition_backref(graphql_argument) is arg_def:
+        if published_python_name(graphql_argument) == parameter_name:
             return wire_name, graphql_argument
     raise ConfigurationError(
         f"Argument {parameter_name!r} on {raw_info.field_name} has a definition but no "
         "published wire name in the executable schema.",
     )
+
+
+def published_argument_wire_name(
+    info: "Info[object, object]",
+    parameter_name: str,
+    default: str,
+) -> str:
+    """Return the wire name the executing schema published for a parameter, else ``default``.
+
+    The name half of ``published_argument``, for a caller that keys an error to the
+    argument a client sent. ``default`` answers where ``published_argument`` answers
+    ``None`` (a direct-call stub, or a field that declares no ``parameter_name``): the
+    spelling the default ``NameConverter`` would have published.
+    """
+    published = published_argument(info, parameter_name)
+    if published is None:
+        return default
+    return published[0]
 
 
 def published_python_name(

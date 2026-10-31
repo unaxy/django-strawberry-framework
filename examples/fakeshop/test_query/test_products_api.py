@@ -46,6 +46,7 @@ import contextlib
 import json
 import string
 from collections.abc import Callable, Generator
+from functools import wraps
 from pathlib import Path
 from typing import NamedTuple
 
@@ -57,9 +58,10 @@ from apps.products.serializers import (
     REJECTED_RENAMED_DISPLAY_NAME,
     REJECTED_SERIALIZER_ITEM_NAME,
 )
-from apps.products.services import create_users, delete_data, seed_cascade_split, seed_data
+from apps.products.services import create_users, seed_cascade_split, seed_data
 from asgiref.sync import sync_to_async
 from config import schema as config_schema
+from django.apps import apps
 from django.contrib.auth.models import Permission, User
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import connection, transaction
@@ -94,7 +96,9 @@ from graphql_client import post_graphql_raw as _post_graphql_raw
 from strawberry import relay
 
 from django_strawberry_framework import DjangoMutation
+from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing import AsyncTestClient, TestClient
+from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.views import AsyncDjangoGraphQLView
 
 #: Settings that open the spec-048 error policy's pass-through gate for ONE live
@@ -123,9 +127,12 @@ def _staff_client() -> Client:
     return client
 
 
-def _global_id(type_name: str, pk: int | None) -> str:
+def _global_id(type_name: str, pk: object) -> str:
+    """Mint the id the currently finalized primary type emits for this model label."""
     assert pk is not None, "a GlobalID names a saved row"
-    return str(relay.GlobalID(type_name=type_name, node_id=str(pk)))
+    type_cls = registry.get(apps.get_model(type_name))
+    assert type_cls is not None, type_name
+    return global_id_for(type_cls, pk)
 
 
 def _login_with_perm(username: str, *codenames: str) -> Client:
@@ -294,12 +301,15 @@ def test_update_item_non_colliding_partial_update() -> None:
     create_users(1)
     seed_data(1)
     category = models.Category.objects.earliest("pk")
-    item = models.Item.objects.create(
-        name="Before",
+    item = models.Item.objects.order_by("pk")[0]
+    models.Item.objects.filter(pk=item.pk).update(
         description="keep me",
-        category=category,
         is_private=True,
+        attachment="",
+        name="Before",
+        category=category,
     )
+    item.refresh_from_db()
     client = _login_with_perm("staff_1", "change_item")
 
     data = _graphql_data(
@@ -423,7 +433,15 @@ def test_delete_item_happy_path() -> None:
     create_users(1)
     seed_data(1)
     category = models.Category.objects.earliest("pk")
-    item = models.Item.objects.create(name="Doomed", category=category)
+    item = models.Item.objects.order_by("pk")[0]
+    models.Item.objects.filter(pk=item.pk).update(
+        description="",
+        is_private=False,
+        attachment="",
+        name="Doomed",
+        category=category,
+    )
+    item.refresh_from_db()
     gid = _global_id("products.item", item.pk)
     client = _login_with_perm("staff_1", "delete_item")
 
@@ -464,8 +482,24 @@ def test_delete_item_refused_by_a_hold_returns_the_protected_envelope(reference:
     create_users(1)
     seed_data(1)
     category = models.Category.objects.earliest("pk")
-    held = models.Item.objects.create(name="Held", category=category)
-    other = models.Item.objects.create(name="Other", category=category)
+    held = models.Item.objects.order_by("pk")[0]
+    models.Item.objects.filter(pk=held.pk).update(
+        description="",
+        is_private=False,
+        attachment="",
+        name="Held",
+        category=category,
+    )
+    held.refresh_from_db()
+    other = models.Item.objects.order_by("pk")[1]
+    models.Item.objects.filter(pk=other.pk).update(
+        description="",
+        is_private=False,
+        attachment="",
+        name="Other",
+        category=category,
+    )
+    other.refresh_from_db()
     if reference == "item":
         models.ItemHold.objects.create(reason="reserved", item=held)
     else:
@@ -632,11 +666,15 @@ def test_update_item_explicit_null_description_is_a_field_error(document: str, r
     create_users(1)
     seed_data(1)
     category = models.Category.objects.earliest("pk")
-    item = models.Item.objects.create(
-        name="KeepsItsDescription",
+    item = models.Item.objects.order_by("pk")[0]
+    models.Item.objects.filter(pk=item.pk).update(
         description="stored",
+        is_private=False,
+        attachment="",
+        name="KeepsItsDescription",
         category=category,
     )
+    item.refresh_from_db()
     client = _login_with_perm("staff_1", "change_item")
 
     data = _graphql_data(
@@ -751,11 +789,15 @@ def test_update_item_via_prefixed_form_binds_the_one_field(shape: str) -> None:
     create_users(1)
     seed_data(1)
     category = models.Category.objects.earliest("pk")
-    item = models.Item.objects.create(
-        name="PrefixedUpdate",
+    item = models.Item.objects.order_by("pk")[0]
+    models.Item.objects.filter(pk=item.pk).update(
         description="stored",
+        is_private=False,
+        attachment="",
+        name="PrefixedUpdate",
         category=category,
     )
+    item.refresh_from_db()
     client = _login_with_perm("staff_1", "change_item")
     document, root = _update_via_prefixed_form(shape)
 
@@ -839,12 +881,15 @@ def test_update_item_via_prefixed_form_explicit_null_is_a_field_error(
     create_users(1)
     seed_data(1)
     category = models.Category.objects.earliest("pk")
-    item = models.Item.objects.create(
-        name="PrefixedKeeps",
+    item = models.Item.objects.order_by("pk")[0]
+    models.Item.objects.filter(pk=item.pk).update(
         description="stored",
-        category=category,
         is_private=True,
+        attachment="",
+        name="PrefixedKeeps",
+        category=category,
     )
+    item.refresh_from_db()
     client = _login_with_perm("staff_1", "change_item")
     document, root = _update_via_prefixed_form(shape)
 
@@ -903,7 +948,15 @@ def test_update_item_with_required_file_via_prefixed_form_keeps_the_file(
     create_users(1)
     seed_data(1)
     category = models.Category.objects.earliest("pk")
-    item = models.Item.objects.create(name="RequiredFile", category=category)
+    item = models.Item.objects.order_by("pk")[0]
+    models.Item.objects.filter(pk=item.pk).update(
+        description="",
+        is_private=False,
+        attachment="",
+        name="RequiredFile",
+        category=category,
+    )
+    item.refresh_from_db()
     client = _login_with_perm("staff_1", "change_item")
     root = _REQUIRED_FILE_PREFIXED_ROOTS[shape]
 
@@ -953,13 +1006,21 @@ def test_delete_item_snapshot_carries_connection_child_edges() -> None:
     create_users(1)
     seed_data(1)
     category = models.Category.objects.earliest("pk")
-    properties = list(models.Property.objects.filter(category=category)[:2])
-    item = models.Item.objects.create(name="DoomedWithEntries", category=category)
-    entry_pks = [
-        models.Entry.objects.create(value=f"live-entry-{index}", item=item, property=prop).pk
-        for index, prop in enumerate(properties)
-    ]
-    assert len(entry_pks) == 2, "seed_data(1) must give the first category >=2 properties"
+    item = models.Item.objects.order_by("pk")[0]
+    models.Item.objects.filter(pk=item.pk).update(
+        description="",
+        is_private=False,
+        attachment="",
+        name="DoomedWithEntries",
+        category=category,
+    )
+    item.refresh_from_db()
+    entries = list(models.Entry.objects.filter(item=item).order_by("pk")[:2])
+    assert len(entries) == 2, "seed_data(1) must give the first item >=2 entries"
+    entry_pks = [entry.pk for entry in entries]
+    models.Entry.objects.filter(item=item).exclude(pk__in=entry_pks).delete()
+    models.Entry.objects.filter(pk=entries[0].pk).update(value="live-entry-0", is_private=False)
+    models.Entry.objects.filter(pk=entries[1].pk).update(value="live-entry-1", is_private=False)
     client = _login_with_perm("staff_1", "delete_item")
 
     data = _graphql_data(
@@ -1136,7 +1197,15 @@ def test_update_item_nul_in_name_is_the_same_field_error_in_every_flavor(flavor:
     create_users(1)
     seed_data(1)
     category = models.Category.objects.earliest("pk")
-    item = models.Item.objects.create(name="Before", description="keep me", category=category)
+    item = models.Item.objects.order_by("pk")[0]
+    models.Item.objects.filter(pk=item.pk).update(
+        description="keep me",
+        is_private=False,
+        attachment="",
+        name="Before",
+        category=category,
+    )
+    item.refresh_from_db()
     client = _login_with_perm("staff_1", "change_item")
     field, input_type = _ITEM_NAME_UPDATES[flavor]
 
@@ -1199,7 +1268,15 @@ def test_create_item_unique_constraint_envelope_uses_all_sentinel() -> None:
     create_users(1)
     seed_data(1)
     category = models.Category.objects.earliest("pk")
-    existing = models.Item.objects.create(name="Dup", category=category)
+    existing = models.Item.objects.order_by("pk")[0]
+    models.Item.objects.filter(pk=existing.pk).update(
+        description="",
+        is_private=False,
+        attachment="",
+        name="Dup",
+        category=category,
+    )
+    existing.refresh_from_db()
     client = _login_with_perm("view_item_1", "add_item")
 
     response = _post_graphql(
@@ -1316,8 +1393,18 @@ def test_update_item_partial_collision_on_unique_constraint_changing_only_name()
     create_users(1)
     seed_data(1)
     category = models.Category.objects.earliest("pk")
-    item_a = models.Item.objects.create(name="A", category=category)
-    models.Item.objects.create(name="B", category=category)
+    item_a = models.Item.objects.order_by("pk")[0]
+    models.Item.objects.filter(pk=item_a.pk).update(
+        description="",
+        is_private=False,
+        attachment="",
+        name="A",
+        category=category,
+    )
+    item_a.refresh_from_db()
+    models.Item.objects.filter(
+        pk=models.Item.objects.order_by("pk").values_list("pk", flat=True)[1],
+    ).update(description="", is_private=False, attachment="", name="B", category=category)
     client = _login_with_perm("staff_1", "change_item")
 
     response = _post_graphql(
@@ -1428,7 +1515,15 @@ def test_update_item_missing_change_perm_is_denied_no_write() -> None:
     create_users(1)
     seed_data(1)
     category = models.Category.objects.earliest("pk")
-    item = models.Item.objects.create(name="KeepMyName", description="keep me", category=category)
+    item = models.Item.objects.order_by("pk")[0]
+    models.Item.objects.filter(pk=item.pk).update(
+        description="keep me",
+        is_private=False,
+        attachment="",
+        name="KeepMyName",
+        category=category,
+    )
+    item.refresh_from_db()
     client = _login_with_perm("staff_1", "add_item")  # holds add, LACKS change
 
     response = _post_graphql(
@@ -1460,7 +1555,15 @@ def test_delete_item_missing_delete_perm_is_denied_no_write() -> None:
     create_users(1)
     seed_data(1)
     category = models.Category.objects.earliest("pk")
-    item = models.Item.objects.create(name="Undoomed", category=category)
+    item = models.Item.objects.order_by("pk")[0]
+    models.Item.objects.filter(pk=item.pk).update(
+        description="",
+        is_private=False,
+        attachment="",
+        name="Undoomed",
+        category=category,
+    )
+    item.refresh_from_db()
     client = _login_with_perm("staff_1", "add_item")  # holds add, LACKS delete
 
     response = _post_graphql(
@@ -1633,7 +1736,15 @@ def test_update_item_anonymous_on_hidden_private_row_is_not_found_before_any_aut
     create_users(1)
     seed_data(1)
     category = models.Category.objects.earliest("pk")
-    hidden = models.Item.objects.create(name="SecretRow", category=category, is_private=True)
+    hidden = models.Item.objects.order_by("pk")[0]
+    models.Item.objects.filter(pk=hidden.pk).update(
+        description="",
+        is_private=True,
+        attachment="",
+        name="SecretRow",
+        category=category,
+    )
+    hidden.refresh_from_db()
 
     response = _post_graphql(
         _UPDATE_ITEM,
@@ -1694,7 +1805,8 @@ def test_create_item_unresolvable_type_category_id_is_field_error() -> None:
     seed_data(1)
     client = _login_with_perm("view_item_1", "add_item")
     before = models.Item.objects.count()
-    bogus = _global_id("nope.nonexistent", 1)
+    # This wire fixture deliberately names no registered type, so no real type can mint it.
+    bogus = str(relay.GlobalID(type_name="nope.nonexistent", node_id="1"))
 
     response = _post_graphql(
         _CREATE_ITEM,
@@ -1728,7 +1840,15 @@ def test_update_item_wrong_type_global_id_on_id_is_field_error() -> None:
     create_users(1)
     seed_data(1)
     category = models.Category.objects.earliest("pk")
-    item = models.Item.objects.create(name="Untouched", category=category)
+    item = models.Item.objects.order_by("pk")[0]
+    models.Item.objects.filter(pk=item.pk).update(
+        description="",
+        is_private=False,
+        attachment="",
+        name="Untouched",
+        category=category,
+    )
+    item.refresh_from_db()
     client = _login_with_perm("staff_1", "change_item")
 
     # A well-formed Category GlobalID whose numeric pk collides with the Item's pk
@@ -1751,7 +1871,8 @@ def test_update_item_wrong_type_global_id_on_id_is_field_error() -> None:
     assert item.name == "Untouched"
 
     # A GlobalID naming a type that resolves to nothing is rejected the same way.
-    unresolvable_gid = _global_id("nope.nonexistent", item.pk)
+    # The unknown type is the malformed input, rather than a finalized type's emitted id.
+    unresolvable_gid = str(relay.GlobalID(type_name="nope.nonexistent", node_id=str(item.pk)))
     response = _post_graphql(
         _UPDATE_ITEM,
         client=client,
@@ -1776,7 +1897,15 @@ def test_delete_item_wrong_type_global_id_on_id_is_field_error() -> None:
     create_users(1)
     seed_data(1)
     category = models.Category.objects.earliest("pk")
-    item = models.Item.objects.create(name="Survivor", category=category)
+    item = models.Item.objects.order_by("pk")[0]
+    models.Item.objects.filter(pk=item.pk).update(
+        description="",
+        is_private=False,
+        attachment="",
+        name="Survivor",
+        category=category,
+    )
+    item.refresh_from_db()
     client = _login_with_perm("staff_1", "delete_item")
 
     wrong_gid = _global_id("products.category", item.pk)
@@ -1884,7 +2013,15 @@ def test_update_item_explicit_null_category_id_is_field_error() -> None:
     create_users(1)
     seed_data(1)
     category = models.Category.objects.earliest("pk")
-    item = models.Item.objects.create(name="HasCategory", category=category)
+    item = models.Item.objects.order_by("pk")[0]
+    models.Item.objects.filter(pk=item.pk).update(
+        description="",
+        is_private=False,
+        attachment="",
+        name="HasCategory",
+        category=category,
+    )
+    item.refresh_from_db()
     client = _login_with_perm("staff_1", "change_item")
 
     response = _post_graphql(
@@ -1936,7 +2073,8 @@ def test_update_item_explicit_null_scalar_name_is_field_error() -> None:
 
 
 @pytest.mark.django_db(transaction=True)
-def test_update_item_malformed_id_is_field_error_no_coercion_crash() -> None:
+@pytest.mark.parametrize("id_shape", ["malformed", "raw-pk"], ids=["malformed", "raw-pk"])
+def test_update_item_malformed_id_is_field_error_no_coercion_crash(id_shape: str) -> None:
     """A malformed / raw-pk ``id:`` on `updateItem` -> `FieldError` on `id`, no crash.
 
     The ``id:`` is `ID!` and decoded server-side; a string that is not a well-formed
@@ -1947,21 +2085,29 @@ def test_update_item_malformed_id_is_field_error_no_coercion_crash() -> None:
     create_users(1)
     seed_data(1)
     category = models.Category.objects.earliest("pk")
-    item = models.Item.objects.create(name="Untouched", category=category)
+    item = models.Item.objects.order_by("pk")[0]
+    models.Item.objects.filter(pk=item.pk).update(
+        description="",
+        is_private=False,
+        attachment="",
+        name="Untouched",
+        category=category,
+    )
+    item.refresh_from_db()
     client = _login_with_perm("staff_1", "change_item")
 
-    for bad_id in ("not-a-global-id", str(item.pk)):
-        response = _post_graphql(
-            _UPDATE_ITEM,
-            client=client,
-            variables={"id": bad_id, "d": {"name": "Renamed"}},
-        )
-        assert response.status_code == 200
-        payload = response_json(response)
-        assert "errors" not in payload, payload
-        result = json_at(payload, "data", "updateItem")
-        assert json_at(result, "node") is None
-        assert [json_at(e, "field") for e in json_list(result, "errors")] == ["id"]
+    bad_id = "not-a-global-id" if id_shape == "malformed" else str(item.pk)
+    response = _post_graphql(
+        _UPDATE_ITEM,
+        client=client,
+        variables={"id": bad_id, "d": {"name": "Renamed"}},
+    )
+    assert response.status_code == 200
+    payload = response_json(response)
+    assert "errors" not in payload, payload
+    result = json_at(payload, "data", "updateItem")
+    assert json_at(result, "node") is None
+    assert [json_at(e, "field") for e in json_list(result, "errors")] == ["id"]
     item.refresh_from_db()
     assert item.name == "Untouched"
 
@@ -2013,10 +2159,18 @@ def test_update_item_wellformed_id_uncoercible_node_id_is_not_found_no_crash() -
     create_users(1)
     seed_data(1)
     category = models.Category.objects.earliest("pk")
-    item = models.Item.objects.create(name="Untouched", category=category)
+    item = models.Item.objects.order_by("pk")[0]
+    models.Item.objects.filter(pk=item.pk).update(
+        description="",
+        is_private=False,
+        attachment="",
+        name="Untouched",
+        category=category,
+    )
+    item.refresh_from_db()
     client = _login_with_perm("staff_1", "change_item")
 
-    bad_id = str(relay.GlobalID(type_name="products.item", node_id="abc"))
+    bad_id = str(_global_id("products.item", "abc"))
     response = _post_graphql(
         _UPDATE_ITEM,
         client=client,
@@ -2049,7 +2203,7 @@ def test_create_item_wellformed_relation_id_uncoercible_node_id_is_field_error_n
     client = _login_with_perm("view_item_1", "add_item")
     before = models.Item.objects.count()
 
-    bad_cat = str(relay.GlobalID(type_name="products.category", node_id="abc"))
+    bad_cat = str(_global_id("products.category", "abc"))
     response = _post_graphql(
         _CREATE_ITEM,
         client=client,
@@ -2094,7 +2248,7 @@ def test_create_item_relation_id_absurd_huge_pk_is_field_error_no_overflow() -> 
     client = _login_with_perm("view_item_1", "add_item")
     before = models.Item.objects.count()
 
-    huge_cat = str(relay.GlobalID(type_name="products.category", node_id=_ABSURD_INTEGER_NODE_ID))
+    huge_cat = str(_global_id("products.category", _ABSURD_INTEGER_NODE_ID))
     response = _post_graphql(
         _CREATE_ITEM,
         client=client,
@@ -2123,10 +2277,18 @@ def test_update_item_id_absurd_huge_pk_is_not_found_no_overflow() -> None:
     create_users(1)
     seed_data(1)
     category = models.Category.objects.earliest("pk")
-    item = models.Item.objects.create(name="Untouched", category=category)
+    item = models.Item.objects.order_by("pk")[0]
+    models.Item.objects.filter(pk=item.pk).update(
+        description="",
+        is_private=False,
+        attachment="",
+        name="Untouched",
+        category=category,
+    )
+    item.refresh_from_db()
     client = _login_with_perm("staff_1", "change_item")
 
-    huge_id = str(relay.GlobalID(type_name="products.item", node_id=_ABSURD_INTEGER_NODE_ID))
+    huge_id = str(_global_id("products.item", _ABSURD_INTEGER_NODE_ID))
     response = _post_graphql(
         _UPDATE_ITEM,
         client=client,
@@ -2394,24 +2556,10 @@ def test_products_optimizer_merges_duplicate_root_field_nodes_over_http() -> Non
 
 @pytest.mark.django_db
 def test_products_optimizer_prefetches_nested_reverse_fk_depth_2_over_http() -> None:
-    """Through the connection wrapper: depth-2 reverse-FK prefetch holds.
+    """Three table reads serve the exact visible category/item/entry graph, with no COUNT.
 
-    `allCategories` is a connection (one planned categories slice query), and
-    `items` / `entries` stay LIST relations (`{ name }`, not `itemsConnection`)
-    - the depth-2 reverse-FK prefetch chain the test pins is
-    exactly 1 categories slice + 1 `items` prefetch + 1 `entries` prefetch =
-    3 queries, no COUNT. The activated cascade hooks (spec-034) do NOT
-    add per-row queries - their `__in` subqueries compile inline (Decision 7) -
-    so the count stays a fixed 3.
-
-    What the cascade DOES change is row VISIBILITY: run anonymously, the three
-    levels narrow to the cascade-visible set (public categories; non-private
-    items under them; entries passing the full Entry -> Item -> Category /
-    Entry -> Property -> Category chain). Counts are therefore derived from the
-    equivalent post-cascade ORM queries (API == ORM), keeping the pin robust
-    across `seed_data`'s fixed-seed Item/Entry privacy. The deterministic Category
-    `% 2` split keeps the public-category count well under the
-    `relay_max_results` cap.
+    Raw relation-list order is not the claim. IDs keep every row attached to
+    its independently derived parent even if equal text values occur elsewhere.
     """
     seed_data(1)
     visible_categories = models.Category.objects.filter(is_private=False)
@@ -2423,10 +2571,24 @@ def test_products_optimizer_prefetches_nested_reverse_fk_depth_2_over_http() -> 
         property__is_private=False,
         property__category__is_private=False,
     )
-    assert 0 < visible_categories.count() < _RELAY_MAX_RESULTS, (
-        "fixture must be non-empty (an empty page skips the prefetch queries this test "
-        "counts) and stay under the cap so the full-set assertion is not silently truncated"
-    )
+    assert 0 < visible_categories.count() < _RELAY_MAX_RESULTS
+    assert visible_items.exists(), "the nested item projection needs a populated witness"
+    assert visible_entries.exists(), "the depth-two entry projection needs a populated witness"
+    expected: dict[str, object] = {}
+    for category in visible_categories.order_by("pk"):
+        expected_items: dict[str, object] = {}
+        for item in visible_items.filter(category=category).order_by("pk"):
+            expected_items[global_id_for(products_schema.ItemType, item.pk)] = {
+                "name": item.name,
+                "entries": {
+                    global_id_for(products_schema.EntryType, entry.pk): entry.value
+                    for entry in visible_entries.filter(item=item).order_by("pk")
+                },
+            }
+        expected[global_id_for(products_schema.CategoryType, category.pk)] = {
+            "name": category.name,
+            "items": expected_items,
+        }
 
     with CaptureQueriesContext(connection) as captured:
         response = _post_graphql(
@@ -2435,10 +2597,10 @@ def test_products_optimizer_prefetches_nested_reverse_fk_depth_2_over_http() -> 
               allCategories {
                 edges {
                   node {
-                    name
+                    id name
                     items {
-                      name
-                      entries { value }
+                      id name
+                      entries { id value }
                     }
                   }
                 }
@@ -2446,22 +2608,42 @@ def test_products_optimizer_prefetches_nested_reverse_fk_depth_2_over_http() -> 
             }
             """,
         )
-
     assert response.status_code == 200
     payload = response_json(response)
     assert "errors" not in payload, payload
     categories = [
-        json_at(edge, "node") for edge in json_list(payload, "data", "allCategories", "edges")
+        json_object(edge, "node") for edge in json_list(payload, "data", "allCategories", "edges")
     ]
     items = [item for category in categories for item in json_list(category, "items")]
     entries = [entry for item in items for entry in json_list(item, "entries")]
+    observed: dict[str, object] = {}
+    for category in categories:
+        observed_items: dict[str, object] = {}
+        for item in json_list(category, "items"):
+            observed_items[json_str(item, "id")] = {
+                "name": json_str(item, "name"),
+                "entries": {
+                    json_str(entry, "id"): json_str(entry, "value")
+                    for entry in json_list(item, "entries")
+                },
+            }
+        observed[json_str(category, "id")] = {
+            "name": json_str(category, "name"),
+            "items": observed_items,
+        }
+    assert observed == expected
+    # Retain cardinalities as well: duplicate IDs must not disappear into the maps.
     assert len(categories) == visible_categories.count()
     assert len(items) == visible_items.count()
     assert len(entries) == visible_entries.count()
     assert len(captured) == 3, [query["sql"] for query in captured]
-    assert "products_category" in captured[0]["sql"]
-    assert "products_item" in captured[1]["sql"]
-    assert "products_entry" in captured[2]["sql"]
+    for query, table in zip(
+        captured,
+        ("products_category", "products_item", "products_entry"),
+        strict=True,
+    ):
+        assert query["sql"].split(" FROM ", 1)[1].startswith(f'"{table}"'), query["sql"]
+        assert "COUNT(" not in query["sql"].upper(), query["sql"]
 
 
 # The connection caps an un-paginated default page (and any explicit ``first:``)
@@ -3054,10 +3236,9 @@ def test_products_categories_filter_by_relay_own_pk_global_id_in() -> None:
     permission gate guards ``id``, so this works anonymously (the targets
     are PUBLIC rows, visible under the activated cascade - spec-034).
 
-    The two target categories carry EXPLICIT multi-digit pks selected above
-    every row created by ``seed_data``: the ``in`` filter must consume the
-    whole decoded id list in ONE predicate without assuming that a database
-    sequence begins at a fixed value.
+    The two target categories carry multi-digit pks from ``seed_data``: the
+    ``in`` filter must consume the whole decoded id list in ONE predicate
+    without assuming that a database sequence begins at a fixed value.
     Per-element delegation that applied ``pk__in="26"`` would have Django
     iterate the STRING, exploding the clause to ``IN ('2','6')`` - correct by
     accident for the single-digit pks a fresh-per-test SQLite database hands
@@ -3065,25 +3246,20 @@ def test_products_categories_filter_by_relay_own_pk_global_id_in() -> None:
     rolled-back tests) passes 9.
     """
     seed_data(1)
-    highest_pk = models.Category.objects.order_by("-pk").values_list("pk", flat=True).first()
-    alpha_pk = max(126, (highest_pk or 0) + 1)
-    beta_pk = alpha_pk + 2
-    models.Category.objects.create(
+    targets = list(models.Category.objects.order_by("-pk")[:2])
+    alpha_pk, beta_pk = sorted(category.pk for category in targets if category.pk is not None)
+    assert alpha_pk > 9
+    models.Category.objects.filter(pk=alpha_pk).update(
         name="gid-in-alpha",
         description="d",
         is_private=False,
-        pk=alpha_pk,
     )
-    models.Category.objects.create(
+    models.Category.objects.filter(pk=beta_pk).update(
         name="gid-in-beta",
         description="d",
         is_private=False,
-        pk=beta_pk,
     )
-    gids = ", ".join(
-        f'"{relay.GlobalID(type_name=models.Category._meta.label_lower, node_id=str(pk))}"'
-        for pk in (alpha_pk, beta_pk)
-    )
+    gids = ", ".join(json.dumps(_global_id("products.category", pk)) for pk in (alpha_pk, beta_pk))
     _assert_graphql_data(
         f"query {{ allCategories(filter: {{ id: {{ in: [{gids}] }} }}) "
         "{ edges { node { name } } } }",
@@ -3111,15 +3287,23 @@ def test_products_categories_generated_reverse_fk_leaf_collapses_duplicate_paren
     """A generated reverse-FK leaf returns one parent even when two children match."""
     seed_data(1)
     category = models.Category.objects.filter(is_private=False).earliest("pk")
-    models.Item.objects.create(
+    models.Item.objects.filter(
+        pk=models.Item.objects.order_by("pk").values_list("pk", flat=True)[0],
+    ).update(
+        description="",
+        is_private=False,
+        attachment="",
         name="duplicate-leaf-alpha",
         category=category,
-        is_private=False,
     )
-    models.Item.objects.create(
+    models.Item.objects.filter(
+        pk=models.Item.objects.order_by("pk").values_list("pk", flat=True)[1],
+    ).update(
+        description="",
+        is_private=False,
+        attachment="",
         name="duplicate-leaf-beta",
         category=category,
-        is_private=False,
     )
 
     _assert_graphql_data(
@@ -3145,7 +3329,15 @@ def test_products_categories_items_name_leaf_never_matches_through_a_private_ite
     """
     seed_data(1)
     category = models.Category.objects.filter(is_private=False).earliest("pk")
-    models.Item.objects.create(name="zz-private-leaf", category=category, is_private=True)
+    models.Item.objects.filter(
+        pk=models.Item.objects.order_by("pk").values_list("pk", flat=True)[0],
+    ).update(
+        description="",
+        is_private=True,
+        attachment="",
+        name="zz-private-leaf",
+        category=category,
+    )
     staff = _staff_client()
     found = {"allCategories": {"edges": [{"node": {"name": category.name}}]}}
     _assert_graphql_data(_CATEGORIES_BY_ITEM_NAME, found, client=staff)
@@ -3231,7 +3423,7 @@ def test_products_items_filter_by_related_category_global_id() -> None:
     seed_data(1)
     category = models.Category.objects.filter(is_private=False).earliest("id")
     gid = str(
-        relay.GlobalID(type_name=models.Category._meta.label_lower, node_id=str(category.pk)),
+        _global_id(models.Category._meta.label_lower, str(category.pk)),
     )
     expected = [
         {"node": {"name": row.name}}
@@ -3393,7 +3585,7 @@ def test_products_items_filter_and_order_compose() -> None:
     seed_data(1)
     category = models.Category.objects.filter(is_private=False).earliest("id")
     gid = str(
-        relay.GlobalID(type_name=models.Category._meta.label_lower, node_id=str(category.pk)),
+        _global_id(models.Category._meta.label_lower, str(category.pk)),
     )
     expected = [
         {"node": {"name": row.name}}
@@ -3408,8 +3600,8 @@ def test_products_items_filter_and_order_compose() -> None:
 
 # ---------------------------------------------------------------------------
 # Nested relation-connection windowed-prefetch coverage (the spec-033 live
-# fixed-count pin). The reverse-FK windowed nested-connection shape the M2M-only
-# library graph cannot express live: ``Category.items`` synthesizes an
+# fixed-count pin). The catalog's reverse-FK window, under its shipped
+# visibility cascade: ``Category.items`` synthesizes an
 # ``itemsConnection`` (both ``CategoryType`` and ``ItemType`` are
 # Relay-Node-shaped, so the spec-032 synthesis covers it), and the
 # optimizer plans it as a single windowed ``Prefetch``. The raw ``items``
@@ -3427,9 +3619,9 @@ query {
   allCategories {
     edges {
       node {
-        name
+        id name
         itemsConnection(first: 2) {
-          edges { node { name } }
+          edges { node { id name } }
         }
       }
     }
@@ -3439,67 +3631,67 @@ query {
 
 
 @pytest.mark.django_db
-def test_products_categories_items_connection_fixed_query_count() -> None:
-    """The nested reverse-FK ``itemsConnection`` resolves in a FIXED query count.
+@pytest.mark.parametrize(
+    "seed_count",
+    [1, 3],
+    ids=["one-item-per-parent", "three-items-per-parent"],
+)
+def test_products_categories_items_connection_fixed_query_count(seed_count: int) -> None:
+    """Each seed width serves exact per-parent first-two pages in one batched child query.
 
-    Runs the same ``allCategories { edges { node { itemsConnection(first: 2)
-    { edges { node } } } } }`` query under two seed cardinalities and asserts
-    the captured query count is EQUAL (and absolutely small) across both -- the
-    N+1 disproof. The windowed path is a FIXED 2 queries (one ``allCategories``
-    slice + one windowed ``itemsConnection`` prefetch covering every category's
-    page). A per-parent fallback issues at least one query per parent and scales
-    with the number of ITEMS under ``first: 2``, so it neither stays equal across
-    the two seedings nor lands at 2. Both seedings hold the parent-category count
-    fixed and grow items-per-category, so the equality rules out a per-child N+1
-    and the absolute ``== 2`` rules out the item-scaling fallback.
-
-    Under the activated cascade (spec-034) this query runs anonymously,
-    so the cascade narrows the result to the public categories (the deterministic
-    ``% 2`` split, ~half of the seeded providers) and the windowed
-    ``itemsConnection`` prefetch child carries ``ItemType``'s cascade too (only
-    non-private items). That is exactly the interaction this pin must prove
-    query-stable: the cascade's ``__in`` subqueries compile inline (Decision 7),
-    so the count stays a FIXED 2 even with the hooks active. The membership check
-    confirms each returned ``itemsConnection`` page is its own parent's window
-    (every returned item belongs to that category, ``first: 2`` honoured).
-
-    ``itemsConnection`` carries only ``first:`` (no sidecars) so it window-plans
-    rather than falling back (Decision 6). Both seedings stay well under the
-    ``relay_max_results`` cap.
+    The parent count is fixed by provider discovery. These cases vary children
+    per parent; the absolute two-statement window contract rules out per-parent
+    fallback, while the wider populated witness makes the page bound observable.
     """
+    seed_data(seed_count)
+    parents = list(models.Category.objects.filter(is_private=False).order_by("pk"))
+    assert 1 < len(parents) < _RELAY_MAX_RESULTS
+    witness = parents[0]
+    models.Item.objects.filter(category=witness).update(is_private=False)
+    witness_width = models.Item.objects.filter(category=witness, is_private=False).count()
+    assert witness_width == seed_count
+    expected_edges: list[JSONObject] = []
+    for category in parents:
+        page = models.Item.objects.filter(
+            category=category,
+            is_private=False,
+            category__is_private=False,
+        ).order_by("pk")[:2]
+        expected_edges.append(
+            {
+                "node": {
+                    "id": global_id_for(products_schema.CategoryType, category.pk),
+                    "name": category.name,
+                    "itemsConnection": {
+                        "edges": [
+                            {
+                                "node": {
+                                    "id": global_id_for(products_schema.ItemType, item.pk),
+                                    "name": item.name,
+                                },
+                            }
+                            for item in page
+                        ],
+                    },
+                },
+            },
+        )
+    expected: JSONObject = {"data": {"allCategories": {"edges": expected_edges}}}
+    assert any(json_list(edge, "node", "itemsConnection", "edges") for edge in expected_edges)
+    assert len(json_list(expected_edges[0], "node", "itemsConnection", "edges")) == min(
+        2,
+        seed_count,
+    )
 
-    def _run(seed_count: int) -> int:
-        delete_data("everything")
-        seed_data(seed_count)
-        with CaptureQueriesContext(connection) as captured:
-            response = _post_graphql(_CATEGORIES_ITEMS_CONNECTION_QUERY)
-        assert response.status_code == 200
-        payload = response_json(response)
-        assert "errors" not in payload, payload
-        edges = json_list(payload, "data", "allCategories", "edges")
-        # Each category node's itemsConnection is its OWN windowed page: every
-        # returned item belongs to that category and the page honours first: 2.
-        for edge in edges:
-            node = json_at(edge, "node")
-            category = models.Category.objects.get(name=json_at(node, "name"))
-            item_names = {
-                json_at(ie, "node", "name") for ie in json_list(node, "itemsConnection", "edges")
-            }
-            assert len(item_names) <= 2
-            assert item_names <= set(
-                category.items.values_list("name", flat=True),
-            )
-        return len(captured)
-
-    one_item_each = _run(1)
-    three_items_each = _run(3)
-
-    # Load-bearing: count is equal across the two parent cardinalities (no N+1).
-    assert one_item_each == three_items_each
-    # Strengthening: the empirically-derived windowed fixed count (1 allCategories
-    # slice query + 1 windowed itemsConnection prefetch); a fallback issues at
-    # least one query per parent and scales with items (measured ~52 / ~102 here).
-    assert three_items_each == 2
+    with CaptureQueriesContext(connection) as captured:
+        response = _post_graphql(_CATEGORIES_ITEMS_CONNECTION_QUERY)
+    assert response.status_code == 200
+    assert response_json(response) == expected
+    assert len(captured) == 2, [query["sql"] for query in captured]
+    assert captured[0]["sql"].split(" FROM ", 1)[1].startswith('"products_category"')
+    assert 'FROM "products_item"' in captured[1]["sql"]
+    assert "ROW_NUMBER() OVER" in captured[1]["sql"].upper(), captured[1]["sql"]
+    assert "COUNT(" not in captured[1]["sql"].upper(), captured[1]["sql"]
 
 
 # ``after`` + ``before`` on the windowed nested ``itemsConnection``. An INVERTED
@@ -4001,7 +4193,7 @@ def test_cascade_composes_with_filter_and_order_live() -> None:
     # by name. Derived from the equivalent post-cascade ORM query (API == ORM).
     category = models.Category.objects.filter(is_private=False).earliest("id")
     gid = str(
-        relay.GlobalID(type_name=models.Category._meta.label_lower, node_id=str(category.pk)),
+        _global_id(models.Category._meta.label_lower, str(category.pk)),
     )
     expected = [
         {"node": {"name": row.name}}
@@ -4584,11 +4776,15 @@ def test_update_item_via_form_non_colliding_partial_update() -> None:
     create_users(1)
     seed_data(1)
     category = models.Category.objects.earliest("pk")
-    item = models.Item.objects.create(
-        name="BeforeForm",
+    item = models.Item.objects.order_by("pk")[0]
+    models.Item.objects.filter(pk=item.pk).update(
         description="keep me",
+        is_private=False,
+        attachment="",
+        name="BeforeForm",
         category=category,
     )
+    item.refresh_from_db()
     client = _login_with_perm("staff_1", "change_item")
 
     with CaptureQueriesContext(connection) as captured:
@@ -4629,11 +4825,15 @@ def test_update_item_via_form_partial_update_preserves_category_and_description(
     create_users(1)
     seed_data(1)
     category = models.Category.objects.earliest("pk")
-    item = models.Item.objects.create(
-        name="PreserveBefore",
+    item = models.Item.objects.order_by("pk")[0]
+    models.Item.objects.filter(pk=item.pk).update(
         description="preserve this description",
+        is_private=False,
+        attachment="",
+        name="PreserveBefore",
         category=category,
     )
+    item.refresh_from_db()
     original_category_id = item.category_id
     client = _login_with_perm("staff_1", "change_item")
 
@@ -4666,11 +4866,15 @@ def test_update_item_via_form_refuses_an_omitted_dangling_category() -> None:
     create_users(1)
     seed_data(1)
     category = models.Category.objects.earliest("pk")
-    item = models.Item.objects.create(
-        name="DanglingBefore",
+    item = models.Item.objects.order_by("pk")[0]
+    models.Item.objects.filter(pk=item.pk).update(
         description="keep me",
+        is_private=False,
+        attachment="",
+        name="DanglingBefore",
         category=category,
     )
+    item.refresh_from_db()
     client = _login_with_perm("staff_1", "change_item")
 
     with connection.constraint_checks_disabled():
@@ -4729,11 +4933,15 @@ def test_update_item_via_form_revalidates_an_untouched_stale_name() -> None:
     create_users(1)
     seed_data(1)
     category = models.Category.objects.earliest("pk")
-    item = models.Item.objects.create(
-        name=REJECTED_ITEM_NAME,
+    item = models.Item.objects.order_by("pk")[0]
+    models.Item.objects.filter(pk=item.pk).update(
         description="Before",
+        is_private=False,
+        attachment="",
+        name=REJECTED_ITEM_NAME,
         category=category,
     )
+    item.refresh_from_db()
     client = _login_with_perm("staff_1", "change_item")
     gid = _global_id("products.item", item.pk)
 
@@ -4785,7 +4993,15 @@ def test_update_item_via_form_explicit_null_category_id_is_the_form_required_err
     create_users(1)
     seed_data(1)
     category = models.Category.objects.earliest("pk")
-    item = models.Item.objects.create(name="KeepsItsCategory", category=category)
+    item = models.Item.objects.order_by("pk")[0]
+    models.Item.objects.filter(pk=item.pk).update(
+        description="",
+        is_private=False,
+        attachment="",
+        name="KeepsItsCategory",
+        category=category,
+    )
+    item.refresh_from_db()
     client = _login_with_perm("staff_1", "change_item")
 
     response = _post_graphql(
@@ -4826,8 +5042,18 @@ def test_update_item_via_form_partial_collision_fires_unique_constraint_on_name_
     create_users(1)
     seed_data(1)
     category = models.Category.objects.earliest("pk")
-    item_a = models.Item.objects.create(name="FormA", category=category)
-    models.Item.objects.create(name="FormB", category=category)
+    item_a = models.Item.objects.order_by("pk")[0]
+    models.Item.objects.filter(pk=item_a.pk).update(
+        description="",
+        is_private=False,
+        attachment="",
+        name="FormA",
+        category=category,
+    )
+    item_a.refresh_from_db()
+    models.Item.objects.filter(
+        pk=models.Item.objects.order_by("pk").values_list("pk", flat=True)[1],
+    ).update(description="", is_private=False, attachment="", name="FormB", category=category)
     client = _login_with_perm("staff_1", "change_item")
 
     response = _post_graphql(
@@ -4922,7 +5148,15 @@ def test_create_item_via_form_unique_constraint_envelope_uses_all_sentinel() -> 
     create_users(1)
     seed_data(1)
     category = models.Category.objects.earliest("pk")
-    existing = models.Item.objects.create(name="FormDup", category=category)
+    existing = models.Item.objects.order_by("pk")[0]
+    models.Item.objects.filter(pk=existing.pk).update(
+        description="",
+        is_private=False,
+        attachment="",
+        name="FormDup",
+        category=category,
+    )
+    existing.refresh_from_db()
     client = _login_with_perm("view_item_1", "add_item")
 
     response = _post_graphql(
@@ -5329,7 +5563,15 @@ def test_update_item_with_file_via_form_explicit_null_clears_the_file(tmp_path: 
     create_users(1)
     seed_data(1)
     category = models.Category.objects.earliest("pk")
-    item = models.Item.objects.create(name="ClearedFormWidget", category=category)
+    item = models.Item.objects.order_by("pk")[0]
+    models.Item.objects.filter(pk=item.pk).update(
+        description="",
+        is_private=False,
+        attachment="",
+        name="ClearedFormWidget",
+        category=category,
+    )
+    item.refresh_from_db()
     client = _login_with_perm("view_item_1", "change_item")
 
     with override_settings(MEDIA_ROOT=str(tmp_path)):
@@ -5421,7 +5663,15 @@ def test_create_default_category_item_via_form_write_time_integrity_error_uses_e
     create_users(1)
     seed_data(1)
     category = models.Category.objects.earliest("pk")
-    existing = models.Item.objects.create(name="RaceFormDup", category=category)
+    existing = models.Item.objects.order_by("pk")[0]
+    models.Item.objects.filter(pk=existing.pk).update(
+        description="",
+        is_private=False,
+        attachment="",
+        name="RaceFormDup",
+        category=category,
+    )
+    existing.refresh_from_db()
     client = _login_with_perm("view_item_1", "add_item")
 
     response = _post_graphql(
@@ -5599,7 +5849,15 @@ def test_update_item_via_form_malformed_id_is_field_error_no_coercion_crash(bad_
     create_users(1)
     seed_data(1)
     category = models.Category.objects.earliest("pk")
-    item = models.Item.objects.create(name="FormUntouched", category=category)
+    item = models.Item.objects.order_by("pk")[0]
+    models.Item.objects.filter(pk=item.pk).update(
+        description="",
+        is_private=False,
+        attachment="",
+        name="FormUntouched",
+        category=category,
+    )
+    item.refresh_from_db()
     client = _login_with_perm("staff_1", "change_item")
 
     lookup_id = str(item.pk) if bad_id == "raw-pk" else bad_id
@@ -5618,6 +5876,7 @@ def test_update_item_via_form_malformed_id_is_field_error_no_coercion_crash(bad_
     assert item.name == "FormUntouched"
 
 
+@wraps(AsyncDjangoGraphQLView.as_view())
 async def _async_shipped_graphql_view(request: HttpRequest) -> HttpResponseBase:
 
     return await AsyncDjangoGraphQLView.as_view(schema=config_schema.schema)(request)
@@ -6124,7 +6383,15 @@ def test_update_item_via_serializer_happy_path() -> None:
     create_users(1)
     seed_data(1)
     category = models.Category.objects.earliest("pk")
-    item = models.Item.objects.create(name="SerBefore", category=category)
+    item = models.Item.objects.order_by("pk")[0]
+    models.Item.objects.filter(pk=item.pk).update(
+        description="",
+        is_private=False,
+        attachment="",
+        name="SerBefore",
+        category=category,
+    )
+    item.refresh_from_db()
     client = _login_with_perm("staff_1", "change_item")
 
     response = _post_graphql(
@@ -6321,7 +6588,9 @@ def test_create_item_via_serializer_unique_together_error_uses_all_sentinel() ->
     create_users(1)
     seed_data(1)
     category = models.Category.objects.earliest("pk")
-    models.Item.objects.create(name="SerDup", category=category)
+    models.Item.objects.filter(
+        pk=models.Item.objects.order_by("pk").values_list("pk", flat=True)[0],
+    ).update(description="", is_private=False, attachment="", name="SerDup", category=category)
     client = _login_with_perm("view_item_1", "add_item")
 
     response = _post_graphql(
@@ -6346,11 +6615,15 @@ def test_update_item_via_serializer_partial_update_preserves_other_fields() -> N
     create_users(1)
     seed_data(1)
     category = models.Category.objects.earliest("pk")
-    item = models.Item.objects.create(
-        name="SerPreserveBefore",
+    item = models.Item.objects.order_by("pk")[0]
+    models.Item.objects.filter(pk=item.pk).update(
         description="keep this",
+        is_private=False,
+        attachment="",
+        name="SerPreserveBefore",
         category=category,
     )
+    item.refresh_from_db()
     client = _login_with_perm("staff_1", "change_item")
 
     response = _post_graphql(
@@ -6381,8 +6654,24 @@ def test_update_item_via_serializer_partial_unique_together_fires_on_name_only_c
     create_users(1)
     seed_data(1)
     category = models.Category.objects.earliest("pk")
-    models.Item.objects.create(name="SerTakenName", category=category)
-    item = models.Item.objects.create(name="SerOriginal", category=category)
+    models.Item.objects.filter(
+        pk=models.Item.objects.order_by("pk").values_list("pk", flat=True)[0],
+    ).update(
+        description="",
+        is_private=False,
+        attachment="",
+        name="SerTakenName",
+        category=category,
+    )
+    item = models.Item.objects.order_by("pk")[1]
+    models.Item.objects.filter(pk=item.pk).update(
+        description="",
+        is_private=False,
+        attachment="",
+        name="SerOriginal",
+        category=category,
+    )
+    item.refresh_from_db()
     client = _login_with_perm("staff_1", "change_item")
 
     response = _post_graphql(

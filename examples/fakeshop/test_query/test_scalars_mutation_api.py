@@ -1,4 +1,4 @@
-"""Live GraphQL HTTP tests for temporal writes the database cannot store.
+"""Live GraphQL HTTP tests for model input normalization and temporal database storability.
 
 The ``scalars`` app writes ``ScalarSpecimen.occurred_at`` (``DateTime``) and
 ``occurred_time`` (``Time``) through every write flavor: ``createScalarSpecimen`` /
@@ -36,7 +36,9 @@ import datetime
 import uuid
 from collections.abc import Generator, Mapping
 from contextlib import contextmanager
+from functools import wraps
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
 import pytest
 from apps.scalars import models
@@ -44,8 +46,10 @@ from asgiref.sync import sync_to_async
 from config import schema as config_schema
 from django.db import connection
 from django.test import override_settings
+from django.test.utils import CaptureQueriesContext
 from django.urls import path
-from graphql_client import json_at, post_graphql, response_json
+from django.utils import timezone
+from graphql_client import JSONObject, json_at, post_graphql, response_json
 
 from django_strawberry_framework.testing import AsyncTestClient
 from django_strawberry_framework.views import AsyncDjangoGraphQLView
@@ -416,6 +420,7 @@ def test_serializer_temporal_refusal_is_keyed_to_the_renamed_input(operation: st
     assert models.ScalarSpecimen.objects.get(label=label).occurred_time == datetime.time(11, 15)
 
 
+@wraps(AsyncDjangoGraphQLView.as_view())
 async def _async_shipped_graphql_view(request: HttpRequest) -> HttpResponseBase:
     return await AsyncDjangoGraphQLView.as_view(schema=config_schema.schema)(request)
 
@@ -527,3 +532,142 @@ def test_split_datetime_form_field_writes_the_datetime_sent(form: str, operation
     }
     rows = list(models.ScalarSpecimen.objects.values_list("label", "occurred_at"))
     assert rows == [(label, stored_at)]
+
+
+def _create_model_value(data: Mapping[str, object]) -> JSONObject:
+    """Create through the shipped model mutation and return its entire HTTP envelope."""
+    _root, document = _document("model", "create")
+    response = post_graphql(document, variables={"data": data})
+    assert response.status_code == 200
+    return response_json(response)
+
+
+_MODEL_CREATE_SUCCESS: JSONObject = {
+    "data": {"createScalarSpecimen": {"result": {"label": "written"}, "errors": []}},
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("operation", ["create", "update"])
+def test_omitting_empty_value_default_field_succeeds_on_create_and_update(operation: str) -> None:
+    """Create and update leave an omitted JSON default out of client-input validation."""
+    specimen = None if operation == "create" else _seed()
+    root, document = _document("model", operation)
+    variables: dict[str, object] = (
+        {"data": _CREATE_DATA} if specimen is None else {"id": str(specimen.pk), "data": {}}
+    )
+    label = "written" if operation == "create" else "stored"
+
+    response = post_graphql(document, variables=variables)
+
+    assert response.status_code == 200
+    assert response_json(response) == {"data": {root: {"result": {"label": label}, "errors": []}}}
+    assert list(models.ScalarSpecimen.objects.values_list("label", "payload")) == [(label, {})]
+    if specimen is not None:
+        assert models.ScalarSpecimen.objects.get().pk == specimen.pk
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("operation", ["create", "update"])
+@override_settings(USE_TZ=True, TIME_ZONE="UTC")
+@timezone.override(ZoneInfo("America/New_York"))
+def test_naive_datetime_input_is_made_timezone_aware_on_create_and_update(operation: str) -> None:
+    """Both writes store a naive datetime at the current zone's instant without a warning."""
+    specimen = None if operation == "create" else _seed()
+    root, document = _document("model", operation)
+    value = "2021-06-15T09:30:00"
+    variables = (
+        {"data": {**_CREATE_DATA, "occurredAt": value}}
+        if specimen is None
+        else {"id": str(specimen.pk), "data": {"occurredAt": value}}
+    )
+    label = "written" if operation == "create" else "stored"
+
+    response = post_graphql(document, variables=variables)
+
+    assert response.status_code == 200
+    assert response_json(response) == {"data": {root: {"result": {"label": label}, "errors": []}}}
+    expected = datetime.datetime(2021, 6, 15, 13, 30, tzinfo=datetime.timezone.utc)
+    assert list(models.ScalarSpecimen.objects.values_list("label", "occurred_at")) == [
+        (label, expected),
+    ]
+    if specimen is not None:
+        assert models.ScalarSpecimen.objects.get().pk == specimen.pk
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "value",
+        "field",
+        "message",
+        "code",
+    ),
+    [
+        pytest.param(
+            {"tags": ["ok", "\ud800"]},
+            "payload.tags.1",
+            "Text contains invalid Unicode (unpaired surrogate code points).",
+            "invalid",
+            id="surrogate-value",
+        ),
+        pytest.param(
+            {"tags": ["ok", "a\x00b"]},
+            "payload.tags.1",
+            "Null characters are not allowed.",
+            "null_characters_not_allowed",
+            id="nul-value",
+        ),
+        pytest.param(
+            {"co\x00lor": "red"},
+            "payload",
+            "Null characters are not allowed.",
+            "null_characters_not_allowed",
+            id="nul-key",
+        ),
+    ],
+)
+def test_create_unstorable_json_text_is_a_path_keyed_error_before_save(
+    value: dict[str, object],
+    field: str,
+    message: str,
+    code: str,
+) -> None:
+    """Invalid Unicode and NUL text in JSON keys or values are refused at their input path."""
+    with CaptureQueriesContext(connection) as queries:
+        payload = _create_model_value({**_CREATE_DATA, "payload": value})
+
+    table = connection.ops.quote_name(models.ScalarSpecimen._meta.db_table).upper()
+    writes = [
+        query["sql"]
+        for query in queries.captured_queries
+        if query["sql"].lstrip().upper().startswith(("INSERT ", "UPDATE "))
+        and table in query["sql"].upper()
+    ]
+    assert writes == [], writes
+    assert payload == {
+        "data": {
+            "createScalarSpecimen": {
+                "result": None,
+                "errors": [
+                    {
+                        "field": field,
+                        "messages": [message],
+                        "codes": [code],
+                        "path": field.split("."),
+                    },
+                ],
+            },
+        },
+    }
+    assert not models.ScalarSpecimen.objects.exists()
+
+
+@pytest.mark.django_db
+def test_create_json_text_keeps_representable_unicode() -> None:
+    """The JSON preflight accepts ordinary Unicode text and leaves its stored value intact."""
+    value = {"tags": ["ok", "caf\u00e9"]}
+    payload = _create_model_value({**_CREATE_DATA, "payload": value})
+
+    assert payload == _MODEL_CREATE_SUCCESS
+    assert models.ScalarSpecimen.objects.get(label="written").payload == value

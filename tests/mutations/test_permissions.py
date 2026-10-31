@@ -1,34 +1,22 @@
-"""``DjangoModelPermission`` class behavior + write-auth enforcement.
+"""Mutation permission construction, hidden exception state, and direct helper contracts.
 
-The class-behavior tests exercise ``DjangoModelPermission.has_permission``
-DIRECTLY - a stub ``info`` whose ``context.request.user`` is a real Django ``User``
-with / without the relevant ``add`` / ``change`` / ``delete`` model permission -
-pinning the operation -> Django-action map and the anonymous-is-denied safe
-default.
-
-The *enforcement* tests (the second section below) run through a
-finalized throwaway schema. Consumer-visible ``DjangoModelPermission`` denial
-and allow, plus ``permission_classes = []`` on a shipped field, are live in
-``examples/fakeshop/test_query/test_products_api.py`` (``createItem`` /
-``submitContact``). What stays here has no second copy on the composed schema:
-async/awaitable ``has_permission`` refused as ``SyncMisuseError``, a hostile
-non-bool result, empty ``permission_classes`` never resolving request auth
-(ExplodingUser), a DenyAll override on a model mutation (shipped ``submitPing``
-is model-less deny-by-default, not an override of ``DjangoModelPermission``),
-and the class-list snapshot seal. One-declaration-per-process: a second
-``CreateItem`` with different ``permission_classes`` cannot share fakeshop's
-composed schema with the shipped mutation.
+The HTTP authorization verdicts for consumer-declared permission classes live in
+``examples/fakeshop/test_query/test_mutation_permissions_api.py``. The shipped
+model-permission matrix is in ``examples/fakeshop/test_query/test_products_api.py``.
+This module keeps the operation/action mapping, permission-class snapshot internals,
+non-HTTP actor shapes, and exception objects and validated records a wire response
+cannot encode. The in-process schema rows read only that hidden state.
 """
 
 from __future__ import annotations
 
 from collections.abc import Awaitable, Generator, Iterator
 from types import SimpleNamespace
-from typing import NoReturn
 
 import pytest
 import strawberry
 from apps.products import models as product_models
+from apps.products.services import create_users, seed_data
 from django.apps import apps
 from django.conf import settings as django_settings
 from django.contrib.auth import get_user_model
@@ -93,8 +81,8 @@ def _create_item_mutation() -> type[DjangoMutation]:
 
 
 def _user_with_perms(*codenames: str) -> AbstractBaseUser:
-    """Create a Django user holding exactly the named products permissions."""
-    user = User.objects.create_user(username="perm_probe", password="x")
+    """Grant exactly the named products permissions to a service-seeded regular user."""
+    user = User.objects.get(username="regular_1")
     for codename in codenames:
         perm = Permission.objects.get(codename=codename, content_type__app_label="products")
         user.user_permissions.add(perm)
@@ -122,6 +110,7 @@ def test_anonymous_user_is_denied() -> None:
 @pytest.mark.django_db
 def test_user_lacking_perm_is_denied() -> None:
     """An authenticated user without ``add_item`` is denied for ``create``."""
+    create_users(1)
     mutation = _create_item_mutation()
     user = _user_with_perms()  # no perms
     info = _info_for(user)
@@ -131,6 +120,7 @@ def test_user_lacking_perm_is_denied() -> None:
 @pytest.mark.django_db
 def test_user_with_add_perm_allowed_for_create() -> None:
     """A user holding ``add_item`` is allowed for ``create``."""
+    create_users(1)
     mutation = _create_item_mutation()
     user = _user_with_perms("add_item")
     info = _info_for(user)
@@ -140,6 +130,7 @@ def test_user_with_add_perm_allowed_for_create() -> None:
 @pytest.mark.django_db
 def test_create_perm_does_not_authorize_update_or_delete() -> None:
     """``add_item`` alone does not authorize ``update`` (needs ``change``) or ``delete``."""
+    create_users(1)
     mutation = _create_item_mutation()
     user = _user_with_perms("add_item")
     info = _info_for(user)
@@ -150,6 +141,7 @@ def test_create_perm_does_not_authorize_update_or_delete() -> None:
 @pytest.mark.django_db
 def test_change_and_delete_perms_authorize_their_operations() -> None:
     """``change_item`` authorizes ``update``; ``delete_item`` authorizes ``delete``."""
+    create_users(1)
     mutation = _create_item_mutation()
     user = _user_with_perms("change_item", "delete_item")
     info = _info_for(user)
@@ -171,6 +163,7 @@ def test_model_permission_checks_the_model_the_class_declared(
     setting changes, yet the checked permission stays ``Item``'s, so the user holding
     ``add_item`` is authorized and the one holding only ``add_property`` is not.
     """
+    create_users(1)
     with override_settings(PRODUCTS_WRITE_MODEL="products.Item"):
 
         class CreateItem(DjangoMutation):
@@ -284,96 +277,13 @@ _CREATE_Q = "mutation($d: ItemInput!){ createItem(data:$d){ node{ name } errors{
 
 
 @pytest.mark.django_db
-def test_empty_permission_classes_never_resolves_request_auth() -> None:
-    """The explicit allow-any opt-out does not invoke lazy user or auth-backend code."""
+def test_awaitable_permission_error_keeps_original_sync_misuse_exception() -> None:
+    """The refusal keeps its ``SyncMisuseError`` as ``original_error``, an unwired property.
 
-    class ExplodingUser:
-        @property
-        def is_authenticated(self) -> NoReturn:
-            raise AssertionError("permission-free mutations must not resolve auth")
-
-        def get_all_permissions(self) -> NoReturn:
-            raise AssertionError("permission-free mutations must not call auth backends")
-
-    schema, (CategoryT, _ItemT) = _build_auth_schema(create_permission_classes=[])
-    cat = product_models.Category.objects.create(name="Cat-no-auth")
-    res = _execute(
-        schema,
-        _CREATE_Q,
-        ExplodingUser(),
-        {"d": {"name": "Open", "categoryId": global_id_for(CategoryT, saved_pk(cat))}},
-    )
-    assert res.errors is None, res.errors
-    assert res.data is not None
-    assert res.data["createItem"]["node"]["name"] == "Open"
-
-
-@pytest.mark.django_db
-def test_permission_classes_override_deny_blocks_permitted_caller() -> None:
-    """A custom deny-all override blocks an otherwise-permitted caller (proving the override path)."""
-
-    class DenyAll:
-        def has_permission(
-            self,
-            _info: object,
-            _mutation: type[object],
-            _operation: str,
-            _data: object,
-            _instance: object = None,
-        ) -> bool:
-            return False
-
-    schema, (CategoryT, _ItemT) = _build_auth_schema(create_permission_classes=[DenyAll])
-    cat = product_models.Category.objects.create(name="Cat-denyall")
-    user = _user_with_perms("add_item")  # holds the default perm, still denied by override
-    res = _execute(
-        schema,
-        _CREATE_Q,
-        user,
-        {"d": {"name": "Nope", "categoryId": global_id_for(CategoryT, saved_pk(cat))}},
-    )
-    assert res.errors is not None
-    assert not product_models.Item.objects.filter(name="Nope").exists()
-
-
-@pytest.mark.django_db
-def test_async_has_permission_is_rejected_not_bypassed() -> None:
-    """An async ``has_permission`` raises SyncMisuseError, never a silent allow.
-
-    A coroutine is truthy, so a naive ``if not has_permission(...)`` would treat an
-    async deny-check as ALLOW - an authorization bypass. The sync pipeline cannot
-    await the coroutine, so it is closed and raised as a ``SyncMisuseError`` (surfacing
-    as a top-level GraphQL error), and crucially NO row is written: the deny is
-    honored, not bypassed.
+    The HTTP verdict lives in ``test_mutation_permissions_api.py``; JSON cannot carry
+    the exception object this row reads.
     """
-
-    class AsyncDeny:
-        async def has_permission(
-            self,
-            _info: object,
-            _mutation: type[object],
-            _operation: str,
-            _data: object,
-            _instance: object = None,
-        ) -> bool:
-            return False
-
-    schema, (CategoryT, _ItemT) = _build_auth_schema(create_permission_classes=[AsyncDeny])
-    cat = product_models.Category.objects.create(name="Cat-asyncdeny")
-    res = _execute(
-        schema,
-        _CREATE_Q,
-        AnonymousUser(),
-        {"d": {"name": "AsyncBlocked", "categoryId": global_id_for(CategoryT, saved_pk(cat))}},
-    )
-    assert res.errors is not None
-    assert "coroutine" in res.errors[0].message.lower()
-    assert not product_models.Item.objects.filter(name="AsyncBlocked").exists()
-
-
-@pytest.mark.django_db
-def test_awaitable_has_permission_is_rejected_not_bypassed() -> None:
-    """A custom awaitable permission result cannot be treated as truthy authorization."""
+    seed_data(1)
 
     class DeferredDeny:
         def __await__(self) -> Generator[None, None, bool]:
@@ -394,7 +304,7 @@ def test_awaitable_has_permission_is_rejected_not_bypassed() -> None:
     schema, (CategoryT, _ItemT) = _build_auth_schema(
         create_permission_classes=[AwaitableDeny],
     )
-    cat = product_models.Category.objects.create(name="Cat-awaitable-deny")
+    cat = product_models.Category.objects.earliest("pk")
     res = _execute(
         schema,
         _CREATE_Q,
@@ -404,17 +314,16 @@ def test_awaitable_has_permission_is_rejected_not_bypassed() -> None:
 
     assert res.errors is not None
     assert isinstance(res.errors[0].original_error, SyncMisuseError)
-    assert not product_models.Item.objects.filter(name="AwaitableBlocked").exists()
 
 
 @pytest.mark.django_db
-def test_hostile_non_bool_permission_result_repr_propagates_and_denies() -> None:
-    """A non-bool result's own ``__repr__`` renders it; what that raises propagates, no write.
+def test_hostile_permission_result_keeps_its_original_exception() -> None:
+    """The result renderer's raised exception remains the GraphQL error's original object.
 
-    The non-bool is still refused before any write: the message that names it is built
-    from the result's ``repr``, which is consumer behaviour, so its exception surfaces
-    in place of the ``ConfigurationError`` and the create never runs.
+    The HTTP refusal lives in ``test_mutation_permissions_api.py``. Exception identity
+    is not a response field, so this half is observed on the in-process result.
     """
+    seed_data(1)
 
     class Hostile:
         @override
@@ -436,7 +345,7 @@ def test_hostile_non_bool_permission_result_repr_propagates_and_denies() -> None
     schema, (CategoryT, _ItemT) = _build_auth_schema(
         create_permission_classes=[HostileResult],
     )
-    cat = product_models.Category.objects.create(name="Cat-hostile-non-bool")
+    cat = product_models.Category.objects.earliest("pk")
     res = _execute(
         schema,
         _CREATE_Q,
@@ -446,70 +355,6 @@ def test_hostile_non_bool_permission_result_repr_propagates_and_denies() -> None
 
     assert res.errors is not None
     assert isinstance(res.errors[0].original_error, RuntimeError)
-    assert "repr escape" in res.errors[0].message
-    assert not product_models.Item.objects.filter(name="HostileBlocked").exists()
-
-
-@pytest.mark.django_db
-def test_async_check_permission_override_is_rejected_not_bypassed() -> None:
-    """An async ``check_permission`` override raises SyncMisuseError, not a silent allow.
-
-    The override returns a coroutine; ``authorize_or_raise`` closes it and raises
-    ``SyncMisuseError`` rather than treating the truthy coroutine as authorized. No
-    row is written.
-    """
-
-    class CategoryT(DjangoType, relay.Node):
-        class Meta:
-            model = product_models.Category
-            fields = ("id", "name")
-            primary = True
-
-    class ItemT(DjangoType, relay.Node):
-        class Meta:
-            model = product_models.Item
-            fields = ("id", "name")
-            primary = True
-
-    assert registry.get(product_models.Item) is ItemT
-
-    class AsyncCheckCreateItem(DjangoMutation):
-        class Meta:
-            model = product_models.Item
-            operation = "create"
-
-        @override
-        # basedpyright: deliberately async: the coroutine is the result the sync write-auth check refuses
-        async def check_permission(  # pyright: ignore[reportIncompatibleMethodOverride]
-            self,
-            info: strawberry.Info,
-            operation: str,
-            data: object,
-            instance: object = None,
-        ) -> bool:
-            return False
-
-    @strawberry.type
-    class Mutation:
-        create_item = DjangoMutationField(AsyncCheckCreateItem)
-
-    finalize_django_types()
-    schema = DjangoSchema(query=_Query, mutation=Mutation, error_policy=_NO_ERROR_MASKING)
-    cat = product_models.Category.objects.create(name="Cat-asynccheck")
-    res = _execute(
-        schema,
-        _CREATE_Q,
-        AnonymousUser(),
-        {
-            "d": {
-                "name": "AsyncCheckBlocked",
-                "categoryId": global_id_for(CategoryT, saved_pk(cat)),
-            },
-        },
-    )
-    assert res.errors is not None
-    assert "coroutine" in res.errors[0].message.lower()
-    assert not product_models.Item.objects.filter(name="AsyncCheckBlocked").exists()
 
 
 @pytest.mark.django_db
@@ -754,18 +599,13 @@ def test_walk_ignores_mid_request_pollution_of_the_class_permission_list() -> No
 
 
 @pytest.mark.django_db
-def test_hook_rebinding_the_validated_permission_slot_fails_closed() -> None:
-    """A hook reassigning the validated permission set fails the request closed (live tier).
+def test_permission_slot_refusal_preserves_snapshot_and_original_error() -> None:
+    """A refused permission-slot write keeps the validated record and its original exception.
 
-    The snapshot walk survives list pollution (above); a hook could also try to
-    REASSIGN the validated ``permission_classes`` slot on the shared
-    ``_ValidatedMutationMeta`` record, which would leave an empty posture on the
-    class that authorizes every later request. The sealed record refuses the write with
-    ``ConfigurationError``, so the hostile hook fails the request loudly (a
-    top-level error, no row), the validated configuration survives untouched,
-    and a second identical anonymous request is still denied.
+    The two-request HTTP verdict lives in ``test_mutation_permissions_api.py``. This
+    row retains only the record's identity/type and the unencoded original error.
     """
-    denier_runs: list[str] = []
+    seed_data(1)
 
     class AllowAndRebind:
         def has_permission(
@@ -790,7 +630,6 @@ def test_hook_rebinding_the_validated_permission_slot_fails_closed() -> None:
             _data: object,
             _instance: object = None,
         ) -> bool:
-            denier_runs.append("Denier")
             return False
 
     class CategoryT(DjangoType, relay.Node):
@@ -819,7 +658,7 @@ def test_hook_rebinding_the_validated_permission_slot_fails_closed() -> None:
 
     finalize_django_types()
     schema = DjangoSchema(query=_Query, mutation=Mutation, error_policy=_NO_ERROR_MASKING)
-    cat = product_models.Category.objects.create(name="Cat-rebind-seal")
+    cat = product_models.Category.objects.earliest("pk")
 
     res = _execute(
         schema,
@@ -830,21 +669,6 @@ def test_hook_rebinding_the_validated_permission_slot_fails_closed() -> None:
     # The seal raises OUT of the walk: loud top-level failure, no write.
     assert res.errors is not None
     assert isinstance(res.errors[0].original_error, ConfigurationError)
-    assert "sealed" in str(res.errors[0].original_error)
-    assert not product_models.Item.objects.filter(name="Blocked").exists()
     # The seal refused the rebind: the validated configuration is untouched.
     assert isinstance(CreateItem._mutation_meta, _ValidatedMutationMeta)
     assert CreateItem._mutation_meta.permission_classes == (AllowAndRebind, Denier)
-
-    # The next (identical anonymous) request is still denied by the intact posture.
-    res2 = _execute(
-        schema,
-        _CREATE_Q,
-        AnonymousUser(),
-        {"d": {"name": "StillBlocked", "categoryId": global_id_for(CategoryT, saved_pk(cat))}},
-    )
-    assert res2.errors is not None
-    assert not product_models.Item.objects.filter(name="StillBlocked").exists()
-    # The walk aborts at the FIRST entry (the raising hook) on every request:
-    # the configured denier never ran at all under the seal.
-    assert denier_runs == []

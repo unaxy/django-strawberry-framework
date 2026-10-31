@@ -6,7 +6,7 @@ mapping read Python values no wire request can shape. Consumer envelopes
 ``examples/fakeshop/test_query/test_products_api.py``. The error key map
 primitives (``build_error_key_map``, ``rekey_error_segment``,
 ``model_field_error_names``) are pinned here directly; the per-flavor keying matrix
-is ``tests/utils/test_error_keys.py``.
+is ``examples/fakeshop/test_query/test_mutation_error_keys_api.py``.
 
 ``unstorable_temporal`` is pinned live per flavor on SQLite and PostgreSQL in
 ``examples/fakeshop/test_query/test_scalars_mutation_api.py``; the rows here hold the
@@ -1171,9 +1171,8 @@ def test_unstorable_temporal_holds_a_duration_to_the_integer_the_backend_binds(
     is 106751991 days 04:00:54.775808); a backend with a native interval (PostgreSQL,
     stood in here) binds the ``timedelta`` itself, so every duration stores.
     """
-    assert unstorable_temporal(_DURATION, value, lambda: DEFAULT_DB_ALIAS) is (
-        refused_without_interval
-    )
+    with _sqlite_alias(None) as alias:
+        assert unstorable_temporal(_DURATION, value, lambda: alias) is (refused_without_interval)
     driver, cursor_factory, _ = BINDING_MODES["psycopg3-client"]
     with postgresql_stand_in(driver, cursor_factory) as alias:
         assert unstorable_temporal(_DURATION, value, lambda: alias) is False
@@ -1398,7 +1397,8 @@ def test_refuses_utc_offset_reads_the_backend_and_the_text_binding(
     """
     value = _leaf_value(_offset(1, 0, 0, 500_000), is_time=False)
     if alias_kind == "sqlite":
-        assert refuses_utc_offset(connections[DEFAULT_DB_ALIAS], [value]) is refused
+        with _sqlite_alias(None) as alias:
+            assert refuses_utc_offset(connections[alias], [value]) is refused
         return
     driver, cursor_factory, _ = BINDING_MODES["psycopg3-server"]
     with postgresql_stand_in(driver, cursor_factory) as alias:
@@ -1559,14 +1559,15 @@ def test_refuses_integer_range_holds_each_integer_a_query_binds_to_the_element_r
     a float, a decimal and a ``None`` are not read. SQLite binds every integer type in 64
     bits.
     """
-    assert (
-        refuses_integer_range(
-            connections[DEFAULT_DB_ALIAS],
-            models.IntegerField[int, int](),
-            params,
+    with _sqlite_alias(None) as alias:
+        assert (
+            refuses_integer_range(
+                connections[alias],
+                models.IntegerField[int, int](),
+                params,
+            )
+            is refused
         )
-        is refused
-    )
 
 
 @pytest.mark.parametrize(
@@ -1601,10 +1602,11 @@ def test_refuses_integer_range_reads_the_element_type_range(
 @pytest.mark.parametrize(("raw", "_refused"), _NUMERIC_SPELLINGS)
 def test_refuses_numeric_format_reads_only_postgresql(raw: str, _refused: bool) -> None:  # noqa: FBT001
     """No other backend is read: SQLite binds every one of the PostgreSQL rows."""
-    assert not refuses_numeric_format(
-        connections[DEFAULT_DB_ALIAS],
-        [Decimal(raw), [Decimal(raw)]],
-    )
+    with _sqlite_alias(None) as alias:
+        assert not refuses_numeric_format(
+            connections[alias],
+            [Decimal(raw), [Decimal(raw)]],
+        )
 
 
 @pytest.mark.parametrize("mode", list(BINDING_MODES))

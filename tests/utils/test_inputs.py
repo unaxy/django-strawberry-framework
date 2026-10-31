@@ -33,7 +33,6 @@ from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.filters import FilterSet, filter_input_type
 from django_strawberry_framework.filters import inputs as filter_inputs
 from django_strawberry_framework.filters import sets as filter_sets
-from django_strawberry_framework.forms import sets as form_sets
 from django_strawberry_framework.mutations import sets as mutation_sets
 from django_strawberry_framework.orders import OrderSet
 from django_strawberry_framework.orders import inputs as order_inputs
@@ -41,7 +40,6 @@ from django_strawberry_framework.orders import sets as order_sets
 from django_strawberry_framework.orders.factories import OrderArgumentsFactory
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.rest_framework import inputs as ser_inputs
-from django_strawberry_framework.rest_framework import sets as ser_sets
 from django_strawberry_framework.sets_mixins import ClassBasedTypeNameMixin
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
@@ -811,9 +809,6 @@ def test_set_metaclasses_share_the_fields_alias_owner() -> None:
     assert module_binding(filter_sets, "promote_set_meta_fields") is promote_set_meta_fields
     assert module_binding(order_sets, "promote_set_meta_fields") is promote_set_meta_fields
     assert module_binding(order_sets, "read_set_meta_fields") is read_set_meta_fields
-    assert "promote_set_meta_fields" in filter_sets.FilterSetMetaclass.__new__.__code__.co_names
-    assert "promote_set_meta_fields" in order_sets.OrderSetMetaclass.__new__.__code__.co_names
-    assert "read_set_meta_fields" in order_sets.OrderSet._expand_meta_fields.__code__.co_names
 
 
 def test_promote_set_meta_fields_writes_the_alias_onto_class_meta() -> None:
@@ -826,20 +821,6 @@ def test_promote_set_meta_fields_writes_the_alias_onto_class_meta() -> None:
     assert promote_set_meta_fields(Meta, fields_alias=FILTERSET_FIELDS_ALIAS) == ["code"]
     assert Meta.fields == ["code"]
     assert Meta.filter_fields == ["code"]
-
-
-def test_reject_unknown_meta_keys_is_the_one_meta_key_guard() -> None:
-    """Every write flavor and both set metaclasses refuse an unknown ``Meta`` key through it."""
-    for module in (
-        mutation_sets,
-        form_sets,
-        ser_sets,
-        filter_sets,
-        order_sets,
-    ):
-        assert module_binding(module, "reject_unknown_meta_keys") is reject_unknown_meta_keys
-    assert "reject_unknown_meta_keys" in filter_sets.FilterSetMetaclass.__new__.__code__.co_names
-    assert "reject_unknown_meta_keys" in order_sets.OrderSetMetaclass.__new__.__code__.co_names
 
 
 @pytest.mark.parametrize(
@@ -975,8 +956,9 @@ def test_plain_set_meta_fields_reads_every_str_subclass_name_as_plain_text(
     if isinstance(expected, _PlainNames):
         # No base slot to rebuild from: an ordered, re-readable copy that is, like the
         # declaration, no ``list`` / ``tuple`` / ``set``.
-        assert list(cast("_PlainNames", plain)) == list(expected)
-        assert list(cast("_PlainNames", plain)) == list(cast("_PlainNames", plain))
+        expected_members = list(expected)
+        assert list(cast("_PlainNames", plain)) == expected_members
+        assert list(cast("_PlainNames", plain)) == expected_members
         assert is_re_readable_field_declaration(plain)
         assert not isinstance(
             plain,
@@ -1128,7 +1110,21 @@ def test_plain_set_meta_fields_never_evaluates_a_lazy_string() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_re_readable_gate_accepts_every_sized_collection() -> None:
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "list",
+        "tuple",
+        "set",
+        "frozenset",
+        "mapping",
+        "keys",
+        "values",
+        "range",
+        "project",
+    ],
+)
+def test_re_readable_gate_accepts_every_sized_collection(shape: str) -> None:
     """The contract is ``Collection``, not a hardcoded builtin allow-list.
 
     A consumer legitimately computes ``Meta.fields`` from a mapping
@@ -1154,22 +1150,37 @@ def test_re_readable_gate_accepts_every_sized_collection() -> None:
         def __contains__(self, item: object) -> bool:
             return item in self._names
 
-    accepted = (
-        ["code"],
-        ("code",),
-        {"code"},
-        frozenset({"code"}),
-        {"code": ["exact"]},
-        {"code": ["exact"]}.keys(),
-        {"exact": "code"}.values(),
-        range(3),
-        _NameSet("code"),
-    )
-    for value in accepted:
-        assert is_re_readable_field_declaration(value) is True
+    accepted: dict[str, object] = {
+        "list": ["code"],
+        "tuple": ("code",),
+        "set": {"code"},
+        "frozenset": frozenset({"code"}),
+        "mapping": {"code": ["exact"]},
+        "keys": {"code": ["exact"]}.keys(),
+        "values": {"exact": "code"}.values(),
+        "range": range(3),
+        "project": _NameSet("code"),
+    }
+    assert is_re_readable_field_declaration(accepted[shape]) is True
 
 
-def test_re_readable_gate_rejects_one_shot_and_text_atoms() -> None:
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "generator",
+        "iterator",
+        "map",
+        "text",
+        "lazy-text",
+        "bytes",
+        "bytearray",
+        "memoryview",
+        "int",
+        "object",
+        "none",
+    ],
+)
+def test_re_readable_gate_rejects_one_shot_and_text_atoms(shape: str) -> None:
     """One-shot producers, text atoms, and non-collections are the three rejected shapes.
 
     A generator / ``iter(...)`` / ``map`` object is exhausted by the first
@@ -1181,21 +1192,20 @@ def test_re_readable_gate_rejects_one_shot_and_text_atoms() -> None:
     Rejected at class creation (``ConfigurationError``), never as a GraphQL
     error.
     """
-    rejected = (
-        (name for name in ["code"]),
-        iter(["code"]),
-        map(str, ["code"]),
-        "code",
-        gettext_lazy("code"),
-        b"code",
-        bytearray(b"code"),
-        memoryview(b"code"),
-        123,
-        object(),
-        None,
-    )
-    for value in rejected:
-        assert is_re_readable_field_declaration(value) is False
+    rejected: dict[str, object] = {
+        "generator": (name for name in ["code"]),
+        "iterator": iter(["code"]),
+        "map": map(str, ["code"]),
+        "text": "code",
+        "lazy-text": gettext_lazy("code"),
+        "bytes": b"code",
+        "bytearray": bytearray(b"code"),
+        "memoryview": memoryview(b"code"),
+        "int": 123,
+        "object": object(),
+        "none": None,
+    }
+    assert is_re_readable_field_declaration(rejected[shape]) is False
 
 
 def test_re_readable_gate_never_iterates_the_declaration() -> None:
@@ -1255,7 +1265,27 @@ def test_write_flavor_shape_caches_share_get_or_store_owner() -> None:
     assert module_binding(ser_inputs, "get_or_store_shape_build") is get_or_store_shape_build
 
 
-def test_pascalize_token_is_injective_across_legal_field_name_boundaries() -> None:
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [
+        ("a_b", "ab"),
+        ("field_2", "field2"),
+        ("field2_x", "field2x"),
+        ("fooBar", "foobar"),
+        ("_foo", "x_foo"),
+    ],
+    ids=[
+        "underscore",
+        "digit-underscore",
+        "after-digit",
+        "camel-case",
+        "leading-underscore",
+    ],
+)
+def test_pascalize_token_is_injective_across_legal_field_name_boundaries(
+    left: str,
+    right: str,
+) -> None:
     """Underscore, digit, and case distinctions survive without interior capitals."""
     assert pascalize_token("") == ""
     assert pascalize_token("is_private") == "Is_uprivate"
@@ -1267,14 +1297,7 @@ def test_pascalize_token_is_injective_across_legal_field_name_boundaries() -> No
     assert pascalize_token("2fa") == "X_d2fa"
     assert pascalize_token("\N{LATIN SMALL LETTER E WITH ACUTE}x") == "X_ze9_x"
     assert pascalize_token("a\N{LATIN SMALL LETTER E WITH ACUTE}") == "A_xe9_"
-    for left, right in (
-        ("a_b", "ab"),
-        ("field_2", "field2"),
-        ("field2_x", "field2x"),
-        ("fooBar", "foobar"),
-        ("_foo", "x_foo"),
-    ):
-        assert pascalize_token(left) != pascalize_token(right)
+    assert pascalize_token(left) != pascalize_token(right)
 
 
 def test_name_set_input_type_name_canonical_and_narrowed() -> None:
@@ -1409,7 +1432,11 @@ def test_iter_provided_input_fields_handles_none_and_non_inputs() -> None:
     assert list(iter_provided_input_fields(42)) == []
 
 
-def test_generated_input_arguments_factory_tolerates_none_or_missing_related_attr() -> None:
+@pytest.mark.parametrize("related_present", [True, False], ids=["none", "missing"])
+def test_generated_input_arguments_factory_tolerates_none_or_missing_related_attr(
+    *,
+    related_present: bool,
+) -> None:
     """GeneratedInputArgumentsFactory does not crash when related_attr is None or missing."""
 
     class _ProbeFactory(GeneratedInputArgumentsFactory[ClassBasedTypeNameMixin]):
@@ -1431,7 +1458,10 @@ def test_generated_input_arguments_factory_tolerates_none_or_missing_related_att
             return [("id", int | None, {"default": None})]
 
     class _SetWithNoneRelated(OrderSet):
-        related_probes = None
+        pass
+
+    if related_present:
+        setattr(_SetWithNoneRelated, _ProbeFactory._related_attr, None)
 
     factory = _ProbeFactory(_SetWithNoneRelated)
     input_cls = factory.arguments

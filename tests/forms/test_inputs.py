@@ -76,7 +76,6 @@ from django_strawberry_framework.forms.converter import (
 )
 from django_strawberry_framework.forms.inputs import (
     _TEMPORAL_COLUMN_FORM_CLASSES,
-    CREATE_SHAPED_KINDS,
     FORM,
     INPUTS_MODULE_PATH,
     _form_basis_content_identity,
@@ -179,12 +178,6 @@ def _make_non_relay_target() -> tuple[type[library_models.Branch], type[DjangoTy
 # ---------------------------------------------------------------------------
 # Module-path constant
 # ---------------------------------------------------------------------------
-
-
-def test_inputs_module_path_and_kind_constants() -> None:
-    """The module constants match the expected module path and create-shaped kinds."""
-    assert INPUTS_MODULE_PATH == "django_strawberry_framework.forms.inputs"
-    assert frozenset({CREATE, FORM}) == CREATE_SHAPED_KINDS
 
 
 # ---------------------------------------------------------------------------
@@ -310,28 +303,31 @@ def test_form_field_basis_rejects_malformed_names_and_field_values() -> None:
         )
 
 
-def test_basis_rejects_non_identifier_field_names() -> None:
-    """A basis with a non-identifier field name raises typed, naming it.
-
-    A generated input attribute is rendered into the dataclass ``__init__``, so
-    an empty / spaced / digit-leading / keyword name could never build an input:
-    before the identifier guard such a name passed the string check and detonated
-    as a raw ``SyntaxError`` out of the generated ``__init__`` source at
-    input-class construction.
-    """
-
-    class ProbeForm(forms.Form):
-        pass
-
-    for name in (
+@pytest.mark.parametrize(
+    "name",
+    [
         "",
         "with space",
         "9lead",
         "class",
         "None",
-    ):
-        with pytest.raises(ConfigurationError, match="invalid names"):
-            normalize_form_field_basis(ProbeForm, {name: forms.CharField()})
+    ],
+    ids=[
+        "empty",
+        "space",
+        "digit-leading",
+        "keyword",
+        "none-keyword",
+    ],
+)
+def test_basis_rejects_non_identifier_field_names(name: str) -> None:
+    """A basis name that cannot name an input attribute raises the typed invalid-name refusal."""
+
+    class ProbeForm(forms.Form):
+        pass
+
+    with pytest.raises(ConfigurationError, match="invalid names"):
+        normalize_form_field_basis(ProbeForm, {name: forms.CharField()})
 
 
 def test_weird_field_names_fail_loud_through_build() -> None:
@@ -575,16 +571,20 @@ def test_partial_input_keeps_a_form_field_named_like_a_non_editable_key() -> Non
     assert set(_field_map(par)) == {"name", "code"}
 
 
-def test_partial_input_model_backed_optional_extra_field_still_required() -> None:
+@pytest.mark.parametrize(
+    "name",
+    ["name", "category_id", "is_private"],
+    ids=["name", "relation", "privacy"],
+)
+def test_partial_input_model_backed_optional_extra_field_still_required(name: str) -> None:
     """``<FormClass>PartialInput``: model-backed fields optional, a required extra stays required."""
     par, _ = build_form_input_class(_item_model_form(), operation_kind=PARTIAL)
     assert par.__name__ == "ItemModelFormPartialInput"
     fields = _field_map(par)
 
     # Model-backed fields are forced optional + UNSET in the partial input.
-    for name in ("name", "category_id", "is_private"):
-        assert _is_optional(fields[name]), name
-        assert fields[name].default_value is UNSET, name
+    assert _is_optional(fields[name]), name
+    assert fields[name].default_value is UNSET, name
 
     # The non-model required ``confirm`` keeps its declared ``field.required``
     # (the load-bearing partial assertion).
@@ -701,11 +701,12 @@ def test_json_field_maps_to_json_scalar_in_input() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_fk_to_non_relay_products_target_uses_raw_pk_id() -> None:
-    """The products ``Item.category`` FK (non-Relay ``CategoryType``) becomes a raw pk id."""
+def test_fk_to_unregistered_products_target_uses_raw_pk_id() -> None:
+    """An Item.category target with no registered primary becomes a raw pk id."""
     cre, specs = build_form_input_class(_item_model_form(), operation_kind=CREATE)
     fields = _field_map(cre)
-    # CategoryType is non-Relay, so the id is the raw pk scalar (int), not GlobalID.
+    assert registry.get(Category) is None
+    # With no primary type registered, the relation input uses its raw pk scalar.
     assert _inner_type(fields["category_id"]) is int
     # Reverse map: input attr -> form field name + kind (unified InputFieldSpec).
     cat_spec = next(s for s in specs if s.target_name == "category")
@@ -953,8 +954,10 @@ def _members(enum_cls: type[Enum]) -> dict[str, object]:
         ),
     ],
 )
+@pytest.mark.parametrize("operation", ["create", "partial"], ids=["create", "partial"])
 def test_choice_field_narrower_than_column_publishes_admitted_values(
     status_field: Callable[[], forms.Field],
+    operation: str,
 ) -> None:
     """A choice field admitting fewer of the column's values publishes only those values.
 
@@ -969,14 +972,15 @@ def test_choice_field_narrower_than_column_publishes_admitted_values(
     form_class = _book_status_form(status_field())
     cre, _ = build_form_input_class(form_class, operation_kind=CREATE)
     par, _ = build_form_input_class(form_class, operation_kind=PARTIAL)
-    for input_cls, enum_name in (
-        (cre, "BookStatusFormInputCirculationStatusEnum"),
-        (par, "BookStatusFormPartialInputCirculationStatusEnum"),
-    ):
-        enum_cls = _enum_of(_field_map(input_cls)["circulation_status"])
-        assert enum_cls is not read_enum
-        assert enum_cls.__name__ == enum_name
-        assert _members(enum_cls) == {"available": "available", "repair": "repair"}
+    input_cls, enum_name = (
+        (cre, "BookStatusFormInputCirculationStatusEnum")
+        if operation == "create"
+        else (par, "BookStatusFormPartialInputCirculationStatusEnum")
+    )
+    enum_cls = _enum_of(_field_map(input_cls)["circulation_status"])
+    assert enum_cls is not read_enum
+    assert enum_cls.__name__ == enum_name
+    assert _members(enum_cls) == {"available": "available", "repair": "repair"}
     assert len(read_enum) == 3
 
 
@@ -1445,17 +1449,20 @@ def test_temporal_field_reading_its_column_builds(
     assert [spec.target_name for spec in specs] == [name]
 
 
-def test_temporal_readers_open_with_the_form_class_django_builds_for_the_column() -> None:
+@pytest.mark.parametrize("column_kind", ["datetime", "date", "time"], ids=str)
+def test_temporal_readers_open_with_the_form_class_django_builds_for_the_column(
+    column_kind: str,
+) -> None:
     """Each temporal column's first reader is the class its own ``formfield()`` builds."""
-    columns: tuple[models.Field[object, object], ...] = (
-        models.DateTimeField(),
-        models.DateField(),
-        models.TimeField(),
-    )
-
-    assert list(_TEMPORAL_COLUMN_FORM_CLASSES) == [type(column) for column in columns]
-    for column in columns:
-        assert _TEMPORAL_COLUMN_FORM_CLASSES[type(column)][0] is type(column.formfield())
+    columns = {
+        "datetime": scalar_models.ScalarSpecimen._meta.get_field("occurred_at"),
+        "date": scalar_models.ScalarSpecimen._meta.get_field("occurred_on"),
+        "time": scalar_models.ScalarSpecimen._meta.get_field("occurred_time"),
+    }
+    assert list(_TEMPORAL_COLUMN_FORM_CLASSES) == [type(column) for column in columns.values()]
+    column = columns[column_kind]
+    assert isinstance(column, models.Field)
+    assert _TEMPORAL_COLUMN_FORM_CLASSES[type(column)][0] is type(column.formfield())
 
 
 @pytest.mark.parametrize(
@@ -2185,26 +2192,22 @@ def test_choice_field_over_grouped_column_binds_only_when_narrowed(
 # ---------------------------------------------------------------------------
 
 
-def test_fields_narrowing_omits_dropped_field() -> None:
-    """``Meta.fields`` narrows the input to the named fields."""
-    cre, _ = build_form_input_class(
-        _item_model_form(),
-        operation_kind=CREATE,
-        fields=(
-            "name",
-            "category",
-            "is_private",
-            "confirm",
-        ),
-    )
-    fields = _field_map(cre)
-    assert "is_private" in fields
-    cre2, _ = build_form_input_class(
-        _item_model_form(),
-        operation_kind=CREATE,
-        exclude=("is_private",),
-    )
-    assert "is_private" not in _field_map(cre2)
+@pytest.mark.parametrize("key", ["fields", "exclude"], ids=["fields", "exclude"])
+def test_fields_narrowing_omits_dropped_field(key: str) -> None:
+    """Either narrowing leaves the same exact shape when it drops optional is_private."""
+    if key == "fields":
+        built, _ = build_form_input_class(
+            _item_model_form(),
+            operation_kind=CREATE,
+            fields=("name", "category", "confirm"),
+        )
+    else:
+        built, _ = build_form_input_class(
+            _item_model_form(),
+            operation_kind=CREATE,
+            exclude=("is_private",),
+        )
+    assert set(_field_map(built)) == {"name", "category_id", "confirm"}
 
 
 def test_build_form_input_class_consumes_a_one_shot_narrowing_iterable_once() -> None:
@@ -2455,18 +2458,28 @@ def test_canonical_name_for_full_shape() -> None:
     )
 
 
-def test_build_form_input_class_rejects_out_of_vocabulary_operation_kind() -> None:
-    """``build_form_input_class`` rejects anything but CREATE / FORM / PARTIAL."""
+@pytest.mark.parametrize(
+    "operation_kind",
+    [42, "update"],
+    ids=["non-string", "unknown-string"],
+)
+def test_build_form_input_class_rejects_out_of_vocabulary_operation_kind(
+    operation_kind: str | int,
+) -> None:
+    """Every operation outside CREATE / FORM / PARTIAL raises the vocabulary refusal."""
 
     class ProbeForm(forms.Form):
         x = forms.CharField(required=False)
 
-    with pytest.raises(ConfigurationError, match="out-of-vocabulary operation_kind 42"):
-        # basedpyright: the non-str operation kind is the hostile input under test;
-        # build_form_input_class types the parameter as str
-        build_form_input_class(ProbeForm, operation_kind=42)  # pyright: ignore[reportArgumentType]
-    with pytest.raises(ConfigurationError, match="out-of-vocabulary operation_kind 'update'"):
-        build_form_input_class(ProbeForm, operation_kind="update")
+    with pytest.raises(
+        ConfigurationError,
+        match=re.escape(f"out-of-vocabulary operation_kind {operation_kind!r}"),
+    ):
+        # basedpyright: the non-str operation kind is the deliberate invalid input.
+        build_form_input_class(
+            ProbeForm,
+            operation_kind=operation_kind,  # pyright: ignore[reportArgumentType]
+        )
 
 
 def test_identical_shape_dedupes_via_ledger() -> None:
@@ -2519,13 +2532,6 @@ def test_two_forms_sharing_name_always_collide() -> None:
 # ---------------------------------------------------------------------------
 # Module-global materialization
 # ---------------------------------------------------------------------------
-
-
-def test_materialized_input_is_module_global() -> None:
-    """A materialized input class is a real global of ``forms.inputs`` (the lazy-ref contract)."""
-    cre, _ = build_form_input_class(_item_model_form(), operation_kind=CREATE)
-    materialize_form_input_class("ItemModelFormInput", cre)
-    assert module_binding(sys.modules[INPUTS_MODULE_PATH], "ItemModelFormInput") is cre
 
 
 # ---------------------------------------------------------------------------

@@ -70,6 +70,7 @@ def test_typing_exports_all() -> None:
         "object_result",
         "peel_strawberry_containers",
         "published_argument",
+        "published_argument_wire_name",
         "published_python_name",
         "return_type_of",
         "schema_config_from_info",
@@ -537,7 +538,7 @@ def _info_stand_in(stand_in: object) -> strawberry.Info[object, object]:
 
 
 def test_published_argument_reads_the_executable_schemas_argument_map() -> None:
-    """A parameter's published argument is read back by its definition, never re-derived."""
+    """A parameter's published argument is read back by its definition's Python name."""
     # graphql-core's ``GraphQLNamedType.__new__`` widens every built-in scalar to its base.
     int_scalar = require_instance(GraphQLInt, GraphQLScalarType)
     arg_def = SimpleNamespace(python_name="offset")
@@ -559,7 +560,7 @@ def test_published_argument_reads_the_executable_schemas_argument_map() -> None:
             SimpleNamespace(get_argument_definition=defines_offset, _raw_info=raw),
         )
 
-    # 3. A definition no published argument back-references is a configuration error.
+    # 3. A declared parameter no published argument back-references is a configuration error.
     other = GraphQLArgument(int_scalar, extensions={"strawberry-definition": object()})
     with pytest.raises(ConfigurationError, match="has a definition but no published wire name"):
         _ = published_argument(info_over({"offset": other}), "offset")

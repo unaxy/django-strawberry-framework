@@ -1,4 +1,4 @@
-"""Every write flavor keys a validator error to the GraphQL input field the client sent.
+"""Live HTTP writes key each validator error to the GraphQL input field the client sent.
 
 One matrix over the flavors that run a validator ({model ``DjangoMutation``,
 ``DjangoModelFormMutation``, plain ``DjangoFormMutation``, serializer
@@ -22,26 +22,28 @@ from model code, so it can). ``register`` x forward-key needs a user model whose
 ``REQUIRED_FIELDS`` names a forward key; the stock user has none and
 ``get_user_model()`` cannot be swapped per test, so that cell is left to the model
 flavor's forward-key cells, which run the same tail ``register`` delegates to.
-The live rows (stock kanban ``setCardStatus``, products ``updateItemViaForm``,
-library ``createPublisher`` and ``createShelfViaSubclassedSerializer``) live in
-``examples/fakeshop/test_query/``.
+Consumer-declared validators and input renames run on a holder HTTP mount; stock
+kanban, products and library mutation surfaces have their own live suites.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
-from functools import partial
-from types import SimpleNamespace
+from functools import partial, wraps
 from typing import TYPE_CHECKING, Literal, NoReturn
 
 import pytest
 import strawberry
 from apps.products import models as product_models
+from apps.products.services import seed_data
 from django import forms
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import Model, UniqueConstraint
-from django.http import HttpRequest
+from django.http import HttpRequest, HttpResponseBase
+from django.test import override_settings
+from django.urls import path
+from graphql_client import assert_graphql_success
 from rest_framework import serializers
 from strawberry import relay
 from typing_extensions import override
@@ -60,6 +62,7 @@ from django_strawberry_framework.auth import register_mutation
 from django_strawberry_framework.mutations.inputs import NON_FIELD_ERROR_KEY
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing.relay import global_id_for
+from django_strawberry_framework.views import DjangoGraphQLView
 from tests._idioms import ModelSerializerBase, is_object_dict, is_object_list, saved_pk
 
 if TYPE_CHECKING:
@@ -70,6 +73,20 @@ if TYPE_CHECKING:
 _Raised = tuple[str | None, str]
 #: A flavor runner: ``(shape, raised) -> [(field, path), ...]`` from the payload.
 _Runner = Callable[[str, _Raised, pytest.MonkeyPatch], list[tuple[str, list[str]]]]
+
+pytestmark = pytest.mark.usefixtures("private_registry")
+
+_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
+
+
+@wraps(DjangoGraphQLView.as_view())
+def _graphql_view(request: HttpRequest) -> HttpResponseBase:
+    schema = _CURRENT["schema"]
+    assert schema is not None
+    return DjangoGraphQLView.as_view(schema=schema)(request)
+
+
+urlpatterns = [path("graphql-keyed-write/", _graphql_view)]
 
 
 @pytest.fixture(autouse=True)
@@ -165,17 +182,17 @@ def _execute(
 
     finalize_django_types()
     schema = DjangoSchema(query=_Query, mutation=Mutation, error_policy={"enabled": False})
-    request = HttpRequest()
-    request.user = User(username="u")
     id_argument = "" if id_literal is None else f'id: "{id_literal()}", '
-    result = schema.execute_sync(
+    query = (
         f"mutation {{ write({id_argument}data: {{ {data_literal()} }}) "
-        "{ errors { field path } } }",
-        context_value=SimpleNamespace(request=request),
+        "{ errors { field path } } }"
     )
-    assert result.errors is None, result.errors
-    assert result.data is not None
-    data: dict[str, object] = result.data
+    _CURRENT["schema"] = schema
+    try:
+        with override_settings(ROOT_URLCONF=__name__):
+            data = assert_graphql_success(query, url="/graphql-keyed-write/")
+    finally:
+        _CURRENT["schema"] = None
     write = data["write"]
     assert is_object_dict(write)
     errors = write["errors"]
@@ -191,7 +208,8 @@ def _execute(
 
 
 def _category_gid(category_type: type[DjangoType]) -> str:
-    category, _created = product_models.Category.objects.get_or_create(name="Keyed category")
+    category = product_models.Category.objects.order_by("pk").first()
+    assert category is not None
     return global_id_for(category_type, saved_pk(category))
 
 
@@ -243,8 +261,8 @@ def _run_model_update_save(
     """
     del shape
     category_type, item_type = _category_types()
-    category, _created = product_models.Category.objects.get_or_create(name="Keyed category")
-    item = product_models.Item.objects.create(name="located", category=category)
+    item = product_models.Item.objects.order_by("pk").first()
+    assert item is not None
     update_item = type(
         "UpdateItem",
         (DjangoMutation,),
@@ -783,6 +801,7 @@ def test_validator_error_keys_to_the_input_field_sent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The flavor's validator error comes back under the input name, one-segment ``path``."""
+    seed_data(1)
     errors = _RUNNERS[flavor](shape, (raised_name, "keyed failure"), monkeypatch)
 
     expected_path = [] if expected == NON_FIELD_ERROR_KEY else [expected]
@@ -800,6 +819,7 @@ def test_rename_onto_an_unexposed_model_name_shares_one_key(
     ``name`` because ``category`` is its input name, the FK because an unexposed field
     keeps its model field name. Both entries are kept; nothing refuses the shape.
     """
+    seed_data(1)
     _category_types()
 
     @strawberry.input
@@ -837,6 +857,7 @@ def test_decode_error_keeps_its_input_name_under_a_swapped_rename(
     it were a model name would report ``name``, the other field. A ``full_clean()`` error
     on model ``name`` in the same shape keys to ``description`` through the map.
     """
+    seed_data(1)
     category_type, _item_type = _category_types()
 
     @strawberry.input
@@ -896,9 +917,8 @@ def test_constraint_listing_a_forward_key_column_keys_to_its_input(
     under ``category_id``; the model key map answers that column name as well as
     ``category``.
     """
+    seed_data(1)
     category_type, _item_type = _category_types()
-    category, _created = product_models.Category.objects.get_or_create(name="Keyed category")
-    product_models.Item.objects.create(name="first", category=category)
     constraint = UniqueConstraint(fields=["category_id"], name="one_item_per_keyed_category")
 
     # ``get_constraints`` is the seam ``validate_constraints`` reads; patching it leaves

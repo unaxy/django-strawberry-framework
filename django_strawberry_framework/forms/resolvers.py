@@ -20,8 +20,9 @@ and the form-specific invariants this module owns:
   field name (``ItemModelForm(data={"category": pk})``, never ``{"category_id":
   pk}``) and reads uploads from ``files=``, never ``data=``. The reverse
   map (``mutation_cls._input_field_specs``, a list of
-  ``utils/inputs.py::InputFieldSpec``) routes each provided input attr to its form
-  field name + decode ``kind`` (``SCALAR`` / ``RELATION_SINGLE`` /
+  ``utils/inputs.py::InputFieldSpec``, read once per request as the executing schema
+  named it, ``utils/inputs.py::published_input_specs``) routes each provided input attr
+  to its form field name + decode ``kind`` (``SCALAR`` / ``RELATION_SINGLE`` /
   ``RELATION_MULTI`` / ``FILE``). An update binds an explicit ``null`` file as
   Django's clear sentinel ``False`` (``_file_clears``); a required file field cannot
   clear, so that ``null`` is its ``required`` error (``_required_file_clears``).
@@ -112,7 +113,7 @@ and the form-specific invariants this module owns:
   the reused ``validation_error_to_field_errors(ValidationError(
   form.errors.as_data()), key_map)``: each form field name is re-keyed to the
   GraphQL input field the client sent (``category`` -> ``categoryId``) through
-  the shared ``build_error_key_map`` over the bind-stashed specs, a form field
+  the shared ``build_error_key_map`` over the request's published specs, a form field
   the input does not expose keeps its form field name, and the form's
   ``NON_FIELD_ERRORS`` bucket lands on the ``"__all__"`` sentinel - the same
   keying a model ``full_clean()`` failure gets. A valid ``ModelForm`` whose instance
@@ -221,11 +222,13 @@ from django_strawberry_framework.utils.errors import (
     validation_error_to_field_errors,
 )
 from django_strawberry_framework.utils.imports import import_attr_if_importable
+from django_strawberry_framework.utils.inputs import published_input_specs
 from django_strawberry_framework.utils.querysets import sync_pipeline_recourse
 from django_strawberry_framework.utils.relations import (
     is_model_class,
     is_single_column_foreign_key,
 )
+from django_strawberry_framework.utils.widgets import bound_value as _bound_value
 from django_strawberry_framework.utils.widgets import widget_entries, widget_keys
 from django_strawberry_framework.utils.write_transaction import (
     pinned_write_alias,
@@ -245,7 +248,7 @@ from .inputs import choice_key_field, relation_target_model, shape_disagreeing_c
 from .sets import _is_form_class
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Container, Iterable, Mapping
+    from collections.abc import Callable, Container, Iterable, Mapping, Sequence
     from typing import Protocol, TypeAlias, TypeVar
 
     from strawberry.types import Info
@@ -256,6 +259,7 @@ if TYPE_CHECKING:
         _SyncResolverEntry,
     )
     from django_strawberry_framework.utils.errors import ErrorKeyMap, FieldError
+    from django_strawberry_framework.utils.inputs import InputFieldSpec
     from django_strawberry_framework.utils.typing import ForeignKeyField
     from django_strawberry_framework.utils.write_values import AttemptedSave
 
@@ -524,11 +528,14 @@ def _decode_form_data(
     mutation_cls: _FormMutationClass,
     data: object,
     info: Info[object, object],
+    *,
+    specs: Sequence[InputFieldSpec],
 ) -> tuple[dict[str, object], dict[str, object], FieldError | None]:
     """Decode the bound input dataclass into ``(provided_data, provided_files, error)``.
 
     Walks the provided input fields (``UNSET`` stripped) and, using the
-    bind-stashed per-field reverse map (``mutation_cls._input_field_specs``,
+    per-field reverse map ``specs`` (``mutation_cls._input_field_specs`` named as
+    the executing schema published them, ``utils/inputs.py::published_input_specs``,
     keyed by input attr), routes each value by ``kind`` to the right FORM-keyed
     place:
 
@@ -561,7 +568,7 @@ def _decode_form_data(
         extra=lambda spec: {"form_field": form_fields[spec.target_name]},
     )
     error = decode_provided_fields(
-        mutation_cls._input_field_specs,
+        specs,
         data,
         handlers=handlers,
         scalar_handler=scalar_handler,
@@ -736,7 +743,7 @@ def _reconstruct_partial_data(
 
 def _form_errors_to_field_errors(
     errors: dict[str, list[ValidationError]],
-    mutation_cls: _FormMutationClass,
+    specs: Sequence[InputFieldSpec],
 ) -> list[FieldError]:
     """Map form-field-keyed errors onto the ``FieldError`` envelope.
 
@@ -747,13 +754,13 @@ def _form_errors_to_field_errors(
     consumes, so the form's ``NON_FIELD_ERRORS`` bucket keys to the ``"__all__"``
     sentinel exactly as a model ``full_clean()`` failure does (Decision 8 step 4).
     Each form field name is re-keyed to the GraphQL input field the client sent
-    through ``build_error_key_map`` over ``mutation_cls._input_field_specs`` (a
+    through ``build_error_key_map`` over the request's published ``specs`` (a
     form spec's ``target_name`` IS the form field name); a form field the input
     does not expose keeps its form field name. No parallel mapper.
     """
     return validation_error_to_field_errors(
         ValidationError(errors),
-        build_error_key_map(mutation_cls._input_field_specs),
+        build_error_key_map(specs),
     )
 
 
@@ -763,6 +770,7 @@ def _modelform_decode_step(
     info: Info[object, object],
     *,
     instance: models.Model | None,
+    specs: Sequence[InputFieldSpec],
 ) -> _DecodedForm | StepFailure:
     """Run the form ``decode_step``: form-decode + (ModelForm update) partial reconstruction.
 
@@ -775,14 +783,19 @@ def _modelform_decode_step(
     on a decode failure or an omitted relation whose stored key resolves to no row
     (the shared skeleton maps it to the error envelope; no form is bound).
     """
-    provided_data, provided_files, decode_error = _decode_form_data(mutation_cls, data, info)
+    provided_data, provided_files, decode_error = _decode_form_data(
+        mutation_cls,
+        data,
+        info,
+        specs=specs,
+    )
     if decode_error is not None:
         return StepFailure([decode_error])
     if instance is None:
         return provided_data, provided_files
     form_data, unresolved = _reconstruct_partial_data(mutation_cls, instance, provided_data)
     if unresolved:
-        return StepFailure(_form_errors_to_field_errors(unresolved, mutation_cls))
+        return StepFailure(_form_errors_to_field_errors(unresolved, specs))
     return form_data, provided_files
 
 
@@ -1098,19 +1111,6 @@ def _widget_keys(form: forms.BaseForm, name: str) -> list[str]:
     return widget_keys(read_attr(form.fields[name], "widget"), form.add_prefix(name))
 
 
-def _bound_value(bound: Mapping[str, object], name: str) -> object:
-    """Return the value ``bound`` holds under ``name``: a ``MultiValueDict``'s values read whole.
-
-    A ``MultiValueDict`` (a ``QueryDict``) holding one value answers it; one holding several
-    (``setlist(name, [...])``, a ``doseq`` query string) answers the list of them, the
-    inverse of ``_bind_form_values``'s ``setlist``. Any other mapping answers its value.
-    """
-    if not isinstance(bound, MultiValueDict):
-        return bound[name]
-    values = list_of(bound.getlist(name))
-    return values[0] if len(values) == 1 else values
-
-
 def _bind_kept_parts(form: forms.BaseForm, errors: dict[str, list[ValidationError]]) -> None:
     """Bind the parts of each whole value a hook keyed itself under a multi-key widget's keys.
 
@@ -1289,11 +1289,12 @@ def _bound_form_or_field_errors(
     decoded: _DecodedForm,
     *,
     instance: models.Model | None,
+    specs: Sequence[InputFieldSpec],
 ) -> tuple[_FormT, None] | tuple[None, list[FieldError]]:
     """Construct the bound form and run ``is_valid()`` once (both form flavors).
 
     Returns ``(form, None)`` on success or ``(None, errors)`` on a validation
-    failure, the errors keyed through ``mutation_cls``'s input specs. A value the bound
+    failure, the errors keyed through the request's published ``specs``. A value the bound
     form's widget cannot read (a list longer than a ``SplitArrayWidget``'s ``size``, sent,
     reconstructed from the located row, or an omitted field's initial) is that field's
     ``max_length`` error before ``is_valid()`` runs (``_bind_under_form_keys``). ``holder``
@@ -1315,9 +1316,9 @@ def _bound_form_or_field_errors(
         unbindable |= _bind_omitted_shape_disagreeing_initials(mutation_cls, form, form_data)
     _assert_bound_choice_agreement(mutation_cls, form, form_data)
     if unbindable:
-        return None, _form_errors_to_field_errors(unbindable, mutation_cls)
+        return None, _form_errors_to_field_errors(unbindable, specs)
     if not form.is_valid():
-        return None, _form_errors_to_field_errors(form.errors.as_data(), mutation_cls)
+        return None, _form_errors_to_field_errors(form.errors.as_data(), specs)
     return form, None
 
 
@@ -1540,6 +1541,7 @@ def _modelform_save_or_field_errors(
     mutation_cls: type[DjangoModelFormMutation],
     *,
     creating: bool,
+    specs: Sequence[InputFieldSpec],
 ) -> list[FieldError] | None:
     """Run the form's save; map a save-time failure to the envelope else ``None``.
 
@@ -1563,7 +1565,8 @@ def _modelform_save_or_field_errors(
     The ``IntegrityError`` -> ``"__all__"`` and consumer ``ValidationError`` mappings
     are the shared ``save_or_field_errors`` (``forced_save_or_field_errors`` on an
     update), keyed through
-    ``utils/errors.py::save_time_error_key_map`` over the backing model: a
+    ``utils/errors.py::save_time_error_key_map`` over the request's published ``specs``
+    and the backing model: a
     ``ModelForm`` field is named after its model field, and a model ``save()`` or
     signal receiver keys its error by the model field name or a forward relation's
     ``attname``, so both reach the GraphQL input name. On top, the one failure a
@@ -1624,7 +1627,7 @@ def _modelform_save_or_field_errors(
 
     def error_key_map() -> ErrorKeyMap:
         return save_time_error_key_map(
-            mutation_cls._input_field_specs,
+            specs,
             backing_model_of(mutation_cls._mutation_meta),
         )
 
@@ -1644,6 +1647,8 @@ def _modelform_write_step(
     info: Info[object, object],
     instance: models.Model | None,
     decoded: _DecodedForm,
+    *,
+    specs: Sequence[InputFieldSpec],
 ) -> models.Model | StepFailure:
     """Run the ``ModelForm`` ``write_step``: ``get_form`` -> ``is_valid`` -> ``form.save``.
 
@@ -1674,21 +1679,22 @@ def _modelform_write_step(
         info,
         decoded,
         instance=instance,
+        specs=specs,
     )
     if bound[1] is not None:
         return StepFailure(bound[1])
     form = bound[0]
     kept_files = _required_file_clears(form)
     if kept_files:
-        return StepFailure(_form_errors_to_field_errors(kept_files, mutation_cls))
+        return StepFailure(_form_errors_to_field_errors(kept_files, specs))
     coerced_fields = _coerced_null_fields(form)
     if coerced_fields:
         return StepFailure(
-            _form_errors_to_field_errors(_column_null_errors(coerced_fields), mutation_cls),
+            _form_errors_to_field_errors(_column_null_errors(coerced_fields), specs),
         )
     temporal_errors = _unstorable_temporal_errors(form)
     if temporal_errors:
-        return StepFailure(_form_errors_to_field_errors(temporal_errors, mutation_cls))
+        return StepFailure(_form_errors_to_field_errors(temporal_errors, specs))
 
     # The pinned-alias WRITE phase opens for exactly the form's save: the form
     # construction + ``is_valid()`` above are database-read-only under the
@@ -1698,6 +1704,7 @@ def _modelform_write_step(
             form,
             mutation_cls,
             creating=instance is None,
+            specs=specs,
         )
     if write_error is not None:
         return StepFailure(write_error)
@@ -1709,6 +1716,8 @@ def _plain_form_write_step(
     mutation_cls: type[DjangoFormMutation],
     info: Info[object, object],
     decoded: _DecodedForm,
+    *,
+    specs: Sequence[InputFieldSpec],
 ) -> Literal[True] | StepFailure:
     """Run the plain-form ``write_step``: ``get_form`` -> ``is_valid`` -> ``perform_mutate``.
 
@@ -1726,6 +1735,7 @@ def _plain_form_write_step(
         info,
         decoded,
         instance=None,
+        specs=specs,
     )
     if bound[1] is not None:
         return StepFailure(bound[1])
@@ -1736,7 +1746,7 @@ def _plain_form_write_step(
     with pipeline_write_phase():
         write_error = save_or_field_errors(
             lambda: holder.perform_mutate(form, info),
-            error_key_map=lambda: build_error_key_map(mutation_cls._input_field_specs),
+            error_key_map=lambda: build_error_key_map(specs),
         )
     if write_error is not None:
         return StepFailure(write_error)
@@ -1768,6 +1778,8 @@ def _run_form_pipeline_sync(
     This is the single sync body the async path wraps in one
     ``sync_to_async(thread_sensitive=True)`` call.
     """
+    # Every error of the request is keyed through the names the executing schema published.
+    specs = published_input_specs(info, mutation_cls._input_field_specs)
     # ``_primary_type is None`` IS the plain-vs-``ModelForm`` flavor split; each arm
     # names its own differently-shaped step and binds it to the one declared name.
     write_step: Callable[[models.Model | None, _DecodedForm], object]
@@ -1777,7 +1789,7 @@ def _run_form_pipeline_sync(
             _instance: models.Model | None,
             decoded: _DecodedForm,
         ) -> Literal[True] | StepFailure:
-            return _plain_form_write_step(mutation_cls, info, decoded)
+            return _plain_form_write_step(mutation_cls, info, decoded, specs=specs)
 
         write_step = plain_write_step
     else:
@@ -1786,7 +1798,7 @@ def _run_form_pipeline_sync(
             instance: models.Model | None,
             decoded: _DecodedForm,
         ) -> models.Model | StepFailure:
-            return _modelform_write_step(mutation_cls, info, instance, decoded)
+            return _modelform_write_step(mutation_cls, info, instance, decoded, specs=specs)
 
         write_step = modelform_write_step
 
@@ -1800,6 +1812,7 @@ def _run_form_pipeline_sync(
             data,
             info,
             instance=instance,
+            specs=specs,
         ),
         write_step=write_step,
     )

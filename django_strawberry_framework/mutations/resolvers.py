@@ -34,6 +34,9 @@ and the load-bearing invariants this module owns:
   is a ``FieldError`` on ``id``, never coerced to a bare pk); a non-Relay primary
   takes the raw pk. Either way the pk literal is coerced through the target pk
   field, so an uncoercible literal is not-found, never a raw Django ``ValueError``.
+  A ``FieldError`` on ``id`` keys ``field`` and ``path`` to the name the executing
+  schema published for the argument (``utils/write_transaction.py::lookup_id_name``),
+  ``id`` under the default ``NameConverter``.
 - **Write authorization is a separate seam** (spec-036 Decision 15): the pipeline
   calls the mutation's ``check_permission`` (which delegates to
   ``Meta.permission_classes``) and maps a ``False`` return to a top-level
@@ -99,7 +102,7 @@ products ``Mutation`` + ``config/schema.py`` wiring + the live
 from __future__ import annotations
 
 import datetime
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple, cast
 
 from django.core.exceptions import NON_FIELD_ERRORS, ObjectDoesNotExist, ValidationError
@@ -113,7 +116,7 @@ from django.db.models import (
 )
 from django.db.models.constants import LOOKUP_SEP
 from django.utils import timezone
-from graphql import GraphQLError, GraphQLInputObjectType
+from graphql import GraphQLError
 
 from django_strawberry_framework.conf import django_setting
 from django_strawberry_framework.optimizer.extension import (
@@ -151,7 +154,12 @@ from django_strawberry_framework.utils.errors import (
     validation_error_to_field_errors,
 )
 from django_strawberry_framework.utils.input_values import UNSET
-from django_strawberry_framework.utils.inputs import FILE, RELATION_MULTI, RELATION_SINGLE
+from django_strawberry_framework.utils.inputs import (
+    FILE,
+    RELATION_MULTI,
+    RELATION_SINGLE,
+    published_input_specs,
+)
 from django_strawberry_framework.utils.permissions import auth_aliases_for_permission_classes
 from django_strawberry_framework.utils.querysets import (
     apply_type_visibility_sync,
@@ -162,12 +170,8 @@ from django_strawberry_framework.utils.querysets import (
 )
 from django_strawberry_framework.utils.relations import is_row_key_column
 from django_strawberry_framework.utils.typing import (
-    graphql_input_fields,
-    graphql_type_of,
-    published_argument,
-    published_python_name,
+    published_argument_wire_name,
     strawberry_schema_from_info,
-    unwrap_non_null,
 )
 from django_strawberry_framework.utils.write_transaction import (
     authorization_phase,
@@ -177,6 +181,7 @@ from django_strawberry_framework.utils.write_transaction import (
     forced_update_conflict_errors,
     located_row_vanished,
     locks_rows,
+    lookup_id_name,
     not_updated_exceptions,
     open_write_pipeline,
     pin_write_queryset,
@@ -449,9 +454,12 @@ def run_write_pipeline_sync(
             None if target is None else target.slot,
             using,
         )
+        pipeline_context = require_write_pipeline()
 
         located = None
         if locate_target is not None:
+            # Every error about the addressed row keys to the ``id`` name the client sent.
+            pipeline_context.id_name = published_argument_wire_name(info, "id", "id")
             node_id, id_error = coerce_lookup_id(
                 id_,
                 locate_target.primary_type,
@@ -483,7 +491,6 @@ def run_write_pipeline_sync(
         # claims "the authorized row" compares against THIS value, never against
         # the live ``instance.pk`` a hook could have re-pointed.
         authorized_pk = None if instance is None else pk_of(instance)
-        pipeline_context = require_write_pipeline()
         pipeline_context.authorized_pk = authorized_pk
         if snapshot_target and instance is not None:
             pipeline_context.target_state = snapshot_target_state(instance)
@@ -1228,7 +1235,7 @@ def _run_pipeline_sync(
     model = model_for(primary_type)
     # A create / update has an input, so the bind stashed the decode's reverse maps;
     # their wire names are read from the executing schema once per request.
-    specs = _published_input_specs(info, mutation_cls._input_field_specs)
+    specs = published_input_specs(info, mutation_cls._input_field_specs)
     return run_write_pipeline_sync(
         mutation_cls,
         info,
@@ -1250,55 +1257,6 @@ def _run_pipeline_sync(
             decoded,
             specs=specs,
         ),
-    )
-
-
-def _published_input_specs(
-    info: Info[object, object],
-    specs: Sequence[InputFieldSpec],
-) -> Sequence[InputFieldSpec]:
-    """Return a model mutation's bind specs, each named as the executing schema published it.
-
-    A spec is recorded at bind (phase 2.5), before any schema exists. Every
-    generated input field pins its wire name, so its ``graphql_name`` is final
-    there; a consumer-authored ``Meta.input_class`` / ``partial_input_class``
-    field declared without ``name=`` is named by the schema's own
-    ``NameConverter`` at schema build, which the bind can only predict
-    (``mutations/inputs.py::_predicted_input_field_name``): ``isbn_10`` publishes
-    ``isbn10`` under the default config and ``isbn_10`` under
-    ``auto_camel_case=False``, and one merged input class can serve several
-    schemas. The executable schema keys the ``data:`` input object's fields by
-    the names it published and back-references each field's attr
-    (``utils/typing.py::published_argument`` /
-    ``utils/typing.py::published_python_name``), so every name an error is
-    keyed by - the decode's, ``full_clean()``'s and a save-time
-    ``ValidationError``'s - is one a client of THIS schema could have sent.
-
-    The bind tuple itself comes back when every name already agrees (an
-    all-generated input) and when ``info`` carries no executable schema (a
-    direct-call stub), which keeps the bind prediction. Never stored: the
-    answer belongs to the executing schema.
-    """
-    # ``mutations/fields.py::_synthesized_mutation_signature`` names the input parameter ``data``.
-    published = published_argument(info, "data")
-    if published is None:
-        return specs
-    input_type = require_instance(
-        unwrap_non_null(graphql_type_of(published[1])),
-        GraphQLInputObjectType,
-    )
-    wire_names: dict[str, str] = {}
-    for wire_name, input_field in graphql_input_fields(input_type).items():
-        python_name = published_python_name(input_field)
-        if python_name is not None:
-            wire_names[python_name] = wire_name
-    if all(
-        wire_names.get(spec.input_attr, spec.graphql_name) == spec.graphql_name for spec in specs
-    ):
-        return specs
-    return tuple(
-        replace(spec, graphql_name=wire_names.get(spec.input_attr, spec.graphql_name))
-        for spec in specs
     )
 
 
@@ -1379,7 +1337,7 @@ def _model_write_step(
     ``IntegrityError`` or a consumer save-time
     ``ValidationError`` into the envelope), then the M2M ``.set(...)`` assignment
     (the same two mappings). ``specs`` are the request's published specs
-    (``_published_input_specs``) every error of the step is keyed through, beside
+    (``utils/inputs.py::published_input_specs``) every error of the step is keyed through, beside
     ``mutation_cls``'s bind-time Django-field index. Returns the saved instance (the skeleton's
     ``refetch_optimized`` re-fetches it by pk under the optimizer plan) or a
     ``StepFailure`` on a validation / write failure. ``instance`` (the located
@@ -1910,7 +1868,7 @@ def _model_error_key_map(
     (``_model_fields_by_attr``) - the same index the decode and the exclude
     calculation read, never a live ``get_field``. Input ``categoryId`` is keyed
     by both ``category`` and ``category_id``. ``specs`` are the request's
-    published specs (``_published_input_specs``), so each key is a name the
+    published specs (``utils/inputs.py::published_input_specs``), so each key is a name the
     executing schema published.
     """
     model_fields = _bound_model_fields(mutation_cls)
@@ -2029,6 +1987,9 @@ def coerce_lookup_id(
     any query: the coercion (``utils/querysets.py::coerce_field_value_or_none``) answers
     it as naming no row, since no write stores a NUL and PostgreSQL refuses to bind one.
 
+    Each ``FieldError`` on ``id`` keys to the argument's published name
+    (``utils/write_transaction.py::lookup_id_name``), the name the client sent.
+
     Returns ``(pk, None)`` on success or ``(None, FieldError)`` otherwise.
     """
     target_model = model_for(target_type)
@@ -2036,7 +1997,7 @@ def coerce_lookup_id(
         pk = coerce_relation_pk_or_none(target_model, id_)
         if pk is None:
             return None, not_found_error()
-        text_error = unstorable_text_error("id", pk)
+        text_error = unstorable_text_error(lookup_id_name(), pk)
         if text_error is not None:
             return None, text_error
         return pk, None
@@ -2049,8 +2010,15 @@ def coerce_lookup_id(
 
 
 def not_found_error() -> FieldError:
-    """Build the not-found ``FieldError`` on ``id`` (hidden or missing - no existence leak)."""
-    return field_error("id", "No matching row found.", codes=FIELD_ERROR_CODE_NOT_FOUND)
+    """Build the not-found ``FieldError`` on the ``id`` argument (hidden or missing - no existence leak).
+
+    Keyed to the argument's published name (``utils/write_transaction.py::lookup_id_name``).
+    """
+    return field_error(
+        lookup_id_name(),
+        "No matching row found.",
+        codes=FIELD_ERROR_CODE_NOT_FOUND,
+    )
 
 
 def _invalid_lookup_id_error() -> FieldError:
@@ -2059,9 +2027,10 @@ def _invalid_lookup_id_error() -> FieldError:
     A ``GlobalID`` whose decoded type is not the mutation's target model (or whose
     type cannot be resolved) is rejected here rather than coerced to a bare pk; the
     failure is determined from the id's type slot alone, without a DB read, so it
-    reveals nothing about row existence (spec-036 Decision 10).
+    reveals nothing about row existence (spec-036 Decision 10). Keyed to the ``id``
+    argument's published name (``utils/write_transaction.py::lookup_id_name``).
     """
-    return field_error("id", "Invalid id.", codes=FIELD_ERROR_CODE_INVALID)
+    return field_error(lookup_id_name(), "Invalid id.", codes=FIELD_ERROR_CODE_INVALID)
 
 
 def payload_cls_for(mutation_cls: _AuthorizedClass) -> type[_GeneratedPayload]:

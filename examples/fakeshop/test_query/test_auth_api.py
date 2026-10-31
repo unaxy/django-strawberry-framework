@@ -23,6 +23,7 @@ the fresh-account path; no test hand-rolls a ``User``.
 import json
 import logging
 from collections.abc import Callable, Mapping
+from functools import wraps
 from typing import TYPE_CHECKING
 
 import pytest
@@ -56,9 +57,15 @@ from graphql_client import (
 from graphql_client import assert_graphql_success as _graphql_data
 from graphql_client import post_graphql as _post_graphql
 from strawberry import relay
-from typing_extensions import TypedDict, Unpack
+from strawberry.schema.name_converter import HasGraphQLName, NameConverter
+from typing_extensions import TypedDict, Unpack, override
 
-from django_strawberry_framework import DjangoSchema, DjangoType, finalize_django_types
+from django_strawberry_framework import (
+    DjangoSchema,
+    DjangoType,
+    finalize_django_types,
+    strawberry_config,
+)
 from django_strawberry_framework.auth import current_user, login_mutation
 from django_strawberry_framework.optimizer import DjangoOptimizerExtension
 from django_strawberry_framework.registry import registry
@@ -850,6 +857,54 @@ def test_register_surrogate_password_keys_to_password_not_a_crash() -> None:
     assert not User.objects.filter(username="surrogate_reg_user").exists()
 
 
+class _UpperCaseNames(NameConverter):
+    """Publishes every field, argument and input field upper-cased, pinned names included."""
+
+    @override
+    def get_graphql_name(self, obj: HasGraphQLName) -> str:
+        return super().get_graphql_name(obj).upper()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("data", "field"),
+    [
+        pytest.param({"USERNAME": "upper_reg_user", "PASSWORD": "123"}, "PASSWORD", id="password"),
+        pytest.param(
+            {"USERNAME": "staff_1", "PASSWORD": _STRONG_PASSWORD},
+            "USERNAME",
+            id="clean",
+        ),
+    ],
+)
+def test_register_errors_key_to_the_names_a_custom_converter_published(
+    data: JSONObject,
+    field: str,
+) -> None:
+    """``register`` keys its errors to the input names the executing schema published.
+
+    The accounts surface under a ``NameConverter`` that upper-cases every name: a password
+    ``validate_password`` refuses keys to ``PASSWORD`` and a taken username, ``full_clean()``'s
+    error, to ``USERNAME``, the names the client sent. Nothing is written.
+    """
+    create_users(1)
+    schema = DjangoSchema(
+        query=accounts_schema.Query,
+        mutation=accounts_schema.Mutation,
+        config=strawberry_config(name_converter=_UpperCaseNames()),
+    )
+    payload = _post_auth_holder(
+        schema,
+        "mutation($d: RegisterInput!){ REGISTER(DATA: $d){ NODE{ USERNAME } ERRORS{ FIELD PATH } } }",
+        variables={"d": data},
+    )
+
+    assert payload == {
+        "data": {"REGISTER": {"NODE": None, "ERRORS": [{"FIELD": field, "PATH": [field]}]}},
+    }
+    assert not User.objects.filter(username="upper_reg_user").exists()
+
+
 @pytest.mark.django_db
 def test_non_string_login_username_fails_validation_before_the_resolver() -> None:
     """``login(username: 123)`` is refused by GraphQL validation; nobody is authenticated.
@@ -1114,11 +1169,13 @@ def test_login_and_logout_face_djangos_real_csrf_check() -> None:
 _CURRENT: dict[str, object | None] = {"schema": None}
 
 
+@wraps(AsyncDjangoGraphQLView.as_view())
 async def _async_shipped_graphql_view(request: HttpRequest) -> HttpResponseBase:
 
     return await AsyncDjangoGraphQLView.as_view(schema=config_schema.schema)(request)
 
 
+@wraps(DjangoGraphQLView.as_view())
 def _holder_graphql_view(request: HttpRequest) -> HttpResponseBase:
     schema = _CURRENT["schema"]
     assert schema is not None

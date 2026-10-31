@@ -202,6 +202,14 @@ class WriteAliasContext:
     validator that ``setattr``-ed the located row cannot smuggle unvalidated values
     into the write); ``None`` for every other flavor and for create.
 
+    ``id_name`` is the wire name the executing schema published for the update /
+    delete ``id`` argument (``utils/typing.py::published_argument_wire_name``), set by
+    the pipeline skeleton as the pipeline opens; the default ``"id"`` stands for
+    create, which takes no ``id``. Every error about the addressed row keys to it
+    (``lookup_id_name``), so it is read per request and never stored on the
+    mutation class: one class can serve schemas whose converters spell ``id``
+    differently.
+
     ``write_phase`` is the pipeline-phase flag ``pipeline_alias_guard`` consults:
     ``False`` (the default) means the operation is in a database-READ-ONLY phase
     (permission checks, decoding, hooks, validation, save-kwargs preparation) and
@@ -227,6 +235,7 @@ class WriteAliasContext:
         "auth_aliases",
         "auth_phase",
         "authorized_pk",
+        "id_name",
         "lock",
         "target_state",
         "write_phase",
@@ -238,6 +247,7 @@ class WriteAliasContext:
         self.lock: bool = lock
         self.authorized_pk: object = None
         self.target_state: dict[str, _ValueSnapshot] | None = None
+        self.id_name: str = "id"
         self.write_phase: bool = False
         self.auth_phase: bool = False
         self.auth_aliases: frozenset[str] = frozenset()
@@ -736,6 +746,16 @@ def require_write_pipeline() -> WriteAliasContext:
             "only callable from the pipeline skeleton (run_write_pipeline_sync).",
         )
     return context
+
+
+def lookup_id_name() -> str:
+    """Return the published name of the active pipeline's ``id`` argument, ``"id"`` outside one.
+
+    The key of every ``FieldError`` about the addressed row (not-found, invalid id,
+    ``conflict``): the name the client sent, read from the pipeline's ``id_name``.
+    """
+    pipeline = current_write_pipeline()
+    return "id" if pipeline is None else pipeline.id_name
 
 
 def pinned_write_alias() -> str:
@@ -1366,18 +1386,18 @@ def pipeline_rows_visible_after_lock(
 
 
 def conflict_error() -> FieldError:
-    """Build the in-band concurrent-write ``conflict`` ``FieldError`` on ``id``.
+    """Build the in-band concurrent-write ``conflict`` ``FieldError`` on the ``id`` argument.
 
     The disappearing-row envelope: the target existed at locate but a concurrent
     transaction removed (or made unwritable) it before this one finished - found
     by the save, the post-write re-fetch, or the ``located_row_vanished`` probe a
     failed update / delete step runs, whose field errors it replaces. Keyed
-    to ``id`` like the not-found envelope - the failure is about the addressed
-    row - with the distinct ``conflict`` code so a client can retry rather than
-    treat it as a permanent miss.
+    to the ``id`` argument's published name (``lookup_id_name``) like the not-found
+    envelope - the failure is about the addressed row - with the distinct
+    ``conflict`` code so a client can retry rather than treat it as a permanent miss.
     """
     return field_error(
-        "id",
+        lookup_id_name(),
         "The row was changed or removed by a concurrent operation; retry.",
         codes=FIELD_ERROR_CODE_CONFLICT,
     )

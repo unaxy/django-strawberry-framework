@@ -29,13 +29,16 @@ is sync-only).
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from functools import wraps
 from typing import TYPE_CHECKING
 
 import pytest
-from apps.products.services import create_users
+from apps.products import models
+from apps.products.services import create_users, seed_data
 from asgiref.sync import sync_to_async
 from config import schema as config_schema
+from django.apps import apps
 from django.contrib.auth.models import Permission, User
 from django.db import connection
 from django.db.backends.utils import CursorWrapper
@@ -43,11 +46,13 @@ from django.http import HttpRequest
 from django.http.response import HttpResponseBase
 from django.test import AsyncClient, Client, override_settings
 from django.urls import path
-from graphql_client import json_at, response_json
-from strawberry import relay
+from graphql_client import JSONObject, json_at, json_list, read_attr, response_json
 
+from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing import AsyncTestClient, TestClient
+from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.views import AsyncDjangoGraphQLView
+from tests._idioms import saved_pk
 
 if TYPE_CHECKING:
     from django.test.client import _MonkeyPatchedASGIResponse, _MonkeyPatchedWSGIResponse
@@ -132,10 +137,52 @@ def _login_with_perm(username: str, *codenames: str) -> Client:
 
 
 def _global_id(type_name: str, pk: int) -> str:
-    return str(relay.GlobalID(type_name=type_name, node_id=str(pk)))
+    """Mint the id from the finalized primary type rather than an assumed strategy."""
+    type_cls = registry.get(apps.get_model(type_name))
+    assert type_cls is not None, type_name
+    return global_id_for(type_cls, pk)
 
 
 _VALID_DATE = "2026-01-02 03:04:05"
+
+
+@pytest.fixture(autouse=True)
+def _restore_created_date_columns(transactional_db: None) -> Iterator[None]:
+    """A PostgreSQL corruption probe restores the nullability it found before it ran."""
+    del transactional_db
+    original_nullability: dict[str, bool] = {}
+    if connection.vendor == "postgresql":
+        with connection.cursor() as cursor:
+            for table in ("products_category", "products_item"):
+                columns: list[object] = connection.introspection.get_table_description(
+                    cursor,
+                    table,
+                )
+                created_column = next(
+                    column for column in columns if read_attr(column, "name") == "created_date"
+                )
+                nullable = read_attr(created_column, "null_ok")
+                assert isinstance(nullable, bool), nullable
+                original_nullability[table] = nullable
+    try:
+        yield
+    finally:
+        repair_statements = {
+            "products_category": (
+                "UPDATE products_category SET created_date = %s WHERE created_date IS NULL"
+            ),
+            "products_item": (
+                "UPDATE products_item SET created_date = %s WHERE created_date IS NULL"
+            ),
+        }
+        with connection.cursor() as cursor:
+            for table, was_nullable in original_nullability.items():
+                if not was_nullable:
+                    cursor.execute(
+                        repair_statements[table],
+                        (_VALID_DATE,),
+                    )
+                    cursor.execute(f"ALTER TABLE {table} ALTER COLUMN created_date SET NOT NULL")
 
 
 def _first_column(cursor: CursorWrapper) -> object:
@@ -144,12 +191,8 @@ def _first_column(cursor: CursorWrapper) -> object:
     return row[0]
 
 
-def _execute_raw(sql: str, params: tuple[str | int | None, ...] = ()) -> int:
-    """Run a raw ``INSERT ... RETURNING id`` (bypassing the ORM) and return the new pk.
-
-    ``RETURNING`` keeps the pk read vendor-neutral: DB-API ``lastrowid`` is a
-    SQLite-only affordance.
-    """
+def _update_raw(sql: str, params: tuple[str | int | None, ...]) -> int:
+    """Rewrite an existing seeded row and return its unchanged key through ``RETURNING``."""
     with connection.cursor() as cursor:
         cursor.execute(sql, params)
         pk = _first_column(cursor)
@@ -211,48 +254,60 @@ def _post_delete(client: Client, item_pk: int) -> _MonkeyPatchedWSGIResponse:
     return res.response
 
 
-def _insert_category(name: str, *, corrupt: bool = False) -> int:
-    """Insert a category by raw SQL; ``corrupt=True`` plants an un-hydratable ``created_date``.
+def _prepare_category(name: str, *, position: int = 0, corrupt: bool = False) -> int:
+    """Rewrite a service-seeded category; ``corrupt=True`` plants an un-hydratable date.
 
     A corrupt date hydrates to ``None`` on refetch (no exception, nothing rolls
     back at write time) and only fails later, completing the non-nullable
     ``createdDate``. ``is_private`` is bound as a real Python ``bool`` so the
     parameter matches Postgres' ``boolean`` column as well as SQLite's.
     """
+    pk = saved_pk(models.Category.objects.order_by("pk")[position])
     created_date = _corrupt_created_date("products_category") if corrupt else _VALID_DATE
-    return _execute_raw(
+    return _update_raw(
         """
-        INSERT INTO products_category (name, description, is_private, created_date, updated_date)
-        VALUES (%s, %s, %s, %s, %s)
+        UPDATE products_category
+        SET name = %s, description = %s, is_private = %s, created_date = %s, updated_date = %s
+        WHERE id = %s
         RETURNING id
         """,
         (
             name,
-            "category created by raw SQL",
+            "service-seeded category",
             False,
             created_date,
             _VALID_DATE,
+            pk,
         ),
     )
 
 
-def _insert_item(name: str, category_pk: int, *, corrupt: bool = False) -> int:
-    """Insert an item by raw SQL; ``corrupt=True`` plants an un-hydratable ``created_date``."""
+def _prepare_item(
+    name: str,
+    category_pk: int,
+    *,
+    position: int = 0,
+    corrupt: bool = False,
+) -> int:
+    """Rewrite a service-seeded item; raw SQL is reserved for the corrupt date."""
+    pk = saved_pk(models.Item.objects.order_by("pk")[position])
     created_date = _corrupt_created_date("products_item") if corrupt else _VALID_DATE
-    return _execute_raw(
+    return _update_raw(
         """
-        INSERT INTO products_item
-            (name, description, category_id, is_private, created_date, updated_date)
-        VALUES (%s, %s, %s, %s, %s, %s)
+        UPDATE products_item
+        SET name = %s, description = %s, category_id = %s, is_private = %s,
+            created_date = %s, updated_date = %s
+        WHERE id = %s
         RETURNING id
         """,
         (
             name,
-            "item created by raw SQL",
+            "service-seeded item",
             category_pk,
             False,
             created_date,
             _VALID_DATE,
+            pk,
         ),
     )
 
@@ -265,28 +320,37 @@ def _stored_item_name(item_pk: int) -> str:
     return name
 
 
+def _completion_failure(
+    response: _MonkeyPatchedWSGIResponse | _MonkeyPatchedASGIResponse,
+    root: str,
+    *field_path: str,
+) -> JSONObject:
+    """Require the intended completion failure rather than any error before the write."""
+    assert response.status_code == 200
+    payload = response_json(response)
+    errors = json_list(payload, "errors")
+    assert len(errors) == 1, payload
+    assert json_at(errors[0], "message") == "An unexpected error occurred.", payload
+    assert json_at(errors[0], "path") == [root, "node", *field_path], payload
+    assert json_at(payload, "data", root, "node") is None, payload
+    return payload
+
+
 @pytest.mark.django_db(transaction=True)
 def test_update_does_not_commit_when_response_completion_fails() -> None:
     """An update whose response can't be serialized must roll back, not commit a partial write."""
     create_users(1)
+    seed_data(2)
     client = _login_with_perm("view_item_1", "view_category", "change_item")
 
     # A category whose `created_date` cannot round-trip: it hydrates to None on
     # refetch (no exception), then fails the non-nullable `createdDate` at completion.
-    category_pk = _insert_category("raw-update-bad-date-category", corrupt=True)
-    item_pk = _insert_item("raw-bad-date-item", category_pk)
+    category_pk = _prepare_category("raw-update-bad-date-category", corrupt=True)
+    item_pk = _prepare_item("raw-bad-date-item", category_pk)
 
     response = _post_update(client, item_pk, name="post-corruption-update")
 
-    payload = response_json(response)
-    assert response.status_code == 200
-    assert "errors" in payload
-    assert json_at(payload, "errors", 0, "path") == [
-        "updateItem",
-        "node",
-        "category",
-        "createdDate",
-    ]
+    _completion_failure(response, "updateItem", "category", "createdDate")
 
     # ...but the write must NOT have committed: the row keeps its original name.
     assert _stored_item_name(item_pk) == "raw-bad-date-item"
@@ -305,9 +369,10 @@ def test_delete_does_not_commit_when_own_scalar_response_completion_fails() -> N
     write time as a NOT NULL constraint envelope instead (itself rolled back).
     """
     create_users(1)
+    seed_data(2)
     client = _login_with_perm("staff_1", "delete_item")
-    category_pk = _insert_category("raw-own-scalar-category")
-    item_pk = _insert_item("raw-own-scalar-item", category_pk, corrupt=True)
+    category_pk = _prepare_category("raw-own-scalar-category")
+    item_pk = _prepare_item("raw-own-scalar-item", category_pk, corrupt=True)
 
     res = TestClient(client=client).query(
         _DELETE_ITEM_OWN_SCALAR,
@@ -316,8 +381,7 @@ def test_delete_does_not_commit_when_own_scalar_response_completion_fails() -> N
     )
     response = res.response
 
-    assert response.status_code < 500
-    assert "errors" in response_json(response)
+    _completion_failure(response, "deleteItem", "createdDate")
     # The delete rolled back: the row survives.
     with connection.cursor() as cursor:
         cursor.execute("SELECT COUNT(*) FROM products_item WHERE id = %s", (item_pk,))
@@ -328,13 +392,13 @@ def test_delete_does_not_commit_when_own_scalar_response_completion_fails() -> N
 def test_create_does_not_commit_when_response_completion_fails() -> None:
     """A create whose response can't be serialized must roll back, not leave a row."""
     create_users(1)
+    seed_data(2)
     client = _login_with_perm("view_item_1", "add_item")
-    category_pk = _insert_category("raw-create-bad-date-category", corrupt=True)
+    category_pk = _prepare_category("raw-create-bad-date-category", corrupt=True)
 
     response = _post_create(client, category_pk)
 
-    assert response.status_code < 500
-    assert "errors" in response_json(response)
+    _completion_failure(response, "createItem", "category", "createdDate")
     with connection.cursor() as cursor:
         cursor.execute(
             "SELECT COUNT(*) FROM products_item WHERE name = %s",
@@ -348,14 +412,14 @@ def test_create_does_not_commit_when_response_completion_fails() -> None:
 def test_delete_does_not_commit_when_response_completion_fails() -> None:
     """A delete whose response can't be serialized must roll back, not remove the row."""
     create_users(1)
+    seed_data(2)
     client = _login_with_perm("staff_1", "delete_item")
-    category_pk = _insert_category("raw-delete-bad-date-category", corrupt=True)
-    item_pk = _insert_item("raw-delete-bad-date-item", category_pk)
+    category_pk = _prepare_category("raw-delete-bad-date-category", corrupt=True)
+    item_pk = _prepare_item("raw-delete-bad-date-item", category_pk)
 
     response = _post_delete(client, item_pk)
 
-    assert response.status_code < 500
-    assert "errors" in response_json(response)
+    _completion_failure(response, "deleteItem", "category", "createdDate")
     with connection.cursor() as cursor:
         cursor.execute("SELECT COUNT(*) FROM products_item WHERE id = %s", (item_pk,))
         remaining_count = _first_column(cursor)
@@ -371,9 +435,10 @@ def test_successful_update_still_commits_through_the_completion_spanning_transac
     healthy rows completes, returns the success payload, and persists.
     """
     create_users(1)
+    seed_data(2)
     client = _login_with_perm("view_item_1", "view_category", "change_item")
-    category_pk = _insert_category("healthy-commit-category")
-    item_pk = _insert_item("healthy-commit-item", category_pk)
+    category_pk = _prepare_category("healthy-commit-category")
+    item_pk = _prepare_item("healthy-commit-item", category_pk)
 
     response = _post_update(client, item_pk, name="committed-update")
 
@@ -392,11 +457,12 @@ def test_serial_top_level_mutations_keep_independent_transactions() -> None:
     field's already-committed transaction survives.
     """
     create_users(1)
+    seed_data(2)
     client = _login_with_perm("view_item_1", "view_category", "change_item")
-    healthy_category_pk = _insert_category("serial-healthy-category")
-    corrupt_category_pk = _insert_category("serial-corrupt-category", corrupt=True)
-    first_pk = _insert_item("serial-first-item", healthy_category_pk)
-    second_pk = _insert_item("serial-second-item", corrupt_category_pk)
+    healthy_category_pk = _prepare_category("serial-healthy-category")
+    corrupt_category_pk = _prepare_category("serial-corrupt-category", position=1, corrupt=True)
+    first_pk = _prepare_item("serial-first-item", healthy_category_pk)
+    second_pk = _prepare_item("serial-second-item", corrupt_category_pk, position=1)
 
     res = TestClient(client=client).query(
         _TWO_UPDATES,
@@ -409,13 +475,10 @@ def test_serial_top_level_mutations_keep_independent_transactions() -> None:
         assert_no_errors=False,
     )
 
-    payload = response_json(res.response)
-    assert res.response.status_code < 500
+    payload = _completion_failure(res.response, "second", "category", "createdDate")
     # The second field's completion failed (its category createdDate is corrupt);
     # the non-nullable error null-bubbles to the nearest nullable ancestor - the
     # payload's `node` slot - and surfaces as a top-level error...
-    assert "errors" in payload
-    assert json_at(payload, "data", "second", "node") is None
     # ...and only ITS write rolled back; the first field committed independently.
     assert json_at(payload, "data", "first", "node", "name") == "serial-first-updated"
     assert _stored_item_name(first_pk) == "serial-first-updated"
@@ -431,6 +494,7 @@ def test_mutation_root_typename_meta_field_resolves() -> None:
     assert response_json(res.response) == {"data": {"__typename": "Mutation"}}
 
 
+@wraps(AsyncDjangoGraphQLView.as_view())
 async def _async_shipped_graphql_view(request: HttpRequest) -> HttpResponseBase:
 
     return await AsyncDjangoGraphQLView.as_view(schema=config_schema.schema)(request)
@@ -471,11 +535,12 @@ async def _async_client_with_perm(username: str, *codenames: str) -> AsyncClient
 async def test_update_does_not_commit_when_response_completion_fails_over_graphql_async() -> None:
     """Async ``updateItem`` whose response can't be serialized must roll back."""
     await sync_to_async(create_users)(1)
+    await sync_to_async(seed_data)(2)
     client = await _async_client_with_perm("view_item_1", "view_category", "change_item")
 
     def _seed() -> int:
-        category_pk = _insert_category("async-raw-update-bad-date-category", corrupt=True)
-        return _insert_item("async-raw-bad-date-item", category_pk)
+        category_pk = _prepare_category("async-raw-update-bad-date-category", corrupt=True)
+        return _prepare_item("async-raw-bad-date-item", category_pk)
 
     item_pk = await sync_to_async(_seed)()
     response = await _post_async(
@@ -487,15 +552,7 @@ async def test_update_does_not_commit_when_response_completion_fails_over_graphq
         },
     )
 
-    payload = response_json(response)
-    assert response.status_code == 200
-    assert "errors" in payload
-    assert json_at(payload, "errors", 0, "path") == [
-        "updateItem",
-        "node",
-        "category",
-        "createdDate",
-    ]
+    _completion_failure(response, "updateItem", "category", "createdDate")
     stored = await sync_to_async(_stored_item_name)(item_pk)
     assert stored == "async-raw-bad-date-item"
 
@@ -504,11 +561,12 @@ async def test_update_does_not_commit_when_response_completion_fails_over_graphq
 async def test_successful_update_still_commits_over_graphql_async() -> None:
     """A serializable async ``updateItem`` still commits through completion."""
     await sync_to_async(create_users)(1)
+    await sync_to_async(seed_data)(2)
     client = await _async_client_with_perm("view_item_1", "view_category", "change_item")
 
     def _seed() -> int:
-        category_pk = _insert_category("async-healthy-commit-category")
-        return _insert_item("async-healthy-commit-item", category_pk)
+        category_pk = _prepare_category("async-healthy-commit-category")
+        return _prepare_item("async-healthy-commit-item", category_pk)
 
     item_pk = await sync_to_async(_seed)()
     response = await _post_async(

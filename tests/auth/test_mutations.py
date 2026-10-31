@@ -120,6 +120,7 @@ from django_strawberry_framework.registry import (
 )
 from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.utils.input_values import UNSET
+from django_strawberry_framework.utils.inputs import InputFieldSpec
 from django_strawberry_framework.utils.permissions import ChannelsRequestAdapter
 from django_strawberry_framework.utils.querysets import SyncMisuseError
 from django_strawberry_framework.utils.sessions import connection_actor_state
@@ -1017,8 +1018,12 @@ def test_sync_login_dispatch_never_enters_the_async_boundary(
     sync_boundary_spy: list[Callable[..., object]],
 ) -> None:
     """``execute_sync`` login runs the native sync body with no event-loop bridge."""
+    create_users(1)
     schema = _login_logout_schema()
-    User.objects.create_user(username="probe", password="pw-9x-strong")
+    user = User.objects.get(username="regular_1")
+    user.username = "probe"
+    user.set_password("pw-9x-strong")
+    user.save(update_fields=["username", "password"])
 
     res = schema.execute_sync(
         _LOGIN_Q,
@@ -1037,8 +1042,12 @@ async def test_async_login_dispatch_awaits_the_native_async_body_exactly_once(
     sync_boundary_spy: list[Callable[..., object]],
 ) -> None:
     """``await schema.execute`` login awaits the native async body exactly once."""
+    await _acreate_users(1)
     schema = _login_logout_schema()
-    await User.objects.acreate_user(username="probe", password="pw-9x-strong")
+    user = await User.objects.aget(username="regular_1")
+    user.username = "probe"
+    user.set_password("pw-9x-strong")
+    await user.asave(update_fields=["username", "password"])
 
     request = _session_request()
     res = await schema.execute(
@@ -1146,12 +1155,16 @@ def test_an_unplanned_relation_under_login_node_is_strictness_visible() -> None:
     selection VISIBLE rather than silently N+1. Strictness is a construction
     argument, so only a locally built schema can arm it.
     """
+    create_users(1)
     _declare_group_type()
     schema = _login_logout_schema(
         declare=lambda: _declare_user_type(fields=("id", "username", "groups")),
         optimizer=DjangoOptimizerExtension(strictness="raise"),
     )
-    user = User.objects.create_user(username="probe", password="pw-9x-strong")
+    user = User.objects.get(username="regular_1")
+    user.username = "probe"
+    user.set_password("pw-9x-strong")
+    user.save(update_fields=["username", "password"])
     user.groups.add(Group.objects.create(name="g1"))
     res = schema.execute_sync(
         'mutation { login(username: "probe", password: "pw-9x-strong") '
@@ -2029,6 +2042,7 @@ def test_register_decode_step_refuses_a_bind_without_the_excluded_password() -> 
             ProbeInput(username="plain"),
             info=unread_info(),
             instance=None,
+            specs=CreateUser._input_field_specs,
         )
 
 
@@ -2058,12 +2072,41 @@ def test_register_with_explicit_none_password_returns_null_field_error() -> None
         password: str | None = None
 
     data = _RegisterInput(username="testuser", email="u@example.com", password=None)
-    failure = _register_decode_step(rider, data, info=unread_info(), instance=None)
+    failure = _register_decode_step(
+        rider,
+        data,
+        info=unread_info(),
+        instance=None,
+        specs=rider._input_field_specs,
+    )
     assert isinstance(failure, StepFailure)
     errors = failure.errors
     assert len(errors) == 1
     assert errors[0].field == "password"
     assert errors[0].codes == ["null"]
+
+
+#: The register bind's ``password`` spec, as an unconverted schema publishes it.
+_PASSWORD_SPECS = (
+    InputFieldSpec(
+        input_attr="password",
+        graphql_name="password",
+        target_name="password",
+        kind=EXCLUDED,
+    ),
+)
+
+
+def test_register_write_step_refuses_specs_without_a_password_field() -> None:
+    """A write step handed specs with no ``password`` field raises before any validation."""
+    decoded: _RegisterDecoded = (
+        User(username="testuser"),
+        [],
+        CleanExcludes(fields=[], checks=[]),
+        "secret",
+    )
+    with pytest.raises(ValueError, match="carry no password field"):
+        _register_write_step(DjangoMutation, None, decoded, specs=())
 
 
 def test_register_write_step_none_password_defense_in_depth() -> None:
@@ -2075,7 +2118,7 @@ def test_register_write_step_none_password_defense_in_depth() -> None:
         CleanExcludes(fields=[], checks=[]),
         None,
     )
-    failure = _register_write_step(DjangoMutation, None, decoded)
+    failure = _register_write_step(DjangoMutation, None, decoded, specs=_PASSWORD_SPECS)
     assert isinstance(failure, StepFailure)
     errors = failure.errors
     assert len(errors) == 1
@@ -2099,6 +2142,7 @@ def test_register_decode_step_with_unset_password_returns_none_password() -> Non
         data,
         info=unread_info(),
         instance=None,
+        specs=rider._input_field_specs,
     )
     assert not isinstance(decoded, StepFailure)
     user, _m2m, _exclude, raw_password = decoded
@@ -2137,7 +2181,7 @@ def test_register_write_step_non_str_password_defense_in_depth(bad_password: obj
         CleanExcludes(fields=[], checks=[]),
         bad_password,
     )
-    failure = _register_write_step(DjangoMutation, None, decoded)
+    failure = _register_write_step(DjangoMutation, None, decoded, specs=_PASSWORD_SPECS)
     assert isinstance(failure, StepFailure)
     errors = failure.errors
     assert len(errors) == 1
