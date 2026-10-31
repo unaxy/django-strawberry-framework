@@ -24,7 +24,8 @@ The serializer-specific invariants this module owns:
   ``data`` like any other value (the deliberate contrast with Django forms, which
   split ``files=``). The reverse map
   (``mutation_cls._input_field_specs``, a list of
-  ``utils/inputs.py::InputFieldSpec``) routes each provided input attr to its
+  ``utils/inputs.py::InputFieldSpec``, read per request as the executing schema named
+  it, ``utils/inputs.py::published_input_specs``) routes each provided input attr to its
   serializer field name (``spec.target_name``) + decode ``kind`` (``SCALAR`` /
   ``RELATION_SINGLE`` / ``RELATION_MULTI`` / ``FILE``).
 
@@ -42,9 +43,10 @@ The serializer-specific invariants this module owns:
   visibility query the form decoder re-keys over), reduced to the pk a
   ``PrimaryKeyRelatedField`` expects. A hidden / wrong-model / uncoercible id is a
   field-keyed ``FieldError`` keyed to ``spec.graphql_name`` (the GraphQL wire name
-  the client sent, e.g. ``categoryId``). The generated input field exposes exactly
-  ONE strategy-dependent shape (spec-039 Decision 7 - an ``ID`` carrying a GlobalID for a
-  Relay target, else the raw-pk scalar); the shared decode helper reads which one from
+  the executing schema published and the client sent, e.g. ``categoryId``). The
+  generated input field exposes exactly ONE strategy-dependent shape (spec-039
+  Decision 7 - an ``ID`` carrying a GlobalID for a Relay target, else the raw-pk
+  scalar); the shared decode helper reads which one from
   the target (``utils/write_values.py::relation_takes_global_id``), never from the
   value.
 
@@ -195,7 +197,7 @@ from django_strawberry_framework.utils.errors import (
     save_time_error_key_map,
     unstorable_temporal,
 )
-from django_strawberry_framework.utils.inputs import optional_input_field
+from django_strawberry_framework.utils.inputs import optional_input_field, published_input_specs
 from django_strawberry_framework.utils.permissions import request_from_info
 from django_strawberry_framework.utils.querysets import (
     is_manager,
@@ -261,7 +263,7 @@ from .serializer_converter import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Iterable, Iterator, Mapping
+    from collections.abc import Generator, Iterable, Iterator, Mapping, Sequence
     from typing import Protocol, TypeAlias
 
     from django.db import models
@@ -427,20 +429,6 @@ def _decode_relation_multi(
 def _visible_pk(pk: object, _key: object) -> object:
     """Answer the pk a ``PrimaryKeyRelatedField`` resolves, not the key the relation stores."""
     return pk
-
-
-def _decode_serializer_data(
-    mutation_cls: type[SerializerMutation],
-    data: object,
-    info: Info[object, object],
-) -> tuple[dict[str, object], FieldError | None]:
-    """Decode the bound input dataclass into a serializer-field-keyed ``provided_data``.
-
-    The top entry: decodes ``data`` against the bind-stashed top-level reverse map
-    (``mutation_cls._input_field_specs``) via the recursive ``_decode_input_object`` (which
-    handles nested inputs). A decode ``FieldError`` short-circuits.
-    """
-    return _decode_input_object(mutation_cls._input_field_specs, data, info)
 
 
 def _nested_specs_of(spec: InputFieldSpec) -> tuple[InputFieldSpec, ...]:
@@ -683,6 +671,10 @@ def _error_node_children(
     DRF's non-field bucket to the ``"__all__"`` sentinel segment with no child map (the bucket key
     is read from ``api_settings.NON_FIELD_ERRORS_KEY`` per node, the way DRF's own
     ``as_serializer_error`` reads it, so a key DRF reloads on ``setting_changed`` is honoured);
+    an ``int`` key is an item index, not a field name: DRF 3.18's ``ListSerializer`` reports
+    its failing items as ``{index: errors}`` where 3.17's lists every item
+    (``ListSerializer.to_internal_value``), so the index segment carries the SAME level map,
+    as a list item does;
     a **list containing dicts / lists** indexes each child under its numeric position,
     carrying the SAME level map (the items are the same nested
     serializer; a mixed list never occurs in DRF's shape, but the guard keeps a stray leaf from
@@ -695,11 +687,12 @@ def _error_node_children(
         children: list[tuple[object, ErrorKeyMap, str]] = []
         for key, value in error_map.items():
             name = str(key)
-            segment, child_map = (
-                (NON_FIELD_ERROR_KEY, {})
-                if name == drf_non_field_key
-                else rekey_error_segment(name, key_map)
-            )
+            if isinstance(key, int):
+                segment, child_map = name, key_map
+            elif name == drf_non_field_key:
+                segment, child_map = NON_FIELD_ERROR_KEY, {}
+            else:
+                segment, child_map = rekey_error_segment(name, key_map)
             children.append((value, child_map, join_error_path(prefix, segment)))
         return children
     if is_list(errors) and any(isinstance(item, (dict, list)) for item in errors):
@@ -2677,6 +2670,8 @@ def _serializer_write_step(
     info: Info[object, object],
     instance: models.Model | None,
     provided_data: dict[str, object],
+    *,
+    specs: Sequence[InputFieldSpec],
 ) -> models.Model | StepFailure:
     """Run the serializer ``write_step`` callback: construct -> validate -> save.
 
@@ -2699,7 +2694,9 @@ def _serializer_write_step(
     integrity mapper, diagnosing the refused row through
     ``_attempted_row_integrity_errors``) - never a top-level ``GraphQLError`` at the write. Every
     validation branch builds its key map on that failure path only; a successful
-    write never builds one.
+    write never builds one. Every key map reads ``specs``, the mutation's input specs
+    as the executing schema published them, which ``_run_serializer_pipeline_sync``
+    reads once per request and hands to the decode step too.
     """
     # Class validation gated ``Meta.serializer_class`` to a ``ModelSerializer`` subclass.
     serializer_class = require(mutation_cls._mutation_meta.serializer_class, _is_serializer_class)
@@ -2741,6 +2738,7 @@ def _serializer_write_step(
             authorized_pk=authorized_pk,
             hook_context=hook_context,
             witness=witness,
+            specs=specs,
         )
 
 
@@ -2830,8 +2828,13 @@ def _guarded_serializer_write(
     authorized_pk: object,
     hook_context: SerializerHookContext,
     witness: _Witness,
+    specs: Sequence[InputFieldSpec],
 ) -> models.Model | StepFailure:
     """Run the write-step body inside the ``_write_witness`` guards.
+
+    Every validation and save-time error is keyed through ``specs``, the mutation's
+    input specs named as the executing schema published them
+    (``utils/inputs.py::published_input_specs``).
 
     A save-time ``IntegrityError`` is diagnosed from the row the database refused, the
     instance ``witness.attempted`` names (``_attempted_row_integrity_errors``): each
@@ -2912,7 +2915,7 @@ def _guarded_serializer_write(
         return StepFailure(
             serializer_errors_to_field_errors(
                 serializer_errors(serializer),
-                build_error_key_map(mutation_cls._input_field_specs),
+                build_error_key_map(specs),
             ),
         )
 
@@ -2931,7 +2934,7 @@ def _guarded_serializer_write(
         return StepFailure(
             serializer_errors_to_field_errors(
                 temporal_errors,
-                build_error_key_map(mutation_cls._input_field_specs),
+                build_error_key_map(specs),
             ),
         )
 
@@ -2992,7 +2995,7 @@ def _guarded_serializer_write(
 
     def _error_key_map() -> ErrorKeyMap:
         return save_time_error_key_map(
-            mutation_cls._input_field_specs,
+            specs,
             backing_model_of(mutation_cls._mutation_meta),
         )
 
@@ -3009,7 +3012,7 @@ def _guarded_serializer_write(
         return StepFailure(
             serializer_errors_to_field_errors(
                 exc.detail,
-                build_error_key_map(mutation_cls._input_field_specs),
+                build_error_key_map(specs),
             ),
         )
     if write_error is not None:
@@ -3047,21 +3050,23 @@ def _guarded_serializer_write(
 
 
 def _serializer_decode_step(
-    mutation_cls: type[SerializerMutation],
     data: object,
     info: Info[object, object],
+    *,
+    specs: Sequence[InputFieldSpec],
 ) -> dict[str, object] | StepFailure:
     """Run the serializer ``decode_step`` callback: serializer-field-keyed decode.
 
-    Decodes the bound input into a serializer-field-keyed ``provided_data`` (the
-    ``_decode_serializer_data`` contract: type-check + visibility on every relation
-    branch, ``Upload`` into ``data``). Returns ``provided_data`` for the write step,
-    or a ``StepFailure`` on a decode failure (the shared skeleton maps it to a
-    null-object payload). The ``instance`` the skeleton locates is not needed at
-    decode (DRF's ``partial=True`` + the framework merge own the partial update at
-    construction), so it is not threaded in.
+    Decodes the bound input against ``specs``, the top-level reverse map with its nested
+    maps, through the recursive ``_decode_input_object`` into a serializer-field-keyed
+    ``provided_data`` (type-check + visibility on every relation branch, ``Upload`` into
+    ``data``), so a decode ``FieldError`` carries a name the client sent. Returns
+    ``provided_data`` for the write step, or a ``StepFailure`` on a decode failure (the
+    shared skeleton maps it to a null-object payload). The ``instance`` the skeleton
+    locates is not needed at decode (DRF's ``partial=True`` + the framework merge own the
+    partial update at construction), so it is not threaded in.
     """
-    provided_data, decode_error = _decode_serializer_data(mutation_cls, data, info)
+    provided_data, decode_error = _decode_input_object(specs, data, info)
     if decode_error is not None:
         return StepFailure([decode_error])
     return provided_data
@@ -3078,19 +3083,24 @@ def _run_serializer_pipeline_sync(
     The serializer-flavor dispatcher matching ``_run_pipeline_sync`` /
     ``_run_form_pipeline_sync``: ``make_resolver_entries`` owns the ``UNSET``-default
     kwargs and the async boundary; this body supplies only the serializer
-    ``decode_step`` / ``write_step``.
+    ``decode_step`` / ``write_step``, both keyed through the mutation's input specs as
+    the executing schema published them (``utils/inputs.py::published_input_specs``),
+    read once per request.
     """
+    # Every error of the request is keyed through the names the executing schema published.
+    specs = published_input_specs(info, mutation_cls._input_field_specs)
     return run_write_pipeline_sync(
         mutation_cls,
         info,
         data,
         id_,
-        decode_step=lambda _instance: _serializer_decode_step(mutation_cls, data, info),
+        decode_step=lambda _instance: _serializer_decode_step(data, info, specs=specs),
         write_step=lambda instance, decoded: _serializer_write_step(
             mutation_cls,
             info,
             instance,
             decoded,
+            specs=specs,
         ),
         # The serializer write step checks the located row for in-memory drift
         # against this snapshot (``assert_no_target_drift``).

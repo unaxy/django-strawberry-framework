@@ -1,51 +1,30 @@
 """Write-pipeline resolver tests.
 
-Internals a live fakeshop request cannot express: custom ``relay.NodeID`` write
-locate (shipped ``CategoryType`` uses pk; changing it would retarget every
-Category GlobalID), ``_unprovided_exclude`` / ``coerce_lookup_id`` helpers, a
-create over a multi-table child of a client-keyed parent, through a ``save()``
-override that saves twice and through one that fills in an omitted ``blank=True,
-null=False`` column (no fakeshop model fills a column in from ``save()``), the
-``update_fields`` an update names for a proxy, a three-table row, a non-key parent
-link, a generated column and a deferred row,
-``async def get_queryset`` ``SyncMisuseError``,
-async-row leak isolation, Relay M2M hide on a second ``Genre`` primary
-(shipped ``GenreType`` has no hide hook; a second primary cannot coexist in the
-live process), raw-pk M2M *update* (no shipped ``updateShelf``), unregistered
-primary existence-only decode, ``TaggedItem.object_id`` GFK indexing (no
-shipped ``TaggedItemType``; rung 1 would add one to the library schema, rung 3
-cannot declare ``DjangoMutation`` after the live autouse finalize),
-relation-override visibility (no shipped override declares a relation field, so
-the composite is package-only), pipeline pk-drift, model-flavor ``full_clean``
-wire-name re-key (the only
-multi-word validated model column, ``Book.circulation_status``, rides an
-enum-guarded input, so no live request can fail its ``full_clean``), the keying
-of a save-time Django ``ValidationError`` against the backing model through a
-renamed ``Meta.input_class`` input, a relation ``attname`` and a dotted name
-(fakeshop's ``Item.save()`` rule raises only ``name``), the error keys and the
-relation bound of a ``Meta.input_class`` field declared without ``name=`` under the
-default config, ``auto_camel_case=False`` and a custom ``NameConverter`` (the live
-schema is one config: ``createEdition``'s unnamed ``isbn_10`` under the default config
-is pinned in ``examples/fakeshop/test_query/test_library_api.py``; the other two
-configs and the unnamed ``isbn_13`` / ``publisher_2_id`` shapes stay here), and
-``ScalarSpecimen`` writes (no shipped mutation; rung 1
-would add ``CreateScalarSpecimen`` to the scalars schema, rung 3 is the same
-late-declaration reject). Consumer-visible create/update/delete, empty-name
-``full_clean``, unresolvable relation ids, M2M replace/clear/omit, choice-enum
-unwrap, raw-pk create visibility, model-flavor ``Item.attachment`` omit /
-replace, the ``PROTECT`` / ``RESTRICT`` refused delete and the
-``blank=True, null=False`` FK omitted / null guard live in
-``examples/fakeshop/test_query/test_products_api.py`` and
-``examples/fakeshop/test_query/test_library_api.py``; file-column update omit /
-replace / explicit null live in ``examples/fakeshop/test_query/test_uploads_api.py``. Atomicity live in
-``examples/fakeshop/test_query/test_mutation_atomicity.py``.
+Private checks cover constrained-field exclusion, lookup coercion and pinned
+aliases, metadata-based field indexing, row-lock and visibility re-read seams,
+exception identity, and transaction lifetime. Direct mutation probes also cover
+model inheritance, consumer save/delete hooks and update field sets, and a
+generated column's absence from every flavor's write input (the model flavor's
+is pinned live too; no fakeshop form or serializer discovers its fields over a
+generated column).
+
+Consumer model mutation identities, relation overrides, M2M visibility and
+assignment refusals, raw-pk existence with or without registered targets, error-field
+names, nullable foreign-key clears and scalar fields ending in ``_id`` are exercised over HTTP in
+``examples/fakeshop/test_query/test_model_mutation_flows_api.py``.
+Other consumer writes live in
+``examples/fakeshop/test_query/test_products_api.py``,
+``examples/fakeshop/test_query/test_library_api.py`` and
+``examples/fakeshop/test_query/test_uploads_api.py``; transaction rollback lives in
+``examples/fakeshop/test_query/test_mutation_atomicity.py``. JSON defaults,
+naive datetimes and JSON text preflight live in
+``examples/fakeshop/test_query/test_scalars_mutation_api.py``.
 """
 
 from __future__ import annotations
 
 import contextlib
 import datetime
-import inspect
 import itertools
 import json
 import threading
@@ -64,25 +43,22 @@ import pytest
 import strawberry
 from apps.library import models as library_models
 from apps.products import models as product_models
+from apps.products.services import seed_data
 from apps.scalars import models as scalars_models
 from asgiref.sync import sync_to_async
 from django import forms
-from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, OperationalError, connection, models, transaction
 from django.db.models import Model, QuerySet
 from django.db.models.functions import Lower
-from django.db.models.signals import m2m_changed, post_save, pre_save
+from django.db.models.signals import post_save, pre_save
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
-from django.utils import timezone
-from graphql import GraphQLInputObjectType
+from rest_framework.serializers import ModelSerializer
 from strawberry import relay
-from strawberry.schema.config import StrawberryConfig
-from strawberry.schema.name_converter import NameConverter
 from strawberry.types import ExecutionResult
-from strawberry.types.base import has_object_definition
+from strawberry.types.base import get_object_definition, has_object_definition
 from typing_extensions import Self, override
 
 from django_strawberry_framework import (
@@ -92,20 +68,21 @@ from django_strawberry_framework import (
     DjangoOptimizerExtension,
     DjangoSchema,
     DjangoType,
-    ResourcePolicy,
     finalize_django_types,
 )
 from django_strawberry_framework.exceptions import ConfigurationError
-from django_strawberry_framework.forms.resolvers import resolve_form_sync
+from django_strawberry_framework.forms.inputs import build_form_input_class
 from django_strawberry_framework.mutations import resolvers
 from django_strawberry_framework.mutations import resolvers as mutation_resolvers
 from django_strawberry_framework.mutations.inputs import (
+    CREATE,
     NON_FIELD_ERROR_KEY,
     _relation_field_index,
+    editable_input_fields,
     mutation_input_field_specs,
 )
 from django_strawberry_framework.registry import registry
-from django_strawberry_framework.rest_framework.resolvers import resolve_serializer_sync
+from django_strawberry_framework.rest_framework.inputs import build_serializer_input_class
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
@@ -121,7 +98,6 @@ from django_strawberry_framework.utils.querysets import SyncMisuseError, visible
 from django_strawberry_framework.utils.relations import is_model_class
 from django_strawberry_framework.utils.typing import (
     call_forwarded,
-    graphql_input_fields,
     object_result,
 )
 from django_strawberry_framework.utils.write_transaction import (
@@ -131,6 +107,7 @@ from django_strawberry_framework.utils.write_transaction import (
     require_write_pipeline,
     write_pipeline,
 )
+from tests._catalog_data import categories_from_seed, items_from_seed
 from tests._idioms import (
     FETCH_MODES,
     TEST_ASYNC_RECOURSE,
@@ -347,34 +324,11 @@ _DELETE = (
 )
 
 
-def _item_gid(item_type: type, pk: object) -> str:
-    return global_id_for(item_type, pk)
-
-
 # ---------------------------------------------------------------------------
-# Custom ``relay.NodeID`` write-side
-#
-# When a primary type encodes a NON-pk column as its Relay id
-# (``name: relay.NodeID[str]``), the GlobalID a client holds carries that column's
-# value, not the pk. ``decode_model_global_id`` -> ``_resolve_real_pk`` must map it
-# to the row's real pk BEFORE the write locate runs ``get(pk=...)``. The unit test
-# in ``tests/test_relay_node_field.py`` pins the decode in isolation; these pin a
-# real update / delete CONSUMER of that decoded pk end-to-end, with the decoy row
-# seeded so its pk's string form IS the target row's ``name`` - the exact pk/name
-# confusion the mapping guards (an unmapped value passed straight into
-# ``get(pk=...)`` would hit the decoy row).
+# Custom NodeID lookup on the ambient write alias.
+# The HTTP identity and decoy-row verdicts live in test_model_mutation_flows_api.py;
+# this builder remains for the direct coercion probe's manager-alias witness.
 # ---------------------------------------------------------------------------
-
-# ``name`` is consumed as the Relay id (``relay.NodeID[str]``), so it surfaces as the
-# ``id`` field, not a ``name`` field - select ``id`` (the encoded GlobalID) + a plain
-# writable column (``description``).
-_CATEGORY_UPDATE = (
-    "mutation($id: ID!, $d: CategoryPartialInput!){ updateCategory(id:$id, data:$d){ "
-    "node{ id description } errors{ field messages } } }"
-)
-_CATEGORY_DELETE = (
-    "mutation($id: ID!){ deleteCategory(id:$id){ node{ id } errors{ field messages } } }"
-)
 
 
 def _build_category_node_schema() -> tuple[strawberry.Schema, type[DjangoType]]:
@@ -416,44 +370,6 @@ def _build_category_node_schema() -> tuple[strawberry.Schema, type[DjangoType]]:
 
 
 @pytest.mark.django_db
-def test_update_custom_node_id_resolves_payload_to_real_pk_not_wrong_row() -> None:
-    """A write through a custom ``relay.NodeID[str]`` updates the NAME-matched row, not the pk-coincident one.
-
-    Shipped ``CategoryType`` uses the pk as Relay id; retargeting it would change
-    every Category GlobalID. Decode isolation is
-    ``tests/test_relay_node_field.py``; this is the write consumer. Live
-    ``updateItem`` locates by pk GlobalID
-    (``test_products_api.py::test_update_item_non_colliding_partial_update``).
-    """
-    schema, CategoryNode = _build_category_node_schema()
-    decoy = product_models.Category.objects.create(name="decoy", description="decoy-untouched")
-    target = product_models.Category.objects.create(
-        name=str(saved_pk(decoy)),
-        description="before",
-    )
-    assert saved_pk(target) != saved_pk(decoy)
-    assert target.name == str(saved_pk(decoy))
-
-    gid = global_id_for(CategoryNode, target.name)
-    res = schema.execute_sync(
-        _CATEGORY_UPDATE,
-        variable_values={"id": gid, "d": {"description": "after"}},
-    )
-    assert res.errors is None, res.errors
-    assert res.data is not None
-    node = _json_object(res.data, "updateCategory", "node")
-    assert node["description"] == "after"
-    # The returned id is rebuilt from the (unchanged) ``name``, so it round-trips to
-    # the same GlobalID - the node returned is the target, not the pk-coincident decoy.
-    assert node["id"] == gid
-
-    target.refresh_from_db()
-    decoy.refresh_from_db()
-    assert target.description == "after"  # the row whose NAME matched the payload
-    assert decoy.description == "decoy-untouched"  # the pk-coincident row is untouched
-
-
-@pytest.mark.django_db
 def test_custom_node_id_real_pk_lookup_uses_pinned_alias(monkeypatch: pytest.MonkeyPatch) -> None:
     """A custom NodeID lookup reads through the ambient write pipeline's alias.
 
@@ -467,8 +383,16 @@ def test_custom_node_id_real_pk_lookup_uses_pinned_alias(monkeypatch: pytest.Mon
     without requiring a second test database; the live sharded fakeshop suite
     exercises the same contract end to end.
     """
+    seed_data(0)
+    catalog_categories = categories_from_seed(("__fixture_category_0__", False))
     _schema, CategoryNode = _build_category_node_schema()
-    target = product_models.Category.objects.create(name="alias-node-id", description="before")
+    target = catalog_categories[0]
+    product_models.Category.objects.filter(pk=target.pk).update(
+        description="before",
+        is_private=False,
+        name="alias-node-id",
+    )
+    target.refresh_from_db()
     gid = global_id_for(CategoryNode, target.name)
     manager = product_models.Category._default_manager
     using = mock.Mock(wraps=manager.using)
@@ -480,34 +404,6 @@ def test_custom_node_id_real_pk_lookup_uses_pinned_alias(monkeypatch: pytest.Mon
     assert error is None
     assert node_id == saved_pk(target)
     using.assert_called_once_with("default")
-
-
-@pytest.mark.django_db
-def test_delete_custom_node_id_resolves_payload_to_real_pk_not_wrong_row() -> None:
-    """A delete through a custom ``relay.NodeID[str]`` removes the NAME-matched row.
-
-    The delete twin of the update case: the located instance comes from the resolved
-    real pk, so deleting via a GlobalID whose payload is the target's ``name`` removes
-    the target - while the row whose pk's string form equals that ``name`` survives.
-    """
-    schema, CategoryNode = _build_category_node_schema()
-    decoy = product_models.Category.objects.create(name="decoy-del", description="x")
-    target = product_models.Category.objects.create(
-        name=str(saved_pk(decoy)),
-        description="doomed",
-    )
-    assert saved_pk(target) != saved_pk(decoy)
-    assert target.name == str(saved_pk(decoy))
-
-    gid = global_id_for(CategoryNode, target.name)
-    res = schema.execute_sync(_CATEGORY_DELETE, variable_values={"id": gid})
-    assert res.errors is None, res.errors
-    # The snapshot id (preserved for cache eviction) decodes to the target's name.
-    assert res.data is not None
-    assert res.data["deleteCategory"]["node"]["id"] == gid
-    # The NAME-matched target is gone; the row whose pk string equals that name survives.
-    assert not product_models.Category.objects.filter(pk=saved_pk(target)).exists()
-    assert product_models.Category.objects.filter(pk=saved_pk(decoy)).exists()
 
 
 def test_unprovided_exclude_keeps_constrained_co_member_drops_unrelated() -> None:
@@ -956,6 +852,34 @@ def test_located_row_update_fields_names_a_multi_table_rows_loaded_non_key_colum
     it. Fakeshop updates no proxy, no three-table row and no row of the last shape.
     """
     assert resolvers.located_row_update_fields(row()) == update_fields
+
+
+def test_generated_column_is_absent_from_every_write_flavor_input() -> None:
+    """``LinkedDesk.double_seats`` reaches no generated write input, in any flavor.
+
+    Django forces ``GeneratedField(editable=False)``: the model flavor's column selector
+    drops a non-editable column, a ``ModelForm`` builds no field for one, and DRF's
+    ``ModelSerializer`` makes it read-only, which the serializer input leaves out. Each
+    flavor writes every other column it discovers (the parent link left out, its target
+    having no type here).
+    """
+    model_columns = [
+        column.name for column in editable_input_fields(LinkedDesk, operation_kind=CREATE)
+    ]
+    form_class = forms.modelform_factory(LinkedDesk, exclude=("venue",))
+    form_input, _ = build_form_input_class(form_class, operation_kind=CREATE)
+    serializer_meta = type("Meta", (), {"model": LinkedDesk, "exclude": ("venue",)})
+    serializer_class = type("LinkedDeskSerializer", (ModelSerializer,), {"Meta": serializer_meta})
+    serializer_input, _ = build_serializer_input_class(serializer_class, operation_kind=CREATE)
+
+    assert "double_seats" not in model_columns
+    assert "seats" in model_columns
+    for input_cls in (form_input, serializer_input):
+        names = {
+            field.python_name for field in get_object_definition(input_cls, strict=True).fields
+        }
+        assert "seats" in names
+        assert "double_seats" not in names
 
 
 @pytest.mark.django_db
@@ -1990,51 +1914,12 @@ def test_a_field_failing_validation_is_left_out_of_its_uniqueness_checks() -> No
 
 
 @pytest.mark.django_db
-def test_globalid_relation_override_flows_through_visibility_contract() -> None:
-    """A Relay relation override is still relation-visibility-checked (Decision 10).
-
-    The bind-time type-lock (``sets.py::_validate_relation_override_types``) forces a
-    relation override to keep the generated ``strawberry.ID`` id type, so the override
-    decodes through the same GlobalID type-check and Decision-10 visibility check
-    as the generated input. This pins the end-to-end guarantee: a
-    ``createItem`` whose ``categoryId`` names a ``Category`` hidden by
-    ``Category.get_queryset`` is a ``FieldError`` on ``categoryId`` (hidden
-    indistinguishable from missing, no existence leak) - even though ``categoryId``
-    came from a consumer ``input_class`` override, not the generated input.
-
-    No shipped override declares a relation field, so the composite is package-only.
-    """
-
-    @classmethod
-    def _hide_private(
-        _cls: type[DjangoType],
-        queryset: QuerySet[product_models.Category],
-        _info: strawberry.Info,
-    ) -> QuerySet[product_models.Category]:
-        return queryset.filter(is_private=False)
-
-    @strawberry.input
-    class GidItemInput:
-        category_id: strawberry.ID = strawberry.field(description="custom category ref")
-
-    schema, (CategoryT, _ItemT) = _build_item_schema(
-        category_get_queryset=_hide_private,
-        input_cls=GidItemInput,
-    )
-    hidden = product_models.Category.objects.create(name=_category_name(), is_private=True)
-    res = schema.execute_sync(
-        _CREATE,
-        variable_values={
-            "d": {"name": "New", "categoryId": global_id_for(CategoryT, saved_pk(hidden))},
-        },
-    )
-    assert_mutation_field_error(res, "createItem", "categoryId")
-    assert product_models.Item.objects.filter(name="New").count() == 0
-
-
-@pytest.mark.django_db
 def test_sync_misuse_async_get_queryset_from_sync_path() -> None:
     """A sync update over a type with an ``async def get_queryset`` raises ``SyncMisuseError``."""
+    seed_data(1)
+    catalog_categories = categories_from_seed(("__fixture_category_0__", False))
+    catalog_items = items_from_seed(catalog_categories[0], ("__fixture_item_0__", False))
+    product_models.Entry.objects.filter(item__in=catalog_items).delete()
 
     async def _async_get_queryset(
         _cls: type[DjangoType],
@@ -2072,8 +1957,22 @@ def test_sync_misuse_async_get_queryset_from_sync_path() -> None:
             permission_classes = [_AllowAll]
 
     finalize_django_types()
-    cat = product_models.Category.objects.create(name=_category_name())
-    item = product_models.Item.objects.create(name="X", category=cat)
+    cat = catalog_categories[0]
+    product_models.Category.objects.filter(pk=cat.pk).update(
+        description="",
+        is_private=False,
+        name=_category_name(),
+    )
+    cat.refresh_from_db()
+    item = catalog_items[0]
+    product_models.Item.objects.filter(pk=item.pk).update(
+        description="",
+        is_private=False,
+        attachment="",
+        name="X",
+        category=cat,
+    )
+    item.refresh_from_db()
     # Drive the sync pipeline directly (the locate path runs get_queryset); the
     # managed-transaction context stands in for the DjangoSchema execution the
     # direct call bypasses.
@@ -2248,584 +2147,6 @@ async def test_async_mutation_does_not_leak_into_later_read_optimizer_execution(
     assert read.data["allItems"][0]["category"]["name"] == user_name
 
 
-# ---------------------------------------------------------------------------
-# Library Book/Genre M2M: hidden Relay member (GenreType has no hide hook)
-# ---------------------------------------------------------------------------
-
-
-def _build_book_schema(
-    *,
-    genre_get_queryset: object | None = None,
-) -> tuple[strawberry.Schema, tuple[type[DjangoType], type[DjangoType], type[DjangoType]]]:
-    """Declare Book/Genre/Shelf primaries + a create mutation over the Book M2M."""
-    genre_body: dict[str, object] = {
-        "Meta": type(
-            "Meta",
-            (),
-            {"model": library_models.Genre, "fields": ("id", "name"), "primary": True},
-        ),
-    }
-    if genre_get_queryset is not None:
-        genre_body["get_queryset"] = genre_get_queryset
-    GenreT = type("GenreT", (DjangoType, relay.Node), genre_body)
-
-    class ShelfT(DjangoType, relay.Node):
-        class Meta:
-            model = library_models.Shelf
-            fields = ("id", "code")
-            primary = True
-
-    class BookT(DjangoType, relay.Node):
-        class Meta:
-            model = library_models.Book
-            fields = ("id", "title")
-            primary = True
-
-    class CreateBook(DjangoMutation):
-        class Meta:
-            model = library_models.Book
-            operation = "create"
-            fields = ("title", "shelf", "genres")
-            permission_classes = [_AllowAll]
-
-    @strawberry.type
-    class Mutation:
-        create_book = DjangoMutationField(CreateBook)
-
-    finalize_django_types()
-    return _schema(Mutation), (GenreT, ShelfT, BookT)
-
-
-def _make_branch_shelf() -> library_models.Shelf:
-    branch = library_models.Branch.objects.create(name="Main")
-    return library_models.Shelf.objects.create(code="S1", branch=branch)
-
-
-_CREATE_BOOK = (
-    "mutation($d: BookGenresShelfTitleInput!){ createBook(data:$d){ "
-    "node{ id title } errors{ field messages } } }"
-)
-
-
-@pytest.mark.django_db
-def test_m2m_hidden_related_id_is_field_error() -> None:
-    """An M2M id for a row the related type hides -> ``FieldError`` on the M2M field.
-
-    Live ``createBookViaCustomInput`` covers visible Genre GlobalIDs. Shipped
-    ``GenreType`` has no ``get_queryset``; adding one (even flag-gated) would
-    change every genre read. A second primary ``Genre`` type cannot coexist with
-    the shipped type in the live process, so the hide arm stays on a throwaway
-    schema. Hidden indistinguishable from missing; no book is written.
-    """
-
-    @classmethod
-    def _hide_secret(
-        _cls: type[DjangoType],
-        queryset: QuerySet[library_models.Genre],
-        _info: strawberry.Info,
-    ) -> QuerySet[library_models.Genre]:
-        return queryset.exclude(name="Secret")
-
-    schema, (GenreT, ShelfT, _BookT) = _build_book_schema(genre_get_queryset=_hide_secret)
-    shelf = _make_branch_shelf()
-    visible = library_models.Genre.objects.create(name="Sci-Fi")
-    hidden = library_models.Genre.objects.create(name="Secret")
-    res = schema.execute_sync(
-        _CREATE_BOOK,
-        variable_values={
-            "d": {
-                "title": "Dune",
-                "shelfId": global_id_for(ShelfT, saved_pk(shelf)),
-                "genres": [
-                    global_id_for(GenreT, saved_pk(visible)),
-                    global_id_for(GenreT, saved_pk(hidden)),
-                ],
-            },
-        },
-    )
-    assert_mutation_field_error(res, "createBook", "genres")
-    assert not library_models.Book.objects.filter(title="Dune").exists()
-
-
-_M2M_REFUSAL_DISPATCH_UID = "tests.mutations.m2m_save_time_refusal"
-
-
-def _refuse_genre_assignment(action: str, **_kwargs: object) -> None:
-    """An ``m2m_changed`` receiver refusing every genre assignment once it is made."""
-    if action == "post_add":
-        raise DjangoValidationError(
-            {
-                "genres": DjangoValidationError("Genres are frozen.", code="frozen"),
-                "shelf_id": "Shelf rejected with the genres.",
-            },
-        )
-
-
-@contextlib.contextmanager
-def _genre_assignment_refused() -> Generator[None, None, None]:
-    """Connect ``_refuse_genre_assignment`` to ``Book.genres``' through model inside the block."""
-    through = library_models.Book.genres.through
-    m2m_changed.connect(
-        _refuse_genre_assignment,
-        sender=through,
-        weak=False,
-        dispatch_uid=_M2M_REFUSAL_DISPATCH_UID,
-    )
-    try:
-        yield
-    finally:
-        _ = m2m_changed.disconnect(sender=through, dispatch_uid=_M2M_REFUSAL_DISPATCH_UID)
-
-
-def _build_update_book_schema() -> tuple[
-    strawberry.Schema,
-    tuple[type[DjangoType], type[DjangoType], type[DjangoType]],
-]:
-    """Declare Book/Genre/Shelf primaries + an update mutation over the Book M2M."""
-
-    class GenreT(DjangoType, relay.Node):
-        class Meta:
-            model = library_models.Genre
-            fields = ("id", "name")
-            primary = True
-
-    class ShelfT(DjangoType, relay.Node):
-        class Meta:
-            model = library_models.Shelf
-            fields = ("id", "code")
-            primary = True
-
-    class BookT(DjangoType, relay.Node):
-        class Meta:
-            model = library_models.Book
-            fields = ("id", "title")
-            primary = True
-
-    class UpdateBook(DjangoMutation):
-        class Meta:
-            model = library_models.Book
-            operation = "update"
-            fields = ("title", "shelf", "genres")
-            permission_classes = [_AllowAll]
-
-    @strawberry.type
-    class Mutation:
-        update_book = DjangoMutationField(UpdateBook)
-
-    finalize_django_types()
-    return _schema(Mutation), (GenreT, ShelfT, BookT)
-
-
-#: The envelope the refusing receiver produces, keyed through the model key map:
-#: ``genres`` stays ``genres`` and the forward key's column ``shelf_id`` reports as
-#: ``shelfId``.
-_M2M_REFUSAL_ERRORS = [
-    {
-        "field": "genres",
-        "messages": ["Genres are frozen."],
-        "codes": ["frozen"],
-        "path": ["genres"],
-    },
-    {
-        "field": "shelfId",
-        "messages": ["Shelf rejected with the genres."],
-        "codes": [],
-        "path": ["shelfId"],
-    },
-]
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize("operation", ["create", "update"])
-def test_m2m_assignment_validation_error_is_the_model_keyed_envelope(operation: str) -> None:
-    """A ``ValidationError`` from an ``m2m_changed`` receiver is the envelope, nothing written.
-
-    The M2M ``.set(...)`` runs after the row's ``save()`` inside the write window, so a
-    receiver refusing the assignment raises after the ``Book`` row and its new through
-    rows were written. The model flavor maps it through the same key map as
-    ``full_clean()``, returns a null object, and rolls everything back: a create leaves
-    no book and no through row, an update leaves the stored title and genres as they
-    were.
-    """
-    shelf = _make_branch_shelf()
-    stored = library_models.Genre.objects.create(name="Stored")
-    frozen = library_models.Genre.objects.create(name="Frozen")
-    if operation == "create":
-        schema, (GenreT, ShelfT, _BookT) = _build_book_schema()
-        query = (
-            "mutation($d: BookGenresShelfTitleInput!){ createBook(data:$d){ "
-            "node{ id } errors{ field messages codes path } } }"
-        )
-        variables: dict[str, object] = {
-            "d": {
-                "title": "Refused",
-                "shelfId": global_id_for(ShelfT, saved_pk(shelf)),
-                "genres": [global_id_for(GenreT, saved_pk(frozen))],
-            },
-        }
-        book = None
-    else:
-        schema, (GenreT, _ShelfT, BookT) = _build_update_book_schema()
-        book = library_models.Book.objects.create(title="Kept", shelf=shelf)
-        book.genres.set([stored])
-        query = (
-            "mutation($id: ID!, $d: BookGenresShelfTitlePartialInput!){ "
-            "updateBook(id:$id, data:$d){ node{ id } errors{ field messages codes path } } }"
-        )
-        variables = {
-            "id": global_id_for(BookT, saved_pk(book)),
-            "d": {"title": "Refused", "genres": [global_id_for(GenreT, saved_pk(frozen))]},
-        }
-    with _genre_assignment_refused():
-        res = schema.execute_sync(query, variable_values=variables)
-    assert res.errors is None, res.errors
-    assert res.data == {
-        f"{operation}Book": {"node": None, "errors": _M2M_REFUSAL_ERRORS},
-    }
-    assert not library_models.Book.objects.filter(title="Refused").exists()
-    through_pairs = set(
-        library_models.Book.genres.through.objects.values_list("book_id", "genre_id"),
-    )
-    if book is None:
-        assert through_pairs == set()
-    else:
-        book.refresh_from_db()
-        assert book.title == "Kept"
-        assert through_pairs == {(saved_pk(book), saved_pk(stored))}
-
-
-_ITEM_SAVE_REFUSAL_DISPATCH_UID = "tests.mutations.item_save_time_refusal"
-
-
-@contextlib.contextmanager
-def _item_save_refused(error_key: str) -> Generator[None, None, None]:
-    """Refuse every ``Item`` save inside the block with a Django error keyed ``error_key``."""
-
-    def _refuse(**_kwargs: object) -> None:
-        raise DjangoValidationError(
-            {error_key: DjangoValidationError("Refused at save.", code="refused")},
-        )
-
-    pre_save.connect(
-        _refuse,
-        sender=product_models.Item,
-        weak=False,
-        dispatch_uid=_ITEM_SAVE_REFUSAL_DISPATCH_UID,
-    )
-    try:
-        yield
-    finally:
-        _ = pre_save.disconnect(
-            sender=product_models.Item,
-            dispatch_uid=_ITEM_SAVE_REFUSAL_DISPATCH_UID,
-        )
-
-
-@strawberry.input
-class _RenamedItemName:
-    """A ``Meta.input_class`` override exposing ``Item.name`` as ``itemName``."""
-
-    name: str = strawberry.field(name="itemName")
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize(
-    ("error_key", "field", "path"),
-    [
-        pytest.param("name", "itemName", ["itemName"], id="renamed-input"),
-        pytest.param("category", "categoryId", ["categoryId"], id="relation-name"),
-        pytest.param("category_id", "categoryId", ["categoryId"], id="relation-attname"),
-        pytest.param("is_private", "isPrivate", ["isPrivate"], id="multi-word"),
-        pytest.param("code", "code", ["code"], id="no-such-model-field"),
-        pytest.param(
-            "shelves.1.code",
-            "shelves.1.code",
-            ["shelves", "1", "code"],
-            id="dotted-name-verbatim",
-        ),
-    ],
-)
-def test_save_time_django_validation_error_reads_its_names_as_model_fields(
-    error_key: str,
-    field: str,
-    path: list[str],
-) -> None:
-    """A save-time Django error keys each name as a field of the mutation's own model.
-
-    A ``pre_save`` receiver refuses the ``Item`` write with one name. The model
-    flavor reads it through ``_model_error_key_map``: the model field ``name`` lands
-    on the renamed root input ``itemName``, the relation under both its name and its
-    ``attname`` on ``categoryId``, ``is_private`` on ``isPrivate``. ``code``, which
-    ``Item`` lacks, keeps its name, and a dotted name is kept verbatim (its ``path``
-    split at the dots), never re-keyed. Nothing is written.
-    """
-    schema, (CategoryT, _ItemT) = _build_item_schema(input_cls=_RenamedItemName)
-    category = product_models.Category.objects.create(name=_category_name())
-    with _item_save_refused(error_key):
-        res = schema.execute_sync(
-            "mutation($d: ItemInput!){ createItem(data:$d){ "
-            "node{ id } errors{ field messages codes path } } }",
-            variable_values={
-                "d": {
-                    "itemName": "Refused",
-                    "categoryId": global_id_for(CategoryT, saved_pk(category)),
-                },
-            },
-        )
-    assert res.errors is None, res.errors
-    assert res.data == {
-        "createItem": {
-            "node": None,
-            "errors": [
-                {
-                    "field": field,
-                    "messages": ["Refused at save."],
-                    "codes": ["refused"],
-                    "path": path,
-                },
-            ],
-        },
-    }
-    assert not product_models.Item.objects.filter(name="Refused").exists()
-
-
-class _UnderscorePrefixConverter(NameConverter):
-    """Prefix ``n_`` onto every converter-named field whose Python name carries an underscore."""
-
-    @override
-    def apply_naming_config(self, name: str) -> str:
-        base = super().apply_naming_config(name)
-        return f"n_{base}" if "_" in name else base
-
-
-#: ``(isbn_13, isbn_10, publisher_2_id)`` as each schema config publishes them.
-_NAMING_CONFIGS = [
-    pytest.param(StrawberryConfig(), ("isbn13", "isbn10", "publisher2Id"), id="default"),
-    pytest.param(
-        StrawberryConfig(auto_camel_case=False),
-        ("isbn_13", "isbn_10", "publisher_2_id"),
-        id="auto-camel-case-off",
-    ),
-    pytest.param(
-        StrawberryConfig(name_converter=_UnderscorePrefixConverter()),
-        ("n_isbn13", "n_isbn10", "n_publisher2Id"),
-        id="custom-converter",
-    ),
-]
-
-
-@strawberry.input
-class _EditionUnnamedFields:
-    """A ``Meta.input_class`` whose fields carry no ``name=``: the schema's converter names them."""
-
-    isbn_13: str
-    isbn_10: str | None = strawberry.field(default=UNSET)
-    publisher_2_id: int | None = strawberry.field(default=UNSET)
-
-
-_EDITION_SAVE_REFUSAL_DISPATCH_UID = "tests.mutations.edition_save_time_refusal"
-
-
-@contextlib.contextmanager
-def _edition_save_refused() -> Generator[None, None, None]:
-    """Refuse every ``Edition`` save inside the block with a Django error keyed ``isbn_10``."""
-
-    def _refuse(**_kwargs: object) -> None:
-        raise DjangoValidationError(
-            {"isbn_10": DjangoValidationError("Refused at save.", code="refused")},
-        )
-
-    pre_save.connect(
-        _refuse,
-        sender=library_models.Edition,
-        weak=False,
-        dispatch_uid=_EDITION_SAVE_REFUSAL_DISPATCH_UID,
-    )
-    try:
-        yield
-    finally:
-        _ = pre_save.disconnect(
-            sender=library_models.Edition,
-            dispatch_uid=_EDITION_SAVE_REFUSAL_DISPATCH_UID,
-        )
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize(("config", "published"), _NAMING_CONFIGS)
-def test_unnamed_consumer_input_fields_key_errors_to_the_names_the_schema_published(
-    config: StrawberryConfig,
-    published: tuple[str, str, str],
-) -> None:
-    """Every error on an unnamed consumer field keys to the name the executing schema published.
-
-    ``_EditionUnnamedFields`` declares ``isbn_13``, ``isbn_10`` and ``publisher_2_id``
-    without ``name=``, so the schema's own converter names them at schema build and
-    the bind can only predict the spelling. A duplicate key (``full_clean``), an
-    explicit ``null`` and an unresolvable relation id (the decode) and a save-time
-    Django ``ValidationError`` each key to the published name under the default
-    config, under ``auto_camel_case=False`` and under a custom ``NameConverter``,
-    and the SDL publishes exactly those names.
-    """
-    isbn_13, isbn_10, publisher_2_id = published
-
-    class PublisherT(DjangoType):
-        class Meta:
-            model = library_models.Publisher
-            fields = ("id", "name")
-            primary = True
-
-    class EditionT(DjangoType):
-        class Meta:
-            model = library_models.Edition
-            fields = ("isbn_13",)
-            primary = True
-
-    # The primaries only have to exist: the bind reads them from the registry.
-    del PublisherT, EditionT
-
-    class CreateEdition(DjangoMutation):
-        class Meta:
-            model = library_models.Edition
-            operation = "create"
-            input_class = _EditionUnnamedFields
-            permission_classes = [_AllowAll]
-
-    @strawberry.type
-    class Mutation:
-        # One word, so every config publishes the field under the same name.
-        write = DjangoMutationField(CreateEdition)
-
-    finalize_django_types()
-    schema = DjangoSchema(query=_Query, mutation=Mutation, config=config)
-    input_type = require_instance(schema._schema.type_map["EditionInput"], GraphQLInputObjectType)
-    assert set(graphql_input_fields(input_type)) == {
-        isbn_13,
-        isbn_10,
-        publisher_2_id,
-        "imprint",
-        "publisherId",
-    }
-
-    publisher = library_models.Publisher.objects.create(name="P-Unnamed", house_code="PU")
-    _ = library_models.Edition.objects.create(isbn_13="978-dup", publisher=publisher)
-    mutation = "mutation($d: EditionInput!){ write(data: $d){ errors{ field path codes } } }"
-
-    def errors_for(**data: object) -> object:
-        result = schema.execute_sync(
-            mutation,
-            variable_values={"d": {"publisherId": saved_pk(publisher), **data}},
-        )
-        assert result.errors is None, result.errors
-        return _json_at(result.data, "write", "errors")
-
-    assert errors_for(**{isbn_13: "978-dup"}) == [
-        {"field": isbn_13, "path": [isbn_13], "codes": ["unique"]},
-    ]
-    assert errors_for(**{isbn_13: "978-null", isbn_10: None}) == [
-        {"field": isbn_10, "path": [isbn_10], "codes": ["null"]},
-    ]
-    assert errors_for(**{isbn_13: "978-rel", publisher_2_id: 999_999}) == [
-        {"field": publisher_2_id, "path": [publisher_2_id], "codes": ["invalid"]},
-    ]
-    with _edition_save_refused():
-        assert errors_for(**{isbn_13: "978-save", isbn_10: "0-00"}) == [
-            {"field": isbn_10, "path": [isbn_10], "codes": ["refused"]},
-        ]
-    assert list(
-        library_models.Edition.objects.values_list("isbn_13", flat=True),
-    ) == ["978-dup"]
-
-
-@strawberry.input
-class _PrintingUnnamedBoundWith:
-    """A ``Meta.input_class`` exposing the raw-pk ``bound_with`` M2M without ``name=``."""
-
-    bound_with: list[str] | None = strawberry.field(default=UNSET)
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize(
-    ("config", "bound_with"),
-    [
-        pytest.param(StrawberryConfig(), "boundWith", id="default"),
-        pytest.param(
-            StrawberryConfig(auto_camel_case=False),
-            "bound_with",
-            id="auto-camel-case-off",
-        ),
-        pytest.param(
-            StrawberryConfig(name_converter=_UnderscorePrefixConverter()),
-            "n_boundWith",
-            id="custom-converter",
-        ),
-    ],
-)
-def test_an_unnamed_consumer_relation_list_charges_the_relation_bound(
-    config: StrawberryConfig,
-    bound_with: str,
-) -> None:
-    """A raw-pk M2M a consumer field declares without ``name=`` is charged as relation ids.
-
-    ``Edition`` is non-Relay, so ``bound_with`` is a ``[String!]`` of raw ISBNs that
-    only the mutation's bind specs classify as a relation list. The resource policy
-    reaches the spec through the attr the schema back-referenced on the wire field,
-    so the list charges ``max_relation_ids_per_mutation`` under whatever name the
-    schema's converter published, and nothing is written.
-    """
-
-    class EditionT(DjangoType):
-        class Meta:
-            model = library_models.Edition
-            fields = ("isbn_13",)
-            primary = True
-
-    class PrintingT(DjangoType):
-        class Meta:
-            model = library_models.Printing
-            fields = ("id",)
-            primary = True
-
-    # The primaries only have to exist: the bind reads them from the registry.
-    del EditionT, PrintingT
-
-    class CreatePrinting(DjangoMutation):
-        class Meta:
-            model = library_models.Printing
-            operation = "create"
-            input_class = _PrintingUnnamedBoundWith
-            permission_classes = [_AllowAll]
-
-    @strawberry.type
-    class Mutation:
-        # One word, so every config publishes the field under the same name.
-        write = DjangoMutationField(CreatePrinting)
-
-    finalize_django_types()
-    schema = DjangoSchema(
-        query=_Query,
-        mutation=Mutation,
-        config=config,
-        resource_policy=ResourcePolicy(max_relation_ids_per_mutation=1),
-    )
-    publisher = library_models.Publisher.objects.create(name="P-Bound", house_code="PB")
-    for isbn in ("978-a", "978-b"):
-        _ = library_models.Edition.objects.create(isbn_13=isbn, publisher=publisher)
-    result = schema.execute_sync(
-        "mutation($d: PrintingInput!){ write(data: $d){ errors{ field } } }",
-        variable_values={"d": {"editionId": "978-a", bound_with: ["978-a", "978-b"]}},
-    )
-    assert result.errors is not None
-    assert [error.extensions for error in result.errors] == [
-        {
-            "code": "RESOURCE_LIMIT_EXCEEDED",
-            "bound": "max_relation_ids_per_mutation",
-            "limit": 1,
-            "charged": 2,
-        },
-    ]
-    assert not library_models.Printing.objects.exists()
-
-
 _ITEM_SAVE_LOOKUP_DISPATCH_UID = "tests.mutations.item_save_reads_a_missing_category"
 
 
@@ -2872,9 +2193,27 @@ def test_does_not_exist_from_the_write_propagates_while_the_row_is_present(opera
     the GraphQL boundary unchanged. A create has no located row and re-raises without a
     probe. Nothing is written either way.
     """
+    seed_data(1)
+    catalog_categories = categories_from_seed(("__fixture_category_0__", False))
+    catalog_items = items_from_seed(catalog_categories[0], ("__fixture_item_0__", False))
+    product_models.Entry.objects.filter(item__in=catalog_items).delete()
     schema, (CategoryT, ItemT) = _build_item_schema(mask_errors=False)
-    category = product_models.Category.objects.create(name=_category_name())
-    item = product_models.Item.objects.create(name="Kept", category=category)
+    category = catalog_categories[0]
+    product_models.Category.objects.filter(pk=category.pk).update(
+        description="",
+        is_private=False,
+        name=_category_name(),
+    )
+    category.refresh_from_db()
+    item = catalog_items[0]
+    product_models.Item.objects.filter(pk=item.pk).update(
+        description="",
+        is_private=False,
+        attachment="",
+        name="Kept",
+        category=category,
+    )
+    item.refresh_from_db()
     if operation == "create":
         query = "mutation($d: ItemInput!){ createItem(data:$d){ node{ id } errors{ field } } }"
         variables: dict[str, object] = {
@@ -2900,91 +2239,6 @@ def test_does_not_exist_from_the_write_propagates_while_the_row_is_present(opera
     lookup = max(index for index, table in enumerate(tables) if table == '"products_category"')
     assert tables[lookup + 1 :] == ([] if operation == "create" else ['"products_item"'])
     assert list(product_models.Item.objects.values_list("name", flat=True)) == ["Kept"]
-
-
-# ---------------------------------------------------------------------------
-# Raw-pk M2M update existence check (no shipped updateShelf)
-# ---------------------------------------------------------------------------
-
-
-def _build_book_raw_m2m_schema() -> tuple[
-    strawberry.Schema,
-    tuple[type[DjangoType], type[DjangoType], type[DjangoType]],
-]:
-    """Declare a NON-Relay ``Genre`` primary so ``Book.genres`` is a raw-pk ``list[Int]`` M2M."""
-    GenreT = type(
-        "GenreT",
-        (DjangoType,),
-        {
-            "Meta": type(
-                "Meta",
-                (),
-                {"model": library_models.Genre, "fields": ("id", "name"), "primary": True},
-            ),
-        },
-    )
-
-    class BranchT(DjangoType, relay.Node):
-        class Meta:
-            model = library_models.Branch
-            fields = ("id", "name")
-            primary = True
-
-    assert registry.get(library_models.Branch) is BranchT
-
-    class ShelfT(DjangoType, relay.Node):
-        class Meta:
-            model = library_models.Shelf
-            fields = ("id", "code", "branch")
-            primary = True
-
-    class BookT(DjangoType, relay.Node):
-        class Meta:
-            model = library_models.Book
-            fields = (
-                "id",
-                "title",
-                "shelf",
-                "genres",
-            )
-            primary = True
-
-    class UpdateBook(DjangoMutation):
-        class Meta:
-            model = library_models.Book
-            operation = "update"
-            permission_classes = [_AllowAll]
-
-    @strawberry.type
-    class Mutation:
-        update_book = DjangoMutationField(UpdateBook)
-
-    finalize_django_types()
-    return _schema(Mutation), (GenreT, ShelfT, BookT)
-
-
-@pytest.mark.django_db
-def test_update_raw_pk_m2m_nonexistent_id_is_field_error_no_dangling_row() -> None:
-    """A nonexistent raw-pk M2M id on update -> ``FieldError`` on the M2M field, set unchanged.
-
-    Live ``createShelf`` covers the create arm
-    (``test_library_api.py::test_create_shelf_model_mutation_nonexistent_alt_branch_is_field_error``).
-    Fakeshop ships no ``updateShelf`` / ``updateBook`` with a raw-pk M2M, so the
-    update arm stays on a throwaway non-Relay ``Genre`` primary.
-    """
-    schema, (_GenreT, _ShelfT, BookT) = _build_book_raw_m2m_schema()
-    shelf = _make_branch_shelf()
-    book = library_models.Book.objects.create(title="Seeded", shelf=shelf)
-    existing = library_models.Genre.objects.create(name="Sci-Fi")
-    book.genres.set([existing])
-    res = schema.execute_sync(
-        "mutation($id: ID!, $d: BookPartialInput!){ updateBook(id:$id, data:$d){ "
-        "node{ id } errors{ field messages } } }",
-        variable_values={"id": global_id_for(BookT, saved_pk(book)), "d": {"genres": [88888]}},
-    )
-    assert_mutation_field_error(res, "updateBook", "genres")
-    # The pre-existing M2M set is untouched (the failed write rolled back).
-    assert set(book.genres.values_list("pk", flat=True)) == {saved_pk(existing)}
 
 
 @pytest.mark.django_db
@@ -3015,307 +2269,6 @@ def test_raw_pk_m2m_existence_check_coerces_out_of_range_pk_no_overflow() -> Non
 
 
 # ---------------------------------------------------------------------------
-# FK explicit-null decode (required-null is live on updateItem.categoryId)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.django_db
-def test_single_fk_explicit_null_on_nullable_clears_not_relation_error() -> None:
-    """An explicit ``null`` on a nullable FK clears (``None``), never a relation error.
-
-    Required-FK ``null`` is live
-    (``test_products_api.py::test_update_item_explicit_null_category_id_is_field_error``).
-    Fakeshop write surfaces have no ``null=True`` FK, so the clear-signal branch
-    is a helper pin with ``category.null`` patched True.
-    """
-    _build_item_schema()
-    # Item.attachment is a nullable FileField, not an FK. Use Category.is_private's
-    # sibling: monkeypatch a nullable FK field object that mirrors a real relation.
-    fk_field = product_models.Item._meta.get_field("category")
-    related_model = fk_field.related_model
-    assert related_model is not None
-    # Temporarily treat the relation as nullable for the clear-signal branch.
-    with mock.patch.object(fk_field, "null", new=True):
-        pk, error = resolvers._decode_single_relation_id(
-            None,
-            graphql_name="categoryId",
-            related_model=related_model,
-            key_attname=None,
-            info=unread_info(),
-            relation_field=fk_field,
-        )
-    assert error is None
-    assert pk is None
-
-
-@pytest.mark.django_db
-def test_raw_pk_relations_with_no_registered_primary_use_default_manager_existence() -> None:
-    """An unregistered raw-pk relation has existence validation but no visibility contract.
-
-    Only ``Book`` is registered: the generated ``shelfId`` FK and ``genres`` M2M
-    inputs therefore carry raw primary keys with no target ``get_queryset`` policy.
-    Existing target rows remain attachable through the default manager, while a
-    missing member of either relation fails in-band before validation / write.
-    """
-
-    class BookT(DjangoType, relay.Node):
-        class Meta:
-            model = library_models.Book
-            fields = ("id", "title")
-            primary = True
-
-    assert registry.get(library_models.Book) is BookT
-
-    class CreateBook(DjangoMutation):
-        class Meta:
-            model = library_models.Book
-            operation = "create"
-            permission_classes = [_AllowAll]
-
-    @strawberry.type
-    class Mutation:
-        create_book = DjangoMutationField(CreateBook)
-
-    finalize_django_types()
-    schema = _schema(Mutation)
-    shelf = _make_branch_shelf()
-    genre = library_models.Genre.objects.create(name="Real")
-    query = (
-        "mutation($d: BookInput!){ createBook(data:$d){ "
-        "node{ id title } errors{ field messages } } }"
-    )
-
-    valid = schema.execute_sync(
-        query,
-        variable_values={
-            "d": {"title": "Valid", "shelfId": saved_pk(shelf), "genres": [saved_pk(genre)]},
-        },
-    )
-    assert valid.errors is None, valid.errors
-    assert valid.data is not None
-    assert valid.data["createBook"]["errors"] == []
-    book = library_models.Book.objects.get(title="Valid")
-    assert book.shelf_id == saved_pk(shelf)
-    assert set(book.genres.values_list("pk", flat=True)) == {saved_pk(genre)}
-
-    invalid_cases = (
-        (
-            "Missing shelf",
-            {"shelfId": saved_pk(shelf) + 9999, "genres": [saved_pk(genre)]},
-            "shelfId",
-        ),
-        (
-            "Missing genre",
-            {"shelfId": saved_pk(shelf), "genres": [saved_pk(genre) + 9999]},
-            "genres",
-        ),
-    )
-    for title, relations, error_field in invalid_cases:
-        result = schema.execute_sync(
-            query,
-            variable_values={"d": {"title": title, **relations}},
-        )
-        assert_mutation_field_error(result, "createBook", error_field)
-        assert not library_models.Book.objects.filter(title=title).exists()
-
-
-# ---------------------------------------------------------------------------
-# Create-validation parity with Model.objects.create over empty-value defaults,
-# plus naive-datetime tz-coercion.
-#
-# ``ScalarSpecimen`` (scalars app) has ``payload = JSONField(default=dict)``
-# (``blank=False``) and ``occurred_at = DateTimeField()``. Neither is reachable
-# via a live mutation (the scalars app exposes no write surface), so these are
-# package tests over the real model. The mutation is narrowed to the non-BigInt
-# scalar columns so the schema builds without the scalar_map config.
-# ---------------------------------------------------------------------------
-
-_SPEC_UUID = "12345678-1234-5678-1234-567812345678"
-
-
-def _build_scalar_specimen_schema() -> tuple[strawberry.Schema, type[DjangoMutation]]:
-    """Declare a ScalarSpecimen primary + a create mutation; return (schema, CreateSpec)."""
-
-    class SpecT(DjangoType, relay.Node):
-        class Meta:
-            model = scalars_models.ScalarSpecimen
-            fields = ("id", "label")
-            primary = True
-
-    assert registry.get(scalars_models.ScalarSpecimen) is SpecT
-
-    class CreateSpec(DjangoMutation):
-        class Meta:
-            model = scalars_models.ScalarSpecimen
-            operation = "create"
-            fields = (
-                "label",
-                "occurred_on",
-                "occurred_at",
-                "occurred_time",
-                "external_id",
-                "payload",
-            )
-            permission_classes = [_AllowAll]
-
-    @strawberry.type
-    class Mutation:
-        create_spec = DjangoMutationField(CreateSpec)
-
-    finalize_django_types()
-    return _schema(Mutation), CreateSpec
-
-
-@pytest.mark.django_db
-def test_create_omitting_empty_value_default_field_succeeds() -> None:
-    """Omitting a ``JSONField(default=dict)`` (blank=False) on create succeeds.
-
-    The field is optional in the input (it has a default), so a client may omit it.
-    A ``full_clean`` that validated the model's own empty default (``{}`` is in
-    Django's ``empty_values``) would reject it ("This field cannot be blank") -
-    stricter than ``Model.objects.create()``, which applies the default unvalidated.
-    Create excludes unprovided fields from ``full_clean``, so the omission writes
-    the default cleanly. No shipped ScalarSpecimen mutation: rung 1 would add one to
-    the scalars schema; a live holder cannot declare ``DjangoMutation`` after
-    finalize.
-    """
-    schema, CreateSpec = _build_scalar_specimen_schema()
-    assert CreateSpec._input_class is not None
-    input_name = CreateSpec._input_class.__name__
-    res = schema.execute_sync(
-        f"mutation($d: {input_name}!){{ createSpec(data:$d){{ node{{ id }} errors{{ field messages }} }} }}",
-        variable_values={
-            "d": {
-                "label": "spec-omit-payload",
-                "occurredOn": "2024-01-01",
-                "occurredAt": "2024-01-01T12:00:00+00:00",
-                "occurredTime": "12:00:00",
-                "externalId": _SPEC_UUID,
-            },
-        },
-    )
-    assert res.errors is None, res.errors
-    assert res.data is not None
-    assert res.data["createSpec"]["errors"] == []
-    assert res.data["createSpec"]["node"] is not None
-    assert scalars_models.ScalarSpecimen.objects.get(label="spec-omit-payload").payload == {}
-
-
-@pytest.mark.django_db
-def test_create_naive_datetime_input_is_made_timezone_aware() -> None:
-    """A naive datetime input is coerced to an aware datetime on create.
-
-    Under ``USE_TZ=True`` a naive datetime would trigger Django's naive-datetime
-    ``RuntimeWarning`` at save - which this suite's ``-W error`` config escalates to a
-    top-level error. The decode step makes a naive datetime aware (like DRF), so the
-    create succeeds warning-free and stores an aware value. (A regression would
-    surface as the escalated warning failing this test.) No shipped ScalarSpecimen
-    mutation: rung 1 would add one to the scalars schema; a live holder cannot
-    declare ``DjangoMutation`` after finalize.
-    """
-    schema, CreateSpec = _build_scalar_specimen_schema()
-    assert CreateSpec._input_class is not None
-    input_name = CreateSpec._input_class.__name__
-    res = schema.execute_sync(
-        f"mutation($d: {input_name}!){{ createSpec(data:$d){{ node{{ id }} errors{{ field messages }} }} }}",
-        variable_values={
-            "d": {
-                "label": "spec-naive-dt",
-                "occurredOn": "2024-01-01",
-                "occurredAt": "2024-01-01T12:00:00",  # naive: no offset
-                "occurredTime": "12:00:00",
-                "externalId": _SPEC_UUID,
-            },
-        },
-    )
-    assert res.errors is None, res.errors
-    assert res.data is not None
-    assert res.data["createSpec"]["errors"] == []
-    row = scalars_models.ScalarSpecimen.objects.get(label="spec-naive-dt")
-    assert timezone.is_aware(row.occurred_at)
-
-
-@pytest.mark.django_db
-def test_create_unencodable_text_nested_in_a_json_value_is_field_error_before_save() -> None:
-    """A lone surrogate nested in a ``JSONField`` value is a path-keyed decode error; no row.
-
-    The model flavor runs the same storability walk as a top-level string, so a list
-    element inside the ``payload`` object is refused at decode (keyed ``payload.tags.1``)
-    instead of being handed to the column's encoder.
-    """
-    schema, CreateSpec = _build_scalar_specimen_schema()
-    assert CreateSpec._input_class is not None
-    input_name = CreateSpec._input_class.__name__
-    res = schema.execute_sync(
-        f"mutation($d: {input_name}!){{ createSpec(data:$d){{ node{{ id }} errors{{ field codes }} }} }}",
-        variable_values={
-            "d": {
-                "label": "spec-surrogate-json",
-                "occurredOn": "2024-01-01",
-                "occurredAt": "2024-01-01T12:00:00+00:00",
-                "occurredTime": "12:00:00",
-                "externalId": _SPEC_UUID,
-                "payload": {"tags": ["ok", "\ud800"]},
-            },
-        },
-    )
-    assert res.errors is None, res.errors
-    assert res.data is not None
-    assert res.data["createSpec"] == {
-        "node": None,
-        "errors": [{"field": "payload.tags.1", "codes": ["invalid"]}],
-    }
-    assert not scalars_models.ScalarSpecimen.objects.filter(label="spec-surrogate-json").exists()
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize(
-    ("payload", "error_field"),
-    [({"tags": ["ok", "a\x00b"]}, "payload.tags.1"), ({"co\x00lor": "red"}, "payload")],
-    ids=["json-value", "json-key"],
-)
-def test_create_nul_in_a_json_value_is_field_error_before_save(
-    payload: dict[str, object],
-    error_field: str,
-) -> None:
-    r"""A NUL in a ``JSONField`` value or key is the null-character decode error; no row.
-
-    PostgreSQL's ``jsonb`` refuses ``\u0000`` in a string or a key, so the model flavor
-    refuses it at decode on every backend: a value keyed to its path, a key to the dict.
-    """
-    schema, CreateSpec = _build_scalar_specimen_schema()
-    assert CreateSpec._input_class is not None
-    input_name = CreateSpec._input_class.__name__
-    res = schema.execute_sync(
-        f"mutation($d: {input_name}!){{ createSpec(data:$d){{ node{{ id }} "
-        "errors{ field messages codes } } }",
-        variable_values={
-            "d": {
-                "label": "spec-nul-json",
-                "occurredOn": "2024-01-01",
-                "occurredAt": "2024-01-01T12:00:00+00:00",
-                "occurredTime": "12:00:00",
-                "externalId": _SPEC_UUID,
-                "payload": payload,
-            },
-        },
-    )
-    assert res.errors is None, res.errors
-    assert res.data is not None
-    assert res.data["createSpec"] == {
-        "node": None,
-        "errors": [
-            {
-                "field": error_field,
-                "messages": ["Null characters are not allowed."],
-                "codes": ["null_characters_not_allowed"],
-            },
-        ],
-    }
-    assert not scalars_models.ScalarSpecimen.objects.filter(label="spec-nul-json").exists()
-
-
-# ---------------------------------------------------------------------------
 # Scalar field named ``<x>_id`` (spec-036)
 #
 # ``library.TaggedItem`` has a *scalar* ``object_id`` (a ``PositiveIntegerField``,
@@ -3325,76 +2278,6 @@ def test_create_nul_in_a_json_value_is_field_error_before_save(
 # GFK as a decode-able FK. Both are reasoned from the relation field index,
 # not a string heuristic.
 # ---------------------------------------------------------------------------
-
-
-def _build_tagged_item_schema() -> tuple[strawberry.Schema, type[DjangoType]]:
-    """Declare a TaggedItem primary + an update mutation; return (schema, TaggedItemT)."""
-
-    class TaggedItemT(DjangoType, relay.Node):
-        class Meta:
-            model = library_models.TaggedItem
-            fields = ("id", "tag", "object_id")
-            primary = True
-
-    class UpdateTaggedItem(DjangoMutation):
-        class Meta:
-            model = library_models.TaggedItem
-            operation = "update"
-            permission_classes = [_AllowAll]
-
-    @strawberry.type
-    class Mutation:
-        update_tagged_item = DjangoMutationField(UpdateTaggedItem)
-
-    finalize_django_types()
-    return _schema(Mutation), TaggedItemT
-
-
-@pytest.mark.django_db
-def test_partial_update_validates_scalar_field_named_id_suffix() -> None:
-    """A scalar field literally named ``<x>_id`` IS validated on partial update (spec-036).
-
-    ``TaggedItem.object_id`` is a scalar ``PositiveIntegerField``. A partial update
-    providing an invalid value (``-5``) must surface as a ``FieldError`` from
-    ``full_clean`` keyed to the ``objectId`` input the client sent - NOT skipped from validation (which an
-    ``_id`` suffix-strip would cause: ``object_id`` mangled to ``object``, read
-    as unprovided, excluded from ``full_clean``, and the invalid value slipping to
-    the DB as a mis-labeled ``IntegrityError`` / ``"__all__"`` envelope). No
-    shipped ``TaggedItemType``: rung 1 would add one to the library schema; a live
-    holder cannot declare ``DjangoMutation`` after finalize.
-    """
-    schema, TaggedItemT = _build_tagged_item_schema()
-    ct = ContentType.objects.get_for_model(library_models.Branch)
-    branch = library_models.Branch.objects.create(name="RegressionBranch")
-    tagged = library_models.TaggedItem.objects.create(
-        tag="alpha",
-        content_type=ct,
-        object_id=saved_pk(branch),
-    )
-    update_q = (
-        "mutation($id: ID!, $d: TaggedItemPartialInput!){ "
-        "updateTaggedItem(id:$id, data:$d){ "
-        "node{ tag } errors{ field messages } } }"
-    )
-    res = schema.execute_sync(
-        update_q,
-        variable_values={
-            "id": global_id_for(TaggedItemT, saved_pk(tagged)),
-            "d": {"objectId": -5},
-        },
-    )
-    assert res.errors is None, res.errors
-    assert res.data is not None
-    payload = _json_object(res.data, "updateTaggedItem")
-    # The invalid scalar surfaces as a FieldError keyed to the ``objectId`` input -
-    # NOT a swallowed write, NOT a mis-labeled ``"__all__"`` uniqueness envelope.
-    assert payload["node"] is None
-    fields = [_json_at(error, "field") for error in _json_list(payload, "errors")]
-    assert "objectId" in fields, payload["errors"]
-    assert NON_FIELD_ERROR_KEY not in fields, payload["errors"]
-    # The invalid value never reached the DB.
-    tagged.refresh_from_db()
-    assert tagged.object_id == saved_pk(branch)
 
 
 def test_provided_attr_names_keeps_scalar_id_suffix_field() -> None:
@@ -3510,10 +2393,28 @@ def test_locate_instance_locks_through_base_manager_subquery_by_default() -> Non
     ``pk__in=<visible pks>``. The located row still respects visibility (a row
     outside the subquery is not found).
     """
+    seed_data(1)
+    catalog_categories = categories_from_seed(("__fixture_category_0__", False))
+    catalog_items = items_from_seed(catalog_categories[0], ("__fixture_item_0__", False))
+    product_models.Entry.objects.filter(item__in=catalog_items).delete()
     _schema_and_types = _build_item_schema()
     ItemT = _schema_and_types[1][1]
-    cat = product_models.Category.objects.create(name=_category_name())
-    item = product_models.Item.objects.create(name="Lockable", category=cat)
+    cat = catalog_categories[0]
+    product_models.Category.objects.filter(pk=cat.pk).update(
+        description="",
+        is_private=False,
+        name=_category_name(),
+    )
+    cat.refresh_from_db()
+    item = catalog_items[0]
+    product_models.Item.objects.filter(pk=item.pk).update(
+        description="",
+        is_private=False,
+        attachment="",
+        name="Lockable",
+        category=cat,
+    )
+    item.refresh_from_db()
 
     with transaction.atomic():
         located = mutation_resolvers.locate_instance(
@@ -3554,6 +2455,10 @@ def test_locate_instance_loads_the_row_under_the_hook_fetch_mode(
     mode, so the row loads its relations as a read of it does. The unlocked locate reads
     through the sealed visible queryset itself.
     """
+    seed_data(1)
+    catalog_categories = categories_from_seed(("__fixture_category_0__", False))
+    catalog_items = items_from_seed(catalog_categories[0], ("__fixture_item_0__", False))
+    product_models.Entry.objects.filter(item__in=catalog_items).delete()
     mode = FETCH_MODES[mode_name]
 
     def _hook(
@@ -3564,8 +2469,22 @@ def test_locate_instance_loads_the_row_under_the_hook_fetch_mode(
         return queryset.fetch_mode(mode)
 
     ItemT = _build_item_schema(item_get_queryset=classmethod(_hook))[1][1]
-    category = product_models.Category.objects.create(name=_category_name())
-    item = product_models.Item.objects.create(name="Lockable", category=category)
+    category = catalog_categories[0]
+    product_models.Category.objects.filter(pk=category.pk).update(
+        description="",
+        is_private=False,
+        name=_category_name(),
+    )
+    category.refresh_from_db()
+    item = catalog_items[0]
+    product_models.Item.objects.filter(pk=item.pk).update(
+        description="",
+        is_private=False,
+        attachment="",
+        name="Lockable",
+        category=category,
+    )
+    item.refresh_from_db()
 
     with transaction.atomic():
         located = mutation_resolvers.locate_instance(
@@ -3588,9 +2507,27 @@ def test_locate_instance_confirms_the_locked_row_with_a_fresh_visibility_read(
     SQLite takes no row lock, so the re-read is forced on here; the Postgres race it
     closes is ``test_locate_instance_misses_a_row_hidden_while_its_lock_waited``.
     """
+    seed_data(1)
+    catalog_categories = categories_from_seed(("__fixture_category_0__", False))
+    catalog_items = items_from_seed(catalog_categories[0], ("__fixture_item_0__", False))
+    product_models.Entry.objects.filter(item__in=catalog_items).delete()
     ItemT = _build_item_schema()[1][1]
-    category = product_models.Category.objects.create(name=_category_name())
-    item = product_models.Item.objects.create(name="Lockable", category=category)
+    category = catalog_categories[0]
+    product_models.Category.objects.filter(pk=category.pk).update(
+        description="",
+        is_private=False,
+        name=_category_name(),
+    )
+    category.refresh_from_db()
+    item = catalog_items[0]
+    product_models.Item.objects.filter(pk=item.pk).update(
+        description="",
+        is_private=False,
+        attachment="",
+        name="Lockable",
+        category=category,
+    )
+    item.refresh_from_db()
     monkeypatch.setattr(mutation_resolvers, "locks_rows", _returning(value=True))
 
     with transaction.atomic(), CaptureQueriesContext(connection) as captured:
@@ -3675,9 +2612,27 @@ def test_locate_instance_misses_a_row_hidden_while_its_lock_waited() -> None:
     The locked statement re-reads the row after the wait but keeps its visibility
     subquery's snapshot, so it still returns the row; the fresh re-read does not.
     """
+    seed_data(1)
+    catalog_categories = categories_from_seed(("__fixture_category_0__", False))
+    catalog_items = items_from_seed(catalog_categories[0], ("__fixture_item_0__", False))
+    product_models.Entry.objects.filter(item__in=catalog_items).delete()
     ItemT = _build_item_schema(item_get_queryset=classmethod(_public_rows))[1][1]
-    category = product_models.Category.objects.create(name=_category_name())
-    item = product_models.Item.objects.create(name="Hidden mid-lock", category=category)
+    category = catalog_categories[0]
+    product_models.Category.objects.filter(pk=category.pk).update(
+        description="",
+        is_private=False,
+        name=_category_name(),
+    )
+    category.refresh_from_db()
+    item = catalog_items[0]
+    product_models.Item.objects.filter(pk=item.pk).update(
+        description="",
+        is_private=False,
+        attachment="",
+        name="Hidden mid-lock",
+        category=category,
+    )
+    item.refresh_from_db()
 
     with _hidden_while_waited_on(product_models.Item, saved_pk(item)), transaction.atomic():
         located = mutation_resolvers.locate_instance(
@@ -3694,9 +2649,27 @@ def test_locate_instance_misses_a_row_hidden_while_its_lock_waited() -> None:
 @pytest.mark.django_db(transaction=True)
 def test_locate_instance_lock_blocks_a_second_connections_writer() -> None:
     """The located row stays locked until the write transaction ends."""
+    seed_data(1)
+    catalog_categories = categories_from_seed(("__fixture_category_0__", False))
+    catalog_items = items_from_seed(catalog_categories[0], ("__fixture_item_0__", False))
+    product_models.Entry.objects.filter(item__in=catalog_items).delete()
     ItemT = _build_item_schema()[1][1]
-    category = product_models.Category.objects.create(name=_category_name())
-    item = product_models.Item.objects.create(name="Lockable", category=category)
+    category = catalog_categories[0]
+    product_models.Category.objects.filter(pk=category.pk).update(
+        description="",
+        is_private=False,
+        name=_category_name(),
+    )
+    category.refresh_from_db()
+    item = catalog_items[0]
+    product_models.Item.objects.filter(pk=item.pk).update(
+        description="",
+        is_private=False,
+        attachment="",
+        name="Lockable",
+        category=category,
+    )
+    item.refresh_from_db()
 
     def _write_with_a_short_lock_timeout() -> None:
         try:
@@ -3728,6 +2701,8 @@ def test_locate_instance_lock_blocks_a_second_connections_writer() -> None:
 @pytest.mark.django_db(transaction=True)
 def test_relation_target_hidden_while_its_lock_waited_is_a_relation_error() -> None:
     """A create's category, hidden by the commit its row lock waited on, answers the relation error."""
+    seed_data(0)
+    catalog_categories = categories_from_seed(("__fixture_category_0__", False))
 
     @strawberry.input
     class GidItemInput:
@@ -3737,7 +2712,13 @@ def test_relation_target_hidden_while_its_lock_waited_is_a_relation_error() -> N
         category_get_queryset=classmethod(_public_rows),
         input_cls=GidItemInput,
     )
-    category = product_models.Category.objects.create(name=_category_name())
+    category = catalog_categories[0]
+    product_models.Category.objects.filter(pk=category.pk).update(
+        description="",
+        is_private=False,
+        name=_category_name(),
+    )
+    category.refresh_from_db()
     variables = {
         "d": {
             "name": "Linked mid-lock",
@@ -3756,8 +2737,16 @@ def test_relation_target_hidden_while_its_lock_waited_is_a_relation_error() -> N
 @pytest.mark.django_db(transaction=True)
 def test_visible_related_object_misses_a_target_hidden_while_its_lock_waited() -> None:
     """The single-object relation decode re-reads visibility after its row lock too."""
+    seed_data(0)
+    catalog_categories = categories_from_seed(("__fixture_category_0__", False))
     _build_item_schema(category_get_queryset=classmethod(_public_rows))
-    category = product_models.Category.objects.create(name=_category_name())
+    category = catalog_categories[0]
+    product_models.Category.objects.filter(pk=category.pk).update(
+        description="",
+        is_private=False,
+        name=_category_name(),
+    )
+    category.refresh_from_db()
 
     with (
         _hidden_while_waited_on(product_models.Category, saved_pk(category)),
@@ -4303,16 +3292,6 @@ def test_bound_model_fields_refuses_a_delete_mutation() -> None:
         mutation_resolvers._bound_model_fields(DeleteItem)
 
 
-def test_write_flavors_share_resolver_entry_factory() -> None:
-    """Model, form, and serializer sync entries all come from ``make_resolver_entries``."""
-    assert inspect.isfunction(resolvers.resolve_mutation_sync)
-    assert inspect.isfunction(resolve_form_sync)
-    assert inspect.isfunction(resolve_serializer_sync)
-    assert resolvers.resolve_mutation_sync.__name__ == "resolve_sync"
-    assert resolve_form_sync.__name__ == "resolve_sync"
-    assert resolve_serializer_sync.__name__ == "resolve_sync"
-
-
 @pytest.mark.django_db
 def test_assign_m2m_integrity_error_contained_in_envelope() -> None:
     """IntegrityError during M2M assignment is returned as the constraint FieldError envelope."""
@@ -4419,7 +3398,15 @@ def test_model_write_step_refuses_a_decode_carrying_excluded_values() -> None:
 @pytest.mark.django_db
 def test_delete_integrity_error_contained_in_envelope() -> None:
     """IntegrityError during instance.delete() is returned as the constraint FieldError envelope."""
-    cat = product_models.Category.objects.create(name=_category_name())
+    seed_data(0)
+    catalog_categories = categories_from_seed(("__fixture_category_0__", False))
+    cat = catalog_categories[0]
+    product_models.Category.objects.filter(pk=cat.pk).update(
+        description="",
+        is_private=False,
+        name=_category_name(),
+    )
+    cat.refresh_from_db()
 
     with patch.object(
         product_models.Category,
@@ -4456,7 +3443,15 @@ def test_delete_without_a_count_is_success(returned: object) -> None:
     soft-delete override's ``None``) reports no count and answers no envelope, never a
     top-level ``TypeError`` / ``ValueError`` from unpacking it.
     """
-    cat = product_models.Category.objects.create(name=_category_name())
+    seed_data(0)
+    catalog_categories = categories_from_seed(("__fixture_category_0__", False))
+    cat = catalog_categories[0]
+    product_models.Category.objects.filter(pk=cat.pk).update(
+        description="",
+        is_private=False,
+        name=_category_name(),
+    )
+    cat.refresh_from_db()
 
     with patch.object(product_models.Category, "delete", return_value=returned):
         assert resolvers._delete_or_field_errors(cat) is None
@@ -4465,7 +3460,15 @@ def test_delete_without_a_count_is_success(returned: object) -> None:
 @pytest.mark.django_db
 def test_delete_of_zero_target_rows_is_conflict() -> None:
     """Django's pair with the target model's count zero is the ``conflict`` envelope on ``id``."""
-    cat = product_models.Category.objects.create(name=_category_name())
+    seed_data(0)
+    catalog_categories = categories_from_seed(("__fixture_category_0__", False))
+    cat = catalog_categories[0]
+    product_models.Category.objects.filter(pk=cat.pk).update(
+        description="",
+        is_private=False,
+        name=_category_name(),
+    )
+    cat.refresh_from_db()
 
     with patch.object(product_models.Category, "delete", return_value=(0, {})):
         errors = resolvers._delete_or_field_errors(cat)

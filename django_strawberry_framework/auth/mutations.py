@@ -87,6 +87,7 @@ from django_strawberry_framework.utils.errors import (
 )
 from django_strawberry_framework.utils.execution_mode import async_execution
 from django_strawberry_framework.utils.input_values import UNSET
+from django_strawberry_framework.utils.inputs import published_input_specs
 from django_strawberry_framework.utils.permissions import ChannelsRequestAdapter, request_from_info
 from django_strawberry_framework.utils.querysets import (
     _disposed_awaitable,
@@ -119,6 +120,7 @@ if TYPE_CHECKING:
         _M2MAssignments,
     )
     from django_strawberry_framework.types.base import DjangoType
+    from django_strawberry_framework.utils.inputs import InputFieldSpec
     from django_strawberry_framework.write_mixins import (
         DeclarationRegistry,
         _ValidatedMutationMeta,
@@ -1218,6 +1220,8 @@ def _register_decode_step(
     data: object,
     info: Info[object, object],
     instance: models.Model | None,
+    *,
+    specs: Sequence[InputFieldSpec],
 ) -> _RegisterDecoded | StepFailure:
     """Run the register ``decode_step``: the shared model decode + the password capture.
 
@@ -1240,7 +1244,7 @@ def _register_decode_step(
         data,
         info,
         instance=instance,
-        specs=mutation_cls._input_field_specs,
+        specs=specs,
         model_fields=resolvers._bound_model_fields(mutation_cls),
     )
     if isinstance(decoded, resolvers.StepFailure):
@@ -1265,35 +1269,39 @@ def _register_write_step(
     mutation_cls: type[DjangoMutation],
     instance: models.Model | None,
     decoded: _RegisterDecoded,
+    *,
+    specs: Sequence[InputFieldSpec],
 ) -> models.Model | StepFailure:
     """Run the register ``write_step``: validate + hash the password, then the shared tail.
 
     ``validate_password(raw_password, user)`` runs with the constructed (unsaved)
     instance so ``UserAttributeSimilarityValidator`` compares against the
     submitted username/email (the deliberate improvement over upstream's
-    user-less call). A failure is keyed to ``password`` DIRECTLY at the call site
-    (the D-N2 deliberate non-reuse: ``validate_password`` raises a list-style
+    user-less call). A failure is keyed to the ``password`` input field DIRECTLY at the
+    call site (the D-N2 deliberate non-reuse: ``validate_password`` raises a list-style
     ``ValidationError`` with no ``error_dict``, and the generic
     ``validation_error_to_field_errors`` mapper would key it to the ``"__all__"``
-    sentinel, not ``password``; ``RegisterInput`` takes no ``input_class``, so the
-    input field is always ``password``). Success hashes via ``set_password`` BEFORE
+    sentinel), under the name the executing schema published for it
+    (``_password_input_name`` over ``specs``). Success hashes via ``set_password`` BEFORE
     ``full_clean()`` (the ``password`` column validates against the hash, never
     the raw input), then delegates ``full_clean`` -> ``save`` (a race
     ``IntegrityError`` or a save-time ``ValidationError`` -> envelope) -> M2M to
     the shared model write tail, which
     keys every ``full_clean`` error to the GraphQL input field the client sent
-    through ``mutation_cls``'s bind specs (``first_name`` -> ``firstName``) -
+    through ``specs``, the request's published specs (``first_name`` -> ``firstName``
+    by default; ``utils/inputs.py::published_input_specs``) -
     ``validate_password`` + ``set_password`` are the ONLY auth-specific steps.
     """
     user, m2m_assignments, exclude, raw_password = decoded
+    password = _password_input_name(specs)
     if raw_password is None:
         # The user model's ``password`` column's message, as the decode's explicit-null
         # refusal answers it.
         password_column = require(type(user)._meta.get_field("password"), is_concrete_field)
-        return resolvers.StepFailure([null_field_error("password", password_column)])
+        return resolvers.StepFailure([null_field_error(password, password_column)])
     if not isinstance(raw_password, str):
         return resolvers.StepFailure(
-            [field_error("password", "Invalid password.", codes=FIELD_ERROR_CODE_INVALID)],
+            [field_error(password, "Invalid password.", codes=FIELD_ERROR_CODE_INVALID)],
         )
     # ``password`` rides the D6 exclusion seam, so it bypasses the shared decode's
     # scalar storability preflight (``decode_scalar_leaf``) that every other input
@@ -1305,23 +1313,33 @@ def _register_write_step(
     # primitive the model decode uses, so an unstorable password is the field-keyed
     # ``password`` envelope (byte-identical to how the shared decode already rejects such
     # a ``username``), never a top-level GraphQL error.
-    text_error = unstorable_text_error("password", raw_password)
+    text_error = unstorable_text_error(password, raw_password)
     if text_error is not None:
         return resolvers.StepFailure([text_error])
     try:
         validate_password(raw_password, user)
     except ValidationError as exc:
         codes = [leaf.code for leaf in exc.error_list if leaf.code]
-        return resolvers.StepFailure([field_error("password", exc.messages, codes=codes)])
+        return resolvers.StepFailure([field_error(password, exc.messages, codes=codes)])
     user.set_password(raw_password)
-    # ``RegisterInput`` takes no ``input_class``, so every field pins its wire name
-    # and the bind specs are already the published ones.
     return resolvers._model_write_step(
         mutation_cls,
         instance,
         (user, m2m_assignments, exclude),
-        specs=mutation_cls._input_field_specs,
+        specs=specs,
     )
+
+
+def _password_input_name(specs: Sequence[InputFieldSpec]) -> str:
+    """Return the wire name of the register input's ``password`` field among ``specs``.
+
+    The register bind stashes ``password`` as an ``EXCLUDED`` spec; a bind without one
+    cannot register a user (``_register_decode_step`` refuses it).
+    """
+    for spec in specs:
+        if spec.input_attr == "password":
+            return spec.graphql_name
+    raise ValueError("The register input specs carry no password field to key its errors to.")
 
 
 def _run_register_pipeline_sync(
@@ -1339,16 +1357,25 @@ def _run_register_pipeline_sync(
     decode / write step pair. Structurally a fourth decode/write STEP PAIR, not a
     fourth plumbing kit.
     """
+    # Every error of the request is keyed through the names the executing schema published.
+    specs = published_input_specs(info, mutation_cls._input_field_specs)
     return run_write_pipeline_sync(
         mutation_cls,
         info,
         data,
         UNSET,
-        decode_step=lambda instance: _register_decode_step(mutation_cls, data, info, instance),
+        decode_step=lambda instance: _register_decode_step(
+            mutation_cls,
+            data,
+            info,
+            instance,
+            specs=specs,
+        ),
         write_step=lambda instance, decoded: _register_write_step(
             mutation_cls,
             instance,
             decoded,
+            specs=specs,
         ),
     )
 

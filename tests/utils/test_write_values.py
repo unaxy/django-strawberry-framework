@@ -16,7 +16,7 @@ from unittest import mock
 
 import pytest
 import strawberry
-from apps.products.models import Category
+from apps.library.models import Genre
 from apps.scalars.models import NullableScalarSpecimen
 from django.apps.registry import Apps
 from django.core.validators import MinValueValidator
@@ -34,6 +34,7 @@ from django_strawberry_framework.mutations import resolvers as mutation_resolver
 from django_strawberry_framework.mutations.inputs import FieldError
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.rest_framework import resolvers as serializer_resolvers
+from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.types.base import DjangoType
 from django_strawberry_framework.types.finalizer import finalize_django_types
 from django_strawberry_framework.utils.errors import field_error
@@ -44,6 +45,7 @@ from django_strawberry_framework.utils.inputs import (
     SCALAR,
     InputFieldSpec,
 )
+from django_strawberry_framework.utils.typing import object_result
 from django_strawberry_framework.utils.write_transaction import write_pipeline
 from django_strawberry_framework.utils.write_values import (
     coerce_relation_pk_or_none,
@@ -94,7 +96,7 @@ _TRI_STATE_SPECS = [
         graphql_name="relation",
         target_name="relation",
         kind="relation",
-        related_model=Category,
+        related_model=Genre,
     ),
 ]
 
@@ -152,15 +154,15 @@ def test_decode_layers_preserve_omitted_null_and_provided_values() -> None:
     assert error is None
     assert decoded == {"scalar": None, "relation": None}
 
-    category = Category.objects.create(name="TriState")
+    genre = Genre.objects.create(name="TriState")
     error = decode_provided_fields(
         _TRI_STATE_SPECS,
-        _TriStateInput(scalar="provided", relation=saved_pk(category)),
+        _TriStateInput(scalar="provided", relation=saved_pk(genre)),
         handlers={"relation": relation_handler},
         scalar_handler=scalar_handler,
     )
     assert error is None
-    assert decoded == {"scalar": "provided", "relation": saved_pk(category)}
+    assert decoded == {"scalar": "provided", "relation": saved_pk(genre)}
 
 
 @pytest.mark.django_db
@@ -168,20 +170,20 @@ def test_decode_visible_relation_ids_rejects_uncoercible_member_without_a_visibi
     None
 ):
     """A string member fails the type check before any ``pk__in``; GraphQL ``[Int!]`` never delivers it."""
-    first = Category.objects.create(name="BatchA")
+    first = Genre.objects.create(name="BatchA")
     recourse = "Use a synchronous visibility hook."
 
     with CaptureQueriesContext(connection) as ctx:
         pks, error = decode_visible_relation_ids(
             [saved_pk(first), "bad"],
-            graphql_name="categoryIds",
-            related_model=Category,
+            graphql_name="genreIds",
+            related_model=Genre,
             info=unread_info(),
             async_recourse=recourse,
         )
     assert pks is None
     assert error is not None
-    assert error.field == "categoryIds"
+    assert error.field == "genreIds"
     assert ctx.captured_queries == []
 
 
@@ -189,14 +191,14 @@ def test_decode_visible_relation_ids_maps_a_non_iterable_to_relation_error() -> 
     """A non-iterable container stays inside the field error envelope."""
     pks, error = decode_visible_relation_ids(
         object(),
-        graphql_name="categoryIds",
-        related_model=Category,
+        graphql_name="genreIds",
+        related_model=Genre,
         info=unread_info(),
         async_recourse="Use a synchronous visibility hook.",
     )
     assert pks is None
     assert error is not None
-    assert error.field == "categoryIds"
+    assert error.field == "genreIds"
 
 
 def test_materialize_relation_id_container_iteration_error_propagates() -> None:
@@ -208,7 +210,7 @@ def test_materialize_relation_id_container_iteration_error_propagates() -> None:
             raise RuntimeError("relation iterator detonated")
 
     with pytest.raises(RuntimeError, match="relation iterator detonated"):
-        materialize_relation_id_container(RaisingIterator(), "categoryIds")
+        materialize_relation_id_container(RaisingIterator(), "genreIds")
 
 
 class _TextSub(str):
@@ -249,10 +251,10 @@ def test_materialize_relation_id_container_rejects_text_mapping_and_non_iterable
     A ``SimpleLazyObject`` is judged by the object it stands for; a lazy translation
     ``Promise`` is text by its own class, whatever result class it wraps.
     """
-    provided_values, error = materialize_relation_id_container(values, "categoryIds")
+    provided_values, error = materialize_relation_id_container(values, "genreIds")
     assert provided_values is None
     assert error is not None
-    assert error.field == "categoryIds"
+    assert error.field == "genreIds"
 
 
 @pytest.mark.parametrize(
@@ -264,7 +266,7 @@ def test_materialize_relation_id_container_rejects_text_mapping_and_non_iterable
 )
 def test_materialize_relation_id_container_materializes_a_list(values: object) -> None:
     """A list, or a lazy proxy standing for one, is materialized member by member."""
-    provided_values, error = materialize_relation_id_container(values, "categoryIds")
+    provided_values, error = materialize_relation_id_container(values, "genreIds")
     assert error is None
     assert provided_values == [1, 2]
 
@@ -281,7 +283,7 @@ def test_materialize_relation_id_container_materializes_once() -> None:
             consumed.append(item)
             yield item
 
-    provided_values, error = materialize_relation_id_container(_one_shot(), "categoryIds")
+    provided_values, error = materialize_relation_id_container(_one_shot(), "genreIds")
     assert error is None
     assert provided_values == [1, 2]
     assert consumed == [1, 2]
@@ -300,7 +302,7 @@ def _spec(
         graphql_name=graphql or attr,
         target_name=target or attr,
         kind=kind,
-        related_model=Category if kind in {RELATION_SINGLE, RELATION_MULTI} else None,
+        related_model=Genre if kind in {RELATION_SINGLE, RELATION_MULTI} else None,
         key_attname=key_attname,
     )
 
@@ -563,7 +565,7 @@ def test_relation_into_dispatches_single_and_multi_then_stores() -> None:
     spec_single = _spec(
         attr="category_id",
         kind=RELATION_SINGLE,
-        target="category",
+        target="genre",
         graphql="categoryId",
         key_attname="code",
     )
@@ -577,14 +579,14 @@ def test_relation_into_dispatches_single_and_multi_then_stores() -> None:
         extra=lambda spec: {"form_field": spec.target_name},
     )
     assert handler(spec_single, 7) is None
-    assert dest["category"] == "s-7"
+    assert dest["genre"] == "s-7"
     assert calls[0] == (
         "single",
         7,
         "categoryId",
         "code",
         info,
-        {"form_field": "category"},
+        {"form_field": "genre"},
     )
     assert handler(spec_multi, [1, 2]) is None
     assert dest["tags"] == ["m", [1, 2]]
@@ -639,7 +641,7 @@ def test_decode_field_handlers_split_files_from_data() -> None:
     files: dict[str, object] = {}
     scalar_spec = _spec(attr="name", kind=SCALAR, target="name")
     file_spec = _spec(attr="attachment", kind=FILE, target="attachment")
-    relation_spec = _spec(attr="category_id", kind=RELATION_SINGLE, target="category")
+    relation_spec = _spec(attr="category_id", kind=RELATION_SINGLE, target="genre")
 
     def single(
         value: object,
@@ -683,7 +685,7 @@ def test_decode_field_handlers_split_files_from_data() -> None:
     assert scalar_handler(scalar_spec, "Widget") is None
     assert handlers[FILE](file_spec, "upload") is None
     assert handlers[RELATION_SINGLE](relation_spec, 3) is None
-    assert data == {"name": "Widget", "category": "pk-3"}
+    assert data == {"name": "Widget", "genre": "pk-3"}
     assert files == {"attachment": "upload"}
 
 
@@ -703,29 +705,39 @@ def test_form_and_serializer_decode_walks_share_field_handlers() -> None:
 
 
 @pytest.mark.django_db
-def test_decode_visible_relation_ids_rejects_non_collection_types() -> None:
-    """Strings, bytes, bytearrays, memoryviews, and mappings are rejected as invalid relation values."""
-    category = Category.objects.create(name="NonCollTarget")
-    recourse = "Use a synchronous visibility hook."
-
-    for bad_container in [
-        "123",
-        "abc",
-        b"123",
-        bytearray(b"123"),
-        memoryview(b"123"),
-        {"category": saved_pk(category)},
-    ]:
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "text",
+        "bytes",
+        "bytearray",
+        "memoryview",
+        "mapping",
+    ],
+)
+def test_decode_visible_relation_ids_rejects_non_collection_types(shape: str) -> None:
+    """An atom that could yield a real key still receives the typed refusal before SQL."""
+    row = Genre.objects.create(name="NonCollTarget")
+    encoded = str(saved_pk(row)).encode("ascii")
+    container = {
+        "text": str(saved_pk(row)),
+        "bytes": encoded,
+        "bytearray": bytearray(encoded),
+        "memoryview": memoryview(encoded),
+        "mapping": {saved_pk(row): "value"},
+    }[shape]
+    with CaptureQueriesContext(connection) as captured:
         pks, error = decode_visible_relation_ids(
-            bad_container,
-            graphql_name="categoryIds",
-            related_model=Category,
+            container,
+            graphql_name="genreIds",
+            related_model=Genre,
             info=unread_info(),
-            async_recourse=recourse,
+            async_recourse="Use a synchronous visibility hook.",
         )
-        assert pks is None
-        assert error is not None
-        assert error.field == "categoryIds"
+    assert pks is None
+    assert error is not None
+    assert error.field == "genreIds"
+    assert captured.captured_queries == []
 
 
 def test_coerce_relation_pk_or_none_handles_non_models_and_uncoercible_values() -> None:
@@ -736,7 +748,7 @@ def test_coerce_relation_pk_or_none_handles_non_models_and_uncoercible_values() 
     # basedpyright: the None model is the hostile input under test; coerce_relation_pk_or_none
     # types the parameter as type[Model]
     assert coerce_relation_pk_or_none(None, 1) is None  # pyright: ignore[reportArgumentType]
-    assert coerce_relation_pk_or_none(Category, object()) is None
+    assert coerce_relation_pk_or_none(Genre, object()) is None
 
 
 _gated_pk_apps = Apps([])
@@ -858,7 +870,7 @@ def test_decode_visible_relation_handles_invalid_id_and_missing_object() -> None
     val, error = decode_visible_relation(
         "not_an_int",
         graphql_name="categoryId",
-        related_model=Category,
+        related_model=Genre,
         info=unread_info(),
         async_recourse=recourse,
         skip=lambda x: x is None,
@@ -873,7 +885,7 @@ def test_decode_visible_relation_handles_invalid_id_and_missing_object() -> None
     val, error = decode_visible_relation(
         999999,
         graphql_name="categoryId",
-        related_model=Category,
+        related_model=Genre,
         info=unread_info(),
         async_recourse=recourse,
         skip=lambda x: x is None,
@@ -920,111 +932,116 @@ def test_decode_provided_fields_short_circuits_on_handler_error() -> None:
     assert len(scalar_handler_called) == 0
 
 
-@pytest.mark.django_db
-def test_decode_visible_relation_ids_accepts_global_id_members_with_one_query() -> None:
-    """GlobalID members decode end-to-end at the batch seam and still batch to ONE query.
-
-    Two valid GlobalID strings for a Relay target decode to real pks and confirm
-    visibility in the single ``pk__in`` query (the GlobalID decode itself is
-    non-raising and query-free for a pk ``id_attr``; it reads the executing schema
-    off ``info``); a wrong-model GlobalID, a malformed pk token, and a raw pk member
-    (the target, not the value, picks the GlobalID decode) are the uniform field-keyed
-    error. The malformed-string member reaches this seam live
-    (``test_query/test_library_api.py``), so it is not repeated here.
-    """
+def _pk_genre_node() -> type[DjangoType]:
+    """The plain-key Relay type the batch decoder resolves through the registry."""
 
     class GidBatchPinType(DjangoType):
         class Meta:
-            model = Category
+            model = Genre
             fields = ("id", "name")
             interfaces = (relay.Node,)
 
-    assert registry.get(Category) is GidBatchPinType
-
+    assert registry.get(Genre) is GidBatchPinType
     finalize_django_types()
-    recourse = "Use a synchronous visibility hook."
-    row = Category.objects.create(name="GidBatch")
-
-    with CaptureQueriesContext(connection) as ctx:
-        pks, error = decode_visible_relation_ids(
-            [str(relay.GlobalID("products.category", str(saved_pk(row))))] * 2,
-            graphql_name="categoryIds",
-            related_model=Category,
-            info=make_info(),
-            async_recourse=recourse,
-        )
-    assert error is None
-    assert pks == [saved_pk(row), saved_pk(row)]
-    assert len(ctx.captured_queries) == 1
-
-    for bad_member in (
-        str(relay.GlobalID("unknown.model", str(saved_pk(row)))),
-        str(relay.GlobalID("products.category", "not-a-pk")),
-        saved_pk(row),
-    ):
-        pks, error = decode_visible_relation_ids(
-            [bad_member],
-            graphql_name="categoryIds",
-            related_model=Category,
-            info=make_info(),
-            async_recourse=recourse,
-        )
-        assert pks is None
-        assert error is not None
-        assert error.field == "categoryIds"
+    return GidBatchPinType
 
 
-@pytest.mark.django_db
-def test_custom_node_id_relation_set_batches_real_pk_lookup() -> None:
-    """A same-type non-pk-NodeID set maps to real pks in ONE query, not one per id.
-
-    The batched set decode resolves each distinct non-pk ``(type, id_attr)``
-    group with a single ``__in`` mapping query: total queries stay constant at
-    one mapping plus one visibility query across K=1/2/4 (the GlobalID decode
-    reads the executing schema off ``info``). A value matching no row is the
-    uniform field-keyed error after the mapping query alone (no visibility
-    query).
-    """
+def _name_genre_node() -> type[DjangoType]:
+    """A Relay id carrying the genre's name rather than its table key."""
 
     class NameBatchNodeType(DjangoType):
         name: relay.NodeID[str]
 
         class Meta:
-            model = Category
+            model = Genre
             fields = ("id", "name")
             interfaces = (relay.Node,)
 
-    assert registry.get(Category) is NameBatchNodeType
-
+    assert registry.get(Genre) is NameBatchNodeType
     finalize_django_types()
-    recourse = "Use a synchronous visibility hook."
-    rows = [Category.objects.create(name=f"BatchNode{i}") for i in range(4)]
-    for size in (1, 2, 4):
-        members = [str(relay.GlobalID("products.category", rows[i].name)) for i in range(size)]
-        with CaptureQueriesContext(connection) as ctx:
-            pks, error = decode_visible_relation_ids(
-                members,
-                graphql_name="categoryIds",
-                related_model=Category,
-                info=make_info(),
-                async_recourse=recourse,
-            )
-        assert error is None
-        assert pks == [rows[i].pk for i in range(size)]
-        assert len(ctx.captured_queries) == 2
+    return NameBatchNodeType
 
-    with CaptureQueriesContext(connection) as ctx:
+
+@pytest.mark.django_db
+def test_decode_visible_relation_ids_accepts_global_id_members_with_one_query() -> None:
+    """Duplicate GlobalID members preserve their positions while visibility is checked once."""
+    node_type = _pk_genre_node()
+    row = Genre.objects.create(name="GidBatch")
+    with CaptureQueriesContext(connection) as captured:
         pks, error = decode_visible_relation_ids(
-            [str(relay.GlobalID("products.category", "no-such-batch-name"))],
-            graphql_name="categoryIds",
-            related_model=Category,
+            [global_id_for(node_type, saved_pk(row))] * 2,
+            graphql_name="genreIds",
+            related_model=Genre,
             info=make_info(),
-            async_recourse=recourse,
+            async_recourse="Use a synchronous visibility hook.",
+        )
+    assert error is None
+    assert pks == [saved_pk(row), saved_pk(row)]
+    assert len(captured.captured_queries) == 1
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("shape", ["wrong-model", "malformed-key", "raw-key"])
+def test_relay_relation_ids_refuse_a_member_that_does_not_name_the_target(shape: str) -> None:
+    """Wrong-model, uncoercible-key and raw-key members are typed errors before visibility SQL."""
+    _pk_genre_node()
+    row = Genre.objects.create(name="RejectedBatch")
+    member = {
+        "wrong-model": str(relay.GlobalID("unknown.model", str(saved_pk(row)))),
+        "malformed-key": str(relay.GlobalID(Genre._meta.label_lower, "not-a-pk")),
+        "raw-key": saved_pk(row),
+    }[shape]
+    with CaptureQueriesContext(connection) as captured:
+        pks, error = decode_visible_relation_ids(
+            [member],
+            graphql_name="genreIds",
+            related_model=Genre,
+            info=make_info(),
+            async_recourse="Use a synchronous visibility hook.",
         )
     assert pks is None
     assert error is not None
-    assert error.field == "categoryIds"
-    assert len(ctx.captured_queries) == 1
+    assert error.field == "genreIds"
+    assert captured.captured_queries == []
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("size", [1, 2, 4], ids=["one", "two", "four"])
+def test_custom_node_id_relation_set_batches_real_pk_lookup(size: int) -> None:
+    """Each non-pk NodeID batch takes one mapping query and one visibility query, regardless of size."""
+    node_type = _name_genre_node()
+    rows = [Genre.objects.create(name=f"BatchNode{index}") for index in range(size)]
+    members = [global_id_for(node_type, row.name) for row in rows]
+    with CaptureQueriesContext(connection) as captured:
+        pks, error = decode_visible_relation_ids(
+            members,
+            graphql_name="genreIds",
+            related_model=Genre,
+            info=make_info(),
+            async_recourse="Use a synchronous visibility hook.",
+        )
+    assert error is None
+    assert pks == [saved_pk(row) for row in rows]
+    assert len(captured.captured_queries) == 2
+
+
+@pytest.mark.django_db
+def test_custom_node_id_relation_set_refuses_a_name_no_row_holds_before_visibility() -> None:
+    """A missing non-pk NodeID is the typed relation error after the mapping query alone."""
+    node_type = _name_genre_node()
+    Genre.objects.create(name="PresentBatchNode")
+    with CaptureQueriesContext(connection) as captured:
+        pks, error = decode_visible_relation_ids(
+            [global_id_for(node_type, "no-such-batch-name")],
+            graphql_name="genreIds",
+            related_model=Genre,
+            info=make_info(),
+            async_recourse="Use a synchronous visibility hook.",
+        )
+    assert pks is None
+    assert error is not None
+    assert error.field == "genreIds"
+    assert len(captured.captured_queries) == 1
 
 
 @pytest.mark.django_db
@@ -1042,28 +1059,28 @@ def test_custom_node_id_relation_set_refuses_unencodable_text_before_the_mapping
         name: relay.NodeID[str]
 
         class Meta:
-            model = Category
+            model = Genre
             fields = ("id", "name")
             interfaces = (relay.Node,)
 
-    assert registry.get(Category) is SurrogateBatchNodeType
+    assert registry.get(Genre) is SurrogateBatchNodeType
 
     finalize_django_types()
-    row = Category.objects.create(name="SurrogateBatchNode")
+    row = Genre.objects.create(name="SurrogateBatchNode")
     with CaptureQueriesContext(connection) as ctx:
         pks, error = decode_visible_relation_ids(
             [
-                relay.GlobalID("products.category", row.name),
-                relay.GlobalID("products.category", "Batch\ud800"),
+                relay.GlobalID("library.genre", row.name),
+                relay.GlobalID("library.genre", "Batch\ud800"),
             ],
-            graphql_name="categoryIds",
-            related_model=Category,
+            graphql_name="genreIds",
+            related_model=Genre,
             info=make_info(),
             async_recourse="Use a synchronous visibility hook.",
         )
     assert pks is None
     assert error is not None
-    assert error.field == "categoryIds.1"
+    assert error.field == "genreIds.1"
     assert error.codes == ["invalid"]
     assert ctx.captured_queries == []
 
@@ -1084,22 +1101,22 @@ def test_custom_node_id_relation_set_mapping_uses_pipeline_alias(
         name: relay.NodeID[str]
 
         class Meta:
-            model = Category
+            model = Genre
             fields = ("id", "name")
             interfaces = (relay.Node,)
 
-    assert registry.get(Category) is AliasBatchNodeType
+    assert registry.get(Genre) is AliasBatchNodeType
 
     finalize_django_types()
-    row = Category.objects.create(name="AliasBatchNode")
-    manager = Category._default_manager
+    row = Genre.objects.create(name="AliasBatchNode")
+    manager = Genre._default_manager
     using = mock.Mock(wraps=manager.using)
     monkeypatch.setattr(manager, "using", using)
     with write_pipeline("default", lock=False):
         pks, error = decode_visible_relation_ids(
-            [str(relay.GlobalID("products.category", row.name))],
-            graphql_name="categoryIds",
-            related_model=Category,
+            [str(relay.GlobalID("library.genre", row.name))],
+            graphql_name="genreIds",
+            related_model=Genre,
             info=make_info(),
             async_recourse="Use a synchronous visibility hook.",
         )
@@ -1117,13 +1134,13 @@ def test_decode_visible_relation_ids_accepts_duplicate_pks_with_one_query() -> N
     ``[a, b, a]`` rather than a set; a len-compare in ``pks_all_present`` would
     still unique-attach.
     """
-    first = Category.objects.create(name="DupA")
-    second = Category.objects.create(name="DupB")
+    first = Genre.objects.create(name="DupA")
+    second = Genre.objects.create(name="DupB")
     with CaptureQueriesContext(connection) as ctx:
         pks, error = decode_visible_relation_ids(
             [saved_pk(first), saved_pk(second), saved_pk(first)],
-            graphql_name="categoryIds",
-            related_model=Category,
+            graphql_name="genreIds",
+            related_model=Genre,
             info=unread_info(),
             async_recourse="Use a synchronous visibility hook.",
         )
@@ -1245,7 +1262,7 @@ def test_decode_visible_relation_ids_materializes_generators_once_and_clears_emp
     generator yielding nothing is a valid M2M clear that returns ``[]``
     WITHOUT touching the DB.
     """
-    created = [Category.objects.create(name=f"Gen{i}") for i in range(2)]
+    created = [Genre.objects.create(name=f"Gen{i}") for i in range(2)]
     consumed: list[int] = []
 
     def _one_shot() -> Iterator[int]:
@@ -1255,8 +1272,8 @@ def test_decode_visible_relation_ids_materializes_generators_once_and_clears_emp
 
     pks, error = decode_visible_relation_ids(
         _one_shot(),
-        graphql_name="categoryIds",
-        related_model=Category,
+        graphql_name="genreIds",
+        related_model=Genre,
         info=unread_info(),
         async_recourse="Use a synchronous visibility hook.",
     )
@@ -1270,8 +1287,8 @@ def test_decode_visible_relation_ids_materializes_generators_once_and_clears_emp
     with CaptureQueriesContext(connection) as ctx:
         pks, error = decode_visible_relation_ids(
             _empty(),
-            graphql_name="categoryIds",
-            related_model=Category,
+            graphql_name="genreIds",
+            related_model=Genre,
             info=unread_info(),
             async_recourse="Use a synchronous visibility hook.",
         )
@@ -1281,61 +1298,74 @@ def test_decode_visible_relation_ids_materializes_generators_once_and_clears_emp
 
 
 @pytest.mark.django_db
-def test_decode_visible_relation_ids_coercion_and_null_boundaries_stay_contained() -> None:
-    """Hostile member shapes collapse to the uniform error or coerce visibly - never raw.
+@pytest.mark.parametrize("container", [None, [None]], ids=["null-container", "null-member"])
+def test_relation_ids_refuse_null_as_a_container_or_member(container: object) -> None:
+    """A null container and a null member each remain a field-keyed typed refusal."""
+    Genre.objects.create(name="BoundaryTarget")
+    pks, error = decode_visible_relation_ids(
+        container,
+        graphql_name="genreIds",
+        related_model=Genre,
+        info=unread_info(),
+        async_recourse="Use a synchronous visibility hook.",
+    )
+    assert pks is None
+    assert error is not None
+    assert error.field == "genreIds"
 
-    ``None`` as a MEMBER or as the whole container, an out-of-range int (the
-    ``OverflowError`` guard), lexical strings the pk field's ``to_python``
-    governs, and bools all either fail the type check into the field-keyed
-    ``relation_field_error`` or coerce through the pk field and pass the same
-    visibility gate as any other pk - no raw ``TypeError`` / ``ValueError`` /
-    ``OverflowError`` escapes the resolver.
-    """
-    category = Category.objects.create(name="BoundaryTarget")
-    recourse = "Use a synchronous visibility hook."
 
-    for bad_container in (None, [None]):
-        pks, error = decode_visible_relation_ids(
-            bad_container,
-            graphql_name="categoryIds",
-            related_model=Category,
-            info=unread_info(),
-            async_recourse=recourse,
-        )
-        assert pks is None
-        assert error is not None
-        assert error.field == "categoryIds"
-
-    for member in (
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "member",
+    [
         10**30,
         "",
         "0x10",
         "12.0",
         True,
         False,
-    ):
-        pks, error = decode_visible_relation_ids(
-            [member],
-            graphql_name="categoryIds",
-            related_model=Category,
-            info=unread_info(),
-            async_recourse=recourse,
-        )
-        assert (pks is None) == (error is not None), f"ambiguous decode for {member!r}"
-        if error is not None:
-            assert error.field == "categoryIds"
-
-    # A string the pk field coerces to a REAL pk passes the same visibility
-    # gate as the int literal (to_python mechanics are the documented contract).
+    ],
+    ids=[
+        "out-of-range",
+        "empty",
+        "hex",
+        "float-text",
+        "true",
+        "false",
+    ],
+)
+def test_relation_id_member_coercion_returns_a_real_key_or_a_typed_error(member: object) -> None:
+    """A Python-only member either names the row Django's key conversion names, or is refused."""
+    Genre.objects.create(name="BoundaryTarget")
     pks, error = decode_visible_relation_ids(
-        [str(saved_pk(category))],
-        graphql_name="categoryIds",
-        related_model=Category,
+        [member],
+        graphql_name="genreIds",
+        related_model=Genre,
         info=unread_info(),
-        async_recourse=recourse,
+        async_recourse="Use a synchronous visibility hook.",
+    )
+    if error is not None:
+        assert pks is None
+        assert error.field == "genreIds"
+    else:
+        key = object_result(Genre._meta.pk.to_python, member)
+        assert pks == [key]
+        assert Genre.objects.filter(pk=key).exists()
+
+
+@pytest.mark.django_db
+def test_relation_ids_accept_a_string_the_primary_key_coerces() -> None:
+    """A decimal string naming a saved key resolves to that key rather than a false refusal."""
+    row = Genre.objects.create(name="CoercibleTarget")
+    pks, error = decode_visible_relation_ids(
+        [str(saved_pk(row))],
+        graphql_name="genreIds",
+        related_model=Genre,
+        info=unread_info(),
+        async_recourse="Use a synchronous visibility hook.",
     )
     assert error is None
-    assert pks == [saved_pk(category)]
+    assert pks == [saved_pk(row)]
 
 
 def _relation_decoder_never_called(*_args: object, **_kwargs: object) -> NoReturn:

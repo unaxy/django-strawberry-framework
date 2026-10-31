@@ -414,7 +414,7 @@ def build_error_key_map(
     *,
     keys_of: Callable[[InputFieldSpec], tuple[str, ...]] | None = None,
 ) -> ErrorKeyMap:
-    """Build the recursive error key map from a mutation's bind-stashed input specs.
+    """Build the recursive error key map from a mutation's schema-published input specs.
 
     ``{validator-side name: (spec.graphql_name, child_map | None)}``: each
     validator-side name in ``keys_of(spec)`` maps to the spec's GraphQL name, or

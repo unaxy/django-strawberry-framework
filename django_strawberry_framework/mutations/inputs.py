@@ -187,15 +187,16 @@ _materialized_names, _materialize_input, _clear_input_namespace = make_input_nam
 def _predicted_input_field_name(field: StrawberryField) -> str:
     """Predict, at bind, the wire name a default-config schema publishes for an input field.
 
-    An explicit ``name=`` is final, and every generated field pins one. A
-    consumer-authored field without one is named by the executing schema's
-    ``NameConverter`` at schema build, and no schema exists at bind; under the
+    An explicit ``name=`` is the default converter's answer, and every generated
+    field pins one. A consumer-authored field without one is named by the executing
+    schema's ``NameConverter`` at schema build, and no schema exists at bind; under the
     default ``auto_camel_case=True`` the converter's ``apply_naming_config`` is
     Strawberry's ``to_camel_case``, so that is the prediction - NOT the
     package's ``graphql_camel_name``, which disagrees with it (``field_2`` ->
     ``field2`` vs ``field_2``). A request never trusts the prediction: it reads
-    the executing schema's own name
-    (``mutations/resolvers.py::_published_input_specs``).
+    the executing schema's own name, as it does for a pinned one, which a converter
+    overriding ``get_graphql_name`` / ``from_field`` respells
+    (``utils/inputs.py::published_input_specs``).
     """
     return field.graphql_name or to_camel_case(field.python_name)
 
@@ -724,7 +725,7 @@ def mutation_input_field_specs(
     field's pinned wire name or, for a consumer-authored field without ``name=``,
     ``_predicted_input_field_name``'s bind-time prediction, which a request
     replaces with the executing schema's name
-    (``mutations/resolvers.py::_published_input_specs``).
+    (``utils/inputs.py::published_input_specs``).
     """
     excluded = _frozenset_of_attr_names(excluded_attrs, parameter="excluded_attrs")
     fk_by_attr, m2m_by_name = _relation_field_index(model)

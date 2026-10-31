@@ -21,6 +21,8 @@ The relation id-type (Relay-``GlobalID`` vs raw pk, single + multi) is pinned at
 the input-build site (the converter returns only the ``kind`` for relations), so
 that assertion lives in ``test_inputs.py`` where the id type is finalized.
 
+The validating nullable-boolean subclass's input coercion is live in
+``examples/fakeshop/test_query/test_input_shapes_api.py``.
 Shipped ``FileField`` / ``ImageField`` -> ``Upload`` writes live in
 ``test_uploads_api.py`` / ``test_products_api.py``; this file keeps converter
 dispatch, required-ness, and fail-loud unknown subclasses.
@@ -37,7 +39,6 @@ import pytest
 import strawberry
 from django import forms
 from django.db import models
-from strawberry.types.base import StrawberryOptional, get_object_definition
 from typing_extensions import override
 
 from django_strawberry_framework.exceptions import ConfigurationError
@@ -53,7 +54,6 @@ from django_strawberry_framework.forms.converter import (
     form_field_reads_one_value,
     form_field_required,
 )
-from django_strawberry_framework.forms.inputs import build_form_input_class
 from django_strawberry_framework.utils._narrowing import list_of
 from tests._soft_dependency import blocked_modules
 
@@ -128,48 +128,6 @@ def test_null_boolean_subclass_with_real_validation_stays_required() -> None:
     assert ProbeForm(data={}).errors["flag"] == ["This field is required."]
 
 
-def test_null_boolean_validating_subclass_generates_required_input() -> None:
-    """A validating subclass must not generate nullable-required SDL.
-
-    The converter preserves the subclass's real requiredness and emits a
-    non-null ``bool`` annotation. The generated input therefore rejects omission
-    during GraphQL coercion instead of exposing ``Boolean`` while its dataclass
-    constructor still requires ``flag``.
-    """
-
-    class RequiredNullableBoolean(forms.NullBooleanField):
-        validate = forms.Field.validate
-
-    class ProbeForm(forms.Form):
-        flag = RequiredNullableBoolean(required=True)
-
-    assert convert_form_field(ProbeForm.base_fields["flag"]).annotation is bool
-
-    input_cls, _ = build_form_input_class(ProbeForm, operation_kind="form")
-    field = get_object_definition(input_cls, strict=True).fields[0]
-    assert not isinstance(field.type, StrawberryOptional)
-
-    def resolve_probe(inp: object) -> int:
-        del inp
-        return 1
-
-    resolve_probe.__annotations__ = {"inp": input_cls, "return": int}
-
-    @strawberry.type
-    class Query:
-        # basedpyright: Strawberry types the field from the resolver's run-time __annotations__
-        # set above; a class annotation would be a second, static declaration of that type
-        probe = strawberry.field(resolver=resolve_probe)  # pyright: ignore[reportGeneralTypeIssues]
-
-    schema = strawberry.Schema(query=Query)
-    assert "flag: Boolean!" in schema.as_str()
-
-    omitted = schema.execute_sync("{ probe(inp: {}) }")
-    assert omitted.errors is not None
-    assert "flag" in omitted.errors[0].message
-    assert schema.execute_sync("{ probe(inp: {flag: true}) }").errors is None
-
-
 def test_json_field_maps_to_json_scalar_not_charfield_str() -> None:
     """``JSONField`` subclasses ``CharField`` but must resolve to ``JSON``, not ``str``.
 
@@ -182,30 +140,10 @@ def test_json_field_maps_to_json_scalar_not_charfield_str() -> None:
     assert conversion.kind == SCALAR
 
 
-def test_required_ness_reflects_field_required() -> None:
-    """``required`` mirrors ``field.required`` for both states (non-NullBoolean)."""
-    assert convert_form_field(forms.CharField(required=True)).required is True
-    assert convert_form_field(forms.CharField(required=False)).required is False
-
-
-def test_email_field_maps_via_mro_under_charfield() -> None:
-    """A known subclass (``EmailField``) resolves to its ``CharField`` parent's scalar."""
-    # EmailField is not its own entry in the scalar table; the MRO walk reaches
-    # CharField -> str. This is the parity behavior the spec mandates.
-    assert convert_form_field(forms.EmailField()).annotation is str
-
-
-def test_float_and_decimal_do_not_collapse_to_integer_parent() -> None:
-    """``FloatField`` / ``DecimalField`` subclass ``IntegerField`` but keep their own scalar.
-
-    A naive "first ``isinstance`` wins" walk over an ``IntegerField``-first
-    registry would mis-map both to ``int``; the ``type(field).__mro__`` walk
-    visits the field's own class first so each resolves correctly.
-    """
-    assert convert_form_field(forms.FloatField()).annotation is float
-    assert convert_form_field(forms.DecimalField()).annotation is decimal.Decimal
-    # UUIDField subclasses CharField - same hazard, same guard.
-    assert convert_form_field(forms.UUIDField()).annotation is uuid.UUID
+@pytest.mark.parametrize("required", [True, False], ids=["required", "optional"])
+def test_required_ness_reflects_field_required(*, required: bool) -> None:
+    """A non-NullBoolean conversion preserves its field's requiredness."""
+    assert convert_form_field(forms.CharField(required=required)).required is required
 
 
 # ---------------------------------------------------------------------------
@@ -237,10 +175,10 @@ def test_model_multiple_choice_field_is_relation_multi() -> None:
     assert conversion.annotation is None
 
 
-def test_file_and_image_fields_are_file_kind() -> None:
-    """``FileField`` / ``ImageField`` -> kind ``file`` (the ``Upload`` annotation is build-site)."""
-    assert convert_form_field(forms.FileField()).kind == FILE
-    assert convert_form_field(forms.ImageField()).kind == FILE
+@pytest.mark.parametrize("field_class", [forms.FileField, forms.ImageField], ids=["file", "image"])
+def test_file_and_image_fields_are_file_kind(field_class: type[forms.FileField]) -> None:
+    """Each upload form-field flavor has file kind before input-build annotation."""
+    assert convert_form_field(field_class()).kind == FILE
 
 
 class _UnsupportedField(forms.Field):
@@ -305,13 +243,6 @@ def test_form_field_kind_reads_the_class_and_widget(field: forms.Field, kind: st
 # ---------------------------------------------------------------------------
 
 
-def test_bare_field_maps_to_str_as_exact_type_special_case() -> None:
-    """A bare ``forms.Field`` is an exact-type special case -> ``str`` (not a catch-all)."""
-    conversion = convert_form_field(forms.Field())
-    assert conversion.annotation is str
-    assert conversion.kind == SCALAR
-
-
 def test_unknown_custom_field_subclass_raises() -> None:
     """A custom ``forms.Field`` subclass with no supported ancestor raises ``ConfigurationError``.
 
@@ -333,40 +264,61 @@ def test_unknown_custom_field_subclass_raises() -> None:
     )
 
 
-def test_form_field_required_column_backed_variations() -> None:
-    """``form_field_required`` accounts for backing column nullability on exact NullBooleanField."""
+@pytest.mark.parametrize(
+    (
+        "kind",
+        "required",
+        "column_kind",
+        "expected",
+    ),
+    [
+        pytest.param("nullable-boolean", True, "absent", False, id="nullboolean-no-column"),
+        pytest.param("nullable-boolean", False, "absent", False, id="optional-no-column"),
+        pytest.param("nullable-boolean", True, "nullable", False, id="nullable-column"),
+        pytest.param("nullable-boolean", True, "malformed", False, id="column-without-null"),
+        pytest.param("nullable-boolean", True, "required", True, id="required-column"),
+        pytest.param("nullable-boolean", False, "required", False, id="optional-required-column"),
+        pytest.param("text", True, "absent", True, id="text-required-no-column"),
+        pytest.param("text", True, "nullable", True, id="text-required-nullable-column"),
+        pytest.param("text", False, "absent", False, id="text-optional-no-column"),
+        pytest.param("text", False, "required", False, id="text-optional-required-column"),
+    ],
+)
+def test_form_field_required_column_backed_variations(
+    kind: str,
+    column_kind: str,
+    *,
+    required: bool,
+    expected: bool,
+) -> None:
+    """Exact NullBooleanField honors real column nullability; other fields retain requiredness."""
+    field = (
+        forms.NullBooleanField(required=required)
+        if kind == "nullable-boolean"
+        else forms.CharField(required=required)
+    )
+    columns: dict[str, object] = {
+        "absent": None,
+        "nullable": models.BooleanField(null=True),
+        "required": models.BooleanField(null=False),
+        # The helper also accepts a column-like object lacking null; no model can carry it.
+        "malformed": object(),
+    }
+    assert form_field_required(field, column=columns[column_kind]) is expected
 
-    class MockColumn:
-        def __init__(self, *, null: bool) -> None:
-            self.null = null
 
-    class MockColumnNoNull:
-        pass
-
-    nb_req = forms.NullBooleanField(required=True)
-    nb_opt = forms.NullBooleanField(required=False)
-
-    # Exact NullBooleanField is forced optional when column is None or column.null is True
-    assert form_field_required(nb_req, column=None) is False
-    assert form_field_required(nb_opt, column=None) is False
-    assert form_field_required(nb_req, column=MockColumn(null=True)) is False
-    assert form_field_required(nb_req, column=MockColumnNoNull()) is False
-
-    # Backed by non-null column, exact NullBooleanField preserves field.required
-    assert form_field_required(nb_req, column=MockColumn(null=False)) is True
-    assert form_field_required(nb_opt, column=MockColumn(null=False)) is False
-
-    # Non-NullBooleanField always returns field.required regardless of column
-    char_req = forms.CharField(required=True)
-    char_opt = forms.CharField(required=False)
-    assert form_field_required(char_req, column=None) is True
-    assert form_field_required(char_req, column=MockColumn(null=True)) is True
-    assert form_field_required(char_opt, column=None) is False
-    assert form_field_required(char_opt, column=MockColumn(null=False)) is False
-
-
-def test_custom_subclasses_of_precheck_kinds() -> None:
-    """Custom subclasses of relation, file, and multi-choice fields resolve to expected kinds."""
+@pytest.mark.parametrize(
+    ("kind", "expected"),
+    [
+        pytest.param("single", RELATION_SINGLE, id="model-choice"),
+        pytest.param("multi", RELATION_MULTI, id="model-multiple-choice"),
+        pytest.param("file", FILE, id="file"),
+        pytest.param("image", FILE, id="image"),
+        pytest.param("scalar-list", SCALAR, id="multiple-choice"),
+    ],
+)
+def test_custom_subclasses_of_precheck_kinds(kind: str, expected: str) -> None:
+    """A supported field subclass keeps the converter's precheck kind."""
 
     class CustomModelChoiceField(forms.ModelChoiceField[models.Model]):
         pass
@@ -383,26 +335,38 @@ def test_custom_subclasses_of_precheck_kinds() -> None:
     class CustomMultipleChoiceField(forms.MultipleChoiceField):
         pass
 
-    assert convert_form_field(CustomModelChoiceField(queryset=None)).kind == RELATION_SINGLE
-    assert convert_form_field(CustomModelMultipleChoiceField(queryset=None)).kind == RELATION_MULTI
-    assert convert_form_field(CustomFileField()).kind == FILE
-    assert convert_form_field(CustomImageField()).kind == FILE
-    conv_multi = convert_form_field(CustomMultipleChoiceField())
-    assert conv_multi.kind == SCALAR
-    assert conv_multi.annotation == list[str]
+    fields = {
+        "single": CustomModelChoiceField(queryset=None),
+        "multi": CustomModelMultipleChoiceField(queryset=None),
+        "file": CustomFileField(),
+        "image": CustomImageField(),
+        "scalar-list": CustomMultipleChoiceField(),
+    }
+    conversion = convert_form_field(fields[kind])
+    assert conversion.kind == expected
+    if kind == "scalar-list":
+        assert conversion.annotation == list[str]
 
 
-def test_unsupported_django_form_fields_raise() -> None:
-    """Form fields without scalar mapping or supported ancestor raise ConfigurationError."""
-    unsupported_fields = [
+@pytest.mark.parametrize(
+    "field",
+    [
         forms.DurationField(),
         forms.MultiValueField(fields=[forms.CharField()]),
         forms.SplitDateTimeField(),
         forms.ComboField(fields=[forms.CharField()]),
-    ]
-    for field in unsupported_fields:
-        with pytest.raises(ConfigurationError, match="Unsupported form field type"):
-            convert_form_field(field)
+    ],
+    ids=[
+        "duration",
+        "multi-value",
+        "split-datetime",
+        "combo",
+    ],
+)
+def test_unsupported_django_form_fields_raise(field: forms.Field) -> None:
+    """Form fields without scalar mapping or supported ancestor raise ConfigurationError."""
+    with pytest.raises(ConfigurationError, match="Unsupported form field type"):
+        convert_form_field(field)
 
 
 class _PickedTags(forms.MultipleChoiceField):

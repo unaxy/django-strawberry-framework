@@ -41,11 +41,12 @@ import keyword
 import sys
 from collections import Counter
 from collections.abc import Collection
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Annotated, ClassVar, Generic, TypeGuard, TypeVar, cast, final
 from weakref import WeakKeyDictionary
 
 import strawberry
+from graphql import GraphQLInputObjectType, get_named_type
 from strawberry.types.base import StrawberryList, StrawberryOptional, get_object_definition
 from strawberry.types.enum import StrawberryEnumDefinition
 from strawberry.types.lazy_type import LazyType
@@ -66,6 +67,7 @@ from ._narrowing import (
     optional_annotation,
     read_attr,
     require,
+    require_instance,
 )
 from .canonical import base_container_values, canonical_sort_key
 from .imports import import_attr_if_importable
@@ -79,7 +81,13 @@ from .permissions import set_bound_definition
 # path.
 from .strings import flatten_lookup_path
 from .strings import graphql_camel_name as graphql_camel_name  # noqa: PLC0414 - explicit re-export
-from .typing import unwrap_container_type
+from .typing import (
+    graphql_input_fields,
+    graphql_type_of,
+    published_argument,
+    published_python_name,
+    unwrap_container_type,
+)
 
 _EntryT = TypeVar("_EntryT")
 _FieldT = TypeVar("_FieldT")
@@ -94,6 +102,8 @@ if TYPE_CHECKING:
     from typing import Protocol, TypeAlias
 
     from django.db import models as django_models
+    from graphql import GraphQLInputField, GraphQLType
+    from strawberry.types import Info
     from strawberry.types.base import StrawberryObjectDefinition, WithStrawberryObjectDefinition
     from strawberry.types.field import StrawberryField
     from typing_extensions import TypeIs
@@ -390,11 +400,12 @@ class InputFieldSpec:
 
     - ``input_attr`` - the generated Strawberry dataclass attr (``category_id``
       for an FK relation, ``name`` for a scalar).
-    - ``graphql_name`` - the GraphQL wire name (``categoryId``): the name a
-      generated field pins, or, for a model mutation's ``Meta.input_class``
-      field declared without ``name=``, the bind-time prediction that a request
-      replaces with the executing schema's name
-      (``mutations/resolvers.py::_published_input_specs``).
+    - ``graphql_name`` - the GraphQL wire name (``categoryId``) as the bind
+      records it: the name a generated field pins, or, for a model mutation's
+      ``Meta.input_class`` field declared without ``name=``, the bind-time
+      prediction. A request replaces it with the executing schema's name
+      (``published_input_specs``), since a schema's ``NameConverter`` can
+      respell even a pinned name.
     - ``target_name`` - the per-flavor decode key. For the form flavor this is the
       form's declared field name (``category``); for the serializer flavor this is
       the DECLARED serializer field name (``category_pk``), which the framework
@@ -444,6 +455,71 @@ class InputFieldSpec:
     nested_specs: tuple[InputFieldSpec, ...] | None = None
     annotation_repr: str | None = None
     required: bool | None = None
+
+
+def published_input_specs(
+    info: Info[object, object],
+    specs: Sequence[InputFieldSpec],
+) -> Sequence[InputFieldSpec]:
+    """Return a write mutation's bind specs, each named as the executing schema published it.
+
+    A spec is recorded at bind, before any schema exists, so its ``graphql_name``
+    is the name the bind expects: the one a generated field pins, or the
+    prediction for a model mutation's ``Meta.input_class`` field declared without
+    ``name=`` (``mutations/inputs.py::_predicted_input_field_name``). The schema's
+    own ``NameConverter`` names every field at schema build, and a converter
+    overriding ``get_graphql_name`` or ``from_field`` respells even a pinned
+    name; one input class can serve several schemas. The executable schema keys
+    the ``data:`` input object's fields by the names it published and
+    back-references each field's attr (``utils/typing.py::published_argument`` /
+    ``utils/typing.py::published_python_name``), so every flavor keys its errors
+    - the decode's, the validator's (``full_clean()``, ``form.errors``,
+    ``is_valid()``) and a save-time ``ValidationError``'s - through these specs,
+    and each name is one a client of THIS schema could have sent. A nested
+    serializer spec's ``nested_specs`` are renamed the same way through the
+    published input object under the field's non-null and list wrappers.
+
+    The bind tuple itself comes back when every name already agrees and when
+    ``info`` carries no executable schema (a direct-call stub), which keeps the
+    bind's names. Never stored: the answer belongs to the executing schema.
+    """
+    # ``mutations/fields.py::_synthesized_mutation_signature`` names the input parameter ``data``.
+    published = published_argument(info, "data")
+    if published is None:
+        return specs
+    return _specs_named_by(graphql_type_of(published[1]), specs)
+
+
+def _specs_named_by(
+    input_type: GraphQLType,
+    specs: Sequence[InputFieldSpec],
+) -> Sequence[InputFieldSpec]:
+    """Name ``specs`` by the published input object under ``input_type``'s wrappers.
+
+    graphql-core's ``get_named_type`` peels the non-null and list layers a
+    ``data:`` argument or a nested serializer field wears. ``specs`` itself comes
+    back when no name, at any depth, differs.
+    """
+    input_object = require_instance(get_named_type(input_type), GraphQLInputObjectType)
+    published: dict[str, tuple[str, GraphQLInputField]] = {}
+    for wire_name, input_field in graphql_input_fields(input_object).items():
+        python_name = published_python_name(input_field)
+        if python_name is not None:
+            published[python_name] = (wire_name, input_field)
+    renamed: list[InputFieldSpec] = []
+    changed = False
+    for spec in specs:
+        # Every spec records a field of the input class the schema published.
+        wire_name, input_field = published[spec.input_attr]
+        nested = spec.nested_specs
+        if nested is not None:
+            nested = tuple(_specs_named_by(graphql_type_of(input_field), nested))
+        if wire_name == spec.graphql_name and nested is spec.nested_specs:
+            renamed.append(spec)
+            continue
+        changed = True
+        renamed.append(replace(spec, graphql_name=wire_name, nested_specs=nested))
+    return tuple(renamed) if changed else specs
 
 
 def make_input_namespace(

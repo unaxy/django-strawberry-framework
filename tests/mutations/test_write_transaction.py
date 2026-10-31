@@ -34,6 +34,7 @@ import pytest
 import strawberry
 from apps.kanban.models import UUIDModel
 from apps.products import models as product_models
+from apps.products.services import seed_data
 from apps.scalars.models import ScalarSpecimen
 from asgiref.sync import ThreadSensitiveContext, async_to_sync, sync_to_async
 from asgiref.testing import ApplicationCommunicator as AsgirefApplicationCommunicator
@@ -50,6 +51,7 @@ from django.db import (
     router,
     transaction,
 )
+from django.db.backends.base.base import BaseDatabaseWrapper
 from django.db.backends.signals import connection_created
 from django.db.backends.sqlite3 import base as sqlite_base
 from django.db.models import Model, QuerySet
@@ -106,6 +108,7 @@ from django_strawberry_framework.utils.write_transaction import (
     conflict_error,
     forced_update_conflict_errors,
     is_read_only_sql,
+    lookup_id_name,
     managed_write_transaction,
     not_updated_exceptions,
     open_write_pipeline,
@@ -121,6 +124,7 @@ from django_strawberry_framework.utils.write_transaction import (
     snapshot_target_state,
     write_pipeline,
 )
+from tests._catalog_data import categories_from_seed, items_from_seed
 from tests._idioms import (
     TEST_ASYNC_RECOURSE,
     ClaimsClass,
@@ -308,8 +312,11 @@ _DELETE = "mutation($id: ID!){ write0(id:$id){ node{ name } errors{ field messag
 
 
 def _seed_item(name: str = "Seeded") -> product_models.Item:
-    category = product_models.Category.objects.create(name=_category_name())
-    return product_models.Item.objects.create(name=name, category=category)
+    """Reshape one service-seeded saved item after the caller's first-line seed."""
+    (category,) = categories_from_seed((_category_name(), False))
+    (item,) = items_from_seed(category, (name, False))
+    product_models.Entry.objects.filter(item=item).delete()
+    return item
 
 
 # ===========================================================================
@@ -320,6 +327,7 @@ def _seed_item(name: str = "Seeded") -> product_models.Item:
 @pytest.mark.django_db
 def test_plain_strawberry_schema_refuses_generated_mutations_before_writing() -> None:
     """A generated mutation on a plain ``strawberry.Schema`` fails loudly, writing nothing."""
+    seed_data(1)
     _declare_item_types()
     UpdateItem = _declare_update_mutation()
     schema = _mutation_schema(UpdateItem, schema_cls=strawberry.Schema)
@@ -433,18 +441,26 @@ async def test_async_execution_context_exits_transaction_on_raised_base_exceptio
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A non-GraphQL exception escaping the field still exits the worker transaction."""
+    await sync_to_async(seed_data)(1)
     _declare_item_types()
     UpdateItem = _declare_update_mutation()
     schema = _mutation_schema(UpdateItem)
     item = await sync_to_async(_seed_item)("AsyncRaise")
+    worker_connections: list[BaseDatabaseWrapper] = []
 
-    def _boom(
+    def _capture_worker_connection() -> None:
+        owned = connections["default"]
+        assert owned.in_atomic_block is True
+        worker_connections.append(owned)
+
+    async def _boom(
         _self: object,
         _parent_type: object,
         _source: object,
         _field_nodes: object,
         _path: object,
     ) -> NoReturn:
+        await sync_to_async(_capture_worker_connection, thread_sensitive=True)()
         raise RuntimeError("execution exploded outside GraphQL error handling")
 
     monkeypatch.setattr(CoreExecutionContext, "execute_field", _boom)
@@ -457,8 +473,9 @@ async def test_async_execution_context_exits_transaction_on_raised_base_exceptio
     )
     assert result.errors is not None
     assert "execution exploded" in str(result.errors[0])
-    in_atomic = await sync_to_async(lambda: connections["default"].in_atomic_block)()
-    assert in_atomic is False
+    assert len(worker_connections) == 1
+    assert worker_connections[0].in_atomic_block is False
+    assert worker_connections[0].savepoint_ids == []
 
 
 @pytest.mark.django_db(transaction=True)
@@ -466,6 +483,7 @@ def test_sync_execution_context_exits_transaction_on_raised_base_exception(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The sync twin: a non-GraphQL exception escaping the field exits the transaction."""
+    seed_data(1)
     _declare_item_types()
     UpdateItem = _declare_update_mutation()
     schema = _mutation_schema(UpdateItem)
@@ -810,6 +828,7 @@ async def test_another_sockets_message_mid_window_leaves_the_windows_write_commi
     while the window holds its write cannot reach it: the success payload the
     window reports is a committed row.
     """
+    await sync_to_async(seed_data)(0)
     router = _window_router(_category_create_schema())
     name = "window-pinged"
     with _connections_really_close(), _held_in_the_pipeline(name) as (reached, release):
@@ -838,6 +857,7 @@ async def test_a_client_complete_mid_window_never_strands_its_transaction() -> N
     socket afterwards reports success AND is committed, which a transaction left
     open under it would prevent.
     """
+    await sync_to_async(seed_data)(0)
     router = _window_router(_category_create_schema())
     loop = asyncio.get_running_loop()
     occupied = asyncio.Event()
@@ -884,6 +904,7 @@ async def test_a_cancelled_window_ends_after_its_thread_and_the_next_mutation_co
     The thread exits the atomic once the pipeline returns, so the held write is
     rolled back rather than left open, and the next mutation commits on its own.
     """
+    await sync_to_async(seed_data)(0)
     thread_left = threading.Event()
     close_thread_connections = schema_module._close_thread_connections
 
@@ -932,6 +953,7 @@ async def test_work_on_an_outer_thread_sensitive_contexts_thread_never_sees_the_
     an inner one would be a no-op there. Sync work that context runs while the
     window holds its write finds no transaction open on that thread's connection.
     """
+    await sync_to_async(seed_data)(0)
     schema = _category_create_schema()
     name = "window-under-an-outer-context"
     with _held_in_the_pipeline(name) as (reached, release):
@@ -962,6 +984,7 @@ async def test_a_connection_closed_inside_an_async_window_fails_the_field_and_wr
     connection mid-transaction. Django's atomic then skips the commit without
     raising, so the field must resolve as an error, with nothing written.
     """
+    await sync_to_async(seed_data)(0)
     schema = _category_create_schema(touched=_touch_through_channels_database_sync_to_async)
     with _connections_really_close():
         result = await schema.execute(
@@ -1011,6 +1034,7 @@ async def test_a_window_cancelled_during_its_enter_still_exits_the_transaction_i
     transaction the enter opened is closed, rolled back, and the next mutation
     commits on its own.
     """
+    await sync_to_async(seed_data)(0)
     schema = _category_create_schema()
     loop = asyncio.get_running_loop()
     connecting = asyncio.Event()
@@ -1050,6 +1074,7 @@ async def test_a_window_whose_transaction_cannot_open_reports_the_failure_and_wr
     None
 ):
     """A failed enter leaves nothing to exit: the field reports the connect failure."""
+    await sync_to_async(seed_data)(0)
     schema = _category_create_schema()
 
     def _refuse_the_connect() -> None:
@@ -1077,6 +1102,7 @@ def test_an_async_window_under_a_blocked_sync_caller_nests_in_the_callers_transa
     transaction - a test case's, a sync view's - is the one the window must nest
     in: the write is visible to the caller inside it and rolls back with it.
     """
+    seed_data(0)
     schema = _category_create_schema()
     with transaction.atomic():
         result = async_to_sync(schema.execute)(
@@ -1094,6 +1120,7 @@ def test_an_async_window_under_a_blocked_sync_caller_nests_in_the_callers_transa
 @pytest.mark.django_db(transaction=True)
 def test_a_connection_closed_inside_a_sync_window_fails_the_field_and_writes_nothing() -> None:
     """The sync mode applies the same closed-connection rule to its calling thread's window."""
+    seed_data(0)
     schema = _category_create_schema(touched=_close_old_connections_in_a_resolver)
     with _connections_really_close():
         result = schema.execute_sync(
@@ -1119,6 +1146,7 @@ async def test_every_success_payload_under_steady_pings_is_a_committed_row() -> 
     sequential mutations, the production shape in which a real close of a shared
     connection silently discarded committed-looking writes.
     """
+    await sync_to_async(seed_data)(0)
     router = _window_router(_category_create_schema())
     names = [f"window-steady-{index}" for index in range(20)]
     stop = asyncio.Event()
@@ -1225,6 +1253,7 @@ class _DeleteTargetOutFromUnder:
 @pytest.mark.django_db
 def test_delete_of_concurrently_deleted_row_returns_conflict_envelope() -> None:
     """A delete whose target row vanished after locate is the ``conflict`` envelope."""
+    seed_data(1)
     _declare_item_types()
     DeleteItem = _declare_delete_mutation(permission_classes=[_DeleteTargetOutFromUnder])
     schema = _mutation_schema(DeleteItem)
@@ -1245,6 +1274,7 @@ def test_missing_post_write_refetch_returns_conflict_envelope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A write whose pk re-fetch finds nothing returns ``conflict``, and rolls back."""
+    seed_data(1)
     _declare_item_types()
     UpdateItem = _declare_update_mutation()
     schema = _mutation_schema(UpdateItem)
@@ -1291,6 +1321,7 @@ def test_not_updated_exceptions_prefers_the_typed_signal(monkeypatch: pytest.Mon
 @pytest.mark.django_db
 def test_forced_update_conflict_requires_a_demonstrably_absent_row() -> None:
     """A zero-row signal with the row still present re-raises (not a conflict)."""
+    seed_data(1)
     item = _seed_item("StillThere")
     signal = DatabaseError("Forced update did not affect any rows.")
     with pytest.raises(DatabaseError):
@@ -1300,6 +1331,7 @@ def test_forced_update_conflict_requires_a_demonstrably_absent_row() -> None:
 @pytest.mark.django_db
 def test_forced_update_conflict_maps_absent_row_to_conflict() -> None:
     """A zero-row signal with the row demonstrably gone is the ``conflict`` envelope."""
+    seed_data(1)
     item = _seed_item("Gone")
     product_models.Item._base_manager.filter(pk=saved_pk(item)).delete()
     signal = DatabaseError("Forced update did not affect any rows.")
@@ -1311,6 +1343,7 @@ def test_forced_update_conflict_maps_absent_row_to_conflict() -> None:
 @pytest.mark.django_db
 def test_forced_update_conflict_requires_a_usable_transaction() -> None:
     """With the connection marked needs-rollback the original error propagates untouched."""
+    seed_data(1)
     item = _seed_item("Poisoned")
     signal = DatabaseError("some backend failure")
     connection = connections["default"]
@@ -1344,6 +1377,17 @@ def test_conflict_error_shape() -> None:
     assert error.codes == ["conflict"]
 
 
+def test_lookup_id_name_is_the_pipelines_published_id_or_id_outside_one() -> None:
+    """Outside a pipeline the name is ``id``; inside one it is the slot the skeleton set."""
+    assert lookup_id_name() == "id"
+    with write_pipeline("default", lock=False):
+        assert lookup_id_name() == "id"
+        require_write_pipeline().id_name = "ID"
+        assert lookup_id_name() == "ID"
+        assert conflict_error().field == "ID"
+    assert lookup_id_name() == "id"
+
+
 # ===========================================================================
 # Alias pinning: fail-closed hook switch, instance-sensitive router, helpers
 # ===========================================================================
@@ -1352,6 +1396,7 @@ def test_conflict_error_shape() -> None:
 @pytest.mark.django_db
 def test_visibility_hook_switching_aliases_fails_closed() -> None:
     """A ``get_queryset`` hook re-routing to another alias is a loud refusal, not a write."""
+    seed_data(1)
 
     def _reroute(
         _cls: type[DjangoType],
@@ -1452,13 +1497,14 @@ def test_pipeline_rows_visible_after_lock_re_reads_only_under_a_taken_row_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``None`` unless a row lock was taken; then the pks a fresh read still sees."""
-    category = product_models.Category.objects.create(name="relock-category")
-    public = product_models.Item.objects.create(name="relock-public", category=category)
-    private = product_models.Item.objects.create(
-        name="relock-private",
-        category=category,
-        is_private=True,
+    seed_data(2)
+    (category,) = categories_from_seed(("relock-category", False))
+    public, private = items_from_seed(
+        category,
+        ("relock-public", False),
+        ("relock-private", True),
     )
+    product_models.Entry.objects.filter(item__in=[public, private]).delete()
     visible = product_models.Item.objects.filter(is_private=False)
     pks = [saved_pk(public), saved_pk(private)]
 
@@ -1480,8 +1526,8 @@ def test_relation_reads_drop_a_locked_row_the_fresh_read_no_longer_sees(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The batched and single relation reads keep only the rows the post-lock re-read returns."""
-    kept = product_models.Category.objects.create(name="relock-kept")
-    dropped = product_models.Category.objects.create(name="relock-dropped")
+    seed_data(0)
+    kept, dropped = categories_from_seed(("relock-kept", False), ("relock-dropped", False))
     categories = product_models.Category.objects.all()
     still_visible: set[object] = {saved_pk(kept)}
     monkeypatch.setattr(
@@ -1690,6 +1736,7 @@ def test_enforce_read_only_barrier_fails_closed_on_unsupported_backend() -> None
 @pytest.mark.django_db
 def test_select_for_update_false_update_still_succeeds_unlocked() -> None:
     """The explicit lock opt-out updates cleanly (weaker concurrency, same envelope contract)."""
+    seed_data(1)
     _declare_item_types()
     UpdateItem = _declare_update_mutation(select_for_update=False)
     schema = _mutation_schema(UpdateItem)
@@ -1764,6 +1811,7 @@ class _TruthyNonBool:
 
 @pytest.mark.django_db
 def test_permission_class_returning_non_bool_is_a_configuration_error() -> None:
+    seed_data(1)
     _declare_item_types()
     UpdateItem = _declare_update_mutation(permission_classes=[_TruthyNonBool])
     schema = _mutation_schema(UpdateItem)
@@ -1782,6 +1830,7 @@ def test_permission_class_returning_non_bool_is_a_configuration_error() -> None:
 
 @pytest.mark.django_db
 def test_check_permission_override_returning_non_bool_is_a_configuration_error() -> None:
+    seed_data(1)
     _declare_item_types()
 
     class NonBoolCheck(DjangoMutation):
@@ -1842,6 +1891,7 @@ def test_forced_update_integrity_error_race_maps_to_the_constraint_envelope() ->
     untyped zero-row catch the ordering matters: the constraint race must hit
     the ``IntegrityError`` arm, never the conflict disambiguation.
     """
+    seed_data(1)
     _declare_item_types()
     UpdateItem = _declare_update_mutation()
     schema = _mutation_schema(UpdateItem)
@@ -1954,6 +2004,7 @@ def test_is_read_only_sql_fails_closed_on_a_statement_that_is_not_really_a_strin
 @pytest.mark.django_db
 def test_pinned_alias_guard_rejects_writes_outside_the_write_phase() -> None:
     """On the PINNED alias, write SQL is rejected in the read-only phase and allowed inside it."""
+    seed_data(0)
     with write_pipeline("default", lock=False), pipeline_alias_guard("GuardMut", "default"):
         # Reads pass in the read-only phase.
         with connection.cursor() as cursor:
@@ -2006,8 +2057,8 @@ def test_reject_substituted_row_raises_the_caller_message() -> None:
 @pytest.mark.django_db
 def test_target_state_snapshot_and_drift_rejection() -> None:
     """``assert_no_target_drift`` rejects mutated loaded fields; deferred fields never read as drift."""
-    category = product_models.Category.objects.create(name="DriftHelperCat")
-    item = product_models.Item.objects.create(name="DriftHelperItem", category=category)
+    seed_data(1)
+    item = _seed_item("DriftHelperItem")
 
     with write_pipeline("default", lock=False):
         pipeline = require_write_pipeline()
@@ -2097,6 +2148,7 @@ def test_assert_no_target_drift_propagates_a_planted_eq_error() -> None:
     plant ANY object on a field. Its equality read runs as-is, and its exception
     reaches the error policy; the write never happens.
     """
+    seed_data(1)
 
     class _RaisingEq:
         @override
@@ -2107,8 +2159,7 @@ def test_assert_no_target_drift_propagates_a_planted_eq_error() -> None:
         def __hash__(self) -> int:
             return 0
 
-    category = product_models.Category.objects.create(name=_category_name())
-    item = product_models.Item.objects.create(name="GuardEq", category=category)
+    item = _seed_item("GuardEq")
     with write_pipeline("default", lock=False):
         require_write_pipeline().target_state = snapshot_target_state(item)
         # basedpyright: the value planted by the code the check polices is the input under
@@ -2433,15 +2484,17 @@ def test_snapshot_residual_value_is_checked_for_replacement(
             assert_no_target_drift("ResidualReplaceMut", item)
 
 
-def test_snapshot_target_state_wraps_every_value() -> None:
+@pytest.mark.parametrize("shape", ["text-file", "json-uuid"], ids=["text-file", "json-uuid"])
+def test_snapshot_target_state_wraps_every_value(shape: str) -> None:
     """Every captured value is a ``_ValueSnapshot``: the drift check asks each one, uniformly."""
-    for instance in (
-        product_models.Item(name="GuardEveryValue", attachment="a.png"),
-        ScalarSpecimen(payload={"k": [1]}, external_id=uuid.uuid4()),
-    ):
-        snapshot = snapshot_target_state(instance)
-        assert snapshot
-        assert all(isinstance(value, _ValueSnapshot) for value in snapshot.values())
+    instance = (
+        product_models.Item(name="GuardEveryValue", attachment="a.png")
+        if shape == "text-file"
+        else ScalarSpecimen(payload={"k": [1]}, external_id=uuid.uuid4())
+    )
+    snapshot = snapshot_target_state(instance)
+    assert snapshot
+    assert all(isinstance(value, _ValueSnapshot) for value in snapshot.values())
 
 
 def test_field_fingerprint_covers_container_kinds_and_is_deterministic() -> None:
@@ -2517,9 +2570,9 @@ def test_field_fingerprint_orders_by_a_guarded_key_not_a_bare_repr() -> None:
     # Under a constant repr the ordering key falls through to type and object
     # identity, which are total, so two calls over the same members agree.
     first, second = _ConstantRepr(1), _ConstantRepr(2)
-    assert _field_fingerprint({first: "x", second: "y"}) == _field_fingerprint(
-        {first: "x", second: "y"},
-    )
+    original = _field_fingerprint({first: "x", second: "y"})
+    assert original == _field_fingerprint({second: "y", first: "x"})
+    assert original != _field_fingerprint({second: "x", first: "y"})
 
 
 def test_field_fingerprint_rejects_a_reference_cycle() -> None:

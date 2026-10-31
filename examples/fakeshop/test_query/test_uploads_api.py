@@ -35,8 +35,9 @@ from pathlib import Path
 from typing import NoReturn
 
 import pytest
+from apps.products.services import create_users
 from apps.scalars import models
-from django.contrib.auth.models import User
+from django.contrib.auth.models import Permission, User
 from django.core.exceptions import SuspiciousFileOperation
 from django.core.files.base import ContentFile, File
 from django.core.files.storage import FileSystemStorage
@@ -116,7 +117,8 @@ def test_media_specimen_output_sdl_is_default_nullable_over_http() -> None:
     assert by_name["image"] == {"kind": "OBJECT", "name": "DjangoImageType"}
 
 
-def test_default_file_output_objects_expose_no_filesystem_path_over_http() -> None:
+@pytest.mark.parametrize("type_name", ["DjangoFileType", "DjangoImageType"], ids=["file", "image"])
+def test_default_file_output_objects_expose_no_filesystem_path_over_http(type_name: str) -> None:
     """Neither default output object publishes ``path`` in the live schema (spec-048 D1).
 
     Introspection over the real endpoint, not a rendered SDL string: this is the
@@ -124,18 +126,16 @@ def test_default_file_output_objects_expose_no_filesystem_path_over_http() -> No
     what "the server's absolute path is not client data" has to mean on the
     wire.
     """
-    for type_name in ("DjangoFileType", "DjangoImageType"):
-        output_type = _introspect_type(type_name, "fields { name }")
-        names = {json_at(field, "name") for field in json_list(output_type, "fields")}
-        assert "path" not in names, (type_name, names)
-    file_names = {
-        json_at(field, "name")
-        for field in json_list(_introspect_type("DjangoFileType", "fields { name }"), "fields")
-    }
-    assert file_names == {"name", "size", "url"}
+    output_type = _introspect_type(type_name, "fields { name }")
+    names = {json_at(field, "name") for field in json_list(output_type, "fields")}
+    expected = {"name", "size", "url"}
+    if type_name == "DjangoImageType":
+        expected |= {"width", "height"}
+    assert names == expected
 
 
-def test_file_output_objects_publish_nullable_subfields_over_http() -> None:
+@pytest.mark.parametrize("type_name", ["DjangoFileType", "DjangoImageType"], ids=["file", "image"])
+def test_file_output_objects_publish_nullable_subfields_over_http(type_name: str) -> None:
     """Every subfield a storage read can fail is nullable; only the stored ``name`` is not.
 
     The divergence from upstream's all-non-null subfields, read off the live
@@ -145,21 +145,25 @@ def test_file_output_objects_publish_nullable_subfields_over_http() -> None:
     them non-null would let one such row take the whole object down. ``name``
     is the stored column string and stays non-null.
     """
-    image_fields = {
+    fields = {
         json_str(field, "name"): json_at(field, "type")
         for field in json_list(
-            _introspect_type("DjangoImageType", "fields { name type { kind name } }"),
+            _introspect_type(type_name, "fields { name type { kind name } }"),
             "fields",
         )
     }
 
-    assert image_fields == {
+    expected = {
         "name": {"kind": "NON_NULL", "name": None},
         "size": {"kind": "SCALAR", "name": "Int"},
         "url": {"kind": "SCALAR", "name": "String"},
-        "width": {"kind": "SCALAR", "name": "Int"},
-        "height": {"kind": "SCALAR", "name": "Int"},
     }
+    if type_name == "DjangoImageType":
+        expected.update(
+            width={"kind": "SCALAR", "name": "Int"},
+            height={"kind": "SCALAR", "name": "Int"},
+        )
+    assert fields == expected
 
 
 def test_filesystem_path_opt_in_is_absent_unless_declared_over_http() -> None:
@@ -503,7 +507,8 @@ def test_suspicious_file_operation_is_reported_not_nulled_over_http(
 # ---------------------------------------------------------------------------
 
 
-def test_media_specimen_input_exposes_upload_over_http() -> None:
+@pytest.mark.parametrize("field", ["attachment", "image"], ids=["file", "image"])
+def test_media_specimen_input_exposes_upload_over_http(field: str) -> None:
     """The generated ``MediaSpecimenInput`` maps file/image columns to NON_NULL ``Upload``.
 
     A file column is a scalar input under its own field name, never the
@@ -523,12 +528,11 @@ def test_media_specimen_input_exposes_upload_over_http() -> None:
     # The columns are required (no null / blank / default), so the input field is
     # ``Upload!``. Assert the DIRECT wrapper is NON_NULL -> Upload: a nullable
     # ``Upload`` (kind SCALAR at the top) must NOT pass.
-    for field in ("attachment", "image"):
-        assert by_name[field] == {
-            "kind": "NON_NULL",
-            "name": None,
-            "ofType": {"kind": "SCALAR", "name": "Upload"},
-        }
+    assert by_name[field] == {
+        "kind": "NON_NULL",
+        "name": None,
+        "ofType": {"kind": "SCALAR", "name": "Upload"},
+    }
 
 
 @pytest.mark.django_db
@@ -538,8 +542,8 @@ def test_multipart_create_uploads_real_files_over_http(tmp_path: Path) -> None:
     Exercises the full transport the resolver-level ``SimpleUploadedFile`` tests
     cannot: URL routing -> GraphQLView (``multipart_uploads_enabled=True``) ->
     multipart request parse -> schema execution -> JSON response. The caller is a
-    superuser so the default ``DjangoModelPermission`` ``add_mediaspecimen`` gate
-    passes (write-auth is exercised on its own in the products suite).
+    seeded non-superuser with ``add_mediaspecimen`` so the default
+    ``DjangoModelPermission`` gate checks the real codename.
 
     The spec-043 scenario-5 vehicle: the nested two-file input object rides
     ``TestClient``'s path-keyed ``files=`` contract (each key is the variable
@@ -547,6 +551,7 @@ def test_multipart_create_uploads_real_files_over_http(tmp_path: Path) -> None:
     ``operationName`` is proven to land INSIDE the multipart ``operations``
     field - the exact envelope the engine base's map builder cannot produce.
     """
+    create_users(1)
     mutation = """
     mutation Create($data: MediaSpecimenInput!) {
       createMediaSpecimen(data: $data) {
@@ -560,7 +565,13 @@ def test_multipart_create_uploads_real_files_over_http(tmp_path: Path) -> None:
     }
     """
     with override_settings(MEDIA_ROOT=str(tmp_path)):
-        user = User.objects.create_superuser("uploader", "uploader@example.com", "pw")
+        user = User.objects.get(username="regular_1")
+        user.user_permissions.add(
+            Permission.objects.get(
+                codename="add_mediaspecimen",
+                content_type__app_label="scalars",
+            ),
+        )
         client = TestClient()
 
         with client.login(user):
@@ -676,12 +687,15 @@ def _update_specimen(
     *,
     lookup_id: str | None = None,
 ) -> JSONObject:
-    """Post ``updateMediaSpecimen`` as a superuser and return its payload.
+    """Post ``updateMediaSpecimen`` as a seeded user holding its change permission.
 
     ``MediaSpecimenType`` is not a Relay node, so the ``id:`` is the raw pk
     string (``str(specimen.pk)`` unless ``lookup_id`` overrides it).
     """
-    user = User.objects.create_superuser("updater", "updater@example.com", "pw")
+    user = User.objects.get(username="regular_1")
+    user.user_permissions.add(
+        Permission.objects.get(codename="change_mediaspecimen", content_type__app_label="scalars"),
+    )
     client = TestClient()
     with client.login(user):
         res = client.query(
@@ -722,6 +736,7 @@ def test_update_omitting_the_file_keeps_the_stored_file_over_http(tmp_path: Path
     before the update's ``setattr`` loop, so an omitted file column is never
     re-assigned.
     """
+    create_users(1)
     with override_settings(MEDIA_ROOT=str(tmp_path)):
         specimen = _stored_specimen("keep-file")
         original_name = specimen.attachment.name
@@ -737,6 +752,7 @@ def test_update_omitting_the_file_keeps_the_stored_file_over_http(tmp_path: Path
 @pytest.mark.django_db
 def test_update_with_a_new_upload_replaces_the_stored_file_over_http(tmp_path: Path) -> None:
     """A multipart update carrying a new ``attachment`` replaces the stored file."""
+    create_users(1)
     with override_settings(MEDIA_ROOT=str(tmp_path)):
         specimen = _stored_specimen("replace-file")
         payload = _update_specimen(
@@ -769,6 +785,7 @@ def test_update_explicit_null_on_the_required_file_is_a_field_error_over_http(
     write; a file column is a scalar input, so omittable is not clearable. The
     stored file is untouched.
     """
+    create_users(1)
     with override_settings(MEDIA_ROOT=str(tmp_path)):
         specimen = _stored_specimen("null-file")
         payload = _update_specimen(specimen, {"attachment": None})
@@ -807,6 +824,7 @@ def test_update_with_an_uncoercible_raw_pk_is_the_not_found_field_error_over_htt
     GlobalID names a non-Relay type, so a GlobalID string is one more uncoercible
     literal here, not the Relay arm's invalid-id error. The stored row is untouched.
     """
+    create_users(1)
     with override_settings(MEDIA_ROOT=str(tmp_path)):
         specimen = _stored_specimen("bad-id")
         payload = _update_specimen(specimen, {"label": "renamed"}, lookup_id=raw_id)
@@ -831,6 +849,7 @@ def test_update_with_a_missing_raw_pk_is_the_not_found_field_error_over_http(
     this viewer; the missing-row verdict is the one the visibility-scoped locate
     also gives a hidden row.
     """
+    create_users(1)
     with override_settings(MEDIA_ROOT=str(tmp_path)):
         specimen = _stored_specimen("missing-id")
         payload = _update_specimen(

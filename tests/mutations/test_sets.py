@@ -59,9 +59,7 @@ from django_strawberry_framework import (
 )
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.forms.sets import (
-    DjangoFormMutation,
     DjangoFormMutationMetaclass,
-    DjangoModelFormMutation,
 )
 from django_strawberry_framework.mutations import (
     DjangoModelPermission as DjangoModelPermissionFromPackage,
@@ -90,16 +88,12 @@ from django_strawberry_framework.mutations.sets import (
     register_mutation,
 )
 from django_strawberry_framework.registry import registry
-from django_strawberry_framework.rest_framework.sets import (
-    SerializerMutation,
-)
 from django_strawberry_framework.types.base import (
     ALLOWED_META_KEYS,
     DEFERRED_META_KEYS,
 )
 from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.inputs import RELATION_SINGLE, SCALAR
-from django_strawberry_framework.write_mixins import resolve_backed_model_or_raise
 from tests._idioms import (
     canonical_order,
     definition_raises,
@@ -1689,16 +1683,20 @@ def test_mutation_meta_key_rejected_on_django_type_meta() -> None:
                 operation = "create"
 
 
-def test_djangotype_meta_key_sets_carry_no_mutation_key() -> None:
-    """The ``DjangoType`` Meta-key sets carry no mutation key."""
-    for mutation_key in (
+@pytest.mark.parametrize(
+    "mutation_key",
+    [
         "operation",
         "input_class",
         "partial_input_class",
         "permission_classes",
-    ):
-        assert mutation_key not in ALLOWED_META_KEYS
-        assert mutation_key not in DEFERRED_META_KEYS
+    ],
+    ids=str,
+)
+def test_djangotype_meta_key_sets_carry_no_mutation_key(mutation_key: str) -> None:
+    """The ``DjangoType`` Meta-key sets carry no mutation key."""
+    assert mutation_key not in ALLOWED_META_KEYS
+    assert mutation_key not in DEFERRED_META_KEYS
 
 
 # ---------------------------------------------------------------------------
@@ -1948,82 +1946,34 @@ def test_mutation_shape_build_cache_clears_via_registry_and_direct_clear() -> No
     assert _shape_build_cache == {}
 
 
-def test_public_metaclasses_pin_public_identity_and_pickle() -> None:
-    """Both factory-built public metaclasses carry their own public identity.
-
-    ``make_meta_validating_metaclass`` builds a function-local class; left
-    unpinned, ``DjangoMutationMetaclass`` and ``DjangoFormMutationMetaclass``
-    would both report ``__name__ == "MetaValidatingMetaclass"`` and a
-    ``<locals>`` ``__qualname__``, breaking module addressability, introspection,
-    and reference-based pickling. Each is pinned to its own public symbol +
-    defining module so ``module + __qualname__`` resolves back to the object,
-    which is exactly what ``pickle`` requires to round-trip a class by reference.
-    """
-    cases = [
-        (
+@pytest.mark.parametrize(
+    ("metaclass", "name", "module"),
+    [
+        pytest.param(
             DjangoMutationMetaclass,
             "DjangoMutationMetaclass",
             "django_strawberry_framework.mutations.sets",
+            id="model-mutation",
         ),
-        (
+        pytest.param(
             DjangoFormMutationMetaclass,
             "DjangoFormMutationMetaclass",
             "django_strawberry_framework.forms.sets",
+            id="form-mutation",
         ),
-    ]
-    for metaclass, name, module in cases:
-        assert metaclass.__name__ == name
-        assert metaclass.__qualname__ == name
-        assert metaclass.__module__ == module
-        # Module addressability: the metaclass is reachable at module.name.
-        assert getattr(importlib.import_module(module), name) is metaclass
-        # Reference pickling round-trips to the very same class object.
-        assert pickle_roundtrip(metaclass) is metaclass
-
-    # The two consumers are distinct class objects over disjoint ledgers, not one
-    # shared function-local metaclass reused under two names.
-    assert DjangoMutationMetaclass is not DjangoFormMutationMetaclass
-
-
-def test_form_and_serializer_type_gates_ride_require_subclass() -> None:
-    """Form and serializer ``_validate_meta`` type-gates share ``require_subclass``."""
-    for cls in (DjangoModelFormMutation, DjangoFormMutation, SerializerMutation):
-        assert "require_subclass" in cls._validate_meta.__code__.co_names
-
-
-def test_form_and_serializer_operation_checks_ride_require_non_delete_operation() -> None:
-    """Model-backed form + serializer share the create/update lookup; plain form does not."""
-    for cls in (DjangoModelFormMutation, SerializerMutation):
-        assert "require_non_delete_operation" in cls._validate_meta.__code__.co_names
-    assert (
-        "require_non_delete_operation" not in DjangoFormMutation._validate_meta.__code__.co_names
-    )
-
-
-def test_model_and_form_validate_ride_shared_meta_helpers() -> None:
-    """Model + ModelForm ride the shared model-class / fields / permission-lock helpers."""
-    model_names = DjangoMutation._validate_meta.__code__.co_names
-    assert "require_model_class" in model_names
-    assert "normalize_meta_field_selection" in model_names
-    assert "model_backed_permission_and_lock" in model_names
-
-    # The backed flavors reach the model-class gate through the shared no-model raise.
-    assert "require_model_class" in resolve_backed_model_or_raise.__code__.co_names
-    form_names = DjangoModelFormMutation._validate_meta.__code__.co_names
-    assert "resolve_backed_model_or_raise" in form_names
-    assert "model_backed_permission_and_lock" in form_names
-    assert "_normalized_form_field_selection" in form_names
-
-    plain_names = DjangoFormMutation._validate_meta.__code__.co_names
-    assert "_normalized_form_field_selection" in plain_names
-    assert "require_model_class" not in plain_names
-    assert "model_backed_permission_and_lock" not in plain_names
-
-    assert "resolve_backed_model_or_raise" in SerializerMutation._validate_meta.__code__.co_names
-    assert (
-        "model_backed_permission_and_lock"
-        not in SerializerMutation._validate_meta.__code__.co_names
-    )
+    ],
+)
+def test_public_metaclasses_pin_public_identity_and_pickle(
+    metaclass: type,
+    name: str,
+    module: str,
+) -> None:
+    """Each public metaclass remains module-addressable and pickleable by its own name."""
+    assert metaclass.__name__ == name
+    assert metaclass.__qualname__ == name
+    assert metaclass.__module__ == module
+    assert getattr(importlib.import_module(module), name) is metaclass
+    assert pickle_roundtrip(metaclass) is metaclass
 
 
 # Each value an operation key can never be: unhashable containers and non-string scalars.

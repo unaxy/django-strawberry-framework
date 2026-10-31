@@ -26,6 +26,8 @@ from unittest import mock
 
 import pytest
 import strawberry
+from apps.products.services import create_users
+from asgiref.sync import sync_to_async
 from django.contrib.auth.models import User
 from django.contrib.sessions.middleware import SessionMiddleware
 from django.http import HttpResponse
@@ -178,8 +180,12 @@ def test_sync_me_dispatch_never_enters_the_async_boundary(
     sync_boundary_spy: list[Callable[..., object]],
 ) -> None:
     """``execute_sync`` ``me`` runs the native sync body with no event-loop bridge."""
+    create_users(1)
     schema = _me_schema()
-    user = User.objects.create_user(username="me_sync", password="pw-9x-strong")
+    user = User.objects.get(username="regular_1")
+    user.username = "me_sync"
+    user.set_password("pw-9x-strong")
+    user.save(update_fields=["username", "password"])
     res = schema.execute_sync(_ME_Q, context_value=_session_request(user))
     assert res.errors is None, res.errors
     assert res.data is not None
@@ -192,8 +198,12 @@ async def test_async_me_dispatch_awaits_the_bridged_async_body_exactly_once(
     sync_boundary_spy: list[Callable[..., object]],
 ) -> None:
     """``await schema.execute`` ``me`` awaits the bridged async body exactly once."""
+    await sync_to_async(create_users)(1)
     schema = _me_schema()
-    user = await User.objects.acreate_user(username="me_async", password="pw-9x-strong")
+    user = await User.objects.aget(username="regular_1")
+    user.username = "me_async"
+    user.set_password("pw-9x-strong")
+    await user.asave(update_fields=["username", "password"])
     res = await schema.execute(_ME_Q, context_value=_session_request(user))
     assert res.errors is None, res.errors
     assert res.data is not None
@@ -204,8 +214,12 @@ async def test_async_me_dispatch_awaits_the_bridged_async_body_exactly_once(
 @pytest.mark.django_db
 def test_me_accepts_a_regular_mapping_context_with_a_django_request() -> None:
     """A direct ``Schema.execute`` mapping context carries its Django request to ``me``."""
+    create_users(1)
     schema = _me_schema()
-    user = User.objects.create_user(username="mapping_me", password="pw-9x-strong")
+    user = User.objects.get(username="regular_1")
+    user.username = "mapping_me"
+    user.set_password("pw-9x-strong")
+    user.save(update_fields=["username", "password"])
 
     result = schema.execute_sync(_ME_Q, context_value={"request": _session_request(user)})
 
@@ -311,7 +325,11 @@ def test_legacy_callable_is_authenticated_is_called_and_its_result_classifies(
     expected: dict[str, str] | None,
 ) -> None:
     """A legacy ``is_authenticated()`` is called; a bound method's truthiness never classifies."""
-    User.objects.create_user(username="legacy", password="pw")
+    create_users(1)
+    user = User.objects.get(username="regular_1")
+    user.username = "legacy"
+    user.set_password("pw")
+    user.save(update_fields=["username", "password"])
     schema = _me_schema()
     req = RequestFactory().post("/graphql/")
     req.user = User.objects.get(username="legacy")
@@ -453,12 +471,16 @@ def test_current_user_bare_string_directives_raise_configuration_error() -> None
 @pytest.mark.django_db
 def test_gated_me_denies_the_anonymous_caller_with_the_exact_pinned_string() -> None:
     """An ``IsAuthenticated``-style gate turns anonymous ``null`` into the ``GraphQLError``."""
+    create_users(1)
     schema = _me_schema(permission_classes=[_IsAuthenticated])
     denied = schema.execute_sync(_ME_Q, context_value=_session_request())
     assert denied.errors is not None
     assert denied.errors[0].message == "Not authorized to current_user UserT."
 
-    user = User.objects.create_user(username="gated_probe", password="pw-9x-strong")
+    user = User.objects.get(username="regular_1")
+    user.username = "gated_probe"
+    user.set_password("pw-9x-strong")
+    user.save(update_fields=["username", "password"])
     allowed = schema.execute_sync(_ME_Q, context_value=_session_request(user))
     assert allowed.errors is None, allowed.errors
     assert allowed.data is not None
@@ -475,6 +497,7 @@ async def test_async_gated_me_forces_the_lazy_user_inside_the_one_sync_boundary(
     ``sync_to_async(thread_sensitive=True)`` worker, the forced load succeeds and
     the recorded gate ``instance`` is the real user row.
     """
+    await sync_to_async(create_users)(1)
     seen: dict[str, object] = {}
 
     class RecordingGate:
@@ -490,7 +513,10 @@ async def test_async_gated_me_forces_the_lazy_user_inside_the_one_sync_boundary(
             return True
 
     schema = _me_schema(permission_classes=[RecordingGate])
-    user = await User.objects.acreate_user(username="lazy_probe", password="pw-9x-strong")
+    user = await User.objects.aget(username="regular_1")
+    user.username = "lazy_probe"
+    user.set_password("pw-9x-strong")
+    await user.asave(update_fields=["username", "password"])
 
     request = RequestFactory().post("/graphql/")
     SessionMiddleware(lambda _request: HttpResponse()).process_request(request)

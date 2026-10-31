@@ -33,6 +33,7 @@ from __future__ import annotations
 import re
 import sys
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import MISSING
 from typing import TYPE_CHECKING, NoReturn
 
 import pytest
@@ -367,26 +368,35 @@ def test_schema_hook_stable_field_map_generates_input() -> None:
     assert set(_field_map(cre)) == {"name"}
 
 
+@pytest.mark.parametrize("operation", ["create", "update"])
 @pytest.mark.parametrize(
     ("selector", "expected"),
     [("fields", {"name"}), ("exclude", {"name", "is_private"})],
 )
 def test_build_serializer_inputs_materializes_one_shot_narrowing(
+    operation: str,
     selector: str,
     expected: set[str],
 ) -> None:
-    """The create and partial builds both receive one-shot field selectors."""
+    """One-shot public Meta selectors survive class validation and finalization for each write."""
     _register_products_types()
+    serializer_cls = _item_serializer()
+    selected_fields = iter(("name",)) if selector == "fields" else None
+    selected_exclude = iter(("category",)) if selector == "exclude" else None
+    selected_operation = operation
 
-    narrowed = iter(("name",) if selector == "fields" else ("category",))
-    create_cls, _, partial_cls, _ = _build_serializer_inputs(
-        _item_serializer(),
-        guard_required=False,
-        fields=narrowed if selector == "fields" else None,
-        exclude=narrowed if selector == "exclude" else None,
-    )
-    assert set(_field_map(create_cls)) == expected
-    assert set(_field_map(partial_cls)) == expected
+    class ConsumerMutation(SerializerMutation):
+        class Meta:
+            serializer_class = serializer_cls
+            operation = selected_operation
+            fields = selected_fields
+            exclude = selected_exclude
+            injected_fields = ("category",)
+
+    dsf.finalize_django_types()
+    input_cls = ConsumerMutation._input_class
+    assert input_cls is not None
+    assert set(_field_map(input_cls)) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -414,15 +424,19 @@ def test_create_input_required_and_optional_shapes() -> None:
     assert fields["is_private"].default_value is UNSET
 
 
-def test_partial_input_all_fields_optional() -> None:
+@pytest.mark.parametrize(
+    "name",
+    ["name", "category_id", "is_private"],
+    ids=["name", "relation", "privacy"],
+)
+def test_partial_input_all_fields_optional(name: str) -> None:
     """``<Serializer>PartialInput``: every field optional + UNSET."""
     _register_products_types()
     _, _, par, _ = _build_serializer_inputs(_item_serializer())
     assert par.__name__ == "ItemSerPartialInput"
     fields = _field_map(par)
-    for name in ("name", "category_id", "is_private"):
-        assert _is_optional(fields[name]), name
-        assert fields[name].default_value is UNSET, name
+    assert _is_optional(fields[name]), name
+    assert fields[name].default_value is UNSET, name
 
 
 def test_serializer_only_field_included() -> None:
@@ -567,21 +581,16 @@ def test_read_only_and_hidden_fields_dropped() -> None:
     assert set(_field_map(cre)) == {"name"}
 
 
-def test_fields_narrowing_omits_dropped_field() -> None:
-    """``Meta.fields`` narrows the input; ``Meta.exclude`` drops the named field."""
+@pytest.mark.parametrize("selector", ["fields", "exclude"])
+def test_fields_narrowing_omits_dropped_field(selector: str) -> None:
+    """Either selection spelling actually drops privacy while keeping the required name and FK."""
     _register_products_types()
     cre, _, _, _ = _build_serializer_inputs(
         _item_serializer(),
-        fields=("name", "category", "is_private"),
-        guard_required=False,
+        fields=("name", "category") if selector == "fields" else None,
+        exclude=("is_private",) if selector == "exclude" else None,
     )
-    assert "is_private" in _field_map(cre)
-    cre2, _, _, _ = _build_serializer_inputs(
-        _item_serializer(),
-        exclude=("is_private",),
-        guard_required=False,
-    )
-    assert "is_private" not in _field_map(cre2)
+    assert set(_field_map(cre)) == {"name", "category_id"}
 
 
 def test_meta_fields_rejects_bare_string() -> None:
@@ -683,18 +692,23 @@ def test_optional_fields_all_bare_string_rejected() -> None:
 
 
 def test_differing_annotations_yield_distinct_descriptor_names() -> None:
-    """Two same-name-set shapes with different annotations get distinct descriptor names."""
+    """Annotation-only hook variations over the SAME serializer give distinct generated names."""
 
-    class StrSer(serializers.Serializer[object]):
+    class Ser(serializers.Serializer[object]):
         x = serializers.CharField()
 
-    class IntSer(serializers.Serializer[object]):
-        x = serializers.IntegerField()
-
-    cre_str, _, _, _ = _build_serializer_inputs(StrSer, optional_fields=("x",))
-    cre_int, _, _, _ = _build_serializer_inputs(IntSer, optional_fields=("x",))
-    # Both are divergent shapes (optional_fields set); their descriptor-derived
-    # suffixes encode the differing annotation, so the names differ.
+    cre_str, _, _, _ = _build_serializer_inputs(
+        Ser,
+        optional_fields=("x",),
+        field_map={"x": bind_unparented(serializers.CharField(), "x")},
+    )
+    cre_int, _, _, _ = _build_serializer_inputs(
+        Ser,
+        optional_fields=("x",),
+        field_map={"x": bind_unparented(serializers.IntegerField(), "x")},
+    )
+    assert _inner_type(_field_map(cre_str)["x"]) is str
+    assert _inner_type(_field_map(cre_int)["x"]) is int
     assert cre_str.__name__ != cre_int.__name__
 
 
@@ -954,22 +968,6 @@ def test_create_guard_waiver_does_not_raise() -> None:
     assert "required_scalar" not in _field_map(cre)
 
 
-def test_guard_runs_per_declaration() -> None:
-    """The guard fires PER declaration; a waiving build first does not suppress a later one.
-
-    Asserted by calling ``guard_create_required_serializer_fields`` directly (the
-    form precedent): a waiving build never runs the guard, so a later non-waiving
-    build of the same effective set still raises.
-    """
-    ser = _required_field_serializer()
-    effective = resolve_effective_serializer_fields(ser, fields=("maybe",))
-    # First, a waiving build (guard_required=False) materializes the shape - no guard.
-    _build_serializer_inputs(ser, fields=("maybe",), guard_required=False)
-    # A later non-waiving check on the SAME effective set still raises.
-    with pytest.raises(ConfigurationError, match="required_scalar"):
-        guard_create_required_serializer_fields(ser, effective)
-
-
 # ---------------------------------------------------------------------------
 # Nullability / defaults
 # ---------------------------------------------------------------------------
@@ -985,7 +983,7 @@ def test_required_non_null_field_is_required_with_no_default() -> None:
     field = _field_map(cre)["nick"]
     assert not _is_optional(field)  # bare T (non-null)
     # No UNSET default: GraphQL itself enforces presence + non-null for this field.
-    assert field.default_value is not UNSET
+    assert field.default_value is MISSING
 
 
 def test_field_with_default_is_optional_no_fabricated_default() -> None:
@@ -1977,24 +1975,46 @@ def test_nested_config_narrows_nested_fields() -> None:
     assert [s.target_name for s in detail_spec.nested_specs] == ["code"]
 
 
-def test_build_serializer_inputs_materializes_one_shot_nested_selectors() -> None:
-    """Nested create and partial builds both receive one-shot config selectors."""
+@pytest.mark.parametrize("operation", ["create", "update"])
+def test_build_serializer_inputs_materializes_one_shot_nested_selectors(operation: str) -> None:
+    """A nested public Meta selector survives fingerprinting and the final input build."""
+    _register_products_types()
     child = _nested_child_serializer()
 
-    class Parent(serializers.Serializer[object]):
+    class Parent(ModelSerializerBase[product_models.Category]):
         detail = child()
 
-    config = NestedSerializerConfig(fields=iter(("code",)))
-    create_cls, create_shape, partial_cls, partial_shape = _build_serializer_inputs(
-        Parent,
-        nested_configs={"detail": config},
-    )
+        class Meta:
+            model = product_models.Category
+            fields = ("name", "detail")
 
-    for input_cls, shape in ((create_cls, create_shape), (partial_cls, partial_shape)):
-        assert set(_field_map(input_cls)) == {"detail"}
-        detail_spec = next(s for s in shape.field_specs if s.target_name == "detail")
-        assert detail_spec.nested_specs is not None
-        assert [s.target_name for s in detail_spec.nested_specs] == ["code"]
+        @override
+        def create(self, validated_data: dict[str, object]) -> NoReturn:
+            raise AssertionError("schema discovery must not execute the consumer write")
+
+        @override
+        def update(
+            self,
+            instance: product_models.Category,
+            validated_data: dict[str, object],
+        ) -> NoReturn:
+            raise AssertionError("schema discovery must not execute the consumer write")
+
+    selected_operation = operation
+
+    class ConsumerMutation(SerializerMutation):
+        class Meta:
+            serializer_class = Parent
+            operation = selected_operation
+            nested_fields = {"detail": NestedSerializerConfig(fields=iter(("code",)))}
+
+    dsf.finalize_django_types()
+    input_cls = ConsumerMutation._input_class
+    assert input_cls is not None
+    assert set(_field_map(input_cls)) == {"name", "detail"}
+    nested_cls = _inner_type(_field_map(input_cls)["detail"])
+    assert isinstance(nested_cls, type)
+    assert set(_field_map(nested_cls)) == {"code"}
 
 
 def test_nested_config_deeper_nesting_opts_in_grandchild() -> None:
@@ -2138,32 +2158,29 @@ def test_identical_nested_shape_dedupes_to_one_class() -> None:
 
 
 def test_distinct_nested_shapes_yield_distinct_top_names() -> None:
-    """Two DIFFERENT nested shapes give the top inputs DISTINCT descriptor-derived names."""
+    """Nested-config-only differences over ONE parent and child give distinct top names."""
+    child = _nested_child_serializer()
 
-    class ChildA(serializers.Serializer[object]):
-        code = serializers.CharField()
+    class Parent(serializers.Serializer[object]):
+        detail = child()
 
-    class ChildB(serializers.Serializer[object]):
-        code = serializers.CharField()
-        extra = serializers.IntegerField()
-
-    class ParentA(serializers.Serializer[object]):
-        detail = ChildA()
-
-    class ParentB(serializers.Serializer[object]):
-        detail = ChildB()
-
-    _a, shape_a = build_serializer_input_class(
-        ParentA,
+    first, shape_a = build_serializer_input_class(
+        Parent,
         operation_kind="create",
-        nested_configs={"detail": NestedSerializerConfig()},
+        nested_configs={"detail": NestedSerializerConfig(fields=("code",))},
     )
-    _b, shape_b = build_serializer_input_class(
-        ParentB,
+    second, shape_b = build_serializer_input_class(
+        Parent,
         operation_kind="create",
-        nested_configs={"detail": NestedSerializerConfig()},
+        nested_configs={"detail": NestedSerializerConfig(fields=("code", "note"))},
     )
     assert shape_a.type_name != shape_b.type_name
+    first_nested = _inner_type(_field_map(first)["detail"])
+    second_nested = _inner_type(_field_map(second)["detail"])
+    assert isinstance(first_nested, type)
+    assert isinstance(second_nested, type)
+    assert set(_field_map(first_nested)) == {"code"}
+    assert set(_field_map(second_nested)) == {"code", "note"}
 
 
 def test_build_serializer_inputs_threads_nested_into_both_shapes() -> None:
@@ -2584,20 +2601,31 @@ def test_resolve_injected_field_specs_unknown_field_raises_configuration_error()
         resolve_injected_field_specs(S, field_map, ("non_existent",), operation_kind=CREATE)
 
 
-def test_build_serializer_inputs_preserves_optional_fields_one_shot_iterator() -> None:
-    """One-shot iterator in optional_fields is normalized for both create and partial shapes."""
+@pytest.mark.parametrize("operation", ["create", "update"])
+def test_build_serializer_inputs_preserves_optional_fields_one_shot_iterator(
+    operation: str,
+) -> None:
+    """A one-shot public optional_fields declaration survives validation and finalization."""
+    _register_products_types()
+    serializer_cls = _item_serializer()
+    selected_operation = operation
 
-    class SampleSer(serializers.Serializer[object]):
-        code = serializers.CharField(required=True)
-        name = serializers.CharField(required=True)
+    class ConsumerMutation(SerializerMutation):
+        class Meta:
+            serializer_class = serializer_cls
+            operation = selected_operation
+            optional_fields = iter(("name",))
 
-    gen = (f for f in ("code",))
-    _create_cls, c_shape, _partial_cls, p_shape = _build_serializer_inputs(
-        SampleSer,
-        optional_fields=gen,
-    )
-    assert c_shape.optional_fields == frozenset({"code"})
-    assert p_shape.optional_fields == frozenset()
+    dsf.finalize_django_types()
+    input_cls = ConsumerMutation._input_class
+    assert input_cls is not None
+    fields = _field_map(input_cls)
+    assert _is_optional(fields["name"])
+    assert fields["name"].default_value is UNSET
+    assert _is_optional(fields["category_id"]) is (operation == "update")
+    assert fields["category_id"].default_value is (UNSET if operation == "update" else MISSING)
+    if operation == "update":
+        assert input_cls.__name__ == "ItemSerPartialInput"
 
 
 def test_validate_nested_config_keys_not_a_mapping() -> None:

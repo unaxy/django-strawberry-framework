@@ -36,7 +36,6 @@ registries, and bind/dedupe.
 
 from __future__ import annotations
 
-import itertools
 import re
 import sys
 from collections.abc import Callable, Iterator
@@ -113,14 +112,6 @@ def _isolate_registry() -> Iterator[None]:
     registry.clear()
     yield
     registry.clear()
-
-
-_app_label_counter = itertools.count(1)
-
-
-def _unique_app_label() -> str:
-    """Return a unique ``app_label`` per call to avoid Django's re-register warning."""
-    return f"test_form_sets__{next(_app_label_counter)}"
 
 
 def _item_model_form() -> type[forms.ModelForm[product_models.Item]]:

@@ -22,6 +22,7 @@ from django import forms
 from graphql import GraphQLField
 from strawberry import relay
 from strawberry.schema_directive import Location, schema_directive
+from strawberry.types.base import StrawberryObjectDefinition
 from typing_extensions import override
 
 from django_strawberry_framework import (
@@ -167,8 +168,9 @@ def test_payload_lazy_ref_resolves_to_materialized_payload_after_bind() -> None:
     assert hasattr(inputs_module, "CreateItemPayload")
     schema = DjangoSchema(query=_Query, mutation=Mutation)
     # The schema's CreateItemPayload type is the one bound to the materialized class.
-    payload_type = schema._schema.type_map["CreateItemPayload"]
-    assert payload_type is not None
+    payload_definition = schema.get_type_by_name("CreateItemPayload")
+    assert isinstance(payload_definition, StrawberryObjectDefinition)
+    assert payload_definition.origin is read_attr(inputs_module, "CreateItemPayload")
 
 
 # ---------------------------------------------------------------------------

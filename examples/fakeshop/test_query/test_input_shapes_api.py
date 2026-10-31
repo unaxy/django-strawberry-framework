@@ -1,4 +1,4 @@
-"""Live GraphQL HTTP tests for the relation-id and payload-slot shapes of generated write inputs.
+"""Live GraphQL HTTP tests for generated mutation input shapes and payload slots.
 
 Each row introspects a generated ``DjangoMutation`` input or payload over
 ``/graphql`` and reads one shape the input generator decides from the related
@@ -15,6 +15,14 @@ model's primary ``DjangoType``:
   ``errors: [FieldError!]!`` list either way.
 """
 
+from functools import wraps
+
+import pytest
+import strawberry
+from django import forms
+from django.http import HttpRequest, HttpResponseBase
+from django.test import override_settings
+from django.urls import path
 from graphql_client import (
     JSONObject,
     assert_graphql_success,
@@ -22,7 +30,31 @@ from graphql_client import (
     json_list,
     json_object,
     json_str,
+    post_graphql,
+    response_json,
 )
+from typing_extensions import override
+
+from django_strawberry_framework import (
+    DjangoFormMutation,
+    DjangoMutationField,
+    DjangoSchema,
+    finalize_django_types,
+)
+from django_strawberry_framework.utils._narrowing import dict_of
+from django_strawberry_framework.views import DjangoGraphQLView
+
+_CURRENT_SCHEMA: dict[str, DjangoSchema | None] = {"schema": None}
+
+
+@wraps(DjangoGraphQLView.as_view())
+def _form_input_view(request: HttpRequest) -> HttpResponseBase:
+    schema = _CURRENT_SCHEMA["schema"]
+    assert schema is not None
+    return DjangoGraphQLView.as_view(schema=schema)(request)
+
+
+urlpatterns = [path("graphql-input/", _form_input_view)]
 
 _TYPE_REF = "kind name ofType { kind name ofType { kind name ofType { kind name } } }"
 
@@ -175,3 +207,84 @@ def test_payload_of_a_plain_primary_carries_a_nullable_result_slot() -> None:
     assert fields["errors"] == _FIELD_ERRORS, fields
     assert "node" not in fields, fields
     assert "shelf" not in fields, fields
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.parametrize(
+    ("input_literal", "written", "message"),
+    [
+        pytest.param("{flag: true}", [True], None, id="true"),
+        pytest.param("{flag: false}", [False], None, id="false"),
+        pytest.param(
+            "{}",
+            [],
+            "Field 'RequiredFlagFormInput.flag' of required type 'Boolean!' was not provided.",
+            id="omitted",
+        ),
+        pytest.param(
+            "{flag: null}",
+            [],
+            "Expected value of type 'Boolean!', found null.",
+            id="null",
+        ),
+    ],
+)
+def test_a_validating_nullable_boolean_form_field_requires_a_boolean_over_http(
+    input_literal: str,
+    written: list[bool],
+    message: str | None,
+) -> None:
+    """A validating NullBooleanField subclass accepts either boolean and refuses absence or null."""
+    called: list[object] = []
+
+    class RequiredNullableBoolean(forms.NullBooleanField):
+        validate = forms.Field.validate
+
+    class RequiredFlagForm(forms.Form):
+        flag = RequiredNullableBoolean(required=True)
+
+    class SubmitRequired(DjangoFormMutation):
+        class Meta:
+            form_class = RequiredFlagForm
+            permission_classes = []
+
+        @override
+        def perform_mutate(
+            self,
+            form: forms.BaseForm,
+            info: strawberry.Info[object, object],
+        ) -> None:
+            del info
+            called.append(dict_of(form.cleaned_data)["flag"])
+
+    @strawberry.type
+    class InputQuery:
+        @strawberry.field
+        def ping(self) -> int:
+            return 1
+
+    @strawberry.type
+    class InputMutation:
+        submit_required = DjangoMutationField(SubmitRequired)
+
+    finalize_django_types()
+    _CURRENT_SCHEMA["schema"] = DjangoSchema(query=InputQuery, mutation=InputMutation)
+    try:
+        with override_settings(ROOT_URLCONF=__name__):
+            response = post_graphql(
+                f"mutation {{ submitRequired(data: {input_literal}) {{ ok errors {{ field }} }} }}",
+                url="/graphql-input/",
+            )
+        assert response.status_code == 200
+        payload = response_json(response)
+    finally:
+        _CURRENT_SCHEMA["schema"] = None
+
+    if message is None:
+        assert payload == {"data": {"submitRequired": {"ok": True, "errors": []}}}
+    else:
+        assert payload["data"] is None, payload
+        assert len(json_list(payload, "errors")) == 1, payload
+        assert json_at(payload, "errors", 0, "message") == message, payload
+    assert called == written

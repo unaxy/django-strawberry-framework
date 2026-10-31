@@ -76,7 +76,6 @@ from strawberry.types.field import StrawberryField
 import django_strawberry_framework
 from django_strawberry_framework import DjangoSchema, DjangoType, strawberry_config
 from django_strawberry_framework.exceptions import ConfigurationError
-from django_strawberry_framework.forms import inputs as form_inputs
 from django_strawberry_framework.mutations import FieldError as FieldErrorFromPackage
 from django_strawberry_framework.mutations import inputs as mutation_inputs
 from django_strawberry_framework.mutations.inputs import (
@@ -106,9 +105,6 @@ from django_strawberry_framework.mutations.inputs import (
     require_queryset_related_model,
 )
 from django_strawberry_framework.registry import registry
-from django_strawberry_framework.rest_framework import (
-    serializer_converter as ser_converter,
-)
 from django_strawberry_framework.scalars import Upload
 from django_strawberry_framework.types.converters import convert_scalar
 from django_strawberry_framework.utils._narrowing import read_attr
@@ -197,11 +193,6 @@ def _inner_type(field: StrawberryField) -> StrawberryType | type:
 # ---------------------------------------------------------------------------
 # Module-path constant
 # ---------------------------------------------------------------------------
-
-
-def test_inputs_module_path_constant() -> None:
-    """The module constant matches the actual dotted path of ``inputs.py``."""
-    assert INPUTS_MODULE_PATH == "django_strawberry_framework.mutations.inputs"
 
 
 def test_non_field_error_key_is_django_all_sentinel() -> None:
@@ -553,18 +544,27 @@ def test_create_input_required_and_optional_shapes() -> None:
     assert "updated_date" not in fields
 
 
-def test_partial_input_all_fields_optional_and_unset() -> None:
-    """ItemPartialInput: every field optional + UNSET-defaulted, incl. name / categoryId."""
-    cls = build_mutation_input(product_models.Item, operation_kind=PARTIAL, primary_type=ItemType)
-    fields = _field_map(cls)
-    for name in (
+@pytest.mark.parametrize(
+    "name",
+    [
         "name",
         "description",
         "category_id",
         "is_private",
-    ):
-        assert _is_optional(fields[name]), name
-        assert _default_of(fields[name]) is UNSET, name
+    ],
+    ids=[
+        "name",
+        "description",
+        "relation",
+        "privacy",
+    ],
+)
+def test_partial_input_all_fields_optional_and_unset(name: str) -> None:
+    """ItemPartialInput: every field optional + UNSET-defaulted, incl. name / categoryId."""
+    cls = build_mutation_input(product_models.Item, operation_kind=PARTIAL, primary_type=ItemType)
+    fields = _field_map(cls)
+    assert _is_optional(fields[name]), name
+    assert _default_of(fields[name]) is UNSET, name
 
 
 def test_create_input_name_is_canonical_model_input() -> None:
@@ -666,14 +666,6 @@ def test_annotate_queryset_relation_packages_id_type_and_related_model() -> None
     assert python_attr == "targets"
     assert annotation == list[strawberry.ID]
     assert related_model is relay_model
-
-
-def test_form_and_serializer_column_less_relation_share_queryset_annotation() -> None:
-    """Form and serializer column-less relation helpers import the same owner."""
-    assert module_binding(form_inputs, "annotate_queryset_relation") is annotate_queryset_relation
-    assert (
-        module_binding(ser_converter, "annotate_queryset_relation") is annotate_queryset_relation
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -817,16 +809,6 @@ def test_model_column_write_annotation_maps_file_and_scalar() -> None:
         "MediaSpecimenInput",
         primary_of=lambda _model: None,
     ) == convert_scalar(label_field, "MediaSpecimenInput", force_nullable=False)
-
-
-def test_form_and_serializer_column_kind_share_model_column_owner() -> None:
-    """Form reverse-map kind and serializer column resolve import the same owners."""
-    assert module_binding(form_inputs, "model_column_write_kind") is model_column_write_kind
-    assert module_binding(ser_converter, "model_column_write_kind") is model_column_write_kind
-    assert (
-        module_binding(ser_converter, "model_column_write_annotation")
-        is model_column_write_annotation
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -1282,24 +1264,31 @@ def test_type_name_digit_boundary_narrowings_stay_distinct() -> None:
     assert "input DigitBoundaryField2Input" in sdl
 
 
-def test_type_name_other_legal_boundaries_do_not_collide() -> None:
+@pytest.mark.parametrize(
+    ("left_field", "right_field"),
+    [("a_b", "ab"), ("field2_x", "field2x"), ("fooBar", "foobar")],
+    ids=["underscore", "digit-underscore", "capitalization"],
+)
+def test_type_name_other_legal_boundaries_do_not_collide(
+    left_field: str,
+    right_field: str,
+) -> None:
     """Underscores after digits, collapsed letters, and capitals remain injective."""
     full = ("not_the_narrowed_set",)
 
-    for left_field, right_field in (("a_b", "ab"), ("field2_x", "field2x"), ("fooBar", "foobar")):
-        left = mutation_input_type_name(
-            product_models.Item,
-            CREATE,
-            (left_field,),
-            full_field_names=full,
-        )
-        right = mutation_input_type_name(
-            product_models.Item,
-            CREATE,
-            (right_field,),
-            full_field_names=full,
-        )
-        assert left != right
+    left = mutation_input_type_name(
+        product_models.Item,
+        CREATE,
+        (left_field,),
+        full_field_names=full,
+    )
+    right = mutation_input_type_name(
+        product_models.Item,
+        CREATE,
+        (right_field,),
+        full_field_names=full,
+    )
+    assert left != right
 
 
 def _empty_input_message(kind: str, model_name: str) -> str:
@@ -2060,16 +2049,6 @@ def test_field_error_is_public_export() -> None:
     assert django_strawberry_framework.FieldError is FieldError
     assert FieldErrorFromPackage is FieldError
     assert "FieldError" in django_strawberry_framework.__all__
-
-
-def test_field_error_payload_uses_a_strawberry_type() -> None:
-    """Sanity: the payload + FieldError are real ``@strawberry.type`` classes."""
-    assert hasattr(FieldError, "__strawberry_definition__")
-    payload = build_payload_type("X", object_type=ItemType)
-    # ``strawberry.type`` decoration is detectable via the definition marker.
-    assert hasattr(payload, "__strawberry_definition__")
-    # Guard against accidental input-vs-type confusion: payloads are output types.
-    assert not strawberry.type(payload).__strawberry_definition__.is_input
 
 
 def test_editable_input_fields_normalizes_its_declared_sequences() -> None:
