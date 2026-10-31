@@ -35,6 +35,10 @@ an array map through the generic JSON helper and then calls ``.items()`` on it,
 or lets malformed path values escape as low-level traversal errors. The delegates
 turn those client-input failures into Strawberry's controlled ``400`` while
 leaving accepted multipart behavior and non-structural consumer failures alone.
+A deep ``operations`` document's parse refusal is pinned over both HTTP views in
+``examples/fakeshop/test_query/test_transport_api.py``; the package rows keep delegate
+installation, the native-reason literal, structurally invalid maps and parser failures
+outside the upload utility.
 
 And it rebinds the ``strawberry.relay.types`` connection-page check
 ``ListConnection.resolve_connection`` calls, so a page whose ``edges`` /
@@ -804,39 +808,6 @@ def test_patched_parse_query_params_translates_a_deep_param(
     assert excinfo.value.status_code == 400
     assert excinfo.value.reason == patches._UPSTREAM_JSON_PARSE_REASON
     assert type(excinfo.value.__cause__) is RecursionError
-
-
-def test_patched_sync_parse_multipart_translates_a_deep_operations_document(
-    deepcopy_overflow_operations_text: str,
-) -> None:
-    """The upload utility's ``copy.deepcopy`` recursion becomes its own 400.
-
-    A valid-JSON ``operations`` document whose value nesting exceeds Python's
-    recursion limit parses cleanly (so the envelope guard passes it) and then
-    overflows the utility's unconditional ``copy.deepcopy`` - inside the very
-    frame the provenance check scopes by, hence a client-input translation to
-    the multipart-parse ``400``, not a server-bug ``500``.
-    """
-    request = _sync_request(deepcopy_overflow_operations_text, "{}", {})
-
-    with pytest.raises(HTTPException) as excinfo:
-        patches._patched_sync_parse_multipart(_MultipartView(), request)
-
-    assert excinfo.value.status_code == 400
-    assert excinfo.value.reason == patches._UPSTREAM_MULTIPART_PARSE_REASON
-
-
-async def test_patched_async_parse_multipart_translates_a_deep_operations_document(
-    deepcopy_overflow_operations_text: str,
-) -> None:
-    """The async delegate scopes the deepcopy recursion identically."""
-    request = _async_request(deepcopy_overflow_operations_text, "{}", {})
-
-    with pytest.raises(HTTPException) as excinfo:
-        await patches._patched_async_parse_multipart(_AsyncMultipartView(), request)
-
-    assert excinfo.value.status_code == 400
-    assert excinfo.value.reason == patches._UPSTREAM_MULTIPART_PARSE_REASON
 
 
 def _relay_resolver_function() -> object:

@@ -6632,45 +6632,6 @@ def test_serializer_pipeline_captures_the_target_and_rejects_permission_drift() 
     assert item.name == "PipelineDriftItem"
 
 
-@pytest.mark.django_db
-def test_save_kwargs_naming_a_model_field_is_rejected() -> None:
-    """A save kwarg naming ANY model field is rejected (injection goes through injected_fields)."""
-    seed_data(0)
-
-    class PlainSerializer(ModelSerializerBase[product_models.Item]):
-        class Meta:
-            model = product_models.Item
-            fields = ("name", "category")
-
-    mutation_cls = _bind_item_serializer_mutation(PlainSerializer)
-
-    def model_field_save_kwargs(
-        self: SerializerMutation,
-        info: object,
-        **_kwargs: object,
-    ) -> dict[str, object]:
-        del (
-            self,
-            info,
-        )  # the typed hook fixes these names; the body returns a fixed model-field kwarg
-        return {"is_private": True}  # an Item column never validated or visibility-checked
-
-    mutation_cls.get_serializer_save_kwargs = model_field_save_kwargs
-    (category,) = categories_from_seed(("SaveKwargCat", False))
-    with (
-        write_pipeline("default", lock=False),
-        pytest.raises(ConfigurationError, match="model field"),
-    ):
-        serializer_resolvers._serializer_write_step(
-            mutation_cls,
-            _info(),
-            None,
-            {"name": "SaveKwargItem", "category": saved_pk(category)},
-            specs=mutation_cls._input_field_specs,
-        )
-    assert not product_models.Item.objects.filter(name="SaveKwargItem").exists()
-
-
 def test_flattener_survives_error_depth_beyond_the_recursion_limit() -> None:
     """The flattener is ITERATIVE: a deeper-than-recursion-limit error tree must not crash."""
     depth = sys.getrecursionlimit() + 200

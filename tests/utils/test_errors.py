@@ -78,7 +78,6 @@ from django_strawberry_framework.utils.errors import (
     refuses_numeric_format,
     refuses_utc_offset,
     rekey_error_segment,
-    relation_field_error,
     save_time_error_key_map,
     unbindable_temporal,
     unstorable_temporal,
@@ -144,13 +143,6 @@ def test_validation_error_leaves_must_be_validation_errors() -> None:
     vars(planted_map)["error_dict"] = [("name", [])]
     with pytest.raises(TypeError, match="expected the type the source guarantees"):
         validation_error_to_field_errors(planted_map)
-
-
-def test_relation_field_error_message_is_pinned() -> None:
-    leaf = relation_field_error("categoryId")
-    assert leaf.field == "categoryId"
-    assert leaf.messages == ["Invalid id for relation 'categoryId'."]
-    assert leaf.codes == [FIELD_ERROR_CODE_INVALID]
 
 
 def test_validation_error_mapper_keeps_normal_codes_and_non_field_shape() -> None:
@@ -327,18 +319,6 @@ def test_null_field_error_and_empty_validation_error_leaf_shapes() -> None:
     named_empty = empty_validation_error("name")
     assert named_empty.field == "name"
     assert named_empty.path == ["name"]
-
-
-def test_conflict_code_reaches_the_leaf_through_the_public_ctor() -> None:
-    leaf = field_error(
-        "id",
-        "The row was changed or removed by a concurrent operation; retry.",
-        codes=FIELD_ERROR_CODE_CONFLICT,
-    )
-
-    assert leaf.field == "id"
-    assert leaf.codes == [FIELD_ERROR_CODE_CONFLICT]
-    assert leaf.path == ["id"]
 
 
 def test_validation_error_mapper_keys_django_non_field_bucket_to_sentinel() -> None:

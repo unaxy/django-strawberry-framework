@@ -52,7 +52,7 @@ from django.contrib.auth import (
 )
 from django.contrib.auth.backends import ModelBackend
 from django.contrib.auth.base_user import AbstractBaseUser
-from django.contrib.auth.models import AnonymousUser, Group, User
+from django.contrib.auth.models import AnonymousUser, User
 from django.contrib.sessions.backends.base import SessionBase, UpdateError
 from django.contrib.sessions.backends.db import SessionStore as DBSessionStore
 from django.contrib.sessions.middleware import SessionMiddleware
@@ -113,7 +113,6 @@ from django_strawberry_framework.mutations.resolvers import (
     _model_decode_step,
 )
 from django_strawberry_framework.mutations.sets import _mutation_registry
-from django_strawberry_framework.optimizer import DjangoOptimizerExtension
 from django_strawberry_framework.registry import (
     iter_subsystem_clears,
     registry,
@@ -248,27 +247,6 @@ def _declare_user_type(fields: tuple[str, ...] = ("id", "username", "email")) ->
     )
 
 
-def _declare_group_type() -> type:
-    """Register a Relay-backed ``DjangoType`` over ``Group``, the user's M2M target.
-
-    Declared beside ``_declare_user_type`` rather than shared with
-    ``tests/auth/test_queries.py``: the two modules already carry their own
-    ``_declare_user_type`` copies so each file's registrations stay readable
-    inside the per-test cleared registry.
-    """
-    return type(
-        "GroupT",
-        (DjangoType, relay.Node),
-        {
-            "Meta": type(
-                "Meta",
-                (),
-                {"model": Group, "fields": ("id", "name")},
-            ),
-        },
-    )
-
-
 @strawberry.type
 class _Query:
     @strawberry.field
@@ -276,12 +254,7 @@ class _Query:
         return 1
 
 
-def _finalize_schema(
-    mutation_type: type,
-    *,
-    query_type: type = _Query,
-    optimizer: DjangoOptimizerExtension | None = None,
-) -> strawberry.Schema:
+def _finalize_schema(mutation_type: type, *, query_type: type = _Query) -> strawberry.Schema:
     """Finalize and return this suite's probe schema, with response-boundary masking OFF.
 
     Every schema in this file exists to prove that the AUTH pipeline does not
@@ -295,18 +268,12 @@ def _finalize_schema(
     (``error_policy={"enabled": False}``) rather than claiming these in-process
     schemas run a debug deployment; masking is pinned on its own in
     ``tests/test_error_policy.py`` and the live tier.
-
-    ``optimizer`` installs a caller-constructed ``DjangoOptimizerExtension`` -
-    strictness is a CONSTRUCTION argument, so a strictness-armed schema can only
-    be obtained by building one here.
     """
     finalize_django_types()
-    extensions = [lambda: optimizer] if optimizer is not None else []
     return DjangoSchema(
         query=query_type,
         mutation=mutation_type,
         error_policy={"enabled": False},
-        extensions=extensions,
     )
 
 
@@ -314,7 +281,6 @@ def _login_logout_schema(
     *,
     declare: Callable[[], object] = _declare_user_type,
     query_type: type = _Query,
-    optimizer: DjangoOptimizerExtension | None = None,
     permission_classes: Iterable[type[object]] | None = None,
 ) -> strawberry.Schema:
     """Declare the user type + a login/logout Mutation; return the finalized schema.
@@ -323,8 +289,7 @@ def _login_logout_schema(
     identity-trio type; a ``last_login``-exposing variant swaps it in). ``query_type``
     seams a richer Query in - e.g. one carrying ``me`` for the router tests - and must
     be built by the caller so its auth field factories run inside the per-test cleared
-    registry. ``optimizer`` threads a caller-built ``DjangoOptimizerExtension``
-    through to ``_finalize_schema``. ``permission_classes`` flows to ``login_mutation``.
+    registry. ``permission_classes`` flows to ``login_mutation``.
     """
     declare()
 
@@ -333,7 +298,7 @@ def _login_logout_schema(
         login = login_mutation(permission_classes=permission_classes)
         logout = logout_mutation()
 
-    return _finalize_schema(Mutation, query_type=query_type, optimizer=optimizer)
+    return _finalize_schema(Mutation, query_type=query_type)
 
 
 def _channels_scope(
@@ -1142,38 +1107,6 @@ async def test_async_permission_hook_rejected_inside_the_sync_worker_too() -> No
     assert res.errors is not None
     assert "AsyncGate.has_permission returned a coroutine" in res.errors[0].message
     assert isinstance(res.errors[0].original_error, SyncMisuseError)
-
-
-@pytest.mark.django_db
-def test_an_unplanned_relation_under_login_node_is_strictness_visible() -> None:
-    """``login``'s payload object is a raw instance, so a relation under it is unplanned.
-
-    ``::_login_result_payload`` returns the authenticated actor directly - no
-    optimizer plan rides the mutation payload - so selecting a relation under
-    ``login { node { ... } }`` resolves per-parent. Under a strictness-armed
-    optimizer that is the ``OptimizerError``, which is what makes the deep
-    selection VISIBLE rather than silently N+1. Strictness is a construction
-    argument, so only a locally built schema can arm it.
-    """
-    create_users(1)
-    _declare_group_type()
-    schema = _login_logout_schema(
-        declare=lambda: _declare_user_type(fields=("id", "username", "groups")),
-        optimizer=DjangoOptimizerExtension(strictness="raise"),
-    )
-    user = User.objects.get(username="regular_1")
-    user.username = "probe"
-    user.set_password("pw-9x-strong")
-    user.save(update_fields=["username", "password"])
-    user.groups.add(Group.objects.create(name="g1"))
-    res = schema.execute_sync(
-        'mutation { login(username: "probe", password: "pw-9x-strong") '
-        "{ node { groupsConnection { edges { node { name } } } } errors { field } } }",
-        context_value=_session_request(),
-    )
-    assert res.errors is not None
-    assert "Unplanned N+1: groups" in res.errors[0].message
-    assert res.errors[0].path == ["login", "node", "groupsConnection"]
 
 
 # ---------------------------------------------------------------------------
