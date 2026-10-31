@@ -1430,8 +1430,8 @@ class DjangoConnection(relay.ListConnection[NodeType], Generic[NodeType]):  # py
         The count-selection inspection sits in the ``_consume_window`` argument
         list, so it runs only AFTER the guard and AFTER the selected-fields
         prime below - a malformed pagination request answers with the guard's
-        ``PaginationArgumentError`` having read only the schema config off
-        ``info`` (the ``relay_max_results`` clamp runs first;
+        ``PaginationArgumentError`` before the deadline check or the selected-fields
+        prime runs (only the ``relay_max_results`` / ``max_page_size`` clamp runs first;
         ``test_first_and_last_guard_on_generated_subclass``), and the bare shape
         short-circuits it away entirely. The window branch then runs BEFORE the
         count work, so the ``_WindowedConnectionRows`` marker - which is NOT a
@@ -1441,7 +1441,7 @@ class DjangoConnection(relay.ListConnection[NodeType], Generic[NodeType]):  # py
         (spec-033 Decision 5). Marker rows directly serve planned ``limit == 0`` /
         overshot-``offset`` pages; only unservable wrappers recover through
         ``_consume_fallback``. Pins:
-        ``test_fast_path_total_count_marker_bypasses_non_queryset_guard`` /
+        ``test_fast_path_total_count_from_annotation_no_query`` /
         ``test_fast_path_ambiguous_empty_served_from_marker_row`` /
         ``test_fast_path_last_zero_serves_the_first_zero_page``.
 

@@ -281,10 +281,15 @@ def test_live_malformed_before_cursor_is_graphql_error() -> None:
 
 
 @pytest.mark.django_db
-def test_live_first_and_last_together_is_graphql_error() -> None:
-    """``first`` + ``last`` together is the package's mutual-exclusivity GraphQLError."""
+@pytest.mark.parametrize(
+    "field",
+    ["allItems", "allLibraryGenresConnection"],
+    ids=["without-total-count", "with-total-count"],
+)
+def test_live_first_and_last_together_is_graphql_error(field: str) -> None:
+    """Both generated connection shapes reject ``first`` and ``last`` together."""
     seed_data(1)
-    payload = graphql_payload("{ allItems(first: 1, last: 1) { edges { node { id } } } }")
+    payload = graphql_payload(f"{{ {field}(first: 1, last: 1) {{ edges {{ node {{ id }} }} }} }}")
     assert "errors" in payload
     assert payload["data"] is None, payload
     assert any(
