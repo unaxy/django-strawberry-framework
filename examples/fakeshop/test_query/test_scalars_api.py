@@ -29,6 +29,7 @@ from django.urls import path
 from graphql_client import (
     JSONObject,
     RecordCompiledSql,
+    batched_pk_lookup,
     json_at,
     json_list,
     json_object,
@@ -1643,7 +1644,9 @@ def test_scalars_optimizer_o6_downgrade_to_prefetch_for_custom_get_queryset_in_h
     tag_sql = relevant[1]
     assert "scalarspecimentag" in tag_sql.lower(), tag_sql
     assert "active" in tag_sql.lower(), tag_sql
-    assert " IN " in tag_sql.upper(), tag_sql
+    assert batched_pk_lookup(tag_sql, "scalars_scalarspecimentag") == {active.pk, inactive.pk}, (
+        tag_sql
+    )
 
 
 @pytest.mark.django_db

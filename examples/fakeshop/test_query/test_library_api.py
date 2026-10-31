@@ -62,6 +62,7 @@ from graphql_client import (
     JSONObject,
     JSONValue,
     RecordCompiledSql,
+    batched_pk_lookup,
     is_json_list,
     is_json_object,
     json_at,
@@ -552,7 +553,8 @@ def test_library_optimizer_selects_book_shelf_in_http_query() -> None:
     shelf_sql = _sql_from_table(captured, "library_shelf")
     assert len(book_sql) == 1, captured.captured_queries
     assert len(shelf_sql) == 1, captured.captured_queries
-    assert " IN (" in shelf_sql[0].upper(), shelf_sql
+    shelf_pks = set(models.Shelf.objects.values_list("pk", flat=True))
+    assert batched_pk_lookup(shelf_sql[0], "library_shelf") == shelf_pks, shelf_sql
 
 
 @pytest.mark.django_db
@@ -786,7 +788,8 @@ def test_library_consumer_prefetched_queryset_cooperates_with_optimizer_over_htt
     assert len(root_sql) == len(shelf_sql) == len(genre_sql) == 1, captured.captured_queries
     assert "library_shelf" not in root_sql[0], root_sql
     assert "\"topic\" = 'secret'" in shelf_sql[0], shelf_sql
-    assert " IN (" in shelf_sql[0].upper(), shelf_sql
+    shelf_pks = set(models.Shelf.objects.values_list("pk", flat=True))
+    assert batched_pk_lookup(shelf_sql[0], "library_shelf") == shelf_pks, shelf_sql
     assert "library_book_genres" in genre_sql[0], genre_sql
     assert " IN (" in genre_sql[0].upper(), genre_sql
 
