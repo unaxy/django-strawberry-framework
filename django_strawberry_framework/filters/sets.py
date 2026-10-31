@@ -203,6 +203,7 @@ from .base import (
     copied_declared_filter,
     copied_form_field,
     membership_in_filter_class,
+    refuse_identityless_relation,
 )
 from .form_binding import FilterFormBindings, NormalizedFormValue, bound_filter_form_class
 from .inputs import (
@@ -3289,12 +3290,17 @@ class FilterSet(
         published table: ``base_filters`` (every instance's copies), the
         snapshot's candidate rows, flat copies and form keys, and every package
         read (``_filter_table``). A projected copy the set does not hold is
-        refused first (``_reject_foreign_projection``). A read of the set's table
+        refused first (``_reject_foreign_projection``), and so is a GlobalID filter
+        on a relation no row identity is compared on
+        (``filters/base.py::refuse_identityless_relation``). A read of the set's table
         while it publishes answers the table being published.
         """
         table = OrderedDict(cls._reshape(expansion))
         for filter_name, filter_instance in table.items():
             cls._reject_foreign_projection(filter_name, filter_instance)
+            # An expanded copy is its declaring set's filter, refused when that set published.
+            if _expansion_record(filter_instance) is None:
+                refuse_identityless_relation(cls, filter_name, filter_instance)
         model = cls._meta.model
         candidates: dict[str, CandidateFilterMetadata] = {}
         if model is not None:

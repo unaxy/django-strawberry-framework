@@ -85,7 +85,7 @@ from django_strawberry_framework.sets_mixins import (
     LazyRelatedClassMixin as LazyRelatedClassMixin,  # noqa: PLC0414 - kept re-export path
 )  # re-exported via filters.__init__
 from django_strawberry_framework.sets_mixins import RelatedSetTargetMixin
-from django_strawberry_framework.types.converters import generated_output_field
+from django_strawberry_framework.types.converters import _field_label, generated_output_field
 from django_strawberry_framework.types.definition import DjangoTypeDefinition, _resolves_id_off_pk
 
 # ``filters -> types`` is the documented safe (acyclic) import direction:
@@ -1664,8 +1664,9 @@ def _globalid_target(filter_instance: Filter) -> _GlobalIDTarget | None:
     else:
         owner = set_bound_definition(truth.class_of(parent))
         relation_only = owner is None
-    start_model: type[models.Model] | None = None
-    if owner is None:
+    if owner is not None:
+        start_model = owner.model
+    else:
         # Rows no definition answers for (an unbound set, an undeclared hop into a model no
         # type exposes) still carry relation leaves generated from the registry primary of
         # their relation's model, so they validate from that primary once the registry is
@@ -1679,7 +1680,7 @@ def _globalid_target(filter_instance: Filter) -> _GlobalIDTarget | None:
         if relation_only:
             owner = registry.get_definition(registry.get(model))
     field_name: str | None = getattr(filter_instance, "field_name", None)
-    resolved = _resolve_globalid_target(owner, field_name, start_model=start_model)
+    resolved = _resolve_globalid_target(owner, start_model, field_name)
     if resolved is None:
         return None
     definition, row_path = resolved
@@ -1722,15 +1723,15 @@ def resolve_globalid_target_definition(
     the registry as stable (``stable=True``) and resolves the target the request-time
     walk resolves once the registry is finalized.
     """
-    resolved = _resolve_globalid_target(owner, field_name, stable=True)
+    resolved = _resolve_globalid_target(owner, owner.model, field_name, stable=True)
     return None if resolved is None else resolved[0]
 
 
 def _resolve_globalid_target(
     owner: DjangoTypeDefinition | None,
+    start_model: type[models.Model],
     field_name: str | None,
     *,
-    start_model: type[models.Model] | None = None,
     stable: bool = False,
 ) -> tuple[DjangoTypeDefinition, str] | None:
     """Resolve ``field_name`` from ``owner`` to ``(target definition, row path)``.
@@ -1744,8 +1745,9 @@ def _resolve_globalid_target(
     ``DjangoType`` exposes continues on that model, so the target is the terminal
     relation's ``registry.get`` exactly as generation types the leaf (a
     ``shelf__branch`` key with no ``Shelf`` type validates against ``Branch``'s);
-    a primary key ending on such a model resolves nothing. With no ``owner`` the
-    walk starts on ``start_model`` (rows no definition answers for). Continuing past a
+    a primary key ending on such a model resolves nothing. The walk starts on
+    ``start_model``: the owner's own model, or the model of rows no definition answers
+    for when there is no ``owner``. Continuing past a
     hop no definition resolves waits for a stable registry: ``stable`` (the
     finalizer's build-time audit, which runs once every type is collected and its
     strategy stamped, before ``registry.is_finalized()`` flips) or a finalized
@@ -1756,9 +1758,7 @@ def _resolve_globalid_target(
         return None
 
     current_def: DjangoTypeDefinition | None = owner
-    current_model = owner.model if owner is not None else start_model
-    if current_model is None:
-        return None
+    current_model = start_model
     segments = field_name.split("__")
 
     for i, raw_segment in enumerate(segments):
@@ -2139,8 +2139,9 @@ def _unresolved_target_node_id(
     composite primary key): no single node id can name a row, so every id answers
     ``GLOBALID_INVALID`` too. A ``lookup_expr`` that is no lookup ``field`` registers
     (one continuing the path, ``lookup_expr="code"``, or applying a transform) compares
-    another column, and a relation into a model that is not resolved has none; both pass
-    the node id through unchanged. A ``GeneratedField``'s computed column answers its
+    another column and passes the node id through unchanged. A relation linked by no
+    column (a ``GenericForeignKey``) never reaches here: its set refused the filter when
+    it published (``refuse_identityless_relation``). A ``GeneratedField``'s computed column answers its
     lookups from the registry Django's query resolves them on, its ``output_field``
     instance (``utils/relations.py::lookup_registry``, the generated field read back by
     ``generated_column_source``), so a lookup a project registers there is one it registers.
@@ -2149,8 +2150,6 @@ def _unresolved_target_node_id(
     if lookup_registry(source or field).get_lookup(filter_instance.lookup_expr) is None:
         return node_id
     columns = _compared_columns(filter_instance, field)
-    if columns is None:
-        return node_id
     suffix = "" if index is None else f" at index {index}"
     if len(columns) != 1:
         raise GraphQLError(
@@ -2456,10 +2455,7 @@ def model_choice_identity_column(
     return _model_identity_column(model, filter_instance.extra.get("to_field_name"))
 
 
-def _compared_columns(
-    filter_instance: Filter,
-    field: ModelField | None,
-) -> tuple[ConcreteField, ...] | None:
+def _compared_columns(filter_instance: Filter, field: ModelField) -> tuple[ConcreteField, ...]:
     """Return the columns a raw identity compared on ``field`` meets, each the column it stores.
 
     ``field`` is what ``filter_instance``'s ORM path names (``_bound_model_field``). A
@@ -2481,24 +2477,24 @@ def _compared_columns(
     key for a reverse relation and an ordinary link, the link's column for a
     ``ForeignObject`` off the pk and for a many-to-many whose through foreign key onto
     the target has a ``to_field``, and every carrier's target for a multi-column link.
-    ``None`` for a path naming no field and for a relation whose target is not a
-    resolved model.
+    No column for a relation Django builds no join for (a ``GenericForeignKey``, whose
+    target is no one model): no value compares on it, so a set holding a GlobalID
+    filter on one refuses it when it publishes (``refuse_identityless_relation``); a
+    raw-key leaf on one is refused by its input build, or matches no row unserved.
     """
-    if field is None:
-        return None
     marked = bool(getattr(filter_instance, _GLOBALID_RELATION_PK_ATTR, False))
     if isinstance(field, models.ForeignKey) or not field.is_relation:
         if field.is_relation and marked:
             column = relation_identity_column(field)
-            return None if column is None else (column,)
+            return () if column is None else (column,)
         column = stored_value_column(field)
-        return (column,) if isinstance(column, models.Field) else None
+        return (column,) if isinstance(column, models.Field) else ()
     related = getattr(field, "related_model", None)
     if not is_model_class(related) or not isinstance(
         field,
         (models.ForeignObject, models.ManyToManyField, models.ForeignObjectRel),
     ):
-        return None
+        return ()
     targets = related._meta.pk_fields if marked else field.path_infos[-1].target_fields
     return tuple(stored_value_column(target) for target in targets)
 
@@ -2512,15 +2508,16 @@ def _coerce_relation_identity(filter_instance: Filter, value: object, alias: str
     queryset's database ``alias`` cannot bind, out of the column's range there, wrong
     shape) identifies no row, the same verdict ``_identifying_members`` gives an integer
     ``in`` member; the column's own validators are not run, so a key they would refuse
-    still matches a row that holds it. A relation linked by more than one column
-    (``_compared_columns``) has no single column one value can name, so every value
+    still matches a row that holds it. A relation linked by more than one column, or by
+    none (``_compared_columns``), has no single column one value can name, so every value
     identifies no row. A filter whose path names no field (``_bound_model_field``: no
     model to walk, or nothing on it) has no column and passes the value through
     unchanged.
     """
-    columns = _compared_columns(filter_instance, _bound_model_field(filter_instance))
-    if columns is None:
+    field = _bound_model_field(filter_instance)
+    if field is None:
         return value
+    columns = _compared_columns(filter_instance, field)
     if len(columns) != 1:
         return None
     return coerce_field_value_or_none(columns[0], value, alias=alias)
@@ -2623,6 +2620,38 @@ class RelationPkMultipleFilter(Filter):
             return _match_none_queryset(self, qs)
         field_name = _marked_pk_field_name(self) or self.field_name
         return _apply_lookups(self, qs, {f"{field_name}__in": kept})
+
+
+def refuse_identityless_relation(
+    filterset_cls: type[BaseFilterSet],
+    filter_name: str,
+    filter_instance: Filter,
+) -> None:
+    """Refuse a GlobalID filter whose path names a relation no row identity is compared on.
+
+    A ``GlobalIDFilter`` / ``GlobalIDMultipleChoiceFilter`` with no resolvable target
+    compares its node id on the columns ``_compared_columns`` reads off the relation its
+    ``field_name`` names (``_unresolved_target_node_id``). A relation Django builds no
+    join for, a ``GenericForeignKey`` (a content type and an object id, no one target
+    model), has none, and Django refuses a queryset filter through it with
+    ``FieldError``, so the declaration could answer no request.
+    ``filters/sets.py::FilterSet._publish_filters`` asks this of every leaf a set
+    publishes: a set a type serves refuses it when the schema builds, an unserved set
+    applied over JSON at its first use. A path naming no field is not read here.
+    """
+    if not isinstance(filter_instance, (GlobalIDFilter, GlobalIDMultipleChoiceFilter)):
+        return
+    field = _filterset_model_field(filterset_cls, filter_instance)
+    if field is None or not field.is_relation or _compared_columns(filter_instance, field):
+        return
+    raise ConfigurationError(
+        f"FilterSet {truth.qualname(filterset_cls)}: {truth.kind(filter_instance)} "
+        f"{filter_name!r} has field_name {_bound_field_name(filter_instance)!r}, which names "
+        f"{_field_label(field)}, a {truth.kind(field)}: Django filters no queryset through "
+        "it, so no related row's identity can be compared on it. Filter through the "
+        "GenericRelation that reverses it on the related model, or on the content type and "
+        "object id columns it reads.",
+    )
 
 
 def _filter_set_class() -> type[FilterSet]:

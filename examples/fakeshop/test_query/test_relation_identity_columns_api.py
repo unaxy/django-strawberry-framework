@@ -744,6 +744,14 @@ _HIDDEN = object()
             id="stamp-not-below-range",
         ),
         pytest.param(_HttpStampHopKey, [_STAMP_VISIBLE], False, ["alpha"], id="stamp-visible"),
+        pytest.param(_HttpStampHopKey, [None], False, [], id="stamp-null"),
+        pytest.param(
+            _HttpStampHopKey,
+            [None, _STAMP_VISIBLE],
+            False,
+            ["alpha"],
+            id="stamp-null-beside-visible",
+        ),
         pytest.param(_HttpStampHopKey, [_STAMP_HIDDEN], False, _HIDDEN, id="stamp-hidden"),
         pytest.param(
             _HttpStampHopKey,
@@ -798,7 +806,10 @@ def test_rich_relation_key_values_keep_membership_and_visibility_semantics(
     expected: object,
     mode: str,
 ) -> None:
-    """Unrepresentable keys drop beside matching members; hidden and missing keys stay distinct."""
+    """Unrepresentable keys drop beside matching members; hidden and missing keys stay distinct.
+
+    A JSON ``null`` member names no row, as a value the column cannot hold does.
+    """
     relation = _HOP_KEY_PREFIXES[target] + "_links"
     filterset, targets = _filterset(_HttpHopKeyOwner, relation, mode)
     leaf: JSONObject = {relation: {"exact": _wire_members(members)}}
