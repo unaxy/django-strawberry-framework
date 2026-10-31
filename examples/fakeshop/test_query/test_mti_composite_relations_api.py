@@ -140,7 +140,7 @@ async def test_async_forward_m2m_reads_an_mti_ancestor_prefetch_over_http(
     """An ancestor-served list remains async-safe, and a hook rechecks only its hidden rows.
 
     The identity-hook control serves Hidden; the hiding hook must remove it
-    while retaining Alpha/Beta and the second parent's Beta. Below Django 6.1
+    while retaining Alpha/Beta and the second parent's Beta. Below Django 6.0
     the upstream manager does not reuse an ancestor's cache, but wire data and
     hook visibility still hold; the table-specific cost reflects that tier.
     """
@@ -161,15 +161,15 @@ async def test_async_forward_m2m_reads_an_mti_ancestor_prefetch_over_http(
         payload = await _post_async(schema, _MTI_TAGS_QUERY)
 
         assert payload == _expected_shops(first_shop_tags)
-        tag_reads = 3 if hide_prefix is not None or django.VERSION < (6, 1) else 1
+        tag_reads = 3 if hide_prefix is not None or django.VERSION < (6, 0) else 1
         _assert_mti_cost(statements, tag_reads=tag_reads)
     finally:
         await sync_to_async(drop_mti_tag_tables)(*models_in_order)
 
 
 @pytest.mark.skipif(
-    django.VERSION < (6, 1),
-    reason="Django below 6.1 queries a child's M2M instead of reusing its ancestor prefetch",
+    django.VERSION < (6, 0),
+    reason="Django below 6.0 queries a child's M2M instead of reusing its ancestor prefetch",
 )
 @pytest.mark.django_db(transaction=True)
 def test_sync_forward_m2m_reuses_the_mti_ancestor_prefetch_over_http() -> None:

@@ -115,9 +115,11 @@ class RpGenericTag(models.Model):
     """
 
     name: _Text = models.TextField()
+    # DO_NOTHING, not CASCADE: the table exists only inside ``relation_fixture_tables``,
+    # so a cascade would make every ContentType delete in the session query a missing table.
     content_type: models.ForeignKey[ContentType | Combinable, ContentType] = models.ForeignKey(
         ContentType,
-        on_delete=models.CASCADE,
+        on_delete=models.DO_NOTHING,
         related_name="+",
     )
     object_id: _PositiveInt = models.PositiveIntegerField()

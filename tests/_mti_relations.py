@@ -115,7 +115,7 @@ def _shops_reached_through_prefetched_places(place_model: type[Model]) -> list[M
     """Prefetch ``tags`` on the PARENT rows, then walk down to each child.
 
     ``place.mtishop`` caches the parent on the child's ``mtiplace_ptr``. From
-    Django 6.1 the child's ``tags`` manager answers from that ancestor's
+    Django 6.0 the child's ``tags`` manager answers from that ancestor's
     prefetch, so its ``all()`` is an EVALUATED queryset while the child's own
     ``_prefetched_objects_cache`` holds nothing.
     """
