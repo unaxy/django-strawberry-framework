@@ -1,11 +1,8 @@
-"""Service-layer gap coverage for branches the main service suite leaves open.
+"""Kanban service tests for database consistency, card placement and tracked-path state.
 
-Kept in a separate module from ``test_services.py`` (concurrently owned) and
-scoped to WS-3D's list: the ``_database_alias`` multi-database guard, the
-``_target_number`` ``after`` branch, the ``create_card_from_spec`` rejection
-branches (duplicate title / born-done / dependencies-in-sections), and the
-``sync_tracked_paths_from_constants`` current<->historical flip in both
-directions.
+A card's related objects belong to one database, its requested position follows
+its anchor, invalid specifications write nothing, and syncing the tracked set
+updates historical/current paths without changing planned ones.
 """
 
 import pytest

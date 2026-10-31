@@ -470,15 +470,16 @@ def test_move_card_number_does_not_churn_neighbor_updated_date(
 
 
 @pytest.mark.django_db
-def test_move_card_number_rejects_out_of_range_target(three_cards: list[models.Card]) -> None:
+@pytest.mark.parametrize("number", [0, 4], ids=["below-first", "above-last"])
+def test_move_card_number_rejects_out_of_range_target(
+    three_cards: list[models.Card],
+    number: int,
+) -> None:
     first, _second, _third = three_cards
 
     with pytest.raises(services.KanbanServiceError, match="between 1 and 3") as excinfo:
-        services.move_card_number(first, 4)
+        services.move_card_number(first, number)
     assert excinfo.value.code == "card_number_out_of_range"
-
-    with pytest.raises(services.KanbanServiceError, match="between 1 and 3"):
-        services.move_card_number(first, 0)
 
     assert _numbers_by_title("Board card 1", "Board card 2", "Board card 3") == [1, 2, 3]
 
@@ -504,16 +505,22 @@ def test_move_card_number_rejects_unsaved_card() -> None:
 
 
 @pytest.mark.django_db
-def test_move_card_number_rejects_dependency_reordering(three_cards: list[models.Card]) -> None:
+@pytest.mark.parametrize(
+    "moving",
+    ["dependency", "dependent"],
+    ids=["dependency-after-dependent", "dependent-before-dependency"],
+)
+def test_move_card_number_rejects_dependency_reordering(
+    three_cards: list[models.Card],
+    moving: str,
+) -> None:
     first, second, _third = three_cards
     services.add_dependency(second, first)
 
+    card, target = (first, 3) if moving == "dependency" else (second, 1)
     with pytest.raises(services.KanbanServiceError, match="before dependent") as excinfo:
-        services.move_card_number(first, 3)
+        services.move_card_number(card, target)
     assert excinfo.value.code == "dependency_order"
-
-    with pytest.raises(services.KanbanServiceError, match="before dependent"):
-        services.move_card_number(second, 1)
 
     assert _numbers_by_title("Board card 1", "Board card 2", "Board card 3") == [1, 2, 3]
 
@@ -530,30 +537,27 @@ def test_move_card_number_allows_dependency_preserving_move(
     assert _numbers_by_title("Board card 1", "Board card 3", "Board card 2") == [1, 2, 3]
 
 
-@pytest.mark.django_db
-def test_compact_card_numbers_closes_the_delete_gap(three_cards: list[models.Card]) -> None:
-    _first, second, _third = three_cards
-
-    second.delete()
-
-    assert list(models.Card.objects.order_by("number").values_list("number", flat=True)) == [1, 2]
-
-
 # ---------------------------------------------------------------------------
 # Error codes
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.django_db
-def test_service_error_codes_are_stable() -> None:
+def test_unresolvable_card_error_code_is_stable() -> None:
     with pytest.raises(services.KanbanServiceError) as unresolvable:
         services.resolve_card("no such card")
     assert unresolvable.value.code == "unresolvable_card"
 
+
+@pytest.mark.django_db
+def test_unknown_lookup_error_code_is_stable() -> None:
     with pytest.raises(services.KanbanServiceError) as unknown_lookup:
         services.set_card_status(kf.make_card(), "nope", actor=kf.make_actor())
     assert unknown_lookup.value.code == "unknown_lookup"
 
+
+@pytest.mark.django_db
+def test_missing_required_field_error_code_is_stable() -> None:
     with pytest.raises(services.KanbanServiceError) as missing_field:
         # basedpyright: deliberately ill-typed: proves the required-field guard rejects it
         services.create_card_from_spec({"title": "Codes card"})  # pyright: ignore[reportArgumentType]
@@ -561,13 +565,16 @@ def test_service_error_codes_are_stable() -> None:
 
 
 @pytest.mark.django_db
-def test_tracked_path_error_codes(beta_version: models.TargetVersion) -> None:
+def test_outside_root_tracked_path_error_code(beta_version: models.TargetVersion) -> None:
     card = kf.make_card(title="Code paths card", target_version=beta_version)
 
     with pytest.raises(services.KanbanServiceError) as outside:
         services.set_card_predicted_files(card, ["docs/GLOSSARY.md"])
     assert outside.value.code == "tracked_path_outside_roots"
 
+
+@pytest.mark.django_db
+def test_unknown_tracked_path_error_code(beta_version: models.TargetVersion) -> None:
     done_card = kf.make_card(
         title="Code paths done card",
         target_version=beta_version,
@@ -577,6 +584,10 @@ def test_tracked_path_error_codes(beta_version: models.TargetVersion) -> None:
         services.set_card_changed_files(done_card, ["django_strawberry_framework/not_real.py"])
     assert unknown.value.code == "unknown_tracked_path"
 
+
+@pytest.mark.django_db
+def test_invalid_tracked_path_error_code(beta_version: models.TargetVersion) -> None:
+    card = kf.make_card(title="Code paths card", target_version=beta_version)
     with pytest.raises(services.KanbanServiceError) as invalid:
         services.set_card_predicted_files(card, ["../escape.py"])
     assert invalid.value.code == "invalid_tracked_path"

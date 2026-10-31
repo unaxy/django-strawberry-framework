@@ -264,18 +264,25 @@ def test_load_ledger_refuses_an_invalid_entry(tmp_path: Path, text: str, message
         _ = cts.load_ledger(ledger, _LOCKED)
 
 
-def test_load_locked_reads_only_the_marked_basedpyright_lines(tmp_path: Path) -> None:
-    """Only ``# Locked`` lines inside ``[tool.basedpyright]`` lock a rule; none locked is refused."""
+@pytest.mark.parametrize("marked", [True, False], ids=["locked-rule", "missing-marker"])
+def test_load_locked_reads_only_the_marked_basedpyright_lines(
+    tmp_path: Path,
+    *,
+    marked: bool,
+) -> None:
+    """A marked rule locks; removing its marker is an independent refusal."""
     pyproject = tmp_path / "pyproject.toml"
-    _ = pyproject.write_text(_PYPROJECT)
-
-    assert cts.load_locked(pyproject) == frozenset({"reportRedeclaration"})
-
-    _ = pyproject.write_text(
-        _PYPROJECT.replace('"error"  # Locked\nreportAny', '"error"\nreportAny'),
+    text = (
+        _PYPROJECT
+        if marked
+        else _PYPROJECT.replace('"error"  # Locked\nreportAny', '"error"\nreportAny')
     )
-    with pytest.raises(cts.LedgerError, match="marks no rule"):
-        _ = cts.load_locked(pyproject)
+    pyproject.write_text(text)
+    if marked:
+        assert cts.load_locked(pyproject) == frozenset({"reportRedeclaration"})
+    else:
+        with pytest.raises(cts.LedgerError, match="marks no rule"):
+            cts.load_locked(pyproject)
 
 
 def _tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, files: dict[str, str]) -> Path:

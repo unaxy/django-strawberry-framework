@@ -148,6 +148,7 @@ SUBSCRIPTABLE: dict[str, bool | tuple[int, int]] = {
     "strawberry.http.async_base_view.AsyncBaseHTTPView": True,
     "strawberry.http.sync_base_view.SyncBaseHTTPView": True,
     "strawberry.relay.Edge": True,
+    "strawberry.relay.types.ListConnection": True,
     "strawberry.relay.types.NodeIterableType": True,
     "strawberry.types.Info": True,
     "strawberry.types.info.Info": True,

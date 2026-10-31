@@ -61,8 +61,14 @@ def make_django_type(
 def build_strategy_schema(
     query_cls: type[object],
     strategy: StrategySelection | None,
+    *,
+    schema_class: type[strawberry.Schema],
 ) -> strawberry.Schema:
-    """One ``strawberry.Schema`` over ``query_cls`` running ``strategy``.
+    """One ``schema_class`` over ``query_cls`` running ``strategy``.
+
+    Callers choose their execution boundary explicitly: HTTP acceptance holders
+    use ``DjangoSchema``; the historical in-process benchmark chooses plain
+    ``strawberry.Schema``. There is no implicit plain-schema fallback for a new holder.
 
     ``strategy`` is a ``nested_connection_strategy`` selection (``"windowed"``,
     ``"lateral"``, an instance) mounted on ONE ``DjangoOptimizerExtension`` per
@@ -75,7 +81,7 @@ def build_strategy_schema(
     if strategy is not None:
         optimizer = DjangoOptimizerExtension(nested_connection_strategy=strategy)
         extensions = [lambda: optimizer]
-    return strawberry.Schema(
+    return schema_class(
         query=query_cls,
         config=strawberry_config(),
         extensions=extensions,

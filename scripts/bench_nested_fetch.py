@@ -153,10 +153,24 @@ def _build_schemas(*, lateral: bool = True) -> dict[str, strawberry.Schema]:
             },
         ),
     )
-    schemas = {"windowed": build_strategy_schema(query_cls, "windowed")}
+    schemas = {
+        "windowed": build_strategy_schema(
+            query_cls,
+            "windowed",
+            schema_class=strawberry.Schema,
+        ),
+    }
     if lateral:
-        schemas["lateral"] = build_strategy_schema(query_cls, "lateral")
-    schemas["per-parent"] = build_strategy_schema(query_cls, None)
+        schemas["lateral"] = build_strategy_schema(
+            query_cls,
+            "lateral",
+            schema_class=strawberry.Schema,
+        )
+    schemas["per-parent"] = build_strategy_schema(
+        query_cls,
+        None,
+        schema_class=strawberry.Schema,
+    )
     return schemas
 
 

@@ -371,14 +371,27 @@ def test_memory_db_name_is_a_shared_cache_uri_per_alias(tmp_path: Path) -> None:
     assert name != _bench_common.memory_db_name("shard_b")
 
 
-def test_tracked_database_is_refused_and_other_names_pass(tmp_path: Path) -> None:
-    """Only a NAME resolving to the tracked fixture raises."""
-    with pytest.raises(RuntimeError, match="tracked fixture"):
-        _bench_common.assert_not_tracked_db(_bench_common.TRACKED_DB)
-
-    _bench_common.assert_not_tracked_db(_bench_common.memory_db_name("default"))
-    _bench_common.assert_not_tracked_db(tmp_path / "db.sqlite3")
-    _bench_common.assert_not_tracked_db("fakeshop")
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "tracked",
+        "memory",
+        "scratch",
+        "postgres",
+    ],
+)
+def test_tracked_database_is_refused_and_other_names_pass(tmp_path: Path, shape: str) -> None:
+    """Only the tracked fixture path is refused; each allowed namespace has its own control."""
+    if shape == "tracked":
+        with pytest.raises(RuntimeError, match="tracked fixture"):
+            _bench_common.assert_not_tracked_db(_bench_common.TRACKED_DB)
+    else:
+        names = {
+            "memory": _bench_common.memory_db_name("default"),
+            "scratch": tmp_path / "db.sqlite3",
+            "postgres": "fakeshop",
+        }
+        assert _bench_common.assert_not_tracked_db(names[shape]) is None
 
 
 def test_package_outside_the_running_tree_is_refused(tmp_path: Path) -> None:
@@ -569,12 +582,16 @@ def test_root_row_count_reads_the_first_list_or_connection(
     assert _bench_common.root_row_count(data) == expected
 
 
-def test_parse_variables_accepts_an_object_and_refuses_other_json() -> None:
-    """``--variables`` must be a JSON object."""
-    assert _bench_common.parse_variables('{"first": 2}') == {"first": 2}
-    assert _bench_common.parse_variables(None) is None
-    with pytest.raises(TypeError, match="JSON object"):
-        _bench_common.parse_variables("[1, 2]")
+@pytest.mark.parametrize("shape", ["object", "omitted", "array"])
+def test_parse_variables_accepts_an_object_and_refuses_other_json(shape: str) -> None:
+    """Variables accept an object or omission and refuse a JSON array independently."""
+    if shape == "object":
+        assert _bench_common.parse_variables('{"first": 2}') == {"first": 2}
+    elif shape == "omitted":
+        assert _bench_common.parse_variables(None) is None
+    else:
+        with pytest.raises(TypeError, match="JSON object"):
+            _bench_common.parse_variables("[1, 2]")
 
 
 def test_importtime_parser_reads_times_names_and_depth(

@@ -647,36 +647,37 @@ def test_cited_by_refuses_a_malformed_symbol() -> None:
         check_citations.main(["--cited-by", "widgets.py::1bad"])
 
 
+@pytest.mark.parametrize(
+    ("source", "missing"),
+    [
+        pytest.param("", None, id="all-valid"),
+        pytest.param("docs/SPECS/appx/spec-001-x-rationale.md", "gone", id="archived-companion"),
+        pytest.param("docs/spec-050-y.md", "Widget.retired", id="in-flight-spec"),
+    ],
+)
 def test_a_spec_citing_a_symbol_its_file_no_longer_defines_fails_the_gate(
     tree: Path,
     capsys: pytest.CaptureFixture[str],
+    source: str,
+    missing: str | None,
 ) -> None:
     _write(tree, "docs/SPECS/spec-001-x.md", "archive cites `widgets.py::Widget.render`\n")
-    _write(
-        tree,
-        "docs/SPECS/appx/spec-001-x-rationale.md",
-        "companion cites `widgets.py::build`\n",
-    )
-    _write(tree, "docs/spec-050-y.md", "in flight cites `widgets.py::LIMIT`\n")
-    assert check_citations.main([]) == 0
-    assert capsys.readouterr().out == (
-        "OK: 3 citations resolve (0 in 1 .py files, 0 in KANBAN.md, 3 in 4 spec files).\n"
-    )
-
-    _write(tree, "docs/SPECS/appx/spec-001-x-rationale.md", "companion cites `widgets.py::gone`\n")
-    assert check_citations.main(["--check"]) == 1
-    out = capsys.readouterr().out
-    assert out.startswith("FAIL: 1 unresolvable citation(s) of 3 checked")
-    assert "docs/SPECS/appx/spec-001-x-rationale.md:1: cites `widgets.py::gone`" in out
-
-    _write(
-        tree,
-        "docs/SPECS/appx/spec-001-x-rationale.md",
-        "companion cites `widgets.py::build`\n",
-    )
-    _write(tree, "docs/spec-050-y.md", "in flight cites `widgets.py::Widget.retired`\n")
-    assert check_citations.main(["--check"]) == 1
-    assert "docs/spec-050-y.md:1: cites `widgets.py::Widget.retired`" in capsys.readouterr().out
+    companion = "docs/SPECS/appx/spec-001-x-rationale.md"
+    inflight = "docs/spec-050-y.md"
+    _write(tree, companion, "companion cites `widgets.py::build`\n")
+    _write(tree, inflight, "in flight cites `widgets.py::LIMIT`\n")
+    if missing is not None:
+        _write(tree, source, f"cites `widgets.py::{missing}`\n")
+    assert check_citations.main(["--check"]) == int(missing is not None)
+    output = capsys.readouterr().out
+    if missing is None:
+        assert (
+            output
+            == "OK: 3 citations resolve (0 in 1 .py files, 0 in KANBAN.md, 3 in 4 spec files).\n"
+        )
+    else:
+        assert output.startswith("FAIL: 1 unresolvable citation(s) of 3 checked")
+        assert f"{source}:1: cites `widgets.py::{missing}`" in output
 
 
 def test_a_spec_may_cite_a_planned_file_and_next_md_is_not_a_spec(

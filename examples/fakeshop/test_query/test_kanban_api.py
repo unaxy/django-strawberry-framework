@@ -26,6 +26,7 @@ directly (not via the importer, so assertions stay independent of how the real
 """
 
 from datetime import timedelta
+from functools import wraps
 from typing import NoReturn
 
 import pytest
@@ -1343,6 +1344,7 @@ def test_nested_decisions_connection_window_orders_by_decided_at_then_pk() -> No
     assert pk_at > decided_at_at, sql
 
 
+@wraps(AsyncDjangoGraphQLView.as_view())
 async def _async_shipped_graphql_view(request: HttpRequest) -> HttpResponseBase:
 
     return await AsyncDjangoGraphQLView.as_view(schema=config_schema.schema)(request)

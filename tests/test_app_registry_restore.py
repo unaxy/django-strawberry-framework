@@ -1,12 +1,12 @@
 """The suite-wide app-registry restore keeps a module-scope model registered.
 
-``tests/conftest.py::_restore_app_registry`` hands every test a ``django.apps``
+``tests/_app_registry.py::_restore_app_registry`` hands every test a ``django.apps``
 registry holding exactly the models it found. A model declared inside a test is
 the test's to discard; a model declared at module scope of a module first
 imported inside a test body stays bound to that module in ``sys.modules``, so
 unregistering it would leave every later test holding a class Django no longer
 knows, its reverse relations gone (``FieldDoesNotExist`` on the next reverse
-read). ``tests/conftest.py::_restore_app_registry_to`` keeps such a model
+read). ``tests/_app_registry.py::_restore_app_registry_to`` keeps such a model
 registered and returns it so the fixture fails the importing test.
 
 Each row registers a probe model with a reverse relation onto ``Category`` and
@@ -26,7 +26,7 @@ from django.apps import apps
 from django.core.exceptions import FieldDoesNotExist
 from django.db import models
 
-from tests.conftest import _restore_app_registry_to
+from tests._app_registry import _restore_app_registry_to
 
 _PROBE_MODULE = "tests._app_registry_restore_probe"
 

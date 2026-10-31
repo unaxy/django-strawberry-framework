@@ -130,19 +130,17 @@ def test_a_card_ref_the_shell_cannot_resolve_is_reported(text: str) -> None:
     assert unresolvable_placeholders(text, reference_orders={0}) == [text]
 
 
-def test_a_computed_token_resolves_in_a_board_doc_body_but_not_in_card_text() -> None:
-    """Only ``BoardDoc`` bodies get the computed set; neither export fills card text."""
-    assert unresolvable_placeholders("{{active_version}}", reference_orders=set[int]()) == [
+@pytest.mark.parametrize("computed", [False, True], ids=["card-text", "board-doc"])
+def test_a_computed_token_resolves_in_a_board_doc_body_but_not_in_card_text(
+    *,
+    computed: bool,
+) -> None:
+    """Only a computed-token owner admits this board-doc placeholder."""
+    assert unresolvable_placeholders(
         "{{active_version}}",
-    ]
-    assert (
-        unresolvable_placeholders(
-            "{{active_version}}",
-            reference_orders=set[int](),
-            computed_tokens={"active_version"},
-        )
-        == []
-    )
+        reference_orders=set[int](),
+        computed_tokens={"active_version"} if computed else set[str](),
+    ) == ([] if computed else ["{{active_version}}"])
 
 
 def test_a_defect_names_the_row_that_stores_it() -> None:
@@ -152,14 +150,17 @@ def test_a_defect_names_the_row_that_stores_it() -> None:
     ]
 
 
-def test_the_html_build_refuses_a_placeholder_that_resolves_nowhere() -> None:
-    """``KANBAN.html`` embeds placeholders verbatim, so an unresolvable one would print."""
-    snapshot = _snapshot([_card("see {{card_ref:N}}")])
-    with pytest.raises(RuntimeError, match=r"resolve nowhere"):
-        assert_placeholders_resolve(snapshot)
-
-    resolvable = _snapshot([_card("see {{card_ref:0}}", orders=(0,))])
-    assert assert_placeholders_resolve(resolvable) is None
+@pytest.mark.parametrize("resolvable", [True, False], ids=["resolved", "unresolved"])
+def test_the_html_build_refuses_a_placeholder_that_resolves_nowhere(*, resolvable: bool) -> None:
+    """An export accepts a real card reference and independently refuses an unresolved one."""
+    if resolvable:
+        assert (
+            assert_placeholders_resolve(_snapshot([_card("see {{card_ref:0}}", orders=(0,))]))
+            is None
+        )
+    else:
+        with pytest.raises(RuntimeError, match=r"resolve nowhere"):
+            assert_placeholders_resolve(_snapshot([_card("see {{card_ref:N}}")]))
 
 
 def _payload_card(number: int, **lists: int) -> dict[str, object]:
@@ -221,13 +222,15 @@ def test_a_top_level_list_is_not_checked() -> None:
     assert truncation_defects([], {}) == []
 
 
-def test_the_build_refuses_a_board_that_came_back_short(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A silent cap must stop the build; the freshness checks cannot see one."""
-    monkeypatch.setattr(
-        "scripts._kanban_lib.board_row_counts",
-        lambda: _expected(52, items=101),
-    )
-    with pytest.raises(RuntimeError, match=r"came back short of the database"):
-        assert_nothing_truncated([_payload_card(52, items=100)])
-
-    assert assert_nothing_truncated([_payload_card(52, items=101)]) is None
+@pytest.mark.parametrize("items", [101, 100], ids=["complete", "truncated"])
+def test_the_build_refuses_a_board_that_came_back_short(
+    monkeypatch: pytest.MonkeyPatch,
+    items: int,
+) -> None:
+    """A complete board exports; a silent item cap independently stops the build."""
+    monkeypatch.setattr("scripts._kanban_lib.board_row_counts", lambda: _expected(52, items=101))
+    if items == 101:
+        assert assert_nothing_truncated([_payload_card(52, items=items)]) is None
+    else:
+        with pytest.raises(RuntimeError, match=r"came back short of the database"):
+            assert_nothing_truncated([_payload_card(52, items=items)])

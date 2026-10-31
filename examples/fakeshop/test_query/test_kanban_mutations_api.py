@@ -11,17 +11,38 @@ anonymously and asserts a top-level GraphQL error with no board mutation.
 
 from __future__ import annotations
 
+from functools import wraps
+
 import pytest
 from apps.kanban import factories as kf
 from apps.kanban import models
+from apps.kanban import schema as kanban_schema
 from apps.kanban.signals import CARD_STATUS_TRANSITION_ERROR
+from apps.products.services import create_users
+from config import schema as config_schema
 from django.contrib.auth.models import User
+from django.http import HttpRequest, HttpResponseBase
 from django.test import Client
+from django.urls import include, path
 from graphql_client import JSONObject, json_at, json_list, json_object, json_str, response_json
 from graphql_client import post_graphql as _post_graphql
-from strawberry import relay
 
 from django_strawberry_framework.testing import AsyncTestClient
+from django_strawberry_framework.testing.relay import global_id_for
+from django_strawberry_framework.views import AsyncDjangoGraphQLView
+
+pytestmark = pytest.mark.urls(__name__)
+
+
+@wraps(AsyncDjangoGraphQLView.as_view())
+async def _async_graphql_view(request: HttpRequest) -> HttpResponseBase:
+    return await AsyncDjangoGraphQLView.as_view(schema=config_schema.schema)(request)
+
+
+urlpatterns = [
+    path("", include("config.urls")),
+    path("graphql-kanban-async/", _async_graphql_view),
+]
 
 
 @pytest.fixture(autouse=True)
@@ -44,18 +65,14 @@ def _lookups() -> None:
 
 
 def _staff_client() -> Client:
-    user = User.objects.create_user(
-        username="staff_agent",
-        password="pw",
-        is_staff=True,
-    )
+    """Authenticate the staff row each caller created through the catalog auth seed."""
     client = Client()
-    client.force_login(user)
+    client.force_login(User.objects.get(username="staff_1"))
     return client
 
 
 def _card_gid(card: models.Card) -> str:
-    return str(relay.GlobalID(type_name=models.Card._meta.label_lower, node_id=str(card.pk)))
+    return global_id_for(kanban_schema.CardType, card.pk)
 
 
 def _run(query: str, variables: dict[str, object], *, client: Client) -> JSONObject:
@@ -87,15 +104,14 @@ _ILLEGAL_TODO_TO_DONE_ERRORS = [
 
 @pytest.mark.django_db
 def test_set_card_status_happy_path() -> None:
+    create_users(1)
     card = kf.make_card(status=kf.make_status("todo"))
     client = _staff_client()
-
     payload = _run(
         _SET_STATUS,
         {"d": {"cardId": _card_gid(card), "statusKey": "wip", "actorKey": "maintainer"}},
         client=client,
     )
-
     assert "errors" not in payload, payload
     assert json_at(payload, "data", "setCardStatus") == {"ok": True, "errors": []}
     card.refresh_from_db()
@@ -111,15 +127,14 @@ def test_set_card_status_illegal_transition_returns_envelope() -> None:
     plain-form pipeline maps it to ``{ok: false}`` with one root non-field error and
     rolls the write back.
     """
+    create_users(1)
     card = kf.make_card(status=kf.make_status("todo"))
     client = _staff_client()
-
     payload = _run(
         _SET_STATUS_WITH_PATH,
         {"d": {"cardId": _card_gid(card), "statusKey": "done", "actorKey": "maintainer"}},
         client=client,
     )
-
     assert "errors" not in payload, payload
     envelope = json_object(payload, "data", "setCardStatus")
     assert envelope == {"ok": False, "errors": _ILLEGAL_TODO_TO_DONE_ERRORS}
@@ -130,14 +145,17 @@ def test_set_card_status_illegal_transition_returns_envelope() -> None:
 @pytest.mark.django_db
 def test_set_card_status_permission_denied_anonymous() -> None:
     card = kf.make_card(status=kf.make_status("todo"))
-
     payload = _run(
         _SET_STATUS,
         {"d": {"cardId": _card_gid(card), "statusKey": "wip", "actorKey": "maintainer"}},
         client=Client(),
     )
-
-    assert payload.get("errors"), payload
+    assert payload["data"] is None
+    errors = json_list(payload, "errors")
+    assert len(errors) == 1
+    assert json_at(errors, 0, "message") == "Not authorized to form SetCardStatus."
+    assert json_at(errors, 0, "path") == ["setCardStatus"]
+    assert not card.transitions.exists()
     card.refresh_from_db()
     assert card.status.key == "todo"
 
@@ -145,20 +163,29 @@ def test_set_card_status_permission_denied_anonymous() -> None:
 @pytest.mark.django_db
 def test_set_card_status_unknown_lookup_envelope_uses_all_sentinel() -> None:
     """An unknown ``statusKey`` is an in-band ``unknown_lookup`` on ``__all__``."""
+    create_users(1)
     card = kf.make_card(status=kf.make_status("todo"))
     client = _staff_client()
-
     payload = _run(
         _SET_STATUS,
         {"d": {"cardId": _card_gid(card), "statusKey": "nope", "actorKey": "maintainer"}},
         client=client,
     )
-
     assert "errors" not in payload, payload
     envelope = json_object(payload, "data", "setCardStatus")
-    assert envelope["ok"] is False
-    assert json_at(envelope, "errors", 0, "codes") == ["unknown_lookup"]
-    assert json_at(envelope, "errors", 0, "field") == "__all__"
+    assert envelope == {
+        "ok": False,
+        "errors": [
+            {
+                "field": "__all__",
+                "codes": ["unknown_lookup"],
+                "messages": ["Unknown Status key='nope'. Valid values: backlog, done, todo, wip"],
+            },
+        ],
+    }
+    card.refresh_from_db()
+    assert card.status.key == "todo"
+    assert not card.transitions.exists()
 
 
 @pytest.mark.django_db
@@ -170,16 +197,17 @@ def test_set_card_status_form_errors_key_to_the_input_fields_sent() -> None:
     ``required`` check, and each error comes back under the name the client sent, with
     the matching one-segment ``path``.
     """
+    create_users(1)
     card = kf.make_card(status=kf.make_status("todo"))
     client = _staff_client()
-
     payload = _run(
-        "mutation($d: SetCardStatusFormInput!) { setCardStatus(data: $d) "
-        "{ ok errors { field path codes } } }",
+        (
+            "mutation($d: SetCardStatusFormInput!) { setCardStatus(data: $d) { ok "
+            "errors { field path codes } } }"
+        ),
         {"d": {"cardId": _card_gid(card), "statusKey": "", "actorKey": ""}},
         client=client,
     )
-
     assert "errors" not in payload, payload
     envelope = json_object(payload, "data", "setCardStatus")
     assert envelope["ok"] is False
@@ -193,12 +221,14 @@ def test_set_card_status_form_errors_key_to_the_input_fields_sent() -> None:
 
 @pytest.mark.django_db
 def test_create_card_from_spec_happy_path() -> None:
+    create_users(1)
     version = kf.make_target_version("9.9.9")
     client = _staff_client()
-
     payload = _run(
-        "mutation($d: CreateCardFromSpecFormInput!) { createCardFromSpec(data: $d) "
-        "{ ok errors { field messages } } }",
+        (
+            "mutation($d: CreateCardFromSpecFormInput!) { createCardFromSpec(data: "
+            "$d) { ok errors { field messages } } }"
+        ),
         {
             "d": {
                 "title": "Live card",
@@ -209,7 +239,6 @@ def test_create_card_from_spec_happy_path() -> None:
         },
         client=client,
     )
-
     assert "errors" not in payload, payload
     assert json_at(payload, "data", "createCardFromSpec") == {"ok": True, "errors": []}
     assert models.Card.objects.filter(title="Live card").exists()
@@ -217,19 +246,18 @@ def test_create_card_from_spec_happy_path() -> None:
 
 @pytest.mark.django_db
 def test_create_card_from_spec_duplicate_title_envelope() -> None:
+    create_users(1)
     version = kf.make_target_version("9.9.9")
     kf.make_card(title="Dup card")
     client = _staff_client()
-
     payload = _run(
-        "mutation($d: CreateCardFromSpecFormInput!) { createCardFromSpec(data: $d) "
-        "{ ok errors { field messages codes } } }",
-        {
-            "d": {"title": "Dup card", "targetVersion": version.number, "relativeSize": "s"},
-        },
+        (
+            "mutation($d: CreateCardFromSpecFormInput!) { createCardFromSpec(data: "
+            "$d) { ok errors { field messages codes } } }"
+        ),
+        {"d": {"title": "Dup card", "targetVersion": version.number, "relativeSize": "s"}},
         client=client,
     )
-
     assert "errors" not in payload, payload
     envelope = json_object(payload, "data", "createCardFromSpec")
     assert envelope["ok"] is False
@@ -238,18 +266,16 @@ def test_create_card_from_spec_duplicate_title_envelope() -> None:
 
 @pytest.mark.django_db
 def test_move_card_number_happy_path() -> None:
+    create_users(1)
     kf.make_card(number=1)
     card = kf.make_card(number=2)
     kf.make_card(number=3)
     client = _staff_client()
-
     payload = _run(
-        "mutation($d: MoveCardNumberFormInput!) { moveCardNumber(data: $d) "
-        "{ ok errors { field codes } } }",
+        "mutation($d: MoveCardNumberFormInput!) { moveCardNumber(data: $d) { ok errors { field codes } } }",
         {"d": {"cardId": _card_gid(card), "number": 1}},
         client=client,
     )
-
     assert "errors" not in payload, payload
     assert json_at(payload, "data", "moveCardNumber", "ok") is True
     card.refresh_from_db()
@@ -258,16 +284,14 @@ def test_move_card_number_happy_path() -> None:
 
 @pytest.mark.django_db
 def test_move_card_number_out_of_range_envelope() -> None:
+    create_users(1)
     card = kf.make_card(number=1)
     client = _staff_client()
-
     payload = _run(
-        "mutation($d: MoveCardNumberFormInput!) { moveCardNumber(data: $d) "
-        "{ ok errors { field codes } } }",
+        "mutation($d: MoveCardNumberFormInput!) { moveCardNumber(data: $d) { ok errors { field codes } } }",
         {"d": {"cardId": _card_gid(card), "number": 99}},
         client=client,
     )
-
     assert "errors" not in payload, payload
     envelope = json_object(payload, "data", "moveCardNumber")
     assert envelope["ok"] is False
@@ -276,16 +300,15 @@ def test_move_card_number_out_of_range_envelope() -> None:
 
 @pytest.mark.django_db
 def test_add_dependency_happy_path() -> None:
+    create_users(1)
     dependency = kf.make_card(number=1)
     dependent = kf.make_card(number=2)
     client = _staff_client()
-
     payload = _run(
         "mutation($d: AddDependencyFormInput!) { addDependency(data: $d) { ok errors { field } } }",
         {"d": {"sourceCardId": _card_gid(dependent), "targetCardId": _card_gid(dependency)}},
         client=client,
     )
-
     assert "errors" not in payload, payload
     assert json_at(payload, "data", "addDependency", "ok") is True
     assert models.CardReference.objects.filter(
@@ -297,13 +320,12 @@ def test_add_dependency_happy_path() -> None:
 
 @pytest.mark.django_db
 def test_add_dependency_invalid_kind_envelope() -> None:
+    create_users(1)
     dependency = kf.make_card(number=1)
     dependent = kf.make_card(number=2)
     client = _staff_client()
-
     payload = _run(
-        "mutation($d: AddDependencyFormInput!) { addDependency(data: $d) "
-        "{ ok errors { field codes } } }",
+        "mutation($d: AddDependencyFormInput!) { addDependency(data: $d) { ok errors { field codes } } }",
         {
             "d": {
                 "sourceCardId": _card_gid(dependent),
@@ -313,7 +335,6 @@ def test_add_dependency_invalid_kind_envelope() -> None:
         },
         client=client,
     )
-
     envelope = json_object(payload, "data", "addDependency")
     assert envelope["ok"] is False
     assert json_at(envelope, "errors", 0, "codes") == ["invalid_dependency_kind"]
@@ -321,6 +342,7 @@ def test_add_dependency_invalid_kind_envelope() -> None:
 
 @pytest.mark.django_db
 def test_remove_dependency_happy_path() -> None:
+    create_users(1)
     dependency = kf.make_card(number=1)
     dependent = kf.make_card(number=2)
     kf.make_card_reference(
@@ -329,14 +351,11 @@ def test_remove_dependency_happy_path() -> None:
         kind=kf.make_card_reference_kind("dependency"),
     )
     client = _staff_client()
-
     payload = _run(
-        "mutation($d: RemoveDependencyFormInput!) { removeDependency(data: $d) "
-        "{ ok errors { field } } }",
+        "mutation($d: RemoveDependencyFormInput!) { removeDependency(data: $d) { ok errors { field } } }",
         {"d": {"sourceCardId": _card_gid(dependent), "targetCardId": _card_gid(dependency)}},
         client=client,
     )
-
     assert "errors" not in payload, payload
     assert json_at(payload, "data", "removeDependency", "ok") is True
     assert not models.CardReference.objects.filter(
@@ -347,16 +366,17 @@ def test_remove_dependency_happy_path() -> None:
 
 @pytest.mark.django_db
 def test_set_card_item_complete_happy_path() -> None:
+    create_users(1)
     item = kf.make_card_item(section=kf.make_section("scope"), is_complete=False)
     client = _staff_client()
-
     payload = _run(
-        "mutation($d: SetCardItemCompleteFormInput!) { setCardItemComplete(data: $d) "
-        "{ ok errors { field } } }",
+        (
+            "mutation($d: SetCardItemCompleteFormInput!) { "
+            "setCardItemComplete(data: $d) { ok errors { field } } }"
+        ),
         {"d": {"itemId": item.pk, "complete": True}},
         client=client,
     )
-
     assert "errors" not in payload, payload
     assert json_at(payload, "data", "setCardItemComplete", "ok") is True
     item.refresh_from_db()
@@ -365,16 +385,14 @@ def test_set_card_item_complete_happy_path() -> None:
 
 @pytest.mark.django_db
 def test_verify_card_item_happy_path() -> None:
+    create_users(1)
     item = kf.make_card_item(section=kf.make_section("scope"))
     client = _staff_client()
-
     payload = _run(
-        "mutation($d: VerifyCardItemFormInput!) { verifyCardItem(data: $d) "
-        "{ ok errors { field } } }",
+        "mutation($d: VerifyCardItemFormInput!) { verifyCardItem(data: $d) { ok errors { field } } }",
         {"d": {"itemId": item.pk, "actorKey": "maintainer", "kindKey": "manual"}},
         client=client,
     )
-
     assert "errors" not in payload, payload
     assert json_at(payload, "data", "verifyCardItem", "ok") is True
     item.refresh_from_db()
@@ -387,16 +405,14 @@ def test_verify_card_item_happy_path() -> None:
 
 @pytest.mark.django_db
 def test_verify_card_item_unknown_kind_envelope() -> None:
+    create_users(1)
     item = kf.make_card_item(section=kf.make_section("scope"))
     client = _staff_client()
-
     payload = _run(
-        "mutation($d: VerifyCardItemFormInput!) { verifyCardItem(data: $d) "
-        "{ ok errors { field codes } } }",
+        "mutation($d: VerifyCardItemFormInput!) { verifyCardItem(data: $d) { ok errors { field codes } } }",
         {"d": {"itemId": item.pk, "actorKey": "maintainer", "kindKey": "nope"}},
         client=client,
     )
-
     envelope = json_object(payload, "data", "verifyCardItem")
     assert envelope["ok"] is False
     assert json_at(envelope, "errors", 0, "codes") == ["unknown_lookup"]
@@ -404,12 +420,11 @@ def test_verify_card_item_unknown_kind_envelope() -> None:
 
 @pytest.mark.django_db
 def test_record_and_finish_work_attempt_happy_path() -> None:
+    create_users(1)
     card = kf.make_card()
     client = _staff_client()
-
     opened = _run(
-        "mutation($d: RecordWorkAttemptFormInput!) { recordWorkAttempt(data: $d) "
-        "{ ok errors { field } } }",
+        "mutation($d: RecordWorkAttemptFormInput!) { recordWorkAttempt(data: $d) { ok errors { field } } }",
         {"d": {"cardId": _card_gid(card), "actorKey": "maintainer", "summary": "attempt"}},
         client=client,
     )
@@ -417,10 +432,8 @@ def test_record_and_finish_work_attempt_happy_path() -> None:
     assert json_at(opened, "data", "recordWorkAttempt", "ok") is True
     attempt = models.WorkAttempt.objects.get(card=card)
     assert attempt.outcome_id is None
-
     finished = _run(
-        "mutation($d: FinishWorkAttemptFormInput!) { finishWorkAttempt(data: $d) "
-        "{ ok errors { field } } }",
+        "mutation($d: FinishWorkAttemptFormInput!) { finishWorkAttempt(data: $d) { ok errors { field } } }",
         {"d": {"attemptId": attempt.pk, "outcomeKey": "succeeded"}},
         client=client,
     )
@@ -435,16 +448,17 @@ def test_record_and_finish_work_attempt_happy_path() -> None:
 
 @pytest.mark.django_db
 def test_finish_work_attempt_unknown_outcome_envelope() -> None:
+    create_users(1)
     attempt = kf.make_work_attempt(card=kf.make_card(), actor=kf.make_actor("maintainer"))
     client = _staff_client()
-
     payload = _run(
-        "mutation($d: FinishWorkAttemptFormInput!) { finishWorkAttempt(data: $d) "
-        "{ ok errors { field codes } } }",
+        (
+            "mutation($d: FinishWorkAttemptFormInput!) { finishWorkAttempt(data: "
+            "$d) { ok errors { field codes } } }"
+        ),
         {"d": {"attemptId": attempt.pk, "outcomeKey": "nope"}},
         client=client,
     )
-
     envelope = json_object(payload, "data", "finishWorkAttempt")
     assert envelope["ok"] is False
     assert json_at(envelope, "errors", 0, "codes") == ["unknown_lookup"]
@@ -452,15 +466,13 @@ def test_finish_work_attempt_unknown_outcome_envelope() -> None:
 
 @pytest.mark.django_db
 def test_record_decision_happy_path() -> None:
+    create_users(1)
     client = _staff_client()
-
     payload = _run(
-        "mutation($d: RecordDecisionFormInput!) { recordDecision(data: $d) "
-        "{ ok errors { field } } }",
+        "mutation($d: RecordDecisionFormInput!) { recordDecision(data: $d) { ok errors { field } } }",
         {"d": {"actorKey": "maintainer", "question": "Ship?", "choice": "yes"}},
         client=client,
     )
-
     assert "errors" not in payload, payload
     assert json_at(payload, "data", "recordDecision", "ok") is True
     assert models.Decision.objects.filter(question="Ship?", card__isnull=True).exists()
@@ -468,16 +480,15 @@ def test_record_decision_happy_path() -> None:
 
 @pytest.mark.django_db
 def test_set_card_files_predicted_happy_path() -> None:
+    create_users(1)
     card = kf.make_card(status=kf.make_status("todo"))
     path = "django_strawberry_framework/mutations_ws3b_live_probe.py"
     client = _staff_client()
-
     payload = _run(
         "mutation($d: SetCardFilesFormInput!) { setCardFiles(data: $d) { ok errors { field } } }",
         {"d": {"cardId": _card_gid(card), "kind": "predicted", "paths": [path]}},
         client=client,
     )
-
     assert "errors" not in payload, payload
     assert json_at(payload, "data", "setCardFiles", "ok") is True
     assert card.path_links.filter(path__path=path, kind="predicted").exists()
@@ -485,16 +496,14 @@ def test_set_card_files_predicted_happy_path() -> None:
 
 @pytest.mark.django_db
 def test_set_card_files_outside_root_envelope() -> None:
+    create_users(1)
     card = kf.make_card(status=kf.make_status("todo"))
     client = _staff_client()
-
     payload = _run(
-        "mutation($d: SetCardFilesFormInput!) { setCardFiles(data: $d) "
-        "{ ok errors { field codes } } }",
+        "mutation($d: SetCardFilesFormInput!) { setCardFiles(data: $d) { ok errors { field codes } } }",
         {"d": {"cardId": _card_gid(card), "kind": "predicted", "paths": ["outside/root/foo.py"]}},
         client=client,
     )
-
     assert "errors" not in payload, payload
     envelope = json_object(payload, "data", "setCardFiles")
     assert envelope["ok"] is False
@@ -504,28 +513,22 @@ def test_set_card_files_outside_root_envelope() -> None:
 @pytest.mark.django_db
 @pytest.mark.parametrize("bad", [0, False])
 def test_set_card_files_rejects_a_falsy_non_list_without_clearing_links(bad: object) -> None:
-    # The ``paths`` JSON scalar admits any value; a falsy non-list is a malformed
-    # input rejected by the service, never read as the empty list that clears links.
+    create_users(1)
     card = kf.make_card(status=kf.make_status("todo"))
     path = "django_strawberry_framework/mutations_ws3b_live_probe.py"
     client = _staff_client()
-    mutation = (
-        "mutation($d: SetCardFilesFormInput!) { setCardFiles(data: $d) "
-        "{ ok errors { field codes } } }"
-    )
+    mutation = "mutation($d: SetCardFilesFormInput!) { setCardFiles(data: $d) { ok errors { field codes } } }"
     seeded = _run(
         mutation,
         {"d": {"cardId": _card_gid(card), "kind": "predicted", "paths": [path]}},
         client=client,
     )
     assert json_at(seeded, "data", "setCardFiles", "ok") is True
-
     payload = _run(
         mutation,
         {"d": {"cardId": _card_gid(card), "kind": "predicted", "paths": bad}},
         client=client,
     )
-
     assert "errors" not in payload, payload
     envelope = json_object(payload, "data", "setCardFiles")
     assert envelope["ok"] is False
@@ -540,17 +543,14 @@ _ALLOWLISTED_PATH = "django_strawberry_framework/filters/base.py"
 
 @pytest.mark.django_db
 def test_set_card_files_changed_happy_path() -> None:
-    # A DONE card is the only legal home for ``kind=changed`` links; the factory
-    # builds the required spec + glossary link and ships it through todo->wip->done.
+    create_users(1)
     card = kf.make_card(status=kf.make_status("done"))
     client = _staff_client()
-
     payload = _run(
         "mutation($d: SetCardFilesFormInput!) { setCardFiles(data: $d) { ok errors { field } } }",
         {"d": {"cardId": _card_gid(card), "kind": "changed", "paths": [_ALLOWLISTED_PATH]}},
         client=client,
     )
-
     assert "errors" not in payload, payload
     assert json_at(payload, "data", "setCardFiles", "ok") is True
     assert card.path_links.filter(path__path=_ALLOWLISTED_PATH, kind="changed").exists()
@@ -558,15 +558,11 @@ def test_set_card_files_changed_happy_path() -> None:
 
 @pytest.mark.django_db
 def test_set_card_files_unencodable_path_is_field_error_not_a_crash() -> None:
-    # ``paths`` is a ``JSON`` value whose strings the service stores in a text column; a
-    # lone surrogate in one element is refused at decode, keyed to that element, before
-    # the service writes a planned TrackedPath row (which SQLite cannot encode).
+    create_users(1)
     card = kf.make_card(status=kf.make_status("todo"))
     client = _staff_client()
-
     payload = _run(
-        "mutation($d: SetCardFilesFormInput!) { setCardFiles(data: $d) "
-        "{ ok errors { field codes } } }",
+        "mutation($d: SetCardFilesFormInput!) { setCardFiles(data: $d) { ok errors { field codes } } }",
         {
             "d": {
                 "cardId": _card_gid(card),
@@ -579,7 +575,6 @@ def test_set_card_files_unencodable_path_is_field_error_not_a_crash() -> None:
         },
         client=client,
     )
-
     assert "errors" not in payload, payload
     envelope = json_object(payload, "data", "setCardFiles")
     assert envelope["ok"] is False
@@ -590,16 +585,14 @@ def test_set_card_files_unencodable_path_is_field_error_not_a_crash() -> None:
 
 @pytest.mark.django_db
 def test_set_card_files_changed_on_undone_card_envelope() -> None:
+    create_users(1)
     card = kf.make_card(status=kf.make_status("todo"))
     client = _staff_client()
-
     payload = _run(
-        "mutation($d: SetCardFilesFormInput!) { setCardFiles(data: $d) "
-        "{ ok errors { field codes } } }",
+        "mutation($d: SetCardFilesFormInput!) { setCardFiles(data: $d) { ok errors { field codes } } }",
         {"d": {"cardId": _card_gid(card), "kind": "changed", "paths": [_ALLOWLISTED_PATH]}},
         client=client,
     )
-
     assert "errors" not in payload, payload
     envelope = json_object(payload, "data", "setCardFiles")
     assert envelope["ok"] is False
@@ -610,14 +603,16 @@ def test_set_card_files_changed_on_undone_card_envelope() -> None:
 @pytest.mark.django_db
 def test_create_card_from_spec_number_branch_places_and_shifts() -> None:
     """Passing an explicit ``number`` inserts the card at that slot and shifts neighbours up."""
+    create_users(1)
     version = kf.make_target_version("9.9.9")
     kf.make_card(number=1, title="Board one")
     second = kf.make_card(number=2, title="Board two")
     client = _staff_client()
-
     payload = _run(
-        "mutation($d: CreateCardFromSpecFormInput!) { createCardFromSpec(data: $d) "
-        "{ ok errors { field messages } } }",
+        (
+            "mutation($d: CreateCardFromSpecFormInput!) { createCardFromSpec(data: "
+            "$d) { ok errors { field messages } } }"
+        ),
         {
             "d": {
                 "title": "Inserted card",
@@ -628,7 +623,6 @@ def test_create_card_from_spec_number_branch_places_and_shifts() -> None:
         },
         client=client,
     )
-
     assert "errors" not in payload, payload
     assert json_at(payload, "data", "createCardFromSpec") == {"ok": True, "errors": []}
     inserted = models.Card.objects.get(title="Inserted card")
@@ -642,10 +636,11 @@ def async_kanban_card() -> tuple[models.Card, User]:
     """Seed lookups, a TODO card, and a staff user, committed so the async view thread sees them.
 
     ``AsyncTestClient`` posts through Django's in-process async handler, running
-    the sync GraphQL view (and thus ``resolve_async``) on asgiref's executor
-    thread; that thread's connection only sees committed rows, so the seed runs
-    in a sync fixture of a ``django_db(transaction=True)`` test rather than the async test body.
+    the native async package view and its async mutation pipeline. The worker's
+    connection sees committed rows, so a synchronous fixture seeds them under
+    ``django_db(transaction=True)`` before the async test begins.
     """
+    create_users(1)
     for key in (
         "backlog",
         "todo",
@@ -657,12 +652,8 @@ def async_kanban_card() -> tuple[models.Card, User]:
     kf.make_relative_size("s", order=1)
     kf.make_actor("maintainer")
     card = kf.make_card(status=kf.make_status("todo"))
-    user = User.objects.create_user(
-        username="async_staff_agent",
-        password="pw",
-        is_staff=True,
-    )
-    return card, user
+    user = User.objects.get(username="staff_1")
+    return (card, user)
 
 
 @pytest.mark.django_db(transaction=True)
@@ -677,8 +668,7 @@ async def test_set_card_status_illegal_transition_async_envelope(
     rather than a top-level GraphQL error.
     """
     card, user = async_kanban_card
-    client = AsyncTestClient()
-
+    client = AsyncTestClient("/graphql-kanban-async/")
     async with client.login(user):
         res = await client.query(
             _SET_STATUS_WITH_PATH,
@@ -686,6 +676,7 @@ async def test_set_card_status_illegal_transition_async_envelope(
                 "d": {"cardId": _card_gid(card), "statusKey": "done", "actorKey": "maintainer"},
             },
         )
-
     assert res.data is not None
     assert res.data["setCardStatus"] == {"ok": False, "errors": _ILLEGAL_TODO_TO_DONE_ERRORS}
+    assert await models.Card.objects.filter(pk=card.pk, status__key="todo").aexists()
+    assert not await models.CardTransition.objects.filter(card_id=card.pk).aexists()

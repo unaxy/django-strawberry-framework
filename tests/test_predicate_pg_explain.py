@@ -4,12 +4,12 @@ A flat filter leaf over a to-many path compiles to one of two shapes, both
 captured by ``scripts/capture_pg_predicate_explain.py`` (artifact
 ``docs/row-preserving-predicates-part1-pg-explain.md``) and pinned here:
 
-- a routed leaf (``ScalarSpecimenFilter``'s generated reverse-FK relation key
+- a routed leaf (``scalar_filters.ScalarSpecimenFilter``'s generated reverse-FK relation key
   ``children``, whose relation no ``RelatedFilter`` declares and whose target
   type scopes nothing, so it is not walked) is one ``EXISTS`` correlated on the
   outer primary key (``optimizer/predicates.py::correlated_inner_root`` +
   ``attach_exists``);
-- a walked leaf (``LoanFilter``'s ``book__loans__patron__email__icontains``,
+- a walked leaf (``library_filters.LoanFilter``'s ``book__loans__patron__email__icontains``,
   every relation of which a ``RelatedFilter`` declares) is one ``EXISTS`` per
   declared hop, each built from that hop's visible rows and correlated on the
   link columns (``optimizer/predicates.py::related_rows_exist``).
@@ -28,9 +28,9 @@ import re
 import uuid
 
 import pytest
-from apps.library.filters import LoanFilter
+from apps.library import filters as library_filters
 from apps.library.models import Book, Branch, Loan, Patron, Shelf
-from apps.scalars.filters import ScalarSpecimenFilter
+from apps.scalars import filters as scalar_filters
 from apps.scalars.models import ScalarSpecimen
 from django.db import connection as db_connection
 from django.db.models import Model, QuerySet
@@ -174,36 +174,6 @@ def _top_actual_rows(qs: QuerySet[Model]) -> tuple[str, int]:
     return plan, int(top_rows.group(1))
 
 
-def test_routed_leaf_is_a_single_distinct_free_exists_on_the_outer_pk() -> None:
-    """The routed leaf compiles to one distinct-free ``EXISTS`` correlated on the outer pk."""
-    needle = _seed_specimens()
-    qs = _production_qs(ScalarSpecimenFilter, _SPECIMEN_LEAF, ScalarSpecimen.objects.all(), needle)
-    sql = str(qs.query)
-
-    assert qs.query.distinct is False
-    assert sql.upper().count("EXISTS") == 1
-    assert "DISTINCT" not in sql.upper()
-    assert _referenced_tables(qs) == {"scalars_scalarspecimen"}
-    assert '= ("scalars_scalarspecimen"."id")' in sql
-
-
-def test_walked_leaf_is_one_distinct_free_exists_per_declared_hop() -> None:
-    """The walked leaf compiles to one ``EXISTS`` per declared hop, correlated on the link columns.
-
-    The outer statement reads only ``library_loan``; the outermost hop
-    correlates on the outer row's ``book_id``, never by re-reading the loan table.
-    """
-    _seed_library()
-    qs = _production_qs(LoanFilter, _LOAN_LEAF, Loan.objects.all())
-    sql = str(qs.query)
-
-    assert qs.query.distinct is False
-    assert sql.upper().count("EXISTS") == len(_LOAN_HOPS)
-    assert "DISTINCT" not in sql.upper()
-    assert _referenced_tables(qs) == {"library_loan"}
-    assert '= ("library_loan"."book_id")' in sql
-
-
 @pytest.mark.parametrize("shape", ["routed", "walked"])
 def test_explain_analyze_buffers_shows_no_outer_fan_out(shape: str) -> None:
     """EXPLAIN(ANALYZE, BUFFERS) executes each emitted query with no outer multiplication.
@@ -219,21 +189,34 @@ def test_explain_analyze_buffers_shows_no_outer_fan_out(shape: str) -> None:
     if shape == "routed":
         value = _seed_specimens()
         qs = _production_qs(
-            ScalarSpecimenFilter,
+            scalar_filters.ScalarSpecimenFilter,
             _SPECIMEN_LEAF,
             ScalarSpecimen.objects.all(),
             value,
         )
-        leaf = ScalarSpecimenFilter.get_filters()[_SPECIMEN_LEAF]
+        leaf = scalar_filters.ScalarSpecimenFilter.get_filters()[_SPECIMEN_LEAF]
         oracle_root = ScalarSpecimen.objects.all()
     else:
         value = _NEEDLE
         _seed_library()
-        qs = _production_qs(LoanFilter, _LOAN_LEAF, Loan.objects.all())
-        leaf = LoanFilter.get_filters()[_LOAN_LEAF]
+        qs = _production_qs(library_filters.LoanFilter, _LOAN_LEAF, Loan.objects.all())
+        leaf = library_filters.LoanFilter.get_filters()[_LOAN_LEAF]
         oracle_root = Loan.objects.exclude(book__circulation_status=Book.CirculationStatus.REPAIR)
         raw = set(leaf.filter(Loan.objects.all(), value).values_list("pk", flat=True))
         assert len(raw) > qs.count()
+
+    sql = str(qs.query)
+    expected_table = ScalarSpecimen._meta.db_table if shape == "routed" else Loan._meta.db_table
+    expected_correlation = (
+        '= ("scalars_scalarspecimen"."id")'
+        if shape == "routed"
+        else '= ("library_loan"."book_id")'
+    )
+    assert qs.query.distinct is False
+    assert sql.upper().count("EXISTS") == (1 if shape == "routed" else len(_LOAN_HOPS))
+    assert "DISTINCT" not in sql.upper()
+    assert _referenced_tables(qs) == {expected_table}
+    assert expected_correlation in sql
 
     production_pks = list(qs.values_list("pk", flat=True))
     oracle_pks = sorted(

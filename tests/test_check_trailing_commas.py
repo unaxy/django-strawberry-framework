@@ -368,9 +368,17 @@ def test_diff_rejects_fix() -> None:
 def test_fix_writes_what_diff_showed(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """Positive control for --diff: --fix on the same file does write the scaffold."""
     path = _write(repo, "docs/guide.md", "# Guide\n")
+    assert ctc.main(["--diff", "docs/guide.md"]) == 1
+    proposal = capsys.readouterr().out
+    assert path.read_bytes() == b"# Guide\n"
     assert ctc.main(["--fix", "docs/guide.md"]) == 0
     written = path.read_text(encoding="utf-8")
-    assert written.startswith(f"# Guide\n\n{ctc.LINK_DEF_HEADER}\n")
+    added = [
+        line[1:]
+        for line in proposal.splitlines()
+        if line.startswith("+") and not line.startswith("+++")
+    ]
+    assert written == "# Guide\n" + "\n".join(added) + "\n"
     assert ctc._scaffold_in_canonical_order(written) is None
     assert "Fixed 1 file(s)." in capsys.readouterr().out
 

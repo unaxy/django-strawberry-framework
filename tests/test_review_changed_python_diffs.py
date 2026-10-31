@@ -78,11 +78,6 @@ def load(queryset):
 '''
 
 
-def test_module_imports_as_scripts_package_member() -> None:
-    assert callable(diffs.main)
-    assert Path("docs/shadow/diff") == diffs.OUTPUT_DIFF
-
-
 def test_output_dir_receives_all_three_folders_and_docs_shadow_is_untouched(
     repo: Path,
     tmp_path: Path,

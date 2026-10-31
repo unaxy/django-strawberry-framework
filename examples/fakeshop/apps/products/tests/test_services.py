@@ -263,10 +263,13 @@ def test_create_users_creates_six_users_per_unit() -> None:
     assert result["users"] == 6
     assert User.objects.count() == 6
     # Verify each per-permission user has exactly the matching permission
-    for codename in services.VIEW_PERMISSIONS:
-        user = User.objects.get(username=f"{codename}_1")
-        assert user.user_permissions.filter(codename=codename).count() == 1
-        assert user.is_staff is False
+    expected = {f"{codename}_1": {codename} for codename in services.VIEW_PERMISSIONS}
+    actual = {
+        user.username: set(user.user_permissions.values_list("codename", flat=True))
+        for user in User.objects.filter(username__in=expected)
+    }
+    assert actual == expected
+    assert not User.objects.filter(username__in=expected, is_staff=True).exists()
     # Staff and regular users exist
     assert User.objects.filter(username="staff_1", is_staff=True).count() == 1
     assert User.objects.filter(username="regular_1", is_staff=False).count() == 1
@@ -283,7 +286,7 @@ def test_create_users_is_idempotent() -> None:
 @pytest.mark.django_db
 def test_delete_users_int_mode_deletes_first_n_non_superusers() -> None:
     services.create_users(2)
-    User.objects.create_superuser(username="boss", password="boss")
+    User.objects.filter(username="staff_1").update(username="boss", is_superuser=True)
     pre = User.objects.count()
     result = services.delete_users(3)
     assert result["users"] == 3
@@ -301,9 +304,10 @@ def test_delete_users_int_mode_no_data_returns_zero() -> None:
 @pytest.mark.django_db
 def test_delete_users_all_mode_wipes_non_superusers() -> None:
     services.create_users(1)
-    User.objects.create_superuser(username="boss", password="boss")
+    User.objects.filter(username="staff_1").update(username="boss", is_superuser=True)
+    removable = User.objects.filter(is_superuser=False).count()
     result = services.delete_users("all")
-    assert result["users"] == 6
+    assert result["users"] == removable
     assert User.objects.filter(is_superuser=True).count() == 1
     assert User.objects.filter(is_superuser=False).count() == 0
 

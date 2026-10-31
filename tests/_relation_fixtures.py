@@ -16,11 +16,12 @@ and the test runner from ever creating or dropping their tables on their own.
 Because nothing manages the tables, callers create and drop them on demand
 with ``connection.schema_editor()`` via ``relation_fixture_tables``.
 
-None of these classes enters a GraphQL schema: a test that declares a
-``DjangoType`` over one runs under a cleared registry (and a declaration over
-``RpGenericTag`` that selects ``holder`` is refused before it registers). The
-``Rp`` prefix keeps the class and table names distinct from the inline test
-models declared elsewhere in the suite.
+Consumer test holders may wrap these models in ``DjangoType`` classes. Such a
+holder runs under a cleared registry, and a declaration over ``RpGenericTag``
+that selects ``holder`` is refused before it registers. A composite-primary-key
+parent needs an explicit scalar ``NodeID`` declaration rather than the default
+composite key. The ``Rp`` prefix keeps class and table names distinct from
+inline test models declared elsewhere in the suite.
 """
 
 from __future__ import annotations
@@ -56,10 +57,9 @@ class RpCompositeParent(models.Model):
 
     This family models a composite-primary-key parent whose reverse to-many
     needs a ``ForeignObject`` child (Django refuses a plain ``ForeignKey`` to a
-    ``CompositePrimaryKey`` target, ``fields.E347``), a shape fakeshop excludes
-    because Relay finalization rejects composite pks, and it alone executes
-    ``django_strawberry_framework/optimizer/predicates.py::correlated_inner_root``
-    against a real composite-pk table.
+    ``CompositePrimaryKey`` target, ``fields.E347``). A consumer holder can use
+    an explicit scalar ``NodeID`` to expose the parent; the default composite
+    key cannot serve as its Relay identifier.
     """
 
     tenant_id: _Int = models.IntegerField()

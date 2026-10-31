@@ -166,7 +166,9 @@ def test_generator_writes_autonomous_progress_and_preserves_existing_run(
     assert report.index("Final test gate") < report.index("## Owned changes")
     assert refreshes == [(full_sha, bug_hunt.DEFAULT_PACKAGE_DIR, current_dir.resolve())]
 
+    prior_bytes = output.read_bytes()
     assert bug_hunt.main([]) == 3
+    assert output.read_bytes() == prior_bytes
     assert len(refreshes) == 1
 
     output.write_text("stale progress\n", encoding="utf-8")
@@ -248,38 +250,43 @@ def test_snapshot_exclusion_rule_is_shared_with_the_snapshot_helper() -> None:
     assert not snapshot.snapshot_excludes("django_strawberry_framework/views.py")
 
 
-def test_no_shadow_reason_reads_exclusion_and_age_independently() -> None:
-    """Neither fact may be inferred from the other, so all four cases are named.
-
-    A path-only classifier calls every ``testing/`` file old and a baseline-only
-    classifier calls every excluded file new; both produce a confidently wrong
-    orientation line for the file a hunter is about to read.
-    """
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        pytest.param(
+            "django_strawberry_framework/testing/relay.py",
+            "path excluded from the snapshot by its 'test' path filter, not new",
+            id="old-excluded",
+        ),
+        pytest.param(
+            "django_strawberry_framework/testing/new_after_baseline.py",
+            (
+                "live file added since the hunt baseline; its path is also excluded by the "
+                "snapshot's 'test' filter"
+            ),
+            id="new-excluded",
+        ),
+        pytest.param(
+            "django_strawberry_framework/brand_new.py",
+            "live file added since the hunt baseline",
+            id="new-eligible",
+        ),
+        pytest.param(
+            "django_strawberry_framework/views.py",
+            (
+                "file existed at the hunt baseline and is snapshot-eligible, so this shadow is "
+                "missing unexpectedly -- treat the snapshot as incomplete"
+            ),
+            id="old-eligible",
+        ),
+    ],
+)
+def test_no_shadow_reason_reads_exclusion_and_age_independently(path: str, expected: str) -> None:
+    """Age and exclusion are independent facts, each with a named case."""
     baseline = frozenset(
         {"django_strawberry_framework/testing/relay.py", "django_strawberry_framework/views.py"},
     )
-
-    assert (
-        bug_hunt._no_shadow_reason("django_strawberry_framework/testing/relay.py", baseline)
-        == "path excluded from the snapshot by its 'test' path filter, not new"
-    )
-    assert bug_hunt._no_shadow_reason(
-        "django_strawberry_framework/testing/new_after_baseline.py",
-        baseline,
-    ) == (
-        "live file added since the hunt baseline; its path is also excluded by the "
-        "snapshot's 'test' filter"
-    )
-    assert (
-        bug_hunt._no_shadow_reason("django_strawberry_framework/brand_new.py", baseline)
-        == "live file added since the hunt baseline"
-    )
-    # Eligible and present at the baseline should have produced a shadow; say so
-    # rather than inventing a cause for it.
-    assert bug_hunt._no_shadow_reason("django_strawberry_framework/views.py", baseline) == (
-        "file existed at the hunt baseline and is snapshot-eligible, so this shadow is "
-        "missing unexpectedly -- treat the snapshot as incomplete"
-    )
+    assert bug_hunt._no_shadow_reason(path, baseline) == expected
 
 
 def test_baseline_python_paths_reads_the_commit_unfiltered(
@@ -370,6 +377,7 @@ def test_snapshot_failure_never_publishes_partial_staging(
     out_dir = tmp_path / snapshot.SHADOW_DIR
     _write(out_dir / "previous.stripped.py", "previous\n")
     _write(out_dir / "previous.overview.md", "previous\n")
+    before = {path.name: path.read_bytes() for path in out_dir.iterdir()}
     paths = ["package/one.py", "package/two.py"]
     monkeypatch.setattr(snapshot, "_validate_commit", _accept_commit)
 
@@ -395,6 +403,8 @@ def test_snapshot_failure_never_publishes_partial_staging(
         "previous.overview.md",
         "previous.stripped.py",
     }
+
+    assert {path.name: path.read_bytes() for path in out_dir.iterdir()} == before
 
 
 def test_snapshot_validation_rejects_colliding_flat_artifact_names(tmp_path: Path) -> None:
