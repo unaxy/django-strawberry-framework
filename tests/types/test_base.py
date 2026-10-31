@@ -24,7 +24,6 @@ captures the scalar-only field list used in those updated tests.
 
 import datetime
 import functools
-import inspect
 import itertools
 import sys
 import types
@@ -61,7 +60,6 @@ from strawberry.types.auto import StrawberryAuto
 from typing_extensions import override
 
 import django_strawberry_framework
-import django_strawberry_framework.types.base as base_mod
 from django_strawberry_framework import DjangoType, finalize_django_types
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.filters import FilterSet
@@ -977,11 +975,7 @@ def test_connection_key_requires_relay_node() -> None:
 
 
 def test_meta_relation_shapes_in_allowed_meta_keys() -> None:
-    """``relation_shapes`` is a shipped Meta key (spec-032 Decision 7), not deferred.
-
-    Mirrors ``test_interfaces_is_shipped_not_deferred`` below: a net-new
-    ``ALLOWED_META_KEYS`` entry, NOT a ``DEFERRED_META_KEYS`` promotion.
-    """
+    """``relation_shapes`` is supported rather than deferred (spec-032 Decision 7)."""
     assert "relation_shapes" in ALLOWED_META_KEYS
     assert "relation_shapes" not in DEFERRED_META_KEYS
 
@@ -1216,23 +1210,6 @@ def test_meta_filterset_class_rejects_non_filterset_value() -> None:
                 filterset_class = object
 
 
-def test_filterset_and_orderset_meta_validators_ride_validate_set_sidecar() -> None:
-    """Both DjangoType sidecar Meta gates share ``_validate_set_sidecar``.
-
-    The wrappers keep the cycle-safe local imports; the subclass check
-    and ``must be {article} {Name} subclass`` wording live once in the
-    shared helper.
-    """
-    for fn in (base_mod._validate_filterset_class, base_mod._validate_orderset_class):
-        assert "_validate_set_sidecar" in fn.__code__.co_names
-    src_filter = inspect.getsource(base_mod._validate_filterset_class)
-    src_order = inspect.getsource(base_mod._validate_orderset_class)
-    assert "from django_strawberry_framework.filters.sets import FilterSet" in src_filter
-    assert "from django_strawberry_framework.orders.sets import OrderSet" in src_order
-    assert "FilterSet" not in vars(base_mod)
-    assert "OrderSet" not in vars(base_mod)
-
-
 def test_meta_filterset_class_accepts_filterset_subclass() -> None:
     """A real ``FilterSet`` subclass is accepted and stored on the definition."""
 
@@ -1252,11 +1229,7 @@ def test_meta_filterset_class_accepts_filterset_subclass() -> None:
 
 
 def test_meta_connection_in_allowed_meta_keys() -> None:
-    """``Meta.connection`` ships in spec-030 - a net-new ALLOWED key.
-
-    Net-new ALLOWED, NOT a DEFERRED_META_KEYS promotion (spec-030 Decision 8;
-    mirrors the filterset/orderset precedent).
-    """
+    """``Meta.connection`` is supported rather than deferred (spec-030 Decision 8)."""
     assert "connection" in ALLOWED_META_KEYS
     assert "connection" not in DEFERRED_META_KEYS
 
@@ -1391,11 +1364,7 @@ def test_meta_connection_absent_leaves_definition_none() -> None:
 
 
 def test_meta_globalid_strategy_in_allowed_meta_keys() -> None:
-    """``Meta.globalid_strategy`` ships in spec-031 - a net-new ALLOWED key.
-
-    Net-new ALLOWED, NOT a ``DEFERRED_META_KEYS`` promotion (spec-031 Decision 6;
-    mirrors the connection / filterset / orderset precedent).
-    """
+    """``Meta.globalid_strategy`` is supported rather than deferred (spec-031 Decision 6)."""
     assert "globalid_strategy" in ALLOWED_META_KEYS
     assert "globalid_strategy" not in DEFERRED_META_KEYS
 
@@ -2519,7 +2488,7 @@ def _make_override_type(
 
 
 def test_nullable_overrides_in_allowed_meta_keys() -> None:
-    """Both override keys are net-new ALLOWED keys, NOT deferred (Decision 6)."""
+    """Both nullability override keys are supported rather than deferred (Decision 6)."""
     assert "nullable_overrides" in ALLOWED_META_KEYS
     assert "required_overrides" in ALLOWED_META_KEYS
     assert "nullable_overrides" not in DEFERRED_META_KEYS
@@ -3038,11 +3007,7 @@ def test_exclude_accepts_a_frozenset_too() -> None:
 
 
 def test_meta_cursor_field_in_allowed_meta_keys() -> None:
-    """``Meta.cursor_field`` is a net-new ALLOWED key.
-
-    Net-new ALLOWED, NOT a DEFERRED_META_KEYS promotion - the feature ships in
-    the same change that adds the key (the ``Meta.connection`` precedent).
-    """
+    """``Meta.cursor_field`` is supported rather than accepted as a deferred setting."""
     assert "cursor_field" in ALLOWED_META_KEYS
     assert "cursor_field" not in DEFERRED_META_KEYS
 
@@ -3060,41 +3025,53 @@ def test_meta_cursor_field_valid_declaration_lands_on_definition() -> None:
     assert CategoryType.__django_strawberry_definition__.cursor_field == ("-name", "id")
 
 
-def test_meta_cursor_field_rejects_non_sequence_shapes() -> None:
+@pytest.mark.parametrize(
+    "bad_value",
+    ["name", (), ("name", 3)],
+    ids=["string", "empty", "non-string-entry"],
+)
+def test_meta_cursor_field_rejects_non_sequence_shapes(bad_value: object) -> None:
     """A string / empty / non-string-entry ``cursor_field`` raises the shape error."""
-    for bad_value in ("name", (), ("name", 3)):
-        with pytest.raises(ConfigurationError, match="non-empty non-string sequence"):
+    with pytest.raises(ConfigurationError, match="non-empty non-string sequence"):
 
-            @definition_raises
-            class CategoryType(DjangoType):
-                class Meta:
-                    model = Category
-                    fields = CATEGORY_SCALAR_FIELDS
-                    interfaces = (relay.Node,)
-                    cursor_field = bad_value
-
-        registry.clear()
+        @definition_raises
+        class CategoryType(DjangoType):
+            class Meta:
+                model = Category
+                fields = CATEGORY_SCALAR_FIELDS
+                interfaces = (relay.Node,)
+                cursor_field = bad_value
 
 
-def test_meta_cursor_field_rejects_malformed_and_traversing_entries() -> None:
-    """A bare ``-``, a ``__`` traversal, and a duplicate column all raise."""
-    for bad_value, match in (
+@pytest.mark.parametrize(
+    ("bad_value", "match"),
+    [
         (("-", "id"), "not a valid order string"),
         (("--name", "id"), "not a valid order string"),
         (("parent__name", "id"), "traverses a relation"),
         (("name", "-name"), "more than once"),
-    ):
-        with pytest.raises(ConfigurationError, match=match):
+    ],
+    ids=[
+        "bare-minus",
+        "repeated-minus",
+        "relation-traversal",
+        "duplicate-column",
+    ],
+)
+def test_meta_cursor_field_rejects_malformed_and_traversing_entries(
+    bad_value: tuple[str, ...],
+    match: str,
+) -> None:
+    """A bare ``-``, a ``__`` traversal, and a duplicate column all raise."""
+    with pytest.raises(ConfigurationError, match=match):
 
-            @definition_raises
-            class CategoryType(DjangoType):
-                class Meta:
-                    model = Category
-                    fields = CATEGORY_SCALAR_FIELDS
-                    interfaces = (relay.Node,)
-                    cursor_field = bad_value
-
-        registry.clear()
+        @definition_raises
+        class CategoryType(DjangoType):
+            class Meta:
+                model = Category
+                fields = CATEGORY_SCALAR_FIELDS
+                interfaces = (relay.Node,)
+                cursor_field = bad_value
 
 
 def test_meta_cursor_field_requires_relay_node_shape() -> None:

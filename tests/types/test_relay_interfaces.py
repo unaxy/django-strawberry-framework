@@ -171,17 +171,18 @@ def test_meta_interfaces_rejects_string_entries() -> None:
         _validate_interfaces(meta_entry, Category)
 
 
-def test_meta_interfaces_rejects_non_interface_classes() -> None:
-    """Plain classes, builtin types, and ``@strawberry.type``-decorated classes are rejected."""
+@pytest.mark.parametrize("shape", ["plain", "builtin", "object-type"])
+def test_meta_interfaces_rejects_non_interface_classes(shape: str) -> None:
+    """Every non-interface class shape is refused, even if Strawberry publishes it as an object."""
 
     @strawberry.type
     class NotAnInterface:
         name: str
 
-    for entry in (object, int, NotAnInterface):
-        meta = _meta(interfaces=(entry,))
-        with pytest.raises(ConfigurationError, match="not a Strawberry interface"):
-            _validate_interfaces(meta, Category)
+    entry = {"plain": object, "builtin": int, "object-type": NotAnInterface}[shape]
+    meta = _meta(interfaces=(entry,))
+    with pytest.raises(ConfigurationError, match="not a Strawberry interface"):
+        _validate_interfaces(meta, Category)
 
 
 @pytest.mark.parametrize(
@@ -358,40 +359,28 @@ def test_composite_pk_with_a_pk_node_id_annotation_raises(monkeypatch: pytest.Mo
 # ---------------------------------------------------------------------------
 
 
-def test_is_type_of_injected_for_all_djangotypes() -> None:
-    """``is_type_of`` is installed on every concrete ``DjangoType`` subclass.
+@pytest.mark.parametrize(
+    ("model_cls", "other_model_cls"),
+    [(Category, Item), (Item, Category)],
+    ids=["category", "item"],
+)
+def test_is_type_of_injected_for_all_djangotypes(
+    model_cls: type[Model],
+    other_model_cls: type[Model],
+) -> None:
+    """Each concrete DjangoType owns its discriminator even without any Relay interface."""
 
-    Decision 6 (spec-015 #"injection (Decision-1 borrow) is added unconditionally") is
-    that injection is unconditional - it
-    happens for every ``DjangoType`` subclass with a ``Meta`` regardless
-    of whether ``Meta.interfaces`` is declared. The non-Relay
-    ``DjangoType`` here exercises that unconditional path.
-
-    The assertion uses ``cls.__dict__`` membership (not ``getattr``) so a
-    method inherited from a base would not satisfy the contract; the
-    injection must land on the class itself.
-    """
-
-    class CategoryNode(DjangoType):
+    class DeclaredType(DjangoType):
         class Meta:
-            model = Category
+            model = model_cls
             fields = ("id", "name")
 
-    class ItemNode(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name")
-
-    for type_cls, model_cls, other_model_cls in (
-        (CategoryNode, Category, Item),
-        (ItemNode, Item, Category),
-    ):
-        assert "is_type_of" in type_cls.__dict__
-        is_type_of = truth.class_dict(type_cls)["is_type_of"]
-        assert callable(is_type_of)
-        assert is_type_of(model_cls(), None) is True
-        assert is_type_of(other_model_cls(), None) is False
-        assert is_type_of(object(), None) is False
+    assert "is_type_of" in DeclaredType.__dict__
+    is_type_of = truth.class_dict(DeclaredType)["is_type_of"]
+    assert callable(is_type_of)
+    assert is_type_of(model_cls(), None) is True
+    assert is_type_of(other_model_cls(), None) is False
+    assert is_type_of(object(), None) is False
 
 
 def test_consumer_declared_is_type_of_is_preserved() -> None:
@@ -555,8 +544,13 @@ def test_non_relay_type_keeps_id_int() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_relay_node_injects_default_resolvers() -> None:
-    """Phase 2.5 injects three ``resolve_*`` classmethods; ``resolve_node`` stays Strawberry's.
+@pytest.mark.parametrize(
+    "attr",
+    ["resolve_id", "resolve_id_attr", "resolve_nodes"],
+    ids=["resolve-id", "resolve-id-attr", "resolve-nodes"],
+)
+def test_relay_node_injects_default_resolvers(attr: str) -> None:
+    """Finalization injects three ``resolve_*`` classmethods; ``resolve_node`` stays Strawberry's.
 
     Strawberry's ``Node.resolve_node`` answers one id through ``resolve_nodes``, so the
     package installs no ``resolve_node`` of its own.
@@ -570,10 +564,9 @@ def test_relay_node_injects_default_resolvers() -> None:
 
     finalize_django_types()
     assert relay.Node in CategoryNode.__mro__
-    for attr in ("resolve_id", "resolve_id_attr", "resolve_nodes"):
-        assert attr in CategoryNode.__dict__, f"{attr} was not injected"
-        descriptor = truth.class_dict(CategoryNode)[attr]
-        assert isinstance(descriptor, classmethod)
+    assert attr in CategoryNode.__dict__, f"{attr} was not injected"
+    descriptor = truth.class_dict(CategoryNode)[attr]
+    assert isinstance(descriptor, classmethod)
     assert "resolve_node" not in CategoryNode.__dict__
     assert not truth.overrides(CategoryNode, relay.Node, "resolve_node")
 
@@ -1654,10 +1647,15 @@ def test_direct_relay_node_inheritance_suppresses_id_annotation() -> None:
 
 
 @pytest.mark.django_db
-def test_direct_relay_node_inheritance_injects_resolvers_and_suppresses_id() -> None:
+@pytest.mark.parametrize(
+    "attr",
+    ["resolve_id", "resolve_id_attr", "resolve_nodes"],
+    ids=["resolve-id", "resolve-id-attr", "resolve-nodes"],
+)
+def test_direct_relay_node_inheritance_injects_resolvers_and_suppresses_id(attr: str) -> None:
     """End-to-end: ``class Foo(DjangoType, relay.Node)`` finalizes the Relay shape.
 
-    Direct ``relay.Node`` inheritance must not bypass Relay finalization: Phase 2.5
+    Direct ``relay.Node`` inheritance must not bypass Relay finalization: it
     must run the composite-pk gate and the three ``resolve_*`` defaults
     for every class whose resolved MRO includes ``relay.Node``, not only
     for classes with a non-empty ``Meta.interfaces`` tuple. Otherwise the
@@ -1677,9 +1675,8 @@ def test_direct_relay_node_inheritance_injects_resolvers_and_suppresses_id() -> 
     # ``Meta.interfaces`` was empty - the definition stores the empty tuple.
     assert CategoryNode.__django_strawberry_definition__.interfaces == ()
     # All three resolver defaults landed on the class itself.
-    for attr in ("resolve_id", "resolve_id_attr", "resolve_nodes"):
-        assert attr in CategoryNode.__dict__, f"{attr} was not injected"
-        assert isinstance(CategoryNode.__dict__[attr], classmethod)
+    assert attr in CategoryNode.__dict__, f"{attr} was not injected"
+    assert isinstance(CategoryNode.__dict__[attr], classmethod)
     # The synthesized ``id`` annotation was dropped so the interface-supplied
     # ``id: GlobalID!`` field wins at Strawberry decoration time.
     assert "id" not in CategoryNode.__annotations__

@@ -495,6 +495,19 @@ def test_has_custom_id_resolver_for_ignores_the_installed_strawberry_resolve_id(
     assert definition._custom_id_resolver_cache == {("id", False): False}
 
 
+def test_has_custom_id_resolver_for_ignores_inherited_relay_default() -> None:
+    """Inherited Strawberry Relay ``resolve_id`` does not count as consumer custom."""
+
+    class InheritedNode(relay.Node):
+        pass
+
+    assert "resolve_id" not in vars(InheritedNode)
+    definition = _malformed_definition(origin=InheritedNode)
+
+    assert definition.has_custom_id_resolver_for("id") is False
+    assert definition._custom_id_resolver_cache == {("id", False): False}
+
+
 def test_has_custom_id_resolver_for_detects_non_id_pk_resolver() -> None:
     """A ``resolve_<pk>`` override for a non-``id`` pk column counts as custom.
 

@@ -14,6 +14,7 @@ the shipped schema, with the sync view's rows in its statements.
 
 import datetime
 from decimal import Decimal
+from functools import wraps
 from uuid import UUID
 
 import pytest
@@ -232,78 +233,58 @@ def test_filter_specimens_by_bigint_in_accepts_64bit_values() -> None:
 
 
 @pytest.mark.django_db
-def test_filter_specimens_by_bigint_in_drops_past_64bit_members_no_overflow() -> None:
-    """A past-signed-64-bit ``in`` member is dropped, never a raw backend ``OverflowError``.
-
-    A scalar ``__in`` lookup binds each element directly, so a value past the column's
-    signed-64-bit range (``2**63``) would reach the backend as a raw ``Python int too large
-    to convert to SQLite INTEGER`` top-level error - unlike a scalar ``exact``, which
-    Django's range-aware integer lookups resolve to an empty match before binding.
-    ``filters/base.py::IntegerInFilter`` drops the out-of-range member (it can
-    identify no row), so the in-range member still filters; a NON-empty list whose
-    members ALL drop matches NOTHING (``qs.none()``), not every row (the second leg).
-    """
+@pytest.mark.parametrize(
+    "include_valid",
+    [True, False],
+    ids=["mixed-members", "all-members-dropped"],
+)
+def test_filter_specimens_by_bigint_in_drops_past_64bit_members_no_overflow(
+    *,
+    include_valid: bool,
+) -> None:
+    """Out-of-column-range IN members cannot bind or widen the remaining supported membership set."""
     _seed_specimen(label="keep", signed_big=7)
-    _seed_specimen(label="other", signed_big=1)
-
-    # 9223372036854775808 == 2**63, one past the signed-64-bit maximum. The in-range
-    # member (7) must still select its row, proving the bad member was dropped (not the
-    # whole filter) and no OverflowError reached the backend.
-    mixed = _post_graphql(
-        """
-        query {
-          allScalarSpecimens(filter: { signedBig: { in: [9223372036854775808, 7] } }) {
-            label
-          }
-        }
-        """,
+    _seed_specimen(label="other", signed_big=3)
+    values = "[9223372036854775808, 7]" if include_valid else "[9223372036854775808]"
+    response = _post_graphql(
+        "{ allScalarSpecimens(filter: { signedBig: { in: " + values + " } }) { label } }",
     )
-    assert mixed.status_code == 200
-    mixed_body = response_json(mixed)
-    assert "errors" not in mixed_body, mixed_body
-    assert json_at(mixed_body, "data", "allScalarSpecimens") == [{"label": "keep"}]
-
-    # A NON-empty ``in`` whose only member is out of range identifies no row, so the
-    # correct result is ``[]`` (match nothing) - NOT every visible row. ``IntegerInFilter``
-    # short-circuits a fully-dropped non-empty list to ``qs.none()`` rather than letting
-    # django-filter SKIP the coerced-empty list (which would silently widen the
-    # restrictive filter to no constraint). No ``OverflowError`` reaches the backend.
-    only_bad = _post_graphql(
-        """
-        query {
-          allScalarSpecimens(filter: { signedBig: { in: [9223372036854775808] } }) {
-            label
-          }
-        }
-        """,
+    assert response.status_code == 200
+    body = response_json(response)
+    assert "errors" not in body, body
+    assert json_at(body, "data", "allScalarSpecimens") == (
+        [{"label": "keep"}] if include_valid else []
     )
-    assert only_bad.status_code == 200
-    only_bad_body = response_json(only_bad)
-    assert "errors" not in only_bad_body, only_bad_body
-    assert json_at(only_bad_body, "data", "allScalarSpecimens") == []
 
 
 @pytest.mark.django_db
 @pytest.mark.parametrize(
     ("leaf", "valid"),
     [
-        ("signedBig", "[7]"),
-        ("label", '["keep"]'),
-        ("occurredOn", '["2021-06-11"]'),
-        ("price", '["1.5000"]'),
-        ("externalId", '["00000000-0000-0000-0000-000000000007"]'),
+        pytest.param("signedBig", "[7]", id="integer"),
+        pytest.param("label", '["keep"]', id="text"),
+        pytest.param("occurredOn", '["2021-06-11"]', id="date"),
+        pytest.param("price", '["1.5000"]', id="decimal"),
+        pytest.param("externalId", '["00000000-0000-0000-0000-000000000007"]', id="uuid"),
+    ],
+)
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "valid",
+        "empty",
+        "not",
+        "or",
+        "and",
+        "null",
     ],
 )
 def test_filter_specimens_explicit_empty_in_is_the_empty_set_on_every_column(
     leaf: str,
     valid: str,
+    shape: str,
 ) -> None:
-    """An explicit ``in: []`` is the empty set on every column type, as Django's ``x__in=[]``.
-
-    No rows; ``not`` of it every row; ``or`` with a real arm that arm, ``and`` with one no
-    rows; ``null`` stays the no-constraint form. The integer column's ``in`` drops
-    out-of-range members (``IntegerInFilter``) and keeps the same empty-set rule.
-    """
+    """Each scalar column independently preserves empty-set algebra through real generated input."""
     _seed_specimen(
         label="keep",
         signed_big=7,
@@ -312,130 +293,80 @@ def test_filter_specimens_explicit_empty_in_is_the_empty_set_on_every_column(
         external_id=UUID(int=7),
     )
     _seed_specimen(label="other")
-
-    def rows(doc: str) -> set[str]:
-        response = _post_graphql(f"query {{ allScalarSpecimens(filter: {doc}) {{ label }} }}")
-        body = response_json(response)
-        assert "errors" not in body, body
-        return {json_str(row, "label") for row in json_list(body, "data", "allScalarSpecimens")}
-
-    assert rows(f"{{ {leaf}: {{ in: {valid} }} }}") == {"keep"}
-    assert rows(f"{{ {leaf}: {{ in: [] }} }}") == set()
-    assert rows(f"{{ not: {{ {leaf}: {{ in: [] }} }} }}") == {"keep", "other"}
-    assert rows(f"{{ or: [{{ {leaf}: {{ in: [] }} }}, {{ {leaf}: {{ in: {valid} }} }}] }}") == {
-        "keep",
+    empty = "{ " + leaf + ": { in: [] } }"
+    matching = "{ " + leaf + ": { in: " + valid + " } }"
+    cases: dict[str, tuple[str, list[str]]] = {
+        "valid": (matching, ["keep"]),
+        "empty": (empty, []),
+        "not": ("{ not: " + empty + " }", ["keep", "other"]),
+        "or": ("{ or: [" + empty + ", " + matching + "] }", ["keep"]),
+        "and": ("{ and: [" + empty + ", " + matching + "] }", []),
+        "null": ("{ " + leaf + ": { in: null } }", ["keep", "other"]),
     }
+    filter_input, expected = cases[shape]
+    response = _post_graphql("{ allScalarSpecimens(filter: " + filter_input + ") { label } }")
+    assert response.status_code == 200
+    body = response_json(response)
+    assert "errors" not in body, body
     assert (
-        rows(f"{{ and: [{{ {leaf}: {{ in: [] }} }}, {{ {leaf}: {{ in: {valid} }} }}] }}") == set()
+        sorted(json_str(row, "label") for row in json_list(body, "data", "allScalarSpecimens"))
+        == expected
     )
-    assert rows(f"{{ {leaf}: {{ in: null }} }}") == {"keep", "other"}
 
 
 @pytest.mark.django_db
-def test_filter_specimens_by_unsigned_bigint_in_drops_below_zero_members() -> None:
-    """A negative ``in`` member on a ``PositiveBigIntegerField`` is dropped by the column's LOWER bound.
-
-    ``unsigned_big`` is a ``PositiveBigIntegerField`` whose integer range on the
-    database starts at 0, so ``IntegerInFilter``'s per-member coercion (``to_python``,
-    then the column's range) drops a negative member through the lower bound - the
-    unsigned counterpart to the signed upper-bound overflow drop above. The in-range
-    member still filters; a NON-empty list whose members ALL drop matches NOTHING
-    (``qs.none()``), not every row. Pins ``IntegerInFilter``'s application to
-    ``PositiveBigIntegerField`` (``apps/scalars/filters.py``), not only the signed
-    ``BigIntegerField`` upper-bound case.
-    """
+@pytest.mark.parametrize(
+    "include_valid",
+    [True, False],
+    ids=["mixed-members", "all-members-dropped"],
+)
+def test_filter_specimens_by_unsigned_bigint_in_drops_below_zero_members(
+    *,
+    include_valid: bool,
+) -> None:
+    """Out-of-column-range IN members cannot bind or widen the remaining supported membership set."""
     _seed_specimen(label="keep", unsigned_big=7)
     _seed_specimen(label="other", unsigned_big=3)
-
-    # -1 is below the PositiveBigIntegerField minimum (0) and is dropped as outside
-    # the column's range; 7 still selects its row, proving only the bad member
-    # was dropped (not the whole filter).
-    mixed = _post_graphql(
-        """
-        query {
-          allScalarSpecimens(filter: { unsignedBig: { in: [-1, 7] } }) {
-            label
-          }
-        }
-        """,
+    values = "[-1, 7]" if include_valid else "[-1]"
+    response = _post_graphql(
+        "{ allScalarSpecimens(filter: { unsignedBig: { in: " + values + " } }) { label } }",
     )
-    assert mixed.status_code == 200
-    mixed_body = response_json(mixed)
-    assert "errors" not in mixed_body, mixed_body
-    assert json_at(mixed_body, "data", "allScalarSpecimens") == [{"label": "keep"}]
-
-    # A NON-empty ``in`` whose only member is below the minimum identifies no row, so
-    # the result is ``[]`` (match nothing) - the lower-bound twin of the all-out-of-
-    # range signed leg, never django-filter's empty-value skip that returns all rows.
-    only_bad = _post_graphql(
-        """
-        query {
-          allScalarSpecimens(filter: { unsignedBig: { in: [-1] } }) {
-            label
-          }
-        }
-        """,
+    assert response.status_code == 200
+    body = response_json(response)
+    assert "errors" not in body, body
+    assert json_at(body, "data", "allScalarSpecimens") == (
+        [{"label": "keep"}] if include_valid else []
     )
-    assert only_bad.status_code == 200
-    only_bad_body = response_json(only_bad)
-    assert "errors" not in only_bad_body, only_bad_body
-    assert json_at(only_bad_body, "data", "allScalarSpecimens") == []
 
 
 @pytest.mark.django_db
-def test_filter_specimens_by_bigint_range_out_of_range_bound_no_overflow() -> None:
-    """A past-signed-64-bit ``range`` bound is range-adapted, never a raw backend ``OverflowError``.
-
-    The ``range`` counterpart of
-    ``test_filter_specimens_by_bigint_in_drops_past_64bit_members_no_overflow``.
-    A scalar ``__range`` lookup binds BOTH bounds directly (``WHERE col BETWEEN a
-    AND b``), so a bound past the column's signed-64-bit range would reach the backend
-    as a raw ``Python int too large to convert to SQLite INTEGER`` top-level error -
-    the same defect an element-binding ``__in`` has without ``IntegerInFilter``.
-    ``filters/base.py::IntegerRangeFilter`` decomposes the range into Django's
-    range-aware ``gte`` / ``lte`` lookups, which resolve an out-of-range bound
-    (widen to no constraint / match nothing) BEFORE binding, so the query succeeds:
-
-    - upper bound past ``2**63`` widens to just the lower constraint;
-    - both bounds past ``2**63`` identify no row (``[]``), never a backend overflow;
-    - lower bound past ``-(2**63)`` widens to just the upper constraint; and
-    - a fully in-range ``range`` keeps its inclusive-BETWEEN semantics unchanged.
-    """
+@pytest.mark.parametrize(
+    ("bounds", "expected"),
+    [
+        pytest.param("[1, 9223372036854775808]", ["keep", "other"], id="upper-unbounded"),
+        pytest.param("[9223372036854775808, 9223372036854775818]", [], id="both-above-range"),
+        pytest.param("[-9223372036854775809, 100]", ["keep"], id="lower-unbounded"),
+        pytest.param("[7, 7]", ["keep"], id="inclusive-boundary"),
+        pytest.param("[]", ["keep", "other"], id="empty-range-skips"),
+    ],
+)
+def test_filter_specimens_by_bigint_range_out_of_range_bound_no_overflow(
+    bounds: str,
+    expected: list[str],
+) -> None:
+    """Each range decision reaches Django's supported integer lookup without an overflowing bound."""
     _seed_specimen(label="keep", signed_big=7)
     _seed_specimen(label="other", signed_big=1_000_000)
-
-    past_max = 9223372036854775808  # 2**63, one past the signed-64-bit maximum
-    past_min = -9223372036854775809  # one past the signed-64-bit minimum
-
-    def _labels(filter_body: str) -> list[str]:
-        response = _post_graphql(
-            f"query {{ allScalarSpecimens(filter: {{ {filter_body} }}) {{ label }} }}",
-        )
-        assert response.status_code == 200
-        body = response_json(response)
-        assert "errors" not in body, body
-        return sorted(
-            json_str(row, "label") for row in json_list(body, "data", "allScalarSpecimens")
-        )
-
-    # Upper bound past 2**63: BETWEEN 1 AND 2**63 == col >= 1 (the impossible
-    # upper bound imposes no constraint). Both seeded rows are >= 1.
-    assert _labels(f"signedBig: {{ range: [1, {past_max}] }}") == ["keep", "other"]
-
-    # Both bounds past the maximum: no storable value can be >= 2**63, so the
-    # range identifies no row - ``[]``, never a raw OverflowError.
-    assert _labels(f"signedBig: {{ range: [{past_max}, {past_max + 10}] }}") == []
-
-    # Lower bound past -(2**63): BETWEEN past_min AND 100 == col <= 100. Only the
-    # in-range ``keep`` (7) matches; ``other`` (1_000_000) is excluded.
-    assert _labels(f"signedBig: {{ range: [{past_min}, 100] }}") == ["keep"]
-
-    # A fully in-range range keeps ordinary inclusive-BETWEEN semantics.
-    assert _labels("signedBig: { range: [7, 7] }") == ["keep"]
-
-    # An explicitly empty range supplies no bounds: keep django-filter's skip
-    # (no constraint), returning every row rather than matching nothing.
-    assert _labels("signedBig: { range: [] }") == ["keep", "other"]
+    response = _post_graphql(
+        "{ allScalarSpecimens(filter: { signedBig: { range: " + bounds + " } }) { label } }",
+    )
+    assert response.status_code == 200
+    body = response_json(response)
+    assert "errors" not in body, body
+    assert (
+        sorted(json_str(row, "label") for row in json_list(body, "data", "allScalarSpecimens"))
+        == expected
+    )
 
 
 _I64_MAX = 2**63 - 1
@@ -834,28 +765,22 @@ def _introspect_field_types(type_name: str) -> dict[str, JSONObject]:
     }
 
 
-@pytest.mark.django_db
-def test_scalar_specimen_introspects_bigint_scalar_for_both_fields() -> None:
-    """Both halves of the ``BigInt`` converter entry introspect correctly in both shapes.
-
-    Signed and unsigned alike, as ``NON_NULL`` and as nullable ``SCALAR``.
-    """
-    required_fields = _introspect_field_types("ScalarSpecimenType")
-    nullable_fields = _introspect_field_types("NullableScalarSpecimenType")
-
-    # ``ScalarSpecimen`` declares ``signed_big`` / ``unsigned_big`` without
-    # ``null=True``, so introspection must report ``NON_NULL`` wrapping the
-    # ``BigInt`` ``SCALAR``.
-    for field_name in ("signedBig", "unsignedBig"):
-        field_type = required_fields[field_name]
-        assert field_type["kind"] == "NON_NULL", field_name
-        assert field_type["ofType"] == {"name": "BigInt", "kind": "SCALAR"}, field_name
-
-    # ``NullableScalarSpecimen`` declares the same fields with ``null=True``,
-    # so introspection must report a bare ``SCALAR`` (no ``NON_NULL`` wrapper).
-    for field_name in ("signedBig", "unsignedBig"):
-        field_type = nullable_fields[field_name]
-        assert field_type == {"name": "BigInt", "kind": "SCALAR", "ofType": None}, field_name
+@pytest.mark.parametrize("field_name", ["signedBig", "unsignedBig"], ids=["signed", "unsigned"])
+@pytest.mark.parametrize("nullable", [False, True], ids=["required", "nullable"])
+def test_scalar_specimen_introspects_bigint_scalar_for_both_fields(
+    field_name: str,
+    *,
+    nullable: bool,
+) -> None:
+    """Each signedness and column nullability publishes its own precise BigInt wrapper."""
+    type_name = "NullableScalarSpecimenType" if nullable else "ScalarSpecimenType"
+    fields = _introspect_field_types(type_name)
+    expected = (
+        {"name": "BigInt", "kind": "SCALAR", "ofType": None}
+        if nullable
+        else {"name": None, "kind": "NON_NULL", "ofType": {"name": "BigInt", "kind": "SCALAR"}}
+    )
+    assert fields[field_name] == expected
 
 
 @pytest.mark.django_db
@@ -907,49 +832,37 @@ def test_nullable_scalar_specimen_all_null_wire_format_over_http() -> None:
     non-null branch.
     """
     _seed_nullable_specimen(label="empty")
-
     response = _post_graphql(
-        """
-        query {
-          allNullableScalarSpecimens {
-            label
-            flag
-            score
-            price
-            occurredOn
-            occurredAt
-            occurredTime
-            payload
-            externalId
-            signedBig
-            unsignedBig
-            partner { label }
-          }
-        }
-        """,
+        (
+            "\n        query {\n          allNullableScalarSpecimens {\n            "
+            "label\n            flag\n            score\n            price"
+            "\n            occurredOn\n            occurredAt\n            "
+            "occurredTime\n            payload\n            externalId\n            "
+            "signedBig\n            unsignedBig\n            partner { label }"
+            "\n          }\n        }\n        "
+        ),
     )
     assert response.status_code == 200
     body = response_json(response)
     assert "errors" not in body, body
-    rows = json_list(body, "data", "allNullableScalarSpecimens")
-    assert len(rows) == 1
-    row = rows[0]
-
-    assert json_at(row, "label") == "empty"  # the one non-null field we set
-    for field_name in (
-        "flag",
-        "score",
-        "price",
-        "occurredOn",
-        "occurredAt",
-        "occurredTime",
-        "payload",
-        "externalId",
-        "signedBig",
-        "unsignedBig",
-        "partner",
-    ):
-        assert json_at(row, field_name) is None, field_name
+    assert body["data"] == {
+        "allNullableScalarSpecimens": [
+            {
+                "label": "empty",
+                "flag": None,
+                "score": None,
+                "price": None,
+                "occurredOn": None,
+                "occurredAt": None,
+                "occurredTime": None,
+                "payload": None,
+                "externalId": None,
+                "signedBig": None,
+                "unsignedBig": None,
+                "partner": None,
+            },
+        ],
+    }
 
 
 @pytest.mark.django_db
@@ -1216,27 +1129,38 @@ def test_scalars_optimizer_select_related_on_self_fk_in_http_query() -> None:
     parent = _seed_specimen(label="root")
     _seed_specimen(label="child_a", parent=parent)
     _seed_specimen(label="child_b", parent=parent)
+    other = _seed_specimen(label="other_root")
+    _seed_specimen(label="other_leaf", parent=other)
 
     with CaptureQueriesContext(connection) as captured:
         response = _post_graphql(
-            """
-            query {
-              allScalarSpecimens {
-                label
-                parent { label }
-              }
-            }
-            """,
+            (
+                "\n            query {\n              allScalarSpecimens {"
+                "\n                label\n                parent { label }\n              "
+                "}\n            }\n            "
+            ),
         )
-
     assert response.status_code == 200
     body = response_json(response)
     assert "errors" not in body, body
-    # 1 query: SELECT scalars_scalarspecimen ... LEFT OUTER JOIN
-    # scalars_scalarspecimen T2 ON parent_id. Without the optimizer the
-    # ``parent { label }`` branch would issue 1 + 3 = 4 queries.
-    assert len(captured) == 1, [q["sql"] for q in captured]
-    sql = captured[0]["sql"]
+    assert sorted(
+        json_list(body, "data", "allScalarSpecimens"),
+        key=lambda row: json_str(row, "label"),
+    ) == [
+        {"label": "child_a", "parent": {"label": "root"}},
+        {"label": "child_b", "parent": {"label": "root"}},
+        {"label": "other_leaf", "parent": {"label": "other_root"}},
+        {"label": "other_root", "parent": None},
+        {"label": "root", "parent": None},
+    ]
+
+    relevant = [
+        query["sql"]
+        for query in captured.captured_queries
+        if 'FROM "scalars_scalarspecimen"' in query["sql"]
+    ]
+    assert len(relevant) == 1, [q["sql"] for q in captured]
+    sql = relevant[0]
     assert "scalars_scalarspecimen" in sql
     assert "JOIN" in sql.upper()
 
@@ -1256,26 +1180,42 @@ def test_scalars_optimizer_prefetch_related_on_reverse_self_fk_in_http_query() -
     root = _seed_specimen(label="root")
     _seed_specimen(label="leaf_a", parent=root)
     _seed_specimen(label="leaf_b", parent=root)
+    other = _seed_specimen(label="other_root")
+    _seed_specimen(label="other_leaf", parent=other)
 
     with CaptureQueriesContext(connection) as captured:
         response = _post_graphql(
-            """
-            query {
-              allScalarSpecimens {
-                label
-                children { label }
-              }
-            }
-            """,
+            (
+                "\n            query {\n              allScalarSpecimens {"
+                "\n                label\n                children { label }"
+                "\n              }\n            }\n            "
+            ),
         )
-
     assert response.status_code == 200
     body = response_json(response)
     assert "errors" not in body, body
-    # 2 queries: SELECT scalars_scalarspecimen ... + a single prefetched
-    # SELECT for the ``children`` reverse relation. Without the optimizer
-    # the ``children`` branch would issue 1 + 3 = 4 queries.
-    assert len(captured) == 2, [q["sql"] for q in captured]
+    expected: list[JSONObject] = [
+        {"label": "leaf_a", "children": []},
+        {"label": "leaf_b", "children": []},
+        {"label": "other_leaf", "children": []},
+        {"label": "other_root", "children": [{"label": "other_leaf"}]},
+        {"label": "root", "children": [{"label": "leaf_a"}, {"label": "leaf_b"}]},
+    ]
+    actual = json_list(body, "data", "allScalarSpecimens")
+    for row in actual:
+        row_object = json_object(row)
+        row_object["children"] = sorted(
+            json_list(row_object, "children"),
+            key=lambda child: json_str(child, "label"),
+        )
+    assert sorted(actual, key=lambda row: json_str(row, "label")) == expected
+
+    relevant = [
+        query["sql"]
+        for query in captured.captured_queries
+        if 'FROM "scalars_scalarspecimen"' in query["sql"]
+    ]
+    assert len(relevant) == 2, [q["sql"] for q in captured]
 
 
 @pytest.mark.django_db
@@ -1668,35 +1608,42 @@ def test_scalars_optimizer_o6_downgrade_to_prefetch_for_custom_get_queryset_in_h
     """
     active = _seed_tag(label="active-tag", active=True)
     _seed_specimen(label="tagged", tag=active)
-
+    inactive = _seed_tag(label="inactive-tag", active=False)
+    _seed_specimen(label="hidden-tag", tag=inactive)
+    _seed_specimen(label="untagged")
     with CaptureQueriesContext(connection) as captured:
         response = _post_graphql(
-            """
-            query {
-              allScalarSpecimens {
-                label
-                tag { id }
-              }
-            }
-            """,
+            (
+                "\n            query {\n              allScalarSpecimens {"
+                "\n                label\n                tag { id }\n              }"
+                "\n            }\n            "
+            ),
         )
-
     assert response.status_code == 200
     body = response_json(response)
     assert "errors" not in body, body
-    # 2 queries: SELECT scalars_scalarspecimen + a prefetched SELECT for
-    # scalars_scalarspecimentag (filtered to ``active=True`` by the custom
-    # get_queryset). Without the O6 downgrade this would either JOIN
-    # (1 query) or elide entirely - both incorrect because the consumer's
-    # filter would be silently bypassed.
-    assert len(captured) == 2, [q["sql"] for q in captured]
-    main_sql = captured[0]["sql"]
-    # Main query must NOT JOIN - that would be the un-downgraded path.
+    assert sorted(
+        json_list(body, "data", "allScalarSpecimens"),
+        key=lambda row: json_str(row, "label"),
+    ) == [
+        {"label": "hidden-tag", "tag": None},
+        {"label": "tagged", "tag": {"id": active.pk}},
+        {"label": "untagged", "tag": None},
+    ]
+
+    relevant = [
+        query["sql"]
+        for query in captured.captured_queries
+        if 'FROM "scalars_scalarspecimen"' in query["sql"]
+        or 'FROM "scalars_scalarspecimentag"' in query["sql"]
+    ]
+    assert len(relevant) == 2, [q["sql"] for q in captured]
+    main_sql = relevant[0]
     assert "scalarspecimentag" not in main_sql.lower(), main_sql
-    # Prefetch SELECT must hit the tag table and carry the ``active`` filter.
-    tag_sql = captured[1]["sql"]
+    tag_sql = relevant[1]
     assert "scalarspecimentag" in tag_sql.lower(), tag_sql
     assert "active" in tag_sql.lower(), tag_sql
+    assert " IN " in tag_sql.upper(), tag_sql
 
 
 @pytest.mark.django_db
@@ -1805,29 +1752,38 @@ def test_scalars_optimizer_coerces_manager_to_queryset_in_http_query() -> None:
     root = _seed_specimen(label="root")
     _seed_specimen(label="child_a", parent=root)
     _seed_specimen(label="child_b", parent=root)
+    other = _seed_specimen(label="other_root")
+    _seed_specimen(label="other_leaf", parent=other)
 
     with CaptureQueriesContext(connection) as captured:
         response = _post_graphql(
-            """
-            query {
-              allScalarSpecimensViaManager {
-                label
-                parent { label }
-              }
-            }
-            """,
+            (
+                "\n            query {\n              allScalarSpecimensViaManager {"
+                "\n                label\n                parent { label }\n              "
+                "}\n            }\n            "
+            ),
         )
-
     assert response.status_code == 200
     body = response_json(response)
     assert "errors" not in body, body
-    # 1 query: SELECT scalarspecimen ... LEFT OUTER JOIN scalarspecimen
-    # via select_related("parent"). Without the optimizer's Manager
-    # coercion this would be 1 + 3 = 4 queries - one per child's parent
-    # lookup - proving the gate would have let the Manager pass through
-    # unoptimized.
-    assert len(captured) == 1, [q["sql"] for q in captured]
-    sql = captured[0]["sql"]
+    assert sorted(
+        json_list(body, "data", "allScalarSpecimensViaManager"),
+        key=lambda row: json_str(row, "label"),
+    ) == [
+        {"label": "child_a", "parent": {"label": "root"}},
+        {"label": "child_b", "parent": {"label": "root"}},
+        {"label": "other_leaf", "parent": {"label": "other_root"}},
+        {"label": "other_root", "parent": None},
+        {"label": "root", "parent": None},
+    ]
+
+    relevant = [
+        query["sql"]
+        for query in captured.captured_queries
+        if 'FROM "scalars_scalarspecimen"' in query["sql"]
+    ]
+    assert len(relevant) == 1, [q["sql"] for q in captured]
+    sql = relevant[0]
     assert "JOIN" in sql.upper(), sql
 
 
@@ -1892,6 +1848,7 @@ def test_override_specimen_consumer_field_overrides_resolve_over_http() -> None:
     assert note_type["ofType"] == {"name": "String", "kind": "SCALAR"}
 
 
+@wraps(AsyncDjangoGraphQLView.as_view())
 async def _async_shipped_graphql_view(request: HttpRequest) -> HttpResponseBase:
     """The shipped schema behind ``AsyncDjangoGraphQLView``, mounted for this module only."""
     return await AsyncDjangoGraphQLView.as_view(schema=config_schema.schema)(request)

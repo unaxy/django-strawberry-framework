@@ -135,7 +135,7 @@ it lands with its tick.
   - `DistributorType`'s `name="display_name"` pin stays: under the shipped `auto_camel_case=True`, `display_name`
     really collides with `displayName`.
 
-- [ ] 5. (TYP-2) A `GeneratedField` column has no conversion
+- [x] 5. (TYP-2) A `GeneratedField` column has no conversion
   - Our code: `types/converters.py::_scalar_map_entry`, `::scalar_route` and `::convert_scalar`. No `GeneratedField`
     arm exists in `types/`.
   - Upstream: `django/db/models/fields/generated.py::GeneratedField.output_field`. Public, Django 5.0+.
@@ -149,8 +149,46 @@ it lands with its tick.
   - Risk / blockers:
     - Nullability reads `GeneratedField.null`, and the field has no write side.
     - Coordinate with spec-051, which plans the filter-side `GeneratedField` unwrap.
-  - Owner: spec-051 Slice 2. The maintainer left the conversion to the builder flow; it lands with that slice, not
-    here.
+  - Owner: spec-051 Slice 2. The maintainer left the conversion to the builder flow; it landed here as that slice
+    (spec-051's Status line records it).
+  - Landed: one computed column per `GeneratedField`, `utils/relations.py::generated_column`: a clone of
+    `output_field` bound to the outer name, model and `db_column`, carrying the outer `choices`, `blank` and
+    `help_text`, with `null = field.null or output_field.null` (the clone Django's own `GeneratedField.check`
+    builds). It feeds classification and value coding only, never a query.
+    - `types/converters.py::generated_output_field` wraps it with the three refusals (file / image output, an output
+      no conversion publishes, an array output whose `base_field` declares choices), each naming the outer field.
+      `scalar_route`, `convert_scalar`, `_scalar_map_entry` and `_column_admits_empty_string` read it.
+    - Filters: `FilterSet._selected_column` keeps the `GeneratedField` when the merged `FILTER_DEFAULTS` +
+      `Meta.filter_overrides` map has an entry for it (an override stays honoured) and selects the column otherwise;
+      `_upstream_filter_for_lookup`, the origin oracle and `_lookups_for_field` read it, and
+      `filters/base.py::_model_resolved_field` hands it to the request-time guards. Every lookup is read off the one
+      registry Django's query resolves a generated column's lookups on, its `output_field` instance
+      (`utils/relations.py::lookup_registry`), never the copy of the output class's lookups the generated field files
+      on itself, and every walk starts from the generated field's own column (`utils/relations.py::lookup_operand`):
+      the generated leaf's filter selection (`filters/sets.py::_generated_filter_field`, adapted into
+      `FilterSet._upstream_filter_for_field`), the operand walk, the text-pattern test and the target-less GlobalID
+      lookup test.
+    - The identity codec (`utils/querysets.py::coerce_field_value_or_none` / `::column_python_value`) keeps the
+      declared field's own `to_python` / `get_db_prep_value` (a consumer key subclass's hold) and codes a value stored
+      in a generated column through its computed column after them (`::_value_codecs`; a lookup on that column is
+      read off `utils/relations.py::lookup_registry`, never off the clone); `stored_value_column`, which now answers
+      a generated column, feeds the storage-domain checks: a `relay.NodeID` over one refetched `null` for an
+      existing row before. Keyset cursors, `orderBy:` cursor state, the array helpers and `inspect_django_type` read
+      it too.
+    - The research corrected two claims above: about 25 package lines, not 4, and nullability is the either-flag rule
+      (strawberry-django reads `output_field.null` only).
+    - Fixture: library `Shelf.code_length` (BigInteger output over `code`) and `Shelf.topic_length` (nullable integer
+      over `NULLIF(topic, '')`), `db_persist=True`, migration `0020`; the tracked `db.sqlite3` is not migrated.
+  - Tests: live `examples/fakeshop/test_query/test_library_generated_api.py` (44 rows: read, every filter lookup,
+    the past-64-bit `in` / `range` guard, a nested `RelatedFilter`, order with nulls, the form update payload, an
+    `"__all__"` type, a no-field-list mutation's input, the `relay.NodeID` refetch, and lookups registered on the
+    `output_field` instance: a `Chr` operand, a text pattern, a target-less `GlobalIDFilter`, and a registration that
+    replaces a name the generated field's copy holds, `Exact` or an equality named `contains` and `Chr` as
+    `endswith`) and `examples/fakeshop/test_query/test_node_refetch_api.py` (a key subclass to a generated integer
+    column refetched by `node` / `nodes`), plus package rows in
+    `tests/types/test_converters.py`, `tests/filters/test_sets.py`, `tests/test_keyset.py`,
+    `tests/utils/test_querysets.py` and `tests/mutations/test_resolvers.py`. Every fix row failed on the old code;
+    the live module passes at Django 5.2.16 + django-filter 25.2. Postgres is Actions only.
 
 - [x] 6. (TYP-5) The Relay `resolve_node` default does not delegate to `resolve_nodes`
   - Our code: `types/relay.py`'s `_resolve_node_default`, `_resolve_node_async`, `_apply_node_filter` and the

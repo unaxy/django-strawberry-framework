@@ -8,6 +8,7 @@ from django.contrib.contenttypes.fields import GenericForeignKey, GenericRelatio
 from django.contrib.contenttypes.models import ContentType
 from django.core.validators import RegexValidator
 from django.db import models
+from django.db.models.functions import Length, NullIf
 from typing_extensions import Self, override
 
 if TYPE_CHECKING:
@@ -187,6 +188,21 @@ class Shelf(models.Model):
 
     code: _Text = models.TextField()
     topic: _Text = models.TextField(blank=True, default="")
+    # Two database-computed columns, read-only on every surface. Unannotated: django-stubs
+    # declares ``GeneratedField`` without type parameters, so it has no field generic to spell.
+    # ``code_length`` has a 64-bit output (``BigInt`` on the wire, so an ``in`` member past the
+    # column's range reaches the package's range guard); ``topic_length`` is ``NULL`` for an
+    # empty topic, which only its ``output_field`` declares.
+    code_length = models.GeneratedField(
+        expression=Length("code"),
+        output_field=models.BigIntegerField(),
+        db_persist=True,
+    )
+    topic_length = models.GeneratedField(
+        expression=Length(NullIf("topic", models.Value(""))),
+        output_field=models.IntegerField(null=True),
+        db_persist=True,
+    )
     # A blank-admitting choice column: an unassessed shelf stores ``""``, so the
     # generated enum carries a ``BLANK`` member beside the declared conditions.
     condition: _Char = models.CharField(

@@ -166,6 +166,7 @@ from .errors import (
 )
 from .lazy import unwrap_lazy_object
 from .relations import (
+    generated_column,
     is_model_class,
     leading_relation_hops,
     order_column_paths,
@@ -844,21 +845,47 @@ def identity_key(field: ModelField | None, value: object) -> object:
     return key
 
 
+def _value_codecs(field: ConcreteField) -> tuple[ConcreteField, ...]:
+    """Return the fields whose ``to_python`` / ``get_db_prep_value`` code ``field``'s value, in order.
+
+    ``field`` first, so a consumer subclass's own methods hold (Django's
+    ``ForeignKey.to_python`` / ``get_db_prep_value`` delegate to the column the key
+    references). When the value is stored in a ``GeneratedField`` (``field`` itself or the
+    ``to_field`` its key links reach), that delegation ends on the generated field's own
+    methods, the identity, so the column it computes (``relations.py::generated_column``)
+    codes the value next: a key subclass's cast and the computed column's both apply.
+    """
+    stored: ConcreteField = field
+    while isinstance(stored, models.ForeignKey):
+        stored = stored.target_field
+    column = generated_column(stored)
+    return (field,) if column is None else (field, column)
+
+
+def _cast_value(field: ConcreteField, value: object) -> object:
+    """Return ``value`` cast by each of ``_value_codecs(field)``'s ``to_python`` in turn."""
+    for codec in _value_codecs(field):
+        value = to_python_value(codec, value)
+    return value
+
+
 def column_python_value(field: ConcreteField, value: object) -> object:
     """Return ``field.to_python(value)``, a ``DateTimeField``'s naive value read as Django binds it.
 
-    A key casts through the column it references (``relations.py::stored_value_column``).
-    When that column is a ``DateTimeField``, a date or naive datetime (one ``to_python``
-    returns for a spelling without an offset, a date-only spelling as its midnight) is the
-    datetime Django's lookup and save bind for it: under ``USE_TZ``, aware in the default
-    time zone (``errors.py::datetime_django_binds``). Django makes that projection with a
+    The cast is ``_value_codecs``': the declared field's own ``to_python``, so a consumer
+    key subclass's cast holds, then for a value stored in a ``GeneratedField`` the column it
+    computes. When the column the value is stored in (``relations.py::stored_value_column``)
+    is a ``DateTimeField``, a date or naive datetime (one ``to_python`` returns for a
+    spelling without an offset, a date-only spelling as its midnight) is the datetime
+    Django's lookup and save bind for it: under ``USE_TZ``, aware in the default time zone
+    (``errors.py::datetime_django_binds``). Django makes that projection with a
     ``RuntimeWarning``; reading it here is silent, so an identity decode neither warns nor
     keys a naive request apart from the aware row it matched. Every other value is
     ``to_python``'s.
     """
     if not isinstance(stored_value_column(field), models.DateTimeField):
-        return to_python_value(field, value)
-    stamp = value if isinstance(value, datetime.date) else to_python_value(field, value)
+        return _cast_value(field, value)
+    stamp = value if isinstance(value, datetime.date) else _cast_value(field, value)
     if not isinstance(stamp, datetime.date):
         return stamp
     return datetime_django_binds(stamp, use_tz=bool(django_setting("USE_TZ")))
@@ -983,11 +1010,16 @@ def coerce_field_value_or_none(field: ModelField | None, value: object, *, alias
     if not isinstance(field, models.Field):
         return None
     connection = connections[alias]
+    # The declared field casts and prepares the value, then for a generated column the
+    # column it computes (``_value_codecs``); the storage-domain checks below read the
+    # column the value is stored in (``stored_value_column``).
     try:
         coerced = column_python_value(field, unwrap_lazy_object(value))
         if truth.is_instance(coerced, str):
             _PROHIBIT_NULL_CHARACTERS(truth.text(coerced))
-        bound = object_result(field.get_db_prep_value, coerced, connection, prepared=False)
+        bound = coerced
+        for codec in _value_codecs(field):
+            bound = object_result(codec.get_db_prep_value, bound, connection, prepared=False)
     except (
         ValidationError,
         TypeError,

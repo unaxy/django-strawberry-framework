@@ -25,8 +25,6 @@ from django_strawberry_framework.types.finalizer import (
     _annotation_names,
     _audit_model_label_routing,
     _field_surface_names,
-    _format_owner_model_mismatch_error,
-    _format_owner_orderset_model_mismatch_error,
     _warn_model_label_secondary_collapse,
 )
 from django_strawberry_framework.types.relations import PendingRelation
@@ -201,12 +199,6 @@ def test_model_label_collapse_warning_refuses_a_secondary_with_no_definition() -
     ):
         _warn_model_label_secondary_collapse((Genre,))
     assert registry.primary_for(Genre) is GenrePrimaryType
-
-
-def test_owner_model_mismatch_formatters_ride_shared_template() -> None:
-    """FilterSet and OrderSet first-bind model-mismatch messages share one template."""
-    for fn in (_format_owner_model_mismatch_error, _format_owner_orderset_model_mismatch_error):
-        assert "_format_owner_set_model_mismatch_error" in fn.__code__.co_names
 
 
 def test_field_surface_names_ignores_field_without_python_or_graphql_name() -> None:

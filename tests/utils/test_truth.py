@@ -974,7 +974,22 @@ def test_overrides_asks_about_any_of_the_named_hooks() -> None:
     assert truth.overrides(second_only, TwoHooks, "hook") is False
 
 
-def test_overrides_a_non_subclass_or_non_class_is_false() -> None:
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        3,
+        "not_a_type",
+        _HookBase(),
+    ],
+    ids=[
+        "none",
+        "int",
+        "text",
+        "instance",
+    ],
+)
+def test_overrides_a_non_subclass_or_non_class_is_false(value: object) -> None:
     class Unrelated:
         @classmethod
         def hook(cls) -> str:
@@ -991,13 +1006,7 @@ def test_overrides_a_non_subclass_or_non_class_is_false() -> None:
     assert issubclass(Unrelated, ClaimingBase)
     assert truth.overrides(Unrelated, ClaimingBase, "hook") is False
     assert truth.overrides(Unrelated, _HookBase, "hook") is False
-    for value in (
-        None,
-        3,
-        "not_a_type",
-        _HookBase(),
-    ):
-        assert truth.overrides(value, _HookBase, "hook") is False
+    assert truth.overrides(value, _HookBase, "hook") is False
 
 
 def test_overrides_never_consults_the_metaclass() -> None:
@@ -1171,17 +1180,21 @@ def test_empty_class_name_falls_back() -> None:
     assert truth.kind(nameless) == "type"
 
 
-def test_results_are_exact_str() -> None:
-    for value in (
-        truth.name(_RaisingGetattribute),
-        truth.qualname(_LyingGetattribute),
-        truth.module(_RaisingGetattribute),
-        truth.label(_LyingGetattribute),
-        truth.kind(_ClassRaiser()),
-        truth.text(_HostileStr("x")),
-        truth.render(_PlainInt(3)),
-    ):
-        assert type(value) is str
+@pytest.mark.parametrize(
+    "read",
+    [
+        pytest.param(lambda: truth.name(_RaisingGetattribute), id="name"),
+        pytest.param(lambda: truth.qualname(_LyingGetattribute), id="qualname"),
+        pytest.param(lambda: truth.module(_RaisingGetattribute), id="module"),
+        pytest.param(lambda: truth.label(_LyingGetattribute), id="label"),
+        pytest.param(lambda: truth.kind(_ClassRaiser()), id="kind"),
+        pytest.param(lambda: truth.text(_HostileStr("x")), id="text"),
+        pytest.param(lambda: truth.render(_PlainInt(3)), id="render"),
+    ],
+)
+def test_results_are_exact_str(read: Callable[[], str]) -> None:
+    """Every identity/render reader returns an exact str."""
+    assert type(read()) is str
 
 
 def _str_subclass_named_class(module: str = "consumer") -> type[object]:
@@ -1317,8 +1330,9 @@ def test_honest_spellings_are_pinned_on_every_supported_version() -> None:
     assert truth.render(int) == "<class 'int'>"
 
 
-def test_text_matches_str_for_non_str_scalars() -> None:
-    for value in (
+@pytest.mark.parametrize(
+    "value",
+    [
         3,
         1.5,
         None,
@@ -1326,8 +1340,19 @@ def test_text_matches_str_for_non_str_scalars() -> None:
         _OwnStrInt(3),
         _Level.LOW,
         _Color.RED,
-    ):
-        assert truth.text(value) == str(value)
+    ],
+    ids=[
+        "int",
+        "float",
+        "none",
+        "plain-int",
+        "own-str-int",
+        "int-enum",
+        "enum",
+    ],
+)
+def test_text_matches_str_for_non_str_scalars(value: object) -> None:
+    assert truth.text(value) == str(value)
     assert truth.render(_OwnStrInt(3)) == "3"
     assert truth.text(_OwnStrInt(3)) == "own"
 

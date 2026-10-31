@@ -79,6 +79,7 @@ from django_strawberry_framework.utils.connections import (
 )
 from django_strawberry_framework.utils.querysets import applied_order, resolve_order_name
 from django_strawberry_framework.utils.relations import (
+    generated_column,
     instance_accessor,
     is_model_class,
     is_stored_column,
@@ -1631,6 +1632,8 @@ def effective_cursor_state(
                 "unsupported orderBy entry or paginate under the default order.",
             )
         ref, name, descending = parsed
+        # A ``GeneratedField`` is nullable, JSON and coded as the column it computes.
+        field = generated_column(field) or field
         if getattr(field, "null", False):
             raise keyset_contract_error(
                 f"require non-nullable ordering columns; '{name}' is nullable. "

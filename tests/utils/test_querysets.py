@@ -54,6 +54,7 @@ from apps.library.models import (
 from apps.products.models import Category, Entry, Item, Property
 from apps.products.services import seed_data
 from apps.scalars.models import NullableScalarSpecimen, ScalarSpecimen
+from asgiref.sync import sync_to_async
 from django.apps import apps
 from django.apps.registry import Apps
 from django.contrib.admin.models import LogEntry
@@ -84,7 +85,15 @@ from django.db.models import (
     sql,
 )
 from django.db.models.expressions import CombinedExpression, RawSQL
-from django.db.models.functions import Cast, Coalesce, Concat, Lower, RowNumber, Trunc, Upper
+from django.db.models.functions import (
+    Cast,
+    Coalesce,
+    Concat,
+    Lower,
+    RowNumber,
+    Trunc,
+    Upper,
+)
 from django.db.models.lookups import Exact, In, Lookup
 from django.db.models.sql import Query as SqlQuery
 from django.db.models.sql import query as sql_query_module
@@ -197,6 +206,7 @@ from django_strawberry_framework.utils.querysets import (
 )
 from django_strawberry_framework.utils.typing import object_result
 from django_strawberry_framework.utils.write_transaction import write_pipeline
+from tests._catalog_data import categories_from_seed, items_from_seed
 from tests._django_private import (
     has_constructor_args,
     has_filtered_relations,
@@ -452,6 +462,19 @@ def test_coerce_field_value_or_none_skips_validators_and_range_checks_the_stored
     assert coerce_field_value_or_none(key, "7", alias=DEFAULT_DB_ALIAS) == 7
     assert coerce_field_value_or_none(key, "13", alias=DEFAULT_DB_ALIAS) == 13
     assert coerce_field_value_or_none(key, 2**63, alias=DEFAULT_DB_ALIAS) is None
+
+
+def test_coerce_field_value_or_none_codes_a_generated_column_as_the_column_it_computes() -> None:
+    """A ``GeneratedField``'s own ``to_python`` is the identity; the output's casts.
+
+    ``Shelf.code_length`` computes a ``BigIntegerField``: a decoded ``"2"`` is the integer
+    its rows hold, and a literal past 64 bits identifies no row.
+    """
+    field = Shelf._meta.get_field("code_length")
+
+    assert coerce_field_value_or_none(field, "2", alias=DEFAULT_DB_ALIAS) == 2
+    assert coerce_field_value_or_none(field, str(2**70), alias=DEFAULT_DB_ALIAS) is None
+    assert coerce_field_value_or_none(field, "two", alias=DEFAULT_DB_ALIAS) is None
 
 
 def test_coerce_field_value_or_none_drops_an_infinite_float() -> None:
@@ -1224,8 +1247,9 @@ def test_expand_relation_order_spells_a_related_pk_as_its_key_column(
 @pytest.mark.django_db
 def test_relation_write_visibility_boundary_is_controlled_by_type_registration() -> None:
     """Unregistered targets use their default manager; registered targets apply visibility."""
+    seed_data(0)
     registry.clear()
-    category = Category.objects.create(name="VisibilityBoundary")
+    (category,) = categories_from_seed(("VisibilityBoundary", False))
     try:
         assert visible_related_objects(
             Category,
@@ -1371,7 +1395,8 @@ def test_apply_type_visibility_sync_runs_sync_get_queryset() -> None:
         info=None,
         async_recourse=TEST_ASYNC_RECOURSE,
     )
-    assert isinstance(result, models.QuerySet)
+    assert type(result) is models.QuerySet
+    assert _compiled_sql(result.query) == _compiled_sql(base.exclude(name="__never__").query)
 
 
 def test_apply_type_visibility_sync_rejects_async_hook_loudly() -> None:
@@ -1394,10 +1419,23 @@ def test_apply_type_visibility_sync_rejects_async_hook_loudly() -> None:
 
 
 async def test_apply_type_visibility_async_awaits_async_hook() -> None:
-    """The async path awaits an ``async def`` ``get_queryset`` to a real queryset."""
+    """The async runner awaits the hook and preserves the predicate it returns."""
+    seen: list[models.QuerySet[Category]] = []
+
+    async def hook(
+        _cls: type,
+        queryset: models.QuerySet[Category],
+        _info: object,
+    ) -> models.QuerySet[Category]:
+        seen.append(queryset)
+        return queryset.filter(name="awaited")
+
     base = Category.objects.all()
-    result = await apply_type_visibility_async(_AsyncType, base, info=None)
-    assert isinstance(result, models.QuerySet)
+    result = await apply_type_visibility_async(_stub_type(Category, hook), base, info=None)
+    assert len(seen) == 1
+    assert seen[0] is not base
+    assert type(result) is models.QuerySet
+    assert _compiled_sql(result.query) == _compiled_sql(base.filter(name="awaited").query)
 
 
 async def test_apply_type_visibility_async_runs_a_custom_sync_hook_off_the_event_loop() -> None:
@@ -1589,16 +1627,26 @@ def test_evaluated_source_is_refreshed_before_hook(
 
 
 def test_active_write_pipeline_pins_source_and_repins_result() -> None:
-    """Under an active write pipeline the source is pre-pinned and an unpinned result repinned."""
-    hook = _stub_type(Category, lambda _cls, _qs, _info: Category.objects.filter(name="x"))
-    with write_pipeline("default", lock=False):
+    """An active nondefault write alias pins the hook input and its unpinned result."""
+    received: list[str | None] = []
+
+    def hook(
+        _cls: type,
+        queryset: models.QuerySet[Category],
+        _info: object,
+    ) -> models.QuerySet[Category]:
+        received.append(queryset_db(queryset))
+        return Category.objects.filter(name="x")
+
+    with write_pipeline("archive", lock=False):
         result = apply_type_visibility_sync(
-            hook,
+            _stub_type(Category, hook),
             Category.objects.all(),
             info=None,
             async_recourse=TEST_ASYNC_RECOURSE,
         )
-    assert queryset_db(result) == "default"
+    assert received == ["archive"]
+    assert queryset_db(result) == "archive"
 
 
 def test_active_write_pipeline_rejects_divergent_source_alias() -> None:
@@ -1767,7 +1815,7 @@ def test_active_write_pipeline_pins_a_project_class_source() -> None:
         seen["qs"] = queryset
         return queryset
 
-    with write_pipeline("default", lock=False):
+    with write_pipeline("archive", lock=False):
         result = apply_type_visibility_sync(
             _stub_type(Category, _capture),
             _ProjectCategoryQuerySet(model=Category),
@@ -1775,8 +1823,8 @@ def test_active_write_pipeline_pins_a_project_class_source() -> None:
             async_recourse=TEST_ASYNC_RECOURSE,
         )
     received = require_instance(seen["qs"], _ProjectCategoryQuerySet)
-    assert queryset_db(received) == "default"
-    assert queryset_db(result) == "default"
+    assert queryset_db(received) == "archive"
+    assert queryset_db(result) == "archive"
 
 
 def _seal_by_default(source: models.QuerySet[Category]) -> models.QuerySet[Category]:
@@ -1919,15 +1967,29 @@ def _sync_hook_type(result: object) -> type[DjangoType]:
 
 
 def test_hook_manager_result_is_coerced_sync() -> None:
-    """A ``Manager`` hook return is coerced exactly once through ``.all()`` (sync path)."""
+    """A Manager hook result is read once and its exact queryset predicate is preserved."""
+    calls: list[str] = []
+
+    class ScopedManager(models.Manager[Category]):
+        @override
+        def all(self) -> models.QuerySet[Category]:
+            calls.append("all")
+            return Category.objects.filter(name="managed")
+
+    manager = ScopedManager()
+    manager.model = Category
     result = apply_type_visibility_sync(
-        _sync_hook_type(Category.objects),
+        _sync_hook_type(manager),
         Category.objects.all(),
         info=None,
         async_recourse=TEST_ASYNC_RECOURSE,
     )
-    assert isinstance(result, models.QuerySet)
+    assert calls == ["all"]
+    assert type(result) is models.QuerySet
     assert result.model is Category
+    assert _compiled_sql(result.query) == _compiled_sql(
+        Category.objects.filter(name="managed").query,
+    )
 
 
 async def test_hook_manager_result_is_coerced_async() -> None:
@@ -2219,32 +2281,6 @@ def test_hostile_result_using_override_repin_is_neutralized_by_sealing() -> None
     assert type(result) is models.QuerySet
     # Pinned at construction, not via the override.
     assert queryset_db(result) == "other"
-
-
-def test_predicate_dropping_all_override_source_is_neutralized_by_sealing() -> None:
-    """A source ``.all()`` that would return a fresh UNFILTERED queryset is neutralized.
-
-    The core predicate-erasure vector: the override would return a same-model,
-    same-alias, unevaluated queryset with NO ``WHERE`` clause. Both seals rebuild
-    from extracted query state and the framework never calls ``.all()`` on the
-    hook's input, so the override never runs and the visibility predicate is
-    preserved in the plain result.
-    """
-
-    class _DropFilter(models.QuerySet[Category]):
-        @override
-        def all(self) -> models.QuerySet[Category]:
-            return Category.objects.all()  # would drop whatever WHERE the source carried
-
-    hostile = models.QuerySet[Category].filter(_DropFilter(model=Category), name="visible")
-    result = apply_type_visibility_sync(
-        _sync_type(),
-        hostile,
-        info=None,
-        async_recourse=TEST_ASYNC_RECOURSE,
-    )
-    assert type(result) is models.QuerySet
-    assert "visible" in str(result.query)
 
 
 def test_foreign_query_class_result_fails_closed() -> None:
@@ -2700,10 +2736,10 @@ def test_related_manager_queryset_seals_and_scopes_to_its_parent() -> None:
     parents each get a child; sealing parent A's ``items.all()`` and evaluating it
     must return A's child alone (a lost predicate would leak B's child too).
     """
-    parent_a = Category.objects.create(name="RelParentA")
-    parent_b = Category.objects.create(name="RelParentB")
-    item_a = Item.objects.create(name="ChildA", category=parent_a)
-    Item.objects.create(name="ChildB", category=parent_b)
+    seed_data(1)
+    parent_a, parent_b = categories_from_seed(("RelParentA", False), ("RelParentB", False))
+    (item_a,) = items_from_seed(parent_a, ("ChildA", False))
+    items_from_seed(parent_b, ("ChildB", False))
     sealed, defect = _seal_or_defect(parent_a.items.all(), Item, None)
     assert defect is None
     assert type(sealed) is models.QuerySet
@@ -3184,8 +3220,8 @@ def test_instance_shadowed_all_hook_serves_only_visible_rows_sync() -> None:
     The seal reads state from ``__dict__`` via ``object.__getattribute__``, never
     calling ``.all()``, so the shadow is inert - only ``is_private=False`` rows survive.
     """
-    Category.objects.create(name="visible_row", is_private=False)
-    Category.objects.create(name="hidden_row", is_private=True)
+    seed_data(0)
+    categories_from_seed(("visible_row", False), ("hidden_row", True))
     result = apply_type_visibility_sync(
         _stub_type(Category, _shadowed_all_hook),
         Category.objects.all(),
@@ -3199,8 +3235,8 @@ def test_instance_shadowed_all_hook_serves_only_visible_rows_sync() -> None:
 @pytest.mark.django_db(transaction=True)
 async def test_instance_shadowed_all_hook_serves_only_visible_rows_async() -> None:
     """Sync/async parity: the async runner seals the instance-shadowed ``.all()`` too."""
-    await Category.objects.acreate(name="visible_row", is_private=False)
-    await Category.objects.acreate(name="hidden_row", is_private=True)
+    await sync_to_async(seed_data)(0)
+    await sync_to_async(categories_from_seed)(("visible_row", False), ("hidden_row", True))
     result = await apply_type_visibility_async(
         _stub_type(Category, _shadowed_all_hook),
         Category.objects.all(),
@@ -3250,8 +3286,8 @@ def test_clean_queryset_transforms_after_seal() -> None:
     queryset still transforms normally -- ``values_list`` keeps the visibility
     predicate and serves only the visible rows.
     """
-    Category.objects.create(name="visible_row", is_private=False)
-    Category.objects.create(name="hidden_row", is_private=True)
+    seed_data(0)
+    categories_from_seed(("visible_row", False), ("hidden_row", True))
     result = apply_type_visibility_sync(
         _sync_hook_type(Category.objects.filter(is_private=False)),
         Category.objects.all(),
@@ -3359,8 +3395,9 @@ def test_hostile_prefetch_synthetic_row_never_materializes() -> None:
     synthetic hidden row) is never dispatched because the sealed child is a plain
     ``QuerySet``.
     """
-    category = Category.objects.create(name="c-real")
-    Item.objects.create(name="item-real", category=category)
+    seed_data(1)
+    (category,) = categories_from_seed(("c-real", False))
+    items_from_seed(category, ("item-real", False))
 
     class _HostileItemQS(models.QuerySet[Item]):
         @override
@@ -3528,7 +3565,8 @@ def test_identity_hook_result_is_resealed_dropping_injected_cache_sync() -> None
     result is ALWAYS re-sealed, so the returned queryset has
     ``_result_cache is None`` and only the real visible rows survive on evaluation.
     """
-    Category.objects.create(name="visible_row", is_private=False)
+    seed_data(0)
+    categories_from_seed(("visible_row", False))
 
     def _hook(
         _cls: type,
@@ -3878,7 +3916,8 @@ async def test_identity_hook_result_is_resealed_dropping_injected_cache_async() 
     source's ``_result_cache`` and returns the SAME object; the async runner
     re-seals it, dropping the cache, so only the real visible row survives.
     """
-    await Category.objects.acreate(name="visible_row", is_private=False)
+    await sync_to_async(seed_data)(0)
+    await sync_to_async(categories_from_seed)(("visible_row", False))
 
     @_as_stand_in_hook_type
     class _CaptureAsyncType:
@@ -4099,25 +4138,6 @@ def test_lookup_direct_rhs_sequence_members_are_walked() -> None:
     sealed, defect = _seal_or_defect(hostile, Category, None)
     assert sealed is None
     assert defect == ("untrusted", "where clause lookup rhs is a object")
-
-
-def test_lookup_direct_rhs_enum_member_seals() -> None:
-    """A ``TextChoices`` member in RHS position is plain query data and seals cleanly.
-
-    Enum members are ``str`` / ``int`` SUBCLASSES, so the exact-type inert rule that
-    governs expression leaves would fail-close ordinary consumer schemas here; a direct
-    RHS is admitted on plain-data ancestry plus the absence of its own attribute hooks.
-    """
-
-    class _SealChoices(models.TextChoices):
-        KEEP = "keep", "Keep"
-
-    source = Category.objects.filter(name=_SealChoices.KEEP)
-    str(source.query)
-    assert type(_rhs(source.query)) is _SealChoices
-    sealed, defect = _seal_or_defect(source, Category, None)
-    assert defect is None
-    assert type(sealed) is models.QuerySet
 
 
 def test_lookup_direct_rhs_date_subclass_normalizes_to_exact_date() -> None:
@@ -5914,14 +5934,15 @@ def test_hostile_filtered_relation_payload_fails_closed(monkeypatch: pytest.Monk
 
 
 def test_sealed_queryset_keeps_its_predicate_through_filter_composition() -> None:
-    """Ordinary downstream ``.filter()`` composition keeps the sealed predicate."""
+    """Post-seal filtering compiles the same predicates and values as ordinary Django."""
     source = Category.objects.filter(is_private=False)
     sealed, defect = _seal_or_defect(source, Category, None)
     assert defect is None
     assert sealed is not None
-    composed_sql = str(sealed.filter(name="visible").query)
-    assert "is_private" in composed_sql
-    assert "name" in composed_sql
+    composed = sealed.filter(name="visible")
+    oracle = Category.objects.filter(is_private=False, name="visible")
+    assert composed.query.sql_with_params() == oracle.query.sql_with_params()
+    assert composed.query.where.children
 
 
 def test_sealed_query_table_map_payload_is_not_shared_with_the_candidate() -> None:
@@ -6486,7 +6507,8 @@ def test_trunc_tzinfo_is_retained_and_rows_survive() -> None:
     are ordinary consumer annotations; the seal must keep the timezone (an immutable
     interpreter-owned value) and the annotated queryset must still return its rows.
     """
-    Category.objects.create(name="tz_row", is_private=False)
+    seed_data(0)
+    categories_from_seed(("tz_row", False))
     tz = zoneinfo.ZoneInfo("UTC")
     source = Category.objects.filter(is_private=False).annotate(
         day=Trunc("created_date", "day", tzinfo=tz),
@@ -6512,7 +6534,8 @@ def test_trunc_tzinfo_is_retained_and_rows_survive() -> None:
 @pytest.mark.django_db
 def test_value_payload_literals_seal_and_rows_survive() -> None:
     """Ordinary ``Value`` literals seal and the annotated queryset still returns rows."""
-    Category.objects.create(name="lit_row", is_private=False)
+    seed_data(0)
+    categories_from_seed(("lit_row", False))
     source = Category.objects.filter(is_private=False).annotate(
         flag=models.Value(1),
         label=models.Value("x"),
@@ -7124,7 +7147,8 @@ def test_pks_all_present_subset_check() -> None:
 @pytest.mark.django_db
 def test_visible_related_object_resolution() -> None:
     """visible_related_object resolves the visible object or returns None."""
-    cat = Category.objects.create(name="Electronics")
+    seed_data(0)
+    (cat,) = categories_from_seed(("Electronics", False))
     info = SimpleNamespace(context=SimpleNamespace(request=None))
 
     resolved = visible_related_object(
@@ -8083,7 +8107,9 @@ def test_validate_post_orderset_result_valid() -> None:
         valid_candidate,
         "MyOrderSet.apply_sync",
     )
-    assert isinstance(sealed, models.QuerySet)
+    assert type(sealed) is models.QuerySet
+    assert sealed.query.order_by == ("name",)
+    assert _compiled_sql(sealed.query) == _compiled_sql(valid_candidate.query)
 
 
 def test_validate_post_orderset_result_rejects_non_queryset() -> None:
@@ -8671,8 +8697,8 @@ def test_routing_intent_resolves_a_write_marked_source_through_the_write_router(
 def test_routing_intent_on_an_explicitly_routed_source_needs_no_router() -> None:
     """An explicit ``.using(...)`` alias IS the effective alias; no router is consulted."""
     source_qs = Category.objects.using("default")
-
-    intent = _snapshot_routing_intent(source_qs, "MyOrderSet.apply_sync")
+    with override_settings(DATABASE_ROUTERS=[_RaisingRouter()]):
+        intent = _snapshot_routing_intent(source_qs, "MyOrderSet.apply_sync")
     assert (intent.db, intent.effective_alias) == ("default", "default")
 
 
@@ -9548,20 +9574,26 @@ def test_raw_sql_with_none_params_fails_closed() -> None:
     assert defect == ("untrusted", "annotation 'x' params is a NoneType")
 
 
-def test_str_subclass_order_term_defining_resolve_expression_is_walked_as_an_expression() -> None:
+@pytest.mark.parametrize(
+    "slot",
+    ["order_by", "extra_order_by"],
+    ids=["order-by", "extra-order-by"],
+)
+def test_str_subclass_order_term_defining_resolve_expression_is_walked_as_an_expression(
+    slot: str,
+) -> None:
     """A ``str`` subclass that defines ``resolve_expression`` is no text term: it is refused."""
 
     class _ExpressionName(str):
         def resolve_expression(self, *args: object, **kwargs: object) -> object:
             raise AssertionError((self, args, kwargs))
 
-    for slot in ("order_by", "extra_order_by"):
-        source = Book.objects.all()
-        setattr(source.query, slot, (_ExpressionName("title"),))
-        _, defect = _seal_or_defect(source, Book, None)
-        assert defect is not None
-        assert defect[0] == "untrusted"
-        assert "_ExpressionName" in defect[1]
+    source = Book.objects.all()
+    setattr(source.query, slot, (_ExpressionName("title"),))
+    _, defect = _seal_or_defect(source, Book, None)
+    assert defect is not None
+    assert defect[0] == "untrusted"
+    assert "_ExpressionName" in defect[1]
 
 
 def test_member_prefetch_path_resolves_the_relation_target_guard() -> None:

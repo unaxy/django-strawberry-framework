@@ -116,6 +116,27 @@ def test_inspect_by_registered_name() -> None:
 
 
 @pytest.mark.usefixtures("reload_inspect_schema")
+def test_inspect_labels_a_generated_column_by_the_column_it_computes() -> None:
+    """A ``GeneratedField`` row names the ``SCALAR_MAP`` row of its ``output_field``.
+
+    ``Shelf.code_length`` computes a ``BigIntegerField`` and ``Shelf.topic_length`` a
+    nullable ``IntegerField``: each converter column reads ``GeneratedField ->`` the output's
+    label, and the nullability column follows the output for ``topic_length``.
+    """
+    out = StringIO()
+    call_command("inspect_django_type", "ShelfType", stdout=out)
+    text = out.getvalue()
+    code_length = _field_row(text, "code_length")
+    assert "BigInt!" in code_length
+    assert " no " in code_length
+    assert "GeneratedField -> SCALAR_MAP[BigIntegerField]" in code_length
+    topic_length = _field_row(text, "topic_length")
+    assert "Int!" not in topic_length
+    assert " yes " in topic_length
+    assert "GeneratedField -> SCALAR_MAP[IntegerField]" in topic_length
+
+
+@pytest.mark.usefixtures("reload_inspect_schema")
 def test_inspect_by_dotted_path() -> None:
     out = StringIO()
     call_command("inspect_django_type", "apps.library.schema.BookType", stdout=out)

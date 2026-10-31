@@ -38,6 +38,9 @@ Public surface:
   (the matched ``SCALAR_MAP`` key class, its scalar, and whether the choice
   enum replaces it). ``inspect_django_type`` names its converter column from
   the same route.
+- ``generated_output_field(field)`` - the column a ``GeneratedField`` computes,
+  which every conversion and filter read takes in its place (``None`` for any
+  other field), with the refusals of the outputs no conversion can publish.
 - ``refuse_nested_array(field, element)`` - the one nested-``ArrayField``
   refusal, asked by ``convert_scalar``'s array arm and by the filter-input
   element read (``filters/inputs.py::_array_element_column``).
@@ -97,6 +100,7 @@ from django_strawberry_framework.utils._narrowing import (
 )
 from django_strawberry_framework.utils.imports import import_attr_if_importable
 from django_strawberry_framework.utils.lazy import unwrap_lazy_object
+from django_strawberry_framework.utils.relations import generated_column
 from django_strawberry_framework.utils.strings import pascal_case
 
 if TYPE_CHECKING:
@@ -360,18 +364,72 @@ def _field_label(field: object) -> str:
     return f"{model_name}.{truth.text(getattr(field, 'name', '<unknown>'), '<unknown>')}"
 
 
+def generated_output_field(field: object) -> "ConcreteField | None":
+    """Return the column a ``GeneratedField`` computes for conversion, or ``None`` for any other field.
+
+    The column is ``utils/relations.py::generated_column``'s (the ``output_field`` bound
+    under the generated field's model and name, carrying its ``choices``, ``blank`` and
+    either-flag ``null``), so every read of it, the ``Model.field`` label of every message
+    included, answers for the generated field. The one ``GeneratedField`` unwrap of the type
+    side (``scalar_route``, ``convert_scalar``, ``_scalar_map_entry``,
+    ``_column_admits_empty_string``) and the filter side (``filters/sets.py``,
+    ``filters/base.py``). It refuses, each time it is read, the three outputs no conversion
+    can publish, each a ``ConfigurationError`` naming the generated field:
+
+    - a ``FileField`` / ``ImageField`` output: the file output types resolve a stored file
+      through its storage, and a database expression stores none (refused here, so a filter
+      never publishes ``String`` for it either);
+    - an output class with no ``SCALAR_MAP`` ancestor that is no ``ArrayField`` /
+      ``HStoreField`` (the container arms convert those);
+    - an ``ArrayField`` output whose ``base_field`` declares choices: ``choices`` on the
+      output are a detail Django never validates or reads for the generated column, so they
+      publish no enum, and outer choices on an array are refused by ``convert_scalar``.
+
+    The ``SCALAR_MAP`` read is live, as ``convert_scalar``'s is.
+    """
+    column = generated_column(field)
+    if column is None:
+        return None
+    output = truth.kind(column)
+    if _field_output_type_for(column) is not None:
+        raise ConfigurationError(
+            f"GeneratedField {_field_label(column)} has a file output_field {truth.render(output)}; "
+            "a database expression stores no file. Exclude the field via Meta.exclude.",
+        )
+    element = array_element_field(column)
+    if element is not None:
+        if element.choices:
+            raise ConfigurationError(
+                f"GeneratedField {_field_label(column)} declares choices on its ArrayField "
+                "output_field's base_field; Django never validates a GeneratedField's "
+                "output_field choices, so they publish no enum. Drop them.",
+            )
+    elif not (_HSTORE_FIELD_CLS is not None and truth.is_instance(column, _HSTORE_FIELD_CLS)) and (
+        truth.mro_entry(SCALAR_MAP, truth.class_of(column)) is None
+    ):
+        raise ConfigurationError(
+            f"Unsupported output_field type {truth.render(output)} on GeneratedField "
+            f"{_field_label(column)}. Add an entry to SCALAR_MAP or exclude this field via "
+            "Meta.exclude.",
+        )
+    return column
+
+
 def _scalar_map_entry(field: "ModelField") -> "tuple[type[ConcreteField], TypeForm[object]]":
     """Return the ``SCALAR_MAP`` ``(key, scalar)`` entry ``field``'s nearest MRO class keys.
 
     The one ``SCALAR_MAP`` walk: ``scalar_for_field`` and ``scalar_route``'s map arm both
-    read it. Raises ``ConfigurationError`` for an unsupported field class.
+    read it. A ``GeneratedField`` is walked as the column it computes
+    (``generated_output_field``). Raises ``ConfigurationError`` for an unsupported field
+    class.
     """
-    entry = truth.mro_entry(SCALAR_MAP, truth.class_of(field))
+    column = generated_output_field(field) or field
+    entry = truth.mro_entry(SCALAR_MAP, truth.class_of(column))
     if entry is not None:
         return entry
     raise ConfigurationError(
-        f"Unsupported Django field type {truth.render(truth.kind(field))} on "
-        f"{_field_label(field)}. Add an entry to "
+        f"Unsupported Django field type {truth.render(truth.kind(column))} on "
+        f"{_field_label(column)}. Add an entry to "
         "SCALAR_MAP or exclude this field via Meta.exclude.",
     )
 
@@ -426,10 +484,15 @@ def scalar_route(field: "ConcreteField") -> ScalarRoute:
     The sentinel-guarded postgres containers come first (``ArrayField``, then
     ``HStoreField``), so a test double subclassing ``models.Field`` never matches a
     ``SCALAR_MAP`` parent; every other column takes the ``SCALAR_MAP`` arm, which
-    raises ``ConfigurationError`` for an unsupported field class. Classification only:
-    the container arms' nested-array and ``choices`` rejections stay in
-    ``convert_scalar``.
+    raises ``ConfigurationError`` for an unsupported field class. A ``GeneratedField`` is
+    routed as the column it computes (``generated_output_field``), checked first, so an
+    ``ArrayField`` / ``HStoreField`` output takes the arm it would take as a plain column.
+    Classification only: the container arms' nested-array and ``choices`` rejections stay
+    in ``convert_scalar``.
     """
+    column = generated_output_field(field)
+    if column is not None:
+        return scalar_route(column)
     element = array_element_field(field)
     if element is not None:
         return ArrayRoute(element)
@@ -462,6 +525,11 @@ def convert_scalar(
     """Map a Django scalar field to a Python / Strawberry type.
 
     Algorithm:
+
+    A ``GeneratedField`` converts as the column it computes (``generated_output_field``):
+    its ``null`` is either flag, its ``choices`` and ``blank`` the generated field's own,
+    its ``empty_strings_allowed`` the output class's, and ``force_nullable`` replaces the
+    either-flag result outright.
 
     0. Compute ``effective_null`` from the ``force_nullable`` tri-state
        (``field.null`` when ``force_nullable is None``, else
@@ -524,6 +592,9 @@ def convert_scalar(
               choice declarations.
 
     """
+    generated = generated_output_field(field)
+    if generated is not None:
+        return convert_scalar(generated, type_name, force_nullable=force_nullable)
     # The tri-state collapses to a single boolean computed once: the
     # override (``force_nullable``) wins when set, otherwise the column's
     # ``field.null`` drives the decision. Every outer widening site below
@@ -913,9 +984,13 @@ def _column_admits_empty_string(field: "ConcreteField") -> bool:
 
     ``blank=True`` on a type that stores empty strings; an ``IntegerChoices`` column with
     ``blank=True`` admits only ``None``, never ``""``. It is the ``include_blank`` a choice
-    column's read enum (``convert_choices_to_enum``) is built with.
+    column's read enum (``convert_choices_to_enum``) is built with. A ``GeneratedField``
+    reads as the column it computes (``generated_output_field``): Django forces its
+    ``blank=True``, and whether the expression can compute ``""`` is the output class's
+    ``empty_strings_allowed`` (a text output admits it, an integer one never does).
     """
-    return bool(field.blank and field.empty_strings_allowed)
+    column = generated_output_field(field) or field
+    return bool(column.blank and column.empty_strings_allowed)
 
 
 def choice_column_pairs(field: "ConcreteField") -> list[tuple[object, object]]:
