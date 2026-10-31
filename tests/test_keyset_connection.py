@@ -24,12 +24,14 @@ The private contracts in this module include:
   wrapper is built
   (``test_nested_keyset_backward_falls_back_per_parent_with_same_cursors``).
 - ``_keyset_order_state`` derivation (``plans.py::effective_cursor_state``)
-  with hand-built states: column-object reuse, and rejection of JSON and
-  optional-or-multivalued related orders. The expression, NULLS-positioned and
-  nullable-column refusals are live through a consumer ``get_queryset`` order
+  with hand-built states: column-object reuse. The expression, NULLS-positioned,
+  nullable-column, JSON-column and optional-or-multivalued related-path refusals
+  are live through a consumer ``get_queryset`` order
   (``test_unanchorable_hook_order_raises_the_root_keyset_error_nested``,
-  ``test_nullable_hook_order_column_raises_the_root_keyset_error_nested``), and
-  related-path acceptance too
+  ``test_nullable_hook_order_column_raises_the_root_keyset_error_nested``,
+  ``test_keyset_order_terms_api.py::test_keyset_hook_order_by_a_json_column_is_refused``,
+  ``test_keyset_order_terms_api.py::test_keyset_hook_order_through_an_optional_or_multivalued_relation_is_refused``),
+  and related-path acceptance too
   (``test_root_keyset_order_by_related_path_seeks_via_annotation``).
 - Pure ``plans.py`` helpers ``_keyset_order_ref`` and ``_resolve_order_path_field``
   (including detached / virtual fields, and the ``LendingDesk.venue_ptr``
@@ -54,11 +56,9 @@ from types import SimpleNamespace
 import pytest
 import strawberry
 from apps.library.models import Issue, LendingDesk, Patron, Periodical
-from apps.scalars.models import ScalarSpecimen
 from django.contrib.auth.models import AnonymousUser
 from django.db.models import F, Model
 from django.http import HttpRequest
-from graphql import GraphQLError
 from strategy_schemas import make_django_type
 from strawberry.schema.config import StrawberryConfig
 
@@ -103,7 +103,6 @@ from django_strawberry_framework.utils.connections import (
     UnwindowableConnection,
 )
 from django_strawberry_framework.utils.typing import graphql_fields, graphql_type_of
-from tests._definition import make_definition
 from tests._info import make_info
 
 ISSUE_ORDER = ("-number", "id")
@@ -361,7 +360,7 @@ def test_counted_keyset_window_without_seek_count_falls_back() -> None:
 
 
 # =============================================================================
-# order-state derivation error arms (hand-built states)
+# order-state derivation (column reuse and derived related names)
 # =============================================================================
 
 
@@ -370,16 +369,6 @@ def _issue_order_state() -> CursorState:
     state = _issue_state(issue_type)
     assert state is not None
     return state
-
-
-def _state_stub(model: type[Model], cursor_field: tuple[str, ...]) -> CursorState:
-    """A hand-built declared state over a directly built definition of ``model``."""
-    return CursorState(
-        definition=make_definition(model, cursor_field=cursor_field),
-        cursor_field=cursor_field,
-        columns=cursor_columns_for(model, cursor_field),
-        fingerprint=order_fingerprint(cursor_field),
-    )
 
 
 @pytest.mark.django_db
@@ -396,30 +385,6 @@ def test_keyset_order_state_default_order_reuses_declared_columns() -> None:
     _columns, fingerprint2, ordered = _keyset_order_state(state, Issue.objects.all())
     assert fingerprint2 == state.fingerprint
     assert tuple(ordered.query.order_by) == ISSUE_ORDER
-
-
-@pytest.mark.django_db
-def test_keyset_order_state_rejects_json_columns() -> None:
-    state_stub = _state_stub(ScalarSpecimen, ("label",))
-    with pytest.raises(GraphQLError, match="ordering differs between database backends"):
-        _keyset_order_state(
-            state_stub,
-            ScalarSpecimen.objects.order_by("payload", "id"),
-        )
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize(
-    "order",
-    [("card__barcode", "id"), ("loans__note", "id")],
-    ids=["optional-o2o", "multivalued-reverse"],
-)
-def test_keyset_order_state_rejects_optional_or_multivalued_related_paths(
-    order: tuple[str, str],
-) -> None:
-    state_stub = _state_stub(Patron, ("name",))
-    with pytest.raises(GraphQLError, match="cannot anchor stable cursors"):
-        _keyset_order_state(state_stub, Patron.objects.order_by(*order))
 
 
 @pytest.mark.django_db

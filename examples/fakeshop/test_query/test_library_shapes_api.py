@@ -511,7 +511,10 @@ def test_printing_edition_non_key_selection_reads_the_edition_table() -> None:
     """The same relation joins the moment a non-key edition column is selected.
 
     The elision is scoped to a selection the source row can answer; ``imprint``
-    is not the edition's primary key, so ``library_edition`` is read.
+    is not the edition's primary key, so ``library_edition`` is read - and read
+    inside the one printing statement: the root connection field plans its own
+    queryset before ``ConnectionExtension`` slices it, so the hook-free edition
+    is a ``JOIN`` there, never a second edition read.
     """
     _seed_publishing_graph()
 
@@ -532,6 +535,18 @@ def test_printing_edition_non_key_selection_reads_the_edition_table() -> None:
         "Orbit Classics",
     }, edges
     assert _sql_touching(captured, "library_edition") != [], captured.captured_queries
+    printing_sql = [
+        entry["sql"]
+        for entry in captured.captured_queries
+        if 'FROM "library_printing"' in entry["sql"]
+    ]
+    assert len(printing_sql) == 1, captured.captured_queries
+    assert 'JOIN "library_edition"' in printing_sql[0], printing_sql
+    assert [
+        entry["sql"]
+        for entry in captured.captured_queries
+        if 'FROM "library_edition"' in entry["sql"]
+    ] == []
 
 
 @pytest.mark.django_db

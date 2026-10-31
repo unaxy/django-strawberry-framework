@@ -50,6 +50,7 @@ from graphql_client import (
     read_attr,
     response_json,
 )
+from strategy_schemas import make_django_type
 from strawberry.django.context import StrawberryDjangoContext
 from strawberry.schema.name_converter import NameConverter
 from typing_extensions import TypedDict, Unpack, override
@@ -59,6 +60,7 @@ from django_strawberry_framework import (
     DjangoConnection,
     DjangoConnectionField,
     DjangoListField,
+    finalize_django_types,
     strawberry_config,
 )
 from django_strawberry_framework.optimizer import DjangoOptimizerExtension
@@ -654,6 +656,115 @@ def test_holder_offset_refuses_an_order_only_the_resolver_applied() -> None:
     assert json_at(err, "extensions", "reason") == "order_required"
     assert json_at(err, "extensions", "argument") == "offset"
     assert [q for q in ctx.captured_queries if "library_branch" in q["sql"]] == []
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("grouped", [True, False], ids=["grouped", "ungrouped"])
+def test_holder_offset_on_a_grouped_source_does_not_ride_the_model_default(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    grouped: bool,
+) -> None:
+    """A grouped source does not carry the model's ``Meta.ordering``, so it backs no offset.
+
+    Django compiles no model default into an aggregate query (``QuerySet.ordered``
+    is ``False`` there), so the resolver's ``annotate(Count(...))`` leaves the
+    window with no order to page through and a positive offset is refused before
+    any branch statement runs. The ungrouped control over the same stable default
+    is served.
+    """
+    _seed_three_branches()
+    monkeypatch.setattr(library_models.Branch._meta, "ordering", ("name",))
+
+    def _branches(_root: object, _info: object) -> models.QuerySet[library_models.Branch]:
+        branches = library_models.Branch.objects.all()
+        return branches.annotate(shelf_count=models.Count("shelves")) if grouped else branches
+
+    @strawberry.type
+    class _GroupedQuery:
+        branches: list[library_schema.BranchType] = DjangoListField(
+            library_schema.BranchType,
+            resolver=_list_resolver(_branches),
+        )
+
+    schema = DjangoSchema(query=_GroupedQuery, config=strawberry_config())
+    with CaptureQueriesContext(connection) as ctx:
+        payload = _post_sync(schema, "{ branches(offset: 1, limit: 1) { name } }")
+    branch_sql = [q["sql"] for q in ctx.captured_queries if "library_branch" in q["sql"]]
+
+    if not grouped:
+        assert payload == {"data": {"branches": [{"name": "Bravo"}]}}, payload
+        assert len(branch_sql) == 1, branch_sql
+        return
+    assert payload["data"] is None, payload
+    err = json_object(payload, "errors", 0)
+    assert json_at(err, "extensions", "reason") == "order_required"
+    assert json_at(err, "extensions", "argument") == "offset"
+    assert branch_sql == []
+
+
+_ABSTRACT_SEED_REFUSAL = (
+    "TitledEntry is an abstract model and has no default manager to seed a queryset "
+    "from. Point Meta.model at a concrete model, or resolve the field with a custom "
+    "resolver that returns concrete rows."
+)
+
+
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.django_db
+def test_holder_type_over_an_abstract_model_serves_concrete_rows_and_refuses_a_default_seed() -> (
+    None
+):
+    """A type over an abstract model serves the concrete rows a resolver returns.
+
+    The generated default resolver has no table to seed from, so it fails with a
+    ``ConfigurationError`` naming the abstract model rather than an
+    ``AttributeError`` off the default manager the abstract model does not have.
+    """
+    library_models.ReadingList.objects.create(title="Classics")
+    titled_type = make_django_type(
+        "TitledEntryType",
+        library_models.TitledEntry,
+        ("title",),
+        node=False,
+    )
+    finalize_django_types()
+
+    def _reading_lists() -> list[library_models.TitledEntry]:
+        return list(library_models.ReadingList.objects.all())
+
+    query = strawberry.type(
+        type(
+            "Query",
+            (),
+            {
+                "__annotations__": {
+                    "entries": list[titled_type],
+                    "reading_lists": list[titled_type],
+                },
+                "entries": DjangoListField(titled_type),
+                "reading_lists": strawberry.field(
+                    resolver=_reading_lists,
+                    graphql_type=list[titled_type],
+                ),
+            },
+        ),
+    )
+    schema = DjangoSchema(query=query, config=strawberry_config())
+
+    served = _post_sync(schema, "{ readingLists { title } }")
+    assert served == {"data": {"readingLists": [{"title": "Classics"}]}}, served
+
+    seeded = _post_sync(
+        schema,
+        "{ entries { title } }",
+        extra_settings=_ERROR_POLICY_PASS_THROUGH,
+    )
+    assert seeded["data"] is None, seeded
+    assert [
+        (json_at(error, "message"), json_at(error, "path"))
+        for error in json_list(seeded, "errors")
+    ] == [(_ABSTRACT_SEED_REFUSAL, ["entries"])]
 
 
 def _seed_three_shelves() -> None:

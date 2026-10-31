@@ -34,10 +34,8 @@ from apps.library.models import Issue, MembershipCard, Patron
 from apps.products import services
 from apps.products.models import Category, Entry, Item, Property
 from asgiref.sync import sync_to_async
-from django.db import connection
 from django.db.models import Manager, Model, Prefetch, QuerySet
 from django.http import HttpRequest, QueryDict
-from django.test.utils import CaptureQueriesContext
 from django.utils.functional import SimpleLazyObject
 from graphql import (
     DefinitionNode,
@@ -281,11 +279,13 @@ def test_optimize_coerces_manager_through_all_records_cache_miss() -> None:
     The behavioral half (1 SQL query, JOIN applied, data round-trips) is
     pinned end-to-end by
     ``examples/fakeshop/test_query/test_scalars_api.py::test_scalars_optimizer_coerces_manager_to_queryset_in_http_query``.
-    This test keeps the package-internal cache-state assertion that proves
-    the plan was actually BUILT (cache miss recorded) rather than the
-    Manager being short-circuited by the ``isinstance(QuerySet)`` gate -
-    a guarantee unreachable from the live HTTP path because the project
-    schema doesn't expose its extension instance for inspection.
+    This test keeps the cache-state assertion that proves the plan was actually
+    BUILT (cache miss recorded) rather than the Manager being short-circuited by
+    the ``isinstance(QuerySet)`` gate. The counter is extension state no response
+    carries; the served instance is readable from a live row
+    (``sys.modules["config.schema"]._optimizer``, as
+    ``test_library_api.py::test_library_optimizer_plan_cache_is_reused_across_http_requests``
+    reads it), but this row measures the gate on an instance of its own.
     """
     services.seed_data(1)
 
@@ -666,10 +666,10 @@ def test_optimizer_passes_through_unregistered_return_type(
 def test_evaluated_root_queryset_does_not_record_a_plan_cache_miss() -> None:
     """The G1 guard short-circuits before ``_get_or_build_plan``, so misses stay 0.
 
-    Live HTTP one-query SQL is ``allLibraryBranchesEagerEval``. This row keeps
-    the cache-state half AND the consumer-``select_related`` relation that the
-    shipped eager-eval field cannot host: ``category { name }`` is served from
-    the JOIN the resolver already applied, in one query, with no plan miss.
+    The one statement an evaluated root costs is live: ``allLibraryBranchesEagerEval``
+    and, with the consumer's own ``select_related`` relation served from its JOIN,
+    ``examples/fakeshop/test_query/test_library_api.py::test_library_evaluated_root_with_its_own_join_runs_one_statement``.
+    This row keeps the plan-cache counter, which no response carries.
     """
     services.seed_data(2)
 
@@ -701,13 +701,9 @@ def test_evaluated_root_queryset_does_not_record_a_plan_cache_miss() -> None:
 
     finalize_django_types()
     schema = strawberry.Schema(query=Query, extensions=[lambda: ext])
-    with CaptureQueriesContext(connection) as captured:
-        result = schema.execute_sync("{ allItems { name category { name } } }")
+    result = schema.execute_sync("{ allItems { name category { name } } }")
     assert result.errors is None
     assert ext.cache_info().misses == 0
-    item_sql = [q["sql"] for q in captured.captured_queries if "products_item" in q["sql"]]
-    assert len(item_sql) == 1, captured.captured_queries
-    assert "JOIN" in item_sql[0].upper()
 
 
 @pytest.mark.django_db
@@ -1548,8 +1544,10 @@ def test_cache_clear_makes_the_next_request_build_its_plan_again() -> None:
     """``cache_clear`` empties the plan cache and zeroes both counters.
 
     A warm hit before the clear, zeroed ``cache_info`` after it, and a miss
-    with a rebuilt entry on the next identical request. Package tier: the
-    project schema does not expose its extension instance.
+    with a rebuilt entry on the next identical request. The counters are
+    extension state no response carries; cross-request reuse of the served
+    instance (``sys.modules["config.schema"]._optimizer``) is pinned live by
+    ``test_library_api.py::test_library_optimizer_plan_cache_is_reused_across_http_requests``.
     """
     services.seed_data(1)
 
@@ -2828,20 +2826,14 @@ def test_strictness_warn_stashes_sentinel() -> None:
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("mode", ["warn", "raise"])
-def test_strictness_with_empty_plan_does_not_raise_or_warn(
-    mode: str,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """An empty plan plus strictness='warn'/'raise' must not raise or warn.
+def test_strictness_with_empty_plan_still_stashes_its_sentinels(mode: str) -> None:
+    """An empty plan still publishes the strictness sentinels, with an empty planned set.
 
     ``_publish_plan_to_context`` stashes the strictness sentinels (planned set,
     lookup paths, mode) before ``_optimize`` short-circuits on ``plan.is_empty``.
-    The invariant is that an empty plan implies no relation selections, so the
-    downstream resolver path never compares against the empty planned set.  This
-    test pins the invariant for the enabled-optimizer path under both ``warn``
-    and ``raise`` - a typename-only query against a registered type produces an
-    empty plan and must resolve cleanly with no warning emitted and no
-    exception raised.
+    That a typename-only selection then neither raises nor warns is pinned live by
+    ``examples/fakeshop/test_query/test_library_api.py::test_library_typename_only_selection_is_clean_under_armed_strictness``;
+    this row keeps the private stash.
     """
     services.seed_data(1)
 
@@ -2864,21 +2856,9 @@ def test_strictness_with_empty_plan_does_not_raise_or_warn(
     finalize_django_types()
     schema = strawberry.Schema(query=Query, extensions=[lambda: ext])
     ctx = SimpleNamespace()
-    with caplog.at_level("WARNING", logger=optimizer_logger.name):
-        result = schema.execute_sync("{ allCategories { __typename } }", context_value=ctx)
-    # No GraphQL execution errors (would surface a "raise" strictness trip).
+    result = schema.execute_sync("{ allCategories { __typename } }", context_value=ctx)
     assert result.errors is None
-    assert result.data == {
-        "allCategories": [{"__typename": "CategoryType"} for _ in Category.objects.all()],
-    }
     assert _stashed_plan(ctx).is_empty
-    # No optimizer-level warning logged (would surface a "warn" strictness trip).
-    assert not any(
-        record.name == optimizer_logger.name and record.levelname == "WARNING"
-        for record in caplog.records
-    )
-    # Strictness sentinels are still stashed (the plan is published before the
-    # is_empty short-circuit); the planned set is just empty.
     assert read_attr(ctx, DST_OPTIMIZER_STRICTNESS) == mode
     assert _stashed_keys(ctx, DST_OPTIMIZER_PLANNED) == set()
 
@@ -2982,53 +2962,6 @@ def test_will_lazy_load_false_when_prefetched() -> None:
 
 
 @pytest.mark.django_db
-def test_strictness_raise_accepts_unplanned_cached_reverse_one_to_one() -> None:
-    """strictness='raise' accepts an unplanned reverse OneToOne already loaded."""
-    patron = Patron.objects.create(name="Ada")
-    MembershipCard.objects.create(patron=patron, barcode="1234")
-
-    class CardType(DjangoType):
-        class Meta:
-            model = MembershipCard
-            fields = ("id", "barcode")
-
-    assert registry.get(MembershipCard) is CardType
-
-    class PatronType(DjangoType):
-        class Meta:
-            model = Patron
-            fields = ("id", "name", "card")
-
-    @strawberry.type
-    class Query:
-        def _all_patrons(self) -> list[Patron]:
-            return list(Patron.objects.select_related("card").all())
-
-        all_patrons: list[Patron] = strawberry.field(
-            resolver=_all_patrons,
-            graphql_type=list[PatronType],
-        )
-
-    finalize_django_types()
-    schema = strawberry.Schema(query=Query)
-    ctx = SimpleNamespace(
-        dst_optimizer_planned=set(),
-        dst_optimizer_strictness="raise",
-    )
-
-    result = schema.execute_sync(
-        "{ allPatrons { name card { barcode } } }",
-        context_value=ctx,
-    )
-    assert result.errors is None
-    assert result.data == {
-        "allPatrons": [
-            {"name": "Ada", "card": {"barcode": "1234"}},
-        ],
-    }
-
-
-@pytest.mark.django_db
 def test_strictness_warn_planned_alias_no_warning(caplog: pytest.LogCaptureFixture) -> None:
     """Aliased relation that IS planned does not trigger a warning."""
     services.seed_data(1)
@@ -3073,8 +3006,14 @@ def test_strictness_warn_planned_alias_no_warning(caplog: pytest.LogCaptureFixtu
 
 
 @pytest.mark.django_db
-def test_optimizer_strictness_accepts_nested_planned_relation() -> None:
-    """Strictness accepts resolver keys from nested plans."""
+def test_optimizer_strictness_stashes_the_nested_planned_relation_key() -> None:
+    """The planned set carries the resolver key of a relation planned two levels down.
+
+    That ``"raise"`` serves such a nested planned selection without a flag is
+    pinned live by
+    ``examples/fakeshop/test_query/test_library_api.py::test_library_nested_planned_relations_are_silent_under_raise``;
+    this row keeps the stashed key itself.
+    """
     services.seed_data(1)
 
     class EntryType(DjangoType):
@@ -5537,79 +5476,6 @@ def test_plan_with_cascading_hook_uncacheable() -> None:
 
 
 @pytest.mark.django_db
-def test_consumer_prefetch_nested_keys_stay_strictness_visible() -> None:
-    """B8 + B3: consumer-wins Prefetch drop must not mask nested N+1 under raise.
-
-    When the root resolver already carries ``Prefetch("items", queryset=...)``,
-    B8 drops the optimizer's richer nested Prefetch (consumer wins) but must
-    ALSO strip the nested ``entries`` planned-resolver keys before publishing
-    strictness sentinels. Publishing the pre-diff plan left ``entries`` marked
-    planned while every item row lazy-loaded it.
-    """
-    services.seed_data(1)
-
-    class EntryType(DjangoType):
-        class Meta:
-            model = Entry
-            fields = ("id", "value")
-
-    assert registry.get(Entry) is EntryType
-
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name", "entries")
-
-    assert registry.get(Item) is ItemType
-
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name", "items")
-
-    @strawberry.type
-    class Query:
-        def _objs(self) -> QuerySet[Category]:
-            return Category.objects.all().prefetch_related(
-                Prefetch("items", queryset=Item.objects.filter(is_private=False)),
-            )
-
-        objs: QuerySet[Category] = strawberry.field(
-            resolver=_objs,
-            graphql_type=list[CategoryType],
-        )
-
-        def _planned_objs(self) -> QuerySet[Category]:
-            return Category.objects.all()
-
-        planned_objs: QuerySet[Category] = strawberry.field(
-            resolver=_planned_objs,
-            graphql_type=list[CategoryType],
-        )
-
-    finalize_django_types()
-    optimizer = DjangoOptimizerExtension(strictness="raise")
-    schema = strawberry.Schema(
-        query=Query,
-        extensions=[lambda: optimizer],
-    )
-    consumer_wins = schema.execute_sync(
-        "{ objs { name items { name entries { value } } } }",
-        context_value=SimpleNamespace(),
-    )
-    assert consumer_wins.errors is not None
-    assert any(
-        "Unplanned N+1" in str(error) and "entries" in str(error) for error in consumer_wins.errors
-    )
-
-    planned = schema.execute_sync(
-        "{ plannedObjs { name items { name entries { value } } } }",
-        context_value=SimpleNamespace(),
-    )
-    assert planned.errors is None, planned.errors
-
-
-@pytest.mark.django_db
 def test_consumer_prefetch_preserves_nested_fk_id_elision() -> None:
     """B8 + FK-id elision: a consumer-wins Prefetch drop must PRESERVE nested elisions.
 
@@ -5668,9 +5534,12 @@ def test_consumer_prefetch_preserves_nested_fk_id_elision() -> None:
 
 # B3 strictness reachability: ``_check_n1`` consults the in-force strictness
 # BEFORE it decides to stay silent. Gating on the ``DST_OPTIMIZER_PLANNED`` stash
-# alone left an armed guard silently disarmed for three shapes - an execution with
-# no stashable context, an operation whose root the walker cannot plan, and an
-# async execution where Django's sync gate fires first.
+# alone would leave an armed guard silently disarmed for three shapes - an
+# execution with no stashable context (pinned below), an operation whose root the
+# walker cannot plan, and an async execution where Django's sync gate fires first.
+# The last two are live:
+# ``examples/fakeshop/test_query/test_products_visibility_api.py::test_strictness_raise_flags_a_relation_under_a_list_root_the_walker_cannot_plan``  # noqa: E501 - citation path cannot wrap
+# ``examples/fakeshop/test_query/test_relations_async_api.py::test_async_strictness_names_an_unplanned_relation_before_the_sync_only_gate``.  # noqa: E501 - citation path cannot wrap
 
 
 @pytest.mark.django_db
@@ -5726,113 +5595,6 @@ def test_strictness_reaches_an_execution_with_no_stashable_context() -> None:
     bare = schema.execute_sync(query)
     assert bare.errors is not None
     assert any("Unplanned N+1: category" in str(error) for error in bare.errors)
-
-
-@pytest.mark.django_db
-def test_strictness_flags_a_relation_under_an_unplannable_root() -> None:
-    """A root the walker cannot plan leaves every relation strictness-visible.
-
-    A resolver returning a materialized ``list`` gives the walker no queryset to
-    rewrite, so the operation publishes no planned-resolver keys at all. That is
-    the case the guard exists to report - every parent row lazy-loads - not a
-    reason to treat the relation as satisfied. ``strictness="off"`` on the same
-    schema stays silent and serves the rows.
-    """
-    services.seed_data(1)
-
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name")
-
-    assert registry.get(Item) is ItemType
-
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name", "items")
-
-    @strawberry.type
-    class Query:
-        def _categories(self) -> list[Category]:
-            return list(Category.objects.order_by("id"))
-
-        categories: list[Category] = strawberry.field(
-            resolver=_categories,
-            graphql_type=list[CategoryType],
-        )
-
-    finalize_django_types()
-    query = "{ categories { name items { name } } }"
-
-    raising_optimizer = DjangoOptimizerExtension(strictness="raise")
-    raising = strawberry.Schema(
-        query=Query,
-        extensions=[lambda: raising_optimizer],
-    )
-    flagged = raising.execute_sync(query, context_value=SimpleNamespace())
-    assert flagged.errors is not None
-    assert any("Unplanned N+1: items" in str(error) for error in flagged.errors)
-
-    silent_optimizer = DjangoOptimizerExtension(strictness="off")
-    silent = strawberry.Schema(
-        query=Query,
-        extensions=[lambda: silent_optimizer],
-    )
-    served = silent.execute_sync(query, context_value=SimpleNamespace())
-    assert served.errors is None, served.errors
-    assert served.data is not None
-    assert served.data["categories"]
-
-
-@pytest.mark.django_db(transaction=True)
-async def test_strictness_flags_an_unplanned_relation_before_the_async_sync_gate() -> None:
-    """The guard speaks before Django's ``SynchronousOnlyOperation``.
-
-    A many-side lazy load inside an async execution trips Django's sync-only gate,
-    which surfaces to the consumer as an opaque "cannot call this from an async
-    context" rather than as the actionable unplanned-relation report. The N+1
-    probe reads only the instance cache (never the database), so an armed guard
-    reaches the relation first and names it.
-    """
-    await sync_to_async(services.seed_data)(1)
-
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name")
-
-    assert registry.get(Item) is ItemType
-
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name", "items")
-
-    @strawberry.type
-    class Query:
-        async def _categories(self) -> list[Category]:
-            return [obj async for obj in Category.objects.order_by("id")]
-
-        categories: list[Category] = strawberry.field(
-            resolver=_categories,
-            graphql_type=list[CategoryType],
-        )
-
-    finalize_django_types()
-    optimizer = DjangoOptimizerExtension(strictness="raise")
-    schema = strawberry.Schema(
-        query=Query,
-        extensions=[lambda: optimizer],
-    )
-    result = await schema.execute(
-        "{ categories { name items { name } } }",
-        context_value=SimpleNamespace(),
-    )
-    assert result.errors is not None
-    messages = [str(error) for error in result.errors]
-    assert any("Unplanned N+1: items" in message for message in messages)
-    assert not any("async context" in message for message in messages)
 
 
 def test_optimizer_unadapted_non_queryset_passthrough() -> None:

@@ -531,7 +531,6 @@
 "tests/test_relay_connection.py::_as_django_type" = { reportReturnType = 1 }
 "tests/test_relay_connection.py::_consumer_edge_book_connection_class" = { cast = 1 }
 "tests/test_relay_connection.py::test_consume_window_serves_the_connections_own_prefix_cursor" = { cast = 1 }
-"tests/test_relay_node_field.py::test_node_sync_async_get_queryset_raises_sync_misuse.AsyncCategoryNode.get_queryset" = { reportIncompatibleMethodOverride = 1 }
 "tests/test_relay_node_field.py::test_stamp_node_type_passes_through_none_and_unstampable_objects" = { reportArgumentType = 1 }
 "tests/test_resource_policy.py::_AmountNoBoundCanExceed.__radd__" = { reportIncompatibleMethodOverride = 1 }
 "tests/test_resource_policy.py::_AmountNoBoundCanExceed.__rmul__" = { reportIncompatibleMethodOverride = 1 }

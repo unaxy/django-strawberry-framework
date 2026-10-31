@@ -794,6 +794,91 @@ def test_nested_connection_still_costs_one_query_per_parent_when_the_optimizer_g
     assert len(item_sql_five) == 5
 
 
+def _list_root_items_schema(strictness: str) -> strawberry.Schema:
+    """Holder whose ``categories`` root hands back a materialized list, optimizer installed.
+
+    A list gives the walker no queryset to rewrite, so the operation plans and
+    records nothing; the error policy is off so a strictness refusal reads as
+    its own message.
+    """
+
+    @strawberry.type
+    class Query:
+        def _categories(self) -> list[Category]:
+            return list(Category.objects.order_by("pk"))
+
+        categories: list[Category] = strawberry.field(
+            resolver=_categories,
+            graphql_type=list[products_schema.CategoryType],
+        )
+
+    optimizer = DjangoOptimizerExtension(strictness=strictness)
+    return DjangoSchema(
+        error_policy={"enabled": False},
+        query=Query,
+        extensions=[lambda: optimizer],
+    )
+
+
+_LIST_ROOT_ITEMS_QUERY = "{ categories { name items { name } } }"
+
+
+@pytest.mark.django_db
+def test_strictness_raise_flags_a_relation_under_a_list_root_the_walker_cannot_plan() -> None:
+    """A root the walker cannot plan leaves every relation under it strictness-visible.
+
+    The materialized list publishes no planned-resolver keys, so each parent's
+    ``items`` read is the per-parent load the guard exists to report, not a
+    relation it may treat as satisfied: ``strictness="raise"`` refuses the first
+    one and no item statement runs.
+    """
+    services.seed_data(1)
+
+    with CaptureQueriesContext(connection) as captured:
+        payload = _post_visibility_query(_list_root_items_schema("raise"), _LIST_ROOT_ITEMS_QUERY)
+
+    assert payload["data"] is None, payload
+    assert [
+        (json_at(error, "message"), json_at(error, "path"))
+        for error in json_list(payload, "errors")
+    ] == [("Unplanned N+1: items", ["categories", 0, "items"])]
+    assert [q for q in captured.captured_queries if 'FROM "products_item"' in q["sql"]] == []
+
+
+@pytest.mark.django_db
+def test_strictness_off_serves_the_same_list_root_relation_per_parent() -> None:
+    """The control: the same schema with ``strictness="off"`` serves every parent's items.
+
+    The refusal above is the armed guard, not the list root failing to resolve:
+    disarmed, each parent loads the items ``ItemType.get_queryset`` shows an
+    anonymous viewer, one item statement per parent.
+    """
+    services.seed_data(1)
+    parents = list(Category.objects.order_by("pk"))
+    expected = {
+        parent.name: sorted(
+            Item.objects.filter(
+                category=parent,
+                is_private=False,
+                category__is_private=False,
+            ).values_list("name", flat=True),
+        )
+        for parent in parents
+    }
+
+    with CaptureQueriesContext(connection) as captured:
+        payload = _post_visibility_query(_list_root_items_schema("off"), _LIST_ROOT_ITEMS_QUERY)
+
+    assert payload.get("errors") is None, payload
+    served = {
+        json_str(row, "name"): sorted(json_str(item, "name") for item in json_list(row, "items"))
+        for row in json_list(payload, "data", "categories")
+    }
+    assert served == expected
+    item_sql = [q for q in captured.captured_queries if 'FROM "products_item"' in q["sql"]]
+    assert len(item_sql) == len(parents), item_sql
+
+
 def _list_relation_item_queries(parent_count: int) -> list[str]:
     """Post a raw-list ``items`` selection at ``parent_count`` parents; return item SQL.
 
@@ -1191,7 +1276,9 @@ def _planned_item_names(
     ONE ``products_item`` query for the whole page is what "planned" means here: a
     relation the walker declined costs one read per parent, and its rows are then
     scoped by the resolver rather than by the plan - the opposite of what these
-    rows measure.
+    rows measure. The root connection field plans its own page too: its one
+    category statement selects the read columns, never the unselected
+    ``description``.
 
     Pages come back sorted rather than carrying an ``orderBy:``. A generated
     relation promises WHICH rows, not their order, so sorting is what makes the
@@ -1205,6 +1292,14 @@ def _planned_item_names(
         if 'FROM "products_item"' in entry["sql"]
     ]
     assert len(item_queries) == 1, item_queries
+    root_queries = [
+        entry["sql"]
+        for entry in captured.captured_queries
+        if 'FROM "products_category"' in entry["sql"] and entry["sql"] not in item_queries
+    ]
+    assert len(root_queries) == 1, root_queries
+    assert '"products_category"."name"' in root_queries[0], root_queries
+    assert '"products_category"."description"' not in root_queries[0], root_queries
     return {
         json_str(edge, "node", "name"): sorted(reader(json_object(edge, "node")))
         for edge in json_list(data, "allCategories", "edges")

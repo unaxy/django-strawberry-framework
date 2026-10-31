@@ -39,8 +39,8 @@ from django.core.exceptions import SynchronousOnlyOperation
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import connection, transaction
 from django.db.backends.utils import CursorWrapper
-from django.db.models import Model, Prefetch, QuerySet, TextField, Value
-from django.db.models.functions import Upper
+from django.db.models import F, Model, Prefetch, QuerySet, TextField, Value, Window
+from django.db.models.functions import RowNumber, Upper
 from django.db.models.signals import post_init, pre_save
 from django.http import HttpRequest
 from django.http.response import HttpResponseBase
@@ -593,6 +593,42 @@ def test_library_evaluated_queryset_not_re_executed_over_http() -> None:
     assert len(branch_sql) == 1, captured.captured_queries
     assert 'FROM "library_branch"' in branch_sql[0]
     assert "JOIN" not in branch_sql[0].upper()
+
+
+@pytest.mark.django_db
+def test_library_evaluated_root_with_its_own_join_runs_one_statement() -> None:
+    """An evaluated root carrying the consumer's ``select_related`` is served from that JOIN.
+
+    The resolver evaluates ``select_related("patron")`` before returning it, so
+    the optimizer's evaluated-queryset guard passes the executed queryset through
+    rather than cloning and re-running it, and each card's ``patron`` reads the
+    joined row: one statement for the page and its relation.
+    """
+    _seed_library_graph()
+
+    @strawberry.type
+    class Query:
+        def _cards(self) -> QuerySet[models.MembershipCard]:
+            cards = models.MembershipCard.objects.select_related("patron").order_by("pk")
+            _ = len(cards)
+            return cards
+
+        cards: QuerySet[models.MembershipCard] = strawberry.field(
+            resolver=_cards,
+            graphql_type=list[library_schema.MembershipCardType],
+        )
+
+    optimizer = DjangoOptimizerExtension()
+    schema = DjangoSchema(query=Query, config=strawberry_config(), extensions=[lambda: optimizer])
+    with CaptureQueriesContext(connection) as captured:
+        response = _post_holder(schema, "{ cards { barcode patron { name } } }")
+
+    assert response_json(response) == {
+        "data": {"cards": [{"barcode": "CARD-1", "patron": {"name": "Ada"}}]},
+    }
+    library_sql = _library_sql(captured)
+    assert len(library_sql) == 1, library_sql
+    assert 'JOIN "library_patron"' in library_sql[0], library_sql
 
 
 @pytest.mark.django_db(transaction=True)
@@ -13722,18 +13758,16 @@ _REFUSED_WINDOW_SHAPES: dict[str, tuple[_GenreQuerysetHook, str, bool]] = {
 }
 
 
-def _strict_genre_books_connection(
+def _patch_genre_books_hooks(
     monkeypatch: pytest.MonkeyPatch,
-    arguments: str,
     *,
-    hook: _GenreQuerysetHook | None = None,
-    distinct_target: bool = False,
-) -> JSONObject:
-    """Post ``allLibraryGenres { booksConnection(<arguments>) }`` under ``strictness="raise"``.
+    hook: _GenreQuerysetHook | None,
+    distinct_target: bool,
+) -> None:
+    """Rewrite the shipped genre and book hooks for one ``booksConnection`` request.
 
     ``hook`` (when given) rewrites ``GenreType.get_queryset``'s queryset;
     ``distinct_target`` makes ``BookType.get_queryset`` return ``.distinct()``.
-    Returns the parsed envelope.
     """
     if hook is not None:
 
@@ -13758,6 +13792,21 @@ def _strict_genre_books_connection(
             return book_hook(queryset, info).distinct()
 
         monkeypatch.setattr(library_schema.BookType, "get_queryset", classmethod(_distinct_books))
+
+
+def _strict_genre_books_connection(
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: str,
+    *,
+    hook: _GenreQuerysetHook | None = None,
+    distinct_target: bool = False,
+) -> JSONObject:
+    """Post ``allLibraryGenres { booksConnection(<arguments>) }`` under ``strictness="raise"``.
+
+    ``hook`` and ``distinct_target`` are ``_patch_genre_books_hooks``'s. Returns
+    the parsed envelope.
+    """
+    _patch_genre_books_hooks(monkeypatch, hook=hook, distinct_target=distinct_target)
     optimizer = DjangoOptimizerExtension(strictness="raise")
     schema = DjangoSchema(
         query=library_schema.Query,
@@ -13802,6 +13851,100 @@ def test_strictness_raise_reports_a_refused_window_attribute_as_unplanned(
         0,
         "booksConnection",
     ], payload
+
+
+def _plant_books_under_window_attr(
+    queryset: QuerySet[models.Book],
+) -> Callable[[QuerySet[models.Genre]], QuerySet[Model]]:
+    """A genre hook prefetching ``queryset``'s rows under the shared window attribute."""
+
+    def _plant(genres: QuerySet[models.Genre]) -> QuerySet[Model]:
+        return genres.prefetch_related(
+            Prefetch("books", queryset=queryset, to_attr="_dst_books_connection"),
+        )
+
+    return _plant
+
+
+def _genre_books_page_under_hooks(
+    arguments: str,
+) -> tuple[list[str], list[str]]:
+    """Post one anonymous ``booksConnection`` page on ``/graphql/``; return titles and book SQL."""
+    with CaptureQueriesContext(connection) as captured:
+        data = _assert_graphql_success(
+            f"{{ allLibraryGenres {{ booksConnection({arguments}) "
+            "{ edges { node { title } } } } }",
+        )
+    titles = [
+        json_str(edge, "node", "title")
+        for edge in json_list(data, "allLibraryGenres", 0, "booksConnection", "edges")
+    ]
+    return titles, _sql_from_table(captured, "library_book")
+
+
+@pytest.mark.django_db
+def test_genre_books_connection_refuses_unnumbered_rows_under_the_window_attribute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rows a hook prefetched under the window attribute without a row number are not a page.
+
+    The hook plants only ``c`` under ``_dst_books_connection``, so a resolver that
+    served the reserved attribute would answer ``c``; the resolver requires the
+    window row number on every row, refuses the list, and a fresh per-parent query
+    serves ``a`` and ``b``. ``BookType`` returns ``.distinct()`` so the walker
+    leaves the relation to that pipeline instead of planning its own window under
+    the same attribute. Two guards refuse the list in series: the resolver's
+    row-number check (``connection.py::_build_relation_connection_resolver``) and
+    the page's own refusal of a window with no published plan
+    (``connection.py::_consume_window``); removing either alone leaves the page
+    served by the other.
+    """
+    _seed_genre_books("a", "b", "c")
+    _patch_genre_books_hooks(
+        monkeypatch,
+        hook=_plant_books_under_window_attr(models.Book.objects.filter(title="c")),
+        distinct_target=True,
+    )
+
+    titles, book_sql = _genre_books_page_under_hooks("first: 2")
+
+    assert titles == ["a", "b"]
+    assert len(book_sql) == 2, book_sql
+    # The upstream offset connection fetches one probe row beyond ``first: 2``.
+    assert [sql for sql in book_sql if "LIMIT 3" in sql.upper()] == book_sql[1:], book_sql
+    assert not any("ROW_NUMBER()" in sql.upper() for sql in book_sql), book_sql
+
+
+@pytest.mark.django_db
+def test_genre_books_connection_filter_refuses_a_numbered_window_under_the_window_attribute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``filter:`` page is never served from the window attribute, numbered rows or not.
+
+    The hook plants ``apple`` and ``avocado`` with a window row number under
+    ``_dst_books_connection``, exactly the shape the fast path serves; the
+    sidecar ``filter:`` cannot be carried by a window, so the resolver refuses
+    it and the per-parent query answers ``banana``.
+    """
+    _seed_genre_books("apple", "banana", "avocado")
+    _patch_genre_books_hooks(
+        monkeypatch,
+        hook=_plant_books_under_window_attr(
+            models.Book.objects.filter(title__in=["apple", "avocado"]).annotate(
+                _dst_row_number=Window(RowNumber(), order_by=F("pk").asc()),
+            ),
+        ),
+        distinct_target=False,
+    )
+
+    titles, book_sql = _genre_books_page_under_hooks('filter: { title: { exact: "banana" } }')
+
+    assert titles == ["banana"]
+    assert len(book_sql) == 2, book_sql
+    planted, fallback = book_sql
+    assert "ROW_NUMBER()" in planted.upper(), planted
+    assert "banana" in fallback, fallback
+    assert "ROW_NUMBER()" not in fallback.upper(), fallback
 
 
 @pytest.mark.django_db
@@ -22681,6 +22824,13 @@ def _consumer_prefetched_books() -> QuerySet[models.Book]:
     )
 
 
+def _consumer_whole_loans_books() -> QuerySet[models.Book]:
+    """A root resolver whose own ``Prefetch`` loads each book's loans whole, keys included."""
+    return models.Book.objects.order_by("pk").prefetch_related(
+        Prefetch("loans", queryset=models.Loan.objects.order_by("pk")),
+    )
+
+
 def _hooked_holder_schema(
     *,
     genres: Callable[[QuerySet[models.Genre]], QuerySet[models.Genre]] | None = None,
@@ -22695,9 +22845,9 @@ def _hooked_holder_schema(
     it to the root queryset, and a planned ``Prefetch`` child applies it to the
     child's base queryset, so whatever ``.only()`` / ``.defer()`` /
     ``prefetch_related`` it adds meets the plan's projection in one writer. The
-    ``Mutation`` type repeats the ``Query`` fields, so one selection runs under
-    either operation, and adds ``updateShelf``, whose post-write re-fetch plans
-    its ``result`` selection through the same hooks.
+    ``Mutation`` type repeats the projection rows' ``Query`` fields, so one
+    selection runs under either operation, and adds ``updateShelf``, whose
+    post-write re-fetch plans its ``result`` selection through the same hooks.
     """
 
     class HolderHookedGenreType(DjangoType):
@@ -22759,6 +22909,7 @@ def _hooked_holder_schema(
                 "id",
                 "title",
                 "subtitle",
+                "shelf",
                 "loans",
             )
             interfaces = (relay.Node,)
@@ -22804,6 +22955,7 @@ def _hooked_holder_schema(
         shelves: list[HolderHookedShelfType] = DjangoListField(HolderHookedShelfType)
         loans: list[HolderHookedLoanType] = DjangoListField(HolderHookedLoanType)
         tags: list[HolderHookedTagType] = DjangoListField(HolderHookedTagType)
+        books: list[HolderHookedBookType] = DjangoListField(HolderHookedBookType)
         only_genres: QuerySet[models.Genre] = strawberry.field(
             resolver=_only_genres,
             graphql_type=list[HolderHookedGenreType],
@@ -22818,6 +22970,10 @@ def _hooked_holder_schema(
         )
         consumer_prefetched_books: QuerySet[models.Book] = strawberry.field(
             resolver=_consumer_prefetched_books,
+            graphql_type=list[HolderHookedBookType],
+        )
+        consumer_whole_loans_books: QuerySet[models.Book] = strawberry.field(
+            resolver=_consumer_whole_loans_books,
             graphql_type=list[HolderHookedBookType],
         )
 
@@ -23203,6 +23359,268 @@ def test_library_consumer_prefetch_deferring_a_key_falls_back_loudly(
     assert len(patrons) == 4, payload
     warnings = [record for record in caplog.records if "Potential N+1 on patron" in record.message]
     assert len(warnings) == 4, [record.message for record in caplog.records]
+
+
+def _post_hooked_holder_payload(
+    document: str,
+    build: Callable[[], strawberry.Schema],
+) -> tuple[JSONObject, list[str]]:
+    """``_post_hooked_holder`` for a row whose subject is the error: no error assertion.
+
+    The error policy passes messages through, so a strictness refusal reads as itself.
+    """
+    registry.clear()
+    try:
+        schema = build()
+        with (
+            override_settings(**_ERROR_POLICY_PASS_THROUGH),
+            CaptureQueriesContext(
+                connection,
+            ) as captured,
+        ):
+            response = _post_holder(schema, document)
+    finally:
+        registry.clear()
+    return response_json(response), [entry["sql"] for entry in captured.captured_queries]
+
+
+@pytest.mark.django_db
+def test_library_consumer_prefetch_leaves_the_relation_under_it_strictness_visible() -> None:
+    """A consumer's own ``Prefetch`` wins and drops the plan beneath it from the planned set.
+
+    ``consumerWholeLoansBooks`` prefetches each book's loans itself, so the
+    optimizer's richer nested ``Prefetch`` (loans with their ``patron`` joined) is
+    dropped and every loan's ``patron`` is a real per-row load. The nested
+    planned-resolver keys go with it, so ``strictness="raise"`` reports the
+    relation instead of trusting a plan that never ran. The same selection under
+    the plain ``books`` root is planned whole and stays silent.
+    """
+    _seed_subtitled_books()
+    document = "{ %s { title loans { note patron { name } } } }"
+
+    payload, sql = _post_hooked_holder_payload(
+        document % "consumerWholeLoansBooks",
+        lambda: _hooked_holder_schema(strictness="raise"),
+    )
+
+    assert payload["data"] is None, payload
+    assert {json_str(error, "message") for error in json_list(payload, "errors")} == {
+        "Unplanned N+1: patron",
+    }, payload
+    assert [statement for statement in sql if 'FROM "library_patron"' in statement] == []
+
+    planned, planned_sql = _post_hooked_holder(
+        document % "books",
+        lambda: _hooked_holder_schema(strictness="raise"),
+    )
+
+    # A generated relation promises which rows, not their order: compare sorted.
+    assert sorted(
+        (
+            json_str(book, "title"),
+            sorted(json_str(loan, "patron", "name") for loan in json_list(book, "loans")),
+        )
+        for book in json_list(planned, "data", "books")
+    ) == [
+        ("Kindred", ["Ada"]),
+        ("Volume 0", ["Ada"]),
+        ("Volume 1", ["Ada"]),
+        ("Volume 2", ["Ada"]),
+    ]
+    assert len(planned_sql) == 2, planned_sql
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("strictness", ["warn", "raise"])
+def test_library_typename_only_selection_is_clean_under_armed_strictness(
+    strictness: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A selection with no relation plans nothing and trips neither strictness mode.
+
+    ``genres { __typename }`` builds an empty plan; the guard has no relation to
+    compare against the empty planned set, so ``"raise"`` returns the page and
+    ``"warn"`` logs nothing.
+    """
+    _seed_hooked_holder_graph()
+    caplog.set_level(logging.WARNING, logger="django_strawberry_framework")
+
+    payload, sql = _post_hooked_holder(
+        "{ genres { __typename } }",
+        lambda: _hooked_holder_schema(strictness=strictness),
+    )
+
+    assert payload["data"] == {
+        "genres": [{"__typename": "HolderHookedGenreType"}] * models.Genre.objects.count(),
+    }
+    assert len(sql) == 1, sql
+    assert [record.message for record in caplog.records] == []
+
+
+@pytest.mark.django_db
+def test_library_nested_planned_relations_are_silent_under_raise() -> None:
+    """Every level of a planned nested selection is accounted for under ``strictness="raise"``.
+
+    ``shelves { books { loans } }`` plans a ``Prefetch`` per level and records each
+    level's resolver key, so the deepest ``loans`` access is planned rather than
+    flagged: the page is served in one statement per level.
+    """
+    _seed_subtitled_books()
+
+    payload, sql = _post_hooked_holder(
+        "{ shelves { code books { title loans { note } } } }",
+        lambda: _hooked_holder_schema(strictness="raise"),
+    )
+
+    [shelf] = json_list(payload, "data", "shelves")
+    assert sorted(json_list(shelf, "books"), key=lambda book: json_str(book, "title")) == [
+        {"title": "Kindred", "loans": [{"note": "first checkout"}]},
+        {"title": "Volume 0", "loans": [{"note": "loan 0"}]},
+        {"title": "Volume 1", "loans": [{"note": "loan 1"}]},
+        {"title": "Volume 2", "loans": [{"note": "loan 2"}]},
+    ]
+    assert len(sql) == 3, sql
+
+
+def _patron_cards_schema(*, joined: bool) -> strawberry.Schema:
+    """Holder over shipped ``PatronType`` whose list root the walker cannot plan.
+
+    ``joined`` makes the resolver ``select_related("card")`` itself. The optimizer
+    is installed under ``strictness="raise"`` with the error policy off, so a
+    refusal reads as its own message.
+    """
+
+    @strawberry.type
+    class Query:
+        def _patrons(self) -> list[models.Patron]:
+            patrons = models.Patron.objects.order_by("pk")
+            return list(patrons.select_related("card") if joined else patrons)
+
+        patrons: list[models.Patron] = strawberry.field(
+            resolver=_patrons,
+            graphql_type=list[library_schema.PatronType],
+        )
+
+    optimizer = DjangoOptimizerExtension(strictness="raise")
+    return DjangoSchema(
+        query=Query,
+        config=strawberry_config(),
+        extensions=[lambda: optimizer],
+        error_policy={"enabled": False},
+    )
+
+
+@pytest.mark.django_db
+def test_strictness_raise_accepts_a_reverse_one_to_one_the_resolver_already_joined() -> None:
+    """An unplanned reverse one-to-one the resolver joined itself is not an N+1.
+
+    The list root plans nothing, but each patron's ``card`` (present or absent)
+    is already in Django's relation cache from the resolver's own JOIN, so the
+    guard reads no lazy load: one statement serves both patrons.
+    """
+    _seed_library_graph()
+
+    with CaptureQueriesContext(connection) as captured:
+        response = _post_holder(
+            _patron_cards_schema(joined=True),
+            "{ patrons { name card { barcode } } }",
+        )
+
+    assert response_json(response) == {
+        "data": {
+            "patrons": [
+                {"name": "Ada", "card": {"barcode": "CARD-1"}},
+                {"name": "Grace", "card": None},
+            ],
+        },
+    }
+    library_sql = _library_sql(captured)
+    assert len(library_sql) == 1, library_sql
+    assert 'JOIN "library_membershipcard"' in library_sql[0], library_sql
+
+
+@pytest.mark.django_db
+def test_strictness_raise_flags_a_reverse_one_to_one_the_resolver_left_unloaded() -> None:
+    """The control: the same relation without the resolver's JOIN is flagged per patron."""
+    _seed_library_graph()
+
+    response = _post_holder(
+        _patron_cards_schema(joined=False),
+        "{ patrons { name card { barcode } } }",
+    )
+
+    payload = response_json(response)
+    assert payload["data"] == {
+        "patrons": [{"name": "Ada", "card": None}, {"name": "Grace", "card": None}],
+    }, payload
+    assert [
+        (json_at(error, "message"), json_at(error, "path"))
+        for error in json_list(payload, "errors")
+    ] == [
+        ("Unplanned N+1: card", ["patrons", 0, "card"]),
+        ("Unplanned N+1: card", ["patrons", 1, "card"]),
+    ]
+
+
+_DEFERRED_BOOK_SPELLINGS = [
+    pytest.param(("shelf", "subtitle"), "shelf { id }", (), ("subtitle",), id="attname"),
+    pytest.param(
+        ("shelf", "subtitle"),
+        "shelf { code }",
+        ('"library_shelf"."code"',),
+        ("subtitle",),
+        id="dotted-read",
+    ),
+    pytest.param(
+        ("shelf__code", "shelf__topic"),
+        "shelf { code }",
+        ('"library_shelf"."code"',),
+        ('"library_shelf"."topic"',),
+        id="dotted-defer",
+    ),
+]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "deferred",
+        "selection",
+        "loaded",
+        "still_deferred",
+    ),
+    _DEFERRED_BOOK_SPELLINGS,
+)
+def test_library_root_hook_defer_stops_deferring_what_the_selection_reads_under_any_spelling(
+    deferred: tuple[str, ...],
+    selection: str,
+    loaded: tuple[str, ...],
+    still_deferred: tuple[str, ...],
+) -> None:
+    """A book hook's ``.defer()`` is re-deferred minus every column the selection reads.
+
+    The selection reads the deferred ``shelf`` key as the FK-id elision's attname
+    (``shelf { id }``) or through the planned JOIN (``shelf { code }``), and the
+    hook may defer a joined column by its dotted name. Each spelling must load:
+    Django refuses a deferred-and-traversed relation (``FieldError``), and a
+    still-deferred read column loads once per book. One statement for four books,
+    with the columns the selection never reads still deferred.
+    """
+    _seed_subtitled_books()
+
+    payload, sql = _post_hooked_holder(
+        f"{{ books {{ title {selection} }} }}",
+        lambda: _hooked_holder_schema(books=lambda queryset: queryset.defer(*deferred)),
+    )
+
+    assert len(json_list(payload, "data", "books")) == 4, payload
+    assert len(sql) == 1, sql
+    assert '"library_book"."shelf_id"' in sql[0], sql[0]
+    for column in loaded:
+        assert column in sql[0], sql[0]
+    for column in still_deferred:
+        spelled = column if column.startswith('"') else f'"library_book"."{column}"'
+        assert spelled not in sql[0], sql[0]
 
 
 def _books_prefetching_loans_without_their_note() -> strawberry.Schema:
