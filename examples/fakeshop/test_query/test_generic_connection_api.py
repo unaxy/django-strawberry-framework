@@ -1,64 +1,97 @@
-"""In-process windowed GenericRelation connection acceptance tests.
+"""Live HTTP tests for generic-connection content types, projection and pagination.
 
-``Branch.tags = GenericRelation(TaggedItem)`` is the package's generic-relation
-substrate; the public example schema deliberately does NOT expose it (a model
-comment forbids exposing tags), so these tests build test-local Relay-Node
-``BranchNode`` / ``TaggedItemNode`` types and drive them through
-``schema.execute_sync`` with the optimizer extension - never over live
-``/graphql`` (there is nothing to hit there). They pin the first-class
-``"generic"`` relation kind: the alias-late content-type morph predicate
-(Django's ``GenericRelatedObjectManager.get_prefetch_querysets`` adds it at
-fetch time INSIDE the window subquery - the planner never injects it), the
-scalar-only projection that includes both the ``object_id`` and
-``content_type_id`` columns (the deferred-refetch N+1 fix), the count-free
-``hasNextPage`` probe composition, and the lateral strategy degrading
-to the windowed body.
-
-Library acceptance tests use inline ``Model.objects.create`` (the library app
-has no ``services.py``), per AGENTS.md. Every generic ``DjangoType`` is declared
-inside the schema factory so the autouse registry/connection-cache reset keeps
-each test independent.
+The shipped schema deliberately leaves its generic relations unpublished. These
+holder mounts declare the public Meta-based graph beside fakeshop and keep the
+content-type, paging and query-cost claims on the HTTP tier.
 """
 
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
+from functools import wraps
 
 import pytest
 import strawberry
+from apps.library.models import Branch, Genre, ProxyBranch, TaggedItem
 from asgiref.sync import sync_to_async
 from django.contrib.contenttypes.models import ContentType
 from django.db import connection as db_connection
 from django.db.models import QuerySet
+from django.http import HttpRequest, HttpResponseBase
+from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
-from graphql_client import json_at, json_list, json_object
+from django.urls import path
+from graphql_client import (
+    JSONObject,
+    RecordCompiledSql,
+    graphql_payload,
+    json_at,
+    json_list,
+    json_object,
+    response_json,
+)
 from strawberry import relay
 
-from apps.library.models import Branch, Genre, ProxyBranch, TaggedItem
 from django_strawberry_framework import (
     DjangoOptimizerExtension,
+    DjangoSchema,
     DjangoType,
     finalize_django_types,
     strawberry_config,
 )
-from django_strawberry_framework.connection import _connection_type_cache
 from django_strawberry_framework.registry import registry
+from django_strawberry_framework.testing import AsyncTestClient
+from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
+
+pytestmark = pytest.mark.usefixtures("private_registry")
+_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 
-@pytest.fixture(autouse=True)
-def _isolate_registry() -> Iterator[None]:
-    """Reset the global registry and connection-type cache around each test.
-
-    Every test declares fresh function-scope ``DjangoType`` classes; connection
-    classes are cached on ``target_type`` identity, so a discarded class must
-    not leak into a later test's identity check.
-    """
-    registry.clear()
-    _connection_type_cache.clear()
-    yield
-    registry.clear()
-    _connection_type_cache.clear()
+@wraps(DjangoGraphQLView.as_view())
+def _graphql_view(request: HttpRequest) -> HttpResponseBase:
+    schema = _CURRENT["schema"]
+    assert schema is not None
+    return DjangoGraphQLView.as_view(schema=schema)(request)
 
 
-def _build_schema(*, strategy: str | None = None, total_count: bool = False) -> strawberry.Schema:
+@wraps(AsyncDjangoGraphQLView.as_view())
+async def _async_graphql_view(request: HttpRequest) -> HttpResponseBase:
+    schema = _CURRENT["schema"]
+    assert schema is not None
+    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
+
+
+urlpatterns = [
+    path("graphql-generic/", _graphql_view),
+    path("graphql-generic-async/", _async_graphql_view),
+]
+
+
+def _post(schema: DjangoSchema, query: str) -> JSONObject:
+    """Serve the function-scoped graph through Django's HTTP request stack."""
+    _CURRENT["schema"] = schema
+    try:
+        with override_settings(ROOT_URLCONF=__name__):
+            payload = graphql_payload(query, url="/graphql-generic/")
+        assert "errors" not in payload, payload
+        return json_object(payload, "data")
+    finally:
+        _CURRENT["schema"] = None
+
+
+async def _post_async(schema: DjangoSchema, query: str) -> JSONObject:
+    """Serve the same graph through the package's async HTTP view."""
+    _CURRENT["schema"] = schema
+    try:
+        with override_settings(ROOT_URLCONF=__name__):
+            result = await AsyncTestClient().query(query, url="/graphql-generic-async/")
+        assert result.response.status_code == 200
+        payload = response_json(result.response)
+        assert "errors" not in payload, payload
+        return json_object(payload, "data")
+    finally:
+        _CURRENT["schema"] = None
+
+
+def _build_schema(*, strategy: str | None = None, total_count: bool = False) -> DjangoSchema:
     """Build a schema exposing ``branches`` with a windowed ``tagsConnection``.
 
     ``strategy`` selects the nested-connection strategy
@@ -94,11 +127,17 @@ def _build_schema(*, strategy: str | None = None, total_count: bool = False) -> 
 
     finalize_django_types()
     ext = DjangoOptimizerExtension(nested_connection_strategy=strategy)
-    return strawberry.Schema(
+    return DjangoSchema(
         query=Query,
         config=strawberry_config(),
         extensions=[lambda: ext],
     )
+
+
+def _tag_statements(captured_queries: Sequence[Mapping[str, str]]) -> list[str]:
+    """Read only the child table's statements, excluding middleware and parent reads."""
+    table = db_connection.ops.quote_name(TaggedItem._meta.db_table)
+    return [query["sql"] for query in captured_queries if f"FROM {table}" in query["sql"]]
 
 
 def _window_sql(captured_queries: Sequence[Mapping[str, str]]) -> str:
@@ -107,9 +146,9 @@ def _window_sql(captured_queries: Sequence[Mapping[str, str]]) -> str:
     Its presence proves the generic connection took the WINDOWED path rather
     than degrading to a per-parent fallback.
     """
-    for query in captured_queries:
-        if "ROW_NUMBER" in query["sql"].upper():
-            return query["sql"]
+    for sql in _tag_statements(captured_queries):
+        if "ROW_NUMBER" in sql.upper():
+            return sql
     raise AssertionError("no windowed (ROW_NUMBER) child query was captured")
 
 
@@ -120,8 +159,8 @@ def test_windowed_generic_connection_first_page_excludes_poison_row() -> None:
     The poison ``TaggedItem`` shares ``object_id`` with the branch but carries a
     DIFFERENT content type, so it lands in the same ``object_id`` partition. The
     alias-late content-type WHERE Django's generic prefetch adds at fetch time
-    (inside the window subquery) excludes it - the recon's wrong-data scare,
-    pinned forever.
+    (inside the window subquery) excludes the foreign content type even though
+    the partition alone would admit it.
     """
     branch = Branch.objects.create(name="Central")
     other = Branch.objects.create(name="Annex")
@@ -133,7 +172,8 @@ def test_windowed_generic_connection_first_page_excludes_poison_row() -> None:
     TaggedItem.objects.create(content_type=genre_ct, object_id=branch.pk, tag="poison")
 
     schema = _build_schema(total_count=True)
-    result = schema.execute_sync(
+    data = _post(
+        schema,
         """
         query {
           branches {
@@ -147,9 +187,7 @@ def test_windowed_generic_connection_first_page_excludes_poison_row() -> None:
         """,
     )
 
-    assert result.errors is None, result.errors
-    assert result.data is not None
-    conn = json_object(result.data, "branches", 0, "tagsConnection")
+    conn = json_object(data, "branches", 0, "tagsConnection")
     edges = json_list(conn, "edges")
     assert [json_at(edge, "node", "tag") for edge in edges] == ["a1", "a2"]
     assert all(json_at(edge, "cursor") for edge in edges)
@@ -160,7 +198,7 @@ def test_windowed_generic_connection_first_page_excludes_poison_row() -> None:
 
 
 @pytest.mark.django_db
-def test_generic_connection_has_next_page_probe_composes_with_ws_a() -> None:
+def test_generic_connection_has_next_page_probe_avoids_a_partition_count() -> None:
     """A hasNextPage-only generic page composes with the count-free probe.
 
     No ``totalCount`` selected on a bounded first page -> the window overfetches
@@ -174,13 +212,12 @@ def test_generic_connection_has_next_page_probe_composes_with_ws_a() -> None:
     schema = _build_schema()
 
     with CaptureQueriesContext(db_connection) as ctx:
-        result = schema.execute_sync(
+        data = _post(
+            schema,
             "{ branches { tagsConnection(first: 2) {"
             " edges { node { tag } } pageInfo { hasNextPage } } } }",
         )
-    assert result.errors is None, result.errors
-    assert result.data is not None
-    conn = json_object(result.data, "branches", 0, "tagsConnection")
+    conn = json_object(data, "branches", 0, "tagsConnection")
     assert [json_at(edge, "node", "tag") for edge in json_list(conn, "edges")] == ["t0", "t1"]
     assert json_at(conn, "pageInfo", "hasNextPage") is True
     # Windowed path taken, and count-free: the probe replaces the partition count.
@@ -188,12 +225,11 @@ def test_generic_connection_has_next_page_probe_composes_with_ws_a() -> None:
     assert "COUNT(" not in window_sql.upper()
 
     # Boundary: the page ending exactly at the partition tail -> hasNextPage False.
-    exact = schema.execute_sync(
+    exact = _post(
+        schema,
         "{ branches { tagsConnection(first: 3) { pageInfo { hasNextPage } } } }",
     )
-    assert exact.errors is None, exact.errors
-    assert exact.data is not None
-    assert json_at(exact.data, "branches", 0, "tagsConnection", "pageInfo", "hasNextPage") is False
+    assert json_at(exact, "branches", 0, "tagsConnection", "pageInfo", "hasNextPage") is False
 
 
 @pytest.mark.django_db
@@ -213,15 +249,18 @@ def test_scalar_only_generic_connection_has_no_per_row_refetch() -> None:
     for index in range(2):
         TaggedItem.objects.create(content_object=branch, tag=f"t{index}")
     with CaptureQueriesContext(db_connection) as small:
-        assert schema.execute_sync(query).errors is None
+        data = _post(schema, query)
+        assert data == {"branches": [{"tagsConnection": {"pageInfo": {"hasNextPage": False}}}]}
 
     for index in range(2, 8):
         TaggedItem.objects.create(content_object=branch, tag=f"t{index}")
     with CaptureQueriesContext(db_connection) as large:
-        assert schema.execute_sync(query).errors is None
+        data = _post(schema, query)
+        assert data == {"branches": [{"tagsConnection": {"pageInfo": {"hasNextPage": False}}}]}
 
     # No per-row deferred refetch: adding six tags does not add six queries.
-    assert len(large.captured_queries) == len(small.captured_queries)
+    assert len(_tag_statements(large.captured_queries)) == 1
+    assert len(_tag_statements(small.captured_queries)) == 1
     # The scalar-only window explicitly loads both morph columns.
     window_sql = _window_sql(large.captured_queries).lower()
     assert "object_id" in window_sql
@@ -241,19 +280,22 @@ def test_lateral_strategy_generic_connection_degrades_to_windowed() -> None:
         TaggedItem.objects.create(content_object=branch, tag=f"t{index}")
 
     schema = _build_schema(strategy="lateral")
-    result = schema.execute_sync(
-        "{ branches { tagsConnection(first: 2) { edges { node { tag } } } } }",
-    )
+    with CaptureQueriesContext(db_connection) as captured:
+        data = _post(
+            schema,
+            "{ branches { tagsConnection(first: 2) { edges { node { tag } } } } }",
+        )
+    assert "ROW_NUMBER" in _window_sql(captured.captured_queries).upper()
 
-    assert result.errors is None, result.errors
-    assert result.data is not None
-    conn = json_object(result.data, "branches", 0, "tagsConnection")
+    conn = json_object(data, "branches", 0, "tagsConnection")
     assert [json_at(edge, "node", "tag") for edge in json_list(conn, "edges")] == ["t0", "t1"]
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_generic_connection_serves_a_plain_root_under_async() -> None:
-    """Async ``schema.execute`` of a generic connection under a plain ``def`` root completes.
+async def test_generic_connection_serves_a_plain_root_under_async(
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """An async HTTP request completes a generic connection under a plain ``def`` root.
 
     The root resolver returns an unevaluated queryset on the event-loop thread; the
     optimizer builds the windowed ``tagsConnection`` plan in a worker thread (the
@@ -267,18 +309,19 @@ async def test_generic_connection_serves_a_plain_root_under_async() -> None:
         await sync_to_async(TaggedItem.objects.create)(content_object=branch, tag=f"t{index}")
     schema = _build_schema()
     ContentType.objects.clear_cache()
+    compiled = record_compiled_sql(TaggedItem._meta.db_table)
 
-    result = await schema.execute(
+    data = await _post_async(
+        schema,
         "{ branches { tagsConnection(first: 2) { edges { node { tag } } } } }",
     )
 
-    assert result.errors is None, result.errors
-    assert result.data is not None
-    conn = json_object(result.data, "branches", 0, "tagsConnection")
+    conn = json_object(data, "branches", 0, "tagsConnection")
     assert [json_at(edge, "node", "tag") for edge in json_list(conn, "edges")] == ["t0", "t1"]
+    assert len(compiled) == 1, compiled
 
 
-def _build_proxy_schema() -> strawberry.Schema:
+def _build_proxy_schema() -> DjangoSchema:
     """Build a schema exposing ``proxyBranches`` with a ``proxyTagsConnection``.
 
     ``ProxyBranch`` is a proxy of ``Branch`` whose ``proxy_tags`` generic
@@ -314,7 +357,7 @@ def _build_proxy_schema() -> strawberry.Schema:
 
     finalize_django_types()
     ext = DjangoOptimizerExtension()
-    return strawberry.Schema(
+    return DjangoSchema(
         query=Query,
         config=strawberry_config(),
         extensions=[lambda: ext],
@@ -353,7 +396,8 @@ def test_generic_connection_honors_non_default_for_concrete_model() -> None:
     TaggedItem.objects.create(content_type=concrete_ct, object_id=branch.pk, tag="decoy")
 
     schema = _build_proxy_schema()
-    result = schema.execute_sync(
+    data = _post(
+        schema,
         """
         query {
           proxyBranches {
@@ -367,9 +411,7 @@ def test_generic_connection_honors_non_default_for_concrete_model() -> None:
         """,
     )
 
-    assert result.errors is None, result.errors
-    assert result.data is not None
-    conn = json_object(result.data, "proxyBranches", 0, "proxyTagsConnection")
+    conn = json_object(data, "proxyBranches", 0, "proxyTagsConnection")
     # Only the proxy-content-type rows come back; the concrete decoy is excluded.
     assert [json_at(edge, "node", "tag") for edge in json_list(conn, "edges")] == ["p1", "p2"]
     assert conn["totalCount"] == 3

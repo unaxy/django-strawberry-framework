@@ -36,6 +36,7 @@ import importlib
 import inspect
 import time
 from collections.abc import Awaitable, Callable
+from functools import wraps
 
 import pytest
 import strawberry
@@ -51,7 +52,6 @@ from django.http import HttpRequest
 from django.http.response import HttpResponseBase
 from django.test.utils import CaptureQueriesContext
 from django.urls import path
-from django.views.decorators.csrf import csrf_exempt
 from graphql import GraphQLResolveInfo
 from graphql_client import (
     JSONObject,
@@ -125,17 +125,17 @@ def _hand_schema(deadline: float | None) -> DjangoSchema:
     )
 
 
-@csrf_exempt
+@wraps(DjangoGraphQLView.as_view())
 def _hand_view(request: HttpRequest) -> HttpResponseBase:
     return DjangoGraphQLView.as_view(schema=_hand_schema(None))(request)
 
 
-@csrf_exempt
+@wraps(DjangoGraphQLView.as_view())
 def _hand_deadline_view(request: HttpRequest) -> HttpResponseBase:
     return DjangoGraphQLView.as_view(schema=_hand_schema(_DEADLINE_SECONDS))(request)
 
 
-@csrf_exempt
+@wraps(AsyncDjangoGraphQLView.as_view())
 async def _hand_deadline_async_view(request: HttpRequest) -> HttpResponseBase:
     return await AsyncDjangoGraphQLView.as_view(schema=_hand_schema(_DEADLINE_SECONDS))(
         request,
@@ -188,17 +188,17 @@ def _write_schema(extensions: list[type[SchemaExtension]]) -> DjangoSchema:
     )
 
 
-@csrf_exempt
+@wraps(DjangoGraphQLView.as_view())
 def _write_unspent_view(request: HttpRequest) -> HttpResponseBase:
     return DjangoGraphQLView.as_view(schema=_write_schema([]))(request)
 
 
-@csrf_exempt
+@wraps(DjangoGraphQLView.as_view())
 def _write_spent_view(request: HttpRequest) -> HttpResponseBase:
     return DjangoGraphQLView.as_view(schema=_write_schema([_ExpireAfterWrite]))(request)
 
 
-@csrf_exempt
+@wraps(AsyncDjangoGraphQLView.as_view())
 async def _write_spent_async_view(request: HttpRequest) -> HttpResponseBase:
     return await AsyncDjangoGraphQLView.as_view(schema=_write_schema([_ExpireAfterWrite]))(request)
 
@@ -238,7 +238,7 @@ def _hand_loaded_schema() -> DjangoSchema:
     )
 
 
-@csrf_exempt
+@wraps(AsyncDjangoGraphQLView.as_view())
 async def _hand_loaded_async_view(request: HttpRequest) -> HttpResponseBase:
     return await AsyncDjangoGraphQLView.as_view(schema=_hand_loaded_schema())(request)
 

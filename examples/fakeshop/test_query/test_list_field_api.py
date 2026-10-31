@@ -13,6 +13,7 @@ import contextlib
 import datetime
 from collections.abc import AsyncIterator, Callable, Generator, Iterator, Mapping
 from dataclasses import dataclass
+from functools import wraps
 from typing import TYPE_CHECKING, SupportsIndex, TypeAlias, cast, overload
 
 import pytest
@@ -23,7 +24,7 @@ from apps.library import models as library_models
 from apps.library import schema as library_schema
 from apps.library.orders import BranchOrder
 from apps.products import schema as products_schema
-from apps.products.services import seed_cascade_split, seed_data
+from apps.products.services import create_users, seed_cascade_split, seed_data
 from django.contrib.auth.models import User
 from django.db import connection, models
 from django.db.backends.base.base import BaseDatabaseWrapper
@@ -136,6 +137,7 @@ class _CurrentView(TypedDict):
 _CURRENT: _CurrentView = {"schema": None, "view_class": None}
 
 
+@wraps(DjangoGraphQLView.as_view())
 def _graphql_view(request: HttpRequest) -> HttpResponseBase:
     schema = _CURRENT["schema"]
     assert schema is not None
@@ -153,11 +155,7 @@ def _list_resolver(resolver: _ListResolver) -> _ListResolver:
 
 
 def _staff_client() -> Client:
-    staff = User.objects.create_user(
-        username="staff_list_sync",
-        password="pw",
-        is_staff=True,
-    )
+    staff = User.objects.get(username="staff_1")
     client = Client()
     client.force_login(staff)
     return client
@@ -341,6 +339,7 @@ def test_shipped_branches_introspection_return_types() -> None:
 
 @pytest.mark.django_db
 def test_shipped_branches_staff_ordered_offset_limit() -> None:
+    create_users(1)
     library_models.Branch.objects.create(name="Bravo", city="Boston")
     library_models.Branch.objects.create(name="Alpha", city="Boston")
     library_models.Branch.objects.create(name="Delta", city="Boston")
@@ -418,6 +417,7 @@ def test_shipped_branches_anonymous_visibility_before_offset() -> None:
 
 @pytest.mark.django_db
 def test_shipped_branches_order_by_alone() -> None:
+    create_users(1)
     library_models.Branch.objects.create(name="Charlie", city="Boston")
     library_models.Branch.objects.create(name="Alpha", city="Boston")
     library_models.Branch.objects.create(name="Bravo", city="Boston")
@@ -3654,6 +3654,7 @@ def test_shipped_branches_an_order_permission_denial_precedes_the_order_requirem
 
 @pytest.mark.django_db
 def test_shipped_branches_aggregate_order_no_distinct_in_sql() -> None:
+    create_users(1)
     client = _staff_client()
     for i in range(3):
         b = library_models.Branch.objects.create(name=f"Branch {i}", city="Boston")
@@ -4892,6 +4893,7 @@ def test_holder_branches_a_combined_legacy_spelling_matches_the_reference(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The combined-source legacy branch is held to the reference oracle, not to "no new error"."""
+    create_users(1)
     client = _staff_client()
     counters, current_schema, oracle = _combined_branch_oracle(monkeypatch, client)
 
@@ -4921,6 +4923,7 @@ def test_holder_branches_an_argument_windows_the_combined_source_after_visibilit
     the union as its primary-key set, runs the visibility hook once over it and
     windows the result.
     """
+    create_users(1)
     client = _staff_client()
     counters, current_schema, _oracle = _combined_branch_oracle(monkeypatch, client)
 
@@ -4945,6 +4948,7 @@ def test_holder_branches_an_argument_windows_the_combined_source_after_visibilit
 
 @pytest.mark.django_db
 def test_shipped_branches_offset_alone_bounds() -> None:
+    create_users(1)
     client = _staff_client()
     for i in range(5):
         library_models.Branch.objects.create(name=f"Branch {i}", city="Boston")
@@ -4978,6 +4982,7 @@ def test_shipped_branches_offset_alone_bounds() -> None:
 
 @pytest.mark.django_db
 def test_shipped_branches_independent_aliases() -> None:
+    create_users(1)
     client = _staff_client()
     library_models.Branch.objects.create(name="Alpha", city="Boston")
     library_models.Branch.objects.create(name="Bravo", city="Boston")
@@ -5072,6 +5077,7 @@ def test_holder_nullability_propagation_over_none_source(
 def test_holder_orderset_override_returning_queryset_subclass(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    create_users(1)
     client = _staff_client()
     library_models.Branch.objects.create(name="Alpha", city="Boston")
     library_models.Branch.objects.create(name="Bravo", city="Boston")
@@ -5207,6 +5213,7 @@ def test_holder_ordering_leaves_the_consumer_context_exactly_as_found(
     The list and the connection reach that handoff by different paths, so each
     owns a node rather than sharing one that stops at the first leak.
     """
+    create_users(1)
     client = _staff_client()
     for name in ("Alpha", "Bravo"):
         library_models.Branch.objects.create(name=name, city="Boston")
@@ -5238,6 +5245,7 @@ def test_holder_ordering_succeeds_on_a_context_that_forbids_writes(ordered_query
     Nothing in public ordering, the offset guard, or the post-order seal asks the
     consumer context to accept a value or to give one up.
     """
+    create_users(1)
     client = _staff_client()
     for name in ("Alpha", "Bravo"):
         library_models.Branch.objects.create(name=name, city="Boston")
@@ -5252,6 +5260,7 @@ def test_holder_ordering_succeeds_on_a_context_that_forbids_writes(ordered_query
 @pytest.mark.django_db
 def test_holder_a_frozen_context_still_returns_the_windowed_rows() -> None:
     """The positive control: refusing the stash must not quietly empty the window."""
+    create_users(1)
     client = _staff_client()
     for name in ("Alpha", "Bravo"):
         library_models.Branch.objects.create(name=name, city="Boston")

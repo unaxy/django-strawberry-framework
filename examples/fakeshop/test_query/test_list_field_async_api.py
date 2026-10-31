@@ -30,6 +30,7 @@ import json
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import wraps
 from typing import TYPE_CHECKING, NoReturn, TypeAlias, TypedDict, TypeGuard, cast
 
 import pytest
@@ -149,6 +150,7 @@ def _list_resolver(resolver: _ListResolver) -> _ListResolver:
     return resolver
 
 
+@wraps(AsyncDjangoGraphQLView.as_view())
 async def _async_graphql_view(request: HttpRequest) -> HttpResponseBase:
     schema = _CURRENT["schema"]
     assert schema is not None
@@ -986,45 +988,60 @@ async def test_async_generator_cleanup_and_finally_witness() -> None:
         await sync_to_async(library_models.Branch.objects.create)(name=f"B{i}", city="Boston")
         for i in range(5)
     ]
-
     finally_entered = False
 
     async def _gen() -> AsyncGenerator[library_models.Branch, None]:
         nonlocal finally_entered
         try:
-            for b in branches:
-                yield b
+            for branch in branches:
+                yield branch
         finally:
             finally_entered = True
+
+    # Retain the exact source until the close oracle: garbage collection must
+    # never supply the finally witness on behalf of the bounded field.
+    source = _gen()
 
     @strawberry.type
     class _GenQuery:
         branches: list[library_schema.BranchType] = DjangoListField(
             library_schema.BranchType,
-            resolver=_list_resolver(lambda _root, _info: _gen()),
+            resolver=_list_resolver(lambda _root, _info: source),
         )
 
     schema = DjangoSchema(query=_GenQuery, config=strawberry_config())
-    payload = await _post_async(schema, "{ branches(limit: 2) { name } }")
-    assert "errors" not in payload, payload
-    assert len(json_list(payload, "data", "branches")) == 2
-    # Generator was advanced then stopped by limit ceiling; finally block witnessed
-    assert finally_entered is True
+    try:
+        payload = await _post_async(schema, "{ branches(limit: 2) { name } }")
+        assert payload == {"data": {"branches": [{"name": "B0"}, {"name": "B1"}]}}
+        assert finally_entered is True
+    finally:
+        await source.aclose()
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_async_iterator_aclose_witness_on_limit_zero_and_rejection() -> None:
+@pytest.mark.parametrize(
+    ("arguments", "reason"),
+    [
+        ("limit: 0", None),
+        ("offset: 1", "order_required"),
+        ("orderBy: [{ city: ASC }]", "queryset_required"),
+    ],
+    ids=["limit-zero", "offset-refusal", "ordering-refusal"],
+)
+async def test_async_iterator_aclose_witness_on_limit_zero_and_rejection(
+    arguments: str,
+    reason: str | None,
+) -> None:
     branches = [
         await sync_to_async(library_models.Branch.objects.create)(name=f"B{i}", city="Boston")
         for i in range(3)
     ]
-
-    holder: dict[str, _ClosableAsyncIterator | None] = {"it": None}
+    created: list[_ClosableAsyncIterator] = []
 
     def _resolver(_root: object, _info: strawberry.Info[object, object]) -> _ClosableAsyncIterator:
-        it = _ClosableAsyncIterator(branches)
-        holder["it"] = it
-        return it
+        source = _ClosableAsyncIterator(branches)
+        created.append(source)
+        return source
 
     @strawberry.type
     class _ItQuery:
@@ -1034,26 +1051,16 @@ async def test_async_iterator_aclose_witness_on_limit_zero_and_rejection() -> No
         )
 
     schema = DjangoSchema(query=_ItQuery, config=strawberry_config())
-
-    # 1. limit: 0 short-circuit invokes aclose with 0 next calls
-    p_lim0 = await _post_async(schema, "{ branches(limit: 0) { name } }")
-    assert "errors" not in p_lim0, p_lim0
-    assert json_at(p_lim0, "data", "branches") == []
-    assert holder["it"] is not None
-    assert holder["it"].aclose_called == 1
-    assert holder["it"].next_count == 0
-
-    # 2. Nonzero offset rejection invokes aclose with 0 next calls
-    p_off = await _post_async(schema, "{ branches(offset: 1) { name } }")
-    assert json_at(p_off, "errors", 0, "extensions", "reason") == "order_required"
-    assert holder["it"].aclose_called == 1
-    assert holder["it"].next_count == 0
-
-    # 3. Non-null orderBy rejection invokes aclose with 0 next calls
-    p_ord = await _post_async(schema, "{ branches(orderBy: [{ city: ASC }]) { name } }")
-    assert json_at(p_ord, "errors", 0, "extensions", "reason") == "queryset_required"
-    assert holder["it"].aclose_called == 1
-    assert holder["it"].next_count == 0
+    payload = await _post_async(schema, "{ branches(" + arguments + ") { name } }")
+    if reason is None:
+        assert payload == {"data": {"branches": []}}
+    else:
+        assert payload["data"] is None, payload
+        assert len(json_list(payload, "errors")) == 1
+        assert json_at(payload, "errors", 0, "extensions", "reason") == reason
+    assert len(created) == 1, "this request must construct its own source"
+    assert created[0].aclose_called == 1
+    assert created[0].next_count == 0
 
 
 @pytest.mark.django_db(transaction=True)
@@ -3878,39 +3885,36 @@ _ASYNC_REACHABLE_POLICY_IDS = ("policy-from-info", "schema-attribute", "context-
 async def test_async_a_resolver_cannot_widen_the_row_bound_by_writing_a_policy_it_can_reach(
     reach: Callable[[strawberry.Info[object, object]], object],
 ) -> None:
-    """The object-write twin of the context-write row, on the far side of an ``await``.
-
-    The write happens after a real suspension point, so the bounded field answers
-    it from whatever task-local budget the hand-off restored rather than from the
-    one the writing resolver last saw.
-    """
+    """The bounded field reads its source only after that resolver attempted the policy write."""
     for i in range(5):
         await sync_to_async(library_models.Branch.objects.create)(name=f"B{i}", city="Boston")
 
     holder: dict[str, bool] = {"awaited": False}
 
-    async def _widen(info: strawberry.Info[object, object]) -> str:
+    async def _branches(
+        _root: object,
+        info: strawberry.Info[object, object],
+    ) -> models.QuerySet[library_models.Branch]:
         await asyncio.sleep(0)
         holder["awaited"] = True
         reach(info).__dict__["max_list_rows"] = 999
-        return "written"
+        return library_models.Branch.objects.order_by("id")
 
     @strawberry.type
     class _WideningQuery:
-        branches: list[library_schema.BranchType] = DjangoListField(library_schema.BranchType)
-        widen: str = strawberry.field(resolver=_widen)
+        branches: list[library_schema.BranchType] = DjangoListField(
+            library_schema.BranchType,
+            resolver=_branches,
+        )
 
     schema = DjangoSchema(
         query=_WideningQuery,
         config=strawberry_config(),
         resource_policy={"max_list_rows": 2},
     )
-
-    payload = await _post_async(schema, "{ widen branches { name } }")
-
+    payload = await _post_async(schema, "{ branches { name } }")
     assert holder["awaited"] is True, "the resolver never reached its await"
-    assert "errors" not in payload, payload
-    assert [json_at(row, "name") for row in json_list(payload, "data", "branches")] == ["B0", "B1"]
+    assert payload == {"data": {"branches": [{"name": "B0"}, {"name": "B1"}]}}
 
 
 # ---------------------------------------------------------------------------

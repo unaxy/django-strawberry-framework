@@ -130,7 +130,7 @@ from .utils.querysets import (
     take_order_expansion_step,
     wrap_async_queryset_adapter,
 )
-from .utils.typing import is_async_callable, published_argument
+from .utils.typing import is_async_callable, published_argument_wire_name
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Mapping, Sequence
@@ -367,13 +367,14 @@ def _resolve_argument_wire_name(info: Info[object, object], parameter_name: str)
     Only invoked on error paths (e.g. inside ``ListArgumentError`` instantiation or
     normalizer error branches) so successful requests perform zero name lookups.
     The name comes from the executable schema's published argument map
-    (``utils/typing.py::published_argument``); the schema's ``NameConverter`` is
+    (``utils/typing.py::published_argument_wire_name``); the schema's ``NameConverter`` is
     never invoked at request time.
     """
-    published = published_argument(info, parameter_name)
-    if published is None:
-        return _DEFAULT_WIRE_NAMES.get(parameter_name, parameter_name)
-    return published[0]
+    return published_argument_wire_name(
+        info,
+        parameter_name,
+        _DEFAULT_WIRE_NAMES.get(parameter_name, parameter_name),
+    )
 
 
 # ``slots=True`` is deliberately absent: combined with ``frozen=True`` the

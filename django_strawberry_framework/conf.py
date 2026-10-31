@@ -78,8 +78,12 @@ APPLY_UPSTREAM_PATCHES_KEY = "APPLY_UPSTREAM_PATCHES"
 # strict decode and its own body source (``views.py::_RawBodyRequestAdapter``)
 # - but it rides the gate for the body-envelope guard: with the ``strawberry``
 # half off, a scalar or non-object-batch body is an unhandled ``500`` on a
-# package mount too. ``graphql_core`` independently owns async-iterable list
-# completion and has no HTTP-view lifecycle coupling.
+# package mount too. ``strawberry`` also owns the Relay connection-page and async
+# row-elision workarounds. Disabling it at startup restores upstream's empty
+# renamed pages on package offset connections (the keyset page decides itself)
+# and unnecessary async offset row fetches for count-only/typename-only requests.
+# ``graphql_core`` independently owns async-iterable list completion with no
+# HTTP-view lifecycle coupling.
 UPSTREAM_PATCH_DEPENDENCIES = frozenset(
     {
         "cross_web",
@@ -433,8 +437,13 @@ def upstream_patches_enabled(dependency: str) -> bool:
       installed. Missing names default to ``True`` (the opt-out stance
       holds per dependency). ``strawberry`` and ``cross_web`` jointly
       own the malformed-body hardening - see the
-      ``UPSTREAM_PATCH_DEPENDENCIES`` comment; ``graphql_core`` owns only
-      executor list completion.
+      ``UPSTREAM_PATCH_DEPENDENCIES`` comment. ``strawberry`` also owns the Relay
+      connection-page and async row-elision fixes on both native and package
+      connections. With it disabled at startup, renamed ``edges`` / ``pageInfo``
+      can return empty offset pages (the keyset page decides itself), and async
+      offset count-only or typename-only selections may fetch node rows. ``graphql_core`` owns only
+      executor list completion. Disabling an applier does not uninstall patches
+      already installed in the running process.
 
     Any other shape raises ``ConfigurationError`` (the
     ``_normalize_user_settings`` fail-loud precedent): a non-bool /

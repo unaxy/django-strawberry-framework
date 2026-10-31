@@ -795,7 +795,19 @@ async def test_async_client_posts_a_real_query_through_a_falsy_transport(
     assert read_attr(res, "response") is transport.responses[0]
 
 
-def test_export_surface_is_the_testing_root_not_the_package_root() -> None:
+@pytest.mark.parametrize(
+    "name",
+    [
+        "TestClient",
+        "AsyncTestClient",
+        "Response",
+        "GraphQLTestMixin",
+        "GraphQLTestCase",
+        "GraphQLTransactionTestCase",
+    ],
+    ids=str,
+)
+def test_export_surface_is_the_testing_root_not_the_package_root(name: str) -> None:
     """The six names live on ``testing``'s ``__all__``; the package root has none.
 
     The no-root-export contract is pinned by its two accurate shapes (spec-043
@@ -804,22 +816,12 @@ def test_export_surface_is_the_testing_root_not_the_package_root() -> None:
     that as ``ImportError`` - Python's import machinery converts the module
     ``__getattr__``'s ``AttributeError`` for ``from ... import ...``.
     """
-    exported = (
-        "TestClient",
-        "AsyncTestClient",
-        "Response",
-        "GraphQLTestMixin",
-        "GraphQLTestCase",
-        "GraphQLTransactionTestCase",
-    )
-    for name in exported:
-        assert name in testing_root.__all__
-        assert getattr(testing_root, name) is not None
+    assert name in testing_root.__all__
+    assert getattr(testing_root, name) is not None
 
-    root_name = "TestClient"  # via a variable so the probe is a real dynamic getattr
-    assert not hasattr(django_strawberry_framework, root_name)
+    assert not hasattr(django_strawberry_framework, name)
     with pytest.raises(AttributeError):
-        getattr(django_strawberry_framework, root_name)
+        getattr(django_strawberry_framework, name)
     with pytest.raises(ImportError):
         # The import statement is the probe; it raises, so the name is never bound.
         # basedpyright: the package root's PEP 562 __getattr__ returns Any; the statement

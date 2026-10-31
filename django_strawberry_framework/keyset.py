@@ -104,9 +104,9 @@ from strawberry.relay.utils import from_base64, to_base64
 from .exceptions import ConfigurationError
 from .utils import truth
 from .utils._narrowing import is_concrete_field, is_dict, is_list, list_of, read_attr, require
-from .utils.connections import PaginationArgumentError
+from .utils.connections import PaginationArgumentError, published_page_argument_name
 from .utils.imports import CRYPTOGRAPHY_FLOOR, require_optional_module
-from .utils.relations import _resolve_segment_field, is_stored_column
+from .utils.relations import _resolve_segment_field, generated_column, is_stored_column
 from .utils.typing import object_result
 
 if TYPE_CHECKING:
@@ -115,7 +115,7 @@ if TYPE_CHECKING:
     from cryptography.hazmat.primitives.ciphers.aead import AESSIV
 
     from .types.definition import DjangoTypeDefinition
-    from .utils.typing import ConcreteField
+    from .utils.typing import ConcreteField, EitherInfo
 
 #: The keyset cursor namespace, package-owned (upstream strawberry uses
 #: ``arrayconnection``; strawberry-graphql-django uses ``orderedcursor`` -
@@ -262,8 +262,10 @@ def cursor_columns_for(
 ) -> tuple[CursorColumn, ...]:
     """Resolve validated ``cursor_field`` entries into ``CursorColumn`` specs.
 
-    Assumes ``validate_cursor_field_columns`` passed at finalization. Each
-    name resolves through ``utils/relations.py::_resolve_segment_field``, which
+    Assumes ``validate_cursor_field_columns`` passed at finalization. A
+    ``GeneratedField`` entry's ``field`` is the column it computes
+    (``utils/relations.py::generated_column``), whose codec is the output's.
+    Each name resolves through ``utils/relations.py::_resolve_segment_field``, which
     owns the ``pk`` alias and the ``FieldDoesNotExist`` vocabulary, so a
     resolution failure here (a model change after finalize) surfaces as the
     loud ``FieldDoesNotExist`` it is. Finalization refused every entry naming a
@@ -274,6 +276,7 @@ def cursor_columns_for(
     for order_ref in order_refs:
         name, descending = split_order_ref(order_ref)
         field = require(_resolve_segment_field(model, name), is_concrete_field)
+        field = generated_column(field) or field
         columns.append(
             CursorColumn(
                 order_ref=order_ref,
@@ -347,7 +350,10 @@ def validate_cursor_field_columns(
     to a LOCAL CONCRETE NON-NULLABLE column, and the terminal entry is a
     unique total-order anchor (the pk or a ``unique=True`` column) - the
     BACKLOG contract requires the tiebreak DECLARED, not silently appended,
-    so the declared order IS the connection order with no hidden tail.
+    so the declared order IS the connection order with no hidden tail. A
+    ``GeneratedField`` entry is nullable and JSON as the column it computes
+    (``utils/relations.py::generated_column``: nullable when either it or its
+    ``output_field`` says so).
     Raises ``ConfigurationError`` naming the offending entry.
     """
     lead = f"{type_name}.Meta.cursor_field"
@@ -365,14 +371,15 @@ def validate_cursor_field_columns(
                 f"{lead} entry {truth.render(order_ref)} must be a local concrete column; "
                 "relation and reverse fields cannot anchor a keyset cursor.",
             )
-        if field.null:
+        column = generated_column(field) or field
+        if column.null:
             raise ConfigurationError(
                 f"{lead} entry {truth.render(order_ref)} is nullable. Keyset cursor columns "
                 "must be non-nullable: NULL placement diverges across database "
                 "backends and poisons tuple comparisons. Use a non-nullable "
                 "column (or a defaulted denormalization of the nullable one).",
             )
-        if not _is_supported_cursor_field(field):
+        if not _is_supported_cursor_field(column):
             raise ConfigurationError(
                 f"{lead} entry {truth.render(order_ref)} uses JSONField. Keyset cursor columns "
                 "must have portable ordering semantics across database backends; "
@@ -413,7 +420,12 @@ def serialize_cursor_value(field: ConcreteField, value: object) -> str:
     return field.value_to_string(SimpleNamespace(**{field.attname: value}))  # pyright: ignore[reportArgumentType]
 
 
-def _deserialize_cursor_value(field: ConcreteField, raw: object, argument: str) -> object:
+def _deserialize_cursor_value(
+    field: ConcreteField,
+    raw: object,
+    argument: str,
+    info: EitherInfo | None,
+) -> object:
     """Invert ``serialize_cursor_value``; malformed/non-canonical values raise."""
     try:
         value = object_result(field.to_python, raw)
@@ -422,9 +434,9 @@ def _deserialize_cursor_value(field: ConcreteField, raw: object, argument: str) 
         # detects model-field drift between mint and decode (and malformed
         # internally minted/test payloads) before a mismatched value reaches SQL.
         if serialize_cursor_value(field, value) != raw:
-            raise _invalid_cursor_error(argument)
+            raise _invalid_cursor_error(argument, info)
     except (TypeError, ValidationError, ValueError):
-        raise _invalid_cursor_error(argument) from None
+        raise _invalid_cursor_error(argument, info) from None
     else:
         return value
 
@@ -443,10 +455,15 @@ def keyset_contract_error(detail: str) -> GraphQLError:
     )
 
 
-def _invalid_cursor_error(argument: str) -> PaginationArgumentError:
-    """Build the one malformed / tampered / mismatched keyset-cursor error shape."""
+def _invalid_cursor_error(argument: str, info: EitherInfo | None) -> PaginationArgumentError:
+    """Build the one malformed / tampered / mismatched keyset-cursor error shape.
+
+    ``argument`` is the Python name; the message carries the name ``info``'s
+    schema published for it (``utils/connections.py::published_page_argument_name``).
+    """
+    name = published_page_argument_name(info, argument)
     return PaginationArgumentError(
-        f"Argument '{argument}' contains an invalid cursor for this connection.",
+        f"Argument '{name}' contains an invalid cursor for this connection.",
     )
 
 
@@ -503,7 +520,7 @@ def _encrypt_cursor_payload(payload: dict[str, str | list[str]]) -> str:
     return base64.urlsafe_b64encode(encrypted).decode("ascii")
 
 
-def _decrypt_cursor_payload(value: str, argument: str) -> object:
+def _decrypt_cursor_payload(value: str, argument: str, info: EitherInfo | None = None) -> object:
     """Decrypt one payload with the active key or any configured fallback."""
     try:
         encrypted = base64.b64decode(
@@ -512,7 +529,7 @@ def _decrypt_cursor_payload(value: str, argument: str) -> object:
             validate=True,
         )
     except (UnicodeEncodeError, binascii.Error, ValueError):
-        raise _invalid_cursor_error(argument) from None
+        raise _invalid_cursor_error(argument, info) from None
     _aessiv, invalid_tag = _cursor_crypto_types()
     secrets = (
         read_attr(settings, "SECRET_KEY"),
@@ -529,8 +546,8 @@ def _decrypt_cursor_payload(value: str, argument: str) -> object:
         try:
             return object_result(signing.JSONSerializer().loads, serialized)
         except (TypeError, ValueError):
-            raise _invalid_cursor_error(argument) from None
-    raise _invalid_cursor_error(argument)
+            raise _invalid_cursor_error(argument, info) from None
+    raise _invalid_cursor_error(argument, info)
 
 
 def encode_keyset_cursor(
@@ -573,6 +590,7 @@ def decode_keyset_cursor(
     *,
     fingerprint: str,
     argument: str,
+    info: EitherInfo | None = None,
 ) -> KeysetCursor:
     """Verify + decode one ``after:`` / ``before:`` keyset cursor.
 
@@ -583,29 +601,30 @@ def decode_keyset_cursor(
     (tampering or a rotated-out ``SECRET_KEY``), an order-fingerprint mismatch
     (replay under a different ``orderBy:``), and a value-arity or value-shape
     mismatch. The error is deliberately uniform: distinguishing "tampered"
-    from "stale order" would leak oracle detail about the opaque payload.
+    from "stale order" would leak oracle detail about the opaque payload. It
+    names ``argument`` (the Python name) as ``info``'s schema published it.
     """
     try:
         prefix, encrypted = from_base64(value)
     except ValueError:
-        raise _invalid_cursor_error(argument) from None
+        raise _invalid_cursor_error(argument, info) from None
     if prefix != KEYSET_CURSOR_PREFIX:
-        raise _invalid_cursor_error(argument)
-    payload = _decrypt_cursor_payload(encrypted, argument)
+        raise _invalid_cursor_error(argument, info)
+    payload = _decrypt_cursor_payload(encrypted, argument, info)
     # The decoded JSON object's keys and values are unchecked beyond the reads below.
     if not is_dict(payload):
-        raise _invalid_cursor_error(argument)
+        raise _invalid_cursor_error(argument, info)
     if payload.get("o") != fingerprint:
-        raise _invalid_cursor_error(argument)
+        raise _invalid_cursor_error(argument, info)
     raw_list = payload.get("v")
     # Each element is checked by ``_deserialize_cursor_value``, which takes ``object``.
     if not is_list(raw_list):
-        raise _invalid_cursor_error(argument)
+        raise _invalid_cursor_error(argument, info)
     if len(raw_list) != len(columns):
-        raise _invalid_cursor_error(argument)
+        raise _invalid_cursor_error(argument, info)
     return KeysetCursor(
         values=tuple(
-            _deserialize_cursor_value(column.field, raw, argument)
+            _deserialize_cursor_value(column.field, raw, argument, info)
             for column, raw in zip(columns, raw_list, strict=True)
         ),
     )

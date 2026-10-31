@@ -54,6 +54,7 @@ types rather than inventing throwaway ones.
 """
 
 from collections.abc import Callable
+from functools import wraps
 
 import pytest
 import strawberry
@@ -74,6 +75,7 @@ from django_strawberry_framework.views import AsyncDjangoGraphQLView
 _CURRENT: dict[str, object | None] = {"schema": None}
 
 
+@wraps(AsyncDjangoGraphQLView.as_view())
 async def _async_graphql_view(request: HttpRequest) -> HttpResponseBase:
     schema = _CURRENT["schema"]
     assert schema is not None
@@ -363,7 +365,7 @@ async def test_async_consumer_prefetched_many_side_resolves_over_http(strictness
             )
 
         optimizer = DjangoOptimizerExtension(strictness="raise")
-        return strawberry.Schema(
+        return DjangoSchema(
             query=Query,
             config=strawberry_config(),
             extensions=[lambda: optimizer] if strictness == "raise" else [],

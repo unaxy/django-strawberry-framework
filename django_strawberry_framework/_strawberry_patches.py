@@ -3,11 +3,12 @@
 Companion to :mod:`django_strawberry_framework._django_patches`. Where
 that module hardens a Django test-runner bug, this module hardens
 Strawberry HTTP-view bugs that affect live request handling for every
-consumer of ``django-strawberry-framework``, plus one Relay bug: the
+consumer of ``django-strawberry-framework``, plus two Relay bugs: the
 connection-page check that decides by wire name whether a
 ``ListConnection`` resolves its rows (see "The connection-page gap"
-below). The package ships one patch module per third-party dependency
-boundary; this module owns the Strawberry one.
+below), and the asynchronous branch that never asks it (see "Relay async
+row elision" below). The package ships one patch module per third-party
+dependency boundary; this module owns the Strawberry one.
 
 The patch is applied once from
 :meth:`django_strawberry_framework.apps.DjangoStrawberryFrameworkConfig.ready`,
@@ -225,16 +226,37 @@ rows (empty ``edges``, ``hasNextPage: false``) unless
 ``pageInfo`` on the wire. Under a ``NameConverter`` that respells both - a
 custom converter, or ``auto_camel_case=False`` with only
 ``page_info { has_next_page }`` selected - a query that selects the page
-gets an empty one. The asynchronous branch never asks, so it is correct.
-:func:`apply` rebinds the ``strawberry.relay.types`` global the synchronous
-branch calls to :func:`_patched_should_resolve_list_connection_edges`, which
-asks upstream first and, only on its ``False``,
-``connection.py::_page_requested``: the same two fields matched by the
-Python names they were declared under. No upstream code is copied, and the
-rebind reaches only that call (``strawberry.relay.utils`` keeps its own
-binding). The ``DjangoConnection`` offset page reaches the call through
+gets an empty one. The same check also answers ``True`` for a fragment
+spread merely named ``edges`` (a ``__typename``-only page fetches its rows),
+and it reads ``info.selected_fields``, whose conversion raises
+``AttributeError`` on an anonymous inline fragment (``... { edges { ... } }``).
+The asynchronous branch never asks, so it never serves the empty page, but it
+slices rows nobody selected (see "Relay async row elision" below).
+:func:`apply` replaces ``ListConnection.resolve_connection`` with an adapted
+copy whose branches both call :func:`_patched_should_resolve_list_connection_edges`
+directly (see "Relay async row elision" below), and also rebinds the
+``strawberry.relay.types`` global the genuine method's synchronous branch calls
+to the same function; while the replacement is installed nothing calls that
+rebound global. The patched check answers by ``connection.py::_page_requested`` alone: the same two fields
+matched by the Python names they were declared under, as direct children of
+the connection through fragment wrappers, over the converted selections
+``optimizer/selections.py::info_selections`` reads. Asking upstream first
+cannot be kept, because its ``True`` for a fragment named ``edges`` and its
+raise on an anonymous fragment both come before any fallback could answer.
+Three Strawberry-facing pieces therefore sit side by side, and only one of them
+delegates. The connection-page check is *replaced*: the patched check never calls
+the captured ``should_resolve_list_connection_edges`` and copies none of its code,
+and ``strawberry.relay.utils`` keeps its own binding. ``resolve_connection`` is
+*adapted*: :func:`_patched_list_connection_resolve_connection` is upstream's
+method body, named in its origin comment, shipped with Strawberry's MIT license
+as ``LICENSE.strawberry``, and pinned to the genuine method's dedented-source
+SHA256 (see "Relay async row elision" below). The four HTTP methods are
+*wrapped*: :func:`_patched_parse_json`, :func:`_patched_parse_query_params` and
+the two multipart ``parse_multipart`` replacements call the captured originals
+and only translate, guard or shield around that call.
+The ``DjangoConnection`` offset page reaches the check through
 ``connection.py::_consume_fallback``; the keyset page in
-``connection.py::_resolve_keyset_connection`` composes the same two checks
+``connection.py::_resolve_keyset_connection`` asks ``_page_requested``
 itself, ungated, because it is package code. With
 ``APPLY_UPSTREAM_PATCHES = {"strawberry": False}`` the offset page (root,
 and a nested page resolved per parent) under such a converter serves the
@@ -296,13 +318,15 @@ last checked (2026-10-29): every published release from 0.322.2 on carries the
 same ``should_resolve_list_connection_edges`` body, the literal
 ``{"edges", "pageInfo"}`` matched against ``selection.name``, and imports it
 into ``strawberry.relay.types`` for ``ListConnection.resolve_connection``. No
-upstream issue tracks it. Retire the rebind once upstream decides by the
-schema's own field names rather than wire literals.
+upstream issue tracks it. Retire the patched check (the rebind and the adapted
+copy's two direct calls; see "Five lifecycles" item 4) once upstream decides by
+the schema's own field names rather than wire literals, ignores fragment-spread
+names, and reads anonymous inline fragments.
 
-Four lifecycles
+Five lifecycles
 ---------------
 
-Read the retirement question per concern, because this module carries four
+Read the retirement question per concern, because this module carries five
 independent upstream *bugs* that do not retire together:
 
 1. **The ``UnicodeDecodeError`` / ``RecursionError`` translation** -
@@ -317,10 +341,20 @@ independent upstream *bugs* that do not retire together:
 3. **The sync and async multipart delegates** - retirable once upstream
    validates malformed ``map`` containers and paths before the upload
    utility traverses them.
-4. **The connection-page rebind** - retirable once upstream's
+4. **The connection-page check** - retirable once upstream's
    ``should_resolve_list_connection_edges`` matches ``edges`` / ``pageInfo``
-   under any wire names. ``connection.py::_resolve_keyset_connection`` then
-   drops its own ``_page_requested`` arm in the same change.
+   under any wire names, ignores fragment-spread names, and reads anonymous
+   inline fragments. While concern 5's adapted ``resolve_connection`` is
+   installed, it calls :func:`_patched_should_resolve_list_connection_edges`
+   directly in both branches and the rebound ``strawberry.relay.types`` global
+   is called by nothing, so retiring this concern means deleting the rebind
+   *and* switching the adapted copy's two predicate calls back to upstream's
+   check; deleting the rebind alone changes nothing.
+   ``connection.py::_resolve_keyset_connection`` keeps its own
+   ``_page_requested`` check either way.
+5. **The async Relay selection gate** - retirable once upstream applies the
+   connection-page check before slicing async node sources on count-only and
+   typename-only requests.
 
 The strict UTF-8 wire contract is deliberately excluded from this module
 because it is **not** retirable with upstream bugs. Upstream will not change
@@ -329,16 +363,16 @@ deliberately narrows wire decoding. Keeping a permanent policy in a module
 whose other concerns are scheduled for retirement would risk a security regression
 if the module were retired en bloc. The UTF-8 policy therefore lives in
 ``views.py::_RequestBodyBoundaryMixin.parse_json`` (see "Where the strict UTF-8
-wire contract lives" above). **This module can be deleted outright once all four
+wire contract lives" above). **This module can be deleted outright once all five
 upstream-bug concerns retire**.
 
 Re-checking whether upstream fixed this
 ---------------------------------------
 
 You do not need to redo the research from scratch. Three ways to tell
-whether the four *upstream-bug* parts are still required (the wire
+whether the *upstream-bug* parts are still required (the wire
 contract is not an upstream question at all and is owned by ``views.py`` -
-see "Three lifecycles" above):
+see "Five lifecycles" above):
 
 1. End-to-end, for the **non-envelope-body gap only**. Set ``DJANGO_STRAWBERRY_FRAMEWORK =
    {"APPLY_UPSTREAM_PATCHES": False}`` and run the fakeshop scalar-body
@@ -414,6 +448,36 @@ The ``parse_query_params`` shield has no upstream bug of its own to
 track - it exists purely to keep the non-envelope-body guard off the GET
 path - so it retires in the same change that retires the envelope guard.
 
+
+Relay async row elision
+-----------------------
+
+``ListConnection.resolve_connection`` omits the connection-page check from its
+async branch, fetching node rows for a count-only or typename-only request.
+:func:`apply` replaces the method with
+:func:`_patched_list_connection_resolve_connection`, which retains Strawberry's
+complete algorithm, including its original edge-type and pagination validation,
+async-context classification, slicing, cleanup and return shape. Only the missing
+async check is inserted after validation and before slicing the source; the sync
+branch retains its original slice-before-check ordering. Both branches call
+:func:`_patched_should_resolve_list_connection_edges` by name, never through the
+rebound ``strawberry.relay.types`` global, so that global is called by nothing
+while the copy is installed. The method matches the upstream body at Strawberry
+0.322.2 and 0.327.7; installation pins its dedented source SHA256, refusing
+unreviewed drift. Source hashes avoid interpreter-dependent AST shapes.
+
+The adaptation names its upstream origin and ships Strawberry's MIT license as
+``LICENSE.strawberry``. It shares this module's ``strawberry`` opt-out,
+reload-safe original capture, and idempotent/self-healing installation.
+Disabling ``APPLY_UPSTREAM_PATCHES`` globally or for ``strawberry`` at startup
+lets an async offset count-only or typename-only selection on a package
+connection fetch node rows again, and plain Strawberry ``ListConnection`` fields
+regain the same defect; the keyset page decides in
+``connection.py::_resolve_keyset_connection`` and is unaffected. The setting is
+an app-load opt-out; changing it after installation does not uninstall an
+existing patch. Retire the async gate together with its source pin when upstream
+asks the check in its async branch, independently of the connection-page rebind.
+
 Surface visibility
 ------------------
 
@@ -423,14 +487,30 @@ package's regression tests can call it explicitly without going through
 the AppConfig.
 """
 
+import hashlib
 import inspect
+import itertools
+import operator
+import sys
+import textwrap
+from collections.abc import AsyncIterable, AsyncIterator, Iterable, Iterator, Sequence
 from contextvars import ContextVar
+from types import FunctionType
 from typing import TYPE_CHECKING, NamedTuple, TypeVar, cast
+
+from strawberry.relay import types as _relay_types
+from strawberry.relay import utils as _relay_utils
+from strawberry.types.base import StrawberryContainer, get_object_definition
+from strawberry.types.info import Info
+from strawberry.utils.aio import aclosing, aenumerate, aislice
+from strawberry.utils.await_maybe import AwaitableOrValue
+from strawberry.utils.inspect import in_async_context
 
 from .conf import upstream_patches_enabled
 from .connection import _page_requested
 from .utils import truth
-from .utils._narrowing import is_dict, is_list, read_attr
+from .utils._narrowing import is_dict, is_list
+from .utils.typing import object_result
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -687,13 +767,16 @@ def _upstream_captures() -> _UpstreamCaptures:
 def _validate_upstream_shape() -> _UpstreamCaptures:
     """Fail loudly when Strawberry no longer exposes the method shapes we patch.
 
-    All four patched methods delegate to the captured original, so only each
+    The four patched HTTP methods delegate to the captured original, so only each
     one's presence and ``(self, argument)`` signature are pinned; upstream body
-    changes flow through the call. The rebound connection-page check delegates
-    the same way, so its ``(info)`` signature is pinned, plus the one fact the
-    rebind depends on: ``ListConnection.resolve_connection`` still reads the
-    check as a ``strawberry.relay.types`` global. A release that inlines or
-    renames that call would otherwise leave the rebind installed and inert.
+    changes flow through the call. The connection-page check is replaced, not
+    delegated to: :func:`_patched_should_resolve_list_connection_edges` answers by
+    ``connection.py::_page_requested`` alone and never calls the captured original,
+    whose ``(info)`` signature is pinned because the replacement is rebound in its
+    place and must accept the call upstream's caller makes. The one fact the rebind
+    depends on, that ``ListConnection.resolve_connection`` still reads the check as a
+    ``strawberry.relay.types`` global, is pinned with that method's own shape and
+    source SHA256 (the adapted copy's) by :func:`_validate_relay_upstream_shape`.
 
     Returns the captures (see :func:`_upstream_captures`) the install step uses.
     """
@@ -723,21 +806,6 @@ def _validate_upstream_shape() -> _UpstreamCaptures:
             "Cannot apply django-strawberry-framework's Strawberry patch: "
             f"strawberry.relay.utils.{_EDGES_CHECK} no longer has the expected (info) "
             'signature. Disable this patch with APPLY_UPSTREAM_PATCHES = {"strawberry": False} '
-            "or use a supported Strawberry version.",
-        )
-    resolve_connection = truth.stored_function(
-        truth.class_dict(read_attr(upstream.relay_types, "ListConnection", None)).get(
-            "resolve_connection",
-        ),
-    )
-    if not inspect.isfunction(resolve_connection) or (
-        _EDGES_CHECK not in resolve_connection.__code__.co_names
-    ):
-        raise RuntimeError(
-            "Cannot apply django-strawberry-framework's Strawberry patch: "
-            "ListConnection.resolve_connection no longer calls "
-            f"strawberry.relay.types.{_EDGES_CHECK}. "
-            'Disable this patch with APPLY_UPSTREAM_PATCHES = {"strawberry": False} '
             "or use a supported Strawberry version.",
         )
     return upstream
@@ -968,28 +1036,25 @@ async def _patched_async_parse_multipart(
 
 
 def _patched_should_resolve_list_connection_edges(info: "Info[object, object]") -> bool:
-    """Answer upstream's connection-page check, then the Python-name check it misses.
+    """Answer the connection-page check by Python name: ``connection.py::_page_requested``.
 
-    ``ListConnection.resolve_connection``'s synchronous branch serves an empty
-    page with ``hasNextPage: false`` unless
-    ``strawberry/relay/utils.py::should_resolve_list_connection_edges`` answers
-    ``True``, and that check matches a selection under the connection by the
-    wire names ``edges`` / ``pageInfo``. A ``NameConverter`` that respells both
-    (``page_info`` under ``auto_camel_case=False``) makes it answer ``False`` for
-    a query that selects the page. Upstream answers first, unchanged; only its
-    ``False`` reaches ``connection.py::_page_requested``, which matches the same
-    two fields by the Python names they were declared under. The
-    ``DjangoConnection`` offset page reaches this through
-    ``connection.py::_consume_fallback``; the keyset page composes the same two
-    checks itself, ungated.
+    ``ListConnection.resolve_connection`` serves an empty page with
+    ``hasNextPage: false`` unless this check answers ``True``. Upstream's
+    ``strawberry/relay/utils.py::should_resolve_list_connection_edges`` matches
+    the wire names ``edges`` / ``pageInfo``, so a ``NameConverter`` that respells
+    both (``page_info`` under ``auto_camel_case=False``) makes it answer ``False``
+    for a query that selects the page; it answers ``True`` for a fragment spread
+    named ``edges``; and it raises on an anonymous inline fragment. Upstream is
+    therefore not asked: ``_page_requested`` matches the two fields by the Python
+    names they were declared under. The ``DjangoConnection`` offset page reaches
+    this through ``connection.py::_consume_fallback``; the keyset page asks
+    ``_page_requested`` itself, ungated.
     """
-    return _upstream_captures().should_resolve_list_connection_edges(info) or _page_requested(
-        info,
-    )
+    return _page_requested(info)
 
 
 def _mark_patch_replacement(patched: object, original: object) -> None:
-    """Stamp a replacement with its owner and the upstream callable it wraps.
+    """Stamp a replacement with its owner and the upstream callable it wraps or adapts.
 
     Called at import, before ``apply()`` can install anything, so a reloaded
     module can recover the genuine upstream method from an already installed
@@ -1005,6 +1070,293 @@ _mark_patch_replacement(_patched_parse_json, _original_parse_json)
 _mark_patch_replacement(_patched_parse_query_params, _original_parse_query_params)
 _mark_patch_replacement(_patched_sync_parse_multipart, _original_sync_parse_multipart)
 _mark_patch_replacement(_patched_async_parse_multipart, _original_async_parse_multipart)
+
+
+_RelayNodeT = TypeVar("_RelayNodeT", bound=_relay_types.Node)
+_RELAY_RESOLVER_NAME = "resolve_connection"
+_RELAY_PATCH_OPT_OUT_HINT = (
+    'Disable this patch with APPLY_UPSTREAM_PATCHES = {"strawberry": False} '
+    "and review the Relay opt-out consequences in this module's docstring."
+)
+_UPSTREAM_RELAY_LIST_CONNECTION_SOURCE_SHA256 = (
+    "fcc432decd6bd60b9c29ec43f5af161c724c64f8ec5a8854f72164a44da6d418"
+)
+
+
+# Adapted from strawberry.relay.types.ListConnection.resolve_connection (MIT;
+# LICENSE.strawberry). The algorithm is upstream's; the missing async selection
+# predicate is added after its original edge/pagination validation and before slicing,
+# and both branches call the patched predicate by name instead of the module global.
+def _patched_list_connection_resolve_connection(
+    cls: "type[_relay_types.ListConnection[_RelayNodeT]]",
+    nodes: "_relay_types.NodeIterableType[_RelayNodeT]",
+    *,
+    info: "Info[object, object]",
+    before: str | None = None,
+    after: str | None = None,
+    first: int | None = None,
+    last: int | None = None,
+    max_results: int | None = None,
+    **kwargs: object,
+) -> "AwaitableOrValue[_relay_types.ListConnection[_RelayNodeT]]":
+    """Resolve a connection from the list of nodes.
+
+    This uses the described Relay Pagination algorithm_
+
+    Args:
+        cls: The concrete connection class Strawberry is resolving.
+        info: The strawberry execution info resolve the type name from.
+        nodes: An iterable/iteretor of nodes to paginate.
+        before: Returns the items in the list that come before the specified cursor.
+        after: Returns the items in the list that come after the specified cursor.
+        first: Returns the first n items from the list.
+        last: Returns the items in the list that come after the specified cursor.
+        max_results: The maximum number of results to resolve.
+        kwargs: Additional arguments passed to the resolver.
+
+    Returns:
+        The resolved `Connection`
+
+    .. _Relay Pagination algorithm:
+        https://relay.dev/graphql/connections.htm#sec-Pagination-algorithm
+
+    """
+    type_def = get_object_definition(cls)
+    assert type_def  # noqa: S101 - upstream invariant
+    field_def = type_def.get_field("edges")
+    assert field_def  # noqa: S101 - upstream invariant
+
+    field = field_def.resolve_type(type_definition=type_def)
+    while isinstance(field, StrawberryContainer):
+        field = field.of_type
+
+    edge_class = cast("type[_relay_types.Edge[_RelayNodeT]]", field)
+
+    slice_metadata = _relay_utils.SliceMetadata.from_arguments(
+        info,
+        before=before,
+        after=after,
+        first=first,
+        last=last,
+        max_results=max_results,
+        prefix=edge_class.CURSOR_PREFIX,
+    )
+
+    if isinstance(nodes, (AsyncIterator, AsyncIterable)) and in_async_context():
+
+        async def resolver() -> "_relay_types.ListConnection[_RelayNodeT]":
+            # The missing async twin of upstream's sync predicate below. Bounds and
+            # edge metadata are already validated, and no slice has touched the source.
+            if not _patched_should_resolve_list_connection_edges(info):
+                return cls(
+                    edges=[],
+                    page_info=_relay_types.PageInfo(
+                        start_cursor=None,
+                        end_cursor=None,
+                        has_previous_page=False,
+                        has_next_page=False,
+                    ),
+                )
+            try:
+                iterator = cast(
+                    "Sequence[_RelayNodeT] | AsyncIterator[_RelayNodeT] | AsyncIterable[_RelayNodeT]",
+                    object_result(
+                        operator.getitem,
+                        nodes,
+                        slice(slice_metadata.start, slice_metadata.overfetch),
+                    ),
+                )
+            except TypeError:
+                # TODO(upstream): Why mypy is not narrowing this based on the if above?
+                assert isinstance(nodes, (AsyncIterator, AsyncIterable))  # noqa: S101 - upstream invariant
+                iterator = aislice(
+                    nodes,
+                    slice_metadata.start,
+                    slice_metadata.overfetch,
+                )
+
+            async with aclosing(iterator):
+                # The slice above might return an object that now is not async
+                # iterable anymore (e.g. an already cached django queryset)
+                if isinstance(iterator, (AsyncIterator, AsyncIterable)):
+                    edges = [
+                        edge_class.resolve_edge(
+                            cls.resolve_node(v, info=info, **kwargs),
+                            cursor=slice_metadata.start + i,
+                        )
+                        async for i, v in aenumerate(iterator)
+                    ]
+                else:
+                    edges = [
+                        edge_class.resolve_edge(
+                            cls.resolve_node(v, info=info, **kwargs),
+                            cursor=slice_metadata.start + i,
+                        )
+                        for i, v in enumerate(iterator)
+                    ]
+
+            has_previous_page = slice_metadata.start > 0
+            if slice_metadata.expected is not None and len(edges) == slice_metadata.expected + 1:
+                # Remove the overfetched result
+                edges = edges[:-1]
+                has_next_page = True
+            elif slice_metadata.end == sys.maxsize:
+                # Last was asked without any after/before
+                assert last is not None  # noqa: S101 - upstream invariant
+                original_len = len(edges)
+                edges = edges[-last:]
+                has_next_page = False
+                has_previous_page = len(edges) != original_len
+            else:
+                has_next_page = False
+
+            return cls(
+                edges=edges,
+                page_info=_relay_types.PageInfo(
+                    start_cursor=edges[0].cursor if edges else None,
+                    end_cursor=edges[-1].cursor if edges else None,
+                    has_previous_page=has_previous_page,
+                    has_next_page=has_next_page,
+                ),
+            )
+
+        return resolver()
+
+    iterator: Iterable[_RelayNodeT]
+    try:
+        iterator = cast("Sequence[_RelayNodeT]", nodes)[
+            slice_metadata.start : slice_metadata.overfetch
+        ]
+    except TypeError:
+        assert isinstance(nodes, (Iterable, Iterator))  # noqa: S101 - upstream invariant
+        iterator = itertools.islice(
+            nodes,
+            slice_metadata.start,
+            slice_metadata.overfetch,
+        )
+
+    if not _patched_should_resolve_list_connection_edges(info):
+        return cls(
+            edges=[],
+            page_info=_relay_types.PageInfo(
+                start_cursor=None,
+                end_cursor=None,
+                has_previous_page=False,
+                has_next_page=False,
+            ),
+        )
+
+    edges = [
+        edge_class.resolve_edge(
+            cls.resolve_node(v, info=info, **kwargs),
+            cursor=slice_metadata.start + i,
+        )
+        for i, v in enumerate(iterator)
+    ]
+
+    has_previous_page = slice_metadata.start > 0
+    if slice_metadata.expected is not None and len(edges) == slice_metadata.expected + 1:
+        # Remove the overfetched result
+        edges = edges[:-1]
+        has_next_page = True
+    elif slice_metadata.end == sys.maxsize:
+        # Last was asked without any after/before
+        assert last is not None  # noqa: S101 - upstream invariant
+        original_len = len(edges)
+        edges = edges[-last:]
+        has_next_page = False
+        has_previous_page = len(edges) != original_len
+    else:
+        has_next_page = False
+
+    return cls(
+        edges=edges,
+        page_info=_relay_types.PageInfo(
+            start_cursor=edges[0].cursor if edges else None,
+            end_cursor=edges[-1].cursor if edges else None,
+            has_previous_page=has_previous_page,
+            has_next_page=has_next_page,
+        ),
+    )
+
+
+def _relay_original(candidate: object) -> object:
+    """Recover the installed replacement's genuine original across an in-process reload."""
+    function = truth.stored_function(candidate)
+    if getattr(function, _PATCH_OWNER_ATTRIBUTE, None) == _PATCH_OWNER:
+        return getattr(function, _PATCH_ORIGINAL_ATTRIBUTE, None)
+    return function
+
+
+_original_relay_list_connection = _relay_original(
+    truth.class_dict(_relay_types.ListConnection).get("resolve_connection"),
+)
+
+
+def _validate_relay_upstream_shape() -> None:
+    """Pin the adapted upstream body and its call shape across supported releases.
+
+    The genuine method (recovered across the adapted replacement ``apply()`` installs)
+    must still read the connection-page check as a ``strawberry.relay.types`` global,
+    the only caller the rebound check would have once the adapted replacement retires;
+    while the replacement is installed, it calls the patched check directly and the
+    rebound global is called by nothing. Its parameters and its source, the adapted
+    algorithm, are pinned after.
+    """
+    if not isinstance(_original_relay_list_connection, FunctionType):
+        raise RuntimeError(  # noqa: TRY004 - startup dependency drift is the module's RuntimeError contract
+            "Cannot apply Strawberry Relay patches: expected "
+            "ListConnection.resolve_connection. " + _RELAY_PATCH_OPT_OUT_HINT,
+        )
+    if _EDGES_CHECK not in _original_relay_list_connection.__code__.co_names:
+        raise RuntimeError(
+            "Cannot apply Strawberry Relay patches: ListConnection.resolve_connection no "
+            f"longer calls strawberry.relay.types.{_EDGES_CHECK}. " + _RELAY_PATCH_OPT_OUT_HINT,
+        )
+    connection_parameters = tuple(inspect.signature(_original_relay_list_connection).parameters)
+    if connection_parameters != (
+        "cls",
+        "nodes",
+        "info",
+        "before",
+        "after",
+        "first",
+        "last",
+        "max_results",
+        "kwargs",
+    ):
+        raise RuntimeError(
+            "Cannot apply Strawberry Relay patches: upstream pagination signature changed. "
+            + _RELAY_PATCH_OPT_OUT_HINT,
+        )
+    try:
+        algorithm_source = textwrap.dedent(inspect.getsource(_original_relay_list_connection))
+    except (OSError, TypeError):
+        algorithm_source = None
+    fingerprint = (
+        None if algorithm_source is None else hashlib.sha256(algorithm_source.encode()).hexdigest()
+    )
+    if fingerprint != _UPSTREAM_RELAY_LIST_CONNECTION_SOURCE_SHA256:
+        raise RuntimeError(
+            "Cannot apply Strawberry Relay patches: ListConnection.resolve_connection no longer "
+            "matches the adapted upstream algorithm. " + _RELAY_PATCH_OPT_OUT_HINT,
+        )
+
+
+_mark_patch_replacement(
+    _patched_list_connection_resolve_connection,
+    _original_relay_list_connection,
+)
+
+
+def _relay_patch_is_installed() -> bool:
+    """Return whether ``ListConnection.resolve_connection`` is the adapted async-gated method."""
+    return (
+        truth.stored_function(
+            truth.class_dict(_relay_types.ListConnection).get(_RELAY_RESOLVER_NAME),
+        )
+        is _patched_list_connection_resolve_connection
+    )
 
 
 def _patch_is_installed() -> bool:
@@ -1028,6 +1380,7 @@ def _patch_is_installed() -> bool:
         and relay_types is not None
         and getattr(relay_types, _EDGES_CHECK, None)
         is _patched_should_resolve_list_connection_edges
+        and _relay_patch_is_installed()
     )
 
 
@@ -1037,9 +1390,11 @@ def apply() -> None:
     Installs :func:`_patched_parse_json` (the two-gap body hardening),
     :func:`_patched_parse_query_params` (the GET shield that keeps the scalar
     guard off upstream's query-param parses), the sync/async multipart
-    delegates that normalize malformed multipart structures, and
+    delegates that normalize malformed multipart structures,
     :func:`_patched_should_resolve_list_connection_edges` (the connection-page
-    check that also matches ``edges`` / ``pageInfo`` by Python name).
+    check, which matches ``edges`` / ``pageInfo`` by Python name alone), and
+    :func:`_patched_list_connection_resolve_connection` (the adapted method that
+    adds the async gate).
 
     Idempotent and self-healing: re-entrant calls are no-ops when every member
     is still installed, and re-install the complete patch if a third party
@@ -1056,13 +1411,16 @@ def apply() -> None:
 
     Before installation, validates the imported symbols, the delegated
     methods' ``(self, argument)`` signatures and the connection-page check's
-    call shape (see :func:`_validate_upstream_shape`). Dependency drift raises a
+    call shape (see :func:`_validate_upstream_shape`), then the adapted method's
+    parameters and source SHA256 (see :func:`_validate_relay_upstream_shape`).
+    Dependency drift raises a
     targeted ``RuntimeError`` instead of silently dropping the request
     hardening.
     """
     if not upstream_patches_enabled("strawberry"):
         return
     upstream = _validate_upstream_shape()
+    _validate_relay_upstream_shape()
     if _patch_is_installed():
         return
     upstream.base_view.parse_json = _patched_parse_json
@@ -1070,3 +1428,8 @@ def apply() -> None:
     upstream.sync_view.parse_multipart = _patched_sync_parse_multipart
     upstream.async_view.parse_multipart = _patched_async_parse_multipart
     setattr(upstream.relay_types, _EDGES_CHECK, _patched_should_resolve_list_connection_edges)
+    setattr(
+        _relay_types.ListConnection,
+        _RELAY_RESOLVER_NAME,
+        classmethod(_patched_list_connection_resolve_connection),
+    )

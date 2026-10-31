@@ -8,6 +8,7 @@ out of ``__all__`` so ``import *`` stays DRF-free (spec-039 Decision 12).
 import logging
 import os
 import textwrap
+from importlib.metadata import version
 
 import pytest
 
@@ -84,8 +85,8 @@ from tests._subprocess import run_in_fresh_process
 
 
 def test_version() -> None:
-    # The single-sourced package version literal.
-    assert __version__ == "0.0.15"
+    """The installed distribution metadata is derived from the package's one version literal."""
+    assert version("django-strawberry-framework") == __version__
 
 
 def test_logger_name_is_django_strawberry_framework() -> None:

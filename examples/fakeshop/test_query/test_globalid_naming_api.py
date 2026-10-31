@@ -26,6 +26,7 @@ Relay parent, whose shadowing closure emits the published name like every other
 
 import sys
 from collections.abc import Callable, Iterator, Mapping
+from functools import wraps
 
 import pytest
 import strawberry
@@ -67,11 +68,13 @@ from django_strawberry_framework import (
 )
 from django_strawberry_framework.filters import FilterSet
 from django_strawberry_framework.registry import registry
+from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.views import DjangoGraphQLView
 
 _CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 
+@wraps(DjangoGraphQLView.as_view())
 def _graphql_view(request: HttpRequest) -> HttpResponseBase:
     schema = _CURRENT["schema"]
     assert schema is not None
@@ -91,7 +94,17 @@ class _ApiPrefix(NameConverter):
 
 
 def _gid(type_name: str, pk: object) -> str:
+    """Encode deliberately unpublished names for the refusal probes."""
     return str(relay.GlobalID(type_name=type_name, node_id=str(pk)))
+
+
+def _published_id(type_name: str, pk: object) -> str:
+    """Mint against the real registered type and the executing schema's NameConverter."""
+    schema = _CURRENT["schema"]
+    assert schema is not None
+    origin = registry.definition_for_graphql_name(type_name).origin
+    assert origin is not None
+    return global_id_for(origin, pk, schema=schema)
 
 
 @pytest.fixture
@@ -178,6 +191,31 @@ def _first_item() -> models.Item:
     return models.Item.objects.select_related("category").earliest("pk")
 
 
+def _emitted_item_ids(item: models.Item, client: Client) -> tuple[str, str]:
+    """Read both ids from the real connection before measuring a later refetch request."""
+    item_id = _published_id("ItemType", item.pk)
+    category_id = _published_id("CategoryType", item.category_id)
+    emitted = _data(
+        "query($id: String!){ allItems(filter:{id:{exact:$id}}){ "
+        "edges{ node{ id category{ id } } } } }",
+        {"id": item_id},
+        client=client,
+    )
+    assert emitted == {
+        "allItems": {
+            "edges": [
+                {
+                    "node": {"id": item_id, "category": {"id": category_id}},
+                },
+            ],
+        },
+    }
+    return (
+        json_str(emitted, "allItems", "edges", 0, "node", "id"),
+        json_str(emitted, "allItems", "edges", 0, "node", "category", "id"),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Emission: the slot is the published name, i.e. the client's ``__typename``
 # ---------------------------------------------------------------------------
@@ -194,7 +232,7 @@ def test_connection_edge_and_nested_relation_ids_carry_the_published_name() -> N
     data = _data(
         "query($id: String!) { allItems(filter: { id: { exact: $id } }) { edges { node { "
         "__typename id category { __typename id } } } } }",
-        {"id": _gid("ApiItemType", item.pk)},
+        {"id": _published_id("ItemType", item.pk)},
         client=_staff(),
     )
 
@@ -204,10 +242,10 @@ def test_connection_edge_and_nested_relation_ids_carry_the_published_name() -> N
                 {
                     "node": {
                         "__typename": "ApiItemType",
-                        "id": _gid("ApiItemType", item.pk),
+                        "id": _published_id("ItemType", item.pk),
                         "category": {
                             "__typename": "ApiCategoryType",
-                            "id": _gid("ApiCategoryType", item.category_id),
+                            "id": _published_id("CategoryType", item.category_id),
                         },
                     },
                 },
@@ -229,20 +267,17 @@ def test_bare_node_refetches_an_emitted_item_id_in_one_item_query() -> None:
     create_users(1)
     item = _first_item()
     client = _staff()
+    item_id, _category_id = _emitted_item_ids(item, client)
 
     with CaptureQueriesContext(connection) as captured:
         data = _data(
             "query($id: ID!) { node(id: $id) { __typename id ... on ApiItemType { name } } }",
-            {"id": _gid("ApiItemType", item.pk)},
+            {"id": item_id},
             client=client,
         )
 
     assert data == {
-        "node": {
-            "__typename": "ApiItemType",
-            "id": _gid("ApiItemType", item.pk),
-            "name": item.name,
-        },
+        "node": {"__typename": "ApiItemType", "id": item_id, "name": item.name},
     }
     assert len(_table_queries(captured, "products_item")) == 1
 
@@ -255,12 +290,13 @@ def test_nodes_refetches_emitted_ids_of_two_types_in_input_order() -> None:
     create_users(1)
     item = _first_item()
     client = _staff()
+    item_id, category_id = _emitted_item_ids(item, client)
 
     with CaptureQueriesContext(connection) as captured:
         data = _data(
             "query($ids: [ID!]!) { nodes(ids: $ids) { __typename "
             "... on ApiItemType { name } ... on ApiCategoryType { name } } }",
-            {"ids": [_gid("ApiCategoryType", item.category_id), _gid("ApiItemType", item.pk)]},
+            {"ids": [category_id, item_id]},
             client=client,
         )
 
@@ -284,13 +320,13 @@ def test_typed_node_field_refetches_an_emitted_genre_id() -> None:
     with CaptureQueriesContext(connection) as captured:
         data = _data(
             "query($id: ID!) { genre(id: $id) { __typename id name } }",
-            {"id": _gid("ApiGenreType", genre.pk)},
+            {"id": _published_id("GenreType", genre.pk)},
         )
 
     assert data == {
         "genre": {
             "__typename": "ApiGenreType",
-            "id": _gid("ApiGenreType", genre.pk),
+            "id": _published_id("GenreType", genre.pk),
             "name": "Renamed",
         },
     }
@@ -307,7 +343,7 @@ def test_typed_node_field_names_published_types_in_the_mismatch_error() -> None:
 
     payload = _payload(
         "query($id: ID!) { genre(id: $id) { name } }",
-        {"id": _gid("ApiItemType", item.pk)},
+        {"id": _published_id("ItemType", item.pk)},
         client=_staff(),
     )
 
@@ -369,7 +405,7 @@ _ITEM_WRITES: dict[
         "mutation($d: ItemInput!) { createItem(data: $d) { errors { field messages } } }",
         "products.add_item",
         lambda _item, target: {
-            "d": {"name": "RenamedWidget", "categoryId": _gid("ApiCategoryType", target.pk)},
+            "d": {"name": "RenamedWidget", "categoryId": _published_id("CategoryType", target.pk)},
         },
     ),
     "model-update": (
@@ -379,8 +415,8 @@ _ITEM_WRITES: dict[
         ),
         "products.change_item",
         lambda item, target: {
-            "id": _gid("ApiItemType", item.pk),
-            "d": {"name": "RenamedWidget", "categoryId": _gid("ApiCategoryType", target.pk)},
+            "id": _published_id("ItemType", item.pk),
+            "d": {"name": "RenamedWidget", "categoryId": _published_id("CategoryType", target.pk)},
         },
     ),
     "form-create": (
@@ -390,7 +426,7 @@ _ITEM_WRITES: dict[
         ),
         "products.add_item",
         lambda _item, target: {
-            "d": {"name": "RenamedWidget", "categoryId": _gid("ApiCategoryType", target.pk)},
+            "d": {"name": "RenamedWidget", "categoryId": _published_id("CategoryType", target.pk)},
         },
     ),
     "form-update": (
@@ -400,8 +436,8 @@ _ITEM_WRITES: dict[
         ),
         "products.change_item",
         lambda item, target: {
-            "id": _gid("ApiItemType", item.pk),
-            "d": {"name": "RenamedWidget", "categoryId": _gid("ApiCategoryType", target.pk)},
+            "id": _published_id("ItemType", item.pk),
+            "d": {"name": "RenamedWidget", "categoryId": _published_id("CategoryType", target.pk)},
         },
     ),
     "serializer-create": (
@@ -411,7 +447,7 @@ _ITEM_WRITES: dict[
         ),
         "products.add_item",
         lambda _item, target: {
-            "d": {"name": "RenamedWidget", "categoryId": _gid("ApiCategoryType", target.pk)},
+            "d": {"name": "RenamedWidget", "categoryId": _published_id("CategoryType", target.pk)},
         },
     ),
     "serializer-update": (
@@ -421,8 +457,8 @@ _ITEM_WRITES: dict[
         ),
         "products.change_item",
         lambda item, target: {
-            "id": _gid("ApiItemType", item.pk),
-            "d": {"name": "RenamedWidget", "categoryId": _gid("ApiCategoryType", target.pk)},
+            "id": _published_id("ItemType", item.pk),
+            "d": {"name": "RenamedWidget", "categoryId": _published_id("CategoryType", target.pk)},
         },
     ),
 }
@@ -461,7 +497,7 @@ def test_delete_by_emitted_id_removes_the_named_item() -> None:
 
     data = _data(
         "mutation($id: ID!) { deleteItem(id: $id) { errors { field messages } } }",
-        {"id": _gid("ApiItemType", item.pk)},
+        {"id": _published_id("ItemType", item.pk)},
         client=_staff("products.delete_item"),
     )
 
@@ -488,7 +524,10 @@ def test_many_to_many_ids_by_emitted_genre_ids_attach_the_named_genres() -> None
                 "title": "RenamedBook",
                 "subtitle": "renamed",
                 "shelfId": shelf.pk,
-                "genres": [_gid("ApiGenreType", first.pk), _gid("ApiGenreType", second.pk)],
+                "genres": [
+                    _published_id("GenreType", first.pk),
+                    _published_id("GenreType", second.pk),
+                ],
             },
         },
     )
@@ -501,22 +540,30 @@ def test_many_to_many_ids_by_emitted_genre_ids_attach_the_named_genres() -> None
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.usefixtures("renaming_schema")
 def test_serializer_many_to_many_update_by_emitted_ids() -> None:
-    """``updateBookGenresViaSerializer`` locates the ``ApiBookType`` id and sets the named genres."""
+    """The renamed book id replaces its previous genre with exactly the supplied named genre."""
     seed_data(1)
     branch = library_models.Branch.objects.create(name="Central", city="Boston")
     shelf = library_models.Shelf.objects.create(code="A-1", topic="Fiction", branch=branch)
     book = library_models.Book.objects.create(title="Kindred", shelf=shelf)
+    previous = library_models.Genre.objects.create(name="Previous")
+    book.genres.set([previous])
     kept = library_models.Genre.objects.create(name="Kept")
     library_models.Genre.objects.create(name="Unnamed")
 
     data = _data(
         "mutation($id: ID!, $d: BookGenresSerializerPartialInput!) { "
         "updateBookGenresViaSerializer(id: $id, data: $d) { errors { field messages } } }",
-        {"id": _gid("ApiBookType", book.pk), "d": {"genres": [_gid("ApiGenreType", kept.pk)]}},
+        {
+            "id": _published_id("BookType", book.pk),
+            "d": {"genres": [_published_id("GenreType", kept.pk)]},
+        },
     )
 
     assert data == {"updateBookGenresViaSerializer": {"errors": []}}
     assert list(book.genres.values_list("name", flat=True)) == ["Kept"]
+    book.refresh_from_db()
+    assert book.title == "Kindred"
+    assert library_models.Genre.objects.get(pk=previous.pk).name == "Previous"
 
 
 @pytest.mark.django_db(transaction=True)
@@ -573,13 +620,13 @@ def test_globalid_filters_accept_emitted_ids(variable: str, filter_input: str) -
     other = models.Item.objects.exclude(category_id=item.category_id).earliest("pk")
     entry = models.Entry.objects.filter(item=item).earliest("pk")
     value, expected = {
-        "{ id: { exact: $a } }": (_gid("ApiItemType", item.pk), [item.name]),
+        "{ id: { exact: $a } }": (_published_id("ItemType", item.pk), [item.name]),
         "{ id: { in: $a } }": (
-            [_gid("ApiItemType", item.pk), _gid("ApiItemType", other.pk)],
+            [_published_id("ItemType", item.pk), _published_id("ItemType", other.pk)],
             sorted([item.name, other.name]),
         ),
         "{ category: { id: { exact: $a } } }": (
-            _gid("ApiCategoryType", item.category_id),
+            _published_id("CategoryType", item.category_id),
             sorted(
                 models.Item.objects.filter(category_id=item.category_id).values_list(
                     "name",
@@ -587,7 +634,7 @@ def test_globalid_filters_accept_emitted_ids(variable: str, filter_input: str) -
                 ),
             ),
         ),
-        "{ entriesId: { in: $a } }": ([_gid("ApiEntryType", entry.pk)], [item.name]),
+        "{ entriesId: { in: $a } }": ([_published_id("EntryType", entry.pk)], [item.name]),
     }[filter_input]
 
     data = _data(
@@ -613,14 +660,15 @@ def test_relation_key_exact_filter_accepts_an_emitted_property_id() -> None:
     data = _data(
         "query($p: String!) { allEntries(filter: { propertyId: { exact: $p } }) { "
         "edges { node { id } } } }",
-        {"p": _gid("ApiPropertyType", prop.pk)},
+        {"p": _published_id("PropertyType", prop.pk)},
         client=_staff(),
     )
 
     assert sorted(
         json_str(edge, "node", "id") for edge in json_list(data, "allEntries", "edges")
     ) == sorted(
-        _gid("ApiEntryType", entry.pk) for entry in models.Entry.objects.filter(property=prop)
+        _published_id("EntryType", entry.pk)
+        for entry in models.Entry.objects.filter(property=prop)
     )
 
 
@@ -706,7 +754,7 @@ def test_converted_name_equal_to_another_types_name_resolves_the_published_type(
 
     data = _data(
         "query($id: ID!) { node(id: $id) { __typename ... on ApiCategoryNode { name } } }",
-        {"id": _gid("ApiCategoryNode", category.pk)},
+        {"id": _published_id("CategoryNode", category.pk)},
     )
 
     assert data == {"node": {"__typename": "ApiCategoryNode", "name": category.name}}
@@ -721,7 +769,7 @@ def test_converted_name_collision_is_a_typed_mismatch_not_a_wrong_row() -> None:
 
     payload = _payload(
         "query($id: ID!) { item(id: $id) { name } }",
-        {"id": _gid("ApiCategoryNode", category.pk)},
+        {"id": _published_id("CategoryNode", category.pk)},
     )
 
     assert payload["data"] == {"item": None}
@@ -739,7 +787,7 @@ def test_typed_nodes_field_names_published_types_in_the_mismatch_error() -> None
 
     payload = _payload(
         "query($ids: [ID!]!) { items(ids: $ids) { name } }",
-        {"ids": [_gid("ApiCategoryNode", category.pk)]},
+        {"ids": [_published_id("CategoryNode", category.pk)]},
     )
 
     # ``items`` is a non-null list, so its field error nulls ``data`` itself.
@@ -844,19 +892,30 @@ def test_relation_filter_refuses_a_slot_this_schema_publishes_for_another_type()
     category = models.Item.objects.earliest("pk").category
     # Primary keys drift with whatever ran earlier in the process, so pin the collision:
     # a property whose pk equals a category that owns items.
-    prop, _ = models.Property.objects.get_or_create(
-        pk=category.pk,
-        defaults={"name": "collision", "category": category},
+    assert category.pk is not None
+    prop = models.Property.objects.filter(pk=category.pk).first()
+    if prop is None:
+        prop = models.Property.objects.earliest("pk")
+    assert prop.pk is not None
+    models.Property.objects.exclude(pk=prop.pk).delete()
+    models.Entry.objects.filter(property_id=prop.pk).delete()
+    models.Property.objects.filter(pk=prop.pk).update(
+        id=category.pk,
+        category=category,
+        is_private=False,
     )
+    prop = models.Property.objects.get(pk=category.pk)
     assert models.Item.objects.filter(category_id=prop.pk).exists()
+    emitted = _data("{ properties(first: 2) { edges { node { id } } } }")
+    property_id = json_str(emitted, "properties", "edges", 0, "node", "id")
 
     refetched = _data(
         "query($id: ID!) { node(id: $id) { __typename ... on CategoryNode { name } } }",
-        {"id": _gid("CategoryNode", prop.pk)},
+        {"id": property_id},
     )
     payload = _payload(
         "query($v: String!) { items(filter: { category: { exact: $v } }) { edges { node { name } } } }",
-        {"v": _gid("CategoryNode", prop.pk)},
+        {"v": property_id},
     )
 
     assert refetched == {"node": {"__typename": "CategoryNode", "name": prop.name}}
@@ -921,7 +980,7 @@ def test_shadowing_type_child_emits_its_published_name() -> None:
                 {
                     "node": {
                         "__typename": "ApiChildCategoryNode",
-                        "id": _gid("ApiChildCategoryNode", category.pk),
+                        "id": _published_id("ChildCategoryNode", category.pk),
                     },
                 },
             ],
@@ -931,7 +990,7 @@ def test_shadowing_type_child_emits_its_published_name() -> None:
                 {
                     "node": {
                         "__typename": "ApiParentCategoryNode",
-                        "id": _gid("products.category", category.pk),
+                        "id": _published_id("ParentCategoryNode", category.pk),
                     },
                 },
             ],

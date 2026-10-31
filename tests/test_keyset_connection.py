@@ -9,14 +9,13 @@ round-trips, resolver-contract refusals over HTTP, and the async slicer colour
 on ``/graphql-async/``). Pagination bound errors on the shipped keyset field
 live in ``examples/fakeshop/test_query/test_connection_pagination_api.py``.
 
-This module keeps claims no GraphQL request can express:
+The private contracts in this module include:
 
 - The generated connection class's ``_dst_keyset_state`` slot (identity cache
   and the offset-type ``None`` sentinel). The live sibling is
   ``test_root_keyset_first_page_orders_by_cursor_field``. A ``cursor_field``
-  type with no ``Meta.connection`` still resolves as keyset-mode here:
-  live ``IssueType`` always declares ``connection``, and a live module cannot
-  register a second ``DjangoType`` after finalize.
+  type with no ``Meta.connection`` still caches the declared vocabulary here;
+  the assertion is the private class slot, not a GraphQL payload.
 - ``declared_cursor_state_for_definition`` lookup, including a ``None``
   definition.
 - Defensive ``_WindowedConnectionRows`` arms the walker never plans: ``last``
@@ -31,10 +30,6 @@ This module keeps claims no GraphQL request can express:
   non-null local and required-FK paths, so those error arms are not reachable
   on the shipped schema. Related-path acceptance is live
   (``test_root_keyset_order_by_related_path_seeks_via_annotation``).
-- A ``ForeignObject`` ``orderBy:`` term paged by a seek over its carrier
-  columns, on the test-local ``LnkPairChild``: the fakeshop link
-  (``ShelfLabel.shelf``) has a relation carrier and a target type that hides
-  rows, so a keyset connection refuses its term.
 - Pure ``plans.py`` helpers ``_keyset_order_ref`` and ``_resolve_order_path_field``
   (including detached / virtual fields, and the ``LendingDesk.venue_ptr``
   parent link no keyset type orders through).
@@ -46,6 +41,11 @@ This module keeps claims no GraphQL request can express:
   (``test_nested_keyset_unselected_cursor_column_is_not_lazy_loaded_per_edge``)
   and on the async holder
   (``test_async_keyset_deferred_cursor_column_is_loaded``).
+
+Related-value visibility and ForeignObject carrier paging have HTTP owners in
+``examples/fakeshop/test_query/test_keyset_order_terms_api.py``. Exact derived
+CursorColumn names, private column identities and helper fallback return values
+remain package contracts.
 """
 
 from types import SimpleNamespace
@@ -55,17 +55,19 @@ import strawberry
 from apps.library.models import Book, Issue, LendingDesk, Patron, Periodical
 from apps.scalars.models import ScalarSpecimen
 from django.contrib.auth.models import AnonymousUser
-from django.db import connection
-from django.db.models import Count, F, Model, QuerySet
+from django.db.models import Count, F, Model
 from django.http import HttpRequest
-from django.test import RequestFactory
-from django.test.utils import CaptureQueriesContext
 from graphql import GraphQLError
 from strategy_schemas import make_django_type
 from strawberry.schema.config import StrawberryConfig
-from strawberry.types import ExecutionResult
 
-from django_strawberry_framework import DjangoConnectionField, DjangoType, finalize_django_types
+from django_strawberry_framework import (
+    DjangoConnectionField,
+    DjangoSchema,
+    DjangoType,
+    finalize_django_types,
+    strawberry_config,
+)
 from django_strawberry_framework.connection import (
     DjangoConnection,
     _connection_type_for,
@@ -99,10 +101,9 @@ from django_strawberry_framework.utils.connections import (
     ConnectionWindowBounds,
     UnwindowableConnection,
 )
+from django_strawberry_framework.utils.typing import graphql_fields, graphql_type_of
 from tests._definition import make_definition
-from tests._idioms import json_at, json_list, json_object, saved_pk
 from tests._info import make_info
-from tests.optimizer._link_models import LnkPairChild, link_fixture_tables
 
 ISSUE_ORDER = ("-number", "id")
 
@@ -131,6 +132,33 @@ def _issue_connection_of(node_type: type[DjangoType]) -> type[DjangoConnection[D
 def _issue_state(issue_type: type) -> CursorState | None:
     finalize_django_types()
     return _keyset_connection_context(_issue_connection_of(issue_type))
+
+
+def _issue_connection_info(
+    issue_type: type[DjangoType],
+    selections: str,
+) -> strawberry.Info[object, object]:
+    """Build private-wrapper Info from the actual published Issue connection metadata.
+
+    The planted window states cannot be produced by the public planner, but
+    observer selection still follows the native schema's field definitions.
+    """
+
+    @strawberry.type
+    class Query:
+        issues = DjangoConnectionField(issue_type)
+
+    schema = DjangoSchema(query=Query, config=strawberry_config(relay_max_results=100))
+    parent_type = schema._schema.query_type
+    assert parent_type is not None
+    field = schema.get_field_for_type("issues", parent_type.name)
+    assert field is not None
+    raw_info = make_info(field_name="issues", selections=selections)._raw_info._replace(
+        parent_type=parent_type,
+        return_type=graphql_type_of(graphql_fields(parent_type)["issues"]),
+        schema=schema._schema,
+    )
+    return schema.config.info_class(_raw_info=raw_info, _field=field)
 
 
 # =============================================================================
@@ -197,9 +225,9 @@ def test_keyset_connection_context_resolves_without_connection_opt_in() -> None:
 
     ``Meta.connection`` only opts into ``totalCount``. Keyset vocabulary is
     ``cursor_field``. The minted prefix on default-order shipped ``IssueType``
-    is ``test_root_keyset_first_page_orders_by_cursor_field``. A live module
-    cannot register a second ``DjangoType`` after finalize, so the
-    ``connection=None`` generation path stays here.
+    is ``test_root_keyset_first_page_orders_by_cursor_field``. This row reads
+    the generated class's private cursor-state slot independently of the
+    ``totalCount`` opt-in; an HTTP payload cannot expose that cached object.
     """
     issue_type = _make_issue_type("BareKeysetNode", connection=None)
     finalize_django_types()
@@ -251,11 +279,7 @@ def test_backward_args_over_a_window_wrapper_fall_back_to_the_keyset_slicer() ->
     )
     # ``edges`` selected so the slicer's edge-resolution gate
     # (``should_resolve_list_connection_edges``) actually slices.
-    info = make_info(
-        field_name="issues",
-        selections="{ edges }",
-        config=StrawberryConfig(relay_max_results=100),
-    )
+    info = _issue_connection_info(issue_type, "{ edges { node { title } } }")
     connection_payload = connection_type.resolve_connection(wrapper, info=info, last=2)
     # ``last`` over a window wrapper cannot be served by the (forward-only)
     # keyset window - the wrapper's fallback queryset routes through the
@@ -291,11 +315,7 @@ def test_keyset_window_without_a_published_vocabulary_is_served_per_parent(*, se
     decoy = Issue(id=99, number=99, title="decoy")
     vars(decoy).update({WINDOW_ROW_NUMBER: 1, WINDOW_TOTAL_COUNT: 1})
     wrapper = _WindowedConnectionRows(rows=[decoy], fallback=Issue.objects.all)
-    info = make_info(
-        field_name="issues",
-        selections="{ edges }",
-        config=StrawberryConfig(relay_max_results=100),
-    )
+    info = _issue_connection_info(issue_type, "{ edges { node { title } } }")
     after = (
         encode_keyset_cursor(state.columns, newest, fingerprint=state.fingerprint)
         if seek
@@ -322,7 +342,7 @@ def test_counted_keyset_window_without_seek_count_falls_back() -> None:
     row = Issue(id=1, number=1)
     # The window columns arrive as annotations: attributes Django sets on each row it builds.
     vars(row).update({WINDOW_ROW_NUMBER: 1, WINDOW_TOTAL_COUNT: 3})
-    info = make_info(field_name="connectionField", selections="{ pageInfo { hasNextPage } }")
+    info = _issue_connection_info(issue_type, "{ pageInfo { hasNextPage } }")
     window = _WindowedConnectionRows(rows=[row], fallback=Issue.objects.all)
     assert (
         _resolve_from_window(
@@ -428,33 +448,13 @@ def test_keyset_order_state_rejects_optional_or_multivalued_related_paths(
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("spelling", ["flat", "nested"])
-@pytest.mark.parametrize("hides", [True, False], ids=["hiding-target", "identity-target"])
-def test_keyset_order_state_rejects_a_related_value_read_through_a_hiding_type(
-    *,
-    hides: bool,
-    spelling: str,
-) -> None:
-    """A related ``orderBy:`` value through a type that hides rows is nullable, so refused.
-
-    ``OrderSet`` reads ``periodical__name`` as ``NULL`` for a periodical the
-    periodical type hides; a value cursor cannot anchor that. Through a type
-    keeping the identity hook the path stays the plain non-null column.
-    """
-    attrs: dict[str, object] = {
-        "Meta": type("Meta", (), {"model": Periodical, "fields": "__all__"}),
-    }
-    if hides:
-
-        def _hide_secret(
-            _cls: type[DjangoType],
-            queryset: QuerySet[Periodical],
-            _info: object,
-            **_kwargs: object,
-        ) -> QuerySet[Periodical]:
-            return queryset.exclude(name="secret")
-
-        attrs["get_queryset"] = classmethod(_hide_secret)
-    type("KeysetPeriodicalNode", (DjangoType,), attrs)
+def test_related_keyset_order_state_names_the_identity_paths(spelling: str) -> None:
+    """Identity-hook related terms preserve their exact derived CursorColumn names."""
+    type(
+        "KeysetPeriodicalNode",
+        (DjangoType,),
+        {"Meta": type("Meta", (), {"model": Periodical, "fields": "__all__"})},
+    )
     state = _issue_order_state()
 
     class PeriodicalNameOrder(OrderSet):
@@ -474,7 +474,6 @@ def test_keyset_order_state_rejects_a_related_value_read_through_a_hiding_type(
         if spelling == "flat"
         else {"periodical": {"name": Ordering.ASC}}
     )
-
     request = HttpRequest()
     request.user = AnonymousUser()
     ordered = IssuePeriodicalOrder.apply_sync(
@@ -482,91 +481,32 @@ def test_keyset_order_state_rejects_a_related_value_read_through_a_hiding_type(
         Issue.objects.all(),
         SimpleNamespace(context=SimpleNamespace(request=request)),
     )
-    if hides:
-        with pytest.raises(GraphQLError, match="'periodical__name' is nullable"):
-            _keyset_order_state(state, ordered)
-    else:
-        columns, _fingerprint, _queryset = _keyset_order_state(state, ordered)
-        assert [column.name for column in columns] == ["periodical__name", "number"]
+
+    columns, _fingerprint, _queryset = _keyset_order_state(state, ordered)
+
+    assert [column.name for column in columns] == ["periodical__name", "number"]
 
 
-@pytest.mark.django_db(transaction=True)
-def test_keyset_pages_a_foreign_object_term_by_seeking_over_its_carriers() -> None:
-    """A ``ForeignObject`` ``orderBy:`` term pages by value cursors over each carrier column.
-
-    ``LnkPairChild.parent`` is held in ``p_tenant`` and ``p_code``, so the term
-    is two non-null columns and the cursor seeks over both, then the
-    ``cursor_field`` pk tiebreaker. The live ``ShelfLabel.shelf`` cannot carry
-    this row: one of its carriers is the ``branch`` key, a relation no keyset
-    order accepts, and its target ``ShelfType`` hides rows, which makes the
-    term nullable. ``z9`` names no parent and sorts first by its carriers,
-    although it is inserted last. A cursor minted under the ``parent`` order is
-    refused under another order.
-    """
-
-    class KeysetPairOrder(OrderSet):
-        class Meta:
-            model = LnkPairChild
-            fields = ["parent", "name"]
-
-    pair_type = make_django_type(
-        "KeysetPairNode",
-        LnkPairChild,
-        ("id", "name"),
-        meta_extra={"cursor_field": ("id",), "orderset_class": KeysetPairOrder},
-    )
-    finalize_django_types()
-
-    @strawberry.type
-    class Query:
-        children = DjangoConnectionField(pair_type)
-
-    schema = strawberry.Schema(query=Query)
-
-    def page(order: str, after: str | None = None) -> tuple[ExecutionResult, list[str]]:
-        cursor = "" if after is None else f', after: "{after}"'
-        with CaptureQueriesContext(connection) as captured:
-            result = schema.execute_sync(
-                f"{{ children(first: 2{cursor}, orderBy: [{{{order}: ASC}}]) "
-                "{ edges { node { name } } pageInfo { hasNextPage endCursor } } }",
-                context_value={"request": RequestFactory().get("/")},
-            )
-        return result, [entry["sql"] for entry in captured.captured_queries]
-
-    with link_fixture_tables(connection):
-        LnkPairChild.objects.create(p_tenant=0, p_code="Z", name="z9")
-        first, _sql = page("parent")
-        assert first.errors is None, first.errors
-        assert first.data is not None
-        first_page = json_object(first.data, "children")
-        assert [json_at(edge, "node", "name") for edge in json_list(first_page, "edges")] == [
-            "z9",
-            "a1",
-        ]
-        end_cursor = json_at(first_page, "pageInfo", "endCursor")
-        assert isinstance(end_cursor, str)
-        second, second_sql = page("parent", end_cursor)
-        replayed, _sql = page("name", end_cursor)
-
-    assert second.errors is None, second.errors
-    assert second.data is not None
-    assert [
-        json_at(edge, "node", "name") for edge in json_list(second.data, "children", "edges")
-    ] == ["a2", "a3"]
-    assert second.data["children"]["pageInfo"]["hasNextPage"] is True
-    (seek,) = [sql for sql in second_sql if "ORDER BY" in sql]
-    where = seek.split(" WHERE ", 1)[1].split(" ORDER BY ", 1)[0]
-    assert '"p_tenant"' in where, seek
-    assert '"p_code"' in where, seek
-    assert replayed.errors is not None
-    assert "invalid cursor" in str(replayed.errors[0]), replayed.errors
-
-
-def test_keyset_order_ref_parses_strings_and_rejects_nulls() -> None:
-    assert _keyset_order_ref("-number") == ("-number", "number", True)
-    assert _keyset_order_ref(F("number").asc()) == ("number", "number", False)
-    assert _keyset_order_ref(F("number").desc(nulls_first=True)) is None
-    assert _keyset_order_ref(SimpleNamespace(expression=None, descending=False)) is None
+@pytest.mark.parametrize(
+    ("entry", "expected"),
+    [
+        ("-number", ("-number", "number", True)),
+        (F("number").asc(), ("number", "number", False)),
+        (F("number").desc(nulls_first=True), None),
+        (SimpleNamespace(expression=None, descending=False), None),
+    ],
+    ids=[
+        "descending-name",
+        "ascending-expression",
+        "explicit-nulls",
+        "no-expression",
+    ],
+)
+def test_keyset_order_ref_parses_strings_and_rejects_nulls(
+    entry: object,
+    expected: tuple[str, str, bool] | None,
+) -> None:
+    assert _keyset_order_ref(entry) == expected
 
 
 def _resolved_name(model: type[Model], path: str) -> str:
@@ -576,45 +516,116 @@ def _resolved_name(model: type[Model], path: str) -> str:
     return field.name
 
 
-def test_resolve_order_path_field_arms(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Local column; pk alias; related path terminal.
-    assert _resolved_name(Issue, "number") == "number"
-    assert _resolved_name(Issue, "pk") == "id"
-    assert _resolved_name(Issue, "periodical__name") == "name"
-    # Unknown segment; relation terminal; a path THROUGH a non-relation;
-    # optional reverse-one and multi-valued reverse paths.
-    assert _resolve_order_path_field(Issue, "nope") is None
-    assert _resolve_order_path_field(Issue, "periodical") is None
-    assert _resolve_order_path_field(Issue, "title__x") is None
-    assert _resolve_order_path_field(Patron, "card__barcode") is None
-    assert _resolve_order_path_field(Patron, "loans__note") is None
+@pytest.mark.parametrize(
+    (
+        "model",
+        "path",
+        "expected_name",
+        "shape",
+    ),
+    [
+        (
+            Issue,
+            "number",
+            "number",
+            "real",
+        ),
+        (
+            Issue,
+            "pk",
+            "id",
+            "real",
+        ),
+        (
+            Issue,
+            "periodical__name",
+            "name",
+            "real",
+        ),
+        (
+            Issue,
+            "nope",
+            None,
+            "real",
+        ),
+        (
+            Issue,
+            "periodical",
+            None,
+            "real",
+        ),
+        (
+            Issue,
+            "title__x",
+            None,
+            "real",
+        ),
+        (
+            Patron,
+            "card__barcode",
+            None,
+            "real",
+        ),
+        (
+            Patron,
+            "loans__note",
+            None,
+            "real",
+        ),
+        (
+            Issue,
+            "relation__value",
+            None,
+            "detached",
+        ),
+        (
+            Issue,
+            "virtual",
+            None,
+            "virtual",
+        ),
+    ],
+    ids=[
+        "local-column",
+        "pk-alias",
+        "required-related-column",
+        "missing-column",
+        "relation-terminal",
+        "through-scalar",
+        "optional-reverse-one",
+        "reverse-many",
+        "detached-relation",
+        "virtual-column",
+    ],
+)
+def test_resolve_order_path_field_arms(
+    monkeypatch: pytest.MonkeyPatch,
+    model: type[Model],
+    path: str,
+    expected_name: str | None,
+    shape: str,
+) -> None:
+    if shape != "real":
+        field = SimpleNamespace(
+            is_relation=shape == "detached",
+            auto_created=False,
+            many_to_many=False,
+            one_to_many=False,
+            null=False,
+            concrete=shape != "virtual",
+            related_model=None,
+        )
 
-    detached_relation = SimpleNamespace(
-        is_relation=True,
-        auto_created=False,
-        many_to_many=False,
-        one_to_many=False,
-        null=False,
-        related_model=None,
-    )
+        def _field(_name: str) -> object:
+            return field
 
-    def _detached_relation(_name: str) -> object:
-        return detached_relation
-
-    monkeypatch.setattr(Issue._meta, "get_field", _detached_relation)
-    assert _resolve_order_path_field(Issue, "relation__value") is None
-
-    virtual_field = SimpleNamespace(
-        is_relation=False,
-        concrete=False,
-        related_model=None,
-    )
-
-    def _virtual_field(_name: str) -> object:
-        return virtual_field
-
-    monkeypatch.setattr(Issue._meta, "get_field", _virtual_field)
-    assert _resolve_order_path_field(Issue, "virtual") is None
+        monkeypatch.setattr(model._meta, "get_field", _field)
+    resolved = _resolve_order_path_field(model, path)
+    if expected_name is None:
+        assert resolved is None
+    else:
+        assert resolved is not None
+        assert resolved.name == expected_name
 
 
 def test_resolve_order_path_field_accepts_mti_parent_link() -> None:
@@ -630,91 +641,69 @@ def test_resolve_order_path_field_accepts_mti_parent_link() -> None:
 # =============================================================================
 
 
-@pytest.mark.django_db
-def test_keyset_window_slice_from_arguments_arms() -> None:
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [
+        ({"first": 2}, "plain-window"),
+        ({"first": 2, "after": "minted"}, "seek-window"),
+        ({"first": -1}, "invalid"),
+        ({"before": "garbage", "last": 2}, "invalid"),
+        ({"after": "garbage", "last": 2}, "invalid"),
+        ({"first": 2, "after": "garbage"}, "invalid"),
+        ({"last": 2}, "fallback"),
+    ],
+    ids=[
+        "forward",
+        "after",
+        "negative-first",
+        "bad-before-backward",
+        "bad-after-backward",
+        "bad-after-forward",
+        "valid-backward-fallback",
+    ],
+)
+def test_keyset_window_slice_from_arguments_arms(
+    arguments: dict[str, object],
+    expected: str,
+) -> None:
+    """The private adapter distinguishes a seek, invalid arguments and the fallback signal."""
     issue_type = _make_issue_type("KeysetWalkerSliceNode")
     finalize_django_types()
     state = declared_cursor_state_for_definition(issue_type.__django_strawberry_definition__)
     assert state is not None
     columns, fingerprint = state.columns, state.fingerprint
     info = make_info(config=StrawberryConfig(relay_max_results=100))._raw_info
-
-    # No cursor: a plain forward window, no seek.
+    resolved_arguments = dict(arguments)
+    if arguments.get("after") == "minted":
+        # Encoding reads only the scalar carrier values; this probe needs no saved row.
+        issue = Issue(pk=17, periodical_id=1, number=1, title="one")
+        resolved_arguments["after"] = encode_keyset_cursor(columns, issue, fingerprint=fingerprint)
+    if expected == "fallback":
+        with pytest.raises(UnwindowableConnection):
+            _keyset_window_slice_from_arguments(
+                resolved_arguments,
+                info,
+                columns=columns,
+                fingerprint=fingerprint,
+            )
+        return
     sliced = _keyset_window_slice_from_arguments(
-        {"first": 2},
+        resolved_arguments,
         info,
         columns=columns,
         fingerprint=fingerprint,
     )
+    if expected == "invalid":
+        assert sliced is None
+        return
     assert sliced is not None
     window, seek = sliced
     assert (window.offset, window.limit, window.reverse) == (0, 2, False)
-    assert seek is None
-
-    # A valid minted cursor decodes into the seek.
-    periodical = Periodical.objects.create(name="P")
-    issue = Issue.objects.create(periodical=periodical, number=1, title="one")
-
-    cursor = encode_keyset_cursor(columns, issue, fingerprint=fingerprint)
-    sliced = _keyset_window_slice_from_arguments(
-        {"first": 2, "after": cursor},
-        info,
-        columns=columns,
-        fingerprint=fingerprint,
-    )
-    assert sliced is not None
-    window, seek = sliced
-    assert (window.offset, window.limit, window.reverse) == (0, 2, False)
-    assert seek is not None
-    assert seek.cursor.values == (1, saved_pk(issue))
-
-    # Malformed pagination and malformed cursors both map to ``None``,
-    # including backward shapes that would otherwise be unwindowable.
-    assert (
-        _keyset_window_slice_from_arguments(
-            {"first": -1},
-            info,
-            columns=columns,
-            fingerprint=fingerprint,
-        )
-        is None
-    )
-    assert (
-        _keyset_window_slice_from_arguments(
-            {"before": "garbage", "last": 2},
-            info,
-            columns=columns,
-            fingerprint=fingerprint,
-        )
-        is None
-    )
-    assert (
-        _keyset_window_slice_from_arguments(
-            {"after": "garbage", "last": 2},
-            info,
-            columns=columns,
-            fingerprint=fingerprint,
-        )
-        is None
-    )
-    assert (
-        _keyset_window_slice_from_arguments(
-            {"first": 2, "after": "garbage"},
-            info,
-            columns=columns,
-            fingerprint=fingerprint,
-        )
-        is None
-    )
-
-    # Backward shapes propagate the fallback signal.
-    with pytest.raises(UnwindowableConnection):
-        _keyset_window_slice_from_arguments(
-            {"last": 2},
-            info,
-            columns=columns,
-            fingerprint=fingerprint,
-        )
+    if expected == "plain-window":
+        assert seek is None
+    else:
+        assert seek is not None
+        assert seek.cursor.values == (1, 17)
 
 
 @pytest.mark.django_db

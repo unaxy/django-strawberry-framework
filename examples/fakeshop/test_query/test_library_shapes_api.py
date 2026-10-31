@@ -94,6 +94,7 @@ One shape per planner rule, each read off the wire and off the SQL the request e
 import enum
 import re
 from collections.abc import Callable
+from functools import wraps
 
 import pytest
 import strawberry
@@ -1280,6 +1281,7 @@ _ERROR_POLICY_PASS_THROUGH = {"DEBUG": True, "MIDDLEWARE": middleware_without_de
 _MOUNTED: dict[str, strawberry.Schema | None] = {"schema": None}
 
 
+@wraps(DjangoGraphQLView.as_view())
 def _mounted_view(request: HttpRequest) -> HttpResponseBase:
     schema = _MOUNTED["schema"]
     assert schema is not None
@@ -1359,12 +1361,12 @@ def _hold(
             return parent_model._default_manager.order_by("name")
 
     optimizer = DjangoOptimizerExtension()
-    optimized = strawberry.Schema(
+    optimized = DjangoSchema(
         query=Query,
         config=strawberry_config(),
         extensions=[lambda: optimizer],
     )
-    return optimized, strawberry.Schema(query=Query, config=strawberry_config())
+    return optimized, DjangoSchema(query=Query, config=strawberry_config())
 
 
 def _seed_shelved_genres() -> None:

@@ -60,17 +60,18 @@ Critical contract pins (do not violate without an explicit spec revision):
 # ``os`` owns the import-time environment gate below.
 
 import os
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
+from functools import wraps
 from typing import TypeGuard
 
 import pytest
-import strawberry.relay as relay_module
 from apps.library import filters as library_filters
 from apps.library import schema as library_schema
 from apps.library.orders import BranchOrder
 from apps.library.orders_genre import GenreOrder
 from apps.products import models as product_models
-from apps.products.services import create_users
+from apps.products import schema as products_schema
+from apps.products.services import create_users, seed_data
 from config import schema as config_schema
 from django.contrib.auth.models import Permission, User
 from django.contrib.contenttypes.models import ContentType
@@ -108,12 +109,9 @@ from graphql_client import (
     read_attr,
     saved_pk,
 )
-from graphql_client import (
-    assert_graphql_success as _graphql_data,
-)
+from graphql_client import assert_graphql_success as _graphql_data
 from strategy_schemas import make_django_type
 from strawberry import relay
-from strawberry.django.views import GraphQLView
 from strawberry.types import Info
 
 from django_strawberry_framework import (
@@ -137,6 +135,7 @@ from django_strawberry_framework.utils._queryset_private import (
     set_queryset_db,
     set_queryset_hints,
 )
+from django_strawberry_framework.views import DjangoGraphQLView
 
 _UPDATE_BOOK_TITLE_VALIDATOR_MUTATION = """
 mutation($id: ID!, $d: AliasValidatedBookSerializerPartialInput!) {
@@ -159,22 +158,78 @@ mutation($id: ID!, $d: AliasValidatedBookSerializerPartialInput!) {
 _current: dict[str, object | None] = {"schema": None}
 
 
+@wraps(DjangoGraphQLView.as_view())
 def _graphql_view(request: HttpRequest) -> HttpResponseBase:
     """Closure-bound view that reads ``_current['schema']`` per request."""
     schema = _current["schema"]
     assert schema is not None, "_build_test_schema fixture must run before any /graphql/ request"
-    return GraphQLView.as_view(schema=schema)(request)
+    return DjangoGraphQLView.as_view(schema=schema)(request)
 
 
 urlpatterns = [path("graphql/", _graphql_view)]
 
 
+def _capture_payload(
+    document: str,
+    *,
+    client: Client | None = None,
+    variables: Mapping[str, object] | None = None,
+) -> tuple[JSONObject, dict[str, list[str]]]:
+    """Capture both physical aliases around one native HTTP request only."""
+    with (
+        CaptureQueriesContext(connections["default"]) as on_default,
+        CaptureQueriesContext(connections["shard_b"]) as on_shard_b,
+    ):
+        payload = graphql_payload(document, client=client, variables=variables)
+    return payload, {
+        alias: [entry["sql"] for entry in captured.captured_queries]
+        for alias, captured in (("default", on_default), ("shard_b", on_shard_b))
+    }
+
+
+def _from_table(statements: list[str], table: str) -> list[str]:
+    """Count a SELECT's outer FROM, not mentions in JOINs or membership subqueries."""
+    return [
+        sql
+        for sql in statements
+        if sql.lstrip().upper().startswith("SELECT ")
+        and " FROM " in sql
+        and sql.split(" FROM ", 1)[1].startswith(f'"{table}"')
+    ]
+
+
+def _touching_tables(statements: list[str], *tables: str) -> list[str]:
+    return [sql for sql in statements if any(f'"{table}"' in sql for table in tables)]
+
+
+def _assert_read_alias(
+    statements: dict[str, list[str]],
+    alias: str,
+    counts: Mapping[str, int],
+) -> None:
+    """Pin each outer table read and forbid these tables on the other connection."""
+    for table, count in counts.items():
+        assert len(_from_table(statements[alias], table)) == count, statements
+    assert len(_touching_tables(statements[alias], *counts)) == sum(counts.values()), statements
+    for other_alias, sql in statements.items():
+        if other_alias != alias:
+            assert _touching_tables(sql, *counts) == [], statements
+
+
+def _assert_one_refusal(payload: JSONObject, *, message: str, field: str) -> None:
+    assert payload["data"] is None, payload
+    assert len(json_list(payload, "errors")) == 1, payload
+    assert json_str(payload, "errors", 0, "message") == message
+    assert json_at(payload, "errors", 0, "path") == [field]
+
+
 @pytest.fixture
-def _build_list_field_routing_mismatch_schema(
+def list_routing_override(
     _reload_project_schema_for_acceptance_tests: None,
     monkeypatch: pytest.MonkeyPatch,
-) -> Iterator[None]:
+) -> Iterator[dict[str, bool]]:
     """Build a schema with Branch list field whose OrderSet maliciously routes shard_b to default."""
+    routing = {"reject": False}
 
     def _malicious_apply_sync(
         _cls: type[BranchOrder],
@@ -182,6 +237,8 @@ def _build_list_field_routing_mismatch_schema(
         _queryset: QuerySet[models.Branch],
         _info: object,
     ) -> QuerySet[models.Branch]:
+        if not routing["reject"]:
+            return _queryset.order_by("name")
         # Receives shard_b queryset, maliciously returns default queryset
         return models.Branch.objects.using("default").order_by("name")
 
@@ -201,50 +258,50 @@ def _build_list_field_routing_mismatch_schema(
         query=_RoutingQuery,
         config=strawberry_config(),
     )
-    yield
+    yield routing
     _current["schema"] = None
 
 
-@pytest.mark.usefixtures("_build_list_field_routing_mismatch_schema")
 @pytest.mark.django_db(databases=["default", "shard_b"])
-def test_post_orderset_routing_mismatch_rejected_on_sharded_db() -> None:
-    """Post-OrderSet validation rejects database routing intent mismatch on sharded DB."""
+def test_post_orderset_routing_mismatch_rejected_on_sharded_db(
+    list_routing_override: dict[str, bool],
+) -> None:
+    """Preserved routing executes; changing only the routing is refused before either alias reads."""
     models.Branch.objects.using("shard_b").create(name="Branch-ShardB", city="Boston")
     models.Branch.objects.using("default").create(name="Branch-Default", city="Boston")
-
-    query = """
-    query {
-      branchesShardB(orderBy: [{ city: ASC }]) {
-        name
-      }
-    }
-    """
-    client = Client()
+    query = "{ branchesShardB(orderBy: [{ city: ASC }]) { name } }"
     with override_settings(
         ROOT_URLCONF=__name__,
         DEBUG=True,
         MIDDLEWARE=middleware_without_debug_toolbar(),
     ):
-        clear_url_caches()
-        try:
-            payload = graphql_payload(query, client=client)
-        finally:
-            clear_url_caches()
+        control, control_sql = _capture_payload(query)
+        list_routing_override["reject"] = True
+        rejected, rejected_sql = _capture_payload(query)
 
-    assert payload["data"] is None
-    assert "errors" in payload
-    err_msg = json_str(payload, "errors", 0, "message")
-    assert "apply_sync changed database routing intent" in err_msg
-    assert "expected db='shard_b'" in err_msg
-    assert "got db='default'" in err_msg
+    assert control == {"data": {"branchesShardB": [{"name": "Branch-ShardB"}]}}
+    _assert_read_alias(control_sql, "shard_b", {"library_branch": 1})
+    _assert_one_refusal(
+        rejected,
+        message=(
+            "BranchOrder.apply_sync changed database routing intent; "
+            "expected db='shard_b', hints={}, "
+            "got db='default', hints={}."
+        ),
+        field="branchesShardB",
+    )
+    assert {
+        alias: _touching_tables(sql, "library_branch") for alias, sql in rejected_sql.items()
+    } == {"default": [], "shard_b": []}
 
 
 @pytest.fixture
-def _build_connection_routing_mismatch_schema(
+def connection_routing_override(
     _reload_project_schema_for_acceptance_tests: None,
     monkeypatch: pytest.MonkeyPatch,
-) -> Iterator[None]:
+) -> Iterator[dict[str, bool]]:
     """Build a schema with a Genre CONNECTION whose OrderSet re-routes shard_b to default."""
+    routing = {"reject": False}
 
     def _malicious_apply_sync(
         _cls: type[GenreOrder],
@@ -252,6 +309,8 @@ def _build_connection_routing_mismatch_schema(
         _queryset: QuerySet[models.Genre],
         _info: object,
     ) -> QuerySet[models.Genre]:
+        if not routing["reject"]:
+            return _queryset.order_by("name")
         # Receives the shard_b queryset, maliciously returns a default one.
         return models.Genre.objects.using("default").order_by("name")
 
@@ -271,55 +330,50 @@ def _build_connection_routing_mismatch_schema(
         query=_ConnectionRoutingQuery,
         config=strawberry_config(),
     )
-    yield
+    yield routing
     _current["schema"] = None
 
 
-@pytest.mark.usefixtures("_build_connection_routing_mismatch_schema")
 @pytest.mark.django_db(databases=["default", "shard_b"])
-def test_post_orderset_routing_mismatch_rejected_on_connection_field() -> None:
-    """The connection field runs the same post-OrderSet routing seal the list field runs.
-
-    Without it the Relay window would be taken on the ``default`` rows the
-    override substituted, serving another shard's data under a ``shard_b``
-    field.
-    """
+def test_post_orderset_routing_mismatch_rejected_on_connection_field(
+    connection_routing_override: dict[str, bool],
+) -> None:
+    """Preserved routing executes; changing only the routing is refused before either alias reads."""
     models.Genre.objects.using("shard_b").create(name="Genre-ShardB")
     models.Genre.objects.using("default").create(name="Genre-Default")
-
-    query = """
-    query {
-      genresShardB(orderBy: [{ name: ASC }]) {
-        edges { node { name } }
-      }
-    }
-    """
-    client = Client()
+    query = "{ genresShardB(orderBy: [{ name: ASC }]) { edges { node { name } } } }"
     with override_settings(
         ROOT_URLCONF=__name__,
         DEBUG=True,
         MIDDLEWARE=middleware_without_debug_toolbar(),
     ):
-        clear_url_caches()
-        try:
-            payload = graphql_payload(query, client=client)
-        finally:
-            clear_url_caches()
+        control, control_sql = _capture_payload(query)
+        connection_routing_override["reject"] = True
+        rejected, rejected_sql = _capture_payload(query)
 
-    assert payload["data"] is None
-    assert "errors" in payload
-    err_msg = json_str(payload, "errors", 0, "message")
-    assert "apply_sync changed database routing intent" in err_msg
-    assert "expected db='shard_b'" in err_msg
-    assert "got db='default'" in err_msg
+    assert control == {"data": {"genresShardB": {"edges": [{"node": {"name": "Genre-ShardB"}}]}}}
+    _assert_read_alias(control_sql, "shard_b", {"library_genre": 1})
+    _assert_one_refusal(
+        rejected,
+        message=(
+            "GenreOrder.apply_sync changed database routing intent; "
+            "expected db='shard_b', hints={}, "
+            "got db='default', hints={}."
+        ),
+        field="genresShardB",
+    )
+    assert {
+        alias: _touching_tables(sql, "library_genre") for alias, sql in rejected_sql.items()
+    } == {"default": [], "shard_b": []}
 
 
 @pytest.fixture
-def _build_list_field_hints_mismatch_schema(
+def hints_routing_override(
     _reload_project_schema_for_acceptance_tests: None,
     monkeypatch: pytest.MonkeyPatch,
-) -> Iterator[None]:
+) -> Iterator[dict[str, bool]]:
     """Build a schema with Branch list field whose OrderSet changes routing hints with db=None."""
+    routing = {"reject": False}
 
     def _malicious_hints_apply_sync(
         _cls: type[BranchOrder],
@@ -331,7 +385,8 @@ def _build_list_field_hints_mismatch_schema(
         # carrying hints={'tenant': 2}. Both sides have ``_db is None``, so the hints
         # are the only thing that could route them apart.
         ordered = queryset.order_by("name")
-        set_queryset_hints(ordered, {"tenant": 2})
+        if routing["reject"]:
+            set_queryset_hints(ordered, {"tenant": 2})
         return ordered
 
     monkeypatch.setattr(BranchOrder, "apply_sync", classmethod(_malicious_hints_apply_sync))
@@ -352,41 +407,41 @@ def _build_list_field_hints_mismatch_schema(
         query=_RoutingHintsQuery,
         config=strawberry_config(),
     )
-    yield
+    yield routing
     _current["schema"] = None
 
 
-@pytest.mark.usefixtures("_build_list_field_hints_mismatch_schema")
 @pytest.mark.django_db(databases=["default", "shard_b"])
-def test_post_orderset_hints_routing_mismatch_rejected_on_sharded_db() -> None:
-    """Post-OrderSet validation rejects routing hints mismatch when _db is None on both sides."""
+def test_post_orderset_hints_routing_mismatch_rejected_on_sharded_db(
+    hints_routing_override: dict[str, bool],
+) -> None:
+    """Preserved routing executes; changing only the routing is refused before either alias reads."""
+    models.Branch.objects.using("shard_b").create(name="Branch-ShardB", city="Boston")
     models.Branch.objects.using("default").create(name="Branch-Default", city="Boston")
-
-    query = """
-    query {
-      branchesHints(orderBy: [{ city: ASC }]) {
-        name
-      }
-    }
-    """
-    client = Client()
+    query = "{ branchesHints(orderBy: [{ city: ASC }]) { name } }"
     with override_settings(
         ROOT_URLCONF=__name__,
         DEBUG=True,
         MIDDLEWARE=middleware_without_debug_toolbar(),
     ):
-        clear_url_caches()
-        try:
-            payload = graphql_payload(query, client=client)
-        finally:
-            clear_url_caches()
+        control, control_sql = _capture_payload(query)
+        hints_routing_override["reject"] = True
+        rejected, rejected_sql = _capture_payload(query)
 
-    assert payload["data"] is None
-    assert "errors" in payload
-    err_msg = json_str(payload, "errors", 0, "message")
-    assert "apply_sync changed database routing intent" in err_msg
-    assert "expected db=None, hints={'tenant': 1}" in err_msg
-    assert "got db=None, hints={'tenant': 2}" in err_msg
+    assert control == {"data": {"branchesHints": [{"name": "Branch-Default"}]}}
+    _assert_read_alias(control_sql, "default", {"library_branch": 1})
+    _assert_one_refusal(
+        rejected,
+        message=(
+            "BranchOrder.apply_sync changed database routing intent; "
+            "expected db=None, hints={'tenant': 1}, "
+            "got db=None, hints={'tenant': 2}."
+        ),
+        field="branchesHints",
+    )
+    assert {
+        alias: _touching_tables(sql, "library_branch") for alias, sql in rejected_sql.items()
+    } == {"default": [], "shard_b": []}
 
 
 @pytest.fixture
@@ -431,7 +486,7 @@ def _build_list_field_in_place_routing_mutation_schema(
 
 
 def _branch_sql(captured: list[dict[str, str]]) -> list[str]:
-    return [q["sql"] for q in captured if "library_branch" in q["sql"].lower()]
+    return _from_table([q["sql"] for q in captured], "library_branch")
 
 
 @pytest.mark.usefixtures("_build_list_field_in_place_routing_mutation_schema")
@@ -579,7 +634,10 @@ def test_post_orderset_equal_but_distinct_hint_token_rejected_under_identity_rou
         clear_url_caches()
         try:
             swap["active"] = False
-            with CaptureQueriesContext(connections["shard_b"]) as control_shard_ctx:
+            with (
+                CaptureQueriesContext(connections["default"]) as control_default_ctx,
+                CaptureQueriesContext(connections["shard_b"]) as control_shard_ctx,
+            ):
                 control = graphql_payload(query, client=client)
             swap["active"] = True
             with (
@@ -592,6 +650,7 @@ def test_post_orderset_equal_but_distinct_hint_token_rejected_under_identity_rou
 
     assert "errors" not in control, control
     assert json_at(control, "data", "branchesTenant") == [{"name": "Branch-ShardB"}]
+    assert _branch_sql(control_default_ctx.captured_queries) == []
     assert len(_branch_sql(control_shard_ctx.captured_queries)) == 1
 
     assert rejected["data"] is None
@@ -748,8 +807,12 @@ def _build_test_schema(_reload_project_schema_for_acceptance_tests: None) -> Ite
     @strawberry.type
     class _MultiDbTestQuery:
         def _books_on_shard_b(self) -> QuerySet[models.Book]:
-            return models.Book.objects.using("shard_b").select_related(
-                "shelf__branch",
+            return (
+                models.Book.objects.using("shard_b")
+                .order_by("pk")
+                .select_related(
+                    "shelf__branch",
+                )
             )
 
         books_on_shard_b: QuerySet[models.Book] = strawberry.field(
@@ -758,7 +821,7 @@ def _build_test_schema(_reload_project_schema_for_acceptance_tests: None) -> Ite
         )
 
     optimizer = DjangoOptimizerExtension()
-    _current["schema"] = strawberry.Schema(
+    _current["schema"] = DjangoSchema(
         query=_MultiDbTestQuery,
         config=strawberry_config(),
         extensions=[lambda: optimizer],
@@ -788,8 +851,12 @@ def _build_debug_test_schema(_reload_project_schema_for_acceptance_tests: None) 
     @strawberry.type
     class _MultiDbDebugTestQuery:
         def _books_on_shard_b(self) -> QuerySet[models.Book]:
-            return models.Book.objects.using("shard_b").select_related(
-                "shelf__branch",
+            return (
+                models.Book.objects.using("shard_b")
+                .order_by("pk")
+                .select_related(
+                    "shelf__branch",
+                )
             )
 
         books_on_shard_b: QuerySet[models.Book] = strawberry.field(
@@ -798,7 +865,7 @@ def _build_debug_test_schema(_reload_project_schema_for_acceptance_tests: None) 
         )
 
     optimizer = DjangoOptimizerExtension()
-    _current["schema"] = strawberry.Schema(
+    _current["schema"] = DjangoSchema(
         query=_MultiDbDebugTestQuery,
         config=strawberry_config(),
         extensions=[lambda: optimizer, lambda: DjangoDebugExtension(allow_unsafe_production=True)],
@@ -841,7 +908,7 @@ def _build_loan_filter_test_schema(
         )
 
     optimizer = DjangoOptimizerExtension()
-    _current["schema"] = strawberry.Schema(
+    _current["schema"] = DjangoSchema(
         query=_LoanFilterShardQuery,
         config=strawberry_config(),
         extensions=[lambda: optimizer],
@@ -884,100 +951,80 @@ def _seed_book_chain(alias: str, *, title: str) -> "models.Book":
 # ---------------------------------------------------------------------------
 
 
+def _expected_book(alias: str, title: str) -> JSONObject:
+    return {
+        "title": title,
+        "shelf": {"code": f"S-{alias}-{title}", "branch": {"name": f"Branch-{alias}-{title}"}},
+    }
+
+
 @pytest.mark.usefixtures("_build_test_schema")
 @pytest.mark.django_db(databases=["default", "shard_b"])
 def test_using_shard_b_resolver_returns_rows_seeded_on_shard_b() -> None:
-    """Seeded ``shard_b`` rows are visible through a ``.using('shard_b')`` resolver."""
+    """Two exact nested graphs are served from shard_b, with one read of each selected table."""
     _seed_book_chain("shard_b", title="A")
     _seed_book_chain("shard_b", title="B")
-
-    query = """
-      query {
-        booksOnShardB {
-          title
-          shelf { code branch { name } }
-        }
-      }
-    """
-
-    client = Client()
+    query = "{ booksOnShardB { title shelf { code branch { name } } } }"
     with override_settings(ROOT_URLCONF=__name__):
-        clear_url_caches()
-        try:
-            data = _graphql_data(query, client=client)
-        finally:
-            clear_url_caches()
-
-    titles = {json_at(b, "title") for b in json_list(data, "booksOnShardB")}
-    assert titles == {"A", "B"}
+        payload, statements = _capture_payload(query)
+    assert payload == {
+        "data": {
+            "booksOnShardB": [_expected_book("shard_b", "A"), _expected_book("shard_b", "B")],
+        },
+    }
+    _assert_read_alias(
+        statements,
+        "shard_b",
+        {"library_book": 1, "library_shelf": 1, "library_branch": 1},
+    )
 
 
 @pytest.mark.usefixtures("_build_test_schema")
 @pytest.mark.django_db(databases=["default", "shard_b"])
 def test_cross_shard_isolation_default_rows_not_visible_via_shard_b_resolver() -> None:
-    """A chain seeded on ``default`` is invisible to a ``.using('shard_b')`` resolver."""
+    """Only the shard_b singleton is served; duplicates and default reads cannot hide in a set."""
     _seed_book_chain("default", title="default-only")
     _seed_book_chain("shard_b", title="shard-b-only")
-
-    query = "{ booksOnShardB { title } }"
-
-    client = Client()
     with override_settings(ROOT_URLCONF=__name__):
-        clear_url_caches()
-        try:
-            data = _graphql_data(query, client=client)
-        finally:
-            clear_url_caches()
-
-    titles = {json_at(b, "title") for b in json_list(data, "booksOnShardB")}
-    assert titles == {"shard-b-only"}
-    assert "default-only" not in titles  # explicit negative pin
+        payload, statements = _capture_payload("{ booksOnShardB { title } }")
+    assert payload == {"data": {"booksOnShardB": [{"title": "shard-b-only"}]}}
+    _assert_read_alias(statements, "shard_b", {"library_book": 1})
 
 
 @pytest.mark.usefixtures("_build_debug_test_schema")
 @pytest.mark.django_db(databases=["default", "shard_b"])
 def test_debug_extension_captures_shard_b_alias_rows() -> None:
-    """The real multi-database capture proof (spec-044 Test plan scenario 16).
-
-    A live query routed to ``shard_b`` through a debug-enabled probe schema
-    reports a captured row with ``alias == "shard_b"`` and the correct vendor,
-    and BOTH configured aliases restore their prior ``force_debug_cursor``
-    values - the per-alias contract must not rest solely on
-    ``alias == "default"`` assertions plus fakes.
-    """
+    """The debug payload reports all three real nested shard reads and restores both cursors."""
     _seed_book_chain("shard_b", title="DebugShard")
     prior_flags = {
         database_connection.alias: database_connection.force_debug_cursor
         for database_connection in connections.all()
     }
-
-    query = """
-      query {
-        booksOnShardB {
-          title
-          shelf { code branch { name } }
-        }
-      }
-    """
-
-    client = TestClient()
     with override_settings(ROOT_URLCONF=__name__):
-        clear_url_caches()
-        try:
-            res = client.query(query)
-        finally:
-            clear_url_caches()
-
-    assert res.data is not None
-    assert [json_at(book, "title") for book in json_list(res.data, "booksOnShardB")] == [
-        "DebugShard",
+        payload, statements = _capture_payload(
+            "{ booksOnShardB { title shelf { code branch { name } } } }",
+        )
+    assert json_at(payload, "data") == {"booksOnShardB": [_expected_book("shard_b", "DebugShard")]}
+    _assert_read_alias(
+        statements,
+        "shard_b",
+        {"library_book": 1, "library_shelf": 1, "library_branch": 1},
+    )
+    debug = json_object(payload, "extensions", "debug")
+    relevant = [
+        row
+        for row in json_list(debug, "sql")
+        if any(
+            f'"{table}"' in json_str(row, "sql")
+            for table in ("library_book", "library_shelf", "library_branch")
+        )
     ]
-    payload = json_object(res.extensions or {}, "debug")
-    shard_rows = [row for row in json_list(payload, "sql") if json_at(row, "alias") == "shard_b"]
-    assert shard_rows, payload["sql"]
-    assert json_at(shard_rows, 0, "vendor") == connections["shard_b"].vendor
-    assert json_at(shard_rows, 0, "isSelect") is True
-    assert payload["exceptions"] == []
+    assert len(relevant) == 3, relevant
+    for row in relevant:
+        assert json_str(row, "alias") == "shard_b"
+        assert json_str(row, "vendor") == connections["shard_b"].vendor
+        assert json_at(row, "isSelect") is True
+    assert json_at(debug, "exceptions") == []
     for database_connection in connections.all():
         assert database_connection.force_debug_cursor is prior_flags[database_connection.alias]
 
@@ -1074,14 +1121,19 @@ def test_row_preserving_relational_leaf_predicate_executes_on_shard_b_alias() ->
         for query in shard_captured.captured_queries
         if 'FROM "library_loan"' in query["sql"] and "library_book" in query["sql"]
     ]
-    assert shard_loan_sql, shard_captured.captured_queries
+    assert len(shard_loan_sql) == 1, shard_captured.captured_queries
     for sql in shard_loan_sql:
         assert "DISTINCT" not in sql.upper()
-    assert not [
-        query["sql"]
-        for query in default_captured.captured_queries
-        if "library_loan" in query["sql"].lower()
-    ], default_captured.captured_queries
+    statements = {
+        "default": [query["sql"] for query in default_captured.captured_queries],
+        "shard_b": [query["sql"] for query in shard_captured.captured_queries],
+    }
+    _assert_read_alias(
+        statements,
+        "shard_b",
+        {"library_loan": 1, "library_book": 0, "library_patron": 0},
+    )
+    assert '"library_patron"' in shard_loan_sql[0], shard_loan_sql
 
 
 @pytest.fixture
@@ -1184,14 +1236,14 @@ def test_generic_relation_filter_matches_content_type_on_shard_b_alias() -> None
 
 
 # ---------------------------------------------------------------------------
-# Mutation atomicity: write-alias pinning for generated mutations (live sharded HTTP)
+# Write-alias pinning and uniqueness refusals for generated mutations (live sharded HTTP)
 # ---------------------------------------------------------------------------
 #
 # The write tests drive the PROJECT schema (config.schema - the real products
 # write surface over DjangoSchema) under a router whose READ and WRITE answers
 # diverge for the products app: reads route to ``default``, writes to
 # ``shard_b``. The pipeline must pin EVERYTHING - locate, relation visibility,
-# the write, the re-fetch, and the envelope rollback - to the ONE write alias,
+# the write, the re-fetch, and uniqueness validation - to the ONE write alias,
 # so the shard_b twin of a same-pk row pair is the one affected and the
 # default twin never is.
 
@@ -1234,22 +1286,47 @@ def _project_schema(_reload_project_schema_for_acceptance_tests: None) -> Iterat
     _current["schema"] = None
 
 
-def _seed_same_pk_item_pair(pk_base: int) -> None:
-    """Seed a same-pk ``Category``/``Item`` pair on BOTH aliases.
-
-    The pk collision is the point: an alias-pinning bug that lets any pipeline
-    step slip to the read alias would still find A row, so only differing
-    per-alias field values can prove which alias each step really used.
-    """
+def _pin_seeded_same_pk_item_pair(pk_base: int) -> None:
+    """Pin caller-service-seeded rows to the intentional same-PK twins on both aliases."""
     for alias in ("default", "shard_b"):
-        category = product_models.Category.objects.using(alias).create(
-            pk=pk_base,
-            name=f"pin-category-{alias}-{pk_base}",
+        categories = list(product_models.Category.objects.using(alias).order_by("pk")[:2])
+        assert len(categories) == 2
+        category, parking_category = categories
+        item = (
+            product_models.Item.objects.using(alias)
+            .filter(category=category)
+            .order_by("pk")
+            .first()
         )
-        product_models.Item.objects.using(alias).create(
-            pk=pk_base,
-            name=f"pin-item-{alias}",
-            category=category,
+        assert item is not None
+        # Existing child foreign keys prevent a parent-PK update. Park seeded Items
+        # on another real seeded Category and remove only the old property's graph.
+        product_models.Item.objects.using(alias).filter(category=category).update(
+            category=parking_category,
+        )
+        product_models.Property.objects.using(alias).filter(category=category).delete()
+        assert (
+            product_models.Category.objects.using(alias)
+            .filter(pk=category.pk)
+            .update(
+                id=pk_base,
+                name=f"pin-category-{alias}-{pk_base}",
+                is_private=False,
+            )
+            == 1
+        )
+        # Entry.item is a real FK, so its rows must go before moving this Item's PK.
+        product_models.Entry.objects.using(alias).filter(item=item).delete()
+        assert (
+            product_models.Item.objects.using(alias)
+            .filter(pk=item.pk)
+            .update(
+                id=pk_base,
+                name=f"pin-item-{alias}",
+                category_id=pk_base,
+                is_private=False,
+            )
+            == 1
         )
 
 
@@ -1269,56 +1346,52 @@ _UPDATE_ITEM_MUTATION = """
 mutation($id: ID!, $d: ItemPartialInput!) {
   updateItem(id: $id, data: $d) {
     node { name category { name } }
-    errors { field messages }
+    errors { field messages codes }
   }
 }
 """
 
 
 def _item_gid(pk: int) -> str:
-    return str(relay_module.GlobalID(type_name="products.item", node_id=str(pk)))
+    return global_id_for(products_schema.ItemType, pk)
 
 
 @pytest.mark.usefixtures("_project_schema")
 @pytest.mark.django_db(databases=["default", "shard_b"], transaction=True)
 def test_mutation_write_pins_locate_write_and_refetch_to_the_write_alias() -> None:
-    """Under a divergent read/write router the WHOLE update pipeline rides ``shard_b``.
-
-    The locate (visibility), the write, and the post-write re-fetch must all use
-    the router's WRITE answer - a step that slipped to the read alias would
-    either miss the row, write the wrong twin, or re-fetch stale data. The
-    response's ``category`` relation also proves the relation ride-along: it
-    renders the SHARD_B category's name.
-    """
-    _seed_same_pk_item_pair(90001)
+    """Locate, update, relation and returned row all stay on the write alias's same-PK twin."""
+    seed_data(2, db_alias="default")
+    seed_data(2, db_alias="shard_b")
+    _pin_seeded_same_pk_item_pair(90001)
     client = _login_products_writer("change_item", "view_category")
-
     with override_settings(
         ROOT_URLCONF=__name__,
         DATABASE_ROUTERS=[_ProductsWriteToShardBRouter()],
     ):
-        clear_url_caches()
-        try:
-            res = TestClient(client=client).query(
-                _UPDATE_ITEM_MUTATION,
-                variables={"id": _item_gid(90001), "d": {"name": "pinned-write"}},
-            )
-        finally:
-            clear_url_caches()
-
-    assert res.data is not None
-
-    payload = json_object(res.data, "updateItem")
-    assert payload["errors"] == []
-    assert json_at(payload, "node", "name") == "pinned-write"
-    # The re-fetch and its relation came from shard_b (the write alias)...
-    assert json_at(payload, "node", "category", "name") == "pin-category-shard_b-90001"
-    # ...the shard_b twin was written, and the default twin never touched.
+        payload, statements = _capture_payload(
+            _UPDATE_ITEM_MUTATION,
+            client=client,
+            variables={"id": _item_gid(90001), "d": {"name": "pinned-write"}},
+        )
+    assert payload == {
+        "data": {
+            "updateItem": {
+                "node": {
+                    "name": "pinned-write",
+                    "category": {"name": "pin-category-shard_b-90001"},
+                },
+                "errors": [],
+            },
+        },
+    }
+    assert _touching_tables(statements["default"], "products_item", "products_category") == []
+    assert any(sql.startswith('UPDATE "products_item"') for sql in statements["shard_b"])
     assert product_models.Item.objects.using("shard_b").get(pk=90001).name == "pinned-write"
     assert product_models.Item.objects.using("default").get(pk=90001).name == "pin-item-default"
 
 
 @pytest.mark.django_db(databases=["default", "shard_b"], transaction=True)
+@pytest.mark.usefixtures("private_registry")
 def test_custom_nodeid_mutation_resolves_real_pk_on_write_alias() -> None:
     """A custom NodeID mutation resolves its non-pk payload on ``shard_b``.
 
@@ -1327,18 +1400,31 @@ def test_custom_nodeid_mutation_resolves_real_pk_on_write_alias() -> None:
     router sends fresh reads to ``default``; resolving the NodeID through the
     default manager would produce an in-band not-found error before the locate.
     """
+    seed_data(1, db_alias="default")
+    seed_data(1, db_alias="shard_b")
     registry.clear()
     category_pk = 92021
-    product_models.Category.objects.using("default").create(
-        pk=category_pk,
-        name="read-alias-category",
-        description="default untouched",
-    )
-    target = product_models.Category.objects.using("shard_b").create(
-        pk=category_pk,
-        name="write-alias-category",
-        description="before",
-    )
+    for alias, name, description in (
+        ("default", "read-alias-category", "default untouched"),
+        ("shard_b", "write-alias-category", "before"),
+    ):
+        seeded = product_models.Category.objects.using(alias).order_by("pk").first()
+        assert seeded is not None
+        # Move an existing seeded row to the intentional shared PK. Its child FKs
+        # must be pruned before that update; the other seeded providers stay intact.
+        product_models.Item.objects.using(alias).filter(category_id=seeded.pk).delete()
+        product_models.Property.objects.using(alias).filter(category_id=seeded.pk).delete()
+        updated = (
+            product_models.Category.objects.using(alias)
+            .filter(pk=seeded.pk)
+            .update(
+                id=category_pk,
+                name=name,
+                description=description,
+            )
+        )
+        assert updated == 1
+    target = product_models.Category.objects.using("shard_b").get(pk=category_pk)
 
     class CategoryNode(DjangoType):
         name: relay.NodeID[str]
@@ -1387,21 +1473,41 @@ def test_custom_nodeid_mutation_resolves_real_pk_on_write_alias() -> None:
         ):
             clear_url_caches()
             try:
-                response = TestClient(client=client).query(
-                    query,
-                    variables={
-                        "id": global_id_for(CategoryNode, target.name),
-                        "d": {"description": "write-alias-updated"},
-                    },
-                )
+                with (
+                    CaptureQueriesContext(connections["default"]) as on_default,
+                    CaptureQueriesContext(connections["shard_b"]) as on_shard_b,
+                ):
+                    response = TestClient(client=client).query(
+                        query,
+                        variables={
+                            "id": global_id_for(CategoryNode, target.name),
+                            "d": {"description": "write-alias-updated"},
+                        },
+                    )
             finally:
                 clear_url_caches()
     finally:
         _current["schema"] = None
 
-    assert response.data is not None
-    assert response.data["updateCategory"]["errors"] == []
-    assert response.data["updateCategory"]["node"]["description"] == "write-alias-updated"
+    assert response.data == {
+        "updateCategory": {
+            "node": {
+                "id": global_id_for(CategoryNode, target.name),
+                "description": "write-alias-updated",
+            },
+            "errors": [],
+        },
+    }
+    category_sql = {
+        alias: [
+            entry["sql"]
+            for entry in captured.captured_queries
+            if '"products_category"' in entry["sql"]
+        ]
+        for alias, captured in (("default", on_default), ("shard_b", on_shard_b))
+    }
+    assert category_sql["default"] == [], category_sql
+    assert any(sql.startswith('UPDATE "products_category"') for sql in category_sql["shard_b"])
     assert (
         product_models.Category.objects.using("shard_b").get(pk=category_pk).description
         == "write-alias-updated"
@@ -1414,45 +1520,48 @@ def test_custom_nodeid_mutation_resolves_real_pk_on_write_alias() -> None:
 
 @pytest.mark.usefixtures("_project_schema")
 @pytest.mark.django_db(databases=["default", "shard_b"], transaction=True)
-def test_mutation_validation_envelope_rolls_back_on_the_write_alias() -> None:
-    """A validation-envelope failure rolls back on ``shard_b`` (the pinned alias).
-
-    Two shard_b items share a category; renaming one to the other's name trips
-    ``unique_item_per_category`` as the in-band envelope - and the pinned
-    ``set_rollback`` must discard any partial work on the WRITE alias, leaving
-    both twins untouched on both aliases.
-    """
-    _seed_same_pk_item_pair(90011)
-    sibling = product_models.Item.objects.using("shard_b").create(
+def test_model_uniqueness_validation_uses_write_alias_without_changing_either_twin() -> None:
+    """A name collision is refused by pre-write validation on shard_b; both twins stay unchanged."""
+    seed_data(2, db_alias="default")
+    seed_data(2, db_alias="shard_b")
+    _pin_seeded_same_pk_item_pair(90011)
+    sibling = product_models.Item.objects.using("shard_b").exclude(pk=90011).order_by("pk").first()
+    assert sibling is not None
+    product_models.Entry.objects.using("shard_b").filter(item=sibling).delete()
+    product_models.Item.objects.using("shard_b").filter(pk=sibling.pk).update(
         name="pin-sibling",
         category_id=90011,
+        is_private=False,
     )
     client = _login_products_writer("change_item", "view_category")
-
     with override_settings(
         ROOT_URLCONF=__name__,
         DATABASE_ROUTERS=[_ProductsWriteToShardBRouter()],
     ):
-        clear_url_caches()
-        try:
-            res = TestClient(client=client).query(
-                _UPDATE_ITEM_MUTATION,
-                variables={
-                    "id": _item_gid(saved_pk(sibling.pk)),
-                    "d": {"name": "pin-item-shard_b"},
-                },
-                assert_no_errors=False,
-            )
-        finally:
-            clear_url_caches()
-
-    assert res.data is not None
-
-    payload = json_object(res.data, "updateItem")
-    assert payload["node"] is None
-    assert payload["errors"], payload
-    # Nothing changed on either alias.
+        payload, statements = _capture_payload(
+            _UPDATE_ITEM_MUTATION,
+            client=client,
+            variables={"id": _item_gid(saved_pk(sibling.pk)), "d": {"name": "pin-item-shard_b"}},
+        )
+    assert payload == {
+        "data": {
+            "updateItem": {
+                "node": None,
+                "errors": [
+                    {
+                        "field": "__all__",
+                        "messages": ["Item with this Category and Name already exists."],
+                        "codes": ["unique_together"],
+                    },
+                ],
+            },
+        },
+    }
+    assert _touching_tables(statements["default"], "products_item", "products_category") == []
+    assert _from_table(statements["shard_b"], "products_item"), statements
+    assert not any(sql.startswith('UPDATE "products_item"') for sql in statements["shard_b"])
     assert product_models.Item.objects.using("shard_b").get(pk=sibling.pk).name == "pin-sibling"
+    assert product_models.Item.objects.using("shard_b").get(pk=90011).name == "pin-item-shard_b"
     assert product_models.Item.objects.using("default").get(pk=90011).name == "pin-item-default"
 
 
@@ -1474,41 +1583,53 @@ class _SessionStoreToShardBRouter:
 @pytest.mark.usefixtures("_project_schema")
 @pytest.mark.django_db(databases=["default", "shard_b"], transaction=True)
 def test_mutation_authorizes_a_session_stored_on_its_own_alias() -> None:
-    """The authorization phase may read a session store the router keeps on its own alias.
-
-    ``createCategory`` locates no row, so the lazy request user is first resolved
-    inside the authorization phase, and resolving it loads the session from
-    ``shard_b``. That alias is in the auth set, so the read runs inside the
-    read-only rolled-back barrier and the write on ``default`` succeeds.
-    """
+    """A shard_b session authenticates a default-only Category write without cross-alias copies."""
     create_users(1)
     user = User.objects.get(username="staff_1")
     user.user_permissions.add(
         Permission.objects.get(codename="add_category", content_type__app_label="products"),
     )
-
     with override_settings(
         ROOT_URLCONF=__name__,
         DATABASE_ROUTERS=[_SessionStoreToShardBRouter()],
     ):
         client = Client()
         client.force_login(User.objects.get(pk=read_attr(user, "pk")))
-        clear_url_caches()
-        try:
-            res = TestClient(client=client).query(
-                "mutation($d: CategoryInput!) { createCategory(data: $d) { "
-                "node { name } errors { field messages } } }",
-                variables={"d": {"name": "zzz_session_alias_cat"}},
-            )
-        finally:
-            clear_url_caches()
-
-    assert res.data is not None
-    payload = json_object(res.data, "createCategory")
-    assert payload["errors"] == []
-    assert json_at(payload, "node", "name") == "zzz_session_alias_cat"
-    created = product_models.Category.objects.using("default")
-    assert created.filter(name="zzz_session_alias_cat").exists()
+        payload, statements = _capture_payload(
+            "mutation($d: CategoryInput!) { createCategory(data: $d) { "
+            "node { name } errors { field messages } } }",
+            client=client,
+            variables={"d": {"name": "zzz_session_alias_cat"}},
+        )
+    assert payload == {
+        "data": {
+            "createCategory": {"node": {"name": "zzz_session_alias_cat"}, "errors": []},
+        },
+    }
+    assert (
+        product_models.Category.objects.using("default")
+        .filter(name="zzz_session_alias_cat")
+        .count()
+        == 1
+    )
+    assert (
+        not product_models.Category.objects.using("shard_b")
+        .filter(name="zzz_session_alias_cat")
+        .exists()
+    )
+    assert _from_table(statements["default"], "django_session") == []
+    assert len(_from_table(statements["shard_b"], "django_session")) == 1, statements
+    assert _from_table(statements["default"], "auth_user"), statements
+    assert (
+        _touching_tables(
+            statements["shard_b"],
+            "auth_user",
+            "auth_permission",
+            "products_category",
+        )
+        == []
+    )
+    assert any(sql.startswith('INSERT INTO "products_category"') for sql in statements["default"])
 
 
 # ---------------------------------------------------------------------------
@@ -1517,7 +1638,7 @@ def test_mutation_authorizes_a_session_stored_on_its_own_alias() -> None:
 #
 # The serializer twin of the model-flavor pinning tests above: the SERIALIZER
 # pipeline's locate, relation decode, DRF's second relation lookup (the scoped
-# field queryset), the save, the re-fetch, and the envelope rollback must all
+# field queryset), the save, the re-fetch, and constraint refusal must all
 # ride the router's ONE write answer. Routed on the library app so the project
 # schema's ``updateBookGenresViaSerializer`` (a ``SerializerMutation`` with an
 # M2M ``genres`` relation) is the surface under test.
@@ -1547,7 +1668,7 @@ class _LibraryWriteToShardBRouter:
 def _seed_same_pk_book_pair(pk_base: int) -> None:
     """Seed a same-pk ``Branch -> Shelf -> Book`` chain on BOTH aliases.
 
-    Same rationale as ``_seed_same_pk_item_pair``: only per-alias field values
+    Same rationale as ``_pin_seeded_same_pk_item_pair``: only per-alias field values
     can prove which alias each pipeline step really used.
     """
     for alias in ("default", "shard_b"):
@@ -1573,63 +1694,68 @@ _UPDATE_BOOK_GENRES_MUTATION = """
 mutation($id: ID!, $d: BookGenresSerializerPartialInput!) {
   updateBookGenresViaSerializer(id: $id, data: $d) {
     node { title }
-    errors { field messages }
+    errors { field messages codes }
   }
 }
 """
 
 
-def _library_gid(type_name: str, pk: int) -> str:
-    return str(relay_module.GlobalID(type_name=type_name, node_id=str(pk)))
+def _library_gid(node_type: type[DjangoType], pk: int) -> str:
+    return global_id_for(node_type, pk)
 
 
 @pytest.mark.usefixtures("_project_schema")
 @pytest.mark.django_db(databases=["default", "shard_b"], transaction=True)
 def test_serializer_mutation_pins_locate_relation_save_and_refetch_to_write_alias() -> None:
-    """Under a divergent read/write router the WHOLE serializer update rides ``shard_b``.
-
-    The genre attached exists ONLY on ``shard_b``, so the relation decode, DRF's
-    second relation lookup (the pinned, visibility-scoped field queryset), and the
-    M2M write all had to run on the write alias - any step slipping to the read
-    alias would fail to find the genre. The shard_b book twin is the one written;
-    the default twin (same pk) is untouched.
-    """
+    """The serializer updates only shard_b and replaces its old genre while retaining default's set."""
     _seed_same_pk_book_pair(91001)
-    shard_genre = models.Genre.objects.using("shard_b").create(
-        pk=91001,
-        name="ser-genre-shard-b-only",
-    )
-
+    shard_genre = models.Genre.objects.using("shard_b").create(name="ser-genre-shard-b-only")
+    old_shard_genre = models.Genre.objects.using("shard_b").create(name="old-shard-genre")
+    default_genre = models.Genre.objects.using("default").create(name="retained-default-genre")
+    shard_book = models.Book.objects.using("shard_b").get(pk=91001)
+    default_book = models.Book.objects.using("default").get(pk=91001)
+    shard_book.genres.add(old_shard_genre)
+    default_book.genres.add(default_genre)
     with override_settings(
         ROOT_URLCONF=__name__,
         DATABASE_ROUTERS=[_LibraryWriteToShardBRouter()],
     ):
-        clear_url_caches()
-        try:
-            res = TestClient().query(
-                _UPDATE_BOOK_GENRES_MUTATION,
-                variables={
-                    "id": _library_gid("library.book", 91001),
-                    "d": {
-                        "title": "ser-pinned-write",
-                        "genres": [_library_gid("library.genre", saved_pk(shard_genre.pk))],
-                    },
+        payload, statements = _capture_payload(
+            _UPDATE_BOOK_GENRES_MUTATION,
+            variables={
+                "id": _library_gid(library_schema.BookType, 91001),
+                "d": {
+                    "title": "ser-pinned-write",
+                    "genres": [
+                        _library_gid(library_schema.GenreType, saved_pk(shard_genre.pk)),
+                    ],
                 },
-            )
-        finally:
-            clear_url_caches()
-
-    assert res.data is not None
-
-    payload = json_object(res.data, "updateBookGenresViaSerializer")
-    assert payload["errors"] == []
-    assert json_at(payload, "node", "title") == "ser-pinned-write"
-    shard_book = models.Book.objects.using("shard_b").get(pk=91001)
+            },
+        )
+    assert payload == {
+        "data": {
+            "updateBookGenresViaSerializer": {"node": {"title": "ser-pinned-write"}, "errors": []},
+        },
+    }
+    shard_book.refresh_from_db()
+    default_book.refresh_from_db()
     assert shard_book.title == "ser-pinned-write"
     assert list(shard_book.genres.values_list("name", flat=True)) == ["ser-genre-shard-b-only"]
-    default_book = models.Book.objects.using("default").get(pk=91001)
     assert default_book.title == "ser-book-default"
-    assert default_book.genres.count() == 0
+    assert list(default_book.genres.values_list("name", flat=True)) == ["retained-default-genre"]
+    assert (
+        _touching_tables(
+            statements["default"],
+            "library_book",
+            "library_genre",
+            "library_book_genres",
+        )
+        == []
+    )
+    assert any(sql.startswith('UPDATE "library_book"') for sql in statements["shard_b"])
+    assert any(
+        sql.startswith('DELETE FROM "library_book_genres"') for sql in statements["shard_b"]
+    )
 
 
 @pytest.mark.usefixtures("_project_schema")
@@ -1649,21 +1775,28 @@ def test_serializer_unique_validator_reads_write_alias() -> None:
     ):
         clear_url_caches()
         try:
-            res = TestClient().query(
-                _UPDATE_BOOK_TITLE_VALIDATOR_MUTATION,
-                variables={
-                    "id": _library_gid("library.book", 91006),
-                    "d": {"title": "validator-default-only-collision"},
-                },
-            )
+            with (
+                CaptureQueriesContext(connections["default"]) as on_default,
+                CaptureQueriesContext(connections["shard_b"]) as on_shard_b,
+            ):
+                res = TestClient().query(
+                    _UPDATE_BOOK_TITLE_VALIDATOR_MUTATION,
+                    variables={
+                        "id": _library_gid(library_schema.BookType, 91006),
+                        "d": {"title": "validator-default-only-collision"},
+                    },
+                )
         finally:
             clear_url_caches()
 
-    assert res.data is not None
-
-    payload = json_object(res.data, "updateBookTitleWithAliasValidator")
-    assert payload["errors"] == []
-    assert json_at(payload, "node", "title") == "validator-default-only-collision"
+    assert res.data == {
+        "updateBookTitleWithAliasValidator": {
+            "node": {"title": "validator-default-only-collision"},
+            "errors": [],
+        },
+    }
+    assert _touching_tables([row["sql"] for row in on_default], "library_book") == []
+    assert _from_table([row["sql"] for row in on_shard_b], "library_book")
     assert (
         models.Book.objects.using("shard_b").get(pk=91006).title
         == "validator-default-only-collision"
@@ -1673,44 +1806,38 @@ def test_serializer_unique_validator_reads_write_alias() -> None:
 
 @pytest.mark.usefixtures("_project_schema")
 @pytest.mark.django_db(databases=["default", "shard_b"], transaction=True)
-def test_serializer_mutation_envelope_rolls_back_on_the_write_alias() -> None:
-    """A serializer save-time failure rolls back on ``shard_b`` (the pinned alias).
-
-    Renaming the shard_b book to a same-shelf sibling's title trips the
-    ``unique_book_title_per_shelf`` constraint at ``save()`` as the in-band
-    ``"__all__"`` envelope, and the pinned rollback leaves both twins untouched
-    on both aliases.
-    """
+def test_serializer_constraint_refusal_leaves_each_alias_unchanged() -> None:
+    """The database rejects a conflicting shard_b title before a successful write can change either twin."""
     _seed_same_pk_book_pair(91011)
     shard_shelf = models.Shelf.objects.using("shard_b").get(pk=91011)
-    models.Book.objects.using("shard_b").create(
-        title="ser-sibling",
-        shelf=shard_shelf,
-    )
-
+    models.Book.objects.using("shard_b").create(title="ser-sibling", shelf=shard_shelf)
     with override_settings(
         ROOT_URLCONF=__name__,
         DATABASE_ROUTERS=[_LibraryWriteToShardBRouter()],
     ):
-        clear_url_caches()
-        try:
-            res = TestClient().query(
-                _UPDATE_BOOK_GENRES_MUTATION,
-                variables={
-                    "id": _library_gid("library.book", 91011),
-                    "d": {"title": "ser-sibling"},
-                },
-                assert_no_errors=False,
-            )
-        finally:
-            clear_url_caches()
-
-    assert res.data is not None
-
-    payload = json_object(res.data, "updateBookGenresViaSerializer")
-    assert payload["node"] is None
-    assert payload["errors"], payload
-    # Nothing changed on either alias.
+        payload, statements = _capture_payload(
+            _UPDATE_BOOK_GENRES_MUTATION,
+            variables={
+                "id": _library_gid(library_schema.BookType, 91011),
+                "d": {"title": "ser-sibling"},
+            },
+        )
+    assert payload == {
+        "data": {
+            "updateBookGenresViaSerializer": {
+                "node": None,
+                "errors": [
+                    {
+                        "field": "__all__",
+                        "messages": ["A database constraint was violated."],
+                        "codes": ["constraint"],
+                    },
+                ],
+            },
+        },
+    }
+    assert _touching_tables(statements["default"], "library_book") == []
+    assert any(sql.startswith('UPDATE "library_book"') for sql in statements["shard_b"])
     assert models.Book.objects.using("shard_b").get(pk=91011).title == "ser-book-shard_b"
     assert models.Book.objects.using("default").get(pk=91011).title == "ser-book-default"
 
@@ -1727,6 +1854,7 @@ def _prefetch_alias_schema(
     ],
     *,
     root_alias: str | None = None,
+    expose_routing_error: bool = False,
 ) -> strawberry.Schema:
     """A ``shelves { books }`` schema whose CHILD type carries ``child_hook``.
 
@@ -1767,7 +1895,10 @@ def _prefetch_alias_schema(
         )
 
     optimizer = DjangoOptimizerExtension()
-    return strawberry.Schema(
+    # The alias-refusal row names its internal ConfigurationError; accepted controls
+    # retain the native policy instead of globally disabling masking in this holder.
+    return DjangoSchema(
+        error_policy={"enabled": False} if expose_routing_error else None,
         query=_PrefetchAliasQuery,
         config=strawberry_config(),
         extensions=[lambda: optimizer],
@@ -1809,6 +1940,7 @@ def _post_prefetch_alias_query(
 
 
 @pytest.mark.django_db(databases=["default", "shard_b"])
+@pytest.mark.usefixtures("private_registry")
 def test_planned_prefetch_child_cannot_route_itself_to_the_other_shard() -> None:
     """A child hook returning ``.using('shard_b')`` fails the planned relation closed.
 
@@ -1822,11 +1954,15 @@ def test_planned_prefetch_child_cannot_route_itself_to_the_other_shard() -> None
     _seed_book_chain("shard_b", title="on-shard-b")
 
     payload, book_sql = _post_prefetch_alias_query(
-        _prefetch_alias_schema(lambda _cls, queryset, _info: queryset.using("shard_b")),
+        _prefetch_alias_schema(
+            lambda _cls, queryset, _info: queryset.using("shard_b"),
+            expose_routing_error=True,
+        ),
     )
 
     assert payload["data"] is None
     assert len(json_list(payload, "errors")) == 1, payload
+    assert json_at(payload, "errors", 0, "path") == ["shelves"]
     message = json_str(payload, "errors", 0, "message")
     assert "AliasBookType.get_queryset" in message
     assert "routed to alias 'shard_b'" in message
@@ -1834,6 +1970,7 @@ def test_planned_prefetch_child_cannot_route_itself_to_the_other_shard() -> None
 
 
 @pytest.mark.django_db(databases=["default", "shard_b"])
+@pytest.mark.usefixtures("private_registry")
 def test_planned_prefetch_child_inherits_an_unrouted_parents_connection() -> None:
     """Control: an unrouted child under an unrouted parent stays on ``default``."""
     _seed_book_chain("default", title="on-default")
@@ -1843,18 +1980,19 @@ def test_planned_prefetch_child_inherits_an_unrouted_parents_connection() -> Non
         _prefetch_alias_schema(lambda _cls, queryset, _info: queryset.exclude(title="")),
     )
 
-    assert payload.get("errors") is None, payload
-    titles = [
-        json_at(row, "title")
-        for shelf in json_list(payload, "data", "shelves")
-        for row in json_list(shelf, "books")
-    ]
-    assert titles == ["on-default"]
+    assert payload == {
+        "data": {
+            "shelves": [
+                {"code": "S-default-on-default", "books": [{"title": "on-default"}]},
+            ],
+        },
+    }
     assert len(book_sql["default"]) == 1, book_sql
     assert book_sql["shard_b"] == []
 
 
 @pytest.mark.django_db(databases=["default", "shard_b"])
+@pytest.mark.usefixtures("private_registry")
 def test_planned_prefetch_child_follows_a_routed_parent_onto_its_shard() -> None:
     """Control: the same unrouted child follows a ``.using('shard_b')`` parent.
 
@@ -1873,18 +2011,19 @@ def test_planned_prefetch_child_follows_a_routed_parent_onto_its_shard() -> None
         ),
     )
 
-    assert payload.get("errors") is None, payload
-    titles = [
-        json_at(row, "title")
-        for shelf in json_list(payload, "data", "shelves")
-        for row in json_list(shelf, "books")
-    ]
-    assert titles == ["on-shard-b"]
+    assert payload == {
+        "data": {
+            "shelves": [
+                {"code": "S-shard_b-on-shard-b", "books": [{"title": "on-shard-b"}]},
+            ],
+        },
+    }
     assert len(book_sql["shard_b"]) == 1, book_sql
     assert book_sql["default"] == []
 
 
 @pytest.mark.django_db(databases=["default", "shard_b"])
+@pytest.mark.usefixtures("private_registry")
 def test_planned_prefetch_child_cascade_subquery_follows_a_routed_parent_onto_its_shard() -> None:
     """A child hook's cascade composes its ``Book.shelf`` subquery on the parent's shard.
 
@@ -1905,13 +2044,13 @@ def test_planned_prefetch_child_cascade_subquery_follows_a_routed_parent_onto_it
         ),
     )
 
-    assert payload.get("errors") is None, payload
-    titles = [
-        json_at(row, "title")
-        for shelf in json_list(payload, "data", "shelves")
-        for row in json_list(shelf, "books")
-    ]
-    assert titles == ["on-shard-b"]
+    assert payload == {
+        "data": {
+            "shelves": [
+                {"code": "S-shard_b-on-shard-b", "books": [{"title": "on-shard-b"}]},
+            ],
+        },
+    }
     assert book_sql["default"] == []
     assert len(book_sql["shard_b"]) == 1, book_sql
     assert "IN (SELECT" in book_sql["shard_b"][0]

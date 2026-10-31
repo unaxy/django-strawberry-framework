@@ -32,11 +32,11 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
-from apps.library.models import Book, Genre, Issue, Patron, Periodical
+from apps.library.models import Book, Genre, Issue, Patron, Periodical, Shelf
 from apps.scalars.models import ScalarSpecimen
 from django.conf import settings as django_settings
 from django.core.exceptions import FieldDoesNotExist
-from django.db.models import Field, Model, Prefetch, QuerySet
+from django.db.models import BigIntegerField, Field, Model, Prefetch, QuerySet
 from django.db.models.lookups import Lookup
 from django.db.models.sql.where import WhereNode
 from graphql import GraphQLError
@@ -50,6 +50,7 @@ from django_strawberry_framework.keyset import (
     _CURSOR_ENCRYPTION_CONTEXT,
     KEYSET_CURSOR_PREFIX,
     CursorColumn,
+    CursorState,
     KeysetCursor,
     KeysetSeek,
     KeysetSeekPlan,
@@ -86,6 +87,7 @@ from django_strawberry_framework.optimizer.plans import (
     WINDOW_TOTAL_COUNT,
     OptimizationPlan,
     apply_window_pagination,
+    effective_cursor_state,
 )
 from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.utils.connections import (
@@ -96,12 +98,14 @@ from django_strawberry_framework.utils.connections import (
     resolve_relay_max_results,
     window_range_plan,
 )
+from tests._definition import make_definition
 from tests._idioms import saved_pk
 from tests._info import make_info
 from tests._soft_dependency import simulated_absence
 
 if TYPE_CHECKING:
     from django.utils.tree import _NodeChildren
+    from typing_extensions import Never
 
     from django_strawberry_framework.optimizer.lateral_fetch import LateralWindowSpec
     from django_strawberry_framework.utils.typing import ConcreteField
@@ -232,6 +236,38 @@ def test_validate_cursor_field_rejects_nullable_column() -> None:
 def test_validate_cursor_field_rejects_json_column() -> None:
     with pytest.raises(ConfigurationError, match="JSON ordering differs"):
         validate_cursor_field_columns("ScalarType", ScalarSpecimen, ("payload", "id"))
+
+
+def test_validate_cursor_field_reads_a_generated_column_as_the_column_it_computes() -> None:
+    """``Shelf.topic_length`` is nullable through its ``output_field`` alone, and refused.
+
+    ``Shelf.code_length`` (non-null both ways) anchors a cursor, coded as the
+    ``BigIntegerField`` it computes under the generated field's own name and column.
+    """
+    with pytest.raises(ConfigurationError, match="'topic_length' is nullable"):
+        validate_cursor_field_columns("ShelfType", Shelf, ("topic_length", "id"))
+    validate_cursor_field_columns("ShelfType", Shelf, ("code_length", "id"))
+
+    (code_length, _pk) = cursor_columns_for(Shelf, ("-code_length", "id"))
+    column: Field[Never, object] = code_length.field
+    assert type(column) is BigIntegerField
+    assert (column.attname, column.column) == ("code_length", "code_length")
+    assert code_length.value_source == "code_length"
+
+
+def test_effective_cursor_order_reads_a_generated_column_as_the_column_it_computes() -> None:
+    """An ``orderBy:`` on a generated column is nullable and coded as its ``output_field``."""
+    state = CursorState(
+        definition=make_definition(Shelf, cursor_field=("id",)),
+        cursor_field=("id",),
+        columns=cursor_columns_for(Shelf, ("id",)),
+        fingerprint=order_fingerprint(("id",)),
+    )
+
+    with pytest.raises(GraphQLError, match="'topic_length' is nullable"):
+        _ = effective_cursor_state(state, ("topic_length", "id"))
+    derived, _annotations = effective_cursor_state(state, ("code_length", "id"))
+    assert type(derived.columns[0].field) is BigIntegerField
 
 
 def test_validate_cursor_field_rejects_non_unique_terminal() -> None:
