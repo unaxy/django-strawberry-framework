@@ -128,19 +128,25 @@ def test_django_connection_is_listconnection_subclass() -> None:
     assert get_origin(specialized) is DjangoConnection
 
 
-def test_first_and_last_raises_graphql_error() -> None:
-    """``resolve_connection`` with both ``first`` and ``last`` raises ``GraphQLError``.
+def test_first_and_last_guard_on_generated_subclass(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The guard answers before the deadline check or ``info.selected_fields`` priming runs.
 
-    The package's own guard - Strawberry's ``SliceMetadata.from_arguments`` does
-    not reject the combination. Driven at the classmethod directly with a bare
-    ``info``: only the schema's ``relay_max_results`` is read ahead of the guard.
+    The wire answer is live (``test_connection_pagination_api.py::
+    test_live_first_and_last_together_is_graphql_error``); the order has no wire shape. Both
+    later steps raise here if reached, so the guard's ``GraphQLError`` proves it ran first.
     """
-    with pytest.raises(GraphQLError, match="mutually exclusive"):
-        DjangoConnection[object].resolve_connection([], info=make_info(), first=1, last=1)
 
+    def _ran_ahead_of_the_guard(*_args: object, **_kwargs: object) -> NoReturn:
+        raise AssertionError("ran ahead of the first + last guard")
 
-def test_first_and_last_guard_on_generated_subclass() -> None:
-    """The generated ``<TypeName>Connection`` shares the ``first`` + ``last`` guard."""
+    monkeypatch.setattr(
+        "django_strawberry_framework.connection.check_deadline",
+        _ran_ahead_of_the_guard,
+    )
+    monkeypatch.setattr(
+        "django_strawberry_framework.connection.prime_selected_fields",
+        _ran_ahead_of_the_guard,
+    )
     node_type = _make_node_type("GuardCountNode", total_count=True)
     connection_type = _connection_type_for(node_type, node_type.__django_strawberry_definition__)
 

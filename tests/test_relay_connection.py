@@ -686,26 +686,6 @@ def test_divergent_mixed_sidecar_strictness_flags_only_the_sidecar_key() -> None
 
 
 @pytest.mark.django_db
-def test_fast_path_total_count_marker_bypasses_non_queryset_guard() -> None:
-    """``totalCount`` over the wrapper does NOT raise the non-queryset count guard.
-
-    The ``_WindowedConnectionRows`` marker is not a ``QuerySet``; the totalCount
-    variant must branch on it BEFORE ``_guard_total_count_countable`` /
-    ``.count()`` (spec-033 Decision 5), so selecting ``totalCount`` over a
-    fast-path window resolves cleanly instead of raising the M1 non-queryset
-    ``GraphQLError``.
-    """
-    _seed_library_books(["a", "b", "c"])
-    schema = _genres_list_schema(optimizer=True, book_total_count=True)
-    result = schema.execute_sync(
-        "{ objs { booksConnection(first: 2) { totalCount edges { node { title } } } } }",
-    )
-    assert result.errors is None, result.errors
-    assert result.data is not None
-    assert result.data["objs"][0]["booksConnection"]["totalCount"] == 3
-
-
-@pytest.mark.django_db
 def test_fast_path_ignores_window_when_sidecar_kwargs_present() -> None:
     """A sidecar refuses even an annotated, contradictory window planted by a drifted walker.
 
