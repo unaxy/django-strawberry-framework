@@ -447,7 +447,7 @@ it lands with its tick.
 
 ## Attribution (extend upstream instead of shipping its license)
 
-- [ ] 22. (FLT-4, NET-4, TYP-11) Copied upstream blocks: extend upstream so no third-party license is owed
+- [x] 22. (FLT-4, NET-4, TYP-11) Copied upstream blocks: extend upstream so no third-party license is owed
   - Rule. MIT and BSD attach only to copied or adapted upstream source. Importing, subclassing or calling upstream owes
     nothing, and neither does code that reproduces upstream behaviour in its own statements or shares a short
     functional string. A license file ships only for a project with at least one block still copied.
@@ -475,12 +475,30 @@ it lands with its tick.
     - [x] 22e. `types/relay.py::_resolve_id_default` goes; the resolver table installs Strawberry's own `Node.resolve_id`.
     - [x] 22f. `utils/errors.py::datetime_django_binds` projects a date with `datetime.combine` and
       `timezone.make_aware`, and no longer claims to adapt Django's code.
-  - Maintainer decisions still open: the debug toolbar redesign onto the stock `djdt-request-id` header (drops the
-    `debugToolbar` JSON key), moving the Strawberry and cross_web patches onto the package's own views, and moving the
-    graphql-core list patch onto `CompletionExecutionContext`.
   - After the extensions (landed): `LICENSE.django` and `LICENSE.graphql-core` are dropped, since no copied block backs
-    them, and "port of" claims on blocks that copy nothing now read "same contract as". The strawberry-django debug
-    toolbar copy still ships without its license and waits on the redesign decision above.
+    them, and "port of" claims on blocks that copy nothing now read "same contract as".
+  - Landed: the debug-toolbar pair is adapted code (65% of upstream's non-blank Python lines and 53% of its template
+    lines survive verbatim), from strawberry-graphql-django 0.82.1, itself based on flavors/django-graphiql-debug-toolbar
+    (MIT, not archived), so AGENTS.md line 6 decides it. `LICENSE.strawberry-django` and
+    `LICENSE.django-graphiql-debug-toolbar` (byte copies) ship in the sdist and the wheel's `licenses/` through
+    `pyproject.toml`'s `license-files` and sdist `include`; `middleware/debug_toolbar.py`'s docstring and a
+    `{% comment %}` atop the template (stripped at render) name both origins and files; the glossary term and spec-042
+    no longer call the project archived. Tests: `tests/middleware/test_debug_toolbar.py` and live
+    `test_debug_toolbar_api.py` pass unchanged (the render is the old one plus one leading newline).
+    - `_completion.py::_gather_with_cancel` is independent: no statement of graphql-core 3.3.0a12's
+      `gather_with_cancel` survives, and its cancel semantics are the opposite. No license is owed.
+    - The remaining "port of" claims name `django_graphene_filters`, the maintainer's own project; no third-party
+      license applies.
+  - The three remaining decisions copy nothing, so none is attribution work any more (yours):
+    - Toolbar redesign onto the stock `djdt-request-id` header: recommend against. It drops the documented
+      `debugToolbar` JSON key (a wire change), and the stock `fetch` patch loads after GraphiQL has captured
+      `window.fetch` (graphiql 3.8.3, read statically, not run in a browser), so a bridge script is still needed and
+      would have to reproduce the toolbar's module-private `replaceToolbarState`.
+    - Moving the Strawberry and cross_web patches onto the package's views: every patched body delegates to the
+      captured upstream method. Moving them drops the protection for consumers who mount Strawberry's own view and the
+      `APPLY_UPSTREAM_PATCHES` `strawberry` / `cross_web` keys, and the Relay arm cannot move. Recommend not.
+    - Moving the graphql-core list patch onto `CompletionExecutionContext`: a plain `strawberry.Schema` or a custom
+      `execution_context_class` would lose the fix, and the `graphql_core` opt-out key goes. Recommend not.
 
 ## Maintainer decisions (a reason to keep exists)
 

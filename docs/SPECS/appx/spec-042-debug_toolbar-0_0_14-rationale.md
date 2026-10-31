@@ -356,7 +356,7 @@ in the spec.
 
 - **`_postprocess` is a private-underscore method.** *Preferred:* accept the coupling — upstream
   carries the identical override (decorated `@override`, so a type checker notices a rename), the
-  archived `django-graphiql-debug-toolbar` did too, and the mechanism has been stable across the
+  `django-graphiql-debug-toolbar` did too, and the mechanism has been stable across the
   toolbar's 4.x → 7.x line. *Fallback:* if a toolbar release breaks the hook, the gate that
   catches it (the suite under a refreshed lockfile) also scopes the repair — worst case the floor
   gains a temporary ceiling with a follow-on card.
