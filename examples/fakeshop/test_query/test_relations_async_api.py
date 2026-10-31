@@ -47,6 +47,10 @@ The withdrawn-row cases target the hooked ``VenueBadgeType`` and
 ``VenueSponsorType`` on purpose, planned and lazy-loaded alike: the rows each
 hook hides stay off the async wire through the visibility arms.
 
+The one optimizer-installed lazy-load case arms ``strictness="raise"`` over a
+list root the walker cannot plan: the N+1 probe reads only the instance cache,
+so the guard names the unplanned relation before Django's sync-only gate fires.
+
 The shipped fakeshop mount at ``examples/fakeshop/config/urls.py`` is the SYNC
 view, so -- exactly as ``test_products_visibility_api.py`` does -- this module
 supplies its own ``AsyncDjangoGraphQLView`` mount over the app's registered
@@ -66,7 +70,7 @@ from django.http import HttpRequest
 from django.http.response import HttpResponseBase
 from django.test import override_settings
 from django.urls import clear_url_caches, path
-from graphql_client import JSONObject, RecordCompiledSql, response_json
+from graphql_client import JSONObject, RecordCompiledSql, json_at, json_list, response_json
 
 from django_strawberry_framework import DjangoOptimizerExtension, DjangoSchema, strawberry_config
 from django_strawberry_framework.testing import AsyncTestClient
@@ -201,6 +205,48 @@ async def test_async_many_side_lazy_loads_over_http() -> None:
             {"name": "Async Patron", "loans": [{"note": "first-note"}, {"note": "second-note"}]},
         ],
     }
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_async_strictness_names_an_unplanned_relation_before_the_sync_only_gate() -> None:
+    """An armed guard reports the unplanned many side in the event loop, not Django's gate.
+
+    The same ``patrons { loans }`` read as the lazy-load row above, with the
+    optimizer installed under ``strictness="raise"`` over the list root it cannot
+    plan. The N+1 probe reads only the instance cache, so the guard reaches the
+    relation before any lazy load trips Django's ``SynchronousOnlyOperation`` and
+    the client reads the actionable relation name, not an async-context error.
+    """
+    await sync_to_async(_seed_loan_graph)()
+
+    def _build() -> strawberry.Schema:
+
+        @strawberry.type
+        class Query:
+            async def _patrons(self) -> list[models.Patron]:
+                return await sync_to_async(list)(models.Patron.objects.order_by("name"))
+
+            patrons: list[models.Patron] = strawberry.field(
+                resolver=_patrons,
+                graphql_type=list[library_schema.PatronType],
+            )
+
+        optimizer = DjangoOptimizerExtension(strictness="raise")
+        return DjangoSchema(
+            error_policy={"enabled": False},
+            query=Query,
+            config=strawberry_config(),
+            extensions=[lambda: optimizer],
+        )
+
+    schema = await sync_to_async(_build)()
+    payload = await _post_async(schema, "{ patrons { name loans { note } } }")
+
+    assert payload["data"] is None, payload
+    assert [
+        (json_at(error, "message"), json_at(error, "path"))
+        for error in json_list(payload, "errors")
+    ] == [("Unplanned N+1: loans", ["patrons", 0, "loans"])]
 
 
 @pytest.mark.django_db(transaction=True)

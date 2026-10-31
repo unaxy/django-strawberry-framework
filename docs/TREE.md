@@ -527,7 +527,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_ci_governance.py         # Governance tests for CI workflows, Dependabot, install floors and first-party source.
 ├── test_clean_up.py              # Script tests for clean_up generated-artifact deletion boundaries.
 ├── test_completion.py            # Completion source audits and revocable ownership that a wire response cannot inspect.
-├── test_connection.py            # DjangoConnection construction, window internals, exception identity and planner metadata tests.
+├── test_connection.py            # DjangoConnection construction, window internals, exception identity and optimizer short-circuit tests.
 ├── test_connection_window_rows.py  # The windowed-prefetch hand-off accepts only model rows as a connection window.
 ├── test_consumer_base_check.py   # The revalidating consumer factory proves its bases carry the hooks it overrides.
 ├── test_consumers.py             # Construction-time and handshake-projection units for the WebSocket consumer.
@@ -895,7 +895,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_ci_governance.py         # Governance tests for CI workflows, Dependabot, install floors and first-party source.
 ├── test_clean_up.py              # Script tests for clean_up generated-artifact deletion boundaries.
 ├── test_completion.py            # Completion source audits and revocable ownership that a wire response cannot inspect.
-├── test_connection.py            # DjangoConnection construction, window internals, exception identity and planner metadata tests.
+├── test_connection.py            # DjangoConnection construction, window internals, exception identity and optimizer short-circuit tests.
 ├── test_connection_window_rows.py  # The windowed-prefetch hand-off accepts only model rows as a connection window.
 ├── test_consumer_base_check.py   # The revalidating consumer factory proves its bases carry the hooks it overrides.
 ├── test_consumers.py             # Construction-time and handshake-projection units for the WebSocket consumer.

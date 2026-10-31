@@ -16,13 +16,9 @@ import strawberry
 from apps.library.models import Book, Branch, Genre, Loan, Shelf
 from apps.products.models import Category, Item, Property
 from asgiref.sync import sync_to_async
-from django.contrib.auth.models import AnonymousUser
-from django.db import connection as db_connection
 from django.db import models as djmodels
 from django.db.models.manager import Manager
 from django.http import HttpRequest
-from django.test import RequestFactory
-from django.test.utils import CaptureQueriesContext
 from strategy_schemas import make_django_type
 from strawberry import relay
 from strawberry.relay.utils import from_base64, to_base64
@@ -659,98 +655,6 @@ def test_divergent_alias_per_key_window_preferred_over_shared() -> None:
     assert titles == ["b"]  # the per-key window, not the shared ["a", "c"]
 
 
-@pytest.mark.django_db
-def test_divergent_mixed_sidecar_strictness_flags_only_the_sidecar_key() -> None:
-    """Under ``"raise"``, only the sidecar alias flags - its planned sibling is silent.
-
-    Per-key strictness visibility: the sidecar key stays a real,
-    flagged per-parent access with the actionable filter/orderBy reason; the
-    planned sibling's identity was recorded, so it never flags.
-    """
-    _seed_library_books(["apple", "banana", "avocado"])
-    schema = _genres_filterable_book_schema(strictness="raise")
-    result = schema.execute_sync(
-        "{ objs { "
-        'a: booksConnection(filter: { title: { exact: "banana" } }) '
-        "{ edges { node { title } } } "
-        "b: booksConnection(first: 5) { edges { node { title } } } "
-        "} }",
-        context_value=HttpRequest(),
-    )
-    # The sidecar alias raises with the actionable reason...
-    assert result.errors is not None
-    messages = [str(e.original_error or e) for e in result.errors]
-    assert any("selection carries filter/orderBy" in m for m in messages), messages
-    # ...and it is the ONLY flag: the planned sibling never fires the checker.
-    assert len([m for m in messages if "Unplanned N+1" in m]) == 1
-
-
-@pytest.mark.django_db
-def test_fast_path_ignores_window_when_sidecar_kwargs_present() -> None:
-    """A sidecar refuses even an annotated, contradictory window planted by a drifted walker.
-
-    The supported walker never plans a sidecar window, so the manually planted
-    rows exercise the resolver's independent refusal rather than walker policy.
-    The fallback must query and return banana instead of the annotated apple/avocado.
-    """
-    _, books = _seed_library_books(["apple", "banana", "avocado"])
-
-    class _BookFilter(FilterSet):
-        class Meta:
-            model = Book
-            fields = {"title": ["exact"]}
-
-    make_django_type(
-        "BookType",
-        Book,
-        ("id", "title"),
-        meta_extra={"filterset_class": _BookFilter},
-    )
-    genre_type = _make_type("GenreType", Genre, ("id", "name", "books"))
-    finalize_django_types()
-    planted = [books[0], books[2]]
-    for number, book in enumerate(planted, start=1):
-        setattr(book, WINDOW_ROW_NUMBER, number)
-
-    def _resolver() -> list[Genre]:
-        parents = list(Genre.objects.order_by("pk"))
-        for parent in parents:
-            vars(parent)["_dst_books_connection"] = planted
-        return parents
-
-    query_cls = strawberry.type(
-        type(
-            "Query",
-            (),
-            {
-                "__annotations__": {"objs": list[genre_type]},
-                "objs": strawberry.field(resolver=_resolver),
-            },
-        ),
-    )
-    schema = DjangoSchema(query=query_cls, config=strawberry_config())
-    request = RequestFactory().get("/graphql/")
-    request.user = AnonymousUser()
-    with CaptureQueriesContext(db_connection) as captured:
-        result = schema.execute_sync(
-            '{ objs { booksConnection(filter: { title: { exact: "banana" } }) '
-            "{ edges { node { title } } } } }",
-            context_value={"request": request},
-        )
-    assert result.errors is None, result.errors
-    assert result.data == {
-        "objs": [{"booksConnection": {"edges": [{"node": {"title": "banana"}}]}}],
-    }
-    fallback_sql = [
-        query["sql"]
-        for query in captured.captured_queries
-        if 'FROM "library_book"' in query["sql"]
-    ]
-    assert len(fallback_sql) == 1, fallback_sql
-    assert "banana" in fallback_sql[0]
-    assert "ROW_NUMBER()" not in fallback_sql[0].upper()
-
-
 def _page_info(
     connection_cls: type[object],
     selections: str,
@@ -840,62 +744,6 @@ def test_fast_path_refuses_a_window_planned_under_other_bounds(strictness: str) 
     assert [read_attr(edge.node, "title") for edge in conn.edges] == ["a", "b"]
 
 
-@pytest.mark.django_db
-def test_fallback_when_annotations_missing() -> None:
-    """An unannotated reserved list is refused and a fresh per-parent query serves the page.
-
-    Planting only c makes the reserved attribute observably different from the
-    actual a/b page; SQL proves recovery ran instead of merely returning a/b
-    from an indistinguishable cached list.
-    """
-    _, books = _seed_library_books(["a", "b", "c"])
-    _make_type("BookType", Book, ("id", "title"))
-    genre_type = _make_type("GenreType", Genre, ("id", "name", "books"))
-    finalize_django_types()
-    assert not hasattr(books[2], WINDOW_ROW_NUMBER)
-
-    def _resolver() -> list[Genre]:
-        parents = list(Genre.objects.order_by("pk"))
-        for parent in parents:
-            vars(parent)["_dst_books_connection"] = [books[2]]
-        return parents
-
-    query_cls = strawberry.type(
-        type(
-            "Query",
-            (),
-            {
-                "__annotations__": {"objs": list[genre_type]},
-                "objs": strawberry.field(resolver=_resolver),
-            },
-        ),
-    )
-    schema = DjangoSchema(query=query_cls, config=strawberry_config())
-    with CaptureQueriesContext(db_connection) as captured:
-        result = schema.execute_sync(
-            "{ objs { booksConnection(first: 2) { edges { node { title } } } } }",
-        )
-    assert result.errors is None, result.errors
-    assert result.data == {
-        "objs": [
-            {
-                "booksConnection": {
-                    "edges": [{"node": {"title": "a"}}, {"node": {"title": "b"}}],
-                },
-            },
-        ],
-    }
-    fallback_sql = [
-        query["sql"]
-        for query in captured.captured_queries
-        if 'FROM "library_book"' in query["sql"]
-    ]
-    assert len(fallback_sql) == 1, fallback_sql
-    # The upstream offset connection fetches one probe row beyond first: 2.
-    assert "LIMIT 3" in fallback_sql[0].upper()
-    assert "ROW_NUMBER()" not in fallback_sql[0].upper()
-
-
 # =============================================================================
 # Strictness wiring for connection paths (spec-033 Decision 8).
 #
@@ -904,23 +752,25 @@ def test_fallback_when_annotations_missing() -> None:
 # (kind="connection_to_attr") before the per-parent fallback pipeline. An
 # unplanned, unserved nested-connection access fires the B3 contract -
 # ``OptimizerError`` under ``"raise"``, a logged warning under ``"warn"`` -
-# through the SAME machinery list relations use. These pins need an
-# optimizer-installed, strictness-active schema (the fakeshop project schema
-# runs strictness-off), so they live here, not in the live suite (Test plan).
+# through the SAME machinery list relations use. The messages, paths and
+# warnings are pinned over HTTP on strictness-armed holder mounts in
+# ``examples/fakeshop/test_query/test_relation_connections_api.py``; these rows
+# keep the exception classes and the private planned-key stash.
 #
 # The sidecar-filtered ``booksConnection(filter: ...)`` is the clearest
-# live-reachable refusal arm (spec-033 Decision 6): the walker leaves it
-# unplanned, so the resolver runs per-parent and is visible to strictness.
+# refusal arm (spec-033 Decision 6): the walker leaves it unplanned, so the
+# resolver runs per-parent and is visible to strictness.
 # =============================================================================
 
 
 @pytest.mark.django_db
-def test_strictness_raise_unplanned_nested_connection() -> None:
-    """``"raise"`` + optimizer + a fallback nested connection -> ``OptimizerError``.
+def test_strictness_raise_flag_on_a_filtered_nested_connection_is_an_optimizer_error() -> None:
+    """The ``"raise"`` refusal of a sidecar fallback is an ``OptimizerError``.
 
-    The flagged message NAMES the generated relation field (the ``field_name``
-    stem, the relation field name ``books`` the walker keyed the would-be plan
-    under), exactly as a plain list relation's strictness flag reads.
+    The message (relation field name plus the filter/orderBy reason), its path
+    and the null ``data`` are pinned live by
+    ``examples/fakeshop/test_query/test_relation_connections_api.py::test_strictness_raise_flags_a_filtered_nested_connection_with_its_field_and_reason``;
+    this row keeps the exception class the wire envelope does not carry.
     """
     _seed_library_books(["apple", "banana", "avocado"])
     schema = _genres_filterable_book_schema(strictness="raise")
@@ -930,21 +780,17 @@ def test_strictness_raise_unplanned_nested_connection() -> None:
         context_value=HttpRequest(),
     )
     assert result.errors is not None
-    messages = [str(e.original_error or e) for e in result.errors]
-    assert any(isinstance(e.original_error, OptimizerError) for e in result.errors)
-    assert any("Unplanned N+1: books" in m for m in messages)
+    assert [type(error.original_error) for error in result.errors] == [OptimizerError]
 
 
 @pytest.mark.django_db
-def test_strictness_raise_malformed_cursor_surfaces_pagination_error_not_optimizer_error() -> None:
-    """A malformed nested ``after:`` cursor raises the PAGINATION error, not ``OptimizerError``.
+def test_strictness_raise_malformed_nested_cursor_error_is_a_pagination_argument_error() -> None:
+    """The one error a malformed nested ``after:`` raises under ``"raise"`` is the cursor's class.
 
-    Error-locality regression (spec-033 Decision 4 step f / Decision 8): a
-    malformed cursor leaves the connection unwindowed so the per-parent pipeline
-    can raise its own cursor-validation error. Under strictness ``"raise"`` the
-    walker must still record the resolver key for this fallback, or the B3 check
-    preempts the real error with a spurious ``OptimizerError("Unplanned N+1")``.
-    The user should see the cursor error, not an optimizer defect.
+    The cursor message and its path are pinned live by
+    ``examples/fakeshop/test_query/test_relation_connections_api.py::test_strictness_raise_malformed_nested_cursor_reports_the_pagination_error``;
+    this row keeps the ``PaginationArgumentError`` class (not ``OptimizerError``)
+    the wire envelope does not carry.
     """
     _seed_library_books(["a", "b", "c"])
     schema = _genres_list_schema(optimizer=True, strictness="raise")
@@ -956,80 +802,36 @@ def test_strictness_raise_malformed_cursor_surfaces_pagination_error_not_optimiz
     assert result.errors is not None
     assert len(result.errors) == 1
     assert isinstance(result.errors[0].original_error, PaginationArgumentError)
-    assert str(result.errors[0].original_error) == (
-        "Argument 'after' contains a non-existing value."
-    )
 
 
 @pytest.mark.django_db
-def test_sidecar_fallback_is_flagged_with_reason() -> None:
-    """A sidecar fallback's ``"raise"`` message carries an ACTIONABLE reason.
-
-    spec-033 Decision 6 consistency pin (rationale bullet "A whole-relation
-    refusal stays visible to strictness on purpose"): a consumer who legitimately filters a nested
-    connection gets a per-parent fallback that strictness flags - the message
-    must explain WHY (the filter/orderBy wording) so it does not look like an
-    optimizer defect.
-    """
-    _seed_library_books(["apple", "banana", "avocado"])
-    schema = _genres_filterable_book_schema(strictness="raise")
-    result = schema.execute_sync(
-        '{ objs { booksConnection(filter: { title: { exact: "banana" } }) '
-        "{ edges { node { title } } } } }",
-        context_value=HttpRequest(),
-    )
-    assert result.errors is not None
-    messages = [str(e.original_error or e) for e in result.errors]
-    assert any("selection carries filter/orderBy" in m for m in messages), messages
-
-
-@pytest.mark.django_db
-def test_strictness_warn_nested_fallback_preserves_parent_plan_context(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+def test_strictness_warn_nested_fallback_keeps_the_list_siblings_key_in_the_planned_stash() -> (
+    None
+):
     """A completed warn-mode fallback preserves the parent's private planned-key stash.
 
-    Resolve the filtered connection first so its optimizer publication really
-    precedes the list sibling. Exact payload and warnings pin the consumer
-    verdict; the post-execution stash membership pins the private union even
-    when a prefetched list or the scoped-relation channel would mask its loss.
+    The filtered connection resolves first, so its optimizer publication
+    precedes the list sibling. The payload, the one warning and the two book
+    statements are pinned live by
+    ``examples/fakeshop/test_query/test_relation_connections_api.py::test_strictness_warn_nested_fallback_keeps_its_list_sibling_planned``;
+    this row keeps the post-execution stash membership, which pins the private
+    union even when a prefetched list or the scoped-relation channel would mask
+    its loss on the wire.
     """
     _seed_library_books(["apple", "banana", "avocado"])
     schema = _genres_filterable_book_schema(strictness="warn")
     genre_type = registry.get(Genre)
     assert genre_type is not None
     request = HttpRequest()
-    with CaptureQueriesContext(db_connection) as captured, caplog.at_level("WARNING"):
-        result = schema.execute_sync(
-            '{ objs { booksConnection(filter: { title: { exact: "banana" } }) '
-            "{ edges { node { title } } } books { title } } }",
-            context_value=request,
-        )
+    result = schema.execute_sync(
+        '{ objs { booksConnection(filter: { title: { exact: "banana" } }) '
+        "{ edges { node { title } } } books { title } } }",
+        context_value=request,
+    )
     assert result.errors is None, result.errors
-    assert result.data == {
-        "objs": [
-            {
-                "booksConnection": {"edges": [{"node": {"title": "banana"}}]},
-                "books": [{"title": title} for title in ("apple", "banana", "avocado")],
-            },
-        ],
-    }
-    assert caplog.messages == [
-        (
-            "Potential N+1 on books "
-            "(not window-planned: selection carries filter/orderBy; resolving per-parent)"
-        ),
-    ]
     planned = read_attr(request, "dst_optimizer_planned")
     assert isinstance(planned, frozenset)
     assert resolver_key(genre_type, "books", ("objs", "books")) in planned
-    book_sql = [
-        query["sql"]
-        for query in captured.captured_queries
-        if 'FROM "library_book"' in query["sql"]
-    ]
-    assert len(book_sql) == 2, book_sql
-    assert sum("banana" in query for query in book_sql) == 1
 
 
 def test_strictness_silent_when_planned() -> None:

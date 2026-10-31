@@ -175,7 +175,7 @@ Link-column execution tests over a holder HTTP mount over the test-local models 
 
 Extension integration tests in `tests/optimizer/test_extension.py`:
 
-- `test_optimizer_strictness_accepts_nested_planned_relation`: strictness `"raise"` does not raise for a nested relation covered by O4.
+- `examples/fakeshop/test_query/test_library_api.py::test_library_nested_planned_relations_are_silent_under_raise`: strictness `"raise"` does not raise for a nested relation covered by O4; `tests/optimizer/test_extension.py::test_optimizer_strictness_stashes_the_nested_planned_relation_key` keeps the stashed resolver key.
 - `test_optimizer_nested_prefetch_with_custom_get_queryset_marks_uncacheable`: the combined O6 + O4 path flips the cache flag.
 
 The query-count rows belong to the live tier, because they are reachable through a real query against the example project (`AGENTS.md` "Test through real usage"); a package-level stand-in for a live-reachable row is retired by the live row that replaces it:

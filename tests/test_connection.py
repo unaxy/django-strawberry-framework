@@ -1,10 +1,10 @@
-"""DjangoConnection construction, window internals, exception identity and planner metadata tests.
+"""DjangoConnection construction, window internals, exception identity and optimizer short-circuit tests.
 
-Request-shaped source, count, sidecar and cursor behavior lives in
+Request-shaped source, count, sidecar, cursor and root-planning behavior lives in
 ``examples/fakeshop/test_query/test_connection_fields_api.py``. These rows keep
 construction-time type identity, window state, original exception classes and
-internal planner publication that a response does not expose. Shared consumer
-declarations live in ``tests/_connection_field_schemas.py``.
+the cooperation point's no-optimizer short-circuits, none of which a response
+exposes. Shared consumer declarations live in ``tests/_connection_field_schemas.py``.
 """
 
 import asyncio
@@ -13,7 +13,6 @@ import functools
 import gc
 import warnings
 from collections.abc import AsyncIterator, Awaitable, Iterable, Iterator
-from types import SimpleNamespace
 from typing import NoReturn, get_origin
 
 import pytest
@@ -28,7 +27,6 @@ from strawberry.types.base import get_object_definition
 from typing_extensions import override
 
 from django_strawberry_framework import (
-    DjangoOptimizerExtension,
     DjangoType,
     finalize_django_types,
     strawberry_config,
@@ -58,17 +56,11 @@ from django_strawberry_framework.filters import _helper_referenced_filtersets
 from django_strawberry_framework.optimizer.extension import apply_connection_optimization
 from django_strawberry_framework.optimizer.plans import (
     WINDOW_ROW_NUMBER,
-    OptimizationPlan,
     _keyset_order_ref,
 )
 from django_strawberry_framework.orders import _helper_referenced_ordersets
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.types.relay import SyncMisuseError
-from django_strawberry_framework.utils._narrowing import (
-    is_abstract_set,
-    read_attr,
-    require,
-)
 from django_strawberry_framework.utils.input_values import UNSET
 from tests._connection_field_schemas import (
     _PLANNED_CONNECTION_DOCUMENT,
@@ -79,7 +71,6 @@ from tests._connection_field_schemas import (
     _field_schema,
     _info_with_selection,
     _make_node_type,
-    _make_relation_node_type,
     _make_sidecar_node_type,
     _node_over,
     _planned_relation_request,
@@ -849,104 +840,6 @@ async def test_connection_residual_awaitable_refusal_is_a_configuration_error() 
     assert result.errors is not None
     assert len(result.errors) == 1
     assert isinstance(result.errors[0].original_error, ConfigurationError)
-
-
-# =============================================================================
-# Optimizer cooperation point + connection-aware-planning gap guard
-# =============================================================================
-
-
-@pytest.mark.django_db
-def test_root_connection_field_queryset_is_planned() -> None:
-    """The field's helper plans ``edges.node`` selections on the pre-slice queryset.
-
-    A root ``DjangoConnectionField`` self-optimizes by calling
-    ``apply_connection_optimization`` before ``ConnectionExtension`` slices -
-    the schema middleware (``DjangoOptimizerExtension.resolve``) cannot reach the
-    pre-slice queryset behind the connection result, so any published plan over
-    the connection IS the field's own cooperation point running (per the spec's
-    "the cooperation point the field now owns, NOT the middleware" framing).
-
-    The published plan is asserted via ``info.context.dst_optimizer_plan`` (the
-    B5 plan-introspection shape from ``tests/optimizer/test_extension.py``): its
-    presence on the context proves ``apply_to`` -> ``_publish_plan_to_context``
-    ran for the connection field, which it does ONLY through the field's helper.
-    Live SQL for a hooked target is Prefetch, not ``select_related``
-    (``test_products_api.py::test_products_optimizer_merges_duplicate_root_field_nodes_over_http``);
-    this row keeps the plan-object for a hook-free throwaway, which no shipped
-    type reproduces.
-    """
-    services.seed_data(2)
-    # ``ItemNode`` exposes the forward FK ``category`` - the relation a plain
-    # ``DjangoListField`` over the same type plans as ``select_related``.
-    _make_relation_node_type("PlanCatNode", fields=("id", "name"))
-    item_node = _make_relation_node_type(
-        "PlanItemNode",
-        fields=("id", "name", "category"),
-        model=Item,
-    )
-    schema = _field_schema(item_node, optimizer=DjangoOptimizerExtension(strictness="raise"))
-
-    ctx = SimpleNamespace()
-    result = schema.execute_sync(
-        "{ items { edges { node { id name category { id name } } } } }",
-        context_value=ctx,
-    )
-    assert result.errors is None
-    # The cooperation point ran: the field's helper published a plan to context.
-    # (The middleware never sees the pre-slice queryset behind ConnectionExtension,
-    # so this plan can only have come from the field's own helper.)
-    plan = read_attr(ctx, "dst_optimizer_plan", None)
-    assert isinstance(plan, OptimizationPlan)
-    assert plan.select_related == ("category",)
-    assert plan.prefetch_related == ()
-    assert plan.only_fields == (
-        "id",
-        "name",
-        "category_id",
-        "category__id",
-        "category__name",
-    )
-    assert "PlanItemNode.category@items.edges.node.category" in require(
-        read_attr(ctx, "dst_optimizer_planned"),
-        is_abstract_set,
-    )
-
-
-@pytest.mark.django_db
-def test_root_connection_field_queryset_prefetches_node_many_relation() -> None:
-    """A many-side relation under ``edges.node`` is planned as a prefetch.
-
-    Live SQL for the same many-side under a root connection is
-    ``test_products_visibility_api.py``'s planned-list / planned-connection rows
-    (one ``FROM "products_item"`` query). This row keeps the plan-object
-    (``prefetch_related`` / ``only_fields``) a response cannot uniquely show.
-    """
-    services.seed_data(2)
-    _make_relation_node_type("PlanPrefetchItemNode", fields=("id", "name"), model=Item)
-    category_node = _make_relation_node_type(
-        "PlanPrefetchCatNode",
-        fields=("id", "name", "items"),
-        list_relations=("items",),
-    )
-    schema = _field_schema(category_node, optimizer=DjangoOptimizerExtension(strictness="raise"))
-
-    ctx = SimpleNamespace()
-    result = schema.execute_sync(
-        "{ items { edges { node { id name items { id name } } } } }",
-        context_value=ctx,
-    )
-
-    assert result.errors is None
-    plan = read_attr(ctx, "dst_optimizer_plan", None)
-    assert isinstance(plan, OptimizationPlan)
-    assert plan.select_related == ()
-    assert [read_attr(entry, "prefetch_to", entry) for entry in plan.prefetch_related] == ["items"]
-    assert plan.only_fields == ("id", "name")
-    assert "PlanPrefetchCatNode.items@items.edges.node.items" in require(
-        read_attr(ctx, "dst_optimizer_planned"),
-        is_abstract_set,
-    )
 
 
 # =============================================================================

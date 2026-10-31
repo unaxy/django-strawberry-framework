@@ -10,37 +10,31 @@ This module owns construction/finalize refusal, class cache and private decoder
 status, stamp identity, original_error exception classes, helper return shapes
 and public-export identity. The private stamping tests inspect the original ORM
 row's cast attribute directly; the required-node test inspects the original
-model exception hidden by the GraphQL error envelope. It also keeps the refetch
-rows over key shapes no fakeshop model carries: a test-local comma-list key whose
-value is unhashable, a decimal key SQLite stores as a float, and naive datetime
-keys read in the default time zone (including a wall clock the zone repeats or
-skips). The NodeID over a queryset annotation refetches live on ``SeriesType``
+model exception hidden by the GraphQL error envelope. Refetch over key shapes no
+fakeshop model carries (an unhashable comma-list key, a decimal key SQLite stores
+as a float, naive datetime keys in the default time zone) runs over HTTP on
+function-local models in ``test_node_refetch_api.py``, as do the sync-misuse
+messages whose exception classes stay here. The NodeID over a queryset annotation
+refetches live on ``SeriesType``
 (``test_library_api.py::test_library_series_node_refetches_by_its_annotated_handle``).
 """
 
-import contextlib
-import datetime
 import re
-import zoneinfo
-from collections.abc import Awaitable, Callable, Generator, Iterable, Iterator
-from decimal import Decimal
-from typing import TYPE_CHECKING
+from collections.abc import Awaitable, Callable, Iterable, Iterator
 
-import django
 import pytest
 import strawberry
 from apps.products import services
 from apps.products.models import Category
 from asgiref.sync import sync_to_async
-from django.db import DEFAULT_DB_ALIAS, connection, models
+from django.db import DEFAULT_DB_ALIAS
 from django.db.models import Model, QuerySet
-from django.test import override_settings
 from django.utils.functional import SimpleLazyObject
+from strategy_schemas import make_django_type
 from strawberry import relay
 from strawberry.schema_directive import Location as DirectiveLocation
 from strawberry.schema_directive import schema_directive
 from strawberry.types.cast import TYPE_CAST_ATTRIBUTE
-from typing_extensions import override
 
 import django_strawberry_framework
 import django_strawberry_framework.relay as relay_module
@@ -67,22 +61,10 @@ from django_strawberry_framework.types.relay import (
     implements_relay_node,
 )
 from django_strawberry_framework.utils import truth as real_truth
-from django_strawberry_framework.utils._narrowing import is_exact_list, read_attr
+from django_strawberry_framework.utils._narrowing import read_attr
 from tests._idioms import (
     saved_pk,
 )
-
-if TYPE_CHECKING:
-    from typing import TypeAlias
-
-    from django.db.models.expressions import Combinable
-
-    # The field's descriptor types as django-stubs declares them (set type, get type), spelled
-    # out because the checker runs without the django-stubs mypy plugin that would infer them.
-    _AwareStamp: TypeAlias = models.DateTimeField[
-        str | datetime.datetime | datetime.date | Combinable,
-        datetime.datetime,
-    ]
 
 
 @pytest.fixture(autouse=True)
@@ -404,250 +386,6 @@ def test_batch_coercion_computes_id_slot_once_per_type(monkeypatch: pytest.Monke
 # ---------------------------------------------------------------------------
 
 
-class _SpelledDecimalKeyed(Model):
-    """A Relay row keyed by a ``DecimalField`` without ``max_digits``."""
-
-    code: "models.DecimalField[str | float | Decimal | Combinable, Decimal]" = models.DecimalField(
-        primary_key=True,
-        max_digits=None,
-        decimal_places=None,
-    )
-    name: "models.TextField[str | Combinable, str]" = models.TextField()
-
-    class Meta:
-        app_label = "products"
-        managed = False
-        db_table = "relay_spelled_decimal_keyed"
-
-
-class _SpelledStampKeyed(Model):
-    """A Relay row keyed by an aware ``DateTimeField``."""
-
-    stamp: "_AwareStamp" = models.DateTimeField(primary_key=True)
-    name: "models.TextField[str | Combinable, str]" = models.TextField()
-
-    class Meta:
-        app_label = "products"
-        managed = False
-        db_table = "relay_spelled_stamp_keyed"
-
-
-# The stubs make ``TextField`` generic; the runtime class takes no subscript.
-if TYPE_CHECKING:
-    _CommaListBase = models.TextField[str | list[str] | Combinable, list[str]]
-else:
-    _CommaListBase = models.TextField
-
-
-class _CommaListField(_CommaListBase):
-    """A consumer column holding a list of words, stored as their comma-joined text."""
-
-    @override
-    def to_python(self, value: object) -> object:
-        return value.split(",") if isinstance(value, str) else value
-
-    def from_db_value(self, value: object, *_context: object) -> object:
-        """Read the stored text back as the list it holds; Django passes two more arguments."""
-        return self.to_python(value)
-
-    @override
-    def get_prep_value(self, value: object) -> object:
-        return ",".join(str(word) for word in value) if is_exact_list(value) else value
-
-
-class _SpelledListKeyed(Model):
-    """A Relay row keyed by a consumer column whose Python value is a list, never hashable."""
-
-    code: "_CommaListField" = _CommaListField(primary_key=True)
-    name: "models.TextField[str | Combinable, str]" = models.TextField()
-
-    class Meta:
-        app_label = "products"
-        managed = False
-        db_table = "relay_spelled_list_keyed"
-
-
-@contextlib.contextmanager
-def _spelled_key_table(model: type[Model], key: object) -> Generator[str, None, None]:
-    """Create ``model``'s table holding one row keyed ``key``; yield its model-label prefix."""
-    with connection.schema_editor() as editor:
-        editor.create_model(model)
-    try:
-        _ = model._default_manager.create(pk=key, name="stored")
-        yield f"products.{model._meta.model_name}"
-    finally:
-        with connection.schema_editor() as editor:
-            editor.delete_model(model)
-
-
-def _spelled_key_answer(
-    model: type[Model],
-    label: str,
-    spelled: str,
-    root: str,
-) -> object:
-    """Query the ``root`` refetch field over ``model`` with the id spelled ``spelled``."""
-    return _spelled_key_answers(model, label, [spelled], root)[0]
-
-
-def _spelled_key_answers(
-    model: type[Model],
-    label: str,
-    spellings: Iterable[str],
-    root: str,
-) -> list[object]:
-    """Query the ``root`` refetch field over ``model`` once per id spelling in ``spellings``."""
-    meta = {
-        "model": model,
-        "fields": ("name",),
-        "interfaces": (relay.Node,),
-        "name": "SpelledNode",
-    }
-    spelled_node = type("SpelledNode", (DjangoType,), {"Meta": type("Meta", (), meta)})
-
-    @strawberry.type
-    class Query:
-        node: relay.Node | None = DjangoNodeField()
-        nodes: list[relay.Node | None] = DjangoNodesField()
-
-    finalize_django_types()
-    schema = strawberry.Schema(query=Query, config=strawberry_config(), types=[spelled_node])
-    selection = "node(id: $id)" if root == "node" else "nodes(ids: [$id])"
-    answers: list[object] = []
-    for spelled in spellings:
-        result = schema.execute_sync(
-            f"query ($id: ID!) {{ {selection} {{ ... on SpelledNode {{ name }} }} }}",
-            variable_values={"id": _gid(label, spelled)},
-        )
-        assert result.errors is None, result.errors
-        answers.append(result.data)
-    return answers
-
-
-_STORED_ANSWER = {"node": {"node": {"name": "stored"}}, "nodes": {"nodes": [{"name": "stored"}]}}
-_MISSING_ANSWER = {"node": {"node": None}, "nodes": {"nodes": [None]}}
-_REFETCH_ROOTS = pytest.mark.parametrize("root", ["node", "nodes"])
-
-
-@pytest.mark.django_db(transaction=True)
-@_REFETCH_ROOTS
-def test_refetch_finds_a_row_whose_key_value_is_unhashable(root: str) -> None:
-    """A key column whose Python value is a list keys the reorder by its ``str``.
-
-    ``to_python`` turns the id and the row's key into lists, which cannot key the
-    reorder's index (``utils/querysets.py::identity_key``), so both sides key by the
-    list's ``str`` and ``node`` and ``nodes`` get the row instead of raising.
-    """
-    with _spelled_key_table(_SpelledListKeyed, ["ab", "cd"]) as label:
-        answer = _spelled_key_answer(_SpelledListKeyed, label, "ab,cd", root)
-    assert answer == _STORED_ANSWER[root]
-
-
-@pytest.mark.skipif(
-    connection.vendor != "sqlite",
-    reason="SQLite stores such a decimal as a float",
-)
-@pytest.mark.skipif(
-    django.VERSION < (6, 1),
-    reason="Django below 6.1 cannot read back a DecimalField without decimal_places",
-)
-@pytest.mark.django_db(transaction=True)
-@pytest.mark.parametrize(
-    "stored",
-    [
-        pytest.param(Decimal("1234567890.1234567"), id="non-integral-past-15-digits"),
-        pytest.param(Decimal(123456789012345678901), id="integral-past-64-bits"),
-    ],
-)
-@_REFETCH_ROOTS
-def test_refetch_cannot_address_a_decimal_key_sqlite_stores_as_a_float(
-    stored: Decimal,
-    root: str,
-) -> None:
-    """On SQLite a decimal key past 15 significant digits is stored as a float.
-
-    Django reads it back rounded to 15 digits, so neither the written value nor the
-    rounded one the row reads back as (the value its emitted id carries) equals the
-    stored float: both spellings answer null.
-    """
-    with _spelled_key_table(_SpelledDecimalKeyed, stored) as label:
-        read_back = _SpelledDecimalKeyed.objects.get().code
-        assert read_back != stored
-        answers = _spelled_key_answers(
-            _SpelledDecimalKeyed,
-            label,
-            [str(stored), str(read_back)],
-            root,
-        )
-    assert answers == [_MISSING_ANSWER[root]] * 2
-
-
-#: A non-UTC default time zone, so a naive id read in UTC would name another instant.
-_NAIVE_ZONE = "America/New_York"
-
-
-@override_settings(TIME_ZONE=_NAIVE_ZONE)
-@pytest.mark.django_db(transaction=True)
-@pytest.mark.parametrize(
-    ("spelled", "answers"),
-    [
-        pytest.param("2024-01-01T08:00:00", _STORED_ANSWER, id="naive-iso-t"),
-        pytest.param("2024-01-01 08:00:00", _STORED_ANSWER, id="naive-iso-space"),
-        pytest.param("2024-01-01", _MISSING_ANSWER, id="date-only-is-midnight"),
-        pytest.param("2024-01-01T13:00:00", _MISSING_ANSWER, id="naive-utc-wall-clock"),
-    ],
-)
-@_REFETCH_ROOTS
-def test_refetch_reads_a_naive_datetime_key_in_the_default_time_zone(
-    spelled: str,
-    answers: dict[str, object],
-    root: str,
-) -> None:
-    """A naive datetime id names the instant Django's lookup binds: its wall clock in ``TIME_ZONE``.
-
-    The id is made aware in the default zone without Django's naive-datetime warning, so
-    ``node`` and ``nodes`` get the row stored at that instant; a date-only spelling is its
-    midnight and the same wall clock read as UTC is another instant, so both answer null.
-    """
-    stored = datetime.datetime(2024, 1, 1, 8, tzinfo=zoneinfo.ZoneInfo(_NAIVE_ZONE))
-    with _spelled_key_table(_SpelledStampKeyed, stored) as label:
-        answer = _spelled_key_answer(_SpelledStampKeyed, label, spelled, root)
-    assert answer == answers[root]
-
-
-@override_settings(TIME_ZONE=_NAIVE_ZONE)
-@pytest.mark.django_db(transaction=True)
-@pytest.mark.parametrize(
-    ("stored", "spelled"),
-    [
-        pytest.param(
-            datetime.datetime(2024, 11, 3, 5, 30, tzinfo=datetime.timezone.utc),
-            "2024-11-03T01:30:00",
-            id="dst-fold",
-        ),
-        pytest.param(
-            datetime.datetime(2024, 3, 10, 7, 30, tzinfo=datetime.timezone.utc),
-            "2024-03-10T02:30:00",
-            id="dst-gap",
-        ),
-    ],
-)
-@_REFETCH_ROOTS
-def test_refetch_reads_a_naive_datetime_key_the_default_zone_repeats_or_skips(
-    stored: datetime.datetime,
-    spelled: str,
-    root: str,
-) -> None:
-    """A naive id on a DST fold or gap wall clock names the instant Django's lookup binds.
-
-    Django makes the wall clock aware at its first offset; the row it matches reads back
-    in UTC, and the reorder keys both as that instant, so ``node`` and ``nodes`` get it.
-    """
-    with _spelled_key_table(_SpelledStampKeyed, stored) as label:
-        answer = _spelled_key_answer(_SpelledStampKeyed, label, spelled, root)
-    assert answer == _STORED_ANSWER[root]
-
-
 def _strawberry_node_schema() -> strawberry.Schema:
     """A schema whose root fields are Strawberry's own ``relay.node()`` over the defaults."""
 
@@ -794,8 +532,13 @@ def test_node_field_without_node_types_raises_at_finalize() -> None:
 
 
 @pytest.mark.django_db
-def test_node_sync_with_async_consumer_resolve_node_raises_sync_misuse() -> None:
-    """Sync node refetch rejects an async consumer ``resolve_node`` explicitly."""
+def test_sync_refetch_async_resolve_node_error_is_a_sync_misuse_error() -> None:
+    """The error a sync refetch raises for an async ``resolve_node`` is a ``SyncMisuseError``.
+
+    The message naming the override, its path and the null row are pinned live by
+    ``examples/fakeshop/test_query/test_node_refetch_api.py::test_sync_refetch_refuses_an_async_consumer_resolve_node``;
+    this row keeps the exception class the wire envelope does not carry.
+    """
     services.seed_data(1)
 
     class AsyncCategoryNode(DjangoType):
@@ -828,8 +571,6 @@ def test_node_sync_with_async_consumer_resolve_node_raises_sync_misuse() -> None
     )
     assert result.errors is not None
     assert isinstance(result.errors[0].original_error, SyncMisuseError)
-    assert "resolve_node" in str(result.errors[0])
-    assert result.data == {"category": None}
 
 
 @pytest.mark.django_db(transaction=True)
@@ -885,8 +626,13 @@ async def test_node_sync_operation_inside_an_event_loop_never_calls_async_resolv
 
 
 @pytest.mark.django_db
-def test_nodes_sync_with_async_consumer_resolve_nodes_raises_sync_misuse() -> None:
-    """Sync batch refetch rejects an async consumer ``resolve_nodes`` explicitly."""
+def test_sync_batch_refetch_async_resolve_nodes_error_is_a_sync_misuse_error() -> None:
+    """The error a sync batch refetch raises for an async ``resolve_nodes`` is a ``SyncMisuseError``.
+
+    The message naming the override, its path and the null ``data`` are pinned live by
+    ``examples/fakeshop/test_query/test_node_refetch_api.py::test_sync_batch_refetch_refuses_an_async_consumer_resolve_nodes``;
+    this row keeps the exception class the wire envelope does not carry.
+    """
     services.seed_data(1)
 
     class AsyncCategoryNode(DjangoType):
@@ -920,43 +666,39 @@ def test_nodes_sync_with_async_consumer_resolve_nodes_raises_sync_misuse() -> No
     )
     assert result.errors is not None
     assert isinstance(result.errors[0].original_error, SyncMisuseError)
-    assert "resolve_nodes" in str(result.errors[0])
-    assert result.data is None
 
 
 @pytest.mark.django_db
-def test_node_sync_async_get_queryset_raises_sync_misuse() -> None:
-    """An async ``get_queryset`` under sync execution surfaces SyncMisuseError, NOT GLOBALID_INVALID.
+def test_sync_refetch_async_get_queryset_error_is_a_sync_misuse_error() -> None:
+    """The error an async ``get_queryset`` raises under a sync refetch is a ``SyncMisuseError``.
 
-    Discriminating (spec-032 Decision 5): ``SyncMisuseError`` IS-A
-    ``ConfigurationError``, so a blanket catch-convert around the resolver
-    body would mislabel this server misconfiguration a client id error; the
-    boundary scopes the decode call only.
+    The message, the null row and the absent ``GLOBALID_INVALID`` code (spec-032
+    Decision 5: the id-error conversion is scoped to the decode call only) are
+    pinned live by
+    ``examples/fakeshop/test_query/test_node_refetch_api.py::test_sync_refetch_reports_an_async_get_queryset_as_misuse_not_an_invalid_id``;
+    this row keeps the exception class the wire envelope does not carry.
     """
     services.seed_data(1)
 
-    class AsyncCategoryNode(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
-            name = "CategoryNode"
+    async def _async_get_queryset(
+        _cls: type[DjangoType],
+        queryset: QuerySet[Category],
+        _info: object,
+        **_kwargs: object,
+    ) -> QuerySet[Category]:
+        return queryset
 
-        @classmethod
-        @override
-        # basedpyright: deliberately async on the sync path: the coroutine is the input the guard refuses
-        async def get_queryset(  # pyright: ignore[reportIncompatibleMethodOverride]
-            cls,
-            queryset: QuerySet[Category],
-            info: object,
-            **kwargs: object,
-        ) -> QuerySet[Category]:
-            return queryset
-
+    async_category_node = make_django_type(
+        "AsyncCategoryNode",
+        Category,
+        ("id", "name"),
+        meta_extra={"name": "CategoryNode"},
+        namespace_extra={"get_queryset": classmethod(_async_get_queryset)},
+    )
     schema = _schema_with(
         "category",
-        AsyncCategoryNode | None,
-        DjangoNodeField(AsyncCategoryNode),
+        async_category_node | None,
+        DjangoNodeField(async_category_node),
     )
     row = Category.objects.order_by("pk").first()
     assert row is not None
@@ -966,8 +708,6 @@ def test_node_sync_async_get_queryset_raises_sync_misuse() -> None:
     )
     assert result.errors is not None
     assert isinstance(result.errors[0].original_error, SyncMisuseError)
-    assert (result.errors[0].extensions or {}).get("code") != "GLOBALID_INVALID"
-    assert "Invalid GlobalID" not in str(result.errors[0])
 
 
 @pytest.mark.django_db

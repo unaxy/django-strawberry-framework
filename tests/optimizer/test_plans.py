@@ -59,7 +59,6 @@ from django_strawberry_framework.optimizer.plans import (
     ends_in_unique_column,
     local_cursor_attnames,
     lookup_paths,
-    merged_projection,
     normalize_order_direction,
     order_entry_has_explicit_nulls,
     resolver_key,
@@ -1824,33 +1823,6 @@ def test_apply_projection_keeps_a_generic_foreign_key_carrier_by_its_key_attname
     applied = apply_projection(_RenamedTag.objects.prefetch_related("target"), ["id"])
 
     assert applied.query.deferred_loading == (frozenset({"id", "ct_ref", "obj_id"}), False)
-
-
-@pytest.mark.parametrize(
-    ("deferred", "names", "remaining"),
-    [
-        pytest.param(("shelf", "subtitle"), ["shelf_id"], ["subtitle"], id="attname"),
-        pytest.param(("shelf", "subtitle"), ["shelf__code"], ["subtitle"], id="dotted-read"),
-        pytest.param(
-            ("shelf__code", "shelf__topic"),
-            ["shelf__code"],
-            ["shelf__topic"],
-            id="dotted-defer",
-        ),
-    ],
-)
-def test_merged_projection_defer_mode_matches_every_spelling_of_a_read_column(
-    deferred: tuple[str, ...],
-    names: list[str],
-    remaining: list[str],
-) -> None:
-    """A consumer ``.defer()`` stops deferring a column the names read under any spelling.
-
-    The live rows defer and read one column by its field name; these are the
-    spellings no fakeshop row carries: the attname, a dotted read under the
-    deferred relation, and a dotted ``.defer()`` entry.
-    """
-    assert merged_projection(Book.objects.defer(*deferred), names) == (remaining, True)
 
 
 @pytest.mark.parametrize(

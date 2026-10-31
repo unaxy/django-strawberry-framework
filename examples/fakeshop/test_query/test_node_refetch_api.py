@@ -10,11 +10,18 @@ alternate spellings and uncoercible literals are deliberate input probes.
 The unconstrained decimal and datetime primary keys have no shipped equivalent.
 Their function-local models use real temporary tables and native HTTP requests.
 Both equal-value alternate spellings and different existing-type keys cross the
-same public refetch fields.
+same public refetch fields, as do a comma-list key whose Python value is an
+unhashable list, a decimal key SQLite stores as a float, and naive datetime keys
+read in the default time zone (including a DST fold or gap wall clock).
+
+An ``async def`` consumer ``resolve_node`` / ``resolve_nodes`` or ``get_queryset``
+under the sync view is refused with its sync-misuse message, never a null row or
+an invalid-id error; the exception classes stay in ``tests/test_relay_node_field.py``.
 """
 
 import contextlib
 import datetime
+import zoneinfo
 from collections.abc import Generator, Iterable, Iterator, Mapping
 from decimal import Decimal
 from functools import wraps
@@ -27,7 +34,7 @@ from apps.products import services
 from apps.products.models import Category
 from asgiref.sync import sync_to_async
 from django.db import connection, models
-from django.db.models import Model
+from django.db.models import Model, QuerySet
 from django.db.models.functions import Length
 from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
@@ -39,6 +46,7 @@ from graphql_client import (
     graphql_payload,
     json_at,
     json_list,
+    json_object,
     json_str,
     response_json,
 )
@@ -58,7 +66,7 @@ from django_strawberry_framework import (
 )
 from django_strawberry_framework.testing import AsyncTestClient
 from django_strawberry_framework.testing.relay import global_id_for
-from django_strawberry_framework.utils._narrowing import read_attr
+from django_strawberry_framework.utils._narrowing import is_exact_list, read_attr
 from django_strawberry_framework.utils.typing import object_result
 from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 from tests._idioms import FETCH_MODES, pickle_roundtrip, requires_fetch_modes, saved_pk
@@ -72,6 +80,12 @@ if TYPE_CHECKING:
         str | datetime.datetime | datetime.date | Combinable,
         datetime.datetime,
     ]
+
+# The stubs make ``TextField`` generic; the runtime class takes no subscript.
+if TYPE_CHECKING:
+    _CommaListBase = models.TextField[str | list[str] | Combinable, list[str]]
+else:
+    _CommaListBase = models.TextField
 
 pytestmark = pytest.mark.usefixtures("private_registry")
 
@@ -503,7 +517,39 @@ def test_default_refetch_resolves_a_padded_integer_key_by_value() -> None:
     assert payload == {"data": {"node": {"name": row.name}, "nodes": [{"name": row.name}]}}
 
 
+class _CommaListField(_CommaListBase):
+    """A consumer column holding a list of words, stored as their comma-joined text."""
+
+    @override
+    def to_python(self, value: object) -> object:
+        return value.split(",") if isinstance(value, str) else value
+
+    def from_db_value(self, value: object, *_context: object) -> object:
+        """Read the stored text back as the list it holds; Django passes two more arguments."""
+        return self.to_python(value)
+
+    @override
+    def get_prep_value(self, value: object) -> object:
+        return ",".join(str(word) for word in value) if is_exact_list(value) else value
+
+
 def _spelled_model(kind: str) -> type[Model]:
+    if kind == "list":
+
+        class RefetchListRow(Model):
+            code: "_CommaListField" = _CommaListField(primary_key=True)
+            name: "models.TextField[str | Combinable, str]" = models.TextField()
+
+            class Meta:
+                app_label = "products"
+                managed = False
+                db_table = "refetch_list_row"
+
+            @override
+            def __str__(self) -> str:
+                return self.name
+
+        return RefetchListRow
     if kind == "decimal":
 
         class RefetchDecimalRow(Model):
@@ -664,6 +710,130 @@ def test_refetch_does_not_substitute_a_row_for_a_different_datetime_key(root: st
     with _key_table(model, datetime.datetime(2024, 1, 1, 8, tzinfo=datetime.timezone.utc)):
         payload = _spelled_answer(model, "2024-01-01T11:00:00+02:00", root)
     assert payload == {"data": {root: None if root == "node" else [None]}}
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("root", ["node", "nodes"])
+def test_refetch_finds_a_row_whose_key_value_is_unhashable(root: str) -> None:
+    """A key column whose Python value is a list keys the reorder by its ``str``.
+
+    ``to_python`` turns the id and the row's key into lists, which cannot key the
+    reorder's index (``utils/querysets.py::identity_key``), so both sides key by the
+    list's ``str`` and ``node`` and ``nodes`` get the row instead of an error.
+    """
+    model = _spelled_model("list")
+    with _key_table(model, ["ab", "cd"]):
+        payload = _spelled_answer(model, "ab,cd", root)
+    expected: object = {"name": "stored"} if root == "node" else [{"name": "stored"}]
+    assert payload == {"data": {root: expected}}
+
+
+@pytest.mark.skipif(
+    connection.vendor != "sqlite",
+    reason="SQLite stores such a decimal as a float",
+)
+@pytest.mark.skipif(
+    django.VERSION < (6, 1),
+    reason="Django below 6.1 cannot read an unconstrained DecimalField",
+)
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    "stored",
+    [
+        pytest.param(Decimal("1234567890.1234567"), id="non-integral-past-15-digits"),
+        pytest.param(Decimal(123456789012345678901), id="integral-past-64-bits"),
+    ],
+)
+@pytest.mark.parametrize("spelling", ["written", "read-back"])
+@pytest.mark.parametrize("root", ["node", "nodes"])
+def test_refetch_cannot_address_a_decimal_key_sqlite_stores_as_a_float(
+    stored: Decimal,
+    spelling: str,
+    root: str,
+) -> None:
+    """On SQLite a decimal key past 15 significant digits is stored as a float.
+
+    Django reads it back rounded to 15 digits, so neither the written value nor the
+    rounded one the row reads back as (the value its emitted id carries) equals the
+    stored float: both spellings answer null.
+    """
+    model = _spelled_model("decimal")
+    with _key_table(model, stored):
+        read_back = read_attr(model._default_manager.get(), "pk")
+        assert read_back != stored
+        payload = _spelled_answer(model, str(stored if spelling == "written" else read_back), root)
+    assert payload == {"data": {root: None if root == "node" else [None]}}
+
+
+#: A non-UTC default time zone, so a naive id read in UTC would name another instant.
+_NAIVE_ZONE = "America/New_York"
+
+
+@override_settings(TIME_ZONE=_NAIVE_ZONE)
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("spelled", "found"),
+    [
+        pytest.param("2024-01-01T08:00:00", True, id="naive-iso-t"),
+        pytest.param("2024-01-01 08:00:00", True, id="naive-iso-space"),
+        pytest.param("2024-01-01", False, id="date-only-is-midnight"),
+        pytest.param("2024-01-01T13:00:00", False, id="naive-utc-wall-clock"),
+    ],
+)
+@pytest.mark.parametrize("root", ["node", "nodes"])
+def test_refetch_reads_a_naive_datetime_key_in_the_default_time_zone(
+    spelled: str,
+    root: str,
+    *,
+    found: bool,
+) -> None:
+    """A naive datetime id names the instant Django's lookup binds: its wall clock in ``TIME_ZONE``.
+
+    The id is made aware in the default zone without Django's naive-datetime warning, so
+    ``node`` and ``nodes`` get the row stored at that instant; a date-only spelling is its
+    midnight and the same wall clock read as UTC is another instant, so both answer null.
+    """
+    model = _spelled_model("datetime")
+    stored = datetime.datetime(2024, 1, 1, 8, tzinfo=zoneinfo.ZoneInfo(_NAIVE_ZONE))
+    with _key_table(model, stored):
+        payload = _spelled_answer(model, spelled, root)
+    row: object = {"name": "stored"} if found else None
+    assert payload == {"data": {root: row if root == "node" else [row]}}
+
+
+@override_settings(TIME_ZONE=_NAIVE_ZONE)
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("stored", "spelled"),
+    [
+        pytest.param(
+            datetime.datetime(2024, 11, 3, 5, 30, tzinfo=datetime.timezone.utc),
+            "2024-11-03T01:30:00",
+            id="dst-fold",
+        ),
+        pytest.param(
+            datetime.datetime(2024, 3, 10, 7, 30, tzinfo=datetime.timezone.utc),
+            "2024-03-10T02:30:00",
+            id="dst-gap",
+        ),
+    ],
+)
+@pytest.mark.parametrize("root", ["node", "nodes"])
+def test_refetch_reads_a_naive_datetime_key_the_default_zone_repeats_or_skips(
+    stored: datetime.datetime,
+    spelled: str,
+    root: str,
+) -> None:
+    """A naive id on a DST fold or gap wall clock names the instant Django's lookup binds.
+
+    Django makes the wall clock aware at its first offset; the row it matches reads back
+    in UTC, and the reorder keys both as that instant, so ``node`` and ``nodes`` get it.
+    """
+    model = _spelled_model("datetime")
+    with _key_table(model, stored):
+        payload = _spelled_answer(model, spelled, root)
+    expected: object = {"name": "stored"} if root == "node" else [{"name": "stored"}]
+    assert payload == {"data": {root: expected}}
 
 
 class _KeyPrefixedOneToOneField(models.OneToOneField["Category", "Category"]):
@@ -1102,3 +1272,147 @@ def test_consumer_override_rows_keep_their_deferred_column_fetch_mode(
     name_sql = [sql for sql in category_sql if '"name"' in sql.split(" FROM ", 1)[0]]
     assert len(category_sql) == 1 + name_statements, category_sql
     assert len(name_sql) == name_statements, name_sql
+
+
+@pytest.mark.django_db
+def test_sync_refetch_refuses_an_async_consumer_resolve_node() -> None:
+    """A sync ``node`` refetch refuses an ``async def`` consumer ``resolve_node``, naming it.
+
+    The sync view cannot await the override, so its coroutine is a server
+    misconfiguration reported against the override, never a silent null row.
+    """
+    services.seed_data(1)
+
+    class CategoryNode(DjangoType):
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+
+        @classmethod
+        async def resolve_node(
+            cls,
+            node_id: str,
+            *,
+            info: strawberry.Info,
+            required: bool = False,
+        ) -> None:
+            del cls, node_id, info, required
+
+    schema = _schema_with(
+        "category",
+        CategoryNode | None,
+        DjangoNodeField(CategoryNode),
+        expose_errors=True,
+    )
+    row = Category.objects.order_by("pk").first()
+    assert row is not None
+    payload = _post(
+        schema,
+        "query ($id: ID!) { category(id: $id) { name } }",
+        variables={"id": global_id_for(CategoryNode, saved_pk(row))},
+    )
+    assert payload["data"] == {"category": None}, payload
+    assert len(json_list(payload, "errors")) == 1
+    assert json_at(payload, "errors", 0, "path") == ["category"]
+    assert json_str(payload, "errors", 0, "message") == (
+        "CategoryNode.resolve_node returned a coroutine in a sync Relay refetch context. "
+        "DjangoNodeField and DjangoNodesField execute resolve_node(s) synchronously under "
+        "schema.execute_sync(); make the consumer override synchronous or run the schema "
+        "asynchronously."
+    )
+
+
+@pytest.mark.django_db
+def test_sync_batch_refetch_refuses_an_async_consumer_resolve_nodes() -> None:
+    """A sync ``nodes`` refetch refuses an ``async def`` consumer ``resolve_nodes``, naming it."""
+    services.seed_data(1)
+
+    class CategoryNode(DjangoType):
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+
+        @classmethod
+        async def resolve_nodes(
+            cls,
+            *,
+            info: strawberry.Info,
+            node_ids: Iterable[str],
+            required: bool = False,
+        ) -> list[None]:
+            del cls, info, required
+            return [None for _ in node_ids]
+
+    schema = _schema_with(
+        "categories",
+        list[CategoryNode | None],
+        DjangoNodesField(CategoryNode),
+        expose_errors=True,
+    )
+    row = Category.objects.order_by("pk").first()
+    assert row is not None
+    payload = _post(
+        schema,
+        "query ($ids: [ID!]!) { categories(ids: $ids) { name } }",
+        variables={"ids": [global_id_for(CategoryNode, saved_pk(row))]},
+    )
+    assert payload["data"] is None, payload
+    assert len(json_list(payload, "errors")) == 1
+    assert json_at(payload, "errors", 0, "path") == ["categories"]
+    assert json_str(payload, "errors", 0, "message") == (
+        "CategoryNode.resolve_nodes returned a coroutine in a sync Relay refetch context. "
+        "DjangoNodeField and DjangoNodesField execute resolve_node(s) synchronously under "
+        "schema.execute_sync(); make the consumer override synchronous or run the schema "
+        "asynchronously."
+    )
+
+
+@pytest.mark.django_db
+def test_sync_refetch_reports_an_async_get_queryset_as_misuse_not_an_invalid_id() -> None:
+    """An ``async def`` ``get_queryset`` under a sync refetch is a server error, not a client id error.
+
+    ``SyncMisuseError`` is a ``ConfigurationError``, so a blanket catch-convert around the
+    resolver body would mislabel this misconfiguration ``GLOBALID_INVALID``; the decode
+    boundary scopes the id-error conversion to the decode call only (spec-032 Decision 5).
+    """
+    services.seed_data(1)
+
+    async def _async_get_queryset(
+        _cls: type[DjangoType],
+        queryset: QuerySet[Category],
+        _info: object,
+        **_kwargs: object,
+    ) -> QuerySet[Category]:
+        return queryset
+
+    category_node = make_django_type(
+        "CategoryNode",
+        Category,
+        ("id", "name"),
+        namespace_extra={"get_queryset": classmethod(_async_get_queryset)},
+    )
+    schema = _schema_with(
+        "category",
+        category_node | None,
+        DjangoNodeField(category_node),
+        expose_errors=True,
+    )
+    row = Category.objects.order_by("pk").first()
+    assert row is not None
+    payload = _post(
+        schema,
+        "query ($id: ID!) { category(id: $id) { name } }",
+        variables={"id": global_id_for(category_node, saved_pk(row))},
+    )
+    assert payload["data"] == {"category": None}, payload
+    assert len(json_list(payload, "errors")) == 1
+    error = json_object(payload, "errors", 0)
+    assert json_at(error, "path") == ["category"]
+    assert json_str(error, "message") == (
+        "CategoryNode.get_queryset returned a coroutine in a sync resolver context. The Relay "
+        "node defaults only await async get_queryset hooks on the async branch; either invoke "
+        "the Relay node default from an async resolver, or redefine get_queryset as a sync method."
+    )
+    assert error.get("extensions") is None, error

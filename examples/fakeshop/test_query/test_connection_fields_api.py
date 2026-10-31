@@ -2,6 +2,8 @@
 
 Each consumer declaration crosses the package view with real rows and request context.
 The responses and SQL distinguish source validation, pagination, sidecars and visibility.
+A root connection's own optimizer cooperation point plans a forward FK as a JOIN and a
+many side as one prefetch, both accepted under ``strictness="raise"``.
 """
 
 import asyncio
@@ -16,10 +18,11 @@ import strawberry
 from apps.products import services
 from apps.products.models import Category, Item
 from asgiref.sync import sync_to_async
-from django.db import models
+from django.db import connection, models
 from django.db.models.sql import Query
 from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
+from django.test.utils import CaptureQueriesContext
 from django.urls import path
 from graphql_client import JSONObject, json_str
 from strawberry import relay
@@ -44,6 +47,7 @@ from django_strawberry_framework.filters import FilterSet
 from django_strawberry_framework.orders import OrderSet
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing import AsyncTestClient, Response, TestClient
+from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 from tests._catalog_data import categories_from_seed, items_from_seed
 from tests._connection_field_schemas import (
@@ -759,6 +763,137 @@ def test_nested_connection_unplanned_raises_under_strictness(
             for category in Category.objects.order_by("pk")
         }
         assert served == expected
+
+
+def _item_and_category_sql(captured: CaptureQueriesContext) -> tuple[list[str], list[str]]:
+    """Split captured SQL into ``products_item`` and ``products_category`` reads by ``FROM``."""
+    sql = [entry["sql"] for entry in captured.captured_queries]
+    return (
+        [statement for statement in sql if 'FROM "products_item"' in statement],
+        [statement for statement in sql if 'FROM "products_category"' in statement],
+    )
+
+
+@pytest.mark.django_db
+def test_root_connection_plans_a_forward_fk_join_that_raise_accepts() -> None:
+    """A root connection plans its ``edges.node`` forward FK as a JOIN that ``"raise"`` accepts.
+
+    The field runs its own optimizer cooperation point before ``ConnectionExtension``
+    slices the page, so every ``category`` arrives loaded and ``strictness="raise"``
+    has no per-row load to refuse. One item statement JOINs the category and
+    projects only what the selection reads, with the FK key. The response path the
+    planned keys are published under is pinned by the id-only row below, where only
+    the key, not a loaded row, keeps the guard silent.
+    """
+    services.seed_data(2)
+    _make_relation_node_type("PlannedJoinCatNode", fields=("id", "name"))
+    item_node = _make_relation_node_type(
+        "PlannedJoinItemNode",
+        fields=("id", "name", "category"),
+        model=Item,
+    )
+    schema = _field_schema(item_node, optimizer=DjangoOptimizerExtension(strictness="raise"))
+
+    with CaptureQueriesContext(connection) as captured:
+        result = _post(schema, "{ items { edges { node { name category { name } } } } }")
+
+    assert result.errors is None, result.errors
+    assert json_at(result.data, "items", "edges") == [
+        {"node": {"name": item.name, "category": {"name": item.category.name}}}
+        for item in Item.objects.select_related("category").order_by("pk")
+    ]
+    item_sql, category_sql = _item_and_category_sql(captured)
+    assert len(item_sql) == 1, item_sql
+    assert category_sql == [], category_sql
+    root = item_sql[0]
+    assert 'JOIN "products_category"' in root, root
+    for column in (
+        '"products_item"."name"',
+        '"products_item"."category_id"',
+        '"products_category"."name"',
+    ):
+        assert column in root, root
+    for column in ('"products_item"."description"', '"products_category"."description"'):
+        assert column not in root, root
+
+
+@pytest.mark.django_db
+def test_root_connection_elides_an_id_only_forward_fk_that_raise_accepts() -> None:
+    """``category { id }`` under a root connection is read off the item row, keyed at its path.
+
+    The elision is published under the ``items.edges.node.category`` response path
+    the relation resolver reads at run time; a key recorded under any other path
+    leaves the unloaded relation to the lazy-load probe, which ``strictness="raise"``
+    refuses. One item statement, no category read, and each id is the category's.
+    """
+    services.seed_data(2)
+    category_node = _make_relation_node_type("ElidedCatNode", fields=("id", "name"))
+    item_node = _make_relation_node_type(
+        "ElidedItemNode",
+        fields=("id", "name", "category"),
+        model=Item,
+    )
+    schema = _field_schema(item_node, optimizer=DjangoOptimizerExtension(strictness="raise"))
+
+    with CaptureQueriesContext(connection) as captured:
+        result = _post(schema, "{ items { edges { node { name category { id } } } } }")
+
+    assert result.errors is None, result.errors
+    assert json_at(result.data, "items", "edges") == [
+        {
+            "node": {
+                "name": item.name,
+                "category": {"id": global_id_for(category_node, item.category_id)},
+            },
+        }
+        for item in Item.objects.order_by("pk")
+    ]
+    item_sql, category_sql = _item_and_category_sql(captured)
+    assert len(item_sql) == 1, item_sql
+    assert category_sql == [], category_sql
+    assert "JOIN" not in item_sql[0].upper(), item_sql
+
+
+@pytest.mark.django_db
+def test_root_connection_plans_a_many_side_prefetch_that_raise_accepts() -> None:
+    """A root connection plans its ``edges.node`` many side as one batched prefetch.
+
+    The same cooperation point plans ``items`` under each category node as a
+    prefetch rather than a JOIN, so every parent's read is served from the
+    prefetch and ``strictness="raise"`` accepts it. One category statement
+    projects the parent's read columns, and one item statement serves every parent.
+    """
+    services.seed_data(2)
+    _make_relation_node_type("PlannedPrefetchItemNode", fields=("id", "name"), model=Item)
+    category_node = _make_relation_node_type(
+        "PlannedPrefetchCatNode",
+        fields=("id", "name", "items"),
+        list_relations=("items",),
+    )
+    schema = _field_schema(category_node, optimizer=DjangoOptimizerExtension(strictness="raise"))
+
+    with CaptureQueriesContext(connection) as captured:
+        result = _post(schema, "{ items { edges { node { name items { name } } } } }")
+
+    assert result.errors is None, result.errors
+    served = [
+        (
+            json_str(edge, "node", "name"),
+            sorted(json_str(item, "name") for item in json_list(edge, "node", "items")),
+        )
+        for edge in json_list(result.data, "items", "edges")
+    ]
+    assert served == [
+        (category.name, sorted(category.items.values_list("name", flat=True)))
+        for category in Category.objects.order_by("pk")
+    ]
+    item_sql, category_sql = _item_and_category_sql(captured)
+    assert len(category_sql) == 1, category_sql
+    assert len(item_sql) == 1, item_sql
+    root = category_sql[0]
+    assert '"products_category"."name"' in root, root
+    assert '"products_category"."description"' not in root, root
+    assert "JOIN" not in root.upper(), root
 
 
 @pytest.mark.django_db(transaction=True)

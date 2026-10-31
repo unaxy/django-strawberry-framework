@@ -9,16 +9,23 @@ For the accepted ForeignObject carrier order, the shipped ShelfLabel link has a
 relation carrier and a hiding Shelf target. The existing LnkPairChild fixture
 supplies two non-null scalar carriers instead, with the same real Django query,
 connection pipeline and HTTP view. Its fixture table lifecycle remains explicit.
+
+A consumer ``get_queryset`` order is the page's effective order too: a JSON
+column and a related path through an optional or multivalued relation are
+refused by name, beside controls ordering the same holders by a scalar column.
 """
 
+import datetime
+import uuid
 from collections.abc import Mapping
 from functools import wraps
 
 import pytest
 import strawberry
-from apps.library.models import Issue, Periodical
+from apps.library.models import Issue, MembershipCard, Patron, Periodical
+from apps.scalars.models import ScalarSpecimen
 from django.db import connection
-from django.db.models import QuerySet
+from django.db.models import Model, QuerySet
 from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
@@ -247,3 +254,163 @@ def test_foreign_object_keyset_order_seeks_over_all_scalar_carriers() -> None:
         assert json_str(replayed, "errors", 0, "message") == (
             "Argument 'after' contains an invalid cursor for this connection."
         )
+
+
+def _hook_ordered_keyset_schema(
+    model: type[Model],
+    fields: tuple[str, ...],
+    hook_order: tuple[str, ...],
+) -> DjangoSchema:
+    """A keyset connection (``cursor_field = ("id",)``) whose ``get_queryset`` orders by ``hook_order``.
+
+    The hook's order is the page's effective order, so the cursor vocabulary is
+    derived from it entry by entry.
+    """
+
+    def _ordered(
+        _cls: type[DjangoType],
+        queryset: QuerySet[Model],
+        _info: object,
+        **_kwargs: object,
+    ) -> QuerySet[Model]:
+        return queryset.order_by(*hook_order)
+
+    node_type = make_django_type(
+        "HookOrderedNode",
+        model,
+        fields,
+        meta_extra={"cursor_field": ("id",)},
+        namespace_extra={"get_queryset": classmethod(_ordered)},
+    )
+    finalize_django_types()
+
+    @strawberry.type
+    class Query:
+        rows = DjangoConnectionField(node_type)
+
+    return DjangoSchema(query=Query, config=strawberry_config())
+
+
+_JSON_ORDER_REFUSAL = (
+    "This connection uses keyset cursors (Meta.cursor_field), which require portable "
+    "ordering semantics; 'payload' is a JSONField, whose ordering differs between database "
+    "backends. Order by a scalar column or paginate under the default order."
+)
+
+
+def _seed_two_specimens() -> None:
+    """Two specimens whose ``label`` order is the reverse of their pk order."""
+    for index, label in enumerate(("alpha", "bravo")):
+        ScalarSpecimen.objects.create(
+            label=label,
+            occurred_on=datetime.date(2024, 1, 1),
+            occurred_at=datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc),
+            occurred_time=datetime.time(8),
+            payload={"rank": index},
+            external_id=uuid.UUID(int=index + 1),
+        )
+
+
+@pytest.mark.django_db
+def test_keyset_hook_order_by_a_json_column_is_refused() -> None:
+    """A JSON column cannot anchor a keyset cursor: its ordering differs between backends.
+
+    The refusal names the column and the request has no page, rather than one
+    whose cursors would seek differently on another database.
+    """
+    _seed_two_specimens()
+    payload = _post(
+        _hook_ordered_keyset_schema(ScalarSpecimen, ("id", "label"), ("payload", "id")),
+        "{ rows(first: 1) { edges { node { label } } } }",
+    )
+    assert payload["data"] is None, payload
+    assert [
+        (json_at(error, "message"), json_at(error, "path"))
+        for error in json_list(payload, "errors")
+    ] == [(_JSON_ORDER_REFUSAL, ["rows"])]
+
+
+@pytest.mark.django_db
+def test_keyset_hook_order_by_a_scalar_column_of_the_same_model_pages() -> None:
+    """The control: the same holder ordered by the scalar ``label`` pages both rows by cursor.
+
+    The hook orders by ``-label``, against pk order, so the cursor seeks under the
+    hook's own column.
+    """
+    _seed_two_specimens()
+    schema = _hook_ordered_keyset_schema(ScalarSpecimen, ("id", "label"), ("-label", "id"))
+    query = (
+        "query ($after: String) { rows(first: 1, after: $after) "
+        "{ edges { node { label } } pageInfo { hasNextPage endCursor } } }"
+    )
+    first = _post(schema, query)
+    assert "errors" not in first, first
+    page = json_object(first, "data", "rows")
+    assert json_at(page, "edges") == [{"node": {"label": "bravo"}}]
+    assert json_at(page, "pageInfo", "hasNextPage") is True
+    second = _post(schema, query, variables={"after": json_str(page, "pageInfo", "endCursor")})
+    assert "errors" not in second, second
+    page = json_object(second, "data", "rows")
+    assert json_at(page, "edges") == [{"node": {"label": "alpha"}}]
+    assert json_at(page, "pageInfo", "hasNextPage") is False
+
+
+_UNANCHORED_ORDER_REFUSAL = (
+    "This connection uses keyset cursors (Meta.cursor_field), which require every ordering "
+    "entry to be a database column; the requested order cannot anchor stable cursors. Remove "
+    "the unsupported orderBy entry or paginate under the default order."
+)
+
+
+def _seed_patrons_with_one_card() -> None:
+    ada = Patron.objects.create(name="Ada")
+    Patron.objects.create(name="Grace")
+    MembershipCard.objects.create(patron=ada, barcode="CARD-1")
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "hook_order",
+    [("card__barcode", "id"), ("loans__note", "id")],
+    ids=["optional-reverse-one-to-one", "multivalued-reverse-fk"],
+)
+def test_keyset_hook_order_through_an_optional_or_multivalued_relation_is_refused(
+    hook_order: tuple[str, ...],
+) -> None:
+    """A related order path a value cursor cannot anchor is refused, not paged wrongly.
+
+    ``card__barcode`` crosses a reverse one-to-one a patron may lack (a missing
+    card orders as NULL), and ``loans__note`` crosses a reverse FK that repeats
+    the patron once per loan; neither yields one stable value per row.
+    """
+    _seed_patrons_with_one_card()
+    payload = _post(
+        _hook_ordered_keyset_schema(Patron, ("id", "name"), hook_order),
+        "{ rows(first: 1) { edges { node { name } } } }",
+    )
+    assert payload["data"] is None, payload
+    assert [
+        (json_at(error, "message"), json_at(error, "path"))
+        for error in json_list(payload, "errors")
+    ] == [(_UNANCHORED_ORDER_REFUSAL, ["rows"])]
+
+
+@pytest.mark.django_db
+def test_keyset_hook_order_by_the_patrons_own_column_pages() -> None:
+    """The control: the same holder ordered by the patron's own ``name`` pages both rows."""
+    _seed_patrons_with_one_card()
+    query = (
+        "query ($after: String) { rows(first: 1, after: $after) "
+        "{ edges { node { name } } pageInfo { hasNextPage endCursor } } }"
+    )
+    schema = _hook_ordered_keyset_schema(Patron, ("id", "name"), ("-name", "id"))
+    first = _post(schema, query)
+    assert "errors" not in first, first
+    assert _names(json_object(first, "data", "rows")) == ["Grace"]
+    second = _post(
+        schema,
+        query,
+        variables={"after": json_str(first, "data", "rows", "pageInfo", "endCursor")},
+    )
+    assert "errors" not in second, second
+    assert _names(json_object(second, "data", "rows")) == ["Ada"]

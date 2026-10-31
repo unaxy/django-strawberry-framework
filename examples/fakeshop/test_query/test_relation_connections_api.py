@@ -1435,6 +1435,126 @@ def test_strictness_warn_logs_once_per_occurrence(caplog: pytest.LogCaptureFixtu
     ]
 
 
+_SIDECAR_FALLBACK_REASON = (
+    "not window-planned: selection carries filter/orderBy; resolving per-parent"
+)
+
+
+@pytest.mark.django_db
+def test_strictness_raise_flags_a_filtered_nested_connection_with_its_field_and_reason() -> None:
+    """``"raise"`` refuses a sidecar fallback with a message naming the relation and the reason.
+
+    The flag names the relation field ``books`` the walker keyed the would-be
+    plan under (not the generated ``booksConnection`` name), exactly as a plain
+    list relation's flag reads, and carries the filter/orderBy wording so a
+    consumer who legitimately filters a nested connection sees WHY it runs per
+    parent rather than an optimizer defect. The refusal precedes the per-parent
+    query: no book statement runs.
+    """
+    _seed_library_books(["apple", "banana", "avocado"])
+    schema = _genres_filterable_book_schema(strictness="raise")
+    with CaptureQueriesContext(db_connection) as captured:
+        result = _exec(
+            schema,
+            '{ objs { booksConnection(filter: { title: { exact: "banana" } }) '
+            "{ edges { node { title } } } } }",
+            expect_errors=True,
+        )
+    assert result.errors is not None
+    assert [(error.get("message"), error.get("path")) for error in result.errors] == [
+        (f"Unplanned N+1: books ({_SIDECAR_FALLBACK_REASON})", ["objs", 0, "booksConnection"]),
+    ]
+    assert result.data is None
+    assert _table_selects(captured, "library_book") == []
+
+
+@pytest.mark.django_db
+def test_strictness_raise_flags_only_the_sidecar_alias_beside_a_planned_sibling() -> None:
+    """Under ``"raise"`` only the filtered alias flags; its window-planned sibling is silent.
+
+    Strictness is per response key: the sidecar alias ``a`` is a real per-parent
+    access and flags with the filter/orderBy reason, while ``b`` was planned as a
+    window, so its identity is recorded and it never reaches the checker.
+    """
+    _seed_library_books(["apple", "banana", "avocado"])
+    schema = _genres_filterable_book_schema(strictness="raise")
+    result = _exec(
+        schema,
+        "{ objs { "
+        'a: booksConnection(filter: { title: { exact: "banana" } }) '
+        "{ edges { node { title } } } "
+        "b: booksConnection(first: 5) { edges { node { title } } } "
+        "} }",
+        expect_errors=True,
+    )
+    assert result.errors is not None
+    assert [(error.get("message"), error.get("path")) for error in result.errors] == [
+        (f"Unplanned N+1: books ({_SIDECAR_FALLBACK_REASON})", ["objs", 0, "a"]),
+    ]
+
+
+@pytest.mark.django_db
+def test_strictness_raise_malformed_nested_cursor_reports_the_pagination_error() -> None:
+    """A malformed nested ``after:`` reports the cursor error, not an unplanned-N+1 flag.
+
+    A malformed cursor leaves the connection unwindowed so the per-parent
+    pipeline raises its own cursor-validation error (spec-033 Decision 4 step f
+    / Decision 8). The walker still records the resolver key for that fallback,
+    so under ``"raise"`` the strictness check stays silent and the only error the
+    client sees is the cursor's.
+    """
+    _seed_library_books(["a", "b", "c"])
+    schema = _genres_list_schema(optimizer=True, strictness="raise")
+    result = _exec(
+        schema,
+        '{ objs { booksConnection(first: 2, after: "not-a-valid-cursor") '
+        "{ edges { node { title } } } } }",
+        expect_errors=True,
+    )
+    assert result.errors is not None
+    assert [(error.get("message"), error.get("path")) for error in result.errors] == [
+        ("Argument 'after' contains a non-existing value.", ["objs", 0, "booksConnection"]),
+    ]
+
+
+@pytest.mark.django_db
+def test_strictness_warn_nested_fallback_keeps_its_list_sibling_planned(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A warn-mode fallback publishing its own plan leaves the parent's list sibling planned.
+
+    The filtered connection resolves first, so its per-parent pipeline publishes
+    before the ``books`` list sibling reads its rows. The sibling must still be
+    served from the parent plan's prefetch: one warning (the connection's), the
+    exact payload, and exactly two book statements - the prefetch and the one
+    filtered fallback.
+    """
+    _seed_library_books(["apple", "banana", "avocado"])
+    schema = _genres_filterable_book_schema(strictness="warn")
+    caplog.set_level("WARNING", logger="django_strawberry_framework")
+    with CaptureQueriesContext(db_connection) as captured:
+        result = _exec(
+            schema,
+            '{ objs { booksConnection(filter: { title: { exact: "banana" } }) '
+            "{ edges { node { title } } } books { title } } }",
+        )
+    assert result.data == {
+        "objs": [
+            {
+                "booksConnection": {"edges": [{"node": {"title": "banana"}}]},
+                "books": [{"title": title} for title in ("apple", "banana", "avocado")],
+            },
+        ],
+    }
+    warnings = [
+        r.getMessage() for r in caplog.records if r.name.startswith("django_strawberry_framework")
+    ]
+    assert warnings == [f"Potential N+1 on books ({_SIDECAR_FALLBACK_REASON})"]
+    book_sql = _table_selects(captured, "library_book")
+    assert len(book_sql) == 2, book_sql
+    assert sum("banana" in sql for sql in book_sql) == 1, book_sql
+
+
 @pytest.mark.django_db
 def test_strictness_silent_when_window_served(caplog: pytest.LogCaptureFixture) -> None:
     """``"raise"`` + a WINDOW-PLANNED nested connection -> no raise, no warn.

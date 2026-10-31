@@ -2858,11 +2858,10 @@ sync or async HTTP request cannot isolate:
   (`test_list_field_optimizer_adapter_unwrap_rewrap_and_early_returns`);
 - `check_deadline` invoked in pre-fetch position for argument-bearing requests
   (`test_list_field_deadline_check_position`);
-- the model-default predicate's two states no live mount constructs as distinct verdicts:
-  grouping suppresses the default
-  (`test_is_model_default_ordering_active_rejects_a_grouped_queryset`), and
+- the model-default predicate's state no live mount constructs as a distinct verdict:
   `default_ordering` must be exactly `True`
-  (`test_is_model_default_ordering_active_exact_bool_identity`);
+  (`test_is_model_default_ordering_active_exact_bool_identity`); grouping suppressing the
+  default is live (`examples/fakeshop/test_query/test_list_field_api.py::test_holder_offset_on_a_grouped_source_does_not_ride_the_model_default`);
 - the term classifier's boundary by type
   (`test_order_term_classifier_admits_only_named_forms`: an approved function accepted and its
   subclass refused, an approved aggregate and a row count accepted, an unlisted aggregate and a

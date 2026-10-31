@@ -33,10 +33,10 @@ generator suspension, iterator ``aclose`` notes, Future cancellation (the JSON
 error cannot show ``Future.cancelled()``). Live async HTTP covers exotic
 resolver classification, safe completion, and ``aclose`` on a rejected window.
 
-A grouped queryset and a merely-truthy ``default_ordering`` have no wire spelling;
-a non-expression order term never arrives from GraphQL. Live HTTP pins the
-offset-guard verdicts those helpers feed, including hostile ``QuerySet``
-subclasses and list-degrading Managers. Instance-shadowed ``.all()`` stays in
+A merely-truthy ``default_ordering`` has no wire spelling; a non-expression order
+term never arrives from GraphQL. Live HTTP pins the offset-guard verdicts those
+helpers feed, including a grouped source, hostile ``QuerySet`` subclasses and
+list-degrading Managers. Instance-shadowed ``.all()`` stays in
 ``tests/utils/test_querysets.py``: the list field iterates the sealed queryset
 and never calls ``.all()`` on the hook result, so HTTP cannot exhibit the leak.
 
@@ -1117,48 +1117,6 @@ def test_a_consumer_resolver_list_field_also_reads_the_definition_only_at_constr
 
 
 @pytest.mark.django_db
-def test_an_abstract_model_type_serves_concrete_rows_and_its_default_seed_names_the_model() -> (
-    None
-):
-    """A ``DjangoType`` over an abstract model serves the concrete rows a resolver returns.
-
-    The generated default resolver has no table to seed from, so it fails with a
-    ``ConfigurationError`` naming the abstract model rather than an ``AttributeError``
-    off the default manager the abstract model does not have.
-    """
-
-    class TitledEntryType(DjangoType):
-        class Meta:
-            model = library_models.TitledEntry
-            fields = ("title",)
-
-    finalize_django_types()
-    library_models.ReadingList.objects.create(title="Classics")
-
-    @strawberry.type
-    class Query:
-        entries: list[TitledEntryType] = DjangoListField(TitledEntryType)
-
-        def _reading_lists(self) -> list[library_models.TitledEntry]:
-            return list(library_models.ReadingList.objects.all())
-
-        reading_lists: list[library_models.TitledEntry] = strawberry.field(
-            resolver=_reading_lists,
-            graphql_type=list[TitledEntryType],
-        )
-
-    schema = strawberry.Schema(query=Query)
-    context = {"request": RequestFactory().get("/")}
-    served = schema.execute_sync("{ readingLists { title } }", context_value=context)
-    assert served.errors is None, served.errors
-    assert served.data == {"readingLists": [{"title": "Classics"}]}
-
-    seeded = schema.execute_sync("{ entries { title } }", context_value=context)
-    assert seeded.errors is not None
-    assert "TitledEntry is an abstract model" in seeded.errors[0].message
-
-
-@pytest.mark.django_db
 def test_the_default_seed_and_both_visibility_seals_use_the_captured_model() -> None:
     """The seed queries the captured model's table and the seals validate against it.
 
@@ -2142,27 +2100,6 @@ def test_order_predicate_classifier_reads_the_annotation_under_a_transform_chain
     queryset = library_models.Shelf.objects.alias(stamp=aliased)
 
     assert _is_model_default_ordering_active(queryset) is expected
-
-
-@pytest.mark.django_db
-def test_is_model_default_ordering_active_rejects_a_grouped_queryset(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Grouping suppresses model default ordering the same way ``QuerySet.ordered`` does.
-
-    A grouped source has one live spelling (``test_list_field_api.py``'s row-count
-    control, which annotates ``Count("*")``), but that page is ACCEPTED: an
-    annotated ``order_by`` is an explicit ordering, so the guard never consults
-    the model default there. The ``group_by`` arm decides only when a grouped
-    queryset arrives with no explicit ordering, which no shipped field produces;
-    extra-order, random, reverse, and empty-queryset verdicts are the live
-    offset-guard matrix.
-    """
-    monkeypatch.setattr(Category._meta, "ordering", ("name",))
-    qs = Category.objects.all()
-    assert _is_model_default_ordering_active(qs) is True
-    qs.query.group_by = ("name",)
-    assert _is_model_default_ordering_active(qs) is False
 
 
 def test_list_field_constructor_validation_precedence() -> None:
