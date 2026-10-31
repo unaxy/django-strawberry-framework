@@ -605,7 +605,7 @@ Module docstring = authoritative description; this = index. Read the docstring b
 |---|---|
 | [`test_connection_fields_api.py`][test-connection-fields-api] | Consumer connection fields: visibility, pagination, ordering, source attestation and precise refusal envelopes. |
 | [`test_connection_names_api.py`][test-connection-names-api] | Relay selection names under default and renamed converters, sync/async row elision and plain Strawberry compatibility. |
-| [`test_converter_outputs_api.py`][test-converter-outputs-api] | Scalar, file, image, enum and container output conversion; blank, null-spelled and padded choice members, raw form-data controls and row-preserving to-many choice predicates through native HTTP holders. |
+| [`test_converter_outputs_api.py`][test-converter-outputs-api] | Scalar, file, image, enum and container output conversion, both path-bearing file/image output objects; blank, null-spelled and padded choice members, raw form-data controls and row-preserving to-many choice predicates through native HTTP holders. |
 | [`test_form_construction_api.py`][test-form-construction-api] | Form construction hooks, omitted NullBoolean inputs, scoped relation choices and narrowed partial validation. |
 | [`test_form_relation_binding_api.py`][test-form-relation-binding-api] | Form relation-key reconstruction, replacement, empty-key refusals and visibility. |
 | [`test_generic_connection_api.py`][test-generic-connection-api] | Generic relations, proxy content types, exact nested pages and optimizer query cost. |

@@ -2477,60 +2477,6 @@ def test_file_columns_stay_scalar_on_the_filter_input_path() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_default_file_output_objects_publish_no_filesystem_path() -> None:
-    """``path`` is absent from both default output objects; the opt-in siblings carry it.
-
-    The field surface is read off Strawberry's own type definitions rather than
-    off a rendered schema, so the assertion holds for every consumer type at
-    once instead of for one generated SDL (spec-048 Decision 1).
-    """
-    default_file = {
-        field.name for field in get_object_definition(DjangoFileType, strict=True).fields
-    }
-    default_image = {
-        field.name for field in get_object_definition(DjangoImageType, strict=True).fields
-    }
-    assert default_file == {"name", "size", "url"}
-    assert default_image == {
-        "name",
-        "size",
-        "url",
-        "width",
-        "height",
-    }
-    opt_in_file = {
-        field.name for field in get_object_definition(DjangoFilePathType, strict=True).fields
-    }
-    opt_in_image = {
-        field.name for field in get_object_definition(DjangoImagePathType, strict=True).fields
-    }
-    assert opt_in_file == default_file | {"path"}
-    assert opt_in_image == default_image | {"path"}
-
-
-def test_opt_in_path_field_carries_the_security_description() -> None:
-    """The single shared ``path`` definition warns, on BOTH opt-in types.
-
-    The mixin exists so the wording cannot drift between the file and image
-    compositions; identity of the description is what proves there is one
-    definition rather than two that currently agree.
-    """
-    file_path = next(
-        field
-        for field in get_object_definition(DjangoFilePathType, strict=True).fields
-        if field.name == "path"
-    )
-    image_path = next(
-        field
-        for field in get_object_definition(DjangoImagePathType, strict=True).fields
-        if field.name == "path"
-    )
-    assert file_path.description == image_path.description
-    assert file_path.description is not None
-    assert "SECURITY" in file_path.description
-    assert "filesystem_path_fields" in file_path.description
-
-
 def test_convert_field_output_swaps_in_the_path_bearing_sibling() -> None:
     """``expose_filesystem_path`` routes a file/image column to its opt-in sibling.
 
