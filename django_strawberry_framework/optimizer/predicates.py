@@ -238,7 +238,8 @@ class _CorrelationStep:
     reads, ``None`` for a many-to-many's join-table link. ``referenced`` marks a
     link whose outer columns are a foreign key onto the inner ones (a forward
     single relation, a many-to-many's target link), so a set outer link
-    names an existing inner row.
+    names an existing inner row; never a reverse ``GenericRel``, whose
+    ``object_id`` carrier constrains nothing.
     """
 
     model: type[models.Model]
@@ -315,7 +316,9 @@ def _correlation_steps(
                     field.related_model,
                     tuple(pairs),
                     index,
-                    source_carried,
+                    # A reverse ``GenericRel``'s ``object_id`` is no foreign key, so it
+                    # proves no target row exists.
+                    kind == "forward_single",
                 ),
             ]
         for link_model, pairs, link_segment, referenced in links:

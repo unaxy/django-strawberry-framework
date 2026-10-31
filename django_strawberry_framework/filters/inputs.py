@@ -100,6 +100,7 @@ from .base import (
     _bound_field_name,
     _compared_columns,
     _EnumMemberFilterMixin,
+    _filterset_lookup_operand,
     _filterset_value_field,
     copied_form_field,
     model_choice_identity_column,
@@ -933,9 +934,9 @@ def convert_filter_to_input_annotation(
         # from the form field its class builds; one whose ``field`` builds none on the
         # unbound declaration raises (spec-027 Decision 4).
         _refuse_method_without_form_field(matched, filterset_cls)
-        if getattr(matched, "lookup_expr", None) == "isnull":
-            # ``isnull`` is a boolean predicate regardless of the column type;
-            # the model field (the column's value type) is irrelevant here.
+        if _filterset_lookup_operand(filterset_cls, matched).lookup == "isnull":
+            # ``isnull`` is a boolean predicate regardless of the column type, past a
+            # transform too (``year__isnull``): the value field is irrelevant here.
             return bool
         return _element_annotation(matched, model_field, owner_definition, filterset_cls)
 

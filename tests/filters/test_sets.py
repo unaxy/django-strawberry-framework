@@ -53,6 +53,7 @@ from apps.scalars import models as scalar_models
 from asgiref.sync import sync_to_async
 from django import forms
 from django.contrib.auth.models import User
+from django.contrib.contenttypes.fields import GenericForeignKey, GenericRelation
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import FieldError
 from django.db import DEFAULT_DB_ALIAS, connection, connections, models, transaction
@@ -222,6 +223,10 @@ if TYPE_CHECKING:
     ]
     _NullText: TypeAlias = django_models.TextField[str | Combinable | None, str | None]
     _Text: TypeAlias = django_models.TextField[str | Combinable, str]
+    _PositiveInt: TypeAlias = django_models.PositiveIntegerField[
+        float | int | str | Combinable,
+        int,
+    ]
 
 
 def _is_model_choice_field(field: object) -> TypeIs[ModelChoiceField[django_models.Model]]:
@@ -381,6 +386,54 @@ class CrLampKiosk(django_models.Model):
     class Meta:
         app_label = "products"
         managed = False
+
+
+class _CrUnmanagedModel(django_models.Model):
+    """The abstract base whose ``Meta`` an MTI child below subclasses.
+
+    Django keeps the ``Meta`` of an abstract model only, so a child of a concrete
+    model spells its own ``Meta`` as a subclass of this one (Django's documented
+    abstract-``Meta`` inheritance), and the checker reads that ``Meta`` as a
+    compatible override.
+    """
+
+    class Meta:
+        abstract = True
+        app_label = "products"
+        managed = False
+
+
+class _CrDeskNote(django_models.Model):
+    """A generic-key note whose reverse ``GenericRel`` ``note_desk`` reaches ``_CrNoteDesk``.
+
+    Its ``object_id`` is no foreign key: a note may carry a ``_CrNoteRoot`` row's
+    pk under ``_CrNoteDesk``'s content type with no ``_CrNoteDesk`` row extending it.
+    """
+
+    content_type: _FK[ContentType] = django_models.ForeignKey(
+        ContentType,
+        on_delete=django_models.CASCADE,
+        related_name="+",
+    )
+    object_id: _PositiveInt = django_models.PositiveIntegerField()
+    content_object = GenericForeignKey("content_type", "object_id")
+
+    class Meta:
+        app_label = "products"
+        managed = False
+
+
+class _CrNoteRoot(_CrUnmanagedModel):
+    """Root of the MTI line whose child declares the ``GenericRelation``."""
+
+
+class _CrNoteDesk(_CrNoteRoot):
+    """An MTI child whose ``GenericRelation`` makes ``_CrDeskNote.note_desk`` a visible field."""
+
+    notes = GenericRelation(_CrDeskNote, related_query_name="note_desk")
+
+    class Meta(_CrUnmanagedModel.Meta):
+        pass
 
 
 @pytest.fixture(autouse=True)
@@ -21687,6 +21740,12 @@ def _branch_parent(
             _CrOwnKeyDesk,
             _CrDesk,
         ),
+        (
+            _CrDeskNote,
+            "note_desk",
+            _CrNoteRoot,
+            _CrNoteDesk,
+        ),
     ],
     ids=[
         "unrelated-forward",
@@ -21701,6 +21760,7 @@ def _branch_parent(
         "mti-descendant-keyed-off-its-parent-link-by-foreign-key",
         "mti-descendant-keyed-off-its-parent-link-by-one-to-one",
         "mti-descendant-keyed-off-its-parent-link-by-many-to-many",
+        "mti-ancestor-across-a-reverse-generic-relation",
     ],
 )
 def test_branch_whose_target_set_model_the_relation_cannot_correlate_is_refused(
@@ -21716,7 +21776,9 @@ def test_branch_whose_target_set_model_the_relation_cannot_correlate_is_refused(
     unrelated model, on an MTI ancestor lacking a column the target declares,
     or on an MTI descendant whose key is not its parent link, those columns
     hold other rows' values, and across a reverse link an ancestor's row
-    matches itself whether or not a target row extends it.
+    matches itself whether or not a target row extends it. A reverse
+    ``GenericRel``'s ``object_id`` is no foreign key, so it proves no target row
+    exists either: an ancestor row would answer for a note no target row backs.
     """
     parent = _branch_parent(parent_model, field_name, child_model)
     with pytest.raises(
