@@ -30,7 +30,7 @@ Project conventions: the live-HTTP-priority rule at [`AGENTS.md #"any line reach
   - [ ] [`tests/test_scalars.py`][test-scalars]: the `strawberry_config()` factory sections ("scalar-map tests" and "`**config_kwargs` passthrough tests") carry the tests named in the [Test plan](#test-plan), one pytest item each.
   - [ ] [`tests/test_scalars.py`][test-scalars]: `test_package_import_does_not_emit_strawberry_deprecation_warning` runs `python -W error::DeprecationWarning -c "import django_strawberry_framework"` in a subprocess and pins the clean import ([Decision 6](#decision-6--no-warning-suppression-at-the-definition-site)).
   - [ ] [`tests/base/test_init.py`][test-init]: `test_public_api_surface_is_pinned` pins `__all__` as an exact tuple, ending in `"strawberry_config"`.
-  - [ ] [`tests/types/test_converters.py`][test-converters]: every schema in the file that resolves to `BigInt` is built with `config=strawberry_config()` (the BigInt section's `test_bigint_in_input_position_with_null_via_schema_execution` and `test_bigint_resolver_returning_bool_raises_via_schema_execution`), and `strawberry_config` is in the file's `from django_strawberry_framework import (...)` block. Which `BigInt` cases live in this package file and which live in live `/graphql/` coverage is owned by the live-coverage rule at [`AGENTS.md #"any line reachable via a real GraphQL query against fakeshop"`][agents]; the migration rule of [Decision 5](#decision-5--migration-posture-hard-break-in-alpha) applies wherever a case lives.
+  - [ ] [`examples/fakeshop/test_query/test_converter_outputs_api.py`][test-converter-outputs-api]: [`examples/fakeshop/test_query/test_converter_outputs_api.py::test_a_nullable_bigint_argument_distinguishes_null_from_a_present_integer`][test-converter-outputs-api] and [`examples/fakeshop/test_query/test_converter_outputs_api.py::test_an_outbound_bigint_rejects_bool_beside_its_integer_control`][test-converter-outputs-api] use native `DjangoSchema(config=strawberry_config())` holders over HTTP. The package converter module keeps private annotation, sentinel and cache contracts; the live-coverage rule at [`AGENTS.md #"any line reachable via a real GraphQL query against fakeshop"`][agents] owns these wire verdicts.
   - [ ] [`tests/test_scalars.py`][test-scalars] module docstring: names the live modules that own wire-reachable `BigInt` parse / serialize ([`examples/fakeshop/test_query/test_scalars_api.py`][test-scalars-api]) and lists `strawberry_config()` construction among what stays in-process.
 - [ ] Slice 3: Example-app migration
   - [ ] [`examples/fakeshop/config/schema.py`][schema]: the schema the project serves at `/graphql/` passes [`examples/fakeshop/config/schema.py #"config=strawberry_config(),"`][schema], with `strawberry_config` on the file's `from django_strawberry_framework import (...)` block. The constructor class, the roots and the `extensions=` entry are other cards' business per [Decision 9](#decision-9--example-app-migration-scope).
@@ -290,7 +290,7 @@ Rationale: [Decision 9][rationale-d9].
 | Slice | Files |
 | --- | --- |
 | 1 — Helper module + `BigInt` definition | [`django_strawberry_framework/scalars.py`][scalars], [`django_strawberry_framework/__init__.py`][django-strawberry-framework-init] |
-| 2 — Tests | [`tests/test_scalars.py`][test-scalars], [`tests/base/test_init.py`][test-init], [`tests/types/test_converters.py`][test-converters] |
+| 2 — Tests | [`tests/test_scalars.py`][test-scalars], [`tests/base/test_init.py`][test-init], [`examples/fakeshop/test_query/test_converter_outputs_api.py`][test-converter-outputs-api] |
 | 3 — Example-app migration | [`examples/fakeshop/config/schema.py`][schema] |
 | 4 — Docs | [`docs/README.md`][readme], [`docs/GLOSSARY.md`][glossary], [`GOAL.md`][goal], [`TODAY.md`][today], [`docs/SPECS/appx/spec-025-scalar_map_helper-0_0_7-terms.csv`][spec-025-terms] |
 | 5 — KANBAN + CHANGELOG | [`KANBAN.md`][kanban], [`CHANGELOG.md`][changelog] |
@@ -342,16 +342,17 @@ Package tests live in [`tests/test_scalars.py`][test-scalars] per [Decision 7](#
 ### `tests/test_scalars.py` — import surface
 
 - `test_package_import_does_not_emit_strawberry_deprecation_warning` — the `-W error::DeprecationWarning` subprocess import exits 0. Pins [Decision 6](#decision-6--no-warning-suppression-at-the-definition-site).
-- `test_bigint_is_importable_from_top_level` — `from django_strawberry_framework import BigInt` resolves.
 
 ### Live tier — the registered round trip
+
+- `examples/fakeshop/test_query/test_converter_outputs_api.py::test_a_nullable_bigint_argument_distinguishes_null_from_a_present_integer` imports `BigInt` from the package root and serves it as a nullable consumer argument.
 
 In [`examples/fakeshop/test_query/test_scalars_api.py`][test-scalars-api], over the served schema built with `config=strawberry_config()`: `test_scalar_specimen_every_field_wire_format_over_http` pins outbound decimal-string serialization for both `BigInt` columns, and `test_scalar_specimen_bigint_input_decimal_string_argument_over_http` pins the inbound decimal-string parse.
 
 ### Other files
 
 - [`tests/base/test_init.py`][test-init] `test_public_api_surface_is_pinned` — exact `__all__` tuple, `"strawberry_config"` last.
-- [`tests/types/test_converters.py`][test-converters] — `test_bigint_in_input_position_with_null_via_schema_execution` and `test_bigint_resolver_returning_bool_raises_via_schema_execution` build with `config=strawberry_config()`.
+- [`examples/fakeshop/test_query/test_converter_outputs_api.py`][test-converter-outputs-api] — [`examples/fakeshop/test_query/test_converter_outputs_api.py::test_a_nullable_bigint_argument_distinguishes_null_from_a_present_integer`][test-converter-outputs-api] and [`examples/fakeshop/test_query/test_converter_outputs_api.py::test_an_outbound_bigint_rejects_bool_beside_its_integer_control`][test-converter-outputs-api] exercise nullable input and strict outbound refusal through `DjangoSchema(config=strawberry_config())` over HTTP.
 
 ## Doc updates
 
@@ -395,7 +396,7 @@ Each item names a live constraint the contract depends on.
 4. [`tests/test_scalars.py`][test-scalars] carries every test named under the two `strawberry_config()` factory headings of the [Test plan](#test-plan), one pytest item each, no `pytest.mark.parametrize` fan-out.
 5. [`tests/test_scalars.py`][test-scalars] `test_package_import_does_not_emit_strawberry_deprecation_warning` passes: the import is clean under `-W error::DeprecationWarning` per [Decision 6](#decision-6--no-warning-suppression-at-the-definition-site).
 6. [`tests/base/test_init.py`][test-init] `test_public_api_surface_is_pinned` ends the pinned `__all__` tuple with `"strawberry_config"`.
-6a. [`tests/types/test_converters.py`][test-converters]: every schema that resolves to `BigInt` is built with `config=strawberry_config()`, and `strawberry_config` is on the file's package import block. Which `BigInt` cases live in this file rather than in live `/graphql/` coverage is owned by the live-coverage rule.
+6a. [`examples/fakeshop/test_query/test_converter_outputs_api.py`][test-converter-outputs-api]: native HTTP holders that resolve `BigInt` use `DjangoSchema(config=strawberry_config())`, with `strawberry_config` imported from the package. Package converter tests retain private metadata and cache observations.
 6b. [`tests/test_scalars.py`][test-scalars] module docstring names the live modules that own wire-reachable `BigInt` behavior and lists `strawberry_config()` construction among what stays in-process.
 6c. [`examples/fakeshop/test_query/test_scalars_api.py`][test-scalars-api] pins the `BigInt` round trip over `/graphql/` through the served `config=strawberry_config()` schema in both directions (the [Test plan](#test-plan) live-tier items).
 7. [`examples/fakeshop/config/schema.py`][schema] carries `strawberry_config` on its package import block and `config=strawberry_config()` on the served schema's constructor call per [Decision 9](#decision-9--example-app-migration-scope).

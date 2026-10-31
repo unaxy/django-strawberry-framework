@@ -332,7 +332,7 @@ so a later round re-running them is re-deriving a known answer:
 | Swallowing `except BaseException` in an async function | 120 swallowing handlers package-wide | all 31 in async code already carry an `except (asyncio.CancelledError, KeyboardInterrupt, SystemExit): raise` guard; the other 89 are sync hostile-input hardening with no await point |
 | Query-capture instruments inside async tests | every async `test_*` in the repo | none besides the row under review; no other async SQL assertion was silently reading an empty capture |
 | Module docstrings carrying a frozen test count | every docstring in the four test trees | `tests/test_list_field.py` was the only one |
-| `for` loop over asserted states in a test body | 17 in this card's six modules | 16 are censuses over equivalent inputs; one sequential loop whose second iteration depended on the first, now spelled apart through `tests/test_connection.py::_planned_relation_request` |
+| `for` loop over asserted states in a test body | 17 in this card's six modules | 16 are censuses over equivalent inputs; one sequential loop whose second iteration depended on the first, now spelled apart through `tests/_connection_field_schemas.py::_planned_relation_request` |
 | The 1-microsecond deadline idiom | `examples/fakeshop/test_query/test_resource_policy_api.py`, `tests/forms/test_resolvers.py` | both sync, both separated from the seam by a full parse-and-validate rather than one resolver return, so the "never crosses an await" defect does not apply to either |
 
 ### Definition reads, measured

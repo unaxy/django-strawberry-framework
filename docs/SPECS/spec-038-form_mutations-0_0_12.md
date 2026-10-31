@@ -1656,7 +1656,9 @@ write flavor rides.
    and each form field name is re-keyed to the GraphQL input field the client sent
    (`category` → `categoryId`) through the key map
    `django_strawberry_framework/utils/errors.py::build_error_key_map` builds over the
-   bind-stashed specs (a form spec's `target_name` is the form field name;
+   specs named as the executing schema published them
+   (`django_strawberry_framework/utils/inputs.py::published_input_specs`; a form spec's
+   `target_name` is the form field name;
    `django_strawberry_framework/forms/resolvers.py::_form_errors_to_field_errors`). A
    form field the input does not expose (a `Meta.fields` narrowing) keeps its form field
    name. This is graphene-django's `ErrorType.from_errors(form.errors)` outcome (the

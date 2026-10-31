@@ -1410,7 +1410,7 @@ assertions read as contract, not as attribute spelunking.
    non-callable raise [`ConfigurationError`][glossary-configurationerror], omitting
    the argument raises `TypeError`. Separately, the router module carries **no**
    Strawberry HTTP consumer at all — asserted positively from the module source, so
-   one cannot return silently (`tests/test_routers.py::test_construction_rejects_an_omitted_or_unusable_django_application`, `tests/test_routers.py::test_graphql_http_consumer_left_the_router_module_entirely`).
+   one cannot return silently (`tests/test_routers.py::test_construction_requires_the_django_application_argument`, `tests/test_routers.py::test_construction_rejects_an_unusable_django_application`, `tests/test_routers.py::test_graphql_http_consumer_left_the_router_module_entirely`).
 4. The `websocket` branch is `AllowedHostsOriginValidator`-wrapped **outside** the
    `AuthMiddlewareStack`, with the package's Host validator outside that again
    (wrapping order asserted). Assertion mechanics:

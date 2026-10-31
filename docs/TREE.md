@@ -233,6 +233,7 @@ django_strawberry_framework/    # Public API of django-strawberry-framework, a D
 ├── filters/    # Filtering subsystem - declarative ``FilterSet`` classes that become GraphQL ``filter:`` arguments.
 │   ├── base.py                   # Filter primitives + ``RelatedFilter``.
 │   ├── factories.py              # Filter input-class BFS factory.
+│   ├── form_binding.py           # Bind normalized filter values through the actual consumer form and widget readers.
 │   ├── inputs.py                 # Filter input namespace, lookup-name scaffolding, and shape converters.
 │   └── sets.py                   # ``FilterSet`` + ``FilterSetMetaclass`` - declaration, validation, and the apply pipeline.
 ├── forms/    # Form-mutations subsystem - the Django-``Form`` / ``ModelForm`` write side.
@@ -376,6 +377,7 @@ django_strawberry_framework/    # Public API of django-strawberry-framework, a D
 ├── filters/    # Filtering subsystem - declarative ``FilterSet`` classes that become GraphQL ``filter:`` arguments.
 │   ├── base.py                   # Filter primitives + ``RelatedFilter``.
 │   ├── factories.py              # Filter input-class BFS factory.
+│   ├── form_binding.py           # Bind normalized filter values through the actual consumer form and widget readers.
 │   ├── inputs.py                 # Filter input namespace, lookup-name scaffolding, and shape converters.
 │   └── sets.py                   # ``FilterSet`` + ``FilterSetMetaclass`` - declaration, validation, and the apply pipeline.
 ├── forms/    # Form-mutations subsystem - the Django-``Form`` / ``ModelForm`` write side.
@@ -485,18 +487,27 @@ Source: `tests/`
 
 ```text
 tests/    # Package, integration, and repository-tool tests for django_strawberry_framework.
+├── _app_registry.py              # Restore test-local Django model registrations across every test tree.
+├── _catalog_data.py              # Select and reshape saved catalog rows produced by the product service seed.
+├── _cleaned_filter_sets.py       # Shared consumer filter declarations and rows for scalar range and list form contracts.
+├── _connection_field_schemas.py  # Shared consumer connection declarations for package and live HTTP tests.
+├── _db_connections.py            # Close SQLite task and executor connections across every test tree.
 ├── _definition.py                # Real ``DjangoTypeDefinition`` records built directly, without declaring or registering a type.
 ├── _django_private.py            # Typed views of Django's private attributes that django-stubs omits.
 ├── _execution.py                 # Real Strawberry ``ExecutionContext`` objects for tests that drive an extension hook directly.
+├── _filter_key_models.py         # Shared real primary-key column models for package metadata and native primitive acceptance.
 ├── _generated_inputs.py          # Shared keyword-constructor view of run-time-generated GraphQL input classes.
 ├── _idioms.py                    # Shared test idioms written so the type checker can follow them.
 ├── _info.py                      # Real Strawberry ``Info`` objects for tests that call a resolver-side entry point directly.
+├── _lateral_data.py              # Shared PostgreSQL periodical fixture rows for HTTP paging and internal EXPLAIN tests.
+├── _mti_relations.py             # Real MTI-parent forward-M2M fixtures shared by live and private resolver tests.
 ├── _postgres_fields.py           # Shared PostgreSQL container-field doubles that run without ``django.contrib.postgres``.
 ├── _postgresql_stand_in.py       # Shared database alias that reads as PostgreSQL on every test tier, never opened.
+├── _relation_connection_schemas.py  # Consumer graph builders shared by connection wire tests and private window-state tests.
 ├── _relation_fixtures.py         # Shared TEST-ONLY relation fixture models.
 ├── _soft_dependency.py           # Shared soft-dependency absence simulation for the optional-import guards.
 ├── _subprocess.py                # Shared fresh-interpreter isolation for tests whose claim is about a clean process.
-├── conftest.py                   # Shared pytest fixtures and test-suite instrumentation.
+├── conftest.py                   # Shared package-test fixtures: registry isolation, script imports, stop signals, budgets.
 ├── test_app_registry_restore.py  # The suite-wide app-registry restore keeps a module-scope model registered.
 ├── test_apps.py                  # AppConfig tests for package registration and upstream patch dispatch.
 ├── test_bench_common.py          # Script tests for the measurement plumbing the bench scripts share.
@@ -516,7 +527,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_ci_governance.py         # Governance tests for CI workflows, Dependabot, install floors and first-party source.
 ├── test_clean_up.py              # Script tests for clean_up generated-artifact deletion boundaries.
 ├── test_completion.py            # Completion source audits and revocable ownership that a wire response cannot inspect.
-├── test_connection.py            # DjangoConnection tests for generated types, fields, resolvers, sidecars, optimization, and pagination.
+├── test_connection.py            # DjangoConnection construction, window internals, exception identity and planner metadata tests.
 ├── test_connection_window_rows.py  # The windowed-prefetch hand-off accepts only model rows as a connection window.
 ├── test_consumer_base_check.py   # The revalidating consumer factory proves its bases carry the hooks it overrides.
 ├── test_consumers.py             # Construction-time and handshake-projection units for the WebSocket consumer.
@@ -534,7 +545,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_info.py                  # Smoke tests proving the shared ``tests/_info.py`` builders hand out what they promise.
 ├── test_keyset.py                # Package-side keyset-cursor tests: codec, bounds, window shapes, lateral seek.
 ├── test_keyset_connection.py     # Package-side keyset connection tests for cursor state, window fallbacks and planner helpers.
-├── test_lateral_pg_parity.py     # Postgres lateral-fetch tests for parity, SQL shape, cleanup, custom joins, adaptation, and index seeks.
+├── test_lateral_pg_parity.py     # PostgreSQL tests for internal JSON adapters, connection cleanup and EXPLAIN index usability.
 ├── test_list_field.py            # Package-side DjangoListField tests for construction-time validation, helper mechanics and internals.
 ├── test_model_field_annotations.py  # Model field annotations agree with the fields they annotate.
 ├── test_multipart.py             # Pin for the GraphQL multipart wire vocabulary pair.
@@ -544,9 +555,9 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_prepared_view_handoff.py # The prepared-view handoff's ignore arms.
 ├── test_prove_failability.py     # Script tests for the failability-proof runner's refusals and restore proof.
 ├── test_registry.py              # TypeRegistry and finalization tests for lookups, primaries, lifecycle callbacks, retries, and reset.
-├── test_relation_fixtures.py     # Smoke tests proving the shared ``Rp*`` relation fixtures work end to end.
-├── test_relay_connection.py      # Relation-as-Connection tests for synthesis, pagination, optimized windows, fallbacks, and cleanup.
-├── test_relay_node_field.py      # Root Relay refetch tests for DjangoNodeField and DjangoNodesField.
+├── test_relation_fixtures.py     # The composite relation fixture drops its unmanaged tables after use.
+├── test_relay_connection.py      # Relation-connection construction, registry lifecycle and private window-state tests.
+├── test_relay_node_field.py      # Package Relay refetch construction, identity, cache and exception-class contracts.
 ├── test_resource_policy.py       # ``ResourcePolicy`` construction, narrowing, threading, and walker edge cases.
 ├── test_review_changed_python_diffs.py  # Repo-tooling tests for the commit-vs-HEAD stripped diff helper.
 ├── test_review_inspect.py        # Repo-tooling tests for the static review inspector ``scripts/review_inspect.py``.
@@ -555,7 +566,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_scalars.py               # Scalar tests for BigInt, Upload, and the framework StrawberryConfig helper.
 ├── test_schema.py                # Permanent behavioral tests for django_strawberry_framework.schema.
 ├── test_sets_mixins.py           # Pins for set-family mixins shared by ``FilterSet`` and ``OrderSet``.
-├── test_strawberry_patches.py    # Tests for the Strawberry request-body and connection-page patches.
+├── test_strawberry_patches.py    # Tests for the Strawberry request-body and Relay patches.
 ├── test_views.py                 # Package-tier contracts for the package's Django GraphQL views.
 ├── test_views_async_callback.py  # The async package view's ``as_view`` returns a coroutine view callback, or refuses.
 ├── test_workspace.py             # Repo-tooling tests for the agentflow workspace tool's copies, pool, evidence and cleanup.
@@ -577,15 +588,16 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 │   ├── test_base.py              # Filter primitive tests for typed, list, range, global-ID, and related filters.
 │   ├── test_factories.py         # FilterArgumentsFactory tests for BFS input generation.
 │   ├── test_finalizer.py         # Finalizer tests for filter binding, owner-aware materialization, and orphan validation.
+│   ├── test_form_binding.py      # Filter form overlays preserve lazy mapping reads and QueryDict copy protocols.
 │   ├── test_inputs.py            # Filter input-generation tests for lookup naming, field construction, normalization, references, and reset.
 │   ├── test_operator_bag_reads.py  # A dict operator bag is classified and read through one base read of its pairs.
-│   ├── test_sets.py              # FilterSet tests for Meta validation, relations, Relay fields, permissions, visibility, and logic trees.
+│   ├── test_sets.py              # FilterSet construction, generation provenance, form data, callback counts, and object identity.
 │   └── fixtures/    # Fixture modules for filter lazy resolution and cyclic input-generation tests.
 │       └── filtersets.py         # Fixture FilterSet declarations for cross-module lazy resolution and self-referential cycle handling.
 ├── forms/    # Package tests for form conversion, generated inputs, and form-backed mutation behavior.
 │   ├── test_converter.py         # Converter tests for the form-field -> Strawberry annotation registry.
 │   ├── test_inputs.py            # Form-derived input tests for the generated ``<FormClass>Input`` / ``PartialInput``.
-│   ├── test_resolvers.py         # Form-mutation resolver-pipeline tests.
+│   ├── test_resolvers.py         # Form-mutation construction, reconstruction, binding and save-time seam tests.
 │   └── test_sets.py              # ``DjangoFormMutation`` / ``DjangoModelFormMutation`` bases, ``Meta`` validation, and the bind.
 ├── management/    # Package tests for django-strawberry-framework management commands.
 │   ├── test_export_schema.py     # Package tests for export_schema argparse contracts and newline-preserving file writes.
@@ -597,7 +609,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 │   ├── test_fields.py            # ``DjangoMutationField`` factory tests.
 │   ├── test_inputs.py            # Mutation input tests for generated Input/PartialInput, FieldError, and the payload wrapper.
 │   ├── test_operations.py        # Tests for canonical mutation operation descriptors (operations.py).
-│   ├── test_permissions.py       # ``DjangoModelPermission`` class behavior + write-auth enforcement.
+│   ├── test_permissions.py       # Mutation permission construction, hidden exception state, and direct helper contracts.
 │   ├── test_resolvers.py         # Write-pipeline resolver tests.
 │   ├── test_sets.py              # ``DjangoMutation`` base, ``Meta`` validation, registration, and the phase-2.5 bind.
 │   ├── test_step_failure.py      # The write skeleton tells a failed step from a step whose product is a list.
@@ -617,14 +629,12 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 │   ├── test_nested_index_advisory.py  # Composite-index advisory unit matrix for nested connection strategies.
 │   ├── test_plans.py             # OptimizationPlan tests for lifecycle, ORM reconciliation, paths, ordering, and window pagination.
 │   ├── test_predicates.py        # Executable ORM tests for the correlated-EXISTS predicate primitive.
-│   ├── test_relation_link_execution.py  # Optimizer execution over relations whose link is not a plain pk ``ForeignKey``.
-│   ├── test_relation_spelling_execution.py  # Optimizer execution over a reverse one-to-one whose query name and accessor differ.
 │   ├── test_selections.py        # Tests for the selection-traversal substrate (``optimizer/selections.py``).
 │   ├── test_single_parent_fetch.py  # Tests for the single-parent window fast path (``optimizer/single_parent_fetch.py``).
 │   └── test_walker.py            # Selection-walker tests for GraphQL selection to ORM OptimizationPlan conversion.
 ├── orders/    # Package tests for the OrderSet subsystem.
 │   ├── test_base.py              # RelatedOrder binding and lazy-resolution tests plus Meta.orderset_class promotion and validation.
-│   ├── test_composition.py       # Filter and order composition smoke tests for Layer-3 read-side integration.
+│   ├── test_composition.py       # Filter and order finalization shares input namespaces, caches, and the neutral related-set mixin.
 │   ├── test_factories.py         # OrderArgumentsFactory tests for BFS generation, annotations, caching, idempotency, and validation.
 │   ├── test_finalizer.py         # Finalizer tests for order binding, Meta.orderset_class promotion, and orphan validation.
 │   ├── test_inputs.py            # Order input tests for Ordering enum, input materialization, reset, and normalization.
@@ -663,7 +673,6 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
     ├── test_context.py           # Tests for the shared request-context read / write / delete dispatch.
     ├── test_converters.py        # Tests for the shared fail-loud converter-dispatch skeleton (``utils/converters.py``).
     ├── test_directives.py        # Tests for the shared field-directives validation (``utils/directives.py``).
-    ├── test_error_keys.py        # Every write flavor keys a validator error to the GraphQL input field the client sent.
     ├── test_errors.py            # Shared mutation-error constructors: leaf shapes, the Django mapper, the code vocabulary.
     ├── test_execution_mode.py    # ``utils/execution_mode.py`` - which GraphQL executor is driving this resolver.
     ├── test_imports.py           # Tests for the shared optional-import helpers (``utils/imports.py``).
@@ -676,7 +685,6 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
     ├── test_policies.py          # ``utils/policies.py::resolve_policy`` - the shared schema-construction resolver.
     ├── test_querysets.py         # Tests for the shared query-source / visibility substrate (``utils/querysets.py``).
     ├── test_related_declaration_keys.py  # The permission walk's related-declaration read holds a collection to attribute-name keys.
-    ├── test_relation_reentry.py  # A relation path re-entering the bound set's table reads the bound type (``relation_target_type``).
     ├── test_relations.py         # Relation utility tests for kinds, many-side detection, instance accessors, and package re-exports.
     ├── test_sessions.py          # Behavioral tests for the session-engine resolver and connection actor lease.
     ├── test_strings.py           # String utility tests for snake/camel/Pascal case conversion and Django lookup-path flattening.
@@ -701,14 +709,12 @@ examples/fakeshop/apps/    # Per-Django-app, non-live tests that stay beside the
 │       ├── test_commands.py      # Kanban command tests for the merged ``import_card_files`` workflow.
 │       ├── test_migrations.py    # Kanban data-migration contract tests.
 │       ├── test_services.py      # Kanban service tests for card resolution, creation, tracked paths, validation, and rollback.
-│       ├── test_services_gaps.py # Service-layer gap coverage for branches the main service suite leaves open.
+│       ├── test_services_gaps.py # Kanban service tests for database consistency, card placement and tracked-path state.
 │       ├── test_signals.py       # Kanban signal tests for dependencies, done-card guards, blocking, and ordering.
 │       ├── test_uuid.py          # Tests for the UUID side-table wiring and its one-hot link constraint.
 │       └── test_worklog.py       # Kanban work-tracking tests for card status, transitions, attempts, decisions, and readiness.
 ├── library/
 │   └── tests/    # Non-live app tests for library models, schema exposure, and declaration-order invariants.
-│       ├── test_generic_connection.py  # In-process windowed GenericRelation connection acceptance tests.
-│       ├── test_generic_connection_sharded.py  # Sharded (``FAKESHOP_SHARDED=1``) GenericRelation connection alias-late morph test.
 │       ├── test_models.py        # Library model tests for string rendering, relation traversal, inheritance, and per-shelf title uniqueness.
 │       └── test_schema.py        # Library schema test for the declaration-order invariant the app deliberately carries.
 ├── products/
@@ -742,41 +748,102 @@ examples/fakeshop/test_query/    # Live GraphQL HTTP tests for fakeshop's consum
 ├── README.md                     # The manual for writing tests in this repository: where a test goes, what it must prove, how a shortcut test becomes a real one, and what the fakeshop live tier owes every package line it can reach.
 ├── conftest.py                   # Shared fixtures for the fakeshop acceptance (live ``/graphql/``) suites.
 ├── test_auth_api.py              # Live ``/graphql/`` auth API acceptance tests.
+├── test_backend_bindability_api.py  # Real-backend numeric format and timezone-setting filter boundaries over HTTP.
 ├── test_client_api.py            # Live GraphQL HTTP acceptance tests for the ``testing`` package's test-client family.
 ├── test_combined_visibility_api.py  # Live GraphQL HTTP tests for a combined ``get_queryset`` result served as its primary-key set.
 ├── test_completion_lifecycle.py  # Live HTTP acceptance for owned async mutation completion and stable error delivery.
+├── test_connection_fields_api.py # Live HTTP root-connection sources, pagination, sidecars and visibility contracts.
+├── test_connection_names_api.py  # Live connection selection names and row-fetch elision under schema name conversion.
 ├── test_connection_pagination_api.py  # Live /graphql pagination error containment and ``totalCount`` gating for connections.
+├── test_converter_outputs_api.py # Native HTTP converter verdicts requiring consumer scalar or column declarations.
 ├── test_debug_extension_api.py   # Live GraphQL HTTP tests for the ``DjangoDebugExtension`` request-visible contract.
 ├── test_debug_toolbar_api.py     # Live HTTP tests for ``DebugToolbarMiddleware`` across GraphQL, panel, and pass-through routes.
+├── test_declared_key_forms_api.py  # Native key filters publish their stored-column scalar and validate raw key bounds over HTTP.
+├── test_declared_key_primitives_api.py  # Declared key primitives compare the real column stored by scalar and relation-valued keys.
+├── test_declared_temporal_bindability_api.py  # Declared temporal filters and resolver annotations use the real database's bind boundary.
+├── test_direct_filter_primitives_api.py  # Ordinary JSON arguments preserve the public primitive's own container contract.
 ├── test_error_policy_api.py      # Live ``/graphql/`` production-error-policy acceptance tests.
+├── test_explicit_temporal_arguments_api.py  # Consumer calendar arguments reach temporal filtering without a generated filter argument.
 ├── test_extension_isolation_api.py  # Live GraphQL HTTP tests for what one operation's extensions may be answered from.
+├── test_filter_absence_api.py    # Live filtering contracts for optional child leaves whose absence would constrain their own form.
+├── test_filter_apply_arguments_api.py  # Consumer JSON arguments preserve filtering, inactive logic and malformed-value refusals.
+├── test_filter_apply_compatibility_api.py  # The public FilterSet.apply compatibility entry point returns rows or its exact sync recourse.
+├── test_filter_consumer_contracts_api.py  # Consumer filters preserve queryset returns, distinctness and projected branch gates over HTTP.
+├── test_filter_copy_keys_api.py  # Copied filters bind by the exact keys their real widgets read without naming a prefix sibling.
+├── test_filter_declarations_api.py  # Consumer filter declarations publish inputs and apply callbacks and postponed annotations over HTTP.
+├── test_filter_logic_customization_api.py  # Authored excluded-empty memberships and queryset overrides keep their logical-arm meaning.
+├── test_filter_lookup_catalog_api.py  # Consumer filter overrides retain usable text-pattern lookups in the all-lookup catalog.
+├── test_filter_normalizer_arguments_api.py  # Ordinary JSON consumers retain each list normalizer arm's refusals and admitted forms.
+├── test_filter_publication_api.py  # Published filter cycles and deferred consumer fields preserve their declared inputs over HTTP.
+├── test_filter_querysets_api.py  # Live HTTP filters preserve consumer row occurrences and paginate generated deep loan predicates.
+├── test_filter_widget_binding_api.py  # Native filter widgets read supplied values through their bound forms over HTTP.
+├── test_form_construction_api.py # Live HTTP form construction, validation and narrowed-update contracts.
+├── test_form_relation_binding_api.py  # Live HTTP form tests for relation-key reconstruction, replacement and decode refusals.
+├── test_generated_relation_filters_api.py  # Native HTTP generated relation filters over Relay keys, ForeignObject and to_field links.
+├── test_generated_reverse_filters_api.py  # Generated reverse relation predicates through native sync and async HTTP.
+├── test_generic_connection_api.py  # Live HTTP tests for generic-connection content types, projection and pagination.
+├── test_generic_connection_sharded_api.py  # Live HTTP tests for generic-connection content-type isolation across database aliases.
+├── test_globalid_filter_strategies_api.py  # GlobalID filters accept only the target's configured emitted identifier spellings.
 ├── test_globalid_naming_api.py   # Live GraphQL HTTP tests for type-strategy GlobalIDs under a type-renaming name converter.
 ├── test_glossary_api.py          # Live GraphQL HTTP tests for the glossary docs-as-data API.
-├── test_input_shapes_api.py      # Live GraphQL HTTP tests for the relation-id and payload-slot shapes of generated write inputs.
+├── test_input_shapes_api.py      # Live GraphQL HTTP tests for generated mutation input shapes and payload slots.
 ├── test_joined_relation_visibility_api.py  # Live GraphQL proof that a consumer JOIN never outranks a planned visibility ``Prefetch``.
 ├── test_kanban_api.py            # Live GraphQL HTTP tests for the kanban board docs-as-data API.
 ├── test_kanban_mutations_api.py  # Live GraphQL HTTP tests for the kanban write surface.
 ├── test_keyset_api.py            # Live GraphQL HTTP tests for keyset (``Meta.cursor_field``) cursor pagination.
+├── test_keyset_order_terms_api.py  # Live keyset ordering over consumer visibility hooks and a multi-column ForeignObject.
+├── test_lateral_strategy_api.py  # Live PostgreSQL HTTP tests for lateral strategy parity, paging, visibility and custom joins.
 ├── test_library_api.py           # Live GraphQL HTTP tests for the library app's read/write, Relay, keyset, and optimizer surface.
+├── test_library_generated_api.py # Live GraphQL HTTP tests for the library ``Shelf``'s database-computed (``GeneratedField``) columns.
 ├── test_library_inheritance_api.py  # Live GraphQL HTTP tests for the library inheritance, proxy, and relation-shape surface.
 ├── test_library_shapes_api.py    # Live GraphQL HTTP tests for the library relation shapes the optimizer plans specially.
 ├── test_list_field_api.py        # Live sync-HTTP contract for ``DjangoListField`` arguments.
 ├── test_list_field_async_api.py  # Live async-HTTP contract for ``DjangoListField`` arguments.
+├── test_model_mutation_flows_api.py  # Live HTTP tests for model-mutation identities, relation decoding and write-error names.
+├── test_mti_composite_relations_api.py  # Native HTTP relation verdicts needing MTI-forward-M2M or composite-key parents.
 ├── test_multi_db.py              # Live GraphQL HTTP tests for sharded resolver isolation and multi-database debug capture.
 ├── test_mutation_atomicity.py    # Live HTTP acceptance for the mutation transaction that spans response completion.
+├── test_mutation_error_keys_api.py  # Live HTTP writes key each validator error to the GraphQL input field the client sent.
+├── test_mutation_permissions_api.py  # Live HTTP tests for consumer-declared mutation authorization and its configuration boundary.
+├── test_node_refetch_api.py      # Native HTTP Relay refetch contracts requiring consumer declarations.
 ├── test_optimizer_auto_api.py    # Live ``/graphql/`` coverage for routed nested-fetch strategy selection.
+├── test_order_apply_arguments_api.py  # Unbound consumer ordering uses the queryset model to preserve one row per root.
+├── test_postgres_array_filter_bindability_api.py  # Real PostgreSQL array filter inputs are refused or applied through native HTTP consumers.
 ├── test_products_api.py          # Live GraphQL HTTP tests for products reads, mutations, permissions, optimization, and request parsing.
 ├── test_products_visibility_api.py  # Live GraphQL proof that generated relations enforce target visibility themselves.
+├── test_projected_owned_filters_api.py  # Native HTTP owners for projected methods and filters carrying their own callable.
+├── test_raw_filter_forms_api.py  # Consumer JSON and raw arguments preserve filter forms, widget keys and public primitive calls.
+├── test_raw_relation_filter_arguments_api.py  # Raw relation filters reached through ordinary public scalar Query arguments.
+├── test_raw_relation_key_forms_api.py  # Unbound raw relation forms compare target primary keys and drop uncoercible members over HTTP.
+├── test_relation_authority_worlds_api.py  # Live relation leaves answer over each relation kind's visible target rows.
+├── test_relation_authority_worlds_sharded_api.py  # Walked relation leaves use their root queryset's database on every correlation link.
+├── test_relation_connection_introspection_api.py  # Live HTTP introspection tests for consumer relation shapes and target-owned connection fields.
+├── test_relation_connections_api.py  # Live HTTP tests for relation-connection windows, fallbacks, hints and strategy parity.
 ├── test_relation_deadline_api.py # Live pins: the execution deadline stops nested relation resolvers.
+├── test_relation_filter_boundaries_api.py  # Native HTTP relation filters over ancestor models, child models and admitted querysets.
+├── test_relation_filter_defaults_api.py  # Consumer relation forms apply defaults, await scoped methods and refuse unresolved active hops.
+├── test_relation_filter_form_paths_api.py  # Consumer form relation keys and projected reentry preserve their target and root universes.
+├── test_relation_identity_columns_api.py  # Raw relation identities use the target's stored key column through native HTTP filters.
+├── test_relation_leaf_sql_api.py # Walked relation predicates preserve null extension, orphan-safe negation and independent SQL.
+├── test_relation_link_api.py     # Live HTTP execution over relations whose link is not a plain pk ``ForeignKey``.
+├── test_relation_reentry_api.py  # Live HTTP relation filters and orders read their bound or registered target type.
+├── test_relation_spelling_api.py # Live HTTP optimizer execution over a reverse one-to-one whose query name and accessor differ.
 ├── test_relations_async_api.py   # Live GraphQL proof that generated relations lazy-load and read prefetches in async.
 ├── test_resource_policy_api.py   # Live ``/graphql/`` execution-resource-policy acceptance tests.
+├── test_scalar_predicate_binding_api.py  # Native scalar predicates preserve Django's transformed, duration and backend binding semantics.
 ├── test_scalars_api.py           # Live GraphQL HTTP tests for scalar wire formats, filtering, relations, and optimizer behavior.
 ├── test_scalars_filter_api.py    # Live GraphQL HTTP tests for scalar filtering, ordering, and related-queryset behavior.
-├── test_scalars_mutation_api.py  # Live GraphQL HTTP tests for temporal writes the database cannot store.
+├── test_scalars_mutation_api.py  # Live GraphQL HTTP tests for model input normalization and temporal database storability.
 ├── test_schema_composition_api.py  # Live ``/graphql/`` proof that fakeshop's composed project schema publishes every app's surface.
+├── test_serializer_runtime_api.py  # Live HTTP serializer tests for save errors, runtime field ownership and post-save conflicts.
 ├── test_single_parent_fastpath_api.py  # Live GraphQL HTTP tests for the single-parent windowed-prefetch fast path.
 ├── test_transport_api.py         # Live ``/graphql/`` transport-boundary acceptance tests.
-└── test_uploads_api.py           # Live GraphQL HTTP tests for the file / image field wire contract.
+├── test_transport_chain_api.py   # Live HTTP tests for configured middleware policies and GraphQL callback fallbacks.
+├── test_transport_encoding_api.py  # Live HTTP tests for declared multipart codecs and middleware-assigned form encodings.
+├── test_uploads_api.py           # Live GraphQL HTTP tests for the file / image field wire contract.
+├── test_visible_relation_boundaries_api.py  # Native HTTP visibility across async hops, multi-relation branches and bound re-entry.
+├── test_visible_relation_keys_api.py  # Native HTTP visible target keys and fully undeclared relation paths.
+└── test_visible_to_field_filters_api.py  # Native nullable to_field visibility, with raw PK and stored-name carriers distinguished.
 ```
 
 
@@ -788,18 +855,27 @@ Source: `tests/ (+ planned card paths)`
 
 ```text
 tests/    # Package, integration, and repository-tool tests for django_strawberry_framework.
+├── _app_registry.py              # Restore test-local Django model registrations across every test tree.
+├── _catalog_data.py              # Select and reshape saved catalog rows produced by the product service seed.
+├── _cleaned_filter_sets.py       # Shared consumer filter declarations and rows for scalar range and list form contracts.
+├── _connection_field_schemas.py  # Shared consumer connection declarations for package and live HTTP tests.
+├── _db_connections.py            # Close SQLite task and executor connections across every test tree.
 ├── _definition.py                # Real ``DjangoTypeDefinition`` records built directly, without declaring or registering a type.
 ├── _django_private.py            # Typed views of Django's private attributes that django-stubs omits.
 ├── _execution.py                 # Real Strawberry ``ExecutionContext`` objects for tests that drive an extension hook directly.
+├── _filter_key_models.py         # Shared real primary-key column models for package metadata and native primitive acceptance.
 ├── _generated_inputs.py          # Shared keyword-constructor view of run-time-generated GraphQL input classes.
 ├── _idioms.py                    # Shared test idioms written so the type checker can follow them.
 ├── _info.py                      # Real Strawberry ``Info`` objects for tests that call a resolver-side entry point directly.
+├── _lateral_data.py              # Shared PostgreSQL periodical fixture rows for HTTP paging and internal EXPLAIN tests.
+├── _mti_relations.py             # Real MTI-parent forward-M2M fixtures shared by live and private resolver tests.
 ├── _postgres_fields.py           # Shared PostgreSQL container-field doubles that run without ``django.contrib.postgres``.
 ├── _postgresql_stand_in.py       # Shared database alias that reads as PostgreSQL on every test tier, never opened.
+├── _relation_connection_schemas.py  # Consumer graph builders shared by connection wire tests and private window-state tests.
 ├── _relation_fixtures.py         # Shared TEST-ONLY relation fixture models.
 ├── _soft_dependency.py           # Shared soft-dependency absence simulation for the optional-import guards.
 ├── _subprocess.py                # Shared fresh-interpreter isolation for tests whose claim is about a clean process.
-├── conftest.py                   # Shared pytest fixtures and test-suite instrumentation.
+├── conftest.py                   # Shared package-test fixtures: registry isolation, script imports, stop signals, budgets.
 ├── test_app_registry_restore.py  # The suite-wide app-registry restore keeps a module-scope model registered.
 ├── test_apps.py                  # AppConfig tests for package registration and upstream patch dispatch.
 ├── test_bench_common.py          # Script tests for the measurement plumbing the bench scripts share.
@@ -819,7 +895,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_ci_governance.py         # Governance tests for CI workflows, Dependabot, install floors and first-party source.
 ├── test_clean_up.py              # Script tests for clean_up generated-artifact deletion boundaries.
 ├── test_completion.py            # Completion source audits and revocable ownership that a wire response cannot inspect.
-├── test_connection.py            # DjangoConnection tests for generated types, fields, resolvers, sidecars, optimization, and pagination.
+├── test_connection.py            # DjangoConnection construction, window internals, exception identity and planner metadata tests.
 ├── test_connection_window_rows.py  # The windowed-prefetch hand-off accepts only model rows as a connection window.
 ├── test_consumer_base_check.py   # The revalidating consumer factory proves its bases carry the hooks it overrides.
 ├── test_consumers.py             # Construction-time and handshake-projection units for the WebSocket consumer.
@@ -837,7 +913,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_info.py                  # Smoke tests proving the shared ``tests/_info.py`` builders hand out what they promise.
 ├── test_keyset.py                # Package-side keyset-cursor tests: codec, bounds, window shapes, lateral seek.
 ├── test_keyset_connection.py     # Package-side keyset connection tests for cursor state, window fallbacks and planner helpers.
-├── test_lateral_pg_parity.py     # Postgres lateral-fetch tests for parity, SQL shape, cleanup, custom joins, adaptation, and index seeks.
+├── test_lateral_pg_parity.py     # PostgreSQL tests for internal JSON adapters, connection cleanup and EXPLAIN index usability.
 ├── test_list_field.py            # Package-side DjangoListField tests for construction-time validation, helper mechanics and internals.
 ├── test_model_field_annotations.py  # Model field annotations agree with the fields they annotate.
 ├── test_multipart.py             # Pin for the GraphQL multipart wire vocabulary pair.
@@ -847,9 +923,9 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_prepared_view_handoff.py # The prepared-view handoff's ignore arms.
 ├── test_prove_failability.py     # Script tests for the failability-proof runner's refusals and restore proof.
 ├── test_registry.py              # TypeRegistry and finalization tests for lookups, primaries, lifecycle callbacks, retries, and reset.
-├── test_relation_fixtures.py     # Smoke tests proving the shared ``Rp*`` relation fixtures work end to end.
-├── test_relay_connection.py      # Relation-as-Connection tests for synthesis, pagination, optimized windows, fallbacks, and cleanup.
-├── test_relay_node_field.py      # Root Relay refetch tests for DjangoNodeField and DjangoNodesField.
+├── test_relation_fixtures.py     # The composite relation fixture drops its unmanaged tables after use.
+├── test_relay_connection.py      # Relation-connection construction, registry lifecycle and private window-state tests.
+├── test_relay_node_field.py      # Package Relay refetch construction, identity, cache and exception-class contracts.
 ├── test_resource_policy.py       # ``ResourcePolicy`` construction, narrowing, threading, and walker edge cases.
 ├── test_review_changed_python_diffs.py  # Repo-tooling tests for the commit-vs-HEAD stripped diff helper.
 ├── test_review_inspect.py        # Repo-tooling tests for the static review inspector ``scripts/review_inspect.py``.
@@ -858,7 +934,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_scalars.py               # Scalar tests for BigInt, Upload, and the framework StrawberryConfig helper.
 ├── test_schema.py                # Permanent behavioral tests for django_strawberry_framework.schema.
 ├── test_sets_mixins.py           # Pins for set-family mixins shared by ``FilterSet`` and ``OrderSet``.
-├── test_strawberry_patches.py    # Tests for the Strawberry request-body and connection-page patches.
+├── test_strawberry_patches.py    # Tests for the Strawberry request-body and Relay patches.
 ├── test_views.py                 # Package-tier contracts for the package's Django GraphQL views.
 ├── test_views_async_callback.py  # The async package view's ``as_view`` returns a coroutine view callback, or refuses.
 ├── test_workspace.py             # Repo-tooling tests for the agentflow workspace tool's copies, pool, evidence and cleanup.
@@ -882,17 +958,18 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 │   ├── test_base.py              # Filter primitive tests for typed, list, range, global-ID, and related filters.
 │   ├── test_factories.py         # FilterArgumentsFactory tests for BFS input generation.
 │   ├── test_finalizer.py         # Finalizer tests for filter binding, owner-aware materialization, and orphan validation.
+│   ├── test_form_binding.py      # Filter form overlays preserve lazy mapping reads and QueryDict copy protocols.
 │   ├── test_inputs.py            # Filter input-generation tests for lookup naming, field construction, normalization, references, and reset.
 │   ├── test_operator_bag_reads.py  # A dict operator bag is classified and read through one base read of its pairs.
 │   ├── test_pg_full_text.py      # planned by TODO-BETA-061-0.1.2 - Postgres full-text search filter primitives.
 │   ├── test_search_fields.py     # planned by TODO-BETA-060-0.1.2 - `Meta.search_fields` support.
-│   ├── test_sets.py              # FilterSet tests for Meta validation, relations, Relay fields, permissions, visibility, and logic trees.
+│   ├── test_sets.py              # FilterSet construction, generation provenance, form data, callback counts, and object identity.
 │   └── fixtures/    # Fixture modules for filter lazy resolution and cyclic input-generation tests.
 │       └── filtersets.py         # Fixture FilterSet declarations for cross-module lazy resolution and self-referential cycle handling.
 ├── forms/    # Package tests for form conversion, generated inputs, and form-backed mutation behavior.
 │   ├── test_converter.py         # Converter tests for the form-field -> Strawberry annotation registry.
 │   ├── test_inputs.py            # Form-derived input tests for the generated ``<FormClass>Input`` / ``PartialInput``.
-│   ├── test_resolvers.py         # Form-mutation resolver-pipeline tests.
+│   ├── test_resolvers.py         # Form-mutation construction, reconstruction, binding and save-time seam tests.
 │   └── test_sets.py              # ``DjangoFormMutation`` / ``DjangoModelFormMutation`` bases, ``Meta`` validation, and the bind.
 ├── graph/    # planned by TODO-BETA-058-0.1.1 - Graph substrate: shared graph policy and dependency planning.
 ├── management/    # Package tests for django-strawberry-framework management commands.
@@ -905,7 +982,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 │   ├── test_fields.py            # ``DjangoMutationField`` factory tests.
 │   ├── test_inputs.py            # Mutation input tests for generated Input/PartialInput, FieldError, and the payload wrapper.
 │   ├── test_operations.py        # Tests for canonical mutation operation descriptors (operations.py).
-│   ├── test_permissions.py       # ``DjangoModelPermission`` class behavior + write-auth enforcement.
+│   ├── test_permissions.py       # Mutation permission construction, hidden exception state, and direct helper contracts.
 │   ├── test_resolvers.py         # Write-pipeline resolver tests.
 │   ├── test_sets.py              # ``DjangoMutation`` base, ``Meta`` validation, registration, and the phase-2.5 bind.
 │   ├── test_step_failure.py      # The write skeleton tells a failed step from a step whose product is a list.
@@ -925,14 +1002,12 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 │   ├── test_nested_index_advisory.py  # Composite-index advisory unit matrix for nested connection strategies.
 │   ├── test_plans.py             # OptimizationPlan tests for lifecycle, ORM reconciliation, paths, ordering, and window pagination.
 │   ├── test_predicates.py        # Executable ORM tests for the correlated-EXISTS predicate primitive.
-│   ├── test_relation_link_execution.py  # Optimizer execution over relations whose link is not a plain pk ``ForeignKey``.
-│   ├── test_relation_spelling_execution.py  # Optimizer execution over a reverse one-to-one whose query name and accessor differ.
 │   ├── test_selections.py        # Tests for the selection-traversal substrate (``optimizer/selections.py``).
 │   ├── test_single_parent_fetch.py  # Tests for the single-parent window fast path (``optimizer/single_parent_fetch.py``).
 │   └── test_walker.py            # Selection-walker tests for GraphQL selection to ORM OptimizationPlan conversion.
 ├── orders/    # Package tests for the OrderSet subsystem.
 │   ├── test_base.py              # RelatedOrder binding and lazy-resolution tests plus Meta.orderset_class promotion and validation.
-│   ├── test_composition.py       # Filter and order composition smoke tests for Layer-3 read-side integration.
+│   ├── test_composition.py       # Filter and order finalization shares input namespaces, caches, and the neutral related-set mixin.
 │   ├── test_factories.py         # OrderArgumentsFactory tests for BFS generation, annotations, caching, idempotency, and validation.
 │   ├── test_finalizer.py         # Finalizer tests for order binding, Meta.orderset_class promotion, and orphan validation.
 │   ├── test_inputs.py            # Order input tests for Ordering enum, input materialization, reset, and normalization.
@@ -971,7 +1046,6 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
     ├── test_context.py           # Tests for the shared request-context read / write / delete dispatch.
     ├── test_converters.py        # Tests for the shared fail-loud converter-dispatch skeleton (``utils/converters.py``).
     ├── test_directives.py        # Tests for the shared field-directives validation (``utils/directives.py``).
-    ├── test_error_keys.py        # Every write flavor keys a validator error to the GraphQL input field the client sent.
     ├── test_errors.py            # Shared mutation-error constructors: leaf shapes, the Django mapper, the code vocabulary.
     ├── test_execution_mode.py    # ``utils/execution_mode.py`` - which GraphQL executor is driving this resolver.
     ├── test_imports.py           # Tests for the shared optional-import helpers (``utils/imports.py``).
@@ -984,7 +1058,6 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
     ├── test_policies.py          # ``utils/policies.py::resolve_policy`` - the shared schema-construction resolver.
     ├── test_querysets.py         # Tests for the shared query-source / visibility substrate (``utils/querysets.py``).
     ├── test_related_declaration_keys.py  # The permission walk's related-declaration read holds a collection to attribute-name keys.
-    ├── test_relation_reentry.py  # A relation path re-entering the bound set's table reads the bound type (``relation_target_type``).
     ├── test_relations.py         # Relation utility tests for kinds, many-side detection, instance accessors, and package re-exports.
     ├── test_sessions.py          # Behavioral tests for the session-engine resolver and connection actor lease.
     ├── test_strings.py           # String utility tests for snake/camel/Pascal case conversion and Django lookup-path flattening.

@@ -64,7 +64,7 @@ Worker 0 read the current source behind every finding before writing this plan (
 ### F2 — HOLDS. The pinned test surface is stale (5 tests / four forbidden keys)
 
 - **Spec claim:** `## Implementation plan` table and Definition of done item 4 say **5** tests; `## Test plan` and the Slice 2 checklist pin the forbidden-key set as `{"ready", "label", "default_auto_field", "default"}`.
-- **`HEAD` `tests/test_apps.py`:** **8** test functions (`grep -c '^def test_' tests/test_apps.py` → 8; Worker 0's first statement said 7, from reading rather than measuring — R1 caught it and Worker 0 re-derived). The forbidden set is three keys — `label`, `default_auto_field`, `default`; `"ready"` was removed with an in-file comment naming the supersession. Three tests exist that the spec does not describe: `tests/test_apps.py::test_djangostrawberryframeworkconfig_defines_ready_for_django_patches`, `::test_ready_dispatches_all_three_patch_appliers_and_refires_safely`, `::test_ready_reinstalls_patches_after_their_modules_reload`.
+- **`HEAD` `tests/test_apps.py`:** **8** test functions (`grep -c '^def test_' tests/test_apps.py` → 8; Worker 0's first statement said 7, from reading rather than measuring — R1 caught it and Worker 0 re-derived). The forbidden set is three keys — `label`, `default_auto_field`, `default`; `"ready"` was removed with an in-file comment naming the supersession. Three tests exist that the spec does not describe: `tests/test_apps.py::test_ready_dispatches_all_four_patch_appliers_and_refires_safely`, `::test_ready_dispatches_all_three_patch_appliers_and_refires_safely`, `::test_ready_reinstalls_patches_after_their_modules_reload`.
 - Consequence of F1; same resolution.
 
 ### F3 — HOLDS. Spec status line says `draft`

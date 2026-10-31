@@ -330,7 +330,7 @@ hostile-node cases (e.g.
 `test_query_shadow_defect_is_name_agnostic`,
 `test_func_extra_template_parameter_object_fails_closed`); the
 connection row-survival case
-`tests/test_connection.py::test_connection_query_chain_shadow_hook_is_sealed`
+`examples/fakeshop/test_query/test_connection_fields_api.py::test_connection_query_chain_shadow_hook_is_sealed`
 ([connection tests][connection-tests]).
 
 **Deliberation.** The rejected `__module__`-string provenance, the rejected

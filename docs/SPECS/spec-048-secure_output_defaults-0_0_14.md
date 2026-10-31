@@ -961,7 +961,7 @@ do not take that path. The package validates every offset `after` / `before` / `
 reached, and the keyset fork applies the same bound check
 (`utils/connections.py::assert_relay_pagination_bound`). Each rejection is raised as
 `PaginationArgumentError`, a deliberate `GraphQLError`, so it passes the policy unmasked with
-its fixed message (the engine's own wording) and `extensions.code` `PAGINATION_INVALID`
+its message (the engine's wording, under the published argument name) and `extensions.code` `PAGINATION_INVALID`
 (`utils/errors.py::PAGINATION_INVALID_ERROR_CODE`, set by the class so no raise site spells
 it), as do the keyset codec's cursor rejection (`keyset.py::decode_keyset_cursor`) and the
 package's `first` + `last` mutual-exclusivity guard (`connection.py::_guard_first_and_last`).

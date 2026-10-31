@@ -45,15 +45,13 @@ Each top-level item maps to one commit in the [Implementation plan](#implementat
       - [ ] `test_bigint_serialize_rejects_non_int_types` — `str`, `Decimal`, `None`, custom object all raise `TypeError`
       - [ ] `test_bigint_int_subclasses_are_normalized_before_serialization` — an `int` subclass with hostile `__int__` / `__repr__` / `__str__` parses to a plain `int` and serializes to its canonical decimal string
     - Parser:
-      - [ ] `test_bigint_rejects_python_bool` — both `True` and `False`
-      - [ ] `test_bigint_rejects_python_float` — `1.9`, `0.0`, `-1.0` (silent-truncation guard: `int(1.9) == 1` would otherwise slip through)
       - [ ] `test_bigint_rejects_none` — unit-level test. Strawberry strips `null` before calling `parse_value` for nullable input positions, so this code path is reachable only through direct calls. Tested for defense in depth so the parser's `None` rejection is not removed as "unreachable".
       - [ ] `test_bigint_rejection_messages_survive_hostile_values` — the rejected value's kind is read through `utils/truth.py::kind`, so a hostile metaclass `__name__` hook never runs and the message names the real class; a hostile `str` subclass parses through its base slot
-    - Public-export smoke:
-      - [ ] `test_bigint_is_importable_from_top_level` — `from django_strawberry_framework import BigInt`; assert `BigInt is not None`. **Type-shape assertions intentionally avoided**: Strawberry's scalar wrapper types are undocumented internals; the schema-execution tests catch any "BigInt isn't actually usable as a scalar" regression with stronger signal.
     - Warning-free import:
       - [ ] `test_package_import_does_not_emit_strawberry_deprecation_warning` — **subprocess-based** test running `python -W error::DeprecationWarning -c "import django_strawberry_framework"`, asserts `returncode == 0`. See [Decision 7](#decision-7--test-strategy) for the implementation pattern and why `importlib.reload` is *not* used.
-  - [ ] Live `/graphql/` tests in `examples/fakeshop/test_query/test_scalars_api.py` (every parse / serialize case a request can express):
+  - [ ] Live `/graphql/` tests (every parse / serialize case a request can express):
+    - [ ] `examples/fakeshop/test_query/test_scalars_api.py::test_filter_specimens_by_bigint_exact_rejects_non_integer_literal` refuses both Boolean literals and `1.9`, `0.0`, `-1.0` on both BigInt columns.
+    - [ ] `examples/fakeshop/test_query/test_converter_outputs_api.py::test_a_nullable_bigint_argument_distinguishes_null_from_a_present_integer` imports `BigInt` from the package root and serves its nullable consumer argument.
     - [ ] `test_scalar_specimen_introspects_bigint_scalar_for_both_fields` — `BigIntegerField` and `PositiveBigIntegerField` each introspect as `BigInt` in both the non-null and nullable shapes
     - [ ] `test_scalar_specimen_every_field_wire_format_over_http` — `BigInt` query results serialize as decimal strings past the JS safe-integer boundary
     - [ ] `test_scalar_specimen_bigint_negative_signed_round_trip` and `test_scalar_specimen_bigint_zero_serializes_as_string` — negative and zero values serialize as decimal strings
@@ -63,9 +61,9 @@ Each top-level item maps to one commit in the [Implementation plan](#implementat
     - [ ] `test_filter_specimens_by_bigint_exact_rejects_non_integer_literal` — the input parser rejects `bool` and `float` literals through the live schema path, for both the signed and unsigned `BigInt` fields
     - [ ] `test_filter_specimens_by_bigint_exact_rejects_malformed_decimal_string` — empty, whitespace-padded, non-decimal (`"abc"`, `"1.9"`, `"1e3"`, `"0x10"`), underscore-separated, leading-plus, Unicode-digit, leading-zero, and `"-0"` strings are each refused
     - [ ] `test_scalar_specimen_id_maps_big_auto_pk_to_int` — the `BigAutoField` pk stays `Int`
-  - [ ] Package-tier converter tests in `tests/types/test_converters.py` (no fakeshop field reaches them):
-    - [ ] `test_bigint_in_input_position_with_null_via_schema_execution`
-    - [ ] `test_bigint_resolver_returning_bool_raises_via_schema_execution` — `_serialize_bigint` rejects a non-`int` resolver return value at the schema boundary
+  - [ ] Native HTTP consumer-declaration tests in [`examples/fakeshop/test_query/test_converter_outputs_api.py`][test-converter-outputs-api]:
+    - [ ] [`examples/fakeshop/test_query/test_converter_outputs_api.py::test_a_nullable_bigint_argument_distinguishes_null_from_a_present_integer`][test-converter-outputs-api] — explicit null and a present zero reach distinct consumer branches; zero participates in integer arithmetic
+    - [ ] [`examples/fakeshop/test_query/test_converter_outputs_api.py::test_an_outbound_bigint_rejects_bool_beside_its_integer_control`][test-converter-outputs-api] — `_serialize_bigint` rejects a non-`int` resolver return value at the schema boundary
 - [ ] Slice 2: `JSONField` mapping
   - [ ] `SCALAR_MAP` maps `models.JSONField: strawberry.scalars.JSON`
   - [ ] Tests at the live `/graphql/` tier in `examples/fakeshop/test_query/test_scalars_api.py`
@@ -89,7 +87,7 @@ Each top-level item maps to one commit in the [Implementation plan](#implementat
       - [ ] `test_array_field_outer_choices_rejected_via_fake_sentinel`
       - [ ] `test_array_field_base_field_unsupported_type_raises`
       - [ ] `test_array_field_sentinel_none_path`
-  - [ ] Optional gated test: `test_real_array_field_compatible_with_strawberry` — `pytest.importorskip("django.contrib.postgres.fields")`; declares a `DjangoType` with `ArrayField(IntegerField())` on a `managed = False` model, calls `finalize_django_types()`, introspects the schema via `__type`, asserts the field type is `[Int!]!`. **Introspection navigation note:** GraphQL introspection returns a nested `kind / ofType` chain (`NON_NULL → LIST → NON_NULL → SCALAR { name: "Int" }` for `[Int!]!`); walk it explicitly rather than asserting on `field.type.name` (which is `None` for wrapping types).
+  - [ ] Optional-driver HTTP test: [`examples/fakeshop/test_query/test_converter_outputs_api.py::test_real_array_field_publishes_and_serializes_its_integer_element_type`][test-converter-outputs-api] — a real `ArrayField(IntegerField())` on an unsaved unmanaged owner publishes `[Int!]!` or `[Int!]` as appropriate and returns exact integer members, an empty list or outer null. The response includes the complete `kind` / `ofType` introspection chain; SQLite can serve these unsaved rows without storing an array.
 - [ ] Slice 4: `HStoreField` conditional registration via sentinel + `strawberry.scalars.JSON` target
   - [ ] Module-level sentinel `_HSTORE_FIELD_CLS`, soft-imported through the package's shared optional-import owner per [Decision 4](#decision-4--soft-import-via-module-level-sentinels)
   - [ ] `convert_scalar` branch guarded by `_HSTORE_FIELD_CLS is not None and isinstance(field, _HSTORE_FIELD_CLS)` returning `strawberry.scalars.JSON` per [Decision 5](#decision-5--hstorefield-wire-shape)
@@ -102,11 +100,9 @@ Each top-level item maps to one commit in the [Implementation plan](#implementat
     - Sentinel-branch coverage (via `FakeHStoreField`):
       - [ ] `test_hstore_field_maps_to_json_scalar_via_fake_sentinel`
       - [ ] `test_hstore_field_nullable_via_fake_sentinel`
-      - [ ] `test_hstore_field_resolver_dict_serializes_via_schema_execution` — resolver returns a hand-built `dict` (no DB persistence; SQLite cannot store HStore values); test name clarifies this is a serializer-level test
-      - [ ] `test_hstore_field_resolver_dict_with_none_value_via_schema_execution` — resolver returns `{"k1": "v", "k2": None}`; pins that `JSON` accepts `None` values inside the dict (mirrors `HStoreField`'s native `dict[str, str | None]` shape)
       - [ ] `test_hstore_field_outer_choices_rejected_via_fake_sentinel` — declares `FakeHStoreField(choices=[("a", "A")])`; asserts `ConfigurationError` is raised at type creation
       - [ ] `test_hstore_field_sentinel_none_path` — monkey-patch sentinel to `None`
-  - [ ] Optional gated test: `test_real_hstore_field_compatible_with_strawberry` — `pytest.importorskip("django.contrib.postgres.fields")`; declares a `DjangoType` with `HStoreField()` on a `managed = False` model, calls `finalize_django_types()`, introspects the schema, asserts the field type is `JSON!` (introspection chain: `NON_NULL → SCALAR { name: "JSON" }`; walk the `kind / ofType` structure explicitly), **and** exercises a resolver returning `{"k1": "v", "k2": None}` via `schema.execute_sync`, asserting the dict shape including the `None` value is preserved in the response.
+  - [ ] Optional-driver HTTP test: [`examples/fakeshop/test_query/test_converter_outputs_api.py::test_real_hstore_field_publishes_json_and_preserves_each_member`][test-converter-outputs-api] — a real `HStoreField` on an unsaved unmanaged owner publishes exact `JSON!` / `JSON` wrappers and preserves string members, null members, the empty map and outer null. The same requests run on SQLite because no HStore value is persisted.
 - [ ] Slice 5: Version bump to `0.0.6`
   - [ ] `django_strawberry_framework/__init__.py` `__version__` (the single version source; hatchling derives the packaging metadata from it) and the pinned `__version__` assertion in `tests/base/test_init.py` move together.
 - [ ] Slice 6: Docs and board
@@ -370,7 +366,7 @@ class FakeHStoreField(models.Field):
 
 **Schema test fixture pattern** (the recipe every schema-execution test here follows):
 
-`tests/types/test_converters.py` applies the shared `tests/conftest.py::isolate_global_registry` to every test through a module-level `pytestmark = pytest.mark.usefixtures("isolate_global_registry")`; the fixture clears the registry and the connection-type cache on entry and exit. The suite-wide autouse `tests/conftest.py::_restore_app_registry` retires every model a test declares, so an in-function model can be re-declared under the same `app_label` without Django's "Model already registered" warning.
+`tests/types/test_converters.py` applies the shared `tests/conftest.py::isolate_global_registry` to every test through a module-level `pytestmark = pytest.mark.usefixtures("isolate_global_registry")`; the fixture clears the registry and the connection-type cache on entry and exit. The suite-wide autouse `tests/_app_registry.py::_restore_app_registry` retires every model a test declares, so an in-function model can be re-declared under the same `app_label` without Django's "Model already registered" warning.
 
 The models are declared inside the test function, so each `patch_array_field(monkeypatch)` sits beside the `DjangoType` declaration it governs. Every schema-execution test follows this sequence:
 
@@ -544,7 +540,7 @@ Per the slice checklist's Slice 6. The `KANBAN.md` card body is not reproduced h
 - Warning-free import pinned via `test_package_import_does_not_emit_strawberry_deprecation_warning` (subprocess-based).
 - `ArrayField` outer-`choices` rejection tested.
 - `HStoreField` outer-`choices` rejection tested.
-- `BigInt` top-level import smoke-tested (`test_bigint_is_importable_from_top_level`).
+- The package-root `BigInt` import is exercised by the native HTTP nullable-argument holder (`examples/fakeshop/test_query/test_converter_outputs_api.py::test_a_nullable_bigint_argument_distinguishes_null_from_a_present_integer`).
 
 <!-- LINK DEFINITIONS -->
 

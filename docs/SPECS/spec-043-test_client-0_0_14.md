@@ -1297,7 +1297,7 @@ run under the live tier's autouse schema reload and seed with `seed_data` /
 **The async client (live, in [`test_client_api.py`][test-client-api]):**
 
 9. **Async happy path + raise direction.**
-   `::test_async_query_happy_path_and_raise_direction` — the scenario-1 typed
+   `::test_async_query_happy_path` — the scenario-1 typed
    assertions through the awaited transport, plus the async
    `assert_no_errors=True` raise.
 10. **Async `login()`.** `::test_async_login_brackets_the_write_authorized_mutation`

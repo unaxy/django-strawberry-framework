@@ -1,11 +1,14 @@
 # CHANGELOG to-do
 
-Every [`CHANGELOG.md`][changelog] entry still to write, moved here from the two trackers that filed them:
-[`docs/dry/dry-0_0_15_3.md`][dry-0_0_15_3] and [`docs/bug_hunt/bug_hunt-0_0_15_2.md`][bug-hunt-0_0_15_2]. Each item
-keeps its number from its source tracker, so "item N" inside an entry, and a "CHANGELOG: item N" note left in the
-source, mean that tracker's item N. Tick an entry once it is written into `CHANGELOG.md`.
+Every [`CHANGELOG.md`][changelog] entry still to write, moved here from the trackers that filed them:
+[`docs/dry/dry-0_0_15_3.md`][dry-0_0_15_3], [`docs/bug_hunt/bug_hunt-0_0_15_2.md`][bug-hunt-0_0_15_2] and
+[`docs/dry/dry-upstream-0_0_15.md`][dry-upstream-0_0_15]. Each item keeps its number from its source tracker, so "item
+N" inside an entry, and a "CHANGELOG: item N" note left in the source, mean that tracker's item N. The
+dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numbered from 101, clear of its items.
+The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
+section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 148 to do.
+Progress: 0 done, 158 to do.
 
 ## From dry-0_0_15_3
 
@@ -78,10 +81,27 @@ Progress: 0 done, 148 to do.
 - [ ] 95. CHANGELOG entry for items 81 and 92: a filter leaf is typed by the field its lookup compares to. Generated
   `year` / `year__gt` / `year__in` leaves take `Int` / `[Int!]` (they took `DateTime` and refused every value) and `date`
   takes `Date`; a declared filter whose `field_name` or `lookup_expr` goes through a transform (`occurred_at__year`, an
-  `ArrayField` index or slice, `len`) takes the transform's output (`Int`, the element type or enum) instead of `String`
-  / `Decimal`, so clients sending text years send ints; an `ArrayField` `len` filter builds instead of raising; a lone
-  `RangeFilter` bound applies through its transforms (`year__range` start only compared the bare column); a
-  `lookup_expr` that is no GraphQL name raises `ConfigurationError` instead of a `SyntaxError`
+  `ArrayField` index or slice, `len`) takes the transform's output (`Int`, the element type or enum) where its own form
+  cleans the output's kind or passes any value through. Past `year`, a `NumberFilter` takes `Int` (with
+  `lookup_expr="year"` it took the column's own type, `Date` on a date column and `DateTime` on a datetime column such
+  as `occurred_at`; with `field_name="<column>__year"` it took `Decimal`), and so do a bare django-filter `Filter` and
+  the package's `TypedFilter` (they took the column's own type with `lookup_expr="year"` and `String` with
+  `field_name="<column>__year"`), so a client sending those a date or a text year sends an int. A declared filter whose
+  own form cleans another kind publishes what its form cleans: a `CharFilter` takes `String` (it took the column's own
+  type with `lookup_expr="year"`; `field_name="<column>__year"` is unchanged), `DateFilter(lookup_expr="year")` and a
+  `TypedFilter` subclass whose `field_class` is a `DateField` take `Date` (unchanged on a date column; on a datetime
+  column they took `DateTime`), each member of a CSV filter (a `BaseInFilter` + `DateFilter` class on `year__in` takes
+  `[Date!]`, unchanged on a date column and `[DateTime!]` before on a datetime column: an `Int` member stays GraphQL's
+  coercion error, and a date member, which failed the request with "An unexpected error occurred.", is now
+  `FILTER_INVALID`) and each axis of a django-filter range filter
+  (`DateFromToRangeFilter(field_name="occurred_on__year")` takes `Date` bounds; it took `String`); a django-filter
+  range filter whose two axes clean different kinds (`fields=(forms.DateField(), forms.IntegerField())`) past a
+  transform raises `ConfigurationError` when the schema is built instead of publishing `String` bounds one axis cannot
+  clean. A `RangeFilter` on `year__range` takes `Int` bounds (it took `DateTime`) and a lone bound applies through the
+  transform (a lone `start` added no condition, so every row came back). On an `ArrayField` column,
+  `NumberFilter(field_name="<column>__len")` takes `Int` (it took `Decimal`), a `lookup_expr="len"` filter builds, and
+  a `lookup_expr` that is no GraphQL name (an index, `lookup_expr="0"`) raises a `ConfigurationError` naming the
+  `field_name` spelling to use; both raised `ConfigurationError: Unsupported Django field type 'ArrayField'`
 - [ ] 75. CHANGELOG entry for item 55: a generated payload, connection or narrowed merged input whose name carries an
   underscore publishes that name verbatim (`Create_CategoryPayload`, `Cat_NodeConnection`, `ItemIs_uprivateNameInput`)
   instead of Strawberry's re-casing (`CreateCategorypayload`, `CatNodeconnection`, `ItemIsUprivatenameinput`), and two
@@ -114,7 +134,7 @@ Progress: 0 done, 148 to do.
   database's integer range of any integer transform is `FILTER_INVALID`
 - [ ] 687. CHANGELOG entry for items 650 and 653: a write of an aware datetime a `DateField` cannot store, or of a
   duration past 64 bits of microseconds on SQLite / MySQL, is the field-keyed "Enter a value the database can
-  represent." instead of a masked error; the release ships Django's license text (`LICENSE.django`)
+  represent." instead of a masked error
 - [ ] 686. CHANGELOG entry for items 596 and 597: a `ProjectedChildFilter` borrowed into a set without its branch is a
   `ConfigurationError` at schema build; a flat filter key or declared filter whose name spells another branch's
   relation no longer fires that branch's permission gates
@@ -595,6 +615,50 @@ Progress: 0 done, 148 to do.
   `db_default` column is optional on create; input type names move where explicit `fields` now equal or differ from the
   canonical shape (a canonical `<Model>Input` over a client-assigned key gains it); `build_form_inputs` is removed
 
+## From dry-upstream-0_0_15
+
+- [ ] 101. CHANGELOG entry for item 22: the debug-toolbar middleware and its GraphiQL bridge template are adapted from
+  strawberry-graphql-django, itself based on django-graphiql-debug-toolbar; both projects' MIT license texts now ship
+  beside the package's (`LICENSE.strawberry-django`, `LICENSE.django-graphiql-debug-toolbar`)
+- [ ] 102. CHANGELOG entry for item 5 (spec-051 Slice 2): a Django `GeneratedField` converts, filters, orders, pages
+  by cursor and refetches as a `relay.NodeID` like the column its `output_field` describes (nullable when either the
+  field or its output field says so; never in a write input), where any type, `FilterSet` or `"__all__"` selecting one
+  used to fail to build; a file / image output, an output no conversion publishes and an array output with element
+  choices are refused at build, naming the generated field
+- [ ] 103. CHANGELOG entry for item 37: under a custom `NameConverter`, form, serializer and `register` mutation
+  errors key `field` / `path` to the input field names the executing schema published (the names the client sent),
+  nested serializer fields included, as model mutations already did; and on DRF 3.18 a nested list serializer's item
+  errors keep their camelCase child keys (`shelves.1.altBranches`, not `shelves.1.alt_branches`) under any converter
+- [ ] 104. CHANGELOG entry for item 38: under a custom `NameConverter`, an update / delete mutation's `id` errors
+  (`not_found`, `invalid`, `conflict`) key `field` / `path` to the name the schema published for the `id` argument
+  (`ID` under an upper-casing converter) instead of the literal `id`, in every model-backed flavor
+- [ ] 105. CHANGELOG entry for item 39: under a custom `NameConverter`, a connection's pagination errors (page size,
+  offset and keyset cursors, `first` with `last`) and its sliced-source and `filter` / `orderBy` refusals name the
+  argument as the schema published it rather than `first` / `last` / `after` / `before`
+
+## From test-compliance-review
+
+- [ ] 106. CHANGELOG entry: a filter value from the GraphQL input reaches the widgets of the form the `FilterSet`
+  actually builds (`Meta.form`, a `get_form_class` override, a consumer widget reading other or several keys such as a
+  `SplitDateTimeWidget` range axis), where it used to be written only under the filter's canonical form-data key and
+  read as absent; `FilterSet.form` builds that consumer form class and binds the normalized values to its widgets, a
+  subclass `__init__` editing or removing a value winning, and a flat copy is named by the keys its widget reads
+- [ ] 107. CHANGELOG entry: a `ListConnection` page (the package's offset connections, root and resolved per parent,
+  its keyset page, and plain Strawberry `ListConnection` fields) resolves its rows by the Python names `edges` /
+  `page_info` were declared under, so a `NameConverter` respelling both, or `auto_camel_case=False` with only
+  `page_info { has_next_page }` selected, no longer gets empty `edges` and `hasNextPage: false`; a `__typename`-only
+  page reached through a fragment spread named `edges` fetches no rows, and an anonymous inline fragment around `edges`
+  no longer raises `AttributeError`
+- [ ] 108. CHANGELOG entry: under the async executor a connection selecting only `totalCount`, or only `__typename`, no
+  longer fetches its node rows (the package's offset pages and plain Strawberry `ListConnection` fields)
+- [ ] 109. CHANGELOG entry: a Strawberry release whose `ListConnection.resolve_connection` signature or source differs
+  from the audited ones, or that no longer calls `should_resolve_list_connection_edges`, fails at app load with a
+  `RuntimeError` naming the `APPLY_UPSTREAM_PATCHES = {"strawberry": False}` opt-out; that opt-out (decided at app
+  load) restores the empty-page and async row-fetch defects of entries 107 and 108 on offset pages
+- [ ] 110. CHANGELOG entry: beside entry 101, `FilterSet.form` adapts django-filter's `BaseFilterSet.form` (BSD) and the
+  Relay `ListConnection.resolve_connection` replacement adapts Strawberry's (MIT); both license texts now ship beside
+  the package's (`LICENSE.django-filter`, `LICENSE.strawberry`)
+
 <!-- LINK DEFINITIONS -->
 
 <!-- Root -->
@@ -604,6 +668,7 @@ Progress: 0 done, 148 to do.
 <!-- docs/ -->
 [bug-hunt-0_0_15_2]: docs/bug_hunt/bug_hunt-0_0_15_2.md
 [dry-0_0_15_3]: docs/dry/dry-0_0_15_3.md
+[dry-upstream-0_0_15]: docs/dry/dry-upstream-0_0_15.md
 
 <!-- docs/SPECS/ -->
 
