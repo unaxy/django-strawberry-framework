@@ -9,13 +9,12 @@ consumers' verdicts are pinned where they classify: ``tests/auth/test_sessions.p
 """
 
 from typing import NoReturn
-from unittest import mock
 
 import pytest
-from django.http import HttpRequest
 from django.utils.functional import SimpleLazyObject
 
-from django_strawberry_framework.utils.lazy import unwrap_lazy_object
+from django_strawberry_framework.utils.lazy import _LAZY_OBJECT, unwrap_lazy_object
+from tests._idioms import ClaimsClass
 
 
 def test_a_lazy_proxy_is_read_as_the_object_it_wraps_running_its_factory_once() -> None:
@@ -41,9 +40,15 @@ def test_a_raising_factory_propagates_its_own_exception() -> None:
         unwrap_lazy_object(SimpleLazyObject(factory))
 
 
-def test_a_value_that_is_not_a_django_lazy_proxy_comes_back_unchanged() -> None:
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(object(), id="ordinary-object"),
+        pytest.param(ClaimsClass(_LAZY_OBJECT), id="claims-lazy-object"),
+    ],
+)
+def test_a_value_that_is_not_a_django_lazy_proxy_comes_back_unchanged(value: object) -> None:
     """Only Django's own proxy is unwrapped; a ``__class__``-forwarding stand-in is not."""
-    value = object()
+    if type(value) is ClaimsClass:
+        assert isinstance(value, _LAZY_OBJECT)
     assert unwrap_lazy_object(value) is value
-    stand_in = mock.Mock(spec=HttpRequest)
-    assert unwrap_lazy_object(stand_in) is stand_in

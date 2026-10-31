@@ -10,6 +10,10 @@ self-FK over HTTP lives in
 keeps direct ``_make_relation_resolver`` / ``_check_n1`` calls, consumer-exception propagation,
 router mocks, ``resolver.__name__``, and the nullable ``DoesNotExist`` swallow a
 planned JOIN never takes.
+
+Ancestor-prefetch MTI payloads and SQL costs live in
+``examples/fakeshop/test_query/test_mti_composite_relations_api.py``; the resolver exception
+identities and private cache/plan observations remain here.
 """
 
 import datetime
@@ -17,12 +21,10 @@ import inspect
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Sized
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Literal, NoReturn, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Literal, NoReturn
 from unittest.mock import Mock
 
-import django
 import pytest
-import strawberry
 from apps.library.models import Patron
 from apps.products import services
 from apps.products.models import Category, Item
@@ -31,8 +33,6 @@ from asgiref.sync import sync_to_async
 from django.db import connection as db_connection
 from django.db import models, router
 from django.db.models import Model, QuerySet
-from django.db.models.expressions import Combinable
-from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from graphql import OperationType
 from strawberry.types import Info
@@ -41,10 +41,8 @@ from typing_extensions import override
 import django_strawberry_framework.types.resolvers as resolvers_mod
 import django_strawberry_framework.types.resolvers as resolvers_module
 from django_strawberry_framework import (
-    DjangoSchema,
     DjangoType,
     finalize_django_types,
-    strawberry_config,
 )
 from django_strawberry_framework.exceptions import ConfigurationError, OptimizerError
 from django_strawberry_framework.optimizer._context import (
@@ -78,12 +76,11 @@ from django_strawberry_framework.types.resolvers import (
     _visible_related_object,
 )
 from django_strawberry_framework.utils._narrowing import is_awaitable, is_iterable, read_attr
+from tests._catalog_data import categories_from_seed, items_from_seed
 from tests._idioms import saved_pk
 from tests._info import make_info, response_path, unread_info
 
 if TYPE_CHECKING:
-    from django.db.models.fields.related_descriptors import ManyRelatedManager
-
     from django_strawberry_framework.utils.typing import ModelField
 
 
@@ -1282,6 +1279,8 @@ def test_fk_attname_is_deferred_and_stub_exceptions() -> None:
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
 async def test_async_resolvers_optimizer_scoped_and_visibility() -> None:
+    await sync_to_async(services.seed_data)(1)
+
     class CustomCategoryType(DjangoType):
         class Meta:
             model = Category
@@ -1331,7 +1330,7 @@ async def test_async_resolvers_optimizer_scoped_and_visibility() -> None:
         key = resolver_key(CustomItemType, "profile", ("item", "profile"))
         publish_scoped_relations({key})
 
-        cat = await Category.objects.acreate(name="Visible Cat")
+        (cat,) = await sync_to_async(categories_from_seed)(("Visible Cat", False))
 
         class FakeRevRoot:
             _state = SimpleNamespace(fields_cache={})
@@ -1470,7 +1469,7 @@ async def test_async_resolvers_optimizer_scoped_and_visibility() -> None:
         many_field = Category._meta.get_field("items")
 
         many_resolver = _make_relation_resolver(many_field, parent_type=CustomCategoryType)
-        item_obj = await Item.objects.acreate(name="Visible Item", category=cat)
+        (item_obj,) = await sync_to_async(items_from_seed)(cat, ("Visible Item", False))
         cat_with_cache = SimpleNamespace(
             _prefetched_objects_cache={"items": [item_obj]},
             items=cat.items,
@@ -1493,6 +1492,8 @@ async def test_async_resolvers_optimizer_scoped_and_visibility() -> None:
 
 @pytest.mark.django_db
 def test_sync_forward_and_many_resolver_visibility() -> None:
+    services.seed_data(1)
+
     class CustomCategoryType(DjangoType):
         class Meta:
             model = Category
@@ -1521,8 +1522,8 @@ def test_sync_forward_and_many_resolver_visibility() -> None:
     frame = begin_execution_frame({}, nested=False)
 
     try:
-        cat = Category.objects.create(name="Visible Cat")
-        item = Item.objects.create(name="Visible Item", category=cat)
+        (cat,) = categories_from_seed(("Visible Cat", False))
+        (item,) = items_from_seed(cat, ("Visible Item", False))
 
         fwd_field = Item._meta.get_field("category")
         fwd_resolver = _make_relation_resolver(fwd_field, parent_type=CustomItemType)
@@ -1661,238 +1662,9 @@ def test_resolver_helpers_edge_cases() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Many-side rows Django serves from an MTI ancestor's prefetch
+# The async many-side bound (MTI ancestor-prefetch reads are live in
+# examples/fakeshop/test_query/test_mti_composite_relations_api.py)
 # ---------------------------------------------------------------------------
-
-
-def _declare_mti_tag_models() -> tuple[type[Model], type[Model], type[Model]]:
-    """Declare a forward many-to-many on an MTI parent, plus the parent's child.
-
-    Test-local because fakeshop carries no forward many-to-many on a model with
-    a multi-table child (its one inherited many-to-many, ``venuesponsor`` on the
-    ``Venue`` chain, is a reverse relation, which Django never serves from an
-    ancestor). ``managed = False`` keeps ``migrate`` away from the tables, which
-    ``_mti_tag_tables`` creates and drops; the suite's ``_restore_app_registry``
-    unregisters the classes after each test.
-    """
-
-    class MtiTag(models.Model):
-        name: "models.TextField[str | Combinable, str]" = models.TextField()
-
-        class Meta:
-            app_label = "library"
-            managed = False
-            db_table = "resolvers_mti_tag"
-
-    class MtiPlace(models.Model):
-        name: "models.TextField[str | Combinable, str]" = models.TextField()
-        tags: "models.ManyToManyField[MtiTag, models.Model]" = models.ManyToManyField(
-            MtiTag,
-            db_table="resolvers_mti_place_tags",
-        )
-
-        class Meta:
-            app_label = "library"
-            managed = False
-            db_table = "resolvers_mti_place"
-
-    class MtiShop(MtiPlace):
-        # basedpyright: Django's ModelBase pops a concrete model's Meta (only an abstract model
-        # keeps one), so MtiPlace has no Meta at run time for this one to subclass
-        class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
-            app_label = "library"
-            managed = False
-            db_table = "resolvers_mti_shop"
-
-    return MtiTag, MtiPlace, MtiShop
-
-
-@runtime_checkable
-class _TaggedRow(Protocol):
-    """An MTI fixture row carrying the ``tags`` many-to-many manager."""
-
-    tags: "ManyRelatedManager[Model, Model]"
-
-
-@runtime_checkable
-class _PlaceWithShop(Protocol):
-    """An MTI fixture parent row reaching its child through the ``mtishop`` accessor."""
-
-    mtishop: Model
-
-
-def _create_mti_tag_tables(*models_in_order: type[Model]) -> None:
-    with db_connection.schema_editor() as editor:
-        for model in models_in_order:
-            editor.create_model(model)
-
-
-def _drop_mti_tag_tables(*models_in_order: type[Model]) -> None:
-    with db_connection.schema_editor() as editor:
-        for model in reversed(models_in_order):
-            editor.delete_model(model)
-
-
-def _seed_mti_tags(tag_model: type[Model], shop_model: type[Model]) -> None:
-    """Two shops: ``One`` tagged Alpha / Beta / Hidden, ``Two`` tagged Beta."""
-    alpha = tag_model.objects.create(name="Alpha")
-    beta = tag_model.objects.create(name="Beta")
-    hidden = tag_model.objects.create(name="Hidden")
-    one = shop_model.objects.create(name="One")
-    two = shop_model.objects.create(name="Two")
-    assert isinstance(one, _TaggedRow)
-    assert isinstance(two, _TaggedRow)
-    one.tags.add(alpha, beta, hidden)
-    two.tags.add(beta)
-
-
-def _shops_reached_through_prefetched_places(place_model: type[Model]) -> list[Model]:
-    """Prefetch ``tags`` on the PARENT rows, then walk down to each child.
-
-    ``place.mtishop`` caches the parent on the child's ``mtiplace_ptr``. From
-    Django 6.1 the child's ``tags`` manager answers from that ancestor's
-    prefetch, so its ``all()`` is an EVALUATED queryset while the child's own
-    ``_prefetched_objects_cache`` holds nothing.
-    """
-    places = place_model.objects.prefetch_related("tags").order_by("name")
-    shops: list[Model] = []
-    for place in places:
-        assert isinstance(place, _PlaceWithShop)
-        shops.append(place.mtishop)
-    return shops
-
-
-def _mti_tag_schema(
-    tag_model: type[Model],
-    place_model: type[Model],
-    shop_model: type[Model],
-    *,
-    hide_prefix: str | None = None,
-    run_async: bool,
-) -> DjangoSchema:
-    """Build a ``DjangoSchema`` whose ``shops`` root returns the walked-down children."""
-
-    class MtiTagType(DjangoType):
-        class Meta:
-            model = tag_model
-            fields = ("id", "name")
-
-        if hide_prefix is not None:
-
-            @classmethod
-            @override
-            def get_queryset(cls, queryset: QuerySet[Model], info: object) -> QuerySet[Model]:
-                return queryset.exclude(name__startswith=hide_prefix)
-
-    assert registry.get(tag_model) is MtiTagType
-
-    class MtiShopType(DjangoType):
-        class Meta:
-            model = shop_model
-            fields = ("id", "name", "tags")
-
-    finalize_django_types()
-
-    @strawberry.type(name="Query")
-    class AsyncQuery:
-        async def _shops(self) -> list[Model]:
-            return await sync_to_async(_shops_reached_through_prefetched_places)(
-                place_model,
-            )
-
-        shops: list[Model] = strawberry.field(resolver=_shops, graphql_type=list[MtiShopType])
-
-    @strawberry.type(name="Query")
-    class SyncQuery:
-        def _shops(self) -> list[Model]:
-            return _shops_reached_through_prefetched_places(place_model)
-
-        shops: list[Model] = strawberry.field(resolver=_shops, graphql_type=list[MtiShopType])
-
-    return DjangoSchema(query=AsyncQuery if run_async else SyncQuery, config=strawberry_config())
-
-
-_MTI_TAGS_QUERY = "{ shops { name tags { name } } }"
-
-
-@pytest.mark.django_db(transaction=True)
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("hide_prefix", "first_shop_tags"),
-    [
-        pytest.param(None, ["Alpha", "Beta", "Hidden"], id="no-visibility-hook"),
-        pytest.param("Hidden", ["Alpha", "Beta"], id="unplanned-visibility-reread"),
-    ],
-)
-async def test_async_many_side_served_from_an_mti_ancestor_prefetch(
-    hide_prefix: str | None,
-    first_shop_tags: list[str],
-) -> None:
-    """An ancestor-served evaluated queryset is routed like a prefetch cache entry.
-
-    The key read in ``many_resolver`` misses (the child's own cache is empty), so
-    the manager fall-through receives the ancestor's evaluated queryset. Without
-    a hook its rows are bounded as fetched; handed to ``bounded_rows_async`` they
-    would slice to a ``list`` and fail the ``async for``. With a hook the unplanned
-    rows are re-read through the visibility boundary, as a consumer prefetch is.
-    On Django below 6.1 the manager queries instead, which yields the same rows.
-    """
-    tag_model, place_model, shop_model = _declare_mti_tag_models()
-    models_in_order = (tag_model, place_model, shop_model)
-    await sync_to_async(_create_mti_tag_tables)(*models_in_order)
-    try:
-        await sync_to_async(_seed_mti_tags)(tag_model, shop_model)
-        schema = await sync_to_async(_mti_tag_schema)(
-            tag_model,
-            place_model,
-            shop_model,
-            hide_prefix=hide_prefix,
-            run_async=True,
-        )
-        result = await schema.execute(_MTI_TAGS_QUERY)
-    finally:
-        await sync_to_async(_drop_mti_tag_tables)(*models_in_order)
-
-    assert result.errors is None, result.errors
-    assert result.data == {
-        "shops": [
-            {"name": "One", "tags": [{"name": name} for name in first_shop_tags]},
-            {"name": "Two", "tags": [{"name": "Beta"}]},
-        ],
-    }
-
-
-@pytest.mark.skipif(
-    django.VERSION < (6, 1),
-    reason="Django below 6.1 never serves a child's many-to-many manager from an "
-    "ancestor's prefetch, so the child's tags are queried rather than served",
-)
-@pytest.mark.django_db(transaction=True)
-def test_sync_many_side_served_from_an_mti_ancestor_prefetch_costs_no_query() -> None:
-    """The ancestor's prefetched rows are served without a per-child tag query.
-
-    Four statements: the places, their ``tags`` prefetch, and one walk down to
-    each of the two shops. A per-child ``tags`` read would add two more.
-    """
-    tag_model, place_model, shop_model = _declare_mti_tag_models()
-    models_in_order = (tag_model, place_model, shop_model)
-    _create_mti_tag_tables(*models_in_order)
-    try:
-        _seed_mti_tags(tag_model, shop_model)
-        schema = _mti_tag_schema(tag_model, place_model, shop_model, run_async=False)
-        with CaptureQueriesContext(db_connection) as captured:
-            result = schema.execute_sync(_MTI_TAGS_QUERY)
-    finally:
-        _drop_mti_tag_tables(*models_in_order)
-
-    assert result.errors is None, result.errors
-    assert result.data == {
-        "shops": [
-            {"name": "One", "tags": [{"name": "Alpha"}, {"name": "Beta"}, {"name": "Hidden"}]},
-            {"name": "Two", "tags": [{"name": "Beta"}]},
-        ],
-    }
-    assert len(captured.captured_queries) == 4, captured.captured_queries
 
 
 @pytest.mark.django_db(transaction=True)

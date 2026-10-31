@@ -11,9 +11,8 @@ What stays here, and why no live request can express it:
   GraphQL argument can carry a Python subclass);
 - serializer rejection of non-int Python objects (the ORM never hands
   ``bool`` / ``float`` / ``str`` / ``Decimal`` to ``_serialize_bigint``);
-- ``_parse_bigint`` on a Python ``bool`` / ``float`` / ``None`` (GraphQL
-  literals for bool / float are live; ``null`` is stripped before
-  ``parse_value``);
+- ``_parse_bigint`` on ``None`` (``null`` is stripped before ``parse_value``);
+  bool/float literal rejections belong to the live scalar filter matrix;
 - the public import surface and the subprocess deprecation-suppression
   contract;
 - ``strawberry_config()`` construction (scalar_map merge, collisions,
@@ -41,7 +40,6 @@ from django_strawberry_framework.scalars import (
     _parse_bigint,
     _serialize_bigint,
 )
-from django_strawberry_framework.scalars import Upload as UploadFromScalars
 from django_strawberry_framework.utils.typing import object_result
 from tests._subprocess import run_in_fresh_process
 
@@ -143,24 +141,6 @@ def test_bigint_serialize_rejects_non_int_types() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_bigint_rejects_python_bool() -> None:
-    """Both ``True`` and ``False`` raise ``ValueError``."""
-    with pytest.raises(ValueError, match="does not accept boolean"):
-        _parse_bigint(True)  # noqa: FBT003 - the bool is the value under test
-    with pytest.raises(ValueError, match="does not accept boolean"):
-        _parse_bigint(False)  # noqa: FBT003 - the bool is the value under test
-
-
-def test_bigint_rejects_python_float() -> None:
-    """Silent-truncation guard: ``int(1.9) == 1`` would otherwise slip through."""
-    with pytest.raises(ValueError, match="BigInt cannot parse float"):
-        _parse_bigint(1.9)
-    with pytest.raises(ValueError, match="BigInt cannot parse float"):
-        _parse_bigint(0.0)
-    with pytest.raises(ValueError, match="BigInt cannot parse float"):
-        _parse_bigint(-1.0)
-
-
 def test_bigint_rejects_none() -> None:
     """The BigInt parser still rejects ``None`` handed to it directly.
 
@@ -229,16 +209,6 @@ def test_bigint_rejection_messages_survive_hostile_values() -> None:
 # ---------------------------------------------------------------------------
 # Public-export smoke
 # ---------------------------------------------------------------------------
-
-
-def test_bigint_is_importable_from_top_level() -> None:
-    """Cheap insurance against an ``__init__.py`` import-order regression.
-
-    Type-shape assertions intentionally avoided - ``ScalarWrapper`` is an
-    undocumented internal Strawberry path; schema-execution tests catch
-    deeper regressions with stronger signal.
-    """
-    assert BigInt is not None
 
 
 # ---------------------------------------------------------------------------
@@ -512,11 +482,6 @@ def test_strawberry_config_unknown_kwarg_raises_typeerror_from_upstream() -> Non
 def test_upload_is_strawberry_builtin_re_export_not_a_wrapper() -> None:
     """``Upload`` is Strawberry's built-in scalar object, re-exported, not a package wrapper."""
     assert Upload is strawberry.file_uploads.scalars.Upload
-
-
-def test_upload_is_importable_from_top_level_scalars_module() -> None:
-    """``Upload`` is importable from ``django_strawberry_framework.scalars``."""
-    assert UploadFromScalars is strawberry.file_uploads.scalars.Upload
 
 
 def test_strawberry_config_scalar_map_excludes_upload() -> None:

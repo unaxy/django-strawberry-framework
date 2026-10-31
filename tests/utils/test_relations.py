@@ -37,7 +37,7 @@ from django.core.exceptions import FieldDoesNotExist
 from django.db import models
 from django.db.models import Model, TextField
 from django.db.models.fields.json import KeyTransformExact, KeyTransformIContains
-from django.db.models.fields.related_lookups import RelatedExact, RelatedIsNull
+from django.db.models.fields.related_lookups import RelatedExact, RelatedIn, RelatedIsNull
 from django.db.models.functions import Lower
 from django.db.models.lookups import Exact, IContains, Lookup
 from django.test.utils import register_lookup
@@ -867,16 +867,6 @@ def test_classify_path_bare_forward_gfk_raises() -> None:
     assert excinfo.value.segment == "content_object"
 
 
-def test_classify_path_hidden_reverse_relation_raises() -> None:
-    """A ``related_name='+'`` hidden reverse name is rejected by ``get_field``.
-
-    No fakeshop model declares ``related_name='+'``; the resolution path is the
-    same ``FieldDoesNotExist`` branch a missing name takes, proven above.
-    """
-    with pytest.raises(PathResolutionError):
-        classify_path(Patron, "definitely_hidden_reverse")
-
-
 def test_classify_path_empty_path_infos_relation_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """A relation exposing empty ``path_infos`` raises (defensive - no real field does).
 
@@ -1020,21 +1010,14 @@ def test_validate_lookup_expr_invalid_mid_chain_transform_raises() -> None:
     assert "bogus__gte" in str(excinfo.value)
 
 
-def test_validate_lookup_expr_trailing_transform_without_exact_support_raises() -> None:
-    """A final part that is neither a lookup nor a trailing transform raises.
-
-    ``year`` is a valid transform on a ``DateField``, but here ``day`` follows a
-    scalar ``TextField`` where it resolves as neither a lookup nor a transform.
-    """
-    terminal = Book._meta.get_field("title")
-    with pytest.raises(LookupValidationError) as excinfo:
-        validate_lookup_expr(terminal, "day")
-
-    assert excinfo.value.part == "day"
-
-
-@pytest.mark.parametrize("lookup_expr", ["isnull", "exact", "in"])
-def test_validate_lookup_expr_relation_descriptor_terminal(lookup_expr: str) -> None:
+@pytest.mark.parametrize(
+    ("lookup_expr", "lookup_class"),
+    [("isnull", RelatedIsNull), ("exact", RelatedExact), ("in", RelatedIn)],
+)
+def test_validate_lookup_expr_relation_descriptor_terminal(
+    lookup_expr: str,
+    lookup_class: type[Lookup[object]],
+) -> None:
     """A relation-descriptor terminal resolves relation lookups (isnull/exact/in).
 
     A reverse-FK descriptor (``Book.loans`` -> ``ManyToOneRel``) answers
@@ -1042,7 +1025,7 @@ def test_validate_lookup_expr_relation_descriptor_terminal(lookup_expr: str) -> 
     """
     terminal = Book._meta.get_field("loans")
     resolved = validate_lookup_expr(terminal, lookup_expr)
-    assert resolved.__name__.startswith("Related")
+    assert resolved is lookup_class
 
 
 def test_validate_lookup_expr_forward_m2m_terminal_isnull() -> None:
@@ -1216,12 +1199,8 @@ def test_classify_path_cached_wrapper_shares_bounded_cache() -> None:
         _classify_path_cached.cache_clear()
 
 
-def test_classify_path_public_is_uncached_accepts_unhashable_model() -> None:
-    """Public ``classify_path`` stays uncached so unhashable test doubles work.
-
-    A ``SimpleNamespace`` model is unhashable (it defines ``__eq__``); the
-    public entry point must not route through the ``lru_cache`` wrapper.
-    """
+def test_classify_path_public_returns_fresh_equal_plans() -> None:
+    """The public classifier returns equal immutable metadata in a fresh plan each call."""
     first = classify_path(Book, "title")
     second = classify_path(Book, "title")
     # Uncached: a fresh frozen plan each call (equal but distinct objects).

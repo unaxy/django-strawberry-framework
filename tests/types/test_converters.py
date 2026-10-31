@@ -11,9 +11,11 @@ delegation rows. Primary-type relation resolution over HTTP lives in
 ``examples/fakeshop/test_query/test_scalars_api.py``
 (``test_scalar_specimen_id_maps_big_auto_pk_to_int``).
 
-The synthetic models that remain carry column shapes no fakeshop model can
-declare, because *exposing* each column on a ``DjangoType`` is what cannot be
-built. The unsupported-field, ``DurationField`` and ``BinaryField`` owners pin
+Native HTTP consumer declarations and real unsaved PostgreSQL containers live in
+``examples/fakeshop/test_query/test_converter_outputs_api.py``. Private annotation
+identities, class-construction refusals, optional-import sentinels and registry
+caches remain package contracts. The unsupported-field,
+``DurationField`` and ``BinaryField`` owners pin
 the ``Unsupported Django field type`` raise in
 ``django_strawberry_framework/types/converters.py::scalar_for_field``; the
 ``FakeArrayField`` / ``FakeHStoreField`` owners pin, on SQLite, the
@@ -46,19 +48,16 @@ import pytest
 import strawberry
 from apps.products.models import Category, Item
 from apps.scalars.models import MediaSpecimen, NullableScalarSpecimen, ScalarSpecimen
-from django.db import connection, models
+from django.db import models
 from django.db.models.expressions import Combinable
+from django.db.models.functions import Length
 from strawberry.types import get_object_definition
 from typing_extensions import Never, override
 
 from django_strawberry_framework import (
     BigInt,
-    DjangoMutation,
-    DjangoMutationField,
-    DjangoSchema,
     DjangoType,
     finalize_django_types,
-    strawberry_config,
 )
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.filters.inputs import _scalar_from_model_field
@@ -89,14 +88,13 @@ from django_strawberry_framework.types.converters import (
     scalar_for_field,
     scalar_route,
 )
+from django_strawberry_framework.utils._array_field import array_element_field, array_leaf_field
 from django_strawberry_framework.utils._narrowing import enum_value, require
 from django_strawberry_framework.utils.typing import object_result
 from tests._idioms import definition_raises, is_object_dict, is_object_list, resolver_function
 from tests._postgres_fields import FakeArrayField, FakeHStoreField, patch_array_field
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
     from django.utils.choices import _ChoicesInput
 
     from django_strawberry_framework.utils.typing import ConcreteField
@@ -145,7 +143,7 @@ def _unique_app_label(base: str) -> str:
     through this helper namespaces each test's synthetic model with a
     monotonically increasing suffix so the registry sees a fresh key per
     call. The choice fixture itself (``ChoiceFixture``) is function-scoped
-    and does not use this helper: ``tests/conftest.py::_restore_app_registry``
+    and does not use this helper: ``tests/_app_registry.py::_restore_app_registry``
     retires its ``test_choice_enums`` label after each test.
     """
     return f"{base}__{next(_app_label_counter)}"
@@ -153,7 +151,7 @@ def _unique_app_label(base: str) -> str:
 
 # The clears cover the type + enum dicts and the connection-type cache but not
 # Django's app registry: the ``ChoiceFixture`` model is declared per test under a
-# synthetic ``app_label`` that ``tests/conftest.py::_restore_app_registry`` retires
+# synthetic ``app_label`` that ``tests/_app_registry.py::_restore_app_registry`` retires
 # afterwards.
 pytestmark = pytest.mark.usefixtures("isolate_global_registry")
 
@@ -164,7 +162,7 @@ def choice_fixture_model() -> type[models.Model]:
 
     Function scope keeps the shared-enum assertions order-independent: every test
     gets its own ``ChoiceFixture`` class, so no enum cached against one test's class
-    can satisfy (or poison) another's, and ``tests/conftest.py::_restore_app_registry``
+    can satisfy (or poison) another's, and ``tests/_app_registry.py::_restore_app_registry``
     retires the ``test_choice_enums`` label after each test so the re-declaration
     never warns.
 
@@ -978,12 +976,8 @@ def test_none_valued_choice_is_the_empty_option_label_and_gets_no_member(
     assert choice_column_values(field) == list(members.values())
 
 
-def test_nullable_empty_label_choice_column_reads_null_without_a_none_member() -> None:
-    """A ``null=True`` column with ``__empty__`` publishes ``Enum | None`` and reads NULL as ``null``.
-
-    The empty option travels as GraphQL ``null``, never as a member: the enum carries only the
-    declared conditions (plus ``BLANK`` for the ``""`` the column admits).
-    """
+def test_nullable_empty_label_choice_column_keeps_nullable_enum_metadata() -> None:
+    """The Python annotation and raw enum map keep null separate from the blank member."""
     owner_model = _blank_choice_model(choices=_Condition.choices, blank=True, null=True)
 
     class EmptyLabelOwnerType(DjangoType):
@@ -995,90 +989,6 @@ def test_nullable_empty_label_choice_column_reads_null_without_a_none_member() -
     assert enum_cls is not None
     assert EmptyLabelOwnerType.__annotations__["status"] == (enum_cls | None)
     assert _member_map(enum_cls) == {"BLANK": "", "good": "good", "worn": "worn"}
-    finalize_django_types()
-
-    @strawberry.type
-    class Query:
-        def _owners(self) -> list[models.Model]:
-            return [owner_model(status=None), owner_model(status="good")]
-
-        owners: list[models.Model] = strawberry.field(
-            resolver=_owners,
-            graphql_type=list[EmptyLabelOwnerType],
-        )
-
-    result = strawberry.Schema(query=Query).execute_sync("{ owners { status } }")
-    assert result.errors is None
-    assert result.data == {"owners": [{"status": None}, {"status": "good"}]}
-
-
-@pytest.mark.django_db(transaction=True)
-def test_nullable_empty_label_choice_column_writes_null_as_null() -> None:
-    """A ``null`` sent to a ``null=True`` ``__empty__`` column stores NULL; ``_None`` is no member.
-
-    The unmanaged owner's table is created for this test only (SQLite's schema editor needs the
-    transaction-less test), so the create mutation runs the real decode, ``full_clean`` and save.
-    """
-
-    class EmptyLabelWriteOwner(models.Model):
-        status: "models.TextField[str | Combinable | None, str | None]" = models.TextField(  # noqa: DJ001 - NULL is the fixture input
-            choices=_Condition.choices,
-            null=True,
-            blank=True,
-        )
-
-        class Meta:
-            app_label = _unique_app_label("test_empty_label_choices")
-            managed = False
-            db_table = "converters_empty_label_write_owner"
-
-    class EmptyLabelWriteOwnerType(DjangoType):
-        class Meta:
-            model = EmptyLabelWriteOwner
-            fields = ("id", "status")
-            primary = True
-
-    assert registry.get(EmptyLabelWriteOwner) is EmptyLabelWriteOwnerType
-
-    class CreateEmptyLabelWriteOwner(DjangoMutation):
-        class Meta:
-            model = EmptyLabelWriteOwner
-            operation = "create"
-            fields = ("status",)
-            permission_classes = []
-
-    @strawberry.type
-    class Query:
-        @strawberry.field
-        def ping(self) -> int:
-            return 1
-
-    @strawberry.type
-    class Mutation:
-        create_owner = DjangoMutationField(CreateEmptyLabelWriteOwner)
-
-    finalize_django_types()
-    schema = DjangoSchema(query=Query, mutation=Mutation)
-    with connection.schema_editor() as editor:
-        editor.create_model(EmptyLabelWriteOwner)
-    try:
-        document = (
-            "mutation($status: EmptyLabelWriteOwnerTypeStatusEnum) { createOwner(data: "
-            "{status: $status}) { result { status } errors { field messages } } }"
-        )
-        written = schema.execute_sync(document, variable_values={"status": None})
-        assert written.errors is None
-        assert written.data == {"createOwner": {"result": {"status": None}, "errors": []}}
-        assert list(EmptyLabelWriteOwner.objects.values_list("status", flat=True)) == [None]
-        refused = schema.execute_sync(document, variable_values={"status": "_None"})
-        assert refused.errors is not None
-        assert "Value '_None' does not exist in 'EmptyLabelWriteOwnerTypeStatusEnum' enum." in (
-            refused.errors[0].message
-        )
-        assert EmptyLabelWriteOwner.objects.count() == 1
-    finally:
-        with connection.schema_editor() as editor:
-            editor.delete_model(EmptyLabelWriteOwner)
 
 
 @pytest.mark.parametrize(
@@ -1169,62 +1079,6 @@ def test_sanitize_member_name_neutralizes_python_enum_reserved_shapes() -> None:
     assert _sanitize_member_name("_x") == "_x"  # no trailing underscore
     assert _sanitize_member_name("x_") == "x_"  # no leading underscore
     assert _sanitize_member_name("caf\u00e9") == "caf_"  # trailing-only underscore
-
-
-def test_choice_enum_with_graphql_reserved_and_non_ascii_values_builds_schema(
-    choice_fixture_model: type[models.Model],
-) -> None:
-    """Reserved, non-ASCII, and introspection-prefixed values produce GraphQL-safe enum members."""
-    field = choice_fixture_model._meta.get_field("status")
-    assert isinstance(field, models.Field)
-    original = field.choices
-    field.choices = (
-        ("true", "True"),
-        ("FALSE", "False"),
-        ("null", "Null"),
-        ("caf\u00e9", "Cafe"),
-        ("__private", "Private"),
-    )
-    registry.clear()
-    try:
-        enum_cls = convert_choices_to_enum(field, "FixtureType")
-
-        assert [member.name for member in enum_cls] == [
-            "MEMBER_true",
-            "MEMBER_FALSE",
-            "MEMBER_null",
-            "caf_",
-            "MEMBER___private",
-        ]
-
-        @strawberry.type
-        class Query:
-            def _statuses(self) -> list[enum.Enum]:
-                return list(enum_cls)
-
-            # The enum class is generated by the converter under test, so the field's GraphQL
-            # type is passed as a value rather than written as a return annotation.
-            statuses: list[enum.Enum] = strawberry.field(
-                resolver=_statuses,
-                graphql_type=list[enum_cls],
-            )
-
-        schema = strawberry.Schema(query=Query)
-        result = schema.execute_sync("{ statuses }")
-
-        assert result.errors is None
-        assert result.data == {
-            "statuses": [
-                "MEMBER_true",
-                "MEMBER_FALSE",
-                "MEMBER_null",
-                "caf_",
-                "MEMBER___private",
-            ],
-        }
-    finally:
-        field.choices = original
-        registry.clear()
 
 
 def test_choice_field_with_null_widens_to_enum_or_none(
@@ -1327,81 +1181,6 @@ def test_convert_choices_to_enum_raises_on_graphql_safe_name_collision(
     try:
         with pytest.raises(ConfigurationError, match="sanitize to the same enum member"):
             convert_choices_to_enum(field, "FixtureType")
-    finally:
-        field.choices = original
-        registry.clear()
-
-
-def test_convert_choices_to_enum_with_python_enum_reserved_values_builds_schema(
-    choice_fixture_model: type[models.Model],
-) -> None:
-    """Choice values that map to Python-``enum``-reserved member names build a working enum.
-
-    Without the ``_is_enum_reserved_member`` neutralisation in
-    ``_sanitize_member_name`` this raised a raw ``ValueError`` from ``Enum(...)``
-    for the ``_sunder_``-shaped / ``mro`` values (``"-x-"``, ``"mro"``) and --
-    worse -- SILENTLY dropped the recognised-directive value ``"_ignore_"`` from
-    the enum. Python 3.11+ also dropped ``"_FixtureTypeStatusEnum__hidden"`` as a
-    class-private attribute, making the generated schema interpreter-dependent.
-    Every choice must survive as a member with its DB value preserved and the
-    schema must build + execute.
-    """
-    field = choice_fixture_model._meta.get_field("status")
-    assert isinstance(field, models.Field)
-    original = field.choices
-    field.choices = (
-        ("-x-", "Dash X"),  # -> _x_ sunder shape: unsanitized, ValueError at Enum build.
-        ("mro", "Method Resolution Order"),  # unsanitized, ValueError at Enum build.
-        ("_ignore_", "Ignore Directive"),  # unsanitized, SILENTLY dropped as a member.
-        # Unsanitized, SILENTLY installed as a class attribute, not a member.
-        ("_FixtureTypeStatusEnum__hidden", "Private Namespace"),
-        ("active", "Active"),  # plain control value.
-    )
-    registry.clear()
-    try:
-        enum_cls = convert_choices_to_enum(field, "FixtureType")
-
-        # Every choice value survives as a distinct member (none dropped).
-        assert {enum_value(member) for member in enum_cls} == {
-            "-x-",
-            "mro",
-            "_ignore_",
-            "_FixtureTypeStatusEnum__hidden",
-            "active",
-        }
-        assert [member.name for member in enum_cls] == [
-            "MEMBER__x_",
-            "MEMBER_mro",
-            "MEMBER__ignore_",
-            "MEMBER__FixtureTypeStatusEnum__hidden",
-            "active",
-        ]
-
-        @strawberry.type
-        class Query:
-            def _statuses(self) -> list[enum.Enum]:
-                return list(enum_cls)
-
-            # The enum class is generated by the converter under test, so the field's GraphQL
-            # type is passed as a value rather than written as a return annotation.
-            statuses: list[enum.Enum] = strawberry.field(
-                resolver=_statuses,
-                graphql_type=list[enum_cls],
-            )
-
-        schema = strawberry.Schema(query=Query)
-        result = schema.execute_sync("{ statuses }")
-
-        assert result.errors is None
-        assert result.data == {
-            "statuses": [
-                "MEMBER__x_",
-                "MEMBER_mro",
-                "MEMBER__ignore_",
-                "MEMBER__FixtureTypeStatusEnum__hidden",
-                "active",
-            ],
-        }
     finally:
         field.choices = original
         registry.clear()
@@ -1631,48 +1410,6 @@ def _introspect_field_type(
     raise AssertionError(f"field {field_name!r} not found on type {type_name!r}; got {fields!r}")
 
 
-def test_bigint_in_input_position_with_null_via_schema_execution() -> None:
-    """A nullable ``BigInt`` argument accepts ``null``.
-
-    Strawberry strips it before the parser runs, so the resolver receives ``None``.
-    """
-
-    @strawberry.type
-    class Query:
-        @strawberry.field
-        def echo(self, val: BigInt | None = None) -> str:
-            return "null" if val is None else str(val)
-
-    schema = strawberry.Schema(query=Query, config=strawberry_config())
-    result = schema.execute_sync("query { echo(val: null) }")
-    assert result.errors is None
-    assert result.data == {"echo": "null"}
-
-
-def test_bigint_resolver_returning_bool_raises_via_schema_execution() -> None:
-    """Outbound: a resolver returning ``True`` for a ``BigInt`` annotation raises ``TypeError``.
-
-    The ``bool`` surfaces a ``TypeError`` at the schema boundary via ``_serialize_bigint``.
-    """
-
-    @strawberry.type
-    class Query:
-        @strawberry.field
-        def bool_as_bigint(self) -> BigInt:
-            # basedpyright: the resolver returns a bool for a BigInt field on purpose: the test
-            # proves the strict serializer rejects it at the schema boundary
-            return True  # pyright: ignore[reportReturnType]
-
-    schema = strawberry.Schema(query=Query, config=strawberry_config())
-    result = schema.execute_sync("{ boolAsBigint }")
-    assert result.errors is not None
-    assert len(result.errors) > 0
-    # The strict serializer's error message is the contract source; GraphQL wraps
-    # the TypeError in a GraphQLError, so assert on the message substring rather
-    # than the exception type.
-    assert any("BigInt cannot serialize bool" in str(err) for err in result.errors)
-
-
 # ---------------------------------------------------------------------------
 # ArrayField -> list[T] sentinel-guarded recursion
 #
@@ -1685,11 +1422,10 @@ def test_bigint_resolver_returning_bool_raises_via_schema_execution() -> None:
 # ``_walk_introspected_type``) defined in the BigInt section above are
 # reused verbatim by every owner-introspection test below.
 #
-# Why this section can never migrate to live HTTP: ``ArrayField`` is a
-# PostgreSQL-only field type and the fakeshop runs on SQLite. The
-# converter-table row is exercised here against synthetic models and the
-# sentinel-monkeypatch pattern; consumer-facing coverage stays package-
-# internal until the example project gains a postgres test matrix.
+# Fake-sentinel construction and annotation probes run without a PostgreSQL
+# driver. Real fields on unsaved model instances can serialize over HTTP on
+# SQLite too; their wire owner is test_converter_outputs_api.py. A missing
+# optional import and a deliberately replaced sentinel remain private probes.
 # ---------------------------------------------------------------------------
 
 
@@ -2116,60 +1852,6 @@ def test_array_field_sentinel_none_path(monkeypatch: pytest.MonkeyPatch) -> None
                 fields = ("arr",)
 
 
-def test_real_array_field_compatible_with_strawberry() -> None:
-    """Optional gated test: real ``ArrayField`` flows through the sentinel branch end-to-end.
-
-    This runs ``django.contrib.postgres.fields.ArrayField`` on a postgres-equipped env.
-
-    The real ``ArrayField`` owner is unmanaged and never migrated, because fakeshop runs
-    on SQLite; it proves the sentinel dispatch in
-    ``django_strawberry_framework/types/converters.py::convert_scalar`` matches Django's
-    own class, and skips where ``django.contrib.postgres`` is unimportable.
-    """
-    pytest.importorskip("django.contrib.postgres.fields")
-    from django.contrib.postgres.fields import ArrayField  # noqa: PLC0415 - after the skip guard
-
-    class RealArrayIntOwner(models.Model):
-        arr: "ArrayField[Sequence[int] | Combinable, list[int]]" = ArrayField(
-            models.IntegerField(),
-        )
-
-        class Meta:
-            managed = False
-            app_label = "test_arrayfield"
-
-    class RealArrayIntOwnerType(DjangoType):
-        class Meta:
-            model = RealArrayIntOwner
-            fields = ("arr",)
-
-    finalize_django_types()
-
-    @strawberry.type
-    class Query:
-        def _owner(self) -> RealArrayIntOwner:
-            return RealArrayIntOwner(
-                arr=[1, 2, 3],
-            )
-
-        owner: RealArrayIntOwner = strawberry.field(
-            resolver=_owner,
-            graphql_type=RealArrayIntOwnerType,
-        )
-
-    schema = strawberry.Schema(query=Query)
-    type_payload = _introspect_field_type(schema, "RealArrayIntOwnerType", "arr")
-    # NON_NULL -> LIST -> NON_NULL -> SCALAR { name: "Int" }
-    assert type_payload["kind"] == "NON_NULL"
-    assert type_payload["ofType"] is not None
-    assert type_payload["ofType"]["kind"] == "LIST"
-    assert type_payload["ofType"]["ofType"] is not None
-    assert type_payload["ofType"]["ofType"]["kind"] == "NON_NULL"
-    terminal = _walk_introspected_type(type_payload)
-    assert terminal["kind"] == "SCALAR"
-    assert terminal["name"] == "Int"
-
-
 # ---------------------------------------------------------------------------
 # HStoreField -> strawberry.scalars.JSON sentinel-guarded branch
 #
@@ -2181,10 +1863,9 @@ def test_real_array_field_compatible_with_strawberry() -> None:
 # The sentinel's soft-import resolution is covered once in ``tests/utils/test_imports.py``,
 # not here (spec-017 #"**Soft-import branch coverage** is NOT written here.").
 #
-# Same postgres-only constraint as the ArrayField section: ``HStoreField``
-# can never run on the SQLite-backed fakeshop, so the converter-table row
-# stays covered here against synthetic models. Migration to live HTTP is
-# gated on the example project gaining a postgres test matrix.
+# The fake sentinel pins private annotation/absent-import behavior without
+# a driver. Real unsaved HStore values serialize over native HTTP in
+# test_converter_outputs_api.py without requiring a PostgreSQL database.
 # ---------------------------------------------------------------------------
 
 
@@ -2268,100 +1949,6 @@ def test_hstore_field_nullable_via_fake_sentinel(monkeypatch: pytest.MonkeyPatch
     assert type_payload == {"kind": "SCALAR", "name": "JSON", "ofType": None}
 
 
-def test_hstore_field_resolver_dict_serializes_via_schema_execution(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Serializer-level test: a hand-built dict round-trips verbatim through the ``JSON`` scalar.
-
-    The resolver returns the dict and ``schema.execute_sync`` serializes it.
-
-    No DB persistence - SQLite cannot store HStore values; the test exercises
-    only the scalar's wire-level serialization through Strawberry.
-
-    ``HStoreField`` is PostgreSQL-only and fakeshop migrates on SQLite, so this
-    unmanaged ``FakeHStoreField`` owner is the only route on SQLite into the ``HStoreField``
-    branch of ``django_strawberry_framework/types/converters.py::convert_scalar``.
-    """
-    monkeypatch.setattr(converters, "_HSTORE_FIELD_CLS", FakeHStoreField)
-
-    class HStoreSerializeOwner(models.Model):
-        data = FakeHStoreField()
-
-        class Meta:
-            managed = False
-            app_label = "test_hstorefield"
-
-    class HStoreSerializeOwnerType(DjangoType):
-        class Meta:
-            model = HStoreSerializeOwner
-            fields = ("data",)
-
-    finalize_django_types()
-
-    payload = {"k1": "v1"}
-
-    @strawberry.type
-    class Query:
-        def _owner(self) -> HStoreSerializeOwner:
-            return HStoreSerializeOwner(data=payload)
-
-        owner: HStoreSerializeOwner = strawberry.field(
-            resolver=_owner,
-            graphql_type=HStoreSerializeOwnerType,
-        )
-
-    schema = strawberry.Schema(query=Query)
-    result = schema.execute_sync("{ owner { data } }")
-    assert result.errors is None
-    assert result.data == {"owner": {"data": payload}}
-
-
-def test_hstore_field_resolver_dict_with_none_value_via_schema_execution(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A resolver returning ``{"k1": "v", "k2": None}`` round-trips with ``None`` preserved.
-
-    The ``None`` value stays inside the dict, mirroring ``HStoreField``'s native
-    ``dict[str, str | None]`` shape.
-
-    ``HStoreField`` is PostgreSQL-only and fakeshop migrates on SQLite, so this
-    unmanaged ``FakeHStoreField`` owner is the only route on SQLite into the ``HStoreField``
-    branch of ``django_strawberry_framework/types/converters.py::convert_scalar``.
-    """
-    monkeypatch.setattr(converters, "_HSTORE_FIELD_CLS", FakeHStoreField)
-
-    class HStoreNoneValueOwner(models.Model):
-        data = FakeHStoreField()
-
-        class Meta:
-            managed = False
-            app_label = "test_hstorefield"
-
-    class HStoreNoneValueOwnerType(DjangoType):
-        class Meta:
-            model = HStoreNoneValueOwner
-            fields = ("data",)
-
-    finalize_django_types()
-
-    payload = {"k1": "v", "k2": None}
-
-    @strawberry.type
-    class Query:
-        def _owner(self) -> HStoreNoneValueOwner:
-            return HStoreNoneValueOwner(data=payload)
-
-        owner: HStoreNoneValueOwner = strawberry.field(
-            resolver=_owner,
-            graphql_type=HStoreNoneValueOwnerType,
-        )
-
-    schema = strawberry.Schema(query=Query)
-    result = schema.execute_sync("{ owner { data } }")
-    assert result.errors is None
-    assert result.data == {"owner": {"data": payload}}
-
-
 def test_hstore_field_outer_choices_rejected_via_fake_sentinel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2422,61 +2009,6 @@ def test_hstore_field_sentinel_none_path(monkeypatch: pytest.MonkeyPatch) -> Non
             class Meta:
                 model = HStoreSentinelNoneOwner
                 fields = ("data",)
-
-
-def test_real_hstore_field_compatible_with_strawberry() -> None:
-    """Optional gated test: real ``HStoreField`` flows through the sentinel branch end-to-end.
-
-    This runs ``django.contrib.postgres.fields.HStoreField`` on a postgres-equipped env.
-
-    Asserts both the introspection chain (``NON_NULL -> SCALAR { name: "JSON" }``)
-    and resolver round-tripping (``{"k1": "v", "k2": None}`` preserved).
-
-    The real ``HStoreField`` owner is unmanaged and never migrated, because fakeshop
-    runs on SQLite; it proves the sentinel dispatch in
-    ``django_strawberry_framework/types/converters.py::convert_scalar`` matches Django's
-    own class, and skips where ``django.contrib.postgres`` is unimportable.
-    """
-    pytest.importorskip("django.contrib.postgres.fields")
-    from django.contrib.postgres.fields import HStoreField  # noqa: PLC0415 - after the skip guard
-
-    class RealHStoreOwner(models.Model):
-        data = HStoreField()
-
-        class Meta:
-            managed = False
-            app_label = "test_hstorefield"
-
-    class RealHStoreOwnerType(DjangoType):
-        class Meta:
-            model = RealHStoreOwner
-            fields = ("data",)
-
-    finalize_django_types()
-
-    payload = {"k1": "v", "k2": None}
-
-    @strawberry.type
-    class Query:
-        def _owner(self) -> RealHStoreOwner:
-            return RealHStoreOwner(data=payload)
-
-        owner: RealHStoreOwner = strawberry.field(
-            resolver=_owner,
-            graphql_type=RealHStoreOwnerType,
-        )
-
-    schema = strawberry.Schema(query=Query)
-    type_payload = _introspect_field_type(schema, "RealHStoreOwnerType", "data")
-    # NON_NULL -> SCALAR { name: "JSON" }
-    assert type_payload["kind"] == "NON_NULL"
-    terminal = _walk_introspected_type(type_payload)
-    assert terminal["kind"] == "SCALAR"
-    assert terminal["name"] == "JSON"
-
-    result = schema.execute_sync("{ owner { data } }")
-    assert result.errors is None
-    assert result.data == {"owner": {"data": payload}}
 
 
 # ---------------------------------------------------------------------------
@@ -3069,3 +2601,201 @@ def test_unsupported_field_message_names_the_field_class_and_label() -> None:
         "Add an entry to SCALAR_MAP or exclude this field via Meta.exclude."
     )
     assert _field_label(_UnsupportedField()) == "<unbound>.None"
+
+
+# ---------------------------------------------------------------------------
+# GeneratedField: converted as the column its ``output_field`` computes
+# ---------------------------------------------------------------------------
+
+
+def _generated_owner(**columns: models.GeneratedField) -> type[models.Model]:
+    """Return a fresh model declaring ``source`` (text), ``amount`` (integer) and ``columns``."""
+    attrs: dict[str, object] = {
+        "__module__": __name__,
+        "source": models.TextField(),
+        "amount": models.IntegerField(),
+        "Meta": type("Meta", (), {"app_label": _unique_app_label("test_generated_columns")}),
+        **columns,
+    }
+    return type("GeneratedOwner", (models.Model,), attrs)
+
+
+def _length_of_source(
+    output_field: models.Field[Never, object],
+    *,
+    null: bool = False,
+    choices: list[tuple[object, str]] | None = None,
+) -> models.GeneratedField:
+    """A ``GeneratedField`` computing ``LENGTH(source)`` into ``output_field``."""
+    return models.GeneratedField(
+        expression=Length("source"),
+        output_field=output_field,
+        db_persist=True,
+        null=null,
+        choices=choices,
+    )
+
+
+@pytest.mark.parametrize(
+    ("outer_null", "output_null", "expected"),
+    [
+        pytest.param(False, False, int, id="neither"),
+        pytest.param(True, False, int | None, id="generated-field-null"),
+        pytest.param(False, True, int | None, id="output-field-null"),
+    ],
+)
+def test_generated_column_is_nullable_when_either_field_says_so(
+    *,
+    outer_null: bool,
+    output_null: bool,
+    expected: object,
+) -> None:
+    """``GeneratedField.null or output_field.null``: the database enforces neither flag."""
+    owner = _generated_owner(
+        computed=_length_of_source(models.IntegerField(null=output_null), null=outer_null),
+    )
+    field = _concrete_field(owner, "computed")
+
+    assert convert_scalar(field, "OwnerType") == expected
+    assert convert_scalar(field, "OwnerType", force_nullable=False) is int
+    assert convert_scalar(field, "OwnerType", force_nullable=True) == int | None
+
+
+def test_generated_column_overrides_apply_on_a_type() -> None:
+    """``Meta.required_overrides`` / ``Meta.nullable_overrides`` replace the either-flag rule."""
+    owner = _generated_owner(
+        nullable=_length_of_source(models.IntegerField(null=True)),
+        required=_length_of_source(models.BigIntegerField()),
+    )
+
+    class GeneratedOverrideType(DjangoType):
+        class Meta:
+            model = owner
+            fields = ("nullable", "required")
+            required_overrides = ("nullable",)
+            nullable_overrides = ("required",)
+
+    assert GeneratedOverrideType.__annotations__["nullable"] is int
+    assert GeneratedOverrideType.__annotations__["required"] == BigInt | None
+
+
+@pytest.mark.parametrize(
+    ("output_class", "members"),
+    [
+        pytest.param(
+            models.IntegerField,
+            {"MEMBER_1": 1, "MEMBER_2": 2},
+            id="integer-output-no-blank",
+        ),
+        pytest.param(
+            models.TextField,
+            {"BLANK": "", "MEMBER_1": "1", "MEMBER_2": "2"},
+            id="text-output-blank",
+        ),
+    ],
+)
+def test_choice_bearing_generated_column_admits_blank_by_its_output_class(
+    output_class: type[models.Field[Never, object]],
+    members: dict[str, object],
+) -> None:
+    """The enum comes from the generated field's choices; ``BLANK`` only for a text output.
+
+    Django forces ``GeneratedField(blank=True)``, and the class inherits
+    ``empty_strings_allowed``; whether the expression can compute ``""`` is the output's.
+    The ``output_field``'s own choices are ignored.
+    """
+    output_field = output_class(choices=[(9, "Ignored")])
+    value = 1 if isinstance(output_field, models.IntegerField) else "1"
+    other = 2 if isinstance(output_field, models.IntegerField) else "2"
+    owner = _generated_owner(
+        graded=_length_of_source(output_field, choices=[(value, "One"), (other, "Two")]),
+    )
+    field = _concrete_field(owner, "graded")
+
+    enum_cls = convert_scalar(field, "GradedType")
+    assert isinstance(enum_cls, type)
+    assert issubclass(enum_cls, enum.Enum)
+    assert _member_map(enum_cls) == members
+    assert _column_admits_empty_string(field) is ("BLANK" in members)
+
+
+@pytest.mark.parametrize(
+    ("output_class", "refusal"),
+    [
+        pytest.param(
+            models.FileField,
+            "GeneratedField GeneratedOwner.computed has a file output_field 'FileField'",
+            id="file",
+        ),
+        pytest.param(
+            models.ImageField,
+            "GeneratedField GeneratedOwner.computed has a file output_field 'ImageField'",
+            id="image",
+        ),
+        pytest.param(
+            models.DurationField,
+            "Unsupported output_field type 'DurationField' on GeneratedField GeneratedOwner.computed",
+            id="unsupported",
+        ),
+    ],
+)
+def test_generated_column_refuses_an_output_no_conversion_publishes(
+    output_class: type[models.Field[Never, object]],
+    refusal: str,
+) -> None:
+    """A file output and an output ``SCALAR_MAP`` lacks are refused, naming the generated field."""
+    owner = _generated_owner(computed=_length_of_source(output_class()))
+    field = _concrete_field(owner, "computed")
+
+    for read in (convert_scalar, convert_field_output):
+        with pytest.raises(ConfigurationError, match=re.escape(refusal)):
+            _ = read(field, "OwnerType")
+    with pytest.raises(ConfigurationError, match=re.escape(refusal)):
+        _ = _scalar_from_model_field(field)
+
+
+def test_generated_array_column_routes_through_the_array_arm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ``ArrayField`` output takes the array arm; a choice-bearing element is refused.
+
+    A scalar output's leaf is the column it computes, never the generated field.
+    """
+    patch_array_field(monkeypatch)
+    owner = _generated_owner(
+        counts=_length_of_source(FakeArrayField(models.IntegerField())),
+        size=_length_of_source(models.IntegerField()),
+        graded=_length_of_source(FakeArrayField(models.IntegerField(choices=[(1, "One")]))),
+    )
+    counts = _concrete_field(owner, "counts")
+
+    route = scalar_route(counts)
+    assert isinstance(route, ArrayRoute)
+    assert isinstance(route.element, models.IntegerField)
+    assert convert_scalar(counts, "OwnerType") == list[int]
+    # Every subsystem's array test reads the generated field as the array it computes.
+    element = array_element_field(counts)
+    assert isinstance(element, models.IntegerField)
+    assert array_leaf_field(counts) == (element, 1)
+    size_leaf, depth = array_leaf_field(_concrete_field(owner, "size"))
+    assert (type(size_leaf), depth) == (models.IntegerField, 0)
+    with pytest.raises(
+        ConfigurationError,
+        match=re.escape(
+            "GeneratedField GeneratedOwner.graded declares choices on its ArrayField "
+            "output_field's base_field",
+        ),
+    ):
+        _ = convert_scalar(_concrete_field(owner, "graded"), "OwnerType")
+
+
+def test_generated_hstore_column_routes_through_the_hstore_arm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ``HStoreField`` output takes the hstore arm and publishes ``JSON``."""
+    monkeypatch.setattr(converters, "_HSTORE_FIELD_CLS", FakeHStoreField)
+    owner = _generated_owner(pairs=_length_of_source(FakeHStoreField()))
+    pairs = _concrete_field(owner, "pairs")
+
+    assert scalar_route(pairs) == HStoreRoute()
+    assert convert_scalar(pairs, "OwnerType") is strawberry.scalars.JSON

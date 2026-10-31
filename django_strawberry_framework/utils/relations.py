@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias, TypeGuard, cast, overload
+from weakref import WeakKeyDictionary
 
 from django.core.exceptions import FieldDoesNotExist
 from django.db import models
@@ -46,6 +47,8 @@ __all__ = [
     "RelationPathHop",
     "carrier_backed_link",
     "classify_path",
+    "generated_column",
+    "generated_column_source",
     "has_composite_pk",
     "instance_accessor",
     "is_forward_concrete_relation",
@@ -57,6 +60,8 @@ __all__ = [
     "is_single_column_foreign_key",
     "is_source_carried_relation_kind",
     "is_stored_column",
+    "lookup_operand",
+    "lookup_registry",
     "m2m_through_link_fields",
     "m2m_through_model",
     "non_pk_forward_link",
@@ -463,6 +468,59 @@ def validate_lookup_expr(terminal: ModelField, lookup_expr: str) -> type[models.
     part, an unresolvable mid-chain transform, or a final part that is neither
     a lookup nor a trailing transform with a supported ``exact``.
     """
+    return _walk_lookup_expr(terminal, lookup_expr)[1]
+
+
+def lookup_operand(
+    field: ConcreteField,
+    lookup_expr: str,
+) -> tuple[ConcreteField, type[models.lookups.Lookup]]:
+    """Return the field ``lookup_expr``'s final lookup compares on ``field``, and that lookup.
+
+    The walk is ``validate_lookup_expr``'s, from ``field.cached_col``, the column Django's
+    ``Query.build_lookup`` starts from, so every transform and lookup is the one Django's
+    query resolves; for a ``GeneratedField`` that is its ``output_field`` instance's
+    registry (``lookup_registry``), never the copy of the output class's lookups the
+    generated field files on itself. The field is the output of the transforms the
+    expression applies (the lookup's left-hand side), the column's own output when it
+    applies none; an output that is a ``GeneratedField``'s ``output_field`` instance
+    answers as the column it computes (``generated_column``), so an identity test
+    against that column holds. Raises ``LookupValidationError`` as the walk does.
+    """
+    lhs, lookup = _walk_lookup_expr(field, lookup_expr)
+    output = require(read_attr(lhs, "output_field"), is_concrete_field)
+    if output is lookup_registry(field):
+        output = generated_column(field) or output
+    return output, lookup
+
+
+def lookup_registry(field: ModelField) -> ModelField:
+    """Return the field whose registry Django's query resolves ``field``'s lookups on.
+
+    ``field`` itself, except a ``GeneratedField``: its ``cached_col`` / ``get_col`` hand the
+    query a ``Col`` whose output is the ``output_field`` instance, so every lookup and
+    transform resolves there. The generated field's own ``get_lookup`` / ``get_transform``
+    answer a name from the copy of the output class's lookups
+    ``GeneratedField.contribute_to_class`` files on it, falling back to the
+    ``output_field`` only for a name the copy lacks, so a later registration (on that
+    instance, or on the output class after the model was built) replacing a name the copy
+    holds is answered by the copy's original, and the copy's ``get_lookups()`` lists
+    neither kind of later registration.
+    """
+    if truth.is_instance(field, models.GeneratedField) and field.output_field is not None:
+        return field.output_field
+    return field
+
+
+def _walk_lookup_expr(
+    terminal: ModelField,
+    lookup_expr: str,
+) -> tuple[Col | Transform | models.ForeignObjectRel, type[models.lookups.Lookup]]:
+    """Return the expression ``lookup_expr``'s final lookup applies to, and that lookup.
+
+    ``validate_lookup_expr``'s walk; see it for the cursor, the trailing-transform rule
+    and the refusals.
+    """
     if type(lookup_expr) is not str:
         raise LookupValidationError(terminal, lookup_expr, lookup_expr) from None
     if not lookup_expr:
@@ -483,12 +541,13 @@ def validate_lookup_expr(terminal: ModelField, lookup_expr: str) -> type[models.
         cursor = transform(cursor)
     lookup = cursor.get_lookup(final_part)
     if lookup is not None:
-        return lookup
+        return cursor, lookup
     transform = cursor.get_transform(final_part)
     if transform is not None:
-        exact = transform(cursor).get_lookup("exact")
+        transformed = transform(cursor)
+        exact = transformed.get_lookup("exact")
         if exact is not None:
-            return exact
+            return transformed, exact
     raise LookupValidationError(terminal, lookup_expr, final_part)
 
 
@@ -916,13 +975,14 @@ def stored_value_link(field: ModelField) -> tuple[ModelField, tuple[str, ...]]:
     until a field that is not a key. Appended to a path ending on ``field``, the names
     reach the column (``pk`` + ``("id",)`` is ``pk__id``), which Django reads on the
     key's own column with no join. A field that is not a key walks no link: itself and
-    ``()``.
+    ``()``. A ``GeneratedField`` reached is answered as the column it computes
+    (``generated_column``), whose name is the generated field's own.
     """
     names: list[str] = []
     while isinstance(field, models.ForeignKey):
         field = field.target_field
         names.append(field.name)
-    return field, tuple(names)
+    return generated_column(field) or field, tuple(names)
 
 
 def carrier_backed_link(field: object) -> RelationLink | None:
@@ -1191,6 +1251,72 @@ def is_stored_column(field: object) -> TypeGuard[ConcreteField]:
     a forward ``ForeignKey`` / ``OneToOneField`` (its ``<name>_id`` column) is in it.
     """
     return is_concrete_field(field) and field in field.model._meta.concrete_fields
+
+
+# One computed column per ``GeneratedField``, filed on its first read; see ``generated_column``.
+# Weakly keyed, so a field of a model that is discarded (a test's isolated app) drops its column.
+_GENERATED_COLUMNS: WeakKeyDictionary[models.GeneratedField, ConcreteField] = WeakKeyDictionary()
+
+
+def generated_column(field: object) -> ConcreteField | None:
+    """Return the column a ``GeneratedField`` computes, or ``None`` for any other field.
+
+    The column is a clone of the field's ``output_field`` bound the way Django binds a
+    real column, the idiom ``GeneratedField.check`` uses to validate the output (an
+    ``output_field.clone()`` given the generated field's model): the generated field's
+    model, ``db_column`` and name (``Field.set_attributes_from_name``, so ``attname`` and
+    ``column`` are the generated field's own, and an ``ArrayField`` output binds its
+    ``base_field`` with it), and the facts Django reads off the outer field, never the
+    output: ``choices``, ``blank`` (forced ``True``), ``help_text``. Its ``null`` is either
+    flag: the schema editor emits the generated clause in place of ``NULL`` / ``NOT
+    NULL``, so the database enforces neither, and either one is the consumer saying the
+    expression can be null. ``empty_strings_allowed`` stays the output class's.
+
+    The column answers classification reads only (its class, nullability, choices, its
+    codec): it is not in ``Options.concrete_fields`` and is never handed to a query, an
+    ordering or a projection, which name the generated field by its path, nor asked for a
+    lookup: its registry is its class's alone, while Django's query resolves the generated
+    column's lookups on the ``output_field`` instance (``lookup_registry``), where a project
+    may register its own (``Field.register_lookup`` on an instance). A lookup is read off
+    that registry, and a walk starts from the generated field's own column
+    (``lookup_operand``; ``generated_column_source`` reads the field back from the clone).
+    One column is filed per field, weakly (a ``WeakKeyDictionary`` keyed by the field: Django hashes it
+    by ``creation_counter`` and compares the bound model too), and every caller
+    gets the one filed (``setdefault``), so an identity test between two reads of it holds.
+    The type and filter conversions read it through
+    ``types/converters.py::generated_output_field``, which refuses the outputs no
+    conversion can publish; the identity codec reads it through ``stored_value_link``.
+    """
+    if not truth.is_instance(field, models.GeneratedField):
+        return None
+    filed = _GENERATED_COLUMNS.get(field)
+    if filed is not None:
+        return filed
+    output = require(read_attr(field, "output_field"), is_concrete_field)
+    column = output.clone()
+    column.model = field.model
+    column.db_column = field.db_column
+    column.set_attributes_from_name(field.name)
+    column.choices = field.choices
+    column.blank = field.blank
+    column.help_text = field.help_text
+    column.null = field.null or output.null
+    return _GENERATED_COLUMNS.setdefault(field, column)
+
+
+def generated_column_source(column: ConcreteField) -> models.GeneratedField | None:
+    """Return the ``GeneratedField`` whose computed column ``column`` is, or ``None`` for any other.
+
+    The inverse of ``generated_column`` for a bound column: the field its model names by
+    the column's name, when ``generated_column`` files ``column`` for it. A filter's
+    path resolves to the clone, so its lookups are read through this field
+    (``lookup_registry``, ``lookup_operand``), never through the clone, whose registry is
+    its class's alone.
+    """
+    field = column.model._meta.get_field(column.name)
+    if truth.is_instance(field, models.GeneratedField) and generated_column(field) is column:
+        return field
+    return None
 
 
 def is_row_key_column(column: ConcreteField) -> bool:

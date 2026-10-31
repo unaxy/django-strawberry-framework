@@ -77,6 +77,7 @@ from django_strawberry_framework.types.converters import (
     ArrayRoute,
     HStoreRoute,
     _field_output_type_for,
+    generated_output_field,
     scalar_route,
 )
 from django_strawberry_framework.utils import truth
@@ -527,8 +528,12 @@ def _scalar_route_label(field: "ConcreteField") -> str:
     matched MRO ancestor (spec-029 Decision 4), so a consumer subclass of a supported field
     reports the ancestor row (``TextField``), not its own class. An ``ArrayField``
     reads ``ArrayField -> list[<element label>]``, the element labelled by this same
-    rule, and an ``HStoreField`` reads ``HStoreField -> JSON``.
+    rule, and an ``HStoreField`` reads ``HStoreField -> JSON``. A ``GeneratedField`` reads
+    ``GeneratedField -> <label of the column it computes>``.
     """
+    generated = generated_output_field(field)
+    if generated is not None:
+        return f"GeneratedField -> {_scalar_route_label(generated)}"
     route = scalar_route(field)
     if isinstance(route, ArrayRoute):
         return f"ArrayField -> list[{_scalar_route_label(route.element)}]"

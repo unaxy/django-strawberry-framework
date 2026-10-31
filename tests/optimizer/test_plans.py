@@ -1142,7 +1142,8 @@ class TestApplyWindowPagination:
         assert "= 1" in sql  # marker only
         assert "<= " not in sql  # no finite fetch ceiling
 
-    def test_engaged_probe_with_count_is_rejected(self) -> None:
+    @pytest.mark.parametrize("offset", [0, 2], ids=["first-page", "offset-page"])
+    def test_engaged_probe_with_count_is_rejected(self, offset: int) -> None:
         """An engaged-probe window that also annotates the count fails loudly.
 
         The probe/count mutual-exclusion contract at the ORM window entry point
@@ -1153,9 +1154,8 @@ class TestApplyWindowPagination:
         offset case is inert and stays allowed
         (``test_next_page_probe_inert_on_the_unbounded_offset_shape`` above).
         """
-        for offset in (0, 2):
-            with pytest.raises(OptimizerError, match="mutually exclusive"):
-                self._windowed(offset=offset, limit=3, with_total_count=True, next_page_probe=True)
+        with pytest.raises(OptimizerError, match="mutually exclusive"):
+            self._windowed(offset=offset, limit=3, with_total_count=True, next_page_probe=True)
 
     def test_with_total_count_false_reverse_branch_still_bounds(self) -> None:
         """The reverse (last-only) branch honors ``with_total_count=False`` too."""
@@ -1190,14 +1190,17 @@ class TestApplyWindowPagination:
         # row-number predicates; both bounds must appear.
         assert WINDOW_ROW_NUMBER.upper() in where
         # offset filter (> 2) and upper-bound filter (<= 5) both present.
-        assert ">" in where
-        assert "<=" in where
+        assert "> 2" in where
+        assert "<= 5" in where
 
     def test_no_offset_skips_lower_filter(self) -> None:
         """``offset == 0`` applies only the upper-bound filter."""
         qs = self._windowed(offset=0, limit=3)
         # The annotations are present; only the upper-bound filter applies.
         assert WINDOW_ROW_NUMBER in qs.query.annotations
+        sql = str(qs.query).upper()
+        assert "<= 3" in sql
+        assert " > " not in sql
 
     def test_reverse_branch_uses_reversed_row_number(self) -> None:
         """The reverse (last-only) branch annotates ``_dst_row_number_reversed`` and bounds it."""
@@ -1245,11 +1248,17 @@ class TestApplyWindowPagination:
         qs = self._windowed(offset=1, limit=None)
         # Annotation present; offset filter applies, but no finite upper bound.
         assert WINDOW_ROW_NUMBER in qs.query.annotations
+        sql = str(qs.query).upper()
+        assert "> 1" in sql
+        assert "<=" not in sql
 
     def test_maxsize_limit_skips_upper_filter(self) -> None:
         """``sys.maxsize`` (relay's no-limit sentinel) adds no upper-bound filter."""
         qs = self._windowed(offset=0, limit=sys.maxsize)
         assert WINDOW_ROW_NUMBER in qs.query.annotations
+        sql = str(qs.query).upper()
+        assert "<=" not in sql
+        assert " > " not in sql
 
     def test_annotations_compose_with_only(self) -> None:
         """Window annotations survive a ``.only()`` projection (annotations, not columns)."""

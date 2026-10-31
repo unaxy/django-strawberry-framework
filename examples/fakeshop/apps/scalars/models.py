@@ -34,18 +34,20 @@ is a ``TextField`` without it: each per-field ``"__all__"`` publishes the lookup
 field registers, so ``prefix`` is a ``ScalarSpecimenFilter`` label leaf and no
 ``ScalarSpecimenTagFilter`` one.
 
-``ArrayField`` and ``HStoreField`` are deliberately absent - both are
-PostgreSQL-only and the fakeshop runs on SQLite. Their converter entries stay
-covered by ``tests/`` against package-internal fixtures.
+``ArrayField`` and ``HStoreField`` are absent from these permanent tables because
+the default fakeshop database is SQLite. ``test_converter_outputs_api.py`` serves
+real field declarations and unsaved rows over HTTP on either backend;
+``test_postgres_array_filter_bindability_api.py`` creates transient real array
+tables for the PostgreSQL filter contract.
 
 ``MediaSpecimen`` carries a ``FileField`` and an ``ImageField`` so the spec-037
 file/image converter rows are earned over a live ``/graphql/`` request (read =
 ``DjangoFileType`` / ``DjangoImageType`` output objects, write = the ``Upload``
 scalar in the generated input). Unlike ``ArrayField`` / ``HStoreField`` these
 ARE SQLite-compatible (they store the relative name as ``TEXT``), so they belong
-here, not in synthetic package tests. The storage-backend fault-injection and
-corrupt-image edges (which need mocking a non-filesystem backend) stay in
-``tests/types/test_resolvers.py``.
+here. Storage degradation and corrupt-image responses are observed through
+``test_uploads_api.py``; private file-attribute and resolver construction checks
+remain in ``tests/types/test_resolvers.py``.
 
 ``OverrideSpecimen`` is the substrate for the consumer-authored field-override
 demonstration (spec-029): each of its columns is overridden a different way by
