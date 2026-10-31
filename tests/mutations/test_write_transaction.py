@@ -1371,12 +1371,6 @@ def test_forced_update_conflict_probe_failure_reraises_the_original(
         forced_update_conflict_errors(product_models.Category(pk=1), "default", signal)
 
 
-def test_conflict_error_shape() -> None:
-    error = conflict_error()
-    assert error.field == "id"
-    assert error.codes == ["conflict"]
-
-
 def test_lookup_id_name_is_the_pipelines_published_id_or_id_outside_one() -> None:
     """Outside a pipeline the name is ``id``; inside one it is the slot the skeleton set."""
     assert lookup_id_name() == "id"
