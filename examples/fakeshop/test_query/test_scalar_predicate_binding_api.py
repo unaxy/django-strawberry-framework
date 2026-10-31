@@ -438,7 +438,7 @@ def test_project_integer_transform_members_bind_as_the_transform_output(
 
         schema = _scalar_holder(PlusOneFilter)
         sqls = record_compiled_sql()
-        payload = _post(schema, {"signed_big__plus_one__in": members})
+        payload = _post(schema, {"signed_big": {"plus_one_in": members}})
     if labels is None:
         _refusal(payload, "signed_big__plus_one__in")
         assert _root_sql(sqls, scalar_models.ScalarSpecimen) == [], sqls
@@ -483,11 +483,11 @@ def test_project_transform_without_a_backend_range_keeps_its_integer_members(
 
         schema = _scalar_holder(UnrangedFilter)
         if not labels:
-            assert _post(schema, {"signed_big__plus_one_unranged__in": ["8"]}) == _expected(
+            assert _post(schema, {"signed_big": {"plus_one_unranged_in": ["8"]}}) == _expected(
                 ("mid-2020", "new-year-2021"),
             )
         sqls = record_compiled_sql()
-        payload = _post(schema, {"signed_big__plus_one_unranged__in": members})
+        payload = _post(schema, {"signed_big": {"plus_one_unranged_in": members}})
     assert payload == _expected(labels), payload
     assert len(_root_sql(sqls, scalar_models.ScalarSpecimen)) == 1, sqls
 

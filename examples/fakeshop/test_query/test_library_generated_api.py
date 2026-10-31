@@ -593,21 +593,22 @@ def test_transform_registered_on_the_generated_output_types_its_operand_over_htt
     owners: tuple[str, ...],
     private_registry: None,
 ) -> None:
-    """``codeLength`` through Django's ``Chr`` publishes and filters a ``String`` operand.
+    """``codeLength``'s ``chr`` leaf through Django's ``Chr`` publishes and filters a ``String``.
 
     Django resolves a generated column's lookups on its ``output_field`` instance, where
     ``Chr`` is registered, and the transform's output is a ``CharField``: the leaf is
     ``String``, ``"A"`` matches the shelf whose code is 65 characters long, and the
-    integer ``65`` is refused as the wrong type.
+    integer ``65`` is refused as the wrong type. ``chr__exact`` is the ``chr`` leaf of the
+    ``codeLength`` head, as django-filter names it ``code_length__chr``.
     """
     del private_registry
     _seed_shelves((("A" * 65, ""), ("B" * 66, "")))
 
     with _output_lookup_schema(owners, Chr, "chr__exact"):
-        assert _operand_types("codeLengthChr") == {"chr_Exact": "String"}
-        assert _row_codes('codeLengthChr: {chr_Exact: "A"}') == ["A" * 65]
+        assert _operand_types("codeLength") == {"chr": "String"}
+        assert _row_codes('codeLength: {chr: "A"}') == ["A" * 65]
         refused = _post_graphql(
-            "{ rows(filter: {codeLengthChr: {chr_Exact: 65}}) { edges { node { code } } } }",
+            "{ rows(filter: {codeLength: {chr: 65}}) { edges { node { code } } } }",
             url="/graphql-test/",
         )
         assert "errors" in response_json(refused)

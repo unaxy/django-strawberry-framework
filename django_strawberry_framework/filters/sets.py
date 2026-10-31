@@ -298,8 +298,9 @@ else:
 _QUERYSET: type[models.QuerySet[models.Model, object]] = models.QuerySet
 
 
-# Every operator-bag lookup attr ``LOOKUP_NAME_MAP`` can generate; a mapping
-# whose keys all name one is an operator bag (``FilterSet._operator_bag_items``).
+# Every operator-bag lookup attr ``LOOKUP_NAME_MAP`` can generate; with the attrs a
+# set's own bags carry (a transform chain's ``year_gt``), a mapping whose keys all
+# name one is an operator bag (``FilterSet._operator_bag_items``).
 _LOOKUP_PYTHON_ATTRS: frozenset[str] = frozenset(
     python_attr for python_attr, _graphql_name in LOOKUP_NAME_MAP.values()
 )
@@ -5015,8 +5016,8 @@ class FilterSet(
             "{start, end} input on a RangeFilter primitive).",
         )
 
-    @staticmethod
-    def _operator_bag_items(raw_value: object) -> list[tuple[str, object]] | None:
+    @classmethod
+    def _operator_bag_items(cls, raw_value: object) -> list[tuple[str, object]] | None:
         """Return the ``(lookup_attr, value)`` pairs of a per-field operator bag.
 
         ``_build_input_fields`` wraps each scalar field's lookups in a
@@ -5067,8 +5068,10 @@ class FilterSet(
         #     ``normalize_input_value`` so it produces the patch of the two
         #     keys the filter's widget reads.
         # Disambiguate by the keys: a dict is an operator bag only when
-        # EVERY key names a known lookup attr (``_LOOKUP_PYTHON_ATTRS``
-        # - ``start`` / ``end`` are absent). Strawberry-input dataclass
+        # EVERY key names a known lookup attr (``_LOOKUP_PYTHON_ATTRS``, or
+        # one of this set's bags, ``FilterLookupTable.lookup_attrs``: a
+        # transform chain's ``year_gt`` - ``start`` / ``end`` are absent;
+        # a model-less set publishes no bag). Strawberry-input dataclass
         # bags (the schema-driven path) always delegate unchanged. The pairs
         # are read once through the base ``dict.items`` slot and each key is
         # reduced to an exact ``str`` before the membership test, so a dict
@@ -5077,11 +5080,16 @@ class FilterSet(
         # never answers for a lookup name.
         if is_dict(raw_value):
             pairs: list[tuple[str, object]] = []
+            published: frozenset[str] = (
+                filter_lookup_table(cls).lookup_attrs
+                if cls._meta.model is not None
+                else frozenset()
+            )
             for key, value in dict_items(raw_value):
                 if not truth.is_instance(key, str):
                     return None
                 lookup_attr = truth.text(key)
-                if lookup_attr not in _LOOKUP_PYTHON_ATTRS:
+                if lookup_attr not in _LOOKUP_PYTHON_ATTRS and lookup_attr not in published:
                     return None
                 pairs.append((lookup_attr, value))
             return pairs or None

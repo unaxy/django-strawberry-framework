@@ -7512,6 +7512,31 @@ def test_operator_bag_items_returns_none_for_non_lookup_key_dict(
     assert CategoryFilter._operator_bag_items(value) is None
 
 
+@pytest.mark.parametrize(
+    ("lookups", "expected"),
+    [
+        pytest.param(["year__gt"], [("year_gt", 5)], id="published-chain"),
+        pytest.param(["year"], None, id="unpublished-chain"),
+    ],
+)
+def test_operator_bag_items_reads_a_chain_attr_the_set_publishes(
+    lookups: list[str],
+    expected: list[tuple[str, object]] | None,
+) -> None:
+    """A transform chain's attr (``year_gt``) makes a dict a bag only on a set publishing it.
+
+    No module vocabulary can list every chain a field's transforms compose, so the set's
+    own lookup table answers.
+    """
+
+    class StampFilter(FilterSet):
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = {"occurred_at": lookups}
+
+    assert StampFilter._operator_bag_items({"year_gt": 5}) == expected
+
+
 @pytest.mark.parametrize("value", ["x", ["x"]], ids=["scalar", "sequence"])
 def test_operator_bag_items_still_returns_none_for_scalars(value: object) -> None:
     """Scalar and sequence values are not operator bags."""
