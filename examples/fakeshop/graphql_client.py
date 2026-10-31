@@ -2,9 +2,10 @@
 
 Single-sites the live-tier request contracts: JSON GraphQL posts, raw-body posts,
 status-code assertions, parsed payload extraction, GraphQL-error rejection,
-exact-data assertions, the verb-and-table reading of captured SQL, and the post-lock
-re-reads a vendor adds to it. Superset signatures keep simple callers terse while
-letting variable-driven and custom-client tests use the same envelope.
+exact-data assertions, the verb-and-table reading of captured SQL, the pks a batched
+lookup names, and the post-lock re-reads a vendor adds to it. Superset signatures keep
+simple callers terse while letting variable-driven and custom-client tests use the same
+envelope.
 
 The JSON path routes through the package's own
 :class:`django_strawberry_framework.testing.TestClient` (spec-043), so
@@ -20,6 +21,7 @@ content-type negotiation), which ``TestClient`` exists to abstract away.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Protocol, TypeAlias
 
@@ -174,6 +176,22 @@ def statement_shapes(sqls: Sequence[str]) -> list[str]:
         else:
             shapes.append(words[0])
     return shapes
+
+
+def batched_pk_lookup(sql: str, table: str) -> set[int]:
+    """Return the pks one batched lookup restricts ``table``'s ``id`` to.
+
+    Django 6 compiles a forward-FK prefetch to ``"t"."id" IN (1, 2)``. Django 5.2 builds it
+    from ``TupleIn``, which a backend without tuple lookups (SQLite) spells
+    ``("t"."id" = 1 OR "t"."id" = 2)``. Both are one statement naming every parent's pk, the
+    shape a batched-not-per-row assertion pins; empty when neither form names the column.
+    """
+    column = re.escape(f'"{table}"."id"')
+    flat = sql.replace("(", " ").replace(")", " ")
+    in_list = re.search(rf"{column}\s+IN\s+([\d,\s]+)", flat)
+    if in_list is not None:
+        return {int(pk) for pk in in_list.group(1).replace(",", " ").split()}
+    return {int(match.group(1)) for match in re.finditer(rf"{column} = (\d+)", flat)}
 
 
 def post_lock_rereads(locked_reads_found: int) -> int:

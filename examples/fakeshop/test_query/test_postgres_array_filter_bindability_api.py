@@ -71,7 +71,7 @@ def array_consumer() -> Iterator[_ArrayConsumer]:
 
         class ArraySpecimen(models.Model):
             label: "models.CharField[str | int | Combinable, str]" = models.CharField(
-                max_length=40
+                max_length=40,
             )
             counts: ArrayField[list[int], list[int]] = ArrayField(models.IntegerField())
             small: ArrayField[list[int], list[int]] = ArrayField(models.SmallIntegerField())
