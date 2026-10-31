@@ -111,6 +111,7 @@ from django_strawberry_framework.filters.inputs import (
     construct_search,
     convert_filter_to_input_annotation,
     filter_lookup_table,
+    lookup_leaf_names,
     materialize_input_class,
     normalize_input_value,
     range_form_keys,
@@ -428,6 +429,61 @@ def test_build_input_fields_pins_every_lookup_name_to_its_camel_name() -> None:
     id_fields = {field.python_name: field.graphql_name for field in _definition_fields(id_bag)}
     # `in_` -> alias `in`.
     assert id_fields["in_"] == "in"
+
+
+@pytest.mark.parametrize(
+    ("lookup", "names"),
+    [
+        pytest.param("exact", ("exact", "exact"), id="mapped"),
+        pytest.param("in", ("in_", "in"), id="keyword-escaped"),
+        pytest.param("iso_year", ("iso_year", "isoYear"), id="unmapped"),
+        pytest.param("year__gt", ("year_gt", "yearGt"), id="chain"),
+        pytest.param("year__in", ("year_in", "yearIn"), id="chain-drops-the-keyword-escape"),
+        pytest.param("year__isnull", ("year_is_null", "yearIsNull"), id="chain-mapped-tail"),
+        pytest.param(
+            "year__icontains",
+            ("year_i_contains", "yearIContains"),
+            id="chain-uppercase-run",
+        ),
+        pytest.param("iso_year__gte", ("iso_year_gte", "isoYearGte"), id="chain-unmapped-head"),
+    ],
+)
+def test_lookup_leaf_names_names_a_chain_segment_by_segment(
+    lookup: str,
+    names: tuple[str, str],
+) -> None:
+    """A bag lookup's ``(python_attr, graphql_name)``, a transform chain's composed per segment.
+
+    A chain's GraphQL name is never the camel case of its joined attr, which marks the
+    uppercase run of ``year_i_contains`` as ``yearI__xContains``.
+    """
+    assert lookup_leaf_names(lookup) == names
+
+
+def test_two_lookups_of_one_head_named_by_one_attr_are_refused() -> None:
+    """A lookup a ``get_filters()`` override adds under a chain's attr would shadow the chain.
+
+    ``year_gt`` and ``year__gt`` both name the attr ``year_gt`` of the ``occurred_at`` head,
+    so one would be unreachable from the generated input.
+    """
+
+    class CollidingFilter(FilterSet):
+        @classmethod
+        @override
+        def get_filters(cls) -> OrderedDict[str, Filter]:
+            filters = OrderedDict(super().get_filters())
+            filters["occurred_at__year_gt"] = NumberFilter(
+                field_name="occurred_at",
+                lookup_expr="year_gt",
+            )
+            return filters
+
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = {"occurred_at": ["year__gt"]}
+
+    with pytest.raises(ConfigurationError, match="both generate the lookup attribute 'year_gt'"):
+        filter_lookup_table(CollidingFilter)
 
 
 @pytest.mark.django_db

@@ -33,8 +33,9 @@ field's queryset holds, a path the schema build cannot resolve, so it keeps its 
 ``Int`` bounds) and filter by the year sent, flat, under ``not`` and through ``partner``
 nested and flat; a text year or one past ``Int``'s 32 bits is the scalar's own refusal.
 A holder schema (``generated_year_schema``) serves ``Meta.fields`` ``year`` / ``year__gt`` /
-``year__in`` leaves on ``occurred_at``, which no shipped set generates: each takes the
-transform's ``Int`` and filters by it, and a ``year`` / ``year__gt`` of 0 or 10000, whose
+``year__in`` leaves on ``occurred_at``, which no shipped set generates: each is a leaf of the
+one ``occurredAt`` head (``year``, ``yearGt``, ``yearIn``), takes the transform's ``Int`` and
+filters by it, and a ``year`` / ``year__gt`` of 0 or 10000, whose
 datetime bound Django cannot form, is ``FILTER_INVALID`` keyed to its form field, flat,
 under ``not`` and through ``partner`` nested and flat. Its declared ``ListFilter``
 (``year__in``) and ``RangeFilter`` (``year__range``, a lone bound included) take and filter
@@ -971,8 +972,9 @@ def generated_year_schema(private_registry: None) -> Iterator[DjangoSchema]:
     """Serve sets whose leaves reach ``occurred_at``'s ``year`` through the ``lookup_expr``.
 
     No shipped fakeshop set spells a transform in a ``lookup_expr``, so the holder declares
-    one over ``ScalarSpecimen``: ``Meta.fields`` ``year`` / ``year__gt`` / ``year__in`` and
-    the null tests ``year__isnull`` / ``date__isnull``; a ``ListFilter`` (``year__in``) and a
+    one over ``ScalarSpecimen``: ``Meta.fields`` ``year`` / ``year__exact`` (which
+    django-filter names as it names ``year``) / ``year__gt`` / ``year__in`` and the null tests
+    ``year__isnull`` / ``date__isnull``; a ``ListFilter`` (``year__in``) and a
     ``RangeFilter`` (``year__range``); and the same list and range shapes with a ``method=``,
     whose method receives the column's values.
     A ``NullableScalarSpecimen`` set reaches it through ``partner``, nested and flat, and
@@ -1018,6 +1020,7 @@ def generated_year_schema(private_registry: None) -> Iterator[DjangoSchema]:
             fields = {
                 "occurred_at": [
                     "year",
+                    "year__exact",
                     "year__gt",
                     "year__in",
                     "year__isnull",
@@ -1085,34 +1088,45 @@ def _seed_year_partners() -> None:
 
 _GENERATED_YEAR_TYPES_QUERY = """
 query {
-  exact: __type(name: "GeneratedYearFilterOccurredAtFilterInputType") {
-    inputFields { name type { name } }
-  }
-  among: __type(name: "GeneratedYearFilterOccurredAtYearInFilterInputType") {
-    inputFields { name type { kind ofType { kind ofType { name } } } }
+  bag: __type(name: "GeneratedYearFilterOccurredAtFilterInputType") {
+    inputFields { name type { name kind ofType { kind ofType { name } } } }
   }
 }
 """
 
 
+def _scalar_leaf(name: str, scalar: str) -> JSONObject:
+    """Return the introspected input field ``name`` typed as the nullable scalar ``scalar``."""
+    return {"name": name, "type": {"name": scalar, "kind": "SCALAR", "ofType": None}}
+
+
 @pytest.mark.django_db
 @pytest.mark.usefixtures("generated_year_schema")
 def test_generated_year_leaf_is_typed_by_the_transforms_output() -> None:
-    """A ``Meta.fields`` ``year`` / ``year__in`` leaf takes the transform's ``Int``, not ``DateTime``."""
+    """Every ``occurred_at`` lookup is a leaf of one ``occurredAt`` head, typed by its operand.
+
+    ``year`` / ``year__gt`` / ``year__in`` take the transform's ``Int``, not ``DateTime``, and
+    each chain leaf is named segment by segment (``yearGt``, ``yearIsNull``). ``year__exact``
+    adds no leaf: django-filter names it ``occurred_at__year`` as it names ``year``.
+    """
     payload = response_json(post_graphql(_GENERATED_YEAR_TYPES_QUERY, url="/graphql-test/"))
 
     assert payload == {
         "data": {
-            "exact": {"inputFields": [{"name": "year", "type": {"name": "Int"}}]},
-            "among": {
+            "bag": {
                 "inputFields": [
+                    _scalar_leaf("year", "Int"),
+                    _scalar_leaf("yearGt", "Int"),
                     {
-                        "name": "year_In",
+                        "name": "yearIn",
                         "type": {
+                            "name": None,
                             "kind": "LIST",
                             "ofType": {"kind": "NON_NULL", "ofType": {"name": "Int"}},
                         },
                     },
+                    _scalar_leaf("yearIsNull", "Boolean"),
+                    _scalar_leaf("dateIsNull", "Boolean"),
                 ],
             },
         },
@@ -1125,12 +1139,12 @@ def test_generated_year_leaf_is_typed_by_the_transforms_output() -> None:
     ("root", "year_filter", "labels"),
     [
         pytest.param("specimens", {"occurredAt": {"year": 2021}}, ["alpha"], id="exact"),
-        pytest.param("specimens", {"occurredAtYearGt": {"year_Gt": 2020}}, ["alpha"], id="gt"),
-        pytest.param("specimens", {"occurredAtYearIn": {"year_In": [2020]}}, ["beta"], id="in"),
+        pytest.param("specimens", {"occurredAt": {"yearGt": 2020}}, ["alpha"], id="gt"),
+        pytest.param("specimens", {"occurredAt": {"yearIn": [2020]}}, ["beta"], id="in"),
         pytest.param("specimens", {"not": {"occurredAt": {"year": 2021}}}, ["beta"], id="not"),
         pytest.param(
             "partners",
-            {"partner": {"occurredAtYearIn": {"year_In": [2021]}}},
+            {"partner": {"occurredAt": {"yearIn": [2021]}}},
             ["of-alpha"],
             id="nested-partner",
         ),
@@ -1139,6 +1153,12 @@ def test_generated_year_leaf_is_typed_by_the_transforms_output() -> None:
             {"partnerOccurredAt": {"year": 2020}},
             ["of-beta"],
             id="flat-partner",
+        ),
+        pytest.param(
+            "partners",
+            {"partnerOccurredAt": {"yearGt": 2020}},
+            ["of-alpha"],
+            id="flat-partner-chain",
         ),
     ],
 )
@@ -1157,10 +1177,7 @@ def test_generated_year_leaf_filters_by_the_integer_sent(
 
 _TRANSFORMED_NULL_TEST_TYPES_QUERY = """
 query {
-  year: __type(name: "GeneratedYearFilterOccurredAtYearIsnullFilterInputType") {
-    inputFields { name type { name } }
-  }
-  date: __type(name: "GeneratedYearFilterOccurredAtDateIsnullFilterInputType") {
+  partners: __type(name: "GeneratedYearPartnerFilterOccurredAtFilterInputType") {
     inputFields { name type { name } }
   }
 }
@@ -1174,14 +1191,19 @@ def test_generated_null_test_after_a_transform_takes_a_boolean() -> None:
 
     The value is the ``isnull`` lookup's operand, which django-filter resolves as the
     terminal lookup past the transform, never a value of ``year``'s ``Int`` or ``date``'s
-    ``Date``.
+    ``Date``. The partner set's ``occurredAt`` head carries only the two null tests; the
+    holder's own carries them beside its other leaves
+    (``test_generated_year_leaf_is_typed_by_the_transforms_output``).
     """
     payload = response_json(post_graphql(_TRANSFORMED_NULL_TEST_TYPES_QUERY, url="/graphql-test/"))
-
     assert payload == {
         "data": {
-            "year": {"inputFields": [{"name": "year_Isnull", "type": {"name": "Boolean"}}]},
-            "date": {"inputFields": [{"name": "date_Isnull", "type": {"name": "Boolean"}}]},
+            "partners": {
+                "inputFields": [
+                    {"name": "yearIsNull", "type": {"name": "Boolean"}},
+                    {"name": "dateIsNull", "type": {"name": "Boolean"}},
+                ],
+            },
         },
     }
 
@@ -1215,7 +1237,7 @@ def test_generated_null_test_after_a_transform_filters_as_django_does(
     models.NullableScalarSpecimen.objects.create(label="dated", occurred_at=_DATETIME)
     model = models.ScalarSpecimen if root == "specimens" else models.NullableScalarSpecimen
     django_rows = model.objects.filter(**{f"occurred_at__{transform}__isnull": is_null})
-    year_filter = {f"occurredAt{transform.title()}Isnull": {f"{transform}_Isnull": is_null}}
+    year_filter = {"occurredAt": {f"{transform}IsNull": is_null}}
 
     assert sorted(django_rows.values_list("label", flat=True)) == labels
     assert _holder_payload(root, year_filter) == {
@@ -1273,23 +1295,23 @@ _BETA_YEAR_STAMP = "2020-03-01T00:00:00+00:00"
 @pytest.mark.parametrize(
     ("year_filter", "labels"),
     [
-        pytest.param({"yearsAmong": {"year_In": [2020]}}, ["beta"], id="list-in"),
+        pytest.param({"yearsAmong": {"yearIn": [2020]}}, ["beta"], id="list-in"),
         pytest.param(
-            {"yearsSpan": {"year_Range": {"start": 2020, "end": 2021}}},
+            {"yearsSpan": {"yearRange": {"start": 2020, "end": 2021}}},
             ["alpha", "beta"],
             id="range",
         ),
-        pytest.param({"yearsSpan": {"year_Range": {"start": 2021}}}, ["alpha"], id="range-start"),
-        pytest.param({"yearsSpan": {"year_Range": {"end": 2020}}}, ["beta"], id="range-end"),
+        pytest.param({"yearsSpan": {"yearRange": {"start": 2021}}}, ["alpha"], id="range-start"),
+        pytest.param({"yearsSpan": {"yearRange": {"end": 2020}}}, ["beta"], id="range-end"),
         pytest.param(
-            {"yearsOfStamps": {"year_In": [_ALPHA_YEAR_STAMP]}},
+            {"yearsOfStamps": {"yearIn": [_ALPHA_YEAR_STAMP]}},
             ["alpha"],
             id="method-list",
         ),
         pytest.param(
             {
                 "yearSpanOfStamps": {
-                    "year_Range": {"start": _BETA_YEAR_STAMP, "end": _BETA_YEAR_STAMP},
+                    "yearRange": {"start": _BETA_YEAR_STAMP, "end": _BETA_YEAR_STAMP},
                 },
             },
             ["beta"],
@@ -1322,7 +1344,7 @@ def test_lookup_expr_transform_leaf_filters_by_its_output_and_a_method_by_its_co
         pytest.param("specimens", {"occurredAt": {"year": 0}}, "occurred_at__year", id="year-0"),
         pytest.param(
             "specimens",
-            {"occurredAtYearGt": {"year_Gt": 10000}},
+            {"occurredAt": {"yearGt": 10000}},
             "occurred_at__year__gt",
             id="gt-10000",
         ),

@@ -297,20 +297,21 @@ def _schema() -> tuple[DjangoSchema, type[DjangoType]]:
             date_iso_year_range: list[BigInt] | None = None,
         ) -> QuerySet[django_models.Model, object]:
             data: JSONObject = {}
-            for value, head in (
-                (datetime_year_gt, "occurred_at__year__gt"),
-                (datetime_year_lt, "occurred_at__year__lt"),
-                (datetime_iso_year, "occurred_at"),
-                (date_iso_year_lte, "occurred_on__iso_year__lte"),
-                (datetime_years, "occurred_at__year__in"),
-                (date_years, "occurred_on__year__in"),
-                (date_iso_years, "occurred_on__iso_year__in"),
-                (datetime_year_range, "occurred_at__year__range"),
-                (date_iso_year_range, "occurred_on__iso_year__range"),
+            # Each transform chain is a lookup of its column's head, named by its python attr.
+            for value, head, lookup in (
+                (datetime_year_gt, "occurred_at", "year_gt"),
+                (datetime_year_lt, "occurred_at", "year_lt"),
+                (date_iso_year_lte, "occurred_on", "iso_year_lte"),
+                (datetime_years, "occurred_at", "year_in"),
+                (date_years, "occurred_on", "year_in"),
+                (date_iso_years, "occurred_on", "iso_year_in"),
+                (datetime_year_range, "occurred_at", "year_range"),
+                (date_iso_year_range, "occurred_on", "iso_year_range"),
+                (date_year, "occurred_on", "year"),
             ):
-                if value is not None:
-                    data[head] = value
-            _put(data, "occurred_on", "year", date_year)
+                _put(data, head, lookup, value)
+            if datetime_iso_year is not None:
+                data["occurred_at"] = datetime_iso_year
             return temporal.apply_sync(data, _stamped_rows(), info)
 
         year_values: QuerySet[django_models.Model, object] = strawberry.field(
