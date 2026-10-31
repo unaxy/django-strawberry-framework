@@ -40,10 +40,9 @@ Each top-level item maps to one commit in the [Implementation plan](#implementat
   - [ ] `SCALAR_MAP`'s declared value type admits scalar wrappers per [Decision 8](#decision-8--scalar_map-value-type-widening).
   - [ ] Package-tier scalar tests in `tests/test_scalars.py` (only what no GraphQL request can express):
     - Serializer:
-      - [ ] `test_bigint_serialize_rejects_bool` — `True` and `False` both raise `TypeError`
-      - [ ] `test_bigint_serialize_rejects_float` — `1.9`, `0.0` raise `TypeError`
-      - [ ] `test_bigint_serialize_rejects_non_int_types` — `str`, `Decimal`, `None`, custom object all raise `TypeError`
-      - [ ] `test_bigint_int_subclasses_are_normalized_before_serialization` — an `int` subclass with hostile `__int__` / `__repr__` / `__str__` parses to a plain `int` and serializes to its canonical decimal string
+      - [ ] `test_bigint_serialize_rejects_none` — `None` handed to the serializer directly raises `TypeError` (graphql-core completes a `None` resolver value before `serialize` runs)
+      - [ ] `test_bigint_int_subclasses_are_normalized_before_parsing` — an `int` subclass with hostile `__int__` / `__repr__` / `__str__` parses to a plain `int`
+      - [ ] Every serializer verdict on a resolver value is live in `examples/fakeshop/test_query/test_converter_outputs_api.py`: `::test_an_outbound_bigint_rejects_bool_beside_its_integer_control` (`True` and `False`), `::test_an_outbound_bigint_refuses_a_non_int_resolver_value` (`1.9`, `0.0`, `str`, `Decimal`, a `str` subclass, a custom object) and `::test_an_outbound_bigint_int_subclass_serializes_its_canonical_decimal` (the hostile and hex-rendering `int` subclasses serialize to their canonical decimal string)
     - Parser:
       - [ ] `test_bigint_rejects_none` — unit-level test. Strawberry strips `null` before calling `parse_value` for nullable input positions, so this code path is reachable only through direct calls. Tested for defense in depth so the parser's `None` rejection is not removed as "unreachable".
       - [ ] `test_bigint_rejection_messages_survive_hostile_values` — the rejected value's kind is read through `utils/truth.py::kind`, so a hostile metaclass `__name__` hook never runs and the message names the real class; a hostile `str` subclass parses through its base slot
@@ -324,7 +323,7 @@ The [`strawberry_config`][glossary-strawberry-config] factory's own surface - th
 
 **Test file layout** (mirrors [`docs/TREE.md`][tree]):
 
-- `tests/test_scalars.py` — the `BigInt` parser / serializer cases no GraphQL request can express (Python `bool` / `float` / `None`, hostile subclasses, non-`int` serializer inputs), the public-import smoke test, and the warning-free-import regression test. Mirrors the flat `django_strawberry_framework/scalars.py`.
+- `tests/test_scalars.py` — the `BigInt` parser / serializer cases no GraphQL request can express (Python `bool` / `float` / `None` and hostile subclasses into the parser, `None` and a hostile-metaclass object into the serializer), the public-import smoke test, and the warning-free-import regression test. Mirrors the flat `django_strawberry_framework/scalars.py`.
 - `tests/types/test_converters.py` — the sentinel-swap field-mapping tests and the package-internal schema-execution tests. Mirrors `django_strawberry_framework/types/converters.py`.
 - `examples/fakeshop/test_query/test_scalars_api.py` — the live `/graphql/` tier. Any mapping reachable from a real query against fakeshop is pinned HERE (per [`AGENTS.md`][agents]); the `apps.scalars` app carries the `ScalarSpecimen` / `NullableScalarSpecimen` pair whose `payload` (`JSONField`), `signed_big` (`BigIntegerField`), and `unsigned_big` (`PositiveBigIntegerField`) columns exercise every mapping this spec owns that a SQLite-backed example can reach, including every string-form parse and reject case. `ArrayField` / `HStoreField` are postgres-only and stay at the package tier behind fake sentinels.
 
@@ -484,7 +483,7 @@ Files: `docs/GLOSSARY.md`, `docs/TREE.md`, `KANBAN.md` (each re-rendered from it
 
 Three test files, all run unconditionally:
 
-- **`tests/test_scalars.py`** — the `BigInt` cases no GraphQL request can express (Python `bool` / `float` / `None` into the parser, non-`int` objects and hostile subclasses into the serializer), the top-level import smoke test, and the warning-free-import test (a subprocess).
+- **`tests/test_scalars.py`** — the `BigInt` cases no GraphQL request can express (Python `bool` / `float` / `None` and hostile subclasses into the parser, `None` and a hostile-metaclass object into the serializer; every other serializer verdict on a resolver value is live in `examples/fakeshop/test_query/test_converter_outputs_api.py`), the top-level import smoke test, and the warning-free-import test (a subprocess).
 - **`tests/types/test_converters.py`** — the sentinel-guarded `ArrayField` / `HStoreField` mappings (postgres-only, unreachable from a real fakeshop query), the `null` input position, and a resolver returning `bool`, via the [Schema test fixture pattern](#decision-7--test-strategy).
 - **`examples/fakeshop/test_query/test_scalars_api.py`** — the live `/graphql/` tier for every case a real fakeshop query reaches: `BigInt` and `JSON` annotation shape via introspection, the `BigAutoField` pk staying `Int`, nullable widening, wire round-trip (including zero, negative, int64-min and int64-max), string-form / int-form argument parsing, and every malformed-string and `bool` / `float` literal rejection.
 
@@ -536,7 +535,7 @@ Per the slice checklist's Slice 6. The `KANBAN.md` card body is not reproduced h
 - `__version__` and its `tests/base/test_init.py` pin at `0.0.6`.
 - `docs/GLOSSARY.md`, `docs/TREE.md`, `TODAY.md`, `CHANGELOG.md`, and `KANBAN.md` (the `DONE-017-0.0.6` body) reflect shipped state.
 - `docs/GLOSSARY.md` updated entries: [Specialized scalar conversions][glossary-specialized-scalar-conversions], [`BigInt` scalar][glossary-bigint-scalar], [Scalar field conversion][glossary-scalar-field-conversion], [Index][glossary-index], [Public exports][glossary-public-exports].
-- `BigInt` strict parser **and strict serializer** pinned live in `examples/fakeshop/test_query/test_scalars_api.py` for every request-expressible case, and in `tests/test_scalars.py` for the Python-object cases.
+- `BigInt` strict parser **and strict serializer** pinned live in `examples/fakeshop/test_query/test_scalars_api.py` for every request-expressible case, in `examples/fakeshop/test_query/test_converter_outputs_api.py` for the resolver-value serializer cases, and in `tests/test_scalars.py` for the Python-object parser cases.
 - Warning-free import pinned via `test_package_import_does_not_emit_strawberry_deprecation_warning` (subprocess-based).
 - `ArrayField` outer-`choices` rejection tested.
 - `HStoreField` outer-`choices` rejection tested.

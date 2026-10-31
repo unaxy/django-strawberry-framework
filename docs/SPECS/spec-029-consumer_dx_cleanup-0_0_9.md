@@ -396,8 +396,8 @@ Where each slice lives:
 
 ## Edge cases and constraints
 
-- **A field in `nullable_overrides` that is already nullable** (`field.null is True`). The override is a no-op for the annotation (`force_nullable=True` produces `T | None`, which a nullable column already produced) but is NOT a configuration error — it is a legitimate (if redundant) declaration. Pinned as a passing case, not a raise.
-- **A field in `required_overrides` that is already non-null** (`field.null is False`). Symmetric no-op; `force_nullable=False` produces `T`, which a non-null column already produced. Passing case, not a raise.
+- **A field in `nullable_overrides` that is already nullable** (`field.null is True`). The override is a no-op for the annotation (`force_nullable=True` produces `T | None`, which a nullable column already produced) but is NOT a configuration error — it is a legitimate (if redundant) declaration. Pinned as a passing case, not a raise, on choice columns (whose nullability reads the same single `effective_null` as a plain scalar's) by `examples/fakeshop/test_query/test_converter_outputs_api.py::test_redundant_nullability_overrides_leave_choice_fields_unchanged`.
+- **A field in `required_overrides` that is already non-null** (`field.null is False`). Symmetric no-op; `force_nullable=False` produces `T`, which a non-null column already produced. Passing case, not a raise, pinned by the same live row.
 - **An override on a choice field** — applies to the generated enum (`EnumType | None` ↔ `EnumType`) per [Decision 9](#decision-9--choice-field-interaction). The enum members are unchanged.
 - **An override on an `ArrayField`** — `force_nullable=True` produces `list[inner] | None`; `force_nullable=False` produces `list[inner]`. The *inner* element nullability follows `base_field.null` and is NOT affected by the outer override (the override controls only the outer field's nullability). Pinned by a `tests/types/test_converters.py` case.
 - **An override on an `HStoreField`** — `JSON | None` ↔ `JSON`, same as the scalar branch.
@@ -463,7 +463,7 @@ The singleton-factory shares one instance per construction site exactly as the i
   - `test_convert_field_output_force_nullable_overrides_default` — the file output object's default-nullable annotation yields to an explicit `force_nullable`.
 - [`tests/types/test_base.py`][test-types-base] — validation + collision + override-applies:
   - `test_nullable_overrides_in_allowed_meta_keys` — `"nullable_overrides"` and `"required_overrides"` are in [`ALLOWED_META_KEYS`][base] and NOT in [`DEFERRED_META_KEYS`][base] (pins [Decision 6](#decision-6--net-new-allowed_meta_keys-entries-not-a-deferred_meta_keys-promotion)).
-  - `test_override_flips_choice_field_enum_nullability` — an override flips a choice field's **generated enum** nullability end-to-end through `Meta` (the enum members are untouched in both directions). Pins [Decision 9](#decision-9--choice-field-interaction).
+  - `test_override_keeps_the_registered_choice_enum_object` — an override wraps the registry's own generated choice enum. The wire flip is live in `examples/fakeshop/test_query/test_converter_outputs_api.py::test_a_nullability_override_flips_only_the_choice_enums_wrapper`: the **generated enum** keeps its name and members in both directions and only the `NON_NULL` wrapper moves. Pins [Decision 9](#decision-9--choice-field-interaction).
   - `test_override_unknown_field_raises` — a name not on the model raises [`ConfigurationError`][glossary-configurationerror].
   - `test_override_excluded_field_raises` — a name excluded via [`Meta.exclude`][glossary-metaexclude] raises.
   - `test_override_consumer_authored_field_raises` — a name with a consumer annotation / `strawberry.field` assignment raises.
@@ -471,7 +471,6 @@ The singleton-factory shares one instance per construction site exactly as the i
   - `test_override_relay_suppressed_pk_raises` — the Relay-Node-suppressed pk named on a Relay-shaped type raises.
   - `test_override_both_sets_collision_raises` — a name in both sets raises.
   - `test_override_non_sequence_raises` — a bare string is rejected by the shape guard.
-  - `test_override_redundant_is_no_op` — `nullable_overrides` on an already-nullable column (and `required_overrides` on an already-non-null column) is accepted.
   - `test_meta_required_overrides_forces_non_null_file_output` / `test_meta_required_overrides_forces_non_null_image_output` / `test_meta_nullable_overrides_on_a_file_column_is_a_no_op` — the file/image direction of the override (per [Edge cases](#edge-cases-and-constraints)).
 - Live HTTP coverage in [`examples/fakeshop/test_query/test_library_api.py`][fakeshop-test-library] against the acceptance-only `NullabilityOverrideBookType` secondary type on `library.Book` (per the [Slice checklist](#slice-checklist)):
   - `test_nullability_override_flips_sdl_nullability` — a `__type(name: "NullabilityOverrideBookType")` introspection query asserts `title` renders `String` (flipped from the `NOT NULL` column's native `String!` via `nullable_overrides`) AND `subtitle` renders `String!` (flipped from the `null=True` column's native `String` via `required_overrides`), while `Book._meta.get_field("title").null` / `...("subtitle").null` are unchanged.

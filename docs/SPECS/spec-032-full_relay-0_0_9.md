@@ -481,7 +481,7 @@ Every live HTTP test follows the `_reload_project_schema_for_acceptance_tests` f
 
 ### Slice 5 — `tests/testing/test_relay.py`
 
-- `examples/fakeshop/test_query/test_library_api.py::test_library_relay_node_global_id_round_trips` (default `model` strategy, over `/graphql/`) / `test_global_id_for_type_strategy` / `test_global_id_for_type_plus_model_strategy` — the helper's output equals the live emitted id (cross-checked against a schema execution).
+- `examples/fakeshop/test_query/test_library_api.py::test_library_relay_node_global_id_round_trips` (default `model` strategy, over `/graphql/`) / `examples/fakeshop/test_query/test_node_refetch_api.py::test_global_id_for_mints_the_type_name_id_each_type_emits` (`type`) / `examples/fakeshop/test_query/test_globalid_filter_strategies_api.py::test_global_id_for_mints_the_type_plus_model_id_the_type_emits` (`type+model`) — the helper's output equals the id the type emits over HTTP.
 - `test_global_id_for_callable_or_custom_raises` / `test_global_id_for_unfinalized_raises` / `test_global_id_for_non_node_raises`.
 - `test_public_decode_round_trip_primary_and_type_name` — `decode_global_id(global_id_for(T, pk)) == (T, str(pk))` **only** for lone/primary model-label types and for `type`-strategy (type-name) payloads.
 - `examples/fakeshop/test_query/test_library_api.py::test_secondary_book_global_id_refetches_as_primary_book_type_over_http` — `global_id_for(SecondaryType, pk)` mints the model-label payload the secondary emits, and `decode_global_id(...)` resolves it to `(primary_type, str(pk))` via `registry.get(model)` (the documented asymmetry, [Decision 10](#decision-10--public-testingrelaypy-helpers-and-the-export-gate)).

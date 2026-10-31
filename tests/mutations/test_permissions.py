@@ -383,20 +383,6 @@ def test_awaitable_has_perm_is_rejected_not_bypassed() -> None:
         DjangoModelPermission().has_permission(info, mutation, "create", data=None)
 
 
-def test_request_without_user_attribute_is_denied() -> None:
-    """A request carrying no ``user`` attribute is denied (the ``user is None`` guard).
-
-    Distinct from the ``AnonymousUser`` case (denied later via ``has_perm``): under a
-    live request ``AuthenticationMiddleware`` always sets ``request.user``, so this
-    guard only fires when the resolved request has no ``user`` at all (a bare context
-    / no auth middleware). It returns ``False`` before resolving the model, so the
-    branch is unreachable from a live ``/graphql/`` request and is earned here.
-    """
-    mutation = _create_item_mutation()
-    info = make_info(context=SimpleNamespace(request=SimpleNamespace()))
-    assert DjangoModelPermission().has_permission(info, mutation, "create", data=None) is False
-
-
 def test_deny_all_always_returns_false() -> None:
     """``DenyAll.has_permission`` returns ``False`` unconditionally across all operations."""
     deny = DenyAll()

@@ -2472,16 +2472,12 @@ def test_nullable_overrides_in_allowed_meta_keys() -> None:
     assert "required_overrides" not in DEFERRED_META_KEYS
 
 
-def test_override_flips_choice_field_enum_nullability() -> None:
-    """An override flips a choice field's generated ENUM nullability through Meta (Decision 9).
+def test_override_keeps_the_registered_choice_enum_object() -> None:
+    """A nullability override wraps the registry's own generated enum, never a copy of it.
 
-    Earns the CHANGELOG "flips a choice field's generated enum nullability for
-    free" claim end-to-end through ``Meta.nullable_overrides`` /
-    ``Meta.required_overrides`` - not only at the ``convert_scalar`` seam
-    (``test_converters.py::test_convert_scalar_force_nullable_on_choice_field``).
-    Widening sits AFTER choice substitution, so the non-null ``status`` column
-    widens to ``StatusEnum | None`` and the nullable ``nullable_status`` column
-    narrows to a bare enum - the enum members are untouched in both directions.
+    The wire flip in both directions (same enum name and members, only the
+    ``NON_NULL`` wrapper moved) is pinned live by
+    ``examples/fakeshop/test_query/test_converter_outputs_api.py::test_a_nullability_override_flips_only_the_choice_enums_wrapper``.
     """
     model = _make_override_model()
     override_type = _make_override_type(
@@ -2495,9 +2491,7 @@ def test_override_flips_choice_field_enum_nullability() -> None:
     nullable_status_enum = registry.get_enum(model, "nullable_status")
     assert status_enum is not None
     assert nullable_status_enum is not None
-    # Non-null choice widened to ``Enum | None`` (the generated enum is preserved).
     assert override_type.__annotations__["status"] == (status_enum | None)
-    # Nullable choice narrowed to a bare ``Enum``.
     assert override_type.__annotations__["nullable_status"] is nullable_status_enum
 
 
@@ -2602,25 +2596,6 @@ def test_override_non_sequence_raises() -> None:
             fields=("id", "text_value"),
             nullable_overrides="text_value",
         )
-
-
-def test_override_redundant_is_no_op() -> None:
-    """A redundant override (already in the target direction) is accepted, not raised.
-
-    ``nullable_overrides`` on an already-nullable column and
-    ``required_overrides`` on an already-non-null column are legitimate
-    (if redundant) declarations - pinned as a passing case (Edge cases).
-    """
-    # note is already nullable; text_value is already non-null.
-    override_type = _make_override_type(
-        _make_override_model(),
-        fields=("id", "text_value", "note"),
-        nullable_overrides=("note",),
-        required_overrides=("text_value",),
-    )
-
-    assert override_type.__annotations__["note"] == (str | None)
-    assert override_type.__annotations__["text_value"] is str
 
 
 # ---------------------------------------------------------------------------
@@ -2757,10 +2732,11 @@ def test_meta_required_overrides_forces_non_null_image_output() -> None:
 def test_meta_nullable_overrides_on_a_file_column_is_a_no_op() -> None:
     """``nullable_overrides`` on an already-nullable file column changes nothing.
 
-    The redundant-declaration direction for the file branch, matching
-    ``test_override_redundant_is_no_op``'s shape for scalars: the output object is
-    already ``| None`` by default, so naming it must neither raise nor widen it
-    twice.
+    The redundant-declaration direction for the file branch, matching the choice
+    shape
+    ``test_converter_outputs_api.py::test_redundant_nullability_overrides_leave_choice_fields_unchanged``
+    pins live: the output object is already ``| None`` by default, so naming it
+    must neither raise nor widen it twice.
     """
     model = _make_path_optin_model()
     override_type = _make_path_optin_type(model, nullable_overrides=("attachment",))

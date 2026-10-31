@@ -455,86 +455,40 @@ def _returning_gate(result: object, calls: list[object]) -> Callable[[object, ob
     return _check
 
 
-@pytest.mark.parametrize(
-    "result",
-    [
-        False,
-        0,
-        0.0,
-        "",
-        [],
-        "yes",
-        1,
-        object(),
-    ],
-    ids=[
-        "false",
-        "zero",
-        "zero-float",
-        "empty-str",
-        "empty-list",
-        "truthy-str",
-        "one",
-        "object",
-    ],
-)
-def test_invoke_permission_method_denies_on_any_return_but_none_or_true(result: object) -> None:
-    """A gate allows only by returning ``None`` or ``True``; every other return denies.
+def test_invoke_permission_method_never_records_a_denying_gate() -> None:
+    """A returned denial is not recorded in the dedup set, so a later fire runs the gate again.
 
-    A DRF-style ``return user.is_staff`` must never read as an allow, and a
-    truthy non-bool is not an explicit allow either: the read fails closed with
-    the plain ``GraphQLError`` a raising gate produces. The denied gate is not
-    recorded in the dedup set, so a later fire in the same request runs it again.
+    The denial itself (every return but ``None`` / ``True``, the exact message, no
+    extensions) is pinned live by
+    ``examples/fakeshop/test_query/test_products_api.py::test_products_category_name_gate_denies_on_any_return_but_none_or_true``.
     """
     calls: list[object] = []
 
     class _Bare:
-        check_name_permission = _returning_gate(result, calls)
+        check_name_permission = _returning_gate(result=False, calls=calls)
 
     fired: set[str] = set()
     for _ in range(2):
-        with pytest.raises(GraphQLError, match=r"^Not authorized to use name on _Bare\.$") as exc:
+        with pytest.raises(GraphQLError):
             invoke_permission_method(_Bare(), "name", HttpRequest(), fired=fired)
-        assert exc.value.extensions == {}
     assert fired == set()
     assert len(calls) == 2
 
 
-@pytest.mark.parametrize("result", [None, True], ids=["none", "true"])
-def test_invoke_permission_method_allows_on_none_or_true(result: object) -> None:
-    """``None`` (the raise-to-deny form's fall-through) and ``True`` both allow and are recorded."""
-    calls: list[object] = []
+def test_invoke_permission_method_never_records_a_refused_async_gate() -> None:
+    """A refused ``async def`` gate is not recorded as fired.
 
-    class _Bare:
-        check_name_permission = _returning_gate(result, calls)
-
-    fired: set[str] = set()
-    invoke_permission_method(_Bare(), "name", HttpRequest(), fired=fired)
-    invoke_permission_method(_Bare(), "name", HttpRequest(), fired=fired)
-    assert fired == {"check_name_permission"}
-    assert calls == [result]
-
-
-@pytest.mark.parametrize("result", [None, True, False], ids=["none", "true", "false"])
-def test_invoke_permission_method_rejects_an_async_gate_whatever_it_would_return(
-    result: object,
-) -> None:
-    """An ``async def`` gate is refused before its result is read, allow or deny alike.
-
-    The pass is synchronous, so the coroutine is never awaited: no awaited value
-    can allow, and the gate is not recorded as fired.
+    The refusal, its message and the unawaited coroutine are pinned live by
+    ``examples/fakeshop/test_query/test_products_api.py::test_products_category_name_async_gate_is_refused_whatever_it_would_return``.
     """
-    ran: list[object] = []
 
     class _Bare:
         async def check_name_permission(self, _request: object) -> object:
-            ran.append(result)
-            return result
+            return True
 
     fired: set[str] = set()
-    with pytest.raises(SyncMisuseError, match="check_name_permission returned a coroutine"):
+    with pytest.raises(SyncMisuseError):
         invoke_permission_method(_Bare(), "name", HttpRequest(), fired=fired)
-    assert ran == []
     assert fired == set()
 
 

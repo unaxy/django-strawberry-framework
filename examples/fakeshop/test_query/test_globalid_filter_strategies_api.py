@@ -46,7 +46,9 @@ from django_strawberry_framework.filters import (
     GlobalIDMultipleChoiceFilter,
 )
 from django_strawberry_framework.registry import registry
+from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.views import DjangoGraphQLView
+from tests._idioms import saved_pk
 
 pytestmark = pytest.mark.usefixtures("private_registry")
 _CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
@@ -189,6 +191,22 @@ def test_globalid_filter_strategy_accepts_only_its_emitted_spellings(
         message = json_at(payload, "errors", 0, "message")
         assert isinstance(message, str), payload
         assert "GlobalID type mismatch" in message, payload
+
+
+@pytest.mark.django_db
+def test_global_id_for_mints_the_type_plus_model_id_the_type_emits() -> None:
+    """Under ``globalid_strategy="type+model"`` the helper mints exactly the id the type emits.
+
+    The emitted payload slot is the model label, not the type name.
+    """
+    _branches()
+    schema = _schema("type+model")
+    emitted = _emitted_id(schema)
+    node_type = registry.get(models.Branch)
+    assert node_type is not None
+    target = models.Branch.objects.get(name="Target")
+    assert emitted == global_id_for(node_type, saved_pk(target))
+    assert relay.GlobalID.from_id(emitted).type_name == "library.branch"
 
 
 @pytest.mark.django_db

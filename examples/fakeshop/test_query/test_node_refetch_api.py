@@ -44,6 +44,7 @@ from graphql_client import (
 )
 from strategy_schemas import make_django_type
 from strawberry import relay
+from strawberry.types.base import StrawberryObjectDefinition
 from typing_extensions import override
 
 from django_strawberry_framework import (
@@ -210,6 +211,35 @@ def _emitted_type_ids(schema: DjangoSchema, row: Category) -> tuple[str, str]:
     }
     assert primary_id != secondary_id
     return primary_id, secondary_id
+
+
+def _published_type(schema: DjangoSchema, name: str) -> type[DjangoType]:
+    """The ``DjangoType`` class ``schema`` publishes under the GraphQL name ``name``."""
+    definition = schema.get_type_by_name(name)
+    assert isinstance(definition, StrawberryObjectDefinition), name
+    origin: type[object] = definition.origin
+    assert issubclass(origin, DjangoType), origin
+    return origin
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("root", ["primary", "secondary"])
+def test_global_id_for_mints_the_type_name_id_each_type_emits(root: str) -> None:
+    """Under ``globalid_strategy="type"`` the helper mints exactly the id the type emits over HTTP.
+
+    The payload slot is the emitting type's GraphQL name, so the two types over one
+    model row emit, and mint, two different ids.
+    """
+    services.seed_data(1)
+    row = Category.objects.order_by("pk").first()
+    assert row is not None
+    schema = _multi_type_schema(row)
+    primary_id, secondary_id = _emitted_type_ids(schema, row)
+    emitted, type_name = (
+        (primary_id, "PrimaryNode") if root == "primary" else (secondary_id, "SecondaryNode")
+    )
+    assert emitted == global_id_for(_published_type(schema, type_name), saved_pk(row))
+    assert relay.GlobalID.from_id(emitted).type_name == type_name
 
 
 @pytest.mark.django_db
