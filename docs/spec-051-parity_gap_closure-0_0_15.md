@@ -1280,10 +1280,11 @@ creation naming the column and the enum:
 - a member name GraphQL cannot publish as an enum value: not a GraphQL Name
   (`[_A-Za-z][_0-9A-Za-z]*`; a Python identifier may carry non-ASCII
   letters), `__`-prefixed (reserved for introspection), or exactly `true`,
-  `false` or `null` (the spellings the GraphQL grammar excludes; the
-  generated path's `casefold` comparison against
-  `django_strawberry_framework/types/converters.py::_GRAPHQL_RESERVED_ENUM_VALUES`
-  is a sanitizer choice, not a validity rule). The generated path renames
+  `false` or `null` (the spellings the GraphQL grammar excludes, as
+  graphql-core's `assert_enum_value_name` refuses them; the generated path
+  asks the same check through
+  `django_strawberry_framework/types/converters.py::_graphql_refuses_enum_value`).
+  The generated path renames
   such members; a consumer enum cannot be renamed, so it is refused.
   `django_strawberry_framework/types/converters.py::_is_enum_reserved_member`
   is not reused: it tests the names Python's `enum` reserves, which a built
