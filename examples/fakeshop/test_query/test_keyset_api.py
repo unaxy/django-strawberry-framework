@@ -33,7 +33,8 @@ newest-first mixed-direction shape) and ``PeriodicalType.issuesConnection``
   per-parent pipeline (sync and async); one relation name windowed twice in
   an operation (``children`` under two root fields) keeps each window's own
   vocabulary; an order no cursor can anchor (an expression, ``"?"``,
-  ``Random()``) is the same keyset error nested as at the root,
+  ``Random()``, explicit NULLS positioning, a nullable column) is the same
+  keyset error nested as at the root,
   ``strictness="raise"`` included, while on an offset relation a random hook
   order is an unplanned per-parent access ``strictness="raise"`` reports, and a
   malformed ``after:`` on a relation the planner refuses stays the cursor error
@@ -80,7 +81,7 @@ from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.db import connection
-from django.db.models import Model, QuerySet, TextChoices
+from django.db.models import F, Model, QuerySet, TextChoices
 from django.db.models.expressions import Combinable
 from django.db.models.functions import Lower, Random
 from django.http import HttpRequest
@@ -319,13 +320,27 @@ def test_root_keyset_page_survives_inserts_and_deletes_before_cursor(change: str
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("kind", ["tampered", "offset"], ids=["tampered", "offset"])
+@pytest.mark.parametrize(
+    "kind",
+    ["tampered", "ciphertext", "offset"],
+    ids=["tampered", "ciphertext", "offset"],
+)
 def test_root_keyset_rejects_tampered_and_offset_cursors(kind: str) -> None:
-    """Tampered bytes and offset-vocabulary cursors both get the uniform rejection."""
+    """Tampered bytes and offset-vocabulary cursors both get the uniform rejection.
+
+    ``ciphertext`` keeps the ``to_base64`` envelope, its prefix and the inner
+    base64 well formed and flips one byte of the authenticated payload, so the
+    refusal is the decryption's, not either parser's, whatever the token length.
+    """
     _seed_periodicals()
     minted = json_str(_root_page(first=1), "pageInfo", "endCursor")
+    prefix, encrypted = from_base64(minted)
+    sealed = bytearray(base64.b64decode(encrypted, altchars=b"-_", validate=True))
+    sealed[-1] ^= 0x01
+    reencrypted = base64.b64encode(bytes(sealed), altchars=b"-_").decode("ascii")
     bad_cursor = {
         "tampered": minted[:-8] + "AAAAAAAA",
+        "ciphertext": to_base64(prefix, reencrypted),
         "offset": to_base64("arrayconnection", 2),
     }[kind]
     response = _post_graphql(ROOT_PAGE_QUERY, variables={"first": 1, "after": bad_cursor})
@@ -1755,8 +1770,18 @@ def test_hook_ordered_single_parent_fast_path_pages_on() -> None:
 @pytest.mark.parametrize("shape", ["fk", "m2m"])
 @pytest.mark.parametrize(
     "hook_order",
-    [(Lower("title"),), ("?",), (Random(),)],
-    ids=["expression", "random-name", "random-expression"],
+    [
+        (Lower("title"),),
+        ("?",),
+        (Random(),),
+        (F("title").asc(nulls_last=True),),
+    ],
+    ids=[
+        "expression",
+        "random-name",
+        "random-expression",
+        "explicit-nulls",
+    ],
 )
 def test_unanchorable_hook_order_raises_the_root_keyset_error_nested(
     shape: str,
@@ -1765,7 +1790,7 @@ def test_unanchorable_hook_order_raises_the_root_keyset_error_nested(
     optimizer: bool,
     strictness: str,
 ) -> None:
-    """An expression or random hook order is refused nested as at the root, on every mount.
+    """An expression, random or NULLS-positioned hook order is refused nested as at the root.
 
     The planner leaves the relation to the per-parent pipeline and records it
     as accounted for, so even ``strictness="raise"`` surfaces the keyset error,
@@ -1787,6 +1812,48 @@ def test_unanchorable_hook_order_raises_the_root_keyset_error_nested(
     ]
     assert [json_at(error, "message") for error in json_list(nested, "errors")] == [
         _UNANCHORABLE_ORDER,
+    ]
+
+
+_NULLABLE_SUBTITLE_ORDER = (
+    "This connection uses keyset cursors (Meta.cursor_field), which require "
+    "non-nullable ordering columns; 'subtitle' is nullable. Order by a non-nullable "
+    "column or paginate under the default order."
+)
+
+
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("optimizer", "strictness"),
+    [(True, "off"), (False, "off"), (True, "raise")],
+    ids=["planned", "unplanned", "strict"],
+)
+def test_nullable_hook_order_column_raises_the_root_keyset_error_nested(
+    *,
+    optimizer: bool,
+    strictness: str,
+) -> None:
+    """A hook ordering by a nullable column is refused nested as at the root, on every mount.
+
+    ``Book.subtitle`` is ``null=True``, so a value cursor over it has no seek past
+    a missing value; the refusal is the column's declaration, not the seeded data,
+    whose subtitles are all present.
+    """
+    _seed_hook_order_rows("m2m", with_b=False)
+    schema = _hook_order_schema(
+        "m2m",
+        ("subtitle", "id"),
+        optimizer=optimizer,
+        strictness=strictness,
+    )
+    root = _post_holder(schema, "{ children(first: 1) { edges { cursor } } }")
+    nested = _post_holder(schema, _nested_hook_query("m2m"), variables={"first": 1})
+    assert [json_at(error, "message") for error in json_list(root, "errors")] == [
+        _NULLABLE_SUBTITLE_ORDER,
+    ]
+    assert [json_at(error, "message") for error in json_list(nested, "errors")] == [
+        _NULLABLE_SUBTITLE_ORDER,
     ]
 
 

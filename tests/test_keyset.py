@@ -40,7 +40,7 @@ from django.db.models import BigIntegerField, Field, Model, Prefetch, QuerySet
 from django.db.models.lookups import Lookup
 from django.db.models.sql.where import WhereNode
 from graphql import GraphQLError
-from strawberry.relay.utils import from_base64, to_base64
+from strawberry.relay.utils import to_base64
 from strawberry.schema.config import StrawberryConfig
 from strawberry.types import Info
 
@@ -350,30 +350,6 @@ def test_decode_rejects_non_base64() -> None:
     with pytest.raises(GraphQLError, match="invalid cursor"):
         decode_keyset_cursor(
             "!!not-base64!!",
-            _issue_columns(),
-            fingerprint=_fingerprint(),
-            argument="after",
-        )
-
-
-@pytest.mark.django_db
-def test_decode_rejects_tampered_ciphertext() -> None:
-    """A well-framed envelope carrying corrupted ciphertext is still rejected.
-
-    Package-only: the inner ciphertext sits under the base64 envelope
-    ``keyset.py::to_base64`` mints, so no wire value addresses it - a request
-    can only corrupt the outer encoding. The rejection is the same uniform
-    ``GraphQLError`` every other cursor rejection raises.
-    """
-    periodical = Periodical.objects.create(name="P")
-    issue = Issue.objects.create(periodical=periodical, number=1, title="one")
-    cursor = _mint(issue)
-    prefix, encrypted = from_base64(cursor)
-    assert prefix == KEYSET_CURSOR_PREFIX
-    tampered = to_base64(KEYSET_CURSOR_PREFIX, encrypted[:-2] + "xx")
-    with pytest.raises(GraphQLError, match="invalid cursor"):
-        decode_keyset_cursor(
-            tampered,
             _issue_columns(),
             fingerprint=_fingerprint(),
             argument="after",

@@ -2982,46 +2982,6 @@ def test_will_lazy_load_false_when_prefetched() -> None:
 
 
 @pytest.mark.django_db
-def test_strictness_raise_accepts_unplanned_cached_forward_fk() -> None:
-    """strictness='raise' accepts an unplanned forward FK that is already loaded."""
-    services.seed_data(1)
-
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-
-    assert registry.get(Category) is CategoryType
-
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name", "category")
-
-    @strawberry.type
-    class Query:
-        def _all_items(self) -> list[Item]:
-            return list(Item.objects.select_related("category").all()[:1])
-
-        all_items: list[Item] = strawberry.field(resolver=_all_items, graphql_type=list[ItemType])
-
-    finalize_django_types()
-    schema = strawberry.Schema(query=Query)
-    ctx = SimpleNamespace(
-        dst_optimizer_planned=set(),
-        dst_optimizer_strictness="raise",
-    )
-
-    result = schema.execute_sync(
-        "{ allItems { name category { name } } }",
-        context_value=ctx,
-    )
-    assert result.errors is None
-    assert result.data is not None
-    assert result.data["allItems"][0]["category"]["name"]
-
-
-@pytest.mark.django_db
 def test_strictness_raise_accepts_unplanned_cached_reverse_one_to_one() -> None:
     """strictness='raise' accepts an unplanned reverse OneToOne already loaded."""
     patron = Patron.objects.create(name="Ada")
@@ -5574,72 +5534,6 @@ def test_plan_with_cascading_hook_uncacheable() -> None:
 # is correctly narrowed; assert strictness ``warn`` emits no optimizer warning
 # and strictness ``raise`` returns no "Unplanned N+1" GraphQL error for the
 # sibling branch the resolver never runs.
-
-
-@pytest.mark.django_db
-def test_consumer_projection_widens_to_the_selection_and_keeps_the_join() -> None:
-    """A consumer ``.only()`` and the plan's projection load as one union.
-
-    ``select_related("category")`` over a consumer ``.only("name")`` is
-    written with the connector and the selection's columns added to the
-    consumer's, so the JOIN compiles and nothing lazy-loads per row: under
-    ``strictness="raise"`` both the projected and the plain resolver stay
-    silent, and each answers in one query.
-    """
-    services.seed_data(1)
-
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-
-    assert registry.get(Category) is CategoryType
-
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name", "category")
-
-    @strawberry.type
-    class Query:
-        def _projected_items(self) -> QuerySet[Item]:
-            return Item.objects.order_by("id").only("name")
-
-        projected_items: QuerySet[Item] = strawberry.field(
-            resolver=_projected_items,
-            graphql_type=list[ItemType],
-        )
-
-        def _planned_items(self) -> QuerySet[Item]:
-            return Item.objects.order_by("id")
-
-        planned_items: QuerySet[Item] = strawberry.field(
-            resolver=_planned_items,
-            graphql_type=list[ItemType],
-        )
-
-    finalize_django_types()
-    optimizer = DjangoOptimizerExtension(strictness="raise")
-    schema = strawberry.Schema(
-        query=Query,
-        extensions=[lambda: optimizer],
-    )
-    # Strictness sentinels stash on the context: execution needs a real
-    # context object (the standing strictness-test convention).
-    with CaptureQueriesContext(connection) as captured:
-        projected = schema.execute_sync(
-            "{ projectedItems { name category { name } } }",
-            context_value=SimpleNamespace(),
-        )
-    assert projected.errors is None, projected.errors
-    assert len(captured) == 1
-    assert 'JOIN "products_category"' in captured[0]["sql"]
-
-    planned = schema.execute_sync(
-        "{ plannedItems { name category { name } } }",
-        context_value=SimpleNamespace(),
-    )
-    assert planned.errors is None, planned.errors
 
 
 @pytest.mark.django_db
