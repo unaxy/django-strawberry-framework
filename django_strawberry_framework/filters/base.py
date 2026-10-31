@@ -455,24 +455,36 @@ def _reads_integer_transform(filter_instance: Filter) -> bool:
     )
 
 
+class _LookupOperand(NamedTuple):
+    """What one value a filter applies is compared as: a value of ``field``, the operand of ``lookup``.
+
+    ``lookup`` is the terminal lookup past the transforms (``isnull`` for a ``year__isnull``
+    leaf), whose operand is not a value of ``field`` when it is ``isnull``.
+    """
+
+    field: ModelField | None
+    lookup: str
+
+
 @cache
-def _lookup_value_field(column: ConcreteField, lookup_expr: str) -> ModelField | None:
-    """Return the output field of the transforms ``lookup_expr`` applies to ``column``.
+def _lookup_operand(column: ConcreteField, lookup_expr: str) -> _LookupOperand | None:
+    """Return the output field of the transforms ``lookup_expr`` applies to ``column``, and its lookup.
 
     ``django_filters.utils.resolve_field``, the walk ``BaseFilterSet.filter_for_field``
-    selects a generated leaf's filter class by; it builds a query per call, so the answer
-    is kept per ``(column, lookup_expr)``, both fixed when the FilterSet is defined: every
-    key is kept, a set bounded by the columns and lookups the defined FilterSets name. No
-    entry is invalidated: Django registers lookups and transforms at startup, before any
-    FilterSet resolves one. ``None`` when that walk refuses the expression (upstream's
+    selects a generated leaf's filter class by (``filter_for_lookup`` keys its class on the
+    terminal lookup this walk answers); it builds a query per call, so the answer is kept
+    per ``(column, lookup_expr)``, both fixed when the FilterSet is defined: every key is
+    kept, a set bounded by the columns and lookups the defined FilterSets name. No entry is
+    invalidated: Django registers lookups and transforms at startup, before any FilterSet
+    resolves one. ``None`` when that walk refuses the expression (upstream's
     ``FieldLookupError``): a name that is no transform or lookup of the column, as a
     relation hop is not.
     """
     try:
-        output_field, _lookup_name = resolve_field(column, lookup_expr)
+        output_field, lookup_name = resolve_field(column, lookup_expr)
     except FieldLookupError:
         return None
-    return require(output_field, is_concrete_field)
+    return _LookupOperand(require(output_field, is_concrete_field), require(lookup_name, is_str))
 
 
 class _ResolvedField(NamedTuple):
@@ -566,11 +578,13 @@ def _filterset_value_field(
     ``date`` leaf, a declared ``lookup_expr="date"``), in the ``field_name``
     (``occurred_at__year``, an ``ArrayField``'s index ``counts__0`` or slice
     ``counts__0_2``), or both. The output is django-filter's own answer
-    (``_lookup_value_field``, the walk ``BaseFilterSet.filter_for_field`` selects a
+    (``_lookup_operand``, the walk ``BaseFilterSet.filter_for_field`` selects a
     generated leaf's filter class by): ``year`` / ``len`` an ``IntegerField``, ``date`` a
     ``DateField``, an index the array's ``base_field``, a slice the array. A lookup
     applied to the column itself (``exact``, ``in``, ``isnull``, a text pattern such as
-    ``icontains``, an ``ArrayField``'s ``contains``) answers the column.
+    ``icontains``, an ``ArrayField``'s ``contains``) answers the column. A null test's
+    operand is a value of neither: its readers ask ``_filterset_lookup_operand`` for the
+    terminal lookup, ``isnull`` past a transform too (``year__isnull``).
 
     A ``field_name`` naming a model field is resolved by ``_filterset_resolved_field``
     (``pk`` read as the column its key stores). One naming none is split as
@@ -587,25 +601,34 @@ def _filterset_value_field(
     ``filter`` hands Django whole). A ``method=`` filter answers its model field: its own
     method, not a lookup, receives the value, so it is published and cleaned by the column.
     """
+    return _filterset_lookup_operand(filterset, filter_instance).field
+
+
+def _filterset_lookup_operand(
+    filterset: type[BaseFilterSet] | BaseFilterSet | None,
+    filter_instance: Filter,
+) -> _LookupOperand:
+    """Return ``_filterset_value_field``'s field with the terminal lookup it is compared by.
+
+    The lookup is django-filter's answer past the transforms (``_lookup_operand``), and the
+    filter's own ``lookup_expr`` wherever the field is not read off that walk.
+    """
+    lookup_expr = filter_instance.lookup_expr
     if read_attr(filter_instance, "method", None) is not None:
-        return _filterset_model_field(filterset, filter_instance)
+        return _LookupOperand(_filterset_model_field(filterset, filter_instance), lookup_expr)
     model = _filterset_model(filterset)
     if model is None:
-        return None
-    return _model_value_field(
-        model,
-        _bound_field_name(filter_instance),
-        filter_instance.lookup_expr,
-    )
+        return _LookupOperand(None, lookup_expr)
+    return _model_lookup_operand(model, _bound_field_name(filter_instance), lookup_expr)
 
 
 @cache
-def _model_value_field(
+def _model_lookup_operand(
     model: type[models.Model],
     field_path: str,
     lookup_expr: str,
-) -> ModelField | None:
-    """Return ``_filterset_value_field``'s answer for ``field_path`` and ``lookup_expr`` on ``model``.
+) -> _LookupOperand:
+    """Return ``_filterset_lookup_operand``'s answer for ``field_path`` and ``lookup_expr`` on ``model``.
 
     The answer depends on the three keys alone (a fresh ``Query`` holds no annotation),
     each fixed when the FilterSet is defined, so it is kept for every key, a set bounded
@@ -618,17 +641,18 @@ def _model_value_field(
         try:
             transforms, field_parts, _expression = query.solve_lookup_type(field_path)
         except FieldError:
-            return None
+            return _LookupOperand(None, lookup_expr)
         # The field part is the one Django's split just walked, so it names a column.
         path_column = require(
             lookup_target_fields(query, LOOKUP_SEP.join(field_parts))[0],
             is_concrete_field,
         )
-        return _lookup_value_field(path_column, LOOKUP_SEP.join((*transforms, lookup_expr)))
+        operand = _lookup_operand(path_column, LOOKUP_SEP.join((*transforms, lookup_expr)))
+        return _LookupOperand(None, lookup_expr) if operand is None else operand
     if not is_concrete_field(column):
-        return column
-    output_field = _lookup_value_field(column, lookup_expr)
-    return column if output_field is None else output_field
+        return _LookupOperand(column, lookup_expr)
+    operand = _lookup_operand(column, lookup_expr)
+    return _LookupOperand(column, lookup_expr) if operand is None else operand
 
 
 def _column_form_field(filter_instance: Filter, *, element: bool = False) -> Field | None:

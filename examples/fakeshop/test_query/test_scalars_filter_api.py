@@ -962,10 +962,12 @@ def generated_year_schema(private_registry: None) -> Iterator[DjangoSchema]:
     """Serve sets whose leaves reach ``occurred_at``'s ``year`` through the ``lookup_expr``.
 
     No shipped fakeshop set spells a transform in a ``lookup_expr``, so the holder declares
-    one over ``ScalarSpecimen``: ``Meta.fields`` ``year`` / ``year__gt`` / ``year__in``;
-    a ``ListFilter`` (``year__in``) and a ``RangeFilter`` (``year__range``); and the same
-    list and range shapes with a ``method=``, whose method receives the column's values.
-    A ``NullableScalarSpecimen`` set reaches it through ``partner``, nested and flat.
+    one over ``ScalarSpecimen``: ``Meta.fields`` ``year`` / ``year__gt`` / ``year__in`` and
+    the null tests ``year__isnull`` / ``date__isnull``; a ``ListFilter`` (``year__in``) and a
+    ``RangeFilter`` (``year__range``); and the same list and range shapes with a ``method=``,
+    whose method receives the column's values.
+    A ``NullableScalarSpecimen`` set reaches it through ``partner``, nested and flat, and
+    carries the same two null tests over its own nullable ``occurred_at``.
     """
     del private_registry
 
@@ -1004,7 +1006,15 @@ def generated_year_schema(private_registry: None) -> Iterator[DjangoSchema]:
 
         class Meta:
             model = models.ScalarSpecimen
-            fields = {"occurred_at": ["year", "year__gt", "year__in"]}
+            fields = {
+                "occurred_at": [
+                    "year",
+                    "year__gt",
+                    "year__in",
+                    "year__isnull",
+                    "date__isnull",
+                ],
+            }
 
     class GeneratedYearSpecimenType(DjangoType):
         class Meta:
@@ -1018,7 +1028,7 @@ def generated_year_schema(private_registry: None) -> Iterator[DjangoSchema]:
 
         class Meta:
             model = models.NullableScalarSpecimen
-            fields = {"label": ["exact"]}
+            fields = {"label": ["exact"], "occurred_at": ["year__isnull", "date__isnull"]}
 
     class GeneratedYearPartnerType(DjangoType):
         class Meta:
@@ -1131,6 +1141,74 @@ def test_generated_year_leaf_filters_by_the_integer_sent(
     """An ``Int`` year sent to a generated ``year`` leaf filters by that year."""
     _seed_year_partners()
 
+    assert _holder_payload(root, year_filter) == {
+        "data": {root: {"edges": [{"node": {"label": label}} for label in labels]}},
+    }
+
+
+_TRANSFORMED_NULL_TEST_TYPES_QUERY = """
+query {
+  year: __type(name: "GeneratedYearFilterOccurredAtYearIsnullFilterInputType") {
+    inputFields { name type { name } }
+  }
+  date: __type(name: "GeneratedYearFilterOccurredAtDateIsnullFilterInputType") {
+    inputFields { name type { name } }
+  }
+}
+"""
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("generated_year_schema")
+def test_generated_null_test_after_a_transform_takes_a_boolean() -> None:
+    """A ``year__isnull`` / ``date__isnull`` leaf takes ``Boolean``, not the transform's output.
+
+    The value is the ``isnull`` lookup's operand, which django-filter resolves as the
+    terminal lookup past the transform, never a value of ``year``'s ``Int`` or ``date``'s
+    ``Date``.
+    """
+    payload = response_json(post_graphql(_TRANSFORMED_NULL_TEST_TYPES_QUERY, url="/graphql-test/"))
+
+    assert payload == {
+        "data": {
+            "year": {"inputFields": [{"name": "year_Isnull", "type": {"name": "Boolean"}}]},
+            "date": {"inputFields": [{"name": "date_Isnull", "type": {"name": "Boolean"}}]},
+        },
+    }
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("generated_year_schema")
+@pytest.mark.parametrize("transform", ["year", "date"])
+@pytest.mark.parametrize(
+    ("root", "is_null", "labels"),
+    [
+        pytest.param("specimens", False, ["alpha", "beta"], id="column-false"),
+        pytest.param("specimens", True, [], id="column-true"),
+        pytest.param("partners", False, ["dated"], id="nullable-column-false"),
+        pytest.param("partners", True, ["of-alpha", "of-beta"], id="nullable-column-true"),
+    ],
+)
+def test_generated_null_test_after_a_transform_filters_as_django_does(
+    transform: str,
+    root: str,
+    *,
+    is_null: bool,
+    labels: list[str],
+) -> None:
+    """A ``Boolean`` sent to a transformed null test filters the rows Django's own lookup does.
+
+    ``ScalarSpecimen.occurred_at`` stores no null, so ``true`` matches nothing there;
+    ``NullableScalarSpecimen``'s ``of-*`` rows store a null timestamp, which ``true``
+    matches, while its ``dated`` row stores one and answers ``false``.
+    """
+    _seed_year_partners()
+    models.NullableScalarSpecimen.objects.create(label="dated", occurred_at=_DATETIME)
+    model = models.ScalarSpecimen if root == "specimens" else models.NullableScalarSpecimen
+    django_rows = model.objects.filter(**{f"occurred_at__{transform}__isnull": is_null})
+    year_filter = {f"occurredAt{transform.title()}Isnull": {f"{transform}_Isnull": is_null}}
+
+    assert sorted(django_rows.values_list("label", flat=True)) == labels
     assert _holder_payload(root, year_filter) == {
         "data": {root: {"edges": [{"node": {"label": label}} for label in labels]}},
     }
