@@ -335,7 +335,7 @@ observability hole in the package's own story.
 
 `strawberry-graphql-django` closes the gap in
 [`strawberry_django/middlewares/debug_toolbar.py`][upstream-middleware] (itself
-based on the archived `django-graphiql-debug-toolbar` project, credited in its
+based on the `django-graphiql-debug-toolbar` project, credited in its
 header comment): a `DebugToolbarMiddleware` subclassing the stock toolbar
 middleware, tagging Strawberry-Django-view requests in `process_view`, and
 injecting a `debugToolbar` payload into the JSON responses those views return in
@@ -475,7 +475,7 @@ Per the [`START.md`][start] "do both libraries provide it?" test this card is
 integration (its debug story is the in-response `DjangoDebug` subsystem — the
 sibling card's territory). The upstream module is 101 lines and every behavior
 below is taken from it directly. Upstream's own header credits `django-graphiql-debug-toolbar` (the
-archived origin project) — the lineage is toolbar-side, not GraphQL-side, which
+origin project) — the lineage is toolbar-side, not GraphQL-side, which
 is consistent with the module's shape: everything hard lives in
 `django-debug-toolbar`; the integration is two overrides.
 
@@ -1933,7 +1933,7 @@ each is in the [rationale][rationale-risks].
   advertise as API; a toolbar major release could rename or reshape it, and
   the `>=7.0.0` floor is deliberately unbounded above (the package pins
   floors, not ceilings). The coupling is knowingly borrowed — upstream carries
-  the identical override and the archived `django-graphiql-debug-toolbar`
+  the identical override and `django-graphiql-debug-toolbar`
   before it did too — and the containment is the behavior-level tests
   (Tests 1, 3), which fail loudly on any reshape.
 - **The floor is single-valued across its three gated sites, and restated

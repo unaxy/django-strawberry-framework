@@ -302,16 +302,15 @@ Importing this module is ``channels``-free, which is what lets ``routers.py``
 import it above its own guard: the module level reaches only for the standard
 library, Django's own ``HttpRequest`` / ``DisallowedHost`` (a HARD dependency, and
 the whole point of the Host boundary below), this package's logger,
-``exceptions.ConfigurationError``, the truthful readers in ``utils/truth.py``, and the
-connection-actor-lease helpers from ``utils/sessions.py`` - a module whose own
-imports are ``__future__``, ``asyncio``, ``contextlib``, ``dataclasses`` and typing names, so it
-adds nothing to the import graph.
+``exceptions.ConfigurationError``, the truthful readers in ``utils/truth.py`` and
+``utils/_narrowing.py``, the error-policy masking helpers from
+``extensions/error_policy.py`` (whose own imports add ``strawberry`` and ``graphql``,
+both HARD dependencies), and the connection-actor-lease helpers from
+``utils/sessions.py`` - a module whose own imports are ``__future__``, ``asyncio``,
+``contextlib``, ``dataclasses`` and typing names, so it adds nothing to the import graph.
 ``channels.auth.get_user`` and the package's session-store resolver are imported
 **inside** the revalidation coroutine (the
-``auth/mutations.py::_channels_http_login_establish`` precedent), the error-policy
-masking helpers **inside** the result source that applies them (that module
-imports ``strawberry`` and ``graphql``, so a module-level import here would put
-both above ``routers.py``'s guard),
+``auth/mutations.py::_channels_http_login_establish`` precedent),
 ``channels.security.websocket.WebsocketDenier`` **inside** the Host validator's
 denial arm, and neither the two protocol handler base classes nor upstream's
 WebSocket adapter are imported at all - all three are read off the base consumer
@@ -1220,12 +1219,6 @@ async def _stop_aware_results(
     schema outlives the socket - while the ``DEBUG`` pass-through gate is read per
     event, which is the same granularity the query path's teardown reads it at.
 
-    The masking import is function-local, deliberately: this module's import
-    graph is ``channels``-free AND ``strawberry``-free so ``routers.py`` can
-    import it above its own soft-dependency guard (see the module docstring), and
-    the extension module imports both ``strawberry`` and ``graphql``. By the time
-    a subscription produces a result, both are long since imported.
-
     The rest is the package-owned half of the operation-stop protocol. Upstream's
     two result loops (``run_operation`` / ``handle_async_results``) iterate whatever
     ``schema.subscribe`` / ``schema.stream`` handed back, so ending THIS generator
@@ -1873,8 +1866,7 @@ def _host_validation_request(scope: WebSocketScope) -> HttpRequest:
     What ``get_host()`` reads is a handful of ``META`` keys, so those are what get
     projected.
 
-    Two ``META`` keys are deliberately NOT projected, and the omission is provably
-    verdict-neutral rather than merely small:
+    Two ``META`` keys are deliberately NOT projected:
 
     - ``HTTP_X_FORWARDED_PORT`` (``USE_X_FORWARDED_PORT``), which
       ``HttpRequest.get_port`` consults; and
@@ -1883,12 +1875,16 @@ def _host_validation_request(scope: WebSocketScope) -> HttpRequest:
 
     Both feed **only** the no-host-header branch of ``_get_raw_host``, and there
     they decide one thing: whether the reconstructed host gets a ``":port"`` suffix.
-    ``get_host()`` then splits that suffix straight back off
-    (``split_domain_port``) and matches ``ALLOWED_HOSTS`` against the **domain**
-    alone, so neither setting can change the allow/deny outcome - only the string a
-    caller would have got back, which this boundary discards. Projecting them would
-    add surface for no behavior, and the reason is recorded here so a later reader
-    does not "complete" the projection on symmetry grounds.
+    So a handshake carrying a ``Host`` or ``X-Forwarded-Host`` header gets the
+    verdict HTTP would give it. A handshake carrying neither is validated against
+    the server's own name, and there the suffix can still move the verdict: a
+    malformed ``X-Forwarded-Port`` (``abc``) under ``USE_X_FORWARDED_PORT`` makes
+    ``example.com:abc``, which ``get_host()`` refuses where this projection allows
+    ``example.com``, and a ``SERVER_NAME`` ending in ``:<digits>`` can flip either
+    way. The authority checked is the server's own in every such case, so no
+    client-chosen host gets through; projecting the two keys (plus the scope's
+    ``scheme``) would buy agreement with HTTP on a hostless handshake at the cost of
+    a wider hand-built ``META``.
     """
     request = HttpRequest()
     collected: dict[str, list[str]] = {}

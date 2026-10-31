@@ -2,9 +2,14 @@
 
 ``DebugToolbarMiddleware`` subclasses the stock
 ``debug_toolbar.middleware.DebugToolbarMiddleware`` and contributes exactly the
-two GraphQL-shaped overrides its strawberry-graphql-django counterpart ships
-(``strawberry_django/middlewares/debug_toolbar.py``, itself based on the
-archived https://github.com/flavors/django-graphiql-debug-toolbar project):
+two GraphQL-shaped overrides its strawberry-graphql-django counterpart ships.
+This module and its ``django_strawberry_framework/debug_toolbar.html`` template
+are adapted from strawberry-graphql-django's
+``strawberry_django/middlewares/debug_toolbar.py`` and
+``templates/strawberry_django/debug_toolbar.html`` (MIT,
+``LICENSE.strawberry-django``), themselves based on
+https://github.com/flavors/django-graphiql-debug-toolbar (MIT,
+``LICENSE.django-graphiql-debug-toolbar``). The overrides:
 ``process_view`` tags requests whose resolved view is a Strawberry Django view
 (``strawberry.django.views.BaseView``), and ``_postprocess`` appends the
 GraphiQL bridge template to the IDE's HTML page and injects the ``debugToolbar``
