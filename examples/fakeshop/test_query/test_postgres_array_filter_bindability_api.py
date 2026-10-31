@@ -11,7 +11,7 @@ import datetime
 import decimal
 from collections.abc import Iterator
 from functools import wraps
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import django_filters
 import pytest
@@ -38,6 +38,9 @@ from django_strawberry_framework import (
 from django_strawberry_framework.filters import ArrayFilter, FilterSet, ListFilter
 from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.views import DjangoGraphQLView
+
+if TYPE_CHECKING:
+    from django.db.models.expressions import Combinable
 
 pytestmark = [pytest.mark.pg, pytest.mark.usefixtures("private_registry")]
 _CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
@@ -67,7 +70,9 @@ def array_consumer() -> Iterator[_ArrayConsumer]:
     with isolate_apps():
 
         class ArraySpecimen(models.Model):
-            label: models.CharField[str, str] = models.CharField(max_length=40)
+            label: "models.CharField[str | int | Combinable, str]" = models.CharField(
+                max_length=40
+            )
             counts: ArrayField[list[int], list[int]] = ArrayField(models.IntegerField())
             small: ArrayField[list[int], list[int]] = ArrayField(models.SmallIntegerField())
             tags: ArrayField[list[str], list[str]] = ArrayField(models.TextField())
