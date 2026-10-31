@@ -3,7 +3,8 @@
 Shipped scalar and library suites own ordinary scalar values, nullable outputs,
 choice blanks and the non-null Shelf condition enum. These holders add nullable
 choice columns with empty-option labels, reserved choice spellings, nullable
-BigInt arguments, an invalid outbound BigInt, and real PostgreSQL container fields.
+BigInt arguments, an invalid outbound BigInt, both path-bearing file and image
+output objects, and real PostgreSQL container fields.
 
 Container rows are unsaved model instances, so the HTTP serialization and SDL
 checks work on SQLite too. Only importing Django's real ArrayField/HStoreField
@@ -20,6 +21,7 @@ from typing import TYPE_CHECKING, Annotated
 import pytest
 import strawberry
 from apps.library import models as library_models
+from apps.scalars import models as scalar_models
 from django.db import connection, models
 from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
@@ -176,6 +178,59 @@ def test_an_outbound_bigint_rejects_bool_beside_its_integer_control(raw_value: i
         )
     else:
         assert payload == {"data": {"value": "7"}}
+
+
+def test_a_consumer_can_publish_both_path_bearing_output_shapes() -> None:
+    """Both opt-in output objects publish their full fields and the same security warning."""
+
+    class PathSpecimen(DjangoType):
+        class Meta:
+            model = scalar_models.MediaSpecimen
+            fields = ("attachment", "image")
+            filesystem_path_fields = ("attachment", "image")
+
+    @strawberry.type
+    class Query:
+        @strawberry.field
+        def specimen(self) -> PathSpecimen | None:
+            return None
+
+    finalize_django_types()
+    schema = DjangoSchema(query=Query, config=strawberry_config())
+    payload = _post(
+        schema,
+        """
+        {
+          file: __type(name: "DjangoFilePathType") { fields { name description } }
+          image: __type(name: "DjangoImagePathType") { fields { name description } }
+        }
+        """,
+    )
+    assert "errors" not in payload, payload
+    file_fields = {
+        json_str(field, "name"): field for field in json_list(payload, "data", "file", "fields")
+    }
+    image_fields = {
+        json_str(field, "name"): field for field in json_list(payload, "data", "image", "fields")
+    }
+    assert set(file_fields) == {
+        "name",
+        "size",
+        "url",
+        "path",
+    }
+    assert set(image_fields) == {
+        "name",
+        "size",
+        "url",
+        "path",
+        "width",
+        "height",
+    }
+    description = json_str(file_fields["path"], "description")
+    assert description == json_str(image_fields["path"], "description")
+    assert "SECURITY" in description
+    assert "filesystem_path_fields" in description
 
 
 def test_a_nullable_empty_label_choice_reads_null_blank_and_a_declared_member() -> None:
