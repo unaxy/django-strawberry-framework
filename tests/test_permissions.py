@@ -2511,14 +2511,20 @@ async def test_aapply_runs_walk_off_event_loop() -> None:
     worker (asgiref ``copy_context``) does not leak back into the awaiting task -
     ``_cascade_state.get()`` stays ``None`` in the async caller after the await.
     """
+    loop_thread = threading.get_ident()
+    hook_threads: list[int] = []
+
+    def _hook(
+        _cls: type[DjangoType],
+        qs: models.QuerySet[models.Model],
+        _info: object,
+    ) -> models.QuerySet[models.Model]:
+        hook_threads.append(threading.get_ident())
+        return qs.filter(is_private=False)
 
     @sync_to_async
     def _setup() -> type[DjangoType]:
-        _make_type(
-            "OffLoopItemType",
-            Item,
-            get_queryset=lambda _cls, qs, _info: qs.filter(is_private=False),
-        )
+        _make_type("OffLoopItemType", Item, get_queryset=_hook)
         entry_type = _make_type("OffLoopEntryType", Entry, primary=False)
         finalize_django_types()
         return entry_type
@@ -2528,7 +2534,9 @@ async def test_aapply_runs_walk_off_event_loop() -> None:
     # Before the await the var is clean in the event-loop task.
     assert _cascade_state.get() is None
     result = await aapply_cascade_permissions(entry_type, Entry.objects.all(), _INFO)
-    # The walk composed a constraint (the cascade ran off the loop)...
+    # The real hook ran on the worker, rather than composing the query on the loop.
+    assert hook_threads
+    assert all(thread != loop_thread for thread in hook_threads)
     assert "IN (SELECT" in str(result.query)
     # ...and the worker-thread traversal state did NOT leak back into the awaiting task.
     assert _cascade_state.get() is None
@@ -2732,12 +2740,15 @@ async def test_aapply_gather_restores_task_contexts() -> None:
 
     entry_type = await _setup()
 
-    first, second = await asyncio.gather(
-        aapply_cascade_permissions(entry_type, Entry.objects.all(), _INFO),
-        aapply_cascade_permissions(entry_type, Entry.objects.all(), _INFO),
-    )
-    assert "IN (SELECT" in str(first.query)
-    assert "IN (SELECT" in str(second.query)
+    async def _walk_in_its_own_task() -> tuple[models.QuerySet[models.Model], object]:
+        assert _cascade_state.get() is None
+        result = await aapply_cascade_permissions(entry_type, Entry.objects.all(), _INFO)
+        return result, _cascade_state.get()
+
+    first, second = await asyncio.gather(_walk_in_its_own_task(), _walk_in_its_own_task())
+    for result, task_state in (first, second):
+        assert "IN (SELECT" in str(result.query)
+        assert task_state is None
     assert _cascade_state.get() is None
 
 

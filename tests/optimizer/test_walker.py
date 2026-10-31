@@ -91,7 +91,6 @@ from django_strawberry_framework.optimizer.walker import (
     _build_connection_child_queryset,
     _ensure_connector_only_fields,
     _has_custom_id_resolver,
-    _introduces_projection_for_operation,
     _merge_aliased_selections,
     _merge_runtime_prefixes,
     _plan_connection_relation,
@@ -1170,7 +1169,7 @@ def test_plan_merges_aliased_selections() -> None:
 
 
 def test_plan_collects_only_fields_for_selected_scalars() -> None:
-    """O5: scalar selections are collected into ``only_fields``."""
+    """Scalar selections are collected into ``only_fields``."""
     plan = plan_optimizations([_sel("id"), _sel("name")], Category)
     assert plan.only_fields == ("id", "name")
     assert plan.select_related == ()
@@ -1178,7 +1177,7 @@ def test_plan_collects_only_fields_for_selected_scalars() -> None:
 
 
 def test_plan_includes_fk_columns_in_only_fields() -> None:
-    """O5: select_related FK traversals include the source FK column."""
+    """select_related FK traversals include the source FK column."""
     plan = plan_optimizations(
         [_sel("name"), _sel("category", selections=[_sel("name")])],
         Item,
@@ -1188,7 +1187,7 @@ def test_plan_includes_fk_columns_in_only_fields() -> None:
 
 
 def test_plan_collects_related_scalar_only_fields_from_fragment() -> None:
-    """O5: scalar selections inside relation fragments use relation paths."""
+    """Scalar selections inside relation fragments use relation paths."""
     plan = plan_optimizations(
         [
             _sel(
@@ -1212,7 +1211,7 @@ def test_plan_collects_related_scalar_only_fields_from_fragment() -> None:
 
 
 def test_plan_elides_forward_fk_when_child_selection_is_id_only() -> None:
-    """B2: ``category { id }`` uses ``category_id`` instead of a JOIN."""
+    """``category { id }`` uses ``category_id`` instead of a JOIN."""
     plan = plan_optimizations(
         [_sel("name"), _sel("category", selections=[_sel("id")])],
         Item,
@@ -1225,7 +1224,7 @@ def test_plan_elides_forward_fk_when_child_selection_is_id_only() -> None:
 
 
 def test_plan_elides_forward_fk_id_only_selection_for_each_alias() -> None:
-    """B2/O4: duplicate aliases keep distinct resolver keys for FK-id elision."""
+    """Duplicate aliases keep distinct resolver keys for FK-id elision."""
     plan = plan_optimizations(
         [
             _sel("category", selections=[_sel("id")], alias="first"),
@@ -1240,7 +1239,7 @@ def test_plan_elides_forward_fk_id_only_selection_for_each_alias() -> None:
 
 
 def test_plan_does_not_elide_forward_fk_when_extra_target_scalar_selected() -> None:
-    """B2: ``category { id name }`` still needs ``select_related``."""
+    """``category { id name }`` still needs ``select_related``."""
     plan = plan_optimizations(
         [_sel("category", selections=[_sel("id"), _sel("name")])],
         Item,
@@ -1252,7 +1251,7 @@ def test_plan_does_not_elide_forward_fk_when_extra_target_scalar_selected() -> N
 
 
 def test_plan_elides_forward_fk_id_only_selection_inside_fragment() -> None:
-    """B2: id-only selections discovered through fragments can elide the JOIN."""
+    """id-only selections discovered through fragments can elide the JOIN."""
     plan = plan_optimizations(
         [
             _sel(
@@ -1270,7 +1269,7 @@ def test_plan_elides_forward_fk_id_only_selection_inside_fragment() -> None:
 
 
 def test_plan_does_not_elide_when_fragment_contains_relation_selection() -> None:
-    """B2: relation selections inside fragments make FK-id elision unsafe."""
+    """Relation selections inside fragments make FK-id elision unsafe."""
     plan = plan_optimizations(
         [
             _sel(
@@ -1288,7 +1287,7 @@ def test_plan_does_not_elide_when_fragment_contains_relation_selection() -> None
 
 
 def test_plan_does_not_elide_forward_fk_when_target_has_custom_get_queryset() -> None:
-    """B2: O6 visibility hooks win over FK-id elision."""
+    """O6 visibility hooks win over FK-id elision."""
     registry.clear()
     try:
 
@@ -1352,7 +1351,7 @@ def _printing_edition_key_only_plan() -> OptimizationPlan:
 
 
 def test_plan_elides_forward_fk_when_target_pk_is_not_named_id() -> None:
-    """B2: elision uses the related model's actual PK field name, not literal ``id``.
+    """Elision uses the related model's actual PK field name, not literal ``id``.
 
     ``apps/library/models.py::Edition`` is keyed by the text column ``isbn_13``,
     so a press run's forward key into it answers an ``{ isbn13 }``-only child
@@ -1398,7 +1397,7 @@ _RELAY_TARGET_PK_ID_SHAPES = {
 
 @pytest.mark.parametrize("shape", list(_RELAY_TARGET_PK_ID_SHAPES))
 def test_plan_elides_forward_fk_when_relay_target_id_reads_the_pk(shape: str) -> None:
-    """B2: a Relay ``{ id }``-only child is the target key whatever the key is named.
+    """A Relay ``{ id }``-only child is the target key whatever the key is named.
 
     The GlobalID selection counts as the model field its id is read from
     (``optimizer/walker.py::_relay_id_field``), never a field-map entry named
@@ -1470,7 +1469,7 @@ def _category_name_node_id(_cls: type[object], root: Category, *, info: object) 
 
 
 def test_plan_does_not_elide_when_relay_target_resolve_id_is_custom() -> None:
-    """B2: a consumer ``resolve_id`` on a target that leaves its key out keeps the join.
+    """A consumer ``resolve_id`` on a target that leaves its key out keeps the join.
 
     The id is whatever the resolver builds from a loaded row, so the stored
     key column cannot answer ``{ id }``.
@@ -1496,7 +1495,7 @@ def _edition_imprint_node_id(_cls: type[object], root: Edition, *, info: object)
 
 
 def test_plan_does_not_elide_when_relay_target_keyed_off_id_resolves_id_custom() -> None:
-    """B2: a consumer ``resolve_id`` on a target keyed by ``isbn_13`` keeps the join.
+    """A consumer ``resolve_id`` on a target keyed by ``isbn_13`` keeps the join.
 
     The definition's custom-resolver check looks for ``resolve_<key>`` and so
     does not see a ``resolve_id`` on a key named otherwise; the GlobalID
@@ -1518,7 +1517,7 @@ def test_plan_does_not_elide_when_relay_target_keyed_off_id_resolves_id_custom()
 
 
 def test_plan_does_not_elide_when_relay_target_node_id_is_not_the_pk() -> None:
-    """B2: a ``NodeID`` column on a target that leaves its key out keeps the join.
+    """A ``NodeID`` column on a target that leaves its key out keeps the join.
 
     ``house_code`` builds the GlobalID and the stored key column does not carry
     it, so the join stays and loads the column the id reads.
@@ -1539,7 +1538,7 @@ def test_plan_does_not_elide_when_relay_target_node_id_is_not_the_pk() -> None:
 
 
 def test_plan_does_not_elide_fk_to_non_pk_to_field() -> None:
-    """B2: FK ``to_field`` values are not treated as related PK values.
+    """FK ``to_field`` values are not treated as related PK values.
 
     ``apps/library/models.py::PatronProfile.favorite_genre`` stores the genre
     NAME, so its column holds no genre key and the join it needs to answer
@@ -1555,7 +1554,7 @@ def test_plan_does_not_elide_fk_to_non_pk_to_field() -> None:
 
 
 def test_plan_does_not_elide_when_target_type_has_custom_id_resolver() -> None:
-    """B2: custom id resolvers may need more than the stubbed PK.
+    """Custom id resolvers may need more than the stubbed PK.
 
     ``apps/library/schema.py::PublisherType`` moves the GlobalID payload onto
     ``house_code`` with ``relay.NodeID[str]``. That is the second of the two
@@ -1599,7 +1598,7 @@ def test_plan_does_not_elide_when_target_type_has_custom_id_resolver() -> None:
 
 
 def test_plan_uses_definition_custom_id_resolver_cache(monkeypatch: pytest.MonkeyPatch) -> None:
-    """B2: custom id resolver checks route through target definition metadata."""
+    """Custom id resolver checks route through target definition metadata."""
 
     class PublisherType:
         @classmethod
@@ -1667,7 +1666,7 @@ def test_has_custom_id_resolver_fallback_matches_definition_path() -> None:
 
 
 def test_plan_downgrades_select_related_when_target_has_custom_get_queryset() -> None:
-    """O6: a custom target ``get_queryset`` downgrades forward FK joins to ``Prefetch``."""
+    """A custom target ``get_queryset`` downgrades forward FK joins to ``Prefetch``."""
     registry.clear()
     info = make_info()._raw_info
     seen_querysets: list[QuerySet[Category]] = []
@@ -1716,7 +1715,7 @@ def test_plan_downgrades_select_related_when_target_has_custom_get_queryset() ->
 
 
 def test_plan_keeps_select_related_when_target_uses_default_get_queryset() -> None:
-    """O6: registered target types without custom ``get_queryset`` still use joins."""
+    """Registered target types without custom ``get_queryset`` still use joins."""
     registry.clear()
 
     class DefaultCategoryType(DjangoType):
@@ -1740,7 +1739,7 @@ def test_plan_keeps_select_related_when_target_uses_default_get_queryset() -> No
 
 
 def test_plan_prefetches_many_side_with_custom_target_get_queryset() -> None:
-    """O6: many-side relations use filtered ``Prefetch`` when the target has visibility logic."""
+    """many-side relations use filtered ``Prefetch`` when the target has visibility logic."""
     registry.clear()
     calls: dict[str, QuerySet[Item]] = {}
 
@@ -1950,7 +1949,7 @@ def test_child_hook_without_resolve_info_fails_loudly() -> None:
 
 
 def test_plan_emits_nested_prefetch_chain_depth_2() -> None:
-    """O4: ``Category > items > entries`` emits nested ``Prefetch`` objects."""
+    """``Category > items > entries`` emits nested ``Prefetch`` objects."""
     plan = plan_optimizations(
         [_sel("items", selections=[_sel("entries", selections=[_sel("value")])])],
         Category,
@@ -1970,7 +1969,7 @@ def test_plan_emits_nested_prefetch_chain_depth_2() -> None:
 
 
 def test_plan_emits_nested_prefetch_chain_depth_3_with_inner_select() -> None:
-    """O4: ``Category > items > entries > property`` keeps connector columns."""
+    """``Category > items > entries > property`` keeps connector columns."""
     plan = plan_optimizations(
         [
             _sel(
@@ -2001,7 +2000,7 @@ def test_plan_emits_nested_prefetch_chain_depth_3_with_inner_select() -> None:
 
 
 def test_plan_emits_nested_select_related_chain_depth_2() -> None:
-    """O4: ``Entry > item > category`` stays in one joined queryset."""
+    """``Entry > item > category`` stays in one joined queryset."""
     plan = plan_optimizations(
         [_sel("item", selections=[_sel("category", selections=[_sel("name")])])],
         Entry,
@@ -2013,7 +2012,7 @@ def test_plan_emits_nested_select_related_chain_depth_2() -> None:
 
 
 def test_plan_combines_prefetch_boundary_with_inner_select_related() -> None:
-    """O4: a prefetched child queryset can carry its own ``select_related``."""
+    """A prefetched child queryset can carry its own ``select_related``."""
     plan = plan_optimizations(
         [_sel("items", selections=[_sel("category", selections=[_sel("name")])])],
         Category,
@@ -2029,7 +2028,7 @@ def test_plan_combines_prefetch_boundary_with_inner_select_related() -> None:
 
 
 def test_plan_propagates_uncacheable_nested_custom_get_queryset() -> None:
-    """O4+O6: a nested custom ``get_queryset`` makes the root plan uncacheable."""
+    """A nested custom ``get_queryset`` makes the root plan uncacheable."""
     registry.clear()
 
     class FilteredEntryType(DjangoType):
@@ -2061,7 +2060,7 @@ def test_plan_propagates_uncacheable_nested_custom_get_queryset() -> None:
 
 
 def test_plan_honors_optimizer_hints_at_nested_depth() -> None:
-    """O4+B4: nested ``OptimizerHint.SKIP`` suppresses that branch."""
+    """Nested ``OptimizerHint.SKIP`` suppresses that branch."""
     registry.clear()
 
     class ItemType:
@@ -2080,10 +2079,12 @@ def test_plan_honors_optimizer_hints_at_nested_depth() -> None:
 
     prefetch = _prefetch_entry(plan)
     assert prefetch.prefetch_to == "items"
+    assert prefetch.queryset is not None
+    assert queryset_prefetch_lookups(prefetch.queryset) == ()
 
 
 def test_plan_honors_prefetch_obj_hint_does_not_walk_inner_selections() -> None:
-    """O4+B4: explicit ``Prefetch`` hints are leaf operations."""
+    """Explicit ``Prefetch`` hints are leaf operations."""
     registry.clear()
     explicit = Prefetch("items", queryset=Item.objects.only("name"))
 
@@ -2230,7 +2231,7 @@ def test_plan_refuses_a_combined_prefetch_obj_hint_the_primary_key_set_cannot_ca
 
 
 def test_plan_prefetch_obj_hint_on_forward_fk_adds_connector_column() -> None:
-    """B4: explicit ``Prefetch`` hints on forward FKs keep the source FK column."""
+    """Explicit ``Prefetch`` hints on forward FKs keep the source FK column."""
     registry.clear()
     explicit = Prefetch("category", queryset=Category.objects.only("name"))
 
@@ -2255,7 +2256,7 @@ def test_plan_prefetch_obj_hint_on_forward_fk_adds_connector_column() -> None:
 
 
 def test_plan_prefetch_obj_hint_adapts_nested_selected_parent_prefix() -> None:
-    """B4: type-relative explicit ``Prefetch`` hints are rooted at the current path."""
+    """type-relative explicit ``Prefetch`` hints are rooted at the current path."""
     registry.clear()
     explicit = Prefetch("items", queryset=Item.objects.only("name"))
 
@@ -2290,7 +2291,7 @@ def test_plan_prefetch_obj_hint_adapts_nested_selected_parent_prefix() -> None:
 
 
 def test_plan_force_select_hint_uses_select_recursion() -> None:
-    """B4: ``select_related`` hints flow through same-query recursion."""
+    """``select_related`` hints flow through same-query recursion."""
     registry.clear()
 
     class ItemType:
@@ -2328,7 +2329,7 @@ def test_plan_force_select_hint_uses_select_recursion() -> None:
 
 
 def test_plan_force_select_hint_downgrades_for_custom_target_get_queryset() -> None:
-    """B4+O6: ``force_select`` cannot override target visibility hooks."""
+    """``force_select`` cannot override target visibility hooks."""
     registry.clear()
     calls: list[strawberry.Info] = []
 
@@ -2376,7 +2377,7 @@ def test_plan_force_select_hint_downgrades_for_custom_target_get_queryset() -> N
 
 
 def test_plan_force_select_hint_raises_for_many_side_relation() -> None:
-    """B4: ``force_select`` on a reverse-FK relation raises ``ConfigurationError`` at plan time.
+    """``force_select`` on a reverse-FK relation raises ``ConfigurationError`` at plan time.
 
     Django's ``select_related`` rejects reverse-FK / M2M paths at queryset execution.
     The walker catches the cardinality mismatch before dispatch so the consumer sees
@@ -2434,7 +2435,7 @@ def test_plan_no_flag_hint_falls_through_to_default_dispatch() -> None:
 
 
 def test_plan_records_nested_fk_id_elision_with_resolver_key() -> None:
-    """O4+B2: FK-id elision inside a child plan uses the nested resolver key."""
+    """FK-id elision inside a child plan uses the nested resolver key."""
     plan = plan_optimizations(
         [_sel("items", selections=[_sel("category", selections=[_sel("id")])])],
         Category,
@@ -2447,7 +2448,7 @@ def test_plan_records_nested_fk_id_elision_with_resolver_key() -> None:
 
 
 def test_plan_nested_prefetch_respects_fragment_alias_and_directive_shapes() -> None:
-    """O4: nested branches still honor existing fragment/alias/directive behavior."""
+    """Nested branches still honor existing fragment/alias/directive behavior."""
     plan = plan_optimizations(
         [
             _sel(
@@ -2552,7 +2553,7 @@ def test_parent_join_columns_are_the_reverse_fk_child_attname() -> None:
 
 
 def test_plan_prefetch_obj_hint_marks_plan_non_cacheable() -> None:
-    """B4: consumer-supplied Prefetch may close over request-scoped state; plan must not be cacheable.
+    """consumer-supplied Prefetch may close over request-scoped state; plan must not be cacheable.
 
     The hint.prefetch_obj queryset commonly carries user-scoped filters; serving
     the cached Prefetch across requests would leak the first request's state.
@@ -2584,7 +2585,7 @@ def test_plan_prefetch_obj_hint_marks_plan_non_cacheable() -> None:
 
 
 def test_plan_prefetch_obj_hint_dedupes_repeat_lookups() -> None:
-    """B4: hint.prefetch_obj routes through append_prefetch_unique so the same lookup is not appended twice.
+    """hint.prefetch_obj routes through append_prefetch_unique so the same lookup is not appended twice.
 
     Without the dedupe, a re-walk over the same selection (e.g. fragment spread
     expanding the same field, or duplicate selections) yields two Prefetch
@@ -2669,7 +2670,7 @@ def test_plan_tolerates_registered_type_without_definition() -> None:
 
 
 def test_prefetch_hint_for_path_rejects_prefetch_without_lookup() -> None:
-    """B4: ``_prefetch_hint_for_path`` raises when the Prefetch carries no lookup path.
+    """``_prefetch_hint_for_path`` raises when the Prefetch carries no lookup path.
 
     ``Prefetch`` always sets ``prefetch_through`` from its first positional arg,
     so the ``None`` branch is reachable only when a malformed surrogate is
@@ -2698,7 +2699,7 @@ def test_prefetch_hint_for_path_rejects_prefetch_without_lookup() -> None:
 
 
 def test_prefetch_hint_for_path_adapts_nested_lookup_under_parent() -> None:
-    """B4: a type-relative nested ``Prefetch`` lookup is rebased onto ``full_path``.
+    """A type-relative nested ``Prefetch`` lookup is rebased onto ``full_path``.
 
     When the hint is declared as ``Prefetch("items__entries", ...)`` on
     ``CategoryType.items`` and the walker reaches that relation through
@@ -2723,7 +2724,7 @@ def test_prefetch_hint_for_path_adapts_nested_lookup_under_parent() -> None:
 
 
 def test_prefetch_hint_for_path_rejects_mismatched_lookup() -> None:
-    """B4: a ``Prefetch`` lookup that does not target the hinted relation raises.
+    """A ``Prefetch`` lookup that does not target the hinted relation raises.
 
     The walker treats the hint as type-relative.  ``Prefetch("items", ...)`` on
     ``CategoryType.items`` is the simple case; ``Prefetch("items__entries", ...)``
@@ -2748,7 +2749,7 @@ def test_prefetch_hint_for_path_rejects_mismatched_lookup() -> None:
 
 
 def test_apply_hint_prefetch_obj_misconfigured_lookup_leaves_plan_clean() -> None:
-    """B4: ``_apply_hint`` must NOT mutate ``plan`` when ``_prefetch_hint_for_path`` raises.
+    """``_apply_hint`` must NOT mutate ``plan`` when ``_prefetch_hint_for_path`` raises.
 
     The ``prefetch_obj`` branch validates the consumer-supplied Prefetch
     via ``_prefetch_hint_for_path`` before recording the resolver identity
@@ -3766,8 +3767,8 @@ def test_relay_max_results_from_optimizer_info_shapes() -> None:
     assert relay_max_results_from_info(configless) is None
 
 
-def test_window_slice_from_variables() -> None:
-    """Variable-supplied pagination resolves through the converted selection's values.
+def test_window_slice_from_literal_first_argument() -> None:
+    """A literal first argument controls the finite window bound.
 
     Converted selections carry graphql-core-coerced values by Python name
     (``selections.py::python_arguments``), so the walker reads a literal and a
@@ -3862,7 +3863,7 @@ def test_window_respects_relay_max_results() -> None:
             source_type=genre_type,
         )
         assert plan.prefetch_related == ()
-        assert len(plan.planned_resolver_keys) >= 1
+        assert plan.planned_resolver_keys == ("GenreType.books@field.booksConnection",)
     finally:
         registry.clear()
 
@@ -4052,7 +4053,7 @@ def test_scalar_only_window_projects_pk_connector_and_order_columns() -> None:
         # An `.only()` projection (defer=False), not full-row loading or `.defer()`.
         assert defer is False
         # pk + reverse-FK connector both projected; Book is pk-ordered ("id").
-        assert {"id", "shelf_id"} <= set(only_fields)
+        assert set(only_fields) == {"id", "shelf_id"}
     finally:
         registry.clear()
 
@@ -5259,7 +5260,18 @@ def test_window_subquery_wrap_preserves_only_mask_and_child_select_related() -> 
         prefetch = _prefetch_entry(plan)
         child_qs = prefetch.queryset
         assert child_qs is not None
-        assert "shelf" in str(child_qs.query.select_related)
+        assert child_qs.query.select_related == {"shelf": {}}
+        assert child_qs.query.deferred_loading == (
+            frozenset(
+                {
+                    "id",
+                    "title",
+                    "shelf_id",
+                    "shelf__code",
+                },
+            ),
+            False,
+        )
         # Window annotations are still present alongside the only() mask.
 
         assert WINDOW_ROW_NUMBER in child_qs.query.annotations
@@ -5612,7 +5624,12 @@ def test_connection_parent_link_columns_record_under_every_operation(
         registry.clear()
 
 
-def test_query_identical_selection_still_projects_only() -> None:
+@pytest.mark.parametrize(
+    "info",
+    [_op_info(OperationType.QUERY), None],
+    ids=["query-info", "missing-info"],
+)
+def test_query_identical_selection_still_projects_only(info: GraphQLResolveInfo | None) -> None:
     """The SAME selection under QUERY (and ``None``) introduces a projection.
 
     Contrasts ``test_mutation_to_one_relation_widens_only_a_consumer_projection``: a
@@ -5620,43 +5637,38 @@ def test_query_identical_selection_still_projects_only() -> None:
     ``info=None``, projects an unprojected queryset - so the flag is
     operation-scoped, not a blanket disable.
     """
-    for info in (_op_info(OperationType.QUERY), None):
-        plan = plan_optimizations(
-            [_sel("category", selections=[_sel("name")])],
-            Item,
-            info=info,
-        )
-        qs = plan.apply(Item.objects.all())
-        only_fields, defer = qs.query.deferred_loading
-        assert defer is False
-        assert {"category_id", "category__name"} <= set(only_fields)
+    plan = plan_optimizations(
+        [_sel("category", selections=[_sel("name")])],
+        Item,
+        info=info,
+    )
+    qs = plan.apply(Item.objects.all())
+    only_fields, defer = qs.query.deferred_loading
+    assert defer is False
+    assert {"category_id", "category__name"} <= set(only_fields)
 
 
-def test_introduce_projection_defaults_on_without_info() -> None:
-    """The defensive arms: ``None`` info and partial doubles default to introducing.
-
-    Covers the no-``info`` and partial-``info`` arms so the ``getattr``-defensive
-    derivation never raises ``AttributeError`` and projects by default. Also drives
-    the ``_introduces_projection_for_operation`` truth table directly.
-    """
-    # No info -> introduces.
-    plan = plan_optimizations([_sel("name")], Category, info=None)
-    assert plan.introduce_projection is True
-    assert plan.only_fields == ("name",)
-    # Partial info whose ``operation`` is absent, ``None``, or carries ``None``.
-    for partial in (
+@pytest.mark.parametrize(
+    "partial",
+    [
+        None,
         SimpleNamespace(),
         SimpleNamespace(operation=None),
         SimpleNamespace(operation=SimpleNamespace(operation=None)),
-    ):
-        plan = plan_optimizations([_sel("name")], Category, info=_as_partial_resolve_info(partial))
-        assert plan.introduce_projection is True
-        assert plan.only_fields == ("name",)
-    # Truth table on the helper directly.
-    assert _introduces_projection_for_operation(None) is True
-    assert _introduces_projection_for_operation(_op_info(OperationType.QUERY)) is True
-    assert _introduces_projection_for_operation(_op_info(OperationType.MUTATION)) is False
-    assert _introduces_projection_for_operation(_op_info(OperationType.SUBSCRIPTION)) is False
+    ],
+    ids=[
+        "no-info",
+        "no-operation",
+        "null-operation",
+        "null-operation-type",
+    ],
+)
+def test_projection_defaults_on_without_an_operation(partial: object) -> None:
+    """A missing executor operation defaults to introducing a projection for every info shape."""
+    info = None if partial is None else _as_partial_resolve_info(partial)
+    plan = plan_optimizations([_sel("name")], Category, info=info)
+    assert plan.introduce_projection is True
+    assert plan.only_fields == ("name",)
 
 
 def test_mutation_id_only_relation_still_records_elision() -> None:
@@ -6130,7 +6142,7 @@ def test_lateral_strategy_plans_a_lateral_queryset_through_the_walker() -> None:
         assert spec is not None
         assert spec.parent_link_table == "library_book_genres"
         assert spec.parent_link_column == "genre_id"
-        assert plan.planned_resolver_keys != []
+        assert plan.planned_resolver_keys == ("GenreType.books@field.booksConnection",)
     finally:
         end_execution_frame(frame)
         registry.clear()
@@ -6265,7 +6277,7 @@ def test_combined_child_queryset_is_planned_as_its_primary_key_set(strategy_name
 
 
 def test_plan_rejects_to_attr_prefetch_hint_on_generated_relation() -> None:
-    """B4: ``Prefetch(..., to_attr=...)`` hints fail loud.
+    """``Prefetch(..., to_attr=...)`` hints fail loud.
 
     Django lands ``to_attr`` rows on that attribute, but the GENERATED
     relation resolver reads Django's prefetch cache
@@ -6333,9 +6345,8 @@ def _generic_connection_types() -> dict[str, tuple[type[Model], type[DjangoType]
 
     ``Branch.tags = GenericRelation(TaggedItem)`` is the package's generic-relation
     substrate; registering the pair here lets the walker plan a real ``"generic"``
-    nested connection against live models (the same substrate the in-process
-    acceptance tests in
-    ``examples/fakeshop/apps/library/tests/test_generic_connection.py`` drive).
+    nested connection against live models. HTTP payload and SQL verdicts live in
+    ``examples/fakeshop/test_query/test_generic_connection_api.py``.
     """
 
     class TaggedItemNode(DjangoType):

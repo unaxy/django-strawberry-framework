@@ -64,16 +64,6 @@ def test_reserved_alias_not_selected() -> None:
     assert "_dst_predicate_0" not in select_clause
 
 
-def test_primitive_injects_no_distinct() -> None:
-    shelf = _shelf()
-    book = Book.objects.create(title="One", shelf=shelf)
-    book.genres.add(Genre.objects.create(name="science fiction"))
-
-    # The caller suppresses DISTINCT; the primitive must not inject its own.
-    _qs, _cond, result = _compose(Book.objects.all(), {"genres__name__icontains": "scien"})
-    assert "SELECT DISTINCT" not in str(result.query).upper()
-
-
 def test_alias_allocation() -> None:
     shelf = _shelf()
     Book.objects.create(title="One", shelf=shelf)

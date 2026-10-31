@@ -308,8 +308,15 @@ def test_exception_collector_guards_filter_order_and_no_dedup() -> None:
     assert rows[1]["excType"] == "<class 'graphql.error.graphql_error.GraphQLError'>"
 
 
+@pytest.mark.parametrize(
+    ("total", "expected"),
+    [(10, 10), (26, 25), (100, 25)],
+    ids=["below-cap", "one-past-cap", "well-past-cap"],
+)
 def test_collect_exceptions_serializes_only_the_first_25_errors(
     monkeypatch: pytest.MonkeyPatch,
+    total: int,
+    expected: int,
 ) -> None:
     """Exception collection filters and caps BEFORE formatting tracebacks.
 
@@ -319,25 +326,31 @@ def test_collect_exceptions_serializes_only_the_first_25_errors(
     ``__str__``, so it cannot discard the admitted rows.
     """
     real_serialize = debug_module._serialize_exception
-    for total, expected in ((10, 10), (26, 25), (100, 25)):
-        errors = [
-            GraphQLError(f"outer {index}", original_error=ValueError(f"boom {index}"))
-            for index in range(total)
-        ]
-        calls: list[BaseException] = []
+    errors = [
+        GraphQLError(f"outer {index}", original_error=ValueError(f"boom {index}"))
+        for index in range(total)
+    ]
+    calls: list[BaseException] = []
 
-        def _counting_serialize(
-            exception: BaseException,
-            _calls: list[BaseException] = calls,
-        ) -> _DebugExceptionRow:
-            _calls.append(exception)
-            return real_serialize(exception)
+    def _counting_serialize(
+        exception: BaseException,
+        _calls: list[BaseException] = calls,
+    ) -> _DebugExceptionRow:
+        _calls.append(exception)
+        return real_serialize(exception)
 
-        monkeypatch.setattr(debug_module, "_serialize_exception", _counting_serialize)
-        rows = _collect_exceptions(SimpleNamespace(errors=errors))
+    monkeypatch.setattr(debug_module, "_serialize_exception", _counting_serialize)
+    rows = _collect_exceptions(SimpleNamespace(errors=errors))
 
-        assert len(calls) == expected
-        assert [row["message"] for row in rows] == [f"boom {index}" for index in range(expected)]
+    assert len(calls) == expected
+    assert [row["message"] for row in rows] == [f"boom {index}" for index in range(expected)]
+
+
+def test_collect_exceptions_does_not_format_an_error_beyond_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A discarded error never runs its hostile string conversion."""
+    real_serialize = debug_module._serialize_exception
 
     class _HostileStrError(Exception):
         @override
@@ -542,8 +555,15 @@ def test_query_log_slicing_suffix_clamp_and_rollover() -> None:
     assert _query_log_entries_since(full_snapshot) == []
 
 
+@pytest.mark.parametrize(
+    ("total", "expected"),
+    [(50, 50), (101, 100), (2000, 100)],
+    ids=["below-cap", "one-past-cap", "deep-log"],
+)
 def test_build_payload_serializes_at_most_100_new_log_entries(
     monkeypatch: pytest.MonkeyPatch,
+    total: int,
+    expected: int,
 ) -> None:
     """The SQL drain is bounded at the row cap: at most 100 serializations per build.
 
@@ -572,34 +592,33 @@ def test_build_payload_serializes_at_most_100_new_log_entries(
             return super().__getitem__(index)
 
     real_serialize = debug_module._serialize_sql_row
-    for total, expected in ((50, 50), (101, 100), (2000, 100)):
-        log = _PullCountingDeque(
-            [{"sql": f"SELECT {index}", "time": "0.001"} for index in range(total)],
-        )
-        wrapper = SimpleNamespace(vendor="sqlite", alias="default", queries_log=log)
-        snapshot = _ConnectionSnapshot(
-            database_connection=_as_connection(wrapper),
-            query_log_start=0,
-        )
-        calls: list[str] = []
+    log = _PullCountingDeque(
+        [{"sql": f"SELECT {index}", "time": "0.001"} for index in range(total)],
+    )
+    wrapper = SimpleNamespace(vendor="sqlite", alias="default", queries_log=log)
+    snapshot = _ConnectionSnapshot(
+        database_connection=_as_connection(wrapper),
+        query_log_start=0,
+    )
+    calls: list[str] = []
 
-        def _counting_serialize(
-            database_connection: BaseDatabaseWrapper,
-            entry: dict[str, str],
-            _calls: list[str] = calls,
-        ) -> _DebugSQLRow:
-            _calls.append(entry["sql"])
-            return real_serialize(database_connection, entry)
+    def _counting_serialize(
+        database_connection: BaseDatabaseWrapper,
+        entry: dict[str, str],
+        _calls: list[str] = calls,
+    ) -> _DebugSQLRow:
+        _calls.append(entry["sql"])
+        return real_serialize(database_connection, entry)
 
-        monkeypatch.setattr(debug_module, "_serialize_sql_row", _counting_serialize)
-        payload = _build_payload([snapshot], SimpleNamespace(errors=None))
+    monkeypatch.setattr(debug_module, "_serialize_sql_row", _counting_serialize)
+    payload = _build_payload([snapshot], SimpleNamespace(errors=None))
 
-        assert len(calls) == expected
-        assert [row["sql"] for row in payload["sql"]] == [
-            f"SELECT {index}" for index in range(expected)
-        ]
-        assert log.iter_pulls <= 100
-        assert log.indexed_gets <= 100
+    assert len(calls) == expected
+    assert [row["sql"] for row in payload["sql"]] == [
+        f"SELECT {index}" for index in range(expected)
+    ]
+    assert log.iter_pulls <= 100
+    assert log.indexed_gets <= 100
 
 
 # ---------------------------------------------------------------------------

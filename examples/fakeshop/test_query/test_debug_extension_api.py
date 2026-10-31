@@ -40,6 +40,7 @@ belong in ``tests/extensions/test_debug.py``.
 import contextlib
 import logging
 from collections.abc import Callable, Generator, Iterator, Sequence
+from functools import wraps
 from typing import TYPE_CHECKING, TypeAlias
 
 import pytest
@@ -66,7 +67,6 @@ from graphql_client import (
     response_json,
 )
 from strawberry import relay
-from strawberry.django.views import GraphQLView
 from strawberry.extensions import SchemaExtension
 
 from django_strawberry_framework import (
@@ -77,6 +77,7 @@ from django_strawberry_framework import (
 )
 from django_strawberry_framework.extensions import DjangoDebugExtension
 from django_strawberry_framework.testing import Response, TestClient
+from django_strawberry_framework.views import DjangoGraphQLView
 
 if TYPE_CHECKING:
     from django.test.client import _MonkeyPatchedWSGIResponse
@@ -105,11 +106,12 @@ _ExtensionEntry: TypeAlias = type[SchemaExtension] | Callable[[], SchemaExtensio
 _InstallProbeSchema: TypeAlias = Callable[[Sequence[_ExtensionEntry]], None]
 
 
+@wraps(DjangoGraphQLView.as_view())
 def _graphql_view(request: HttpRequest) -> HttpResponseBase:
     """Closure-bound view that reads ``_current['schema']`` per request."""
     schema = _current["schema"]
     assert schema is not None, "install_probe_schema must run before any /graphql/ request"
-    return GraphQLView.as_view(schema=schema)(request)
+    return DjangoGraphQLView.as_view(schema=schema)(request)
 
 
 urlpatterns = [path("graphql/", _graphql_view)]
@@ -313,34 +315,33 @@ def test_query_capture_uses_the_forced_debug_cursor_not_debug_query_logging(
     false unless the deployment acknowledges the disclosure - which is exactly
     why this scenario has to spell the acknowledgement to see a payload at all.
     """
-    assert read_attr(settings, "DEBUG") is False  # proving the bracket did the work
     seed_data(1)
-    # One deterministically anonymous-visible row (seed_data fixed-seeds Item
-    # privacy; the test_products_api precedent creates targeted rows after the
-    # seed), so ``first: 1`` always has an edge to return.
-    Item.objects.create(
+    assert read_attr(settings, "DEBUG") is False
+    visible_category = Category.objects.filter(is_private=False).order_by("pk")[0]
+    item = Item.objects.order_by("pk")[0]
+    Item.objects.filter(pk=item.pk).update(
         name="DebugVisibleWidget",
-        category=Category.objects.filter(is_private=False).order_by("pk").first(),
+        category=visible_category,
         is_private=False,
     )
+
     install_probe_schema([_acknowledged_debug])
     client = TestClient()
-
-    res = client.query("query { allItems(first: 1) { edges { node { name } } } }")
-
+    res = client.query(
+        "query { allItems(first: 1, orderBy: [{name: ASC}]) { edges { node { name } } } }",
+    )
     assert res.data is not None
-    assert len(json_list(res.data, "allItems", "edges")) == 1  # the data is intact
+    expected = (
+        Item.objects.filter(is_private=False, category__is_private=False).order_by("name")[0].name
+    )
+    assert res.data == {"allItems": {"edges": [{"node": {"name": expected}}]}}
     payload = _debug(res)
-    # Filter by row semantics - never positional indexing or raw counts,
-    # because transaction rows are in contract.
     select_rows = [row for row in _rows(payload, "sql") if row["isSelect"] is True]
     assert select_rows, payload["sql"]
     first_select = select_rows[0]
     assert first_select["vendor"] == connection.vendor
     assert first_select["alias"] == "default"
     assert "SELECT" in json_str(first_select, "sql").upper()
-    # Interpolated per the spec: ``last_executed_query`` output carries the
-    # bound values, so no placeholder survives (sqlite and postgres alike).
     assert "%s" not in json_str(first_select, "sql")
     assert isinstance(first_select["duration"], float)
     assert first_select["isSlow"] is False
@@ -370,38 +371,50 @@ def test_optimizer_composition_shows_the_two_query_prefetch_shape(
     query (API == ORM), robust across ``seed_data``'s fixed-seed privacy.
     """
     seed_data(2)
-    # One deterministically visible edge (scenario 1's idiom), created BEFORE
-    # the derived count: guarantees a non-empty item slice so the category
-    # Prefetch always executes and the two-SELECT assertion cannot flake on
-    # ``seed_data``'s fixed-seed Item privacy.
-    Item.objects.create(
+    visible_category = Category.objects.filter(is_private=False).order_by("pk")[0]
+    item = Item.objects.order_by("pk")[0]
+    Item.objects.filter(pk=item.pk).update(
         name="DebugPrefetchWidget",
-        category=Category.objects.filter(is_private=False).order_by("pk").first(),
+        category=visible_category,
         is_private=False,
     )
-    visible_count = Item.objects.filter(is_private=False, category__is_private=False).count()
+
+    expected = [
+        {"node": {"name": item.name, "category": {"name": item.category.name}}}
+        for item in Item.objects.filter(is_private=False, category__is_private=False)
+        .select_related("category")
+        .order_by("name", "pk")
+    ]
     install_probe_schema([lambda: _optimizer, _acknowledged_debug])
     client = TestClient()
-
-    res = client.query("query { allItems { edges { node { name category { name } } } } }")
-
+    res = client.query(
+        "query { allItems(orderBy: [{name: ASC}]) { edges { node { name category { name } } } } }",
+    )
     assert res.data is not None
-    assert len(json_list(res.data, "allItems", "edges")) == visible_count
+    assert expected
+    assert res.data == {"allItems": {"edges": expected}}
     select_statements = [
         json_str(row, "sql").lower() for row in _rows(_debug(res), "sql") if row["isSelect"]
     ]
-    # Exactly the two-query shape: one item slice + one category prefetch.
     assert len(select_statements) == 2, select_statements
-    item_slices = [s for s in select_statements if "products_item" in s]
+    item_slices = [
+        s for s in select_statements if s.partition(" from ")[2].startswith('"products_item" ')
+    ]
     assert len(item_slices) == 1, select_statements
-    assert any("products_category" in s for s in select_statements)
-    # No inter-products JOIN: the visibility hook forces the Prefetch downgrade.
+    assert (
+        len(
+            [
+                s
+                for s in select_statements
+                if s.partition(" from ")[2].startswith('"products_category" ')
+            ],
+        )
+        == 1
+    )
     assert not any(
-        "products_item" in s and "products_category" in s and "join" in s
+        'from "products_item"' in s and "products_category" in s and ("join" in s)
         for s in select_statements
     )
-    # The item slice shows the optimizer's projected column list - the payload
-    # as the optimizer's observability surface.
     assert '"products_item"."name"' in item_slices[0]
 
 
@@ -529,27 +542,27 @@ def test_resolver_exception_produces_an_unmasked_exception_row(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("completion", [False, True], ids=["validation", "completion"])
 def test_validation_versus_execution_error_boundary(
     install_probe_schema: _InstallProbeSchema,
+    *,
+    completion: bool,
 ) -> None:
-    """No key for a validation failure; a completion error IS an execution row.
-
-    The second half pins the documented result-level widening beyond
-    graphene's resolver-only middleware: a non-null field resolving ``None``
-    executes, graphql-core raises the completion error, and the row appears.
-    """
+    """Validation omits debug; a genuine non-null completion failure has one exception row."""
     install_probe_schema([_acknowledged_debug])
-    client = TestClient()
-
-    unknown = client.query("query { definitelyNotAField }", assert_no_errors=False)
-    assert unknown.errors
-    assert "debug" not in (unknown.extensions or {})  # nothing executed
-
-    broken = client.query("query { brokenNonNull }", assert_no_errors=False)
-    assert broken.errors
-    payload = _debug(broken)  # execution happened, so the key is present
-    assert len(json_list(payload, "exceptions")) == 1
-    assert "non-nullable" in json_str(payload, "exceptions", 0, "message").lower()
+    query = "{ brokenNonNull }" if completion else "{ definitelyNotAField }"
+    response = TestClient().query(query, assert_no_errors=False)
+    assert response.errors is not None
+    assert len(response.errors) == 1
+    assert response.data is None
+    if completion:
+        assert response.errors[0].get("path") == ["brokenNonNull"]
+        rows = json_list(_debug(response), "exceptions")
+        assert len(rows) == 1
+        assert "non-nullable" in json_str(rows, 0, "message").lower()
+    else:
+        assert "Cannot query field 'definitelyNotAField'" in response.errors[0].get("message", "")
+        assert "debug" not in (response.extensions or {})
 
 
 # ---------------------------------------------------------------------------

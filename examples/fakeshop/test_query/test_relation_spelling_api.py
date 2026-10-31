@@ -1,4 +1,4 @@
-"""Optimizer execution over a reverse one-to-one whose query name and accessor differ.
+"""Live HTTP optimizer execution over a reverse one-to-one whose query name and accessor differ.
 
 ``SpParent.card`` (``tests/optimizer/_spelling_models.py``) is reached on an
 instance and by ``prefetch_related`` as ``card`` and by ``select_related`` and
@@ -10,10 +10,11 @@ prefetch or connection window planned beneath the ``cards`` JOIN is looked up
 through ``card``.
 ``SpParent.badge`` names both the same and is the control. Each row compares the
 optimized wire with the optimizer-off wire and pins both query counts; the
-schemas execute in-process because fakeshop carries no such relation.
+schemas are served through a holder HTTP mount because fakeshop carries no such relation.
 """
 
 from collections.abc import Callable, Iterator, Mapping
+from functools import wraps
 from typing import TYPE_CHECKING
 
 import pytest
@@ -22,26 +23,60 @@ from asgiref.sync import sync_to_async
 from django.db import connection
 from django.db.backends.utils import CursorWrapper
 from django.db.models import Prefetch, QuerySet
+from django.http import HttpRequest, HttpResponseBase
+from django.test import override_settings
+from django.urls import path
+from graphql_client import assert_graphql_success, json_object, response_json
 from strategy_schemas import make_django_type
 
 from django_strawberry_framework import (
     DjangoListField,
     DjangoOptimizerExtension,
+    DjangoSchema,
     DjangoType,
     finalize_django_types,
     strawberry_config,
 )
 from django_strawberry_framework.connection import _connection_type_cache
 from django_strawberry_framework.registry import registry
-
-from ._spelling_models import SpBadge, SpCard, SpGenre, SpParent, spelling_fixture_tables
+from django_strawberry_framework.testing import AsyncTestClient
+from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
+from tests.optimizer._spelling_models import (
+    SpBadge,
+    SpCard,
+    SpGenre,
+    SpParent,
+    spelling_fixture_tables,
+)
 
 if TYPE_CHECKING:
     from django.db.backends.utils import _ExecuteParameters, _ExecuteQuery
 
 pytestmark = [
-    pytest.mark.usefixtures("isolate_global_registry", "spelling_tables"),
+    pytest.mark.usefixtures("private_registry", "spelling_tables"),
     pytest.mark.django_db(transaction=True),
+]
+
+_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
+
+
+@wraps(DjangoGraphQLView.as_view())
+def _graphql_view(request: HttpRequest) -> HttpResponseBase:
+    schema = _CURRENT["schema"]
+    assert schema is not None
+    return DjangoGraphQLView.as_view(schema=schema)(request)
+
+
+@wraps(AsyncDjangoGraphQLView.as_view())
+async def _async_graphql_view(request: HttpRequest) -> HttpResponseBase:
+    schema = _CURRENT["schema"]
+    assert schema is not None
+    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
+
+
+urlpatterns = [
+    path("graphql-spelling/", _graphql_view),
+    path("graphql-spelling-async/", _async_graphql_view),
 ]
 
 #: A ``get_queryset`` hook body, bound as a classmethod on the type it narrows.
@@ -64,7 +99,7 @@ def _schema(
     optimizer: bool,
     parent_hook: _Hook | None = None,
     card_hook: _Hook | None = None,
-) -> strawberry.Schema:
+) -> DjangoSchema:
     registry.clear()
     _connection_type_cache.clear()
     make_django_type("SpGenreType", SpGenre, ("id", "name"))
@@ -103,7 +138,7 @@ def _schema(
     if optimizer:
         extension = DjangoOptimizerExtension(strictness="raise")
         extensions = [lambda: extension]
-    return strawberry.Schema(query=query_cls, config=strawberry_config(), extensions=extensions)
+    return DjangoSchema(query=query_cls, config=strawberry_config(), extensions=extensions)
 
 
 def _recorded_statements(monkeypatch: pytest.MonkeyPatch) -> list[str]:
@@ -122,7 +157,8 @@ def _recorded_statements(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         params: "_ExecuteParameters" = None,
     ) -> None:
         # The ORM reads rows from the cursor, never this call's return value.
-        recorded.append(str(sql))
+        if '"products_sp' in str(sql) or "`products_sp" in str(sql):
+            recorded.append(str(sql))
         execute(cursor, sql, params)
 
     monkeypatch.setattr(CursorWrapper, "execute", _recording_execute)
@@ -138,11 +174,14 @@ def _run_sync(
     card_hook: _Hook | None = None,
 ) -> tuple[object, int]:
     schema = _schema(optimizer=optimizer, parent_hook=parent_hook, card_hook=card_hook)
-    with monkeypatch.context() as patch:
-        recorded = _recorded_statements(patch)
-        result = schema.execute_sync(query)
-    assert result.errors is None, result.errors
-    return result.data, len(recorded)
+    _CURRENT["schema"] = schema
+    try:
+        with override_settings(ROOT_URLCONF=__name__), monkeypatch.context() as patch:
+            recorded = _recorded_statements(patch)
+            data = assert_graphql_success(query, url="/graphql-spelling/")
+        return data, len(recorded)
+    finally:
+        _CURRENT["schema"] = None
 
 
 async def _run_async(
@@ -158,11 +197,15 @@ async def _run_async(
         parent_hook=parent_hook,
         card_hook=card_hook,
     )
-    with monkeypatch.context() as patch:
-        recorded = _recorded_statements(patch)
-        result = await schema.execute(query)
-    assert result.errors is None, result.errors
-    return result.data, len(recorded)
+    _CURRENT["schema"] = schema
+    try:
+        with override_settings(ROOT_URLCONF=__name__), monkeypatch.context() as patch:
+            recorded = _recorded_statements(patch)
+            result = await AsyncTestClient(path="/graphql-spelling-async/").query(query)
+        assert result.response.status_code == 200
+        return json_object(response_json(result.response), "data"), len(recorded)
+    finally:
+        _CURRENT["schema"] = None
 
 
 def _prefetch_card_without_b(

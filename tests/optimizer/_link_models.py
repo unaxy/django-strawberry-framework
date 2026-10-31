@@ -1,17 +1,19 @@
 """Test-local models whose relations join on links other than a pk ``ForeignKey``.
 
-Fakeshop carries no ``ForeignObject``, exposes no reverse relation over a
-``to_field`` link (its one ``to_field`` FK, ``PatronProfile.favorite_genre``, is
-reached only forward) and has no M2M through table keyed on ``to_field``, so
-these models stand in for the link-column tests (optimizer projection, GlobalID
-filter qualification, the generated forward relation over a multi-column link):
-one parent keyed three ways, one child per link shape (the two-column link
-twice, required and nullable), and a tag M2M whose through table joins both
-sides on non-pk unique columns. ``app_label = "products"`` names an installed
-app so Django wires the reverse relations into ``_meta.get_fields()``;
+The fixture isolates scalar-carried two-column links, reverse ``to_field``
+relations, and M2M through tables keyed on non-pk unique columns. Fakeshop's
+``ShelfLabel.shelf`` also uses ``ForeignObject`` but carries one join column
+through a relation and its target type applies visibility, so it exercises a
+different accepted-order boundary. These models enter native HTTP holder
+schemas as well as private projection and registry tests. One parent is keyed
+three ways, the two-column child link is both required and nullable, and the
+M2M through table joins both sides on non-pk unique columns.
+``app_label = "products"`` names an installed app so Django wires the reverse
+relations into ``_meta.get_fields()``;
 ``managed = False`` keeps ``migrate`` from touching their tables, which
-``link_fixture_tables`` creates, seeds and drops on demand. Unlike the ``Rp*``
-models of ``tests/_relation_fixtures.py`` these may enter a test schema.
+``link_fixture_tables`` creates, seeds and drops on demand. Both these models
+and the ``Rp*`` models of ``tests/_relation_fixtures.py`` enter explicit native
+HTTP holders while staying outside the shipped project schema.
 """
 
 from __future__ import annotations

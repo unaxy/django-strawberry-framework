@@ -71,7 +71,6 @@ def test_adapted_method_preserves_code_metadata_and_private_globals(site: str) -
     )
     assert isinstance(original, FunctionType)
     adapted = completion._completion_method(original)
-    assert isinstance(original, FunctionType)
     assert isinstance(adapted, FunctionType)
     assert adapted.__code__ is original.__code__
     assert adapted.__defaults__ is original.__defaults__

@@ -42,8 +42,8 @@ window (a refusing custom strategy advises nothing), and a bounded, strategy-
 and request-independent dedup makes one plan shape warn at most once even when
 a custom-``get_queryset`` plan is rebuilt every request.
 Package tier: the helpers operate on model ``_meta`` and a strategy-agnostic join
-descriptor, unreachable from a live /graphql query (no observable schema
-surface); the deferral is driven through an in-process schema.
+descriptor. The strategy acceptance boundary is driven over HTTP in
+``examples/fakeshop/test_query/test_optimizer_auto_api.py``.
 
 The unmanaged ``_Idx*`` models exist because a model carries exactly one index
 set, so each index variant (bare, composite, expression, partial, reversed,
@@ -66,7 +66,6 @@ from collections.abc import Iterator
 from types import SimpleNamespace
 
 import pytest
-import strawberry
 from apps.glossary.models import GlossaryTerm
 from apps.library.models import Book, Branch, Genre, Shelf, TaggedItem
 from apps.scalars.models import ScalarSpecimen
@@ -81,31 +80,18 @@ from django.contrib.postgres.indexes import (
     SpGistIndex,
 )
 from django.db import models
-from django.db.models import QuerySet
 from django.db.models.expressions import Col, Combinable
 from django.db.models.functions import Lower
 from django.db.models.options import Options
 from django.db.models.sql.query import Query
 from django.test import override_settings
-from strawberry import Schema, relay
 
-from django_strawberry_framework import (
-    DjangoOptimizerExtension,
-    DjangoType,
-    finalize_django_types,
-    strawberry_config,
-)
-from django_strawberry_framework.connection import _connection_type_cache
 from django_strawberry_framework.optimizer import logger as optimizer_logger
 from django_strawberry_framework.optimizer import nested_planner
 from django_strawberry_framework.optimizer.join_taxonomy import (
     LateralJoinShape,
     RelationJoinDescriptor,
     classify_relation_join,
-)
-from django_strawberry_framework.optimizer.nested_fetch import (
-    NestedConnectionRequest,
-    StrategySelection,
 )
 from django_strawberry_framework.optimizer.nested_planner import (
     _INDEX_ABSENT,
@@ -118,12 +104,9 @@ from django_strawberry_framework.optimizer.nested_planner import (
     _plain_field_terms,
     clear_index_advisory_dedup,
 )
-from django_strawberry_framework.optimizer.plans import OptimizationPlan
-from django_strawberry_framework.registry import registry
 from django_strawberry_framework.utils._narrowing import list_of, require, require_instance
 from django_strawberry_framework.utils.imports import import_attr_if_importable
 from django_strawberry_framework.utils.relations import is_model_class
-from tests._idioms import is_object_dict, is_object_list
 from tests._relation_fixtures import RpCompositeParent
 
 from ._link_models import LnkParent, LnkTag
@@ -2073,127 +2056,3 @@ class TestAdvisoryReadsTheTableOwningModel:
                 caplog,
             )
         assert len(advisories) == 1
-
-
-@pytest.mark.django_db
-class TestAdvisoryDeferredUntilWindowAccepted:
-    """The field-static advisory fires only after a strategy ACCEPTS a window.
-
-    A public consumer strategy may refuse every window (the connection then falls
-    back per-parent); advising a composite WINDOW index for a backend that never
-    runs is confusing under strictness, so the advisory is deferred into the
-    per-window loop and latched to fire at most once, only after the first
-    acceptance. Driven through an in-process schema (the faithful path) rather
-    than the planner internals - ``Book`` has no index covering the shelf window,
-    so the accepting run's warning is what proves the refusing run's silence is
-    the deferral, not a covering index.
-    """
-
-    _QUERY = "{ shelves { code booksConnection(first: 2) { edges { node { title } } } } }"
-
-    class _RefuseEveryWindow:
-        name = "refuse-all"
-
-        def plan(self, _request: NestedConnectionRequest, _plan: OptimizationPlan) -> bool:
-            return False
-
-    @staticmethod
-    def _warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
-        return [r for r in caplog.records if r.levelname == "WARNING"]
-
-    @staticmethod
-    def _reset_type_caches() -> None:
-        registry.clear()
-        _connection_type_cache.clear()
-        clear_index_advisory_dedup()
-
-    @pytest.fixture(autouse=True)
-    def _isolate_registry(self) -> Iterator[None]:
-        """Clear the global registry / connection cache around this DB test.
-
-        The test declares function-scope ``DjangoType`` classes; without isolation
-        they would leak into other modules' identity checks (the recurring
-        schema-registry cross-test pollution class).
-        """
-        self._reset_type_caches()
-        yield
-        self._reset_type_caches()
-
-    @staticmethod
-    def _shelf_books_schema(strategy: StrategySelection) -> Schema:
-        """A ``shelves { booksConnection }`` schema running ``strategy``."""
-
-        class BookNode(DjangoType):
-            class Meta:
-                model = Book
-                fields = ("id", "title")
-                interfaces = (relay.Node,)
-
-        assert registry.get(Book) is BookNode
-
-        class ShelfNode(DjangoType):
-            class Meta:
-                model = Shelf
-                fields = ("id", "code", "books")
-                interfaces = (relay.Node,)
-
-        @strawberry.type
-        class Query:
-            def _shelves(self) -> QuerySet[Shelf]:
-                return Shelf.objects.order_by("id")
-
-            shelves: QuerySet[Shelf] = strawberry.field(
-                resolver=_shelves,
-                graphql_type=list[ShelfNode],
-            )
-
-        finalize_django_types()
-        ext = DjangoOptimizerExtension(nested_connection_strategy=strategy)
-        return strawberry.Schema(
-            query=Query,
-            config=strawberry_config(),
-            extensions=[lambda: ext],
-        )
-
-    @override_settings(DEBUG=True)
-    def test_refusing_strategy_emits_no_advisory_but_windowed_does(
-        self,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """A strategy that refuses every window advises no index; windowed advises one."""
-        shelf = Shelf.objects.create(code="A", branch=Branch.objects.create(name="c"))
-        for index in range(3):
-            Book.objects.create(title=f"t{index}", shelf=shelf)
-        caplog.set_level("WARNING", logger=optimizer_logger.name)
-
-        # Refuses every window -> no window planned -> per-parent fallback, and NO
-        # advisory (it is deferred until acceptance): the page still resolves correctly.
-        self._reset_type_caches()
-        refused = self._shelf_books_schema(self._RefuseEveryWindow()).execute_sync(self._QUERY)
-        assert refused.errors is None, refused.errors
-        assert refused.data is not None
-        data: dict[str, object] = refused.data
-        shelves = data["shelves"]
-        assert is_object_list(shelves)
-        shelf = shelves[0]
-        assert is_object_dict(shelf)
-        connection = shelf["booksConnection"]
-        assert is_object_dict(connection)
-        edges = connection["edges"]
-        assert is_object_list(edges)
-        titles: list[object] = []
-        for edge in edges:
-            assert is_object_dict(edge)
-            node = edge["node"]
-            assert is_object_dict(node)
-            titles.append(node["title"])
-        assert titles == ["t0", "t1"]
-        assert not self._warnings(caplog)
-
-        # The SAME model/shape under the accepting windowed strategy DOES warn,
-        # proving the silence above is the deferral, not a covering index.
-        caplog.clear()
-        self._reset_type_caches()
-        accepted = self._shelf_books_schema("windowed").execute_sync(self._QUERY)
-        assert accepted.errors is None, accepted.errors
-        assert self._warnings(caplog)

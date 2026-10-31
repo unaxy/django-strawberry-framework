@@ -28,6 +28,7 @@ verdict.
 
 import json
 from collections.abc import Callable
+from functools import wraps
 from typing import TYPE_CHECKING, Literal, TypeAlias
 
 import pytest
@@ -54,18 +55,19 @@ from graphql_client import (
     json_object,
     json_str,
     post_graphql,
+    read_attr,
     response_json,
     saved_pk,
 )
 from strategy_schemas import make_django_type
 from strawberry import relay
-from strawberry.django.views import GraphQLView
 from typing_extensions import override
 
 from django_strawberry_framework import (
     DjangoConnection,
     DjangoConnectionField,
     DjangoListField,
+    DjangoSchema,
     DjangoType,
     finalize_django_types,
     strawberry_config,
@@ -74,7 +76,7 @@ from django_strawberry_framework.optimizer import DjangoOptimizerExtension
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing import AsyncTestClient
 from django_strawberry_framework.testing.relay import global_id_for
-from django_strawberry_framework.views import AsyncDjangoGraphQLView
+from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 
 if TYPE_CHECKING:
     from django.test.client import _MonkeyPatchedASGIResponse
@@ -87,12 +89,14 @@ _ItemGetQueryset: TypeAlias = Callable[
 _CURRENT: dict[str, object | None] = {"schema": None}
 
 
+@wraps(DjangoGraphQLView.as_view())
 def _graphql_view(request: HttpRequest) -> HttpResponseBase:
     schema = _CURRENT["schema"]
     assert schema is not None
-    return GraphQLView.as_view(schema=schema)(request)
+    return DjangoGraphQLView.as_view(schema=schema)(request)
 
 
+@wraps(AsyncDjangoGraphQLView.as_view())
 async def _async_graphql_view(request: HttpRequest) -> HttpResponseBase:
     schema = _CURRENT["schema"]
     assert schema is not None
@@ -318,10 +322,10 @@ def test_consumer_prefetch_cache_is_rescoped_with_the_optimizer_installed() -> N
     query = "{ categories { items { name isPrivate } } }"
     optimizer = DjangoOptimizerExtension()
     optimized = _post_visibility_query(
-        strawberry.Schema(query=Query, extensions=[lambda: optimizer]),
+        DjangoSchema(query=Query, extensions=[lambda: optimizer]),
         query,
     )
-    unoptimized = _post_visibility_query(strawberry.Schema(query=Query), query)
+    unoptimized = _post_visibility_query(DjangoSchema(query=Query), query)
     assert optimized.get("errors") is None, optimized
     assert optimized["data"] == {"categories": [{"items": []}]}
     assert optimized["data"] == unoptimized["data"]
@@ -353,11 +357,15 @@ def test_forward_fk_target_visibility_holds_with_the_optimizer_installed() -> No
 
     query = "{ items { name category { name } } }"
     optimizer = DjangoOptimizerExtension()
+    # This row observes graphql-core's exact non-null diagnostic; masking has its own suite.
     optimized = _post_visibility_query(
-        strawberry.Schema(query=Query, extensions=[lambda: optimizer]),
+        DjangoSchema(error_policy={"enabled": False}, query=Query, extensions=[lambda: optimizer]),
         query,
     )
-    unoptimized = _post_visibility_query(strawberry.Schema(query=Query), query)
+    unoptimized = _post_visibility_query(
+        DjangoSchema(error_policy={"enabled": False}, query=Query),
+        query,
+    )
     assert optimized["data"] is None
     assert [json_at(error, "message") for error in json_list(optimized, "errors")] == [
         "Cannot return null for non-nullable field ItemType.category.",
@@ -459,7 +467,13 @@ def _strictness_armed_loaded_fk_schema(item_pk: int) -> strawberry.Schema:
         )
 
     optimizer = DjangoOptimizerExtension(strictness="raise")
-    return strawberry.Schema(query=Query, extensions=[lambda: optimizer])
+    # These relation rows assert graphql-core's named non-null completion refusal.
+    # A consumer masking opt-out exposes that diagnostic independently of row visibility.
+    return DjangoSchema(
+        error_policy={"enabled": False},
+        query=Query,
+        extensions=[lambda: optimizer],
+    )
 
 
 def _hide_the_seeded_items_category() -> tuple[int, str]:
@@ -576,10 +590,11 @@ def _strictness_armed_nullable_fk_schema() -> strawberry.Schema:
         )
 
     optimizer = DjangoOptimizerExtension(strictness="raise")
-    return strawberry.Schema(query=Query, extensions=[lambda: optimizer])
+    return DjangoSchema(query=Query, extensions=[lambda: optimizer])
 
 
 @pytest.mark.django_db
+@pytest.mark.usefixtures("private_registry")
 def test_a_nullable_joined_forward_fk_collapses_to_null_only_for_the_hidden_target() -> None:
     """The hidden target nulls its own field; the admitted one on the next row is served.
 
@@ -618,8 +633,45 @@ def test_a_nullable_joined_forward_fk_collapses_to_null_only_for_the_hidden_targ
 #: One nested-connection document, posted against holder schemas that differ only
 #: in how many parent rows their root resolver hands back.
 _NESTED_CONNECTION_QUERY = (
-    "{ categories { itemsConnection(first: 2) { edges { node { name } } } } }"
+    "{ categories { name itemsConnection(first: 2) { edges { node { id name } } } } }"
 )
+
+
+def _prepare_nested_connection_witnesses() -> None:
+    """Narrow caller-seeded catalog rows to public/private parents and three visible children.
+
+    A private child sits between the first two visible children. The third
+    visible child makes the requested bound observable on every public parent.
+    """
+    parents = list(Category.objects.order_by("pk")[:5])
+    assert len(parents) == 5
+    for index, parent in enumerate(parents):
+        Category.objects.filter(pk=parent.pk).update(is_private=index % 2 == 1)
+        children = list(Item.objects.filter(category=parent).order_by("pk"))
+        assert len(children) == 4
+        for child_index, child in enumerate(children):
+            Item.objects.filter(pk=child.pk).update(is_private=child_index == 1)
+
+
+def _expected_nested_connection_payload(parents: list[Category]) -> JSONObject:
+    """Independent anonymous first-two pages, including empty private-parent partitions."""
+    expected_parents: list[JSONObject] = []
+    widths: list[int] = []
+    for parent in parents:
+        visible = Item.objects.filter(
+            category=parent,
+            is_private=False,
+            category__is_private=False,
+        ).order_by("pk")
+        widths.append(visible.count())
+        page: list[JSONObject] = [
+            {"node": {"id": global_id_for(products_schema.ItemType, item.pk), "name": item.name}}
+            for item in visible[:2]
+        ]
+        expected_parents.append({"name": parent.name, "itemsConnection": {"edges": page}})
+    assert any(width > 2 for width in widths), widths
+    assert 0 in widths, widths
+    return {"data": {"categories": expected_parents}}
 
 
 def _nested_connection_item_queries(parent_count: int) -> list[str]:
@@ -628,10 +680,10 @@ def _nested_connection_item_queries(parent_count: int) -> list[str]:
     The holder schema installs NO ``DjangoOptimizerExtension``, so the nested
     connection runs off the relation manager rather than a planned window.
     """
-    parent_pks = list(
-        Category.objects.order_by("pk").values_list("pk", flat=True)[:parent_count],
-    )
-    assert len(parent_pks) == parent_count
+    parents = list(Category.objects.order_by("pk")[:parent_count])
+    assert len(parents) == parent_count
+    parent_pks = [parent.pk for parent in parents]
+    expected = _expected_nested_connection_payload(parents)
 
     @strawberry.type
     class Query:
@@ -644,10 +696,13 @@ def _nested_connection_item_queries(parent_count: int) -> list[str]:
         )
 
     with CaptureQueriesContext(connection) as captured:
-        payload = _post_visibility_query(strawberry.Schema(query=Query), _NESTED_CONNECTION_QUERY)
-    assert payload.get("errors") is None, payload
-    assert len(json_list(payload, "data", "categories")) == parent_count
-    return [entry["sql"] for entry in captured.captured_queries if "products_item" in entry["sql"]]
+        payload = _post_visibility_query(DjangoSchema(query=Query), _NESTED_CONNECTION_QUERY)
+    assert payload == expected
+    return [
+        entry["sql"]
+        for entry in captured.captured_queries
+        if 'FROM "products_item"' in entry["sql"]
+    ]
 
 
 @pytest.mark.django_db
@@ -661,7 +716,8 @@ def test_nested_connection_costs_one_query_per_parent_without_the_optimizer() ->
     cardinalities so a fixed count cannot satisfy it, and so a regression toward
     per-EDGE loading (which would overshoot N) is visible.
     """
-    services.seed_data(1)
+    services.seed_data(4)
+    _prepare_nested_connection_witnesses()
 
     assert len(_nested_connection_item_queries(2)) == 2
     assert len(_nested_connection_item_queries(5)) == 5
@@ -679,10 +735,10 @@ def _nested_connection_item_queries_with_optimizer_on_a_list(
     per-parent cost is real and that the optimizer left the materialized root
     alone instead of re-deriving a queryset from it and running it again.
     """
-    parent_pks = list(
-        Category.objects.order_by("pk").values_list("pk", flat=True)[:parent_count],
-    )
-    assert len(parent_pks) == parent_count
+    parents = list(Category.objects.order_by("pk")[:parent_count])
+    assert len(parents) == parent_count
+    parent_pks = [parent.pk for parent in parents]
+    expected = _expected_nested_connection_payload(parents)
 
     @strawberry.type
     class Query:
@@ -695,15 +751,14 @@ def _nested_connection_item_queries_with_optimizer_on_a_list(
         )
 
     optimizer = DjangoOptimizerExtension()
-    schema = strawberry.Schema(
+    schema = DjangoSchema(
         query=Query,
         extensions=[lambda: optimizer],
         config=strawberry_config(),
     )
     with CaptureQueriesContext(connection) as captured:
         payload = _post_visibility_query(schema, _NESTED_CONNECTION_QUERY)
-    assert payload.get("errors") is None, payload
-    assert len(json_list(payload, "data", "categories")) == parent_count
+    assert payload == expected
     item_sql = [
         entry["sql"]
         for entry in captured.captured_queries
@@ -727,7 +782,8 @@ def test_nested_connection_still_costs_one_query_per_parent_when_the_optimizer_g
     The root itself is read exactly once at both cardinalities: an optimizer that
     re-ran the materialized list would show a second category statement.
     """
-    services.seed_data(1)
+    services.seed_data(4)
+    _prepare_nested_connection_witnesses()
 
     item_sql_two, root_sql_two = _nested_connection_item_queries_with_optimizer_on_a_list(2)
     assert len(root_sql_two) == 1, root_sql_two
@@ -840,12 +896,13 @@ def _holder_patron_card_schema(
     if optimizer:
         installed = DjangoOptimizerExtension()
         extensions = [lambda: installed]
-    return strawberry.Schema(query=Query, extensions=extensions)
+    return DjangoSchema(query=Query, extensions=extensions)
 
 
 @pytest.mark.parametrize("optimizer", [False, True], ids=["unoptimized", "optimized"])
 @pytest.mark.parametrize("root", ["queryset", "list"])
 @pytest.mark.django_db
+@pytest.mark.usefixtures("private_registry")
 def test_reverse_one_to_one_custom_visibility_matches_with_and_without_optimizer(
     root: Literal["queryset", "list"],
     *,
@@ -891,6 +948,7 @@ def test_reverse_one_to_one_custom_visibility_matches_with_and_without_optimizer
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("private_registry")
 async def test_async_reverse_one_to_one_custom_visibility_over_http() -> None:
     """Async reverse-O2O re-checks the card hook and nulls a hidden barcode."""
     await sync_to_async(Patron.objects.create)(name="Hidden Patron")
@@ -1026,7 +1084,7 @@ def test_relay_id_and_name_selection_is_clean_under_strictness_raise_over_http()
 
     optimizer = DjangoOptimizerExtension(strictness="raise")
     payload = _post_visibility_query(
-        strawberry.Schema(
+        DjangoSchema(
             query=Query,
             extensions=[lambda: optimizer],
             config=strawberry_config(),
@@ -1235,7 +1293,11 @@ def test_staff_planned_relation_connection_window_keeps_every_row() -> None:
     assert pages[hidden_parent] == hidden_names
 
 
-def _child_routing_schema(child_hook: _ItemGetQueryset) -> strawberry.Schema:
+def _child_routing_schema(
+    child_hook: _ItemGetQueryset,
+    *,
+    expose_routing_error: bool = False,
+) -> strawberry.Schema:
     """A live ``categories { items }`` schema whose CHILD type carries ``child_hook``.
 
     The root hands back a queryset under a mounted optimizer, so the walker plans
@@ -1270,7 +1332,9 @@ def _child_routing_schema(child_hook: _ItemGetQueryset) -> strawberry.Schema:
         )
 
     optimizer = DjangoOptimizerExtension()
-    return strawberry.Schema(
+    # The routed-child refusal opts out only to name the internal ConfigurationError.
+    return DjangoSchema(
+        error_policy={"enabled": False} if expose_routing_error else None,
         query=RoutingQuery,
         config=strawberry_config(),
         extensions=[lambda: optimizer],
@@ -1281,6 +1345,7 @@ _CHILD_ROUTING_QUERY = "{ categories { name items { name } } }"
 
 
 @pytest.mark.django_db
+@pytest.mark.usefixtures("private_registry")
 def test_planned_prefetch_child_may_not_pin_its_own_connection() -> None:
     """A child ``get_queryset`` calling ``.using(...)`` fails the planned relation closed.
 
@@ -1294,7 +1359,10 @@ def test_planned_prefetch_child_may_not_pin_its_own_connection() -> None:
     services.seed_data(1)
 
     payload = _post_visibility_query(
-        _child_routing_schema(lambda _cls, queryset, _info: queryset.using("default")),
+        _child_routing_schema(
+            lambda _cls, queryset, _info: queryset.using("default"),
+            expose_routing_error=True,
+        ),
         _CHILD_ROUTING_QUERY,
     )
 
@@ -1306,6 +1374,7 @@ def test_planned_prefetch_child_may_not_pin_its_own_connection() -> None:
 
 
 @pytest.mark.django_db
+@pytest.mark.usefixtures("private_registry")
 def test_planned_prefetch_child_still_serves_rows_when_the_hook_only_narrows() -> None:
     """The control: an unrouted hook still scopes the planned child and serves its rows."""
     services.seed_data(1)
@@ -1356,12 +1425,43 @@ def _shipped_document(shape: str) -> str:
 
 
 def _sync_shipped_payload(document: str, username: str) -> JSONObject:
-    """The shipped sync ``/graphql/`` answer to ``document`` for ``username``: the reference."""
+    """The actual shipped sync response, checked against a transport-independent oracle."""
     client = Client()
     client.force_login(get_user_model().objects.get(username=username))
     response = post_graphql(document, client=client)
     assert response.status_code == 200
     return response_json(response)
+
+
+def _expected_shipped_payload(shape: str) -> JSONObject:
+    """The shipped non-staff policy, derived from model privacy rather than either view."""
+    categories = list(Category.objects.order_by("pk"))
+    public_categories = [category for category in categories if not category.is_private]
+    assert public_categories
+    assert len(public_categories) < len(categories) < 100
+    if shape == "allCategories":
+        edges: list[JSONObject] = [{"node": {"name": row.name}} for row in public_categories]
+        return {"data": {"allCategories": {"edges": edges}}}
+    if shape == "allItems":
+        visible_items = list(
+            Item.objects.filter(is_private=False, category__is_private=False)
+            .select_related("category")
+            .order_by("pk"),
+        )
+        assert 0 < len(visible_items) < 100
+        assert len(visible_items) < Item.objects.count()
+        item_edges: list[JSONObject] = [
+            {"node": {"name": item.name, "category": {"name": item.category.name}}}
+            for item in visible_items
+        ]
+        return {"data": {"allItems": {"edges": item_edges}}}
+    if shape == "node":
+        return {"data": {"node": None}}
+    assert shape == "nodes"
+    nodes: list[JSONObject | None] = [
+        None if category.is_private else {"name": category.name} for category in categories
+    ]
+    return {"data": {"nodes": nodes}}
 
 
 async def _async_payload(
@@ -1415,15 +1515,20 @@ async def test_async_view_serves_the_shipped_permission_hooks_the_sync_verdict(
     the permission cache from the database. The async view runs that sync hook in a
     worker thread, so each non-staff seeded user gets the sync view's rows - the
     hidden category's ``node`` stays ``null`` and ``nodes`` nulls only the private
-    rows - rather than a masked ``SynchronousOnlyOperation``.
+    rows - rather than a masked ``SynchronousOnlyOperation``. Both views must
+    independently match the ORM-derived public rows, so shared empty/leaking
+    results cannot satisfy the parity claim.
     """
     await sync_to_async(services.seed_data)(1)
     await sync_to_async(services.create_users)(1)
     document = await sync_to_async(_shipped_document)(shape)
-    expected = await sync_to_async(_sync_shipped_payload)(document, username)
-    assert "errors" not in expected, expected
+    expected = await sync_to_async(_expected_shipped_payload)(shape)
+    user = await get_user_model().objects.aget(username=username)
+    assert read_attr(user, "is_staff") is False
+    sync_payload = await sync_to_async(_sync_shipped_payload)(document, username)
+    assert sync_payload == expected
     client = AsyncClient()
-    await client.aforce_login(await get_user_model().objects.aget(username=username))
+    await client.aforce_login(user)
 
     payload = await _async_payload(config_schema.schema, document, client=client)
 
@@ -1476,7 +1581,7 @@ def _cold_planned_child_schema() -> strawberry.Schema:
         )
 
     optimizer = DjangoOptimizerExtension()
-    return strawberry.Schema(
+    return DjangoSchema(
         query=Query,
         config=strawberry_config(),
         extensions=[lambda: optimizer],
@@ -1504,6 +1609,7 @@ def _cold_served_names(payload: JSONObject, root: str) -> list[str]:
     ],
 )
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("private_registry")
 async def test_async_view_builds_a_cold_plan_whose_child_hook_reads_the_database(
     root: str,
 ) -> None:

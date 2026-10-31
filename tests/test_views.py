@@ -38,6 +38,11 @@ What stays here:
 
 The schema is module-local and ORM-free: none of these contracts touches the
 database, so no ``django_db`` marker and no registry mutation.
+
+Configured middleware/token outcomes and public form encodings live in
+``test_transport_chain_api.py`` and ``test_transport_encoding_api.py`` under
+``examples/fakeshop/test_query/``. Raw allocation, cause, stream and prepared-instance lifecycle
+observations remain here.
 """
 
 import contextlib
@@ -62,7 +67,6 @@ from cross_web import (
     DjangoHTTPRequestAdapter,
     HTTPException,
 )
-from django.conf import settings
 from django.contrib.auth.models import AnonymousUser
 from django.core.handlers.asgi import ASGIRequest
 from django.core.handlers.wsgi import WSGIRequest
@@ -71,21 +75,17 @@ from django.http import (
     HttpResponse,
     HttpResponseBase,
     HttpResponseForbidden,
-    QueryDict,
     RawPostDataException,
     UnreadablePostError,
-    multipartparser,
 )
-from django.middleware.csrf import CSRF_SECRET_LENGTH, CsrfViewMiddleware
+from django.middleware.csrf import CsrfViewMiddleware
 from django.test import (
-    AsyncClient,
     AsyncRequestFactory,
     Client,
     RequestFactory,
     override_settings,
 )
 from django.urls import path
-from django.utils.datastructures import MultiValueDict
 from django.utils.functional import SimpleLazyObject
 from strawberry.django.views import AsyncGraphQLView, GraphQLView
 from strawberry.http.base import BaseView
@@ -1224,7 +1224,7 @@ def _spooled(
 ) -> Generator[tempfile.SpooledTemporaryFile[bytes], None, None]:
     """A rewound ``SpooledTemporaryFile`` holding ``raw``, closed on the way out.
 
-    ``max_size=0`` forces the rollover-to-disk case, which is the shape that makes
+    ``max_size=1`` forces the rollover-to-disk case, which is the shape that makes
     the unbounded read expensive rather than merely wasteful: past
     ``FILE_UPLOAD_MAX_MEMORY_SIZE`` Django's ASGI handler has already written the
     payload to disk, so ``request.body`` reads it back off the filesystem -
@@ -1293,7 +1293,7 @@ _UNDECLARED_LENGTHS = (
 @pytest.mark.parametrize("content_length", _UNDECLARED_LENGTHS)
 @pytest.mark.parametrize(
     "max_size",
-    [pytest.param(1 << 20, id="in-memory"), pytest.param(0, id="rolled-to-disk")],
+    [pytest.param(1 << 20, id="in-memory"), pytest.param(1, id="rolled-to-disk")],
 )
 @pytest.mark.parametrize("view_class", _VIEW_CLASSES)
 def test_a_seekable_over_limit_body_is_refused_without_ever_being_read(
@@ -1327,6 +1327,7 @@ def test_a_seekable_over_limit_body_is_refused_without_ever_being_read(
     """
     view = _capped_view(_PROBE_CAP, view_class=view_class)
     with _spooled(b"x" * (_PROBE_CAP * 16), max_size=max_size) as stream:
+        assert read_attr(stream, "_rolled") is (max_size == 1)
         request = _asgi_request(stream, content_length)
 
         with pytest.raises(HTTPException) as excinfo:
@@ -2389,18 +2390,6 @@ def test_both_package_views_resolve_parse_json_to_the_one_shared_mixin_method() 
 #     ``test_transport_api.py::test_a_project_that_reconfigured_default_charset_is_refused_unless_the_client_declares_utf8``  # noqa: E501 - citation path cannot wrap
 # ---------------------------------------------------------------------------
 
-_DECLARED_CHARSETS = (
-    pytest.param("utf-8", True, id="utf-8"),
-    pytest.param("UTF-8", True, id="uppercase"),
-    pytest.param("utf8", True, id="unhyphenated"),
-    pytest.param("u8", True, id="obscure-alias"),
-    pytest.param("iso-8859-1", False, id="latin-1"),
-    pytest.param("utf-16", False, id="utf-16"),
-    pytest.param("utf-8-sig", False, id="utf-8-sig"),
-    pytest.param("no-such-codec", False, id="unknown-name"),
-)
-
-
 _MULTIPART_BOUNDARY = "BoUnDaRy"
 
 
@@ -2458,195 +2447,14 @@ def _multipart_request(
     return request
 
 
-@pytest.mark.parametrize(("charset", "accepted"), _DECLARED_CHARSETS)
-def test_only_codecs_that_canonicalize_to_utf8_are_accepted_as_a_form_encoding(
-    charset: str,
-    *,
-    accepted: bool,
-) -> None:
-    """The declared charset is resolved through ``codecs``, not compared as a string.
-
-    Every alias Python calls UTF-8 is accepted, including ones the package has
-    never heard of, and everything else is refused - ``utf-8-sig`` included,
-    because it is a *different* codec that would silently eat the BOM Decision 10
-    deliberately refuses. An unknown codec name is refused rather than ignored:
-    Django's own ``_set_content_type_params`` drops an unusable charset and decodes
-    with ``DEFAULT_CHARSET`` instead, so accepting the request would mean honouring
-    a declaration nobody honoured.
-
-    The reason is the shared one on purpose (Decision 9): a caller must not be able
-    to tell which of the endpoint's refusals it hit by reading the message.
-    """
-    view = DjangoGraphQLView(schema=SCHEMA)
-    request = _multipart_request(charset)
-
-    if accepted:
-        view._enforce_multipart_form_encoding(request)
-        return
-
-    with pytest.raises(HTTPException) as excinfo:
-        view._enforce_multipart_form_encoding(request)
-
-    assert excinfo.value.status_code == 400
-    assert excinfo.value.reason == _JSON_PARSE_REASON
-
-
-_NON_STRING_ENCODINGS = (
-    pytest.param(b"utf-8", id="bytes-lifted-off-a-header"),
-    pytest.param(42, id="int"),
-    pytest.param(object(), id="arbitrary-object"),
-)
-
-
-@pytest.mark.parametrize("encoding", _NON_STRING_ENCODINGS)
-def test_a_non_string_effective_encoding_is_refused_rather_than_escaping_as_a_typeerror(
-    encoding: object,
-) -> None:
-    """``codecs.lookup`` raises ``TypeError``, not ``LookupError``, on a non-string.
-
-    ``request.encoding`` is a public settable attribute with no type coercion, so
-    the value ``_form_encoding_is_utf8`` resolves is whatever consumer middleware
-    assigned - and ``b"utf-8"`` lifted straight off a header is the plausible slip
-    rather than a synthetic one. ``codecs.lookup`` refuses every non-``str``
-    argument with ``TypeError``, which no ``LookupError`` handler catches.
-
-    The refusal is asserted at the boundary rather than on
-    ``_canonicalizes_to_utf8``'s return value, because the contract at stake is
-    the wire outcome: with the non-string refusal gone the ``TypeError`` escapes
-    ``_enforce_multipart_form_encoding`` -> ``_enforce_request_boundary`` -> ``run``
-    and upstream's ``dispatch`` ``except HTTPException`` does not catch it, so a
-    controlled ``400`` becomes an unhandled ``500``. That is not a claim a narrower
-    row could not see the mutation - removing the refusal makes the helper *raise*
-    rather than return, so a row asserting only ``is False`` fails too. What this
-    shape buys is that the assertions are the observable contract: the status code
-    and the shared reason string, rather than a private helper's return value.
-    """
-    view = DjangoGraphQLView(schema=SCHEMA)
-
-    with pytest.raises(HTTPException) as excinfo:
-        view._enforce_multipart_form_encoding(_multipart_request(encoding=encoding))
-
-    assert excinfo.value.status_code == 400
-    assert excinfo.value.reason == _JSON_PARSE_REASON
-
-
-@pytest.mark.parametrize(
-    "encoding",
-    [pytest.param("utf-8\x00", id="embedded-nul"), pytest.param("\ud800", id="lone-surrogate")],
-)
-def test_an_unsearchable_effective_encoding_is_refused_rather_than_escaping_as_a_valueerror(
-    encoding: str,
-) -> None:
-    """A string ``codecs.lookup`` cannot search raises ``ValueError``, not ``LookupError``.
-
-    An embedded NUL raises ``ValueError`` and a lone surrogate raises
-    ``UnicodeEncodeError`` (a ``ValueError``) while the codec registry normalizes
-    the name, before any codec is looked up. Neither reaches the endpoint from the
-    wire: Django's own ``HttpRequest._set_content_type_params`` runs the same
-    lookup on a declared ``charset`` while building the request and fails there
-    first. The consumer-set ``request.encoding`` is the path that does reach it,
-    and it must end as the same controlled ``400`` as every other encoding the
-    package cannot prove is UTF-8, not an unhandled ``500``.
-    """
-    view = DjangoGraphQLView(schema=SCHEMA)
-
-    with pytest.raises(HTTPException) as excinfo:
-        view._enforce_multipart_form_encoding(_multipart_request(encoding=encoding))
-
-    assert excinfo.value.status_code == 400
-    assert excinfo.value.reason == _JSON_PARSE_REASON
-
-
-def test_a_declared_utf8_charset_does_not_mask_a_middleware_set_request_encoding() -> None:
-    """The two conditions are ``and``, not a fallback chain.
-
-    The bypass this closes, proved end to end here rather than asserted: a client
-    declares ``charset=utf-8``, one line of consumer middleware assigns
-    ``request.encoding = "iso-8859-1"`` (Django's documented per-request
-    override), and Django decodes every non-file field with the middleware's
-    value - ``HttpRequest.parse_file_upload`` hands ``MultiPartParser`` only
-    ``self.encoding`` and never re-reads ``content_params``. Resolving the gate as
-    ``declared or request.encoding or DEFAULT_CHARSET`` therefore validated the
-    value Django was NOT going to use, and let the *client* choose which rung was
-    consulted.
-
-    The second half is why the loss detector cannot be the backstop, and it is the
-    reason this is a wire-contract defect rather than a cosmetic one: the same
-    request, allowed to parse, decodes the raw Latin-1 byte cleanly into a
-    different character with **no** replacement marker anywhere, so
-    ``_reject_lossy_multipart_control_fields`` is structurally blind to it and a
-    non-UTF-8-decoded control document would reach ``json.loads``. Asserting that
-    here keeps the premise on disk: if a future Django started replacing instead,
-    this row says so rather than silently becoming a tautology.
-    """
-    view = DjangoGraphQLView(schema=SCHEMA)
+def test_djangos_effective_latin1_multipart_decode_preserves_bytes_without_replacement() -> None:
+    """The actual unguarded Django decoder preserves Latin-1 bytes without replacement markers."""
     latin1 = _multipart_body(b'{"query": "{ __typename }", "note": "\xe9"}')
-
-    with pytest.raises(HTTPException) as excinfo:
-        view._enforce_multipart_form_encoding(
-            _multipart_request("utf-8", encoding="iso-8859-1", data=latin1),
-        )
-
-    assert excinfo.value.status_code == 400
-    assert excinfo.value.reason == _JSON_PARSE_REASON
-
     unguarded = _multipart_request("utf-8", encoding="iso-8859-1", data=latin1)
     decoded = unguarded.POST["operations"]
     assert "\ufffd" not in decoded
     assert decoded == '{"query": "{ __typename }", "note": "\u00e9"}'
     assert json.loads(decoded)["note"] == "\u00e9"
-
-
-_UNHONOURED_DECLARATIONS = (
-    pytest.param("iso-8859-1", id="usable-name-django-promoted"),
-    pytest.param("no-such-codec", id="unusable-name-django-dropped"),
-)
-
-
-@pytest.mark.parametrize("charset", _UNHONOURED_DECLARATIONS)
-def test_a_declared_non_utf8_charset_is_refused_even_when_django_would_decode_utf8(
-    charset: str,
-) -> None:
-    """The declared condition is independent, and this is the row that says so.
-
-    Both requests here would be decoded as UTF-8 by Django - ``request.encoding``
-    is UTF-8, which is the only value ``MultiPartParser`` receives - so the
-    effective-encoding condition is satisfied and something else has to refuse
-    them. That something is the declaration: a client asked for an encoding this
-    endpoint will not honour, and accepting would mean honouring a declaration
-    nobody honoured.
-
-    Two shapes, because Django treats them differently and the package must not:
-    a *usable* non-UTF-8 name is promoted onto ``request.encoding`` (so a
-    middleware assignment is what puts UTF-8 back), while an *unusable* one is
-    silently dropped and ``DEFAULT_CHARSET`` decides. The second is the shape that
-    makes this condition strictly necessary rather than merely defensive - with it
-    gone, ``charset=no-such-codec`` is accepted on any ordinary project.
-    """
-    view = DjangoGraphQLView(schema=SCHEMA)
-
-    with pytest.raises(HTTPException) as excinfo:
-        view._enforce_multipart_form_encoding(_multipart_request(charset, encoding="utf-8"))
-
-    assert excinfo.value.status_code == 400
-    assert excinfo.value.reason == _JSON_PARSE_REASON
-
-
-def test_a_middleware_set_non_utf8_request_encoding_is_refused_on_its_own() -> None:
-    """The effective-encoding condition's first sub-rung, with nothing declared.
-
-    ``request.encoding`` is what ``parse_file_upload`` hands over, so a consumer
-    middleware that sets it decides how ``operations`` is decoded without the
-    request line changing at all. The control in the same row is what keeps this
-    from passing for the wrong reason: the identical request with no declaration
-    and no override is accepted, because ``DEFAULT_CHARSET`` is UTF-8.
-    """
-    view = DjangoGraphQLView(schema=SCHEMA)
-
-    view._enforce_multipart_form_encoding(_multipart_request())
-
-    with pytest.raises(HTTPException, match=_JSON_PARSE_REASON):
-        view._enforce_multipart_form_encoding(_multipart_request(encoding="iso-8859-1"))
 
 
 def test_a_non_multipart_request_is_not_subject_to_the_form_encoding_check() -> None:
@@ -3165,19 +2973,9 @@ urlpatterns = [
     path("plain/", _plain_view),
 ]
 
-_MOUNTED_PATHS = (
-    pytest.param("/graphql/", "/capped/", False, id="sync"),
-    pytest.param("/async-graphql/", "/async-capped/", True, id="async"),
-)
 
 #: The same two capped mounts reached through the marker-dropping wrapper, paired
 #: with the stamped mount they must now answer identically to.
-_WRAPPED_PATHS = (
-    pytest.param("/capped/", "/wrapped-capped/", False, id="sync"),
-    pytest.param("/async-capped/", "/wrapped-async-capped/", True, id="async"),
-)
-
-
 @contextlib.contextmanager
 def _chain(middleware: list[str]) -> Generator[None, None, None]:
     """Serve this module as the project's URLconf, with ``middleware`` as the whole chain.
@@ -3190,137 +2988,6 @@ def _chain(middleware: list[str]) -> Generator[None, None, None]:
     _RejectingCsrfMiddleware.calls = []
     with override_settings(ROOT_URLCONF=__name__, MIDDLEWARE=middleware):
         yield
-
-
-async def _post(
-    path: str,
-    *,
-    is_async: bool,
-    client: Client | AsyncClient | None = None,
-    **kwargs: object,
-) -> HttpResponseBase:
-    """POST through the real handler, on whichever client matches the transport.
-
-    A fresh client per call by default, because Django's ``ClientHandler.__call__``
-    builds the middleware chain lazily on the first request and a reused client
-    would carry a chain built under a different ``override_settings``.
-    """
-    if client is None:
-        client = AsyncClient() if is_async else Client()
-    if is_async:
-        assert isinstance(client, AsyncClient)
-        return await call_forwarded(client.post, (path,), kwargs)
-    assert isinstance(client, Client)
-    return call_forwarded(client.post, (path,), kwargs)
-
-
-def _csrf_enforcing_client(*, is_async: bool) -> AsyncClient | Client:
-    """A client whose CSRF check actually reaches the ``request.POST`` read.
-
-    Two fixture traps sit in front of that read, and either one silently turns a
-    parse-ordering assertion into a measurement of the fixture: a default test
-    client makes ``CsrfViewMiddleware.process_view`` short-circuit on
-    ``_dont_enforce_csrf_checks``, and an enforcing client *without* a well-formed
-    ``csrftoken`` cookie is rejected on ``REASON_NO_CSRF_COOKIE``. Only an
-    enforcing client carrying a token-shaped cookie gets as far as reading the
-    POST data - which on a multipart body is the ``MultiPartParser`` invocation the
-    boundary exists to precede.
-    """
-    client = (
-        AsyncClient(enforce_csrf_checks=True) if is_async else Client(enforce_csrf_checks=True)
-    )
-    cookie_name = read_attr(settings, "CSRF_COOKIE_NAME")
-    assert isinstance(cookie_name, str), cookie_name
-    client.cookies[cookie_name] = "a" * CSRF_SECRET_LENGTH * 2
-    return client
-
-
-@contextlib.contextmanager
-def _counting_multipart_parses() -> Generator[list[bool], None, None]:
-    """Count real ``MultiPartParser.parse`` invocations, wherever they come from.
-
-    The primary witness for every ordering row: a CSRF call log only says which
-    class the chain reached, while this says whether any component parsed the body
-    at all. The original is called through, so the request behaves normally.
-    """
-    original = multipartparser.MultiPartParser.parse
-    parses: list[bool] = []
-
-    def counting(
-        self: multipartparser.MultiPartParser,
-        *args: object,
-        **kwargs: object,
-    ) -> tuple[QueryDict, MultiValueDict[str, object]]:
-        parses.append(True)
-        return original(self, *args, **kwargs)
-
-    with mock.patch.object(multipartparser.MultiPartParser, "parse", counting):
-        yield parses
-
-
-@pytest.mark.parametrize(("under", "_over", "is_async"), _MOUNTED_PATHS)
-async def test_the_projects_own_csrf_middleware_runs_when_the_chain_supplies_the_ordering(
-    under: str,
-    _over: str,
-    *,
-    is_async: bool,
-) -> None:
-    """A project's CSRF class is never replaced here.
-
-    A view that marked its callback exempt and re-entered CSRF through
-    ``csrf_protect`` would run Django's STOCK ``CsrfViewMiddleware``, which
-    ``csrf_protect`` is built from. A deployment whose ``MIDDLEWARE`` names a
-    subclass - stronger token binding, a tenant check, failure logging - would
-    have that subclass silently skipped on the GraphQL endpoint and the base
-    implementation run in its place. No view-local decorator can avoid that, because
-    the configured class is a property of the chain.
-
-    With the middleware installed the exemption withdraws itself, so the subclass
-    runs on this endpoint exactly as on any other view: its ``process_view`` is
-    called, and its refusal - not a package response - is what the client gets.
-    """
-    with _chain(_ORDERED_CHAIN):
-        response = await _post(
-            under,
-            is_async=is_async,
-            data=json.dumps({"query": "{ ping }"}),
-            content_type="application/json",
-        )
-
-    assert response.status_code == 403
-    assert _RejectingCsrfMiddleware.calls == [under]
-
-
-@pytest.mark.parametrize(("under", "over", "is_async"), _MOUNTED_PATHS)
-async def test_without_the_middleware_the_view_keeps_its_own_ordering_and_exemption(
-    under: str,
-    over: str,
-    *,
-    is_async: bool,
-) -> None:
-    """Backward compatibility, asserted rather than assumed.
-
-    A deployment that has not changed its ``MIDDLEWARE`` must behave exactly as it
-    did: the callback stays exempt, so the project's CSRF middleware skips it -
-    which the empty call log shows - the view enforces the boundary itself and then
-    re-enters CSRF from inside ``run``, and both the allowed request and the
-    over-limit one end where they always did. This is the row that would fail if the
-    exemption had simply been deleted, or if the boundary had moved into the
-    middleware and out of the view.
-    """
-    with _chain([_CSRF_MIDDLEWARE_PATH]):
-        allowed = await _post(
-            under,
-            is_async=is_async,
-            data=json.dumps({"query": "{ ping }"}),
-            content_type="application/json",
-        )
-        refused = await _post(over, is_async=is_async, data={"operations": "{}"})
-
-    assert isinstance(allowed, HttpResponse)
-    assert json.loads(allowed.content)["data"] == {"ping": "pong"}
-    assert refused.status_code == 413
-    assert _RejectingCsrfMiddleware.calls == []
 
 
 async def test_the_middleware_passes_a_non_package_view_through_untouched() -> None:
@@ -3351,9 +3018,15 @@ async def test_the_view_does_not_measure_a_body_the_chain_already_measured() -> 
     owners.
     """
     seen: list[tuple[object, bytes]] = []
+    measurements: list[HttpRequest] = []
     body = json.dumps({"query": "{ ping }"}).encode()
 
     class _Recording(DjangoGraphQLView):
+        @override
+        def _enforce_request_body_limit(self, request: HttpRequest) -> None:
+            measurements.append(request)
+            super()._enforce_request_body_limit(request)
+
         @override
         def run(self, request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
             seen.append((getattr(request, _BOUNDARY_ENFORCED, False), request.body))
@@ -3373,6 +3046,7 @@ async def test_the_view_does_not_measure_a_body_the_chain_already_measured() -> 
         view(request)
 
     assert seen == [(True, body)]
+    assert measurements == [request]
 
 
 def test_middleware_ignores_an_unreadable_optional_mount_handoff() -> None:
@@ -3619,156 +3293,6 @@ async def test_the_async_chain_refuses_a_downstream_answer_it_cannot_await() -> 
         await response
 
     assert bool(_CSRF_ORDERING_EXEMPTION) is True
-
-
-@pytest.mark.parametrize(("marked", "wrapped", "is_async"), _WRAPPED_PATHS)
-async def test_the_same_two_mounts_parse_nothing_without_the_middleware_either(
-    marked: str,
-    wrapped: str,
-    *,
-    is_async: bool,
-) -> None:
-    """The other half of the pair, and what makes the row above about a regression.
-
-    Package-only: tests what happens when the boundary middleware is not installed,
-    whereas the live fakeshop app always has it installed.
-
-    On a chain carrying no boundary middleware the exemption is unconditionally
-    true, so both callbacks are skipped by the CSRF middleware and both views
-    enforce their own cap. Holding the two rows together is what states the
-    property: installing the middleware does not change the answer for either
-    mount, so no deployment loses an ordering by installing it.
-    """
-    with _chain([_STOCK_CSRF_MIDDLEWARE_PATH]), _counting_multipart_parses() as parses:
-        for route in (marked, wrapped):
-            response = await _post(
-                route,
-                is_async=is_async,
-                client=_csrf_enforcing_client(is_async=is_async),
-                data={"operations": "{}"},
-            )
-            assert (route, response.status_code) == (route, 413)
-
-    assert parses == []
-
-
-@pytest.mark.parametrize(("_marked", "wrapped", "is_async"), _WRAPPED_PATHS)
-async def test_a_declined_callbacks_over_limit_body_never_reaches_the_csrf_class(
-    _marked: str,
-    wrapped: str,
-    *,
-    is_async: bool,
-) -> None:
-    """The secondary witness, against the project's own CSRF class this time.
-
-    ``_RejectingCsrfMiddleware`` records the callbacks Django's chain brings it in a
-    checkable state, and honours an exemption exactly as the base class does. An
-    empty log on an over-limit multipart request to the *declined* mount therefore
-    says the class was never handed the request - which is the same assertion
-    ``::test_the_chain_refuses_an_over_limit_multipart_before_any_csrf_read`` makes
-    for the stamped mount, now made for the one the middleware does not recognize.
-
-    ``_marked`` is unused here and present only because both mounts come from one
-    parametrization.
-
-    The live sync mount is marked, so the declined sync colour is package-only.
-    """
-    with _chain(_ORDERED_CHAIN):
-        response = await _post(wrapped, is_async=is_async, data={"operations": "{}"})
-
-    assert response.status_code == 413
-    assert isinstance(response, HttpResponse)
-    assert response.content.decode() == _BODY_LIMIT_REASON
-    assert _RejectingCsrfMiddleware.calls == []
-
-
-@pytest.mark.parametrize(("_marked", "wrapped", "is_async"), _WRAPPED_PATHS)
-async def test_a_declined_callback_still_gets_a_complete_csrf_check(
-    _marked: str,
-    wrapped: str,
-    *,
-    is_async: bool,
-) -> None:
-    """Falling back must not cost the protection, only the class.
-
-    The mount the middleware declines is left on the arrangement that predates it,
-    and that arrangement's whole claim is one complete CSRF check per request. Both
-    strictnesses are asserted because either alone is non-distinguishing: a passing
-    client cannot show a check ran, and a rejected one cannot show the request
-    would otherwise reach the schema.
-
-    ``_marked`` is unused here and present only because both mounts come from one
-    parametrization.
-    """
-    body = json.dumps({"query": "{ ping }"})
-    with _chain(_ORDERED_CHAIN):
-        allowed = await _post(
-            wrapped,
-            is_async=is_async,
-            data=body,
-            content_type="application/json",
-        )
-        strict_client = (
-            AsyncClient(enforce_csrf_checks=True)
-            if is_async
-            else Client(
-                enforce_csrf_checks=True,
-            )
-        )
-        refused = await _post(
-            wrapped,
-            is_async=is_async,
-            client=strict_client,
-            data=body,
-            content_type="application/json",
-        )
-
-    assert isinstance(allowed, HttpResponse)
-    assert json.loads(allowed.content)["data"] == {"ping": "pong"}
-    assert refused.status_code == 403
-
-
-@pytest.mark.parametrize(("under", "_over", "is_async"), _MOUNTED_PATHS)
-async def test_a_chain_with_the_boundary_and_no_csrf_middleware_still_checks_csrf(
-    under: str,
-    _over: str,
-    *,
-    is_async: bool,
-) -> None:
-    """The disjunct the ordering audit deliberately admits, driven by a request.
-
-    ``_require_boundary_before_csrf`` accepts a chain with no CSRF entry at all -
-    there is no ``request.POST`` read to precede - and until this row nothing sent a
-    request through one: the audit's own accepting case only proved the chain could
-    be *built*. What protects the endpoint there is the view's unconditional CSRF
-    continuation, so the discriminating input is a client that does not pass CSRF by
-    default; with a default client both arrangements answer ``200`` and the
-    assertion would say nothing.
-
-    ``_over`` is unused here and present only because both mounts come from one
-    parametrization.
-    """
-    body = json.dumps({"query": "{ ping }"})
-    with _chain([_BOUNDARY_MIDDLEWARE_PATH]):
-        allowed = await _post(under, is_async=is_async, data=body, content_type="application/json")
-        strict_client = (
-            AsyncClient(enforce_csrf_checks=True)
-            if is_async
-            else Client(
-                enforce_csrf_checks=True,
-            )
-        )
-        refused = await _post(
-            under,
-            is_async=is_async,
-            client=strict_client,
-            data=body,
-            content_type="application/json",
-        )
-
-    assert isinstance(allowed, HttpResponse)
-    assert json.loads(allowed.content)["data"] == {"ping": "pong"}
-    assert refused.status_code == 403
 
 
 @pytest.mark.parametrize(

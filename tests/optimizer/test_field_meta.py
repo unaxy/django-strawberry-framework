@@ -25,19 +25,14 @@ from apps.library.models import (
     TaggedItem,
     Venue,
 )
-from apps.products import services
 from apps.products.models import Category, Item
-from django.db.models import QuerySet
 
-from django_strawberry_framework import DjangoOptimizerExtension, DjangoType, finalize_django_types
+from django_strawberry_framework import DjangoType, finalize_django_types
 from django_strawberry_framework.exceptions import ConfigurationError, OptimizerError
-from django_strawberry_framework.optimizer._context import DST_OPTIMIZER_PLAN
 from django_strawberry_framework.optimizer.field_meta import FieldMeta, _target_pk_name
-from django_strawberry_framework.optimizer.plans import OptimizationPlan
 from django_strawberry_framework.optimizer.selections import PYTHON_NAME_ATTR
 from django_strawberry_framework.optimizer.walker import _resolve_field_map, plan_optimizations
 from django_strawberry_framework.registry import registry
-from django_strawberry_framework.utils._narrowing import read_attr, require_instance
 from django_strawberry_framework.utils.relations import has_composite_pk
 from tests._idioms import pickle_roundtrip
 from tests._relation_fixtures import RpCompositeParent
@@ -557,7 +552,7 @@ def test_is_many_side_pins_every_relation_kind() -> None:
 
 
 def test_definition_field_map_populated() -> None:
-    """B7: definition.field_map is populated after DjangoType subclass creation."""
+    """definition.field_map is populated after DjangoType subclass creation."""
 
     class CategoryType(DjangoType):
         class Meta:
@@ -574,7 +569,7 @@ def test_definition_field_map_populated() -> None:
 
 
 def test_definition_field_map_contains_relations() -> None:
-    """B7: relation fields appear in the map with correct metadata."""
+    """Relation fields appear in the map with correct metadata."""
 
     class CategoryType(DjangoType):
         class Meta:
@@ -599,7 +594,7 @@ def test_definition_field_map_contains_relations() -> None:
 
 
 def test_definition_field_map_respects_fields_filter() -> None:
-    """B7: only Meta.fields-selected fields appear in the map."""
+    """Only Meta.fields-selected fields appear in the map."""
 
     class CategoryType(DjangoType):
         class Meta:
@@ -654,46 +649,31 @@ def test_walker_plan_never_projects_non_column_relation_names() -> None:
     assert "category" in forward_plan.select_related
 
 
-@pytest.mark.django_db
-@pytest.mark.usefixtures("django_assert_num_queries")
-def test_walker_produces_same_plan_with_cached_map() -> None:
-    """B7: the walker's plan is identical whether it uses the cached map or _meta."""
-    services.seed_data(1)
+def test_registered_field_map_reuses_the_canonical_metadata() -> None:
+    """A registered map is the canonical object with the same selected metadata as fallback."""
+    _, fallback_definition, fallback = _resolve_field_map(Item)
+    assert fallback_definition is None
 
     class CategoryType(DjangoType):
         class Meta:
             model = Category
             fields = ("id", "name")
 
-    assert registry.get(Category) is CategoryType
-
     class ItemType(DjangoType):
         class Meta:
             model = Item
             fields = ("id", "name", "category")
 
-    @strawberry.type
-    class Query:
-        def _all_items(self) -> QuerySet[Item]:
-            return Item.objects.all()
-
-        all_items: QuerySet[Item] = strawberry.field(
-            resolver=_all_items,
-            graphql_type=list[ItemType],
-        )
-
     finalize_django_types()
-    ext = DjangoOptimizerExtension()
-    schema = strawberry.Schema(query=Query, extensions=[lambda: ext])
-    ctx = SimpleNamespace()
-    result = schema.execute_sync(
-        "{ allItems { name category { name } } }",
-        context_value=ctx,
-    )
-    assert result.errors is None
-    plan = require_instance(read_attr(ctx, DST_OPTIMIZER_PLAN), OptimizationPlan)
-    # The plan should contain select_related for the forward FK.
-    assert "category" in plan.select_related
+    type_cls, definition, registered = _resolve_field_map(Item)
+    assert type_cls is ItemType
+    assert registry.get(Category) is CategoryType
+    assert definition is not None
+    assert registered is definition.field_map
+    selected = ("id", "name", "category")
+    assert {name: registered[name] for name in selected} == {
+        name: fallback[name] for name in selected
+    }
 
 
 # ---------------------------------------------------------------------------

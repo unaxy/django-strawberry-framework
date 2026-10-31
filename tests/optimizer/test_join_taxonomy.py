@@ -3,6 +3,10 @@
 The classifier's kind / connector / windowable membership is internal. Nested
 window SQL is ``examples/fakeshop/test_query/test_single_parent_fastpath_api.py``
 and ``examples/fakeshop/test_query/test_optimizer_auto_api.py``.
+
+Composite-parent reverse connection fallback is exercised over HTTP in
+``examples/fakeshop/test_query/test_mti_composite_relations_api.py``. The classifier records and
+connector objects remain private observations here.
 """
 
 from collections.abc import Callable
@@ -10,21 +14,10 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, NoReturn
 
 import pytest
-import strawberry
 from apps.library.models import Book, Branch, Genre, Patron, TaggedItem
 from apps.products.models import Category, Item
-from django.db import connection
-from django.db.models import Field, ForeignKey, ForeignObjectRel, QuerySet
-from strawberry import relay
-from strawberry.relay import NodeID
+from django.db.models import Field, ForeignKey, ForeignObjectRel
 
-from django_strawberry_framework import (
-    DjangoOptimizerExtension,
-    DjangoType,
-    finalize_django_types,
-    strawberry_config,
-)
-from django_strawberry_framework.connection import _connection_type_cache
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.optimizer.field_meta import FieldMeta
 from django_strawberry_framework.optimizer.join_taxonomy import (
@@ -33,9 +26,7 @@ from django_strawberry_framework.optimizer.join_taxonomy import (
     RelationJoinDescriptor,
     classify_relation_join,
 )
-from django_strawberry_framework.registry import registry
-from tests._idioms import json_at, json_list
-from tests._relation_fixtures import RpCompositeChild, RpCompositeParent, relation_fixture_tables
+from tests._relation_fixtures import RpCompositeChild, RpCompositeParent
 
 from ._link_models import LnkParent, LnkSlugChild
 
@@ -469,85 +460,3 @@ def test_reverse_double_with_malformed_carrier_slot_has_no_connector() -> None:
     descriptor = classify_relation_join(_as_field(double))
     assert descriptor.parent_join_columns == ()
     assert descriptor.windowable is False
-
-
-@pytest.mark.django_db(transaction=True)
-def test_composite_reverse_nested_connection_falls_back_per_parent() -> None:
-    """An unwindowable composite-FK hop resolves per-parent with exact rows.
-
-    The planner leaves the relation unplanned, so each parent reads its own
-    children through the relation manager instead of a window over a link
-    with no single partition column.
-    """
-    registry.clear()
-    _connection_type_cache.clear()
-
-    class RpChildNode(DjangoType):
-        class Meta:
-            model = RpCompositeChild
-            fields = ("name",)
-            interfaces = (relay.Node,)
-
-    assert registry.get(RpCompositeChild) is RpChildNode
-
-    class RpParentNode(DjangoType):
-        code: NodeID[str]
-
-        class Meta:
-            model = RpCompositeParent
-            fields = ("label", "code", "children")
-            interfaces = (relay.Node,)
-
-    @strawberry.type
-    class Query:
-        def _rp_parents(self) -> QuerySet[RpCompositeParent]:
-            return RpCompositeParent.objects.order_by("tenant_id", "code")
-
-        rp_parents: QuerySet[RpCompositeParent] = strawberry.field(
-            resolver=_rp_parents,
-            graphql_type=list[RpParentNode],
-        )
-
-    try:
-        with relation_fixture_tables(connection):
-            RpCompositeParent.objects.create(tenant_id=1, code="A", label="PA")
-            RpCompositeParent.objects.create(tenant_id=2, code="B", label="PB")
-            RpCompositeChild.objects.create(
-                parent_tenant_id=1,
-                parent_code="A",
-                name="a-one",
-            )
-            RpCompositeChild.objects.create(
-                parent_tenant_id=1,
-                parent_code="A",
-                name="a-two",
-            )
-            RpCompositeChild.objects.create(
-                parent_tenant_id=2,
-                parent_code="B",
-                name="b-one",
-            )
-            finalize_django_types()
-            optimizer = DjangoOptimizerExtension()
-            schema = strawberry.Schema(
-                query=Query,
-                config=strawberry_config(),
-                extensions=[lambda: optimizer],
-            )
-            result = schema.execute_sync(
-                "{ rpParents { label childrenConnection(first: 10) "
-                "{ edges { node { name } } } } }",
-            )
-            assert result.errors is None, result.errors
-            assert result.data is not None
-            by_label = {
-                json_at(row, "label"): sorted(
-                    str(json_at(edge, "node", "name"))
-                    for edge in json_list(row, "childrenConnection", "edges")
-                )
-                for row in json_list(result.data, "rpParents")
-            }
-            assert by_label == {"PA": ["a-one", "a-two"], "PB": ["b-one"]}, by_label
-    finally:
-        registry.clear()
-        _connection_type_cache.clear()
