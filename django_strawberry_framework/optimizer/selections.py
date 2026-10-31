@@ -44,12 +44,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
-from graphql import (
-    GraphQLInterfaceType,
-    GraphQLObjectType,
-    get_argument_values,
-    get_named_type,
-)
+from graphql import GraphQLInterfaceType, GraphQLObjectType, get_named_type
+from graphql.execution.values import get_argument_values
 from graphql.language.ast import (
     DirectiveNode,
     FragmentSpreadNode,
@@ -805,7 +801,7 @@ def connection_page_selected(selection: ConvertedSelection) -> bool:
     asks the same question of the wire names ``edges`` / ``pageInfo`` and answers
     ``False`` under a ``NameConverter`` that spells them otherwise (``page_info``
     under ``auto_camel_case=False``), so ``connection.py::_page_requested`` asks
-    this one after it.
+    this one instead.
     """
     return bool(named_children(selection, _EDGES) or named_children(selection, _PAGE_INFO))
 
