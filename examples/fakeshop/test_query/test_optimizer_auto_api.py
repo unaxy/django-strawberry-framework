@@ -10,7 +10,9 @@ custom-scalar variable that still shares one plan-cache identity across
 requests.
 """
 
+import logging
 from collections.abc import Callable, Iterator
+from functools import wraps
 from typing import NewType, TypeAlias
 
 import pytest
@@ -23,38 +25,46 @@ from django.db import connection
 from django.db.models import QuerySet
 from django.http import HttpRequest
 from django.http.response import HttpResponseBase
+from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import path
+from graphql_client import JSONObject, assert_graphql_success, middleware_without_debug_toolbar
 from strategy_schemas import build_strategy_schema, make_django_type
-from strawberry.django.views import GraphQLView
+from strawberry import relay
 from typing_extensions import override
 
 from django_strawberry_framework import (
     DjangoListField,
     DjangoOptimizerExtension,
+    DjangoSchema,
     DjangoType,
     OptimizerHint,
     finalize_django_types,
     strawberry_config,
 )
+from django_strawberry_framework.connection import _connection_type_cache
+from django_strawberry_framework.optimizer import logger as optimizer_logger
 from django_strawberry_framework.optimizer.nested_fetch import (
     NestedConnectionRequest,
     StrategySelection,
 )
+from django_strawberry_framework.optimizer.nested_planner import clear_index_advisory_dedup
 from django_strawberry_framework.optimizer.plans import OptimizationPlan
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing import TestClient
+from django_strawberry_framework.views import DjangoGraphQLView
 
 pytestmark = pytest.mark.urls(__name__)
 
 _current: dict[str, object | None] = {"schema": None}
 
 
+@wraps(DjangoGraphQLView.as_view())
 def _graphql_view(request: HttpRequest) -> HttpResponseBase:
     """Serve the probe schema installed by the current test's holder fixture."""
     schema = _current["schema"]
     assert schema is not None
-    return GraphQLView.as_view(schema=schema)(request)
+    return DjangoGraphQLView.as_view(schema=schema)(request)
 
 
 urlpatterns = [path("graphql/", _graphql_view), *debug_toolbar_urls()]
@@ -62,9 +72,10 @@ urlpatterns = [path("graphql/", _graphql_view), *debug_toolbar_urls()]
 
 @pytest.fixture
 def install_auto_strategy_schema(
-    _reload_project_schema_for_acceptance_tests: None,
+    private_registry: None,
 ) -> Iterator[None]:
     """Install a minimal library graph whose nested queryset is lateral-capable."""
+    del private_registry  # The dependency clears before holder declarations.
     registry.clear()
     make_django_type(
         "AutoBookType",
@@ -84,13 +95,18 @@ def install_auto_strategy_schema(
             },
         ),
     )
-    _current["schema"] = build_strategy_schema(query_type, "auto")
+    _current["schema"] = build_strategy_schema(
+        query_type,
+        "auto",
+        schema_class=DjangoSchema,
+    )
     yield
     _current["schema"] = None
 
 
 @pytest.mark.django_db
 @pytest.mark.usefixtures("install_auto_strategy_schema")
+@pytest.mark.usefixtures("private_registry")
 def test_auto_strategy_picks_the_vendor_body_and_pages_truthfully_over_http() -> None:
     """Auto runs LATERAL on Postgres, the windowed body elsewhere, with truthful page metadata."""
     branch = Branch.objects.create(name="Auto strategy", city="Boston")
@@ -140,9 +156,10 @@ def test_auto_strategy_picks_the_vendor_body_and_pages_truthfully_over_http() ->
 
 @pytest.fixture
 def install_hashable_scalar_cache_schema(
-    _reload_project_schema_for_acceptance_tests: None,
+    private_registry: None,
 ) -> Iterator[DjangoOptimizerExtension]:
     """Install a live schema whose custom scalar returns hostile hashable values."""
+    del private_registry  # The dependency clears before holder declarations.
     registry.clear()
 
     class CacheCategoryType(DjangoType):
@@ -188,7 +205,7 @@ def install_hashable_scalar_cache_schema(
 
     finalize_django_types()
     optimizer = DjangoOptimizerExtension()
-    _current["schema"] = strawberry.Schema(
+    _current["schema"] = DjangoSchema(
         query=Query,
         config=strawberry_config(extra_scalar_map={BombValue: bomb_scalar}),
         extensions=[lambda: optimizer],
@@ -198,6 +215,7 @@ def install_hashable_scalar_cache_schema(
 
 
 @pytest.mark.django_db
+@pytest.mark.usefixtures("private_registry")
 def test_repeated_live_query_survives_hashable_custom_scalar_equality(
     install_hashable_scalar_cache_schema: DjangoOptimizerExtension,
 ) -> None:
@@ -223,9 +241,10 @@ def test_repeated_live_query_survives_hashable_custom_scalar_equality(
 
 @pytest.fixture
 def install_unhashable_set_scalar_cache_schema(
-    _reload_project_schema_for_acceptance_tests: None,
+    private_registry: None,
 ) -> Iterator[DjangoOptimizerExtension]:
     """Install a live schema whose custom scalar parser returns a ``set``."""
+    del private_registry  # The dependency clears before holder declarations.
     registry.clear()
 
     class SetCacheCategoryType(DjangoType):
@@ -256,7 +275,7 @@ def install_unhashable_set_scalar_cache_schema(
 
     finalize_django_types()
     optimizer = DjangoOptimizerExtension()
-    _current["schema"] = strawberry.Schema(
+    _current["schema"] = DjangoSchema(
         query=Query,
         config=strawberry_config(extra_scalar_map={SetValue: set_scalar}),
         extensions=[lambda: optimizer],
@@ -266,6 +285,7 @@ def install_unhashable_set_scalar_cache_schema(
 
 
 @pytest.mark.django_db
+@pytest.mark.usefixtures("private_registry")
 def test_repeated_live_query_shares_plan_cache_for_unhashable_set_scalar(
     install_unhashable_set_scalar_cache_schema: DjangoOptimizerExtension,
 ) -> None:
@@ -358,9 +378,10 @@ def _book_sql(captured: CaptureQueriesContext) -> list[str]:
 
 @pytest.fixture
 def install_hinted_strategy_schema(
-    _reload_project_schema_for_acceptance_tests: None,
+    private_registry: None,
 ) -> Iterator[Callable[[StrategySelection, OptimizerHint], None]]:
     """Install a library graph whose ``booksConnection`` carries a strategy hint."""
+    del private_registry  # The dependency clears before holder declarations.
 
     def _install(default_strategy: StrategySelection, books_hint: OptimizerHint) -> None:
         registry.clear()
@@ -387,7 +408,11 @@ def install_hinted_strategy_schema(
                 },
             ),
         )
-        _current["schema"] = build_strategy_schema(query_type, default_strategy)
+        _current["schema"] = build_strategy_schema(
+            query_type,
+            default_strategy,
+            schema_class=DjangoSchema,
+        )
 
     yield _install
     _current["schema"] = None
@@ -407,6 +432,7 @@ class _RefusingNestedStrategy:
 
 
 @pytest.mark.django_db
+@pytest.mark.usefixtures("private_registry")
 def test_per_field_strategy_hint_windowed_emits_over_when_the_default_refuses(
     install_hinted_strategy_schema: Callable[[StrategySelection, OptimizerHint], None],
 ) -> None:
@@ -431,6 +457,7 @@ def test_per_field_strategy_hint_windowed_emits_over_when_the_default_refuses(
 
 @pytest.mark.django_db
 @pytest.mark.pg
+@pytest.mark.usefixtures("private_registry")
 def test_per_field_strategy_hint_windowed_under_lateral_default_skips_lateral_over_http(
     install_hinted_strategy_schema: Callable[[StrategySelection, OptimizerHint], None],
 ) -> None:
@@ -450,6 +477,7 @@ def test_per_field_strategy_hint_windowed_under_lateral_default_skips_lateral_ov
 
 @pytest.mark.django_db
 @pytest.mark.pg
+@pytest.mark.usefixtures("private_registry")
 def test_per_field_strategy_hint_lateral_under_windowed_default_emits_lateral_over_http(
     install_hinted_strategy_schema: Callable[[StrategySelection, OptimizerHint], None],
 ) -> None:
@@ -469,9 +497,10 @@ def test_per_field_strategy_hint_lateral_under_windowed_default_emits_lateral_ov
 
 @pytest.fixture
 def install_distinct_child_schema(
-    _reload_project_schema_for_acceptance_tests: None,
+    private_registry: None,
 ) -> Iterator[None]:
     """Install a library graph whose nested book queryset is ``.distinct()``."""
+    del private_registry  # The dependency clears before holder declarations.
 
     def _distinct(
         _cls: type[DjangoType],
@@ -501,13 +530,18 @@ def install_distinct_child_schema(
             },
         ),
     )
-    _current["schema"] = build_strategy_schema(query_type, "windowed")
+    _current["schema"] = build_strategy_schema(
+        query_type,
+        "windowed",
+        schema_class=DjangoSchema,
+    )
     yield
     _current["schema"] = None
 
 
 @pytest.mark.django_db
 @pytest.mark.usefixtures("install_distinct_child_schema")
+@pytest.mark.usefixtures("private_registry")
 def test_distinct_child_queryset_never_windows_over_http() -> None:
     """A target ``get_queryset`` returning ``.distinct()`` leaves the nested page unplanned.
 
@@ -524,3 +558,106 @@ def test_distinct_child_queryset_never_windows_over_http() -> None:
     assert book_sql, captured.captured_queries
     assert not any("OVER (" in sql for sql in book_sql), book_sql
     assert len(book_sql) > 1, book_sql
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("private_registry")
+class TestAdvisoryDeferredUntilWindowAccepted:
+    """Only a strategy that accepts the window emits its composite-index advisory."""
+
+    _QUERY = "{ shelves { code booksConnection(first: 2) { edges { node { title } } } } }"
+
+    class _RefuseEveryWindow:
+        name = "refuse-all"
+
+        def plan(self, _request: NestedConnectionRequest, _plan: OptimizationPlan) -> bool:
+            return False
+
+    @staticmethod
+    def _warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+        return [
+            record
+            for record in caplog.records
+            if record.levelname == "WARNING" and record.name == optimizer_logger.name
+        ]
+
+    @staticmethod
+    def _reset_type_caches() -> None:
+        registry.clear()
+        _connection_type_cache.clear()
+        clear_index_advisory_dedup()
+
+    @pytest.fixture(autouse=True)
+    def _isolate_registry(self) -> Iterator[None]:
+        """Each strategy gets its own registrations and empty advisory dedup state."""
+        self._reset_type_caches()
+        yield
+        self._reset_type_caches()
+
+    @staticmethod
+    def _shelf_books_schema(strategy: StrategySelection) -> DjangoSchema:
+        """A library holder whose public strategy decides whether its window is accepted."""
+
+        class BookNode(DjangoType):
+            class Meta:
+                model = Book
+                fields = ("id", "title")
+                interfaces = (relay.Node,)
+
+        assert registry.get(Book) is BookNode
+
+        class ShelfNode(DjangoType):
+            class Meta:
+                model = Shelf
+                fields = ("id", "code", "books")
+                interfaces = (relay.Node,)
+
+        @strawberry.type
+        class Query:
+            shelves: list[ShelfNode] = DjangoListField(ShelfNode)
+
+        finalize_django_types()
+        extension = DjangoOptimizerExtension(nested_connection_strategy=strategy)
+        return DjangoSchema(
+            query=Query,
+            config=strawberry_config(),
+            extensions=[lambda: extension],
+        )
+
+    def _post(self, strategy: StrategySelection) -> JSONObject:
+        _current["schema"] = self._shelf_books_schema(strategy)
+        try:
+            return assert_graphql_success(self._QUERY)
+        finally:
+            _current["schema"] = None
+
+    @override_settings(DEBUG=True, MIDDLEWARE=middleware_without_debug_toolbar())
+    def test_refusing_strategy_emits_no_advisory_but_windowed_does(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A refusing strategy advises no index; the accepting control advises its actual window."""
+        shelf = Shelf.objects.create(code="A", branch=Branch.objects.create(name="c"))
+        for index in range(3):
+            Book.objects.create(title=f"t{index}", shelf=shelf)
+        caplog.set_level("WARNING", logger=optimizer_logger.name)
+        expected = {
+            "shelves": [
+                {
+                    "code": "A",
+                    "booksConnection": {
+                        "edges": [{"node": {"title": "t0"}}, {"node": {"title": "t1"}}],
+                    },
+                },
+            ],
+        }
+
+        self._reset_type_caches()
+        assert self._post(self._RefuseEveryWindow()) == expected
+        assert not self._warnings(caplog)
+
+        caplog.clear()
+        self._reset_type_caches()
+        assert self._post("windowed") == expected
+        (warning,) = self._warnings(caplog)
+        assert "composite index" in warning.getMessage()

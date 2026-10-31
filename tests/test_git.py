@@ -602,24 +602,45 @@ def test_the_trust_read_keeps_order_and_list_resets(
 
 
 @pytest.mark.usefixtures("bare_caller")
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "root",
+        "shallow",
+        "log",
+        "missing-revision",
+    ],
+)
 def test_the_history_lister_reads_a_real_checkout(
     repo: Path,
     monkeypatch: pytest.MonkeyPatch,
+    operation: str,
 ) -> None:
+    """Each history-runner seam reads the same real checkout from its package subdirectory."""
     monkeypatch.chdir(repo / PACKAGE)
     monkeypatch.setenv("GIT_CONFIG_PARAMETERS", "'log.showsignature'='true'")
-
-    assert list_package_python_changes_by_commit.repo_root().resolve() == repo.resolve()
-    assert not list_package_python_changes_by_commit.is_shallow_repository(repo)
-    assert list_package_python_changes_by_commit.run_git(
-        ["log", "--format=%H"],
-        cwd=repo,
-    ) == (f"{_head(repo)}\n")
-    with pytest.raises(list_package_python_changes_by_commit.GitHistoryError):
-        _ = list_package_python_changes_by_commit.run_git(["rev-parse", "--verify", "nope"])
+    if operation == "root":
+        assert list_package_python_changes_by_commit.repo_root().resolve() == repo.resolve()
+    elif operation == "shallow":
+        assert not list_package_python_changes_by_commit.is_shallow_repository(repo)
+    elif operation == "log":
+        assert (
+            list_package_python_changes_by_commit.run_git(["log", "--format=%H"], cwd=repo)
+            == f"{_head(repo)}\n"
+        )
+    else:
+        with pytest.raises(list_package_python_changes_by_commit.GitHistoryError):
+            list_package_python_changes_by_commit.run_git(["rev-parse", "--verify", "nope"])
 
 
 @pytest.mark.usefixtures("bare_caller")
-def test_the_bench_head_reads_a_real_checkout(repo: Path, tmp_path: Path) -> None:
-    assert _bench_common.git_head(repo) == _head(repo)
-    assert _bench_common.git_head(tmp_path) == "unavailable"
+@pytest.mark.parametrize("checkout", [True, False], ids=["checkout", "outside-git"])
+def test_the_bench_head_reads_a_real_checkout(
+    repo: Path,
+    tmp_path: Path,
+    *,
+    checkout: bool,
+) -> None:
+    """A real checkout yields its HEAD; a directory outside Git yields the unavailable sentinel."""
+    root = repo if checkout else tmp_path
+    assert _bench_common.git_head(root) == (_head(repo) if checkout else "unavailable")

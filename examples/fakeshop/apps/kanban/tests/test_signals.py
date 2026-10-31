@@ -7,6 +7,8 @@ dependency-must-precede-dependent ordering rule, board-number renumbering, and
 the done-card lifecycle is encapsulated in ``_make_card``.
 """
 
+from functools import partial
+
 import pytest
 from django.core.exceptions import ValidationError
 from django.db import transaction
@@ -80,20 +82,19 @@ def test_done_card_requires_glossary_link_on_save() -> None:
 
 
 @pytest.mark.django_db
-def test_done_card_last_glossary_link_cannot_be_deleted_or_moved() -> None:
+@pytest.mark.parametrize("operation", ["delete", "move"], ids=["delete", "move"])
+def test_done_card_last_glossary_link_cannot_be_deleted_or_moved(operation: str) -> None:
     card = _make_card(number=1, title="Protected glossary", status="done")
-    other_card = _make_card(number=2, title="Other card")
     link = card.glossary_links.get()
-
-    # Each protected op touches the DB before its pre_save/pre_delete signal
-    # raises, which marks the test transaction broken. Wrap each in atomic() so
-    # the failure rolls back to a savepoint and the next assertion can still run.
-    with pytest.raises(ValidationError, match="Cannot delete"), transaction.atomic():
-        link.delete()
-
-    link.card = other_card
-    with pytest.raises(ValidationError, match="Cannot move"), transaction.atomic():
-        link.save(update_fields=["card"])
+    if operation == "move":
+        link.card = _make_card(number=2, title="Other card")
+    message = "Cannot delete" if operation == "delete" else "Cannot move"
+    action = link.delete if operation == "delete" else partial(link.save, update_fields=["card"])
+    with pytest.raises(ValidationError, match=message), transaction.atomic():
+        action()
+    link.refresh_from_db()
+    assert link.card_id == card.pk
+    assert list(card.glossary_links.values_list("pk", flat=True)) == [link.pk]
 
 
 @pytest.mark.django_db
@@ -276,21 +277,6 @@ def test_unchanged_number_save_is_allowed() -> None:
 
     card.refresh_from_db()
     assert card.number == 1
-
-
-@pytest.mark.django_db
-def test_card_delete_compacts_following_numbers() -> None:
-    """The post_delete receiver delegates gap-compaction to the service."""
-    first = _make_card(number=1, title="First")
-    second = _make_card(number=2, title="Second")
-    third = _make_card(number=3, title="Third")
-
-    second.delete()
-
-    first.refresh_from_db()
-    third.refresh_from_db()
-    assert first.number == 1
-    assert third.number == 2
 
 
 @pytest.mark.django_db

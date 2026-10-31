@@ -32,7 +32,6 @@ from scripts.build_tree_md import (
     RULE_ONE_SENTENCE,
     RULE_PARSES,
     RULE_PRESENT,
-    SENTENCE_BREAK_RE,
     ModuleDescriptionError,
     PlannedPath,
     TargetNode,
@@ -58,16 +57,20 @@ _FAKESHOP_PROJECT = REPO_ROOT / "examples" / "fakeshop"
 _FAKESHOP_APP_NAMES = fakeshop_app_names(_FAKESHOP_PROJECT / "apps")
 _CURATED_PLANNED_DESCRIPTIONS = tuple(PLANNED_PATH_DESCRIPTIONS.items())
 _FAKESHOP_TREE_SOURCE_FILES = (
-    "graphql_client.py",
-    "manage.py",
-    "schema_reload.py",
-    "strategy_schemas.py",
-    "constraints.py",
-    "filters_genre.py",
-    "serializers.py",
-    "signals.py",
-    "factories.py",
+    "examples/fakeshop/graphql_client.py",
+    "examples/fakeshop/manage.py",
+    "examples/fakeshop/schema_reload.py",
+    "examples/fakeshop/strategy_schemas.py",
+    "examples/fakeshop/apps/kanban/constraints.py",
+    "examples/fakeshop/apps/library/filters_genre.py",
+    "examples/fakeshop/apps/library/serializers.py",
+    "examples/fakeshop/apps/scalars/serializers.py",
+    "examples/fakeshop/apps/products/serializers.py",
+    "examples/fakeshop/apps/kanban/signals.py",
+    "examples/fakeshop/apps/kanban/factories.py",
+    "examples/fakeshop/apps/glossary/factories.py",
 )
+
 _FAKESHOP_APP_LOCAL_TESTS = ("test_signals.py", "test_import_spec_terms.py")
 
 
@@ -182,11 +185,6 @@ def test_planned_path_rejects_a_two_sentence_title_like_any_summary() -> None:
         _ = planned.description
 
 
-def test_curated_planned_descriptions_are_present() -> None:
-    """The curated planned-path descriptions mapping is non-empty."""
-    assert len(PLANNED_PATH_DESCRIPTIONS) > 0
-
-
 @pytest.mark.parametrize(
     ("path", "summary"),
     _CURATED_PLANNED_DESCRIPTIONS,
@@ -270,7 +268,8 @@ def test_fakeshop_project_tree_includes_source_file(
     rendered_fakeshop_project_tree: str,
 ) -> None:
     """Root helpers and app sources the renderer is meant to walk appear in the tree."""
-    assert filename in rendered_fakeshop_project_tree
+    paths = tree_row_paths(["```text", *rendered_fakeshop_project_tree.splitlines(), "```"])
+    assert filename in paths.values()
 
 
 @pytest.mark.parametrize("app_name", _FAKESHOP_APP_NAMES)
@@ -279,7 +278,8 @@ def test_fakeshop_project_tree_includes_app(
     rendered_fakeshop_project_tree: str,
 ) -> None:
     """Every filesystem-discovered fakeshop app is a directory in the project tree."""
-    assert f"{app_name}/" in rendered_fakeshop_project_tree
+    paths = tree_row_paths(["```text", *rendered_fakeshop_project_tree.splitlines(), "```"])
+    assert f"examples/fakeshop/apps/{app_name}/" in paths.values()
 
 
 def test_discovered_fakeshop_apps_equal_the_installed_local_apps() -> None:
@@ -329,11 +329,6 @@ _REJECTED_FIRST_LINES = (
 )
 
 
-def _render_accepts(sentence: str) -> bool:
-    """Return the render's acceptance predicate, restated independently of the rule names."""
-    return sentence.endswith(".") and SENTENCE_BREAK_RE.search(sentence[:-1]) is None
-
-
 def _write_module(path: Path, source: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(source, encoding="utf-8")
@@ -354,18 +349,42 @@ def fake_package(tmp_path: Path) -> Path:
     return package.resolve()
 
 
+def _render_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sentence: str) -> list[str]:
+    """Render a real module through the production tree renderer, with an isolated Git scope."""
+    module = _write_module(tmp_path / "pkg" / "__init__.py", f"{sentence!r}\n")
+    with monkeypatch.context() as patch:
+        patch.setattr(build_tree_md, "REPO_ROOT", tmp_path)
+        git_tracked_paths.cache_clear()
+        try:
+            return render_tree(module.parent)
+        finally:
+            git_tracked_paths.cache_clear()
+
+
 @pytest.mark.parametrize("sentence", _ACCEPTED_FIRST_LINES)
-def test_first_line_rule_accepts_one_period_terminated_sentence(sentence: str) -> None:
+def test_first_line_rule_accepts_one_period_terminated_sentence(
+    sentence: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Interior dots with no following space are not sentence breaks."""
     assert first_line_violations(sentence) == []
-    assert _render_accepts(sentence)
+    assert any(
+        line.endswith(f"# {sentence}") for line in _render_summary(tmp_path, monkeypatch, sentence)
+    )
 
 
 @pytest.mark.parametrize(("sentence", "rules"), _REJECTED_FIRST_LINES)
-def test_first_line_rule_names_every_broken_rule(sentence: str, rules: list[str]) -> None:
+def test_first_line_rule_names_every_broken_rule(
+    sentence: str,
+    rules: list[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Each rejection is named by rule, and the render rejects the same line."""
     assert [violation.rule for violation in first_line_violations(sentence)] == rules
-    assert not _render_accepts(sentence)
+    with pytest.raises(ModuleDescriptionError):
+        _render_summary(tmp_path, monkeypatch, sentence)
 
 
 def test_first_python_docstring_sentence_reads_the_first_physical_line_only(

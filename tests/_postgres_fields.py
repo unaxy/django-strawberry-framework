@@ -76,6 +76,12 @@ class FakeArrayField(models.Field[object, object]):
         self.base_field.model = cls
 
     @override
+    def deconstruct(self) -> tuple[str, str, list[object], dict[str, object]]:
+        """Carry a clone of ``base_field``, as a real ``ArrayField`` does, so ``clone()`` rebuilds it."""
+        name, path, args, kwargs = super().deconstruct()
+        return name, path, list(args), {**kwargs, "base_field": self.base_field.clone()}
+
+    @override
     def get_transform(self, lookup_name: str) -> type[models.Transform] | None:
         """Read an index (``0``) or a slice (``0_2``) as a real ``ArrayField`` reads them.
 

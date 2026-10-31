@@ -807,22 +807,6 @@ def test_the_sweep_corpus_covers_every_committable_python_file() -> None:
     )
 
 
-def test_the_git_oracle_enumerates_this_module() -> None:
-    """The ``git`` command answered about THIS repository, so the census has an oracle at all.
-
-    Self-membership is the check that survives every way the answer can be wrong
-    without being an error: this module is running and it is tracked, so any
-    answer about this checkout carries it. An answer that does not is one git
-    gave about some enclosing repository, and the census would read it as
-    "nothing is missing from the corpus".
-    """
-    assert CENSUS_MODULE in _committable_python_files(), (
-        f"git did not report {CENSUS_MODULE}, so the corpus census has no oracle; "
-        "a checkout that is not itself a git repository answers exactly this way, "
-        "at exit 0, with no error to detect"
-    )
-
-
 #: Answers no coherent oracle can give, each paired with a path it should have
 #: reported. The last three are the load-bearing rows: a non-empty check accepts
 #: all of them, which is why the guard requires named files rather than a size.

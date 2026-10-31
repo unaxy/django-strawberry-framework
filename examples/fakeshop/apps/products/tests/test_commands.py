@@ -30,18 +30,23 @@ User = get_user_model()
 
 @pytest.mark.django_db
 def test_seed_data_command_default_count() -> None:
+    seed_data(0)
     out = StringIO()
     call_command("seed_data", stdout=out)
     output = out.getvalue()
     assert "Done!" in output
-    assert Category.objects.count() > 0
+    assert Item.objects.count() == 5 * Category.objects.count()
+    assert Item.objects.exists()
 
 
 @pytest.mark.django_db
 def test_seed_data_command_explicit_count() -> None:
+    seed_data(0)
     out = StringIO()
     call_command("seed_data", "1", stdout=out)
     assert "Done!" in out.getvalue()
+    assert Item.objects.count() == Category.objects.count()
+    assert Item.objects.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -53,9 +58,12 @@ def test_seed_data_command_explicit_count() -> None:
 def test_delete_data_command_int_mode() -> None:
     seed_data(2)
     out = StringIO()
+    before = set(Item.objects.values_list("pk", flat=True))
+    removed = set(Item.objects.order_by("pk").values_list("pk", flat=True)[:3])
     call_command("delete_data", "3", stdout=out)
     output = out.getvalue()
     assert "Deleted" in output
+    assert set(Item.objects.values_list("pk", flat=True)) == before - removed
 
 
 @pytest.mark.django_db
@@ -78,6 +86,7 @@ def test_delete_data_command_everything_mode() -> None:
 
 @pytest.mark.django_db
 def test_delete_data_command_nothing_to_delete_warns() -> None:
+    seed_data(0)
     out = StringIO()
     call_command("delete_data", "5", stdout=out)
     assert "Nothing to delete" in out.getvalue()
@@ -85,6 +94,7 @@ def test_delete_data_command_nothing_to_delete_warns() -> None:
 
 @pytest.mark.django_db
 def test_delete_data_command_invalid_negative() -> None:
+    seed_data(0)
     err = StringIO()
     call_command("delete_data", "-1", stderr=err)
     assert "positive integer" in err.getvalue()
@@ -92,6 +102,7 @@ def test_delete_data_command_invalid_negative() -> None:
 
 @pytest.mark.django_db
 def test_delete_data_command_invalid_string() -> None:
+    seed_data(0)
     err = StringIO()
     call_command("delete_data", "garbage", stderr=err)
     assert "Invalid target" in err.getvalue()
@@ -104,6 +115,7 @@ def test_delete_data_command_invalid_string() -> None:
 
 @pytest.mark.django_db
 def test_create_users_command_default() -> None:
+    create_users(0)
     out = StringIO()
     call_command("create_users", stdout=out)
     output = out.getvalue()
@@ -113,9 +125,11 @@ def test_create_users_command_default() -> None:
 
 @pytest.mark.django_db
 def test_create_users_command_with_count() -> None:
+    create_users(0)
     out = StringIO()
     call_command("create_users", "2", stdout=out)
     assert "Done!" in out.getvalue()
+    assert User.objects.count() == 12
 
 
 # ---------------------------------------------------------------------------
@@ -127,8 +141,11 @@ def test_create_users_command_with_count() -> None:
 def test_delete_users_command_int_mode() -> None:
     create_users(1)
     out = StringIO()
+    before = set(User.objects.values_list("pk", flat=True))
+    removed = set(User.objects.order_by("pk").values_list("pk", flat=True)[:2])
     call_command("delete_users", "2", stdout=out)
     assert "Deleted" in out.getvalue()
+    assert set(User.objects.values_list("pk", flat=True)) == before - removed
 
 
 @pytest.mark.django_db
@@ -137,10 +154,12 @@ def test_delete_users_command_all_mode() -> None:
     out = StringIO()
     call_command("delete_users", "all", stdout=out)
     assert "Deleted" in out.getvalue()
+    assert not User.objects.exists()
 
 
 @pytest.mark.django_db
 def test_delete_users_command_nothing_to_delete_warns() -> None:
+    create_users(0)
     out = StringIO()
     call_command("delete_users", "5", stdout=out)
     assert "Nothing to delete" in out.getvalue()
@@ -148,6 +167,7 @@ def test_delete_users_command_nothing_to_delete_warns() -> None:
 
 @pytest.mark.django_db
 def test_delete_users_command_invalid_negative() -> None:
+    create_users(0)
     err = StringIO()
     call_command("delete_users", "-1", stderr=err)
     assert "positive integer" in err.getvalue()
@@ -155,6 +175,7 @@ def test_delete_users_command_invalid_negative() -> None:
 
 @pytest.mark.django_db
 def test_delete_users_command_invalid_string() -> None:
+    create_users(0)
     err = StringIO()
     call_command("delete_users", "garbage", stderr=err)
     assert "Invalid target" in err.getvalue()
@@ -194,6 +215,7 @@ def test_seed_shards_command_runs_when_shard_alias_present(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When ``shard_b`` is present in DATABASES, the command runs end-to-end against ``default`` only."""
+    seed_data(0)
     databases = _databases(settings)
     settings.DATABASES = {
         **databases,

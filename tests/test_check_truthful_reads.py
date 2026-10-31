@@ -924,14 +924,16 @@ def test_named_file_is_checked(repo: Path) -> None:
         ("pkg/vendored", "directory yielded no checkable file (1 exempt)"),
     ],
 )
+@pytest.mark.parametrize("mode", ["", "--check", "--report"], ids=["default", "check", "report"])
 def test_path_contributing_nothing_is_an_error_in_every_mode(
     repo: Path,
     capsys: pytest.CaptureFixture[str],
+    mode: str,
     argument: str,
     reason: str,
 ) -> None:
     _tree(repo)
-    assert ctr.main(["--report", argument]) == 1
+    assert ctr.main([*([mode] if mode else []), argument]) == 1
     captured = capsys.readouterr()
     assert f"{argument}: {reason} -- NOT checked" in captured.err
     assert _summary(captured.out).endswith("errors 1")

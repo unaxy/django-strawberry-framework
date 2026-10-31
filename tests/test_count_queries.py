@@ -115,15 +115,25 @@ def test_verdict_is_evidence_only_when_root_rows_grew(
     assert count_queries.rows_grew(root_rows) is grew
 
 
+@pytest.mark.parametrize(
+    ("value", "error"),
+    [
+        pytest.param("30,2,10", None, id="sorted"),
+        pytest.param("0,2", "positive", id="zero"),
+        pytest.param("2,2,10", "distinct", id="repeated"),
+    ],
+)
 def test_cardinalities_parse_sorted_and_refuse_zero_or_repeats(
     count_queries: _CountQueries,
+    value: str,
+    error: str | None,
 ) -> None:
-    """Cells run ascending; 0 fakes a slope and a repeat measures nothing new."""
-    assert count_queries.parse_cardinalities("30,2,10") == [2, 10, 30]
-    with pytest.raises(ValueError, match="positive"):
-        count_queries.parse_cardinalities("0,2")
-    with pytest.raises(ValueError, match="distinct"):
-        count_queries.parse_cardinalities("2,2,10")
+    """The parser sorts positive distinct cells and independently rejects each invalid shape."""
+    if error is None:
+        assert count_queries.parse_cardinalities(value) == [2, 10, 30]
+    else:
+        with pytest.raises(ValueError, match=error):
+            count_queries.parse_cardinalities(value)
 
 
 def _report(

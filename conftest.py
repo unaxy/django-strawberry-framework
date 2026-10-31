@@ -1,6 +1,6 @@
 """Repo-root pytest hooks shared by every test tree in ``testpaths``.
 
-Owns three concerns, all repo-root because each spans every test tree -
+Owns four concerns, all repo-root because each spans every test tree -
 ``tests/``, ``examples/fakeshop/test_query/``, per-app
 ``examples/fakeshop/apps/*/tests/`` - while ``tests/conftest.py`` loads only
 when ``tests/`` is collected:
@@ -22,8 +22,9 @@ when ``tests/`` is collected:
    ``DJANGO_ALLOW_ASYNC_UNSAFE``) in per-asyncio-task contextvar contexts.
    pytest-django's teardown runs ``connections.close_all()`` on the MAIN
    thread only, so those handles stay open for the life of the worker - on
-   SQLite that surfaces as the ``ResourceWarning`` handled per-test in
-   ``tests/conftest.py``; on Postgres it holds the per-worker test database
+   SQLite that surfaces as ``ResourceWarning`` (the root-installed
+   ``tests/_db_connections.py`` plugin closes those handles); on Postgres it
+   holds the per-worker test database
    open and xdist teardown intermittently fails with ``DROP DATABASE
    test_fakeshop_gwN ... is being accessed by other users``. The tracking
    here mirrors the SQLite wrapper but closes at SESSION teardown (executor
@@ -32,6 +33,10 @@ when ``tests/`` is collected:
    pytest-django drops the databases via the ``django_db_setup``
    dependency. Backend modules stay separate: this touches only
    ``django.db.backends.postgresql``.
+
+4. Model-registry restoration, installed through ``tests/_app_registry.py`` as
+   an autouse plugin so function-local model declarations in every test tree
+   are removed before later tests inspect Django's relation graph.
 """
 
 import asyncio
@@ -46,6 +51,8 @@ import pytest
 from django.core.exceptions import ImproperlyConfigured
 from django.db import connection
 from django.test import SimpleTestCase
+
+pytest_plugins = ["tests._app_registry", "tests._db_connections"]
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
