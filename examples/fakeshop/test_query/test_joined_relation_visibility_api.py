@@ -19,6 +19,7 @@ a scalar-only nested connection window.
 """
 
 from collections.abc import Callable
+from functools import wraps
 
 import pytest
 import strawberry
@@ -36,10 +37,10 @@ from django.test.utils import CaptureQueriesContext
 from django.urls import path
 from graphql_client import JSONObject, json_at, json_list, post_graphql, response_json, saved_pk
 from strategy_schemas import make_django_type
-from strawberry.django.views import GraphQLView
 
 from django_strawberry_framework import (
     DjangoListField,
+    DjangoSchema,
     DjangoType,
     finalize_django_types,
     strawberry_config,
@@ -47,17 +48,19 @@ from django_strawberry_framework import (
 from django_strawberry_framework.optimizer import DjangoOptimizerExtension
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing import AsyncTestClient
-from django_strawberry_framework.views import AsyncDjangoGraphQLView
+from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 
 _CURRENT: dict[str, strawberry.Schema | None] = {"schema": None}
 
 
+@wraps(DjangoGraphQLView.as_view())
 def _graphql_view(request: HttpRequest) -> HttpResponseBase:
     schema = _CURRENT["schema"]
     assert schema is not None
-    return GraphQLView.as_view(schema=schema)(request)
+    return DjangoGraphQLView.as_view(schema=schema)(request)
 
 
+@wraps(AsyncDjangoGraphQLView.as_view())
 async def _async_graphql_view(request: HttpRequest) -> HttpResponseBase:
     schema = _CURRENT["schema"]
     assert schema is not None
@@ -118,7 +121,13 @@ def _joined_schema(item_pk: int, entry_pk: int) -> strawberry.Schema:
         )
 
     optimizer = DjangoOptimizerExtension()
-    return strawberry.Schema(query=Query, extensions=[lambda: optimizer])
+    # These relation rows assert graphql-core's named non-null completion refusal.
+    # A consumer masking opt-out exposes that diagnostic independently of row visibility.
+    return DjangoSchema(
+        error_policy={"enabled": False},
+        query=Query,
+        extensions=[lambda: optimizer],
+    )
 
 
 def _post(schema: strawberry.Schema, query: str, *, client: Client | None = None) -> JSONObject:
@@ -313,7 +322,10 @@ def _holder_schema(
     )
 
     optimizer = DjangoOptimizerExtension()
-    return strawberry.Schema(
+    # These relation rows assert graphql-core's named non-null completion refusal.
+    # A consumer masking opt-out exposes that diagnostic independently of row visibility.
+    return DjangoSchema(
+        error_policy={"enabled": False},
         query=query,
         extensions=[lambda: optimizer],
         config=strawberry_config(),
@@ -325,6 +337,7 @@ _HOLDER_REFUSAL = "Cannot return null for non-nullable field HolderItemType.cate
 
 @pytest.mark.parametrize("query", [_DEPTH_ONE_QUERY, _DEPTH_TWO_QUERY])
 @pytest.mark.django_db
+@pytest.mark.usefixtures("private_registry")
 def test_hook_join_does_not_serve_the_planned_targets_hidden_row(query: str) -> None:
     """A JOIN the hook itself adds, at the root and inside a planned child, serves no hidden row."""
     services.seed_data(1)
@@ -336,6 +349,7 @@ def test_hook_join_does_not_serve_the_planned_targets_hidden_row(query: str) -> 
 
 
 @pytest.mark.django_db
+@pytest.mark.usefixtures("private_registry")
 def test_hookless_intermediate_join_does_not_serve_the_planned_targets_hidden_row() -> None:
     """A JOINed ``item`` hop survives while the prefetched ``category`` hop under it is released."""
     services.seed_data(1)
@@ -350,6 +364,7 @@ def test_hookless_intermediate_join_does_not_serve_the_planned_targets_hidden_ro
 
 
 @pytest.mark.django_db
+@pytest.mark.usefixtures("private_registry")
 def test_join_off_the_planned_prefetch_path_is_kept() -> None:
     """A JOIN no planned prefetch covers survives: ``item`` comes in with the entry row.
 
@@ -385,6 +400,7 @@ def _async_holder_schema() -> tuple[strawberry.Schema, str]:
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("query", [_DEPTH_ONE_QUERY, _DEPTH_TWO_QUERY])
+@pytest.mark.usefixtures("private_registry")
 async def test_async_hook_join_does_not_serve_the_planned_targets_hidden_row(query: str) -> None:
     """The same refusal on an async request, at both depths."""
     schema, hidden_name = await sync_to_async(_async_holder_schema)()
@@ -427,6 +443,7 @@ _UNREAD_HOOK_JOINS = [
 
 @pytest.mark.parametrize(("query", "expected", "statement"), _UNREAD_HOOK_JOINS)
 @pytest.mark.django_db
+@pytest.mark.usefixtures("private_registry")
 def test_hook_join_the_selection_never_reads_survives_the_projection(
     query: str,
     expected: Callable[[Item, Entry], JSONObject],
@@ -483,7 +500,7 @@ def _hooked_entries_schema(item_pk: int) -> strawberry.Schema:
         ),
     )
     optimizer = DjangoOptimizerExtension()
-    return strawberry.Schema(
+    return DjangoSchema(
         query=query,
         extensions=[lambda: optimizer],
         config=strawberry_config(),
@@ -491,6 +508,7 @@ def _hooked_entries_schema(item_pk: int) -> strawberry.Schema:
 
 
 @pytest.mark.django_db
+@pytest.mark.usefixtures("private_registry")
 def test_hook_join_survives_a_scalar_only_connection_window() -> None:
     """A ``pageInfo``-only window projects pk and connector columns and keeps the hook's JOIN."""
     services.seed_data(1)
@@ -522,6 +540,7 @@ def _unread_hook_join_rows() -> tuple[strawberry.Schema, Item, Entry]:
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize(("query", "expected", "_statement"), _UNREAD_HOOK_JOINS)
+@pytest.mark.usefixtures("private_registry")
 async def test_async_hook_join_the_selection_never_reads_survives_the_projection(
     query: str,
     expected: Callable[[Item, Entry], JSONObject],

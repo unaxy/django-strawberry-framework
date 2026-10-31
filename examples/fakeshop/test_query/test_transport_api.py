@@ -242,6 +242,47 @@ def _with_a_middleware_that_sets_the_encoding() -> override_settings:
 # ---------------------------------------------------------------------------
 
 
+def _carrying_the_packages_csrf_mark(
+    view_class: type[DjangoGraphQLView | AsyncDjangoGraphQLView],
+) -> Callable[[_ViewT], _ViewT]:
+    """Copy the package view's ``csrf_exempt`` mark - and only that one - onto a probe wrapper.
+
+    Every probe mount in this file resolves its view per request, so the callback
+    the URL resolver hands ``CsrfViewMiddleware.process_view`` is the wrapper
+    function here rather than the one ``as_view`` returned - and ``process_view``
+    reads ``csrf_exempt`` off *that* callback. A real mount needs nothing: ``as_view``
+    stamps **two** ordering marks on its callback, the withdrawable exemption and the
+    boundary marker the chain middleware recognizes, and every Django view decorator
+    carries both onward through ``functools.wraps`` (which is how fakeshop's own
+    ``ensure_csrf_cookie`` mount at ``/graphql/`` keeps them). A bare wrapper defined
+    here carries neither, so it copies the exemption - otherwise the probe mount, not
+    the package, is what loses the ordering, and a row would be measuring its own
+    scaffolding.
+
+    Copying ONLY the exemption is deliberate, and it is what these rows are for.
+    Without the boundary marker the chain middleware declines this callback, so every
+    probe mount here exercises the **view-local fallback** even though fakeshop's
+    ``MIDDLEWARE`` installs the boundary middleware. The declined-callback contract is
+    exactly that: the CSRF class degrades to Django's stock one, while the ordering and
+    the cap do not. Fakeshop's real ``/graphql/`` mount keeps both marks and therefore
+    exercises the chain-supplied arrangement, so the two halves of Decision 18 are both
+    covered live, by construction rather than by an ``override_settings`` toggle.
+
+    The value is READ FROM the package rather than hardcoded, so this raises at
+    import the day the package stops setting it. The load-bearing ordering evidence
+    is still the row that runs against fakeshop's real ``/graphql/`` mount, where no
+    scaffolding is involved at all.
+    """
+    mark = _instance_vars(view_class.as_view())["csrf_exempt"]
+
+    def decorate(view: _ViewT) -> _ViewT:
+        vars(view)["csrf_exempt"] = mark
+        return view
+
+    return decorate
+
+
+@_carrying_the_packages_csrf_mark(DjangoGraphQLView)
 def _ide_off_view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
     """The package view with the IDE and GET queries both turned off."""
     view = DjangoGraphQLView.as_view(
@@ -252,6 +293,7 @@ def _ide_off_view(request: HttpRequest, *args: object, **kwargs: object) -> Http
     return view(request, *args, **kwargs)
 
 
+@_carrying_the_packages_csrf_mark(DjangoGraphQLView)
 def _production_profile_view(
     request: HttpRequest,
     *args: object,
@@ -282,6 +324,7 @@ def _production_profile_view(
     return view(request, *args, **kwargs)
 
 
+@_carrying_the_packages_csrf_mark(AsyncDjangoGraphQLView)
 async def _async_graphql_view(
     request: HttpRequest,
     *args: object,
@@ -305,6 +348,7 @@ class _SessionActorQuery:
     session_actor: str = strawberry.field(resolver=_resolve_session_actor)
 
 
+@_carrying_the_packages_csrf_mark(AsyncDjangoGraphQLView)
 async def _async_session_actor_view(
     request: HttpRequest,
     *args: object,
@@ -383,46 +427,6 @@ class _SetupLimitedView(DjangoGraphQLView):
 _SETUP_LIMITED_CALLBACK = _SetupLimitedView.as_view(schema=_SETUP_PROBE_SCHEMA)
 
 
-def _carrying_the_packages_csrf_mark(
-    view_class: type[DjangoGraphQLView | AsyncDjangoGraphQLView],
-) -> Callable[[_ViewT], _ViewT]:
-    """Copy the package view's ``csrf_exempt`` mark - and only that one - onto a probe wrapper.
-
-    Every probe mount in this file resolves its view per request, so the callback
-    the URL resolver hands ``CsrfViewMiddleware.process_view`` is the wrapper
-    function here rather than the one ``as_view`` returned - and ``process_view``
-    reads ``csrf_exempt`` off *that* callback. A real mount needs nothing: ``as_view``
-    stamps **two** ordering marks on its callback, the withdrawable exemption and the
-    boundary marker the chain middleware recognizes, and every Django view decorator
-    carries both onward through ``functools.wraps`` (which is how fakeshop's own
-    ``ensure_csrf_cookie`` mount at ``/graphql/`` keeps them). A bare wrapper defined
-    here carries neither, so it copies the exemption - otherwise the probe mount, not
-    the package, is what loses the ordering, and a row would be measuring its own
-    scaffolding.
-
-    Copying ONLY the exemption is deliberate, and it is what these rows are for.
-    Without the boundary marker the chain middleware declines this callback, so every
-    probe mount here exercises the **view-local fallback** even though fakeshop's
-    ``MIDDLEWARE`` installs the boundary middleware. The declined-callback contract is
-    exactly that: the CSRF class degrades to Django's stock one, while the ordering and
-    the cap do not. Fakeshop's real ``/graphql/`` mount keeps both marks and therefore
-    exercises the chain-supplied arrangement, so the two halves of Decision 18 are both
-    covered live, by construction rather than by an ``override_settings`` toggle.
-
-    The value is READ FROM the package rather than hardcoded, so this raises at
-    import the day the package stops setting it. The load-bearing ordering evidence
-    is still the row that runs against fakeshop's real ``/graphql/`` mount, where no
-    scaffolding is involved at all.
-    """
-    mark = _instance_vars(view_class.as_view())["csrf_exempt"]
-
-    def decorate(view: _ViewT) -> _ViewT:
-        vars(view)["csrf_exempt"] = mark
-        return view
-
-    return decorate
-
-
 def _capped_view(
     view_class: type[DjangoGraphQLView],
     limit: int,
@@ -496,6 +500,7 @@ async def _async_cap_misconfigured_view(
     return await view(request, *args, **kwargs)
 
 
+@_carrying_the_packages_csrf_mark(AsyncDjangoGraphQLView)
 async def _async_cap_tiny_view(
     request: HttpRequest,
     *args: object,
@@ -2838,62 +2843,50 @@ async def test_the_async_view_refuses_the_same_non_utf8_form_encodings(charset: 
 
 
 @pytest.mark.django_db
-def test_genuine_utf8_and_escaped_unicode_survive_the_multipart_boundary_intact() -> None:
-    """The contract is UTF-8, not ASCII - and the accepted bytes arrive unchanged.
-
-    Four directions, because "rejects the bad shapes" is only half a contract:
-
-    1. genuine multibyte UTF-8 in the control document executes normally. This is
-       also a losslessness proof by construction, not merely an acceptance: had
-       Django replacement-decoded any of those bytes, the marker check would have
-       refused the request, so a ``200`` here means the document survived the
-       decode byte-for-byte. It is what ``JSON.stringify`` emits by default for
-       non-ASCII text, so the endpoint has not become ASCII-only.
-    2. the same text as a JSON escape executes normally too - the ASCII
-       serialization is unaffected.
-    3. an ESCAPED U+FFFD is accepted, and reaches the schema as the real
-       character: upstream echoes ``operationName`` back verbatim, so the response
-       body carries the exact bytes. That is the documented escape hatch for a
-       client that genuinely needs U+FFFD as data, and it is the pair to the
-       literal-U+FFFD refusal above - identical status, different reason,
-       different cause.
-    4. genuine multibyte UTF-8 in ``operationName`` comes back byte-for-byte in
-       upstream's error text, which is the strongest available statement that the
-       transport did not touch the bytes.
-    """
+@pytest.mark.parametrize(
+    "note",
+    [
+        pytest.param("caf\u00e9".encode(), id="raw-utf8"),
+        pytest.param(b"caf\\u00e9", id="json-escaped-unicode"),
+    ],
+)
+def test_unicode_documents_survive_the_multipart_boundary_intact(note: bytes) -> None:
+    """Both UTF-8 and JSON-escaped text reach the GraphQL document without replacement."""
     seed_data(1)
-    cafe = "caf\u00e9"
 
-    raw_utf8 = _post_multipart(
+    accepted = _post_multipart(
         Client(),
         "/graphql/",
-        _multipart_fields("operations", _operations_bytes(note=cafe.encode())),
-    )
-    escaped = _post_multipart(
-        Client(),
-        "/graphql/",
-        _multipart_fields("operations", _operations_bytes(note=b"caf\\u00e9")),
-    )
-    escaped_marker = _post_multipart(
-        Client(),
-        "/graphql/",
-        _multipart_fields("operations", _operations_bytes(operation_name=b"\\ufffd")),
-    )
-    echoed = _post_multipart(
-        Client(),
-        "/graphql/",
-        _multipart_fields("operations", _operations_bytes(operation_name=cafe.encode())),
+        _multipart_fields("operations", _operations_bytes(note=note)),
     )
 
-    for accepted in (raw_utf8, escaped):
-        assert accepted.status_code == 200
-        assert accepted.json()["data"] == {"__typename": "Query"}
+    assert accepted.status_code == 200
+    assert accepted.json()["data"] == {"__typename": "Query"}
 
-    assert escaped_marker.status_code == 400
-    assert escaped_marker.content.decode() == 'Unknown operation named "\ufffd".'
 
-    assert echoed.status_code == 400
-    assert echoed.content.decode() == f'Unknown operation named "{cafe}".'
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("operation_name", "expected"),
+    [
+        pytest.param(b"\\ufffd", "\ufffd", id="escaped-replacement-character"),
+        pytest.param("caf\u00e9".encode(), "caf\u00e9", id="raw-utf8-operation-name"),
+    ],
+)
+def test_multipart_operation_names_reach_upstream_without_loss(
+    operation_name: bytes,
+    expected: str,
+) -> None:
+    """Upstream echoes each supplied Unicode operation name without transport replacement."""
+    seed_data(1)
+
+    response = _post_multipart(
+        Client(),
+        "/graphql/",
+        _multipart_fields("operations", _operations_bytes(operation_name=operation_name)),
+    )
+
+    assert response.status_code == 400
+    assert response.content.decode() == f'Unknown operation named "{expected}".'
 
 
 @pytest.mark.django_db
@@ -2949,7 +2942,7 @@ def test_a_middleware_set_request_encoding_is_not_masked_by_a_declared_utf8_char
     * the exploit body itself: a raw Latin-1 byte in ``operations``, refused. It
       is the shape the marker check cannot see, because a Latin-1 decode never
       fails (proved at the package tier in
-      ``tests/test_views.py::test_a_declared_utf8_charset_does_not_mask_a_middleware_set_request_encoding``).
+      ``tests/test_views.py::test_djangos_effective_latin1_multipart_decode_preserves_bytes_without_replacement``).
 
     Run against fakeshop's real ``/graphql/`` - the shipped mount - because the
     whole subject is a deployment shape.

@@ -1,4 +1,4 @@
-"""Optimizer execution over relations whose link is not a plain pk ``ForeignKey``.
+"""Live HTTP execution over relations whose link is not a plain pk ``ForeignKey``.
 
 A child joins its parent through a ``ForeignObject`` (one or two carrier
 columns), a ``ForeignKey`` bound on a non-pk ``to_field``, or an M2M whose
@@ -11,38 +11,49 @@ parent ``.only()``, so no row refetches a deferred link column. A two-column lin
 has no single partition expression and resolves per parent. A forward hop loads
 its own carriers and, on the Prefetch path, every target column of the link.
 
-Fakeshop carries no ``ForeignObject`` and exposes no reverse relation over a
-``to_field`` link, so the test-local models of
-``tests/optimizer/_link_models.py`` stand in. Each row compares the optimized
-wire against the optimizer-off wire and pins the optimized query count.
+Fakeshop does not publish every link direction and cardinality exercised here, so
+the test-local models of
+``tests/optimizer/_link_models.py`` stand in on a holder HTTP mount. Each row compares
+the optimized wire against the optimizer-off wire and pins the optimized query count.
+
+A raw JSON filter holder deliberately registers no parent type, so a two-column
+relation's ``isnull`` filter tests the stored carriers instead of joining a parent.
 """
 
 from collections.abc import Callable, Iterator
+from functools import wraps
 
 import pytest
 import strawberry
 from django.db import connection
 from django.db.models import QuerySet
+from django.http import HttpRequest, HttpResponseBase
+from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
+from django.urls import path
+from graphql_client import JSONObject, assert_graphql_success
 from strategy_schemas import make_django_type
 from strawberry import relay
+from strawberry.scalars import JSON
 
 from django_strawberry_framework import (
     DjangoConnection,
     DjangoConnectionField,
     DjangoListField,
     DjangoOptimizerExtension,
+    DjangoSchema,
     DjangoType,
     OptimizerHint,
     finalize_django_types,
     strawberry_config,
 )
 from django_strawberry_framework.connection import _connection_type_cache
+from django_strawberry_framework.filters import FilterSet
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.utils._narrowing import is_dict, is_list, is_str, require
+from django_strawberry_framework.views import DjangoGraphQLView
 from tests._idioms import is_object_dict, is_object_list
-
-from ._link_models import (
+from tests.optimizer._link_models import (
     LnkColumnChild,
     LnkOptionalPairChild,
     LnkPairChild,
@@ -52,7 +63,38 @@ from ._link_models import (
     link_fixture_tables,
 )
 
-pytestmark = pytest.mark.usefixtures("isolate_global_registry")
+pytestmark = pytest.mark.usefixtures("private_registry")
+
+_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
+
+
+@wraps(DjangoGraphQLView.as_view())
+def _graphql_view(request: HttpRequest) -> HttpResponseBase:
+    schema = _CURRENT["schema"]
+    assert schema is not None
+    return DjangoGraphQLView.as_view(schema=schema)(request)
+
+
+urlpatterns = [path("graphql-link/", _graphql_view)]
+
+
+def _post(schema: DjangoSchema, query: str) -> JSONObject:
+    """Send the operation through the package view using the current holder schema."""
+    _CURRENT["schema"] = schema
+    try:
+        with override_settings(ROOT_URLCONF=__name__):
+            return assert_graphql_success(query, url="/graphql-link/")
+    finally:
+        _CURRENT["schema"] = None
+
+
+def _link_statements(captured: CaptureQueriesContext) -> list[str]:
+    """Count statements over the synthetic link graph, excluding middleware queries."""
+    return [
+        query["sql"]
+        for query in captured.captured_queries
+        if '"products_lnk' in query["sql"] or "`products_lnk" in query["sql"]
+    ]
 
 
 @pytest.fixture
@@ -72,7 +114,7 @@ def _parent_visibility(
     return queryset
 
 
-def _schema(*, optimizer: bool, parent_hook: bool) -> strawberry.Schema:
+def _schema(*, optimizer: bool, parent_hook: bool) -> DjangoSchema:
     registry.clear()
     _connection_type_cache.clear()
     make_django_type("LnkPairChildType", LnkPairChild, ("id", "name"))
@@ -124,20 +166,17 @@ def _schema(*, optimizer: bool, parent_hook: bool) -> strawberry.Schema:
     if optimizer:
         extension = DjangoOptimizerExtension()
         extensions = [lambda: extension]
-    return strawberry.Schema(query=query_cls, config=strawberry_config(), extensions=extensions)
+    return DjangoSchema(query=query_cls, config=strawberry_config(), extensions=extensions)
 
 
 def _run(query: str, *, parent_hook: bool = False) -> tuple["_WireData", int]:
     """Execute ``query`` optimized; return its data and query count after the oracle agrees."""
-    expected = _schema(optimizer=False, parent_hook=parent_hook).execute_sync(query)
-    assert expected.errors is None, expected.errors
+    expected = _post(_schema(optimizer=False, parent_hook=parent_hook), query)
     schema = _schema(optimizer=True, parent_hook=parent_hook)
     with CaptureQueriesContext(connection) as ctx:
-        result = schema.execute_sync(query)
-    assert result.errors is None, result.errors
-    assert result.data is not None
-    assert result.data == expected.data
-    return require(result.data, is_object_dict), len(ctx.captured_queries)
+        data = _post(schema, query)
+    assert data == expected
+    return require(data, is_object_dict), len(_link_statements(ctx))
 
 
 #: One decoded GraphQL wire object; each member is narrowed where a test reads it.
@@ -388,7 +427,7 @@ def test_m2m_through_to_field_link_loads_the_source_key(row: str) -> None:
     assert queries == 2
 
 
-def _pair_parent_schema(*, optimizer: bool, route: str) -> strawberry.Schema:
+def _pair_parent_schema(*, optimizer: bool, route: str) -> DjangoSchema:
     """Expose the two-column forward ``ForeignObject`` through a consumer-authored field.
 
     ``"annotation"`` annotates ``parent`` over a target whose ``get_queryset``
@@ -429,7 +468,7 @@ def _pair_parent_schema(*, optimizer: bool, route: str) -> strawberry.Schema:
     if optimizer:
         extension = DjangoOptimizerExtension()
         extensions = [lambda: extension]
-    return strawberry.Schema(query=query_cls, config=strawberry_config(), extensions=extensions)
+    return DjangoSchema(query=query_cls, config=strawberry_config(), extensions=extensions)
 
 
 @pytest.mark.django_db(transaction=True)
@@ -445,23 +484,20 @@ def test_consumer_authored_two_column_forward_link_prefetch_loads_every_target(
     alongside the child's two carriers, so no row on either side refetches.
     """
     query = "{ pairs { name parent { label } } }"
-    expected = _pair_parent_schema(optimizer=False, route=route).execute_sync(query)
-    assert expected.errors is None, expected.errors
+    expected = _post(_pair_parent_schema(optimizer=False, route=route), query)
     schema = _pair_parent_schema(optimizer=True, route=route)
     with CaptureQueriesContext(connection) as ctx:
-        result = schema.execute_sync(query)
-    assert result.errors is None, result.errors
-    assert result.data == expected.data
-    assert result.data is not None
+        data = _post(schema, query)
+    assert data == expected
     assert [
-        (_at(row, "name"), _at(row, "parent", "label")) for row in _list_at(result.data, "pairs")
+        (_at(row, "name"), _at(row, "parent", "label")) for row in _list_at(data, "pairs")
     ] == [
         ("a1", "pa"),
         ("a2", "pa"),
         ("a3", "pa"),
         ("b1", "pb"),
     ]
-    assert len(ctx.captured_queries) == 2
+    assert len(_link_statements(ctx)) == 2
 
 
 def _generated_pair_schema(
@@ -469,7 +505,7 @@ def _generated_pair_schema(
     optimizer: bool,
     parent_hook: bool,
     child_model: type = LnkPairChild,
-) -> strawberry.Schema:
+) -> DjangoSchema:
     """Expose a two-column forward ``ForeignObject`` as the generated ``parent`` field.
 
     The child type names ``parent`` in ``Meta.fields``; the parent type exposes
@@ -514,7 +550,7 @@ def _generated_pair_schema(
     if optimizer:
         extension = DjangoOptimizerExtension()
         extensions = [lambda: extension]
-    return strawberry.Schema(query=query_cls, config=strawberry_config(), extensions=extensions)
+    return DjangoSchema(query=query_cls, config=strawberry_config(), extensions=extensions)
 
 
 def _run_generated(
@@ -527,25 +563,23 @@ def _run_generated(
 
     The optimizer-off wire is the oracle: the optimized data must equal it.
     """
-    expected = _generated_pair_schema(
-        optimizer=False,
-        parent_hook=parent_hook,
-        child_model=child_model,
-    ).execute_sync(query)
-    assert expected.errors is None, expected.errors
+    expected = _post(
+        _generated_pair_schema(
+            optimizer=False,
+            parent_hook=parent_hook,
+            child_model=child_model,
+        ),
+        query,
+    )
     schema = _generated_pair_schema(
         optimizer=True,
         parent_hook=parent_hook,
         child_model=child_model,
     )
     with CaptureQueriesContext(connection) as ctx:
-        result = schema.execute_sync(query)
-    assert result.errors is None, result.errors
-    assert result.data is not None
-    assert result.data == expected.data
-    return require(result.data, is_object_dict), [
-        captured["sql"] for captured in ctx.captured_queries
-    ]
+        data = _post(schema, query)
+    assert data == expected
+    return require(data, is_object_dict), _link_statements(ctx)
 
 
 def _pair_rows(data: _WireData) -> list[object]:
@@ -685,3 +719,82 @@ def test_generated_nullable_two_column_forward_link_resolves_absent_parents_to_n
     assert len(sql) == queries
     if not parent_hook:
         assert 'LEFT OUTER JOIN "products_lnkparent"' in sql[0]
+
+
+def _unregistered_pair_filter_schema() -> DjangoSchema:
+    class PairFilter(FilterSet):
+        class Meta:
+            model = LnkOptionalPairChild
+            fields = {"parent": ["isnull"]}
+
+    class PairOutput(DjangoType):
+        class Meta:
+            model = LnkOptionalPairChild
+            fields = ("name",)
+
+    def resolve_rows(
+        root: object,
+        info: strawberry.Info[object, object],
+        where: JSON,
+    ) -> QuerySet[LnkOptionalPairChild]:
+        del root
+        return PairFilter.apply_sync(where, LnkOptionalPairChild.objects.order_by("id"), info)
+
+    def resolve_all(root: object) -> QuerySet[LnkOptionalPairChild]:
+        del root
+        return LnkOptionalPairChild.objects.order_by("id")
+
+    @strawberry.type
+    class Query:
+        rows: QuerySet[LnkOptionalPairChild] = strawberry.field(
+            resolver=resolve_rows,
+            graphql_type=list[PairOutput],
+        )
+        all_rows: QuerySet[LnkOptionalPairChild] = strawberry.field(
+            resolver=resolve_all,
+            graphql_type=list[PairOutput],
+        )
+
+    finalize_django_types()
+    optimizer = DjangoOptimizerExtension()
+    return DjangoSchema(
+        query=Query,
+        config=strawberry_config(),
+        extensions=[lambda: optimizer],
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("link_tables")
+@pytest.mark.parametrize(
+    ("is_null", "names"),
+    [(True, ["o2", "o3"]), (False, ["o1", "o4"])],
+    ids=["null-carrier", "set-carriers"],
+)
+def test_unregistered_two_column_relation_filters_test_null_carriers_without_joining_a_parent(
+    *,
+    is_null: bool,
+    names: list[str],
+) -> None:
+    """A dangling pair with two set carriers stays nonnull; either null carrier answers null."""
+    schema = _unregistered_pair_filter_schema()
+    literal = "true" if is_null else "false"
+    query = "{ rows(where: { parent: { is_null: " + literal + " } }) { name } allRows { name } }"
+    with CaptureQueriesContext(connection) as captured:
+        payload = _post(schema, query)
+    assert payload == {
+        "rows": [{"name": name} for name in names],
+        "allRows": [
+            {"name": name}
+            for name in (
+                "o1",
+                "o2",
+                "o3",
+                "o4",
+            )
+        ],
+    }, payload
+    statements = _link_statements(captured)
+    assert len(statements) == 2, statements
+    assert all(" JOIN " not in statement.upper() for statement in statements), statements
+    assert all('"products_lnkparent"' not in statement for statement in statements), statements

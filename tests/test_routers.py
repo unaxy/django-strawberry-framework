@@ -1598,39 +1598,33 @@ def test_http_branch_is_the_supplied_django_application_by_identity() -> None:
     assert not isinstance(http_branch, (CookieMiddleware, URLRouter, OriginValidator))
 
 
-def test_construction_rejects_an_omitted_or_unusable_django_application() -> None:
-    """Spec-046 Decision 3: omission is ``TypeError``; unusable is ``ConfigurationError``.
-
-    Omission fails as a required parameter should - Python's own signature
-    binding, naming the parameter. Explicit ``None`` (what an asgi.py written for
-    the removed consumer-served HTTP mode still passes) and any non-callable get
-    the prose instead, naming all
-    three facts Error shapes requires: the security reason that mode is
-    unsafe, that the mode is REMOVED rather than flagged, and both halves of the
-    two-place repair. The message substrings are
-    deliberately RE-TYPED rather than imported from the module: asserting the
-    constant against itself could never catch the hint drifting.
-
-    Fakeshop has no ``config/asgi.py`` or WebSocket mount (rungs 1-3). Live HTTP
-    sibling: ``examples/fakeshop/test_query/test_transport_api.py``.
-    """
+def test_construction_requires_the_django_application_argument() -> None:
+    """Omitting the required Django application fails at Python signature binding."""
     with pytest.raises(TypeError, match="django_application"):
-        # basedpyright: deliberately omits the required application; the test proves the TypeError
+        # basedpyright: the missing required argument is the signature refusal under test.
         _router_class()(SCHEMA)  # pyright: ignore[reportCallIssue]
 
-    for unusable in (None, object()):
-        with pytest.raises(ConfigurationError) as exc_info:
-            _router(django_application=unusable)
-        message = str(exc_info.value)
-        assert "ALLOWED_HOSTS" in message
-        assert "REMOVED" in message
-        assert "get_asgi_application" in message
-        # Both mounts, each by its resolver shape; a word boundary keeps the async view's
-        # name from satisfying the sync view's row.
-        assert re.findall(
-            r"\b(\w*DjangoGraphQLView)\.as_view\(schema=schema\)\)` when",
-            message,
-        ) == ["AsyncDjangoGraphQLView", "DjangoGraphQLView"]
+
+@pytest.mark.parametrize("unusable", [None, object()], ids=["explicit-none", "non-callable"])
+def test_construction_rejects_an_unusable_django_application(unusable: object) -> None:
+    """An unusable HTTP application receives the actionable deployment configuration error.
+
+    This constructor-time refusal names the removed routing mode and both halves
+    of the repair. Fakeshop has no WebSocket mount (rungs 1-3); HTTP behavior
+    lives in ``examples/fakeshop/test_query/test_transport_api.py``.
+    """
+    with pytest.raises(ConfigurationError) as exc_info:
+        _router(django_application=unusable)
+    message = str(exc_info.value)
+    assert "ALLOWED_HOSTS" in message
+    assert "REMOVED" in message
+    assert "get_asgi_application" in message
+    # Both mounts, each by its resolver shape; a word boundary keeps the async view's
+    # name from satisfying the sync view's row.
+    assert re.findall(
+        r"\b(\w*DjangoGraphQLView)\.as_view\(schema=schema\)\)` when",
+        message,
+    ) == ["AsyncDjangoGraphQLView", "DjangoGraphQLView"]
 
 
 def test_graphql_http_consumer_left_the_router_module_entirely() -> None:
@@ -3007,8 +3001,9 @@ def test_the_host_projection_matches_djangos_asgi_adapter_key_for_key(
     negative direction: the projection must produce NOTHING beyond the four keys
     ``get_host()`` reads, so a later edit that "completes" it with
     ``HTTP_X_FORWARDED_PORT`` or the ``SECURE_PROXY_SSL_HEADER`` header - both
-    provably verdict-neutral - fails here rather than silently widening a security
-    boundary's input surface.
+    verdict-neutral whenever a host header is present, see
+    ``consumers.py::_host_validation_request`` for the hostless case - fails here
+    rather than silently widening a security boundary's input surface.
 
     WebSocket Host handshake is not the HTTP ``ALLOWED_HOSTS`` boundary. Live HTTP
     sibling: ``examples/fakeshop/test_query/test_transport_api.py``
@@ -7345,7 +7340,11 @@ async def test_a_cancellation_during_the_refusal_close_propagates(handler_class:
 
 
 @pytest.mark.parametrize("handler_class", _revalidating_handler_classes())
-async def test_a_process_level_exception_bypasses_the_guard(handler_class: type) -> None:
+@pytest.mark.parametrize("escape", ["generator-exit", "base-exception"])
+async def test_a_process_level_exception_bypasses_the_guard(
+    handler_class: type,
+    escape: str,
+) -> None:
     """The guard catches ``Exception`` only, BY INHERITANCE, not by name.
 
     ``GeneratorExit`` and a bespoke ``BaseException`` subclass must both escape
@@ -7362,9 +7361,9 @@ async def test_a_process_level_exception_bypasses_the_guard(handler_class: type)
     class _ProcessLevelSentinel(BaseException):
         """A stand-in for any present or future process-level exception."""
 
-    for bypass in (GeneratorExit(), _ProcessLevelSentinel()):
-        transport = _ScriptedTransport(iter_exception=bypass)
-        handler = _mounted_handler(handler_class, transport)
-        with pytest.raises(type(bypass)):
-            await handler.handle()
-        assert transport.closes == [], "a process-level escape must not be refused"
+    bypass = GeneratorExit() if escape == "generator-exit" else _ProcessLevelSentinel()
+    transport = _ScriptedTransport(iter_exception=bypass)
+    handler = _mounted_handler(handler_class, transport)
+    with pytest.raises(type(bypass)):
+        await handler.handle()
+    assert transport.closes == [], "a process-level escape must not be refused"

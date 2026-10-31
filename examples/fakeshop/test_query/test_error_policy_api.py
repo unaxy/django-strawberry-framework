@@ -63,13 +63,14 @@ import logging
 import re
 import threading
 from collections.abc import Awaitable, Callable, Coroutine, Generator, Iterator, Mapping
-from functools import cache
+from functools import cache, wraps
 from logging import LogRecord
 from typing import TYPE_CHECKING, TypeAlias
 
 import pytest
 import strawberry
 from apps.products import models as product_models
+from apps.products import schema as products_schema
 from apps.products.services import create_users, seed_data
 from config import schema as config_schema
 from django.conf import settings
@@ -79,7 +80,6 @@ from django.http.response import HttpResponseBase
 from django.test import Client
 from django.test import override_settings as _override_settings
 from django.urls import include, path
-from django.views.decorators.csrf import csrf_exempt
 from graphql import GraphQLError
 from graphql_client import (
     JSONObject,
@@ -106,6 +106,7 @@ from django_strawberry_framework import (
 )
 from django_strawberry_framework.error_policy import DEFAULT_ERROR_POLICY
 from django_strawberry_framework.testing import AsyncTestClient, Response
+from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 
 if TYPE_CHECKING:
@@ -147,6 +148,20 @@ _CUSTOM_KEY = "supportReference"
 #: under the ambient ``DEBUG=False`` and fail the request for a reason that has
 #: nothing to do with the policy.
 _DEBUG_PASS_THROUGH = {"DEBUG": True, "MIDDLEWARE": middleware_without_debug_toolbar()}
+
+
+class _FailingCompletionList(list[str]):
+    """A resolved list whose iteration fails after one successfully completed item."""
+
+    @override
+    def __iter__(self) -> Iterator[str]:
+        yield "first"
+        raise RuntimeError(_SENSITIVE_OTHER)
+
+
+def _null_completion_value() -> object:
+    """Return the intentionally invalid resolved value through its declared object boundary."""
+    return None
 
 
 def _probe_query_type() -> type:
@@ -198,19 +213,16 @@ def _probe_query_type() -> type:
             info.schema.error_policy.__dict__["enabled"] = False
             return "written"
 
-        @strawberry.field
-        def boom_non_null(self) -> str:
-            """Raise from a NON-NULL field, reaching the client through value completion.
-
-            The error arrives via graphql-core's value-COMPLETION phase (null propagation)
-            rather than as a nullable field's own entry.
-            """
-            raise ValueError(_SENSITIVE)
+        boom_non_null: object = strawberry.field(
+            resolver=_null_completion_value,
+            graphql_type=str,
+            description="Return an invalid null during non-null completion.",
+        )
 
         @strawberry.field
         def boom_items(self) -> list[str]:
-            """Raise while completing a LIST item, the other completion-phase shape."""
-            raise RuntimeError(_SENSITIVE_OTHER)
+            """Return a list that raises while graphql-core completes its iteration."""
+            return _FailingCompletionList()
 
     return ProbeQuery
 
@@ -241,11 +253,12 @@ def _probe_schema(**schema_kwargs: Unpack[_ProbeSchemaOptions]) -> DjangoSchema:
 def _probe_view(**schema_kwargs: Unpack[_ProbeSchemaOptions]) -> Callable[..., HttpResponseBase]:
     """Mount the sync package view over a probe schema built per request."""
 
+    @wraps(DjangoGraphQLView.as_view())
     def view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
         built = DjangoGraphQLView.as_view(schema=_probe_schema(**schema_kwargs))
         return built(request, *args, **kwargs)
 
-    return csrf_exempt(view)
+    return view
 
 
 def _probe_async_view(
@@ -253,11 +266,12 @@ def _probe_async_view(
 ) -> Callable[..., Coroutine[object, object, HttpResponseBase]]:
     """The async twin of ``_probe_view``, so parity is proven on a real event loop."""
 
+    @wraps(AsyncDjangoGraphQLView.as_view())
     async def view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
         built = AsyncDjangoGraphQLView.as_view(schema=_probe_schema(**schema_kwargs))
         return await built(request, *args, **kwargs)
 
-    return csrf_exempt(view)
+    return view
 
 
 #: The document-token ceiling the ``RESOURCE_LIMIT_EXCEEDED`` row trips. Small
@@ -545,11 +559,12 @@ def _shared_entry_schema(spelling: str) -> DjangoSchema:
 def _shared_entry_view(spelling: str) -> Callable[..., HttpResponseBase]:
     """Mount the synchronous package view over one entry spelling."""
 
+    @wraps(DjangoGraphQLView.as_view())
     def view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
         built = DjangoGraphQLView.as_view(schema=_shared_entry_schema(spelling))
         return built(request, *args, **kwargs)
 
-    return csrf_exempt(view)
+    return view
 
 
 def _shared_entry_async_view(
@@ -557,11 +572,12 @@ def _shared_entry_async_view(
 ) -> Callable[..., Coroutine[object, object, HttpResponseBase]]:
     """Mount the asynchronous package view over one entry spelling."""
 
+    @wraps(AsyncDjangoGraphQLView.as_view())
     async def view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
         built = AsyncDjangoGraphQLView.as_view(schema=_shared_entry_schema(spelling))
         return await built(request, *args, **kwargs)
 
-    return csrf_exempt(view)
+    return view
 
 
 #: Where each entry spelling is mounted, per view color.
@@ -702,6 +718,7 @@ def test_an_unexpected_exception_reaches_the_client_as_the_policy_message_only()
 def test_an_exception_surfaced_through_value_completion_is_masked_too(
     document: str,
     sensitive: str,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """graphql-core raises from two phases, and both are masked (spec-048 Decision 8).
 
@@ -713,10 +730,29 @@ def test_an_exception_surfaced_through_value_completion_is_masked_too(
     like the completion phase would look identical on every other row in this
     file, which is why these two are their own.
     """
+    caplog.set_level(logging.ERROR, logger=_PACKAGE_LOGGER)
     response, payload = _post("/ep/", document)
-    _masked_error(payload)
+    error = _masked_error(payload)
+    field = "boomNonNull" if document == "{ boomNonNull }" else "boomItems"
+    assert error["path"] == [field]
     assert payload["data"] is None
     assert sensitive not in response.content.decode()
+    records = [
+        record
+        for record in caplog.records
+        if record.name == _PACKAGE_LOGGER and record.levelno == logging.ERROR
+    ]
+    assert len(records) == 1, caplog.records
+    original = records[0].exc_info
+    assert original is not None
+    assert original[2] is not None
+    if field == "boomNonNull":
+        assert isinstance(original[1], TypeError)
+        assert "Cannot return null for non-nullable field" in str(original[1])
+        assert "boomNonNull" in str(original[1])
+    else:
+        assert isinstance(original[1], RuntimeError)
+        assert str(original[1]) == _SENSITIVE_OTHER
 
 
 @pytest.mark.django_db
@@ -778,9 +814,7 @@ def test_a_factory_resolving_to_the_masker_refuses_the_request_instead_of_maskin
     """
     caplog.set_level(logging.ERROR, logger=_PACKAGE_LOGGER)
     _FactoryHookWitness.ran.clear()
-
     _, payload = _post("/ep-factory/", "{ boom }")
-
     assert payload["data"] is None, payload
     assert [json_at(error, "extensions", "code") for error in json_list(payload, "errors")] == [
         SCHEMA_CONFIGURATION_ERROR_CODE,
@@ -788,15 +822,17 @@ def test_a_factory_resolving_to_the_masker_refuses_the_request_instead_of_maskin
     assert _SENSITIVE not in json.dumps(payload)
     assert "correlationId" not in json.dumps(payload)
     assert "execute" not in _FactoryHookWitness.ran, _FactoryHookWitness.ran
-
     records = [
         record
         for record in caplog.records
         if record.name == _PACKAGE_LOGGER and record.levelno == logging.ERROR
     ]
-    # The refusal names the cause for the operator. A mask would instead log the
-    # correlation id the client was handed, with the original traceback attached.
-    assert [record.exc_info for record in records] == [None] * len(records), caplog.records
+    assert records, caplog.records
+    assert all(
+        record.getMessage().startswith("Refusing every operation on this schema:")
+        for record in records
+    )
+    assert all(record.exc_info is None for record in records)
 
 
 @pytest.mark.django_db
@@ -974,35 +1010,39 @@ def test_a_field_error_envelope_is_untouched_because_it_is_data_not_an_error() -
     create_users(1)
     seed_data(1)
     category = product_models.Category.objects.earliest("pk")
-    existing = product_models.Item.objects.create(name="EnvelopeDup", category=category)
-
+    product_models.Category.objects.filter(pk=category.pk).update(is_private=False)
+    existing = product_models.Item.objects.order_by("pk")[0]
+    product_models.Item.objects.filter(pk=existing.pk).update(
+        name="EnvelopeDup",
+        category=category,
+    )
+    existing.refresh_from_db()
     user = User.objects.get(username="view_item_1")
     user.user_permissions.add(
         Permission.objects.get(codename="add_item", content_type__app_label="products"),
     )
     client = Client()
     client.force_login(User.objects.get(username=user.username))
-
     _, payload = _post(
         "/graphql/",
-        "mutation($d: ItemInput!) { createItem(data: $d) { "
-        "node { name } errors { field messages } } }",
+        "mutation($d: ItemInput!) { createItem(data: $d) { node { name } errors { field messages } } }",
         variables={
             "d": {
                 "name": existing.name,
-                "categoryId": str(
-                    relay.GlobalID(type_name="products.category", node_id=str(category.pk)),
-                ),
+                "categoryId": global_id_for(products_schema.CategoryType, category.pk),
             },
         },
         client=client,
     )
     assert "errors" not in payload, payload
     envelope = json_object(payload, "data", "createItem")
-    assert envelope["node"] is None
-    assert json_at(envelope, "errors", 0, "field") == "__all__"
-    # The validation prose reaches the client unaltered - the envelope is data.
-    assert json_at(envelope, "errors", 0, "messages"), envelope
+    assert envelope == {
+        "node": None,
+        "errors": [
+            {"field": "__all__", "messages": ["Item with this Category and Name already exists."]},
+        ],
+    }
+    assert product_models.Item.objects.filter(category=category, name=existing.name).count() == 1
 
 
 # ---------------------------------------------------------------------------

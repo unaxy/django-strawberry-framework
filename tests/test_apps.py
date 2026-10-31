@@ -41,12 +41,6 @@ from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import read_attr
 
 
-def test_djangostrawberryframeworkconfig_importable_from_apps_module() -> None:
-    # The top-level import is the load-bearing assertion; if it fails,
-    # pytest collection fails before this body runs.
-    assert DjangoStrawberryFrameworkConfig is not None
-
-
 def test_djangostrawberryframeworkconfig_is_appconfig_subclass() -> None:
     assert issubclass(DjangoStrawberryFrameworkConfig, django.apps.AppConfig)
 
@@ -94,17 +88,6 @@ def test_djangostrawberryframeworkconfig_defines_no_extra_appconfig_attributes(
     )
 
 
-def test_djangostrawberryframeworkconfig_defines_ready_for_django_patches() -> None:
-    """The package's ``AppConfig.ready()`` applies the upstream patches.
-
-    Pinned so a future refactor that removes the ``ready()`` body outright fails loudly;
-    the dispatch behavior itself is pinned by
-    ``test_ready_dispatches_all_four_patch_appliers_and_refires_safely``.
-    """
-    assert "ready" in DjangoStrawberryFrameworkConfig.__dict__
-    assert callable(truth.class_dict(DjangoStrawberryFrameworkConfig)["ready"])
-
-
 # Every upstream class attribute, then every upstream module global, the four patch
 # modules replace. A test that drives ``apply()`` (directly or through ``ready()``)
 # mutates process-global state at each of these slots, so a test that also perturbs the
@@ -117,7 +100,10 @@ _PATCHED_SLOTS = (
     (AsyncBaseHTTPView, "parse_multipart"),
     (DjangoHTTPRequestAdapter, "body"),
     (ExecutionContext, "complete_list_value"),
+    (relay_types.ListConnection, "resolve_connection"),
 )
+
+
 _PATCHED_MODULE_SLOTS = ((relay_types, "should_resolve_list_connection_edges"),)
 
 
@@ -158,6 +144,13 @@ def test_ready_dispatches_all_four_patch_appliers_and_refires_safely(
         BaseView,
         "parse_query_params",
         _strawberry_patches._original_parse_query_params,
+    )
+    original_connection = _strawberry_patches._original_relay_list_connection
+    assert callable(original_connection)
+    monkeypatch.setattr(
+        relay_types.ListConnection,
+        "resolve_connection",
+        classmethod(original_connection),
     )
     monkeypatch.setattr(
         relay_types,
@@ -211,6 +204,7 @@ def test_ready_dispatches_all_four_patch_appliers_and_refires_safely(
                 "_original_sync_parse_multipart",
                 "_original_async_parse_multipart",
                 "_original_should_resolve_list_connection_edges",
+                "_original_relay_list_connection",
             ),
         ),
         (_cross_web_patches, ("_original_body_fget",)),

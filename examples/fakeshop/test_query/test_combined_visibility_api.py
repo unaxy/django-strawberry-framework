@@ -29,6 +29,7 @@ under a nested connection, whose seal licenses a slice the rewrite cannot carry.
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import wraps
 
 import pytest
 import strawberry
@@ -82,6 +83,7 @@ _ERROR_POLICY_PASS_THROUGH = {"DEBUG": True, "MIDDLEWARE": middleware_without_de
 _CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 
+@wraps(DjangoGraphQLView.as_view())
 def _graphql_view(request: HttpRequest) -> HttpResponseBase:
     schema = _CURRENT["schema"]
     assert schema is not None

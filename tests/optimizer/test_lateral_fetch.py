@@ -6,8 +6,10 @@ parent-id extraction runs against real querysets shaped by Django's own
 ``_filter_prefetch_queryset``, and the raw-SQL execution path runs through a
 Postgres facade over the real connection with a scripted cursor. The
 ``@pytest.mark.pg`` live tier re-proves the same SQL against a real Postgres
-server (``tests/test_lateral_pg_parity.py``). Routed strategy selection over
-HTTP is ``examples/fakeshop/test_query/test_optimizer_auto_api.py``.
+server through ``examples/fakeshop/test_query/test_lateral_strategy_api.py``.
+``tests/test_lateral_pg_parity.py`` keeps internal JSON adapters, connection
+cleanup and EXPLAIN checks; routed strategy selection over HTTP is also in
+``examples/fakeshop/test_query/test_optimizer_auto_api.py``.
 """
 
 import dataclasses
@@ -1129,8 +1131,8 @@ def test_extract_returns_none_for_a_mutated_root_node() -> None:
 def test_parent_in_values_guards_target_and_rhs_shapes() -> None:
     """The ``__in`` matcher's defensive tail, pinned with synthetic nodes.
 
-    C1: ``_parent_in_values`` takes the target ``column``/``table`` as keyword
-    arguments, not a whole spec.
+    ``_parent_in_values`` matches the requested target column and table and
+    declines expressions or subqueries instead of treating them as parent ids.
     """
     no_target = SimpleNamespace(lookup_name="in", lhs=None, rhs=[1])
     assert _parent_in_values(no_target, column="shelf_id", table="library_book") is None

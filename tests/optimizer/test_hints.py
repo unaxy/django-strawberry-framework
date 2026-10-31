@@ -74,10 +74,6 @@ class TestSkipSentinel:
         assert OptimizerHint.SKIP.force_prefetch is False
         assert OptimizerHint.SKIP.prefetch_obj is None
 
-    def test_skip_identity_stable(self) -> None:
-        """``SKIP`` is the same object across accesses."""
-        assert OptimizerHint.SKIP is OptimizerHint.SKIP
-
     def test_skip_equality(self) -> None:
         """A fresh ``OptimizerHint(skip=True)`` equals the sentinel."""
         assert OptimizerHint(skip=True) == OptimizerHint.SKIP
@@ -415,13 +411,17 @@ class TestInvalidStatesRejected:
     rejected state raises ``ConfigurationError`` at construction time.
     """
 
-    def test_non_bool_flags_raise(self) -> None:
+    @pytest.mark.parametrize(
+        "kwargs",
+        [{"force_select": 1}, {"force_prefetch": ""}, {"skip": "false"}],
+        ids=["force-select", "force-prefetch", "skip"],
+    )
+    def test_non_bool_flags_raise(self, kwargs: dict[str, object]) -> None:
         """Truthy and falsy non-booleans must not control dispatch."""
-        for kwargs in ({"force_select": 1}, {"force_prefetch": ""}, {"skip": "false"}):
-            with pytest.raises(ConfigurationError, match="bool values"):
-                # basedpyright: each non-bool flag is the hostile input under test; OptimizerHint types
-                # the flags as bool
-                OptimizerHint(**kwargs)  # pyright: ignore[reportArgumentType]
+        with pytest.raises(ConfigurationError, match="bool values"):
+            # basedpyright: each non-bool flag is the hostile input under test; OptimizerHint types
+            # the flags as bool
+            OptimizerHint(**kwargs)  # pyright: ignore[reportArgumentType]
 
     def test_skip_with_force_select_raises(self) -> None:
         with pytest.raises(ConfigurationError, match="skip=True"):

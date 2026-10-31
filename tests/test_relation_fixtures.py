@@ -1,52 +1,19 @@
-"""Smoke tests proving the shared ``Rp*`` relation fixtures work end to end.
+"""The composite relation fixture drops its unmanaged tables after use.
 
-Fixture smoke for ``tests/_relation_fixtures.py``: ``managed = False`` table
-create/drop via ``schema_editor`` and a ``CompositePrimaryKey`` parent with a
-``ForeignObject`` reverse to-many. Composite-pk correlation execution imports
-these classes; this file only proves the shared tables and accessors work
-before those rows run.
-
-A live ``/graphql/`` request cannot observe whether a test-only table exists,
-whether instance ``pk`` is a tuple, or whether ``delete_model`` ran on context
-exit: fakeshop ships no ``CompositePrimaryKey`` model (Relay finalization
-rejects that pk shape), and ``tests/_relation_fixtures.py`` forbids wrapping
-``Rp*`` in a ``DjangoType``. There is no live sibling in
-``examples/fakeshop/test_query/``.
-
-Each test runs under ``@pytest.mark.django_db(transaction=True)`` -- the
-SQLite schema editor cannot run inside the plain ``django_db`` atomic
-wrapper -- and materializes the tables via ``relation_fixture_tables``.
+Native composite-parent queries and crossed-carrier controls live in
+``examples/fakeshop/test_query/test_mti_composite_relations_api.py``. This file
+keeps the fixture's cleanup contract: a table query fails after context exit,
+an observation the HTTP response cannot expose.
 """
 
 import pytest
 from django.db import connection
 from django.db.utils import DatabaseError
 
-from django_strawberry_framework.utils._narrowing import pk_of
 from tests._relation_fixtures import (
-    RpCompositeChild,
     RpCompositeParent,
     relation_fixture_tables,
 )
-
-
-@pytest.mark.django_db(transaction=True)
-def test_composite_pk_pair_round_trips() -> None:
-    """Fixture smoke: the composite-pk parent exposes its tuple pk and a reverse to-many.
-
-    No live request can express this: fakeshop has no ``CompositePrimaryKey``
-    model, and Relay finalization rejects that pk shape. Rungs 1-3 would wrap
-    ``Rp*`` in GraphQL, which these models must never enter.
-    """
-    with relation_fixture_tables(connection):
-        parent = RpCompositeParent.objects.create(tenant_id=1, code="X", label="P")
-        # Django renders a CompositePrimaryKey instance's pk as a tuple in
-        # declaration order.
-        assert pk_of(parent) == (1, "X")
-
-        RpCompositeChild.objects.create(parent=parent, name="k1")
-        assert parent.children.get().name == "k1"
-        assert RpCompositeChild.objects.filter(parent=parent).count() == 1
 
 
 @pytest.mark.django_db(transaction=True)

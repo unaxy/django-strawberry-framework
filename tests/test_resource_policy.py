@@ -63,6 +63,8 @@ from collections.abc import (
     Iterator,
     Mapping,
 )
+from dataclasses import FrozenInstanceError
+from dataclasses import fields as dataclass_fields
 from itertools import islice
 from types import MappingProxyType, SimpleNamespace
 from typing import NewType, NoReturn, SupportsIndex, TypeVar, overload
@@ -268,22 +270,27 @@ def test_a_huge_int_deadline_overflows_the_finite_check_into_the_typed_rejection
         ResourcePolicy(execution_deadline_seconds=10**600)
 
 
-def test_the_package_default_policy_is_bounded_on_every_axis() -> None:
+@pytest.mark.parametrize(
+    "name",
+    [field.name for field in dataclass_fields(ResourcePolicy)],
+    ids=str,
+)
+def test_the_package_default_policy_is_bounded_on_every_axis(name: str) -> None:
     """The fail-closed claim, asserted rather than assumed.
 
     There is no spelling of a bound that disables it, so the default policy must
     carry a positive integer on every axis except the deadline.
     """
-    for name, value in truth.instance_state(DEFAULT_RESOURCE_POLICY).items():
-        if name == "execution_deadline_seconds":
-            assert value is None
-            continue
-        assert isinstance(value, int), name
+    value = read_attr(DEFAULT_RESOURCE_POLICY, name)
+    if name == "execution_deadline_seconds":
+        assert value is None
+    else:
+        assert type(value) is int, name
         assert value >= 1, name
 
 
 def test_a_policy_is_frozen() -> None:
-    with pytest.raises(Exception, match="cannot assign to field"):
+    with pytest.raises(FrozenInstanceError, match="cannot assign to field"):
         # basedpyright: the write to the frozen dataclass field is the mutation under test; the
         # checker rejects assignment to a frozen field
         DEFAULT_RESOURCE_POLICY.max_page_size = 1  # pyright: ignore[reportAttributeAccessIssue]
@@ -591,12 +598,14 @@ def _frozen_context() -> MappingProxyType[str, object]:
 
 
 @pytest.mark.parametrize(
-    "context_factory",
-    [SimpleNamespace, dict, _frozen_context],
+    ("context_factory", "writable"),
+    [(SimpleNamespace, True), (dict, True), (_frozen_context, False)],
     ids=["object", "dict", "frozen"],
 )
 def test_the_policy_round_trips_or_fails_closed_on_every_context_shape(
     context_factory: Callable[[], object],
+    *,
+    writable: bool,
 ) -> None:
     """A frozen context cannot hold the published mirror, and still gets a BOUNDED policy.
 
@@ -609,7 +618,7 @@ def test_the_policy_round_trips_or_fails_closed_on_every_context_shape(
     with _armed(context, policy):
         pass
     read = policy_from_info(SimpleNamespace(context=context))
-    assert read in (policy, DEFAULT_RESOURCE_POLICY)
+    assert read == (policy if writable else DEFAULT_RESOURCE_POLICY)
     assert read is not policy
     assert read is not DEFAULT_RESOURCE_POLICY
 

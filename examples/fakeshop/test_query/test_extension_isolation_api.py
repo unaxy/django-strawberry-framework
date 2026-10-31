@@ -30,7 +30,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Callable, Coroutine, Iterator
-from functools import partial
+from functools import partial, wraps
 from types import MethodType, SimpleNamespace
 from typing import TYPE_CHECKING, NoReturn
 
@@ -44,7 +44,6 @@ from django.http.response import HttpResponseBase
 from django.test import AsyncClient, Client
 from django.urls import include, path
 from django.utils.functional import SimpleLazyObject
-from django.views.decorators.csrf import csrf_exempt
 from graphql import GraphQLError
 from graphql_client import (
     JSONObject,
@@ -407,11 +406,12 @@ def _held(name: str, build: Callable[[], DjangoSchema]) -> object:
 def _view(name: str, build: Callable[[], DjangoSchema]) -> Callable[..., HttpResponseBase]:
     """Mount the package's synchronous view over one held schema."""
 
+    @wraps(DjangoGraphQLView.as_view())
     def view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
         built = DjangoGraphQLView.as_view(schema=_held(name, build))
         return built(request, *args, **kwargs)
 
-    return csrf_exempt(view)
+    return view
 
 
 def _fresh_view(build: Callable[[], DjangoSchema]) -> Callable[..., HttpResponseBase]:
@@ -422,11 +422,12 @@ def _fresh_view(build: Callable[[], DjangoSchema]) -> Callable[..., HttpResponse
     requests is the module-level optimizer, which is the shipped spelling.
     """
 
+    @wraps(DjangoGraphQLView.as_view())
     def view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
         built = DjangoGraphQLView.as_view(schema=build())
         return built(request, *args, **kwargs)
 
-    return csrf_exempt(view)
+    return view
 
 
 def _nesting_schema() -> DjangoSchema:
@@ -550,11 +551,12 @@ def _async_view(
 ) -> Callable[..., Coroutine[object, object, HttpResponseBase]]:
     """Mount the package's asynchronous view over a schema built per request."""
 
+    @wraps(AsyncDjangoGraphQLView.as_view())
     async def view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
         built = AsyncDjangoGraphQLView.as_view(schema=build())
         return await built(request, *args, **kwargs)
 
-    return csrf_exempt(view)
+    return view
 
 
 def _held_async_view(
@@ -563,11 +565,12 @@ def _held_async_view(
 ) -> Callable[..., Coroutine[object, object, HttpResponseBase]]:
     """Mount the asynchronous view over one held schema."""
 
+    @wraps(AsyncDjangoGraphQLView.as_view())
     async def view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
         built = AsyncDjangoGraphQLView.as_view(schema=_held(name, build))
         return await built(request, *args, **kwargs)
 
-    return csrf_exempt(view)
+    return view
 
 
 urlpatterns = [

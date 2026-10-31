@@ -3,12 +3,8 @@
 The request-driving half of ``testing/client.py``'s coverage: every case here
 posts through Django's real fakeshop URLconf (the live ``/graphql/`` endpoint or
 an intentional missing-endpoint probe) using the package's own ``TestClient`` /
-``AsyncTestClient`` / ``GraphQLTestCase`` family, so the live behaviour is
-earned live per the ``test_query/README.md`` coverage rule and AGENTS.md's
-live-first mandate. The DB-free mechanics - endpoint precedence, the owned
-builder's path-keyed map rule and placeholder guard, the assertion-helper
-failure directions against canned responses, and the export / collection
-guards - stay in the package tier at ``tests/testing/test_client.py``.
+``AsyncTestClient`` / ``GraphQLTestCase`` family. Responses assert transport status,
+payloads, authentication changes and the errors raised for invalid requests.
 
 Covered live here: the ``assert_no_errors=True`` raising direction on a real
 invalid selection; a non-``dict`` ``variables`` mapping (``MappingProxyType``,
@@ -36,10 +32,12 @@ Django's 404 handler and needs no database.
 import io
 from collections import UserDict
 from collections.abc import Callable, Mapping
+from functools import wraps
 from pathlib import Path
 from types import MappingProxyType
 
 import pytest
+from apps.products import schema as products_schema
 from apps.products.models import Category, Item
 from apps.products.services import create_users, seed_data
 from django.contrib.auth.models import Permission, User
@@ -50,7 +48,6 @@ from django.test import override_settings
 from django.urls import include, path, resolve
 from graphql_client import json_at, json_list, json_object, read_attr
 from PIL import Image
-from strawberry import relay
 from typing_extensions import override
 
 from django_strawberry_framework.testing import (
@@ -59,6 +56,8 @@ from django_strawberry_framework.testing import (
     GraphQLTransactionTestCase,
     TestClient,
 )
+from django_strawberry_framework.testing.relay import global_id_for
+from django_strawberry_framework.views import DjangoGraphQLView
 
 # ---------------------------------------------------------------------------
 # Probe URLconf: ``/alt/`` delegates to whatever the freshly reloaded
@@ -77,6 +76,7 @@ _PROBE_MARKER_HEADER = "X-Probe-Endpoint"
 _PROBE_MARKER_VALUE = "alt"
 
 
+@wraps(DjangoGraphQLView.as_view())
 def _alt_graphql_view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
     """Delegate ``/alt/`` to the view ``/graphql/`` currently resolves to, marked.
 
@@ -101,7 +101,10 @@ _CREATE_ITEM = (
     "mutation($d: ItemInput!) { createItem(data: $d) { node { name } errors { field messages } } }"
 )
 
-_ITEMS_QUERY = "query Items($first: Int) { allItems(first: $first) { edges { node { name } } } }"
+_ITEMS_QUERY = (
+    "query Items($first: Int) { allItems(first: $first, orderBy: [{name: "
+    "ASC}]) { edges { node { name } } } }"
+)
 
 # The nested two-file upload mutation the async multipart test drives (the sync
 # twin lives in ``test_uploads_api.py``); ``attachment`` / ``image`` are both
@@ -183,12 +186,17 @@ def test_query_sends_a_non_dict_variables_mapping(
     """
     seed_data(2)
     res = TestClient().query(_ITEMS_QUERY, variables=wrap({"first": 1}))
-
     assert res.errors is None
     assert res.data is not None
     edges = json_list(res.data, "allItems", "edges")
-    assert len(edges) == 1
-    assert Item.objects.filter(name=json_at(edges, 0, "node", "name")).exists()
+    expected = [
+        item.name
+        for item in Item.objects.filter(is_private=False, category__is_private=False).order_by(
+            "name",
+        )[:1]
+    ]
+    assert edges == [{"node": {"name": name}} for name in expected]
+    assert expected
 
 
 # ---------------------------------------------------------------------------
@@ -198,9 +206,12 @@ def test_query_sends_a_non_dict_variables_mapping(
 
 
 @pytest.fixture
-def seeded_catalog() -> None:
-    """``seed_data(1)`` in a sync fixture; the async consumer is transactional so the view sees it."""
+def seeded_catalog() -> str:
+    """Seed catalog rows synchronously and return the first visible ordered item name."""
     seed_data(1)
+    return (
+        Item.objects.filter(is_private=False, category__is_private=False).order_by("name")[0].name
+    )
 
 
 @pytest.fixture
@@ -223,31 +234,24 @@ def permitted_writer() -> tuple[User, str]:
     )
     user = User.objects.get(pk=read_attr(user, "pk"))  # drop the stale perm cache
     category = Category.objects.earliest("pk")
-    category_gid = str(relay.GlobalID(type_name="products.category", node_id=str(category.pk)))
+    category_gid = global_id_for(products_schema.CategoryType, category.pk)
     return user, category_gid
 
 
 @pytest.mark.django_db(transaction=True)
-@pytest.mark.usefixtures("seeded_catalog")
-async def test_async_query_happy_path_and_raise_direction() -> None:
-    """The awaited transport, the async decode, and the package ``Response``.
-
-    The same typed-shape assertions as the live sync happy path - ``errors`` /
-    ``data`` / the raw ride-along - plus the async color of the
-    ``assert_no_errors`` raising direction.
-    """
-    client = AsyncTestClient()
-    res = await client.query(_ITEMS_QUERY, variables={"first": 1})
-
+async def test_async_query_happy_path(seeded_catalog: str) -> None:
+    """The awaited request decodes the exact visible ordered page and retains its HTTP response."""
+    res = await AsyncTestClient().query(_ITEMS_QUERY, variables={"first": 1})
     assert res.errors is None
-    assert res.data is not None
-    assert len(json_list(res.data, "allItems", "edges")) == 1
+    assert res.data == {"allItems": {"edges": [{"node": {"name": seeded_catalog}}]}}
     assert res.response.status_code == 200
     assert res.response["Content-Type"].startswith("application/json")
 
-    with pytest.raises(AssertionError) as excinfo:
-        await client.query("{ nope }")
-    assert "nope" in str(excinfo.value)
+
+async def test_async_query_default_gate_raises_for_invalid_selection() -> None:
+    """The async client's default assertion gate refuses a real validation error."""
+    with pytest.raises(AssertionError, match="nope"):
+        await AsyncTestClient().query("{ nope }")
 
 
 async def test_async_wrong_endpoint_surfaces_the_same_non_json_decode_error() -> None:
@@ -275,8 +279,9 @@ async def test_async_login_brackets_the_write_authorized_mutation(
     denied = await client.query(_CREATE_ITEM, variables=variables, assert_no_errors=False)
     assert denied.data is None
     assert denied.errors is not None
-    assert "message" in denied.errors[0]
-    assert "Not authorized" in denied.errors[0]["message"]
+    assert len(denied.errors) == 1
+    assert denied.errors[0].get("message") == "Not authorized to create ItemType."
+    assert denied.errors[0].get("path") == ["createItem"]
 
     async with client.login(user):
         granted = await client.query(_CREATE_ITEM, variables=variables)
@@ -287,8 +292,9 @@ async def test_async_login_brackets_the_write_authorized_mutation(
     denied_again = await client.query(_CREATE_ITEM, variables=variables, assert_no_errors=False)
     assert denied_again.data is None
     assert denied_again.errors is not None
-    assert "message" in denied_again.errors[0]
-    assert "Not authorized" in denied_again.errors[0]["message"]
+    assert len(denied_again.errors) == 1
+    assert denied_again.errors[0].get("message") == "Not authorized to create ItemType."
+    assert denied_again.errors[0].get("path") == ["createItem"]
 
 
 @pytest.mark.django_db
@@ -309,7 +315,7 @@ def test_sync_login_bracket_logs_out_when_the_block_raises() -> None:
     )
     user = User.objects.get(pk=read_attr(user, "pk"))
     category = Category.objects.earliest("pk")
-    category_gid = str(relay.GlobalID(type_name="products.category", node_id=str(category.pk)))
+    category_gid = global_id_for(products_schema.CategoryType, category.pk)
     variables = {"d": {"name": "SyncRaiseLogoutWidget", "categoryId": category_gid}}
     client = TestClient()
 
@@ -331,8 +337,9 @@ def test_sync_login_bracket_logs_out_when_the_block_raises() -> None:
     )
     assert denied.data is None
     assert denied.errors is not None
-    assert "message" in denied.errors[0]
-    assert "Not authorized" in denied.errors[0]["message"]
+    assert len(denied.errors) == 1
+    assert denied.errors[0].get("message") == "Not authorized to create ItemType."
+    assert denied.errors[0].get("path") == ["createItem"]
 
 
 @pytest.mark.django_db(transaction=True)
@@ -362,28 +369,20 @@ async def test_async_login_bracket_logs_out_when_the_block_raises(
     )
     assert denied.data is None
     assert denied.errors is not None
-    assert "message" in denied.errors[0]
-    assert "Not authorized" in denied.errors[0]["message"]
+    assert len(denied.errors) == 1
+    assert denied.errors[0].get("message") == "Not authorized to create ItemType."
+    assert denied.errors[0].get("path") == ["createItem"]
 
 
 @pytest.fixture
 def upload_superuser() -> User:
-    """A superuser for the async multipart upload, created in a sync fixture.
-
-    ``createMediaSpecimen`` is gated by the default ``add_mediaspecimen``
-    ``DjangoModelPermission``; a superuser short-circuits it (write-auth itself
-    is exercised on its own in the async ``login()`` bracket above). Created here
-    rather than in the async body so the ORM work never runs in the event loop,
-    and the consuming test is ``django_db(transaction=True)`` so the async view's
-    executor-thread SQLite connection sees the committed row. The sync twin is a plain
-    ``client.login(superuser)`` in
-    ``test_uploads_api.py::test_multipart_create_uploads_real_files_over_http``.
-    """
-    return User.objects.create_superuser(
-        "async_uploader",
-        "async_uploader@example.com",
-        "pw",
+    """Grant the seeded staff user the explicit media creation permission for the async upload."""
+    create_users(1)
+    user = User.objects.get(username="staff_1")
+    user.user_permissions.add(
+        Permission.objects.get(codename="add_mediaspecimen", content_type__app_label="scalars"),
     )
+    return User.objects.get(pk=read_attr(user, "pk"))
 
 
 @pytest.mark.django_db(transaction=True)
@@ -391,19 +390,7 @@ async def test_async_multipart_upload_creates_media_specimen(
     upload_superuser: User,
     tmp_path: Path,
 ) -> None:
-    """The nested two-file multipart upload through ``AsyncTestClient`` (the DoD's "both clients").
-
-    The async color of
-    ``test_uploads_api.py::test_multipart_create_uploads_real_files_over_http``:
-    the path-keyed ``files=`` contract (``data.attachment`` / ``data.image``,
-    each a ``None`` placeholder in ``variables``) combined with
-    ``operation_name=``, driven end to end through Django's in-process
-    ``AsyncClientHandler`` (ASGI-scope multipart parse -> the sync GraphQL view
-    on the executor thread -> JSON response). Before this the "multipart ... on
-    both clients" DoD claim was proven live only on the sync client. Assertions
-    read the returned ``result`` payload (the saved files read back through the
-    resolver) rather than the ORM, so no sync query runs in the event loop.
-    """
+    """Nested file placeholders and operation selection create and return both saved uploads."""
     variables = {"data": {"label": "async-uploaded", "attachment": None, "image": None}}
     files: dict[str, object] = {
         "data.attachment": SimpleUploadedFile(
@@ -414,7 +401,6 @@ async def test_async_multipart_upload_creates_media_specimen(
         "data.image": SimpleUploadedFile("async.png", _png_bytes(), content_type="image/png"),
     }
     client = AsyncTestClient()
-
     with override_settings(MEDIA_ROOT=str(tmp_path)):
         async with client.login(upload_superuser):
             res = await client.query(
@@ -423,7 +409,6 @@ async def test_async_multipart_upload_creates_media_specimen(
                 files=files,
                 operation_name="Create",
             )
-
     assert res.response.status_code == 200
     assert res.data is not None
     payload = json_object(res.data, "createMediaSpecimen")

@@ -178,20 +178,26 @@ def test_lookup_validation_error_roundtrip_preserves_attributes(
         assert restored.terminal is not term
 
 
-def test_framework_error_keeps_its_type_through_graphql() -> None:
-    """GraphQL-core ``located_error`` calls ``str(exc)``; the original type survives."""
-    result = _execute_raising(lambda: ConfigurationError("bad config"))
+@pytest.mark.parametrize(
+    ("exception_type", "message", "base"),
+    [
+        (ConfigurationError, "bad config", DjangoStrawberryFrameworkError),
+        (SyncMisuseError, "sync misuse", RuntimeError),
+    ],
+    ids=["configuration", "sync-misuse"],
+)
+def test_framework_error_keeps_its_type_through_graphql(
+    exception_type: type[ConfigurationError],
+    message: str,
+    base: type[BaseException],
+) -> None:
+    """GraphQL-core preserves the original exception's type and message."""
+    result = _execute_raising(lambda: exception_type(message))
     assert result.errors is not None
-    oe = result.errors[0].original_error
-    assert isinstance(oe, ConfigurationError)
-    assert isinstance(oe, DjangoStrawberryFrameworkError)
-    assert result.errors[0].message == "bad config"
-
-    result = _execute_raising(lambda: SyncMisuseError("sync misuse"))
-    assert result.errors is not None
-    oe = result.errors[0].original_error
-    assert isinstance(oe, SyncMisuseError)
-    assert isinstance(oe, RuntimeError)
+    original = result.errors[0].original_error
+    assert isinstance(original, exception_type)
+    assert isinstance(original, base)
+    assert result.errors[0].message == message
 
 
 def test_consumer_message_arg_renders_through_its_own_dunders() -> None:

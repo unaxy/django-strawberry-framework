@@ -81,11 +81,14 @@ import asyncio
 import dataclasses
 import enum
 import json
+import logging
+import pathlib
+import re
 import threading
 import warnings
 from collections.abc import Callable, Coroutine, Generator, Iterator, Mapping
 from contextlib import contextmanager
-from functools import _lru_cache_wrapper, cache, partial
+from functools import _lru_cache_wrapper, cache, partial, wraps
 from typing import TYPE_CHECKING, ClassVar, NewType, TypeAlias
 
 import pytest
@@ -95,17 +98,18 @@ from apps.library import schema as library_schema
 from apps.products import models as products_models
 from apps.products import schema as products_schema
 from apps.products.services import TEST_USER_PASSWORD, create_users, seed_data
+from apps.scalars import models as scalar_models
 from asgiref.sync import sync_to_async
 from config import schema as config_schema
 from django.contrib.auth import get_user_model
+from django.contrib.auth.models import Permission, User
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import connection
 from django.db.models import Manager, QuerySet, TextChoices
 from django.http import HttpRequest, HttpResponseBase
-from django.test import AsyncClient, Client
+from django.test import AsyncClient, Client, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import include, path
-from django.views.decorators.csrf import csrf_exempt
 from graphql import GraphQLScalarType, get_named_type
 from graphql_client import (
     JSONObject,
@@ -148,10 +152,12 @@ from django_strawberry_framework.resource_policy import (
     bounded_rows,
 )
 from django_strawberry_framework.testing import AsyncTestClient, Response, TestClient
+from django_strawberry_framework.testing.relay import global_id_for
+from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.utils._queryset_private import (
     queryset_db,
 )
-from django_strawberry_framework.utils.typing import graphql_fields, graphql_type_of
+from django_strawberry_framework.utils.typing import graphql_fields, graphql_type_of, object_result
 from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 
 if TYPE_CHECKING:
@@ -214,7 +220,7 @@ def _renamed_probe_view(**overrides: int) -> Callable[..., HttpResponseBase]:
     """Mount the package view over a renamed probe schema narrowing exactly ``overrides``."""
     frozen = tuple(sorted(overrides.items()))
 
-    @csrf_exempt
+    @wraps(DjangoGraphQLView.as_view())
     def view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
         built = DjangoGraphQLView.as_view(schema=_renamed_probe_schema(frozen))
         return built(request, *args, **kwargs)
@@ -246,7 +252,7 @@ def _optimized_probe_view(**overrides: float) -> Callable[..., HttpResponseBase]
     """Mount the package view over the optimizer-mounted probe twin."""
     frozen = tuple(sorted(overrides.items()))
 
-    @csrf_exempt
+    @wraps(DjangoGraphQLView.as_view())
     def view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
         built = DjangoGraphQLView.as_view(schema=_optimized_probe_schema(frozen))
         return built(request, *args, **kwargs)
@@ -258,7 +264,7 @@ def _probe_view(**overrides: float) -> Callable[..., HttpResponseBase]:
     """Mount the package view over a probe schema narrowing exactly ``overrides``."""
     frozen = tuple(sorted(overrides.items()))
 
-    @csrf_exempt
+    @wraps(DjangoGraphQLView.as_view())
     def view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
         built = DjangoGraphQLView.as_view(schema=_probe_schema(frozen))
         return built(request, *args, **kwargs)
@@ -270,7 +276,7 @@ def _probe_upload_view(**overrides: int) -> Callable[..., HttpResponseBase]:
     """The upload twin: same probe schema, with upstream's multipart handling on."""
     frozen = tuple(sorted(overrides.items()))
 
-    @csrf_exempt
+    @wraps(DjangoGraphQLView.as_view())
     def view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
         built = DjangoGraphQLView.as_view(
             schema=_probe_schema(frozen),
@@ -323,7 +329,7 @@ def _rebound_upload_schema(*, prebuilt: bool) -> DjangoSchema:
 def _rebound_upload_view(*, prebuilt: bool) -> Callable[..., HttpResponseBase]:
     """Mount the multipart-enabled package view over ``_rebound_upload_schema``."""
 
-    @csrf_exempt
+    @wraps(DjangoGraphQLView.as_view())
     def view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
         built = DjangoGraphQLView.as_view(
             schema=_rebound_upload_schema(prebuilt=prebuilt),
@@ -340,7 +346,7 @@ def _probe_async_view(
     """The async twin of ``_probe_view``, so parity is proven on a real event loop."""
     frozen = tuple(sorted(overrides.items()))
 
-    @csrf_exempt
+    @wraps(AsyncDjangoGraphQLView.as_view())
     async def view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
         built = AsyncDjangoGraphQLView.as_view(schema=_probe_schema(frozen))
         return await built(request, *args, **kwargs)
@@ -434,7 +440,7 @@ def _hostile_relation_schema(patron_type: type) -> DjangoSchema:
     )
 
 
-@csrf_exempt
+@wraps(DjangoGraphQLView.as_view())
 def _hostile_relation_view(
     request: HttpRequest,
     *args: object,
@@ -445,7 +451,7 @@ def _hostile_relation_view(
     return DjangoGraphQLView.as_view(schema=schema)(request, *args, **kwargs)
 
 
-@csrf_exempt
+@wraps(AsyncDjangoGraphQLView.as_view())
 async def _hostile_relation_async_view(
     request: HttpRequest,
     *args: object,
@@ -502,7 +508,7 @@ def _async_relation_deadline_schema(card_type: type, patron_type: type) -> Djang
     )
 
 
-@csrf_exempt
+@wraps(AsyncDjangoGraphQLView.as_view())
 async def _async_relation_deadline_view(
     request: HttpRequest,
     *args: object,
@@ -568,7 +574,7 @@ def _legacy_global_id_nodes_schema() -> DjangoSchema:
     )
 
 
-@csrf_exempt
+@wraps(DjangoGraphQLView.as_view())
 def _legacy_global_id_nodes_view(
     request: HttpRequest,
     *args: object,
@@ -582,7 +588,7 @@ def _legacy_global_id_nodes_view(
 def _native_node_view(deadline: float | None) -> Callable[..., HttpResponseBase]:
     """Mount the native-node schema over the sync view."""
 
-    @csrf_exempt
+    @wraps(DjangoGraphQLView.as_view())
     def view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
         schema = _native_node_schema(products_schema.CategoryType, deadline)
         return DjangoGraphQLView.as_view(schema=schema)(request, *args, **kwargs)
@@ -595,7 +601,7 @@ def _native_node_async_view(
 ) -> Callable[..., Coroutine[object, object, HttpResponseBase]]:
     """Mount the native-node schema over the async view."""
 
-    @csrf_exempt
+    @wraps(AsyncDjangoGraphQLView.as_view())
     async def view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
         schema = _native_node_schema(products_schema.CategoryType, deadline)
         return await AsyncDjangoGraphQLView.as_view(schema=schema)(request, *args, **kwargs)
@@ -647,7 +653,7 @@ def _carry_relation_schema(patron_type: type) -> DjangoSchema:
     )
 
 
-@csrf_exempt
+@wraps(DjangoGraphQLView.as_view())
 def _carry_relation_view(
     request: HttpRequest,
     *args: object,
@@ -658,7 +664,7 @@ def _carry_relation_view(
     return DjangoGraphQLView.as_view(schema=schema)(request, *args, **kwargs)
 
 
-@csrf_exempt
+@wraps(AsyncDjangoGraphQLView.as_view())
 async def _carry_relation_async_view(
     request: HttpRequest,
     *args: object,
@@ -858,7 +864,7 @@ def _authority_schema() -> DjangoSchema:
     )
 
 
-@csrf_exempt
+@wraps(DjangoGraphQLView.as_view())
 def _authority_view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
     built = DjangoGraphQLView.as_view(schema=_authority_schema())
     return built(request, *args, **kwargs)
@@ -874,7 +880,7 @@ def _entry_rows_schema() -> DjangoSchema:
     )
 
 
-@csrf_exempt
+@wraps(DjangoGraphQLView.as_view())
 def _entry_rows_view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
     built = DjangoGraphQLView.as_view(schema=_entry_rows_schema())
     return built(request, *args, **kwargs)
@@ -909,7 +915,7 @@ def _equal_schema(rows: int) -> DjangoSchema:
 def _equal_view(rows: int) -> Callable[..., HttpResponseBase]:
     """One mount per equal-but-distinct schema, so two live requests can differ."""
 
-    @csrf_exempt
+    @wraps(DjangoGraphQLView.as_view())
     def view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
         built = DjangoGraphQLView.as_view(schema=_equal_schema(rows))
         return built(request, *args, **kwargs)
@@ -1030,7 +1036,7 @@ def _accepted_instance_schema() -> DjangoSchema:
         )
 
 
-@csrf_exempt
+@wraps(DjangoGraphQLView.as_view())
 def _accepted_instance_view(
     request: HttpRequest,
     *args: object,
@@ -1061,7 +1067,7 @@ def _inherited_instance_schema() -> DjangoSchema:
         )
 
 
-@csrf_exempt
+@wraps(DjangoGraphQLView.as_view())
 def _inherited_instance_view(
     request: HttpRequest,
     *args: object,
@@ -1153,7 +1159,7 @@ def _membership_schema(mount: str) -> DjangoSchema:
 
 
 def _membership_view(mount: str) -> Callable[..., HttpResponseBase]:
-    @csrf_exempt
+    @wraps(DjangoGraphQLView.as_view())
     def view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
         built = DjangoGraphQLView.as_view(schema=_membership_schema(mount))
         return built(request, *args, **kwargs)
@@ -1199,7 +1205,7 @@ def _factory_schema() -> DjangoSchema:
     )
 
 
-@csrf_exempt
+@wraps(DjangoGraphQLView.as_view())
 def _factory_view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
     built = DjangoGraphQLView.as_view(schema=_factory_schema())
     return built(request, *args, **kwargs)
@@ -1245,7 +1251,7 @@ def _droppable_schema(mount: str) -> DjangoSchema:
 
 
 def _droppable_view(mount: str) -> Callable[..., HttpResponseBase]:
-    @csrf_exempt
+    @wraps(DjangoGraphQLView.as_view())
     def view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", DeprecationWarning)
@@ -1266,7 +1272,7 @@ def _census_schema() -> DjangoSchema:
     )
 
 
-@csrf_exempt
+@wraps(DjangoGraphQLView.as_view())
 def _census_view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
     built = DjangoGraphQLView.as_view(schema=_census_schema())
     return built(request, *args, **kwargs)
@@ -1325,7 +1331,7 @@ def _witness_schema(order: str) -> DjangoSchema:
 
 
 def _witness_view(order: str) -> Callable[..., HttpResponseBase]:
-    @csrf_exempt
+    @wraps(DjangoGraphQLView.as_view())
     def view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
         built = DjangoGraphQLView.as_view(schema=_witness_schema(order))
         return built(request, *args, **kwargs)
@@ -1334,7 +1340,7 @@ def _witness_view(order: str) -> Callable[..., HttpResponseBase]:
 
 
 def _witness_async_view(order: str) -> Callable[..., Coroutine[object, object, HttpResponseBase]]:
-    @csrf_exempt
+    @wraps(AsyncDjangoGraphQLView.as_view())
     async def view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
         built = AsyncDjangoGraphQLView.as_view(schema=_witness_schema(order))
         return await built(request, *args, **kwargs)
@@ -1385,7 +1391,7 @@ def _cache_schema(order: str) -> DjangoSchema:
 
 
 def _cache_view(order: str) -> Callable[..., HttpResponseBase]:
-    @csrf_exempt
+    @wraps(DjangoGraphQLView.as_view())
     def view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
         built = DjangoGraphQLView.as_view(schema=_cache_schema(order))
         return built(request, *args, **kwargs)
@@ -1394,7 +1400,7 @@ def _cache_view(order: str) -> Callable[..., HttpResponseBase]:
 
 
 def _cache_async_view(order: str) -> Callable[..., Coroutine[object, object, HttpResponseBase]]:
-    @csrf_exempt
+    @wraps(AsyncDjangoGraphQLView.as_view())
     async def view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
         built = AsyncDjangoGraphQLView.as_view(schema=_cache_schema(order))
         return await built(request, *args, **kwargs)
@@ -1415,13 +1421,13 @@ def _retained_schema() -> DjangoSchema:
     )
 
 
-@csrf_exempt
+@wraps(DjangoGraphQLView.as_view())
 def _retained_view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
     built = DjangoGraphQLView.as_view(schema=_retained_schema())
     return built(request, *args, **kwargs)
 
 
-@csrf_exempt
+@wraps(DjangoGraphQLView.as_view())
 def _unconfigured_view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
     """Mount a schema that configures NO resource policy at all, built per request.
 
@@ -1480,7 +1486,9 @@ class _OverlapCoordinator(SchemaExtension):
         """Park the oversized document, once, while the overlap row is armed."""
         if _OverlapCoordinator.armed and "a: rows" in (self.execution_context.query or ""):
             _OverlapCoordinator.parked.set()
-            _OverlapCoordinator.released.wait(timeout=10)
+            assert _OverlapCoordinator.released.wait(timeout=10), (
+                "overlap coordinator was never released"
+            )
         yield
 
 
@@ -1537,7 +1545,7 @@ def _entry_schema(spelling: str) -> DjangoSchema:
 def _entry_view(spelling: str) -> Callable[..., HttpResponseBase]:
     """Mount the synchronous package view over one entry spelling."""
 
-    @csrf_exempt
+    @wraps(DjangoGraphQLView.as_view())
     def view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
         built = DjangoGraphQLView.as_view(schema=_entry_schema(spelling))
         return built(request, *args, **kwargs)
@@ -1548,7 +1556,7 @@ def _entry_view(spelling: str) -> Callable[..., HttpResponseBase]:
 def _entry_async_view(spelling: str) -> Callable[..., Coroutine[object, object, HttpResponseBase]]:
     """Mount the asynchronous package view over one entry spelling."""
 
-    @csrf_exempt
+    @wraps(AsyncDjangoGraphQLView.as_view())
     async def view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
         built = AsyncDjangoGraphQLView.as_view(schema=_entry_schema(spelling))
         return await built(request, *args, **kwargs)
@@ -1650,6 +1658,9 @@ urlpatterns = [
     ),
     path("rp-uploads-rebound/", _rebound_upload_view(prebuilt=False)),
     path("rp-uploads-prebuilt/", _rebound_upload_view(prebuilt=True)),
+    path("rp-uploads-count/", _probe_upload_view(max_upload_count=1)),
+    path("rp-uploads-file/", _probe_upload_view(max_upload_file_bytes=MAX_UPLOAD_FILE_BYTES)),
+    path("rp-uploads-total/", _probe_upload_view(max_upload_total_bytes=MAX_UPLOAD_TOTAL_BYTES)),
     path(
         "rp-uploads/",
         _probe_upload_view(
@@ -1852,17 +1863,21 @@ def test_a_name_over_the_name_bound_is_rejected_before_the_parse() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_selections_are_charged_after_fragment_expansion() -> None:
-    """A fragment is charged at EVERY spread site, so spreading it N times costs N times.
-
-    The evasion this closes: moving a selection set into a fragment and spreading
-    it repeatedly leaves the document small while the executed selection set is
-    not.
-    """
-    spreads = " ".join("g%d: allLibraryGenres { ...F }" % index for index in range(4))
-    query = "{ %s } fragment F on GenreType { name id }" % spreads
-    extensions = _rejection(_post("/rp-shape/", query))
-    assert extensions["bound"] in {"max_selections", "max_aliases"}
+@pytest.mark.django_db
+@pytest.mark.parametrize("spreads", [5, 6], ids=["within-bound", "one-over"])
+def test_selections_are_charged_after_fragment_expansion(spreads: int) -> None:
+    """Every unaliased fragment spread charges its fields independently of alias limits."""
+    query = "{ allLibraryGenres { %s } } fragment F on GenreType { name id }" % " ".join(
+        ["...F"] * spreads,
+    )
+    payload = _post("/rp-shape/", query)
+    if spreads == 5:
+        assert "errors" not in payload, payload
+        assert payload["data"] == {"allLibraryGenres": []}
+    else:
+        extensions = _rejection(payload)
+        assert extensions["bound"] == "max_selections"
+        assert extensions["charged"] == MAX_SELECTIONS + 1
 
 
 def _doubling_fragments(depth: int, leaf: str) -> str:
@@ -1896,17 +1911,22 @@ def test_a_fragment_chain_selecting_no_field_is_charged_per_fragment_entered(lea
     assert extensions["charged"] == MAX_SELECTIONS + 1
 
 
-def test_a_directive_does_not_hide_a_selection_from_accounting() -> None:
-    """``@skip`` changes what is RETURNED, never what is charged.
-
-    Charging only the fields a directive lets through would make ``@skip(if:
-    true)`` a free pass around every document bound.
-    """
-    fields = " ".join(
-        f"s{index}: __typename @skip(if: true)" for index in range(MAX_SELECTIONS + 2)
-    )
-    extensions = _rejection(_post("/rp-shape/", "{ %s }" % fields))
-    assert extensions["bound"] in {"max_selections", "max_aliases"}
+@pytest.mark.parametrize(
+    "count",
+    [MAX_SELECTIONS, MAX_SELECTIONS + 1],
+    ids=["at-bound", "one-over"],
+)
+def test_a_directive_does_not_hide_a_selection_from_accounting(count: int) -> None:
+    """Skipped unaliased fields still charge selection count without spending alias count."""
+    fields = " ".join(["__typename @skip(if: true)"] * count)
+    payload = _post("/rp-shape/", "{ %s }" % fields)
+    if count == MAX_SELECTIONS:
+        assert "errors" not in payload, payload
+        assert payload["data"] == {}
+    else:
+        extensions = _rejection(payload)
+        assert extensions["bound"] == "max_selections"
+        assert extensions["charged"] == MAX_SELECTIONS + 1
 
 
 def test_the_same_field_under_many_aliases_is_charged_once_per_alias() -> None:
@@ -2053,16 +2073,45 @@ def test_an_introspection_document_is_charged_like_any_other() -> None:
     assert json_int(extensions, "charged") > MAX_COST
 
 
+@pytest.mark.django_db
 def test_an_explicit_small_page_narrows_the_collection_cost() -> None:
-    """``first:`` narrows the charge, so a client that asks for less is charged less."""
-    query = """
-    {
-      allCategories(first: 2) {
-        edges { node { itemsConnection(first: 2) { edges { node { name } } } } }
-      }
-    }
-    """
-    _no_rejection(_post("/rp-cost/", query))
+    """A two-by-two ordered page executes under the collection budget with decisive row witnesses."""
+    seed_data(3)
+    create_users(1)
+    client = Client()
+    client.force_login(get_user_model().objects.get(username="staff_1"))
+    categories = list(products_models.Category.objects.order_by("name")[:2])
+    expected: list[JSONObject] = []
+    for category in categories:
+        products_models.Category.objects.filter(pk=category.pk).update(is_private=False)
+        products_models.Item.objects.filter(category=category).update(is_private=False)
+        names = [
+            item.name
+            for item in products_models.Item.objects.filter(category=category).order_by(
+                "name",
+                "pk",
+            )
+        ]
+        assert len(names) > 2
+        expected.append(
+            {
+                "node": {
+                    "name": category.name,
+                    "itemsConnection": {"edges": [{"node": {"name": name}} for name in names[:2]]},
+                },
+            },
+        )
+    payload = _post(
+        "/rp-cost/",
+        (
+            "{ allCategories(first: 2, orderBy: [{name: ASC}]) { edges { node { "
+            "name itemsConnection(first: 2, orderBy: [{name: ASC}]) { edges { node "
+            "{ name } } } } } } }"
+        ),
+        client=client,
+    )
+    assert "errors" not in payload, payload
+    assert payload["data"] == {"allCategories": {"edges": expected}}
 
 
 @pytest.mark.django_db
@@ -2073,23 +2122,45 @@ def test_a_page_size_the_name_converter_renamed_narrows_the_collection_cost() ->
     ``take``. The budget reads each by the Python name Strawberry declared it
     under, so ``take: 2`` narrows both pages and the ``rows`` list under each
     connection is not charged as a second collection, exactly as on the
-    default-named twin above. The renamed ``rows`` page resolves to the two
-    categories ``take: 2`` asked for.
+    default-named twin above. The two-by-two ordered page resolves to the two
+    categories and the first two items of each that ``take: 2`` asked for.
     """
-    seed_data(1)
-    query = """
-    {
-      allCategories(take: 2) {
-        rows { entry { itemsConnection(take: 2) { rows { entry { name } } } } }
-      }
-    }
-    """
-    payload = _post("/rp-cost-renamed/", query)
+    seed_data(3)
+    create_users(1)
+    client = Client()
+    client.force_login(get_user_model().objects.get(username="staff_1"))
+    categories = list(products_models.Category.objects.order_by("name")[:2])
+    expected: list[JSONObject] = []
+    for category in categories:
+        products_models.Category.objects.filter(pk=category.pk).update(is_private=False)
+        products_models.Item.objects.filter(category=category).update(is_private=False)
+        names = [
+            item.name
+            for item in products_models.Item.objects.filter(category=category).order_by(
+                "name",
+                "pk",
+            )
+        ]
+        assert len(names) > 2
+        expected.append(
+            {
+                "entry": {
+                    "name": category.name,
+                    "itemsConnection": {"rows": [{"entry": {"name": name}} for name in names[:2]]},
+                },
+            },
+        )
+    payload = _post(
+        "/rp-cost-renamed/",
+        (
+            "{ allCategories(take: 2, orderBy: [{name: ASC}]) { rows { entry { name"
+            " itemsConnection(take: 2, orderBy: [{name: ASC}]) { rows { entry { "
+            "name } } } } } } }"
+        ),
+        client=client,
+    )
     assert "errors" not in payload, payload
-    assert json_at(payload, "data", "allCategories", "rows") == [
-        {"entry": {"itemsConnection": {"rows": []}}},
-        {"entry": {"itemsConnection": {"rows": []}}},
-    ], payload
+    assert payload["data"] == {"allCategories": {"rows": expected}}
 
 
 def test_a_page_argument_other_than_first_or_last_does_not_narrow_the_collection_cost() -> None:
@@ -2132,7 +2203,9 @@ def test_a_nested_row_list_over_the_bound_is_rejected() -> None:
 def test_a_nested_row_list_at_the_bound_is_not_rejected() -> None:
     branches = ", ".join('{ name: { exact: "x" } }' for _ in range(MAX_NESTED_ROWS))
     query = "{ allLibraryGenres(filter: { and: [%s] }) { name } }" % branches
-    _no_rejection(_post("/rp-nested-rows/", query))
+    payload = _post("/rp-nested-rows/", query)
+    assert "errors" not in payload, payload
+    assert payload["data"] == {"allLibraryGenres": []}
 
 
 @pytest.mark.django_db
@@ -2164,7 +2237,11 @@ _GENRE_FILTER = "query G($f: GenreFilterInputType) { allLibraryGenres(filter: $f
 
 @pytest.mark.django_db
 def test_node_refetch_ids_at_the_bound_are_not_rejected() -> None:
-    _no_rejection(_post("/rp-values/", _NODES, {"ids": ["x"] * MAX_NODE_IDS}))
+    genre = library_models.Genre.objects.create(name="BudgetGenre")
+    gid = global_id_for(library_schema.GenreType, genre.pk)
+    payload = _post("/rp-values/", _NODES, {"ids": [gid] * MAX_NODE_IDS})
+    assert "errors" not in payload, payload
+    assert payload["data"] == {"nodes": [{"__typename": "GenreType"}] * MAX_NODE_IDS}
 
 
 @pytest.mark.django_db
@@ -2283,7 +2360,9 @@ def test_duplicate_node_ids_are_charged_positionally() -> None:
 
 @pytest.mark.django_db
 def test_an_empty_id_list_is_not_rejected() -> None:
-    _no_rejection(_post("/rp-values/", _NODES, {"ids": []}))
+    payload = _post("/rp-values/", _NODES, {"ids": []})
+    assert "errors" not in payload, payload
+    assert payload["data"] == {"nodes": []}
 
 
 @pytest.mark.django_db
@@ -2294,45 +2373,65 @@ def test_membership_list_over_the_bound_is_rejected() -> None:
 
 @pytest.mark.django_db
 def test_membership_list_at_the_bound_is_not_rejected() -> None:
-    _no_rejection(_post("/rp-values/", _GENRE_IN, {"ids": ["1"] * MAX_MEMBERSHIP}))
+    genre = library_models.Genre.objects.create(name="BudgetGenre")
+    library_models.Genre.objects.create(name="Nonmatch")
+    gid = global_id_for(library_schema.GenreType, genre.pk)
+    payload = _post("/rp-values/", _GENRE_IN, {"ids": [gid] * MAX_MEMBERSHIP})
+    assert "errors" not in payload, payload
+    assert payload["data"] == {"allLibraryGenres": [{"name": "BudgetGenre"}]}
 
 
-_MEMBERSHIP_DEFAULT_OVER = (
-    'query MyQuery($ids: [String!] = ["1", "2", "3", "4", "5"]) { '
-    "allLibraryGenres(filter: { id: { in: $ids } }) { name } "
-    "}"
-)
-_MEMBERSHIP_DEFAULT_AT = (
-    'query MyQuery($ids: [String!] = ["1", "2", "3", "4"]) { '
-    "allLibraryGenres(filter: { id: { in: $ids } }) { name } "
-    "}"
-)
-
-
-@pytest.mark.django_db
-def test_variable_default_value_in_operation_header_is_rejected_when_omitted() -> None:
-    """An omitted variable is charged as its document default, over and at the bound."""
-    extensions = _rejection(_post("/rp-values/", _MEMBERSHIP_DEFAULT_OVER, {}))
-    assert extensions["bound"] == "max_membership_items"
-    assert extensions["charged"] == MAX_MEMBERSHIP + 1
-    _no_rejection(_post("/rp-values/", _MEMBERSHIP_DEFAULT_AT, {}))
-
-
-@pytest.mark.django_db
-def test_variable_default_value_in_operation_header_ignored_when_overridden() -> None:
-    """An explicit variable is charged at its use as the runtime list, not the default.
-
-    The default sits at the bound (four) and is charged once at its definition;
-    the use site charges what the request supplied. Under the bound the request
-    runs; over it the charge is the runtime width (five), which the default
-    alone could never reach.
-    """
-    _no_rejection(_post("/rp-values/", _MEMBERSHIP_DEFAULT_AT, {"ids": ["1", "2"]}))
-    extensions = _rejection(
-        _post("/rp-values/", _MEMBERSHIP_DEFAULT_AT, {"ids": ["1"] * (MAX_MEMBERSHIP + 1)}),
+def _membership_default_query(gid: str, width: int) -> str:
+    """A real membership default whose only varying property is its positional width."""
+    default = json.dumps([gid] * width)
+    return (
+        "query MyQuery($ids: [String!] = "
+        + default
+        + ") { allLibraryGenres(filter: {id: {in: $ids}}) {name} }"
     )
-    assert extensions["bound"] == "max_membership_items"
-    assert extensions["charged"] == MAX_MEMBERSHIP + 1
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "width",
+    [MAX_MEMBERSHIP, MAX_MEMBERSHIP + 1],
+    ids=["at-bound", "over-bound"],
+)
+def test_variable_default_value_in_operation_header_is_rejected_when_omitted(width: int) -> None:
+    """Omission charges the real default; its legal boundary actually returns the matching row."""
+    genre = library_models.Genre.objects.create(name="DefaultGenre")
+    library_models.Genre.objects.create(name="Nonmatch")
+    gid = global_id_for(library_schema.GenreType, genre.pk)
+    payload = _post("/rp-values/", _membership_default_query(gid, width), {})
+    if width > MAX_MEMBERSHIP:
+        extensions = _rejection(payload)
+        assert extensions["bound"] == "max_membership_items"
+        assert extensions["charged"] == width
+    else:
+        assert "errors" not in payload, payload
+        assert payload["data"] == {"allLibraryGenres": [{"name": "DefaultGenre"}]}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("width", [2, MAX_MEMBERSHIP + 1], ids=["under-bound", "over-bound"])
+def test_variable_default_value_in_operation_header_ignored_when_overridden(width: int) -> None:
+    """The supplied list controls use-site membership width, with a legal matching-row control."""
+    genre = library_models.Genre.objects.create(name="RuntimeGenre")
+    default = library_models.Genre.objects.create(name="DefaultGenre")
+    gid = global_id_for(library_schema.GenreType, genre.pk)
+    default_gid = global_id_for(library_schema.GenreType, default.pk)
+    payload = _post(
+        "/rp-values/",
+        _membership_default_query(default_gid, MAX_MEMBERSHIP),
+        {"ids": [gid] * width},
+    )
+    if width > MAX_MEMBERSHIP:
+        extensions = _rejection(payload)
+        assert extensions["bound"] == "max_membership_items"
+        assert extensions["charged"] == width
+    else:
+        assert "errors" not in payload, payload
+        assert payload["data"] == {"allLibraryGenres": [{"name": "RuntimeGenre"}]}
 
 
 @pytest.mark.django_db
@@ -2625,38 +2724,38 @@ def test_a_global_id_relation_and_a_raw_pk_relation_share_one_aggregate() -> Non
 
 @pytest.mark.django_db
 def test_a_nested_row_relation_list_at_the_bound_is_not_rejected() -> None:
-    """The under-boundary half on the nested tier: one row of one id stays legal."""
+    """A legal nested relation writes its actual target and returns a clean envelope."""
+    alt = library_models.Branch.objects.create(name="RPAlt", city="open")
     input_type = _data_input_type("createBranchWithNestedShelves")
     mutation = (
-        "mutation N($d: " + input_type + "!) { createBranchWithNestedShelves(data: $d) "
-        "{ result { id } errors { field messages } } }"
+        "mutation N($d: "
+        + input_type
+        + "!) { createBranchWithNestedShelves(data: $d) { result { name } errors { field messages } } }"
     )
-    variables = {"d": {"name": "RP-NestedOK", "shelves": [{"code": "RP-N2", "altBranches": [1]}]}}
-    _no_rejection(_post("/rp-values/", mutation, variables))
+    variables = {
+        "d": {"name": "RP-NestedOK", "shelves": [{"code": "RP-N2", "altBranches": [alt.pk]}]},
+    }
+    payload = _post("/rp-values/", mutation, variables)
+    assert "errors" not in payload, payload
+    assert payload["data"] == {
+        "createBranchWithNestedShelves": {"result": {"name": "RP-NestedOK"}, "errors": []},
+    }
+    shelf = library_models.Shelf.objects.get(code="RP-N2", branch__name="RP-NestedOK")
+    assert list(shelf.alt_branches.values_list("pk", flat=True)) == [alt.pk]
 
 
 @pytest.mark.django_db
-def test_a_membership_list_inside_a_generated_mutation_input_stays_membership() -> None:
-    """Spec-keyed classification charges only RELATION fields as relations.
-
-    ``ShelfAlt_ubranchesBranchCodeConditionInput.branchId`` is a raw-pk SINGLE relation
-    (one id, not a list); its sibling ``code`` is a scalar. Neither is a relation
-    LIST, so a raw-pk write carrying only those reaches the resolver with no
-    resource rejection - the control proving the spec signal charges only the
-    LIST fields that ARE relations, which is what keeps
-    ``test_raw_pk_relation_lists_at_the_bound_execute``'s legal write (one FK +
-    a two-id list) under the per-field bound of two.
-    """
+def test_a_single_relation_inside_a_generated_mutation_input_stays_single() -> None:
+    """One FK is not a relation list; a legal generated mutation persists that exact target."""
+    branch = library_models.Branch.objects.create(name="RPSingle", city="open")
     mutation = (
-        "mutation S($d: ShelfAlt_ubranchesBranchCodeConditionInput!) { createShelf(data: $d) "
-        "{ result { code } errors { field messages } } }"
+        "mutation S($d: ShelfAlt_ubranchesBranchCodeConditionInput!) { "
+        "createShelf(data: $d) { result { code } errors { field messages } } }"
     )
-    payload = _post(
-        "/rp-values/",
-        mutation,
-        {"d": {"code": "RP-OK", "branchId": 1}},
-    )
-    _no_rejection(payload)
+    payload = _post("/rp-values/", mutation, {"d": {"code": "RP-OK", "branchId": branch.pk}})
+    assert "errors" not in payload, payload
+    assert payload["data"] == {"createShelf": {"result": {"code": "RP-OK"}, "errors": []}}
+    assert library_models.Shelf.objects.get(code="RP-OK").branch_id == branch.pk
 
 
 @pytest.mark.django_db
@@ -2678,7 +2777,9 @@ def test_a_deeply_nested_variable_value_is_bounded_by_value_depth() -> None:
 
 @pytest.mark.django_db
 def test_a_shallow_variable_value_is_not_rejected_on_value_depth() -> None:
-    _no_rejection(_post("/rp-value-depth/", _GENRE_FILTER, {"f": {"name": {"exact": "x"}}}))
+    payload = _post("/rp-value-depth/", _GENRE_FILTER, {"f": {"name": {"exact": "x"}}})
+    assert "errors" not in payload, payload
+    assert payload["data"] == {"allLibraryGenres": []}
 
 
 @pytest.mark.django_db
@@ -2834,7 +2935,14 @@ def _two_directive_values(shape: str, count: int) -> str:
 
 @pytest.mark.parametrize("shape", _TWO_DIRECTIVE_VALUE_SHAPES)
 def test_two_directive_values_on_one_node_at_the_node_bound_are_admitted(shape: str) -> None:
-    _no_rejection(_post("/rp-values/", _two_directive_values(shape, MAX_INPUT_NODES // 2)))
+    payload = _post("/rp-values/", _two_directive_values(shape, MAX_INPUT_NODES // 2))
+    assert "errors" not in payload, payload
+    expected = (
+        {f"f{i}": "Query" for i in range(MAX_INPUT_NODES // 2)}
+        if shape == "field"
+        else {"__typename": "Query"}
+    )
+    assert payload["data"] == expected
 
 
 @pytest.mark.parametrize("shape", _TWO_DIRECTIVE_VALUE_SHAPES)
@@ -2954,7 +3062,11 @@ def test_an_unknown_argument_of_a_known_directive_is_charged_untyped() -> None:
 def test_a_directive_value_on_a_type_system_definition_at_the_byte_bound_is_admitted() -> None:
     """At the bound the budget admits it, and rejecting the definition is validation's job."""
     query = '{ __typename } scalar S @specifiedBy(url: "%s")' % ("x" * MAX_SCALAR_BYTES)
-    _no_rejection(_post("/rp-values/", query))
+    payload = _post("/rp-values/", query)
+    assert payload["data"] is None
+    assert [json_str(error, "message") for error in json_list(payload, "errors")] == [
+        "The 'S' definition is not executable.",
+    ]
 
 
 def test_a_directive_value_on_a_type_system_definition_is_charged() -> None:
@@ -3017,7 +3129,9 @@ _SUBSTITUTED_DEFAULT = (
 @pytest.mark.django_db
 def test_a_default_substituted_at_its_use_is_charged_once_at_the_node_bound() -> None:
     """Six rows are exactly ``MAX_INPUT_NODES`` nodes, charged at the use site alone."""
-    _no_rejection(_post("/rp-values/", _SUBSTITUTED_DEFAULT % _genre_or_filter(6)))
+    payload = _post("/rp-values/", _SUBSTITUTED_DEFAULT % _genre_or_filter(6))
+    assert "errors" not in payload, payload
+    assert payload["data"] == {"allLibraryGenres": []}
 
 
 def test_a_default_substituted_at_its_use_one_node_over_the_bound_is_rejected() -> None:
@@ -3041,7 +3155,9 @@ def test_defaults_substituted_inside_a_list_literal_are_charged_once_at_the_node
         definitions,
         reads,
     )
-    _no_rejection(_post("/rp-values/", query))
+    payload = _post("/rp-values/", query)
+    assert "errors" not in payload, payload
+    assert payload["data"] == {"allLibraryGenres": []}
 
 
 def test_an_unselected_operation_repeating_a_charged_argument_is_charged_again() -> None:
@@ -3189,7 +3305,37 @@ _SPECIMEN = (
 
 
 @pytest.mark.django_db
-def test_an_oversized_upload_is_rejected_by_the_policy_not_by_the_body_cap() -> None:
+@pytest.mark.parametrize(
+    (
+        "mount",
+        "sizes",
+        "bound",
+        "charged",
+    ),
+    [
+        pytest.param("/rp-uploads-count/", (1, 1), "max_upload_count", 2, id="count"),
+        pytest.param(
+            "/rp-uploads-file/",
+            (MAX_UPLOAD_FILE_BYTES + 1, 1),
+            "max_upload_file_bytes",
+            MAX_UPLOAD_FILE_BYTES + 1,
+            id="per-file",
+        ),
+        pytest.param(
+            "/rp-uploads-total/",
+            (MAX_UPLOAD_FILE_BYTES, MAX_UPLOAD_TOTAL_BYTES - MAX_UPLOAD_FILE_BYTES + 1),
+            "max_upload_total_bytes",
+            MAX_UPLOAD_TOTAL_BYTES + 1,
+            id="aggregate",
+        ),
+    ],
+)
+def test_an_oversized_upload_is_rejected_by_the_policy_not_by_the_body_cap(
+    mount: str,
+    sizes: tuple[int, int],
+    bound: str,
+    charged: int,
+) -> None:
     """The multipart body is never materialized by the transport cap, so this is the bound.
 
     ``MAX_REQUEST_BODY_BYTES`` deliberately does not measure a multipart body -
@@ -3200,19 +3346,68 @@ def test_an_oversized_upload_is_rejected_by_the_policy_not_by_the_body_cap() -> 
         _SPECIMEN,
         variables={"d": {"label": "l", "attachment": None, "image": None}},
         files={
-            "d.attachment": SimpleUploadedFile("attachment.bin", b"z" * 200),
-            "d.image": SimpleUploadedFile("image.bin", b"z" * 200),
+            "d.attachment": SimpleUploadedFile("attachment.bin", b"z" * sizes[0]),
+            "d.image": SimpleUploadedFile("image.bin", b"z" * sizes[1]),
         },
         assert_no_errors=False,
-        url="/rp-uploads/",
+        url=mount,
     )
     assert res.response.status_code == 200, res.response.content
     extensions = _rejection(response_json(res.response))
-    assert extensions["bound"] in {
-        "max_upload_count",
-        "max_upload_file_bytes",
-        "max_upload_total_bytes",
-    }
+    assert extensions["bound"] == bound
+    assert extensions["charged"] == charged
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("mount", "size"),
+    [
+        pytest.param("/rp-uploads-count/", 1, id="count-at-bound"),
+        pytest.param("/rp-uploads-file/", MAX_UPLOAD_FILE_BYTES, id="file-at-bound"),
+        pytest.param("/rp-uploads-total/", MAX_UPLOAD_TOTAL_BYTES, id="aggregate-at-bound"),
+    ],
+)
+def test_an_upload_at_each_isolated_bound_reaches_the_write(
+    mount: str,
+    size: int,
+    tmp_path: pathlib.Path,
+) -> None:
+    """Each exact upload ceiling admits a real authorized partial update and preserves its bytes."""
+    create_users(1)
+    user = User.objects.get(username="staff_1")
+    user.user_permissions.add(
+        Permission.objects.get(content_type__app_label="scalars", codename="change_mediaspecimen"),
+    )
+    client = TestClient()
+    specimen = scalar_models.MediaSpecimen.objects.create(
+        label="at-upload-bound",
+        attachment="old.bin",
+        image="existing.png",
+    )
+    mutation = (
+        "mutation U($id: ID!, $d: MediaSpecimenPartialInput!) { "
+        "updateMediaSpecimen(id: $id, data: $d) { result { label attachment { "
+        "size } } errors { field messages } } }"
+    )
+    with override_settings(MEDIA_ROOT=str(tmp_path)), client.login(user):
+        result = client.query(
+            mutation,
+            variables={"id": str(specimen.pk), "d": {"attachment": None}},
+            files={"d.attachment": SimpleUploadedFile("bounded.bin", b"z" * size)},
+            url=mount,
+        )
+        assert result.response.status_code == 200
+        assert result.data == {
+            "updateMediaSpecimen": {
+                "result": {"label": "at-upload-bound", "attachment": {"size": size}},
+                "errors": [],
+            },
+        }
+        specimen.refresh_from_db()
+        with specimen.attachment.open("rb") as saved:
+            read = read_attr(saved, "read")
+            assert callable(read)
+            assert object_result(read) == b"z" * size
 
 
 @pytest.mark.django_db
@@ -3245,28 +3440,32 @@ def test_an_oversized_upload_under_a_rebound_upload_scalar_is_rejected(mount: st
 
 
 @pytest.mark.django_db
-def test_list_argument_smaller_limit_serializes_subset_and_charges_full_collection_cost() -> None:
-    """Client limit narrows serialized rows while collection cost charges full max_list_rows."""
-    library_models.Branch.objects.create(name="B1", city="Boston")
-    library_models.Branch.objects.create(name="B2", city="Boston")
-    library_models.Branch.objects.create(name="B3", city="Boston")
-
-    # 1. On /rp-rows/ (max_list_rows=3), client limit: 2 serializes exactly 2 rows
-    payload = _post("/rp-rows/", "{ allLibraryBranchesViaListField(limit: 2) { name } }")
-    _no_rejection(payload)
-    assert len(json_list(payload, "data", "allLibraryBranchesViaListField")) == 2
-
-    # 2. On /rp-list-cost/ (max_list_rows=3, max_collection_cost=2), client limit: 1
-    # is rejected because pre-execution collection cost charges max_list_rows (3),
-    # not the client limit (1).
-    cost_payload = _post(
-        "/rp-list-cost/",
-        "{ allLibraryBranchesViaListField(limit: 1) { name } }",
+@pytest.mark.parametrize("cost_cap", [False, True], ids=["bounded-subset", "full-collection-cost"])
+def test_list_argument_smaller_limit_serializes_subset_and_charges_full_collection_cost(
+    *,
+    cost_cap: bool,
+) -> None:
+    """Serialization honors the client limit while static cost still charges the policy maximum."""
+    create_users(1)
+    client = Client()
+    client.force_login(get_user_model().objects.get(username="staff_1"))
+    _seed_five_branches()
+    mount = "/rp-list-cost/" if cost_cap else "/rp-rows/"
+    payload = _post(
+        mount,
+        "{ allLibraryBranchesViaListField(orderBy: [{name: ASC}], limit: 2) { name } }",
+        client=client,
     )
-    ext = _rejection(cost_payload)
-    assert ext["bound"] == "max_collection_cost"
-    assert ext["charged"] == MAX_LIST_ROWS
-    assert ext["limit"] == MAX_LIST_ROWS - 1
+    if cost_cap:
+        ext = _rejection(payload)
+        assert ext["bound"] == "max_collection_cost"
+        assert ext["charged"] == MAX_LIST_ROWS
+        assert ext["limit"] == MAX_LIST_ROWS - 1
+    else:
+        assert "errors" not in payload, payload
+        assert payload["data"] == {
+            "allLibraryBranchesViaListField": [{"name": "B0"}, {"name": "B1"}],
+        }
 
 
 def _seed_five_branches() -> list[library_models.Branch]:
@@ -3281,138 +3480,170 @@ def _seed_five_branches() -> list[library_models.Branch]:
 
 
 @pytest.mark.django_db
-def test_list_argument_limit_at_and_over_narrowed_policy_ceiling() -> None:
-    """Client limit at policy ceiling succeeds; over ceiling reports narrowed bound."""
-    _seed_five_branches()
-
-    # limit == MAX_LIST_ROWS (3) succeeds
-    payload_at = _post(
-        "/rp-rows/",
-        f"{{ allLibraryBranchesViaListField(limit: {MAX_LIST_ROWS}) {{ name }} }}",
-    )
-    _no_rejection(payload_at)
-    assert len(json_list(payload_at, "data", "allLibraryBranchesViaListField")) == MAX_LIST_ROWS
-
-    # limit == MAX_LIST_ROWS + 1 (4) rejects with LIST_ARGUMENT_INVALID naming ceiling 3
-    payload_over = _post(
-        "/rp-rows/",
-        f"{{ allLibraryBranchesViaListField(limit: {MAX_LIST_ROWS + 1}) {{ name }} }}",
-    )
-    assert payload_over["data"] is None
-    assert "errors" in payload_over
-    err = json_object(payload_over, "errors", 0)
-    assert json_at(err, "extensions", "code") == "LIST_ARGUMENT_INVALID"
-    assert json_at(err, "extensions", "reason") == "over_ceiling"
-    assert json_at(err, "extensions", "argument") == "limit"
-    assert json_at(err, "extensions", "value") == MAX_LIST_ROWS + 1
-    assert json_at(err, "extensions", "ceiling") == MAX_LIST_ROWS
-
-
-@pytest.mark.django_db
-def test_list_argument_offset_at_and_over_narrowed_policy_ceiling() -> None:
-    """Ordered offset at policy ceiling succeeds; over ceiling reports narrowed bound."""
+@pytest.mark.parametrize(
+    "value",
+    [MAX_LIST_ROWS, MAX_LIST_ROWS + 1],
+    ids=["at-ceiling", "over-ceiling"],
+)
+def test_list_argument_limit_at_and_over_narrowed_policy_ceiling(value: int) -> None:
+    """The ordered legal window returns exact rows; the independent illegal window names its bound."""
     create_users(1)
     client = Client()
     client.force_login(get_user_model().objects.get(username="staff_1"))
-
     _seed_five_branches()
-
-    # offset == MAX_LIST_ROWS (3) with active ordering succeeds
-    payload_at = _post(
-        "/rp-rows/",
-        f"""
-        query {{
-          allLibraryBranchesViaListField(
-            orderBy: [{{ name: ASC }}]
-            offset: {MAX_LIST_ROWS}
-          ) {{
-            name
-          }}
-        }}
-        """,
-        client=client,
+    query = (
+        "{ allLibraryBranchesViaListField(orderBy: [{name: ASC}], limit: "
+        + str(value)
+        + ") { name } }"
     )
-    _no_rejection(payload_at)
-    # 5 branches total, offset 3 leaves 2
-    assert len(json_list(payload_at, "data", "allLibraryBranchesViaListField")) == 2
-
-    # offset == MAX_LIST_ROWS + 1 (4) rejects with LIST_ARGUMENT_INVALID naming ceiling 3
-    payload_over = _post(
-        "/rp-rows/",
-        f"""
-        query {{
-          allLibraryBranchesViaListField(
-            orderBy: [{{ name: ASC }}]
-            offset: {MAX_LIST_ROWS + 1}
-          ) {{
-            name
-          }}
-        }}
-        """,
-        client=client,
-    )
-    assert payload_over["data"] is None
-    assert "errors" in payload_over
-    err = json_object(payload_over, "errors", 0)
-    assert json_at(err, "extensions", "code") == "LIST_ARGUMENT_INVALID"
-    assert json_at(err, "extensions", "reason") == "over_ceiling"
-    assert json_at(err, "extensions", "argument") == "offset"
-    assert json_at(err, "extensions", "value") == MAX_LIST_ROWS + 1
-    assert json_at(err, "extensions", "ceiling") == MAX_LIST_ROWS
+    payload = _post("/rp-rows/", query, client=client)
+    if value == MAX_LIST_ROWS:
+        assert "errors" not in payload, payload
+        assert payload["data"] == {
+            "allLibraryBranchesViaListField": [{"name": "B0"}, {"name": "B1"}, {"name": "B2"}],
+        }
+    else:
+        assert payload["data"] is None, payload
+        assert len(json_list(payload, "errors")) == 1
+        err = json_object(payload, "errors", 0)
+        assert err["path"] == ["allLibraryBranchesViaListField"]
+        assert json_object(err, "extensions") == {
+            "code": "LIST_ARGUMENT_INVALID",
+            "reason": "over_ceiling",
+            "argument": "limit",
+            "value": value,
+            "ceiling": MAX_LIST_ROWS,
+        }
 
 
 @pytest.mark.django_db
-def test_list_argument_rejections_and_limit_zero_perform_no_sql() -> None:
-    """Argument refusal and limit: 0 perform zero row-fetching queries."""
-    library_models.Branch.objects.create(name="B1", city="Boston")
-    library_models.Branch.objects.create(name="B2", city="Boston")
+@pytest.mark.parametrize(
+    "value",
+    [MAX_LIST_ROWS, MAX_LIST_ROWS + 1],
+    ids=["at-ceiling", "over-ceiling"],
+)
+def test_list_argument_offset_at_and_over_narrowed_policy_ceiling(value: int) -> None:
+    """The ordered legal window returns exact rows; the independent illegal window names its bound."""
+    create_users(1)
+    client = Client()
+    client.force_login(get_user_model().objects.get(username="staff_1"))
+    _seed_five_branches()
+    query = (
+        "{ allLibraryBranchesViaListField(orderBy: [{name: ASC}], offset: "
+        + str(value)
+        + ") { name } }"
+    )
+    payload = _post("/rp-rows/", query, client=client)
+    if value == MAX_LIST_ROWS:
+        assert "errors" not in payload, payload
+        assert payload["data"] == {
+            "allLibraryBranchesViaListField": [{"name": "B3"}, {"name": "B4"}],
+        }
+    else:
+        assert payload["data"] is None, payload
+        assert len(json_list(payload, "errors")) == 1
+        err = json_object(payload, "errors", 0)
+        assert err["path"] == ["allLibraryBranchesViaListField"]
+        assert json_object(err, "extensions") == {
+            "code": "LIST_ARGUMENT_INVALID",
+            "reason": "over_ceiling",
+            "argument": "offset",
+            "value": value,
+            "ceiling": MAX_LIST_ROWS,
+        }
 
-    # 1. Negative limit rejection
-    with CaptureQueriesContext(connection) as ctx:
-        payload_neg = _post(
-            "/rp-rows/",
-            "{ allLibraryBranchesViaListField(limit: -1) { name } }",
-        )
-    assert "errors" in payload_neg
-    assert payload_neg["data"] is None, payload_neg
-    assert len(ctx.captured_queries) == 0
 
-    # 2. Limit zero short-circuit
-    with CaptureQueriesContext(connection) as ctx:
-        payload_zero = _post(
+@pytest.mark.django_db
+@pytest.mark.parametrize("limit", [-1, 0], ids=["negative-refusal", "zero-short-circuit"])
+def test_list_argument_rejections_and_limit_zero_perform_no_sql(limit: int) -> None:
+    """Neither a negative refusal nor a legal zero-row list evaluates its overfull source."""
+    _seed_five_branches()
+    with CaptureQueriesContext(connection) as captured:
+        payload = _post(
             "/rp-rows/",
-            "{ allLibraryBranchesViaListField(limit: 0) { name } }",
+            "{ allLibraryBranchesViaListField(limit: " + str(limit) + ") { name } }",
         )
-    assert "errors" not in payload_zero, payload_zero
-    assert json_at(payload_zero, "data", "allLibraryBranchesViaListField") == []
-    assert len(ctx.captured_queries) == 0
+    assert captured.captured_queries == []
+    if limit == 0:
+        assert "errors" not in payload, payload
+        assert payload["data"] == {"allLibraryBranchesViaListField": []}
+    else:
+        assert payload["data"] is None, payload
+        assert len(json_list(payload, "errors")) == 1
+        err = json_object(payload, "errors", 0)
+        assert err["path"] == ["allLibraryBranchesViaListField"]
+        assert json_at(err, "extensions", "code") == "LIST_ARGUMENT_INVALID"
+        assert json_at(err, "extensions", "reason") == "negative"
+        assert json_at(err, "extensions", "argument") == "limit"
+        assert json_at(err, "extensions", "value") == -1
 
 
 @pytest.mark.django_db
 def test_a_raw_root_list_stops_at_the_configured_maximum() -> None:
-    """``DjangoListField`` is bounded whether or not the field says anything."""
-    seed_data(2)
-    payload = _post("/rp-rows/", "{ allLibraryBranchesViaListField { name } }")
-    _no_rejection(payload)
-    assert len(json_list(payload, "data", "allLibraryBranchesViaListField")) <= MAX_LIST_ROWS
+    """The configured collection bound serves real ordered branch rows in one bounded statement."""
+    create_users(1)
+    client = Client()
+    client.force_login(get_user_model().objects.get(username="staff_1"))
+    _seed_five_branches()
+    with CaptureQueriesContext(connection) as captured:
+        payload = _post(
+            "/rp-rows/",
+            "{ allLibraryBranchesViaListField(orderBy: [{name: ASC}]) { name } }",
+            client=client,
+        )
+    assert "errors" not in payload, payload
+    assert payload["data"] == {
+        "allLibraryBranchesViaListField": [{"name": f"B{i}"} for i in range(3)],
+    }
+    statements = [
+        q["sql"] for q in captured.captured_queries if 'FROM "library_branch"' in q["sql"]
+    ]
+    assert len(statements) == 1, statements
+    assert "LIMIT 3" in statements[0].upper(), statements
 
 
 @pytest.mark.django_db
 def test_the_list_sibling_cannot_bypass_the_connection_page_cap() -> None:
-    """The bypass S3 names, closed from both ends.
-
-    ``CategoryType.items`` is an explicit ``"both"`` opt-in, so the raw list
-    sibling still exists - and it is bounded by ``max_list_rows`` rather than
-    being the unbounded escape hatch beside a capped ``itemsConnection``.
-    """
-    seed_data(3)
-    payload = _post(
-        "/rp-rows/",
-        "{ allCategories(first: 2) { edges { node { items { name } } } } }",
-    )
-    _no_rejection(payload)
-    for edge in json_list(payload, "data", "allCategories", "edges"):
-        assert len(json_list(edge, "node", "items")) <= MAX_LIST_ROWS
+    """Each of two overfull parents returns its own capped raw list; that list promises no order."""
+    seed_data(MAX_LIST_ROWS + 1)
+    create_users(1)
+    client = Client()
+    client.force_login(get_user_model().objects.get(username="staff_1"))
+    categories = list(products_models.Category.objects.order_by("name")[:2])
+    names_by_category: dict[str, set[str]] = {}
+    for category in categories:
+        items = list(products_models.Item.objects.filter(category=category).order_by("pk"))
+        names: set[str] = set()
+        for index, item in enumerate(items):
+            name = f"RP-{category.pk}-{index}"
+            products_models.Item.objects.filter(pk=item.pk).update(name=name, is_private=False)
+            names.add(name)
+        assert len(names) > MAX_LIST_ROWS
+        names_by_category[category.name] = names
+    with CaptureQueriesContext(connection) as captured:
+        payload = _post(
+            "/rp-rows/",
+            "{ allCategories(first: 2, orderBy: [{name: ASC}]) { edges { node { name items { name } } } } }",
+            client=client,
+        )
+    assert "errors" not in payload, payload
+    edges = json_list(payload, "data", "allCategories", "edges")
+    assert [json_str(edge, "node", "name") for edge in edges] == [
+        category.name for category in categories
+    ]
+    for edge in edges:
+        node = json_object(edge, "node")
+        rows = json_list(node, "items")
+        returned_names = [json_str(row, "name") for row in rows]
+        assert len(returned_names) == len(set(returned_names)) == MAX_LIST_ROWS
+        assert set(returned_names) <= names_by_category[json_str(node, "name")]
+    item_queries = [
+        query["sql"]
+        for query in captured.captured_queries
+        if 'FROM "products_item"' in query["sql"]
+    ]
+    assert len(item_queries) == 2, item_queries
+    assert all("LIMIT 3" in sql.upper() for sql in item_queries), item_queries
 
 
 @pytest.mark.django_db
@@ -3577,15 +3808,20 @@ def test_a_passed_deadline_stops_a_native_node_field_on_the_async_transport(fiel
     assert _error_paths(payload) == [[field]]
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_a_passed_deadline_stops_a_write_before_its_pipeline_transaction_opens() -> None:
-    """The write seam: refusing before the pipeline's own atomic leaves no write to unwind."""
+    """Only the schema's completion transaction opens; the expired pipeline neither nests nor reads."""
     mutation = (
-        'mutation { createBookViaCustomInput(data: { title: "t", subtitle: "s", shelfId: 1 }) '
-        "{ node { title } errors { field messages } } }"
+        'mutation { createBookViaCustomInput(data: { title: "t", subtitle: "s",'
+        " shelfId: 1 }) { node { title } errors { field messages } } }"
     )
-    payload = _post("/rp-deadline/", mutation)
+    before = library_models.Book.objects.count()
+    with CaptureQueriesContext(connection) as captured:
+        payload = _post("/rp-deadline/", mutation)
     _deadline_rejection(payload)
+    assert _error_paths(payload) == [["createBookViaCustomInput"]]
+    assert [query["sql"].upper() for query in captured.captured_queries] == ["BEGIN", "ROLLBACK"]
+    assert library_models.Book.objects.count() == before
 
 
 _BOOK_SHELVES = "{ allLibraryBooks { title shelf { code } } }"
@@ -4009,9 +4245,25 @@ def test_a_passed_deadline_stops_the_auth_fields_on_the_async_transport(
 
 @pytest.mark.django_db
 def test_an_unarmed_deadline_never_rejects() -> None:
-    """The default policy carries no deadline, so no seam may reject on one."""
-    seed_data(1)
-    _no_rejection(_post("/rp-rows/", "{ allLibraryBranchesViaListField { name } }"))
+    """With no deadline, the ordered five-row control reaches its one branch statement."""
+    create_users(1)
+    client = Client()
+    client.force_login(get_user_model().objects.get(username="staff_1"))
+    _seed_five_branches()
+    with CaptureQueriesContext(connection) as captured:
+        payload = _post(
+            "/rp-deadline-unarmed/",
+            "{ allLibraryBranchesViaListField(orderBy: [{name: ASC}]) { name } }",
+            client=client,
+        )
+    assert "errors" not in payload, payload
+    assert payload["data"] == {
+        "allLibraryBranchesViaListField": [{"name": f"B{i}"} for i in range(5)],
+    }
+    statements = [
+        q["sql"] for q in captured.captured_queries if 'FROM "library_branch"' in q["sql"]
+    ]
+    assert len(statements) == 1, statements
 
 
 # ---------------------------------------------------------------------------
@@ -4059,21 +4311,33 @@ def test_a_resolver_cannot_widen_the_next_request_through_the_schema() -> None:
     assert _rejection(third)["bound"] == "max_container_width"
 
 
-def test_a_resolver_cannot_nominate_a_new_policy_authority_over_the_wire() -> None:
-    """Presence of an enforcement extension is not evidence that it was configured.
-
-    A replacement list can carry an ordinary resource-policy extension with a
-    wider policy of its own, which every presence and deduplication check
-    accepts while the configured bound is gone for the life of the process. The
-    assignment is refused where it is made, so the request that tried it fails
-    and the next one is still held to what the deployment configured.
-    """
+def test_a_resolver_cannot_nominate_a_new_policy_authority_over_the_wire(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Replacing accepted extensions raises the recorded configuration error and preserves the next bound."""
+    caplog.set_level(logging.ERROR, logger="django_strawberry_framework")
     attacked = _post("/rp-authority/", "{ nominate }")
-    assert attacked.get("errors")
-
+    assert attacked["data"] is None, attacked
+    assert len(json_list(attacked, "errors")) == 1
+    error = json_object(attacked, "errors", 0)
+    assert error["path"] == ["nominate"]
+    assert error["message"] == DEFAULT_ERROR_POLICY.message
+    extensions = json_object(error, "extensions")
+    assert set(extensions) == {"correlationId"}
+    assert re.fullmatch("[0-9a-f]{32}", json_str(extensions, "correlationId"))
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "django_strawberry_framework" and record.levelno == logging.ERROR
+    ]
+    assert len(records) == 1, caplog.records
+    original = records[0].exc_info
+    assert original is not None
+    assert original[2] is not None
+    assert isinstance(original[1], ConfigurationError)
     second = _post("/rp-authority/", "{ rows }")
-    _no_rejection(second)
-    assert json_at(second, "data", "rows") == ["a"]
+    assert "errors" not in second, second
+    assert second["data"] == {"rows": ["a"]}
 
 
 def test_two_schemas_that_compare_equal_bound_their_own_requests() -> None:
@@ -4353,16 +4617,19 @@ def test_an_extension_factory_still_builds_one_per_operation() -> None:
     called once per operation by design. Each request must still get an instance
     of its own while the schema's own bound goes on holding it.
     """
+    initial = len(_FACTORY_BUILDS)
     before = _post("/rp-factory-entry/", "{ builds }")
-    _no_rejection(before)
-
+    assert "errors" not in before, before
+    assert before["data"] == {"builds": initial + 1}
     bounded = _post("/rp-factory-entry/", "{ rows }")
-    _no_rejection(bounded)
-    assert json_at(bounded, "data", "rows") == ["a"]
-
+    assert "errors" not in bounded, bounded
+    assert bounded["data"] == {"rows": ["a"]}
     after = _post("/rp-factory-entry/", "{ builds }")
-    _no_rejection(after)
-    assert json_int(after, "data", "builds") > json_int(before, "data", "builds")
+    assert "errors" not in after, after
+    assert after["data"] == {"builds": initial + 3}
+    fresh = _FACTORY_BUILDS[initial:]
+    assert len(fresh) == 3
+    assert len({id(instance) for instance in fresh}) == 3
 
 
 @pytest.mark.parametrize(
@@ -4839,22 +5106,26 @@ def test_a_project_manager_routing_through_an_enum_member_alias_is_served(
 
 @pytest.mark.django_db
 def test_a_bound_at_the_representable_maximum_reaches_the_database() -> None:
-    """The largest configurable bound has to work as a real ``LIMIT``.
-
-    A bound is handed to the backend's adapter, which binds it as an integer of
-    the backend's own width, so the top of the accepted domain is only the top
-    if a request configured there executes. The row runs against whichever
-    backend the suite is running on, so the sqlite tier and the Postgres tier
-    each prove it for themselves.
-
-    ``max_collection_cost`` is raised with it because the pre-execution cost
-    charge is ``max_list_rows`` itself: left at its default, the request is
-    refused by the cost bound before it can say anything about the row bound.
-    """
-    seed_data(2)
-    payload = _post("/rp-max-bound/", "{ allLibraryBranchesViaListField { name } }")
-    _no_rejection(payload)
-    assert json_at(payload, "data", "allLibraryBranchesViaListField") is not None
+    """The configured collection bound serves real ordered branch rows in one bounded statement."""
+    create_users(1)
+    client = Client()
+    client.force_login(get_user_model().objects.get(username="staff_1"))
+    _seed_five_branches()
+    with CaptureQueriesContext(connection) as captured:
+        payload = _post(
+            "/rp-max-bound/",
+            "{ allLibraryBranchesViaListField(orderBy: [{name: ASC}]) { name } }",
+            client=client,
+        )
+    assert "errors" not in payload, payload
+    assert payload["data"] == {
+        "allLibraryBranchesViaListField": [{"name": f"B{i}"} for i in range(5)],
+    }
+    statements = [
+        q["sql"] for q in captured.captured_queries if 'FROM "library_branch"' in q["sql"]
+    ]
+    assert len(statements) == 1, statements
+    assert f"LIMIT {MAX_RESOURCE_BOUND}" in statements[0].upper(), statements
 
 
 # ---------------------------------------------------------------------------
@@ -4862,27 +5133,29 @@ def test_a_bound_at_the_representable_maximum_reaches_the_database() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.django_db
-def test_sync_and_async_transports_share_one_typed_error_code() -> None:
-    """The rejection is a ``GraphQLError``, so no transport translates it.
-
-    Sync and async mounts of the package view must answer with the same code,
-    the same bound, and the same charge - a per-transport difference here would
-    mean a client cannot recognize the failure without knowing its transport.
-    """
+@pytest.mark.parametrize("color", ["sync", "async"])
+def test_sync_and_async_transports_share_one_typed_error_code(color: str) -> None:
+    """Each native transport independently preserves the exact typed node-ID refusal."""
     variables = {"ids": ["x"] * (MAX_NODE_IDS + 1)}
-    sync_extensions = _rejection(_post("/rp-values/", _NODES, variables))
-
-    async_response = _await_response(
-        AsyncTestClient().query(
-            _NODES,
-            variables=variables,
-            assert_no_errors=False,
-            url="/rp-values-async/",
-        ),
-    )
-    async_payload = response_json(async_response.response)
-    assert _rejection(async_payload) == sync_extensions
+    if color == "sync":
+        payload = _post("/rp-values/", _NODES, variables)
+    else:
+        response = _await_response(
+            AsyncTestClient().query(
+                _NODES,
+                variables=variables,
+                assert_no_errors=False,
+                url="/rp-values-async/",
+            ),
+        )
+        assert response.response.status_code == 200
+        payload = response_json(response.response)
+    assert _rejection(payload) == {
+        "code": RESOURCE_LIMIT_ERROR_CODE,
+        "bound": "max_node_ids",
+        "charged": MAX_NODE_IDS + 1,
+        "limit": MAX_NODE_IDS,
+    }
 
 
 _AsyncResponse: TypeAlias = "Response[_MonkeyPatchedASGIResponse]"
@@ -4931,11 +5204,7 @@ def _reset_overlap_state() -> Iterator[None]:
 
 
 @pytest.mark.usefixtures("_reset_overlap_state")
-@pytest.mark.parametrize(
-    ("spelling", "color"),
-    ENTRY_ROWS,
-    ids=ENTRY_IDS,
-)
+@pytest.mark.parametrize(("spelling", "color"), ENTRY_ROWS, ids=ENTRY_IDS)
 def test_an_overlapping_request_does_not_admit_an_oversized_one(spelling: str, color: str) -> None:
     """Whichever object a consumer entry resolves to, the charge lands on its own document.
 
@@ -4956,17 +5225,14 @@ def test_an_overlapping_request_does_not_admit_an_oversized_one(spelling: str, c
     entry = (spelling, color)
     oversized = "{ a: rows b: rows }"
     benign = "{ rows }"
-
     _ExecutionWitness.entered.clear()
     _OverlapCoordinator.parked = threading.Event()
     _OverlapCoordinator.released = threading.Event()
     _OverlapCoordinator.armed = False
-
     alone = _rejection(_entry_request(entry, oversized))
     assert alone["bound"] == "max_aliases"
     assert alone["limit"] == ENTRY_ALIASES
     assert _ExecutionWitness.entered == []
-
     _OverlapCoordinator.armed = True
     overlapped: dict[str, JSONObject] = {}
 
@@ -4982,12 +5248,12 @@ def test_an_overlapping_request_does_not_admit_an_oversized_one(spelling: str, c
         _OverlapCoordinator.released.set()
         held.join(timeout=10)
         _OverlapCoordinator.armed = False
-
-    _no_rejection(benign_payload)
+    assert not held.is_alive(), "the held request did not terminate after release"
+    assert "payload" in overlapped, "the held request raised before recording its response"
+    assert "errors" not in benign_payload, benign_payload
     assert benign_payload["data"] == {"rows": ["a", "b", "c"]}
     assert _rejection(overlapped["payload"]) == alone
     assert _ExecutionWitness.entered == [benign]
-
     _ExecutionWitness.entered.clear()
     assert _rejection(_entry_request(entry, oversized)) == alone
     assert _ExecutionWitness.entered == []
