@@ -17,7 +17,6 @@ from collections.abc import Iterator
 from typing import get_args
 
 import pytest
-import strawberry
 from apps.library import models as library_models
 from strawberry.types.base import get_object_definition
 
@@ -32,6 +31,7 @@ from django_strawberry_framework.orders.inputs import (
     _field_specs,
     _materialized_names,
 )
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import is_tuple, read_attr
 from django_strawberry_framework.utils.inputs import _type_name_claims
 from tests._idioms import canonical_order, definition_raises, scrambled, type_args
@@ -378,12 +378,14 @@ def test_factory_raises_when_reachable_related_orderset_is_empty() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_factory_dedupes_double_enqueued_target_via_seen_check() -> None:
+def test_factory_dedupes_double_enqueued_target_via_seen_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Covers ``utils/inputs.py::GeneratedInputArgumentsFactory._ensure_built`` #"if set_cls in seen:".
 
     The existing ``test_factory_handles_cycles_via_seen_set`` pins the same
     helper's enqueue-time #"if target is not None and target not in seen:"
-    gate; this test pins the pop-time one. To force a double-enqueue, declare an
+    gate; this test counts the pop-time traversal reads. To force a double-enqueue, declare an
     orderset with TWO ``RelatedOrder`` instances pointing to the SAME
     target -- both walk the ``related_orders.values()`` loop while the
     target is not yet in ``seen`` (the parent class is still in flight),
@@ -407,8 +409,33 @@ def test_factory_dedupes_double_enqueued_target_via_seen_check() -> None:
             model = library_models.Branch
             fields = ["name"]
 
+    # Count the BFS's map reads, delegating every real build and read. The
+    # input cache also prevents duplicate builds, so final registry cardinality
+    # alone cannot prove that a twice-enqueued target was visited only once.
+    visits: list[object] = []
+    building = False
+    build = OrderArgumentsFactory._build_class_type
+    read = truth.static_attr
+
+    def tracked_build(factory: OrderArgumentsFactory, set_class: type[OrderSet]) -> None:
+        nonlocal building
+        building = True
+        try:
+            build(factory, set_class)
+        finally:
+            building = False
+
+    def tracked_read(obj: object, attr: str, default: object = None) -> object:
+        if not building and obj is ChildOrderDedup and attr == "related_orders":
+            visits.append(obj)
+        return read(obj, attr, default)
+
+    monkeypatch.setattr(OrderArgumentsFactory, "_build_class_type", tracked_build)
+    monkeypatch.setattr(truth, "static_attr", tracked_read)
+
     factory = OrderArgumentsFactory(ParentOrderDedup)
     _ = factory.arguments  # must not raise; the pop-time guard fires.
+    assert visits == [ChildOrderDedup]
     # The target was built exactly once (the registry has one entry).
     assert (
         OrderArgumentsFactory._type_orderset_registry["ChildOrderDedupInputType"]
@@ -551,8 +578,3 @@ def test_factory_handles_related_order_targeting_callable_factory() -> None:
     _ = factory.arguments
     assert "RootOrderInputType" in OrderArgumentsFactory.input_object_types
     assert "TargetOrderInputType" in OrderArgumentsFactory.input_object_types
-
-
-# Keep ``strawberry`` import alive for re-exported lazy types under
-# the Annotated forward-references.
-assert strawberry is not None

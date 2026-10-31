@@ -5,19 +5,18 @@ Covers the five parity-floor primitives (`TypedFilter`, `ArrayFilter`,
 the lazy-resolution mixin, and `RelatedFilter`.
 
 Own-PK empty / malformed GlobalID filter rejection lives in
-``test_library_api.py``. This file keeps primitive ``filter()`` methods,
-marked non-pk ``to_field`` decode, lazy ``RelatedFilter`` resolution, and
-encode-only strategy fail-closed. No fakeshop filterset exposes the one
-non-pk ``to_field`` relation (``PatronProfile.favorite_genre``); GraphQL never
-delivers a non-list container to ``GlobalIDMultipleChoiceFilter``.
+``test_library_api.py``. This file keeps primitive form contracts, query-object identity, metadata,
+lazy ``RelatedFilter`` resolution, and encode-only strategy refusal. The
+``PatronProfile.favorite_genre`` target-key round trips live in
+``test_library_api.py``; generated GlobalID list inputs reject non-list containers
+before ``GlobalIDMultipleChoiceFilter`` runs. Ordinary JSON consumer arguments are a
+separate public form surface.
 """
 
 from __future__ import annotations
 
 import copy
-import datetime
-import uuid
-from collections.abc import Callable, Generator, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from decimal import Decimal
 from functools import partial
 from types import SimpleNamespace
@@ -31,7 +30,6 @@ from apps.scalars import models as scalar_models
 from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
-from django.core.validators import MinValueValidator
 from django.db import DEFAULT_DB_ALIAS
 from django.db import connection as db_connection
 from django.db import models as db_models
@@ -51,11 +49,8 @@ from strawberry import relay
 from typing_extensions import Self, override
 
 from django_strawberry_framework import (
-    DjangoConnection,
-    DjangoConnectionField,
     DjangoType,
     finalize_django_types,
-    strawberry_config,
 )
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.filters import (
@@ -104,13 +99,30 @@ from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.types.definition import DjangoTypeDefinition
 from django_strawberry_framework.utils._narrowing import (
     call_method,
-    list_of,
     read_attr,
     require,
     require_instance,
 )
 from django_strawberry_framework.utils.relations import is_model_class
 from django_strawberry_framework.utils.typing import object_result
+from tests._cleaned_filter_sets import (
+    KEPT_EXTERNAL_ID as _KEPT_EXTERNAL_ID,
+)
+from tests._cleaned_filter_sets import (
+    PackageCleanedScalarSet as _PackageCleanedScalarSet,
+)
+from tests._cleaned_filter_sets import (
+    PlainCleanedScalarSet as _PlainCleanedScalarSet,
+)
+from tests._cleaned_filter_sets import (
+    cleaned_specimen as _cleaned_specimen,
+)
+from tests._filter_key_models import (
+    _DecimalKeyed,
+    _DecimalKeyedHolder,
+    _UuidKeyed,
+    _UuidKeyedProfile,
+)
 from tests._idioms import ModelSerializerBase, saved_pk
 from tests._postgres_fields import FakeArrayField, patch_array_field
 from tests._relation_fixtures import RpCompositeChild
@@ -188,11 +200,6 @@ def _isolate_registry() -> Iterator[None]:
     registry.clear()
 
 
-# ---------------------------------------------------------------------------
-# TypedFilter
-# ---------------------------------------------------------------------------
-
-
 def test_typed_filter_drops_input_type_property() -> None:
     """The Graphene-port `input_type` property is intentionally dropped.
 
@@ -210,17 +217,13 @@ def test_typed_filter_does_not_carry_graphene_input_type_attribute() -> None:
     assert not hasattr(f, "_input_type")
 
 
-def test_typed_filter_is_a_django_filter_filter() -> None:
-    assert issubclass(TypedFilter, Filter)
-
-
-# ---------------------------------------------------------------------------
-# ArrayFilter
-# ---------------------------------------------------------------------------
-
-
 def test_array_filter_treats_empty_list_as_value() -> None:
-    """`[]` is a real value for `ArrayField`; default filter must run."""
+    """The primitive forwards the actual empty list to the exact lookup keyword.
+
+    The recording queryset observes the Python call, not array equality. Real
+    empty-array predicates live in
+    ``test_postgres_array_filter_bindability_api.py::test_raw_array_forms_keep_upstream_csv_and_explicit_empty_membership``.
+    """
     qs = _RecordingQs()
 
     f = ArrayFilter(field_name="tags", lookup_expr="exact")
@@ -230,7 +233,11 @@ def test_array_filter_treats_empty_list_as_value() -> None:
 
 
 def test_array_filter_passes_through_none() -> None:
-    """`None` is `EMPTY_VALUES`-ish and short-circuits."""
+    """Omission returns the identical queryset without invoking its query methods.
+
+    HTTP omission rows live in
+    ``test_postgres_array_filter_bindability_api.py::test_raw_array_forms_keep_upstream_csv_and_explicit_empty_membership``.
+    """
     sentinel = _RecordingQs()
     f = ArrayFilter(field_name="tags")
     # The cookbook returns the original queryset untouched for `None`.
@@ -247,26 +254,8 @@ def test_array_filter_method_setter_swaps_in_array_filter_method() -> None:
     assert isinstance(f.filter, ArrayFilterMethod)
 
 
-# ---------------------------------------------------------------------------
-# RangeField / RangeFilter
-# ---------------------------------------------------------------------------
-
-
 def test_validate_range_accepts_two_values() -> None:
     assert validate_range([1, 2]) is None
-
-
-def test_validate_range_rejects_single_value() -> None:
-    with pytest.raises(ValidationError) as excinfo:
-        validate_range([1])
-    assert excinfo.value.code == "invalid"
-
-
-def test_validate_range_rejects_three_values() -> None:
-    with pytest.raises(ValidationError):
-        validate_range(
-            [1, 2, 3],
-        )
 
 
 def test_range_filter_uses_range_field_class() -> None:
@@ -312,10 +301,21 @@ def test_range_field_cleans_each_bound_with_its_bound_field(
     assert RangeField(required=False, bound_field=bound_field).clean(value) == cleaned
 
 
-def test_range_field_leaves_a_pair_of_the_wrong_length_to_validate_range() -> None:
-    """A value that is not a pair is never cleaned bound by bound; ``validate_range`` refuses it."""
+@pytest.mark.parametrize(
+    "value",
+    [["NaN"], ["1", "2", "3"], "not-a-sequence"],
+    ids=["short", "long", "scalar"],
+)
+def test_range_field_leaves_a_pair_of_the_wrong_length_to_validate_range(value: object) -> None:
+    """Malformed Python values reach shape validation without per-bound cleaning.
+
+    Generated range inputs and ordinary apply arguments normalize to a fixed pair
+    or refuse earlier, so their HTTP verdicts cannot distinguish this form-field
+    precedence. Native input-shape refusals live in
+    ``examples/fakeshop/test_query/test_filter_apply_arguments_api.py``.
+    """
     with pytest.raises(ValidationError) as excinfo:
-        RangeField(bound_field=DecimalField()).clean(["NaN"])
+        RangeField(bound_field=DecimalField()).clean(value)
     assert excinfo.value.messages == ["Invalid range specified: it needs to contain 2 values."]
 
 
@@ -523,63 +523,10 @@ def test_package_set_over_a_django_filter_base_generates_the_bases_filter() -> N
     assert type(_PackageOverDecimalAsTextSet.base_filters["price__gte"]) is CharFilter
 
 
-class _PackageCleanedScalarSet(FilterSet):
-    price_span = RangeFilter(field_name="price", lookup_expr="range")
-    occurred_at_span = RangeFilter(field_name="occurred_at", lookup_expr="range")
-    external_id_span = RangeFilter(field_name="external_id", lookup_expr="range")
-    signed_big_span = RangeFilter(field_name="signed_big", lookup_expr="range")
-    price_in = ListFilter(field_name="price", lookup_expr="in")
-    occurred_at_in = ListFilter(field_name="occurred_at", lookup_expr="in")
-    external_id_in = ListFilter(field_name="external_id", lookup_expr="in")
-    signed_big_in = ListFilter(field_name="signed_big", lookup_expr="in")
-
-    class Meta:
-        model = scalar_models.ScalarSpecimen
-        fields = ("label",)
-
-
-class _PlainCleanedScalarSet(django_filters.FilterSet):
-    price_span = RangeFilter(field_name="price", lookup_expr="range")
-    occurred_at_span = RangeFilter(field_name="occurred_at", lookup_expr="range")
-    external_id_span = RangeFilter(field_name="external_id", lookup_expr="range")
-    signed_big_span = RangeFilter(field_name="signed_big", lookup_expr="range")
-    price_in = ListFilter(field_name="price", lookup_expr="in")
-    occurred_at_in = ListFilter(field_name="occurred_at", lookup_expr="in")
-    external_id_in = ListFilter(field_name="external_id", lookup_expr="in")
-    signed_big_in = ListFilter(field_name="signed_big", lookup_expr="in")
-
-    class Meta:
-        model = scalar_models.ScalarSpecimen
-        fields = ("label",)
-
-
 _CLEANED_SCALAR_SETS = [
     pytest.param(_PackageCleanedScalarSet, id="package-filterset"),
     pytest.param(_PlainCleanedScalarSet, id="django-filter-filterset"),
 ]
-
-_KEPT_EXTERNAL_ID = uuid.UUID("6f1c2a3e-0b4d-4e5f-8a9b-1c2d3e4f5a6b")
-
-
-def _cleaned_specimen(label: str, *, kept: bool) -> scalar_models.ScalarSpecimen:
-    """Create a specimen whose price, timestamp, id and integer each match only when ``kept``."""
-    return scalar_models.ScalarSpecimen.objects.create(
-        label=label,
-        price=Decimal("10.5") if kept else Decimal(99),
-        occurred_on=datetime.date(2026, 1, 2),
-        occurred_at=datetime.datetime(
-            2026 if kept else 2020,
-            1,
-            2,
-            3,
-            4,
-            5,
-            tzinfo=datetime.timezone.utc,
-        ),
-        occurred_time=datetime.time(3, 4, 5),
-        external_id=_KEPT_EXTERNAL_ID if kept else uuid.uuid4(),
-        signed_big=7 if kept else 900,
-    )
 
 
 @pytest.mark.parametrize("filterset_class", _CLEANED_SCALAR_SETS)
@@ -649,48 +596,6 @@ def test_declared_range_or_list_value_the_column_cannot_hold_is_a_form_error_und
 
     assert not filterset.is_valid()
     assert filterset.errors == {name: [message]}
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize("filterset_class", _CLEANED_SCALAR_SETS)
-@pytest.mark.parametrize(
-    "data",
-    [
-        pytest.param({"price_span_0": "10", "price_span_1": "11"}, id="decimal-range"),
-        pytest.param(
-            {
-                "occurred_at_span_0": "2026-01-01 00:00:00",
-                "occurred_at_span_1": "2026-12-31 00:00:00",
-            },
-            id="datetime-range",
-        ),
-        pytest.param(
-            {
-                "external_id_span_0": str(_KEPT_EXTERNAL_ID),
-                "external_id_span_1": str(_KEPT_EXTERNAL_ID),
-            },
-            id="uuid-range",
-        ),
-        pytest.param({"signed_big_span_0": "5", "signed_big_span_1": "8"}, id="integer-range"),
-        pytest.param({"price_in": ["10.5"]}, id="decimal-list"),
-        pytest.param({"occurred_at_in": ["2026-01-02 03:04:05"]}, id="datetime-list"),
-        pytest.param({"external_id_in": [str(_KEPT_EXTERNAL_ID)]}, id="uuid-list"),
-        pytest.param({"signed_big_in": ["7"]}, id="integer-list"),
-    ],
-)
-def test_declared_range_or_list_value_the_column_holds_filters_under_any_filterset(
-    filterset_class: type[django_filters.FilterSet | FilterSet],
-    data: dict[str, object],
-) -> None:
-    """A well-formed bound or element filters the rows the same under either parent."""
-    _ = _cleaned_specimen("kept", kept=True)
-    _ = _cleaned_specimen("other", kept=False)
-    queryset = scalar_models.ScalarSpecimen.objects.order_by("label")
-
-    filterset = filterset_class(data=data, queryset=queryset)
-
-    assert filterset.is_valid()
-    assert list(filterset.qs.values_list("label", flat=True)) == ["kept"]
 
 
 class _SpecimenLabelSerializer(ModelSerializerBase[scalar_models.ScalarSpecimen]):
@@ -838,27 +743,6 @@ def test_declared_list_filter_under_django_filter_backend_answers_a_bad_member_w
     assert len(captured) == 0
 
 
-@pytest.mark.django_db
-@pytest.mark.parametrize("filterset_class", _CLEANED_SCALAR_SETS)
-@pytest.mark.parametrize(("query", "labels"), _RAW_FORM_LIST_ROWS)
-def test_declared_list_filter_reads_a_query_dict_as_raw_form_members(
-    filterset_class: type[django_filters.FilterSet | FilterSet],
-    query: str,
-    labels: list[str],
-) -> None:
-    """``FilterSet(data=QueryDict(...))`` reads a raw list member as the backend does."""
-    _ = _cleaned_specimen("kept", kept=True)
-    _ = _cleaned_specimen("other", kept=False)
-    queryset = scalar_models.ScalarSpecimen.objects.order_by("label")
-
-    filterset = filterset_class(data=QueryDict(query), queryset=queryset)
-
-    assert filterset.is_valid()
-    with CaptureQueriesContext(db_connection) as captured:
-        assert list(filterset.qs.values_list("label", flat=True)) == labels
-    assert len(captured) == 1
-
-
 @pytest.mark.parametrize("filterset_class", _CLEANED_SCALAR_SETS)
 @pytest.mark.parametrize(
     ("data", "cleaned"),
@@ -917,30 +801,28 @@ def test_declared_list_filter_renders_its_raw_form_members_as_text(
     assert '<input type="text" name="signed_big_in" id="id_signed_big_in">' in unbound
 
 
-@pytest.mark.django_db
 @pytest.mark.parametrize("parent", [FilterSet, django_filters.FilterSet])
-def test_declared_list_filter_consumer_widget_replaces_the_raw_form_reading(
+def test_a_consumer_list_widget_keeps_its_class_and_cleaned_numeric_members(
     parent: type[django_filters.FilterSet | FilterSet],
 ) -> None:
-    """A consumer ``widget=`` reads the form data its own way: ``SelectMultiple`` repeats a key."""
-    _ = _cleaned_specimen("kept", kept=True)
-    _ = _cleaned_specimen("other", kept=False)
-    filterset_class = _declared_set(
+    """The consumer's widget class and cleaned numeric members remain form observations.
+
+    Raw repeated-key membership and scalar range/list results are covered through HTTP by
+    ``examples/fakeshop/test_query/test_raw_filter_forms_api.py``. The wire cannot show the
+    widget's Python class or its intermediate cleaned_data before Django prepares the query.
+    """
+    declared = _declared_set(
         parent,
         scalar_models.ScalarSpecimen,
         signed_big_in=ListFilter(field_name="signed_big", lookup_expr="in", widget=SelectMultiple),
     )
-    queryset = scalar_models.ScalarSpecimen.objects.order_by("label")
-
-    filterset = filterset_class(
+    filterset = declared(
         data=QueryDict("signed_big_in=7&signed_big_in=900"),
-        queryset=queryset,
+        queryset=scalar_models.ScalarSpecimen.objects.none(),
     )
-
     assert type(read_attr(filterset.form.fields["signed_big_in"], "widget")) is SelectMultiple
     assert filterset.is_valid()
     assert filterset.form.cleaned_data["signed_big_in"] == [7, 900]
-    assert list(filterset.qs.values_list("label", flat=True)) == ["kept", "other"]
 
 
 @pytest.mark.parametrize("parent", [FilterSet, django_filters.FilterSet])
@@ -953,7 +835,7 @@ def test_declared_list_filter_consumer_widget_replaces_the_raw_form_reading(
         pytest.param({"priced": []}, [], id="explicit-empty-list-is-kept"),
     ],
 )
-def test_array_filter_reads_raw_form_members(
+def test_a_driver_free_array_form_cleans_members_to_upstreams_python_values(
     monkeypatch: pytest.MonkeyPatch,
     parent: type[django_filters.FilterSet | FilterSet],
     data: QueryDict | dict[str, object],
@@ -961,8 +843,10 @@ def test_array_filter_reads_raw_form_members(
 ) -> None:
     """An ``ArrayFilter`` reads raw form data as ``ListFilter`` does: one shared form field.
 
-    Form-level only: an ``ArrayField`` query needs PostgreSQL. Package-only: fakeshop
-    declares no ``ArrayField``.
+    Only the cleaned Python Decimal/None values and upstream ErrorDict remain here.
+    The optional-contrib classifier is replaced by its driver-free stand-in; real
+    array CSV predicates and invalid-form results run over HTTP in
+    ``examples/fakeshop/test_query/test_postgres_array_filter_bindability_api.py::test_raw_array_forms_keep_upstream_csv_and_explicit_empty_membership``.
     """
     patch_array_field(monkeypatch)
 
@@ -1002,9 +886,10 @@ def test_range_filter_one_sided_applies_lone_bound(
     value: list[int | None],
     expected: dict[str, object],
 ) -> None:
-    """A range with one bound applies that bound alone, never ``BETWEEN x AND NULL``.
+    """A lone bound forwards the exact gte/lte keyword to the queryset method.
 
-    Live: ``test_scalars_filter_api.py::test_scalars_filter_price_span_one_sided_bounds``.
+    This records the Python call. Bound rowsets live in
+    ``test_scalars_filter_api.py::test_scalars_filter_price_span_one_sided_bounds``.
     """
     qs = _RecordingQs()
 
@@ -1020,7 +905,11 @@ def test_range_filter_one_sided_applies_lone_bound(
     ids=["both-bounds", "zero-start", "zero-end"],
 )
 def test_range_filter_two_bounds_keep_declared_lookup(value: list[int]) -> None:
-    """Both bounds bind the declared ``range`` lookup unchanged; a ``0`` bound is a bound."""
+    """Two bounds retain their supplied Python list under the declared range keyword.
+
+    Real integer and decimal predicates live in
+    ``test_raw_filter_forms_api.py::test_declared_scalar_ranges_and_lists_match_the_rows_their_forms_clean``.
+    """
     qs = _RecordingQs()
 
     f = RangeFilter(field_name="price_span", lookup_expr="range")
@@ -1036,7 +925,11 @@ def test_range_filter_two_bounds_keep_declared_lookup(value: list[int]) -> None:
 def test_range_filter_without_bounds_is_skipped(
     value: list[None] | tuple[None, None] | None,
 ) -> None:
-    """A range with neither bound constrains nothing: the queryset comes back untouched."""
+    """No bound returns the identical queryset without calling filter or exclude.
+
+    A request can show unchanged rows, not query-object identity. HTTP rows live in
+    ``test_scalars_filter_api.py::test_scalars_filter_price_span_one_sided_bounds``.
+    """
     qs = _RecordingQs()
 
     f = RangeFilter(field_name="price_span", lookup_expr="range")
@@ -1049,7 +942,11 @@ def test_range_filter_one_sided_honours_exclude(
     value: list[int | None],
     expected: dict[str, object],
 ) -> None:
-    """Under ``exclude=True`` the lone bound goes through ``qs.exclude``."""
+    """A lone bound invokes the queryset's exclude method exactly once.
+
+    The method call is private; its real complement is served in
+    ``test_scalars_filter_api.py::test_scalars_filter_not_price_span_start_only_keeps_the_complement``.
+    """
     qs = _RecordingQs()
 
     f = RangeFilter(field_name="price_span", lookup_expr="range", exclude=True)
@@ -1063,7 +960,11 @@ def test_range_filter_one_sided_applies_distinct_when_flagged(
     value: list[int | None],
     expected: dict[str, object],
 ) -> None:
-    """``distinct=True`` calls ``.distinct()`` before the lone bound applies."""
+    """The primitive invokes the queryset's distinct method once before its lone bound.
+
+    This records invocation, not row uniqueness. Bound rowsets live in
+    ``test_scalars_filter_api.py::test_scalars_filter_price_span_one_sided_bounds``.
+    """
     qs = _RecordingQs()
 
     f = RangeFilter(field_name="price_span", lookup_expr="range", distinct=True)
@@ -1072,16 +973,11 @@ def test_range_filter_one_sided_applies_distinct_when_flagged(
     assert qs.captured == expected
 
 
-# ---------------------------------------------------------------------------
-# IntegerRangeFilter
-# ---------------------------------------------------------------------------
-
-
 def test_integer_range_filter_decomposes_range_into_gte_lte() -> None:
-    """A two-bound range applies one ``gte`` + ``lte`` predicate, never a raw ``__range`` bind.
+    """The integer primitive forwards both bounds in one gte/lte keyword mapping.
 
-    Each bound flows through Django's range-aware integer lookup, so an out-of-range value never
-    overflows the backend (a ``BETWEEN`` bind would).
+    Exact Python kwargs stay private. Real overflow-safe integer predicates live in
+    ``test_scalars_api.py::test_filter_specimens_by_bigint_range_out_of_range_bound_no_overflow``.
     """
     qs = _RecordingQs()
 
@@ -1092,19 +988,25 @@ def test_integer_range_filter_decomposes_range_into_gte_lte() -> None:
 
 
 def test_integer_range_filter_excludes_via_negated_conjunction() -> None:
-    """Under ``exclude=True`` the decomposed pair is applied through ``qs.exclude``.
+    """The integer primitive sends both bound keywords through exclude together.
 
-    That is the exact complement of ``NOT (col BETWEEN a AND b)``.
+    The recording queryset captures kwargs; the actual complemented rowsets live in
+    ``test_scalars_api.py::test_filter_specimens_by_bigint_range_out_of_range_bound_no_overflow``.
     """
     qs = _RecordingQs()
 
     f = IntegerRangeFilter(field_name="signed_big", lookup_expr="range", exclude=True)
     f.filter(qs, [1, 100])
     assert qs.captured == {"signed_big__gte": 1, "signed_big__lte": 100}
+    assert qs.exclude_calls == 1
 
 
 def test_integer_range_filter_passes_through_empty_value() -> None:
-    """An empty / ``None`` range keeps django-filter's skip (no bounds supplied)."""
+    """Omission preserves the exact queryset object.
+
+    HTTP omission and malformed-pair rowsets live in
+    ``test_direct_filter_primitives_api.py::test_a_direct_integer_range_primitive_keeps_upstreams_non_pair_skip``.
+    """
     sentinel = _RecordingQs()
     f = IntegerRangeFilter(field_name="signed_big", lookup_expr="range")
     assert f.filter(sentinel, None) is sentinel
@@ -1124,7 +1026,11 @@ def test_integer_range_filter_list_subclass_iteration_error_propagates() -> None
 
 
 def test_integer_range_filter_applies_distinct_when_flagged() -> None:
-    """``IntegerRangeFilter.filter`` calls ``.distinct()`` when ``distinct=True``."""
+    """The integer primitive invokes distinct exactly once before forwarding both bounds.
+
+    HTTP evaluates SQL, not Python method counts. Integer rowsets live in
+    ``test_scalars_api.py::test_filter_specimens_by_bigint_range_out_of_range_bound_no_overflow``.
+    """
     qs = _RecordingQs()
 
     f = IntegerRangeFilter(field_name="signed_big", lookup_expr="range", distinct=True)
@@ -1177,7 +1083,8 @@ def test_integer_in_filter_binds_a_transform_members_uncoerced_by_the_column(
     The members are values of the transform's ``IntegerField`` output, never of the
     column: none is coerced through the column's field (which drops every member of a
     temporal column), and one past every integer range is kept for the filter form's bind
-    ask, which refuses it (``test_sets.py``).
+    ask, which refuses it over HTTP in
+    ``examples/fakeshop/test_query/test_scalar_predicate_binding_api.py::test_project_integer_transform_members_bind_as_the_transform_output``.
     """
     qs = _RecordingQs()
     f = _bound_integer_filter(
@@ -1228,7 +1135,11 @@ def test_integer_range_filter_applies_its_bounds_through_the_transform(
     column: str,
     transform: str,
 ) -> None:
-    """An integer ``range`` through a transform applies ``gte`` + ``lte`` to the transform."""
+    """Both integer bound keywords retain the declared transform path.
+
+    The Python kwargs stay private; actual transform predicates live in
+    ``test_scalar_predicate_binding_api.py::test_project_transform_without_a_backend_range_keeps_its_integer_members``.
+    """
     qs = _RecordingQs()
     f = _bound_integer_filter(
         model,
@@ -1241,7 +1152,11 @@ def test_integer_range_filter_applies_its_bounds_through_the_transform(
 
 @pytest.mark.django_db
 def test_integer_in_filter_coerces_an_integer_column_members() -> None:
-    """An integer ``in`` on the column itself coerces each member, dropping one past its range."""
+    """Forwarded integer members have int type after column coercion and range dropping.
+
+    This inspects Python kwargs. The corresponding real rowsets live in
+    ``test_scalars_api.py::test_filter_specimens_by_declared_bigint_list_drops_out_of_range_members``.
+    """
     qs = _RecordingQs()
     f = _bound_integer_filter(
         scalar_models.ScalarSpecimen,
@@ -1279,12 +1194,12 @@ def test_integer_in_filter_drops_an_integer_column_fractional_member() -> None:
     assert f.filter(nothing, [Decimal("1.5"), -1.5]) is nothing.nothing
 
 
-# ---------------------------------------------------------------------------
-# ListFilter
-# ---------------------------------------------------------------------------
-
-
 def test_list_filter_returns_qs_none_on_empty_list() -> None:
+    """An empty list returns the specific queryset object created by none().
+
+    HTTP can observe no rows, not that returned object's identity. Native membership
+    rowsets live in ``test_library_api.py::test_relay_relation_empty_exact_list_matches_no_rows_over_http``.
+    """
     qs = _RecordingQs()
 
     f = ListFilter(field_name="ids")
@@ -1292,6 +1207,11 @@ def test_list_filter_returns_qs_none_on_empty_list() -> None:
 
 
 def test_list_filter_defers_to_super_for_nonempty_lists() -> None:
+    """The supplied Python members reach the upstream in-lookup kwargs unchanged.
+
+    Real list predicates live in
+    ``test_raw_filter_forms_api.py::test_declared_scalar_ranges_and_lists_match_the_rows_their_forms_clean``.
+    """
     qs = _RecordingQs()
 
     f = ListFilter(field_name="ids", lookup_expr="in")
@@ -1300,652 +1220,14 @@ def test_list_filter_defers_to_super_for_nonempty_lists() -> None:
 
 
 def test_list_filter_passes_through_none() -> None:
-    """``None`` skips the list-shape gate and falls through to ``Filter.filter``.
+    """Omission preserves the identical queryset object through the upstream filter.
 
-    ``Filter.filter`` short-circuits on ``EMPTY_VALUES``, the same omission pass-through the sibling
-    ``MembershipInFilter`` documents.
+    HTTP omission rowsets live in
+    ``test_raw_filter_forms_api.py::test_django_query_dict_arguments_keep_csv_emptiness_and_membership``.
     """
     sentinel = _RecordingQs()
     f = ListFilter(field_name="ids")
     assert f.filter(sentinel, None) is sentinel
-
-
-class _StoredCount(db_models.Model):
-    """A plain integer column."""
-
-    count: db_models.IntegerField[float | int | str | Combinable, int] = db_models.IntegerField()
-
-    class Meta:
-        managed = False
-        app_label = "test_list_filter_members"
-
-
-class _StoredCountSet(FilterSet):
-    count_among = ListFilter(field_name="count", lookup_expr="in")
-    count_outside = ListFilter(field_name="count", lookup_expr="in", exclude=True)
-
-    class Meta:
-        model = _StoredCount
-        fields = ("count",)
-
-
-@pytest.fixture
-def stored_counts() -> Generator[QuerySet[_StoredCount], None, None]:
-    """A real ``_StoredCount`` table holding 5 and 12."""
-    with db_connection.schema_editor() as editor:
-        editor.create_model(_StoredCount)
-    try:
-        _StoredCount.objects.create(count=5)
-        _StoredCount.objects.create(count=12)
-        yield _StoredCount.objects.all()
-    finally:
-        with db_connection.schema_editor() as editor:
-            editor.delete_model(_StoredCount)
-
-
-@pytest.mark.django_db(transaction=True)
-@pytest.mark.parametrize(
-    ("name", "members", "counts"),
-    [
-        pytest.param("count_among", ["abc", 12], [12], id="unconvertible-member-dropped"),
-        pytest.param("count_among", ["abc"], [], id="every-member-dropped"),
-        pytest.param("count_outside", ["abc"], [5, 12], id="every-member-dropped-excluded"),
-    ],
-)
-def test_list_filter_integer_in_drops_members_the_column_cannot_convert(
-    stored_counts: QuerySet[_StoredCount],
-    name: str,
-    members: list[object],
-    counts: list[int],
-) -> None:
-    """An integer ``in`` drops a member the column's ``to_python`` cannot convert.
-
-    Such a member identifies no row and is dropped; a list with none left matches nothing,
-    or every row when excluding. Package-only: the GraphQL input delivers only integers.
-    Live rows for a member past the backend's range:
-    ``test_scalars_api.py::test_filter_specimens_by_declared_bigint_list_drops_out_of_range_members``;
-    for a member the column's validator refuses:
-    ``test_scalars_api.py::test_filter_specimens_match_a_stored_value_the_column_validator_refuses``.
-    """
-    bound = _StoredCountSet(data={}, queryset=stored_counts).filters[name]
-    result: QuerySet[_StoredCount] = bound.filter(stored_counts, members)
-    assert sorted(row.count for row in result) == counts
-
-
-class _GatedKey(db_models.Model):
-    """A target whose integer primary key carries a validator refusing ids below 10."""
-
-    code: db_models.IntegerField[float | int | str | Combinable, int] = db_models.IntegerField(
-        primary_key=True,
-        validators=[MinValueValidator(10)],
-    )
-
-    class Meta:
-        managed = False
-        app_label = "test_relation_pk_validators"
-
-
-class _GatedKeyHolder(db_models.Model):
-    """A row keyed to a ``_GatedKey``."""
-
-    key: db_models.ForeignKey[_GatedKey | Combinable, _GatedKey] = db_models.ForeignKey(
-        _GatedKey,
-        on_delete=db_models.CASCADE,
-        related_name="+",
-    )
-
-    class Meta:
-        managed = False
-        app_label = "test_relation_pk_validators"
-
-
-class _GatedKeyHolderSet(FilterSet):
-    key_is = RelationPkFilter(field_name="key", lookup_expr="exact")
-    key_among = RelationPkMultipleFilter(field_name="key", lookup_expr="in")
-
-    class Meta:
-        model = _GatedKeyHolder
-        fields = ()
-
-
-@pytest.fixture
-def gated_key_holders() -> Generator[QuerySet[_GatedKeyHolder], None, None]:
-    """Real tables: keys 5 (below the validator) and 12, one holder on each."""
-    with db_connection.schema_editor() as editor:
-        editor.create_model(_GatedKey)
-        editor.create_model(_GatedKeyHolder)
-    try:
-        for code in (5, 12):
-            _GatedKeyHolder.objects.create(key=_GatedKey.objects.create(code=code))
-        yield _GatedKeyHolder.objects.all()
-    finally:
-        with db_connection.schema_editor() as editor:
-            editor.delete_model(_GatedKeyHolder)
-            editor.delete_model(_GatedKey)
-
-
-@pytest.mark.django_db(transaction=True)
-@pytest.mark.parametrize(
-    ("name", "value", "keys"),
-    [
-        pytest.param("key_is", 5, [5], id="single"),
-        pytest.param("key_among", [5], [5], id="list"),
-        pytest.param("key_among", [5, 12], [5, 12], id="list-mixed"),
-    ],
-)
-def test_relation_pk_filters_match_a_key_the_target_validator_refuses(
-    gated_key_holders: QuerySet[_GatedKeyHolder],
-    name: str,
-    value: object,
-    keys: list[int],
-) -> None:
-    """A raw relation key the target's validator refuses still matches the row holding it.
-
-    The key ``5`` is stored without ``full_clean``; the filter coerces it through the target
-    key column (``filters/base.py::_coerce_relation_identity``) by what the column stores,
-    never its validators. Package-only: no fakeshop relation into a non-Relay target has a
-    key column carrying a validator.
-    """
-    bound = _GatedKeyHolderSet(data={}, queryset=gated_key_holders).filters[name]
-    result: QuerySet[_GatedKeyHolder] = bound.filter(gated_key_holders, value)
-    assert sorted(saved_pk(row.key) for row in result) == keys
-
-
-class _HopKeyOwner(db_models.Model):
-    """A row reaching each ``_HOP_KEY_PREFIXES`` target by forward many-to-many."""
-
-    name: db_models.TextField[str | Combinable, str] = db_models.TextField()
-    decimal_links: db_models.ManyToManyField[_DecimalHopKey, db_models.Model] = (
-        db_models.ManyToManyField("_DecimalHopKey", related_name="+")
-    )
-    stamp_links: db_models.ManyToManyField[_StampHopKey, db_models.Model] = (
-        db_models.ManyToManyField("_StampHopKey", related_name="+")
-    )
-    parent_decimal_links: db_models.ManyToManyField[_ParentDecimalHopKey, db_models.Model] = (
-        db_models.ManyToManyField("_ParentDecimalHopKey", related_name="+")
-    )
-    parent_text_links: db_models.ManyToManyField[_ParentTextHopKey, db_models.Model] = (
-        db_models.ManyToManyField("_ParentTextHopKey", related_name="+")
-    )
-
-    class Meta:
-        managed = False
-        app_label = "library"
-        db_table = "filters_hop_key_owner"
-
-
-class _DecimalHopKey(db_models.Model):
-    """A decimal-keyed target ``_HopKeyOwner`` reaches by forward M2M, reverse FK and reverse M2M."""
-
-    code: db_models.DecimalField[str | float | Decimal | Combinable, Decimal] = (
-        db_models.DecimalField(primary_key=True, max_digits=6, decimal_places=2)
-    )
-    visible: db_models.BooleanField[bool | Combinable, bool] = db_models.BooleanField()
-    owner: db_models.ForeignKey[_HopKeyOwner | Combinable, _HopKeyOwner] = db_models.ForeignKey(
-        _HopKeyOwner,
-        on_delete=db_models.CASCADE,
-        related_name="decimal_rows",
-    )
-    backers: db_models.ManyToManyField[_HopKeyOwner, db_models.Model] = db_models.ManyToManyField(
-        _HopKeyOwner,
-        related_name="decimal_backs",
-    )
-
-    class Meta:
-        managed = False
-        app_label = "library"
-        db_table = "filters_decimal_hop_key"
-
-
-class _StampHopKey(db_models.Model):
-    """A datetime-keyed target ``_HopKeyOwner`` reaches by forward M2M, reverse FK and reverse M2M."""
-
-    code: db_models.DateTimeField[
-        str | datetime.datetime | datetime.date | Combinable,
-        datetime.datetime,
-    ] = db_models.DateTimeField(primary_key=True)
-    visible: db_models.BooleanField[bool | Combinable, bool] = db_models.BooleanField()
-    owner: db_models.ForeignKey[_HopKeyOwner | Combinable, _HopKeyOwner] = db_models.ForeignKey(
-        _HopKeyOwner,
-        on_delete=db_models.CASCADE,
-        related_name="stamp_rows",
-    )
-    backers: db_models.ManyToManyField[_HopKeyOwner, db_models.Model] = db_models.ManyToManyField(
-        _HopKeyOwner,
-        related_name="stamp_backs",
-    )
-
-    class Meta:
-        managed = False
-        app_label = "library"
-        db_table = "filters_stamp_hop_key"
-
-
-class _DecimalKeyParent(db_models.Model):
-    """A row whose unique decimal ``code`` a ``_ParentDecimalHopKey`` primary key references."""
-
-    code: db_models.DecimalField[str | float | Decimal | Combinable, Decimal] = (
-        db_models.DecimalField(unique=True, max_digits=6, decimal_places=2)
-    )
-
-    class Meta:
-        managed = False
-        app_label = "library"
-        db_table = "filters_decimal_key_parent"
-
-
-class _ParentDecimalHopKey(db_models.Model):
-    """A target keyed by a one-to-one primary key onto ``_DecimalKeyParent.code``, not its pk."""
-
-    parent: db_models.OneToOneField[_DecimalKeyParent | Combinable, _DecimalKeyParent] = (
-        db_models.OneToOneField(
-            _DecimalKeyParent,
-            on_delete=db_models.CASCADE,
-            to_field="code",
-            primary_key=True,
-            related_name="+",
-        )
-    )
-    visible: db_models.BooleanField[bool | Combinable, bool] = db_models.BooleanField()
-    owner: db_models.ForeignKey[_HopKeyOwner | Combinable, _HopKeyOwner] = db_models.ForeignKey(
-        _HopKeyOwner,
-        on_delete=db_models.CASCADE,
-        related_name="parent_decimal_rows",
-    )
-    backers: db_models.ManyToManyField[_HopKeyOwner, db_models.Model] = db_models.ManyToManyField(
-        _HopKeyOwner,
-        related_name="parent_decimal_backs",
-    )
-
-    class Meta:
-        managed = False
-        app_label = "library"
-        db_table = "filters_parent_decimal_hop_key"
-
-
-class _TextKeyParent(db_models.Model):
-    """A row whose unique text ``slug`` a ``_ParentTextHopKey`` primary key references."""
-
-    slug: db_models.TextField[str | Combinable, str] = db_models.TextField(unique=True)
-
-    class Meta:
-        managed = False
-        app_label = "library"
-        db_table = "filters_text_key_parent"
-
-
-class _ParentTextHopKey(db_models.Model):
-    """A target keyed by a one-to-one primary key onto ``_TextKeyParent.slug``, not its pk."""
-
-    parent: db_models.OneToOneField[_TextKeyParent | Combinable, _TextKeyParent] = (
-        db_models.OneToOneField(
-            _TextKeyParent,
-            on_delete=db_models.CASCADE,
-            to_field="slug",
-            primary_key=True,
-            related_name="+",
-        )
-    )
-    visible: db_models.BooleanField[bool | Combinable, bool] = db_models.BooleanField()
-    owner: db_models.ForeignKey[_HopKeyOwner | Combinable, _HopKeyOwner] = db_models.ForeignKey(
-        _HopKeyOwner,
-        on_delete=db_models.CASCADE,
-        related_name="parent_text_rows",
-    )
-    backers: db_models.ManyToManyField[_HopKeyOwner, db_models.Model] = db_models.ManyToManyField(
-        _HopKeyOwner,
-        related_name="parent_text_backs",
-    )
-
-    class Meta:
-        managed = False
-        app_label = "library"
-        db_table = "filters_parent_text_hop_key"
-
-
-_HOP_KEY_PREFIXES: dict[type[Model], str] = {
-    _DecimalHopKey: "decimal",
-    _StampHopKey: "stamp",
-    _ParentDecimalHopKey: "parent_decimal",
-    _ParentTextHopKey: "parent_text",
-}
-"""Each hop target and the prefix of its owner relations: ``<prefix>_links`` / ``_rows`` / ``_backs``."""
-
-_STAMP_VISIBLE = datetime.datetime(2024, 1, 1, 12, tzinfo=datetime.timezone.utc)
-_STAMP_HIDDEN = datetime.datetime(2024, 1, 2, 12, tzinfo=datetime.timezone.utc)
-
-
-@pytest.fixture
-def hop_key_owners() -> Generator[None, None, None]:
-    """Real tables: ``alpha`` reaches each target's visible row, ``beta`` its hidden one, ``gamma`` none.
-
-    Every to-many kind links the same pairs: ``alpha`` lists the visible row in its forward
-    M2M, owns it by its reverse FK and backs it by its reverse M2M; ``beta`` does all three
-    for the hidden row.
-    """
-    parents: tuple[type[Model], ...] = (_DecimalKeyParent, _TextKeyParent)
-    targets = tuple(_HOP_KEY_PREFIXES)
-    with db_connection.schema_editor() as editor:
-        for model in (_HopKeyOwner, *parents, *targets):
-            editor.create_model(model)
-    try:
-        alpha, beta, _gamma = (
-            _HopKeyOwner.objects.create(name=name) for name in ("alpha", "beta", "gamma")
-        )
-        keyed: list[tuple[str, Model, Model]] = [
-            (
-                "decimal",
-                _DecimalHopKey.objects.create(code=Decimal("1.50"), visible=True, owner=alpha),
-                _DecimalHopKey.objects.create(code=Decimal("2.50"), visible=False, owner=beta),
-            ),
-            (
-                "stamp",
-                _StampHopKey.objects.create(code=_STAMP_VISIBLE, visible=True, owner=alpha),
-                _StampHopKey.objects.create(code=_STAMP_HIDDEN, visible=False, owner=beta),
-            ),
-            (
-                "parent_decimal",
-                _ParentDecimalHopKey.objects.create(
-                    parent=_DecimalKeyParent.objects.create(code=Decimal("1.50")),
-                    visible=True,
-                    owner=alpha,
-                ),
-                _ParentDecimalHopKey.objects.create(
-                    parent=_DecimalKeyParent.objects.create(code=Decimal("2.50")),
-                    visible=False,
-                    owner=beta,
-                ),
-            ),
-            (
-                "parent_text",
-                _ParentTextHopKey.objects.create(
-                    parent=_TextKeyParent.objects.create(slug="visible-slug"),
-                    visible=True,
-                    owner=alpha,
-                ),
-                _ParentTextHopKey.objects.create(
-                    parent=_TextKeyParent.objects.create(slug="hidden-slug"),
-                    visible=False,
-                    owner=beta,
-                ),
-            ),
-        ]
-        for prefix, visible, hidden in keyed:
-            _ = call_method(read_attr(alpha, f"{prefix}_links"), "add", visible)
-            _ = call_method(read_attr(beta, f"{prefix}_links"), "add", hidden)
-            _ = call_method(read_attr(visible, "backers"), "add", alpha)
-            _ = call_method(read_attr(hidden, "backers"), "add", beta)
-        yield
-    finally:
-        with db_connection.schema_editor() as editor:
-            for model in (*reversed(targets), *parents, _HopKeyOwner):
-                editor.delete_model(model)
-
-
-def _hop_key_owner_set(target: type[Model], relation: str, mode: str) -> type[FilterSet]:
-    """Build a ``_HopKeyOwner`` set generating ``exact`` / ``in`` on the to-many key ``relation``.
-
-    ``plain`` registers no type, so the key leaf walks no visibility hop. ``scoped``
-    registers a target type whose ``get_queryset`` hides invisible rows; ``declared``
-    declares a ``RelatedFilter`` on the relation whose ``queryset=`` admits only visible
-    rows. Either makes the leaf walk the hop.
-    """
-    namespace: dict[str, object] = {
-        "Meta": type("Meta", (), {"model": _HopKeyOwner, "fields": {relation: ["exact", "in"]}}),
-    }
-    if mode == "scoped":
-
-        class _ScopedTargetType(DjangoType):
-            class Meta:
-                model = target
-
-            @classmethod
-            @override
-            def get_queryset(
-                cls,
-                queryset: QuerySet[Model],
-                info: object,
-                **kwargs: object,
-            ) -> QuerySet[Model]:
-                return queryset.filter(visible=True)
-
-        assert registry.get(target) is _ScopedTargetType
-    elif mode == "declared":
-        _ = type("_PlainTargetType", (DjangoType,), {"Meta": type("Meta", (), {"model": target})})
-        target_set = _pk_alias_set(target)
-        namespace["hop"] = RelatedFilter(
-            target_set,
-            field_name=relation,
-            queryset=target._default_manager.filter(visible=True),
-        )
-    return type("HopKeyOwnerSet", (FilterSet,), namespace)
-
-
-_HIDDEN = object()
-"""Expectation marker: the hidden row's owner, which only an unhopped leaf sees."""
-
-
-@pytest.mark.django_db(transaction=True)
-@pytest.mark.usefixtures("hop_key_owners")
-@pytest.mark.parametrize("mode", ["plain", "scoped", "declared"])
-@pytest.mark.parametrize("lookup", ["exact", "in_"])
-@pytest.mark.parametrize(
-    "kind",
-    [
-        pytest.param("links", id="forward-m2m"),
-        pytest.param("rows", id="reverse-fk"),
-        pytest.param("backs", id="reverse-m2m"),
-    ],
-)
-@pytest.mark.parametrize(
-    (
-        "target",
-        "members",
-        "negated",
-        "expected",
-    ),
-    [
-        pytest.param(_DecimalHopKey, [Decimal("NaN")], False, [], id="decimal-nan"),
-        pytest.param(_DecimalHopKey, [Decimal("Infinity")], False, [], id="decimal-infinity"),
-        pytest.param(_DecimalHopKey, [Decimal("-Infinity")], False, [], id="decimal-neg-infinity"),
-        pytest.param(
-            _DecimalHopKey,
-            [Decimal("NaN")],
-            True,
-            ["alpha", "beta", "gamma"],
-            id="decimal-not-nan",
-        ),
-        pytest.param(
-            _DecimalHopKey,
-            [Decimal("Infinity"), Decimal("1.50")],
-            False,
-            ["alpha"],
-            id="decimal-infinity-beside-visible",
-        ),
-        pytest.param(_DecimalHopKey, [Decimal("1.50")], False, ["alpha"], id="decimal-visible"),
-        pytest.param(_DecimalHopKey, [Decimal("2.50")], False, _HIDDEN, id="decimal-hidden"),
-        pytest.param(_DecimalHopKey, [Decimal("9.99")], False, [], id="decimal-missing"),
-        pytest.param(
-            _StampHopKey,
-            [datetime.datetime(1, 1, 1, tzinfo=datetime.timezone(datetime.timedelta(hours=14)))],
-            False,
-            [],
-            id="stamp-below-range",
-        ),
-        pytest.param(
-            _StampHopKey,
-            [
-                datetime.datetime(
-                    9999,
-                    12,
-                    31,
-                    23,
-                    59,
-                    59,
-                    tzinfo=datetime.timezone(datetime.timedelta(hours=-14)),
-                ),
-            ],
-            False,
-            [],
-            id="stamp-above-range",
-        ),
-        pytest.param(
-            _StampHopKey,
-            [datetime.datetime(1, 1, 1, tzinfo=datetime.timezone(datetime.timedelta(hours=14)))],
-            True,
-            ["alpha", "beta", "gamma"],
-            id="stamp-not-below-range",
-        ),
-        pytest.param(_StampHopKey, [_STAMP_VISIBLE], False, ["alpha"], id="stamp-visible"),
-        pytest.param(_StampHopKey, [None], False, [], id="stamp-null"),
-        pytest.param(
-            _StampHopKey,
-            [None, _STAMP_VISIBLE],
-            False,
-            ["alpha"],
-            id="stamp-null-beside-visible",
-        ),
-        pytest.param(_StampHopKey, [_STAMP_HIDDEN], False, _HIDDEN, id="stamp-hidden"),
-        pytest.param(
-            _StampHopKey,
-            [datetime.datetime(2030, 1, 1, tzinfo=datetime.timezone.utc)],
-            False,
-            [],
-            id="stamp-missing",
-        ),
-        pytest.param(
-            _ParentDecimalHopKey,
-            [Decimal("1.50")],
-            False,
-            ["alpha"],
-            id="parent-decimal-visible",
-        ),
-        pytest.param(
-            _ParentDecimalHopKey,
-            [Decimal("2.50")],
-            False,
-            _HIDDEN,
-            id="parent-decimal-hidden",
-        ),
-        pytest.param(
-            _ParentDecimalHopKey,
-            [Decimal("9.99")],
-            False,
-            [],
-            id="parent-decimal-missing",
-        ),
-        pytest.param(
-            _ParentTextHopKey,
-            ["visible-slug"],
-            False,
-            ["alpha"],
-            id="parent-text-visible",
-        ),
-        pytest.param(_ParentTextHopKey, ["hidden-slug"], False, _HIDDEN, id="parent-text-hidden"),
-        pytest.param(_ParentTextHopKey, ["missing-slug"], False, [], id="parent-text-missing"),
-    ],
-)
-def test_to_many_relation_key_coerces_through_the_target_key_across_a_visibility_hop(
-    *,
-    target: type[Model],
-    members: list[object],
-    negated: bool,
-    expected: object,
-    kind: str,
-    lookup: str,
-    mode: str,
-) -> None:
-    """A to-many raw-key leaf answers the same whether or not it walks a visibility hop.
-
-    A forward M2M, reverse FK or reverse M2M key leaf whose path walks a hop (a scoped
-    target type, a declared ``RelatedFilter``) compares the target rows' own key column
-    (``filters/sets.py::FilterSet._leaf_chain``), and coerces every member through that
-    column as the unhopped leaf coerces it through the relation
-    (``filters/base.py::_coerce_relation_identity``): a decimal ``NaN`` / ``Infinity`` or
-    an aware datetime the backend cannot hold names no row, as does a ``None`` member
-    (a Python caller's; the wire's ``[ID!]`` admits none), so it matches nothing (every
-    row under ``not``) and drops out beside a key that matches, a missing key and one the
-    hop hides match nothing, a visible key matches its rows. A target keyed by a
-    one-to-one primary key onto a non-pk ``to_field`` (decimal or text) is compared and
-    coerced by the column that key stores, never the parent's primary key. Package-only:
-    no fakeshop to-many relation targets a decimal, datetime or ``to_field``-keyed key,
-    and the GraphQL ``Int`` its integer keys take holds no value their column cannot.
-    The live rows over a hopped integer key (``altBranches`` across
-    ``BranchType.get_queryset``) are
-    ``examples/fakeshop/test_query/test_library_api.py::test_library_relation_key_is_no_existence_oracle_for_hidden_or_missing_rows_over_http``.
-    """
-    prefix = _HOP_KEY_PREFIXES[target]
-    leaf: dict[str, object] = {f"{prefix}_{kind}": {lookup: members}}
-    filter_input = {"not_": leaf} if negated else leaf
-    if expected is _HIDDEN:
-        expected = ["beta"] if mode == "plain" else []
-    rows = _hop_key_owner_set(target, f"{prefix}_{kind}", mode).apply_sync(
-        filter_input,
-        _HopKeyOwner.objects.order_by("name"),
-        SimpleNamespace(context=SimpleNamespace(request=HttpRequest())),
-    )
-    assert list(rows.values_list("name", flat=True)) == expected
-
-
-class _DecimalKeyChild(db_models.Model):
-    """A row keyed to a ``_DecimalKeyParent`` by its unique ``code``, not its primary key."""
-
-    name: db_models.TextField[str | Combinable, str] = db_models.TextField()
-    parent: db_models.ForeignKey[_DecimalKeyParent | Combinable, _DecimalKeyParent] = (
-        db_models.ForeignKey(
-            _DecimalKeyParent,
-            on_delete=db_models.CASCADE,
-            to_field="code",
-            related_name="+",
-        )
-    )
-
-    class Meta:
-        managed = False
-        app_label = "library"
-        db_table = "filters_decimal_key_child"
-
-
-class _DecimalKeyChildSet(FilterSet):
-    class Meta:
-        model = _DecimalKeyChild
-        fields = {"parent": ["exact", "in"]}
-
-
-@pytest.mark.django_db(transaction=True)
-@pytest.mark.parametrize(
-    ("lookup", "value"),
-    [pytest.param("exact", 1234567, id="exact"), pytest.param("in_", [1234567], id="in")],
-)
-def test_to_field_relation_key_coerces_through_the_target_primary_key(
-    lookup: str,
-    value: object,
-) -> None:
-    """A forward key onto a non-pk ``to_field`` takes the target's primary key, and is coerced by it.
-
-    Generation marks the leaf (``_GLOBALID_RELATION_PK_ATTR``), so it compiles against
-    ``parent__pk`` and its key is coerced through the parent's primary key column
-    (``filters/base.py::_compared_columns``), never the ``code`` column the link
-    stores: ``1234567`` is a primary key the ``Decimal(6, 2)`` code cannot hold, and it
-    still matches the child of that parent. Package-only: every fakeshop ``to_field``
-    relation stores a text key, which holds any primary key the ``Int`` leaf carries.
-    """
-    with db_connection.schema_editor() as editor:
-        editor.create_model(_DecimalKeyParent)
-        editor.create_model(_DecimalKeyChild)
-    try:
-        parent = _DecimalKeyParent.objects.create(pk=1234567, code=Decimal("1.50"))
-        _ = _DecimalKeyChild.objects.create(name="kept", parent=parent)
-        rows = _DecimalKeyChildSet.apply_sync(
-            {"parent": {lookup: value}},
-            _DecimalKeyChild.objects.order_by("name"),
-            SimpleNamespace(context=SimpleNamespace(request=HttpRequest())),
-        )
-        assert list(rows.values_list("name", flat=True)) == ["kept"]
-    finally:
-        with db_connection.schema_editor() as editor:
-            editor.delete_model(_DecimalKeyChild)
-            editor.delete_model(_DecimalKeyParent)
 
 
 class _CodedOwner(db_models.Model):
@@ -2036,189 +1318,22 @@ class _SourceCodedLink(db_models.Model):
         db_table = "filters_source_coded_link"
 
 
-_CODED_MODELS: tuple[type[Model], ...] = (
-    _CodedOwner,
-    _CodedTarget,
-    _TargetCodedLink,
-    _SourceCodedLink,
-)
-"""The ``coded_links`` tables, in creation order."""
-
-
-@pytest.fixture
-def coded_links() -> Generator[None, None, None]:
-    """Real tables: each row's ``code`` is another row's primary key.
-
-    Owners ``alpha`` (pk 1, code 2), ``beta`` (pk 2, code 1) and the hidden ``gamma`` (pk 3,
-    code 3); targets ``one`` (pk 1, code 2), ``two`` (pk 2, code 1) and the hidden ``three``
-    (pk 3, code 3). Both many-to-manys link ``alpha``-``one``, ``beta``-``two`` and
-    ``gamma``-``three``, so a leaf comparing a code where it takes a primary key answers
-    the swapped partner.
-    """
-    with db_connection.schema_editor() as editor:
-        for model in _CODED_MODELS:
-            editor.create_model(model)
-    try:
-        for pk, code, name, visible in (
-            (
-                1,
-                2,
-                "one",
-                True,
-            ),
-            (
-                2,
-                1,
-                "two",
-                True,
-            ),
-            (
-                3,
-                3,
-                "three",
-                False,
-            ),
-        ):
-            owner_name = {"one": "alpha", "two": "beta", "three": "gamma"}[name]
-            owner = _CodedOwner.objects.create(pk=pk, code=code, name=owner_name, visible=visible)
-            target = _CodedTarget.objects.create(pk=pk, code=code, name=name, visible=visible)
-            _ = _TargetCodedLink.objects.create(owner=owner, target=target)
-            _ = _SourceCodedLink.objects.create(owner=owner, target=target)
-        yield
-    finally:
-        with db_connection.schema_editor() as editor:
-            for model in reversed(_CODED_MODELS):
-                editor.delete_model(model)
-
-
-def _coded_set(source: type[Model], relation: str, mode: str) -> type[FilterSet]:
-    """Build a ``source`` set generating ``exact`` / ``in`` on the many-to-many key ``relation``.
-
-    ``plain`` registers no type, so the key leaf walks no visibility hop. ``scoped``
-    registers a target type whose ``get_queryset`` hides invisible rows; ``declared``
-    declares a ``RelatedFilter`` on the relation whose ``queryset=`` admits only visible
-    rows. Either makes the leaf walk the hop.
-    """
-    target = require(source._meta.get_field(relation).related_model, is_model_class)
-    namespace: dict[str, object] = {
-        "Meta": type("Meta", (), {"model": source, "fields": {relation: ["exact", "in"]}}),
-    }
-    if mode == "scoped":
-
-        class _ScopedCodedType(DjangoType):
-            class Meta:
-                model = target
-
-            @classmethod
-            @override
-            def get_queryset(
-                cls,
-                queryset: QuerySet[Model],
-                info: object,
-                **kwargs: object,
-            ) -> QuerySet[Model]:
-                return queryset.filter(visible=True)
-
-        assert registry.get(target) is _ScopedCodedType
-    elif mode == "declared":
-        _ = type("_PlainCodedType", (DjangoType,), {"Meta": type("Meta", (), {"model": target})})
-        namespace["hop"] = RelatedFilter(
-            _pk_alias_set(target),
-            field_name=relation,
-            queryset=target._default_manager.filter(visible=True),
-        )
-    return type("CodedSet", (FilterSet,), namespace)
-
-
-@pytest.mark.django_db(transaction=True)
-@pytest.mark.usefixtures("coded_links")
-@pytest.mark.parametrize("mode", ["plain", "scoped", "declared"])
-@pytest.mark.parametrize("lookup", ["exact", "in_"])
+@pytest.mark.parametrize("lookup", ["exact", "in"])
 @pytest.mark.parametrize(
     ("source", "relation"),
     [
-        pytest.param(_CodedOwner, "targets", id="forward-through-target-to-field"),
-        pytest.param(_CodedTarget, "source_coded_owners", id="reverse-through-target-to-field"),
-        pytest.param(_CodedOwner, "source_coded_targets", id="forward-through-source-to-field"),
-        pytest.param(_CodedTarget, "owners", id="reverse-through-source-to-field"),
+        pytest.param(_CodedOwner, "targets", id="forward"),
+        pytest.param(_CodedTarget, "source_coded_owners", id="reverse"),
     ],
 )
-@pytest.mark.parametrize(
-    ("members", "expected"),
-    [
-        pytest.param([1], {"plain": [1], "scoped": [1], "declared": [1]}, id="first-pk"),
-        pytest.param([2], {"plain": [2], "scoped": [2], "declared": [2]}, id="second-pk"),
-        pytest.param([1, 2], {"plain": [1, 2], "scoped": [1, 2], "declared": [1, 2]}, id="both"),
-        pytest.param([3], {"plain": [3], "scoped": [], "declared": []}, id="hidden-pk"),
-        pytest.param([4], {"plain": [], "scoped": [], "declared": []}, id="missing-pk"),
-    ],
-)
-def test_many_to_many_key_through_a_to_field_link_compares_the_target_primary_key(
-    *,
+def test_relay_through_to_field_generation_keeps_its_list_class_and_pk_marker(
     source: type[Model],
     relation: str,
-    members: list[int],
-    expected: dict[str, list[int]],
-    lookup: str,
-    mode: str,
-) -> None:
-    """A many-to-many raw-key leaf matches the rows linked to the target whose primary key it names.
-
-    The leaf is typed and coerced by the target's primary key
-    (``filters/base.py::relation_identity_column``), and a through foreign key onto the
-    target keyed by a non-pk ``to_field`` makes Django's own ``<relation>=<value>``
-    compare that ``code`` instead; generation marks such a leaf
-    (``filters/sets.py::FilterSet.filter_for_field``, through
-    ``utils/relations.py::non_pk_forward_link``) so it compiles against
-    ``<relation>__pk``, unhopped or across a visibility hop
-    (``filters/sets.py::FilterSet._leaf_chain``). Every code is another row's primary
-    key, so comparing it would answer the swapped partner; a ``to_field`` on the through
-    foreign key onto the SOURCE never enters the comparison. Package-only: no fakeshop
-    many-to-many runs through a ``to_field`` link.
-    """
-    rows = _coded_set(source, relation, mode).apply_sync(
-        {relation: {lookup: members}},
-        source._default_manager.order_by("pk"),
-        SimpleNamespace(context=SimpleNamespace(request=HttpRequest())),
-    )
-    assert list(rows.values_list("pk", flat=True)) == expected[mode]
-
-
-@pytest.mark.django_db(transaction=True)
-@pytest.mark.usefixtures("coded_links")
-@pytest.mark.parametrize(
-    (
-        "source",
-        "relation",
-        "field_name",
-        "name",
-    ),
-    [
-        pytest.param(_CodedOwner, "targets", "targets", "alpha", id="forward"),
-        pytest.param(
-            _CodedTarget,
-            "source_coded_owners",
-            "sourceCodedOwners",
-            "one",
-            id="reverse",
-        ),
-    ],
-)
-@pytest.mark.parametrize("lookup", ["exact", "in"])
-def test_relay_many_to_many_key_through_a_to_field_link_matches_by_decoded_primary_key(
-    *,
-    source: type[Model],
-    relation: str,
-    field_name: str,
-    name: str,
     lookup: str,
 ) -> None:
-    """A Relay target's many-to-many GlobalID leaf over a ``to_field`` link matches by decoded pk.
+    """Generated Relay lists carry a frozen pk marker, which no response can reveal.
 
-    The finalized schema generates a ``GlobalIDMultipleChoiceFilter`` carrying the
-    ``_GLOBALID_RELATION_PK_ATTR`` marker for the leaf, so the GlobalID of target pk 1
-    selects the source row linked to it, never the row linked to the target whose
-    ``code`` is 1. Package-only: no fakeshop many-to-many runs through a ``to_field`` link.
+    ``examples/fakeshop/test_query/test_relation_identity_columns_api.py`` owns the wire results.
     """
     target = require(source._meta.get_field(relation).related_model, is_model_class)
     source_set = type(
@@ -2226,98 +1341,37 @@ def test_relay_many_to_many_key_through_a_to_field_link_matches_by_decoded_prima
         (FilterSet,),
         {"Meta": type("Meta", (), {"model": source, "fields": {relation: ["exact", "in"]}})},
     )
-    node = (strawberry.relay.Node,)
-    target_meta: dict[str, object] = {
-        "model": target,
-        "fields": ("id", "name"),
-        "interfaces": node,
-    }
-    target_type = type("CodedTargetType", (DjangoType,), {"Meta": type("Meta", (), target_meta)})
-    source_meta: dict[str, object] = {
-        "model": source,
-        "fields": ("id", "name"),
-        "filterset_class": source_set,
-        "interfaces": node,
-    }
-    source_type = type("CodedSourceType", (DjangoType,), {"Meta": type("Meta", (), source_meta)})
+    _ = type(
+        "CodedTargetType",
+        (DjangoType,),
+        {
+            "Meta": type(
+                "Meta",
+                (),
+                {"model": target, "fields": ("id", "name"), "interfaces": (relay.Node,)},
+            ),
+        },
+    )
+    _ = type(
+        "CodedSourceType",
+        (DjangoType,),
+        {
+            "Meta": type(
+                "Meta",
+                (),
+                {
+                    "model": source,
+                    "fields": ("id", "name"),
+                    "filterset_class": source_set,
+                    "interfaces": (relay.Node,),
+                },
+            ),
+        },
+    )
     finalize_django_types()
-    query_cls = strawberry.type(
-        type(
-            "Query",
-            (),
-            {
-                "__annotations__": {"rows": DjangoConnection[source_type]},
-                "rows": DjangoConnectionField(source_type),
-            },
-        ),
-    )
-    schema = strawberry.Schema(query=query_cls, config=strawberry_config())
-    result = schema.execute_sync(
-        f"query ($ids: [String!]!) {{ rows(filter: {{ {field_name}: {{ {lookup}: $ids }} }}) "
-        "{ edges { node { name } } } }",
-        variable_values={"ids": [global_id_for(target_type, 1)]},
-        context_value=HttpRequest(),
-    )
-    assert result.errors is None, result.errors
-    assert result.data == {"rows": {"edges": [{"node": {"name": name}}]}}
     leaf = source_set.base_filters[relation if lookup == "exact" else f"{relation}__in"]
     assert isinstance(leaf, GlobalIDMultipleChoiceFilter)
     assert getattr(leaf, _GLOBALID_RELATION_PK_ATTR) is True
-
-
-class _DecimalKeyed(db_models.Model):
-    """A row keyed by a decimal column."""
-
-    code: db_models.DecimalField[str | float | Decimal | Combinable, Decimal] = (
-        db_models.DecimalField(primary_key=True, max_digits=6, decimal_places=2)
-    )
-
-    class Meta:
-        managed = False
-        app_label = "test_pk_alias_columns"
-
-
-class _DecimalKeyedHolder(db_models.Model):
-    """A row keyed to a ``_DecimalKeyed``."""
-
-    owner: db_models.ForeignKey[_DecimalKeyed | Combinable, _DecimalKeyed] = db_models.ForeignKey(
-        _DecimalKeyed,
-        on_delete=db_models.CASCADE,
-        related_name="+",
-    )
-
-    class Meta:
-        managed = False
-        app_label = "test_pk_alias_columns"
-
-
-class _UuidKeyed(db_models.Model):
-    """A row keyed by a UUID column."""
-
-    code: db_models.UUIDField[str | uuid.UUID, uuid.UUID] = db_models.UUIDField(
-        primary_key=True,
-    )
-
-    class Meta:
-        managed = False
-        app_label = "test_pk_alias_columns"
-
-
-class _UuidKeyedProfile(db_models.Model):
-    """A row whose primary key is a one-to-one key into a ``_UuidKeyed``."""
-
-    owner: db_models.OneToOneField[_UuidKeyed | Combinable, _UuidKeyed] = db_models.OneToOneField(
-        _UuidKeyed,
-        on_delete=db_models.CASCADE,
-        primary_key=True,
-        related_name="+",
-    )
-    # Key column Django adds beside ``owner``, declared for the type checker.
-    owner_id: uuid.UUID
-
-    class Meta:
-        managed = False
-        app_label = "test_pk_alias_columns"
 
 
 class _CompositeKeyed(db_models.Model):
@@ -2513,70 +1567,6 @@ def test_filterset_model_field_keeps_django_filters_answer_on_a_path_the_walk_re
         _ = _declared_leaf_field(_Tag, "unresolved")
 
 
-@pytest.mark.parametrize(
-    ("model", "leaf", "annotation"),
-    [
-        pytest.param(
-            _DecimalKeyed,
-            ListFilter(field_name="pk", lookup_expr="in"),
-            list[Decimal] | None,
-            id="decimal-list",
-        ),
-        pytest.param(
-            _DecimalKeyedHolder,
-            ListFilter(field_name="owner__pk", lookup_expr="in"),
-            list[Decimal] | None,
-            id="decimal-relation-pk-list",
-        ),
-        pytest.param(
-            _UuidKeyed,
-            ListFilter(field_name="pk", lookup_expr="in"),
-            list[uuid.UUID] | None,
-            id="uuid-list",
-        ),
-        pytest.param(
-            _UuidKeyedProfile,
-            ListFilter(field_name="pk", lookup_expr="in"),
-            list[uuid.UUID] | None,
-            id="uuid-one-to-one-pk-list",
-        ),
-        pytest.param(_UuidKeyed, CharFilter(field_name="pk"), uuid.UUID | None, id="uuid-char"),
-        pytest.param(
-            models.Shelf,
-            IntegerInFilter(field_name="pk", lookup_expr="in"),
-            list[int] | None,
-            id="integer-in",
-        ),
-        pytest.param(
-            models.KioskFault,
-            ListFilter(field_name="kiosk__pk", lookup_expr="in"),
-            list[int] | None,
-            id="relation-into-parent-link-pk-list",
-        ),
-    ],
-)
-def test_declared_pk_leaf_is_typed_by_the_column_its_key_stores(
-    model: type[Model],
-    leaf: django_filters.Filter,
-    annotation: object,
-) -> None:
-    """A declared leaf over ``pk`` / ``<relation>__pk`` takes the scalar of the column it names.
-
-    The same scalar a leaf naming that column directly takes (``Decimal``, ``UUID``,
-    ``Int``), never ``String`` or the ``NumberFilter`` form's ``Decimal``. Package-only:
-    fakeshop has no decimal primary key, and its one UUID key (the kanban ``Uuid.id``) is
-    reached only by the board's own filtersets, which declare no filter over it; the integer
-    rows live are in ``test_library_api.py::test_declared_pk_leaf_publishes_the_primary_key_column_scalar``.
-    """
-    filterset = _pk_alias_set(model, leaf=leaf)
-    bound_leaf = filterset.base_filters["leaf"]
-    model_field = _filterset_model_field(filterset, bound_leaf)
-
-    assert (
-        convert_filter_to_input_annotation(bound_leaf, model_field, None, filterset) == annotation
-    )
-
-
 def test_declared_pk_leaf_over_a_composite_primary_key_is_refused_at_build() -> None:
     """A declared leaf over a composite primary key named ``pk`` is the unsupported-field error."""
     filterset = _pk_alias_set(_CompositeKeyed, leaf=ListFilter(field_name="pk", lookup_expr="in"))
@@ -2585,183 +1575,6 @@ def test_declared_pk_leaf_over_a_composite_primary_key_is_refused_at_build() -> 
 
     with pytest.raises(ConfigurationError, match="Unsupported Django field type"):
         _ = convert_filter_to_input_annotation(bound_leaf, model_field, None, filterset)
-
-
-@pytest.mark.parametrize(
-    ("model", "data", "message"),
-    [
-        pytest.param(
-            _DecimalKeyed,
-            {"pk_span_0": "NaN", "pk_span_1": "Infinity"},
-            {"pk_span": ["Enter a number."]},
-            id="decimal-range",
-        ),
-        pytest.param(
-            _DecimalKeyed,
-            {"pk_among": ["1.5", "NaN"]},
-            {"pk_among": ["Enter a number."]},
-            id="decimal-list",
-        ),
-        pytest.param(
-            _UuidKeyed,
-            {"pk_span_0": "not-a-uuid", "pk_span_1": ""},
-            {"pk_span": ["Enter a valid UUID."]},
-            id="uuid-range",
-        ),
-        pytest.param(
-            _UuidKeyed,
-            {"pk_among": ["not-a-uuid"]},
-            {"pk_among": ["Enter a valid UUID."]},
-            id="uuid-list",
-        ),
-        pytest.param(
-            _UuidKeyedProfile,
-            {"pk_among": ["not-a-uuid"]},
-            {"pk_among": ["Enter a valid UUID."]},
-            id="uuid-one-to-one-pk-list",
-        ),
-        pytest.param(
-            models.LendingDesk,
-            {"pk_span_0": "abc", "pk_span_1": "2"},
-            {"pk_span": ["Enter a number."]},
-            id="mti-child-pk-range",
-        ),
-        pytest.param(
-            models.PatronProfile,
-            {"pk_among": ["abc"]},
-            {"pk_among": ["Enter a number."]},
-            id="one-to-one-pk-list",
-        ),
-    ],
-)
-def test_declared_pk_value_the_key_column_cannot_hold_is_a_form_error(
-    model: type[Model],
-    data: dict[str, object],
-    message: dict[str, list[str]],
-) -> None:
-    """A ``pk`` bound or element the key column cannot hold is the form's error.
-
-    Each is cleaned by the column's own ``gte`` form field, as a leaf naming the column
-    is, so a non-finite decimal, a malformed UUID or a non-number never reaches the ORM,
-    where it would raise a masked ``ValidationError`` / ``ValueError``.
-    """
-    filterset_class = _pk_alias_set(
-        model,
-        pk_span=RangeFilter(field_name="pk", lookup_expr="range"),
-        pk_among=ListFilter(field_name="pk", lookup_expr="in"),
-    )
-    filterset = filterset_class(data=data, queryset=model._default_manager.none())
-
-    assert not filterset.is_valid()
-    assert filterset.errors == message
-
-
-def _declared_pk_filter(model: type[Model], leaf: django_filters.Filter) -> django_filters.Filter:
-    """Return ``leaf`` bound to a per-request ``FilterSet`` over ``model``."""
-    filterset_class = _pk_alias_set(model, leaf=leaf)
-    return filterset_class(data={}, queryset=model._default_manager.none()).filters["leaf"]
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize(
-    ("leaf", "value"),
-    [
-        pytest.param(
-            RangeFilter(field_name="pk", lookup_expr="range"),
-            ["first", 2**70],
-            id="range-past-the-column",
-        ),
-        pytest.param(
-            ListFilter(field_name="pk", lookup_expr="in"),
-            ["first", 2**70],
-            id="list-member-past-the-column",
-        ),
-        pytest.param(
-            IntegerInFilter(field_name="pk", lookup_expr="in"),
-            ["first", 2**70],
-            id="integer-in-member-past-the-column",
-        ),
-        pytest.param(
-            RangeFilter(field_name="branch__pk", lookup_expr="range"),
-            ["branch", 2**70],
-            id="relation-pk-range-past-the-column",
-        ),
-    ],
-)
-def test_declared_integer_pk_value_past_the_column_never_reaches_the_backend(
-    leaf: django_filters.Filter,
-    value: list[object],
-) -> None:
-    """An integer ``pk`` bound or member past the column's range applies the integer rules.
-
-    A two-bound range applies its bounds as ``gte`` + ``lte`` and an ``in`` drops a member
-    no row can hold, as on the ``id`` spelling, so a value past signed 64 bits never binds
-    raw (SQLite's ``OverflowError``). Package-only: GraphQL ``Int`` refuses such a value
-    before the filter runs.
-    """
-    lower_branch = models.Branch.objects.create(name="LowerPastRangeBranch", city="Boston")
-    _ = models.Shelf.objects.create(code="PR-0", branch=lower_branch)
-    branch = models.Branch.objects.create(name="PastRangeBranch", city="Boston")
-    shelf = models.Shelf.objects.create(code="PR-1", branch=branch)
-    named = {"first": saved_pk(shelf), "branch": saved_pk(branch)}
-    queryset = models.Shelf.objects.all()
-
-    bound = _declared_pk_filter(models.Shelf, leaf)
-    result: QuerySet[models.Shelf] = bound.filter(
-        queryset,
-        [named.get(member, member) if isinstance(member, str) else member for member in value],
-    )
-
-    assert [row.code for row in result] == ["PR-1"]
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize("model", [models.LendingDesk, models.SelfServeDesk])
-def test_declared_two_bound_range_over_an_integer_parent_link_pk_answers_rows(
-    model: type[models.LendingDesk],
-) -> None:
-    """A two-bound range over a multi-table-inheritance child's ``pk`` answers its rows.
-
-    The key is the parent link, which Django has no ``range`` lookup for; it stores
-    ``Venue.id``, an integer column, so the range applies as ``gte`` + ``lte``.
-    Package-only: ``LendingDeskFilter`` / ``SelfServeDeskFilter`` are bound to their types,
-    but no root or nested field publishes a ``filter:`` argument for them
-    (``allLibraryLendingDesks`` / ``allLibrarySelfServeDesks`` take ``offset``, ``limit``
-    and ``orderBy`` only).
-    """
-    extra = {"kiosk_code": "K"} if model is models.SelfServeDesk else {}
-    pks = [saved_pk(model.objects.create(name=name, **extra)) for name in ("D-1", "D-2", "D-3")]
-
-    bound = _declared_pk_filter(model, RangeFilter(field_name="pk", lookup_expr="range"))
-    result: QuerySet[models.LendingDesk] = bound.filter(model.objects.all(), [pks[0], pks[1]])
-
-    assert sorted(desk.name for desk in result) == ["D-1", "D-2"]
-
-
-@pytest.mark.django_db
-def test_declared_two_bound_range_over_a_relation_into_a_parent_link_pk_answers_rows() -> None:
-    """A two-bound range over ``kiosk__pk`` compares the ``Venue.id`` the kiosk key stores.
-
-    ``KioskFault.kiosk`` targets a self-serve desk, whose key is a parent link two links
-    above ``Venue.id``; the range applies as ``gte`` + ``lte`` on the fault's own column.
-    """
-    kiosks = [
-        models.SelfServeDesk.objects.create(name=name, kiosk_code="K") for name in ("A", "B", "C")
-    ]
-    for kiosk in kiosks:
-        _ = models.KioskFault.objects.create(kiosk=kiosk, note=f"fault-{kiosk.name}")
-    pks = [saved_pk(kiosk) for kiosk in kiosks]
-
-    bound = _declared_pk_filter(
-        models.KioskFault,
-        RangeFilter(field_name="kiosk__pk", lookup_expr="range"),
-    )
-    result: QuerySet[models.KioskFault] = bound.filter(
-        models.KioskFault.objects.all(),
-        [pks[1], pks[2]],
-    )
-
-    assert sorted(fault.note for fault in result) == ["fault-B", "fault-C"]
 
 
 @pytest.mark.parametrize(
@@ -2801,158 +1614,6 @@ def test_declared_range_or_list_naming_a_relation_valued_key_by_name_is_refused_
         _ = convert_filter_to_input_annotation(bound_leaf, model_field, None, filterset)
 
 
-class _BigKeyed(db_models.Model):
-    """A row keyed by a signed 64-bit column."""
-
-    code: db_models.BigIntegerField[float | int | str | Combinable, int] = (
-        db_models.BigIntegerField(primary_key=True)
-    )
-
-    class Meta:
-        managed = False
-        app_label = "test_pk_alias_columns"
-
-
-class _BigKeyedProfile(db_models.Model):
-    """A row whose primary key is a one-to-one key into a ``_BigKeyed``."""
-
-    owner: db_models.OneToOneField[_BigKeyed | Combinable, _BigKeyed] = db_models.OneToOneField(
-        _BigKeyed,
-        on_delete=db_models.CASCADE,
-        primary_key=True,
-        related_name="+",
-    )
-    label: db_models.TextField[str | Combinable, str] = db_models.TextField()
-
-    class Meta:
-        managed = False
-        app_label = "test_pk_alias_columns"
-
-
-@pytest.fixture
-def big_keyed_profiles() -> Generator[QuerySet[_BigKeyedProfile], None, None]:
-    """Real tables: profiles ``low`` and ``high`` keyed to codes 5 and 12."""
-    with db_connection.schema_editor() as editor:
-        editor.create_model(_BigKeyed)
-        editor.create_model(_BigKeyedProfile)
-    try:
-        for code, label in ((5, "low"), (12, "high")):
-            _ = _BigKeyedProfile.objects.create(
-                owner=_BigKeyed.objects.create(code=code),
-                label=label,
-            )
-        yield _BigKeyedProfile.objects.order_by("label")
-    finally:
-        with db_connection.schema_editor() as editor:
-            editor.delete_model(_BigKeyedProfile)
-            editor.delete_model(_BigKeyed)
-
-
-@pytest.mark.django_db(transaction=True)
-@pytest.mark.parametrize(
-    ("leaf", "value", "labels"),
-    [
-        pytest.param(RangeFilter(lookup_expr="range"), [6, 2**70], ["high"], id="two-bound"),
-        pytest.param(RangeFilter(lookup_expr="range"), [2**70, None], [], id="start-only"),
-        pytest.param(
-            RangeFilter(lookup_expr="range"),
-            [None, 2**70],
-            ["high", "low"],
-            id="end-only",
-        ),
-        pytest.param(RangeFilter(lookup_expr="range"), [-(2**70), 5], ["low"], id="low-start"),
-        pytest.param(ListFilter(lookup_expr="in"), [12, 2**70], ["high"], id="list"),
-        pytest.param(IntegerInFilter(lookup_expr="in"), [5, 2**70], ["low"], id="integer-in"),
-    ],
-)
-def test_declared_pk_bound_past_a_one_to_one_keys_column_answers_what_the_column_answers(
-    big_keyed_profiles: QuerySet[_BigKeyedProfile],
-    leaf: django_filters.Filter,
-    value: list[object],
-    labels: list[str],
-) -> None:
-    """A ``pk`` bound past the 64-bit column a one-to-one key stores answers as the column does.
-
-    The bounds apply to the stored column (``pk__code``), whose integer lookups read a
-    value past its range as widening or matching nothing, never to the relation, whose
-    lookups would bind it raw (SQLite's ``OverflowError``). Each answer equals the same
-    filter declared over the column's own path, ``owner__code``. Package-only: fakeshop has no
-    one-to-one key into a 64-bit primary key.
-    """
-    answers: list[list[str]] = []
-    for field_name in ("pk", "owner__code"):
-        declared = copy.deepcopy(leaf)
-        declared.field_name = field_name
-        bound = _declared_pk_filter(_BigKeyedProfile, declared)
-        result: QuerySet[_BigKeyedProfile] = bound.filter(big_keyed_profiles, value)
-        answers.append([row.label for row in result])
-
-    assert answers == [labels, labels]
-
-
-@pytest.fixture
-def uuid_keyed_profiles() -> Generator[QuerySet[_UuidKeyedProfile], None, None]:
-    """Real tables: profiles keyed to the UUIDs with integer values 1, 2 and 3."""
-    with db_connection.schema_editor() as editor:
-        editor.create_model(_UuidKeyed)
-        editor.create_model(_UuidKeyedProfile)
-    try:
-        for value in (1, 2, 3):
-            _ = _UuidKeyedProfile.objects.create(
-                owner=_UuidKeyed.objects.create(code=uuid.UUID(int=value)),
-            )
-        yield _UuidKeyedProfile.objects.order_by("owner_id")
-    finally:
-        with db_connection.schema_editor() as editor:
-            editor.delete_model(_UuidKeyedProfile)
-            editor.delete_model(_UuidKeyed)
-
-
-@pytest.mark.django_db(transaction=True)
-@pytest.mark.parametrize(
-    (
-        "low",
-        "high",
-        "exclude",
-        "kept",
-    ),
-    [
-        pytest.param(1, 2, False, [1, 2], id="lower-pair"),
-        pytest.param(2, 3, False, [2, 3], id="upper-pair"),
-        pytest.param(1, 3, False, [1, 2, 3], id="every-row"),
-        pytest.param(1, 2, True, [3], id="excluded"),
-    ],
-)
-def test_declared_two_bound_range_over_a_uuid_parent_link_pk_ranges_the_stored_column(
-    uuid_keyed_profiles: QuerySet[_UuidKeyedProfile],
-    low: int,
-    high: int,
-    exclude: bool,  # noqa: FBT001 - a parametrized flag
-    kept: list[int],
-) -> None:
-    """A two-bound range over a one-to-one primary key storing a UUID ranges that column.
-
-    The column is not an integer, so the integer ``gte`` + ``lte`` rule does not apply;
-    the ``range`` names the stored column's path (``pk__code``), where Django refuses
-    ``range`` on the relation itself, and ``exclude`` negates it. It answers what the same
-    filter declared over the column's own path, ``owner__code``, answers.
-    """
-    expected = [uuid.UUID(int=value) for value in kept]
-    answers: list[list[uuid.UUID]] = []
-    for field_name in ("pk", "owner__code"):
-        bound = _declared_pk_filter(
-            _UuidKeyedProfile,
-            RangeFilter(field_name=field_name, lookup_expr="range", exclude=exclude),
-        )
-        result: QuerySet[_UuidKeyedProfile] = bound.filter(
-            uuid_keyed_profiles,
-            [uuid.UUID(int=low), uuid.UUID(int=high)],
-        )
-        answers.append([row.owner_id for row in result])
-
-    assert answers == [expected, expected]
-
-
 @pytest.mark.parametrize(
     ("element_field", "value", "cleaned"),
     [
@@ -2983,17 +1644,17 @@ def test_list_filter_field_cleans_each_element_with_its_element_field(
         pytest.param("price", "in", id="scalar-column"),
     ],
 )
-def test_array_filter_element_the_column_cannot_hold_is_filter_invalid(
+def test_a_driver_free_array_member_keeps_upstreams_error_dict(
     monkeypatch: pytest.MonkeyPatch,
     field_name: str,
     lookup_expr: str,
 ) -> None:
-    """Each ``ArrayFilter`` element is cleaned as one value of its column's elements.
+    """The driver-free column classifier retains upstream plain-form errors.
 
-    An ``ArrayField`` column's element is a value of its ``base_field``, so a non-finite
-    decimal is ``FILTER_INVALID`` before ``django.contrib.postgres``'s array lookup hands it
-    to ``base_field.get_prep_value``; under a django-filter ``FilterSet`` it is that form's
-    error. Package-only: fakeshop declares no ``ArrayField``.
+    Optional ArrayField classification and scalar-column fallback can be asked
+    without a PostgreSQL driver. The observable typed refusal of a real array
+    element is owned by
+    ``examples/fakeshop/test_query/test_postgres_array_filter_bindability_api.py::test_numeric_array_members_check_the_real_binding_type_and_keep_non_element_parameters``.
     """
     patch_array_field(monkeypatch)
 
@@ -3010,13 +1671,6 @@ def test_array_filter_element_the_column_cannot_hold_is_filter_invalid(
             managed = False
             app_label = "test_array_filter_elements"
 
-    class PricedShelfFilter(FilterSet):
-        priced = ArrayFilter(field_name=field_name, lookup_expr=lookup_expr)
-
-        class Meta:
-            model = PricedShelf
-            fields = ("price",)
-
     class PlainPricedShelfFilter(django_filters.FilterSet):
         priced = ArrayFilter(field_name=field_name, lookup_expr=lookup_expr)
 
@@ -3025,25 +1679,17 @@ def test_array_filter_element_the_column_cannot_hold_is_filter_invalid(
             fields = ("price",)
 
     data = {"priced": ["1.5", "NaN"]}
-    filterset = PricedShelfFilter(data=data, queryset=PricedShelf.objects.none())
-    with pytest.raises(GraphQLError) as excinfo:
-        PricedShelfFilter._validate_form_or_raise(filterset)
-    assert excinfo.value.extensions == {
-        "code": "FILTER_INVALID",
-        "errors": {"priced": [{"message": "Enter a number.", "code": "invalid"}]},
-    }
     plain = PlainPricedShelfFilter(data=data, queryset=PricedShelf.objects.none())
     assert not plain.is_valid()
     assert plain.errors == {"priced": ["Enter a number."]}
 
 
-# ---------------------------------------------------------------------------
-# GlobalIDFilter
-# ---------------------------------------------------------------------------
-
-
 def test_global_id_filter_decodes_via_strawberry_relay() -> None:
-    """The decoded `node_id` reaches the underlying `Filter.filter` call."""
+    """An unbound primitive forwards the decoded Python text key to the exact keyword.
+
+    The returned Python type stays private. Native unbound acceptance lives in
+    ``test_library_api.py::test_an_unwired_filter_subclass_answers_like_an_unrelated_unwired_set_over_http``.
+    """
     qs = _RecordingQs()
 
     encoded = relay.to_base64("BookType", "42")
@@ -3053,6 +1699,11 @@ def test_global_id_filter_decodes_via_strawberry_relay() -> None:
 
 
 def test_global_id_filter_passes_through_none() -> None:
+    """Omission preserves the exact queryset and invokes no predicate method.
+
+    Actual generated GlobalID predicates live in
+    ``test_library_api.py::test_library_books_filter_by_relay_m2m_global_id``.
+    """
     qs = _RecordingQs()
 
     f = GlobalIDFilter(field_name="id", lookup_expr="exact")
@@ -3065,7 +1716,11 @@ def test_global_id_filter_passes_through_none() -> None:
 def test_global_id_multiple_choice_filter_decodes_every_element(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Decoded `node_id`s reach the underlying `MultipleChoiceFilter.filter`."""
+    """An unbound per-element filter passes decoded Python str keys to its upstream method.
+
+    The spy observes the Python list and element types; native accepted list rowsets live in
+    ``test_library_api.py::test_library_genres_filter_by_relay_own_pk_global_id_in_list``.
+    """
     captured: list[list[str]] = []
 
     def spy(_self: object, qs: object, value: Iterable[str]) -> object:
@@ -3085,6 +1740,11 @@ def test_global_id_multiple_choice_filter_decodes_every_element(
 
 
 def test_global_id_multiple_choice_filter_passes_through_none() -> None:
+    """Omission preserves the exact queryset without forwarding a predicate.
+
+    Real list predicates live in
+    ``test_library_api.py::test_library_genres_filter_by_relay_own_pk_global_id_in_list``.
+    """
     qs = _RecordingQs()
 
     f = GlobalIDMultipleChoiceFilter(field_name="id")
@@ -3093,9 +1753,17 @@ def test_global_id_multiple_choice_filter_passes_through_none() -> None:
     assert result is qs
 
 
-@pytest.mark.parametrize("value", [iter(["not-a-global-id"]), object(), "not-a-list"])
-def test_global_id_multiple_choice_filter_rejects_malformed_container(value: object) -> None:
-    """Malformed direct inputs fail as coded GraphQL errors, not leaked ``TypeError``."""
+@pytest.mark.parametrize(
+    "value",
+    [iter(["not-a-global-id"]), object()],
+    ids=["iterator", "opaque-object"],
+)
+def test_globalid_list_primitive_refuses_python_only_containers(value: object) -> None:
+    """Python iterators and opaque objects cannot be posted as native JSON containers.
+
+    Native scalar/string refusal belongs to
+    ``examples/fakeshop/test_query/test_direct_filter_primitives_api.py::test_direct_public_membership_primitives_refuse_scalar_containers``.
+    """
     f = GlobalIDMultipleChoiceFilter(field_name="id", lookup_expr="in")
 
     with pytest.raises(GraphQLError, match="expected a list of GlobalIDs") as exc_info:
@@ -3138,36 +1806,29 @@ def test_membership_in_field_reads_a_raw_empty_string_as_omission() -> None:
     assert field.clean(csv) == ["a", "b"]
 
 
-def test_membership_in_filter_class_wraps_a_new_class_per_call_and_rejects_a_scalar() -> None:
-    """A NEW class per call (django-filter's lifecycle) keeping the inner name; a scalar is coded."""
+def test_membership_wrapper_keeps_the_upstream_name_and_builds_a_fresh_class() -> None:
+    """Exact dynamic Python class identity, name and MRO stay construction observations.
+
+    Direct scalar rejection and admitted membership run through native HTTP at
+    ``examples/fakeshop/test_query/test_direct_filter_primitives_api.py::test_direct_public_membership_primitives_refuse_scalar_containers``.
+    """
     wrapped = membership_in_filter_class(_CharInFilter)
     assert wrapped is not membership_in_filter_class(_CharInFilter)
     assert wrapped.__name__ == "_CharInFilter"
     assert wrapped.__mro__[1:3] == (MembershipInFilter, _CharInFilter)
-    with pytest.raises(GraphQLError) as exc_info:
-        wrapped(field_name="code", lookup_expr="in").filter(models.Shelf.objects.all(), "ab")
-    assert exc_info.value.extensions == {"code": "FILTER_INVALID"}
 
 
-def test_global_id_multiple_choice_field_omission_still_enforces_required() -> None:
-    """Preserving ``None`` must not bypass Django's required-field validation."""
-    field = GlobalIDMultipleChoiceFilter(field_name="id", required=True).field
-    absent = _widget_value_from_datadict(field, QueryDict(), {}, "id")
+def test_an_empty_globalid_membership_returns_the_querysets_none_object() -> None:
+    """An empty GlobalID list returns the queryset object created by none().
 
-    with pytest.raises(ValidationError, match="required"):
-        field.clean(absent)
-
-
-def test_global_id_multiple_choice_filter_empty_in_matches_nothing_like_list_filter() -> None:
+    HTTP observes empty rows, not object identity. Actual empty relation predicates live in
+    ``test_library_api.py::test_relay_relation_empty_exact_list_matches_no_rows_over_http``.
+    """
     qs = _RecordingQs()
     global_ids = GlobalIDMultipleChoiceFilter(field_name="id", lookup_expr="in")
-    list_filter = ListFilter(field_name="id", lookup_expr="in")
-
     assert global_ids.filter(qs, []) is qs.nothing
-    assert list_filter.filter(qs, []) is qs.nothing
 
 
-@pytest.mark.django_db
 @pytest.mark.parametrize(
     "excluding",
     [
@@ -3177,70 +1838,29 @@ def test_global_id_multiple_choice_filter_empty_in_matches_nothing_like_list_fil
     ],
     ids=["list-filter", "global-id-in", "global-id-exact"],
 )
-def test_excluded_empty_membership_matches_every_row_as_a_constraint(
+def test_excluded_empty_membership_clones_the_exact_input_queryset(
     excluding: Callable[[], Filter],
 ) -> None:
-    """Exclude + empty membership is the complement of match-nothing: every row.
+    """The clone is distinct by Python identity, which the branch applicator uses for activity.
 
-    The rows come back on a new queryset, never the input by identity, which the
-    package reads as "applied no constraint".
+    The match-all rowset and logical complements belong to the real HTTP consumer at
+    ``examples/fakeshop/test_query/test_filter_logic_customization_api.py::test_an_authored_excluded_empty_membership_is_a_real_match_all_constraint``.
     """
-    branch = models.Branch.objects.create(name="Home", city="Boston")
-    models.Shelf.objects.create(code="A-1", topic="general", branch=branch)
-    models.Shelf.objects.create(code="A-2", topic="general", branch=branch)
-    qs = models.Shelf.objects.order_by("code")
-
-    result = object_result(excluding().filter, qs, [])
-
-    assert result is not qs
-    assert [require_instance(shelf, models.Shelf).code for shelf in list_of(result)] == [
-        "A-1",
-        "A-2",
-    ]
-
-
-# ---------------------------------------------------------------------------
-# A crafted empty-id GlobalID (well-typed, empty node part) is a REJECTED input,
-# not a silent no-op. ``to_base64(type, "")`` decodes to ``node_id == ""``
-# and clears decode + strategy + type-name validation, but an empty identifier is
-# not a valid resource id: the shared ``_decode_and_validate_global_id`` boundary
-# raises ``GLOBALID_INVALID`` (naming the list index when present) so a client can
-# never widen a restrictive membership predicate by supplying ``type:``. An
-# explicit ``[]`` (match-none) and a ``None`` value (omission) remain non-error
-# paths and are asserted separately.
-# ---------------------------------------------------------------------------
-
-
-def test_global_id_multiple_choice_filter_empty_node_id_exact_path_rejects() -> None:
-    """The same reject covers the non-``in`` (per-element) path.
-
-    Live ``in`` twins:
-    ``test_library_api.py::test_library_genres_filter_empty_id_in_list_raises_globalid_invalid_at_index_0``
-    and
-    ``::test_library_genres_filter_mixed_empty_id_in_list_rejects_whole_input_at_index_1``.
-    """
-    f = GlobalIDMultipleChoiceFilter(field_name="genres", lookup_expr="exact")
-    with pytest.raises(GraphQLError, match="empty node id") as exc_info:
-        f.filter(_RecordingQs(), [relay.to_base64("GenreType", "")])
-    assert exc_info.value.extensions == {"code": "GLOBALID_INVALID"}
+    queryset = models.Shelf.objects.none()
+    assert object_result(excluding().filter, queryset, []) is not queryset
 
 
 def test_global_id_multiple_choice_filter_well_formed_list_still_applies_predicate() -> None:
-    """Regression: a well-formed non-empty ``in`` list still yields the whole-list predicate.
+    """The whole decoded Python list is forwarded under one in-lookup keyword.
 
-    Removing the empty-stripping block must not disturb the normal path -- a list
-    of real ids compiles the byte-identical ``{field__in: node_ids}`` predicate.
+    The precise kwargs stay private. Real accepted memberships live in
+    ``test_library_api.py::test_library_genres_filter_by_relay_own_pk_global_id_in_list``.
     """
     qs = _RecordingQs()
     f = GlobalIDMultipleChoiceFilter(field_name="genres", lookup_expr="in")
     encoded = [relay.to_base64("GenreType", "5"), relay.to_base64("GenreType", "9")]
     f.filter(qs, encoded)
     assert qs.captured == {"genres__in": ["5", "9"]}
-
-
-# ---------------------------------------------------------------------------
-# A bound filter's ORM path
-# ---------------------------------------------------------------------------
 
 
 def test_bound_field_name_reads_the_path_the_filterset_binds() -> None:
@@ -3254,28 +1874,6 @@ def test_bound_field_name_reads_the_path_the_filterset_binds() -> None:
             fields = ["id"]
 
     assert _bound_field_name(BookFilterSet.base_filters["title"]) == "title"
-
-
-def test_bound_field_name_refuses_a_filter_with_no_path() -> None:
-    """A ``None`` path is refused by name, never handed to a model-field walk."""
-    with pytest.raises(ConfigurationError, match=r"^Filter has no field_name;"):
-        _bound_field_name(Filter())
-
-
-@pytest.mark.parametrize(
-    ("filter_instance", "value"),
-    [(IntegerInFilter(), [1]), (RelationPkFilter(), 1)],
-    ids=["integer-in", "relation-identity"],
-)
-def test_bound_filters_with_no_field_name_are_refused(
-    filter_instance: Filter,
-    value: object,
-) -> None:
-    """A filter bound to a filterset with a model but no ``field_name`` is refused, not skipped."""
-    # django-filter stamps ``parent`` on every per-request filter; the stubs omit it.
-    setattr(filter_instance, "parent", ShelfFilter())  # noqa: B010
-    with pytest.raises(ConfigurationError, match=r"has no field_name;"):
-        filter_instance.filter(models.Shelf.objects.none(), value)
 
 
 def test_filterset_model_field_returns_none_without_model() -> None:
@@ -3312,77 +1910,12 @@ def test_filterset_model_field_walks_related_path() -> None:
     assert _filterset_model_field(ShelfFilter, f) is models.Branch._meta.get_field("name")
 
 
-# ---------------------------------------------------------------------------
-# GlobalID relation filtering against a non-pk ``to_field``
-# ---------------------------------------------------------------------------
-
-
-def _seed_favorite_genre_profiles(*genre_names: str) -> list[models.Genre]:
-    """Create one genre per name and one patron profile favoring each, in order."""
-    genres: list[models.Genre] = []
-    for index, genre_name in enumerate(genre_names):
-        genre = models.Genre.objects.create(name=genre_name)
-        patron = models.Patron.objects.create(name=f"patron-{index}")
-        models.PatronProfile.objects.create(
-            patron=patron,
-            postal_code=f"{genre_name}-zip",
-            favorite_genre=genre,
-        )
-        genres.append(genre)
-    return genres
-
-
-@pytest.mark.django_db
-def test_global_id_filter_non_pk_to_field_matches_by_target_pk() -> None:
-    """A marked forward-FK GlobalID filter compiles against the target's pk.
-
-    The Relay GlobalID carries the genre's PRIMARY KEY, but
-    ``PatronProfile.favorite_genre`` stores / joins on ``name``. The
-    pk-qualified predicate (``favorite_genre__pk``) returns exactly the profile
-    of the encoded genre, whereas the unqualified predicate
-    (``favorite_genre=<pk>``) compares the pk value against the stored ``name``
-    column and matches nothing.
-    """
-    alpha, _beta = _seed_favorite_genre_profiles("ALPHA", "BETA")
-    assert str(saved_pk(alpha)) != alpha.name
-    encoded = relay.to_base64("GenreType", str(saved_pk(alpha)))
-
-    f = GlobalIDFilter(field_name="favorite_genre", lookup_expr="exact")
-    # Boolean flag: ``filter`` derives ``f"{field_name}__pk"``.
-    setattr(f, _GLOBALID_RELATION_PK_ATTR, True)
-    result = f.filter(models.PatronProfile.objects.all(), encoded)
-    assert set(result.values_list("postal_code", flat=True)) == {"ALPHA-zip"}
-
-    # The unqualified predicate compares the pk value against the stored
-    # ``name`` column and returns the WRONG (empty) result.
-    wrong = models.PatronProfile.objects.filter(favorite_genre__exact=str(saved_pk(alpha)))
-    assert wrong.count() == 0
-
-
-@pytest.mark.django_db
-def test_global_id_multiple_choice_filter_non_pk_to_field_union_by_pk() -> None:
-    """A marked multi-choice ``in`` filter unions both genres' profiles by pk."""
-    alpha, beta, _gamma = _seed_favorite_genre_profiles("ALPHA", "BETA", "GAMMA")
-    encoded = [
-        relay.to_base64("GenreType", str(saved_pk(alpha))),
-        relay.to_base64("GenreType", str(saved_pk(beta))),
-    ]
-    f = GlobalIDMultipleChoiceFilter(field_name="favorite_genre", lookup_expr="in")
-    # Boolean flag: ``filter`` derives ``f"{field_name}__pk"``.
-    setattr(f, _GLOBALID_RELATION_PK_ATTR, True)
-    result = f.filter(models.PatronProfile.objects.all(), encoded)
-    assert set(result.values_list("postal_code", flat=True)) == {"ALPHA-zip", "BETA-zip"}
-
-    # The unqualified ``favorite_genre__in`` compares the pk values against the
-    # stored ``name`` column and matches nothing.
-    wrong = models.PatronProfile.objects.filter(
-        favorite_genre__in=[str(saved_pk(alpha)), str(saved_pk(beta))],
-    )
-    assert wrong.count() == 0
-
-
 def test_global_id_filter_fk_to_pk_predicate_is_byte_identical() -> None:
-    """Without the marker, the predicate is the plain ``{field__lookup: node_id}``."""
+    """An unmarked primitive forwards its stored text key without adding a pk segment.
+
+    Exact kwargs and marker absence stay private. Real target-key comparisons live in
+    ``test_library_api.py::test_global_id_filter_over_a_non_pk_to_field_compares_the_target_key_over_http``.
+    """
     qs = _RecordingQs()
 
     encoded = relay.to_base64("ShelfType", "7")
@@ -3393,7 +1926,11 @@ def test_global_id_filter_fk_to_pk_predicate_is_byte_identical() -> None:
 
 
 def test_global_id_multiple_choice_filter_in_predicate_is_byte_identical() -> None:
-    """Without the marker, the ``in`` predicate keeps the raw whole-list form."""
+    """An unmarked primitive forwards its decoded text list under the unchanged in keyword.
+
+    Exact kwargs and marker absence stay private. Actual GlobalID memberships live in
+    ``test_library_api.py::test_library_genres_filter_by_relay_own_pk_global_id_in_list``.
+    """
     qs = _RecordingQs()
 
     encoded = [relay.to_base64("GenreType", "1"), relay.to_base64("GenreType", "2")]
@@ -3402,33 +1939,6 @@ def test_global_id_multiple_choice_filter_in_predicate_is_byte_identical() -> No
     # ``MultipleChoiceFilter`` defaults ``distinct=True``; the stub must accept it.
     f.filter(qs, encoded)
     assert qs.captured == {"genres__in": ["1", "2"]}
-
-
-def test_global_id_filter_marked_empty_node_id_rejects_before_query() -> None:
-    """The marked non-pk-``to_field`` path also rejects an empty id -- never a 500.
-
-    Unmarked own-PK empty-id over HTTP:
-    ``test_library_api.py::test_library_genres_filter_empty_id_scalar_global_id_raises_globalid_invalid``.
-    No fakeshop filterset exposes the one non-pk ``to_field`` relation
-    (``PatronProfile.favorite_genre``), so this marked path stays package-side.
-
-    A MARKED leaf would compile ``<relation>__pk__exact=""`` (a 500
-    ``ValueError`` on the integer target pk) if the empty id slipped past the
-    scalar no-op. The reject happens inside ``_decode_and_validate_global_id``
-    -- before the marked/unmarked branch and before any queryset access -- so
-    the marked path raises the same clean ``GLOBALID_INVALID`` and never
-    touches the database.
-    """
-    f = GlobalIDFilter(field_name="favorite_genre", lookup_expr="exact")
-    setattr(f, _GLOBALID_RELATION_PK_ATTR, True)
-    with pytest.raises(GraphQLError, match="empty node id") as exc_info:
-        f.filter(_RecordingQs(), relay.to_base64("GenreType", ""))
-    assert exc_info.value.extensions == {"code": "GLOBALID_INVALID"}
-
-
-# ---------------------------------------------------------------------------
-# LazyRelatedClassMixin
-# ---------------------------------------------------------------------------
 
 
 class _SampleClass:
@@ -3470,11 +1980,6 @@ def test_lazy_related_class_mixin_raises_when_unresolved_string_has_no_bound_cla
     mixin = LazyRelatedClassMixin()
     with pytest.raises(ImportError):
         mixin.resolve_lazy_class("definitely.not.a.module.ClassName", None)
-
-
-# ---------------------------------------------------------------------------
-# RelatedFilter
-# ---------------------------------------------------------------------------
 
 
 def test_related_filter_accepts_class_argument() -> None:
@@ -3520,6 +2025,12 @@ def test_related_filter_get_queryset_auto_derives_from_target_model() -> None:
 
 
 def test_related_filter_get_queryset_honors_explicit_queryset() -> None:
+    """The explicit-queryset ledger preserves the consumer's exact queryset object.
+
+    HTTP serializes rows and cannot expose this identity. Native explicit-queryset
+    behavior lives in
+    ``test_library_api.py::test_library_branches_filter_respects_related_queryset_boundary_on_parent``.
+    """
     explicit_qs = models.Shelf.objects.filter(code="topic-A")
     f = RelatedFilter(ShelfFilter, queryset=explicit_qs)
     # Constructor records the explicit-queryset ledger entry.
@@ -3560,13 +2071,12 @@ def test_related_filter_filterset_setter_substitutes_target() -> None:
     assert rel.filterset is ShelfFilter
 
 
-# ---------------------------------------------------------------------------
-# ArrayFilterMethod / ListFilterMethod __call__ dispatch
-# ---------------------------------------------------------------------------
-
-
 def test_array_filter_method_call_passes_through_none() -> None:
-    """`ArrayFilterMethod.__call__` returns the queryset untouched for `None`."""
+    """Omission preserves the exact queryset without calling the array callback.
+
+    Exact object identity is private. Real array rowsets live in
+    ``test_postgres_array_filter_bindability_api.py::test_raw_array_forms_keep_upstream_csv_and_explicit_empty_membership``.
+    """
 
     def custom(_qs: object, name: str, value: object) -> tuple[str, str, object]:
         return ("custom", name, value)
@@ -3578,7 +2088,12 @@ def test_array_filter_method_call_passes_through_none() -> None:
 
 
 def test_array_filter_method_call_dispatches_to_custom_method() -> None:
-    """A non-`None` value reaches the consumer callable with `(qs, field_name, value)`."""
+    """The array dispatcher passes the same field name and Python value to its callback.
+
+    This callback returns an argument-recording tuple, not a supported QuerySet
+    result. Real array predicates live in
+    ``test_postgres_array_filter_bindability_api.py::test_raw_array_forms_keep_upstream_csv_and_explicit_empty_membership``.
+    """
 
     def custom(_qs: object, name: str, value: object) -> tuple[str, str, object]:
         return ("custom", name, value)
@@ -3598,7 +2113,11 @@ def test_list_filter_method_setter_swaps_in_list_filter_method() -> None:
 
 
 def test_list_filter_method_call_passes_through_none() -> None:
-    """`ListFilterMethod.__call__` returns the queryset untouched for `None`."""
+    """Omission preserves the exact queryset without calling the list callback.
+
+    Exact object identity is private. Native list rowsets live in
+    ``test_raw_filter_forms_api.py::test_declared_scalar_ranges_and_lists_match_the_rows_their_forms_clean``.
+    """
 
     def custom(_qs: object, name: str, value: object) -> tuple[str, str, object]:
         return ("custom", name, value)
@@ -3609,7 +2128,12 @@ def test_list_filter_method_call_passes_through_none() -> None:
 
 
 def test_list_filter_method_call_dispatches_to_custom_method() -> None:
-    """A non-`None` value reaches the consumer callable with `(qs, field_name, value)`."""
+    """The list dispatcher passes the same field name and Python value to its callback.
+
+    This callback returns an argument-recording tuple, not a supported QuerySet
+    result. Native list rowsets live in
+    ``test_raw_filter_forms_api.py::test_declared_scalar_ranges_and_lists_match_the_rows_their_forms_clean``.
+    """
 
     def custom(_qs: object, name: str, value: object) -> tuple[str, str, object]:
         return ("custom", name, value)
@@ -3619,7 +2143,11 @@ def test_list_filter_method_call_dispatches_to_custom_method() -> None:
 
 
 def test_array_filter_applies_distinct_when_flagged() -> None:
-    """`ArrayFilter.filter` calls `.distinct()` when the filter is `distinct=True`."""
+    """The array primitive invokes distinct exactly once before forwarding the value.
+
+    Python method counts stay private; actual array predicates live in
+    ``test_postgres_array_filter_bindability_api.py::test_raw_array_forms_keep_upstream_csv_and_explicit_empty_membership``.
+    """
     qs = _RecordingQs()
 
     f = ArrayFilter(field_name="tags", lookup_expr="exact", distinct=True)
@@ -3627,12 +2155,6 @@ def test_array_filter_applies_distinct_when_flagged() -> None:
     assert result is qs
     assert qs.distinct_calls == 1
     assert qs.captured == {"tags__exact": [1]}
-
-
-# ---------------------------------------------------------------------------
-# Strategy-aware GlobalID validation (spec-031 Decision 13) - owner/target
-# definition resolution + per-strategy accepted-type-name set.
-# ---------------------------------------------------------------------------
 
 
 def _definition(
@@ -3776,21 +2298,42 @@ def test_filter_schema_is_none_outside_the_apply_pipeline() -> None:
 def test_accepted_globalid_type_names_non_framework_strategies(strategy: str | None) -> None:
     """`callable` / `custom` / absent strategy -> `None` accepted set (defensive belt).
 
-    `_decode_and_validate_global_id` fail-closes on these before reaching this
-    helper (see `test_filter_encode_only_strategy_rejects_fail_closed` /
-    `test_filter_known_definition_none_strategy_rejects_fail_closed`); the helper
-    keeps returning `None` as a defensive belt only.
+    Runtime decoding rejects these states before consulting this metadata
+    helper. The refusal verdicts have separate live and runtime-backstop coverage;
+    this test observes only the metadata helper's Python return value.
     """
     owner = _owner(strategy)
     assert _accepted_globalid_type_names(owner) is None
 
 
-def test_filter_model_strategy_accepts_model_label() -> None:
-    """Under `model`, an own-PK filter accepts the model-label payload."""
-    owner = _owner("model")
-    f = _global_id_filter_with_owner("id", owner)
-    encoded = relay.to_base64("library.book", "42")
-    assert _decode_and_validate_global_id(encoded, f, alias=DEFAULT_DB_ALIAS) == 42
+def test_globalid_decoder_returns_the_targets_integer_python_key() -> None:
+    """Only the decoded Python type stays private; HTTP cannot distinguish str from int PKs."""
+
+    class BookIdentityFilter(FilterSet):
+        chosen = GlobalIDFilter(field_name="id")
+
+        class Meta:
+            model = models.Book
+            fields = ()
+
+    class BookIdentityNode(DjangoType):
+        class Meta:
+            model = models.Book
+            fields = ("id",)
+            interfaces = (relay.Node,)
+            globalid_strategy = "model"
+            filterset_class = BookIdentityFilter
+
+    finalize_django_types()
+    bound = BookIdentityFilter(queryset=models.Book.objects.all())
+    filter_ = require_instance(bound.filters["chosen"], GlobalIDFilter)
+    key = _decode_and_validate_global_id(
+        global_id_for(BookIdentityNode, 42),
+        filter_,
+        alias=DEFAULT_DB_ALIAS,
+    )
+
+    assert type(key) is int
 
 
 def test_filter_model_strategy_reads_the_model_name_case_insensitively() -> None:
@@ -3807,74 +2350,16 @@ def test_filter_model_strategy_reads_the_model_name_case_insensitively() -> None
         )
 
 
-def test_filter_model_strategy_accepts_predecoded_global_id() -> None:
-    """The filter accepts Strawberry's already-coerced ``GlobalID`` value unchanged."""
-    owner = _owner("model")
-    f = _global_id_filter_with_owner("id", owner)
-
-    assert (
-        _decode_and_validate_global_id(
-            relay.GlobalID("library.book", "42"),
-            f,
-            alias=DEFAULT_DB_ALIAS,
-        )
-        == 42
-    )
-
-
-def test_filter_model_strategy_rejects_type_name() -> None:
-    """Under `model`, the bare GraphQL type name is rejected."""
-    owner = _owner("model")
-    f = _global_id_filter_with_owner("id", owner)
-    encoded = relay.to_base64("OwnerType", "42")
-    with pytest.raises(GraphQLError, match="GlobalID type mismatch"):
-        _decode_and_validate_global_id(encoded, f, alias=DEFAULT_DB_ALIAS)
-
-
-def test_filter_type_strategy_accepts_graphql_name() -> None:
-    """`type` accepts the `graphql_type_name` payload."""
-    owner = _owner("type")
-    f = _global_id_filter_with_owner("id", owner)
-    encoded = relay.to_base64("OwnerType", "7")
-    assert _decode_and_validate_global_id(encoded, f, alias=DEFAULT_DB_ALIAS) == 7
-    # And rejects a model-label payload under `type`.
-    with pytest.raises(GraphQLError, match="GlobalID type mismatch"):
-        _decode_and_validate_global_id(
-            relay.to_base64("library.book", "7"),
-            f,
-            alias=DEFAULT_DB_ALIAS,
-        )
-
-
-def test_filter_type_plus_model_accepts_both() -> None:
-    """`type+model` accepts model-label AND type-name inputs."""
-    owner = _owner("type+model")
-    f = _global_id_filter_with_owner("id", owner)
-    assert (
-        _decode_and_validate_global_id(
-            relay.to_base64("library.book", "1"),
-            f,
-            alias=DEFAULT_DB_ALIAS,
-        )
-        == 1
-    )
-    assert (
-        _decode_and_validate_global_id(
-            relay.to_base64("OwnerType", "2"),
-            f,
-            alias=DEFAULT_DB_ALIAS,
-        )
-        == 2
-    )
-
-
 @pytest.mark.parametrize("strategy", ["callable", "custom"])
 def test_filter_encode_only_strategy_rejects_fail_closed(strategy: str) -> None:
-    """`callable` / `custom` targets fail closed: the strategy is encode-only.
+    """A privately installed encode-only strategy retains its runtime decoder refusal.
 
-    These strategies have no decode path, so a typed filter input for the
-    target's GlobalID could never validly consume the IDs it emits. The runtime
-    backstop (behind the build-time audit) rejects with a coded GraphQLError.
+    Rungs 1-3 cannot serve this deliberately incomplete lifecycle state: finalization
+    rejects bound callable/custom GlobalID tables before constructing any schema.
+    ``test_finalizer.py::test_phase_2_5_rejects_globalid_filter_on_callable_strategy_target``
+    and its custom-strategy sibling pin that public configuration refusal. The
+    known-None non-Relay target is different and has a live runtime owner in
+    ``test_globalid_filter_strategies_api.py::test_a_nonrelay_target_refuses_a_globalid_with_a_typed_error``.
     """
     owner = _owner(strategy)
     f = _global_id_filter_with_owner("id", owner)
@@ -3885,23 +2370,13 @@ def test_filter_encode_only_strategy_rejects_fail_closed(strategy: str) -> None:
     assert strategy in str(exc_info.value)
 
 
-def test_filter_known_definition_none_strategy_rejects_fail_closed() -> None:
-    """A known target whose recorded strategy is `None` is a lifecycle defect.
-
-    An unfinalized / non-Relay target should never reach a GlobalID filter; the
-    backstop rejects with a coded GraphQLError distinct from the encode-only
-    message rather than silently falling back to node-id-only.
-    """
-    owner = _owner(None)
-    f = _global_id_filter_with_owner("id", owner)
-    encoded = relay.to_base64("AnythingAtAll", "99")
-    with pytest.raises(GraphQLError, match=r"no .*recorded globalid strategy") as exc_info:
-        _decode_and_validate_global_id(encoded, f, alias=DEFAULT_DB_ALIAS)
-    assert exc_info.value.extensions == {"code": "GLOBALID_UNVALIDATABLE"}
-
-
 def test_multi_value_filter_encode_only_reject_names_index() -> None:
-    """`GlobalIDMultipleChoiceFilter` names the offending index on a fail-closed reject."""
+    """The private encode-only lifecycle backstop retains its offending Python list index.
+
+    Rungs 1-3 cannot publish this manually installed binding: finalization refuses
+    bound encode-only GlobalID tables. Ordinary finalized list refusals live in
+    ``test_library_api.py::test_library_genres_filter_malformed_own_pk_global_id_in_names_index``.
+    """
     owner = _owner("callable")
     f = _bound(GlobalIDMultipleChoiceFilter(field_name="id"), owner)
     with pytest.raises(GraphQLError, match="at index 0") as exc_info:
@@ -4342,29 +2817,6 @@ def test_unresolved_continued_path_lookup_passes_the_node_id_through(*, owner_ki
     assert list(books.values_list("title", flat=True)) == ["Kept"]
 
 
-def test_filter_wrong_model_rejected() -> None:
-    """A wrong-model GlobalID is still rejected for a framework strategy."""
-    owner = _owner("model")
-    f = _global_id_filter_with_owner("id", owner)
-    encoded = relay.to_base64("other.thing", "42")
-    with pytest.raises(GraphQLError, match="GlobalID type mismatch"):
-        _decode_and_validate_global_id(encoded, f, alias=DEFAULT_DB_ALIAS)
-
-
-def test_filter_non_string_global_id_value_rejected_as_malformed() -> None:
-    """A non-string GlobalID value takes the malformed-payload route.
-
-    Only ``str`` (wire form) and ``relay.GlobalID`` objects decode; any
-    other value is the same malformed-payload class as bad base64, so the
-    caller observes the coded ``GLOBALID_INVALID`` rejection, never a raw
-    ``ValueError``.
-    """
-    f = GlobalIDFilter(field_name="id")
-    with pytest.raises(GraphQLError, match="not a valid GlobalID") as exc_info:
-        _decode_and_validate_global_id(42, f, alias=DEFAULT_DB_ALIAS)
-    assert exc_info.value.extensions == {"code": "GLOBALID_INVALID"}
-
-
 def test_related_filter_relation_branch_strategy_aware() -> None:
     """A relation-branch (target-definition) filter applies the target's strategy."""
     _definition(models.Genre, "GenreType", "model")
@@ -4387,16 +2839,15 @@ def test_related_filter_relation_branch_strategy_aware() -> None:
         )
 
 
-def test_multi_value_filter_strategy_aware_indexes_rejection(
+def test_multi_value_filter_forwards_integer_keys_to_upstream_callback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`GlobalIDMultipleChoiceFilter` routes through the strategy-aware check.
+    """A model-owned list filter hands the upstream callback actual Python int keys.
 
-    A wrong-shape element names its index in the rejection message; a
-    well-shaped batch decodes the model-label payloads through to the upstream
-    filter. Spies on the upstream ``MultipleChoiceFilter.filter`` (same pattern
-    as ``test_global_id_multiple_choice_filter_decodes_every_element``) so the
-    real ``Q``-object filter machinery does not run.
+    HTTP rows cannot distinguish an integer key from a database-coercible text key.
+    Ordinary list acceptance and wrong-target refusal live in
+    ``test_library_api.py::test_library_genres_filter_by_relay_own_pk_global_id_in_list``
+    and ``test_library_api.py::test_library_genres_filter_by_relay_own_pk_global_id_in_rejects_wrong_type``.
     """
     owner = _owner("model")
     captured: list[list[object]] = []
@@ -4406,25 +2857,13 @@ def test_multi_value_filter_strategy_aware_indexes_rejection(
         return qs
 
     monkeypatch.setattr(GlobalIDMultipleChoiceFilter.__mro__[1], "filter", spy)
-
     accepted = _bound(GlobalIDMultipleChoiceFilter(field_name="id"), owner)
     accepted.filter(
         _RecordingQs(),
         [relay.to_base64("library.book", "1"), relay.to_base64("library.book", "2")],
     )
     assert captured == [[1, 2]]
-
-    rejected = _bound(GlobalIDMultipleChoiceFilter(field_name="id"), owner)
-    with pytest.raises(GraphQLError, match="at index 1"):
-        rejected.filter(
-            _RecordingQs(),
-            [relay.to_base64("library.book", "1"), relay.to_base64("OwnerType", "2")],
-        )
-
-
-# ---------------------------------------------------------------------------
-# Multi-hop GlobalID target definition resolution
-# ---------------------------------------------------------------------------
+    assert all(type(key) is int for keys in captured for key in keys)
 
 
 def test_resolve_globalid_target_definition_multihop() -> None:
@@ -4521,11 +2960,6 @@ def test_resolve_globalid_target_definition_walks_a_relation_primary_key(
     assert resolved is definitions[expected_model]
 
 
-# ---------------------------------------------------------------------------
-# Range validation & Integer/Range filter edge cases
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     "invalid_value",
     [
@@ -4550,39 +2984,38 @@ def test_validate_range_rejects_non_two_element_sequences(invalid_value: object)
     assert exc_info.value.code == "invalid"
 
 
-def test_integer_in_filter_unbound_and_missing_model() -> None:
-    """`IntegerInFilter.filter` safely filters when unbound or when model field is unresolvable."""
-    qs = models.Shelf.objects.all()
+def test_a_standalone_integer_primitive_keeps_parent_and_omission_identity() -> None:
+    """The absent parent slot and exact queryset identity are Python observations.
 
-    # Standalone / unbound filter instance (parent attribute is absent)
-    f = IntegerInFilter(field_name="id", lookup_expr="in")
-    assert getattr(f, "parent", None) is None
-    res = f.filter(qs, [1, 2])
-    assert "IN (1, 2)" in str(res.query)
-
-    # None (omission) passes through without crashing.
-    assert f.filter(qs, None) is qs
-
-    # A non-list scalar is a CODED reject at the shape gate: iterated, a
-    # string would go char-by-char through the coercion loop ("26"
-    # coercing to [2, 6] -- a wrong-result membership) and a bare int
-    # would leak ``TypeError: 'int' object is not iterable``.
-    with pytest.raises(GraphQLError) as exc_info:
-        f.filter(qs, "")
-    assert exc_info.value.extensions == {"code": "FILTER_INVALID"}
+    Native direct primitive acceptance and scalar refusal are owned by
+    ``examples/fakeshop/test_query/test_direct_filter_primitives_api.py::test_direct_public_membership_primitives_refuse_scalar_containers``.
+    """
+    queryset = models.Shelf.objects.none()
+    primitive = IntegerInFilter(field_name="id", lookup_expr="in")
+    assert getattr(primitive, "parent", None) is None
+    assert primitive.filter(queryset, None) is queryset
 
 
-def test_integer_range_filter_malformed_values_pass_through() -> None:
-    """`IntegerRangeFilter.filter` passes through malformed non-range values without crashing."""
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("", id="empty-string"),
+        pytest.param([1], id="short-list"),
+        pytest.param([1, 2, 3], id="long-list"),
+        pytest.param(123, id="number"),
+        pytest.param("invalid", id="string"),
+    ],
+)
+def test_integer_range_filter_malformed_values_pass_through(value: object) -> None:
+    """A malformed pair preserves the original Python queryset object.
+
+    A request can show unchanged rows, not queryset identity. Native rowsets live in
+    ``test_direct_filter_primitives_api.py::test_a_direct_integer_range_primitive_keeps_upstreams_non_pair_skip``.
+    """
     qs = models.Shelf.objects.all()
     f = IntegerRangeFilter(field_name="id")
 
-    assert f.filter(qs, None) is qs
-    assert f.filter(qs, "") is qs
-    assert f.filter(qs, [1]) is qs
-    assert f.filter(qs, [1, 2, 3]) is qs
-    assert f.filter(qs, 123) is qs
-    assert f.filter(qs, "invalid") is qs
+    assert f.filter(qs, value) is qs
 
 
 def test_filters_base_edge_cases() -> None:
@@ -4617,11 +3050,6 @@ def test_related_filter_get_queryset_mistyped_target_is_typed() -> None:
     with pytest.raises(ConfigurationError) as exc_info:
         rel.get_queryset(request=None)
     assert "is not a FilterSet subclass" in str(exc_info.value)
-
-
-# ---------------------------------------------------------------------------
-# RelatedFilter target-type gate (the `.filterset` read seam).
-# ---------------------------------------------------------------------------
 
 
 class _PlainClassTarget:
@@ -4783,60 +3211,24 @@ def test_related_filter_gate_passes_none_placeholder_through_bfs_enqueue() -> No
     assert factory.input_object_types
 
 
-# ---------------------------------------------------------------------------
-# Filter-value shapes outside the form contract, at the filter() seam.
-# ---------------------------------------------------------------------------
-
-
-def test_list_filter_scalar_value_is_a_coded_reject() -> None:
-    """A scalar never reaches ``len()``: the shape gate rejects it with the coded error."""
-    f = ListFilter(field_name="code")
-    with pytest.raises(GraphQLError) as exc_info:
-        f.filter(models.Shelf.objects.none(), 42)
-    assert exc_info.value.extensions == {"code": "FILTER_INVALID"}
-
-
 def test_list_filter_one_shot_iterator_is_a_coded_reject() -> None:
+    """A Python-only one-shot iterator is refused without being consumed as a JSON list.
+
+    Native scalar-container refusals live in
+    ``test_direct_filter_primitives_api.py::test_direct_public_membership_primitives_refuse_scalar_containers``.
+    """
+    visited: list[str] = []
+
+    def members() -> Iterator[str]:
+        visited.append("iterated")
+        yield "a"
+        yield "b"
+
     f = ListFilter(field_name="code")
-    with pytest.raises(GraphQLError):
-        f.filter(models.Shelf.objects.none(), iter(["a", "b"]))
-
-
-def test_list_filter_string_value_is_rejected_not_iterated_charwise() -> None:
-    """A string under an ``in`` lookup is rejected before Django can iterate it char-wise.
-
-    Char-wise iteration would compile ``in: "26"`` to ``IN ('2','6')``.
-    """
-    f = ListFilter(field_name="code", lookup_expr="in")
-    with pytest.raises(GraphQLError):
-        f.filter(models.Shelf.objects.none(), "26")
-
-
-def test_integer_in_filter_scalar_value_is_a_coded_reject() -> None:
-    """A scalar that bypasses form coercion never reaches the coercion loop."""
-    f = IntegerInFilter(field_name="lifetime_fines_cents")
     with pytest.raises(GraphQLError) as exc_info:
-        f.filter(models.Shelf.objects.none(), 42)
+        f.filter(models.Shelf.objects.none(), members())
     assert exc_info.value.extensions == {"code": "FILTER_INVALID"}
-
-
-def test_integer_in_filter_string_value_is_rejected_not_iterated_charwise() -> None:
-    """A string value is rejected before the coercion loop could iterate it char-by-char.
-
-    ``in: "26"`` would coerce to ``[2, 6]``, a wrong-result membership.
-    """
-
-    class PatronFilter(FilterSet):
-        fines = IntegerInFilter(field_name="lifetime_fines_cents")
-
-        class Meta:
-            model = models.Patron
-            fields = {"name": ["exact"]}
-
-    # django-filter binds the declared filter to its set as ``parent`` on instantiation.
-    f = PatronFilter().filters["fines"]
-    with pytest.raises(GraphQLError):
-        f.filter(models.Shelf.objects.none(), "26")
+    assert visited == []
 
 
 def test_globalid_multiple_choice_list_subclass_iteration_error_propagates() -> None:
@@ -4916,11 +3308,6 @@ def test_related_filter_gate_rejection_message_is_pinned() -> None:
     )
 
 
-# ---------------------------------------------------------------------------
-# Raw-primary-key relation filters (non-Relay targets)
-# ---------------------------------------------------------------------------
-
-
 def test_relation_identity_column_follows_a_relation_valued_primary_key() -> None:
     """A target whose own key is a one-to-one types by the column that key points at.
 
@@ -4937,15 +3324,11 @@ def test_relation_identity_column_is_none_without_a_resolved_relation() -> None:
     assert relation_identity_column(SimpleNamespace(is_relation=True, related_model=None)) is None
 
 
-@pytest.mark.django_db
-def test_relation_pk_filters_generated_for_non_pk_to_field_match_by_target_pk() -> None:
-    """A raw-pk ``favorite_genre`` key (FK on ``to_field="name"``) matches the genre's pk.
+def test_raw_non_pk_to_field_leaves_are_primary_key_marked_relation_filters() -> None:
+    """Only private metadata or callback observations remain here.
 
-    No ``DjangoType`` exposes ``Genre`` here, so both leaves are raw-pk filters carrying
-    the pk-qualification marker; the value is the target's primary key, never its
-    ``name``.
+    Live sibling: ``examples/fakeshop/test_query/test_raw_relation_key_forms_api.py``.
     """
-    alpha, beta, _gamma = _seed_favorite_genre_profiles("ALPHA", "BETA", "GAMMA")
 
     class ProfileFilter(FilterSet):
         class Meta:
@@ -4958,49 +3341,6 @@ def test_relation_pk_filters_generated_for_non_pk_to_field_match_by_target_pk() 
     assert isinstance(in_leaf, RelationPkMultipleFilter)
     assert getattr(exact_leaf, _GLOBALID_RELATION_PK_ATTR) is True
     assert getattr(in_leaf, _GLOBALID_RELATION_PK_ATTR) is True
-
-    def codes(data: dict[str, object]) -> list[str]:
-        filterset = ProfileFilter(
-            data=data,
-            queryset=models.PatronProfile.objects.order_by("postal_code"),
-            request=HttpRequest(),
-        )
-        return list(filterset.qs.values_list("postal_code", flat=True))
-
-    assert codes({"favorite_genre": saved_pk(alpha)}) == ["ALPHA-zip"]
-    assert codes({"favorite_genre__in": [saved_pk(alpha), saved_pk(beta)]}) == [
-        "ALPHA-zip",
-        "BETA-zip",
-    ]
-
-
-@pytest.mark.django_db
-def test_relation_pk_filters_drop_a_value_the_target_column_cannot_hold() -> None:
-    """An uncoercible key identifies no row: ``exact`` matches nothing, ``in`` drops it.
-
-    The GraphQL scalar rejects such a value at the wire, so only a direct caller reaches
-    this; the verdict is still "no row", never django-filter's empty-value skip.
-    """
-    branch = models.Branch.objects.create(name="Home", city="Boston")
-    shelf = models.Shelf.objects.create(code="A-1", topic="general", branch=branch)
-    models.Book.objects.create(title="Kept", shelf=shelf)
-
-    class BookShelfFilter(FilterSet):
-        class Meta:
-            model = models.Book
-            fields = {"shelf": ["exact", "in"]}
-
-    def titles(data: dict[str, object]) -> list[str]:
-        filterset = BookShelfFilter(
-            data=data,
-            queryset=models.Book.objects.order_by("id"),
-            request=HttpRequest(),
-        )
-        return list(filterset.qs.values_list("title", flat=True))
-
-    assert titles({"shelf": "not-a-pk"}) == []
-    assert titles({"shelf__in": ["not-a-pk"]}) == []
-    assert titles({"shelf__in": ["not-a-pk", saved_pk(shelf)]}) == ["Kept"]
 
 
 @pytest.mark.django_db
@@ -5031,19 +3371,14 @@ def test_relation_pk_list_field_skips_existence_checks_and_rejects_a_non_list() 
     assert scalar.errors.as_data()["genres"][0].code == "invalid_list"
 
 
-@pytest.mark.django_db
-def test_unbound_relation_pk_filters_apply_the_value_uncoerced() -> None:
-    """A filter with no parent filterset has no model to read a column from: value as given."""
-    branch = models.Branch.objects.create(name="Home", city="Boston")
-    shelf = models.Shelf.objects.create(code="A-1", topic="general", branch=branch)
-    other = models.Shelf.objects.create(code="B-2", topic="general", branch=branch)
-    models.Book.objects.create(title="Kept", shelf=shelf)
-    models.Book.objects.create(title="Other", shelf=other)
-    books = models.Book.objects.order_by("id")
+def test_an_unbound_relation_key_primitive_preserves_the_omission_queryset_identity() -> None:
+    """Only exact returned QuerySet identity remains a Python-level observation.
 
+    Public unbound single/multiple identity filtering is owned over HTTP by
+    ``examples/fakeshop/test_query/test_declared_key_primitives_api.py::test_an_unbound_relation_key_primitive_keeps_its_public_queryset_contract``.
+    """
+    queryset = models.Book.objects.none()
     single = RelationPkFilter(field_name="shelf", lookup_expr="exact")
     many = RelationPkMultipleFilter(field_name="shelf", lookup_expr="in")
-    assert list(single.filter(books, saved_pk(shelf)).values_list("title", flat=True)) == ["Kept"]
-    assert list(many.filter(books, [saved_pk(other)]).values_list("title", flat=True)) == ["Other"]
-    assert single.filter(books, None) is books
-    assert many.filter(books, None) is books
+    assert single.filter(queryset, None) is queryset
+    assert many.filter(queryset, None) is queryset

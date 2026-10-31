@@ -152,15 +152,19 @@ def test_ordering_resolve_wraps_value_in_f_expression() -> None:
 @pytest.fixture
 def _materialization_cleanup() -> Iterator[None]:
     """Strip any test-emitted ledger / module-global state after each test."""
-    names_before = set(_materialized_names.keys())
-    yield
     module = sys.modules[INPUTS_MODULE_PATH]
-    for name in list(_materialized_names.keys()):
-        if name in names_before:
-            continue
-        _materialized_names.pop(name, None)
-        if hasattr(module, name):
+    namespace_before: dict[str, object] = dict(vars(module))
+    ledger_before = dict(_materialized_names)
+    try:
+        yield
+    finally:
+        for name in set(vars(module)) - namespace_before.keys():
             delattr(module, name)
+        for name, value in namespace_before.items():
+            if vars(module).get(name) is not value:
+                setattr(module, name, value)
+        _materialized_names.clear()
+        _materialized_names.update(ledger_before)
 
 
 @pytest.mark.usefixtures("_materialization_cleanup")
@@ -449,15 +453,19 @@ def test_field_specs_populated_by_build_input_fields_for_relatedorder() -> None:
 @pytest.fixture
 def _namespace_cleanup() -> Iterator[None]:
     """Strip test-emitted ledger / module-global state + factory caches."""
-    names_before = set(_materialized_names.keys())
-    yield
     module = sys.modules[INPUTS_MODULE_PATH]
-    for name in list(_materialized_names.keys()):
-        if name in names_before:
-            continue
-        _materialized_names.pop(name, None)
-        if hasattr(module, name):
+    namespace_before: dict[str, object] = dict(vars(module))
+    ledger_before = dict(_materialized_names)
+    try:
+        yield
+    finally:
+        for name in set(vars(module)) - namespace_before.keys():
             delattr(module, name)
+        for name, value in namespace_before.items():
+            if vars(module).get(name) is not value:
+                setattr(module, name, value)
+        _materialized_names.clear()
+        _materialized_names.update(ledger_before)
     _field_specs.clear()
     OrderArgumentsFactory.input_object_types.clear()
     OrderArgumentsFactory._type_orderset_registry.clear()

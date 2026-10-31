@@ -48,8 +48,8 @@ from django_strawberry_framework import (
     SerializerMutation,
     apply_cascade_permissions,
 )
-from django_strawberry_framework.filters import FilterInput
-from django_strawberry_framework.orders import OrderInput
+from django_strawberry_framework.filters import FilterInput, FilterSet
+from django_strawberry_framework.orders import OrderInput, OrderSet
 from django_strawberry_framework.utils.input_values import UNSET
 
 # Consumer ``resolver=`` helper exercising the shared field-wrapper
@@ -405,10 +405,14 @@ class ShelfType(DjangoType):
 
     class Meta:
         model = models.Shelf
+        if getattr(settings, "FAKESHOP_TEST_BOUND_SETS", False):
+            primary = True
         fields = (
             "id",
             "code",
+            "code_length",
             "topic",
+            "topic_length",
             "condition",
             "branch",
             "books",
@@ -1234,9 +1238,176 @@ class ShelfLabelType(DjangoType):
         orderset_class = orders.ShelfLabelOrder
 
 
+class RoutedBookType(DjangoType):
+    """Secondary book view reached only by the opt-in generated-predicate root.
+
+    The published root is absent unless ``FAKESHOP_TEST_ROUTED_FILTERS`` is set.
+    Its resolver applies the primary book type's visibility before filtering.
+    """
+
+    class Meta:
+        model = models.Book
+        primary = False
+        fields = ("id", "title")
+        filterset_class = filters.RoutedBookFilter
+
+
+def _binding_shelf_visibility(
+    _cls: type[DjangoType],
+    queryset: QuerySet[models.Shelf],
+    _info: Info,
+) -> QuerySet[models.Shelf]:
+    """The opt-in secondary shelf's visibility, independent of its set's base class."""
+    return queryset.exclude(topic="secret")
+
+
+def _binding_shelf_type(
+    name: str,
+    filterset: type[FilterSet],
+    orderset: type[OrderSet],
+    *,
+    hiding: bool,
+) -> type[DjangoType]:
+    """Declare one secondary via Meta; the caller controls the registration order."""
+    namespace: dict[str, object] = {
+        "Meta": type(
+            "Meta",
+            (),
+            {
+                "model": models.Shelf,
+                "fields": ("id", "topic"),
+                "primary": False,
+                "interfaces": (relay.Node,),
+                "globalid_strategy": "type",
+                "filterset_class": filterset,
+                "orderset_class": orderset,
+            },
+        ),
+    }
+    if hiding:
+        namespace["get_queryset"] = classmethod(_binding_shelf_visibility)
+    built = type(name, (DjangoType,), namespace)
+    assert issubclass(built, DjangoType)
+    return built
+
+
+if TYPE_CHECKING or getattr(settings, "FAKESHOP_TEST_BOUND_SETS", False):
+    _binding_base_on_hiding = getattr(settings, "FAKESHOP_TEST_BOUND_SETS_BASE_ON_HIDING", False)
+    _binding_hiding_filter = (
+        filters.BindingShelfFilter if _binding_base_on_hiding else filters.BindingSubShelfFilter
+    )
+    _binding_plain_filter = (
+        filters.BindingSubShelfFilter if _binding_base_on_hiding else filters.BindingShelfFilter
+    )
+    _binding_hiding_order = (
+        orders.BindingShelfOrder if _binding_base_on_hiding else orders.BindingSubShelfOrder
+    )
+    _binding_plain_order = (
+        orders.BindingSubShelfOrder if _binding_base_on_hiding else orders.BindingShelfOrder
+    )
+    _binding_owners: tuple[tuple[str, type[FilterSet], type[OrderSet], bool], ...] = (
+        (
+            "BindingHidingShelfType",
+            _binding_hiding_filter,
+            _binding_hiding_order,
+            True,
+        ),
+        (
+            "BindingPlainShelfType",
+            _binding_plain_filter,
+            _binding_plain_order,
+            False,
+        ),
+    )
+    if not getattr(settings, "FAKESHOP_TEST_BOUND_SETS_HIDING_FIRST", True):
+        _binding_owners = tuple(reversed(_binding_owners))
+    _bound_shelf_types = {
+        name: _binding_shelf_type(name, filterset, orderset, hiding=hiding)
+        for name, filterset, orderset, hiding in _binding_owners
+    }
+
+    class BindingHidingBookType(DjangoType):
+        """Opt-in books whose shelf filter and order read the hiding secondary owner."""
+
+        class Meta:
+            model = models.Book
+            primary = False
+            fields = ("id", "title")
+            interfaces = (relay.Node,)
+            globalid_strategy = "type"
+            filterset_class = (
+                filters.BindingBaseHidingBookFilter
+                if _binding_base_on_hiding
+                else filters.BindingHidingBookFilter
+            )
+            orderset_class = (
+                orders.BindingBaseHidingBookOrder
+                if _binding_base_on_hiding
+                else orders.BindingHidingBookOrder
+            )
+
+    class BindingPlainBookType(DjangoType):
+        """Opt-in books whose shelf filter and order read the plain secondary owner."""
+
+        class Meta:
+            model = models.Book
+            primary = False
+            fields = ("id", "title")
+            interfaces = (relay.Node,)
+            globalid_strategy = "type"
+            filterset_class = (
+                filters.BindingSubPlainBookFilter
+                if _binding_base_on_hiding
+                else filters.BindingPlainBookFilter
+            )
+            orderset_class = (
+                orders.BindingSubPlainBookOrder
+                if _binding_base_on_hiding
+                else orders.BindingPlainBookOrder
+            )
+
+    class BindingUnwiredBookType(DjangoType):
+        """Opt-in books whose child sets are unwired subclasses of bound sets."""
+
+        class Meta:
+            model = models.Book
+            primary = False
+            fields = ("id", "title")
+            interfaces = (relay.Node,)
+            globalid_strategy = "type"
+            filterset_class = filters.BindingUnwiredBookFilter
+            orderset_class = orders.BindingUnwiredBookOrder
+
+    class BindingLoneBookType(DjangoType):
+        """Opt-in books whose unrelated unwired child sets provide the control."""
+
+        class Meta:
+            model = models.Book
+            primary = False
+            fields = ("id", "title")
+            interfaces = (relay.Node,)
+            globalid_strategy = "type"
+            filterset_class = filters.BindingLoneBookFilter
+            orderset_class = orders.BindingLoneBookOrder
+
+
 @strawberry.type
 class Query:
     """Library acceptance root fields."""
+
+    if getattr(settings, "FAKESHOP_TEST_BOUND_SETS", False):
+        all_library_binding_hiding_books: DjangoConnection[BindingHidingBookType] = (
+            DjangoConnectionField(BindingHidingBookType)
+        )
+        all_library_binding_plain_books: DjangoConnection[BindingPlainBookType] = (
+            DjangoConnectionField(BindingPlainBookType)
+        )
+        all_library_binding_unwired_books: DjangoConnection[BindingUnwiredBookType] = (
+            DjangoConnectionField(BindingUnwiredBookType)
+        )
+        all_library_binding_lone_books: DjangoConnection[BindingLoneBookType] = (
+            DjangoConnectionField(BindingLoneBookType)
+        )
 
     # Keyset-cursor (Meta.cursor_field) acceptance surface: the root
     # connection mints/decodes value cursors through the framework slicer;
@@ -1679,6 +1850,27 @@ class Query:
         if order_by is not None:
             queryset = orders.LoanOrder.apply_sync(order_by, queryset, info)
         return queryset
+
+    if getattr(settings, "FAKESHOP_TEST_ROUTED_FILTERS", False):
+
+        def _all_library_routed_books(
+            self,
+            info: strawberry.Info,
+            filter: FilterInput[filters.RoutedBookFilter] | None = None,  # noqa: A002
+            order_by: list[OrderInput[orders.BookOrder]] | None = None,
+        ) -> QuerySet[models.Book]:
+            """Acceptance surface for generated M2M leaves without a declared relation hop."""
+            queryset = BookType.get_queryset(models.Book.objects.all(), info)
+            if filter is not None:
+                queryset = filters.RoutedBookFilter.apply_sync(filter, queryset, info)
+            if order_by is not None:
+                queryset = orders.BookOrder.apply_sync(order_by, queryset, info)
+            return queryset
+
+        all_library_routed_books: QuerySet[models.Book] = strawberry.field(
+            resolver=_all_library_routed_books,
+            graphql_type=list[RoutedBookType],
+        )
 
     # Default-OFF acceptance flag ``FAKESHOP_TEST_LOAN_CONNECTION`` (mirrors the
     # ``HIDE_FLAT_FILTERS`` settings-gated idiom): when set, a live Relay CONNECTION

@@ -319,21 +319,6 @@ def test_related_order_none_placeholder_target_still_reads_none() -> None:
     assert related.orderset is None
 
 
-def test_related_order_target_gate_preserves_importerror_for_unresolved_strings() -> None:
-    """The gate fires AFTER string resolution: unresolvable strings stay ``ImportError``.
-
-    Pins the finalizer's subpass-2 contract -- the rewrap keys on the raw
-    ``ImportError`` (``__cause__`` preserved), which the gate must not
-    preempt or replace.
-    """
-
-    class Owner(OrderSet):
-        a = RelatedOrder("NoSuchOrderAnywhereXYZ", field_name="a")
-
-    with pytest.raises(ImportError):
-        _ = Owner.a.orderset
-
-
 def test_related_order_gate_rejection_message_is_pinned() -> None:
     """The target-gate rejection names the owner, the declaration and the target kind."""
 

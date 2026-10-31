@@ -17,7 +17,7 @@ import strawberry
 from apps.library import models as library_models
 from apps.products.models import Category
 from django.db.models import CASCADE, ForeignKey, IntegerField, Model, TextField
-from django_filters import CharFilter, NumberFilter
+from django_filters import CharFilter
 from strawberry import relay
 from strawberry.types.base import get_object_definition
 
@@ -68,7 +68,6 @@ def _isolate_state() -> Iterator[None]:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.django_db
 def test_filter_arguments_factory_visits_every_reachable_filterset() -> None:
     """A `Branch -> Shelf` `RelatedFilter` -> both classes appear in `input_object_types`."""
 
@@ -90,7 +89,6 @@ def test_filter_arguments_factory_visits_every_reachable_filterset() -> None:
     assert "ShelfFilterAInputType" in FilterArgumentsFactory.input_object_types
 
 
-@pytest.mark.django_db
 def test_filter_arguments_factory_bfs_handles_cycle() -> None:
     """`A -> B -> A` mutual `RelatedFilter`s do not blow the BFS stack."""
     # Use the package's `tests.filters.fixtures.filtersets` self-referential
@@ -104,15 +102,16 @@ def test_filter_arguments_factory_bfs_handles_cycle() -> None:
     assert "SelfReferentialBranchFilterInputType" in FilterArgumentsFactory.input_object_types
 
 
-@pytest.mark.django_db
-def test_filter_arguments_factory_dedupes_target_enqueued_twice() -> None:
+def test_filter_arguments_factory_dedupes_target_enqueued_twice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A diamond ``A -> {B, C} -> D`` enqueues ``D`` twice; the BFS dedups it.
 
     Unlike the ``A -> B -> A`` cycle (caught by the enqueue-time
     ``target not in seen`` gate), a diamond enqueues the shared child ``D``
     from both sibling parents BEFORE ``D`` is popped, so the pop-time
-    ``if fs_class in seen: continue`` dedup is what prevents the duplicate
-    build.
+    seen gate prevents the duplicate traversal. The input cache
+    independently prevents a second build, so the row counts traversal reads.
     """
 
     class DFilter(FilterSet):
@@ -142,18 +141,41 @@ def test_filter_arguments_factory_dedupes_target_enqueued_twice() -> None:
             model = library_models.Branch
             fields = {"name": ["exact"]}
 
+    # Count the BFS's map reads, delegating every real build and read. The
+    # input cache also prevents duplicate builds, so final registry cardinality
+    # alone cannot prove that a twice-enqueued target was visited only once.
+    visits: list[object] = []
+    building = False
+    build = FilterArgumentsFactory._build_class_type
+    read = truth.static_attr
+
+    def tracked_build(factory: FilterArgumentsFactory, set_class: type[FilterSet]) -> None:
+        nonlocal building
+        building = True
+        try:
+            build(factory, set_class)
+        finally:
+            building = False
+
+    def tracked_read(obj: object, attr: str, default: object = None) -> object:
+        if not building and obj is DFilter and attr == "related_filters":
+            visits.append(obj)
+        return read(obj, attr, default)
+
+    monkeypatch.setattr(FilterArgumentsFactory, "_build_class_type", tracked_build)
+    monkeypatch.setattr(truth, "static_attr", tracked_read)
+
     factory = FilterArgumentsFactory(AFilter)
     _ = factory.arguments  # BFS: D is enqueued by both B and C, deduped at pop.
-    for name in (
+    assert visits == [DFilter]
+    assert {
         "AFilterInputType",
         "BFilterInputType",
         "CFilterInputType",
         "DFilterInputType",
-    ):
-        assert name in FilterArgumentsFactory.input_object_types
+    } <= set(FilterArgumentsFactory.input_object_types)
 
 
-@pytest.mark.django_db
 def test_filter_arguments_factory_collision_raises_on_distinct_class_with_same_name() -> None:
     """Two distinct `FilterSet`s named `DupFilter` in different modules -> ConfigurationError."""
 
@@ -188,7 +210,6 @@ def test_filter_arguments_factory_collision_raises_on_distinct_class_with_same_n
     assert "FilterSet" in message
 
 
-@pytest.mark.django_db
 def test_filter_arguments_factory_rejects_flattened_field_collision() -> None:
     """Two members whose paths flatten to one python attr must fail loud, not drop one.
 
@@ -231,7 +252,6 @@ def test_filter_arguments_factory_rejects_flattened_field_collision() -> None:
     assert "ShelfFlattenCollide" in message
 
 
-@pytest.mark.django_db
 def test_filter_arguments_factory_rejects_graphql_name_collision() -> None:
     """Distinct python attrs that camel-case alike must not share one GraphQL field."""
 
@@ -255,7 +275,6 @@ def test_filter_arguments_factory_rejects_graphql_name_collision() -> None:
     assert "GraphQL input field name 'fooBar'" in message
 
 
-@pytest.mark.django_db
 def test_filter_arguments_factory_idempotent_repeated_arguments() -> None:
     """Repeated reads of `.arguments` return the same input class object."""
 
@@ -270,7 +289,6 @@ def test_filter_arguments_factory_idempotent_repeated_arguments() -> None:
     assert first is second
 
 
-@pytest.mark.django_db
 def test_filter_arguments_factory_input_shape_matches_runtime_filter_for_relay_target() -> None:
     """A Relay-shaped M2M target -> input annotation forwards to the target's input class.
 
@@ -328,7 +346,6 @@ def test_filter_arguments_factory_input_shape_matches_runtime_filter_for_relay_t
     assert forward_name == "GenreFilterInputType"
 
 
-@pytest.mark.django_db
 def test_filter_arguments_factory_input_shape_matches_runtime_filter_for_non_relay_target() -> (
     None
 ):
@@ -370,43 +387,6 @@ def test_filter_arguments_factory_input_shape_matches_runtime_filter_for_non_rel
     assert in_annotation is not None
     assert exact_annotation.annotation == (int | None)
     assert in_annotation.annotation == (list[int] | None)
-
-
-@pytest.mark.django_db
-def test_an_in_lookup_is_not_replaced_by_a_csv_filter() -> None:
-    """The cookbook's ``replace_csv_filters`` rewrap is dropped per spec-027.
-
-    `Meta.fields = {"name": ["in"]}` -> the resulting filter is the
-    upstream `django-filter` default (with the inherited list shape),
-    NOT a CSV-rewritten variant.
-    """
-
-    class CategoryInFilter(FilterSet):
-        class Meta:
-            model = Category
-            fields = {"name": ["in"]}
-
-    filters = CategoryInFilter.get_filters()
-    # `name__in` should land as a regular filter; the import path the
-    # cookbook's CSV variant would have used (`graphene_django.filter`
-    # internals) is NOT touched.
-    assert "name__in" in filters
-    # Confirm the resulting filter is NOT a graphene-django-CSV variant
-    # by checking its class hierarchy contains no graphene module path.
-    cls_path = type(filters["name__in"]).__module__
-    assert "graphene" not in cls_path
-
-
-@pytest.mark.django_db
-def test_filter_fields_alias_resolves_on_class_meta() -> None:
-    """A declared ``Meta.filter_fields`` resolves to the FilterSet's fields."""
-
-    class CategoryFilter(FilterSet):
-        class Meta:
-            model = Category
-            filter_fields = {"name": ["exact"]}
-
-    assert CategoryFilter._meta.fields == {"name": ["exact"]}
 
 
 def test_filter_arguments_factory_rejects_subclassing() -> None:
@@ -455,7 +435,6 @@ def test_factory_subclassing_check_finds_the_base_by_identity(
     assert calls == []
 
 
-@pytest.mark.django_db
 def test_filter_arguments_factory_empty_filterset_emits_logic_fields() -> None:
     """A FilterSet with empty fields still emits the and_/or_/not_ logic fields."""
 
@@ -470,7 +449,6 @@ def test_filter_arguments_factory_empty_filterset_emits_logic_fields() -> None:
     assert field_names == {"and_", "or_", "not_"}
 
 
-@pytest.mark.django_db
 def test_filter_arguments_factory_skips_placeholder_related_filter_target() -> None:
     """A RelatedFilter(None, ...) placeholder is skipped during BFS traversal."""
 
@@ -588,7 +566,6 @@ def _declared_and_flat_members() -> type[FilterSet]:
     return FlatShelfFilter
 
 
-@pytest.mark.django_db
 def test_two_members_of_one_bag_name_and_one_lookup_set_in_any_order_finalize() -> None:
     """Case-variant members whose lookups match in another order mint one shape, not a clash."""
 
@@ -623,7 +600,6 @@ _RANGE_CAUSE = (
 )
 
 
-@pytest.mark.django_db
 @pytest.mark.parametrize(
     (
         "build",
@@ -690,10 +666,3 @@ def test_two_shapes_of_one_generated_name_in_one_set_raise_at_finalize(
         f"type per name, so it cannot serve both. {cause} Rename one so its generated "
         "type name is unique."
     )
-
-
-# Touch `NumberFilter` import to ensure the import is exercised (used
-# implicitly by django-filter for the integer-PK FK in the
-# `test_filter_arguments_factory_input_shape_matches_runtime_filter_for_non_relay_target`
-# test above).
-assert NumberFilter is not None

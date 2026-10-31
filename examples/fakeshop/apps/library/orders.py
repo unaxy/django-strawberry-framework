@@ -113,7 +113,9 @@ class ShelfOrder(OrderSet):
         fields = [
             "id",
             "code",
+            "code_length",
             "topic",
+            "topic_length",
             "circulation_desk__name",
         ]
 
@@ -470,3 +472,87 @@ __all__ = (
     "VenueSponsorOrder",
     "VisibleBranchOrder",
 )
+
+
+class BindingShelfOrder(OrderSet):
+    """A base shelf order whose subclass may bind another type or remain unwired."""
+
+    class Meta:
+        model = models.Shelf
+        fields = ["topic", "branch__shelves__topic", "books__shelf__topic"]
+
+
+class BindingSubShelfOrder(BindingShelfOrder):
+    """The separately owned shelf order subclass in the opt-in binding graph."""
+
+
+class BindingUnwiredShelfOrder(BindingShelfOrder):
+    """An unserved subclass reads primary visibility rather than its base's owner."""
+
+
+class BindingLoneShelfOrder(OrderSet):
+    """An unrelated unserved control declaring the same order fields."""
+
+    class Meta:
+        model = models.Shelf
+        fields = ["topic", "branch__shelves__topic", "books__shelf__topic"]
+
+
+class BindingHidingBookOrder(OrderSet):
+    """Book ordering through the subclass owned by the hiding shelf type."""
+
+    shelf = RelatedOrder(BindingSubShelfOrder, field_name="shelf")
+
+    class Meta:
+        model = models.Book
+        fields = ["title"]
+
+
+class BindingPlainBookOrder(OrderSet):
+    """Book ordering through the base set owned by the plain shelf type."""
+
+    shelf = RelatedOrder(BindingShelfOrder, field_name="shelf")
+
+    class Meta:
+        model = models.Book
+        fields = ["title"]
+
+
+class BindingBaseHidingBookOrder(OrderSet):
+    """The reverse arrangement: the hiding shelf owns the base set."""
+
+    shelf = RelatedOrder(BindingShelfOrder, field_name="shelf")
+
+    class Meta:
+        model = models.Book
+        fields = ["title"]
+
+
+class BindingSubPlainBookOrder(OrderSet):
+    """The reverse arrangement: the plain shelf owns the subclass."""
+
+    shelf = RelatedOrder(BindingSubShelfOrder, field_name="shelf")
+
+    class Meta:
+        model = models.Book
+        fields = ["title"]
+
+
+class BindingUnwiredBookOrder(OrderSet):
+    """Book ordering through an unwired subclass of a bound shelf set."""
+
+    shelf = RelatedOrder(BindingUnwiredShelfOrder, field_name="shelf")
+
+    class Meta:
+        model = models.Book
+        fields = ["title"]
+
+
+class BindingLoneBookOrder(OrderSet):
+    """Book ordering through the unrelated unwired shelf control."""
+
+    shelf = RelatedOrder(BindingLoneShelfOrder, field_name="shelf")
+
+    class Meta:
+        model = models.Book
+        fields = ["title"]

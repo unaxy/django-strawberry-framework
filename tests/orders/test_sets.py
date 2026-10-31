@@ -37,7 +37,6 @@ from apps.library.models import (
     ShelfLabel,
     TaggedItem,
 )
-from asgiref.sync import sync_to_async
 from django.contrib.auth.models import AnonymousUser, User
 from django.db import connection
 from django.db.models import F, Min, Model, QuerySet
@@ -73,7 +72,7 @@ from django_strawberry_framework.utils.inputs import (
     promote_set_meta_fields,
     read_set_meta_fields,
 )
-from django_strawberry_framework.utils.querysets import SyncMisuseError, model_for
+from django_strawberry_framework.utils.querysets import model_for
 from django_strawberry_framework.utils.relations import (
     path_traverses_to_many as _path_traverses_to_many,
 )
@@ -1403,68 +1402,6 @@ def test_path_traverses_to_many_returns_false_for_nonmultiplying_paths() -> None
     assert _path_traverses_to_many(Book, "shelf__branch") is False
 
 
-@pytest.mark.django_db
-def test_modelless_orderset_uses_queryset_model_for_to_many_order() -> None:
-    """A direct model-less orderset application still keeps the row-preserving aggregate."""
-
-    class ShelfOrderML(OrderSet):
-        class Meta:
-            model = Shelf
-            fields = ["code"]
-
-    class BranchOrderML(OrderSet):
-        shelves = RelatedOrder(ShelfOrderML, field_name="shelves")
-
-    branch_one = Branch.objects.create(name="Alpha", city="X")
-    Shelf.objects.create(code="a-code", branch=branch_one)
-    Shelf.objects.create(code="b-code", branch=branch_one)
-    branch_two = Branch.objects.create(name="Beta", city="Y")
-    Shelf.objects.create(code="c-code", branch=branch_two)
-
-    factory = OrderArgumentsFactory(BranchOrderML)
-    BranchInput = _keyword_constructor(factory.arguments)
-    ShelfInput = _keyword_constructor(
-        OrderArgumentsFactory.input_object_types["ShelfOrderMLInputType"],
-    )
-    input_value = [BranchInput(shelves=ShelfInput(code=Ordering.ASC))]
-
-    result = BranchOrderML.apply_sync(input_value, Branch.objects.all(), _make_info())
-    assert any(isinstance(agg, Min) for agg in result.query.annotations.values())
-    assert [branch.name for branch in result] == ["Alpha", "Beta"]
-
-
-@pytest.mark.django_db
-def test_queryset_model_overrides_conflicting_orderset_meta_model() -> None:
-    """To-many detection follows the concrete queryset, never stale class metadata."""
-
-    class ShelfOrder(OrderSet):
-        class Meta:
-            model = Shelf
-            fields = ["code"]
-
-    class MisdeclaredBranchOrder(OrderSet):
-        shelves = RelatedOrder(ShelfOrder, field_name="shelves")
-
-        class Meta:
-            # Deliberately incompatible with the direct application below.
-            # Reading this model would miss Branch.shelves and retain fan-out.
-            model = Book
-            fields = ["title"]
-
-    factory = OrderArgumentsFactory(MisdeclaredBranchOrder)
-    BranchInput = _keyword_constructor(factory.arguments)
-    ShelfInput = _keyword_constructor(
-        OrderArgumentsFactory.input_object_types["ShelfOrderInputType"],
-    )
-    input_value = [BranchInput(shelves=ShelfInput(code=Ordering.ASC))]
-    result = MisdeclaredBranchOrder.apply_sync(
-        input_value,
-        Branch.objects.all(),
-        _make_info(),
-    )
-    assert any(isinstance(agg, Min) for agg in result.query.annotations.values())
-
-
 def test_resolve_order_expressions_rejects_non_ordering_direction() -> None:
     """Passing a non-Ordering object to _resolve_order_expressions raises ConfigurationError."""
 
@@ -1758,46 +1695,30 @@ def test_orderset_reads_a_lazy_meta_fields_as_the_object_it_stands_for(shape: st
     assert "title" in names
 
 
-@pytest.mark.django_db
-def test_orderset_expand_meta_fields_rejects_one_shot_iterator_fields() -> None:
-    """A one-shot ``Meta.fields`` iterator is rejected instead of silently diverging.
+@pytest.mark.parametrize("shape", ["iterator", "generator"])
+def test_orderset_expand_meta_fields_rejects_one_shot_iterator_fields(shape: str) -> None:
+    """A one-shot fields declaration is refused before a later reread could exhaust it."""
+    declared_fields: Iterator[str] = (
+        iter(["title", "subtitle"])
+        if shape == "iterator"
+        else (name for name in ["title", "subtitle"])
+    )
 
-    The expansion re-runs whenever a lazy ``RelatedOrder`` target keeps the
-    ``get_fields`` cache gate from writing (the gate refuses while any
-    ``_orderset`` is still a string). A generator ``Meta.fields`` would
-    expand correctly on the FIRST walk and then silently rebuild to an EMPTY
-    field set on every later walk (the iterator exhausted); the
-    re-readable-container gate fails loud at declaration instead.
-    """
-
-    class IteratorFieldsOrder(OrderSet):
-        shelf = RelatedOrder("tests.orders.test_sets.MissingOrder", field_name="shelf")
+    class OneShotFieldsOrder(OrderSet):
+        if shape == "iterator":
+            shelf = RelatedOrder("tests.orders.test_sets.MissingOrder", field_name="shelf")
 
         class Meta:
             model = Book
-            fields = iter(["title", "subtitle"])
+            fields = declared_fields
 
     with pytest.raises(ConfigurationError, match="re-readable"):
-        IteratorFieldsOrder.get_fields()
-
-    class GeneratorFieldsOrder(OrderSet):
-        class Meta:
-            model = Book
-            fields = (name for name in ["title", "subtitle"])
-
-    with pytest.raises(ConfigurationError, match="re-readable"):
-        GeneratorFieldsOrder.get_fields()
+        OneShotFieldsOrder.get_fields()
 
 
-@pytest.mark.django_db
-def test_orderset_expand_meta_fields_accepts_a_computed_re_readable_collection() -> None:
-    """A ``dict`` view or a custom ``Collection`` is a legal ``Meta.fields``.
-
-    The contract is re-readability, not membership of a builtin allow-list:
-    these hold their field names, so the expansion re-runs to the same
-    ``OrderedDict`` and the declaration must be accepted (the order family
-    keeps declaration order, so the view's insertion order survives).
-    """
+@pytest.mark.parametrize("shape", ["keys-view", "custom-collection"])
+def test_orderset_expand_meta_fields_accepts_a_computed_re_readable_collection(shape: str) -> None:
+    """A view or consumer Collection preserves its declared order on successive expansions."""
 
     class _NameSet:
         def __init__(self, *names: str) -> None:
@@ -1812,21 +1733,19 @@ def test_orderset_expand_meta_fields_accepts_a_computed_re_readable_collection()
         def __contains__(self, item: object) -> bool:
             return item in self._names
 
-    class KeysViewOrder(OrderSet):
+    declared_fields = (
+        {"title": None, "subtitle": None}.keys()
+        if shape == "keys-view"
+        else _NameSet("title", "subtitle")
+    )
+
+    class CollectionFieldsOrder(OrderSet):
         class Meta:
             model = Book
-            fields = {"title": None, "subtitle": None}.keys()
+            fields = declared_fields
 
-    class CustomCollectionOrder(OrderSet):
-        class Meta:
-            model = Book
-            fields = _NameSet("title", "subtitle")
-
-    assert list(KeysViewOrder._expand_meta_fields()) == ["title", "subtitle"]
-    assert list(CustomCollectionOrder._expand_meta_fields()) == ["title", "subtitle"]
-    # Re-reading yields the same expansion (the property the gate guarantees).
-    assert list(KeysViewOrder._expand_meta_fields()) == ["title", "subtitle"]
-    assert list(CustomCollectionOrder._expand_meta_fields()) == ["title", "subtitle"]
+    assert list(CollectionFieldsOrder._expand_meta_fields()) == ["title", "subtitle"]
+    assert list(CollectionFieldsOrder._expand_meta_fields()) == ["title", "subtitle"]
 
 
 def test_orderset_expand_meta_fields_rejects_hostile_iterable_without_iterating() -> None:
@@ -1871,35 +1790,34 @@ def test_orderset_expand_meta_fields_dict_shape_iterates_keys() -> None:
     assert all(v is None for v in fields.values())
 
 
-@pytest.mark.django_db
-def test_orderset_expand_meta_fields_handles_non_class_meta_model() -> None:
-    """Non-class / invalid Meta.model does not crash with AttributeError and raises ConfigurationError."""
+@pytest.mark.parametrize(
+    ("invalid_model", "model_name"),
+    [("NotAModel", "str"), (123, "int")],
+    ids=["string", "integer"],
+)
+def test_orderset_expand_meta_fields_handles_non_class_meta_model(
+    invalid_model: object,
+    model_name: str,
+) -> None:
+    """An invalid Meta.model gets its named ConfigurationError instead of an attribute crash."""
 
     class BadModelOrder(OrderSet):
         class Meta:
-            model = "NotAModel"
+            model = invalid_model
             fields = ["title"]
 
-    with pytest.raises(ConfigurationError, match="invalid order path 'title' for model str"):
+    with pytest.raises(
+        ConfigurationError,
+        match=f"invalid order path 'title' for model {model_name}",
+    ):
         BadModelOrder.get_fields()
 
-    class BadModelIntOrder(OrderSet):
-        class Meta:
-            model = 123
-            fields = ["title"]
 
-    with pytest.raises(ConfigurationError, match="invalid order path 'title' for model int"):
-        BadModelIntOrder.get_fields()
-
-
-@pytest.mark.django_db
-def test_get_concrete_field_names_for_order_rejects_non_model() -> None:
-    """_get_concrete_field_names_for_order raises ConfigurationError on non-model objects."""
+@pytest.mark.parametrize("invalid_model", ["NotAModel", 123], ids=["string", "integer"])
+def test_get_concrete_field_names_for_order_rejects_non_model(invalid_model: object) -> None:
+    """The private concrete-field reader refuses each non-model input before reading metadata."""
     with pytest.raises(ConfigurationError, match="Expected a Django Model class"):
-        _get_concrete_field_names_for_order("NotAModel")
-
-    with pytest.raises(ConfigurationError, match="Expected a Django Model class"):
-        _get_concrete_field_names_for_order(123)
+        _get_concrete_field_names_for_order(invalid_model)
 
 
 def test_resolve_order_expressions_handles_non_class_model_on_path_error() -> None:
@@ -1954,99 +1872,6 @@ def test_orderset_type_name_for_inherits_mixin_naming_convention() -> None:
 
     assert CustomOrder.type_name_for() == "CustomOrderInputType"
     assert CustomOrder.type_name_for("field") == "CustomOrderFieldInputType"
-
-
-# Keep imports active so ruff doesn't flag the F-expression / Genre import.
-assert F is not None
-assert Genre is not None
-
-
-def test_input_has_active_terms() -> None:
-    """OrderSet._input_has_active_terms detects presence of active ordering terms."""
-
-    class ShelfOrder(OrderSet):
-        class Meta:
-            model = Shelf
-            fields = ["code"]
-
-    class BookOrder(OrderSet):
-        shelf = RelatedOrder(ShelfOrder, field_name="shelf")
-
-        class Meta:
-            model = Book
-            fields = ["title"]
-
-    factory = OrderArgumentsFactory(BookOrder)
-    BookInput = _keyword_constructor(factory.arguments)
-    ShelfInput = _keyword_constructor(
-        OrderArgumentsFactory.input_object_types["ShelfOrderInputType"],
-    )
-
-    # Falsy / empty / unset cases
-    assert not BookOrder._input_has_active_terms(None)
-    assert not BookOrder._input_has_active_terms(UNSET)
-    assert not BookOrder._input_has_active_terms([])
-    assert not BookOrder._input_has_active_terms([BookInput()])
-    assert not BookOrder._input_has_active_terms([BookInput(title=None)])
-    assert not BookOrder._input_has_active_terms([BookInput(shelf=ShelfInput())])
-    assert not BookOrder._input_has_active_terms([BookInput(shelf=ShelfInput(code=None))])
-
-    # Active cases
-    assert BookOrder._input_has_active_terms([BookInput(title=Ordering.ASC)])
-    assert BookOrder._input_has_active_terms([BookInput(shelf=ShelfInput(code=Ordering.DESC))])
-    assert BookOrder._input_has_active_terms(
-        [BookInput(title=None), BookInput(shelf=ShelfInput(code=Ordering.ASC))],
-    )
-
-
-def test_input_has_active_terms_purity() -> None:
-    """OrderSet._input_has_active_terms raises ConfigurationError when _normalize_input is impure."""
-
-    class ImpureOrder(OrderSet):
-        class Meta:
-            model = Book
-            fields = ["title"]
-
-        _counter = 0
-
-        @classmethod
-        @override
-        def _normalize_input(cls, input_value: object) -> list[tuple[str, Ordering | None]]:
-            cls._counter += 1
-            if cls._counter % 2 == 1:
-                return [("title", Ordering.ASC)]
-            return [("title", Ordering.DESC)]
-
-    with pytest.raises(
-        ConfigurationError,
-        match="is not pure; returned different results",
-    ):
-        ImpureOrder._input_has_active_terms([{"title": "anything"}])
-
-
-def test_input_has_active_terms_purity_structure_disagreement() -> None:
-    """``_input_has_active_terms`` raises ``ConfigurationError`` when normalizations disagree on shape."""
-
-    class FlakyOrder(OrderSet):
-        class Meta:
-            model = Book
-            fields = ["title"]
-
-        _counter = 0
-
-        @classmethod
-        @override
-        def _normalize_input(cls, input_value: object) -> list[tuple[str, Ordering | None]]:
-            cls._counter += 1
-            if cls._counter % 2 == 1:
-                return []
-            return [("title", Ordering.ASC)]
-
-    with pytest.raises(
-        ConfigurationError,
-        match="is not pure; returned different results",
-    ):
-        FlakyOrder._input_has_active_terms([{"title": "anything"}])
 
 
 @pytest.mark.parametrize(
@@ -2361,7 +2186,8 @@ def test_applied_normalization_checks_orderset_class_identity() -> None:
         assert SecondOrder.normalize_count == 2
 
 
-def test_public_apply_never_writes_the_consumer_context() -> None:
+@pytest.mark.parametrize("guarded", [False, True], ids=["ordinary-context", "guarded-context"])
+def test_public_apply_never_writes_the_consumer_context(*, guarded: bool) -> None:
     """``apply_sync`` / ``apply_async`` leave ``info.context`` exactly as they found it.
 
     The normalization handoff is a task-local capture scope, so a public apply
@@ -2385,24 +2211,21 @@ def test_public_apply_never_writes_the_consumer_context() -> None:
             fields = ["title"]
 
     marker = object()
-    plain = {"request": HttpRequest(), "consumer_marker": marker}
-    guarded = GuardedContext()
-    dict[str, object].__setitem__(guarded, "request", HttpRequest())
+    context: dict[str, object] = GuardedContext() if guarded else {}
+    dict[str, object].__setitem__(context, "request", HttpRequest())
+    dict[str, object].__setitem__(context, "consumer_marker", marker)
     TitleInput = _keyword_constructor(OrderArgumentsFactory(TitleOrder).arguments)
     order_input = [TitleInput(title=Ordering.ASC)]
+    info = SimpleNamespace(context=context)
 
-    for context in (plain, guarded):
-        info = SimpleNamespace(context=context)
-        ordered = TitleOrder.apply_sync(order_input, Book.objects.all(), info)
-        assert ordered.ordered is True
-        ordered_async = asyncio.run(TitleOrder.apply_async(order_input, Book.objects.all(), info))
-        assert ordered_async.ordered is True
-        # The active-term helper takes the same no-write path.
-        assert TitleOrder._input_has_active_terms(order_input) is True
+    ordered = TitleOrder.apply_sync(order_input, Book.objects.all(), info)
+    ordered_async = asyncio.run(TitleOrder.apply_async(order_input, Book.objects.all(), info))
 
-    assert set(plain) == {"request", "consumer_marker"}
-    assert plain["consumer_marker"] is marker
-    assert set(guarded) == {"request"}
+    assert ordered.ordered is True
+    assert ordered_async.ordered is True
+    assert TitleOrder._input_has_active_terms(order_input) is True
+    assert set(context) == {"request", "consumer_marker"}
+    assert context["consumer_marker"] is marker
     assert _ORDER_NORMALIZATION_CAPTURE.get() is None
 
 
@@ -3171,6 +2994,7 @@ def test_input_has_active_terms_public_apply_override_independence() -> None:
         ([], [("title", Ordering.ASC)]),
         ([("title", Ordering.ASC)], []),
     ],
+    ids=["direction-changes", "empty-becomes-active", "active-becomes-empty"],
 )
 def test_input_has_active_terms_purity_violation(
     first_return: list[tuple[str, Ordering | None]],
@@ -3575,134 +3399,6 @@ def test_scoped_hops_reentering_the_sets_model_read_the_type_the_set_is_bound_to
     assert ReentrantShelfOrder._scoped_hops(Shelf, "books__shelf__topic") == (
         ("books__shelf", secondary),
     )
-
-
-def _secret_and_mid_shelf_books() -> None:
-    """Two books on a ``secret`` and an ``mmm`` shelf, each in its own genre."""
-    branch = Branch.objects.create(name="home")
-    secret = Shelf.objects.create(branch=branch, code="S1", topic="secret")
-    middle = Shelf.objects.create(branch=branch, code="S2", topic="mmm")
-    on_secret = Book.objects.create(title="on-secret", shelf=secret)
-    on_middle = Book.objects.create(title="on-mmm", shelf=middle)
-    Genre.objects.create(name="g-secret").books.add(on_secret)
-    Genre.objects.create(name="g-mmm").books.add(on_middle)
-
-
-@pytest.mark.django_db
-@pytest.mark.usefixtures("isolate_global_registry")
-@pytest.mark.parametrize(
-    (
-        "model",
-        "fields",
-        "order_input",
-        "expected",
-    ),
-    [
-        (
-            Book,
-            ["title", "shelf__topic"],
-            [{"shelf_topic": Ordering.DESC_NULLS_LAST}],
-            ["on-mmm", "on-secret"],
-        ),
-        (
-            Genre,
-            ["name", "books__shelf__topic"],
-            [{"books_shelf_topic": Ordering.DESC_NULLS_LAST}],
-            ["g-mmm", "g-secret"],
-        ),
-    ],
-    ids=["to-one", "to-many"],
-)
-def test_apply_async_awaits_an_async_only_hook_behind_a_related_term(
-    model: type[Model],
-    fields: list[str],
-    order_input: list[dict[str, Ordering]],
-    expected: list[str],
-) -> None:
-    """``apply_async`` derives an async-only target ``get_queryset`` up front; ``apply_sync`` refuses it."""
-
-    async def hide_secret_async(
-        _cls: type[DjangoType],
-        queryset: QuerySet[Model],
-        _info: object,
-        **_kwargs: object,
-    ) -> QuerySet[Model]:
-        return await sync_to_async(lambda: queryset.exclude(topic="secret"))()
-
-    type(
-        "AsyncShelfType",
-        (DjangoType,),
-        {
-            "Meta": type("Meta", (), {"model": Shelf, "fields": "__all__"}),
-            "get_queryset": classmethod(hide_secret_async),
-        },
-    )
-    _secret_and_mid_shelf_books()
-    async_order = type(
-        "AsyncRelatedOrder",
-        (OrderSet,),
-        {"Meta": type("Meta", (), {"model": model, "fields": fields})},
-    )
-
-    ordered = asyncio.run(
-        async_order.apply_async(order_input, model._default_manager.all(), _make_info()),
-    )
-    label = "title" if model is Book else "name"
-    assert list(ordered.values_list(label, flat=True)) == expected
-    with pytest.raises(SyncMisuseError, match=r"await OrderSet\.apply_async"):
-        async_order.apply_sync(order_input, model._default_manager.all(), _make_info())
-
-
-@pytest.mark.django_db
-@pytest.mark.usefixtures("isolate_global_registry")
-def test_declared_hop_orders_by_the_rows_its_target_sets_bound_type_shows() -> None:
-    """Ordering through a ``RelatedOrder`` reads the bound secondary's hook, not the primary's."""
-    _hiding_type(Shelf, "PrimaryShelfType", topic="mmm")
-    secondary = _hiding_type(Shelf, "SecondaryShelfType", primary=False, topic="secret")
-    _secret_and_mid_shelf_books()
-
-    class BoundShelfOrder(OrderSet):
-        class Meta:
-            model = Shelf
-            fields = ["topic"]
-
-    BoundShelfOrder._owner_definition = secondary.__django_strawberry_definition__
-
-    class DeclaredBookOrder(OrderSet):
-        shelf = RelatedOrder(BoundShelfOrder, field_name="shelf")
-
-        class Meta:
-            model = Book
-            fields = ["title"]
-
-    ordered = DeclaredBookOrder.apply_sync(
-        [{"shelf": {"topic": Ordering.DESC_NULLS_LAST}}],
-        Book.objects.all(),
-        _make_info(),
-    )
-    assert list(ordered.values_list("title", flat=True)) == ["on-mmm", "on-secret"]
-
-
-@pytest.mark.django_db
-@pytest.mark.usefixtures("isolate_global_registry")
-def test_reentering_path_orders_by_the_rows_the_sets_bound_type_shows() -> None:
-    """``books__shelf__topic`` from a shelf set bound to the secondary reads the secondary's hook."""
-    _hiding_type(Shelf, "PrimaryShelfType", topic="mmm")
-    secondary = _hiding_type(Shelf, "SecondaryShelfType", primary=False, topic="secret")
-    _secret_and_mid_shelf_books()
-
-    class ReentrantShelfOrder(OrderSet):
-        class Meta:
-            model = Shelf
-            fields = ["code", "books__shelf__topic"]
-
-    ReentrantShelfOrder._owner_definition = secondary.__django_strawberry_definition__
-    ordered = ReentrantShelfOrder.apply_sync(
-        [{"books_shelf_topic": Ordering.DESC_NULLS_LAST}],
-        Shelf.objects.all(),
-        _make_info(),
-    )
-    assert list(ordered.values_list("code", flat=True)) == ["S2", "S1"]
 
 
 @pytest.mark.django_db(transaction=True)

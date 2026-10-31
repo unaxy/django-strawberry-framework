@@ -35,7 +35,13 @@ from django_filters.filters import BaseInFilter
 from typing_extensions import override
 
 from apps.library import models
-from django_strawberry_framework.filters import FilterSet, ListFilter, RangeFilter, RelatedFilter
+from django_strawberry_framework.filters import (
+    FilterSet,
+    GlobalIDFilter,
+    ListFilter,
+    RangeFilter,
+    RelatedFilter,
+)
 
 
 def _validate_email_must_have_at_sign(value: str) -> None:
@@ -181,7 +187,25 @@ class ShelfFilter(FilterSet):
         fields = {
             "id": ["exact", "in"],
             "code": ["exact", "icontains"],
+            # The database-computed columns filter as their output columns: integer lookups,
+            # no text pattern; ``code_length``'s ``in`` drops a member past its 64-bit range.
+            "code_length": [
+                "exact",
+                "gt",
+                "lt",
+                "in",
+                "range",
+                "isnull",
+            ],
             "topic": ["exact", "icontains"],
+            "topic_length": [
+                "exact",
+                "gt",
+                "lt",
+                "in",
+                "range",
+                "isnull",
+            ],
             # Every single-value lookup on the blank-admitting choice column publishes the
             # column's enum, so ``BLANK`` and every named member are values on each of them.
             "condition": [
@@ -482,6 +506,8 @@ class PatronProfileFilter(FilterSet):
     the profile's own address columns; the patron itself is reached through
     the ``patron`` related filter. ``pk_span`` and ``pk_among`` filter on that key through
     Django's ``pk`` alias, typed and cleaned by the ``Patron.id`` column it stores.
+    ``favorite_genre`` takes the genre's GlobalID and compares its primary key,
+    although the relation stores its name through ``to_field="name"``.
     """
 
     patron = RelatedFilter("PatronFilter", field_name="patron")
@@ -490,7 +516,7 @@ class PatronProfileFilter(FilterSet):
 
     class Meta:
         model = models.PatronProfile
-        fields = {"postal_code": ["exact", "icontains"]}
+        fields = {"postal_code": ["exact", "icontains"], "favorite_genre": ["exact", "in"]}
 
 
 class AnnotationFilter(FilterSet):
@@ -756,3 +782,119 @@ __all__ = (
     "VenueSponsorFilter",
     "VisibleBranchFilter",
 )
+
+
+class RoutedBookFilter(FilterSet):
+    """Generated M2M leaves with no declared hop, for the opt-in predicate acceptance surface.
+
+    ``BookFilter`` declares ``genres`` as a ``RelatedFilter``. These same paths
+    instead come directly from ``Meta.fields``, so they exercise the audited
+    row-preserving adapter rather than the declared-branch walker.
+    """
+
+    class Meta:
+        model = models.Book
+        fields = {"genres__name": ["icontains"], "genres": ["in"]}
+
+
+class BindingBackBookFilter(FilterSet):
+    """Book leaves reached by the opt-in owner-binding shelf graph."""
+
+    class Meta:
+        model = models.Book
+        fields = {"title": ["exact"]}
+
+
+class BindingShelfFilter(FilterSet):
+    """A base set whose subclass can bind a different owner or remain unwired.
+
+    The explicit ``branch_key`` is a consumer GlobalID filter on the branch relation;
+    an unwired set has no owning type, so it validates the key against ``Branch``'s
+    registry primary, as an unrelated unwired set does.
+    """
+
+    back = RelatedFilter(BindingBackBookFilter, field_name="branch__shelves__books")
+    branch_key = GlobalIDFilter(field_name="branch", lookup_expr="exact")
+
+    class Meta:
+        model = models.Shelf
+        fields = {"topic": ["exact"], "id": ["exact"], "branch__shelves__topic": ["exact"]}
+
+
+class BindingSubShelfFilter(BindingShelfFilter):
+    """A separately owned subclass of the opt-in shelf base filter."""
+
+
+class BindingUnwiredShelfFilter(BindingShelfFilter):
+    """An unserved subclass must read the primary type rather than its base's owner."""
+
+
+class BindingLoneShelfFilter(FilterSet):
+    """The unrelated unserved control with the same declarations as the subclass."""
+
+    back = RelatedFilter(BindingBackBookFilter, field_name="branch__shelves__books")
+    branch_key = GlobalIDFilter(field_name="branch", lookup_expr="exact")
+
+    class Meta:
+        model = models.Shelf
+        fields = {"topic": ["exact"], "id": ["exact"], "branch__shelves__topic": ["exact"]}
+
+
+class BindingHidingBookFilter(FilterSet):
+    """Book filtering through the subclass owned by the hiding shelf type."""
+
+    shelf = RelatedFilter(BindingSubShelfFilter, field_name="shelf")
+
+    class Meta:
+        model = models.Book
+        fields = {"title": ["exact"]}
+
+
+class BindingPlainBookFilter(FilterSet):
+    """Book filtering through the base set owned by the plain shelf type."""
+
+    shelf = RelatedFilter(BindingShelfFilter, field_name="shelf")
+
+    class Meta:
+        model = models.Book
+        fields = {"title": ["exact"]}
+
+
+class BindingBaseHidingBookFilter(FilterSet):
+    """The reverse arrangement: the hiding shelf owns the base set."""
+
+    shelf = RelatedFilter(BindingShelfFilter, field_name="shelf")
+
+    class Meta:
+        model = models.Book
+        fields = {"title": ["exact"]}
+
+
+class BindingSubPlainBookFilter(FilterSet):
+    """The reverse arrangement: the plain shelf owns the subclass."""
+
+    shelf = RelatedFilter(BindingSubShelfFilter, field_name="shelf")
+
+    class Meta:
+        model = models.Book
+        fields = {"title": ["exact"]}
+
+
+class BindingUnwiredBookFilter(FilterSet):
+    """Book filtering through an unwired subclass of a bound shelf set."""
+
+    shelf = RelatedFilter(BindingUnwiredShelfFilter, field_name="shelf")
+
+    class Meta:
+        model = models.Book
+        fields = {"title": ["exact"]}
+
+
+class BindingLoneBookFilter(FilterSet):
+    """Book filtering through the unrelated unwired shelf control."""
+
+    shelf = RelatedFilter(BindingLoneShelfFilter, field_name="shelf")
+
+    class Meta:
+        model = models.Book
+        fields = {"title": ["exact"]}

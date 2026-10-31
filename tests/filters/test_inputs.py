@@ -6,14 +6,16 @@ Covers the lookup-name table, the `_build_logic_fields` /
 cases, `FieldSpec` source-path mapping, and the `filter_input_type`
 consumer helper (Decision 11).
 
-``HIDE_FLAT_FILTERS`` wire shape lives in
-``test_library_api.py`` / ``test_products_api.py``; the copy a ``get_filters()``
-override borrows from another set, which no fakeshop set holds, is pinned here.
-Scoped ``RangeFilter`` type names live in ``test_scalars_filter_api.py``. Relay-relation
-``isNull`` Boolean vs GlobalID-list ``exact`` lives in
-``test_library_api.py``. This file keeps converter dispatch, namespace
-lifecycle, and digit-boundary type-name injectivity -- construction and
-private helpers a request cannot name.
+``test_filter_declarations_api.py`` owns borrowed flat-filter publication,
+scoped ranges with differing axis scalars and published input-name boundaries.
+The declaration suite also owns successful postponed helper evaluation over HTTP;
+this file retains the missing runtime import construction refusal.
+``test_library_api.py`` and ``test_products_api.py`` own ordinary flat-filter
+hiding and Relay relation inputs. This file keeps converter dispatch,
+construction-time refusal, exact input-class metadata and namespace lifecycle.
+
+The cross-API reuse row exercises django-filter's DRF view after a refused schema
+build: that failed GraphQL schema has no endpoint through which to test reuse.
 """
 
 from __future__ import annotations
@@ -23,7 +25,6 @@ import dataclasses
 import datetime
 import decimal
 import gc
-import re
 import typing
 import uuid
 import weakref
@@ -43,7 +44,6 @@ from apps.scalars import models as scalar_models
 from django import forms
 from django.db import models
 from django.db.models import QuerySet
-from django.test import override_settings
 from django_filters import (
     AllValuesFilter,
     AllValuesMultipleFilter,
@@ -52,6 +52,7 @@ from django_filters import (
     BooleanFilter,
     CharFilter,
     ChoiceFilter,
+    DateFilter,
     DateRangeFilter,
     Filter,
     LookupChoiceFilter,
@@ -228,36 +229,32 @@ def test_lookup_name_map_full_table_matches_spec() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_build_logic_fields_uses_inside_list_annotated_for_and_or() -> None:
-    """`Annotated[...]` lives INSIDE the `list[...]`, not outside."""
+@pytest.mark.parametrize(
+    ("attr", "sequence"),
+    [
+        pytest.param("and_", True, id="and"),
+        pytest.param("or_", True, id="or"),
+        pytest.param("not_", False, id="not"),
+    ],
+)
+def test_build_logic_fields_places_the_forward_reference_inside_its_container(
+    attr: str,
+    *,
+    sequence: bool,
+) -> None:
+    """Each optional logic field has a lazy forward reference, inside a list only for sequences."""
     triples = _build_logic_fields("DemoFilterInputType")
-    by_attr = {python_attr: (annotation, kwargs) for python_attr, annotation, kwargs in triples}
-
-    # `and_` / `or_` -> `list[Annotated["X", strawberry.lazy(...)]] | None`
-    for attr in ("and_", "or_"):
-        annotation, _ = by_attr[attr]
-        # Strip the `| None` to inspect the list shape.
-        non_none_args = [arg for arg in _args(annotation) if arg is not type(None)]
-        assert len(non_none_args) == 1
-        list_type = non_none_args[0]
-        assert get_origin(list_type) is list
-        inner = _args(list_type)[0]
-        # The inner type must be Annotated with a string forward ref.
-        assert get_origin(inner) is typing.Annotated or hasattr(inner, "__metadata__")
-        inner_args = _args(inner)
-        assert inner_args[0] == "DemoFilterInputType" or (
-            read_attr(inner_args[0], "__forward_arg__", None) == "DemoFilterInputType"
-        )
-
-    # `not_` -> `Annotated["X", strawberry.lazy(...)] | None`
-    annotation, _ = by_attr["not_"]
-    non_none_args = [arg for arg in _args(annotation) if arg is not type(None)]
+    by_attr = {python_attr: annotation for python_attr, annotation, _kwargs in triples}
+    non_none_args = [arg for arg in _args(by_attr[attr]) if arg is not type(None)]
     assert len(non_none_args) == 1
-    not_inner = non_none_args[0]
-    assert hasattr(not_inner, "__metadata__")
-    not_inner_args = _args(not_inner)
-    assert not_inner_args[0] == "DemoFilterInputType" or (
-        read_attr(not_inner_args[0], "__forward_arg__", None) == "DemoFilterInputType"
+    inner = non_none_args[0]
+    if sequence:
+        assert get_origin(inner) is list
+        inner = _args(inner)[0]
+    assert get_origin(inner) is typing.Annotated or hasattr(inner, "__metadata__")
+    reference = _args(inner)[0]
+    assert reference == "DemoFilterInputType" or (
+        read_attr(reference, "__forward_arg__", None) == "DemoFilterInputType"
     )
 
 
@@ -637,60 +634,6 @@ def test_expanded_declared_child_filter_is_its_own_head() -> None:
     assert table.gate_paths["branch__name"] == "branch__name"
 
 
-@pytest.mark.parametrize(
-    ("declares_branch", "published"),
-    [pytest.param(False, True, id="borrowed"), pytest.param(True, False, id="expanded")],
-)
-def test_hide_flat_filters_hides_a_copy_only_where_the_set_expands_its_branch(
-    *,
-    declares_branch: bool,
-    published: bool,
-) -> None:
-    """``HIDE_FLAT_FILTERS`` hides a copy only on a set declaring its branch into its child set.
-
-    ``BorrowingBranchFilter.get_filters`` holds a deep copy of ``SourceBranchFilter``'s
-    ``shelves__code`` as ``borrowed_code``. Without a ``shelves`` branch into
-    ``ChildShelfFilter`` that copy is the set's own filter and stays published; on a set
-    that declares that branch it is the expansion's copy, hidden with ``shelves__code``.
-    """
-
-    class ChildShelfFilter(FilterSet):
-        class Meta:
-            model = library_models.Shelf
-            fields = {"code": ["exact"]}
-
-    class SourceBranchFilter(FilterSet):
-        shelves = RelatedFilter(ChildShelfFilter, field_name="shelves")
-
-        class Meta:
-            model = library_models.Branch
-            fields = []
-
-    class BorrowingBranchFilter(FilterSet):
-        if declares_branch:
-            shelves = RelatedFilter(ChildShelfFilter, field_name="shelves")
-
-        class Meta:
-            model = library_models.Branch
-            fields = {"name": ["exact"]}
-
-        @classmethod
-        @override
-        def get_filters(cls) -> OrderedDict[str, Filter]:
-            filters = OrderedDict(super().get_filters())
-            filters["borrowed_code"] = copy.deepcopy(
-                SourceBranchFilter.get_filters()["shelves__code"],
-            )
-            return filters
-
-    with override_settings(DJANGO_STRAWBERRY_FRAMEWORK={"HIDE_FLAT_FILTERS": True}):
-        triples = _build_input_fields(BorrowingBranchFilter)
-    names = {python_attr for python_attr, _annotation, _kwargs in triples}
-    assert "name" in names
-    assert "shelves_code" not in names
-    assert ("borrowed_code" in names) is published
-
-
 # ---------------------------------------------------------------------------
 # convert_filter_to_input_annotation
 # ---------------------------------------------------------------------------
@@ -781,48 +724,22 @@ def test_convert_filter_to_input_annotation_rejects_non_choices_derived_enum() -
         convert_filter_to_input_annotation(f, model_field, None, FilterSet)
 
 
-def test_convert_filter_to_input_annotation_rejects_unknown_method_filter() -> None:
-    """A ``method=`` filter whose form field cannot be built on a copy raises ConfigurationError.
-
-    The real shape is a filter whose ``field`` needs the bound ``FilterSet``, such as
-    ``AllValuesMultipleFilter`` reading the per-request ``model``; unbound, the copy
-    builds no form field, so nothing can type the input. A bare ``Filter(method=...)``
-    is not one: it builds the base ``forms.Field`` and types as ``str``.
-    """
-
-    # A stand-in with ``method`` set and no form field to read, local to this test so no
-    # shared filter class is patched.
-    def _passthrough_method(qs: object, _name: str, _value: object) -> object:
-        return qs
-
-    class _NoFieldFilter:
-        extra = {}
-        method = staticmethod(_passthrough_method)
-        field = None
-        lookup_expr = "exact"
-
-    f = _NoFieldFilter()
-    # It subclasses none of the filter kinds the converter dispatches on, so it reaches
-    # the catch-all, where a ``method`` with no form field raises.
-    with pytest.raises(ConfigurationError):
-        # basedpyright: a stand-in filter carrying only the slots the code under test reads;
-        # convert_filter_to_input_annotation types the parameter as Filter
-        convert_filter_to_input_annotation(f, None, None, FilterSet)  # pyright: ignore[reportArgumentType]
-
-
 def test_convert_filter_to_input_annotation_malformed_filter_diagnostics() -> None:
     """Malformed filters raise ConfigurationError naming the method and the filter."""
 
-    class NoFieldFilter:
-        extra = {}
-        method = "filter_custom"
-        field = None
-        lookup_expr = "exact"
+    class NoFieldFilter(Filter):
+        @property
+        @override
+        def field(self) -> forms.Field:
+            raise AttributeError("This consumer field cannot be built.")
 
     with pytest.raises(ConfigurationError) as exc_info:
-        # basedpyright: the duck-typed filter with no form field is the malformed input under
-        # test; convert_filter_to_input_annotation types the parameter as Filter
-        convert_filter_to_input_annotation(NoFieldFilter(), None, None, FilterSet)  # pyright: ignore[reportArgumentType]
+        convert_filter_to_input_annotation(
+            NoFieldFilter(method="filter_custom"),
+            None,
+            None,
+            FilterSet,
+        )
     assert str(exc_info.value).startswith("NoFieldFilter(method='filter_custom') on <")
     assert "exposes no form field" in str(exc_info.value)
 
@@ -1877,15 +1794,26 @@ def test_range_form_keys_of_a_field_built_only_in_a_bound_set_is_a_configuration
         _ = range_form_keys(_ParentReadingRangeFilter(field_name="price"), "span")
 
 
-def test_normalize_input_value_range_filter_drops_none_axes_partial_range() -> None:
-    """Partial-range inputs surface only the supplied key.
-
-    A ``None``-valued axis is "axis not supplied"; emitting ``{<name>_0: None}``
-    to the form-data dict surfaces "axis supplied, value is None" to any
-    caller walking ``data.keys()``. The normalizer drops ``None``-valued
-    axes so the patch shape matches django-filter's form-data convention
-    for partial ranges.
-    """
+@pytest.mark.parametrize(
+    ("start", "end", "expected"),
+    [
+        pytest.param(5, None, {"lifetime_fines_cents_0": 5}, id="start"),
+        pytest.param(None, 10, {"lifetime_fines_cents_1": 10}, id="end"),
+        pytest.param(
+            5,
+            10,
+            {"lifetime_fines_cents_0": 5, "lifetime_fines_cents_1": 10},
+            id="both",
+        ),
+        pytest.param(None, None, {}, id="neither"),
+    ],
+)
+def test_normalize_input_value_range_filter_drops_none_axes_partial_range(
+    start: int | None,
+    end: int | None,
+    expected: dict[str, int],
+) -> None:
+    """A partial-range patch names only supplied axes, retaining both when both are supplied."""
     f = RangeFilter(field_name="lifetime_fines_cents")
 
     @dataclass
@@ -1893,41 +1821,33 @@ def test_normalize_input_value_range_filter_drops_none_axes_partial_range() -> N
         start: int | None = None
         end: int | None = None
 
-    # Only ``start`` supplied -> single-key patch.
-    only_start = normalize_input_value(
-        f,
-        _RangeInput(start=5),
-        field_name="lifetime_fines_cents",
+    assert (
+        normalize_input_value(
+            f,
+            _RangeInput(start=start, end=end),
+            field_name="lifetime_fines_cents",
+        )
+        == expected
     )
-    assert only_start == {"lifetime_fines_cents_0": 5}
-
-    # Only ``end`` supplied -> single-key patch.
-    only_end = normalize_input_value(
-        f,
-        _RangeInput(end=10),
-        field_name="lifetime_fines_cents",
-    )
-    assert only_end == {"lifetime_fines_cents_1": 10}
-
-    # Both supplied -> both-key patch (existing both-axes contract preserved).
-    both = normalize_input_value(
-        f,
-        _RangeInput(start=5, end=10),
-        field_name="lifetime_fines_cents",
-    )
-    assert both == {"lifetime_fines_cents_0": 5, "lifetime_fines_cents_1": 10}
-
-    # Neither supplied -> empty patch (no positional keys at all).
-    neither = normalize_input_value(
-        f,
-        _RangeInput(),
-        field_name="lifetime_fines_cents",
-    )
-    assert neither == {}
 
 
-def test_normalize_input_value_range_filter_drops_unset_axes_partial_range() -> None:
-    """Partial-range inputs drop ``UNSET``-valued axes identically to ``None``."""
+@pytest.mark.parametrize("mapping", [False, True], ids=["input-object", "mapping"])
+@pytest.mark.parametrize(
+    ("start", "end", "expected"),
+    [
+        pytest.param(5, UNSET, {"lifetime_fines_cents_0": 5}, id="start"),
+        pytest.param(UNSET, 10, {"lifetime_fines_cents_1": 10}, id="end"),
+        pytest.param(UNSET, UNSET, {}, id="neither"),
+    ],
+)
+def test_normalize_input_value_range_filter_drops_unset_axes_partial_range(
+    start: object,
+    end: object,
+    expected: dict[str, int],
+    *,
+    mapping: bool,
+) -> None:
+    """Mapping and input-object patches omit UNSET axes without adding positional null keys."""
     f = RangeFilter(field_name="lifetime_fines_cents")
 
     @dataclass
@@ -1935,48 +1855,14 @@ def test_normalize_input_value_range_filter_drops_unset_axes_partial_range() -> 
         start: object = UNSET
         end: object = UNSET
 
-    # Dataclass inputs with UNSET
-    assert normalize_input_value(
-        f,
-        _RangeInput(start=5, end=UNSET),
-        field_name="lifetime_fines_cents",
-    ) == {"lifetime_fines_cents_0": 5}
-
-    assert normalize_input_value(
-        f,
-        _RangeInput(start=UNSET, end=10),
-        field_name="lifetime_fines_cents",
-    ) == {"lifetime_fines_cents_1": 10}
-
+    value = {"start": start, "end": end} if mapping else _RangeInput(start=start, end=end)
     assert (
         normalize_input_value(
             f,
-            _RangeInput(start=UNSET, end=UNSET),
+            value,
             field_name="lifetime_fines_cents",
         )
-        == {}
-    )
-
-    # Dict inputs with UNSET
-    assert normalize_input_value(
-        f,
-        {"start": 5, "end": UNSET},
-        field_name="lifetime_fines_cents",
-    ) == {"lifetime_fines_cents_0": 5}
-
-    assert normalize_input_value(
-        f,
-        {"start": UNSET, "end": 10},
-        field_name="lifetime_fines_cents",
-    ) == {"lifetime_fines_cents_1": 10}
-
-    assert (
-        normalize_input_value(
-            f,
-            {"start": UNSET, "end": UNSET},
-            field_name="lifetime_fines_cents",
-        )
-        == {}
+        == expected
     )
 
 
@@ -2010,34 +1896,29 @@ class _StartEndAttrs:
 @pytest.mark.parametrize(
     "bad",
     [
-        pytest.param([1, 5], id="list"),
         pytest.param((1, 5), id="tuple"),
-        pytest.param(42, id="int"),
-        pytest.param("1,5", id="str"),
         pytest.param(range(1, 5), id="python-range"),
         pytest.param(object(), id="object"),
         pytest.param(_StartEndAttrs(), id="start-end-attributes"),
-        pytest.param({"from": 1, "to": 5}, id="only-unknown-keys"),
-        pytest.param({"start": 1, "zzz": 5}, id="start-and-unknown-key"),
-        pytest.param({"start": 1, "end": 5, "zzz": 9}, id="both-axes-and-unknown-key"),
     ],
 )
-def test_normalize_input_value_range_filter_rejects_a_value_it_cannot_read(
+def test_range_filters_reject_python_values_without_mapping_or_input_protocol(
     filter_class: type[Filter],
     bad: object,
 ) -> None:
-    """A range value that is not a ``{start, end}`` mapping or input object raises.
+    """Python-only tuple, range and object protocols cannot masquerade as range mappings.
 
-    Answering it with an empty or partial patch would drop the caller's
-    constraint, so the error names the filter, its input and the value.
+    This retains the exact rejection of an opaque object and an attribute-only object;
+    neither is a JSON value or a generated input. Wire mapping and list refusals live in
+    the consumer raw-argument HTTP tests.
     """
     with pytest.raises(ConfigurationError) as excinfo:
         normalize_input_value(filter_class(field_name="price"), bad, field_name="price_span")
     assert str(excinfo.value) == (
         f"{filter_class.__name__} consumes a range input with only 'start' / 'end' axes for "
         f"its 'price_span' input, but received {type(bad).__name__} {bad!r}; send a mapping "
-        "or input object with 'start' / 'end' (the GraphQL schema already rejects this "
-        "shape over the wire)."
+        "or input object with 'start' / 'end' (generated filter inputs reject this "
+        "shape during GraphQL validation)."
     )
 
 
@@ -2163,8 +2044,8 @@ def test_normalize_input_value_rejects_scalar_on_list_filter() -> None:
         normalize_input_value(ListFilter(field_name="code"), "abc")
     assert str(excinfo.value) == (
         "ListFilter consumes a list of values for its 'code' input, but received a "
-        "non-list container (str 'abc') for the list input; send a list (the GraphQL "
-        "schema already rejects this shape over the wire)."
+        "non-list container (str 'abc') for the list input; send a list (generated "
+        "filter inputs deliver a list after GraphQL coercion)."
     )
     with pytest.raises(ConfigurationError, match="non-list container"):
         normalize_input_value(GlobalIDMultipleChoiceFilter(), 42)
@@ -2209,8 +2090,8 @@ def test_normalize_input_value_rejects_scalar_on_multiple_choice_filter(
         normalize_input_value(made, "abc")
     assert str(excinfo.value) == (
         f"{type(made).__name__} consumes a list of values for its 'code' input, but received "
-        f"a non-list container (str 'abc') for the {shape}; send a list (the GraphQL schema "
-        "already rejects this shape over the wire)."
+        f"a non-list container (str 'abc') for the {shape}; send a list "
+        "(generated filter inputs deliver a list after GraphQL coercion)."
     )
 
 
@@ -2231,7 +2112,12 @@ def test_normalize_input_value_rejects_dict_on_expanded_range_csv() -> None:
         normalize_input_value(IntRange(), {"start": 1, "end": 5}, field_name="code__range")
 
 
-def test_normalize_input_value_unset_returns_none() -> None:
+@pytest.mark.parametrize(
+    "filter_class",
+    [GlobalIDFilter, GlobalIDMultipleChoiceFilter],
+    ids=["single", "multiple"],
+)
+def test_normalize_input_value_unset_returns_none(filter_class: type[Filter]) -> None:
     """``strawberry.UNSET`` is treated as "not supplied", same as ``None``.
 
     Defensive short-circuit at the entry to ``normalize_input_value``:
@@ -2242,8 +2128,7 @@ def test_normalize_input_value_unset_returns_none() -> None:
     benefits, including the operator-bag inner loop and the
     ``_q_for_branch`` recursion.
     """
-    for f in (GlobalIDFilter(), GlobalIDMultipleChoiceFilter()):
-        assert normalize_input_value(f, UNSET) is None
+    assert normalize_input_value(filter_class(), UNSET) is None
 
 
 # ---------------------------------------------------------------------------
@@ -2498,67 +2383,6 @@ def test_filter_input_helpers_propagate_a_rejected_value_whose_repr_raises(
 # filter_input_type / FilterInput[...] under PEP 563 deferred annotations
 # ---------------------------------------------------------------------------
 
-_PEP563_FILTER_PROGRAM = """
-from __future__ import annotations
-
-import strawberry
-from apps.library.models import Branch
-
-from django_strawberry_framework import DjangoType
-from django_strawberry_framework.filters import FilterInput, FilterSet, filter_input_type
-
-
-class Pep563BranchFilter(FilterSet):
-    class Meta:
-        model = Branch
-        fields = {"name": ["exact"]}
-
-
-class Pep563BranchType(DjangoType):
-    class Meta:
-        model = Branch
-        fields = ("id", "name")
-        filterset_class = Pep563BranchFilter
-
-
-@strawberry.type
-class Query:
-    @strawberry.field
-    def by_call(self, filter: filter_input_type(Pep563BranchFilter)) -> list[Pep563BranchType]:
-        return []
-
-    @strawberry.field
-    def by_optional_call(
-        self,
-        filter: filter_input_type(Pep563BranchFilter) | None = None,
-    ) -> list[Pep563BranchType]:
-        return []
-
-    @strawberry.field
-    def by_subscript(
-        self,
-        filter: FilterInput[Pep563BranchFilter] | None = None,
-    ) -> list[Pep563BranchType]:
-        return []
-"""
-
-
-def test_filter_input_helpers_resolve_under_pep563_deferred_annotations() -> None:
-    """Every helper spelling in a ``from __future__ import annotations`` module builds its input.
-
-    Strawberry evaluates the annotation STRING in the consumer module's globals, where the
-    generated ``Pep563BranchFilterInputType`` is not a name; the helper's return must resolve
-    against the inputs module, not the consumer's globals.
-    """
-    with consumer_module("tests_filters_pep563_consumer", _PEP563_FILTER_PROGRAM) as namespace:
-        finalize_django_types()
-        sdl = str(strawberry.Schema(query=consumer_query(namespace)))
-    assert "byCall(filter: Pep563BranchFilterInputType!): [Pep563BranchType!]!" in sdl
-    assert "byOptionalCall(filter: Pep563BranchFilterInputType = null)" in sdl
-    assert "bySubscript(filter: Pep563BranchFilterInputType = null)" in sdl
-    assert _helper_referenced_filtersets == {namespace["Pep563BranchFilter"]}
-    assert sdl.count("input Pep563BranchFilterInputType {") == 1
-
 
 def test_filter_input_type_needs_its_filterset_in_module_globals_under_pep563() -> None:
     """A ``TYPE_CHECKING``-only FilterSet import is the one name the build cannot resolve.
@@ -2614,50 +2438,6 @@ class Query:
         ):
             strawberry.Schema(query=consumer_query(namespace))
     assert _helper_referenced_filtersets == {namespace["Pep563GuardFilter"]}
-
-
-def test_filter_input_type_resolves_each_repeated_pep563_evaluation() -> None:
-    """Two resolvers re-evaluating one helper call share one input and one ledger entry."""
-    program = """
-from __future__ import annotations
-
-import strawberry
-from apps.library.models import Branch
-
-from django_strawberry_framework import DjangoType
-from django_strawberry_framework.filters import FilterSet, filter_input_type
-
-
-class Pep563RepeatFilter(FilterSet):
-    class Meta:
-        model = Branch
-        fields = {"name": ["exact"]}
-
-
-class Pep563RepeatType(DjangoType):
-    class Meta:
-        model = Branch
-        fields = ("id", "name")
-        filterset_class = Pep563RepeatFilter
-
-
-@strawberry.type
-class Query:
-    @strawberry.field
-    def first(self, filter: filter_input_type(Pep563RepeatFilter) | None = None) -> list[str]:
-        return []
-
-    @strawberry.field
-    def second(self, filter: filter_input_type(Pep563RepeatFilter) | None = None) -> list[str]:
-        return []
-"""
-    with consumer_module("tests_filters_pep563_repeat", program) as namespace:
-        finalize_django_types()
-        sdl = str(strawberry.Schema(query=consumer_query(namespace)))
-    assert "first(filter: Pep563RepeatFilterInputType = null): [String!]!" in sdl
-    assert "second(filter: Pep563RepeatFilterInputType = null): [String!]!" in sdl
-    assert sdl.count("input Pep563RepeatFilterInputType {") == 1
-    assert _helper_referenced_filtersets == {namespace["Pep563RepeatFilter"]}
 
 
 # ---------------------------------------------------------------------------
@@ -2721,26 +2501,28 @@ def test_type_name_for_raises_for_no_word_character_field_path(bad: str) -> None
 # ---------------------------------------------------------------------------
 
 
-def test_scalar_from_form_field_maps_each_recognized_shape() -> None:
-    """Every recognized form-field shape maps to its Python scalar.
-
-    Regression pin for the ``django.forms`` hierarchy trap: ``FloatField``
-    and ``DecimalField`` BOTH subclass ``IntegerField``, so they must be
-    matched before the ``IntegerField`` catch - otherwise a float/decimal
-    filter mis-maps to ``int``.
-    """
-    assert _scalar_from_form_field(forms.NullBooleanField()) is bool
-    assert _scalar_from_form_field(forms.BooleanField()) is bool
-    assert _scalar_from_form_field(forms.IntegerField()) is int
-    assert _scalar_from_form_field(forms.FloatField()) is float
-    assert _scalar_from_form_field(forms.DecimalField()) is decimal.Decimal
-    assert _scalar_from_form_field(forms.DateTimeField()) is datetime.datetime
-    assert _scalar_from_form_field(forms.DateField()) is datetime.date
-    assert _scalar_from_form_field(forms.TimeField()) is datetime.time
-    assert _scalar_from_form_field(forms.UUIDField()) is uuid.UUID
-    assert _scalar_from_form_field(forms.CharField()) is str
-    # Unknown shape falls through to the ``str`` catch-all.
-    assert _scalar_from_form_field(forms.Field()) is str
+@pytest.mark.parametrize(
+    ("field_class", "expected"),
+    [
+        pytest.param(forms.NullBooleanField, bool, id="nullable-boolean"),
+        pytest.param(forms.BooleanField, bool, id="boolean"),
+        pytest.param(forms.IntegerField, int, id="integer"),
+        pytest.param(forms.FloatField, float, id="float"),
+        pytest.param(forms.DecimalField, decimal.Decimal, id="decimal"),
+        pytest.param(forms.DateTimeField, datetime.datetime, id="datetime"),
+        pytest.param(forms.DateField, datetime.date, id="date"),
+        pytest.param(forms.TimeField, datetime.time, id="time"),
+        pytest.param(forms.UUIDField, uuid.UUID, id="uuid"),
+        pytest.param(forms.CharField, str, id="text"),
+        pytest.param(forms.Field, str, id="generic-fallback"),
+    ],
+)
+def test_scalar_from_form_field_maps_each_recognized_shape(
+    field_class: type[forms.Field],
+    expected: type[object],
+) -> None:
+    """Each form field maps to its scalar, including float and decimal before their integer base."""
+    assert _scalar_from_form_field(field_class()) is expected
 
 
 # ---------------------------------------------------------------------------
@@ -2752,17 +2534,26 @@ def test_scalar_from_model_field_none_falls_back_to_str() -> None:
     assert _scalar_from_model_field(None) is str
 
 
-def test_scalar_from_model_field_maps_each_recognized_shape() -> None:
-    assert _scalar_from_model_field(models.BooleanField()) is bool
-    assert _scalar_from_model_field(models.IntegerField()) is int
-    assert _scalar_from_model_field(models.FloatField()) is float
-    assert _scalar_from_model_field(models.DecimalField()) is decimal.Decimal
-    assert _scalar_from_model_field(models.DateTimeField()) is datetime.datetime
-    assert _scalar_from_model_field(models.DateField()) is datetime.date
-    assert _scalar_from_model_field(models.TimeField()) is datetime.time
-    assert _scalar_from_model_field(models.UUIDField()) is uuid.UUID
-    # Unknown shape falls through to the ``str`` catch-all.
-    assert _scalar_from_model_field(models.TextField()) is str
+@pytest.mark.parametrize(
+    ("field_class", "expected"),
+    [
+        pytest.param(models.BooleanField, bool, id="boolean"),
+        pytest.param(models.IntegerField, int, id="integer"),
+        pytest.param(models.FloatField, float, id="float"),
+        pytest.param(models.DecimalField, decimal.Decimal, id="decimal"),
+        pytest.param(models.DateTimeField, datetime.datetime, id="datetime"),
+        pytest.param(models.DateField, datetime.date, id="date"),
+        pytest.param(models.TimeField, datetime.time, id="time"),
+        pytest.param(models.UUIDField, uuid.UUID, id="uuid"),
+        pytest.param(models.TextField, str, id="text"),
+    ],
+)
+def test_scalar_from_model_field_maps_each_recognized_shape(
+    field_class: type[models.Field[object, object]],
+    expected: type[object],
+) -> None:
+    """Each model field reads its scalar from the shared model-field converter."""
+    assert _scalar_from_model_field(field_class()) is expected
 
 
 # ---------------------------------------------------------------------------
@@ -2782,16 +2573,23 @@ def test_convert_filter_to_input_annotation_typed_filter_uses_model_scalar() -> 
     assert annotation == (int | None)
 
 
-def test_filter_convert_and_normalize_ride_shared_kind_table() -> None:
+@pytest.mark.parametrize(
+    "function",
+    [inputs_mod.convert_filter_to_input_annotation, inputs_mod.normalize_input_value],
+    ids=["convert", "normalize"],
+)
+def test_filter_convert_and_normalize_ride_shared_kind_table(
+    function: Callable[..., object],
+) -> None:
     """Convert and normalize walk one most-specific-first filter-class table.
 
     Two independent ``isinstance`` chains could drift apart (spec-053 C3), so
     both zip ``_FILTER_INPUT_KIND_TYPES`` into ``convert_with_mro`` prechecks;
     ``object`` is last (the catch-all arm).
     """
-    for fn in (inputs_mod.convert_filter_to_input_annotation, inputs_mod.normalize_input_value):
-        assert "convert_with_mro" in fn.__code__.co_names
-        assert "_filter_input_prechecks" in fn.__code__.co_names
+    names = function.__code__.co_names
+    assert "convert_with_mro" in names
+    assert "_filter_input_prechecks" in names
     assert _FILTER_INPUT_KIND_TYPES[-1] is object
     assert _FILTER_INPUT_KIND_TYPES[-4] is TypedFilter
     with pytest.raises(ValueError, match="argument"):
@@ -2848,7 +2646,10 @@ def test_filter_overrides_model_choice_keys_keep_their_class_and_type_from_the_t
     ``ConcreteInFilter(BaseInFilter, ModelChoiceFilter)`` wrapper, both still holding
     their ``queryset`` (so the form still validates) and stamped ``override_generated``,
     which keeps them out of the optimizer's candidate rows. The input is the category
-    pk: one ``Int`` for ``exact``, a list for ``in``.
+    pk: one ``Int`` for ``exact``, a list for ``in``. The tuple normalization
+    below is a Python carrier observation; raw scalar refusal and real form
+    acceptance live in
+    ``test_filter_normalizer_arguments_api.py::test_a_model_choice_membership_override_keeps_its_json_container_contract``.
     """
 
     def _category_queryset_extra(_field: object) -> dict[str, object]:
@@ -2886,8 +2687,6 @@ def test_filter_overrides_model_choice_keys_keep_their_class_and_type_from_the_t
     )
     assert normalize_input_value(exact, 3) == 3
     assert normalize_input_value(in_, (3, 4)) == [3, 4]
-    with pytest.raises(ConfigurationError, match="model-choice list"):
-        normalize_input_value(in_, 3)
 
 
 def test_declared_model_choice_filter_follows_a_relation_valued_primary_key() -> None:
@@ -3036,9 +2835,8 @@ def test_element_annotation_fallback_branches_when_model_field_is_none() -> None
     class NoFieldTypedFilter(TypedFilter):
         @property
         @override
-        # basedpyright: deliberately a filter with no form field, the input that takes the fallback
-        def field(self) -> None:  # pyright: ignore[reportIncompatibleMethodOverride]
-            return None
+        def field(self) -> forms.Field:
+            raise AttributeError("This consumer field cannot be built.")
 
     # Form field present -> resolved via `_scalar_from_form_field`
     assert (
@@ -3058,9 +2856,14 @@ def test_materialize_input_class_registers_in_module_globals() -> None:
     class ScratchCustomInput:
         pass
 
-    materialize_input_class("ScratchCustomInput", ScratchCustomInput)
-    assert inputs_mod._materialized_names["ScratchCustomInput"] is ScratchCustomInput
-    assert getattr(inputs_mod, "ScratchCustomInput", None) is ScratchCustomInput
+    try:
+        materialize_input_class("ScratchCustomInput", ScratchCustomInput)
+        assert inputs_mod._materialized_names["ScratchCustomInput"] is ScratchCustomInput
+        assert getattr(inputs_mod, "ScratchCustomInput", None) is ScratchCustomInput
+    finally:
+        inputs_mod._materialized_names.pop("ScratchCustomInput", None)
+        if hasattr(inputs_mod, "ScratchCustomInput"):
+            delattr(inputs_mod, "ScratchCustomInput")
 
 
 class _EqRangeFilter(RangeFilter):
@@ -3195,75 +2998,6 @@ def test_build_range_input_class_qualifies_the_field_fallback_stem_by_its_set() 
 
 
 @pytest.mark.django_db
-def test_range_input_type_name_is_scoped_per_filterset() -> None:
-    """Two filtersets sharing a ``field_name`` mint DISTINCT range sub-input classes.
-
-    Pin for the spec-027 collision hazard. Shipped filtersets share one axis
-    scalar, so the differing-axis claim is package-only. The nested
-    ``RangeFilter`` sub-input class name derived from
-    ``field_name`` alone, so two filtersets that each declare a ``RangeFilter``
-    for a same-named column both stamped one GraphQL name
-    (``PriceRangeInputType``), and two ranges of different axis scalars under one
-    name cannot share a schema (the type-name claim,
-    ``utils/inputs.py::claim_generated_type_name``, refuses the pair in any schema
-    serving both). The name is qualified by the owning filterset so the two are
-    distinct and both survive in one schema.
-    """
-
-    class ScalarPriceFilter(FilterSet):
-        price = RangeFilter(field_name="price")
-
-        class Meta:
-            model = scalar_models.ScalarSpecimen
-            fields = []
-
-    class TextPriceFilter(FilterSet):
-        # Same generated top-level ``price`` field, but a text-backed source:
-        # this proves the two scoped nested types retain different axis scalars.
-        price = RangeFilter(field_name="price")
-
-        class Meta:
-            model = library_models.Branch
-            fields = []
-
-    def _range_cls_of(bag: type) -> type:
-        for annotation in _annotations(bag).values():
-            for arg in _args(annotation):
-                if isinstance(arg, type) and arg.__name__.endswith("RangeInputType"):
-                    return arg
-        raise AssertionError("no RangeInputType found in operator bag")
-
-    def _bag(triples: list[tuple[str, object, dict[str, object]]]) -> type:
-        by_attr = {p: a for p, a, _ in triples}
-        return _class_arg(by_attr["price"])
-
-    bag1 = _bag(_build_input_fields(ScalarPriceFilter))
-    bag2 = _bag(_build_input_fields(TextPriceFilter))
-    r1 = _range_cls_of(bag1)
-    r2 = _range_cls_of(bag2)
-
-    # Owning-filterset qualifier makes the two names distinct (unqualified, both
-    # would be ``PriceRangeInputType``).
-    assert r1.__name__ == "ScalarPriceFilterPriceRangeInputType"
-    assert r2.__name__ == "TextPriceFilterPriceRangeInputType"
-    assert r1.__name__ != r2.__name__
-    assert r1.__annotations__["start"] != r2.__annotations__["start"]
-
-    # Both nested range types survive when both operator bags land in one schema;
-    # under one name the two could not share it.
-    @strawberry.type
-    class Query:
-        ok: int
-
-    sdl = str(strawberry.Schema(query=Query, types=[bag1, bag2]))
-    range_defs = set(re.findall(r"input (\w*RangeInputType)", sdl))
-    assert range_defs == {
-        "ScalarPriceFilterPriceRangeInputType",
-        "TextPriceFilterPriceRangeInputType",
-    }
-
-
-@pytest.mark.django_db
 def test_direct_range_conversion_does_not_poison_owned_input_build() -> None:
     """An earlier conversion under another set cannot defeat owner-qualified generation."""
 
@@ -3328,182 +3062,6 @@ def test_build_input_fields_skips_related_filter_with_none_target() -> None:
     names = {python_attr for python_attr, _annotation, _kwargs in triples}
     assert "rel" not in names
     assert "code" in names
-
-
-# ---------------------------------------------------------------------------
-# Digit-boundary operator-bag / range type names
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.django_db
-def test_build_input_fields_keeps_digit_boundary_operator_bags_distinct() -> None:
-    """``field_2`` / ``field2`` mint DISTINCT operator-bag GraphQL type names.
-
-    ``ClassBasedTypeNameMixin.type_name_for`` routes through ``pascal_case``. A
-    non-injective Pascal collapse (``field_2`` / ``field2`` both -> ``Field2``)
-    made both bags claim ``<FilterSet>Field2FilterInputType``: two bags of
-    different lookups under one name in one set, which the type-name claim
-    (``utils/inputs.py::claim_generated_type_name``) refuses at finalize.
-    Top-level field attrs stay distinct via ``graphql_camel_name``; the type-name
-    stem must preserve the same digit boundary.
-    """
-
-    class DigitBoundaryFilter(FilterSet):
-        field_2 = CharFilter(field_name="name", lookup_expr="exact")
-        field2 = CharFilter(field_name="name", lookup_expr="icontains")
-
-        class Meta:
-            model = library_models.Branch
-            fields = []
-
-    assert DigitBoundaryFilter.type_name_for("field_2") == (
-        "DigitBoundaryFilterField_2FilterInputType"
-    )
-    assert DigitBoundaryFilter.type_name_for("field2") == (
-        "DigitBoundaryFilterField2FilterInputType"
-    )
-
-    triples = _build_input_fields(DigitBoundaryFilter)
-    by_attr = {python_attr: annotation for python_attr, annotation, _kwargs in triples}
-
-    def _bag(attr: str) -> type:
-        return _class_arg(by_attr[attr])
-
-    bag_underscore = _bag("field_2")
-    bag_plain = _bag("field2")
-    assert bag_underscore.__name__ == "DigitBoundaryFilterField_2FilterInputType"
-    assert bag_plain.__name__ == "DigitBoundaryFilterField2FilterInputType"
-    assert bag_underscore is not bag_plain
-    assert "exact" in bag_underscore.__annotations__
-    assert "i_contains" in bag_plain.__annotations__
-
-    @strawberry.type
-    class Query:
-        ok: int
-
-    # Register the bags directly (same pattern as the scoped-range collision pin);
-    # a root input with ``strawberry.lazy`` self-refs needs spec-027 Decision 9 materialization.
-    sdl = str(strawberry.Schema(query=Query, types=[bag_underscore, bag_plain]))
-    bag_defs = set(re.findall(r"input (DigitBoundaryFilterField_?2FilterInputType)", sdl))
-    assert bag_defs == {
-        "DigitBoundaryFilterField_2FilterInputType",
-        "DigitBoundaryFilterField2FilterInputType",
-    }
-
-
-@pytest.mark.django_db
-def test_range_input_type_name_preserves_digit_boundary_in_field_name() -> None:
-    """Range sub-input names keep ``price_2`` distinct from ``price2``."""
-
-    class PriceDigitFilter(FilterSet):
-        price_2 = RangeFilter(field_name="price_2")
-        price2 = RangeFilter(field_name="price2")
-
-        class Meta:
-            model = scalar_models.ScalarSpecimen
-            fields = []
-
-    # field_name drives ``_pascal_case`` inside ``_build_range_input_class``.
-    underscored = RangeFilter(field_name="price_2")
-    plain = RangeFilter(field_name="price2")
-    assert (
-        _build_range_input_class(underscored, int, PriceDigitFilter).__name__
-        == "PriceDigitFilterPrice_2RangeInputType"
-    )
-    assert (
-        _build_range_input_class(plain, int, PriceDigitFilter).__name__
-        == "PriceDigitFilterPrice2RangeInputType"
-    )
-
-
-@pytest.mark.django_db
-def test_build_input_fields_keeps_underscore_edge_operator_bags_distinct() -> None:
-    """``price`` / ``price_`` mint DISTINCT operator-bag GraphQL type names.
-
-    A ``pascal_case`` that dropped leading / trailing underscore runs would
-    collapse two members whose names differ only at the edges to one
-    type-name stem even though BOTH emission guards pass (the Python attrs and
-    the camel GraphQL field names stay distinct for edge variants). A
-    ``CharFilter`` bag and a ``RangeFilter`` bag under one name in one set are
-    two shapes the type-name claim
-    (``utils/inputs.py::claim_generated_type_name``) refuses at finalize, so
-    the set could not be served. The stem preserves the edge runs (the Pascal
-    dual of ``graphql_camel_name``).
-    """
-
-    class UnderscoreEdgeFilter(FilterSet):
-        price = CharFilter(field_name="name", lookup_expr="exact")
-        price_ = RangeFilter(field_name="city", lookup_expr="exact")
-
-        class Meta:
-            model = library_models.Branch
-            fields = []
-
-    triples = _build_input_fields(UnderscoreEdgeFilter)
-    by_attr = {python_attr: annotation for python_attr, annotation, _kwargs in triples}
-
-    def _bag(attr: str) -> type:
-        return _class_arg(by_attr[attr])
-
-    bag_plain = _bag("price")
-    bag_under = _bag("price_")
-    assert bag_plain.__name__ == "UnderscoreEdgeFilterPriceFilterInputType"
-    assert bag_under.__name__ == "UnderscoreEdgeFilterPrice_FilterInputType"
-    assert bag_plain is not bag_under
-    # The two bags carry DIFFERENT shapes: the CharFilter bag's ``exact`` is a
-    # scalar, the RangeFilter bag's ``exact`` embeds the range sub-input.
-    assert "RangeInputType" not in str(_annotations(bag_plain)["exact"])
-    assert "RangeInputType" in str(_annotations(bag_under)["exact"])
-
-    @strawberry.type
-    class Query:
-        ok: int
-
-    sdl = str(strawberry.Schema(query=Query, types=[bag_plain, bag_under]))
-    bag_defs = set(re.findall(r"input (UnderscoreEdgeFilterPrice_?FilterInputType)", sdl))
-    assert bag_defs == {
-        "UnderscoreEdgeFilterPriceFilterInputType",
-        "UnderscoreEdgeFilterPrice_FilterInputType",
-    }
-    # The range sub-input of the trailing-underscore member survives too.
-    assert "UnderscoreEdgeFilterCityRangeInputType" in sdl
-
-
-@pytest.mark.django_db
-def test_range_input_type_name_preserves_leading_underscore_run_in_field_name() -> None:
-    """Range sub-input names keep ``_price`` distinct from ``price``."""
-
-    class LeadingEdgeRangeFilter(FilterSet):
-        price = RangeFilter(field_name="name")
-        _price = RangeFilter(field_name="city")
-
-        class Meta:
-            model = library_models.Branch
-            fields = []
-
-    assert (
-        _build_range_input_class(
-            RangeFilter(field_name="name"),
-            int,
-            LeadingEdgeRangeFilter,
-        ).__name__
-        == "LeadingEdgeRangeFilterNameRangeInputType"
-    )
-    assert (
-        _build_range_input_class(
-            RangeFilter(field_name="city"),
-            int,
-            LeadingEdgeRangeFilter,
-        ).__name__
-        == "LeadingEdgeRangeFilterCityRangeInputType"
-    )
-    # The naming rule itself: the leading run survives into the stem.
-    assert LeadingEdgeRangeFilter.type_name_for("_price") == (
-        "LeadingEdgeRangeFilter_PriceFilterInputType"
-    )
-    assert LeadingEdgeRangeFilter.type_name_for("price") == (
-        "LeadingEdgeRangeFilterPriceFilterInputType"
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -3880,6 +3438,40 @@ def test_two_ranges_over_one_column_mint_one_range_type_per_value_path(
     }
 
 
+def test_a_range_whose_axes_clean_two_kinds_is_refused_naming_the_filter() -> None:
+    """A range form whose two axes clean different scalars has no one type for both bounds.
+
+    A ``date`` axis on ``year`` cannot clean the ``Int`` output, and the range input carries
+    one type for both bounds, so the build refuses the filter instead of publishing a bound
+    one of the axes cannot clean.
+    """
+
+    class MixedAxesFilter(FilterSet):
+        # django-filter hands a filter's extra kwargs to its ``RangeField``, ``fields`` included.
+        years_span = DjangoRangeFilter(
+            field_name="occurred_on__year",
+            fields=(forms.DateField(), forms.IntegerField()),
+        )
+
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = []
+
+    meta: dict[str, object] = {
+        "model": scalar_models.ScalarSpecimen,
+        "fields": ("id",),
+        "filterset_class": MixedAxesFilter,
+    }
+    _ = type("MixedAxesType", (DjangoType,), {"Meta": type("Meta", (), meta)})
+    with pytest.raises(ConfigurationError) as excinfo:
+        finalize_django_types()
+
+    message = str(excinfo.value)
+    assert "MixedAxesFilter" in message, message
+    assert "RangeFilter on 'occurred_on__year'" in message, message
+    assert "different kinds (date, int)" in message, message
+
+
 @pytest.mark.parametrize(
     ("declare", "lookup"),
     [
@@ -3923,6 +3515,27 @@ def test_a_list_filter_through_a_slice_of_nested_arrays_is_refused_as_the_read_s
     )
 
     assert _build_refusal() == "Nested ArrayField on _ArraySpecimen.grid is not supported."
+
+
+def test_a_declared_date_filter_through_a_nested_array_index_keeps_the_array_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An index of an array of arrays reaches an array, which no single date input compares.
+
+    django-filter builds no filter for the inner array, so nothing says the declared
+    ``DateField`` cleans a value of it: the leaf keeps the transform's output and the
+    array refusal answers, never a ``Date`` input the column cannot compare.
+    """
+    patch_array_field(monkeypatch)
+    declared = DateFilter(field_name="grid__0")
+    _ = _serve_array_filter(declared, exposed=False)
+
+    assert _build_refusal() == (
+        f"DateFilter on {declared!r} has no input type for lookup 'exact' on the ArrayField "
+        "column _ArraySpecimen.grid: only exact, contains, contained_by and overlap take one "
+        "array of the column's elements. Declare an ArrayFilter with one of those "
+        "lookup_expr values."
+    )
 
 
 def test_a_list_filter_through_a_real_array_index_or_slice_is_typed_from_the_element_column() -> (

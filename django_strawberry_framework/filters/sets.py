@@ -67,6 +67,7 @@ from django_filters import (
     filterset,
 )
 from django_filters import filters as _df_filters
+from django_filters.conf import settings as _filter_settings
 from django_filters.exceptions import FieldLookupError
 from django_filters.filterset import FilterSetOptions
 from django_filters.utils import get_model_field, resolve_field, try_dbfield
@@ -74,7 +75,7 @@ from graphql import GraphQLError
 from typing_extensions import override
 
 from django_strawberry_framework.conf import max_flat_filters_setting
-from django_strawberry_framework.exceptions import ConfigurationError
+from django_strawberry_framework.exceptions import ConfigurationError, LookupValidationError
 from django_strawberry_framework.optimizer.predicates import (
     attach_exists,
     correlated_inner_root,
@@ -97,6 +98,7 @@ from django_strawberry_framework.sets_mixins import (
     require_sweep_model,
     should_cache_expansion,
 )
+from django_strawberry_framework.types.converters import generated_output_field
 from django_strawberry_framework.types.relay import implements_relay_node
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._array_field import array_leaf_field
@@ -166,14 +168,18 @@ from django_strawberry_framework.utils.querysets import (
 from django_strawberry_framework.utils.relations import (
     ClassifiedPath,
     classify_path,
+    generated_column,
     is_many_side_relation_kind,
     is_model_class,
     leading_relation_hops,
+    lookup_operand,
+    lookup_registry,
     m2m_through_link_fields,
     non_pk_forward_link,
     path_traverses_to_many,
     relation_kind,
 )
+from django_strawberry_framework.utils.typing import object_result
 from django_strawberry_framework.utils.widgets import widget_keys
 
 from .base import (
@@ -198,6 +204,7 @@ from .base import (
     copied_form_field,
     membership_in_filter_class,
 )
+from .form_binding import FilterFormBindings, NormalizedFormValue, bound_filter_form_class
 from .inputs import (
     LOGIC_OPERATORS,
     LOGIC_OPERATORS_BY_PYTHON_ATTR,
@@ -251,7 +258,7 @@ if TYPE_CHECKING:
 
     from django_strawberry_framework.types.base import DjangoType
     from django_strawberry_framework.types.definition import DjangoTypeDefinition
-    from django_strawberry_framework.utils.typing import ConcreteField, ModelField
+    from django_strawberry_framework.utils.typing import ModelField
 
     # ``(field_name, target_type, child_filterset, child_input, child_base)`` per active
     # related branch, as ``FilterSet._iter_visibility_steps`` yields it.
@@ -351,17 +358,21 @@ def _lookups_for_field(
     lookup the consumer registers is published like a built-in one. A consumer
     who wants ``search`` or a trigram lookup declares it explicitly.
 
-    The set is read from the field's own registry on every call:
-    ``Field.get_lookups()`` on the instance is the class registrations along the
-    MRO (which Django caches and invalidates on each ``register_lookup``) merged
-    with the instance's own. Two fields of one class with different instance
-    registrations therefore publish different sets, and a registration made at
-    any time before the set builds is seen.
+    The set is read on every call from the registry Django's query resolves the
+    column's lookups on (``utils/relations.py::lookup_registry``): ``Field.get_lookups()`` on that
+    instance is the class registrations along the MRO (which Django caches and
+    invalidates on each ``register_lookup``) merged with the instance's own. Two
+    fields of one class with different instance registrations therefore publish
+    different sets, and a registration made at any time before the set builds is
+    seen. A ``GeneratedField``'s registry is its ``output_field`` instance's, and
+    it is classified as the column it computes
+    (``types/converters.py::generated_output_field``), so two generated columns
+    of different output types publish their outputs' sets.
     """
     if model_field is None:
         return []
-    field_class = type(model_field)
-    registered = model_field.get_lookups()
+    field_class = type(generated_output_field(model_field) or model_field)
+    registered = lookup_registry(model_field).get_lookups()
     lookups = _non_transform_lookups(_without_foreign_postgres_lookups(field_class, registered))
     if not package_default or _is_text_column(field_class):
         return lookups
@@ -370,6 +381,34 @@ def _lookups_for_field(
         for lookup_expr in lookups
         if not _is_text_pattern_lookup(registered.get(lookup_expr))
     ]
+
+
+def _generated_filter_field(
+    field: models.GeneratedField,
+    lookup_expr: str,
+) -> tuple[ModelField, str]:
+    """Return ``django_filters.utils.resolve_field``'s answer for a ``GeneratedField``.
+
+    The output field of the transforms ``lookup_expr`` applies and the name of its final
+    lookup (the class's ``lookup_name``, as upstream names it), walked on the registry
+    Django's query resolves the generated column's lookups on
+    (``utils/relations.py::lookup_operand``). Upstream asks the generated field, whose
+    ``get_lookup`` / ``get_transform`` (Django's ``RegisterLookupMixin``) answer a name from
+    the copy of the output class's lookups ``contribute_to_class`` files on it and fall back
+    to the ``output_field`` only for a name the copy lacks: a registration on the
+    ``output_field`` instance, or on its class after the model was built, that replaces a
+    name the copy holds is answered there by the copy's original, where the predicate
+    compiles the replacement. An output that is the computed column (no
+    transform, or one whose output is its source's) answers as ``field`` itself, the field
+    upstream hands ``filter_for_lookup``. Raises upstream's ``FieldLookupError`` for an
+    expression the walk refuses.
+    """
+    try:
+        output, lookup = lookup_operand(field, lookup_expr)
+    except (LookupValidationError, FieldError) as error:
+        raise FieldLookupError(field, lookup_expr) from error
+    resolved = field if output is generated_column(field) else output
+    return resolved, require(lookup.lookup_name, is_str)
 
 
 # Django's text-pattern lookups. Each compares the column's TEXT rendering against
@@ -409,15 +448,22 @@ def _is_text_column(field_class: type[ModelField]) -> bool:
     return isinstance(filter_class, type) and issubclass(filter_class, CharFilter)
 
 
-def _is_text_pattern_on_non_text(field: ConcreteField, lookup_type: str) -> bool:
+def _is_text_pattern_on_non_text(field: ModelField, lookup_type: str) -> bool:
     """Return whether ``lookup_type`` is a text-pattern lookup ``field`` registers, on a non-text field.
 
     ``field`` is the non-relation field the lookup applies to (a transform's output
     field when the expression names one) and ``lookup_type`` one terminal lookup
-    name, the pair django-filter hands ``filter_for_lookup``.
+    name, the pair django-filter hands ``filter_for_lookup``. A ``GeneratedField`` is
+    classified as the column it computes (``types/converters.py::generated_output_field``)
+    and its lookup is read off the registry Django's query resolves it on, its
+    ``output_field`` instance (``utils/relations.py::lookup_registry``), never the copy of
+    the output class's lookups the generated field files on itself: a registration on that
+    instance, or on the output class after the model was built, that replaces a text
+    pattern (Django's ``Exact`` as ``contains``) takes the column's own value.
     """
-    return not _is_text_column(type(field)) and _is_text_pattern_lookup(
-        field.get_lookup(lookup_type),
+    column = generated_output_field(field) or field
+    return not _is_text_column(type(column)) and _is_text_pattern_lookup(
+        lookup_registry(field).get_lookup(lookup_type),
     )
 
 
@@ -1392,6 +1438,14 @@ class FilterSetMetaclass(_FilterSetMetaclassBase):
     ``OrderSetMetaclass``).
     """
 
+    if not TYPE_CHECKING:
+
+        @override
+        def __call__(self, *args: object, **kwargs: object) -> object:
+            # Transparent dispatch preserves inherited constructor inference, including
+            # consumer __new__ factories whose result is another class.
+            return _construct_filterset(super().__call__, self, args, kwargs)
+
     def __new__(  # noqa: PYI034 - a metaclass; ruff cannot resolve the django-filter base
         cls,
         name: str,
@@ -2176,17 +2230,51 @@ class _ExpansionScope:
     reentered: dict[int, OrderedDict[str, Filter]]
 
 
-# Whether the ``FilterSet`` being constructed is one the package's own request
-# pipeline builds (``_pipeline_built``), the only instances that defer flat
-# copies. ``FilterSet.__init__`` clears it on entry, so a set a consumer
-# ``__init__`` constructs in turn is built as a direct use is.
-_pipeline_build_var: ContextVar[bool] = ContextVar("_pipeline_build_var", default=False)
+@dataclass(frozen=True)
+class _PipelineConstruction:
+    """One intended constructor call and its normalized form binding metadata."""
+
+    owner: type[object]
+    bindings: FilterFormBindings | None
+
+
+_pipeline_build_var: ContextVar[_PipelineConstruction | None] = ContextVar(
+    "_pipeline_build_var",
+    default=None,
+)
+_active_construction_var: ContextVar[_PipelineConstruction | None] = ContextVar(
+    "_active_construction_var",
+    default=None,
+)
+
+
+def _construct_filterset(
+    constructor: Callable[..., object],
+    owner: type[object],
+    args: tuple[object, ...],
+    kwargs: Mapping[str, object],
+) -> object:
+    """Run the ordinary metaclass constructor in its own frame, including nested calls."""
+    pending = _pipeline_build_var.get()
+    if pending is not None and pending.owner is owner:
+        _ = _pipeline_build_var.set(None)
+        current = pending
+    else:
+        current = None
+    token = _active_construction_var.set(current)
+    try:
+        return constructor(*args, **kwargs)
+    finally:
+        _active_construction_var.reset(token)
 
 
 @contextmanager
-def _pipeline_built() -> Generator[None, None, None]:
-    """Mark the ``FilterSet`` constructed inside as built by the package's request pipeline."""
-    token = _pipeline_build_var.set(True)
+def _pipeline_built(
+    owner: type[object],
+    bindings: FilterFormBindings | None = None,
+) -> Generator[None, None, None]:
+    """Mark the next intended metaclass constructor as built by the request pipeline."""
+    token = _pipeline_build_var.set(_PipelineConstruction(owner, bindings))
     try:
         yield
     finally:
@@ -2885,6 +2973,8 @@ class FilterSet(
     # The flat copies a pipeline-built instance's data does not name: never on
     # its bound form (``get_form_class``) and never run (``_apply_flat_leaves``).
     _unnamed_copies: frozenset[str] = frozenset()
+    _form_bindings: FilterFormBindings | None = None
+    _form: forms.Form
 
     # Whether each absent leaf walking a hop constrains anything for the value it
     # cleaned to (``_absent_leaf_applies``), by name, beside that value: a verdict
@@ -2940,8 +3030,10 @@ class FilterSet(
         """
         cls = type(self)
         snapshot = cls._expansion_snapshot()
-        pipeline_built = _pipeline_build_var.get()
-        _ = _pipeline_build_var.set(False)
+        construction = _active_construction_var.get()
+        _ = _active_construction_var.set(None)
+        self._form_bindings = None if construction is None else construction.bindings
+        pipeline_built = construction is not None
         if snapshot is None or not snapshot.deferred_copies or not pipeline_built:
             # basedpyright: typeshed types ``data`` as a ``dict`` or ``QueryDict``; upstream
             # stores the mapping and its form reads it as one. It rejects a ``Mapping``
@@ -2950,6 +3042,8 @@ class FilterSet(
         source = snapshot.filters
         deferred = snapshot.deferred_copies
         named = frozenset(_named_flat_copies(data, snapshot.copy_keys, prefix) if data else ())
+        if data is not None and self._form_bindings is not None:
+            named |= self._form_bindings.names(data) & deferred
         self._unnamed_copies = deferred - named
         # ``BaseFilterSet.__init__`` deep-copies ``self.base_filters`` into
         # ``self.filters`` and binds each copy; an instance attribute shadows the
@@ -3011,7 +3105,8 @@ class FilterSet(
         """django-filter's form class; a bound one holds no flat copy the data does not name.
 
         A pipeline-built bound instance's form holds the set's own filters and
-        the flat copies its data names, in the class's order, also once a
+        the flat copies named by normalized logical keys or actual widget keys,
+        in the class's order, also once a
         subclass ``__init__`` has read ``self.filters`` (which copies every
         filter): an unnamed copy (``_unnamed_copies``) is never a field.
         """
@@ -3023,6 +3118,23 @@ class FilterSet(
             (name, copied[name].field) for name in names if name not in self._unnamed_copies
         )
         return type(f"{truth.kind(self)}Form", (self._meta.form,), fields)
+
+    @property
+    @override
+    def form(self) -> forms.Form:
+        """Build the actual consumer form before binding normalized values to its widgets."""
+        # Adapted from django-filter BaseFilterSet.form (BSD-3-Clause;
+        # LICENSE.django-filter). Consumer get_form_class and Meta.form run unchanged.
+        if not hasattr(self, "_form"):
+            form_class = self.get_form_class()
+            bindings = self._form_bindings
+            if bindings is not None and bindings.values:
+                form_class = bound_filter_form_class(form_class, bindings)
+            if self.is_bound:
+                self._form = form_class(self.data, prefix=self.form_prefix)
+            else:
+                self._form = form_class(prefix=self.form_prefix)
+        return self._form
 
     # ------------------------------------------------------------------
     # Layer 4 - cycle-safe filter expansion (cookbook port).
@@ -3593,7 +3705,9 @@ class FilterSet(
                     model_field = get_model_field(model, field_name)
                     lookups = _lookups_for_field(
                         model_field,
-                        package_default=cls._origin_for_selection_class(type(model_field))
+                        package_default=cls._origin_for_selection_class(
+                            type(cls._selected_column(model_field)),
+                        )
                         == "framework_default",
                     )
                     if cls._is_own_pk_under_relay_owner(model_field, field_name):
@@ -3643,9 +3757,40 @@ class FilterSet(
         entry under ``Meta.unknown_field_behavior`` ``WARN`` / ``IGNORE``, which typeshed's
         stub leaves out. ``(cls, field_name)`` is published in ``_generating_key_var`` while
         upstream runs, so the ``filter_for_lookup`` it calls knows the key it is building.
+
+        A ``GeneratedField`` runs upstream's body over ``_generated_filter_field``'s
+        resolution instead of ``django_filters.utils.resolve_field``'s, which answers a name
+        the generated field's copy of its output class's lookups holds from that copy (its
+        ``get_lookup`` / ``get_transform`` fall back to the ``output_field`` only for a name
+        the copy lacks), where Django's query resolves a name a later registration replaced
+        on the ``output_field`` instance's registry.
         """
         token = _generating_key_var.set((cls, field_name))
         try:
+            if truth.is_instance(field, models.GeneratedField):
+                # Adapted from django-filter BaseFilterSet.filter_for_field (BSD-3-Clause;
+                # LICENSE.django-filter), resolved by ``_generated_filter_field``.
+                if lookup_expr is None:
+                    lookup_expr = require(
+                        read_attr(_filter_settings, "DEFAULT_LOOKUP_EXPR"),
+                        is_str,
+                    )
+                resolved, lookup_type = _generated_filter_field(field, lookup_expr)
+                default: dict[str, object] = {"field_name": field_name, "lookup_expr": lookup_expr}
+                filter_class, params = cls.filter_for_lookup(resolved, lookup_type)
+                default.update(params)
+                if filter_class is None:
+                    cls.handle_unrecognized_field(
+                        field_name,
+                        f"{truth.name(cls)} resolved field '{field_name}' with "
+                        f"'{lookup_expr}' lookup to an unrecognized field type "
+                        f"{truth.name(type(resolved))}. Try adding an override to "
+                        "'Meta.filter_overrides'. See: "
+                        "https://django-filter.readthedocs.io/en/main/ref/filterset.html"
+                        "#customise-filter-generation-with-filter-overrides",
+                    )
+                    return None
+                return require_instance(object_result(filter_class, **default), Filter)
             # basedpyright: typeshed narrows ``field`` to ``Field``; upstream ``get_filters``
             # passes the ``ForeignObjectRel`` of a reverse relation too. It rejects
             # ``ModelField``'s ``ForeignObjectRel`` arm
@@ -3878,7 +4023,9 @@ class FilterSet(
         This method mirrors that exact resolution:
 
         1. ``resolve_field(field, lookup_expr or "exact")`` (matching upstream's
-           ``DEFAULT_LOOKUP_EXPR`` fallback). An invalid lookup raises
+           ``DEFAULT_LOOKUP_EXPR`` fallback), ``_generated_filter_field`` for a
+           ``GeneratedField``, the resolution ``_upstream_filter_for_field`` hands
+           ``filter_for_lookup`` for one. An invalid lookup raises
            ``FieldLookupError`` upstream before any filter is generated, so a leaf
            that fails resolution was never generated and could never be an
            eligible candidate; it fails closed to ``override_generated`` (an
@@ -3924,15 +4071,25 @@ class FilterSet(
         ``BooleanField`` override upstream, and this oracle agrees.
         """
         try:
-            # basedpyright: typeshed narrows ``field`` to ``Field``; upstream resolves a
-            # ``ForeignObjectRel`` the same way. It rejects the ``ForeignObjectRel`` arm
-            resolved_field, lookup_type = resolve_field(
-                field,  # pyright: ignore[reportArgumentType]
-                lookup_expr or "exact",
-            )
+            if truth.is_instance(field, models.GeneratedField):
+                resolved_field, lookup_type = _generated_filter_field(
+                    field,
+                    lookup_expr or "exact",
+                )
+            else:
+                # basedpyright: typeshed narrows ``field`` to ``Field``; upstream resolves a
+                # ``ForeignObjectRel`` the same way. It rejects the ``ForeignObjectRel`` arm
+                resolved_field, lookup_type = resolve_field(
+                    field,  # pyright: ignore[reportArgumentType]
+                    lookup_expr or "exact",
+                )
         except FieldLookupError:
             return "override_generated"
-        selection_cls = models.BooleanField if lookup_type == "isnull" else type(resolved_field)
+        selection_cls = (
+            models.BooleanField
+            if lookup_type == "isnull"
+            else type(cls._selected_column(resolved_field))
+        )
         # Replicate django-filter's EXACT class selection so the oracle cannot drift
         # from it in EITHER direction. ``BaseFilterSet.filter_for_lookup`` builds
         # ``DEFAULTS = dict(cls.FILTER_DEFAULTS)``, then ``DEFAULTS.update(
@@ -4109,9 +4266,10 @@ class FilterSet(
             child_model = require(filterset_cls._meta.model, is_model_class)
             # Never ``None`` on an instance (see ``ProjectedChildFilter.filter``).
             parent_qs = require(self.queryset, is_queryset)
-            with _pipeline_built():
+            child_queryset = base_queryset(child_model, using=parent_qs.db)
+            with _pipeline_built(filterset_cls):
                 child = filterset_cls(
-                    queryset=base_queryset(child_model, using=parent_qs.db),
+                    queryset=child_queryset,
                     request=self.request,
                 )
             child._projection_owner = self
@@ -4148,13 +4306,34 @@ class FilterSet(
 
         The pair is typed as the upstream body returns it: the class is ``None`` for a field
         with no ``FILTER_DEFAULTS`` entry (``(None, {})``), which typeshed's stub leaves out.
+        Upstream is asked about the column ``_selected_column`` names, so a ``GeneratedField``
+        no entry covers is classified as the column it computes.
         """
         # basedpyright: typeshed narrows ``field`` to ``Field`` (see ``filter_for_field``); it
         # rejects ``ModelField``'s ``ForeignObjectRel`` arm
         return super().filter_for_lookup(
-            field,  # pyright: ignore[reportArgumentType]
+            cls._selected_column(field),  # pyright: ignore[reportArgumentType]
             lookup_type,
         )
+
+    @classmethod
+    def _selected_column(cls, field: ModelField) -> ModelField:
+        """Return the field django-filter selects ``field``'s filter class off.
+
+        ``field`` itself, except a ``GeneratedField`` for whose class the merged
+        ``FILTER_DEFAULTS`` plus ``Meta.filter_overrides`` map (``_merged_filter_defaults``)
+        holds no entry: upstream's ``try_dbfield`` walk finds none for it, and
+        ``BaseFilterSet.filter_for_lookup`` answers ``(None, {})``, so the column it computes
+        (``types/converters.py::generated_output_field``: the output class, the generated
+        field's choices) is selected in its place. A consumer entry for ``GeneratedField``
+        (or a subclass) is reached as written. ``_upstream_filter_for_lookup`` asks upstream
+        about this field and the ownership oracle (``_generation_origin_for_field``,
+        ``_origin_for_selection_class``) classifies it, so the two read one selection.
+        """
+        column = generated_output_field(field)
+        if column is None or _entry_by_mro(cls._merged_filter_defaults(), type(field)) is not None:
+            return field
+        return column
 
     # basedpyright: typeshed types ``filter_for_lookup``'s class as never ``None``; upstream
     # returns ``(None, {})`` for a field with no ``FILTER_DEFAULTS`` entry. It rejects the ``None``
@@ -4252,11 +4431,14 @@ class FilterSet(
                 "only 'exact', 'in', and 'isnull'. Remove it from Meta.fields.",
             )
         if not field.is_relation:
+            # A ``GeneratedField`` is the column it computes to every class test below.
+            column = generated_output_field(field) or field
             if (
                 default_class is not None
-                and isinstance(field, models.Field)
+                and isinstance(column, models.Field)
                 and _is_text_pattern_on_non_text(field, lookup_type)
-                and cls._origin_for_selection_class(type(field)) == "framework_default"
+                and cls._origin_for_selection_class(type(cls._selected_column(field)))
+                == "framework_default"
             ):
                 # A text-pattern lookup matches the column's text rendering against a string
                 # pattern (``_TEXT_PATTERN_LOOKUPS``), so on a date, number, Boolean or UUID
@@ -4273,13 +4455,13 @@ class FilterSet(
                 # empty-value skip that would widen it to every row, and a ``"null"``-valued
                 # member included, never ``ChoiceFilter``'s ``IS NULL`` branch.
                 return EnumChoiceFilter, params
-            if default_class is CharFilter and isinstance(field, models.Field) and field.choices:
+            if default_class is CharFilter and isinstance(column, models.Field) and column.choices:
                 # Every other single-value lookup on a text choice column publishes the same
                 # enum (``filters/inputs.py::_element_annotation``), so its members are values
                 # too: ``iExact: BLANK`` applies ``iexact ''``, never the empty-value skip.
                 # ``in`` / ``range`` / ``isnull`` are not ``CharFilter`` and keep their classes.
                 return EnumLookupFilter, params
-            if lookup_type == "in" and isinstance(field, models.IntegerField):
+            if lookup_type == "in" and isinstance(column, models.IntegerField):
                 # An element-binding integer ``__in`` routes through IntegerInFilter:
                 # it drops a column's out-of-range members (an out-of-range value overflows
                 # the backend at bind), binds a transform's members as the lookup prepares
@@ -4302,7 +4484,7 @@ class FilterSet(
                         "package cannot apply its membership rule.",
                     )
                 return membership_in_filter_class(default_class), params
-            if lookup_type == "range" and isinstance(field, models.IntegerField):
+            if lookup_type == "range" and isinstance(column, models.IntegerField):
                 # A bound-binding integer ``__range`` routes through IntegerRangeFilter:
                 # a raw ``BETWEEN a AND b`` binds BOTH bounds directly, so an out-of-range
                 # bound overflows the backend at bind exactly as an ``__in`` member does.
@@ -4586,7 +4768,12 @@ class FilterSet(
             )
 
     @classmethod
-    def _normalize_input(cls, input_value: object) -> dict[str, object]:
+    def _normalize_input(
+        cls,
+        input_value: object,
+        *,
+        _bindings: dict[str, NormalizedFormValue] | None = None,
+    ) -> dict[str, object]:
         """Translate a Strawberry input dataclass into `django-filter` form data.
 
         Related-branch keys (the ``shelves`` / ``books`` / etc. names
@@ -4635,11 +4822,10 @@ class FilterSet(
             # the declared filter ran. ``_validate_logic_element_shape``
             # already fails loud for exactly this shape one level down (a
             # scalar arm of an ``and`` / ``or`` branch); the top of the
-            # request is the same bypass and gets the same verdict. A wire
-            # input can never land here (the generated input class types it),
-            # so what arrives is always a hand-built input -- a direct
-            # ``apply_sync`` / ``filter`` call, or a related branch of a
-            # hand-built mapping -- and it must not be answered with rows.
+            # request gets the same verdict. Generated FilterInput values cannot
+            # have this shape, but an ordinary consumer JSON/scalar argument or
+            # a programmatic mapping can pass it to the public apply pipeline.
+            # Related branches share the guard; none may answer with rows.
             raise ConfigurationError(
                 f"FilterSet {truth.qualname(cls)}: the filter input must be a "
                 f"mapping or a filter-input object, got a "
@@ -4677,7 +4863,14 @@ class FilterSet(
                 field.python_attr,
                 field.raw_value,
             ):
-                data.update(cls._leaf_form_data(form_key, filter_instance, value))
+                patch = cls._leaf_form_data(form_key, filter_instance, value)
+                data.update(patch)
+                if _bindings is not None:
+                    _bindings[form_key] = NormalizedFormValue(
+                        form_key,
+                        filter_instance,
+                        patch.axis_keys if isinstance(patch, _RangeFormPatch) else None,
+                    )
         return data
 
     @classmethod
@@ -4690,11 +4883,13 @@ class FilterSet(
         """Return the form-data keys and values one active lookup of a leaf writes.
 
         The value's form-data shape is ``inputs.py::normalize_input_value``'s: a
-        range patch writes the keys its widget reads for the bounds it carries
-        (none for a range naming no bound), any other value writes ``form_key``,
-        and a dict other than the range patch raises (``_reject_dict_form_value``).
-        A lookup writing no key is one the form data does not name
-        (``_named_leaf_filters``): the form reads it as absent (``_leaf_absent``).
+        range patch writes its declared axis keys for the bounds it carries
+        (none for a range naming no bound), any other value writes the logical
+        ``form_key``, and a dict other than the range patch raises
+        (``_reject_dict_form_value``). The actual bound consumer form reads those
+        current values under its own widget keys and prefix (``form``). A lookup
+        writing no key remains unnamed (``_named_leaf_filters``) and absent
+        (``_leaf_absent``).
         """
         normalized = normalize_input_value(filter_instance, value, field_name=form_key)
         if isinstance(normalized, _RangeFormPatch):
@@ -4733,8 +4928,8 @@ class FilterSet(
         head, so the generated input and the form data never disagree. A scalar
         value is shorthand for the head's ``exact`` lookup, or for its only
         lookup. A field or lookup the table does not hold raises: it can only
-        come from a hand-built mapping, and writing it as an unknown form key
-        would apply nothing.
+        come from a programmatic mapping or an ordinary consumer JSON argument;
+        writing it as an unknown form key would apply nothing.
         """
         lookups = lookups_by_attr.get(python_attr)
         if lookups is None:
@@ -4798,10 +4993,9 @@ class FilterSet(
         close. Only range-kind filters legitimately consume a multi-key patch,
         and their arm always builds the typed patch, so only it merges.
 
-        No generated input annotation for a non-range filter accepts an
-        object, so a dict here never comes off the wire: it is always a
-        malformed programmatic input (the mapping form of ``apply_sync`` /
-        ``filter``), which is why rejecting it cannot break a typed query. The
+        No generated input annotation for a non-range filter accepts an object.
+        Programmatic mappings and ordinary consumer JSON arguments can still
+        supply one to the public apply pipeline, so both receive this refusal. The
         filter is named by its declared class (``_leaf_declaration``), never an
         expanded copy's runtime-built ``Projected<Class>``.
         """
@@ -5595,9 +5789,11 @@ class FilterSet(
         """Return ``(name, filter)`` for every leaf of one input level the form data names.
 
         In input order, as ``_supplied_leaf_filters``. A leaf is named when the
-        form-data keys it writes (``_leaf_form_data``, what ``_normalize_input``
-        binds) are not empty: the keys the form names a flat copy by
-        (``_named_flat_copies``) and reads a leaf's value from (``_leaf_absent``).
+        normalization keys it writes (``_leaf_form_data``) are not empty.
+        A pipeline construction retains these logical names alongside its plain
+        data; the actual bound form supplies the widget keys and prefix. Direct
+        form construction still names copies by actual keys (``_named_flat_copies``).
+        Both readers agree with ``_leaf_absent``.
         Every supplied leaf (``_supplied_leaf_filters``) is named except a range
         naming no bound (``{start: null, end: null}``, ``{}``), which writes no
         key, so the form reads it as absent.
@@ -6241,14 +6437,16 @@ class FilterSet(
         for op, children in cls._iter_logic_branches(tree):
             for index, child_input in enumerate(children):
                 path = _branch_key(self._branch_path, op.arm_key(index))
+                bindings: dict[str, NormalizedFormValue] = {}
                 arm = cls._build_stashed_instance(
-                    cls._normalize_input(child_input),
+                    cls._normalize_input(child_input, _bindings=bindings),
                     rows,
                     self.request,
                     self._apply_info,
                     self._nested_qs_by_branch_id,
                     self._hop_visibility(),
                     branch_path=path,
+                    form_bindings=FilterFormBindings(MappingProxyType(bindings)),
                 )
                 arm._logic_depth = self._logic_depth + 1
                 arm._absent_leaf_verdicts = self._absent_leaf_verdicts
@@ -6396,13 +6594,18 @@ class FilterSet(
     def _leaf_absent(self, name: str) -> bool:
         """Whether the request's data carries no key the form field of leaf ``name`` reads.
 
-        Read as ``_named_flat_copies`` names a copy: the keys the field's widget
-        reads (``utils/widgets.py::widget_keys``, else the name), under the
-        form prefix. A leaf with any of them present is supplied, whatever its
+        Normalized pipeline data names the logical field or a supplied range
+        axis; current consumer form data is read so constructor edits/removals
+        win. Direct and explicitly keyed data names the keys the actual widget
+        reads (``utils/widgets.py::widget_keys``), under the form prefix. A leaf
+        with any of them present is supplied, whatever its
         value (``""`` included); one with none is absent, and its value is
         whatever its field cleans an absent key to.
         """
         form = self.form
+        bindings = self._form_bindings
+        if bindings is not None and bindings.supplied(name, form.data):
+            return False
         key = form.add_prefix(name)
         keys = widget_keys(read_attr(form.fields[name], "widget"), key) or [key]
         return all(read not in form.data for read in keys)
@@ -6820,14 +7023,16 @@ class FilterSet(
             child_set = probed.instance
             child_set.queryset = constrained
         else:
+            bindings: dict[str, NormalizedFormValue] = {}
             child_set = cls._build_stashed_instance(
-                cls._normalize_input(child_input),
+                cls._normalize_input(child_input, _bindings=bindings),
                 constrained,
                 request,
                 info,
                 _nested_qs_by_branch_id,
                 _flat_hop_visibility,
                 branch_path=_branch_path,
+                form_bindings=FilterFormBindings(MappingProxyType(bindings)),
             )
             child_set._logic_depth = _depth
             child_set._absent_leaf_verdicts = (
@@ -6900,15 +7105,16 @@ class FilterSet(
         info: object,
         child_qs_by_branch: Mapping[str, models.QuerySet[models.Model]],
         hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]],
-    ) -> tuple[dict[str, object], object, models.QuerySet[_M]]:
-        """Return the form data, request and constrained queryset shared by both apply paths.
+    ) -> tuple[dict[str, object], object, models.QuerySet[_M], FilterFormBindings]:
+        """Return form data, request, constrained rows and widget bindings for both apply paths.
 
         Captures the verbatim normalize / request / related-constraints
         sequence both apply paths run identically, before the filterset is
         built by ``_apply_common_finalize``. ``hop_visibility`` is the
         request-wide hop visibility map the filter set instance reads next.
         """
-        data = cls._normalize_input(input_value)
+        bindings: dict[str, NormalizedFormValue] = {}
+        data = cls._normalize_input(input_value, _bindings=bindings)
         request = cls._request_from_info(info)
         constrained = cls._apply_related_constraints(
             input_value,
@@ -6917,7 +7123,7 @@ class FilterSet(
             info,
             hop_visibility,
         )
-        return data, request, constrained
+        return data, request, constrained, FilterFormBindings(MappingProxyType(bindings))
 
     @classmethod
     def _build_stashed_instance(
@@ -6930,6 +7136,7 @@ class FilterSet(
         flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]],
         *,
         branch_path: str = "",
+        form_bindings: FilterFormBindings | None = None,
     ) -> Self:
         """Build a filterset over ``constrained`` and stash the per-request state it reads.
 
@@ -6944,7 +7151,7 @@ class FilterSet(
         # basedpyright: typeshed narrows ``request`` to ``HttpRequest``; upstream only stores it,
         # and the context request need not be a Django one. It rejects ``object`` for
         # ``HttpRequest | None``
-        with _pipeline_built():
+        with _pipeline_built(cls, form_bindings):
             instance = cls(
                 data=data,
                 queryset=constrained,
@@ -6969,6 +7176,7 @@ class FilterSet(
         flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]],
         run_permissions: bool = True,
         branch_path: str = "",
+        form_bindings: FilterFormBindings | None = None,
     ) -> models.QuerySet[_M]:
         """Build the filterset, run the perm check + form validate + absent-leaf probe, read ``.qs``.
 
@@ -7014,6 +7222,7 @@ class FilterSet(
             flat_hop_visibility=flat_hop_visibility,
             run_permissions=run_permissions,
             branch_path=branch_path,
+            form_bindings=form_bindings,
         )
         return filterset_instance.qs if rows is None else rows
 
@@ -7030,6 +7239,7 @@ class FilterSet(
         flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]],
         run_permissions: bool,
         branch_path: str,
+        form_bindings: FilterFormBindings | None,
     ) -> Self:
         """Build the filterset (``_build_stashed_instance``), run the permission pass, validate the form.
 
@@ -7044,6 +7254,7 @@ class FilterSet(
             nested_qs_by_branch_id,
             flat_hop_visibility,
             branch_path=branch_path,
+            form_bindings=form_bindings,
         )
         if run_permissions:
             cls._run_permission_checks(input_value, request)
@@ -7063,6 +7274,7 @@ class FilterSet(
         flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]],
         run_permissions: bool,
         branch_path: str,
+        form_bindings: FilterFormBindings | None,
     ) -> tuple[Self, tuple[RelationHop, ...], models.QuerySet[_M] | None]:
         """Return the validated filterset (``_validated_filterset``), its absent leaves' hops, its rows.
 
@@ -7086,6 +7298,7 @@ class FilterSet(
             flat_hop_visibility=flat_hop_visibility,
             run_permissions=run_permissions,
             branch_path=branch_path,
+            form_bindings=form_bindings,
         )
         arms: dict[str, _ProbedArm] = {}
         filterset_instance._probed_arms = arms
@@ -7150,7 +7363,7 @@ class FilterSet(
             _branch_path=_branch_path,
         )
         hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]] = {}
-        data, request, constrained = cls._apply_common_prelude(
+        data, request, constrained, form_bindings = cls._apply_common_prelude(
             input_value,
             queryset,
             info,
@@ -7167,6 +7380,7 @@ class FilterSet(
             flat_hop_visibility=hop_visibility,
             run_permissions=run_permissions,
             branch_path=_branch_path,
+            form_bindings=form_bindings,
         )
 
     @classmethod
@@ -7254,7 +7468,7 @@ class FilterSet(
             _branch_path=_branch_path,
             flat_hop_visibility=flat_hop_visibility,
         )
-        data, request, constrained = cls._apply_common_prelude(
+        data, request, constrained, form_bindings = cls._apply_common_prelude(
             input_value,
             queryset,
             info,
@@ -7272,6 +7486,7 @@ class FilterSet(
             flat_hop_visibility=flat_hop_visibility,
             run_permissions=run_permissions,
             branch_path=_branch_path,
+            form_bindings=form_bindings,
         )
         if rows is not None:
             return rows

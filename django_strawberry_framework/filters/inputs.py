@@ -98,10 +98,13 @@ from .base import (
     TextPatternFilter,
     TypedFilter,
     _bound_field_name,
+    _ColumnCleanedFilter,
     _compared_columns,
     _EnumMemberFilterMixin,
     _filterset_lookup_operand,
+    _filterset_model_field,
     _filterset_value_field,
+    comparison_form_field,
     copied_form_field,
     model_choice_identity_column,
 )
@@ -468,6 +471,121 @@ def _declared_form_field(filter_instance: Filter) -> object:
         return copied_form_field(filter_instance)
     except AttributeError:
         return None
+
+
+def _form_value_fields(filter_instance: Filter) -> tuple[object, ...]:
+    """Return the form fields that clean one value the filter's input publishes.
+
+    The filter's own form field (``_declared_form_field``), whose class also names the
+    member a django-filter CSV field cleans (``BaseCSVFilter`` builds its field as a
+    ``BaseCSVField`` subclass of the filter's own ``field_class``). A ``MultiValueField``
+    (django-filter's ``RangeField`` and its ``DateRangeField`` / ``DateTimeRangeField`` /
+    ``TimeRangeField`` kin) cleans each axis with one of its ``fields``, so those answer.
+    Empty for a filter whose form field is not built unbound.
+    """
+    form_field = _declared_form_field(filter_instance)
+    if form_field is None:
+        return ()
+    if isinstance(form_field, forms.MultiValueField):
+        return tuple(form_field.fields)
+    return (form_field,)
+
+
+def _passes_value_through(form_field: object) -> bool:
+    """Whether ``form_field`` cleans a value to itself, whatever its kind.
+
+    Django's bare ``forms.Field`` (django-filter's ``Filter.field_class``, so a bare
+    ``Filter`` or ``TypedFilter``) and a subclass that overrides neither ``to_python`` nor
+    ``clean``: its ``to_python`` returns the value unchanged, so it cleans a value of any
+    scalar the input publishes and the lookup receives it as sent.
+    """
+    return truth.is_instance(form_field, forms.Field) and not truth.overrides(
+        truth.class_of(form_field),
+        forms.Field,
+        "to_python",
+        "clean",
+    )
+
+
+def _form_cleaned_value_field(
+    filter_instance: Filter,
+    value_field: ModelField | None,
+    filterset_cls: type[FilterSet],
+) -> ModelField | None:
+    """Return ``value_field`` when the filter's own form cleans a value of it, else ``None``.
+
+    A transform between the column and the lookup (``filters/base.py::_filterset_value_field``)
+    types the leaf by its output, because django-filter builds a generated leaf's filter
+    from that output (``filters/sets.py::FilterSet.filter_for_field``), so its form cleans that
+    kind. A declared filter's form comes from its own class instead: a
+    ``DateFilter(field_name="occurred_on", lookup_expr="year")`` binds a ``DateField``
+    whatever the ``year`` output is, and an ``Int`` wire value would reach a form that
+    cannot clean it. The output types the leaf only when every form field that cleans one
+    published value (``_form_value_fields``) cleans the scalar django-filter's own filter
+    for that output cleans (``filters/base.py::comparison_form_field``) or a subclass of it,
+    or passes any value through (``_passes_value_through``): a declared ``NumberFilter`` on
+    ``occurred_at__year`` cleans the ``Decimal`` the generated ``NumberFilter`` does, so it
+    stays ``Int``; a declared ``DateTimeFilter`` with ``lookup_expr="date"`` cleans a
+    ``datetime``, which is a ``date``, so it stays ``Date`` (Django's ``DateTimeField``
+    cleans a ``date``); a bare ``Filter`` or ``TypedFilter`` (``forms.Field``) on ``year``
+    hands the lookup the ``Int`` it was sent, so it stays ``Int``, while a ``CharFilter``
+    cleans text and takes ``String``. Otherwise ``None``, and the caller types the value by
+    that form field. Every arm whose value a declared form cleans reads it: the scalar
+    catch-all, a bare ``TypedFilter``, each member of a CSV filter (a consumer ``class
+    DatesInFilter(BaseInFilter, DateFilter)`` on ``year__in`` takes ``Date`` members, a
+    generated ``year__in`` keeps ``Int``) and each axis of django-filter's range filters (a
+    ``DateFromToRangeFilter`` on ``occurred_on__year`` takes ``Date`` axes; the range arm
+    refuses one whose axes clean different kinds, ``_range_axis_scalar``). A package
+    ``RangeFilter`` / ``ListFilter`` / ``ArrayFilter`` cleans each value with the form field
+    of the output's own ``gte`` filter (``filters/base.py::_ColumnCleanedFilter``), so it
+    agrees by construction and keeps the output. A leaf whose value is its column (no
+    transform, a ``method=`` filter) is unchanged, as is one whose form field is not built
+    unbound or whose output django-filter builds no filter for (an index of an array of
+    arrays keeps its array refusal).
+    """
+    if (
+        value_field is None
+        or truth.is_instance(filter_instance, _ColumnCleanedFilter)
+        or value_field is _filterset_model_field(filterset_cls, filter_instance)
+    ):
+        return value_field
+    form_fields = _form_value_fields(filter_instance)
+    upstream = comparison_form_field(filterset_cls, value_field, filter_instance.field_name)
+    if not form_fields or upstream is None:
+        return value_field
+    compared = _scalar_from_form_field(upstream)
+    if all(
+        _passes_value_through(form_field)
+        or (
+            truth.is_type(compared)
+            and truth.is_subclass(_scalar_from_form_field(form_field), compared)
+        )
+        for form_field in form_fields
+    ):
+        return value_field
+    return None
+
+
+def _range_axis_scalar(filter_instance: Filter, filterset_cls: type[FilterSet]) -> object:
+    """Return the scalar both axes of a range filter's own form clean, the build refusing two.
+
+    The range input carries one scalar for both bounds (``_build_range_input_class``:
+    ``start`` and ``end`` of one type, under one generated name per value path), so a
+    ``MultiValueField`` whose axes clean different kinds (``fields=(forms.DateField(),
+    forms.IntegerField())``) has no type that each bound's form can clean, and is a
+    ``ConfigurationError`` naming the filter as declared (``_declaration_of``).
+    """
+    scalars = {_scalar_from_form_field(axis) for axis in _form_value_fields(filter_instance)}
+    if len(scalars) == 1:
+        return scalars.pop()
+    declaration = _declaration_of(filter_instance, filterset_cls)
+    kinds = ", ".join(sorted(truth.name(scalar) for scalar in scalars))
+    raise ConfigurationError(
+        f"{declaration.owner(filterset_cls)}: {declaration.kind} on "
+        f"{truth.render(declaration.declared.field_name)}{declaration.route} cleans its two "
+        f"range axes as different kinds ({kinds}), and a range input carries one type for "
+        "both bounds; give both axes form fields that clean one kind.",
+    )
 
 
 def _model_choice_identity_annotation(
@@ -894,8 +1012,11 @@ def convert_filter_to_input_annotation(
         # into ``BaseInFilter`` / ``BaseRangeFilter`` (both ``BaseCSVFilter``
         # subclasses) whose form field consumes a LIST of values, not a
         # scalar. The element type is model-field-driven so a CSV ``in`` over
-        # a choice column keeps its enum and a 64-bit column keeps ``BigInt``.
-        column = _array_element_column(matched, model_field, filterset_cls)
+        # a choice column keeps its enum and a 64-bit column keeps ``BigInt``; past a
+        # transform, a member the filter's own form cannot clean as the output is typed by
+        # that form (``_form_cleaned_value_field``).
+        value_field = _form_cleaned_value_field(matched, model_field, filterset_cls)
+        column = _array_element_column(matched, value_field, filterset_cls)
         element = _element_annotation(matched, column, owner_definition, filterset_cls)
         return GenericAlias(list, (element,))
 
@@ -911,7 +1032,13 @@ def convert_filter_to_input_annotation(
         _ = range_form_keys(matched, matched.field_name or "range", filterset_cls)
         if array_element_field(model_field) is not None:
             raise _array_column_refusal(matched, model_field, filterset_cls, "range")
-        inner = _scalar_from_model_field(model_field)
+        # Each axis is typed like a scalar leaf's value (``_form_cleaned_value_field``).
+        value_field = _form_cleaned_value_field(matched, model_field, filterset_cls)
+        inner = (
+            _scalar_from_model_field(value_field)
+            if value_field is not None or model_field is None
+            else _range_axis_scalar(matched, filterset_cls)
+        )
         return _build_range_input_class(matched, inner, filterset_cls)
 
     def _list(matched: Filter) -> object:
@@ -920,7 +1047,10 @@ def convert_filter_to_input_annotation(
         return GenericAlias(list, (element,))
 
     def _typed(matched: Filter) -> object:
-        return _element_annotation(matched, model_field, owner_definition, filterset_cls)
+        # Past a transform, a value the filter's own form cannot clean as the output is typed
+        # by that form (``_form_cleaned_value_field``), as the catch-all's is.
+        value_field = _form_cleaned_value_field(matched, model_field, filterset_cls)
+        return _element_annotation(matched, value_field, owner_definition, filterset_cls)
 
     def _choice(matched: Filter) -> object:
         # The array's own ``choices`` are ambiguous (the read side refuses them too).
@@ -938,7 +1068,8 @@ def convert_filter_to_input_annotation(
             # ``isnull`` is a boolean predicate regardless of the column type, past a
             # transform too (``year__isnull``): the value field is irrelevant here.
             return bool
-        return _element_annotation(matched, model_field, owner_definition, filterset_cls)
+        value_field = _form_cleaned_value_field(matched, model_field, filterset_cls)
+        return _element_annotation(matched, value_field, owner_definition, filterset_cls)
 
     def _one_key(handler: Callable[[Filter], object]) -> Callable[[Filter], object]:
         def _checked(matched: Filter) -> object:
@@ -1091,9 +1222,9 @@ def _require_list_container(
     """Fail loud when a list-consuming normalize arm receives another container.
 
     The list-consuming normalize arms iterate ``raw_value``.
-    The schema declares every such input as a GraphQL list, so the wire can
-    only deliver a list; the reachable non-list shapes are direct-Python
-    ``apply_sync`` caller mistakes. Iterating one would splat it: a
+    Generated filter inputs declare a GraphQL list. A consumer's ordinary JSON
+    argument or a programmatic ``apply_sync`` caller can still supply another
+    shape to the public apply pipeline. Iterating one would splat it: a
     ``{'start': 1, 'end': 5}`` patch would normalize to its KEYS
     (``['start', 'end']``) and a string to its CHARACTERS, silently dropping
     the intended predicate and filling the form-data dict with junk members.
@@ -1107,7 +1238,7 @@ def _require_list_container(
             f"{_declaration_of(filter_instance, None).kind} consumes a list of values for its "
             f"{filter_instance.field_name!r} input, but received a non-list container "
             f"({truth.kind(raw_value)} {truth.render(raw_value)}) for the {shape}; "
-            "send a list (the GraphQL schema already rejects this shape over the wire).",
+            "send a list (generated filter inputs deliver a list after GraphQL coercion).",
         )
     return raw_value
 
@@ -1227,6 +1358,8 @@ class _RangeFormPatch(dict[str, object]):
     a patch.
     """
 
+    axis_keys: tuple[str, str] | None = None
+
 
 def _normalize_range_value(
     filter_instance: Filter,
@@ -1254,11 +1387,11 @@ def _normalize_range_value(
     walking ``data.keys()``.
 
     The value is read through ``utils/input_values.py::iter_input_items``, the
-    package's one dict-or-input-dataclass walk. The schema types every range
-    input as the ``{start, end}`` object, so the wire delivers nothing else; a
-    value that walk cannot read (a list, a scalar, an arbitrary object) or that
-    carries a key other than ``start`` / ``end`` is a hand-built mapping's
-    mistake. Its values would never be read, so it raises the typed
+    package's one dict-or-input-dataclass walk. Generated range inputs declare
+    the ``{start, end}`` object; ordinary consumer JSON arguments and programmatic
+    mappings can also reach this pipeline. A value the walk cannot read (a list,
+    a scalar, an arbitrary object), or a key other than ``start`` / ``end``,
+    would lose its values, so it raises the typed
     ``ConfigurationError`` instead of answering with an unconstrained patch, as
     ``_require_list_container`` does for the list arms. A misspelled lookup
     under a range head (``{"span": {"rnage": {...}}}``) arrives here as the
@@ -1272,8 +1405,8 @@ def _normalize_range_value(
             f"{_declaration_of(filter_instance, None).kind} consumes a range input with only "
             f"'start' / 'end' axes for its {base!r} input, but received "
             f"{truth.kind(raw_value)} {truth.render(raw_value)}; send a mapping or "
-            "input object with 'start' / 'end' (the GraphQL schema already rejects this "
-            "shape over the wire).",
+            "input object with 'start' / 'end' (generated filter inputs reject this shape"
+            " during GraphQL validation).",
         )
     axes = dict(items)
     start = axes.get("start")
@@ -1287,6 +1420,7 @@ def _normalize_range_value(
     # form-field cleaning -- the same ``is_inactive_value`` test as
     # ``normalize_input_value``'s entry guard.
     patch = _RangeFormPatch()
+    patch.axis_keys = (start_key, end_key)
     if not is_inactive_value(start, unset_sentinel=UNSET):
         patch[start_key] = _unwrap_enum_member(start)
     if not is_inactive_value(end, unset_sentinel=UNSET):
@@ -1319,7 +1453,22 @@ def range_form_keys(
             "FilterSet, so the form-data keys its widget reads cannot be known when the "
             "schema is built; build the field from the filter's own arguments.",
         )
-    keys = multi_widget_keys(read_attr(form_field, "widget"), base)
+    return _range_widget_keys(
+        filter_instance,
+        read_attr(form_field, "widget"),
+        base,
+        filterset_cls,
+    )
+
+
+def _range_widget_keys(
+    filter_instance: Filter,
+    widget: object,
+    base: str,
+    filterset_cls: type[FilterSet] | None = None,
+) -> tuple[str, str]:
+    """Ask an actual range widget for its axes under the declaration's typed refusal."""
+    keys = multi_widget_keys(widget, base)
     if keys is None or len(keys) != _RANGE_BOUNDS:
         declaration = _declaration_of(filter_instance, filterset_cls)
         raise ConfigurationError(
