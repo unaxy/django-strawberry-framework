@@ -398,13 +398,18 @@ _CONSUMER_CURSOR_PREFIX = "categorycursor"
 _CONSUMER_WALK_PAGES = 3
 
 
-def _consumer_edge_schema(node_type: type[DjangoType]) -> strawberry.Schema:
+def _consumer_edge_schema(
+    node_type: type[DjangoType],
+    *,
+    schema_class: type[strawberry.Schema] = strawberry.Schema,
+) -> strawberry.Schema:
     """Build a schema whose ``items`` is a consumer connection with its own cursor prefix.
 
     Strawberry's documented customization: an ``Edge`` subclass declaring
     ``CURSOR_PREFIX`` and a ``DjangoConnection`` subclass whose ``edges`` are
     that edge, mounted with ``relay.connection`` over the same ordered source
-    ``_schema_for`` serves.
+    ``_schema_for`` serves. ``schema_class=DjangoSchema`` installs the production
+    error policy, under which only a ``GraphQLError`` reaches the wire verbatim.
     """
     # The node type declares ``Meta.interfaces = (relay.Node,)``, so it is the
     # ``relay.Node`` the edge is generic over.
@@ -435,7 +440,7 @@ def _consumer_edge_schema(node_type: type[DjangoType]) -> strawberry.Schema:
     }
     query_cls = strawberry.type(type("Query", (), query_namespace))
     finalize_django_types()
-    return strawberry.Schema(query=query_cls, config=strawberry_config())
+    return schema_class(query=query_cls, config=strawberry_config())
 
 
 def _page_query(argument: str, cursor: str | None) -> str:

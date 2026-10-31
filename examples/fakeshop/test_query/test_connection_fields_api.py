@@ -5,7 +5,9 @@ The responses and SQL distinguish source validation, pagination, sidecars and vi
 """
 
 import asyncio
-from collections.abc import AsyncIterator, Callable, Iterable
+import functools
+import inspect
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterable
 from functools import wraps
 from typing import TYPE_CHECKING, Literal, TypeVar
 
@@ -21,15 +23,18 @@ from django.test import override_settings
 from django.urls import path
 from graphql_client import JSONObject, json_str
 from strawberry import relay
+from strawberry.relay.utils import from_base64, to_base64
 from typing_extensions import override
 
 from django_strawberry_framework import (
     DjangoOptimizerExtension,
+    DjangoSchema,
     DjangoType,
     finalize_django_types,
     strawberry_config,
 )
 from django_strawberry_framework.connection import (
+    _CONNECTION_ASYNC_RECOURSE,
     DjangoConnectionField,
     _connection_type_cache,
     _connection_type_for,
@@ -44,6 +49,7 @@ from tests._catalog_data import categories_from_seed, items_from_seed
 from tests._connection_field_schemas import (
     _CONNECTION_MALFORMED_FILTER_ROWS,
     _CONNECTION_MALFORMED_ORDER_ROWS,
+    _CONSUMER_CURSOR_PREFIX,
     _CONSUMER_WALK_PAGES,
     _FILTERED_CONNECTION_QUERY,
     _a_or_b_category_names,
@@ -63,6 +69,7 @@ from tests._connection_field_schemas import (
     _make_sidecar_node_type,
     _node_type,
     _order_override_passthrough,
+    _page_query,
     _schema_for,
     _seed_public_private_categories,
     _swap_prefix,
@@ -545,6 +552,174 @@ async def test_connection_async_generator_resolver_executes_on_async_path() -> N
     assert _edge_names(json_at(result.data, "items")) == [rows[0].name]
 
 
+_ASYNC_ONLY_SOURCE_MESSAGE = (
+    "A connection resolver returned an AsyncIterable in a sync execution context. "
+    "Use `await schema.execute(...)` for async iterable resolvers."
+)
+
+
+def _async_only_source_resolver(shape: str, rows: list[Category]) -> Callable[..., object]:
+    """One consumer resolver per async-only source shape the sync executor must refuse."""
+
+    async def stream(_root: object, _info: object) -> AsyncIterator[Category]:
+        for row in rows:
+            yield row
+
+    if shape == "async-generator":
+        return stream
+    if shape == "partial-async-generator":
+
+        class _Resolver:
+            async def __call__(
+                self,
+                _prefix: str,
+                root: object,
+                info: object,
+            ) -> AsyncIterator[Category]:
+                del root, info  # Strawberry passes both by keyword; the stream reads neither
+                for row in rows:
+                    yield row
+
+        return functools.partial(_Resolver(), "ignored")
+
+    def returns_stream(root: object, info: object) -> AsyncIterator[Category]:
+        return stream(root, info)
+
+    return returns_stream
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "shape",
+    ["async-generator", "partial-async-generator", "sync-def-returning-async-iterable"],
+)
+def test_sync_http_refuses_an_async_only_connection_source(shape: str) -> None:
+    """Sync HTTP refuses every async-only connection source with the public sync-misuse error.
+
+    The holder is a plain ``strawberry.Schema`` with no error policy, so the
+    message reaches the wire verbatim; under ``DjangoSchema``'s production policy
+    a consumer sees it masked, since ``SyncMisuseError`` is not a ``GraphQLError``.
+
+    The guard classifies the returned VALUE, so an ``async def`` generator, a
+    ``partial`` around an async-generator callable instance and a plain ``def``
+    returning an async generator all fail closed before Relay's synchronous
+    slicer consumes them (unguarded, the plain ``def`` reaches it and raises a
+    blank internal ``AssertionError``).
+    """
+    services.seed_data(1)
+    rows = list(Category.objects.order_by("pk"))
+    schema = _field_schema(
+        _make_sidecar_node_type("AsyncOnlySourceNode"),
+        resolver=_async_only_source_resolver(shape, rows),
+    )
+    result = _post(schema, "{ items(first: 1) { edges { node { id } } } }")
+    assert result.data is None
+    assert result.errors is not None
+    assert [json_str(error, "message") for error in result.errors] == [
+        _ASYNC_ONLY_SOURCE_MESSAGE,
+    ]
+
+
+@pytest.mark.django_db
+def test_sync_http_refuses_an_async_get_queryset_on_the_connection() -> None:
+    """An ``async def get_queryset`` reached by the sync connection pipeline is refused, not skipped."""
+    services.seed_data(1)
+
+    async def get_queryset(
+        _cls: type[DjangoType],
+        qs: models.QuerySet[Category],
+        _info: object,
+    ) -> models.QuerySet[Category]:
+        return qs
+
+    schema = _field_schema(
+        _make_sidecar_node_type("AsyncVisibilitySyncNode", get_queryset=get_queryset),
+    )
+    result = _post(schema, "{ items { edges { node { id } } } }")
+    assert result.data is None
+    assert result.errors is not None
+    message = (
+        "AsyncVisibilitySyncNode.get_queryset returned a coroutine in a sync resolver "
+        f"context. {_CONNECTION_ASYNC_RECOURSE}"
+    )
+    assert [json_str(error, "message") for error in result.errors] == [message]
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_async_http_refuses_a_sync_connection_resolver_returning_a_coroutine() -> None:
+    """A plain ``def`` returning a coroutine is committed to the sync path and never enters slicing.
+
+    The coroutine is disposed, never awaited: it is closed with its body never run.
+    """
+    inner_body_ran: list[str] = []
+    inner_coroutines: list[Coroutine[object, object, object]] = []
+
+    async def _inner() -> list[object]:
+        inner_body_ran.append("ran")
+        return []
+
+    def resolver(_root: object, _info: object) -> Awaitable[list[object]]:
+        coroutine = _inner()
+        inner_coroutines.append(coroutine)
+        return coroutine
+
+    schema = await sync_to_async(_field_schema)(
+        _make_sidecar_node_type("CoroSyncConnNode"),
+        resolver=resolver,
+    )
+    result = await _post_async(schema, "{ items { edges { node { id } } } }")
+    assert result.data is None
+    assert result.errors is not None
+    message = (
+        "A sync CoroSyncConnNode consumer resolver returned an awaitable. Declare the "
+        "resolver `async def` (or use an async callable) so the field awaits it and "
+        "applies the get_queryset visibility hook; a plain `def` resolver that returns "
+        "an awaitable is committed to the sync path and passing it through would "
+        "silently skip get_queryset."
+    )
+    assert [json_str(error, "message") for error in result.errors] == [message]
+    assert [inspect.getcoroutinestate(c) for c in inner_coroutines] == [inspect.CORO_CLOSED]
+    assert inner_body_ran == []
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_async_http_refuses_a_connection_resolver_resolving_to_another_awaitable() -> None:
+    """An async resolver whose awaited value is a SECOND awaitable fails closed before visibility.
+
+    The connection awaits the consumer resolver once. A value still awaitable after
+    that await, with no sidecar input, would otherwise pass the non-queryset branch
+    and skip ``get_queryset`` entirely. The inner awaitable is disposed, never awaited.
+    """
+    inner_body_ran: list[str] = []
+    inner_coroutines: list[Coroutine[object, object, object]] = []
+
+    async def _inner() -> Iterable[object]:
+        inner_body_ran.append("ran")
+        return []
+
+    async def resolver(_root: object, _info: object) -> Awaitable[Iterable[object]]:
+        coroutine = _inner()
+        inner_coroutines.append(coroutine)
+        return coroutine
+
+    schema = await sync_to_async(_field_schema)(
+        _make_sidecar_node_type("ResidualAsyncConnNode"),
+        resolver=resolver,
+    )
+    result = await _post_async(schema, "{ items { edges { node { id } } } }")
+    assert result.data is None
+    assert result.errors is not None
+    message = (
+        "An async ResidualAsyncConnNode consumer resolver resolved to another awaitable "
+        "after being awaited; a nested awaitable is neither a QuerySet nor a plain "
+        "iterable, and passing it through would silently skip the get_queryset "
+        "visibility hook. Return the queryset (or iterable) directly."
+    )
+    assert [json_str(error, "message") for error in result.errors] == [message]
+    assert [inspect.getcoroutinestate(c) for c in inner_coroutines] == [inspect.CORO_CLOSED]
+    assert inner_body_ran == []
+
+
 @pytest.mark.django_db
 @pytest.mark.parametrize("strictness", ["raise", "off"])
 def test_nested_connection_unplanned_raises_under_strictness(
@@ -747,6 +922,65 @@ def test_consumer_edge_prefix_pages_with_its_own_cursors(argument: str) -> None:
     assert len(stock) == 2 * _CONSUMER_WALK_PAGES
     assert {prefix for _node_id, (prefix, _index) in stock} == {relay.Edge.CURSOR_PREFIX}
     assert consumer == _swap_prefix(stock)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("argument", ["after", "before"])
+def test_consumer_edge_prefix_refuses_a_stock_cursor_with_the_package_cursor_error(
+    argument: str,
+) -> None:
+    """A stock ``arrayconnection`` cursor on a consumer edge prefix is the package's cursor error.
+
+    The holder is a ``DjangoSchema`` with the production error policy active, so only
+    a ``GraphQLError`` reaches the wire verbatim: the package refuses the cursor under
+    the connection's own prefix with ``PaginationArgumentError``, while Strawberry's
+    ``ListConnection`` refusal of the same foreign cursor is a ``TypeError`` with the
+    same words that the policy masks.
+    """
+    services.seed_data(1)
+    schema = _consumer_edge_schema(
+        _make_node_type("ForeignCursorNode", total_count=None),
+        schema_class=DjangoSchema,
+    )
+    result = _post(schema, _page_query(argument, to_base64(relay.Edge.CURSOR_PREFIX, 0)))
+    assert result.data is None
+    assert result.errors is not None
+    assert [json_str(error, "message") for error in result.errors] == [
+        f"Argument '{argument}' contains a non-existing value.",
+    ]
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_async_consumer_edge_prefix_pages_with_its_own_cursors_and_refuses_a_stock_one() -> (
+    None
+):
+    """Over async HTTP a consumer edge prefix pages from its own cursors and refuses a stock one."""
+    await sync_to_async(services.seed_data)(1)
+    schema = await sync_to_async(_consumer_edge_schema)(
+        _make_node_type("AsyncConsumerCursorNode", total_count=None),
+        schema_class=DjangoSchema,
+    )
+    first = await _post_async(schema, _page_query("after", None))
+    assert first.errors is None, first.errors
+    end_cursor = str(json_at(first.data, "items", "pageInfo", "endCursor"))
+    assert from_base64(end_cursor) == (_CONSUMER_CURSOR_PREFIX, "1")
+
+    second = await _post_async(schema, _page_query("after", end_cursor))
+    assert second.errors is None, second.errors
+    assert [
+        from_base64(str(json_at(edge, "cursor")))
+        for edge in json_list(second.data, "items", "edges")
+    ] == [(_CONSUMER_CURSOR_PREFIX, "2"), (_CONSUMER_CURSOR_PREFIX, "3")]
+
+    foreign = await _post_async(
+        schema,
+        _page_query("after", to_base64(relay.Edge.CURSOR_PREFIX, 0)),
+    )
+    assert foreign.data is None
+    assert foreign.errors is not None
+    assert [json_str(error, "message") for error in foreign.errors] == [
+        "Argument 'after' contains a non-existing value.",
+    ]
 
 
 @pytest.mark.django_db

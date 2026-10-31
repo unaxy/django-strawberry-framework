@@ -2,9 +2,11 @@
 
 Shipped scalar and library suites own ordinary scalar values, nullable outputs,
 choice blanks and the non-null Shelf condition enum. These holders add nullable
-choice columns with empty-option labels, reserved choice spellings, nullable
-BigInt arguments, an invalid outbound BigInt, both path-bearing file and image
-output objects, and real PostgreSQL container fields.
+choice columns with empty-option labels, reserved choice spellings, nullability
+overrides on a non-null and a nullable choice enum, nullable BigInt arguments,
+every outbound BigInt verdict on a resolver value (bool, float, str, Decimal,
+objects, int subclasses), both path-bearing file and image output objects, and
+real PostgreSQL container fields.
 
 Container rows are unsaved model instances, so the HTTP serialization and SDL
 checks work on SQLite too. Only importing Django's real ArrayField/HStoreField
@@ -14,6 +16,7 @@ types and their serialized values.
 
 from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager
+from decimal import Decimal
 from functools import wraps
 from types import ModuleType
 from typing import TYPE_CHECKING, Annotated
@@ -157,7 +160,11 @@ def test_a_nullable_bigint_argument_distinguishes_null_from_a_present_integer(wi
     assert payload == {"data": {"echo": "null" if wire == "null" else "1"}}
 
 
-@pytest.mark.parametrize("raw_value", [True, 7], ids=["refuse-bool", "accept-integer"])
+@pytest.mark.parametrize(
+    "raw_value",
+    [True, False, 7],
+    ids=["refuse-true", "refuse-false", "accept-integer"],
+)
 def test_an_outbound_bigint_rejects_bool_beside_its_integer_control(raw_value: int) -> None:
     """Bool never serializes as a BigInt even though Python admits it to the int-shaped NewType."""
 
@@ -173,11 +180,118 @@ def test_an_outbound_bigint_rejects_bool_beside_its_integer_control(raw_value: i
         assert payload["data"] is None, payload
         assert len(json_list(payload, "errors")) == 1
         assert json_at(payload, "errors", 0, "path") == ["value"]
-        assert (
-            json_str(payload, "errors", 0, "message") == "BigInt cannot serialize bool value True"
+        assert json_str(payload, "errors", 0, "message") == (
+            f"BigInt cannot serialize bool value {raw_value!r}"
         )
     else:
         assert payload == {"data": {"value": "7"}}
+
+
+class _NotAnInt:
+    """A resolver value that is no kind of ``int``."""
+
+
+class _HostileStr(str):
+    """A ``str`` subclass whose ``__int__`` raises: still a ``str`` to the serializer."""
+
+    __slots__ = ()
+
+    def __int__(self) -> int:
+        raise RuntimeError("int exploded")
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "kind"),
+    [
+        (1.9, "float"),
+        (0.0, "float"),
+        ("123", "str"),
+        (Decimal(123), "Decimal"),
+        (_HostileStr("7"), "_HostileStr"),
+        (_NotAnInt(), "_NotAnInt"),
+    ],
+    ids=[
+        "float",
+        "zero-float",
+        "str",
+        "decimal",
+        "str-subclass",
+        "object",
+    ],
+)
+def test_an_outbound_bigint_refuses_a_non_int_resolver_value(raw_value: object, kind: str) -> None:
+    """A resolver value that is no ``int`` is refused, never truncated or coerced to a decimal string.
+
+    The serializer reads the value's real class, so a float is not truncated through
+    ``str(float)`` and a numeric ``str`` (or a ``str`` subclass) is not passed through.
+    """
+
+    def resolve_value() -> object:
+        return raw_value
+
+    @strawberry.type
+    class Query:
+        value: object = strawberry.field(resolver=resolve_value, graphql_type=BigInt)
+
+    schema = DjangoSchema(query=Query, config=strawberry_config(), error_policy={"enabled": False})
+    payload = _post(schema, "{ value }")
+    assert payload["data"] is None, payload
+    assert len(json_list(payload, "errors")) == 1
+    assert json_at(payload, "errors", 0, "path") == ["value"]
+    assert json_str(payload, "errors", 0, "message") == f"BigInt cannot serialize {kind}"
+
+
+class _HostileInt(int):
+    """An ``int`` subclass whose conversion dunders raise or forge a value."""
+
+    __slots__ = ()
+
+    @override
+    def __int__(self) -> int:
+        raise RuntimeError("int exploded")
+
+    @override
+    def __repr__(self) -> str:
+        raise RuntimeError("repr exploded")
+
+    @override
+    def __str__(self) -> str:
+        return "forged"
+
+
+class _HexInt(int):
+    """An ``int`` subclass that renders itself in hexadecimal."""
+
+    __slots__ = ()
+
+    @override
+    def __repr__(self) -> str:
+        return hex(self)
+
+    @override
+    def __str__(self) -> str:
+        return hex(self)
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "wire"),
+    [(_HostileInt(7), "7"), (_HexInt(255), "255")],
+    ids=["hostile-dunders", "hex-repr"],
+)
+def test_an_outbound_bigint_int_subclass_serializes_its_canonical_decimal(
+    raw_value: int,
+    wire: str,
+) -> None:
+    """An ``int`` subclass's dunders can neither forge nor break the canonical decimal wire value."""
+
+    @strawberry.type
+    class Query:
+        @strawberry.field
+        def value(self) -> BigInt:
+            return BigInt(raw_value)
+
+    schema = DjangoSchema(query=Query, config=strawberry_config())
+    assert _post(schema, "{ value }") == {"data": {"value": wire}}
 
 
 def test_a_consumer_can_publish_both_path_bearing_output_shapes() -> None:
@@ -415,6 +529,149 @@ def test_reserved_choice_values_publish_and_serialize_all_members(case: str) -> 
             "__type": {"enumValues": [{"name": name} for name in names]},
         },
     }
+
+
+def _no_rows() -> list[models.Model]:
+    """An empty root list: the override rows read only the published types."""
+    return []
+
+
+_OVERRIDE_FIELD_TYPES = """
+{
+  shelf: __type(name: "ShelfConditionHolder") {
+    fields { name type { kind name ofType { kind name } } }
+  }
+  carrier: __type(name: "FixtureType") {
+    fields { name type { kind name ofType { kind name } } }
+  }
+  shelfEnum: __type(name: "ShelfConditionHolderConditionEnum") { enumValues { name } }
+  carrierEnum: __type(name: "FixtureTypeStatusEnum") { enumValues { name } }
+}
+"""
+
+
+def _override_field_types(
+    carrier_model: type[models.Model],
+    *,
+    shelf_meta: Mapping[str, object],
+    carrier_meta: Mapping[str, object],
+) -> JSONObject:
+    """Publish a non-null and a nullable choice column under ``Meta`` overrides; read both back.
+
+    ``Shelf.condition`` is fakeshop's non-null choice column; the carrier's ``status``
+    is the nullable one. Returns each field's introspected type and each enum's members.
+    """
+    registry.clear()
+    shelf_type = make_django_type(
+        "ShelfConditionHolder",
+        library_models.Shelf,
+        ("condition",),
+        node=False,
+        meta_extra=shelf_meta,
+    )
+    carrier_type = make_django_type(
+        "FixtureType",
+        carrier_model,
+        ("status",),
+        node=False,
+        meta_extra=carrier_meta,
+    )
+
+    @strawberry.type
+    class Query:
+        shelves: list[models.Model] = strawberry.field(
+            resolver=_no_rows,
+            graphql_type=list[shelf_type],
+        )
+        carriers: list[models.Model] = strawberry.field(
+            resolver=_no_rows,
+            graphql_type=list[carrier_type],
+        )
+
+    finalize_django_types()
+    payload = _post(DjangoSchema(query=Query, config=strawberry_config()), _OVERRIDE_FIELD_TYPES)
+    assert "errors" not in payload, payload
+    (condition,) = json_list(payload, "data", "shelf", "fields")
+    (status,) = json_list(payload, "data", "carrier", "fields")
+    return {
+        "condition": json_at(condition, "type"),
+        "status": json_at(status, "type"),
+        "shelfEnum": json_at(payload, "data", "shelfEnum"),
+        "carrierEnum": json_at(payload, "data", "carrierEnum"),
+    }
+
+
+_SHELF_CONDITION_ENUM = {"kind": "ENUM", "name": "ShelfConditionHolderConditionEnum"}
+_CARRIER_STATUS_ENUM = {"kind": "ENUM", "name": "FixtureTypeStatusEnum"}
+_OVERRIDE_ENUM_MEMBERS = {
+    "shelfEnum": {
+        "enumValues": [
+            {"name": "BLANK"},
+            {"name": "good"},
+            {"name": "worn"},
+            {"name": "damaged"},
+        ],
+    },
+    "carrierEnum": {"enumValues": [{"name": "BLANK"}, {"name": "good"}, {"name": "worn"}]},
+}
+
+
+@pytest.mark.parametrize(
+    ("shelf_meta", "carrier_meta", "expected"),
+    [
+        pytest.param(
+            {"nullable_overrides": ("condition",)},
+            {},
+            {
+                "condition": {**_SHELF_CONDITION_ENUM, "ofType": None},
+                "status": {**_CARRIER_STATUS_ENUM, "ofType": None},
+            },
+            id="nullable-widens-the-non-null-choice",
+        ),
+        pytest.param(
+            {},
+            {"required_overrides": ("status",)},
+            {
+                "condition": {"kind": "NON_NULL", "name": None, "ofType": _SHELF_CONDITION_ENUM},
+                "status": {"kind": "NON_NULL", "name": None, "ofType": _CARRIER_STATUS_ENUM},
+            },
+            id="required-narrows-the-nullable-choice",
+        ),
+    ],
+)
+def test_a_nullability_override_flips_only_the_choice_enums_wrapper(
+    shelf_meta: Mapping[str, object],
+    carrier_meta: Mapping[str, object],
+    expected: JSONObject,
+) -> None:
+    """``Meta.nullable_overrides`` / ``required_overrides`` flip a choice field's enum nullability.
+
+    Widening runs after choice substitution, so the overridden field keeps the same
+    generated enum, with its members untouched, and only the ``NON_NULL`` wrapper moves.
+    """
+    published = _override_field_types(
+        _choice_model(_EMPTY_LABEL_CHOICES, blank=True),
+        shelf_meta=shelf_meta,
+        carrier_meta=carrier_meta,
+    )
+    assert published == {**expected, **_OVERRIDE_ENUM_MEMBERS}
+
+
+def test_redundant_nullability_overrides_leave_choice_fields_unchanged() -> None:
+    """An override already in its target direction is accepted and publishes the undeclared shape."""
+    carrier_model = _choice_model(_EMPTY_LABEL_CHOICES, blank=True)
+    undeclared = _override_field_types(carrier_model, shelf_meta={}, carrier_meta={})
+    assert undeclared == {
+        "condition": {"kind": "NON_NULL", "name": None, "ofType": _SHELF_CONDITION_ENUM},
+        "status": {**_CARRIER_STATUS_ENUM, "ofType": None},
+        **_OVERRIDE_ENUM_MEMBERS,
+    }
+    redundant = _override_field_types(
+        carrier_model,
+        shelf_meta={"required_overrides": ("condition",)},
+        carrier_meta={"nullable_overrides": ("status",)},
+    )
+    assert redundant == undeclared
 
 
 @pytest.mark.django_db(transaction=True)

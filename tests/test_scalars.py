@@ -7,10 +7,13 @@ in ``tests/types/test_converters.py``.
 
 What stays here, and why no live request can express it:
 
-- ``int`` / ``str`` subclasses normalized to the canonical wire value (no
-  GraphQL argument can carry a Python subclass);
-- serializer rejection of non-int Python objects (the ORM never hands
-  ``bool`` / ``float`` / ``str`` / ``Decimal`` to ``_serialize_bigint``);
+- ``int`` / ``str`` subclasses normalized by the parser (no GraphQL argument can
+  carry a Python subclass); a consumer resolver can return any Python value, so
+  every serializer verdict on a resolver value (bool, float, str, ``Decimal``, a
+  subclass) is live in
+  ``examples/fakeshop/test_query/test_converter_outputs_api.py``;
+- ``_serialize_bigint`` on ``None`` (graphql-core completes ``None`` before
+  ``serialize`` runs);
 - ``_parse_bigint`` on ``None`` (``null`` is stripped before ``parse_value``);
   bool/float literal rejections belong to the live scalar filter matrix;
 - the public import surface and the subprocess deprecation-suppression
@@ -24,7 +27,6 @@ What stays here, and why no live request can express it:
 """
 
 from collections.abc import Iterator, Mapping
-from decimal import Decimal
 from typing import NewType
 
 import pytest
@@ -44,12 +46,18 @@ from django_strawberry_framework.utils.typing import object_result
 from tests._subprocess import run_in_fresh_process
 
 # ---------------------------------------------------------------------------
-# Strict serializer - hostile subclasses and non-int Python objects
+# Python objects no GraphQL argument or completion can carry
 # ---------------------------------------------------------------------------
 
 
-def test_bigint_int_subclasses_are_normalized_before_serialization() -> None:
-    """Subclass dunders cannot forge or break the canonical decimal wire value."""
+def test_bigint_int_subclasses_are_normalized_before_parsing() -> None:
+    """Subclass dunders cannot forge or break the accepted parsed ``int``.
+
+    No GraphQL argument carries a Python subclass, so the parser half stays here; the
+    serializer half is pinned live by
+    ``examples/fakeshop/test_query/test_converter_outputs_api.py::test_an_outbound_bigint_int_subclass_serializes_its_canonical_decimal``
+    and its sibling ``test_an_outbound_bigint_refuses_a_non_int_resolver_value``.
+    """
 
     class _HostileInt(int):
         @override
@@ -85,55 +93,30 @@ def test_bigint_int_subclasses_are_normalized_before_serialization() -> None:
     parsed = _parse_bigint(value)
     assert parsed == 7
     assert type(parsed) is int
-    assert _serialize_bigint(value) == "7"
 
     hex_val = _HexInt(255)
     parsed_hex = _parse_bigint(hex_val)
     assert parsed_hex == 255
     assert type(parsed_hex) is int
-    assert _serialize_bigint(hex_val) == "255"
 
     # The parser's subclass-``str`` leg copies through the base slot, so the
-    # forged ``__str__`` never decides the accepted value; the serializer
-    # rejects ``str`` subclasses like every other ``str``.
+    # forged ``__str__`` never decides the accepted value.
     hostile_str = _HostileStr("7")
     parsed_str = _parse_bigint(hostile_str)
     assert parsed_str == 7
     assert type(parsed_str) is int
-    with pytest.raises(TypeError):
-        _serialize_bigint(hostile_str)
 
 
-def test_bigint_serialize_rejects_bool() -> None:
-    """``True`` and ``False`` both raise ``TypeError``; bool subclasses int."""
-    with pytest.raises(TypeError):
-        _serialize_bigint(True)  # noqa: FBT003 - the bool is the value under test
-    with pytest.raises(TypeError):
-        _serialize_bigint(False)  # noqa: FBT003 - the bool is the value under test
+def test_bigint_serialize_rejects_none() -> None:
+    """``None`` handed to the serializer directly raises ``TypeError``.
 
-
-def test_bigint_serialize_rejects_float() -> None:
-    """``float`` values raise ``TypeError`` - no implicit truncation via ``str(float)``."""
-    with pytest.raises(TypeError):
-        _serialize_bigint(1.9)
-    with pytest.raises(TypeError):
-        _serialize_bigint(0.0)
-
-
-def test_bigint_serialize_rejects_non_int_types() -> None:
-    """``str``, ``Decimal``, ``None``, and arbitrary objects all raise ``TypeError``."""
-    with pytest.raises(TypeError):
-        _serialize_bigint("123")
-    with pytest.raises(TypeError):
-        _serialize_bigint(Decimal(123))
-    with pytest.raises(TypeError):
+    graphql-core completes a ``None`` resolver value as ``null`` (or the non-null
+    error) before it calls ``serialize``, so only a direct call reaches this arm.
+    Every other non-int value is refused live by
+    ``examples/fakeshop/test_query/test_converter_outputs_api.py::test_an_outbound_bigint_refuses_a_non_int_resolver_value``.
+    """
+    with pytest.raises(TypeError, match="BigInt cannot serialize NoneType"):
         _serialize_bigint(None)
-
-    class _Custom:
-        pass
-
-    with pytest.raises(TypeError):
-        _serialize_bigint(_Custom())
 
 
 # ---------------------------------------------------------------------------
@@ -166,8 +149,6 @@ def test_bigint_rejection_messages_are_pinned() -> None:
     )
     with pytest.raises(ValueError, match=r"^BigInt cannot parse object$"):
         _parse_bigint(object())
-    with pytest.raises(TypeError, match=r"^BigInt cannot serialize Decimal$"):
-        _serialize_bigint(Decimal(1))
 
 
 def test_bigint_rejection_messages_survive_hostile_values() -> None:

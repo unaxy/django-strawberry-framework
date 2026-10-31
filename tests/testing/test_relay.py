@@ -7,10 +7,12 @@ Construction-time and throwaway-strategy residue of
   ``examples/fakeshop/test_query/test_library_api.py::test_library_relay_node_global_id_round_trips``
 - secondary model-label emit + ``node(id:)`` refetch as the primary:
   ``examples/fakeshop/test_query/test_library_api.py::test_secondary_book_global_id_refetches_as_primary_book_type_over_http``
+- ``type``-strategy mint equals the id each holder type emits:
+  ``examples/fakeshop/test_query/test_node_refetch_api.py::test_global_id_for_mints_the_type_name_id_each_type_emits``
+- ``type+model``-strategy mint equals the emitted id:
+  ``examples/fakeshop/test_query/test_globalid_filter_strategies_api.py::test_global_id_for_mints_the_type_plus_model_id_the_type_emits``
 
-What stays here has no fakeshop wire: ``type`` / ``type+model`` strategy
-equality (no shipped type sets ``Meta.globalid_strategy``; a flag on a live
-type would rewrite every GlobalID for that type), the ``schema=`` mint under a
+What stays here has no fakeshop wire: the ``schema=`` mint under a
 type-renaming converter (the live rows in
 ``examples/fakeshop/test_query/test_globalid_naming_api.py`` read emitted ids
 off the wire, never through this helper), ``callable`` / ``custom`` /
@@ -97,43 +99,8 @@ _ROW_ID_QUERY = "{ row { id } }"
 
 
 # ---------------------------------------------------------------------------
-# global_id_for - strategies no shipped fakeshop type declares
+# global_id_for - the ``schema=`` mint under a type-renaming converter
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.django_db
-def test_global_id_for_type_strategy() -> None:
-    """``type`` strategy: live id equals helper output; payload is the Meta name."""
-    services.seed_data(1)
-    category_node = _make_node_type("CategoryNode", strategy="type")
-    schema = _schema_with_row(category_node, Category)
-    row = Category.objects.order_by("pk").first()
-    result = schema.execute_sync(_ROW_ID_QUERY)
-    assert result.errors is None
-    assert result.data is not None
-    live_id = json_at(result.data, "row", "id")
-    assert isinstance(live_id, str)
-    assert row is not None
-    assert live_id == global_id_for(category_node, saved_pk(row))
-    # The payload slot is the graphql_type_name (the honored ``Meta.name``).
-    assert relay.GlobalID.from_id(live_id).type_name == "CategoryNode"
-
-
-@pytest.mark.django_db
-def test_global_id_for_type_plus_model_strategy() -> None:
-    """``type+model`` strategy: live id equals helper output; payload is the model label."""
-    services.seed_data(1)
-    category_node = _make_node_type("CategoryNode", strategy="type+model")
-    schema = _schema_with_row(category_node, Category)
-    row = Category.objects.order_by("pk").first()
-    result = schema.execute_sync(_ROW_ID_QUERY)
-    assert result.errors is None
-    assert result.data is not None
-    live_id = json_at(result.data, "row", "id")
-    assert isinstance(live_id, str)
-    assert row is not None
-    assert live_id == global_id_for(category_node, saved_pk(row))
-    assert relay.GlobalID.from_id(live_id).type_name == "products.category"
 
 
 class _ApiPrefix(NameConverter):

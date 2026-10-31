@@ -21,11 +21,9 @@ import strawberry
 from apps.kanban.models import Status
 from apps.products import services
 from apps.products.models import Category, Item
-from asgiref.sync import sync_to_async
 from django.db import models
 from graphql import GraphQLError
 from strawberry import relay
-from strawberry.relay.utils import from_base64, to_base64
 from strawberry.types.base import get_object_definition
 from typing_extensions import override
 
@@ -36,7 +34,6 @@ from django_strawberry_framework import (
     strawberry_config,
 )
 from django_strawberry_framework.connection import (
-    _CONNECTION_ASYNC_RECOURSE,
     DjangoConnection,
     DjangoConnectionField,
     _attach_count_async,
@@ -72,28 +69,24 @@ from django_strawberry_framework.utils._narrowing import (
     read_attr,
     require,
 )
-from django_strawberry_framework.utils.connections import PaginationArgumentError
 from django_strawberry_framework.utils.input_values import UNSET
 from tests._connection_field_schemas import (
-    _CONSUMER_CURSOR_PREFIX,
     _PLANNED_CONNECTION_DOCUMENT,
     _PLANNED_LIST_DOCUMENT,
     _capture_info,
     _CategoryFilter,
     _CategoryOrder,
-    _consumer_edge_schema,
     _field_schema,
     _info_with_selection,
     _make_node_type,
     _make_relation_node_type,
     _make_sidecar_node_type,
     _node_over,
-    _page_query,
     _planned_relation_request,
     _planned_relation_schema,
     _schema_for,
 )
-from tests._idioms import declare_django_type, json_at, json_list
+from tests._idioms import declare_django_type
 from tests._info import make_info
 
 
@@ -664,8 +657,12 @@ def test_default_ordering_preserves_meta_ordering() -> None:
 
 
 @pytest.mark.django_db
-def test_connection_sync_async_generator_resolver_raises_sync_misuse() -> None:
-    """Sync execution rejects an async-generator resolver with a typed error."""
+def test_connection_async_generator_resolver_refusal_is_a_sync_misuse_error() -> None:
+    """The sync refusal of an async-generator resolver raises ``SyncMisuseError``.
+
+    The message and the null ``data`` are pinned live by
+    ``examples/fakeshop/test_query/test_connection_fields_api.py::test_sync_http_refuses_an_async_only_connection_source``.
+    """
     services.seed_data(1)
     rows = list(Category.objects.all())
 
@@ -681,16 +678,14 @@ def test_connection_sync_async_generator_resolver_raises_sync_misuse() -> None:
     assert result.errors is not None
     assert len(result.errors) == 1
     assert isinstance(result.errors[0].original_error, SyncMisuseError)
-    assert "AsyncIterable in a sync execution context" in str(result.errors[0])
 
 
 @pytest.mark.django_db
-def test_connection_partial_async_generator_resolver_raises_sync_misuse() -> None:
-    """``partial`` around an async-gen callable instance still fails closed under sync execution.
+def test_connection_partial_async_generator_resolver_refusal_is_a_sync_misuse_error() -> None:
+    """The sync refusal of a ``partial`` around an async-gen callable raises ``SyncMisuseError``.
 
-    The wrapper calls the partial, classifies the returned value by VALUE
-    (an async-only iterable), and the sync-misuse guard rejects it before
-    Relay's synchronous slicer can consume it.
+    The message and the null ``data`` are pinned live by
+    ``examples/fakeshop/test_query/test_connection_fields_api.py::test_sync_http_refuses_an_async_only_connection_source``.
     """
     services.seed_data(1)
     rows = list(Category.objects.all())
@@ -716,18 +711,16 @@ def test_connection_partial_async_generator_resolver_raises_sync_misuse() -> Non
     assert result.errors is not None
     assert len(result.errors) == 1
     assert isinstance(result.errors[0].original_error, SyncMisuseError)
-    assert "AsyncIterable in a sync execution context" in str(result.errors[0])
 
 
 @pytest.mark.django_db
-def test_connection_sync_resolver_returning_async_iterable_raises_sync_misuse() -> None:
-    """A plain resolver's async-only return is rejected before Relay's sync slicer crashes.
+def test_connection_sync_resolver_returning_async_iterable_refusal_is_a_sync_misuse_error() -> (
+    None
+):
+    """The refusal of a plain ``def``'s async-only return raises ``SyncMisuseError``.
 
-    Resolver classification cannot see this shape at schema construction: the
-    callable is ordinary ``def`` and only its runtime result is an async
-    generator. Without the source-level guard, Strawberry first subscripts it,
-    then raises a blank internal ``AssertionError`` instead of the package's
-    actionable sync-misuse error.
+    The message and the null ``data`` are pinned live by
+    ``examples/fakeshop/test_query/test_connection_fields_api.py::test_sync_http_refuses_an_async_only_connection_source``.
     """
     services.seed_data(1)
     rows = list(Category.objects.order_by("pk"))
@@ -748,12 +741,15 @@ def test_connection_sync_resolver_returning_async_iterable_raises_sync_misuse() 
     assert result.errors is not None
     assert len(result.errors) == 1
     assert isinstance(result.errors[0].original_error, SyncMisuseError)
-    assert "AsyncIterable in a sync execution context" in str(result.errors[0])
 
 
 @pytest.mark.django_db
-def test_sync_context_async_get_queryset_raises_sync_misuse() -> None:
-    """An async ``get_queryset`` invoked from the sync resolver path raises ``SyncMisuseError``."""
+def test_sync_context_async_get_queryset_refusal_is_a_sync_misuse_error() -> None:
+    """An async ``get_queryset`` invoked from the sync resolver path raises ``SyncMisuseError``.
+
+    The message and the null ``data`` are pinned live by
+    ``examples/fakeshop/test_query/test_connection_fields_api.py::test_sync_http_refuses_an_async_get_queryset_on_the_connection``.
+    """
     services.seed_data(1)
 
     async def get_queryset(
@@ -772,14 +768,16 @@ def test_sync_context_async_get_queryset_raises_sync_misuse() -> None:
     assert result.errors is not None
     (error,) = result.errors
     assert isinstance(error.original_error, SyncMisuseError)
-    assert str(error.original_error) == (
-        "AsyncVisibilitySyncNode.get_queryset returned a coroutine in a sync resolver "
-        f"context. {_CONNECTION_ASYNC_RECOURSE}"
-    )
 
 
-async def test_connection_sync_resolver_returning_coroutine_raises_sync_misuse() -> None:
-    """A plain ``def`` returning a coroutine cannot enter connection slicing."""
+async def test_connection_sync_resolver_returning_coroutine_refusal_is_a_sync_misuse_error() -> (
+    None
+):
+    """The refusal of a plain ``def`` returning a coroutine raises ``SyncMisuseError``.
+
+    The message, the null ``data`` and the coroutine's disposal are pinned live by
+    ``examples/fakeshop/test_query/test_connection_fields_api.py::test_async_http_refuses_a_sync_connection_resolver_returning_a_coroutine``.
+    """
     node_type = _make_sidecar_node_type("CoroSyncConnNode")
 
     async def _inner() -> list[object]:
@@ -800,8 +798,6 @@ async def test_connection_sync_resolver_returning_coroutine_raises_sync_misuse()
     assert result.errors is not None
     assert len(result.errors) == 1
     assert isinstance(result.errors[0].original_error, SyncMisuseError)
-    assert "returned an awaitable" in str(result.errors[0])
-    assert result.data is None
 
 
 async def test_an_awaited_connection_source_resolving_to_another_awaitable_fails_closed() -> None:
@@ -830,17 +826,11 @@ async def test_an_awaited_connection_source_resolving_to_another_awaitable_fails
     assert [str(warning.message) for warning in caught] == []
 
 
-async def test_connection_async_resolver_resolving_to_residual_awaitable_fails_closed() -> None:
-    """An async connection resolver resolving to a SECOND awaitable fails closed before visibility.
+async def test_connection_residual_awaitable_refusal_is_a_configuration_error() -> None:
+    """An async resolver resolving to a SECOND awaitable is refused with ``ConfigurationError``.
 
-    ``_build_connection_resolver``'s async branch awaits the consumer resolver
-    once; a value that is STILL awaitable after that await is a nested async
-    resolver whose inner awaitable would otherwise pass the non-queryset sidecar
-    guard and skip ``get_queryset`` entirely. This is the connection twin of the
-    list field's ``reject_residual_async_source`` guard, which the list helper's
-    own unit test pins. Exercised at
-    a real ``DjangoConnectionField`` with NO sidecar input (the bypass shape),
-    so the residual-awaitable guard, not the sidecar guard, is what rejects it.
+    The message, the null ``data`` and the inner awaitable's disposal are pinned live by
+    ``examples/fakeshop/test_query/test_connection_fields_api.py::test_async_http_refuses_a_connection_resolver_resolving_to_another_awaitable``.
     """
     node_type = _make_sidecar_node_type("ResidualAsyncConnNode")
 
@@ -859,8 +849,6 @@ async def test_connection_async_resolver_resolving_to_residual_awaitable_fails_c
     assert result.errors is not None
     assert len(result.errors) == 1
     assert isinstance(result.errors[0].original_error, ConfigurationError)
-    assert "silently skip the get_queryset visibility hook" in str(result.errors[0])
-    assert result.data is None
 
 
 # =============================================================================
@@ -1156,59 +1144,6 @@ def test_registry_clear_also_clears_offset_cursor_prefix_memo() -> None:
     assert _offset_cursor_prefix.cache_info().currsize
     registry.clear()
     assert not _offset_cursor_prefix.cache_info().currsize
-
-
-# =============================================================================
-# A consumer DjangoConnection subclass whose edge class declares its own prefix
-# =============================================================================
-
-#: The ``CURSOR_PREFIX`` the consumer edge class declares in place of ``arrayconnection``.
-
-#: One page walk: three pages of two, forward from ``first`` or backward from ``last``.
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize("argument", ["after", "before"])
-def test_consumer_edge_prefix_refuses_a_stock_cursor(argument: str) -> None:
-    """A stock ``arrayconnection`` cursor on a consumer edge prefix is the cursor error.
-
-    The package's own validation refuses it under the connection's prefix,
-    so it never reaches ``ListConnection`` as a foreign cursor.
-    """
-    services.seed_data(1)
-    schema = _consumer_edge_schema(_make_node_type("ForeignCursorNode", total_count=None))
-    result = schema.execute_sync(_page_query(argument, to_base64(relay.Edge.CURSOR_PREFIX, 0)))
-    assert result.errors is not None
-    assert result.errors[0].message == f"Argument '{argument}' contains a non-existing value."
-    assert isinstance(result.errors[0].original_error, PaginationArgumentError)
-
-
-@pytest.mark.django_db(transaction=True)
-async def test_async_consumer_edge_prefix_pages_and_refuses_a_stock_cursor() -> None:
-    """Under async execution a consumer edge prefix pages with its own cursors and refuses a stock one."""
-    await sync_to_async(services.seed_data)(1)
-    schema = await sync_to_async(_consumer_edge_schema)(
-        _make_node_type("AsyncConsumerCursorNode", total_count=None),
-    )
-    first = await schema.execute(_page_query("after", None))
-    assert first.errors is None, first.errors
-    assert first.data is not None
-    end_cursor = str(json_at(first.data, "items", "pageInfo", "endCursor"))
-    assert from_base64(end_cursor) == (_CONSUMER_CURSOR_PREFIX, "1")
-
-    second = await schema.execute(_page_query("after", end_cursor))
-    assert second.errors is None, second.errors
-    assert second.data is not None
-    edges = json_list(second.data, "items", "edges")
-    assert [from_base64(str(json_at(edge, "cursor"))) for edge in edges] == [
-        (_CONSUMER_CURSOR_PREFIX, "2"),
-        (_CONSUMER_CURSOR_PREFIX, "3"),
-    ]
-
-    foreign = await schema.execute(_page_query("after", to_base64(relay.Edge.CURSOR_PREFIX, 0)))
-    assert foreign.errors is not None
-    assert foreign.errors[0].message == "Argument 'after' contains a non-existing value."
-    assert isinstance(foreign.errors[0].original_error, PaginationArgumentError)
 
 
 # spec-033 Slices 1-2: the root-connection fence. The

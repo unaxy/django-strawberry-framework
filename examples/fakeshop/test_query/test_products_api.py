@@ -8,7 +8,9 @@ wired in ``apps.products.schema`` end to end:
 * the per-field ``check_name_permission`` gate on ``CategoryFilter`` (a
   spec-027 filter permission hook) -- including that the
   gate fires for NON-``exact`` lookups (``iContains``),
-  not just ``exact``;
+  not just ``exact``, that only a ``None`` / ``True`` return allows (an allowing
+  gate firing once per request), and that an ``async def`` gate is refused
+  unawaited;
 * own-PK Relay ``GlobalID`` filtering (``id: { in: [...] }``), since the
   products types declare ``interfaces = (relay.Node,)``;
 * ``RelatedFilter`` traversal (``Item.category``) via the nested
@@ -27,9 +29,10 @@ wired in ``apps.products.schema`` end to end:
   ``prefix=``, a ``get_form`` that re-keys the data itself) binding every value the
   client sent and answering an explicit ``null`` on ``description`` / ``isPrivate`` /
   a required ``attachment`` as the unprefixed form does;
-* an ``Item`` update whose located row is deleted after authorization answered
-  by every flavor with the in-band ``conflict`` envelope and rolled back, and a
-  single-table update saving with ``update_fields=None``.
+* an ``Item`` update (every flavor) or delete whose located row is deleted after
+  authorization answered with the in-band ``conflict`` envelope and rolled back, a
+  ``createItem`` on a request with no ``user`` at all denied with nothing written,
+  and a single-table update saving with ``update_fields=None``.
 
 Form-mutation async colour uses a module-local ``/graphql-async/`` mount
 (``graphql_client.py`` is sync-only).
@@ -53,6 +56,7 @@ from typing import NamedTuple
 import pytest
 from apps.products import models
 from apps.products import schema as products_schema
+from apps.products.filters import CategoryFilter
 from apps.products.forms import REJECTED_ITEM_NAME
 from apps.products.serializers import (
     REJECTED_RENAMED_DISPLAY_NAME,
@@ -82,6 +86,7 @@ from graphql_client import (
     json_list,
     json_object,
     json_str,
+    middleware,
     middleware_without_debug_toolbar,
     post_lock_rereads,
     response_json,
@@ -99,6 +104,7 @@ from django_strawberry_framework import DjangoMutation
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing import AsyncTestClient, TestClient
 from django_strawberry_framework.testing.relay import global_id_for
+from django_strawberry_framework.utils.permissions import _GATE_ASYNC_RECOURSE
 from django_strawberry_framework.views import AsyncDjangoGraphQLView
 
 #: Settings that open the spec-048 error policy's pass-through gate for ONE live
@@ -112,6 +118,11 @@ from django_strawberry_framework.views import AsyncDjangoGraphQLView
 #: form of that - the toolbar's own show-gate is memoized per process, so overriding
 #: its callback would not reliably take effect.
 _ERROR_POLICY_PASS_THROUGH = {"DEBUG": True, "MIDDLEWARE": middleware_without_debug_toolbar()}
+
+#: Settings that serve requests carrying no ``request.user`` at all.
+_NO_AUTHENTICATION_MIDDLEWARE = {
+    "MIDDLEWARE": [entry for entry in middleware() if "AuthenticationMiddleware" not in entry],
+}
 
 
 def _read_all(handle: FieldFile) -> bytes:
@@ -1461,6 +1472,40 @@ def test_create_item_anonymous_is_denied_top_level_error_no_write() -> None:
     assert "Not authorized" in json_str(payload, "errors", 0, "message")
     assert models.Item.objects.count() == before
     assert not models.Item.objects.filter(name="AnonWidget").exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_create_item_on_a_request_without_a_user_attribute_is_denied_no_write() -> None:
+    """A request carrying no ``user`` at all (no ``AuthenticationMiddleware``) is denied, no write.
+
+    Distinct from the anonymous case: ``DjangoModelPermission`` refuses before it
+    resolves the model or asks ``has_perm``, so the answer is the plain denial an
+    anonymous caller gets rather than a crash on the missing user. The ``Client``
+    is built inside the override, since its handler caches the middleware chain on
+    its first request.
+    """
+    seed_data(1)
+    category = models.Category.objects.earliest("pk")
+    before = models.Item.objects.count()
+
+    with override_settings(**_NO_AUTHENTICATION_MIDDLEWARE):
+        response = _post_graphql(
+            _CREATE_ITEM,
+            client=Client(),
+            variables={
+                "d": {
+                    "name": "UserlessWidget",
+                    "categoryId": _global_id("products.category", category.pk),
+                },
+            },
+        )
+    payload = response_json(response)
+    assert payload["data"] is None, payload
+    assert [json_str(error, "message") for error in json_list(payload, "errors")] == [
+        "Not authorized to create ItemType.",
+    ]
+    assert models.Item.objects.count() == before
+    assert not models.Item.objects.filter(name="UserlessWidget").exists()
 
 
 @pytest.mark.django_db(transaction=True)
@@ -2914,6 +2959,140 @@ def test_products_items_deep_flat_category_name_permission_fires_for_anonymous()
     assert "errors" in payload, payload
     assert json_at(payload, "data") is None, payload
     assert "staff user" in json_str(payload, "errors", 0, "message")
+
+
+def _category_name_filter(category: models.Category) -> str:
+    """``allCategories`` filtered by ``name``, the field ``CategoryFilter.check_name_permission`` gates."""
+    return (
+        f"query {{ allCategories(filter: {{ name: {{ exact: {json.dumps(category.name)} }} }}) "
+        "{ edges { node { name } } } }"
+    )
+
+
+def _replace_category_name_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    gate: Callable[[CategoryFilter, object], object],
+) -> None:
+    """Install ``gate`` as the shipped ``CategoryFilter.check_name_permission`` for one test."""
+    monkeypatch.setattr(CategoryFilter, "check_name_permission", gate)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "result",
+    [
+        False,
+        0,
+        0.0,
+        "",
+        [],
+        "yes",
+        1,
+        object(),
+    ],
+    ids=[
+        "false",
+        "zero",
+        "zero-float",
+        "empty-str",
+        "empty-list",
+        "truthy-str",
+        "one",
+        "object",
+    ],
+)
+def test_products_category_name_gate_denies_on_any_return_but_none_or_true(
+    monkeypatch: pytest.MonkeyPatch,
+    result: object,
+) -> None:
+    """A filter gate returning anything but ``None`` / ``True`` denies before any row is read.
+
+    A DRF-style ``return user.is_staff`` must never read as an allow, and a truthy
+    non-bool is not an explicit allow either: the read fails closed with the plain
+    package denial, which carries no ``extensions``, after the gate ran once.
+    """
+    seed_data(1)
+    category = models.Category.objects.filter(is_private=False).earliest("id")
+    calls: list[object] = []
+
+    def gate(_self: CategoryFilter, _request: object) -> object:
+        calls.append(result)
+        return result
+
+    _replace_category_name_gate(monkeypatch, gate)
+    with CaptureQueriesContext(connection) as captured:
+        payload = response_json(_post_graphql(_category_name_filter(category)))
+    assert payload["data"] is None, payload
+    errors = json_list(payload, "errors")
+    assert len(errors) == 1, payload
+    assert json_str(errors[0], "message") == "Not authorized to use name on CategoryFilter."
+    assert "extensions" not in json_object(errors[0]), payload
+    assert calls == [result]
+    assert not [q for q in captured.captured_queries if '"products_category"' in q["sql"]]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("result", [None, True], ids=["none", "true"])
+def test_products_category_name_gate_allows_on_none_or_true(
+    monkeypatch: pytest.MonkeyPatch,
+    result: object,
+) -> None:
+    """``None`` (the raise-to-deny form's fall-through) and ``True`` both allow, and fire once.
+
+    The viewer is anonymous, whom the shipped gate denies, so the filtered page is
+    the replaced gate's allow alone. The filter names ``name`` at the top level and
+    inside ``and`` and ``or``; an allowing gate is recorded for the request, so the
+    later mentions skip it.
+    """
+    seed_data(1)
+    category = models.Category.objects.filter(is_private=False).earliest("id")
+    calls: list[object] = []
+
+    def gate(_self: CategoryFilter, _request: object) -> object:
+        calls.append(result)
+        return result
+
+    _replace_category_name_gate(monkeypatch, gate)
+    name = json.dumps(category.name)
+    _assert_graphql_data(
+        f"query {{ allCategories(filter: {{ name: {{ exact: {name} }}, "
+        f"and: [{{ name: {{ iContains: {name} }} }}], or: [{{ name: {{ exact: {name} }} }}] }}) "
+        "{ edges { node { name } } } }",
+        {"allCategories": {"edges": [{"node": {"name": category.name}}]}},
+    )
+    assert calls == [result]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("result", [None, True, False], ids=["none", "true", "false"])
+def test_products_category_name_async_gate_is_refused_whatever_it_would_return(
+    monkeypatch: pytest.MonkeyPatch,
+    result: object,
+) -> None:
+    """An ``async def`` filter gate is refused before its result is read, allow or deny alike.
+
+    The permission pass is synchronous, so the coroutine is closed unawaited: its body
+    never runs and no awaited value can allow. Reading the refusal needs the
+    pass-through policy (``SyncMisuseError`` is not a ``GraphQLError``).
+    """
+    seed_data(1)
+    category = models.Category.objects.filter(is_private=False).earliest("id")
+    ran: list[object] = []
+
+    async def gate(_self: CategoryFilter, _request: object) -> object:
+        ran.append(result)
+        return result
+
+    _replace_category_name_gate(monkeypatch, gate)
+    with override_settings(**_ERROR_POLICY_PASS_THROUGH):
+        payload = response_json(_post_graphql(_category_name_filter(category)))
+    assert payload["data"] is None, payload
+    message = (
+        "CategoryFilter.check_name_permission returned a coroutine in a sync "
+        f"permission-check context. {_GATE_ASYNC_RECOURSE}"
+    )
+    assert [json_str(error, "message") for error in json_list(payload, "errors")] == [message]
+    assert ran == []
 
 
 @pytest.mark.django_db
@@ -7348,6 +7527,40 @@ def test_update_of_an_item_deleted_after_authorization_is_conflict_over_http(
         )
         == writes
     )
+    assert _stored_item(item.pk) == before
+
+
+@pytest.mark.django_db
+def test_delete_of_an_item_deleted_after_authorization_is_conflict_over_http(
+    delete_after_authorization: DeleteAfterAuthorization,
+) -> None:
+    """An ``Item`` delete whose located row is deleted after authorization is ``conflict``.
+
+    Django's ``delete()`` reports zero rows lost for the target model, so a success
+    payload would claim a deletion that did not happen; the in-band ``conflict``
+    envelope rolls the transaction back and the row and its cascaded entries are
+    stored as before the request.
+    """
+    seed_data(1)
+    create_users(1)
+    item = models.Item.objects.earliest("pk")
+    before = _stored_item(item.pk)
+    assert before[1] > 0
+    client = _login_with_perm("staff_1", "delete_item")
+    delete_after_authorization(
+        products_schema.DeleteItem,
+        lambda: models.Item._base_manager.filter(pk=item.pk).delete(),
+    )
+
+    response = _post_graphql(
+        "mutation($id: ID!) { deleteItem(id: $id) { node { name } errors { field messages codes } } }",
+        client=client,
+        variables={"id": _global_id("products.item", item.pk)},
+    )
+
+    payload = response_json(response)
+    assert "errors" not in payload, payload
+    assert json_at(payload, "data", "deleteItem") == {"node": None, "errors": _CONFLICT_ERRORS}
     assert _stored_item(item.pk) == before
 
 

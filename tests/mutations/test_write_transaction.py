@@ -246,22 +246,6 @@ def _declare_update_mutation(
     return type("UpdateItem", (DjangoMutation,), {"Meta": type("Meta", (), meta_attrs)})
 
 
-def _declare_delete_mutation(
-    *,
-    permission_classes: list[type] | None = None,
-    select_for_update: bool = True,
-) -> type:
-    meta_attrs = {
-        "model": product_models.Item,
-        "operation": "delete",
-        "permission_classes": permission_classes
-        if permission_classes is not None
-        else [_AllowAll],
-        "select_for_update": select_for_update,
-    }
-    return type("DeleteItem", (DjangoMutation,), {"Meta": type("Meta", (), meta_attrs)})
-
-
 def _mutation_schema(
     *mutations: type[DjangoMutation],
     schema_cls: type[strawberry.Schema] = DjangoSchema,
@@ -308,7 +292,6 @@ _UPDATE = (
     "mutation($id: ID!, $d: ItemPartialInput!){ write0(id:$id, data:$d){ "
     "node{ name } errors{ field messages } } }"
 )
-_DELETE = "mutation($id: ID!){ write0(id:$id){ node{ name } errors{ field messages } } }"
 
 
 def _seed_item(name: str = "Seeded") -> product_models.Item:
@@ -1216,57 +1199,8 @@ def test_unmarked_mutation_fields_and_introspection_execute_unwrapped() -> None:
 
 
 # ===========================================================================
-# Disappearing rows: forced update / zero-row delete / missing re-fetch -> conflict
+# Disappearing rows: a missing post-write re-fetch -> conflict
 # ===========================================================================
-
-
-class _DeleteTargetOutFromUnder:
-    """An authorizing permission class that deletes the located row out-of-band.
-
-    Runs AFTER the locate (the auth seam's position in the pipeline), so the
-    located instance's row is gone by the time the write executes - the
-    concurrent-delete race, made deterministic. The delete runs on the write's
-    own connection, which a row lock never blocks, so the default lock cannot
-    serialize the two here on any backend; on a row-locking backend a delete
-    from another connection reaches the write only under ``select_for_update=False``.
-    """
-
-    def has_permission(
-        self,
-        _info: object,
-        _mutation: type[object],
-        _operation: str,
-        _data: object,
-        instance: product_models.Item | None = None,
-    ) -> bool:
-        if instance is not None:
-            # Stand in for ANOTHER transaction's delete: the phased alias guard
-            # polices consumer code (which is read-only pre-save), so the
-            # simulated concurrent writer borrows the pipeline's own write-phase
-            # seam - the race being made deterministic is the point, not the
-            # phase discipline of this fixture.
-            with pipeline_write_phase():
-                product_models.Item._base_manager.filter(pk=saved_pk(instance)).delete()
-        return True
-
-
-@pytest.mark.django_db
-def test_delete_of_concurrently_deleted_row_returns_conflict_envelope() -> None:
-    """A delete whose target row vanished after locate is the ``conflict`` envelope."""
-    seed_data(1)
-    _declare_item_types()
-    DeleteItem = _declare_delete_mutation(permission_classes=[_DeleteTargetOutFromUnder])
-    schema = _mutation_schema(DeleteItem)
-    item = _seed_item("VanishingDelete")
-
-    result = schema.execute_sync(_DELETE, variable_values={"id": _item_gid(saved_pk(item))})
-
-    assert result.errors is None, result.errors
-    assert result.data is not None
-    payload = _json_object(result.data, "write0")
-    assert payload["node"] is None
-    assert [_json_at(error, "field") for error in _json_list(payload, "errors")] == ["id"]
-    assert "concurrent" in require_instance(_json_at(payload, "errors", 0, "messages", 0), str)
 
 
 @pytest.mark.django_db
