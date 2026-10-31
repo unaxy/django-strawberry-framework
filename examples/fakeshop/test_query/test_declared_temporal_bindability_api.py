@@ -46,6 +46,7 @@ from graphql_client import (
 from strawberry import relay
 from strawberry.types import Info
 from strawberry.types.base import StrawberryObjectDefinition
+from typing_extensions import override
 
 from django_strawberry_framework import (
     DjangoConnection,
@@ -83,6 +84,23 @@ class DateTypedFilter(TypedFilter):
     field_class = forms.DateField
 
 
+class ParentBuiltNumberFilter(NumberFilter):
+    """A consumer ``NumberFilter`` whose form field is built only once a FilterSet binds it.
+
+    ``field`` reads the bound set (``parent``) first, as django-filter's ``AllValuesFilter``
+    reads its ``model``, so the class-level declaration builds no form field.
+    """
+
+    # Annotated only: the FilterSet instance binding the filter sets it.
+    parent: FilterSet
+
+    @property
+    @override
+    def field(self) -> forms.Field:
+        _ = self.parent
+        return super().field
+
+
 @wraps(DjangoGraphQLView.as_view())
 def _graphql_view(request: HttpRequest) -> HttpResponseBase:
     schema = _CURRENT["schema"]
@@ -102,6 +120,10 @@ def _holder() -> tuple[DjangoSchema, type[DjangoType]]:
         timed_between = TimeRangeFilter(field_name="occurred_time")
         clock_time = TimeFilter(field_name="occurred_at__time")
         year_from = NumberFilter(field_name="occurred_at__year", lookup_expr="gte")
+        bound_year_from = ParentBuiltNumberFilter(
+            field_name="occurred_at__year",
+            lookup_expr="gte",
+        )
         year_of_day = DateFilter(field_name="occurred_on", lookup_expr="year")
         years_of_days = DatesInFilter(field_name="occurred_on", lookup_expr="year__in")
         years_of_day_span = DateFromToRangeFilter(field_name="occurred_on__year")
@@ -662,6 +684,20 @@ def _range_axis_type_names(schema: DjangoSchema, python_path: tuple[str, str]) -
         get_named_type(graphql_type_of(field)).name
         for field in graphql_input_fields(axes).values()
     }
+
+
+@pytest.mark.django_db
+def test_a_form_field_built_per_request_leaves_the_transform_output_to_type_the_leaf() -> None:
+    """A filter past ``year`` whose form field needs its bound set takes the output's Int.
+
+    The class-level declaration builds no form field, so nothing says its form cleans
+    another kind; the bound filter's ``NumberFilter`` form cleans the year it is sent.
+    """
+    rows = _seed()
+    schema, row_type = _holder()
+    assert _leaf_type_name(schema, ("bound_year_from", "gte")) == "Int"
+    payload = _post(schema, _where(schema, ("bound_year_from", "gte"), 2021))
+    assert payload == _expected(row_type, rows, ("match", "late")), payload
 
 
 @pytest.mark.django_db

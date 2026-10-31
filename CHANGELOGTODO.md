@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 158 to do.
+Progress: 0 done, 159 to do.
 
 ## From dry-0_0_15_3
 
@@ -658,6 +658,11 @@ Progress: 0 done, 158 to do.
 - [ ] 110. CHANGELOG entry: beside entry 101, `FilterSet.form` adapts django-filter's `BaseFilterSet.form` (BSD) and the
   Relay `ListConnection.resolve_connection` replacement adapts Strawberry's (MIT); both license texts now ship beside
   the package's (`LICENSE.django-filter`, `LICENSE.strawberry`)
+- [ ] 111. CHANGELOG entry: a `GlobalIDFilter` / `GlobalIDMultipleChoiceFilter` whose `field_name` names a
+  `GenericForeignKey` is refused with a `ConfigurationError` naming the set, the filter and the field when the set
+  publishes its filters (at schema build for a served set, at first use for one applied unbound), where it used to
+  build and then answer every filtered request with the masked error of the `FieldError` Django raises filtering
+  through it; a GlobalID filter through a `GenericRelation` is unchanged
 
 <!-- LINK DEFINITIONS -->
 

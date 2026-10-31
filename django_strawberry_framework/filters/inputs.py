@@ -424,10 +424,10 @@ def _relation_identity_annotation(
     """
     columns = (
         _compared_columns(filter_instance, model_field)
-        if getattr(model_field, "is_relation", False)
-        else None
+        if model_field is not None and model_field.is_relation
+        else ()
     )
-    if columns is not None and len(columns) > 1:
+    if len(columns) > 1:
         declaration = _declaration_of(filter_instance, filterset_cls)
         declared = declaration.declared
         raise ConfigurationError(

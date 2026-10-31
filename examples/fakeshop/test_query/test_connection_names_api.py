@@ -226,10 +226,12 @@ def test_renamed_connection_selection_survives_aliases_and_anonymous_fragments(
     assert "LIMIT 3" in sql[0].upper(), sql
 
 
-def _plain_schema(*, stream: bool = False) -> strawberry.Schema:
+def _plain_schema(*, stream: bool = False, evaluated: bool = False) -> strawberry.Schema:
     """A standalone Strawberry ListConnection keeps its original async behavior.
 
-    ``stream`` serves the rows from an async generator, which upstream slices lazily.
+    ``stream`` serves the rows from an async generator, which upstream slices lazily;
+    ``evaluated`` from an async resolver's already evaluated ``QuerySet``, whose slice is
+    a list.
     """
 
     class PlainGenreType(DjangoType):
@@ -247,6 +249,14 @@ def _plain_schema(*, stream: bool = False) -> strawberry.Schema:
         async for genre in models.Genre.objects.order_by("name", "pk"):
             yield genre
 
+    async def evaluated_genre_rows() -> Iterable[models.Genre]:
+        rows = models.Genre.objects.order_by("name", "pk")
+        # Iterating fills the queryset's result cache.
+        assert [genre async for genre in rows]
+        return rows
+
+    resolver = streamed_genre_rows if stream else evaluated_genre_rows if evaluated else genre_rows
+
     # Meta.interfaces installs Node at runtime. Ask the upstream generic seam for its
     # specialization, rather than claiming the Python DjangoType class statically inherits Node.
     connection_type = object_result(operator.getitem, relay.ListConnection, PlainGenreType)
@@ -258,7 +268,7 @@ def _plain_schema(*, stream: bool = False) -> strawberry.Schema:
                 "__annotations__": {"genres": connection_type},
                 "genres": object_result(
                     relay.connection,
-                    resolver=streamed_genre_rows if stream else genre_rows,
+                    resolver=resolver,
                 ),
             },
         ),
@@ -301,6 +311,49 @@ def test_plain_strawberry_async_generator_connection_serves_its_trailing_page() 
             "genres": {
                 "edges": [{"node": {"name": "B"}}, {"node": {"name": "C"}}],
                 "pageInfo": {"hasNextPage": False, "hasPreviousPage": True},
+            },
+        },
+    }, payload
+
+
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("arguments", "rows", "page_info"),
+    [
+        ("first: 2", [(0, "A"), (1, "B")], {"hasNextPage": True, "hasPreviousPage": False}),
+        ("last: 2", [(1, "B"), (2, "C")], {"hasNextPage": False, "hasPreviousPage": True}),
+    ],
+    ids=["first", "last"],
+)
+def test_plain_strawberry_async_evaluated_queryset_connection_serves_its_page(
+    arguments: str,
+    rows: list[tuple[int, str]],
+    page_info: JSONObject,
+) -> None:
+    """An evaluated ``QuerySet`` from an async resolver pages from its cached rows.
+
+    Slicing a ``QuerySet`` whose result cache is filled returns a list, which is not
+    async-iterable, so the adapted ``ListConnection.resolve_connection`` builds the edges
+    synchronously inside its async resolver: each edge carries its offset cursor and
+    the page info its position on the source.
+    """
+    for name in ("C", "A", "B"):
+        models.Genre.objects.create(name=name)
+    payload = _post(
+        _plain_schema(evaluated=True),
+        "{ genres(" + arguments + ") { edges { cursor node { name } }"
+        " pageInfo { hasNextPage hasPreviousPage } } }",
+        "async",
+    )
+    assert payload == {
+        "data": {
+            "genres": {
+                "edges": [
+                    {"cursor": relay.to_base64("arrayconnection", index), "node": {"name": name}}
+                    for index, name in rows
+                ],
+                "pageInfo": page_info,
             },
         },
     }, payload

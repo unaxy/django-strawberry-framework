@@ -662,7 +662,7 @@ Module docstring = authoritative description; this = index. Read the docstring b
 | [`test_filter_publication_api.py`][test-filter-publication-api] | Cyclic filter publication, registration order, canonical input ordering, constructor-edited fields, prefixed flat copies and deferred choice binding. |
 | [`test_filter_logic_customization_api.py`][test-filter-logic-customization-api] | Consumer logic customization preserves AND, OR, exclusion and nullable-key worlds. |
 | [`test_filter_widget_binding_api.py`][test-filter-widget-binding-api] | Real bound widgets preserve normalized values, physical form keys, prefixes and consumer form edits. |
-| [`test_globalid_filter_strategies_api.py`][test-globalid-filter-strategies-api] | Emitted Relay IDs preserve model, type and combined naming strategies through consumer filters. |
+| [`test_globalid_filter_strategies_api.py`][test-globalid-filter-strategies-api] | Emitted Relay IDs preserve model, type and combined naming strategies through consumer filters; a GlobalID filter into an untyped model or through a `GenericRelation` compares the related key, and one on a `GenericForeignKey` is refused when its set publishes. |
 | [`test_raw_relation_key_forms_api.py`][test-raw-relation-key-forms-api] | Raw relation-key forms preserve consumer coercion and upstream form defaults. |
 
 Outside this dir: [`../tests/`][fakeshop-tests] = project-level rows (urls, settings guard, schema export, `inspect_django_type`); `../apps/<app>/tests/` = that app's in-process rows; [`../../../tests/`][tests-dir] = package tier, one file per module.

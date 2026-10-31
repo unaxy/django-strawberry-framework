@@ -16181,6 +16181,35 @@ def test_related_filter_over_a_proxy_generic_relation_reads_its_content_type(
         assert list(filtered.values_list("title", flat=True)) == django_answer
 
 
+@pytest.mark.parametrize("default_lookup", ["exact", "gte"])
+def test_generated_column_filter_for_field_reads_the_default_lookup_when_none_is_given(
+    default_lookup: str,
+) -> None:
+    """A direct ``filter_for_field`` call with no lookup builds django-filter's default lookup.
+
+    django-filter's signature defaults ``lookup_expr`` to ``None`` and its body reads
+    ``FILTERS_DEFAULT_LOOKUP_EXPR``; a ``GeneratedField`` runs the adapted body, which
+    reads the same setting, so the call builds what naming that lookup builds.
+    """
+
+    class ShelfFilter(FilterSet):
+        class Meta:
+            model = library_models.Shelf
+            fields = ()
+
+    field = library_models.Shelf._meta.get_field("code_length")
+    with override_settings(FILTERS_DEFAULT_LOOKUP_EXPR=default_lookup):
+        defaulted = ShelfFilter.filter_for_field(field, "code_length")
+    named = ShelfFilter.filter_for_field(field, "code_length", default_lookup)
+    assert defaulted is not None
+    assert named is not None
+    assert (type(defaulted), defaulted.field_name, defaulted.lookup_expr) == (
+        type(named),
+        "code_length",
+        default_lookup,
+    )
+
+
 def _generated_filter_owner(**columns: django_models.GeneratedField) -> type[django_models.Model]:
     """Return a ``library`` model with a text ``source`` and the generated ``columns``.
 
