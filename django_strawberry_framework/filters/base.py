@@ -65,23 +65,27 @@ from django_filters import (
     NumberFilter,
 )
 from django_filters import constants as _filter_constants
-from django_filters.exceptions import FieldLookupError
 from django_filters.fields import BaseCSVField, ChoiceField
 from django_filters.filters import BaseInFilter, BaseRangeFilter, FilterMethod
 from django_filters.filterset import BaseFilterSet, FilterSetOptions
-from django_filters.utils import get_model_field, resolve_field
+from django_filters.utils import get_model_field
 from django_filters.widgets import BaseCSVWidget
 from graphql import GraphQLError
 from strawberry import relay
 from typing_extensions import TypedDict, Unpack, override
 
-from django_strawberry_framework.exceptions import ConfigurationError, PathResolutionError
+from django_strawberry_framework.exceptions import (
+    ConfigurationError,
+    LookupValidationError,
+    PathResolutionError,
+)
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.relay import _coerce_pk_or_none, _node_id_slot
 from django_strawberry_framework.sets_mixins import (
     LazyRelatedClassMixin as LazyRelatedClassMixin,  # noqa: PLC0414 - kept re-export path
 )  # re-exported via filters.__init__
 from django_strawberry_framework.sets_mixins import RelatedSetTargetMixin
+from django_strawberry_framework.types.converters import generated_output_field
 from django_strawberry_framework.types.definition import DjangoTypeDefinition, _resolves_id_off_pk
 
 # ``filters -> types`` is the documented safe (acyclic) import direction:
@@ -123,7 +127,10 @@ from django_strawberry_framework.utils.querysets import (
 )
 from django_strawberry_framework.utils.relations import (
     _classify_path_cached,
+    generated_column_source,
     is_model_class,
+    lookup_operand,
+    lookup_registry,
     relation_bool,
     stored_value_column,
     stored_value_link,
@@ -470,21 +477,29 @@ class _LookupOperand(NamedTuple):
 def _lookup_operand(column: ConcreteField, lookup_expr: str) -> _LookupOperand | None:
     """Return the output field of the transforms ``lookup_expr`` applies to ``column``, and its lookup.
 
-    ``django_filters.utils.resolve_field``, the walk ``BaseFilterSet.filter_for_field``
-    selects a generated leaf's filter class by (``filter_for_lookup`` keys its class on the
-    terminal lookup this walk answers); it builds a query per call, so the answer is kept
-    per ``(column, lookup_expr)``, both fixed when the FilterSet is defined: every key is
-    kept, a set bounded by the columns and lookups the defined FilterSets name. No entry is
+    The walk is ``utils/relations.py::lookup_operand``, from the column Django's query
+    builds for ``column`` (``Field.cached_col``), so each transform and lookup is the one
+    the filter's predicate resolves; the lookup is named by its class's ``lookup_name``, as
+    ``django_filters.utils.resolve_field`` names it. The answer is kept per ``(column,
+    lookup_expr)``, both fixed when the FilterSet is defined: every key is kept, a set
+    bounded by the columns and lookups the defined FilterSets name. No entry is
     invalidated: Django registers lookups and transforms at startup, before any FilterSet
-    resolves one. ``None`` when that walk refuses the expression (upstream's
-    ``FieldLookupError``): a name that is no transform or lookup of the column, as a
-    relation hop is not.
+    resolves one. ``None`` when the walk refuses the expression (a name that is no
+    transform or lookup of the column, as a relation hop is not) or the database
+    expression cannot resolve an output (Django's ``FieldError``).
+
+    A ``GeneratedField``'s computed column (``utils/relations.py::generated_column``) is
+    walked from the generated field's own column (``generated_column_source``), whose
+    lookups Django resolves on the ``output_field`` instance, where a project registers its
+    own (``Field.register_lookup`` on the instance), none of which the clone carries. An
+    output that is that instance (no transform, or one whose output is its source's)
+    answers as the computed column.
     """
     try:
-        output_field, lookup_name = resolve_field(column, lookup_expr)
-    except FieldLookupError:
+        output, lookup = lookup_operand(generated_column_source(column) or column, lookup_expr)
+    except (LookupValidationError, FieldError):
         return None
-    return _LookupOperand(require(output_field, is_concrete_field), require(lookup_name, is_str))
+    return _LookupOperand(output, require(lookup.lookup_name, is_str))
 
 
 class _ResolvedField(NamedTuple):
@@ -546,13 +561,20 @@ def _filterset_resolved_field(
 
 
 def _model_resolved_field(model: type[models.Model], field_path: str) -> _ResolvedField:
-    """Resolve ``field_path`` on ``model``: ``_filterset_resolved_field`` once the model is read."""
+    """Resolve ``field_path`` on ``model``: ``_filterset_resolved_field`` once the model is read.
+
+    A path naming a ``GeneratedField`` answers the column it computes
+    (``types/converters.py::generated_output_field``), so every read of a filter's column
+    (its input type, the form field that cleans a value, the integer range guards of
+    ``IntegerInFilter`` and ``IntegerRangeFilter``) sees the output's class; the path still
+    names the generated field, so the predicate is the one Django builds for it.
+    """
     try:
         field: ModelField = _classify_path_cached(model, field_path).terminal
     except PathResolutionError:
         return _ResolvedField(get_model_field(model, field_path), field_path)
     if field_path.rpartition(LOOKUP_SEP)[2] != "pk":
-        return _ResolvedField(field, field_path)
+        return _ResolvedField(generated_output_field(field) or field, field_path)
     column, links = stored_value_link(field)
     return _ResolvedField(column, LOOKUP_SEP.join((field_path, *links)))
 
@@ -577,9 +599,9 @@ def _filterset_value_field(
     ``lookup_expr`` (a generated ``<column>__year`` / ``year__gt`` / ``year__in`` or
     ``date`` leaf, a declared ``lookup_expr="date"``), in the ``field_name``
     (``occurred_at__year``, an ``ArrayField``'s index ``counts__0`` or slice
-    ``counts__0_2``), or both. The output is django-filter's own answer
-    (``_lookup_operand``, the walk ``BaseFilterSet.filter_for_field`` selects a
-    generated leaf's filter class by): ``year`` / ``len`` an ``IntegerField``, ``date`` a
+    ``counts__0_2``), or both. The output is the one Django's query resolves
+    (``_lookup_operand``, the walk a generated leaf's filter class is selected by too,
+    ``filters/sets.py::FilterSet.filter_for_field``): ``year`` / ``len`` an ``IntegerField``, ``date`` a
     ``DateField``, an index the array's ``base_field``, a slice the array. A lookup
     applied to the column itself (``exact``, ``in``, ``isnull``, a text pattern such as
     ``icontains``, an ``ArrayField``'s ``contains``) answers the column. A null test's
@@ -610,7 +632,7 @@ def _filterset_lookup_operand(
 ) -> _LookupOperand:
     """Return ``_filterset_value_field``'s field with the terminal lookup it is compared by.
 
-    The lookup is django-filter's answer past the transforms (``_lookup_operand``), and the
+    The lookup is the walk's answer past the transforms (``_lookup_operand``), and the
     filter's own ``lookup_expr`` wherever the field is not read off that walk.
     """
     lookup_expr = filter_instance.lookup_expr
@@ -699,16 +721,32 @@ def _column_form_field(filter_instance: Filter, *, element: bool = False) -> Fie
         model_field = array_element_field(model_field) or model_field
     if model_field.is_relation:
         return None
-    if isinstance(parent, _filter_set_class()):
-        filter_class, params = type(parent)._upstream_filter_for_lookup(model_field, "gte")
+    return comparison_form_field(type(parent), model_field, filter_instance.field_name)
+
+
+def comparison_form_field(
+    filterset_cls: type[BaseFilterSet],
+    model_field: ModelField,
+    field_name: str | None,
+) -> Field | None:
+    """Return the form field django-filter's own ``gte`` filter for ``model_field`` builds.
+
+    The filter is the one ``filterset_cls`` selects without the package ``FilterSet``'s own
+    ``filter_for_lookup`` override (``FilterSet._upstream_filter_for_lookup``); any other
+    django-filter ``FilterSet`` is asked through its own ``filter_for_lookup``. Built on
+    ``field_name`` with the params django-filter pairs with the class. ``None`` for a field
+    django-filter builds no filter for.
+    """
+    if issubclass(filterset_cls, _filter_set_class()):
+        filter_class, params = filterset_cls._upstream_filter_for_lookup(model_field, "gte")
     else:
-        filter_class, params = type(parent).filter_for_lookup(
+        filter_class, params = filterset_cls.filter_for_lookup(
             require(model_field, is_concrete_field),
             "gte",
         )
     if filter_class is None:
         return None
-    return _built_filter(filter_class, filter_instance.field_name, params).field
+    return _built_filter(filter_class, field_name, params).field
 
 
 def copied_form_field(filter_instance: Filter) -> Field:
@@ -1853,7 +1891,7 @@ def _filter_schema(filter_instance: Filter) -> Schema | None:
     child instance (``FilterSet._projection_child``) to the instance that owns
     it, so the GlobalID type-name check validates against the names THIS schema
     published. ``None`` for a filterset built outside the apply pipeline (a
-    direct unit-test construction), where no schema exists to consult.
+    direct public construction), where no schema exists to consult.
     """
     owner = read_attr(filter_instance, "parent", None)
     while owner is not None:
@@ -1900,13 +1938,14 @@ def _decode_and_validate_global_id(
     target (`definition is None`, ``_globalid_target``) skips the `type_name` guard (the
     node-id-only fallback, coerced below when the filter names a model field). A
     target on a `callable` / `custom` (encode-only) strategy, or a known target whose
-    `effective_globalid_strategy` is `None` (an unfinalized / non-Relay
-    lifecycle defect), is a fail-closed reject with a coded
-    `GraphQLError(..., extensions={"code": "GLOBALID_UNVALIDATABLE"})` - the
-    runtime backstop behind the build-time audit
-    (`finalizer._audit_globalid_filter_strategies`) for hand-built filtersets
-    constructed outside finalization. A malformed wire string (unparseable
-    base64 / not a
+    `effective_globalid_strategy` is `None` (an unfinalized or non-Relay
+    target), is a fail-closed reject with a coded
+    `GraphQLError(..., extensions={"code": "GLOBALID_UNVALIDATABLE"})`.
+    `finalizer._audit_globalid_filter_strategies` refuses encode-only targets
+    during finalization; that runtime arm is its backstop for hand-built
+    filtersets. A finalized non-Relay target has no recorded strategy and can
+    reach the separate missing-strategy refusal through an ordinary request.
+    A malformed wire string (unparseable base64 / not a
     `type_name:node_id` payload) raises `GraphQLError(..., extensions={"code":
     "GLOBALID_INVALID"})` - the uniform coded error the node-refetch path emits
     (`relay.py::_decode_or_graphql_error`) - instead of leaking Strawberry's raw
@@ -1966,7 +2005,13 @@ def _decode_and_validate_global_id(
     if definition is not None:
         strategy = definition.effective_globalid_strategy
         if strategy not in FRAMEWORK_GLOBALID_STRATEGIES:
-            # Fail closed: an encode-only or unfinalized target.
+            # Fail closed: the target emits GlobalIDs a filter input cannot
+            # decode + validate. ``callable`` / ``custom`` are encode-only; a
+            # ``None`` strategy on a known definition means the type was never
+            # finalized as a Relay node. The encode-only audit refuses callable
+            # and custom targets during finalization; their runtime arm backs
+            # up that audit. A finalized non-Relay target can reach this refusal
+            # through an ordinary request because the audit admits it.
             suffix = "" if index is None else f" at index {index}"
             if strategy in ENCODE_ONLY_GLOBALID_STRATEGIES:
                 message = (
@@ -2095,9 +2140,13 @@ def _unresolved_target_node_id(
     ``GLOBALID_INVALID`` too. A ``lookup_expr`` that is no lookup ``field`` registers
     (one continuing the path, ``lookup_expr="code"``, or applying a transform) compares
     another column, and a relation into a model that is not resolved has none; both pass
-    the node id through unchanged.
+    the node id through unchanged. A ``GeneratedField``'s computed column answers its
+    lookups from the registry Django's query resolves them on, its ``output_field``
+    instance (``utils/relations.py::lookup_registry``, the generated field read back by
+    ``generated_column_source``), so a lookup a project registers there is one it registers.
     """
-    if field.get_lookup(filter_instance.lookup_expr) is None:
+    source = generated_column_source(field) if is_concrete_field(field) else None
+    if lookup_registry(source or field).get_lookup(filter_instance.lookup_expr) is None:
         return node_id
     columns = _compared_columns(filter_instance, field)
     if columns is None:
@@ -2148,8 +2197,8 @@ class GlobalIDFilter(Filter):
     with the decode substituted to `strawberry.relay.GlobalID.from_id(value)`
     per spec-027 Decision 4. The Graphene-only
     `GlobalIDFormField` / `GlobalIDMultipleChoiceField` dependencies drop
-    away; the default `forms.CharField` (inherited via `Filter.field_class`)
-    is used.
+    away; the default `forms.Field` inherited through `django_filters.Filter.field_class`
+    is used. Its cleaning passes the input through without CharField's text coercion.
 
     Accepts both raw `str` and `strawberry.relay.GlobalID` objects per
     spec-027 #"Accepts both raw". Validates the decoded `type_name` against

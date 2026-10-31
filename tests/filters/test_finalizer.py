@@ -21,19 +21,17 @@ Covers:
 - Unresolved ``RelatedFilter`` propagates as ``ConfigurationError``.
 - A declared filter a deep copy refuses fails the build naming its set and
   attribute (a served set's by the subpass-1.5 probe, an unserved
-  ``RelatedFilter`` child's by the expansion copy); controls a copy takes
-  build and filter.
+  ``RelatedFilter`` child's by the expansion copy).
 
-Bound filtersets answering live queries live in the fakeshop filter modules
-and ``test_query/``. This file keeps finalize-time binding, orphan
-rejection, and ``registry.clear`` namespace co-clear -- a request cannot
-observe an unbound FilterSet.
+Bound and unbound filtersets answering requests live in ``test_query/``.
+``test_filter_declarations_api.py`` owns copyable callable and widget controls
+and independently owned enums. This file keeps exact class-owner slots,
+finalize-time refusal and ordering, orphan rejection, and registry reset.
 """
 
 from __future__ import annotations
 
 import functools
-import logging
 import sys
 import threading
 from collections import OrderedDict
@@ -57,7 +55,6 @@ from apps.library.models import (
 from django.contrib.contenttypes.models import ContentType
 from django.core.cache import caches
 from django.db.models import Model, QuerySet, TextField
-from django.forms import TextInput
 from django.http import HttpRequest
 from django.test import override_settings
 from django_filters import BooleanFilter, CharFilter, Filter, NumberFilter
@@ -341,8 +338,7 @@ def test_phase_2_5_rejects_multi_owner_sharing_one_custom_get_queryset() -> None
     (``queryset.filter(kind=cls.KIND)``) would then yield different rows per owner
     while sharing one function, reintroducing the registration-order row-leak the
     axis exists to close. Finalize must fail CLOSED on any custom ``get_queryset``
-    rather than infer behavioral equivalence from function identity (report Defect
-    2: "function identity is not visibility equivalence").
+    rather than infer behavioral equivalence from function identity.
     """
 
     class BookFilter(FilterSet):
@@ -569,21 +565,16 @@ _SUBCLASS_OWNER_CASES = [
 ]
 
 
-@pytest.mark.django_db
 @pytest.mark.parametrize(("hiding_first", "base_on_hiding"), _SUBCLASS_OWNER_CASES)
 def test_a_filterset_subclass_binds_its_own_owner_apart_from_its_base(
     *,
     hiding_first: bool,
     base_on_hiding: bool,
 ) -> None:
-    """``ShelfFilter`` and ``SubShelfFilter(ShelfFilter)`` on two owners each filter by their own owner.
+    """Finalize binds a base filterset and subclass to distinct own class slots.
 
-    The multi-owner refusal's remedy is a separate set subclass per owner, so a
-    subclass binds its OWN owner and never sees its base's binding as a second
-    owner, whichever type declares first and whichever class the hiding type
-    wires. Each ``RelatedFilter`` branch then reads the type its target class is
-    bound to: through the hiding owner a hidden shelf matches nothing, through
-    the plain owner it matches its book.
+    Consumer-visible filtering is covered by
+    ``examples/fakeshop/test_query/test_library_api.py::test_a_set_and_its_subclass_read_their_own_bound_owner_over_http``.
     """
 
     class ShelfFilter(FilterSet):
@@ -661,43 +652,16 @@ def test_a_filterset_subclass_binds_its_own_owner_apart_from_its_base(
             interfaces = (relay.Node,)
 
     finalize_django_types()
+    assert (
+        ViaHidingBookType.__django_strawberry_definition__.filterset_class is ViaHidingBookFilter
+    )
+    assert ViaPlainBookType.__django_strawberry_definition__.filterset_class is ViaPlainBookFilter
     shelf_owner = truth.class_dict(ShelfFilter)["_owner_definition"]
     sub_shelf_owner = truth.class_dict(SubShelfFilter)["_owner_definition"]
     assert isinstance(shelf_owner, DjangoTypeDefinition)
     assert isinstance(sub_shelf_owner, DjangoTypeDefinition)
     assert shelf_owner.origin is (hiding_type if base_on_hiding else plain_type)
     assert sub_shelf_owner.origin is (plain_type if base_on_hiding else hiding_type)
-
-    # ``from __future__ import annotations`` leaves a class-body annotation a string
-    # naming a function local, so the root type is built with resolved annotations.
-    query = strawberry.type(
-        type(
-            "Query",
-            (),
-            {
-                "__annotations__": {
-                    "via_hiding": DjangoConnection[ViaHidingBookType],
-                    "via_plain": DjangoConnection[ViaPlainBookType],
-                },
-                "via_hiding": DjangoConnectionField(ViaHidingBookType),
-                "via_plain": DjangoConnectionField(ViaPlainBookType),
-            },
-        ),
-    )
-    branch = Branch.objects.create(name="b")
-    hidden = Shelf.objects.create(branch=branch, code="h", topic="secret")
-    seen = Shelf.objects.create(branch=branch, code="s", topic="zzz")
-    Book.objects.create(title="on-hidden", shelf=hidden)
-    Book.objects.create(title="on-seen", shelf=seen)
-    match = '(filter: {shelf: {topic: {exact: "secret"}}}) { edges { node { title } } }'
-    result = strawberry.Schema(query=query, config=strawberry_config()).execute_sync(
-        f"{{ viaHiding{match} viaPlain{match} }}",
-        context_value=HttpRequest(),
-    )
-    assert result.errors is None, result.errors
-    assert result.data is not None
-    assert result.data["viaHiding"]["edges"] == []
-    assert result.data["viaPlain"]["edges"] == [{"node": {"title": "on-hidden"}}]
 
 
 @pytest.mark.parametrize(
@@ -707,77 +671,100 @@ def test_a_filterset_subclass_binds_its_own_owner_apart_from_its_base(
         pytest.param(False, id="unrelated-unwired-filterset"),
     ],
 )
-def test_an_unwired_filterset_subclass_names_a_choice_enum_as_an_unbound_set(
+def test_an_unwired_filterset_keeps_its_own_unbound_owner_slot(
     *,
     subclass_target: bool,
 ) -> None:
-    """An unwired subclass names a choice enum it builds first after its own class.
+    """An unwired subclass has no own owner slot despite its bound base.
 
-    No ``DjangoType`` exposes ``Shelf.condition`` and ``HIDE_FLAT_FILTERS`` keeps
-    the root from building the column as a flat leaf, so the ``RelatedFilter``
-    target, built before ``PlainShelfType`` (declared last) builds its own
-    ``ShelfFilter``, is the first to read the column, and the first builder names
-    the enum. A subclass of ``ShelfFilter`` no type wires has no owner, so it names
-    the enum exactly as an unrelated unwired filterset does: after its own class
-    name, never its base's owner's type name.
+    Exact class-dictionary ownership stays private. Related-filter rowsets,
+    key scalars and reentry visibility live in
+    ``test_library_api.py::test_an_unwired_filter_subclass_answers_like_an_unrelated_unwired_set_over_http``.
     """
-    with override_settings(DJANGO_STRAWBERRY_FRAMEWORK={"HIDE_FLAT_FILTERS": True}):
 
-        class ShelfFilter(FilterSet):
-            class Meta:
-                model = Shelf
-                fields = {"condition": ["exact"]}
+    class BackBookFilter(FilterSet):
+        class Meta:
+            model = Book
+            fields = {"title": ["exact"]}
 
-        class SubShelfFilter(ShelfFilter):
-            pass
+    target_fields = {
+        "topic": ["exact"],
+        "id": ["exact"],
+        "branch": ["exact"],
+        "branch__shelves__topic": ["exact"],
+    }
 
-        class LoneShelfFilter(FilterSet):
-            class Meta:
-                model = Shelf
-                fields = {"condition": ["exact"]}
+    class ShelfFilter(FilterSet):
+        back = RelatedFilter(BackBookFilter, field_name="branch__shelves__books")
 
-        target = SubShelfFilter if subclass_target else LoneShelfFilter
+        class Meta:
+            model = Shelf
+            fields = target_fields
 
-        class ViaTargetBookFilter(FilterSet):
-            shelf = RelatedFilter(target, field_name="shelf")
+    class SubShelfFilter(ShelfFilter):
+        pass
 
-            class Meta:
-                model = Book
-                fields = {"title": ["exact"]}
+    class LoneShelfFilter(FilterSet):
+        back = RelatedFilter(BackBookFilter, field_name="branch__shelves__books")
 
-        class ViaTargetBookType(DjangoType):
-            class Meta:
-                model = Book
-                fields = ("id", "title")
-                filterset_class = ViaTargetBookFilter
-                interfaces = (relay.Node,)
+        class Meta:
+            model = Shelf
+            fields = target_fields
 
-        class PlainShelfType(DjangoType):
-            class Meta:
-                model = Shelf
-                fields = ("id", "topic")
-                filterset_class = ShelfFilter
+    target = SubShelfFilter if subclass_target else LoneShelfFilter
 
-        finalize_django_types()
-        assert (
-            read_attr(truth.class_dict(ShelfFilter)["_owner_definition"], "origin")
-            is PlainShelfType
-        )
-        assert "_owner_definition" not in truth.class_dict(target)
-        query = strawberry.type(
-            type(
-                "Query",
-                (),
-                {
-                    "__annotations__": {"via_target": DjangoConnection[ViaTargetBookType]},
-                    "via_target": DjangoConnectionField(ViaTargetBookType),
-                },
-            ),
-        )
-        schema = strawberry.Schema(query=query, config=strawberry_config())
-    expected = "SubShelfFilterConditionEnum" if subclass_target else "LoneShelfFilterConditionEnum"
-    assert schema.get_type_by_name(expected) is not None
-    assert schema.get_type_by_name("PlainShelfTypeConditionEnum") is None
+    class BranchType(DjangoType):
+        class Meta:
+            model = Branch
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+
+    class HidingShelfType(DjangoType):
+        class Meta:
+            model = Shelf
+            fields = ("id", "topic")
+            primary = True
+            interfaces = (relay.Node,)
+
+        @classmethod
+        @override
+        def get_queryset(
+            cls,
+            queryset: QuerySet[Shelf],
+            info: object,
+            **kwargs: object,
+        ) -> QuerySet[Shelf]:
+            return queryset.exclude(topic="secret")
+
+    class PlainShelfType(DjangoType):
+        class Meta:
+            model = Shelf
+            fields = ("id", "topic")
+            interfaces = (relay.Node,)
+            filterset_class = ShelfFilter
+
+    class ViaTargetBookFilter(FilterSet):
+        shelf = RelatedFilter(target, field_name="shelf")
+
+        class Meta:
+            model = Book
+            fields = {"title": ["exact"]}
+
+    class ViaTargetBookType(DjangoType):
+        class Meta:
+            model = Book
+            fields = ("id", "title")
+            filterset_class = ViaTargetBookFilter
+            interfaces = (relay.Node,)
+
+    finalize_django_types()
+    assert (
+        read_attr(truth.class_dict(ShelfFilter)["_owner_definition"], "origin") is PlainShelfType
+    )
+    assert "_owner_definition" not in truth.class_dict(target)
+    assert registry.get(Shelf) is HidingShelfType
+    assert registry.get(Branch) is BranchType
+    assert registry.get(Book) is ViaTargetBookType
 
 
 @pytest.mark.parametrize(
@@ -1652,8 +1639,6 @@ def test_phase_2_5_runs_under_relay_node_interface() -> None:
     assert issubclass(BookType, relay.Node)
     inputs_module = sys.modules[INPUTS_MODULE_PATH]
     assert hasattr(inputs_module, "BookFilterInputType")
-    # Silence ``strawberry`` import unused at module scope.
-    assert strawberry is not None
 
 
 # ---------------------------------------------------------------------------
@@ -2105,43 +2090,6 @@ class _CacheHolder:
         return _code_is(queryset, name, value)
 
 
-class _ClassLockHolder:
-    """A service holding its lock on the class, which a deep copy of a bound method shares."""
-
-    lock = threading.Lock()
-
-    def code_is(
-        self,
-        queryset: QuerySet[Shelf],
-        name: str,
-        value: object,
-    ) -> QuerySet[Shelf]:
-        return _code_is(queryset, name, value)
-
-
-class _LoggerHolder:
-    """A service holding a logger, which deep-copies as itself."""
-
-    def __init__(self) -> None:
-        self.log = logging.getLogger(__name__)
-
-    def code_is(
-        self,
-        queryset: QuerySet[Shelf],
-        name: str,
-        value: object,
-    ) -> QuerySet[Shelf]:
-        return _code_is(queryset, name, value)
-
-
-class _LockedInput(TextInput):
-    """A widget holding a lock; Django's ``Widget.__deepcopy__`` copies it shallowly."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.lock = threading.Lock()
-
-
 _METHOD_ADVICE = (
     'Pass method= as the name of a FilterSet method (method="<name>") or as a plain function.'
 )
@@ -2173,10 +2121,10 @@ def _is_filterset_class(value: object) -> TypeIs[type[FilterSet]]:
     return isinstance(value, type) and issubclass(value, FilterSet)
 
 
-def _shelf_filter(declared: Filter, namespace: dict[str, object] | None = None) -> type[FilterSet]:
+def _shelf_filter(declared: Filter) -> type[FilterSet]:
     """``ShelfFilter`` over ``Shelf`` declaring ``declared`` as ``code_is``."""
     meta = type("Meta", (), {"model": Shelf, "fields": {"topic": ["exact"]}})
-    body: dict[str, object] = {"code_is": declared, "Meta": meta, **(namespace or {})}
+    body: dict[str, object] = {"code_is": declared, "Meta": meta}
     return require(type("ShelfFilter", (FilterSet,), body), _is_filterset_class)
 
 
@@ -2342,79 +2290,3 @@ def test_finalize_refuses_a_related_child_filter_a_deep_copy_refuses() -> None:
     cause = exc_info.value.__cause__
     where = f"ShelfFilter.code_is (reached through RelatedFilter {BookFilter.__qualname__}.shelf)"
     assert str(exc_info.value) == _copy_refusal(where, "CharFilter", cause, has_method=True)
-
-
-def _filter_code(
-    self: FilterSet,
-    queryset: QuerySet[Shelf],
-    name: str,
-    value: object,
-) -> QuerySet[Shelf]:
-    """A FilterSet method named by ``method="filter_code"``."""
-    del self
-    return _code_is(queryset, name, value)
-
-
-_COPYABLE_DECLARATIONS = [
-    pytest.param(
-        lambda: CharFilter(field_name="code", method=_ClassLockHolder().code_is),
-        {},
-        id="bound-method-over-class-lock",
-    ),
-    pytest.param(
-        lambda: CharFilter(field_name="code", method="filter_code"),
-        {"filter_code": _filter_code},
-        id="method-name-string",
-    ),
-    pytest.param(
-        lambda: CharFilter(field_name="code", method=_code_is),
-        {},
-        id="plain-function",
-    ),
-    pytest.param(
-        lambda: CharFilter(field_name="code", method=_LoggerHolder().code_is),
-        {},
-        id="bound-method-over-logger",
-    ),
-    pytest.param(
-        lambda: CharFilter(field_name="code", widget=_LockedInput()),
-        {},
-        id="widget-with-shallow-deepcopy",
-    ),
-]
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize(("declare", "namespace"), _COPYABLE_DECLARATIONS)
-def test_finalize_keeps_a_declared_filter_a_deep_copy_takes(
-    declare: Callable[[], Filter],
-    namespace: dict[str, object],
-) -> None:
-    """A declared filter every deep copy takes builds and answers a filtered request.
-
-    A lock on the service's class rides a copy of the bound method by
-    reference, a method name or plain function holds nothing, a logger copies
-    as itself and Django's widget copy is shallow: none is refused.
-    """
-    shelf_type = _wire_shelf_type(_shelf_filter(declare(), namespace))
-    finalize_django_types()
-
-    query = strawberry.type(
-        type(
-            "Query",
-            (),
-            {
-                "__annotations__": {"shelves": DjangoConnection[shelf_type]},
-                "shelves": DjangoConnectionField(shelf_type),
-            },
-        ),
-    )
-    branch = Branch.objects.create(name="b")
-    Shelf.objects.create(branch=branch, code="a")
-    Shelf.objects.create(branch=branch, code="b")
-    result = strawberry.Schema(query=query, config=strawberry_config()).execute_sync(
-        '{ shelves(filter: {codeIs: {exact: "a"}}) { edges { node { code } } } }',
-        context_value=HttpRequest(),
-    )
-    assert result.errors is None, result.errors
-    assert result.data == {"shelves": {"edges": [{"node": {"code": "a"}}]}}

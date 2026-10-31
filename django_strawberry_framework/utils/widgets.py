@@ -17,8 +17,11 @@ neither of which owns a widget:
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from django.contrib.postgres.validators import ArrayMaxLengthValidator
 from django.forms import MultiWidget, Widget
+from django.utils.datastructures import MultiValueDict
 from django_filters.widgets import SuffixedMultiWidget
 
 from . import truth
@@ -32,7 +35,15 @@ from ._narrowing import (
 )
 from .imports import import_attr_if_importable
 
-__all__ = ("multi_widget_keys", "widget_entries", "widget_keys")
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+__all__ = (
+    "bound_value",
+    "multi_widget_keys",
+    "widget_entries",
+    "widget_keys",
+)
 
 
 def _postgres_split_array_widget() -> type[Widget] | None:
@@ -150,3 +161,16 @@ def _array_parts(value: object) -> list[object]:
     if is_list_or_tuple(value):
         return list(value)
     return [value]
+
+
+def bound_value(bound: Mapping[str, object], name: str) -> object:
+    """Return the value ``bound`` holds under ``name``: a ``MultiValueDict``'s values read whole.
+
+    A ``MultiValueDict`` (a ``QueryDict``) holding one value answers it; one holding several
+    (``setlist(name, [...])``, a ``doseq`` query string) answers the list of them, the
+    inverse of ``_bind_form_values``'s ``setlist``. Any other mapping answers its value.
+    """
+    if not isinstance(bound, MultiValueDict):
+        return bound[name]
+    values = list_of(bound.getlist(name))
+    return values[0] if len(values) == 1 else values

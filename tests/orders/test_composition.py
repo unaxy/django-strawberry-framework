@@ -1,55 +1,19 @@
-"""Filter and order composition smoke tests for Layer-3 read-side integration.
+"""Filter and order finalization shares input namespaces, caches, and the neutral related-set mixin.
 
-Pins the **package-internal** composition contract for a ``DjangoType`` that
-declares BOTH ``Meta.filterset_class`` AND ``Meta.orderset_class``. The
-live HTTP test ``test_library_books_filter_and_order_compose`` (at
-``examples/fakeshop/test_query/test_library_api.py``) already pins the
-consumer-visible behavior end-to-end through ``/graphql/``; this file pins
-the complementary implementation-contract altitude:
-
-1. Both subsystems' per-module input-class namespaces materialize the
-   ``<X>FilterInputType`` AND ``<X>OrderInputType`` classes as module
-   globals of their respective ``inputs.py`` modules in one
-   ``finalize_django_types()`` pass.
-2. Both factories' ``input_object_types`` dicts register the corresponding
-   classes -- the materialization-ledger + factory-cache pair stays
-   consistent across subsystems.
-3. Strawberry's ``LazyType.resolve_type`` path (modeled here as a
-   ``module.__dict__`` lookup over both inputs modules) finds both classes
-   so the schema's ``filter:`` / ``orderBy:`` arguments resolve.
-4. A resolver that consumes BOTH arguments produces a queryset whose
-   ``query.where`` is non-empty (the filter pipeline ran) AND
-   ``list(query.order_by)`` is non-empty (the order pipeline ran),
-   inspected via ``django.test.utils.CaptureQueriesContext`` so the
-   ``WHERE <filter>`` and ``ORDER BY <order>`` clauses are visible in the
-   captured SQL too.
-5. The shared ``django_strawberry_framework/sets_mixins.py::
-   LazyRelatedClassMixin`` is the same class object in both
-   ``RelatedFilter.__mro__`` and ``RelatedOrder.__mro__`` -- the
-   sibling-import sharing does not duplicate the mixin between
-   subsystems.
-
-Fixture choice: reuses the fakeshop library ``Book`` model (per
-``AGENTS.md`` carve-out -- "Library acceptance tests use inline
-Model.objects.create; the library app has no services.py", so the
-seed-helper rule does not apply here) but declares LOCAL ``BookFilter``,
-``BookOrder``, and ``BookType`` classes inside each test function body
-to avoid colliding with the already-schema-bound ``apps.library.*``
-classes carried by the schema-module import.
+A finalization pass publishes each family's input class in its own module,
+materialization ledger, and factory cache. These identities are private
+lifecycle state, which a response cannot expose. Consumer filter/order
+composition is pinned by the live HTTP
+``examples/fakeshop/test_query/test_library_api.py::test_library_books_filter_and_order_compose``.
 """
 
 from __future__ import annotations
 
 import sys
 from collections.abc import Iterator
-from types import SimpleNamespace
 
 import pytest
 from apps.library.models import Book
-from django.contrib.auth.models import User
-from django.db import connection
-from django.http import HttpRequest
-from django.test.utils import CaptureQueriesContext
 
 from django_strawberry_framework import DjangoType, finalize_django_types
 from django_strawberry_framework.filters import (
@@ -68,7 +32,6 @@ from django_strawberry_framework.filters.inputs import (
     _materialized_names as _filter_materialized_names,
 )
 from django_strawberry_framework.orders import (
-    Ordering,
     OrderSet,
     RelatedOrder,
     _helper_referenced_ordersets,
@@ -85,7 +48,7 @@ from django_strawberry_framework.orders.inputs import (
 )
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.sets_mixins import LazyRelatedClassMixin
-from tests._generated_inputs import keyword_constructor as _keyword_constructor
+from django_strawberry_framework.utils._narrowing import read_attr
 
 
 @pytest.fixture(autouse=True)
@@ -127,42 +90,12 @@ def _isolate_registry() -> Iterator[None]:
     OrderArgumentsFactory._type_orderset_registry.clear()
 
 
-def _make_info() -> SimpleNamespace:
-    """Build a minimal ``info``-shaped stub with a Django ``HttpRequest`` on it.
-
-    Mirrors ``tests/orders/test_sets.py::_make_info``; declared locally
-    rather than sibling-imported because the cross-module test-helper
-    coupling would entangle two otherwise-independent test files.
-    """
-    request = HttpRequest()
-    request.user = User(username="u")
-    return SimpleNamespace(context=SimpleNamespace(request=request))
-
-
-@pytest.mark.django_db
-def test_filter_and_order_compose_through_finalizer_and_apply_pipelines() -> None:
-    """Filter + order compose cleanly through one ``finalize_django_types()`` pass.
-
-    Pins the four-part contract from the module docstring: both factories
-    materialize their input classes, both ``input_object_types`` carry
-    them, the ``LazyType.resolve_type`` ``module.__dict__`` lookup finds
-    both, and the apply pipeline produces a queryset whose ``query.where``
-    carries the filter constraint AND ``query.order_by`` carries the
-    order clause. The captured SQL string is inspected via
-    ``CaptureQueriesContext`` so the ``WHERE`` and ``ORDER BY`` clauses
-    are confirmed in the canonical resolver-chain order: filter narrows
-    rows first, order arranges them second.
-    """
+def test_finalizer_materializes_both_input_families_in_their_own_namespaces() -> None:
+    """One finalization publishes both families to their own module, ledger, and cache."""
 
     class BookFilter(FilterSet):
         class Meta:
             model = Book
-            # Single-lookup form so the dict-input apply pipeline accepts
-            # a scalar value for ``title`` (the form maps ``title`` to
-            # the default ``exact`` lookup); the per-field operator-bag
-            # shape requires constructing a Strawberry dataclass instance
-            # which adds fixture noise without changing the composition
-            # contract this test pins.
             fields = {"title": ["exact"]}
 
     class BookOrder(OrderSet):
@@ -181,66 +114,18 @@ def test_filter_and_order_compose_through_finalizer_and_apply_pipelines() -> Non
 
     finalize_django_types()
 
-    # Assertion 1: both per-module inputs modules carry the materialized
-    # classes (the ``LazyType.resolve_type`` path uses ``module.__dict__``
-    # at schema-build time -- this assertion models that lookup).
     filter_inputs_mod = sys.modules[FILTER_INPUTS_MODULE_PATH]
     order_inputs_mod = sys.modules[ORDER_INPUTS_MODULE_PATH]
-    assert hasattr(filter_inputs_mod, "BookFilterInputType")
-    assert hasattr(order_inputs_mod, "BookOrderInputType")
-
-    # Assertion 2: both ``_materialized_names`` ledgers register the names
-    # (spec-028 Decision 9 / spec-027 Decision 9 -- the ledger is the
-    # idempotence guard for ``materialize_input_class``).
     assert "BookFilterInputType" in _filter_materialized_names
     assert "BookOrderInputType" in _order_materialized_names
-
-    # Assertion 3: both factories' class-level ``input_object_types``
-    # dicts carry the materialized classes (the factory-cache
-    # contract on both subsystems).
-    assert "BookFilterInputType" in FilterArgumentsFactory.input_object_types
-    assert "BookOrderInputType" in OrderArgumentsFactory.input_object_types
-
-    # Assertion 4: the apply pipeline composes -- filter narrows rows,
-    # order arranges the survivors. Inspect ``query.where`` /
-    # ``query.order_by`` on the unexecuted queryset for stable Django-
-    # internal contracts, then execute it under
-    # ``CaptureQueriesContext`` so the captured SQL string carries
-    # ``WHERE`` AND ``ORDER BY`` clauses too.
-    order_input_cls = _keyword_constructor(
-        OrderArgumentsFactory.input_object_types["BookOrderInputType"],
+    assert (
+        read_attr(filter_inputs_mod, "BookFilterInputType")
+        is FilterArgumentsFactory.input_object_types["BookFilterInputType"]
     )
-    # Dict-shape input is supported by ``FilterSet._normalize_input`` -- a
-    # scalar value for a single-lookup field maps to the form's default
-    # ``exact`` lookup. The order side receives a list of Strawberry
-    # input dataclass instances per spec-028 Decision 5 list-of-non-null.
-    filter_input = {"title": "Foundation"}
-    order_input = [order_input_cls(title=Ordering.ASC)]
-    info = _make_info()
-    queryset = Book.objects.all()
-    queryset = BookFilter.apply_sync(filter_input, queryset, info)
-    queryset = BookOrder.apply_sync(order_input, queryset, info)
-
-    # Django-internal attributes (no DB hit needed for these checks).
-    assert bool(queryset.query.where), "filter pipeline did not populate WhereNode"
-    order_by = list(queryset.query.order_by)
-    assert order_by, "order pipeline did not populate order_by"
-    assert any("title" in repr(item) for item in order_by), (
-        f"ORDER BY does not reference the title column: {order_by!r}"
+    assert (
+        read_attr(order_inputs_mod, "BookOrderInputType")
+        is OrderArgumentsFactory.input_object_types["BookOrderInputType"]
     )
-
-    # SQL-string confirmation via ``CaptureQueriesContext`` -- execute
-    # the queryset so the captured SQL carries BOTH clauses in the
-    # canonical order (WHERE before ORDER BY).
-    with CaptureQueriesContext(connection) as ctx:
-        list(queryset)
-    assert len(ctx.captured_queries) == 1
-    sql = ctx.captured_queries[0]["sql"].upper()
-    where_idx = sql.find("WHERE")
-    order_idx = sql.find("ORDER BY")
-    assert where_idx != -1, f"SQL missing WHERE clause: {sql!r}"
-    assert order_idx != -1, f"SQL missing ORDER BY clause: {sql!r}"
-    assert where_idx < order_idx, f"WHERE must precede ORDER BY in the SQL string: {sql!r}"
 
 
 def test_filter_and_order_share_lazy_related_class_mixin_via_neutral_module() -> None:

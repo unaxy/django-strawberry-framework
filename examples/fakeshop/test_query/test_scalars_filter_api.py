@@ -72,6 +72,7 @@ from django.db.models import QuerySet
 from django.http import HttpRequest
 from django.http.response import HttpResponseBase
 from django.test import override_settings
+from django.test.utils import CaptureQueriesContext
 from django.urls import path
 from graphql_client import (
     JSONObject,
@@ -121,7 +122,7 @@ def _seed_specimen(label: str, **overrides: object) -> models.ScalarSpecimen:
 
 @pytest.mark.django_db
 def test_scalars_filter_by_label_icontains() -> None:
-    """Text-scalar filter input (``label: { iContains }``)."""
+    """``label: { iContains }`` keeps only labels containing the supplied text."""
     _seed_specimen("alpha")
     _seed_specimen("beta")
     _assert_graphql_data(
@@ -138,14 +139,14 @@ def test_scalars_filter_by_label_icontains() -> None:
 
 @pytest.mark.django_db
 def test_scalars_filter_by_flag_exact() -> None:
-    """Boolean-scalar filter input (``flag: { exact: true }``)."""
+    """``flag: { exact: true }`` keeps only the two true rows."""
     _seed_specimen("alpha", flag=True)
     _seed_specimen("beta", flag=False)
     _seed_specimen("gamma", flag=True)
     _assert_graphql_data(
         """
         query {
-          allScalarSpecimens(filter: { flag: { exact: true } }) {
+          allScalarSpecimens(filter: { flag: { exact: true } }, orderBy: [{ label: ASC }]) {
             label
           }
         }
@@ -156,14 +157,14 @@ def test_scalars_filter_by_flag_exact() -> None:
 
 @pytest.mark.django_db
 def test_scalars_filter_by_non_relay_pk_in_list() -> None:
-    """Non-Relay ``id: { in: [...] }`` resolves to the integer CSV path (H5c).
+    """Non-Relay ``id: { in: [...] }`` resolves to the integer CSV path.
 
     The scalar types are not Relay nodes, so ``id`` is a plain integer column.
     Its ``in`` lookup routes through the framework's ``IntegerInFilter`` (a
     ``BaseInFilter`` subclass that also drops out-of-range members and matches
     nothing on a fully-dropped non-empty list) and converts to a ``list[Int]``
     CSV input rather than the own-PK ``GlobalIDMultipleChoiceFilter`` the Relay
-    apps use. This pins the non-Relay counterpart of that fix end to end.
+    apps use. The wire accepts raw integer keys rather than GlobalIDs.
     """
     alpha = _seed_specimen("alpha")
     _seed_specimen("beta")
@@ -171,7 +172,10 @@ def test_scalars_filter_by_non_relay_pk_in_list() -> None:
     _assert_graphql_data(
         f"""
         query {{
-          allScalarSpecimens(filter: {{ id: {{ in: [{alpha.pk}, {gamma.pk}] }} }}) {{
+          allScalarSpecimens(
+            filter: {{ id: {{ in: [{alpha.pk}, {gamma.pk}] }} }}
+            orderBy: [{{ label: ASC }}]
+          ) {{
             label
           }}
         }}
@@ -182,20 +186,25 @@ def test_scalars_filter_by_non_relay_pk_in_list() -> None:
 
 @pytest.mark.django_db
 def test_scalars_filter_by_related_tag_label() -> None:
-    """``RelatedFilter`` onto ``ScalarSpecimenTag`` (whose ``get_queryset`` is active=True)."""
+    """The related tag predicate reads active rows and excludes an inactive matching tag in SQL."""
     hot = models.ScalarSpecimenTag.objects.create(label="hot", active=True)
+    hidden = models.ScalarSpecimenTag.objects.create(label="hot archived", active=False)
     _seed_specimen("alpha", tag=hot)
+    _seed_specimen("hidden", tag=hidden)
     _seed_specimen("beta")
-    _assert_graphql_data(
-        """
-        query {
-          allScalarSpecimens(filter: { tag: { label: { exact: "hot" } } }) {
-            label
-          }
-        }
-        """,
-        {"allScalarSpecimens": [{"label": "alpha"}]},
-    )
+    with CaptureQueriesContext(connection) as captured:
+        _assert_graphql_data(
+            'query { allScalarSpecimens(filter: { tag: { label: { iContains: "hot" } } }) { label } }',
+            {"allScalarSpecimens": [{"label": "alpha"}]},
+        )
+    specimen_sql = [
+        row["sql"]
+        for row in captured.captured_queries
+        if 'FROM "scalars_scalarspecimen"' in row["sql"]
+    ]
+    assert len(specimen_sql) == 1, captured.captured_queries
+    assert "active" in specimen_sql[0], specimen_sql
+    assert "EXISTS" in specimen_sql[0].upper(), specimen_sql
 
 
 @pytest.mark.django_db
@@ -277,7 +286,7 @@ def test_scalars_filter_by_price_span_range() -> None:
 
 _BY_FILTER = """
 query ($filter: ScalarSpecimenFilterInputType) {
-  allScalarSpecimens(filter: $filter) {
+  allScalarSpecimens(filter: $filter, orderBy: [{ id: ASC }]) {
     label
   }
 }
@@ -1697,13 +1706,21 @@ def test_all_lookup_leaves_publish_no_contrib_postgres_lookup() -> None:
     payload = response_json(
         post_graphql("query { allScalarSpecimens(filter: { id: { containedBy: 5 } }) { label } }"),
     )
-    assert "data" not in payload or payload["data"] is None, payload
-    assert "containedBy" in str(payload["errors"]), payload
+    assert payload["data"] is None, payload
+    assert (
+        "Field 'containedBy' is not defined by type 'ScalarSpecimenFilterIdFilterInputType'."
+        in json_str(
+            payload,
+            "errors",
+            0,
+            "message",
+        )
+    ), payload
 
 
 _BY_PARENT = """
 query ($filter: ScalarSpecimenFilterInputType) {
-  allScalarSpecimens(filter: $filter) {
+  allScalarSpecimens(filter: $filter, orderBy: [{ label: ASC }]) {
     label
   }
 }
@@ -1711,27 +1728,44 @@ query ($filter: ScalarSpecimenFilterInputType) {
 
 
 @pytest.mark.django_db
-def test_scalars_filter_by_forward_fk_primary_key_exact_and_in() -> None:
+@pytest.mark.parametrize("lookup", ["exact", "in", "isNull"], ids=["exact", "in", "is-null"])
+def test_scalars_filter_by_forward_fk_primary_key_exact_and_in(lookup: str) -> None:
     """``parent`` takes one raw pk for ``exact`` and a list for ``in``; ``isNull`` stays Boolean."""
     root_a = _seed_specimen("root-a")
     root_b = _seed_specimen("root-b")
     _seed_specimen("child-a", parent=root_a)
     _seed_specimen("child-b", parent=root_b)
 
-    for filter_input, labels in (
-        ({"parent": {"exact": root_a.pk}}, ["child-a"]),
-        ({"parent": {"in": [root_a.pk, root_b.pk]}}, ["child-a", "child-b"]),
-        ({"parent": {"isNull": True}}, ["root-a", "root-b"]),
-    ):
-        _assert_graphql_data(
-            _BY_PARENT,
-            {"allScalarSpecimens": [{"label": label} for label in labels]},
-            variables={"filter": filter_input},
-        )
+    cases = {
+        "exact": ({"parent": {"exact": root_a.pk}}, ["child-a"]),
+        "in": ({"parent": {"in": [root_a.pk, root_b.pk]}}, ["child-a", "child-b"]),
+        "isNull": ({"parent": {"isNull": True}}, ["root-a", "root-b"]),
+    }
+    filter_input, labels = cases[lookup]
+    _assert_graphql_data(
+        _BY_PARENT,
+        {"allScalarSpecimens": [{"label": label} for label in labels]},
+        variables={"filter": filter_input},
+    )
 
 
 @pytest.mark.django_db
-def test_scalars_forward_fk_primary_key_follows_the_membership_rules() -> None:
+@pytest.mark.parametrize(
+    "case",
+    [
+        "missing-exact",
+        "missing-in",
+        "mixed-in",
+        "empty-in",
+    ],
+    ids=[
+        "missing-exact",
+        "missing-in",
+        "mixed-in",
+        "empty-in",
+    ],
+)
+def test_scalars_forward_fk_primary_key_follows_the_membership_rules(case: str) -> None:
     """A missing pk matches nothing, beside a real one it is dropped, and ``in: []`` is empty.
 
     None of these is a validation error: the relation key never checks that the target
@@ -1743,18 +1777,18 @@ def test_scalars_forward_fk_primary_key_follows_the_membership_rules() -> None:
     assert root_pk is not None
     missing = root_pk + 1000
 
-    cases: tuple[tuple[dict[str, dict[str, int | list[int]]], list[str]], ...] = (
-        ({"parent": {"exact": missing}}, []),
-        ({"parent": {"in": [missing]}}, []),
-        ({"parent": {"in": [missing, root_pk]}}, ["child"]),
-        ({"parent": {"in": []}}, []),
+    cases: dict[str, tuple[dict[str, object], list[str]]] = {
+        "missing-exact": ({"parent": {"exact": missing}}, []),
+        "missing-in": ({"parent": {"in": [missing]}}, []),
+        "mixed-in": ({"parent": {"in": [missing, root_pk]}}, ["child"]),
+        "empty-in": ({"parent": {"in": []}}, []),
+    }
+    filter_input, labels = cases[case]
+    _assert_graphql_data(
+        _BY_PARENT,
+        {"allScalarSpecimens": [{"label": label} for label in labels]},
+        variables={"filter": filter_input},
     )
-    for filter_input, labels in cases:
-        _assert_graphql_data(
-            _BY_PARENT,
-            {"allScalarSpecimens": [{"label": label} for label in labels]},
-            variables={"filter": filter_input},
-        )
 
 
 @pytest.mark.django_db

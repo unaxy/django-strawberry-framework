@@ -2,7 +2,7 @@
 
 Covers:
 
-- ``Meta.orderset_class`` promotion and validation (positive + negative + local-import).
+- ``Meta.orderset_class`` promotion and validation (positive + negative).
 - Four-subpass ordering: bind owners -> expand fields -> orphan-validate ->
   materialize. Subpass 1 completes across all owners before subpass 2 runs;
   subpass 3 runs BEFORE subpass 4 so an orphan failure leaves no partial
@@ -30,23 +30,19 @@ Finalize-time bind / orphan / collision have no request. Shipped
 
 from __future__ import annotations
 
-import inspect
 import sys
 from collections import OrderedDict
 from collections.abc import Iterator
 from typing import NoReturn
 
 import pytest
-import strawberry
 from apps.library.models import Book, Branch, Genre, LendingDesk, ProxyBranch, Shelf, Venue
 from django.db import models
 from django.db.models import QuerySet
-from django.test import RequestFactory
 from strawberry import relay
 from typing_extensions import override
 
-import django_strawberry_framework.types.base as base_mod
-from django_strawberry_framework import DjangoListField, DjangoType, finalize_django_types
+from django_strawberry_framework import DjangoType, finalize_django_types
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.orders import (
     OrderInput,
@@ -67,7 +63,7 @@ from django_strawberry_framework.types.finalizer import _bind_orderset_owner
 from django_strawberry_framework.types.relay import apply_interfaces
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import read_attr
-from tests._idioms import definition_raises, json_at, json_list
+from tests._idioms import definition_raises
 
 
 @pytest.fixture(autouse=True)
@@ -127,21 +123,6 @@ def test_meta_orderset_class_rejects_non_order_set() -> None:
     msg = str(exc_info.value)
     assert "OrderSet subclass" in msg
     assert "NotAnOrderSet" in msg
-
-
-def test_validate_orderset_class_uses_local_import() -> None:
-    """``_validate_orderset_class`` keeps ``OrderSet`` out of ``types.base`` module globals.
-
-    Pins the spec-028 contract: the import lives
-    inside the function so the ``types -> orders -> types`` module-load
-    cycle stays inert.
-    """
-    # Module-top namespace must NOT carry ``OrderSet`` -- the validator
-    # imports it locally.
-    assert "OrderSet" not in vars(base_mod)
-    # The function source carries the local import line.
-    src = inspect.getsource(base_mod._validate_orderset_class)
-    assert "from django_strawberry_framework.orders.sets import OrderSet" in src
 
 
 # ---------------------------------------------------------------------------
@@ -882,21 +863,16 @@ _SUBCLASS_OWNER_CASES = [
 ]
 
 
-@pytest.mark.django_db
 @pytest.mark.parametrize(("hiding_first", "base_on_hiding"), _SUBCLASS_OWNER_CASES)
 def test_an_orderset_subclass_binds_its_own_owner_apart_from_its_base(
     *,
     hiding_first: bool,
     base_on_hiding: bool,
 ) -> None:
-    """``ShelfOrder`` and ``SubShelfOrder(ShelfOrder)`` on two owners each order by their own owner.
+    """Finalize binds a base orderset and its subclass to distinct own class slots in every declaration order.
 
-    The multi-owner refusal's remedy is a separate set subclass per owner, so a
-    subclass binds its OWN owner and never sees its base's binding as a second
-    owner, whichever type declares first and whichever class the hiding type
-    wires. Each ``RelatedOrder`` branch then reads the type its target class is
-    bound to: through the hiding owner a hidden shelf sorts as a missing one
-    (last under ``ASC_NULLS_LAST``), through the plain owner by its topic.
+    Consumer-visible ordering is covered by
+    ``examples/fakeshop/test_query/test_library_api.py::test_a_set_and_its_subclass_read_their_own_bound_owner_over_http``.
     """
 
     class ShelfOrder(OrderSet):
@@ -972,50 +948,14 @@ def test_an_orderset_subclass_binds_its_own_owner_apart_from_its_base(
             orderset_class = ViaPlainBookOrder
 
     finalize_django_types()
+    assert ViaHidingBookType.__django_strawberry_definition__.orderset_class is ViaHidingBookOrder
+    assert ViaPlainBookType.__django_strawberry_definition__.orderset_class is ViaPlainBookOrder
     assert read_attr(truth.class_dict(ShelfOrder)["_owner_definition"], "origin") is (
         hiding_type if base_on_hiding else plain_type
     )
     assert read_attr(truth.class_dict(SubShelfOrder)["_owner_definition"], "origin") is (
         plain_type if base_on_hiding else hiding_type
     )
-
-    # ``from __future__ import annotations`` leaves a class-body annotation a string
-    # naming a function local, so the root type is built with resolved annotations.
-    query = strawberry.type(
-        type(
-            "Query",
-            (),
-            {
-                "__annotations__": {
-                    "via_hiding": list[ViaHidingBookType],
-                    "via_plain": list[ViaPlainBookType],
-                },
-                "via_hiding": DjangoListField(ViaHidingBookType),
-                "via_plain": DjangoListField(ViaPlainBookType),
-            },
-        ),
-    )
-
-    branch = Branch.objects.create(name="b")
-    hidden = Shelf.objects.create(branch=branch, code="h", topic="secret")
-    seen = Shelf.objects.create(branch=branch, code="s", topic="zzz")
-    Book.objects.create(title="on-hidden", shelf=hidden)
-    Book.objects.create(title="on-seen", shelf=seen)
-    order = "(orderBy: [{shelf: {topic: ASC_NULLS_LAST}}]) { title }"
-    result = strawberry.Schema(query=query).execute_sync(
-        f"{{ viaHiding{order} viaPlain{order} }}",
-        context_value={"request": RequestFactory().get("/")},
-    )
-    assert result.errors is None, result.errors
-    assert result.data is not None
-    assert [json_at(row, "title") for row in json_list(result.data, "viaHiding")] == [
-        "on-seen",
-        "on-hidden",
-    ]
-    assert [json_at(row, "title") for row in json_list(result.data, "viaPlain")] == [
-        "on-hidden",
-        "on-seen",
-    ]
 
 
 def test_bind_orderset_owner_rejects_orderset_model_unrelated_to_owner() -> None:

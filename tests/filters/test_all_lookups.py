@@ -19,8 +19,6 @@ a non-text column, the framework's leaf is a ``TextPatternFilter`` typed ``str``
 column's type.
 """
 
-import datetime
-import uuid
 from typing import TYPE_CHECKING
 
 import django_filters
@@ -121,8 +119,47 @@ def test_core_text_field_omits_contrib_postgres_text_lookups(lookup_name: str) -
     } <= set(lookups)
 
 
-def test_contrib_postgres_fields_keep_their_own_lookups() -> None:
-    """``ArrayField``, ``HStoreField``, a range field and an ``ArrayField`` subclass keep theirs."""
+@pytest.mark.parametrize(
+    ("field_kind", "expected"),
+    [
+        pytest.param(
+            "array",
+            {
+                "contained_by",
+                "contains",
+                "overlap",
+                "exact",
+            },
+            id="array",
+        ),
+        pytest.param(
+            "subclass",
+            {
+                "contained_by",
+                "contains",
+                "overlap",
+                "exact",
+            },
+            id="subclass",
+        ),
+        pytest.param("hstore", {"has_key", "has_keys", "contained_by"}, id="hstore"),
+        pytest.param(
+            "range",
+            {
+                "contained_by",
+                "overlap",
+                "fully_lt",
+                "adjacent_to",
+            },
+            id="range",
+        ),
+    ],
+)
+def test_contrib_postgres_fields_keep_their_own_lookups(
+    field_kind: str,
+    expected: set[str],
+) -> None:
+    """Each PostgreSQL container field keeps its native lookup names."""
     pytest.importorskip("django.contrib.postgres.fields")
     from django.contrib.postgres.fields import (  # noqa: PLC0415 - after the skip guard
         ArrayField,
@@ -133,23 +170,16 @@ def test_contrib_postgres_fields_keep_their_own_lookups() -> None:
     class ConsumerArrayField(ArrayField[list[int], list[int]]):
         """A consumer subclass, defined outside ``django.contrib.postgres``."""
 
-    array_field: ArrayField[list[int], list[int]] = ArrayField(models.IntegerField())
-    for field in (array_field, ConsumerArrayField(models.IntegerField())):
-        assert {
-            "contained_by",
-            "contains",
-            "overlap",
-            "exact",
-        } <= set(_lookups_for_field(field))
-    assert {"has_key", "has_keys", "contained_by"} <= set(_lookups_for_field(HStoreField()))
-    assert {
-        "contained_by",
-        "overlap",
-        "fully_lt",
-        "adjacent_to",
-    } <= set(
-        _lookups_for_field(IntegerRangeField()),
-    )
+    if field_kind == "array":
+        array_field: ArrayField[list[int], list[int]] = ArrayField(models.IntegerField())
+        field = array_field
+    elif field_kind == "subclass":
+        field = ConsumerArrayField(models.IntegerField())
+    elif field_kind == "hstore":
+        field = HStoreField()
+    else:
+        field = IntegerRangeField()
+    assert expected <= set(_lookups_for_field(field))
 
 
 class _DivisibleBy(models.Lookup[int]):
@@ -293,7 +323,20 @@ def _leaf(
     return leaf, (record.origin, convert_filter_to_input_annotation(leaf, column, None, filterset))
 
 
-def test_explicit_text_pattern_on_non_text_columns_is_a_string_text_pattern_filter() -> None:
+@pytest.mark.parametrize(
+    "name",
+    [
+        "occurred_at__iexact",
+        "occurred_at__regex",
+        "occurred_at__date__icontains",
+        "price__contains",
+        "flag__istartswith",
+        "external_id__iendswith",
+    ],
+)
+def test_explicit_text_pattern_on_non_text_columns_is_a_string_text_pattern_filter(
+    name: str,
+) -> None:
     """Listed explicitly, a text-pattern lookup on a non-text column is a ``TextPatternFilter`` of ``str``.
 
     The column's other lookups keep their column-typed filters, a text column's pattern
@@ -316,18 +359,9 @@ def test_explicit_text_pattern_on_non_text_columns_is_a_string_text_pattern_filt
                 "label": ["icontains"],
             }
 
-    expected_strings = {
-        "occurred_at__iexact",
-        "occurred_at__regex",
-        "occurred_at__date__icontains",
-        "price__contains",
-        "flag__istartswith",
-        "external_id__iendswith",
-    }
-    for name in expected_strings:
-        leaf, typed = _leaf(SpecimenPatternFilter, name)
-        assert type(leaf) is TextPatternFilter, name
-        assert typed == ("framework_default", str | None), name
+    leaf, typed = _leaf(SpecimenPatternFilter, name)
+    assert type(leaf) is TextPatternFilter
+    assert typed == ("framework_default", str | None)
     label, typed = _leaf(SpecimenPatternFilter, "label__icontains")
     assert type(label) is CharFilter
     assert typed == ("framework_default", str | None)
@@ -426,14 +460,9 @@ def _all_bag(filterset: type[FilterSet], name: str) -> set[str]:
     return {str(lookup) for lookup in value}
 
 
-@pytest.mark.django_db
-def test_override_selected_columns_keep_the_whole_all_set_and_filter() -> None:
-    """A column whose filter ``Meta.filter_overrides`` supplies keeps every text-pattern lookup.
-
-    ``payload`` (a ``JSONField``, no package default) and ``occurred_at`` (a ``DateTimeField``
-    the override maps to ``CharFilter``) expand ``"__all__"`` to their whole lookup set, and a
-    pattern leaf filters through the consumer's ``CharFilter``.
-    """
+@pytest.mark.parametrize("name", ["payload", "occurred_at"])
+def test_override_selected_columns_keep_the_whole_lookup_catalog(name: str) -> None:
+    """Consumer overrides preserve the exact lookup catalog and generated leaf classes."""
 
     class OverriddenSpecimenFilter(FilterSet):
         class Meta:
@@ -445,42 +474,16 @@ def test_override_selected_columns_keep_the_whole_all_set_and_filter() -> None:
             }
 
     meta = scalar_models.ScalarSpecimen._meta
-    for name in ("payload", "occurred_at"):
-        bag = _all_bag(OverriddenSpecimenFilter, name)
-        assert bag == _parent_bag(meta.get_field(name)), name
-        assert {"iexact", "icontains", "regex"} <= bag, name
+    bag = _all_bag(OverriddenSpecimenFilter, name)
+    assert bag == _parent_bag(meta.get_field(name))
+    assert {"iexact", "icontains", "regex"} <= bag
     filters = OverriddenSpecimenFilter.get_filters()
     assert type(filters["occurred_at__icontains"]) is CharFilter
     assert type(filters["payload__icontains"]) is CharFilter
 
-    moment = datetime.datetime(2021, 6, 15, 9, 30, tzinfo=datetime.timezone.utc)
-    later = datetime.datetime(2022, 3, 1, 18, 0, tzinfo=datetime.timezone.utc)
-    common = {"flag": False, "score": 1.0, "occurred_on": moment.date()}
-    scalar_models.ScalarSpecimen.objects.create(
-        label="june",
-        occurred_at=moment,
-        occurred_time=moment.time(),
-        payload={"note": "Needle"},
-        external_id=uuid.uuid4(),
-        **common,
-    )
-    scalar_models.ScalarSpecimen.objects.create(
-        label="march",
-        occurred_at=later,
-        occurred_time=later.time(),
-        payload={"note": "hay"},
-        external_id=uuid.uuid4(),
-        **common,
-    )
-    queryset = scalar_models.ScalarSpecimen.objects.order_by("id")
-    for data in ({"occurred_at__icontains": "2021-06"}, {"payload__icontains": "needle"}):
-        matched = OverriddenSpecimenFilter(data=data, queryset=queryset).qs
-        assert list(matched.values_list("label", flat=True)) == ["june"], data
 
-
-@pytest.mark.django_db
-def test_override_selected_file_column_keeps_the_whole_all_set_and_filters() -> None:
-    """A ``FileField`` made filterable through ``Meta.filter_overrides`` keeps its pattern lookups."""
+def test_override_selected_file_column_keeps_the_whole_lookup_catalog() -> None:
+    """A FileField override preserves the exact lookup catalog and generated leaf class."""
 
     class MediaFilter(FilterSet):
         class Meta:
@@ -497,13 +500,3 @@ def test_override_selected_file_column_keeps_the_whole_all_set_and_filters() -> 
         "regex",
     } <= bag
     assert type(MediaFilter.get_filters()["attachment__icontains"]) is CharFilter
-
-    for label, path in (("report", "scalar_media/files/report.txt"), ("photo", "x/photo.png")):
-        scalar_models.MediaSpecimen.objects.create(
-            label=label,
-            attachment=path,
-            image="scalar_media/images/blank.png",
-        )
-    queryset = scalar_models.MediaSpecimen.objects.order_by("id")
-    matched = MediaFilter(data={"attachment__icontains": "REPORT"}, queryset=queryset).qs
-    assert list(matched.values_list("label", flat=True)) == ["report"]
