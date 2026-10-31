@@ -656,56 +656,32 @@ def test_a_schema_policy_attribute_answers_with_a_copy(row: _PolicyKeyword) -> N
     ["resource_policy", "error_policy"],
     ids=["resource", "error"],
 )
-def test_a_resolver_cannot_install_a_policy_by_writing_the_schema(attribute: str) -> None:
-    """``info.schema`` is not a seam onto what the next request is held to.
+def test_shadow_policy_attributes_do_not_change_the_stored_policy_or_its_setter(
+    attribute: str,
+) -> None:
+    """A shadow leaves the private policy unchanged and cannot enable the property setter.
 
-    The property answers with a copy, which settles what a WRITE THROUGH it can
-    do and nothing about what a write BESIDE it can do: an instance attribute is
-    an ordinary name, and the schema is process-lived, so one assignment from
-    one resolver would have widened - or unmasked - every request the process
-    served afterwards. The ``__dict__`` spelling is the one that gets past an
-    ordinary property, and it lands nowhere a bound is read from because the
-    authority is not an attribute of this object at all.
+    Later requests staying bounded and masked are pinned over HTTP in
+    ``test_resource_policy_api.py`` and ``test_error_policy_api.py`` under
+    ``examples/fakeshop/test_query/``.
     """
+    schema = DjangoSchema(query=DummyQuery, resource_policy=ResourcePolicy(max_list_rows=2))
+    schema.__dict__[attribute] = ResourcePolicy(max_list_rows=999)
 
-    @strawberry.type
-    class _Query:
-        @strawberry.field
-        def widen(self, info: strawberry.Info) -> int:
-            info.schema.__dict__[attribute] = ResourcePolicy(max_list_rows=999)
-            return 1
-
-    schema = DjangoSchema(query=_Query, resource_policy=ResourcePolicy(max_list_rows=2))
-    assert schema.execute_sync("{ widen }").data == {"widen": 1}
     assert schema.resource_policy.max_list_rows == 2
-
     with pytest.raises(AttributeError):
         setattr(schema, attribute, ResourcePolicy(max_list_rows=999))
 
 
-def test_a_resolver_cannot_disarm_enforcement_by_emptying_the_extension_list() -> None:
-    """A ``DjangoSchema`` enforces because it is one, not because a list still says so.
+def test_a_shadow_extension_list_does_not_change_the_resolved_authorities() -> None:
+    """Extension-chain identity survives an attribute that the schema never reads.
 
-    Emptying ``schema.extensions`` would remove the budget and the masking from
-    every later operation on the process, which is a wider primitive than
-    widening one bound: the next request would run with no policy extension
-    instantiated at all. The attribute is a property, so the ``__dict__``
-    spelling that gets past an ordinary one lands in a name nothing reads.
+    The bounded response after this write is pinned over HTTP in
+    ``examples/fakeshop/test_query/test_resource_policy_api.py``.
     """
+    schema = DjangoSchema(query=DummyQuery)
+    schema.__dict__["extensions"] = ()
 
-    @strawberry.type
-    class _Query:
-        @strawberry.field
-        def rows(self, info: strawberry.Info) -> list[str]:
-            info.schema.__dict__["extensions"] = ()
-            return list(bounded_rows(["a", "b", "c"], info, None))
-
-    schema = DjangoSchema(query=_Query, resource_policy=ResourcePolicy(max_list_rows=1))
-    assert schema.execute_sync("{ rows }").data == {"rows": ["a"]}
-
-    second = schema.execute_sync("{ rows }")
-    assert second.errors is None, second.errors
-    assert second.data == {"rows": ["a"]}
     resolved = schema.get_extensions(sync=True)
     assert any(isinstance(entry, DjangoResourcePolicyExtension) for entry in resolved)
     assert any(isinstance(entry, DjangoErrorPolicyExtension) for entry in resolved)
@@ -1028,23 +1004,6 @@ def test_the_accepted_policies_survive_every_write_to_the_schema(
 
     assert schema.resource_policy.max_list_rows == 1
     assert schema.error_policy.enabled is True
-
-
-def test_no_name_on_a_schema_answers_with_a_policy() -> None:
-    """The census behind the row above, quantified over what the schema carries.
-
-    A row that names the attribute it expects to be absent passes once the
-    attribute is renamed. This one asks the question by CONTENT: nothing a
-    resolver reaches through ``info.schema`` is a policy, or holds one.
-    """
-    schema = DjangoSchema(query=DummyQuery, resource_policy=ResourcePolicy(max_list_rows=1))
-
-    held = list(truth.instance_state(schema).values())
-    assert held
-    for value in held:
-        assert not isinstance(value, (ResourcePolicy, ErrorPolicy))
-        assert not isinstance(getattr(value, "resource_policy", None), ResourcePolicy)
-        assert not isinstance(getattr(value, "error_policy", None), ErrorPolicy)
 
 
 def test_a_schema_cannot_be_reconfigured_by_running_its_constructor() -> None:
@@ -1786,54 +1745,11 @@ def test_every_supported_entry_spelling_still_resolves_into_one_chain(entry: obj
     assert len(resolved) == 5
 
 
-@pytest.mark.parametrize(
-    ("document", "code"),
-    [
-        ("{", SCHEMA_CONFIGURATION_ERROR_CODE),
-        ("{ hello }", SCHEMA_CONFIGURATION_ERROR_CODE),
-        ("query Named { hello }", SCHEMA_CONFIGURATION_ERROR_CODE),
-        ("mutation { plainMutation }", SCHEMA_CONFIGURATION_ERROR_CODE),
-    ],
-    ids=[
-        "malformed",
-        "valid",
-        "named-operation",
-        "mutation",
-    ],
-)
-def test_a_refused_schema_answers_every_document_with_the_configuration_code(
-    document: str,
-    code: str,
-) -> None:
-    """Refusing every operation includes the ones that would not have parsed.
+def test_a_refused_schema_resolves_the_bounding_authority_after_its_refusal() -> None:
+    """The private refusal chain retains its resource authority before the mode marker.
 
-    Publishing after the parse would make the claim true only of well-formed
-    documents: a syntax error is raised out of the parse itself and upstream
-    answers with it before any statement after the hook's ``yield`` runs. The
-    refusal is published first and the parse stage is handed a document of the
-    package's own, so the client is told the same thing whatever it sent.
-    """
-    schema = DjangoSchema(
-        query=DummyQuery,
-        mutation=DummyMutation,
-        extensions=_unchecked_entries(lambda: 7),
-    )
-
-    result = schema.execute_sync(document)
-
-    assert result.data is None
-    assert result.errors is not None
-    assert [error.extensions for error in result.errors] == [{"code": code}]
-
-
-def test_a_refused_schema_still_bounds_the_document_it_is_refusing() -> None:
-    """A broken configuration must not be the one shape with no parsing ceiling.
-
-    The refusal chain keeps the package's own resource extension, reading this
-    schema's private policy, so the pre-parse token and depth scan still runs.
-    Without it a deployment with one bad factory would have traded "every
-    operation fails closed" for an endpoint that lexes and nests whatever it is
-    sent before saying no.
+    The token and depth ceilings over HTTP are owned by
+    ``examples/fakeshop/test_query/test_extension_isolation_api.py``.
     """
     schema = DjangoSchema(
         query=DummyQuery,
@@ -1846,11 +1762,6 @@ def test_a_refused_schema_still_bounds_the_document_it_is_refusing() -> None:
         "_RefusedConfiguration",
         "DjangoResourcePolicyExtension",
         "_OperationModeMarker",
-    ]
-    over_budget = schema.execute_sync("{ a: hello b: hello }")
-    assert over_budget.errors is not None
-    assert [_error_code(error) for error in over_budget.errors] == [
-        "RESOURCE_LIMIT_EXCEEDED",
     ]
 
 
@@ -1920,56 +1831,6 @@ _REFUSED_OPERATION_NAME_IDS = [
     "unicode",
     "not-a-string",
 ]
-
-
-@pytest.mark.parametrize(
-    "operation_name",
-    _REFUSED_OPERATION_NAMES,
-    ids=_REFUSED_OPERATION_NAME_IDS,
-)
-def test_a_refused_schema_answers_every_operation_name_the_same_way(
-    operation_name: object,
-) -> None:
-    """The name a request asked for selects nothing once the document is the package's.
-
-    Upstream picks the operation to run by looking the requested name up in
-    whatever document the parse stage left behind. A refused request's document
-    is the package's own, so a name that survived into the selector is a lookup
-    that cannot succeed - and upstream raises that failure out of the API,
-    over a refusal already published. The name is normalized with the document.
-    """
-    schema = DjangoSchema(query=DummyQuery, extensions=_unchecked_entries(lambda: 7))
-
-    # basedpyright: trust boundary: a non-``str`` name a raw transport can still hand over
-    result = schema.execute_sync("{ hello }", operation_name=operation_name)  # pyright: ignore[reportArgumentType]
-
-    assert result.data is None
-    assert result.errors is not None
-    assert [error.extensions for error in result.errors] == [
-        {"code": SCHEMA_CONFIGURATION_ERROR_CODE},
-    ]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "operation_name",
-    _REFUSED_OPERATION_NAMES,
-    ids=_REFUSED_OPERATION_NAME_IDS,
-)
-async def test_a_refused_schema_answers_an_awaited_operation_name_the_same_way(
-    operation_name: object,
-) -> None:
-    """The asynchronous API refuses the same names, and raises out of none of them."""
-    schema = DjangoSchema(query=DummyQuery, extensions=_unchecked_entries(lambda: 7))
-
-    # basedpyright: trust boundary: a non-``str`` name a raw transport can still hand over
-    result = await schema.execute("{ hello }", operation_name=operation_name)  # pyright: ignore[reportArgumentType]
-
-    assert result.data is None
-    assert result.errors is not None
-    assert [error.extensions for error in result.errors] == [
-        {"code": SCHEMA_CONFIGURATION_ERROR_CODE},
-    ]
 
 
 @pytest.mark.asyncio

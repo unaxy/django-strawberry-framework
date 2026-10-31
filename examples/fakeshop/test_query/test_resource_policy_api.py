@@ -780,6 +780,8 @@ class _AuthorityQuery:
         """
         found: list[str] = []
         attributes: dict[str, object] = vars(info.schema)
+        if not attributes:
+            raise AssertionError("an empty census proves nothing")
         for name, value in attributes.items():
             for kind, attribute in (
                 (ResourcePolicy, "resource_policy"),

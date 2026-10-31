@@ -147,6 +147,10 @@ class _AuthoritySubclass(DjangoResourcePolicyExtension):
     """A consumer subclass of the bounding authority, which is not one."""
 
 
+class _MaskingAuthoritySubclass(DjangoErrorPolicyExtension):
+    """A consumer subclass of the masking authority, which is not one either."""
+
+
 # basedpyright: cooperative MRO: ``DjangoResourcePolicyExtension.__init__`` calls
 # ``super().__init__()``, which reaches ``_OperationBoundExtension.__init__`` exactly once
 # through ``DjangoErrorPolicyExtension`` (which defines none), so every base is initialized
@@ -173,6 +177,10 @@ _LADDER_FACTORIES = {
         "not a SchemaExtension instance",
     ),
     "authority-subclass": (partial(_AuthoritySubclass), "claims the resource-policy authority"),
+    "masking-authority-subclass": (
+        partial(_MaskingAuthoritySubclass),
+        "claims the error-policy authority",
+    ),
     "hybrid": (partial(_HybridAuthority), "claims the resource-policy authority"),
 }
 
@@ -477,6 +485,15 @@ class _SurvivorReport:
     plan_published: bool
 
 
+@strawberry.type
+class _ResourceMutation:
+    """A mutation root, so a refused mutation document names a field that exists."""
+
+    @strawberry.mutation
+    def plain_mutation(self) -> bool:
+        return True
+
+
 def _ambiguous_schema() -> DjangoSchema:
     """An opaque factory resolving to an enforcement authority the schema owns.
 
@@ -486,6 +503,7 @@ def _ambiguous_schema() -> DjangoSchema:
     """
     return DjangoSchema(
         query=_ResourceQuery,
+        mutation=_ResourceMutation,
         resource_policy=ResourcePolicy(max_document_tokens=10, max_depth=1),
         extensions=[_NarrowResourceFactory()],
     )
@@ -722,8 +740,20 @@ def test_an_operation_a_consumer_extension_starts_leaves_the_request_its_optimiz
 
 @pytest.mark.parametrize(
     "document",
-    ["{ hello }", "{ a: hello }", "{"],
-    ids=["valid", "aliased", "malformed"],
+    [
+        "{ hello }",
+        "{ a: hello }",
+        "{",
+        "query Named { hello }",
+        "mutation { plainMutation }",
+    ],
+    ids=[
+        "valid",
+        "aliased",
+        "malformed",
+        "named-operation",
+        "mutation",
+    ],
 )
 def test_a_schema_whose_factory_claims_an_authority_refuses_every_request(document: str) -> None:
     """A factory cannot be an enforcement authority, and the wire says so identically.
@@ -740,9 +770,10 @@ def test_a_schema_whose_factory_claims_an_authority_refuses_every_request(docume
 
     assert refused.data is None
     assert refused.errors is not None
-    assert "extensions" in refused.errors[0]
+    assert [error.get("extensions") for error in refused.errors] == [
+        {"code": SCHEMA_CONFIGURATION_ERROR_CODE},
+    ]
     assert "message" in refused.errors[0]
-    assert refused.errors[0]["extensions"] == {"code": SCHEMA_CONFIGURATION_ERROR_CODE}
     assert "ResourcePolicy" not in refused.errors[0]["message"]
     assert "max_aliases" not in refused.errors[0]["message"]
 
@@ -935,3 +966,28 @@ async def test_a_worker_that_outlived_a_request_is_bounded_and_published_for_its
         "rowsBound": DEFAULT_RESOURCE_POLICY.max_list_rows,
         "planPublished": True,
     }
+
+
+def test_a_refused_schema_answers_a_numeric_operation_name_over_http() -> None:
+    """A numeric JSON operationName reaches the same refusal as an ordinary string."""
+    # raw-envelope exemption: operationName is a number outside TestClient's annotated API.
+    response = Client().post(
+        "/iso-chain/",
+        data=json.dumps({"query": "{ hello }", "operationName": 0}),
+        content_type="application/json",
+    )
+
+    _assert_refused_envelope(response, response.content)
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_a_refused_schema_answers_a_numeric_operation_name_over_async_http() -> None:
+    """The async parser also passes a numeric operationName to the schema's refusal."""
+    # raw-envelope exemption: operationName is a number outside AsyncTestClient's annotated API.
+    response = await AsyncClient().post(
+        "/iso-chain-async/",
+        data=json.dumps({"query": "{ hello }", "operationName": 0}),
+        content_type="application/json",
+    )
+
+    _assert_refused_envelope(response, response.content)
