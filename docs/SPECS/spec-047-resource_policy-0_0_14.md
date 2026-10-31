@@ -821,7 +821,8 @@ window arithmetic rather than only the field entry point. Its keyset twin
 **The over-cap rejection has one owner on both forks.**
 `utils/connections.py::assert_relay_pagination_bound` is the single spelling of the
 negative and over-cap check, and it raises `PaginationArgumentError` with
-`SliceMetadata`'s own messages exactly. The offset fork reaches it through
+`SliceMetadata`'s own wording, naming the argument as the executing schema published it
+(upstream's text byte for byte under the default `NameConverter`). The offset fork reaches it through
 `utils/connections.py::validate_offset_pagination`, which `::offset_engine_arguments` runs
 for `::derive_connection_window_bounds` and `connection.py::_consume_fallback` against the
 resolved cap before Strawberry's `SliceMetadata.from_arguments` or `ListConnection` sees

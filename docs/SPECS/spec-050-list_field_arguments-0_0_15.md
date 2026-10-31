@@ -121,8 +121,9 @@ Release: [`django_strawberry_framework.__version__`][package-init] reads `"0.0.1
   - [ ] The live async suite
         ([`examples/fakeshop/test_query/test_list_field_async_api.py`][fakeshop-test-list-field-async])
         sets no `DJANGO_ALLOW_ASYNC_UNSAFE`, so it cannot mask a regression in safe async
-        queryset completion. In the package tier one test sets it:
-        `tests/test_relay_connection.py::test_async_fast_path_last_zero_serves_the_first_zero_page`.
+        queryset completion. No other test sets it either; the async `last: 0` window page,
+        `examples/fakeshop/test_query/test_relation_connections_api.py::test_async_fast_path_last_zero_serves_the_first_zero_page`,
+        runs in the live tier through the async HTTP view without it.
   - [ ] Order input construction uses the `OrderSet` factory and orphan ledger rather than a
         list-field-specific input class.
   - [ ] The shared target validator accepts only the definition the type registry holds for
@@ -543,7 +544,11 @@ name the executable schema PUBLISHED for that definition: the field's `GraphQLFi
 is keyed by the converter's answer at build time and each entry carries its
 `StrawberryArgument` under
 [`strawberry/schema/schema_converter.py::GraphQLCoreConverter.DEFINITION_BACKREF`][strawberry-schema-converter],
-so the key whose back-reference IS the definition is the argument's wire name. A direct helper
+so the key whose back-reference carries the parameter's Python name is the argument's wire
+name. The match is by Python name, not by identity with the definition: a field outlives a
+schema build, and Strawberry's `ConnectionExtension.apply` appends the page arguments again on
+every build, so after a second build over the same types `get_argument_definition` answers an
+earlier build's argument object on a connection field. A direct helper
 call without executable-schema metadata falls back to the default spelling (`offset`, `limit`,
 or `orderBy`) and tests identify that fallback explicitly. The wire message names the
 field, argument, requested value when the payload carries one, and the accepted contract. A
@@ -2119,7 +2124,7 @@ Where each part of the surface lives, keyed to the slice checklist:
   is the neutral schema-config lookup for the optimizer and connection readers. Argument
   error names combine Strawberry `Info.get_argument_definition` with the executable schema's
   published argument map (`Info._raw_info.parent_type` -> `GraphQLField.args`, matched by
-  `DEFINITION_BACKREF` identity); list code never re-runs `name_converter.from_argument` and
+  the `DEFINITION_BACKREF` argument's Python name); list code never re-runs `name_converter.from_argument` and
   does not reimplement wrapped/direct schema traversal.
 - Manager-to-queryset coercion and visibility stay in
   [`django_strawberry_framework/utils/querysets.py`][querysets]; pagination does not grow

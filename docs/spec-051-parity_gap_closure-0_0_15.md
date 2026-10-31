@@ -31,15 +31,25 @@ The six items (items 1–4 are Slices 1–4; Slice 5 verifies items 5 and 6):
 2. **`GeneratedField` support** ([Decision 3](#decision-3--a-generatedfield-converts-through-its-output_field-and-never-enters-a-write-input)):
    a Django `GeneratedField` converts via its `output_field`, is nullable when
    either it or its `output_field` declares `null`, and stays out of every
-   generated write input. Today it raises `Unsupported Django field type` at
-   type creation; the escapes today are exclusion
-   ([`Meta.exclude`][glossary-metaexclude]), an annotation-only override
+   generated write input. **Built** (Slice 2):
+   `django_strawberry_framework/types/converters.py::generated_output_field`
+   unwraps the field to the column it computes, so the scalar route, the
+   `SCALAR_MAP` walk, nullability and the choice enum all read that column.
+   The `SCALAR_MAP` walk is keyed on the **output field's** class (MRO
+   walked, read live), so a project maps an unsupported output class by
+   registering that class, and a `SCALAR_MAP[models.GeneratedField]` entry
+   is never consulted. The unwrap refuses three outputs at type or
+   `FilterSet` creation (a file output; an output class with no `SCALAR_MAP`
+   ancestor that is no `ArrayField` / `HStoreField`, whose message offers
+   `django_strawberry_framework/types/converters.py::generated_output_field #"Add an entry to SCALAR_MAP or exclude this field via"`;
+   an `ArrayField` output whose `base_field` declares choices). The
+   per-field escapes are exclusion
+   ([`Meta.exclude`][glossary-metaexclude]) and, on the type, an
+   annotation-only override
    (`django_strawberry_framework/types/base.py::_build_annotations #"wins over the auto-synthesized annotation"`
-   skips conversion for a consumer-authored name), or a consumer `SCALAR_MAP`
-   entry (the raise text offers it,
-   `django_strawberry_framework/types/converters.py::_scalar_map_entry #"SCALAR_MAP or exclude this field via Meta.exclude"`,
-   and the lookup walks the MRO, so `SCALAR_MAP[models.GeneratedField]` maps
-   every generated column to one scalar).
+   skips conversion for a consumer-authored name); nullability is
+   overridden per field by `Meta.nullable_overrides` /
+   `Meta.required_overrides`.
 3. **Model `help_text` as the SDL description** ([Decision 4](#decision-4--help_text-is-always-on-no-setting) and
    [Decision 5](#decision-5--the-description-is-attached-where-each-field-object-is-built)):
    always on, no setting; an explicit consumer description wins.
@@ -58,8 +68,21 @@ The six items (items 1–4 are Slices 1–4; Slice 5 verifies items 5 and 6):
    audited `extensions.code`.
 
 Status: **PARTIALLY BUILT** (the checklist boxes stay unticked; this line is
-the truth). Built: item 5 (the key map in `utils/errors.py`, its matrix in
-`tests/utils/test_error_keys.py`, and the live rows the card's DoD names —
+the truth). Built: item 2, Slice 2 (`GeneratedField`: the computed column
+`django_strawberry_framework/utils/relations.py::generated_column`, the
+conversion unwrap and its three refusals
+`django_strawberry_framework/types/converters.py::generated_output_field`
+read by the scalar route, the scalar-map walk, nullability and blank
+admission, the filter side's selection column
+`django_strawberry_framework/filters/sets.py::FilterSet._selected_column`
+and resolved column `django_strawberry_framework/filters/base.py::_model_resolved_field`,
+the array helpers, the keyset cursor reads, the identity codec
+(`django_strawberry_framework/utils/querysets.py::coerce_field_value_or_none`)
+and the inspection label; library
+`Shelf.code_length` / `Shelf.topic_length` with migration
+`0020_shelf_code_length_topic_length`, pinned live in
+`examples/fakeshop/test_query/test_library_generated_api.py`); item 5 (the key map in `utils/errors.py`, its matrix in
+`examples/fakeshop/test_query/test_mutation_error_keys_api.py`, and the live rows the card's DoD names —
 library `createPublisher` for the model flavor, kanban `setCardStatus` for the
 plain form, library `createShelfViaSubclassedSerializer` for the serializer)
 and item 6 (`django_strawberry_framework/utils/errors.py::PAGINATION_INVALID_ERROR_CODE`
@@ -72,8 +95,8 @@ row and its write-surface row carries the `through_defaults` refusal, and card
 are in place (placed at the 2026-08-29 board review, the date this card's own
 DoD row records), though the edge's note repeats a false file-overlap claim
 Slice 5 amends. Item 5's card row is current: its Scope row already describes
-the shipped key map. Outstanding (absent from the tree): all four of items
-1–4, each a slice below, and the card-row amendments Slice 5 owes
+the shipped key map. Outstanding (absent from the tree): items 1, 3 and 4,
+each a slice below, and the card-row amendments Slice 5 owes
 ([Decision 11](#decision-11--board-rows-cross-card-rows-are-verified-the-cards-own-stale-rows-are-amended)).
 Five slices: Slice 1 (**the `through=` guard**), Slice 2
 (**`GeneratedField`**), Slice 3 (**`help_text` descriptions**), Slice 4
@@ -166,12 +189,10 @@ Terms this spec relies on (statuses per [`docs/GLOSSARY.md`][glossary]):
 Each top-level item maps to one commit / PR. **Five slices.** The card is an
 M: four small builds in four seams plus a verification wrap. No slice depends
 on another's code, but Slices 2, 3 and 4 each add a library migration and
-migrations chain (the newest today is
-`examples/fakeshop/apps/library/migrations/0017_series_and_printing_relations.py`),
-so those three land in numeric order and the numbers below (`0018`, `0019`,
-`0020`) assume it; a slice that lands out of that order takes the next free
-number and depends on whichever library migration is newest when it is
-built. Slice 1 adds no migration and goes first (it is the only item that
+migrations chain, so each takes the next free number and depends on
+whichever library migration is newest when it is built (Slice 2 took
+`examples/fakeshop/apps/library/migrations/0020_shelf_code_length_topic_length.py`,
+after `0019_distributor_display_name`). Slice 1 adds no migration and goes first (it is the only item that
 changes what a write path accepts); Slice 5 lands last. Each slice rebases
 onto whatever card `053` has landed
 on the shared seams by then ([Risks](#risks-and-open-questions)).
@@ -220,53 +241,113 @@ on the shared seams by then ([Risks](#risks-and-open-questions)).
         `Shelf.alt_branches` (auto-created through) still reaches `.set()`
         through `createShelf` and `createShelfViaForm`.
 - [ ] **Slice 2 — `GeneratedField`**
-  - [ ] `django_strawberry_framework/types/converters.py::scalar_route`
-        gains a `GeneratedField` arm, checked first, that routes through the
-        field's `output_field` (recursively, so an `ArrayField` / `HStoreField`
-        output lands in the arm it would land in as a plain column) and
-        re-stamps a `MapRoute` with `choices=bool(field.choices)` read off the
-        `GeneratedField` itself;
-        `django_strawberry_framework/types/converters.py::_scalar_map_entry`
-        unwraps the same way so the filter-side
-        `django_strawberry_framework/filters/inputs.py::_scalar_from_model_field`
-        agrees. The shared unwrap owns three refusals, each a
-        `ConfigurationError` labelled with the outer field (the output field is
-        unbound, so `django_strawberry_framework/types/converters.py::_field_label`
-        would print `<unbound>.None`, since `Field.__init__` sets
-        `name=None`): a `FileField` / `ImageField`
-        output, an unsupported output class, and a choice-bearing `base_field`
-        inside an `ArrayField` output
+  - [ ] `django_strawberry_framework/utils/relations.py::generated_column`
+        builds the column a `GeneratedField` computes: a clone of its
+        `output_field` bound under the generated field's model, `db_column`
+        and name (an `ArrayField` output binds its `base_field` with it),
+        carrying the generated field's `choices`, `blank` and `help_text`,
+        with `null = GeneratedField.null or output_field.null`; one column is
+        filed per field (`dict.setdefault`), so two reads are one object. It
+        answers classification reads only: it never builds a query and no
+        lookup is read off it, since a clone carries none of the lookups a
+        project registers on the `output_field` instance; every lookup is read
+        off that instance's registry
+        (`django_strawberry_framework/utils/relations.py::lookup_registry`) and
+        every walk starts from the generated field's own column
+        (`django_strawberry_framework/utils/relations.py::lookup_operand`), and
+        `django_strawberry_framework/utils/relations.py::generated_column_source`
+        reads the generated field back from the clone.
+        `django_strawberry_framework/types/converters.py::generated_output_field`
+        is the conversion unwrap over it and owns the three refusals, each a
+        `ConfigurationError` whose label (`_field_label` of the bound column)
+        names the generated field: a `FileField` / `ImageField` output, an
+        output class with no `SCALAR_MAP` ancestor that is no
+        `ArrayField` / `HStoreField`, and an `ArrayField` output whose
+        `base_field` declares choices
         ([Decision 3](#decision-3--a-generatedfield-converts-through-its-output_field-and-never-enters-a-write-input)).
-  - [ ] Nullability: `GeneratedField.null or output_field.null`, read in
-        `django_strawberry_framework/types/converters.py::convert_scalar`'s
-        `effective_null`; `Meta.required_overrides` asserts non-null. Choice
-        blank admission for a `GeneratedField` reads
-        `output_field.empty_strings_allowed`, never the forced `blank=True`.
-  - [ ] `django_strawberry_framework/filters/sets.py`: a `GeneratedField`
-        unwraps to its `output_field` in `FilterSet.filter_for_lookup` /
-        `FilterSet.filter_for_field` (django-filter's `try_dbfield` walk over
-        `FILTER_DEFAULTS` has no `GeneratedField` row, and
-        `handle_unrecognized_field` raises);
-        `django_strawberry_framework/filters/sets.py::_lookups_for_field`
-        already reads the lookup registry off the field instance, where
-        `GeneratedField.contribute_to_class` registers the output field's
-        lookups; its class-keyed reads (`_is_text_column`,
-        `_without_foreign_postgres_lookups`, and
-        `FilterSet._origin_for_selection_class` on the same column) read the
-        output field's class for a `GeneratedField`; errors name the outer
-        field.
+  - [ ] `django_strawberry_framework/types/converters.py::scalar_route`
+        routes a `GeneratedField` first, as its computed column (so an
+        `ArrayField` / `HStoreField` output lands in the arm it would land in
+        as a plain column; the column carries the outer `choices`, so the map
+        arm's `choices` flag needs no re-stamp);
+        `django_strawberry_framework/types/converters.py::convert_scalar`
+        converts the computed column (nullability, `force_nullable` and the
+        choice enum keyed on the generated field's own model and name);
+        `django_strawberry_framework/types/converters.py::_scalar_map_entry`
+        walks it, so the filter-side
+        `django_strawberry_framework/filters/inputs.py::_scalar_from_model_field`
+        agrees; `django_strawberry_framework/types/converters.py::_column_admits_empty_string`
+        reads the generated field's forced `blank=True` with the output's
+        `empty_strings_allowed`. `Meta.required_overrides` asserts non-null.
+  - [ ] `django_strawberry_framework/filters/sets.py`:
+        `FilterSet._selected_column` names the field django-filter
+        classifies, selected off the same merged map upstream's `try_dbfield`
+        walks (`FilterSet._merged_filter_defaults`, read through
+        `_entry_by_mro`): the `GeneratedField` itself when the merged
+        `FILTER_DEFAULTS` plus `Meta.filter_overrides` map holds an entry for
+        its class (a consumer override stays reachable), else its computed
+        column (upstream's `try_dbfield` walk has no `GeneratedField` row and
+        `BaseFilterSet.filter_for_lookup` answers `(None, {})`, after which
+        `handle_unrecognized_field` raises). `FilterSet._upstream_filter_for_lookup`
+        (which `django_strawberry_framework/filters/base.py::_column_form_field`
+        also calls) asks upstream about it, and the ownership oracle
+        (`FilterSet._generation_origin_for_field`, the per-field `"__all__"`
+        origin read) classifies it; `filter_for_field` runs it through
+        `FilterSet._upstream_filter_for_field`'s adapted branch, upstream's
+        body over `_generated_filter_field`'s resolution. The class tests
+        of `FilterSet.filter_for_lookup` (the text-pattern, choice, integer
+        `in` and integer `range` reroutes) and
+        `django_strawberry_framework/filters/sets.py::_lookups_for_field` read
+        the computed column, so outer choices give the enum filters and two
+        generated columns of different output types publish their outputs'
+        lookups. `django_strawberry_framework/filters/base.py::_model_resolved_field`
+        answers a path naming a `GeneratedField` with its computed column, so
+        the input type, the form field that cleans a value and the
+        request-time integer guards (`IntegerInFilter`, `IntegerRangeFilter`)
+        see the output class; the path still names the generated field.
+        `django_strawberry_framework/utils/_array_field.py::array_element_field`
+        and `django_strawberry_framework/utils/_array_field.py::array_leaf_field`
+        read a `GeneratedField` as its computed column (the filter bind ask
+        classifies its leaf by the output class).
+  - [ ] Keyset: `django_strawberry_framework/keyset.py::validate_cursor_field_columns`,
+        `django_strawberry_framework/keyset.py::cursor_columns_for` and
+        `django_strawberry_framework/optimizer/plans.py::effective_cursor_state`
+        read a generated cursor column as its computed column (nullable by the
+        either-flag rule, JSON by the output class, coded by the output's
+        codec).
+  - [ ] Identity codec: `django_strawberry_framework/utils/relations.py::stored_value_link`
+        answers a reached `GeneratedField` with its computed column, and
+        `django_strawberry_framework/utils/querysets.py::coerce_field_value_or_none`
+        and `django_strawberry_framework/utils/querysets.py::column_python_value`
+        (under `identity_key`) cast and prepare through the declared field's
+        own `to_python` / `get_db_prep_value` (a consumer key subclass's
+        methods hold; Django's `ForeignKey` methods delegate to the column it
+        references); a value stored in a `GeneratedField`, whose own methods
+        end that delegation as the identity, then codes through the column it
+        computes too (`django_strawberry_framework/utils/querysets.py::_value_codecs`),
+        so a key subclass's cast and the computed column's both apply.
+        So a `relay.NodeID` over a generated column refetches through `node` /
+        `nodes` and their reorder, and a key whose `to_field` is a unique
+        generated column codes through it too; the storage-domain checks read
+        the column `stored_value_column` answers.
   - [ ] The write-side exclusion pinned (Django forces `editable=False`, so
         `django_strawberry_framework/mutations/inputs.py::editable_input_fields`
         already drops it — a test, not code).
   - [ ] `django_strawberry_framework/management/commands/inspect_django_type.py::_scalar_route_label`
         renders `GeneratedField -> <output label>`.
   - [ ] Fixture: two generated columns on library `Shelf` with migration
-        `0018_…` — `code_length` (integer output over the non-null `code`)
-        and `topic_length` (integer output with `null=True` over a
-        `NULLIF(topic, '')` expression); live coverage reads both through
-        `Meta.fields = "__all__"` and an explicit list, filters and orders
-        them, proves them absent from the create / update inputs, and reads
-        `codeLength` back from an update payload.
+        `0020_shelf_code_length_topic_length` — `code_length` (`BigIntegerField`
+        output over the non-null `code`, so the GraphQL input is `BigInt` and a
+        member past 64 bits reaches the package's range guard) and
+        `topic_length` (`IntegerField(null=True)` output over a
+        `NULLIF(topic, '')` expression), on `ShelfType`'s field list,
+        `ShelfFilter` and `ShelfOrder`; live coverage
+        (`examples/fakeshop/test_query/test_library_generated_api.py`) reads
+        both through an explicit list and a holder `Meta.fields = "__all__"`
+        type, filters (flat and through `BookFilter.shelf`) and orders them,
+        proves them absent from a holder model mutation that names no field
+        list, reads `codeLength` back from an `updateShelfViaForm` payload, and
+        types and applies lookups registered on the `output_field` instance.
 - [ ] **Slice 3 — `help_text` descriptions**
   - [ ] One `help_text` accessor (falsy → no description; `str` kept as
         text; a lazy `Promise` rendered by `str()` at the attach site; a
@@ -304,7 +385,7 @@ on the shared seams by then ([Risks](#risks-and-open-questions)).
         dedupe onto one input; the serializer flavor's
         `django_strawberry_framework/rest_framework/serializer_converter.py::serializer_field_description`
         routes its `help_text` through the same accessor.
-  - [ ] Library migration `0019_…` adding a `help_text` to `Shelf.code` and
+  - [ ] A library migration (the next free number) adding a `help_text` to `Shelf.code` and
         to `Book.genres` (no fakeshop relation column carries a `help_text`
         today; `BookType` declares `relation_shapes = {"genres": "both"}`, so
         `Book.genres` publishes both the list field and the
@@ -335,7 +416,7 @@ on the shared seams by then ([Risks](#risks-and-open-questions)).
   - [ ] `django-choices-field` joins `[dependency-groups].dev` in
         `pyproject.toml` (with `uv.lock`), as the other soft dependencies
         do; **no** `[project.optional-dependencies]` extra.
-  - [ ] Library migration `0020_…` adding a `TextChoicesField` column to
+  - [ ] A library migration (the next free number) adding a `TextChoicesField` column to
         `Shelf`; present-path live coverage over it; absence at package tier
         through `tests/_soft_dependency.py::simulated_absence`.
 - [ ] **Slice 5 — Verification, card amendments, docs fold-in, card wrap (no version cut)**
@@ -436,26 +517,27 @@ on card `TODO-ALPHA-057-0.1.0` (the beta cut) true rather than asserted.
   `(category, order)`). No generated mutation writes any of the five: the
   kanban surface is plain `DjangoFormMutation`s over services, and the
   glossary app has no mutations — which is why nothing has failed.
-- **`GeneratedField`**: `django_strawberry_framework/types/converters.py::_scalar_map_entry`
-  walks `type(field).__mro__` against `SCALAR_MAP`; `GeneratedField` has no
-  row, so `django_strawberry_framework/types/converters.py::scalar_route`
-  raises `Unsupported Django field type 'GeneratedField'` for any type that
-  selects it. Django's `GeneratedField.__init__` forces `editable=False` and
-  `blank=True` and refuses `default` / `db_default`; the class inherits
-  `Field.empty_strings_allowed = True`; `contribute_to_class` registers the
-  output field's class lookups on the instance; and the schema editor emits
-  the generated clause in place of `NULL` / `NOT NULL`, so the generated
-  column's own `null` is enforced by nothing. Every write flavor already drops
-  it (the `editable=False` branch of `editable_input_fields`) — the write side
-  needs a pin, not a change. The order side
+- **`GeneratedField`** (built, Slice 2): Django's `GeneratedField.__init__`
+  forces `editable=False` and `blank=True` and refuses `default` /
+  `db_default`; the class inherits `Field.empty_strings_allowed = True`;
+  `contribute_to_class` registers the output field's class lookups on the
+  instance; and the schema editor emits the generated clause in place of
+  `NULL` / `NOT NULL`, so neither `null` flag is enforced by the database.
+  django-filter's `FILTER_DEFAULTS` walk has no `GeneratedField` row. The
+  package reads the column it computes
+  (`django_strawberry_framework/utils/relations.py::generated_column`,
+  refused or admitted by
+  `django_strawberry_framework/types/converters.py::generated_output_field`)
+  wherever it classifies the column: the scalar route, the filter selection
+  and request-time guards, the array helpers and the keyset cursor reads.
+  Every write flavor drops it (the `editable=False` branch of
+  `editable_input_fields`, a `ModelForm`'s field discovery, DRF's read-only
+  mapping). The order side
   (`django_strawberry_framework/orders/inputs.py::_get_concrete_field_names_for_order`)
-  requires a real database column, which a generated column is. On the filter
-  side, django-filter's `FILTER_DEFAULTS` walk has no `GeneratedField` row, and
-  `django_strawberry_framework/filters/sets.py::_lookups_for_field` reads the
-  instance's lookup registry but classifies the column by `type(model_field)`.
-  No fakeshop model declares one;
+  requires a real database column, which a generated column is. Library
+  `Shelf` declares two (`code_length`, `topic_length`);
   `tests/mutations/test_resolvers.py::LinkedDesk` declares an unmanaged one
-  (`db_persist=True`) for the write-side test only.
+  (`db_persist=True`) for the package-tier write-side test.
 - **`help_text`**: `django_strawberry_framework/types/base.py::_build_annotations`
   synthesizes bare annotations; no description reaches a generated output
   field. The only description threading is the serializer input side
@@ -490,8 +572,8 @@ on card `TODO-ALPHA-057-0.1.0` (the beta cut) true rather than asserted.
   decode errors; `django_strawberry_framework/rest_framework/resolvers.py::serializer_errors_to_field_errors`
   re-keys recursively through the same map; the model flavor's map comes
   from `django_strawberry_framework/mutations/resolvers.py::_model_error_key_map`.
-  `tests/utils/test_error_keys.py` is the flavor × key-shape matrix, with
-  `register` and `ModelForm` at package tier as the card's DoD prescribes,
+  `examples/fakeshop/test_query/test_mutation_error_keys_api.py` is the flavor × key-shape matrix, with
+  `register` and `ModelForm` through native holder HTTP mounts,
   and the three live rows the DoD names exist in
   `examples/fakeshop/test_query/`. `docs/README.md` documents the contract in
   the `## Writing data` keying paragraph ("There is no casing setting: the
@@ -574,9 +656,12 @@ pinned (the card's `Verified in upstream` list, re-read for this spec):
   field map — adopted as the type-routing rule
   ([Decision 3](#decision-3--a-generatedfield-converts-through-its-output_field-and-never-enters-a-write-input)),
   extended to recurse through the package's own container arms. 🍓's
-  `is_optional` reads the `GeneratedField`'s own `null`; this package also
-  honors `output_field.null`, because the schema editor enforces neither and
-  the output field is where a consumer states the expression's result type.
+  read-side nullability (`strawberry_django/fields/base.py`, its
+  `field_to_check`) hands `is_optional` the `output_field` of a
+  `GeneratedField`, so it reads `output_field.null` alone; this package also
+  honors the `GeneratedField`'s own `null`, because the schema editor
+  enforces neither and either flag is the consumer saying the expression can
+  be null.
   🍓's auto-enum arm, which tests `model_field.choices` (the
   `GeneratedField`'s own) before its `GeneratedField` arm, runs only under
   `GENERATE_ENUMS_FROM_CHOICES` (default `False`) and only when the first
@@ -834,14 +919,54 @@ on rows already stored. That collision is data-dependent and stays the
 
 ### Decision 3 — A `GeneratedField` converts through its `output_field` and never enters a write input
 
-**Decision**: `django_strawberry_framework/types/converters.py::scalar_route`
-gains a `GeneratedField` arm, checked **first**, that routes the
-`output_field` — so an `ArrayField` output takes the array arm, an
-`HStoreField` output the hstore arm, and any other output the `SCALAR_MAP`
-arm keyed on the output field's class (🍓's rule, extended through the
-package's container arms). A `MapRoute` returned for a `GeneratedField` is
-re-stamped with `choices=bool(field.choices)` read off the `GeneratedField`
-itself, because `convert_scalar` mints the enum from the outer field.
+**Decision**: a `GeneratedField` is read as the column it computes:
+`django_strawberry_framework/utils/relations.py::generated_column` clones its
+`output_field` (the idiom Django's own `GeneratedField.check` uses to
+validate the output) and binds the clone under the generated field's model,
+`db_column` and name, carrying the facts below; one clone is filed per field.
+It answers classification reads only: it is not in
+`Options.concrete_fields`, and a query, ordering or projection names the
+generated field by its path. No lookup is read off it: Django's query
+resolves a generated column's lookups and transforms on the `output_field`
+instance (the `Col` it builds carries that instance), where a project may
+register its own (`Field.register_lookup` on an instance), and a clone keeps
+only its class's. Every lookup the package reads for a generated column comes
+from that one registry
+(`django_strawberry_framework/utils/relations.py::lookup_registry`), never from
+the copy of the output class's lookups `GeneratedField.contribute_to_class`
+files on the generated field. The generated field's own `get_lookup` /
+`get_transform` (Django's `RegisterLookupMixin`) fall back to the
+`output_field` for a name the copy lacks, so the copy diverges from the query
+in two places only: a name a later registration replaces (Django's `Exact` as
+`contains`, `Chr` as `endswith`) it answers with the class's original, and its
+`get_lookups()` enumeration lists no registration made after the model was
+built, on the class or on the `output_field` instance. Every
+walk starts from the generated field's own column
+(`django_strawberry_framework/utils/relations.py::lookup_operand`, the walk
+`validate_lookup_expr` runs from `Field.cached_col`;
+`django_strawberry_framework/utils/relations.py::generated_column_source`
+reads the generated field back from the clone): the generated leaf's filter
+selection (`FilterSet._upstream_filter_for_field` and the ownership oracle
+`FilterSet._generation_origin_for_field`, through
+`django_strawberry_framework/filters/sets.py::_generated_filter_field`), the
+filter operand walk
+(`django_strawberry_framework/filters/base.py::_lookup_operand`, which answers
+an output that is the `output_field` instance as the computed column), the
+text-pattern test of `FilterSet.filter_for_lookup`
+(`django_strawberry_framework/filters/sets.py::_is_text_pattern_on_non_text`)
+and the target-less GlobalID filter's lookup test
+(`django_strawberry_framework/filters/base.py::_unresolved_target_node_id`).
+A registration on the `GeneratedField` class or instance reaches neither
+those reads nor Django's query: a generated leaf naming it is upstream's
+`FieldLookupError` when the set is defined, and a declared filter naming it is
+refused at execution as Django refuses `Model.objects.filter(...)` with it.
+`django_strawberry_framework/types/converters.py::scalar_route` routes a
+`GeneratedField` **first**, as that column — so an `ArrayField` output takes
+the array arm, an `HStoreField` output the hstore arm, and any other output
+the `SCALAR_MAP` arm keyed on the output field's class (🍓's rule, extended
+through the package's container arms). The column carries the generated
+field's `choices`, so the map arm's `choices` flag and `convert_scalar`'s
+enum (keyed on the generated field's own model and name) need no re-stamp.
 `django_strawberry_framework/types/converters.py::_scalar_map_entry` unwraps
 the same way, so `django_strawberry_framework/types/converters.py::scalar_for_field`
 — and through it the filter-side
@@ -870,39 +995,91 @@ own, because Django forces or bypasses them:
 - **Blank admission** for a choice-bearing `GeneratedField`: Django forces
   `blank=True` and the class inherits `empty_strings_allowed = True`, so
   `django_strawberry_framework/types/converters.py::_column_admits_empty_string`
-  would mint a `BLANK` member even for an integer output. For a
-  `GeneratedField` the admission reads `output_field.empty_strings_allowed`
-  alone: a text expression can compute `""`, an integer one cannot.
+  read off the `GeneratedField` would mint a `BLANK` member even for an
+  integer output. It reads the computed column, whose `blank` is the forced
+  `True` and whose `empty_strings_allowed` is the output class's: a text
+  expression can compute `""`, an integer one cannot.
 
-The shared unwrap owns three refusals, each a `ConfigurationError` at type
-creation labelled with the **outer** field (the output field is unbound, so
-`django_strawberry_framework/types/converters.py::_field_label` would print
-`<unbound>.None`, since `Field.__init__` sets `name=None`): a `FileField` /
+`django_strawberry_framework/types/converters.py::generated_output_field`,
+the conversion unwrap every type-side and filter-side read goes through,
+owns three refusals, each a `ConfigurationError` at type or `FilterSet`
+creation labelled with the **outer** field (the computed column is bound
+under its model and name, so
+`django_strawberry_framework/types/converters.py::_field_label` of the
+column reads `Model.<generated field>`, where the raw `output_field` would
+read `<unbound>.None`): a `FileField` /
 `ImageField` output (the file
 wrappers resolve storage-backed values and a database expression has none;
 the refusal sits in the unwrap so the filter side cannot publish `String`
 for it, and `Meta.filesystem_path_fields` therefore never sees a generated
 column — its validator's non-file refusal would name it too); an output
 class with no `SCALAR_MAP` ancestor; and an `ArrayField` output whose
-`base_field` declares choices (the element enum is keyed on a bound
-`(model, field_name)` an unbound `base_field` lacks, and outer choices on an
-array are refused by `convert_scalar` already, so a generated array has no
-enum). The order side needs nothing (a generated column is a real column).
+`base_field` declares choices (choices on the output, its `base_field`'s
+included, are a detail Django never validates or reads for the generated
+column, and outer choices on an array are refused by `convert_scalar`
+already, so a generated array has no enum). The refusals are re-read on
+every call, so a `SCALAR_MAP` entry registered later is seen. The order side needs nothing (a generated column is a real column).
 `django_strawberry_framework/management/commands/inspect_django_type.py::_scalar_route_label`
 renders `GeneratedField -> <label of the output route>`.
 
-The filter side changes in `django_strawberry_framework/filters/sets.py`:
-`FilterSet.filter_for_lookup` and `FilterSet.filter_for_field` unwrap a
-`GeneratedField` to its `output_field` before django-filter's `try_dbfield`
-walk over `FILTER_DEFAULTS` (which has no `GeneratedField` row, so
-`handle_unrecognized_field` raises today), and
-`django_strawberry_framework/filters/sets.py::_lookups_for_field` classifies
-the column by the output field's class (`_is_text_column`,
-`_without_foreign_postgres_lookups` and `FilterSet._origin_for_selection_class`
-each read a field class). Its lookup registry already comes off the instance
-(`Field.get_lookups()`), where Django registers the output class's lookups on
-each `GeneratedField`, so two generated columns of different output types
-publish their own sets. Any error names the outer field.
+The filter side selects off the same merged map upstream's `try_dbfield`
+walks (`FilterSet._merged_filter_defaults`, read through `_entry_by_mro`):
+`django_strawberry_framework/filters/sets.py::FilterSet._selected_column`
+answers the `GeneratedField` itself when the merged `FILTER_DEFAULTS` plus
+`Meta.filter_overrides` map holds an entry for its class (a consumer's
+`filter_overrides[GeneratedField]` is reached as written), else its computed
+column, the one upstream's `try_dbfield` walk can classify (it has no
+`GeneratedField` row, so `BaseFilterSet.filter_for_lookup` answers
+`(None, {})` and `handle_unrecognized_field` raises). `FilterSet._upstream_filter_for_lookup`
+asks upstream about that field and the ownership oracle classifies the same
+one, so they cannot disagree. Upstream's `filter_for_field` body runs for a
+`GeneratedField` with one change (`FilterSet._upstream_filter_for_field`,
+adapted from django-filter): the field and terminal lookup it hands
+`filter_for_lookup` come from
+`django_strawberry_framework/filters/sets.py::_generated_filter_field`, the
+`resolve_field` answer walked on the registry Django's query reads, which is
+the `GeneratedField` itself for a lookup on the computed column and the
+transform's output past a transform. The class tests of
+`FilterSet.filter_for_lookup` and
+`django_strawberry_framework/filters/sets.py::_lookups_for_field`
+(`_is_text_column`, `_without_foreign_postgres_lookups`) read the computed
+column, so a choice-bearing generated column gets the enum filters a choice
+column gets (`exact` is `EnumChoiceFilter`, never django-filter's
+empty-value skip that would widen `BLANK` to every row). Its per-field
+`"__all__"` set is read off the `output_field` instance's registry
+(`django_strawberry_framework/utils/relations.py::lookup_registry`), where
+Django's query resolves a generated column's lookups (`GeneratedField.cached_col`
+hands the query a `Col` over it): an instance registration there and a class
+registration made after the model was built both publish, which the
+`get_lookups()` of the copy `contribute_to_class` files on the generated field
+would miss, and two
+generated columns of different output types publish their own sets. At
+request time `django_strawberry_framework/filters/base.py::_model_resolved_field`
+answers a path naming a `GeneratedField` with its computed column, so the
+input type, the form field cleaning a value and the integer `in` / `range`
+range guards read the output class, while the predicate still names the
+generated field and a transform between the column and the lookup is
+resolved on the `output_field` instance's registry (a `Chr` registered there,
+under a new name or one the generated field's copy holds, types its operand
+`String`). The array helpers
+(`django_strawberry_framework/utils/_array_field.py::array_element_field`,
+`django_strawberry_framework/utils/_array_field.py::array_leaf_field`) read
+it the same way, so the filter bind ask classifies its leaf by the output
+class, and the keyset cursor reads
+(`django_strawberry_framework/keyset.py::validate_cursor_field_columns`,
+`django_strawberry_framework/keyset.py::cursor_columns_for`,
+`django_strawberry_framework/optimizer/plans.py::effective_cursor_state`)
+hold a generated cursor column to the either-flag nullability and code it
+with the output's codec. The identity codec reads it too:
+`django_strawberry_framework/utils/querysets.py::coerce_field_value_or_none`
+and `identity_key` cast through the declared field's own codec and, for a
+value stored in a generated column, then through its computed column
+(`django_strawberry_framework/utils/querysets.py::_value_codecs`;
+`django_strawberry_framework/utils/relations.py::stored_value_link` answers a
+generated column with its computed column for the storage-domain checks), so
+for a `relay.NodeID` over a
+generated column a decoded id `"2"` is the integer the rows hold and one
+past the column's range names no row. Any error names the outer field.
 
 The write side changes nothing and pins everything: Django's
 `GeneratedField.__init__` forces `editable=False`, so
@@ -925,10 +1102,14 @@ row pins that the payload is current on every supported cell.
 - *The arm in `convert_field_output`* (the card's seam) — the filter side
   reads `scalar_for_field`, not the read-output entry point, and would
   publish a different scalar.
-- *Nullability from the `GeneratedField`'s own `null` alone* (🍓) — the
-  database enforces it no more than the output field's, and a consumer who
-  wrote `output_field=IntegerField(null=True)` has said the expression can
-  be null.
+- *Nullability from one flag alone* (🍓 reads `output_field.null` only) —
+  the database enforces neither, and a consumer who wrote
+  `GeneratedField(null=True)` or `output_field=IntegerField(null=True)` has
+  said the expression can be null.
+- *Unwrapping in `filter_for_field`* — the override would hide a consumer's
+  `Meta.filter_overrides[GeneratedField]`; selecting off the merged map
+  upstream's `try_dbfield` walks, and taking the computed column only where
+  that map has no entry for the `GeneratedField`'s class, keeps it reachable.
 - *Nullability always on* — makes every generated column optional in the
   SDL, though most expressions over non-null columns cannot be null; the
   declared flags carry the information.
@@ -1238,7 +1419,7 @@ exports.
 | Slice | Seam | Change | Risk profile |
 |---|---|---|---|
 | 1 | `utils/relations.py`, `mutations/sets.py`, `forms/inputs.py`, `rest_framework/inputs.py` | one predicate, one formatter, three raise sites, two override checks | MEDIUM — three flavors with different raise moments; the override checks decide which canonical patterns stay legal |
-| 2 | `types/converters.py`, `filters/sets.py`, `management/commands/inspect_django_type.py`, library models + migration | a route arm with re-stamped facts, a shared unwrap with three refusals, the django-filter unwrap and output-class reads, a label row, two fixture columns | MEDIUM — the filter side has its own field-class dispatch that the scalar route does not reach |
+| 2 | `utils/relations.py`, `types/converters.py`, `filters/sets.py`, `filters/base.py`, `utils/_array_field.py`, `keyset.py`, `optimizer/plans.py`, `utils/querysets.py`, `management/commands/inspect_django_type.py`, library models + migration | one computed column per generated field, a conversion unwrap with three refusals, the filter column selected off upstream's merged `try_dbfield` map and output-class reads, the request-time and keyset reads, a label row, two fixture columns | MEDIUM — the filter side has its own field-class dispatch that the scalar route does not reach |
 | 3 | `types/base.py`, `types/finalizer.py`, `types/resolvers.py`, `mutations/inputs.py`, `forms/inputs.py`, `rest_framework/serializer_converter.py`, library models + migration | one accessor, a type-creation check, `description=` threaded into the Phase-2 attachers, the Phase-2.5 sibling and three input builders | MEDIUM — the scalar `strawberry.field(description=…)` assignment is the one new shape, and live SDL changes ([Risks](#risks-and-open-questions)) |
 | 4 | `types/converters.py`, `pyproject.toml` / `uv.lock`, library models + migration | a detection branch, two refusals, a registry teardown, a dev pin, a fixture column | LOW — dead branch when the package is absent |
 | 5 | docs, DB, board, `spec-053` | verification, card amendments, fold-in | mechanical |
@@ -1250,9 +1431,11 @@ Parameterize-don't-average obligations:
   `ModelForm`'s `effective` set, the serializer field's `source`; which
   override exempts it — none, `_save_m2m`, `create` / `update`) stays at
   each call site.
-- Slice 2: the scalar route, the scalar-map unwrap and the filter-set unwrap
-  read one `GeneratedField` unwrap helper; the label rule (outer field) is
-  part of it.
+- Slice 2: the scalar route, the scalar-map walk, the filter selection and
+  the request-time filter reads read one conversion unwrap
+  (`generated_output_field`) over one computed column (`generated_column`,
+  which the array helpers and the keyset reads take directly); the label rule
+  (outer field) is part of the column.
 - Slice 3: the scalar / relation / file / connection attachers and the three
   input builders read one `help_text` accessor; the sites differ only in
   which `strawberry.field(...)` or kwargs dict receives it.
@@ -1269,8 +1452,11 @@ the through-guard message formatter (one home, three callers), the
 `help_text` accessor (one reader of the column text with the falsy / `str` /
 `Promise` / refuse rule, consumed by the type-creation check, the Phase-2
 attachers, the Phase-2.5 sibling and all three input builders), the
-`GeneratedField` unwrap (read by `scalar_route`, `_scalar_map_entry` and
-`filters/sets.py`, never re-spelled), and the consumer-enum member-name
+`GeneratedField` computed column (`utils/relations.py::generated_column`) and
+its conversion unwrap (`types/converters.py::generated_output_field`, read by
+`scalar_route`, `convert_scalar`, `_scalar_map_entry`,
+`_column_admits_empty_string`, `filters/sets.py` and `filters/base.py`,
+never re-spelled), and the consumer-enum member-name
 validator. Existing owners that must not be duplicated:
 `django_strawberry_framework/utils/relations.py::m2m_through_link_fields`
 (the link-field resolution), `django_strawberry_framework/utils/imports.py::loaded_attr`
@@ -1334,6 +1520,13 @@ validator. Existing owners that must not be duplicated:
   the shared unwrap, so the filter side refuses it too.
 - **Two `GeneratedField`s of different output types in one `FilterSet` with
   `"__all__"`** — each gets its own output class's lookups.
+- **A lookup or transform registered on a `GeneratedField`'s `output_field`
+  instance** — reached as Django's query reaches it: the leaf's operand is the
+  transform's output (`Chr` publishes `String`), a text pattern publishes
+  `String`, and a target-less GlobalID filter codes its node id through the
+  column; one registered only on the `GeneratedField` is upstream's
+  `FieldLookupError` for a generated leaf when the set is defined, and a
+  declared filter naming it builds and is refused at execution by Django.
 - **A mutation payload read after an update of a generated column's source**
   — carries the recomputed value whether the backend refreshed it through
   `RETURNING` or deferred it.
@@ -1422,12 +1615,33 @@ schema cannot express or an import-time refusal the live schema cannot load.
   extra raises, a `through_fields` through with a third foreign key to the
   same model counts the third when required; a read-side `DjangoType` over
   `GlossaryTerm` finalizes.
-- **Slice 2** — live: `codeLength` and `topicLength` appear in the SDL with
-  the output scalar (`Int!` and `Int`) under both `Meta.fields = "__all__"`
-  and an explicit list; a shelf with an empty `topic` reads `topicLength:
-  null`; filters and orders on both execute; the create / update inputs for
-  the model omit both; an update of `code` through `updateShelfViaForm`
-  returns the recomputed `codeLength` in its payload. In-process
+- **Slice 2** — live
+  (`examples/fakeshop/test_query/test_library_generated_api.py`):
+  `codeLength` and `topicLength` appear in the SDL with the output scalar
+  (`BigInt!` and `Int`) under both a holder `Meta.fields = "__all__"` type
+  and `ShelfType`'s explicit list; a shelf with an empty `topic` reads
+  `topicLength: null`; `exact` / `gt` / `lt` / `in` / `range` / `isNull`
+  filter both, flat and through `BookFilter.shelf`; a `codeLength` `in`
+  member past 64 bits is dropped (all of them: no row) and a `range` bound
+  past it applies as `gte` / `lte`, never a raw bind; both order, nulls
+  placed as asked; a holder Relay type declaring `code_length:
+  relay.NodeID[int]` refetches through `node` and `nodes` and answers `null`
+  with no error for an id past 64 bits; a holder model mutation naming no
+  field list omits both
+  from its input; an update of `code` through `updateShelfViaForm` returns
+  the recomputed `codeLength` in its payload; with Django's `Chr` registered
+  on `code_length`'s `output_field` instance (alone or with the generated
+  field's), `chr__exact` is a `String` leaf, `"A"` matches the 65-character
+  code and `65` is refused; a `contains` registered there as `has` is a
+  `String` leaf; and a target-less `GlobalIDFilter` over `code_length` with
+  `Exact` registered there as `same` matches by node id `65` and answers
+  `GLOBALID_INVALID` for `abc`; a `Meta.filter_overrides` `IntegerField`
+  entry whose `extra` names `lookup_expr="gte"` makes the `topic_length`
+  leaf a `gte` filter, as on a plain column; and with `Chr` registered as
+  `endswith` on `BigIntegerField`, a branch set's `shelves__code_length`
+  `endswith` leaf selected by a consumer `CharField` override keeps its
+  `distinct=False`, a branch with two matching shelves answering twice.
+  In-process
   (`examples/fakeshop/tests/test_inspect_django_type.py`, `call_command`):
   the inspection command prints the `GeneratedField -> …` label. Package
   tier: a `GeneratedField(null=True)` over a non-null output publishes the
@@ -1437,8 +1651,17 @@ schema cannot express or an import-time refusal the live schema cannot load.
   and an `ArrayField` output with a choice-bearing `base_field` are refused
   with the outer field's label (type and filter side); two `GeneratedField`s
   of different output types in one `FilterSet` with `"__all__"` get their
-  own lookups; an `ArrayField` output routes to the array arm; `LinkedDesk`
-  stays out of every flavor's input.
+  own lookups; a choice-bearing text output's `exact` / `iexact` leaves are
+  `EnumChoiceFilter` / `EnumLookupFilter`; a `Meta.filter_overrides`
+  `GeneratedField` entry is honoured; a `""` lookup is upstream's
+  `FieldLookupError` on a generated column as on a plain one; an `ArrayField` output routes to the
+  array arm (the array helpers read its element), an `HStoreField` output to
+  the hstore arm; the keyset cursor validation and an `orderBy:` cursor
+  refuse `Shelf.topic_length` as nullable and code `Shelf.code_length` as a
+  `BigIntegerField`; `coerce_field_value_or_none` casts a decoded id through
+  a generated column and through a key whose `to_field` is one;
+  `LinkedDesk` stays out of every flavor's input
+  (`editable_input_fields`, a `ModelForm` and a `ModelSerializer` input).
 - **Slice 3** — live introspection: `Shelf.code`'s `help_text` describes
   `ShelfType.code` and the model-flavor and form-flavor input fields;
   `Book.genres`'s `help_text` (Slice 3's migration) describes
@@ -1467,7 +1690,7 @@ schema cannot express or an import-time refusal the live schema cannot load.
   named `true`, a `__`-prefixed member and a non-ASCII member are each
   refused; `registry.clear()` then a rebuild re-wraps a package-decorated
   enum and leaves a consumer-decorated one untouched.
-- **Slice 5** — re-run `tests/utils/test_error_keys.py` and the three live
+- **Slice 5** — re-run `examples/fakeshop/test_query/test_mutation_error_keys_api.py` and the three live
   key rows; re-run the `PAGINATION_INVALID` pin; nothing new unless a row
   is missing. The amended card rows pass `scripts/check_kanban_anchors.py`
   and `scripts/check_citations.py --substrings`; `import_spec_terms --check`
@@ -1482,9 +1705,11 @@ schema cannot express or an import-time refusal the live schema cannot load.
   `Meta.exclude` escape and the consumer-authored through-model mutation;
   `docs/GLOSSARY.md` gains a row for the through-column guard via the
   glossary DB.
-- Slice 2: `docs/README.md` `## Reading data` — `GeneratedField` converts via
-  its `output_field`, is read-only, and is nullable when either field says
-  so; GLOSSARY row under Specialized scalar conversions.
+- Slice 2 (README built): `docs/README.md` `## Reading data` →
+  `### Database-computed columns` — `GeneratedField` converts via its
+  `output_field`, is read-only, is nullable when either field says so, and
+  its three refusals; GLOSSARY row under Specialized scalar conversions
+  (Slice 5's fold-in).
 - Slice 3: `docs/README.md` `## What just happened?` — column `help_text` is
   the field description, an explicit description wins, an annotation-only
   override opts out; GLOSSARY row.
@@ -1543,16 +1768,19 @@ schema cannot express or an import-time refusal the live schema cannot load.
     which no slice changes (the guard fires before `_assign_m2m` is ever
     reached), and omit most of what the four open slices change. Amend to
     `utils/relations.py`, `mutations/sets.py`, `forms/inputs.py`,
-    `rest_framework/inputs.py` (Slice 1); `types/converters.py`,
-    `filters/sets.py`, `management/commands/inspect_django_type.py`
+    `rest_framework/inputs.py` (Slice 1); `utils/relations.py`,
+    `types/converters.py`, `filters/sets.py`, `filters/base.py`,
+    `utils/_array_field.py`, `keyset.py`, `optimizer/plans.py`,
+    `utils/querysets.py`, `management/commands/inspect_django_type.py`
     (Slice 2); `types/base.py`, `types/finalizer.py`, `types/resolvers.py`,
     `mutations/inputs.py`, `rest_framework/serializer_converter.py`
     (Slice 3); `pyproject.toml` and `uv.lock` (Slice 4), each under its
     full `django_strawberry_framework/` path as the rows spell them. 1493
     and 1494 name the built items' files and stay.
   - 1496 (verified_upstream): "resolves type and nullability from
-    `output_field`" misstates 🍓, whose `is_optional` reads the
-    `GeneratedField`'s own `null`.
+    `output_field`" is right for 🍓 (its `field_to_check` hands
+    `is_optional` the `output_field`) but not for this package, which also
+    honors the `GeneratedField`'s own `null` (the either-flag rule).
   - 1500 (why_it_matters): "two type-creation failures a migrant cannot
     work around (`through=`, `GeneratedField`)" → the `through=` failure is
     request-time (the `"__all__"` leaf on a write that sends the relation a
@@ -1640,15 +1868,15 @@ schema cannot express or an import-time refusal the live schema cannot load.
 - **Which library columns carry the fixtures.** Preferred: `Shelf` (it
   already hosts the choice and M2M fixtures and has the richest live
   coverage): `code_length` and `topic_length` generated columns (Slice 2,
-  migration `0018`), a `help_text` on `code` plus one on `Book.genres`
-  (Slice 3, migration `0019`; no fakeshop relation column carries a
+  built, migration `0020_shelf_code_length_topic_length`), a `help_text` on
+  `code` plus one on `Book.genres` (Slice 3, the next free migration
+  number; no fakeshop relation column carries a
   `help_text` today, and `Book.genres` is the forward relation whose
   `relation_shapes = {"genres": "both"}` publishes a connection sibling),
   and a new `grade` `TextChoicesField` column rather than converting
   `condition`, whose `BLANK`-member behavior is pinned and must stay
-  (Slice 4, migration `0020`). The numbers follow
-  `0017_series_and_printing_relations` and assume the Slice 2 → 3 → 4
-  landing order; a slice landing out of order takes the next free number.
+  (Slice 4, the number after Slice 3's). Each slice takes the next free
+  number when it lands.
   Fallback: `Book` for the scalar and choice fixtures, same three
   migrations.
 - **`django-choices-field` floor.** The dev pin needs a release that ships

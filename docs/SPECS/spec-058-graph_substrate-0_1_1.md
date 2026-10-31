@@ -1447,10 +1447,10 @@ raise paths, and interleavings a real query cannot produce.
   outside any target hook, and the selected edge shows the rows the
   secondary type's visibility admits on the re-entered hop, never the
   primary's. Parity row (already shipped, not this plan's proof):
-  `tests/filters/test_sets.py::test_undeclared_path_reentering_the_root_model_reads_the_bound_types_hook`,
+  `examples/fakeshop/test_query/test_visible_relation_boundaries_api.py::test_meta_bound_secondary_reentry_scope_keeps_the_plain_consumers_root_universe`,
   `tests/orders/test_sets.py::test_scoped_hops_reentering_the_sets_model_read_the_type_the_set_is_bound_to`
   and, for re-entry by table,
-  `tests/utils/test_relation_reentry.py::test_a_proxy_root_reads_its_own_visibility_on_a_path_re_entering_its_table`.
+  `examples/fakeshop/test_query/test_relation_reentry_api.py::test_a_proxy_root_reads_its_own_visibility_on_a_path_re_entering_its_table`.
 - **Hop visibility and color (package, Slice 3):** every hop hook receives
   the `info` object passed to `graph.apply` (identity-asserted); each
   `(hop type, alias)` hook runs once per compile and again on a second

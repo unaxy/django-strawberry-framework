@@ -166,11 +166,11 @@ Walker unit tests in `tests/optimizer/test_walker.py`:
 - `test_plan_honors_prefetch_obj_hint_does_not_walk_inner_selections` — explicit `prefetch_obj` is appended verbatim regardless of selections under it.
 - `test_plan_records_nested_fk_id_elision_with_resolver_key` — id-only nested forward FK lands in `fk_id_elisions` keyed by parent type, field name, and runtime branch.
 
-Link-column execution tests in `tests/optimizer/test_relation_link_execution.py` (package-only: fakeshop exposes no `ForeignObject`):
+Link-column execution tests over a holder HTTP mount over the test-local models of `tests/optimizer/_link_models.py` in `examples/fakeshop/test_query/test_relation_link_api.py` (fakeshop exposes no `ForeignObject`):
 
-- `test_forward_link_prefetch_loads_the_child_carrier` — a one-column `ForeignObject` and a `to_field` FK downgraded to a `Prefetch` run in 2 queries: the source row carries the carrier, the prefetched rows their target.
-- `test_consumer_authored_two_column_forward_link_prefetch_loads_every_target` (cases `visibility_hook`, `prefetch_hint`) — a consumer-authored field over a two-column forward `ForeignObject` under a `Prefetch` runs in 2 queries: the source `.only()` carries both carriers and the prefetched `.only()` both targets.
-- `test_generated_two_column_forward_link_resolves_every_parent` (cases `select_related`, `prefetch`) — the generated field over a two-column forward `ForeignObject` is one `select_related` join, or, under a parent `get_queryset`, a `Prefetch` matched on both target columns in 2 queries, each child getting its own parent.
+- `examples/fakeshop/test_query/test_relation_link_api.py::test_forward_link_prefetch_loads_the_child_carrier` — a one-column `ForeignObject` and a `to_field` FK downgraded to a `Prefetch` run in 2 queries: the source row carries the carrier, the prefetched rows their target.
+- `examples/fakeshop/test_query/test_relation_link_api.py::test_consumer_authored_two_column_forward_link_prefetch_loads_every_target` (cases `visibility_hook`, `prefetch_hint`) — a consumer-authored field over a two-column forward `ForeignObject` under a `Prefetch` runs in 2 queries: the source `.only()` carries both carriers and the prefetched `.only()` both targets.
+- `examples/fakeshop/test_query/test_relation_link_api.py::test_generated_two_column_forward_link_resolves_every_parent` (cases `select_related`, `prefetch`) — the generated field over a two-column forward `ForeignObject` is one `select_related` join, or, under a parent `get_queryset`, a `Prefetch` matched on both target columns in 2 queries, each child getting its own parent.
 - Fragment, alias, and directive variants for a nested relation branch, reusing the existing synthetic selection helpers (`_sel`, `_inline_fragment`, `_fragment_spread`).
 
 Extension integration tests in `tests/optimizer/test_extension.py`:

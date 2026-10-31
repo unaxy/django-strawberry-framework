@@ -14,6 +14,8 @@
 "django_strawberry_framework/_strawberry_patches.py::_original_parse_json" = { cast = 1 }
 "django_strawberry_framework/_strawberry_patches.py::_original_parse_query_params" = { cast = 1 }
 "django_strawberry_framework/_strawberry_patches.py::_original_sync_parse_multipart" = { cast = 1 }
+"django_strawberry_framework/_strawberry_patches.py::_patched_list_connection_resolve_connection" = { cast = 2 }
+"django_strawberry_framework/_strawberry_patches.py::_patched_list_connection_resolve_connection.resolver" = { cast = 1 }
 "django_strawberry_framework/auth/mutations.py::_authenticated_actor_or_none" = { cast = 1 }
 "django_strawberry_framework/auth/mutations.py::_channels_http_login_establish" = { reportArgumentType = 1 }
 "django_strawberry_framework/auth/mutations.py::_channels_logout" = { reportArgumentType = 1 }
@@ -186,8 +188,8 @@
 "examples/fakeshop/apps/kanban/migrations/0001_initial.py::Migration.operations" = { reportUnknownArgumentType = 1 }
 "examples/fakeshop/apps/kanban/migrations/0002_card_glossary_terms.py::Migration.operations" = { reportUnknownArgumentType = 2 }
 "examples/fakeshop/apps/kanban/migrations/0012_cardpathlink_through.py::Migration.operations" = { reportUnknownArgumentType = 1 }
+"examples/fakeshop/apps/kanban/tests/test_services.py::test_missing_required_field_error_code_is_stable" = { reportArgumentType = 1 }
 "examples/fakeshop/apps/kanban/tests/test_services.py::test_move_card_number_rejects_non_integer" = { reportArgumentType = 1 }
-"examples/fakeshop/apps/kanban/tests/test_services.py::test_service_error_codes_are_stable" = { reportArgumentType = 1 }
 "examples/fakeshop/apps/library/filters.py::ModelChoiceInFilter" = { reportUnsafeMultipleInheritance = 1 }
 "examples/fakeshop/apps/library/filters.py::ShelfFilter.home_branch_for_request" = { reportArgumentType = 1 }
 "examples/fakeshop/apps/library/forms.py::ShelfRelationsForm.__init__" = { reportArgumentType = 1 }
@@ -227,6 +229,7 @@
 "examples/fakeshop/test_query/test_extension_isolation_api.py::_HybridAuthority" = { reportUnsafeMultipleInheritance = 1 }
 "examples/fakeshop/test_query/test_extension_isolation_api.py::_ladder_schema" = { reportArgumentType = 1 }
 "examples/fakeshop/test_query/test_extension_isolation_api.py::_rebuild_the_box" = { reportCallIssue = 1 }
+"examples/fakeshop/test_query/test_form_construction_api.py::test_request_scoped_form_queryset_controls_relation_acceptance.CategoryPickForm.__init__" = { reportMissingSuperCall = 1 }
 "examples/fakeshop/test_query/test_globalid_naming_api.py::shadowing_child_schema.ChildCategoryNode.Meta" = { reportIncompatibleVariableOverride = 1 }
 "examples/fakeshop/test_query/test_library_api.py::_unplanned_relation_holder_schema.HolderOwnLoanType.book" = { reportAny = 1 }
 "examples/fakeshop/test_query/test_library_api.py::test_library_unplanned_relations_keep_their_link_columns" = { cast = 1 }
@@ -237,6 +240,7 @@
 "examples/fakeshop/test_query/test_list_field_async_api.py::_ProjectQ.resolve_expression" = { reportIncompatibleMethodOverride = 1 }
 "examples/fakeshop/test_query/test_list_field_async_api.py::_async_untrusted" = { reportArgumentType = 1 }
 "examples/fakeshop/test_query/test_list_field_async_api.py::test_async_ordering_leaves_the_consumer_context_exactly_as_found" = { cast = 1 }
+"examples/fakeshop/test_query/test_mutation_permissions_api.py::test_async_check_permission_override_is_rejected_not_bypassed.AsyncCheckCreateItem.check_permission" = { reportIncompatibleMethodOverride = 1 }
 "examples/fakeshop/test_query/test_resource_policy_api.py::_AcceptedInstanceQuery.rebind" = { reportAttributeAccessIssue = 1 }
 "examples/fakeshop/test_query/test_resource_policy_api.py::_EscapingQuerySet.__getitem__" = { reportIncompatibleMethodOverride = 1 }
 "scripts/_kanban_lib.py::_JSONRow" = { reportExplicitAny = 1 }
@@ -251,12 +255,17 @@
 "scripts/workspace.py::_admit" = { cast = 1 }
 "scripts/workspace.py::_load_state" = { cast = 1 }
 "scripts/workspace.py::release" = { cast = 1 }
+"tests/_connection_field_schemas.py::_HostileConnQuerySet.__getitem__" = { reportIncompatibleMethodOverride = 1 }
+"tests/_connection_field_schemas.py::_ListManager.all" = { reportIncompatibleMethodOverride = 1 }
+"tests/_connection_field_schemas.py::_consumer_edge_schema" = { cast = 1 }
+"tests/_connection_field_schemas.py::_order_override_untrusted" = { reportArgumentType = 1 }
 "tests/_idioms.py::ClaimsClassBase.__class__" = { reportIncompatibleMethodOverride = 1 }
 "tests/_idioms.py::ClassReadRaisesBase.__class__" = { reportIncompatibleMethodOverride = 1 }
 "tests/_idioms.py::ModelSerializerBase.Meta" = { reportIncompatibleVariableOverride = 1 }
 "tests/_idioms.py::STR_ENUM" = { cast = 1 }
 "tests/_idioms.py::UnreadableStateQuerySet.__dict__" = { reportGeneralTypeIssues = 1, reportIncompatibleVariableOverride = 1 }
 "tests/_idioms.py::bind_unparented" = { reportArgumentType = 1, reportUnknownMemberType = 1 }
+"tests/_mti_relations.py::declare_mti_tag_models.MtiShop.Meta" = { reportIncompatibleVariableOverride = 1 }
 "tests/_postgresql_stand_in.py::StoringOperations.adapt_datetimefield_value" = { reportIncompatibleMethodOverride = 1 }
 "tests/_postgresql_stand_in.py::StoringOperations.adapt_durationfield_value" = { reportIncompatibleMethodOverride = 1 }
 "tests/_postgresql_stand_in.py::StoringOperations.adapt_timefield_value" = { reportIncompatibleMethodOverride = 1 }
@@ -309,22 +318,14 @@
 "tests/filters/test_inputs.py::_filter_input_call_form" = { reportArgumentType = 1 }
 "tests/filters/test_inputs.py::_filter_input_subscript_form" = { reportInvalidTypeArguments = 1 }
 "tests/filters/test_inputs.py::test_a_model_choice_filter_with_a_request_scoped_queryset_builds_without_calling_it" = { reportArgumentType = 1 }
-"tests/filters/test_inputs.py::test_convert_filter_to_input_annotation_malformed_filter_diagnostics" = { reportArgumentType = 1 }
-"tests/filters/test_inputs.py::test_convert_filter_to_input_annotation_rejects_unknown_method_filter" = { reportArgumentType = 1 }
-"tests/filters/test_inputs.py::test_element_annotation_fallback_branches_when_model_field_is_none.NoFieldTypedFilter.field" = { reportIncompatibleMethodOverride = 1 }
 "tests/filters/test_inputs.py::test_filter_input_subscript_rejects_non_filterset_naming_the_subscript" = { reportArgumentType = 1, reportInvalidTypeArguments = 1 }
 "tests/filters/test_inputs.py::test_filter_input_type_rejects_non_filterset" = { reportArgumentType = 3 }
 "tests/filters/test_inputs.py::test_logic_operator_descriptors_and_mappings" = { reportIndexIssue = 2 }
 "tests/filters/test_inputs.py::test_model_choice_filter_with_no_column_source_names_the_filterset_and_the_fix.ItemFilter" = { reportArgumentType = 1 }
-"tests/filters/test_sets.py::ShelfProxy.Meta" = { reportIncompatibleVariableOverride = 1 }
 "tests/filters/test_sets.py::_CrKioskDesk.Meta" = { reportIncompatibleVariableOverride = 1 }
 "tests/filters/test_sets.py::_CrOwnKeyDesk.Meta" = { reportIncompatibleVariableOverride = 1 }
-"tests/filters/test_sets.py::_ModelChoiceInFilter" = { reportUnsafeMultipleInheritance = 1 }
-"tests/filters/test_sets.py::test_a_deferred_copy_copied_later_is_bound_to_the_instance_model" = { cast = 2 }
 "tests/filters/test_sets.py::test_a_set_overriding_a_form_reading_seam_defers_every_flat_copy" = { cast = 2 }
-"tests/filters/test_sets.py::test_an_unnamed_flat_copy_reads_no_hop_visibility_under_apply_async.AsyncOnlyIssueType.get_queryset" = { reportIncompatibleMethodOverride = 1 }
-"tests/filters/test_sets.py::test_apply_async_nested_or_branch_with_async_get_queryset_does_not_raise_sync_misuse.ShelfType.get_queryset" = { reportIncompatibleMethodOverride = 1 }
-"tests/filters/test_sets.py::test_dynamic_csv_subclass_with_added_behavior_fails_closed._TwoBaseFirstNotCsv" = { reportIncompatibleVariableOverride = 1 }
+"tests/filters/test_sets.py::test_an_unnamed_flat_copy_calls_no_async_hop_visibility_hook.AsyncOnlyIssueType.get_queryset" = { reportIncompatibleMethodOverride = 1 }
 "tests/filters/test_sets.py::test_evaluate_logic_tree_caps_a_non_int_knob_at_the_neutral_default.CategoryFilter" = { reportAssignmentType = 1 }
 "tests/filters/test_sets.py::test_in_lookup_inherited_as_a_non_base_in_filter_fails_at_build._ScalarInFilterSet" = { reportIncompatibleMethodOverride = 1, reportIncompatibleVariableOverride = 1, reportUnsafeMultipleInheritance = 1 }
 "tests/filters/test_sets.py::test_is_generation_capable_false_for_plain_function_seam_override.PlainSeamFilter" = { reportAssignmentType = 1 }
@@ -334,7 +335,6 @@
 "tests/filters/test_sets.py::test_normalize_input_walks_strawberry_dataclass._Input" = { reportAny = 1 }
 "tests/filters/test_sets.py::test_private_baseline_is_immutable_and_independent" = { reportIndexIssue = 1 }
 "tests/filters/test_sets.py::test_run_permission_checks_skips_unset_related_branch.BranchInput" = { reportAny = 2 }
-"tests/forms/test_converter.py::test_null_boolean_validating_subclass_generates_required_input.Query" = { reportGeneralTypeIssues = 1 }
 "tests/forms/test_inputs.py::_as_form_class" = { reportReturnType = 1 }
 "tests/forms/test_inputs.py::test_build_form_input_class_rejects_out_of_vocabulary_operation_kind" = { reportArgumentType = 1 }
 "tests/forms/test_inputs.py::test_corrupted_base_fields_raises_typed_on_default_path" = { reportAttributeAccessIssue = 1 }
@@ -342,8 +342,6 @@
 "tests/forms/test_inputs.py::test_form_basis_content_identity_reraises_the_basis_typed_reject_verbatim" = { reportAttributeAccessIssue = 1 }
 "tests/forms/test_inputs.py::test_get_form_fields_does_not_instantiate_kwarg_requiring_form" = { reportCallIssue = 1 }
 "tests/forms/test_inputs.py::test_hostile_class_base_fields_value_raises_typed_on_default_path" = { reportAttributeAccessIssue = 1 }
-"tests/forms/test_resolvers.py::test_get_form_kwargs_queryset_scoping_leaves_the_generated_input_shape_unchanged.CategoryPickForm.__init__" = { reportMissingSuperCall = 1 }
-"tests/forms/test_resolvers.py::test_get_form_only_override_builds_the_form_and_waives_the_required_guard.Submit.get_form" = { reportArgumentType = 1 }
 "tests/forms/test_resolvers.py::test_is_empty_form_value_handles_unhashable_and_typeerror" = { reportArgumentType = 1 }
 "tests/forms/test_resolvers.py::test_partial_update_reconstruct_with_extra_model_choice_field" = { reportAttributeAccessIssue = 1 }
 "tests/forms/test_sets.py::test_default_form_field_hook_rejects_a_class_without_form_metadata" = { reportArgumentType = 1 }
@@ -357,7 +355,6 @@
 "tests/mutations/test_fields.py::test_non_mutation_target_raises_at_construction" = { reportArgumentType = 1 }
 "tests/mutations/test_inputs.py::test_editable_fields_never_carry_a_consumer_auto_field_key.ConsumerAutoField" = { reportIncompatibleMethodOverride = 1, reportIncompatibleVariableOverride = 1, reportUnsafeMultipleInheritance = 1 }
 "tests/mutations/test_operations.py::test_mutation_operation_descriptor_immutability" = { reportAttributeAccessIssue = 1 }
-"tests/mutations/test_permissions.py::test_async_check_permission_override_is_rejected_not_bypassed.AsyncCheckCreateItem.check_permission" = { reportIncompatibleMethodOverride = 1 }
 "tests/mutations/test_permissions.py::test_walk_ignores_mid_request_pollution_of_the_class_permission_list" = { reportArgumentType = 1 }
 "tests/mutations/test_permissions.py::test_walk_ignores_mid_request_pollution_of_the_class_permission_list.AllowAndPollute.has_permission" = { reportAttributeAccessIssue = 1, reportUnknownMemberType = 1 }
 "tests/mutations/test_resolvers.py::KeyedDesk.Meta" = { reportIncompatibleVariableOverride = 1 }
@@ -471,7 +468,6 @@
 "tests/rest_framework/test_resolvers.py::test_save_kwargs_hook_non_string_keys_fail_before_save" = { reportAttributeAccessIssue = 1 }
 "tests/rest_framework/test_resolvers.py::test_save_time_django_validation_error_reads_its_names_as_backing_model_fields.ItemRaisingCategorySerializer.create" = { cast = 1 }
 "tests/rest_framework/test_resolvers.py::test_serializer_kwargs_hook_non_string_keys_fail_before_serializer_construction" = { reportAttributeAccessIssue = 1 }
-"tests/rest_framework/test_resolvers.py::test_update_whose_row_vanishes_before_attestation_returns_conflict.DeletingItemSerializer.Meta" = { reportIncompatibleVariableOverride = 1 }
 "tests/rest_framework/test_resolvers.py::test_upload_metadata_reports_no_size_for_an_unsizable_upload" = { reportArgumentType = 1 }
 "tests/rest_framework/test_sets.py::test_modelserializer_non_model_meta_model_raises_at_class_creation" = { reportAttributeAccessIssue = 1 }
 "tests/rest_framework/test_sets.py::test_nested_fields_cycle_raises_configuration_error_at_class_creation.RecursiveCategorySerializer" = { reportAssignmentType = 1 }
@@ -483,10 +479,6 @@
 "tests/rest_framework/test_sets.py::test_validate_nested_fields_child_serializer_errors.BrokenConfigChild.fields" = { reportIncompatibleVariableOverride = 1 }
 "tests/rest_framework/test_sets.py::test_validate_nested_fields_child_serializer_errors.BrokenExcChild.fields" = { reportIncompatibleVariableOverride = 1 }
 "tests/test_bench_common.py::test_bootstrap_refuses_an_unknown_mode_before_touching_django" = { reportArgumentType = 1 }
-"tests/test_connection.py::_HostileConnQuerySet.__getitem__" = { reportIncompatibleMethodOverride = 1 }
-"tests/test_connection.py::_ListManager.all" = { reportIncompatibleMethodOverride = 1 }
-"tests/test_connection.py::_consumer_edge_schema" = { cast = 1 }
-"tests/test_connection.py::_order_override_untrusted" = { reportArgumentType = 1 }
 "tests/test_connection.py::test_a_relay_target_with_no_registered_definition_fails_the_synthesized_connection" = { reportArgumentType = 1 }
 "tests/test_connection.py::test_connection_field_rejects_non_callable_resolver" = { reportArgumentType = 1 }
 "tests/test_connection.py::test_connection_field_requires_djangotype" = { reportArgumentType = 1 }
@@ -563,7 +555,7 @@
 "tests/test_resource_policy.py::test_only_the_literal_true_widens_a_declared_bound_past_the_request_policy" = { reportArgumentType = 1 }
 "tests/test_routers.py::_actor_lease" = { reportArgumentType = 1 }
 "tests/test_routers.py::test_a_non_conformant_header_shape_propagates_instead_of_denying" = { reportArgumentType = 1 }
-"tests/test_routers.py::test_construction_rejects_an_omitted_or_unusable_django_application" = { reportCallIssue = 1 }
+"tests/test_routers.py::test_construction_requires_the_django_application_argument" = { reportCallIssue = 1 }
 "tests/test_routers.py::test_control_frame_send_serializes_with_a_concurrent_revocation" = { reportArgumentType = 1 }
 "tests/test_routers.py::test_the_websocket_pattern_is_keyword_only_with_no_legacy_url_pattern_alias" = { reportCallIssue = 1 }
 "tests/test_schema.py::HybridPolicyExtension" = { reportUnsafeMultipleInheritance = 1 }
@@ -601,7 +593,6 @@
 "tests/types/test_base.py::test_has_custom_get_queryset_inherits_through_intermediate_base.ChildCategoryType.Meta" = { reportIncompatibleVariableOverride = 1 }
 "tests/types/test_converters.py::_blank_choice_model" = { reportAssignmentType = 1 }
 "tests/types/test_converters.py::_introspect_field_type" = { cast = 1 }
-"tests/types/test_converters.py::test_bigint_resolver_returning_bool_raises_via_schema_execution.Query.bool_as_bigint" = { reportReturnType = 1 }
 "tests/types/test_converters.py::test_build_enum_rejects_malformed_choice_pairs" = { reportArgumentType = 1 }
 "tests/types/test_converters.py::test_choice_enum_name_derivation_propagates_a_hostile_type_name_format" = { reportArgumentType = 1 }
 "tests/types/test_converters.py::test_scalar_for_field_label_runs_a_hostile_field_name_str" = { reportAttributeAccessIssue = 1 }
@@ -640,7 +631,6 @@
 "tests/types/test_relay_interfaces.py::test_sync_misuse_raises_sync_misuse_error_subclass.CategoryNode.get_queryset" = { reportIncompatibleMethodOverride = 1 }
 "tests/types/test_relay_interfaces.py::test_type_strategy_child_shadows_inherited_framework_closure.TypeScopedChild.Meta" = { reportIncompatibleVariableOverride = 1 }
 "tests/types/test_resolvers.py::_as_field" = { reportReturnType = 1 }
-"tests/types/test_resolvers.py::_declare_mti_tag_models.MtiShop.Meta" = { reportIncompatibleVariableOverride = 1 }
 "tests/types/test_resolvers.py::test_an_unsealable_prefetch_cache_is_refused_under_the_accessor_it_was_read_from" = { reportAttributeAccessIssue = 1 }
 "tests/types/test_resolvers.py::test_fk_attname_is_deferred_and_stub_exceptions" = { reportArgumentType = 1 }
 "tests/utils/test_canonical.py::_LyingDict.items" = { reportIncompatibleMethodOverride = 1 }
@@ -656,7 +646,7 @@
 "tests/utils/test_inputs.py::test_input_field_spec_carries_five_axes_and_optional_source" = { reportAttributeAccessIssue = 1 }
 "tests/utils/test_inputs.py::test_lazy_annotation_and_factory_subclass_messages_are_pinned" = { reportArgumentType = 1 }
 "tests/utils/test_inputs.py::test_plain_set_meta_fields_reads_a_lazy_declaration_as_the_object_it_stands_for" = { cast = 1 }
-"tests/utils/test_inputs.py::test_plain_set_meta_fields_reads_every_str_subclass_name_as_plain_text" = { cast = 3 }
+"tests/utils/test_inputs.py::test_plain_set_meta_fields_reads_every_str_subclass_name_as_plain_text" = { cast = 2 }
 "tests/utils/test_inputs.py::test_reject_unknown_meta_keys_non_string_dict_keys" = { reportArgumentType = 1 }
 "tests/utils/test_policies.py::_resolve_through" = { reportArgumentType = 1 }
 "tests/utils/test_policies.py::test_a_hashable_non_string_key_is_typed_rejected_at_the_key_guard" = { reportArgumentType = 1 }

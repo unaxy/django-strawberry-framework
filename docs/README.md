@@ -383,6 +383,10 @@ Both backends partition each parent's page by the window's partition column and 
 
 **Single-parent fast path.** Numbering every child of a partition is wasteful when a windowed prefetch runs for exactly one parent, so a default-on optimization inside the windowed strategy detects that case — one parent id, a direct FK, a count-free bounded first page — and runs a plain filtered `LIMIT`, synthesizing row numbers in Python. Under `"lateral"` / `"auto"` the lateral backend serves eligible shapes first and only a lateral downgrade reaches this wrapper. Within the windowed body every other shape runs the identical planned window: a performance downgrade, never a wrong page. Disable it with `DJANGO_STRAWBERRY_FRAMEWORK["SINGLE_PARENT_FAST_PATH"] = False`, read at fetch time.
 
+### Database-computed columns
+
+A `GeneratedField` reads, filters and orders as the column its `output_field` describes: `code_length = models.GeneratedField(expression=Length("code"), output_field=models.BigIntegerField(), db_persist=True)` publishes `codeLength: BigInt!`, takes the integer lookups and orders like any column. It is nullable in the SDL when either the `GeneratedField` or its `output_field` declares `null=True` (the database enforces neither flag; `Meta.required_overrides` / `Meta.nullable_overrides` still decide), its `choices` give the choice enum (`BLANK` only for a text output), and it is read-only: Django makes it non-editable, so no generated write input carries it. A file or image `output_field`, an output with no scalar conversion, and an `ArrayField` output whose element declares choices are refused with `ConfigurationError` naming the generated field.
+
 ### File and image output
 
 `FileField` and `ImageField` columns read as the structured `DjangoFileType` / `DjangoImageType` objects: `name`, `size`, `url`, plus `width` / `height` on images. The object is nullable regardless of the column's `null` / `blank`, so an empty stored file resolves to `null`. The server's absolute filesystem `path` is deliberately **not** in the default output: it is deployment metadata that can carry usernames, release directories, container mounts, and tenant layout, none of which a client needs to render a file. If a selection breaks, it was selecting `path` — either drop it (`url` fetches the file, `name` is the stored key) or opt the column in:
@@ -449,7 +453,9 @@ An `update` / `delete` takes `id: ID!`, read by the same Relay test that picks t
 Relay-Node target takes its `GlobalID` (a malformed or wrong-model id is an `invalid`
 `FieldError` on `id`), any other target takes its raw pk as the string (`"42"`). Either way
 an uncoercible pk, a missing row, and a row the target's `get_queryset` hides are the same
-`not_found` `FieldError` on `id`.
+`not_found` `FieldError` on `id`. Under a custom `NameConverter` these errors, and the
+`conflict` of a row a concurrent write removed, key `field` and `path` to the name your
+schema published for the argument (`ID` under one that upper-cases names).
 
 A write runs on one database alias, and the permission check of a mutation with `permission_classes` may also read the aliases your router sends the auth models to (the user model, `auth.Permission` / `Group`, `contenttypes` and `sessions.Session`), as a primary/replica router does. Each such alias is read inside a transaction the database itself holds read-only and that is always rolled back, so a permission backend cannot write there. That read-only mode exists on PostgreSQL and SQLite only: on any other vendor, such a router makes every mutation with `permission_classes` fail with a `ConfigurationError`, and the fix is to route auth and the write to the same alias. On PostgreSQL it costs one read-only, rolled-back transaction per auth alias per mutation; `permission_classes = []` skips the check and the transaction. Any other read outside the write alias and the auth aliases is refused. The full rule is in the barrier paragraph of [`GLOSSARY.md#serializermutation`][glossary-serializermutation], and it applies to every write flavor.
 

@@ -1177,10 +1177,11 @@ to `Register`** with:
   #"return [field_error(\"\", messages, codes=codes)" → `field_error`'s empty-path →
   `NON_FIELD_ERROR_KEY`). So the write step catches the `ValidationError` at the
   `validate_password` call site and builds the leaf itself —
-  `field_error("password", exc.messages, codes=[leaf.code for leaf in exc.error_list if leaf.code])`
-  (the same [`spec-036`][spec-036] leaf ctor, keyed explicitly; `RegisterInput` takes no
-  `input_class`, so `password` is always the input field's name) — so every failing
-  validator's messages land under the single `password` key, not `"__all__"`. It then
+  `field_error(password, exc.messages, codes=codes)` (the same [`spec-036`][spec-036] leaf
+  ctor, keyed explicitly to `password`, the password field's published name, which
+  `django_strawberry_framework/auth/mutations.py::_password_input_name` reads from the
+  request's `published_input_specs`) — so every failing validator's messages land under
+  the single password key, not `"__all__"`. It then
   runs `user.set_password(raw_password)`
   **before** `full_clean()` / `save()`. **The password preflight, `validate_password`
   and `set_password` are the ONLY auth-specific steps, and the preflight itself
@@ -1191,10 +1192,11 @@ to `Register`** with:
   [`save_or_field_errors`][mutations-resolvers]),
   so the duplicate-`USERNAME_FIELD` unique error and the concurrent-race `IntegrityError`
   come back through the standing envelope with no auth-specific error handling. The
-  write step passes the rider class and its bind specs (every `RegisterInput` field pins its
-  wire name) to that tail, so every `full_clean()` error keys to
-  the `RegisterInput` field the client sent, exactly as on the model flavor (a
-  `REQUIRED_FIELDS` entry `first_name` reports as `firstName`). The
+  write step passes the rider class and its specs, named as the executing schema published
+  them (`django_strawberry_framework/utils/inputs.py::published_input_specs`), to that tail,
+  so every `full_clean()` error keys to the `RegisterInput` field the client sent, exactly
+  as on the model flavor (a `REQUIRED_FIELDS` entry `first_name` reports as `firstName`);
+  the password errors key to the published name of the `password` field. The
   plaintext exists only in memory and
   never reaches a model column (a unit assertion pins that the model decode never
   receives `password` in `scalar_and_fk_attrs`); hashing before `full_clean()` means
@@ -1814,7 +1816,9 @@ so each carries a source comment at its site.
   the password preflight (`unstorable_text_error`, itself the shared write-side
   primitive), `validate_password` and `set_password`
   ([Decision 6](#decision-6--register_mutation-rides-djangomutation-a-narrow-create-over-get_user_model-with-password-hashing--not-a-fourth-flavor)).
-- [ ] **D8** — register's password error uses `field_error("password", …)` directly;
+- [ ] **D8** — register's password error uses `field_error(password, …)` directly, keyed
+  to the password field's published name (`_password_input_name` over the request's
+  `published_input_specs`);
   `login`'s failure error uses `field_error("", …)` (empty path → `NON_FIELD_ERROR_KEY`);
   neither hard-codes `"__all__"`
   ([Decision 5](#decision-5--login--logout-session-mutations-on-the-frozen-envelope-anonymous-allowed-by-design) / [Decision 6](#decision-6--register_mutation-rides-djangomutation-a-narrow-create-over-get_user_model-with-password-hashing--not-a-fourth-flavor)).
@@ -1933,7 +1937,9 @@ so each carries a source comment at its site.
 - **Password validator failures.** Every failing validator contributes a message
   under the single `password` key (Django's `validate_password` aggregates into one
   **list-style** `ValidationError`). Because that error has no `error_dict`, the write
-  step keys it to `password` **directly** (`field_error("password", exc.messages, …)`),
+  step keys it **directly** to the password field's published name
+  (`field_error(password, exc.messages, …)`, `password` read through
+  `_password_input_name` from `published_input_specs`),
   **not** via the generic `validation_error_to_field_errors` mapper — whose non-dict
   branch would key it to the `"__all__"` sentinel
   ([Decision 6](#decision-6--register_mutation-rides-djangomutation-a-narrow-create-over-get_user_model-with-password-hashing--not-a-fourth-flavor)).

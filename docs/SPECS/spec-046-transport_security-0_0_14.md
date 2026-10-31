@@ -1506,7 +1506,7 @@ by the [live-first coverage mandate][glossary-live-first-coverage-mandate].
   auth-wrapped and routes no GraphQL.
 - `::test_graphql_http_consumer_left_the_router_module_entirely` — `GraphQLHTTPConsumer` is
   neither imported nor referenced in `routers.py`.
-- `::test_construction_rejects_an_omitted_or_unusable_django_application` — omission is a
+- `::test_construction_requires_the_django_application_argument` and `::test_construction_rejects_an_unusable_django_application` — omission is a
   `TypeError`, and explicit `None` or any non-callable is a
   [`ConfigurationError`][glossary-configurationerror].
 - `::test_custom_websocket_url_pattern_reaches_only_the_websocket_re_path` and

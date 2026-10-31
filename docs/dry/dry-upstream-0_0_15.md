@@ -26,7 +26,9 @@ How to read the entries:
 - **An item whose behaviour change says "fixes"** keeps a known defect for as long as our copy stays.
 
 Every item is a candidate, not a plan. Each one still gets the research pass, a root-cause fix and a live test before
-it lands with its tick.
+it lands with its tick. An unticked item whose research note says "yours" waits on a maintainer decision.
+
+Progress: 32 of 39 landed; 7 yours (25, 27, 28, 29, 30, 32, 33).
 
 ## Fixes behaviour (our copy is wrong today)
 
@@ -102,8 +104,8 @@ it lands with its tick.
   - Tests:
     - Live: `test_scalars_filter_api.py::test_datetime_crossing_a_filtered_relation_alias_outside_years_one_to_9999_is_filter_invalid`,
       over the new root field `allScalarSpecimensByParentStamp` (`ScalarSpecimenParentStampFilter`).
-    - Package: `tests/filters/test_sets.py::test_temporal_primary_key_reached_through_pk_is_asked`. No fakeshop model
-      has a temporal pk.
+    - Live: `examples/fakeshop/test_query/test_scalar_predicate_binding_api.py::test_a_temporal_primary_key_is_checked_through_its_pk_date_transform`,
+      over a real test-local temporal-key table and native public type mounted on the HTTP holder.
 
 - [x] 4. (TYP-1, was S5, plus `mutations/inputs.py::_predicted_input_field_name`) The collision guards use
   `to_camel_case`, not the schema's `NameConverter`
@@ -317,12 +319,14 @@ it lands with its tick.
   - Landed: `optimizer/selections.py::connection_page_selected` asks the same question by Python name, read through
     `connection.py::_page_requested`.
     - The keyset page (`_resolve_keyset_connection`), which called the check itself and was wrong on both executors,
-      asks upstream first and then `_page_requested`.
+      asks `_page_requested` alone.
     - The offset page's synchronous branch (`ListConnection.resolve_connection`, root and per-parent fallback) reaches
       it through `_strawberry_patches.py::_patched_should_resolve_list_connection_edges`, a gated rebind of the
-      `strawberry.relay.types` global that delegates to upstream first; no upstream code is copied. The shape check
-      refuses a release whose `resolve_connection` stops calling the global. The body is the same from 0.322.2 to
-      0.339.0.
+      `strawberry.relay.types` global that answers by `_page_requested` alone; upstream is not asked, since it answers
+      `True` for a fragment spread named `edges` and raises `AttributeError` on an anonymous inline fragment.
+      `strawberry.relay.utils` keeps its own binding. `_strawberry_patches.py::_validate_relay_upstream_shape` refuses
+      a release whose `resolve_connection` stops calling the global, naming the opt-out. The body is the same from
+      0.322.2 to 0.339.0.
     - Not reported upstream yet.
   - Tests: live `test_library_api.py::test_snake_case_page_info_only_page_reports_has_next_page[root-offset|root-keyset|nested-per-parent]`
     and `::test_snake_case_page_info_only_keyset_page_reports_has_next_page_async`; the vocabulary row now renames
@@ -344,6 +348,98 @@ it lands with its tick.
     `tests/optimizer/test_single_parent_fetch.py::test_fetch_returns_none_for_projection_drift_on_a_multi_table_parent_column`
     (failed on the old guard) and `::test_fast_path_serves_an_undrifted_multi_table_child`, over
     `Venue.lendingdesk`; two `_select_projection` rows in `tests/optimizer/test_lateral_fetch.py`.
+
+- [x] 37. (found researching item 28) Form and serializer `FieldError` keys read the bind-time name, not the published
+  one
+  - Our code: `forms/resolvers.py` and `rest_framework/resolvers.py` key every error through the bind-time
+    `InputFieldSpec.graphql_name` (`utils/errors.py::build_error_key_map`), nested serializer specs included. Only the
+    model flavor re-read the executing schema (the former `mutations/resolvers.py` `_published_input_specs`).
+  - Upstream: `strawberry/schema/name_converter.py::NameConverter.get_graphql_name` / `from_field`. A consumer
+    converter overriding either respells even a pinned `name=`.
+  - Status: SUSPECTED. Spec-versus-published comparison over fakeshop's 133 mutation classes: 0 mismatches by
+    default; under a converter lower-casing every field, 224, of which the 54 model-flavor ones are repaired per
+    request and 170 (102 form, 68 serializer) are not, so an error would be keyed `branchId` where the client sent
+    `branchid`.
+  - Behaviour change: fixes form and serializer errors keyed to a name the client never sent, under a custom
+    `NameConverter`.
+  - Landed: CONFIRMED live (all 6 cases of the new library row failed on the old code under an upper-casing
+    converter). The model flavor's read-back moved into the shared `utils/inputs.py::published_input_specs`, which
+    reads the executing schema's published `data` argument and recurses into `nested_specs` through `get_named_type`;
+    the form (`forms/resolvers.py::_run_form_pipeline_sync`), serializer
+    (`rest_framework/resolvers.py::_run_serializer_pipeline_sync`) and register (`auth/mutations.py`, through
+    `_password_input_name`) pipelines read it once per request and pass `specs=` to their decode, error and write
+    steps; a direct call with no executable schema keeps the bind specs. A second defect: DRF 3.18's
+    `ListSerializer.to_internal_value` keys failing items by index (3.17 returns a list), so
+    `rest_framework/resolvers.py::_error_node_children` dropped the child key map and a nested camelCase error was
+    mis-keyed even under the default converter; an int key now keeps the level's map. Specs 036, 038, 039 and 040 are
+    restated. Tests: live `test_library_api.py::test_form_and_serializer_errors_key_to_the_names_a_custom_converter_published`
+    (model form, plain form, serializer, nested serializer) and
+    `test_auth_api.py::test_register_errors_key_to_the_names_a_custom_converter_published`; package
+    `tests/rest_framework/test_resolvers.py::test_flattener_rekeys_children_under_an_index_keyed_list_serializer_error`
+    and `tests/auth/test_mutations.py::test_register_write_step_refuses_specs_without_a_password_field`. Verified
+    (opus-high, two rounds) with eight failability mutations and the DRF 3.17.0, Django 5.2.16 and Strawberry 0.322.2
+    floors.
+
+- [x] 38. (found verifying item 37) The update / delete `id` argument's `FieldError` key is a literal, not the
+  published argument name
+  - Our code: `mutations/resolvers.py::not_found_error`, `::_invalid_lookup_id_error`, the
+    `unstorable_text_error("id", pk)` call in `::coerce_lookup_id`, and `utils/write_transaction.py::conflict_error`
+    key to the literal `"id"`. Model, form and serializer update / delete all reach them through the shared skeleton.
+  - Upstream: `strawberry/schema/name_converter.py::NameConverter.from_argument` (calls `get_graphql_name`; the module
+    is byte-identical at 0.322.2 and 0.327.7). The executing schema's published argument is the seam:
+    `utils/typing.py::published_argument`.
+  - Status: CONFIRMED live over fakeshop for eight cases (model update not-found, Relay invalid id, surrogate text id,
+    delete not-found, form and serializer not-found, conflict): under an upper-casing converter, and under one that
+    overrides `from_argument` alone, each answers `{"field": "id", "path": ["id"]}` where the client sent `ID`. Under
+    the default converter the published name is `id`, so nothing changes on the wire. `login` is not affected: its
+    `username` / `password` literals only feed an `is not None` test, and a failed login is always the `__all__`
+    envelope.
+  - Behaviour change: under a custom `NameConverter`, the `id` argument's not-found, invalid, unstorable-text and
+    conflict errors key to the name the client sent.
+  - Landed: `utils/typing.py::published_argument_wire_name` reads the published name (default on a direct-call stub);
+    `list_field.py::_resolve_argument_wire_name` now delegates to it. The update / delete skeleton
+    (`mutations/resolvers.py::run_write_pipeline_sync`) stores the `id` argument's published name on the request's
+    `utils/write_transaction.py::WriteAliasContext` (`id_name`) before locating, and `not_found_error`,
+    `_invalid_lookup_id_error`, `coerce_lookup_id` and `conflict_error` key through `::lookup_id_name` (`"id"`
+    outside a pipeline). `docs/README.md` and the FieldError / DjangoMutation glossary bodies say so. Tests: live
+    `test_library_api.py::test_lookup_id_errors_key_to_the_id_name_a_custom_converter_published` (8 rows: model,
+    Relay, surrogate text, delete, form, serializer, conflict, and a `from_argument`-only converter; all failed on
+    the old code); package `tests/mutations/test_write_transaction.py::test_lookup_id_name_is_the_pipelines_published_id_or_id_outside_one`.
+    Verified (opus-high) with seven failability mutations, aliased and async documents, class reuse across schemas,
+    and the Strawberry 0.322.2 and Django 5.2.16 floors.
+
+- [x] 39. (found researching item 38) Relay pagination errors name `first` / `last` / `after` / `before` by literal
+  - Our code: seven client-facing messages put a connection argument's Python name into the text:
+    `utils/connections.py::decode_offset_cursor`, `::assert_relay_pagination_bound` (non-negative, cap),
+    `keyset.py::_invalid_cursor_error`, `connection.py::_guard_first_and_last`, and the sliced-source and
+    `filter:` / `orderBy:` refusals in `connection.py`. `list_field.py::_resolve_argument_wire_name` already reads
+    the published name for `offset` / `limit` / `orderBy`.
+  - Upstream: `strawberry/relay/utils.py::SliceMetadata.from_arguments` uses the same literals (byte-identical at
+    0.322.2 and 0.327.7) but raises untyped `TypeError` / `ValueError`, and the package validates before the engine
+    and runs a keyset fork the engine never sees, so the package owns the message; the name in it comes from the
+    executing schema (`utils/typing.py::published_argument`). Upstream hazard:
+    `strawberry/relay/fields.py::ConnectionExtension.apply` appends `before` / `after` / `first` / `last` to
+    `field.arguments` on every schema build, so after a second build over the same types
+    `Info.get_argument_definition` returns a stale argument and `published_argument`'s identity match raises
+    `ConfigurationError` on a connection field.
+  - Status: CONFIRMED live on root and nested offset and keyset connections at 0.322.2 and 0.327.7: under an
+    upper-casing converter `FIRST: -1` answers "Argument 'first' must be a non-negative integer." (code
+    `PAGINATION_INVALID` unchanged). Under the default converter the published names are the Python names, so the
+    text does not change.
+  - Behaviour change: message text only, under a custom `NameConverter`; `extensions.code` unchanged.
+  - Landed: `utils/typing.py::published_argument` matches the published map by the back-referenced argument's
+    Python name instead of identity, so it survives the rebuild append (items 37 and 38's readers inherit it). The
+    pagination refusals read the published name through `utils/connections.py::published_page_argument_name` only
+    when they reject (an accepted page does no lookup; plan-time and direct calls keep the Python name): the offset
+    cursor and page-size bound (`utils/connections.py`), the keyset cursor (`keyset.py::_invalid_cursor_error`),
+    `connection.py::_guard_first_and_last`, `::_guard_source_not_pre_sliced` and
+    `::_guard_sidecar_input_against_non_queryset`. Specs 030, 047, 048 and 050 and the `PaginationArgumentError`
+    glossary body are restated. Tests: live `test_connection_pagination_api.py::test_pagination_errors_name_the_arguments_the_schema_published`
+    (48 rows: root and nested, offset and keyset, renaming and first/last-swapping converters),
+    `::test_pagination_errors_follow_the_executing_schema_after_another_build` and
+    `::test_resolver_contract_refusals_name_the_arguments_the_schema_published`; 43 of the 52 failed on the old code.
+    Verified (opus-high) with 14 failability mutations, an optimizer-on / async / aliased probe (422 rows), and the
+    Strawberry 0.322.2 and Django 5.2.16 floors; its three doc findings were applied as worded.
 
 ## Plain replacements (no behaviour change, no reason to keep)
 
@@ -625,6 +721,21 @@ it lands with its tick.
       constructor whose scope contract is undocumented.
     - No smaller seam exists. Channels' validators read `Origin` only, and calling `validate_host` directly would
       re-derive `_get_raw_host`.
+  - Re-verified (yours, recommend keeping; Decision 19 stands):
+    - Django's host code (`_get_raw_host`, `get_host`, `get_port`, `validate_host`, `split_domain_port`) hashes
+      identical at 5.2.16 and 6.1.2; `ASGIRequest.__init__` drifts only outside the Host path (`HTTP_COOKIE`,
+      `path_info`, the `Content-Type` `BadRequest` wrap). The header-to-META mapping is inline in the constructor at
+      both; channels 4.3.2 and daphne have no `META` / `get_host` code; `AsyncRequestFactory` injects
+      `host: testserver`. Ours vs the minimal-scope `ASGIRequest`: 0 diffs on 50,370 cases per version.
+    - Corrected: the docstring called the two unprojected keys (`HTTP_X_FORWARDED_PORT`, the
+      `SECURE_PROXY_SSL_HEADER` header) "provably verdict-neutral". They are only when a `Host` or
+      `X-Forwarded-Host` header is present. On a hostless handshake under `USE_X_FORWARDED_PORT`, a malformed
+      `X-Forwarded-Port` makes `example.com:abc`, which `get_host()` refuses and ours allows; a `SERVER_NAME` ending
+      in `:<digits>` can flip either way. The authority is the server's own name in every case, so this is a
+      robustness row (AGENTS.md line 39), not a spoof. `consumers.py::_host_validation_request` and the
+      `tests/test_routers.py` subset row now state the exact condition.
+    - Your options: keep (recommended), or project the two keys plus the scope `scheme` to agree with HTTP on a
+      hostless handshake, which widens the hand-built `META`. The `ASGIRequest` seam has the same gap.
 
 - [x] 26. (NET-3) The Strawberry patch shields `parse_query_params` with a pinned copy of upstream's body
   - Our code: `_strawberry_patches.py::_patched_parse_query_params` (~17 lines), `_UPSTREAM_PARSE_QUERY_PARAMS_SOURCE`
@@ -654,6 +765,21 @@ it lands with its tick.
   - Reason to keep ours: swapping changes the wire.
   - Behaviour change: changes the wire. Choice values `True`, `False` and `NULL` would publish without the prefix.
   - Risk / blockers: a schema break for any consumer with such a choice value.
+  - Research (yours): the divergence is narrower than stated above, and no part of it is a defect.
+    - `True`, `False` and `None` never reach the reserved arm: the Python-keyword step runs first and publishes
+      `_True` / `_False` / `_None`, which a swap leaves alone. The real divergence is the casefold: `NULL`, `TRUE`,
+      `FALSE` and any mixed case (`Null`) publish as `MEMBER_NULL` etc., where graphql-core accepts them bare.
+    - Upstream: `assert_enum_value_name` refuses exactly `true` / `false` / `null`, case-sensitively, with the same
+      body at 3.2.0, 3.2.8 and 3.3.0a12. graphql-core parses `NULL`, `TRUE`, `True` and `Null` as `EnumValueNode`
+      at every version (only lower-case `true` / `null` are boolean / null literals), so no client ambiguity exists.
+      Strawberry renames nothing; strawberry-django and graphene-django prefix nothing for case.
+    - Every name we publish passes upstream's check, and lower-case `true` / `false` / `null` are prefixed by both.
+      Fakeshop hits the reserved arm 0 times (its only `MEMBER_` names are the digit arm's `MEMBER_1/2/3`).
+    - The casefold has no recorded reason beyond commit d3829b25's message; spec-051 calls it "a sanitizer choice,
+      not a validity rule".
+    - Recommendation: ask `assert_enum_value_name` on the exact name and drop the casefold (`NULL` / `TRUE` /
+      `FALSE` / `Null` choices publish bare: a wire change for those values). The alternative keeps the wire and
+      writes the casefold's reason into spec-001 and the glossary.
 
 - [ ] 28. (S12) `graphql_camel_name` pins input names instead of letting the `NameConverter` decide
   - Our code:
@@ -669,6 +795,21 @@ it lands with its tick.
   - Reason to keep ours: swapping changes the wire.
   - Behaviour change: changes the wire. Input names would follow `auto_camel_case=False` and custom converters.
   - Risk / blockers: a schema break for consumers on a non-default converter.
+  - Research (yours): recommend keeping the pins as a wire contract.
+    - `graphql_camel_name` is not a model of Strawberry's `to_camel_case`: it is injective on purpose (keeps `_`
+      before a digit, leading and trailing underscores, `__x` for adjacent one-letter segments), so `field_2` and
+      `field2` both publish. AGENTS.md line 6 has nothing to swap it for; the converter offers no injective seam.
+    - Not wire-neutral even by default: on fakeshop, dropping the pins renames 31 input fields in 17 types under
+      `auto_camel_case=True` (all digit boundaries: `isbn_10` → `isbn10`, `publisher_2Id` → `publisher2Id`) and
+      3,528 under `auto_camel_case=False` (2,176 of them the `LOOKUP_NAME_MAP` pins, which stay under any swap).
+      `field_2` beside `field2` would become a build-time collision refusal.
+    - The listed sites are incomplete: `utils/inputs.py::emit_set_input_field_triples` and `::optional_input_field`
+      pin too. The ~40 lines would not be saved: forms and serializers would need the model flavor's per-request
+      published-name read-back (+45 to 70 lines).
+    - Upstream (0.322.2 and 0.327.7 alike): an explicit `name=` bypasses only `apply_naming_config`; a converter
+      overriding `get_graphql_name` / `from_field` still respells pinned names. That exposed item 37.
+    - If you want parity (names matching the output types and `auto_camel_case=False`), item 37's read-back is the
+      prerequisite; then the swap is a pure wire decision over about 10 to 15 test files.
 
 - [ ] 29. (S6) Consumer per-frame masking → `SchemaExtension.on_stream_result`
   - Our code: `consumers.py::_stop_aware_results #"mask_execution_result(result, policy)"` (~3 lines plus the local
@@ -683,6 +824,27 @@ it lands with its tick.
       survives for `DjangoDebugExtension`, which moving would give up (or it would need in-place masking).
   - Behaviour change: none intended.
   - Risk / blockers: a floor raise, and losing the LIFO `original_error` contract.
+  - Research (yours): recommend keeping the transport seam.
+    - The hook is `SchemaExtension.on_stream_result`, first in strawberry-graphql 0.323.0 (0.322.2 has no hook, no
+      runner method and no `StreamExecutionResult`; present and unchanged in every release from 0.323.0 to 0.339.0).
+      Raising the floor drops exactly 0.322.2; the touch list is `pyproject.toml`, `utils/imports.py`'s
+      `STRAWBERRY_FLOOR`, the `django.yml` floor cell, the floor literals in `tests/test_ci_governance.py` and
+      `tests/test_routers.py`, BUILD.md "Floor verification" and two glossary bodies.
+    - Contract: the hook wraps every frame of `schema.stream` / `schema.subscribe` (both WebSocket protocols, plus
+      SSE and multipart); it cannot replace the frame (`async with ...: yield result` ignores its value), only
+      mutate it in place before its `yield`; pre-yield runs in list order, so with the policy installed first every
+      consumer extension's hook would see already-masked errors.
+    - Why keep: at the 0.322.2 floor a moved mask is silently never called; the hook covers only schemas that carry
+      `DjangoErrorPolicyExtension`, while today the consumer seam also masks a plain `strawberry.Schema` through
+      `schema_error_policy`'s default; and the fail-closed whole-frame replacement (`degraded_result`) has no
+      in-place equivalent. The saving is the two masking lines, one import and the `schema` parameter threading.
+    - The tracker's stated `original_error` reason is overstated: the debug payload is built at `on_execute`
+      teardown, before any frame exists, so an in-place masker leaves `debug.exceptions` intact in either order
+      (probed on `DjangoSchema` at 0.323.0 and 0.327.7).
+    - To move it anyway you decide three things: raise the floor to 0.323.0, drop or close the plain-Schema masking
+      over WebSocket, and accept the ordering change.
+    - Fixed in passing: `consumers.py`'s module docstring and `_stop_aware_results` claimed the masking import was
+      function-local; it is module-level (the module stays `channels`-free).
 
 - [ ] 30. (F5) The package `RangeField` / `_RangeWidget` / `validate_range` → django-filter's `RangeFilter` /
   `RangeField`
@@ -696,6 +858,21 @@ it lands with its tick.
     - It loses per-column bound cleaning and the integer gte+lte split.
   - Behaviour change: changes the wire.
   - Risk / blockers: the attribution half is item 22.
+  - Research (yours): recommend closing as kept; the reasons above need three corrections.
+    - The GraphQL wire never changes: a declared range publishes `{start, end}` either way, and the generated
+      `range` lookup is the `BaseRangeFilter` CSV list, which this item does not touch. Only the form keys
+      (`_0`/`_1` vs `_min`/`_max`) and the list-vs-slice value differ, and both can be kept with a
+      `RangeWidget(suffixes=["0", "1"])` subclass and a list-returning `compress`.
+    - Per-column cleaning survives a swap through `RangeField(fields=(col, col))`; the integer gte+lte split lives in
+      `RangeFilter.filter`, which a field swap never touches. A plain swap to the stock filter is not viable: its
+      Decimal sub-fields refuse date bounds and accept a `1e60` price bound our column cleaning refuses.
+    - Nothing is copied. `validate_range` shares only its message and code with graphene-django's; no license is
+      owed, so the attribution half is empty.
+    - The partial swap (subclass django-filter 25.2/26.1's `RangeField(MultiValueField)`, byte-identical at both)
+      saves about 45 of 97 lines, but over 64 clean cases it differs twice: a non-pair is no longer refused by
+      `validate_range` (no wire input sends one), and two bad bounds produce two `FILTER_INVALID` entries instead of
+      one. The second is a wire delta, so the swap is your call; it also drops the public `validate_range` export.
+      Fakeshop has 17 hand-declared range filters (12 package, 5 django-filter) and about 35 test lines pin `_0`/`_1`.
 
 - [x] 31. (F8) `_PUBLIC_PACKAGE_FILTER_DEFAULTS` is a verbatim copy of `FILTER_FOR_DBFIELD_DEFAULTS`
   - Our code: `filters/sets.py::_PUBLIC_PACKAGE_FILTER_DEFAULTS` (~60 lines).
@@ -717,6 +894,27 @@ it lands with its tick.
   - Reason to keep ours: spec-045 trust boundary (a sealed-execution queryset). This is a policy question, not a seam.
   - Behaviour change: it would drop spoof resistance.
   - Risk / blockers: GOAL.md "Trust boundary"; a decision for spec-045, not a refactor.
+  - Research (yours): recommend closing as kept.
+    - Measured: the family is 3,253 lines (1,386 code), 53% of `utils/querysets.py`; the item's contiguous block is
+      1,982 lines, 775 of them code. `_seal_or_defect` has 6 call sites, all in that module; `list_field.py` imports
+      `_type_is_genuinely_django` and `optimizer/walker.py` imports `_pk_membership_query_or_defect`.
+    - No wire input reaches it: every input is a queryset an application hook or manager returned. spec-045
+      Decision 8 scopes it to a mistaken hook and closes the dispatch-path expansion; START.md "Verified and
+      rejected" bars reintroducing a blacklist.
+    - No upstream seam keeps the guarantee. `QuerySet._chain()` / `_clone()` build `self.__class__` and dispatch on
+      the candidate, and Django 6.1's `_chain` returns `self` when cloning is disabled; `Query.clone()` shares leaf
+      lookups and `Query.__deepcopy__` is `clone()`. The two exact-seam fragments (the deferred-filter bake through
+      the `QuerySet.query` getter, and `base_table` on the rebuilt query) total about 10 lines.
+    - The plain-attributes swap (this item as worded) drops ownership, the plain-class rebuild and the alias,
+      combinator and slicing policies built on it. Not recommended.
+    - If you want it smaller, the option is "reconstruct first": rebuild the candidate's `sql.Query` straight from
+      `__dict__` (as `_reconstructed_value` already does for an embedded query) instead of proving each node and then
+      calling `Query.clone`. It removes about 1,050 lines (about 480 code): the graph walkers, the payload and
+      container provers and the raw-SQL / template / metadata hardening. Scratch probes compiled identical SQL on 7
+      shapes and refused 4 of 7 crafted shapes; a class-valued instance shadow and a self-referential list got
+      through, so `_shadow_defect` and a cycle guard would stay. It changes defect wording, spec-045 Decision 2 and
+      two glossary bodies, and rewrites about 70 of the 397 `tests/utils/test_querysets.py` rows. It needs your go
+      and a spec-045 amendment.
 
 - [ ] 33. (TYP-12) GIS/GEOS fields are unsupported; strawberry-django has a scalar block to adapt
   - Our code: `types/converters.py::SCALAR_MAP` / `FIELD_OUTPUT_TYPE_MAP` have no GEOS arm.
@@ -727,6 +925,24 @@ it lands with its tick.
   - Reason to keep ours: n/a. This is a feature gap, not a copy.
   - Behaviour change: adds new scalars.
   - Risk / blockers: needs GDAL; it is a new KANBAN card, not a refactor. Item 22 covers the license.
+  - Research (yours): a project, already owned by card `BACKLOG-STABLE-076-1.1.0` (GIS / GeoDjango geo scalars,
+    Backlog, depends on card 054's pluggable field-conversion registry). Nothing lands in this sweep.
+    - Upstream: `strawberry_django/fields/types.py`'s GEOS block is 105 lines: 8 coordinate-array scalars registered
+      process-globally, 7 `field_type_map` rows, no geometry filter lookups. Its shape loses SRID and Z, its
+      `Geometry` scalar cannot parse its own output, and its serializers pass wrong types through.
+    - Today a spatial column fails closed (`Unsupported Django field type 'PointField'`), and the
+      `SCALAR_MAP[GeometryField] = <scalar>` escape hatch already resolves through the MRO.
+    - Blockers: this machine has no GDAL, GEOS or SpatiaLite; `django.contrib.gis.geos` and `.db.models` raise
+      `ImproperlyConfigured` (not `ImportError`) without GDAL at 5.2.16 and 6.1.2, so the soft-dependency helpers and
+      the `sys.modules` absence sentinel do not fit; a fakeshop model importing GIS breaks every GDAL-less run;
+      Django 5.2.16 lacks 6.1's nested-geometry input guard, so a raw-string geometry input is a native-parser risk.
+    - Plan if promoted: decide satellite package vs documented recipe (the card's open question; the recipe is the
+      escape hatch plus `strawberry_config(extra_scalar_map=...)`, a guides-card page). An in-tree build lands after
+      card 054 in three slices: strict read/write scalars (own statements, or an adapted block with
+      `LICENSE.strawberry-django`, which item 22 now ships), geometry-operand filter lookups (about 24 of the 29
+      Django GIS lookups), then distance / `relate` composite inputs. It needs an env-gated `FAKESHOP_GIS=1`
+      SpatiaLite alias with its own app, a GDAL + SpatiaLite CI tier, and absence tested as `ImproperlyConfigured`.
+      Roughly 1,500 to 2,000 lines for the first two slices.
 
 ## Closed by this sweep (kept, with the reason)
 

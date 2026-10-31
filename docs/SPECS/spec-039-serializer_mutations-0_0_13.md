@@ -2225,13 +2225,17 @@ field name here, the model field name on the save-time Django branch below), bec
 there is no GraphQL input path to report; a rename onto such a name lets two errors share
 one key, which is documented rather than refused. **The re-keying runs at every depth,
 not only the root**: the key map is the shared
-`django_strawberry_framework/utils/errors.py::build_error_key_map` over the bind-stashed
-specs, recursive over `InputFieldSpec.nested_specs`, and each segment re-keys through
+`django_strawberry_framework/utils/errors.py::build_error_key_map` over the specs named
+as the executing schema published them
+(`django_strawberry_framework/utils/inputs.py::published_input_specs`), recursive over
+`InputFieldSpec.nested_specs`, and each segment re-keys through
 `django_strawberry_framework/utils/errors.py::rekey_error_segment` after the flattener
 normalizes DRF's `non_field_errors` bucket to `"__all__"`
 (`django_strawberry_framework/rest_framework/resolvers.py::_error_node_children`), so a
 nested child field, alias, or relation suffix reports its SDL name
-(`shelves.0.altBranches`, never `shelves.0.alt_branches`); numeric indexes, a
+(`shelves.0.altBranches`, never `shelves.0.alt_branches`), a failing item's index carrying
+its level's map whether DRF lists the items or keys the failing ones by index; numeric
+indexes, a
 `JSONField`'s own keys, and the `"__all__"` non-field sentinel are preserved as they are.
 **A Django `ValidationError` raised during `save()` keys to input names too, top level only:** it names MODEL
 fields, so its key map is built from the model field behind `spec.source or spec.target_name`
