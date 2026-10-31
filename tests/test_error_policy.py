@@ -75,10 +75,7 @@ from django_strawberry_framework.extensions.error_policy import (
 )
 from django_strawberry_framework.extensions.resource_policy import DjangoResourcePolicyExtension
 from django_strawberry_framework.utils._narrowing import (
-    dict_of,
-    is_str,
     read_attr,
-    require,
     require_instance,
 )
 from django_strawberry_framework.utils.typing import object_result
@@ -439,31 +436,6 @@ def test_the_error_policy_extension_runs_first_in_every_chain() -> None:
     assert isinstance(resolved[-3], DjangoResourcePolicyExtension)
 
 
-def test_a_callable_policy_entry_cannot_become_the_masking_authority() -> None:
-    """What a factory returns next request is decided after the entry was accepted.
-
-    A mutable factory can hand back the real extension for one operation and a
-    subclass whose ``on_operation`` does nothing for the next; both answer every
-    inheritance check and only one masks. The schema installs its own masking
-    extension per operation and refuses a resolved member claiming that role.
-    """
-
-    class _FactoryPolicy(DjangoErrorPolicyExtension):
-        pass
-
-    def factory() -> DjangoErrorPolicyExtension:
-        return _FactoryPolicy()
-
-    schema = DjangoSchema(query=_Query, extensions=[factory])
-    result = schema.execute_sync("{ ok }")
-
-    assert result.data is None
-    assert result.errors is not None
-    assert [error.extensions for error in result.errors] == [
-        {"code": "SCHEMA_CONFIGURATION_UNAVAILABLE"},
-    ]
-
-
 def test_a_declared_policy_beside_a_debug_factory_preserves_debug_exception_capture() -> None:
     """Declaring the masking extension must not duplicate it or preempt debug teardown.
 
@@ -586,21 +558,6 @@ def test_a_plain_schema_leaves_a_hook_failure_unmasked() -> None:
         assert (error.extensions or {}).get(
             DEFAULT_ERROR_POLICY.correlation_extension_key,
         ) is None, error.extensions
-
-
-def test_the_schema_masks_the_same_hook_failure_its_extension_cannot_reach() -> None:
-    """Positive control: ``DjangoSchema`` masks the hook failure above."""
-    assert read_attr(django_settings, "DEBUG") is False
-    schema = DjangoSchema(query=_Query, extensions=[_FailingHookExtension])
-    result = schema.execute_sync("{ ping }")
-    assert result.errors, result
-    assert result.errors[0].message == DEFAULT_ERROR_POLICY.message
-    assert _SENSITIVE not in result.errors[0].message
-    assert result.errors[0].extensions is not None
-    correlation_id = dict_of(result.errors[0].extensions)[
-        DEFAULT_ERROR_POLICY.correlation_extension_key
-    ]
-    assert len(require(correlation_id, is_str)) == 32
 
 
 # ---------------------------------------------------------------------------

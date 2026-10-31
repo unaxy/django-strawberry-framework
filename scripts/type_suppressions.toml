@@ -561,8 +561,6 @@
 "tests/test_schema.py::HybridPolicyExtension" = { reportUnsafeMultipleInheritance = 1 }
 "tests/test_schema.py::ReversedHybridPolicyExtension" = { reportIncompatibleVariableOverride = 1, reportUnsafeMultipleInheritance = 1 }
 "tests/test_schema.py::_unchecked_entries" = { reportReturnType = 1 }
-"tests/test_schema.py::test_a_refused_schema_answers_an_awaited_operation_name_the_same_way" = { reportArgumentType = 1 }
-"tests/test_schema.py::test_a_refused_schema_answers_every_operation_name_the_same_way" = { reportArgumentType = 1 }
 "tests/test_schema.py::test_a_refused_schema_streams_one_refusal_for_every_operation_name" = { reportArgumentType = 1 }
 "tests/test_schema.py::test_a_schema_that_cannot_be_hashed_is_still_constructible_and_bounded._UnhashableSchema" = { reportAssignmentType = 1 }
 "tests/test_schema.py::test_async_window_hostile_error_container_rolls_back_and_leaks_no_transaction" = { reportAttributeAccessIssue = 1 }
