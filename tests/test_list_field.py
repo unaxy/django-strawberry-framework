@@ -2730,35 +2730,6 @@ _EXECUTION_MODE_FIELDS = ["defaultRows", "consumerRows"]
 _EXECUTION_MODE_FIELD_IDS = ["default-resolver", "sync-consumer-resolver"]
 
 
-@pytest.mark.django_db
-@pytest.mark.parametrize("field", _EXECUTION_MODE_FIELDS, ids=_EXECUTION_MODE_FIELD_IDS)
-def test_a_list_field_completes_synchronously_outside_an_event_loop(field: str) -> None:
-    """The ordinary synchronous state: no loop, the synchronous executor, real rows."""
-    services.seed_data(1)
-    schema = _execution_mode_schema()
-
-    result = schema.execute_sync(f"{{ {field} {{ name }} }}")
-
-    assert result.errors is None, result.errors
-    assert result.data is not None
-    assert len(json_list(result.data, field)) == Category.objects.count()
-
-
-@pytest.mark.asyncio
-@pytest.mark.django_db(transaction=True)
-@pytest.mark.parametrize("field", _EXECUTION_MODE_FIELDS, ids=_EXECUTION_MODE_FIELD_IDS)
-async def test_a_list_field_completes_asynchronously_inside_an_event_loop(field: str) -> None:
-    """The ordinary asynchronous state: a loop, the async executor, real rows."""
-    await sync_to_async(services.seed_data)(1)
-    schema = await sync_to_async(_execution_mode_schema)()
-
-    result = await schema.execute(f"{{ {field} {{ name }} }}")
-
-    assert result.errors is None, result.errors
-    assert result.data is not None
-    assert len(json_list(result.data, field)) == await Category.objects.acount()
-
-
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("field", _EXECUTION_MODE_FIELDS, ids=_EXECUTION_MODE_FIELD_IDS)

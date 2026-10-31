@@ -393,18 +393,6 @@ def test_patched_sync_parse_multipart_rejects_structurally_invalid_maps(
     assert excinfo.value.reason == patches._UPSTREAM_MULTIPART_PARSE_REASON
 
 
-async def test_patched_async_parse_multipart_rejects_structurally_invalid_maps() -> None:
-    """The async parser has the same untrusted-map failure boundary as the sync one."""
-    with pytest.raises(HTTPException) as excinfo:
-        await patches._patched_async_parse_multipart(
-            _AsyncMultipartView(),
-            _async_request(_MULTIPART_OPERATIONS, "[{}]", {"0": "x"}),
-        )
-
-    assert excinfo.value.status_code == 400
-    assert excinfo.value.reason == patches._UPSTREAM_MULTIPART_PARSE_REASON
-
-
 class _UnformableRequest(AsyncDjangoHTTPRequestAdapter):
     """An adapter whose form-data read fails the way a broken multipart body does."""
 

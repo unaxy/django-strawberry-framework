@@ -24,11 +24,12 @@ The private contracts in this module include:
   wrapper is built
   (``test_nested_keyset_backward_falls_back_per_parent_with_same_cursors``).
 - ``_keyset_order_state`` derivation (``plans.py::effective_cursor_state``)
-  with hand-built states: column-object
-  reuse, and rejection of expression / nulls-positioning / nullable / JSON /
-  optional-or-multivalued related orders. ``IssueOrder`` only publishes
-  non-null local and required-FK paths, so those error arms are not reachable
-  on the shipped schema. Related-path acceptance is live
+  with hand-built states: column-object reuse, and rejection of JSON and
+  optional-or-multivalued related orders. The expression, NULLS-positioned and
+  nullable-column refusals are live through a consumer ``get_queryset`` order
+  (``test_unanchorable_hook_order_raises_the_root_keyset_error_nested``,
+  ``test_nullable_hook_order_column_raises_the_root_keyset_error_nested``), and
+  related-path acceptance too
   (``test_root_keyset_order_by_related_path_seeks_via_annotation``).
 - Pure ``plans.py`` helpers ``_keyset_order_ref`` and ``_resolve_order_path_field``
   (including detached / virtual fields, and the ``LendingDesk.venue_ptr``
@@ -52,10 +53,10 @@ from types import SimpleNamespace
 
 import pytest
 import strawberry
-from apps.library.models import Book, Issue, LendingDesk, Patron, Periodical
+from apps.library.models import Issue, LendingDesk, Patron, Periodical
 from apps.scalars.models import ScalarSpecimen
 from django.contrib.auth.models import AnonymousUser
-from django.db.models import Count, F, Model
+from django.db.models import F, Model
 from django.http import HttpRequest
 from graphql import GraphQLError
 from strategy_schemas import make_django_type
@@ -395,31 +396,6 @@ def test_keyset_order_state_default_order_reuses_declared_columns() -> None:
     _columns, fingerprint2, ordered = _keyset_order_state(state, Issue.objects.all())
     assert fingerprint2 == state.fingerprint
     assert tuple(ordered.query.order_by) == ISSUE_ORDER
-
-
-@pytest.mark.django_db
-def test_keyset_order_state_rejects_expression_orders() -> None:
-    state = _issue_order_state()
-    aggregated = Issue.objects.annotate(loan_count=Count("periodical")).order_by("loan_count")
-    with pytest.raises(GraphQLError, match="cannot anchor stable cursors"):
-        _keyset_order_state(state, aggregated)
-
-
-@pytest.mark.django_db
-def test_keyset_order_state_rejects_explicit_nulls_positioning() -> None:
-    state = _issue_order_state()
-    positioned = Issue.objects.order_by(F("title").asc(nulls_last=True))
-    with pytest.raises(GraphQLError, match="cannot anchor stable cursors"):
-        _keyset_order_state(state, positioned)
-
-
-@pytest.mark.django_db
-def test_keyset_order_state_rejects_nullable_columns() -> None:
-    # A hand-built state over Book (whose ``subtitle`` is nullable) - the
-    # arm is unreachable over Issue, whose columns are all non-null.
-    state_stub = _state_stub(Book, ("title", "id"))
-    with pytest.raises(GraphQLError, match="'subtitle' is nullable"):
-        _keyset_order_state(state_stub, Book.objects.order_by("subtitle", "id"))
 
 
 @pytest.mark.django_db

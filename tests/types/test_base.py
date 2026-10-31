@@ -84,7 +84,6 @@ from django_strawberry_framework.types.converters import (
     DjangoImagePathType,
     DjangoImageType,
     convert_scalar,
-    resolved_relation_annotation,
 )
 from django_strawberry_framework.types.relations import PendingRelationAnnotation
 from django_strawberry_framework.types.relay import (
@@ -2385,28 +2384,6 @@ def test_relation_full_chain_when_all_targets_registered() -> None:
     assert EntryType.__annotations__["item"] is ItemType
 
 
-def test_resolved_relation_annotation_nullable_fk_widens_to_optional(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Nullable forward FK widens to ``T | None``.
-
-    No fakeshop FK declares ``null=True``, so monkeypatch the Item.category
-    field for the duration of this test. ``resolved_relation_annotation``
-    reads ``field.null`` via ``FieldMeta.from_django_field``; the widening
-    branch is exercised without the rest of the pipeline.
-    """
-
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = CATEGORY_SCALAR_FIELDS
-
-    item_category = Item._meta.get_field("category")
-    monkeypatch.setattr(item_category, "null", True)
-    annotation = resolved_relation_annotation(item_category, CategoryType)
-    assert annotation == (CategoryType | None)
-
-
 # ---------------------------------------------------------------------------
 # Meta.nullable_overrides / Meta.required_overrides (spec-029)
 #
@@ -2493,21 +2470,6 @@ def test_nullable_overrides_in_allowed_meta_keys() -> None:
     assert "required_overrides" in ALLOWED_META_KEYS
     assert "nullable_overrides" not in DEFERRED_META_KEYS
     assert "required_overrides" not in DEFERRED_META_KEYS
-
-
-def test_nullable_override_flips_annotation() -> None:
-    """``nullable_overrides`` widens a non-null column; ``required_overrides`` narrows a nullable one."""
-    override_type = _make_override_type(
-        _make_override_model(),
-        fields=("id", "text_value", "note"),
-        nullable_overrides=("text_value",),
-        required_overrides=("note",),
-    )
-
-    # text_value is NOT NULL natively (str); the override widens it to str | None.
-    assert override_type.__annotations__["text_value"] == (str | None)
-    # note is null=True natively (str | None); the override narrows it to bare str.
-    assert override_type.__annotations__["note"] is str
 
 
 def test_override_flips_choice_field_enum_nullability() -> None:

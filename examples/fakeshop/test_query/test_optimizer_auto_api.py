@@ -28,7 +28,13 @@ from django.http.response import HttpResponseBase
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import path
-from graphql_client import JSONObject, assert_graphql_success, middleware_without_debug_toolbar
+from graphql_client import (
+    JSONObject,
+    assert_graphql_success,
+    json_list,
+    json_str,
+    middleware_without_debug_toolbar,
+)
 from strategy_schemas import build_strategy_schema, make_django_type
 from strawberry import relay
 from typing_extensions import override
@@ -108,9 +114,14 @@ def install_auto_strategy_schema(
 @pytest.mark.usefixtures("install_auto_strategy_schema")
 @pytest.mark.usefixtures("private_registry")
 def test_auto_strategy_picks_the_vendor_body_and_pages_truthfully_over_http() -> None:
-    """Auto runs LATERAL on Postgres, the windowed body elsewhere, with truthful page metadata."""
+    """Auto runs LATERAL on Postgres, the windowed body elsewhere, with truthful page metadata.
+
+    The bookless shelf is the parent no window row partitions under: its page is
+    empty with a zero count, never another parent's rows.
+    """
     branch = Branch.objects.create(name="Auto strategy", city="Boston")
     shelf = Shelf.objects.create(code="AUTO", topic="Routing", branch=branch)
+    Shelf.objects.create(code="EMPTY", topic="Routing", branch=branch)
     for title in ("a", "b", "c"):
         Book.objects.create(title=title, shelf=shelf)
 
@@ -129,18 +140,21 @@ def test_auto_strategy_picks_the_vendor_body_and_pages_truthfully_over_http() ->
     with CaptureQueriesContext(connection) as captured:
         response = TestClient().query(document)
 
-    assert response.data == {
-        "shelves": [
-            {
-                "code": "AUTO",
-                "booksConnection": {
-                    "edges": [{"node": {"title": "a"}}, {"node": {"title": "b"}}],
-                    "totalCount": 3,
-                    "pageInfo": {"hasNextPage": True},
-                },
+    assert response.data is not None
+    assert sorted(json_list(response.data, "shelves"), key=lambda row: json_str(row, "code")) == [
+        {
+            "code": "AUTO",
+            "booksConnection": {
+                "edges": [{"node": {"title": "a"}}, {"node": {"title": "b"}}],
+                "totalCount": 3,
+                "pageInfo": {"hasNextPage": True},
             },
-        ],
-    }
+        },
+        {
+            "code": "EMPTY",
+            "booksConnection": {"edges": [], "totalCount": 0, "pageInfo": {"hasNextPage": False}},
+        },
+    ]
     book_sql = [
         entry["sql"] for entry in captured.captured_queries if "library_book" in entry["sql"]
     ]

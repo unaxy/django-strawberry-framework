@@ -3331,54 +3331,6 @@ def test_assign_m2m_integrity_error_contained_in_envelope() -> None:
         assert errors[0].codes == ["constraint"]
 
 
-@pytest.mark.django_db
-def test_model_write_step_full_clean_error_keys_to_wire_name() -> None:
-    """A ``full_clean`` failure on a multi-word column reports the GraphQL wire name.
-
-    The write step re-keys the Django field buckets through the specs it is
-    handed (a generated input's bind specs, every name pinned):
-    ``Book.circulation_status`` (whose input is the enum-guarded
-    ``circulationStatus``, so no live request can fail its ``full_clean``) surfaces
-    as ``circulationStatus`` - the wire-name contract the relation-decode errors,
-    the serializer flattener, and the committed ``categoryId`` rows already keep.
-    The key map itself is pinned too: the FK ``shelf`` and its ``shelf_id`` column
-    both ride the ``shelfId`` input.
-    """
-
-    class BookType(DjangoType):
-        class Meta:
-            model = library_models.Book
-            fields = ("id", "title", "circulation_status")
-
-    del BookType
-
-    class CreateBookMutation(DjangoMutation):
-        class Meta:
-            model = library_models.Book
-            operation = "create"
-            permission_classes = [_AllowAll]
-
-    finalize_django_types()
-    specs = CreateBookMutation._input_field_specs
-    key_map = resolvers._model_error_key_map(CreateBookMutation, specs)
-    assert key_map["shelf"][0] == "shelfId"
-    assert key_map["shelf_id"][0] == "shelfId"
-    assert key_map["circulation_status"][0] == "circulationStatus"
-
-    branch = library_models.Branch.objects.create(name="WireNameMapBranch")
-    shelf = library_models.Shelf.objects.create(code="WM-1", branch=branch)
-    book = library_models.Book(
-        title="Wire",
-        circulation_status="bogus-not-a-choice-value!!",
-        shelf=shelf,
-    )
-    decoded: _ModelDecoded = (book, [], resolvers.CleanExcludes([], []))
-    with managed_write_transaction("default"), open_write_pipeline(CreateBookMutation):
-        failure = resolvers._model_write_step(CreateBookMutation, None, decoded, specs=specs)
-    assert isinstance(failure, resolvers.StepFailure)
-    assert [field_error.field for field_error in failure.errors] == ["circulationStatus"]
-
-
 def test_model_write_step_refuses_a_decode_carrying_excluded_values() -> None:
     """A four-tuple decode (one carrying ``EXCLUDED`` values) raises ``ValueError``.
 

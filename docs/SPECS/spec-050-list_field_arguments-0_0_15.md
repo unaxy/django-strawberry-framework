@@ -2919,12 +2919,12 @@ sync or async HTTP request cannot isolate:
   `test_djangolistfield_rejects_a_definition_registered_for_another_class`,
   `test_djangolistfield_accepts_and_captures_the_registrys_exact_object`,
   `test_djangolistfield_registry_lookup_never_hashes_the_target`);
-- the executor read: a list field completes synchronously outside an event loop and
-  asynchronously inside one, and refuses a synchronous operation inside an event loop
-  (`test_a_list_field_completes_synchronously_outside_an_event_loop`,
-  `test_a_list_field_completes_asynchronously_inside_an_event_loop`,
-  `test_a_list_field_refuses_a_synchronous_operation_inside_an_event_loop`), with the live
-  nested-operation row `test_async_a_nested_synchronous_operation_refuses_a_list_field`.
+- the executor read: a list field refuses a synchronous operation inside an event loop
+  (`test_a_list_field_refuses_a_synchronous_operation_inside_an_event_loop`), with the live
+  nested-operation row `test_async_a_nested_synchronous_operation_refuses_a_list_field`; the
+  synchronous and asynchronous completions are live rows
+  (`test_library_api.py::test_library_branches_via_djangolistfield_optimized_nested_selection`,
+  `test_list_field_async_api.py::test_async_queryset_completion_default_resolver`).
 
 [`tests/utils/test_querysets.py`][test-querysets] owns the shared seal mechanics the list field
 routes through:

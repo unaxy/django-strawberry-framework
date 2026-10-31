@@ -4663,6 +4663,33 @@ def test_library_series_filter_compares_its_annotated_handle_on_its_own_rows(
     assert len(captured.captured_queries) == 1
 
 
+@pytest.mark.django_db
+def test_library_series_node_refetches_by_its_annotated_handle() -> None:
+    """``node`` and ``nodes`` find a series by the handle its ``get_queryset`` annotates.
+
+    The handle has no column, so the refetch filters the hook's annotated rows by
+    the raw literal and keys the batch by the annotation value: the emitted id
+    answers its row, an id over a handle no row holds answers ``null`` in place,
+    and an id carrying the series' primary key matches nothing.
+    """
+    emitted = _series_ids()
+    night_pk = pk_of(models.Series.objects.get(title="Night Shade"))
+    missing = global_id_for(library_schema.SeriesType, "SER-No Such Series")
+    by_pk = global_id_for(library_schema.SeriesType, str(night_pk))
+
+    data = _assert_graphql_success(
+        "query ($id: ID!, $ids: [ID!]!) {"
+        " node(id: $id) { ... on SeriesType { id title } }"
+        " nodes(ids: $ids) { ... on SeriesType { title } } }",
+        variables={"id": emitted["Night Shade"], "ids": [missing, emitted["Daybreak"], by_pk]},
+    )
+
+    assert data == {
+        "node": {"id": emitted["Night Shade"], "title": "Night Shade"},
+        "nodes": [None, {"title": "Daybreak"}, None],
+    }
+
+
 #: A printing's ``inSeries`` hop into ``SeriesFilter``, flat and nested, over the
 #: series id (``exact`` and ``in``) and the declared ``handle`` filter; ``VALUE`` stands
 #: for the literal.

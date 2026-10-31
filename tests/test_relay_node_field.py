@@ -11,10 +11,11 @@ status, stamp identity, original_error exception classes, helper return shapes
 and public-export identity. The private stamping tests inspect the original ORM
 row's cast attribute directly; the required-node test inspects the original
 model exception hidden by the GraphQL error envelope. It also keeps the refetch
-rows over key shapes no fakeshop model carries: a NodeID over a queryset
-annotation, a test-local comma-list key whose value is unhashable, a decimal key
-SQLite stores as a float, and naive datetime keys read in the default time zone
-(including a wall clock the zone repeats or skips).
+rows over key shapes no fakeshop model carries: a test-local comma-list key whose
+value is unhashable, a decimal key SQLite stores as a float, and naive datetime
+keys read in the default time zone (including a wall clock the zone repeats or
+skips). The NodeID over a queryset annotation refetches live on ``SeriesType``
+(``test_library_api.py::test_library_series_node_refetches_by_its_annotated_handle``).
 """
 
 import contextlib
@@ -359,60 +360,6 @@ def test_coerce_pk_or_none_passes_raw_string_for_non_field_node_id() -> None:
     finalize_django_types()
     assert implements_relay_node(SlugNode)
     assert _coerce_pk_or_none(SlugNode, "abc-123", alias=DEFAULT_DB_ALIAS) == "abc-123"
-
-
-@pytest.mark.django_db
-def test_refetch_finds_a_row_by_a_node_id_over_a_queryset_annotation() -> None:
-    """A NodeID naming a ``get_queryset`` annotation, no model field, refetches its row.
-
-    The slot has no column (``_node_id_slot`` answers ``None``), so the raw literal
-    filters the annotated queryset and the reorder keys the row's annotation value and
-    the requested id by ``str`` (``utils/querysets.py::identity_key``): ``node`` and
-    ``nodes`` answer the row, and a literal no row holds is ``null``.
-    """
-    services.seed_data(1)
-
-    class SlugNode(DjangoType):
-        slug: relay.NodeID[str]
-
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
-            name = "SlugNode"
-
-        @classmethod
-        @override
-        def get_queryset(
-            cls,
-            queryset: QuerySet[Category],
-            info: object,
-            **kwargs: object,
-        ) -> QuerySet[Category]:
-            return queryset.annotate(slug=models.F("name"))
-
-    @strawberry.type
-    class Query:
-        node: relay.Node | None = DjangoNodeField()
-        nodes: list[relay.Node | None] = DjangoNodesField()
-
-    finalize_django_types()
-    schema = strawberry.Schema(query=Query, config=strawberry_config(), types=[SlugNode])
-    row = Category.objects.order_by("pk").first()
-    assert row is not None
-    found = _gid("products.category", row.name)
-    missing = _gid("products.category", "no-such-category-name")
-    result = schema.execute_sync(
-        "query ($id: ID!, $ids: [ID!]!) {"
-        " node(id: $id) { ... on SlugNode { id name } }"
-        " nodes(ids: $ids) { ... on SlugNode { name } } }",
-        variable_values={"id": found, "ids": [missing, found]},
-    )
-    assert result.errors is None, result.errors
-    assert result.data == {
-        "node": {"id": found, "name": row.name},
-        "nodes": [None, {"name": row.name}],
-    }
 
 
 @pytest.mark.django_db

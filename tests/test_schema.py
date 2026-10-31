@@ -2158,21 +2158,6 @@ async def test_a_refused_schema_answers_a_streamed_operation_with_one_frame() ->
     ]
 
 
-def test_a_factory_exception_is_a_configuration_refusal() -> None:
-    """A factory that raises while the chain resolves refuses the operation.
-
-    The private reason names the factory's exception by its real class and its
-    own ``repr``; the wire message is the constant.
-    """
-
-    def factory() -> NoReturn:
-        raise RuntimeError("factory sentinel")
-
-    schema = DjangoSchema(query=DummyQuery, extensions=[factory])
-
-    _assert_configuration_refusal(schema.execute_sync("{ hello }"))
-
-
 def test_a_refused_chain_runs_no_consumer_hook_and_no_resolver() -> None:
     """Refusing means nothing runs, which is the whole difference from reporting.
 

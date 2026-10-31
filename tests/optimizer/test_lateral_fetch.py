@@ -18,7 +18,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
-from apps.library.models import Book, Branch, Genre, LendingDesk, Shelf
+from apps.library.models import Book, Genre, LendingDesk, Shelf
 from apps.scalars.models import ScalarSpecimen
 from django.db import connections, models
 from django.db.models import F, Prefetch, Q, QuerySet, Value
@@ -63,7 +63,6 @@ from django_strawberry_framework.optimizer.lateral_fetch import (
     window_predicate_signature,
 )
 from django_strawberry_framework.optimizer.nested_fetch import (
-    AUTO_STRATEGY,
     NestedConnectionRequest,
 )
 from django_strawberry_framework.optimizer.plans import (
@@ -72,7 +71,7 @@ from django_strawberry_framework.optimizer.plans import (
     OptimizationPlan,
     apply_window_pagination,
 )
-from django_strawberry_framework.utils._narrowing import is_list, read_attr
+from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.utils._queryset_private import (
     chain_queryset,
     super_clone_queryset,
@@ -87,14 +86,6 @@ if TYPE_CHECKING:
 
 #: The column an M2M prefetch from ``Genre`` attaches each row's parent id under.
 _GENRE_PREFETCH_COLUMN = "_prefetch_related_val_genre_id"
-
-
-def _book_rows(value: object) -> list[Book]:
-    """The rows a ``Prefetch(to_attr=...)`` set: a list holding only ``Book`` instances."""
-    assert is_list(value)
-    books = [row for row in value if isinstance(row, Book)]
-    assert len(books) == len(value)
-    return books
 
 
 def _quote(name: str) -> str:
@@ -1451,40 +1442,8 @@ def test_fetch_vendor_follows_the_queryset_alias_not_default(
 
 
 # ---------------------------------------------------------------------------
-# The in-object windowed fallback, end to end on SQLite
+# The in-object windowed fallback for a queryset the lateral spec refuses
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.django_db
-def test_auto_fallback_executes_the_windowed_body_end_to_end() -> None:
-    """Off Postgres ``"auto"`` serves the bounded window and count annotations.
-
-    This is the correctness floor the lateral path can never fall below: the
-    auto strategy's ``LateralQuerySet`` body IS the windowed queryset, so the
-    worst case of any fetch-time surprise (here: the SQLite vendor) is
-    windowed SQL, not an unbounded child fetch or wrong ``hasNextPage`` input.
-    """
-    branch = Branch.objects.create(name="central")
-    shelf_a = Shelf.objects.create(code="a", branch=branch)
-    shelf_b = Shelf.objects.create(code="b", branch=branch)
-    for shelf, titles in ((shelf_a, ["t1", "t2", "t3"]), (shelf_b, [])):
-        for title in titles:
-            Book.objects.create(title=title, shelf=shelf)
-    plan = OptimizationPlan()
-    AUTO_STRATEGY.plan(_shelf_books_request(), plan)
-    (entry,) = plan.prefetch_related
-    assert isinstance(entry, Prefetch)
-    assert isinstance(entry.queryset, LateralQuerySet)
-    assert entry.to_attr is not None
-    shelves = list(Shelf.objects.order_by("code").prefetch_related(entry))
-    # Prefetch(to_attr=...) sets the attribute on each row at run time; the model class does not
-    # declare it
-    a_rows = _book_rows(read_attr(shelves[0], entry.to_attr))
-    assert [row.title for row in a_rows] == ["t1", "t2"]
-    assert [getattr(row, WINDOW_ROW_NUMBER) for row in a_rows] == [1, 2]
-    assert [getattr(row, WINDOW_TOTAL_COUNT) for row in a_rows] == [3, 3]
-    assert len(a_rows) < getattr(a_rows[-1], WINDOW_TOTAL_COUNT)
-    assert getattr(shelves[1], entry.to_attr) == []
 
 
 def test_spec_downgrades_for_custom_queryset_subclasses() -> None:

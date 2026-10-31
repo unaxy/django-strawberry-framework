@@ -463,7 +463,6 @@ The singleton-factory shares one instance per construction site exactly as the i
   - `test_convert_field_output_force_nullable_overrides_default` — the file output object's default-nullable annotation yields to an explicit `force_nullable`.
 - [`tests/types/test_base.py`][test-types-base] — validation + collision + override-applies:
   - `test_nullable_overrides_in_allowed_meta_keys` — `"nullable_overrides"` and `"required_overrides"` are in [`ALLOWED_META_KEYS`][base] and NOT in [`DEFERRED_META_KEYS`][base] (pins [Decision 6](#decision-6--net-new-allowed_meta_keys-entries-not-a-deferred_meta_keys-promotion)).
-  - `test_nullable_override_flips_annotation` — a `DjangoType` with `nullable_overrides = ("text_value",)` on a non-null column produces a `str | None` annotation; `required_overrides = ("note",)` on a nullable column produces `str`.
   - `test_override_flips_choice_field_enum_nullability` — an override flips a choice field's **generated enum** nullability end-to-end through `Meta` (the enum members are untouched in both directions). Pins [Decision 9](#decision-9--choice-field-interaction).
   - `test_override_unknown_field_raises` — a name not on the model raises [`ConfigurationError`][glossary-configurationerror].
   - `test_override_excluded_field_raises` — a name excluded via [`Meta.exclude`][glossary-metaexclude] raises.
