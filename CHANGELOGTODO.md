@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 159 to do.
+Progress: 0 done, 160 to do.
 
 ## From dry-0_0_15_3
 
@@ -635,6 +635,10 @@ Progress: 0 done, 159 to do.
 - [ ] 105. CHANGELOG entry for item 39: under a custom `NameConverter`, a connection's pagination errors (page size,
   offset and keyset cursors, `first` with `last`) and its sliced-source and `filter` / `orderBy` refusals name the
   argument as the schema published it rather than `first` / `last` / `after` / `before`
+- [ ] 902. CHANGELOG entry for item 27 (breaking): a choice value spelled `NULL`, `TRUE`, `FALSE` or any other casing
+  of `null` / `true` / `false` except all lower case (`Null`, `tRUE`) publishes as that enum member name, where it
+  used to publish with a `MEMBER_` prefix (`MEMBER_NULL`); only the exact lower-case `true` / `false` / `null`, which
+  GraphQL reserves, keep the prefix, and `True` / `False` / `None` keep their Python-keyword `_` prefix
 
 ## From test-compliance-review
 

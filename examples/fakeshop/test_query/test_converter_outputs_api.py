@@ -288,7 +288,7 @@ _CHOICE_CASES: dict[str, tuple[list[tuple[str | None, str]], list[str]]] = {
     "graphql-reserved": (
         [
             ("true", "True"),
-            ("FALSE", "False"),
+            ("false", "False"),
             ("null", "Null"),
             ("caf\u00e9", "Cafe"),
             ("__private", "Private"),
@@ -296,11 +296,29 @@ _CHOICE_CASES: dict[str, tuple[list[tuple[str | None, str]], list[str]]] = {
         ],
         [
             "MEMBER_true",
-            "MEMBER_FALSE",
+            "MEMBER_false",
             "MEMBER_null",
             "caf_",
             "MEMBER___private",
             "active",
+        ],
+    ),
+    "graphql-literal-case": (
+        [
+            ("NULL", "Upper null"),
+            ("TRUE", "Upper true"),
+            ("FALSE", "Upper false"),
+            ("Null", "Title null"),
+            ("True", "Python keyword"),
+            ("false", "Literal false"),
+        ],
+        [
+            "NULL",
+            "TRUE",
+            "FALSE",
+            "Null",
+            "_True",
+            "MEMBER_false",
         ],
     ),
     "python-reserved": (
@@ -322,9 +340,13 @@ _CHOICE_CASES: dict[str, tuple[list[tuple[str | None, str]], list[str]]] = {
 }
 
 
-@pytest.mark.parametrize("case", ["graphql-reserved", "python-reserved"])
+@pytest.mark.parametrize("case", ["graphql-reserved", "graphql-literal-case", "python-reserved"])
 def test_reserved_choice_values_publish_and_serialize_all_members(case: str) -> None:
-    """Reserved values survive as safe distinct members, while an ordinary value stays unchanged."""
+    """Reserved values survive as safe distinct members, while an ordinary value stays unchanged.
+
+    Only the exact lower-case ``true`` / ``false`` / ``null`` are reserved by GraphQL;
+    another casing publishes bare beside them, and ``True`` keeps the Python-keyword ``_``.
+    """
     choices, names = _CHOICE_CASES[case]
     model = _choice_model(choices)
     schema = _choice_schema(model, [value for value, _label in choices])
@@ -338,6 +360,80 @@ def test_reserved_choice_values_publish_and_serialize_all_members(case: str) -> 
             "__type": {"enumValues": [{"name": name} for name in names]},
         },
     }
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("literal", "stored"),
+    [
+        ("NULL", "NULL"),
+        ("Null", "Null"),
+        ("MEMBER_false", "false"),
+        ("MEMBER_NULL", "refused"),
+    ],
+    ids=[
+        "upper-case-literal",
+        "title-case-literal",
+        "prefixed-reserved-literal",
+        "prefixed-ordinary-is-not-a-member",
+    ],
+)
+def test_a_literal_cased_choice_member_writes_its_stored_value(literal: str, stored: str) -> None:
+    """A bare ``NULL`` / ``Null`` enum literal parses as its member and stores that value.
+
+    Only the lower-case reserved value keeps the ``MEMBER_`` spelling on input; ``MEMBER_NULL``
+    names no member, so the request fails validation and writes nothing.
+    """
+    owner_model = _choice_model(_CHOICE_CASES["graphql-literal-case"][0])
+
+    class LiteralChoiceType(DjangoType):
+        class Meta:
+            model = owner_model
+            fields = ("id", "status")
+            primary = True
+
+    class CreateLiteralChoice(DjangoMutation):
+        class Meta:
+            model = owner_model
+            operation = "create"
+            fields = ("status",)
+            permission_classes = []
+
+    @strawberry.type
+    class Query:
+        @strawberry.field
+        def ping(self) -> int:
+            return 1
+
+    @strawberry.type
+    class Mutation:
+        create_owner = DjangoMutationField(CreateLiteralChoice)
+
+    finalize_django_types()
+    assert registry.get(owner_model) is LiteralChoiceType
+    schema = DjangoSchema(query=Query, mutation=Mutation, config=strawberry_config())
+    document = (
+        "mutation { createOwner(data: { status: "
+        + literal
+        + " }) { result { status } errors { field messages } } }"
+    )
+    with _choice_table(owner_model):
+        payload = _post(schema, document)
+        if stored == "refused":
+            assert payload["data"] is None, payload
+            assert len(json_list(payload, "errors")) == 1
+            assert (
+                f"Value '{literal}' does not exist in 'LiteralChoiceTypeStatusEnum' enum."
+                in json_str(payload, "errors", 0, "message")
+            ), payload
+            assert owner_model._default_manager.count() == 0
+        else:
+            assert payload == {
+                "data": {"createOwner": {"result": {"status": literal}, "errors": []}},
+            }, payload
+            rows = list(owner_model._default_manager.all())
+            assert len(rows) == 1
+            assert read_attr(rows[0], "status") == stored
 
 
 def _container_field(kind: str, *, nullable: bool) -> models.Field[object, object]:

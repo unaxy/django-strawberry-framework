@@ -85,6 +85,7 @@ from typing import TYPE_CHECKING, TypeAlias, TypeGuard, TypeVar, cast
 import strawberry
 from django.db import models
 from django.db.models.fields.files import FieldFile, ImageFieldFile
+from graphql import GraphQLError, assert_enum_value_name
 
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.optimizer.field_meta import FieldMeta
@@ -336,11 +337,6 @@ FILESYSTEM_PATH_OUTPUT_TYPE_MAP: dict[type[DjangoFileType], type[DjangoFileType]
 _CHOICE_ENTRY_LENGTH = 2
 
 _NON_IDENT = re.compile(r"\W+", flags=re.ASCII)
-
-
-_GRAPHQL_RESERVED_ENUM_VALUES = frozenset(
-    {"false", "null", "true"},
-)
 
 
 # Soft-import ``HStoreField`` through the shared optional-import owner
@@ -736,6 +732,21 @@ def _is_enum_reserved_member(name: str, *, enum_name: str | None = None) -> bool
     )
 
 
+def _graphql_refuses_enum_value(name: str) -> bool:
+    """Return whether graphql-core's ``assert_enum_value_name`` refuses ``name``.
+
+    Upstream owns the rule: an enum value is a GraphQL Name other than exactly
+    ``true``, ``false`` or ``null``. The match is case-sensitive, since only those
+    lower-case spellings parse as literals; ``NULL`` or ``True`` is an ordinary
+    enum value.
+    """
+    try:
+        _ = assert_enum_value_name(name)
+    except GraphQLError:
+        return True
+    return False
+
+
 def _sanitize_member_name(value: object, *, enum_name: str | None = None) -> str:
     """Produce a Strawberry / GraphQL-safe enum member from a Django choice value.
 
@@ -743,8 +754,9 @@ def _sanitize_member_name(value: object, *, enum_name: str | None = None) -> str
     to ``str`` so ``IntegerChoices`` work, replace any non-ASCII
     identifier characters with ``_``, name the empty string ``BLANK``,
     prefix with ``MEMBER_`` if the result starts with a digit, and prefix
-    with an underscore if it collides with a Python keyword. GraphQL-reserved enum
-    values (``true``, ``false``, ``null``), introspection-prefixed
+    with an underscore if it collides with a Python keyword. A name
+    graphql-core refuses as an enum value (exactly ``true``, ``false`` or
+    ``null``), introspection-prefixed
     names, and names Python's ``enum`` reserves are also prefixed so Strawberry
     can build the schema without a raw ``enum`` crash or a silently dropped
     member. ``enum_name`` enables detection of the class-specific
@@ -756,7 +768,7 @@ def _sanitize_member_name(value: object, *, enum_name: str | None = None) -> str
     rewritten to ``_``; (2) the empty string becomes ``BLANK`` and a
     leading-digit result is prefixed with ``MEMBER_``; (3) Python-keyword
     result prefixed with ``_``;
-    (4) GraphQL-reserved (``true`` / ``false`` / ``null``),
+    (4) refused by graphql-core (see :func:`_graphql_refuses_enum_value`),
     ``__``-prefixed, or Python-``enum``-reserved (``mro``, ``_sunder_``, or the
     generated class's private namespace; see :func:`_is_enum_reserved_member`)
     result prefixed with ``MEMBER_``.
@@ -775,7 +787,7 @@ def _sanitize_member_name(value: object, *, enum_name: str | None = None) -> str
     if keyword.iskeyword(sanitized):
         sanitized = f"_{sanitized}"
     if (
-        sanitized.casefold() in _GRAPHQL_RESERVED_ENUM_VALUES
+        _graphql_refuses_enum_value(sanitized)
         or sanitized.startswith("__")
         or _is_enum_reserved_member(sanitized, enum_name=enum_name)
     ):

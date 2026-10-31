@@ -28,7 +28,7 @@ How to read the entries:
 Every item is a candidate, not a plan. Each one still gets the research pass, a root-cause fix and a live test before
 it lands with its tick. An unticked item whose research note says "yours" waits on a maintainer decision.
 
-Progress: 32 of 39 landed; 7 yours (25, 27, 28, 29, 30, 32, 33).
+Progress: 33 of 39 landed; 6 yours (25, 28, 29, 30, 32, 33).
 
 ## Fixes behaviour (our copy is wrong today)
 
@@ -754,7 +754,7 @@ Progress: 32 of 39 landed; 7 yours (25, 27, 28, 29, 30, 32, 33).
   - Behaviour change: none intended.
   - Risk / blockers: as above.
 
-- [ ] 27. (TYP-3) Enum values `True` / `False` / `NULL` get a `MEMBER_` prefix that GraphQL does not require
+- [x] 27. (TYP-3) Enum values `True` / `False` / `NULL` get a `MEMBER_` prefix that GraphQL does not require
   - Our code: `types/converters.py::_GRAPHQL_RESERVED_ENUM_VALUES` and the reserved arm of `::_sanitize_member_name`
     (~6 lines). The check casefolds.
   - Upstream: `graphql/type/assert_name.py::assert_enum_value_name` (public, 3.2.0+). It also covers the Name grammar
@@ -780,6 +780,13 @@ Progress: 32 of 39 landed; 7 yours (25, 27, 28, 29, 30, 32, 33).
     - Recommendation: ask `assert_enum_value_name` on the exact name and drop the casefold (`NULL` / `TRUE` /
       `FALSE` / `Null` choices publish bare: a wire change for those values). The alternative keeps the wire and
       writes the casefold's reason into spec-001 and the glossary.
+  - Landed (maintainer chose the swap): the reserved arm asks `assert_enum_value_name` through
+    `types/converters.py::_graphql_refuses_enum_value` and `_GRAPHQL_RESERVED_ENUM_VALUES` is gone; spec-001 and
+    spec-051 restated. Live row `test_converter_outputs_api.py::test_reserved_choice_values_publish_and_serialize_all_members`
+    `[graphql-literal-case]` fails on the casefold; removing the arm fails it and `[graphql-reserved]`. The input
+    side is `::test_a_literal_cased_choice_member_writes_its_stored_value` (a bare `NULL` / `Null` literal writes
+    its value, `MEMBER_NULL` is refused); three of its four rows fail on the casefold.
+    CHANGELOG: CHANGELOGTODO.md entry 902.
 
 - [ ] 28. (S12) `graphql_camel_name` pins input names instead of letting the `NameConverter` decide
   - Our code:
