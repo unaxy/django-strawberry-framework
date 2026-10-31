@@ -7,21 +7,25 @@ root lists) drive ``AsyncTestClient`` (``graphql_client.py`` is sync-only) with
 query exposes typed ``genre(id:)`` only.
 """
 
-import base64
 import contextlib
+import copy
 import importlib
 import json
 import logging
 import re
 import string
 import sys
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable, Generator, Mapping, Sequence
+from functools import wraps
 from typing import TYPE_CHECKING, NamedTuple, TypeAlias, cast
 
 import django
 import pytest
 import strawberry
+from apps.library import filters as library_filters
 from apps.library import models
+from apps.library import orders as library_orders
 from apps.library import schema as library_schema
 from apps.library.filters import PrintingFilter, SeriesFilter
 from apps.library.filters_genre import GenreFilter
@@ -81,6 +85,7 @@ from graphql_client import post_graphql as _post_graphql
 from strawberry import relay
 from strawberry.schema.name_converter import HasGraphQLName, NameConverter
 from strawberry.types import Info
+from strawberry.types.arguments import StrawberryArgument
 from typing_extensions import override
 
 from django_strawberry_framework import (
@@ -198,6 +203,14 @@ def _seed_library_graph() -> None:
     models.Loan.objects.create(book=book, patron=patron, note="first checkout")
 
 
+def _seed_second_optimizer_book() -> None:
+    """A second shelf/book/genre chain makes batched loading differ from one lazy read per row."""
+    branch = models.Branch.objects.create(name="East", city="Boston")
+    shelf = models.Shelf.objects.create(code="B-2", topic="Science fiction", branch=branch)
+    book = models.Book.objects.create(title="Dawn", shelf=shelf)
+    book.genres.add(models.Genre.objects.create(name="Science"))
+
+
 def _seed_branch_with_two_shelves(name: str = "Override") -> None:
     branch = models.Branch.objects.create(name=name, city="Boston")
     models.Shelf.objects.create(code="A-1", topic="First floor", branch=branch)
@@ -207,11 +220,9 @@ def _seed_branch_with_two_shelves(name: str = "Override") -> None:
 class _MedtricsLoanGraph(NamedTuple):
     """Captured pks of the four root loans seeded by ``_seed_medtrics_loan_graph``.
 
-    Live-tier mirror of ``tests/filters/test_sets.py::_seed_medtrics_loan_graph``
-    (the package-tier fixture lives in a non-importable test tree, so the
-    four-loan graph is replicated inline per the library-acceptance
-    ``Model.objects.create`` convention). Pks are captured at creation time;
-    assertions compare against these rather than trusting insertion order.
+    The four-loan graph separates related-path and direct-note matches.
+    Pks are captured at creation time; assertions compare against these
+    rather than trusting insertion order.
     """
 
     relation_and_direct: int
@@ -509,12 +520,13 @@ def test_library_patron_bigint_lifetime_fines_over_http() -> None:
 @pytest.mark.django_db
 def test_library_optimizer_selects_book_shelf_in_http_query() -> None:
     _seed_library_graph()
+    _seed_second_optimizer_book()
 
     with CaptureQueriesContext(connection) as captured:
         response = _post_graphql(
             """
             query {
-              allLibraryBooks {
+              allLibraryBooks(orderBy: [{ title: ASC }]) {
                 title
                 shelf { code }
               }
@@ -526,6 +538,7 @@ def test_library_optimizer_selects_book_shelf_in_http_query() -> None:
     assert response_json(response) == {
         "data": {
             "allLibraryBooks": [
+                {"title": "Dawn", "shelf": {"code": "B-2"}},
                 {"title": "Kindred", "shelf": {"code": "A-1"}},
             ],
         },
@@ -535,11 +548,11 @@ def test_library_optimizer_selects_book_shelf_in_http_query() -> None:
     # Prefetch so the visibility hook applies before the join surfaces hidden
     # rows. Two queries - one for the books, one prefetch for shelves through
     # the visibility-scoped queryset.
-    assert len(captured) == 2
-    book_sql = captured[0]["sql"]
-    shelf_sql = captured[1]["sql"]
-    assert "library_book" in book_sql
-    assert "library_shelf" in shelf_sql
+    book_sql = _sql_from_table(captured, "library_book")
+    shelf_sql = _sql_from_table(captured, "library_shelf")
+    assert len(book_sql) == 1, captured.captured_queries
+    assert len(shelf_sql) == 1, captured.captured_queries
+    assert " IN (" in shelf_sql[0].upper(), shelf_sql
 
 
 @pytest.mark.django_db
@@ -649,12 +662,13 @@ def test_scalar_only_branch_list_projects_name_without_a_join_or_unused_column()
 @pytest.mark.django_db
 def test_library_reverse_fk_and_m2m_prefetch_sql_shape_over_http() -> None:
     _seed_library_graph()
+    _seed_second_optimizer_book()
 
     with CaptureQueriesContext(connection) as captured:
         response = _post_graphql(
             """
             query {
-              allLibraryShelves {
+              allLibraryShelves(orderBy: [{ code: ASC }]) {
                 code
                 books {
                   title
@@ -675,15 +689,17 @@ def test_library_reverse_fk_and_m2m_prefetch_sql_shape_over_http() -> None:
                         {"title": "Kindred", "genres": [{"name": "Speculative"}]},
                     ],
                 },
+                {"code": "B-2", "books": [{"title": "Dawn", "genres": [{"name": "Science"}]}]},
             ],
         },
     }
-    assert len(captured) == 3
-    sql = "\n".join(query["sql"] for query in captured)
-    assert "library_shelf" in sql
-    assert "library_book" in sql
-    assert "library_book_genres" in sql
-    assert "library_genre" in sql
+    shelf_sql = _sql_from_table(captured, "library_shelf")
+    book_sql = _sql_from_table(captured, "library_book")
+    genre_sql = _sql_from_table(captured, "library_genre")
+    assert len(shelf_sql) == len(book_sql) == len(genre_sql) == 1, captured.captured_queries
+    assert " IN (" in book_sql[0].upper(), book_sql
+    assert "library_book_genres" in genre_sql[0], genre_sql
+    assert " IN (" in genre_sql[0].upper(), genre_sql
 
 
 @pytest.mark.django_db
@@ -738,6 +754,7 @@ def test_library_choice_enum_and_nullable_subtitle_are_deliberate_http_contracts
 @pytest.mark.django_db
 def test_library_consumer_prefetched_queryset_cooperates_with_optimizer_over_http() -> None:
     _seed_library_graph()
+    _seed_second_optimizer_book()
 
     with CaptureQueriesContext(connection) as captured:
         response = _post_graphql(
@@ -753,27 +770,25 @@ def test_library_consumer_prefetched_queryset_cooperates_with_optimizer_over_htt
         )
 
     assert response.status_code == 200
-    assert response_json(response) == {
-        "data": {
-            "allLibraryPrefetchedBooks": [
-                {
-                    "title": "Kindred",
-                    "shelf": {"code": "A-1"},
-                    "genres": [{"name": "Speculative"}],
-                },
-            ],
-        },
-    }
+    payload = response_json(response)
+    assert "errors" not in payload, payload
+    rows = json_list(payload, "data", "allLibraryPrefetchedBooks")
+    assert sorted(rows, key=lambda row: json_str(row, "title")) == [
+        {"title": "Dawn", "shelf": {"code": "B-2"}, "genres": [{"name": "Science"}]},
+        {"title": "Kindred", "shelf": {"code": "A-1"}, "genres": [{"name": "Speculative"}]},
+    ], payload
     # ``ShelfType`` declares a visibility hook, so the planned ``shelf`` Prefetch,
     # scoped by that hook, replaces the consumer's ``select_related("shelf")``
     # JOIN instead of being skipped over the row the JOIN cached.
-    assert len(captured) == 3
-    root_sql, shelf_sql, genre_sql = (entry["sql"] for entry in captured)
-    assert "library_shelf" not in root_sql
-    assert 'FROM "library_shelf"' in shelf_sql
-    assert "\"topic\" = 'secret'" in shelf_sql
-    assert "library_book_genres" in genre_sql
-    assert "library_genre" in genre_sql
+    root_sql = _sql_from_table(captured, "library_book")
+    shelf_sql = _sql_from_table(captured, "library_shelf")
+    genre_sql = _sql_from_table(captured, "library_genre")
+    assert len(root_sql) == len(shelf_sql) == len(genre_sql) == 1, captured.captured_queries
+    assert "library_shelf" not in root_sql[0], root_sql
+    assert "\"topic\" = 'secret'" in shelf_sql[0], shelf_sql
+    assert " IN (" in shelf_sql[0].upper(), shelf_sql
+    assert "library_book_genres" in genre_sql[0], genre_sql
+    assert " IN (" in genre_sql[0].upper(), genre_sql
 
 
 @pytest.mark.django_db
@@ -2268,15 +2283,9 @@ def test_library_branches_via_djangolistfield_nullable_outer_renders_and_resolve
 
 
 def _decode_global_id(global_id: str) -> tuple[str, str]:
-    """Decode a Strawberry Relay ``GlobalID`` string into ``(type_name, node_id)``.
-
-    Strawberry encodes ``GlobalID`` as ``base64("TypeName:nodeId")``; this
-    test decodes it manually so the HTTP path stays Strawberry-agnostic
-    on the assert side.
-    """
-    decoded = base64.b64decode(global_id.encode()).decode()
-    type_name, _, node_id = decoded.partition(":")
-    return type_name, node_id
+    """Read a wire GlobalID through Strawberry's own decoder."""
+    decoded = relay.GlobalID.from_id(global_id)
+    return decoded.type_name, decoded.node_id
 
 
 @pytest.mark.django_db
@@ -2320,18 +2329,15 @@ def test_library_relay_node_global_id_round_trips() -> None:
 
 
 def _post_graphql_as_staff(query: str) -> "_MonkeyPatchedWSGIResponse":
-    """Issue a GraphQL POST authenticated as a freshly-created staff user, via ``TestClient``.
+    """Issue a GraphQL POST authenticated as the seeded staff user, via ``TestClient``.
 
     The authenticated flow through ``TestClient.login()`` (spec-043): the
     force-login/logout bracket wraps the one post, and the raw ``HttpResponse``
     the client kept on ``Response.response`` is returned so callers keep their
     ``.status_code`` / ``.json()`` assertions.
     """
-    staff = User.objects.create_user(
-        username="staff",
-        password="pw",
-        is_staff=True,
-    )
+    create_users(1)
+    staff = User.objects.get(username="staff_1")
     client = TestClient()
     with client.login(staff):
         return client.query(query, assert_no_errors=False).response
@@ -2687,7 +2693,8 @@ def test_library_relation_key_is_no_existence_oracle_for_hidden_or_missing_rows_
 def test_library_relation_key_matches_a_restricted_branch_for_staff_over_http() -> None:
     """Staff see the ``restricted`` branch, so its pk matches the shelf listing it."""
     branches = _seed_shelves_on_alt_branches()
-    staff = User.objects.create_user(username="staff", password="pw", is_staff=True)
+    create_users(1)
+    staff = User.objects.get(username="staff_1")
     client = TestClient()
     with client.login(staff):
         result = client.query(_SHELVES_BY_ALT_BRANCHES, variables={"ids": [branches["hidden"].pk]})
@@ -2767,7 +2774,8 @@ def test_library_undeclared_relation_key_answers_as_if_hidden_rows_were_absent_o
     """
     query, hidden_key = _UNDECLARED_RELATION_SPELLINGS[spelling]
     pk = saved_pk(_seed_undeclared_relation_world()[hidden_key].pk)
-    staff = User.objects.create_user(username="staff", password="pw", is_staff=True)
+    create_users(1)
+    staff = User.objects.get(username="staff_1")
     client = TestClient()
 
     class _RollbackError(Exception):
@@ -3372,7 +3380,14 @@ def test_library_all_fields_filterset_sweeps_forward_relation_columns_only_over_
 
 
 @pytest.mark.django_db
-def test_library_all_fields_filterset_filters_by_forward_relation_pks_over_http() -> None:
+@pytest.mark.parametrize(
+    "target",
+    ["visible", "hidden", "missing"],
+    ids=["visible", "hidden", "missing"],
+)
+def test_library_all_fields_filterset_filters_by_forward_relation_pks_over_http(
+    target: str,
+) -> None:
     """The swept ``shelf`` key (non-Relay target) filters by the related row's raw pk.
 
     A desk on a ``topic="secret"`` shelf is hidden from the anonymous request by the
@@ -3394,16 +3409,17 @@ def test_library_all_fields_filterset_filters_by_forward_relation_pks_over_http(
     }
     """
 
-    for filter_input, names in (
-        ({"shelf": {"exact": open_shelf.pk}}, ["Front"]),
-        ({"shelf": {"exact": secret_shelf.pk}}, []),
-        ({"shelf": {"exact": saved_pk(secret_shelf.pk) + 1000}}, []),
-    ):
-        _assert_graphql_data(
-            query,
-            {"allLibraryCirculationDesksFiltered": [{"name": name} for name in names]},
-            variables={"filter": filter_input},
-        )
+    cases: dict[str, tuple[JSONObject, list[str]]] = {
+        "visible": ({"shelf": {"exact": open_shelf.pk}}, ["Front"]),
+        "hidden": ({"shelf": {"exact": secret_shelf.pk}}, []),
+        "missing": ({"shelf": {"exact": saved_pk(secret_shelf.pk) + 1000}}, []),
+    }
+    filter_input, names = cases[target]
+    _assert_graphql_data(
+        query,
+        {"allLibraryCirculationDesksFiltered": [{"name": name} for name in names]},
+        variables={"filter": filter_input},
+    )
 
 
 @pytest.mark.django_db
@@ -3432,7 +3448,12 @@ def test_library_exclude_only_filterset_sweeps_like_all_fields_over_http() -> No
 
 
 @pytest.mark.django_db
-def test_library_exclude_only_filterset_filters_by_its_primary_key_over_http() -> None:
+@pytest.mark.parametrize(
+    "case",
+    ["exact", "negated", "missing"],
+    ids=["exact", "negated", "missing"],
+)
+def test_library_exclude_only_filterset_filters_by_its_primary_key_over_http(case: str) -> None:
     """The swept ``id`` key filters an exclude-only set's rows by primary key."""
     branch = models.Branch.objects.create(name="Home", city="Boston")
     shelf = models.Shelf.objects.create(code="A-1", topic="general", branch=branch)
@@ -3446,16 +3467,17 @@ def test_library_exclude_only_filterset_filters_by_its_primary_key_over_http() -
     }
     """
 
-    for filter_input, titles in (
-        ({"id": {"exact": dune.pk}}, ["Dune"]),
-        ({"not": {"id": {"exact": dune.pk}}}, ["Emma"]),
-        ({"id": {"exact": saved_pk(dune.pk) + 1000}}, []),
-    ):
-        _assert_graphql_data(
-            query,
-            {"allLibraryCatalogueBooks": [{"title": title} for title in titles]},
-            variables={"filter": filter_input},
-        )
+    cases: dict[str, tuple[JSONObject, list[str]]] = {
+        "exact": ({"id": {"exact": dune.pk}}, ["Dune"]),
+        "negated": ({"not": {"id": {"exact": dune.pk}}}, ["Emma"]),
+        "missing": ({"id": {"exact": saved_pk(dune.pk) + 1000}}, []),
+    }
+    filter_input, titles = cases[case]
+    _assert_graphql_data(
+        query,
+        {"allLibraryCatalogueBooks": [{"title": title} for title in titles]},
+        variables={"filter": filter_input},
+    )
 
 
 @pytest.mark.django_db
@@ -3671,6 +3693,7 @@ def test_relay_relation_isnull_absent_from_shipped_book_filter() -> None:
     assert json_at(payload, "data", "__type") is None
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 def test_relay_relation_isnull_is_boolean_not_globalid_list_over_http() -> None:
     """A framework-owned Relay-relation ``isnull`` is Boolean; ``exact`` stays a GlobalID list.
@@ -3771,6 +3794,7 @@ def test_relay_relation_isnull_is_boolean_not_globalid_list_over_http() -> None:
     assert "Boolean cannot represent" in json_str(payload, "errors", 0, "message"), payload
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 @pytest.mark.parametrize(
     ("bag", "titles"),
@@ -5461,7 +5485,8 @@ async def test_undeclared_relation_key_reads_its_target_visibility_async(
     await genre.books.aadd(book)
     user = None
     if staff:
-        user = await User.objects.acreate_user(username="staff", password="pw", is_staff=True)
+        await sync_to_async(create_users)(1)
+        user = await User.objects.aget(username="staff_1")
 
     payload = await _post_async_genres(
         "query { genres(filter: %s) { edges { node { name } } } }" % (filter_input % hidden.pk),
@@ -5541,7 +5566,7 @@ def _seed_visible_world() -> _VisibleWorld:
     models.Loan.objects.create(book=hidden_set, patron=reader, note="on-hidden-set")
 
     def book_id(book: models.Book) -> str:
-        return json.dumps(str(relay.GlobalID(type_name="library.book", node_id=str(book.pk))))
+        return json.dumps(global_id_for(library_schema.BookType, book.pk))
 
     return _VisibleWorld(
         secret_shelf=saved_pk(secret_shelf.pk),
@@ -6003,11 +6028,8 @@ async def test_walked_leaf_answers_over_the_visible_world_async(viewer: str, sha
     filter_input = string.Template(row.filter).substitute(world._asdict())
     user = None
     if viewer == "staff":
-        user = await sync_to_async(User.objects.create_user)(
-            username="staff",
-            password="pw",
-            is_staff=True,
-        )
+        await sync_to_async(create_users)(1)
+        user = await User.objects.aget(username="staff_1")
 
     payload = await _post_async_genres(
         f"query {{ genres(filter: {filter_input}, orderBy: [{{ id: ASC }}])"
@@ -6732,10 +6754,8 @@ def test_relay_global_id_filter_rejects_wrong_type_name() -> None:
     book = models.Book.objects.create(title="Hyperion", shelf=shelf)
     book.genres.add(sci_fi)
 
-    right_id = str(
-        relay.GlobalID(type_name=models.Genre._meta.label_lower, node_id=str(sci_fi.pk)),
-    )
-    wrong_id = str(relay.GlobalID(type_name=models.Loan._meta.label_lower, node_id=str(sci_fi.pk)))
+    right_id = global_id_for(library_schema.GenreType, sci_fi.pk)
+    wrong_id = global_id_for(library_schema.BookType, sci_fi.pk)
 
     wrong_response = _post_graphql(
         f"""
@@ -6752,11 +6772,11 @@ def test_relay_global_id_filter_rejects_wrong_type_name() -> None:
     assert wrong_payload["data"] is None, wrong_payload
     message = json_str(wrong_payload, "errors", 0, "message")
     # Under the model-label default the mismatch message reports the model
-    # labels (``library.genre`` expected, ``library.loan`` received), not the
+    # labels (``library.genre`` expected, ``library.book`` received), not the
     # GraphQL type names.
     assert "GlobalID type mismatch" in message
     assert models.Genre._meta.label_lower in message
-    assert models.Loan._meta.label_lower in message
+    assert models.Book._meta.label_lower in message
 
     right_response = _post_graphql(
         f"""
@@ -7565,6 +7585,7 @@ def _post_relation_pk_filter(schema: strawberry.Schema, input_name: str, wire: s
     return response_json(response)
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 @pytest.mark.parametrize("input_name", ["card", "pkCard"])
 def test_relay_global_id_filter_through_a_relation_primary_key_validates_the_terminal(
@@ -7609,6 +7630,7 @@ def test_relay_global_id_filter_through_a_relation_primary_key_validates_the_ter
     assert json_at(invalid, "errors", 0, "extensions", "code") == "GLOBALID_INVALID", invalid
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 def test_relay_global_id_filter_on_a_relation_primary_key_validates_its_target() -> None:
     """The relation primary key's own GlobalID leaf validates the model the key points at.
@@ -7636,6 +7658,7 @@ def test_relay_global_id_filter_on_a_relation_primary_key_validates_its_target()
     assert "GlobalID type mismatch" in json_str(rejected, "errors", 0, "message"), rejected
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 @pytest.mark.parametrize("input_name", ["card", "pkCard"])
 def test_relay_global_id_filter_through_a_relation_primary_key_reads_the_hidden_card(
@@ -8299,7 +8322,8 @@ async def test_related_order_reads_a_hidden_row_as_missing_async(
     await sync_to_async(_seed_genres_over_hidden_books)()
     user = None
     if staff:
-        user = await User.objects.acreate_user(username="staff", password="pw", is_staff=True)
+        await sync_to_async(create_users)(1)
+        user = await User.objects.aget(username="staff_1")
 
     payload = await _post_async_genres(
         f"query {{ genres(orderBy: {_GENRES_BY_BOOK_TITLE}) {{ edges {{ node {{ name }} }} }} }}",
@@ -11081,17 +11105,20 @@ def _nodes_query(ids: tuple[str, ...]) -> str:
 _CURRENT: dict[str, strawberry.Schema | None] = {"schema": None}
 
 
+@wraps(DjangoGraphQLView.as_view())
 def _holder_graphql_view(request: HttpRequest) -> HttpResponseBase:
     schema = _CURRENT["schema"]
     assert schema is not None
     return DjangoGraphQLView.as_view(schema=schema)(request)
 
 
+@wraps(AsyncDjangoGraphQLView.as_view())
 async def _async_shipped_graphql_view(request: HttpRequest) -> HttpResponseBase:
 
     return await AsyncDjangoGraphQLView.as_view(schema=config_schema.schema)(request)
 
 
+@wraps(AsyncDjangoGraphQLView.as_view())
 async def _async_holder_graphql_view(request: HttpRequest) -> HttpResponseBase:
     """The holder schema on the async view, whose sync library hooks read ``request.user``."""
     schema = _CURRENT["schema"]
@@ -11630,6 +11657,7 @@ def _absent_child_filter_holder(
     return DjangoSchema(query=Query, config=strawberry_config()), AbsentChildShelfFilter
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 @pytest.mark.parametrize("case_id", list(_ABSENT_CHILD_FILTER_CASES))
 def test_library_parent_connection_applies_an_omitted_child_filter_nowhere_over_http(
@@ -11784,6 +11812,7 @@ def _method_spelling_value(case: _MethodSpellingCase, book: models.Book) -> obje
     return str(pk) if case.variable_type == "Decimal" else pk
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 @pytest.mark.parametrize("case_id", list(_METHOD_SPELLING_CASES))
 def test_library_method_filter_spellings_the_refusal_advises_filter_over_http(
@@ -11935,6 +11964,7 @@ def _absent_grandchild_filter_holder() -> tuple[strawberry.Schema, type[FilterSe
     return DjangoSchema(query=Query, config=strawberry_config()), GrandchildBranchFilter
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 @pytest.mark.parametrize("named", [False, True], ids=["omitted", "named"])
 def test_library_grandparent_connection_runs_a_grandchild_edit_only_when_named_over_http(
@@ -12000,6 +12030,7 @@ def test_library_grandparent_connection_runs_a_grandchild_edit_only_when_named_o
         assert names == ["Absent A", "Absent B"]
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 def test_generic_relation_tags_resolve_over_http_with_optimizer() -> None:
     """Holder GenericRelation ``tags`` resolves under the optimizer (rung 3).
@@ -12045,7 +12076,7 @@ def test_generic_relation_tags_resolve_over_http_with_optimizer() -> None:
 
         finalize_django_types()
         ext = DjangoOptimizerExtension()
-        schema = strawberry.Schema(query=Query, extensions=[lambda: ext])
+        schema = DjangoSchema(query=Query, extensions=[lambda: ext])
         with CaptureQueriesContext(connection) as captured:
             response = _post_holder(schema, "{ branches { name tags { tag } } }")
     finally:
@@ -12064,74 +12095,343 @@ def test_generic_relation_tags_resolve_over_http_with_optimizer() -> None:
     assert len(tag_sql) == 1, tag_sql
 
 
-@pytest.mark.django_db
-def test_declared_filter_bag_applies_each_lookup_through_its_own_filter() -> None:
-    """A bag over a declared filter plus generated lookups applies every lookup.
+def _operator_bag_holder_schema(
+    filter_class: type[FilterSet],
+    model_class: type[Model],
+    output_fields: tuple[str, ...],
+    *,
+    related_types: tuple[type[DjangoType], ...] = (),
+) -> DjangoSchema:
+    """Mount alternative consumer operator declarations without changing the shipped filtersets.
 
-    ``name`` is declared as an ``iexact`` filter while ``Meta.fields`` also
-    generates ``name__icontains``, so the generated ``name`` bag carries
-    ``iExact`` (the declared filter) and ``iContains`` (the generated one).
-    Each lookup resolves to its own filter, so supplying both is an ordinary
-    conjunction: the rows match both predicates, and a second request whose
-    ``iContains`` excludes the ``iExact`` row returns nothing, which a dropped
-    predicate could not produce. No shipped filterset declares a filter over a
-    generated head, so the consumer surface is a holder (rung 3).
+    The owning Meta binds the exact filter table the request reads. The ordinary connection
+    applies its generated input; only the resolver's deterministic primary-key order is custom.
+    """
+
+    class OperatorBagType(DjangoType):
+        class Meta:
+            model = model_class
+            fields = output_fields
+            filterset_class = filter_class
+            interfaces = (relay.Node,)
+
+    finalize_django_types()
+
+    @strawberry.type
+    class Query:
+        def _rows(self, _info: Info) -> QuerySet[Model]:
+            return model_class._default_manager.order_by("pk")
+
+        rows: DjangoConnection[OperatorBagType] = DjangoConnectionField(
+            OperatorBagType,
+            resolver=_rows,
+        )
+
+    return DjangoSchema(query=Query, types=related_types, config=strawberry_config())
+
+
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("filter_input", "names"),
+    [
+        pytest.param(
+            {"name": {"iContains": "LOVE"}},
+            ["Ada Lovelace", "Lovelace Reader"],
+            id="generated-lookup-only",
+        ),
+        pytest.param(
+            {"name": {"iExact": "ada lovelace"}},
+            ["Ada Lovelace"],
+            id="declared-lookup-only",
+        ),
+        pytest.param(
+            {"name": {"iExact": "ada lovelace", "iContains": "LOVE"}},
+            ["Ada Lovelace"],
+            id="both-lookups-match",
+        ),
+        pytest.param(
+            {"name": {"iExact": "ada lovelace", "iContains": "hopper"}},
+            [],
+            id="both-lookups-disjoint",
+        ),
+    ],
+)
+def test_declared_filter_bag_applies_each_lookup_through_its_own_filter(
+    filter_input: JSONObject,
+    names: list[str],
+) -> None:
+    """A declared iexact and a generated icontains keep their own predicates in one input bag.
+
+    Rung 3: the shipped PatronFilter does not shadow a generated head with a different declared
+    lookup. The wider generated match and the disjoint conjunction distinguish dropped or
+    redirected predicates from a correct conjunction.
     """
     models.Patron.objects.create(name="Ada Lovelace")
     models.Patron.objects.create(name="Lovelace Reader")
     models.Patron.objects.create(name="Grace Hopper")
 
-    registry.clear()
-    try:
+    class DeclaredNameFilter(FilterSet):
+        name = CharFilter(field_name="name", lookup_expr="iexact")
 
-        class HolderDeclaredNameFilter(FilterSet):
-            name = CharFilter(field_name="name", lookup_expr="iexact")
+        class Meta:
+            model = models.Patron
+            fields = {"name": ["exact", "icontains"]}
 
-            class Meta:
-                model = models.Patron
-                fields = {"name": ["exact", "icontains"]}
-
-        class HolderDeclaredNamePatronType(DjangoType):
-            class Meta:
-                model = models.Patron
-                fields = ("id", "name")
-                filterset_class = HolderDeclaredNameFilter
-                name = "HolderDeclaredNamePatronType"
-
-        @strawberry.type
-        class Query:
-            def _patrons(
-                self,
-                info: Info,
-                filter: FilterInput[HolderDeclaredNameFilter] | None = None,  # noqa: A002
-            ) -> QuerySet[models.Patron]:
-                queryset = models.Patron.objects.order_by("name")
-                if filter is not None:
-                    queryset = HolderDeclaredNameFilter.apply_sync(filter, queryset, info)
-                return queryset
-
-            patrons: QuerySet[models.Patron] = strawberry.field(
-                resolver=_patrons,
-                graphql_type=list[HolderDeclaredNamePatronType],
-            )
-
-        finalize_django_types()
-        schema = strawberry.Schema(query=Query, config=strawberry_config())
-        both = _post_holder(
+    schema = _operator_bag_holder_schema(DeclaredNameFilter, models.Patron, ("name",))
+    payload = response_json(
+        _post_holder(
             schema,
-            '{ patrons(filter: {name: {iExact: "ada lovelace", iContains: "LOVE"}}) { name } }',
-        )
-        disjoint = _post_holder(
-            schema,
-            '{ patrons(filter: {name: {iExact: "ada lovelace", iContains: "hopper"}}) { name } }',
-        )
-    finally:
-        registry.clear()
+            "query($filter: DeclaredNameFilterInputType) { "
+            "rows(filter: $filter) { edges { node { name } } } }",
+            variables={"filter": filter_input},
+        ),
+    )
+    assert payload == {
+        "data": {"rows": {"edges": [{"node": {"name": name}} for name in names]}},
+    }, payload
 
-    assert both.status_code == 200
-    assert both.json() == {"data": {"patrons": [{"name": "Ada Lovelace"}]}}
-    assert disjoint.status_code == 200
-    assert disjoint.json() == {"data": {"patrons": []}}
+
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("filter_input", "names"),
+    [
+        pytest.param(
+            {"name": {"exact": "dune"}},
+            ["Dune Messiah", "Arrakis"],
+            id="declared-other-column",
+        ),
+        pytest.param(
+            {"name": {"iContains": "dune"}},
+            ["Dune", "Dune Messiah", "dune"],
+            id="generated-head-column",
+        ),
+        pytest.param(
+            {"name": {"exact": "dune", "iContains": "messiah"}},
+            ["Dune Messiah"],
+            id="both-columns-match",
+        ),
+        pytest.param(
+            {"name": {"exact": "x", "iContains": "arrakis"}},
+            [],
+            id="both-columns-disjoint",
+        ),
+    ],
+)
+def test_a_declared_head_over_another_column_keeps_the_generated_heads_column(
+    filter_input: JSONObject,
+    names: list[str],
+) -> None:
+    """A name bag applies declared exact to city and generated icontains to name.
+
+    Rung 3: the same public input head intentionally addresses two columns in this consumer
+    declaration; the shipped BranchFilter gives name only its own column.
+    """
+    for name, city in (
+        ("Dune", "x"),
+        ("Dune Messiah", "dune"),
+        ("Arrakis", "dune"),
+        ("dune", "y"),
+    ):
+        models.Branch.objects.create(name=name, city=city)
+
+    class OtherColumnFilter(FilterSet):
+        name = CharFilter(field_name="city")
+
+        class Meta:
+            model = models.Branch
+            fields = {"name": ["icontains"]}
+
+    schema = _operator_bag_holder_schema(OtherColumnFilter, models.Branch, ("name",))
+    payload = response_json(
+        _post_holder(
+            schema,
+            "query($filter: OtherColumnFilterInputType) { "
+            "rows(filter: $filter) { edges { node { name } } } }",
+            variables={"filter": filter_input},
+        ),
+    )
+    assert payload == {
+        "data": {"rows": {"edges": [{"node": {"name": name}} for name in names]}},
+    }, payload
+
+
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("value", "names"),
+    [("Alpha", ["Alpha"]), ("missing", [])],
+    ids=["exact-match", "missing-match"],
+)
+def test_a_declared_name_ending_in_exact_keeps_its_literal_form_key_over_http(
+    value: str,
+    names: list[str],
+) -> None:
+    """The nameExact input reaches the declared name__exact filter rather than dropping its suffix.
+
+    Rung 3: the consumer deliberately declares an attribute ending in a lookup token; shipped
+    filtersets use ordinary attribute names and cannot also own this alternate declaration.
+    """
+    models.Branch.objects.create(name="Alpha")
+    models.Branch.objects.create(name="Beta")
+
+    class SuffixedNameFilter(FilterSet):
+        name__exact = CharFilter(field_name="name", lookup_expr="exact")
+
+        class Meta:
+            model = models.Branch
+            fields = []
+
+    schema = _operator_bag_holder_schema(SuffixedNameFilter, models.Branch, ("name",))
+    payload = response_json(
+        _post_holder(
+            schema,
+            "query($filter: SuffixedNameFilterInputType) { "
+            "rows(filter: $filter) { edges { node { name } } } }",
+            variables={"filter": {"nameExact": {"exact": value}}},
+        ),
+    )
+    assert payload == {
+        "data": {"rows": {"edges": [{"node": {"name": name}} for name in names]}},
+    }, payload
+
+
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("filter_input", "codes"),
+    [
+        pytest.param(
+            {"branchTitle": {"iContains": "lph"}},
+            ["A1"],
+            id="renamed-declared-child",
+        ),
+        pytest.param(
+            {"branchNameExact": {"exact": "Alpha"}},
+            ["A1"],
+            id="exact-suffixed-declared-child",
+        ),
+        pytest.param(
+            {"branchName": {"exact": "Beta"}},
+            ["B1"],
+            id="generated-child",
+        ),
+    ],
+)
+def test_flat_expanded_aliases_keep_each_child_filters_own_form_key_over_http(
+    filter_input: JSONObject,
+    codes: list[str],
+) -> None:
+    """A renamed child leaf, an exact-suffixed declaration and a generated leaf remain distinct.
+
+    Rung 3: this child table intentionally publishes all three spellings of name, which the
+    shipped BranchFilter does not declare together.
+    """
+    alpha = models.Branch.objects.create(name="Alpha")
+    beta = models.Branch.objects.create(name="Beta")
+    models.Shelf.objects.create(branch=alpha, code="A1")
+    models.Shelf.objects.create(branch=beta, code="B1")
+
+    class AliasedBranchFilter(FilterSet):
+        title = CharFilter(field_name="name", lookup_expr="icontains")
+        name__exact = CharFilter(field_name="name", lookup_expr="exact")
+
+        class Meta:
+            model = models.Branch
+            fields = {"name": ["exact"]}
+
+    class ExpandedAliasFilter(FilterSet):
+        branch = RelatedFilter(AliasedBranchFilter, field_name="branch")
+
+        class Meta:
+            model = models.Shelf
+            fields = []
+
+    class OperatorBranchType(DjangoType):
+        class Meta:
+            model = models.Branch
+            fields = ("name",)
+
+    schema = _operator_bag_holder_schema(
+        ExpandedAliasFilter,
+        models.Shelf,
+        ("code",),
+        related_types=(OperatorBranchType,),
+    )
+    payload = response_json(
+        _post_holder(
+            schema,
+            "query($filter: ExpandedAliasFilterInputType) { "
+            "rows(filter: $filter) { edges { node { code } } } }",
+            variables={"filter": filter_input},
+        ),
+    )
+    assert payload == {
+        "data": {"rows": {"edges": [{"node": {"code": code}} for code in codes]}},
+    }, payload
+
+
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("case", "codes"),
+    [
+        pytest.param("declared-name", ["A1"], id="declared-name"),
+        pytest.param("generated-key", ["B1"], id="generated-key"),
+        pytest.param("both-match", ["A1"], id="both-match"),
+        pytest.param("both-disjoint", [], id="both-disjoint"),
+    ],
+)
+def test_a_declared_relation_name_lookup_keeps_the_generated_key_membership_over_http(
+    case: str,
+    codes: list[str],
+) -> None:
+    """A branch bag accepts the declared name string beside generated integer-key membership.
+
+    Rung 3: the shipped ShelfFilter declares branch as a RelatedFilter; this consumer instead
+    declares a CharFilter over branch__name beside Meta.fields branch.in.
+    """
+    alpha = models.Branch.objects.create(name="Alpha")
+    beta = models.Branch.objects.create(name="Beta")
+    models.Shelf.objects.create(branch=alpha, code="A1")
+    models.Shelf.objects.create(branch=beta, code="B1")
+
+    class RelationOverlapFilter(FilterSet):
+        branch = CharFilter(field_name="branch__name", lookup_expr="iexact")
+
+        class Meta:
+            model = models.Shelf
+            fields = {"branch": ["exact", "in"]}
+
+    class OperatorBranchType(DjangoType):
+        class Meta:
+            model = models.Branch
+            fields = ("name",)
+
+    inputs: dict[str, JSONObject] = {
+        "declared-name": {"branch": {"iExact": "alpha"}},
+        "generated-key": {"branch": {"in": [saved_pk(beta.pk)]}},
+        "both-match": {"branch": {"iExact": "alpha", "in": [saved_pk(alpha.pk)]}},
+        "both-disjoint": {"branch": {"iExact": "alpha", "in": [saved_pk(beta.pk)]}},
+    }
+    schema = _operator_bag_holder_schema(
+        RelationOverlapFilter,
+        models.Shelf,
+        ("code",),
+        related_types=(OperatorBranchType,),
+    )
+    payload = response_json(
+        _post_holder(
+            schema,
+            "query($filter: RelationOverlapFilterInputType) { "
+            "rows(filter: $filter) { edges { node { code } } } }",
+            variables={"filter": inputs[case]},
+        ),
+    )
+    assert payload == {
+        "data": {"rows": {"edges": [{"node": {"code": code}} for code in codes]}},
+    }, payload
 
 
 async def _post_async_shipped(
@@ -13489,7 +13789,11 @@ def test_strictness_raise_stays_silent_on_a_served_window(
 
 
 def _array_cursor(index: int) -> str:
-    """The ``arrayconnection`` cursor for a 0-based offset index (matches endCursor)."""
+    """Encode a coordinate probe through Strawberry's cursor codec.
+
+    Negative, oversized and beyond-last-row coordinates have no earlier page
+    from which to mint a cursor; continuation tests read their response cursors.
+    """
     return relay.to_base64("arrayconnection", str(index))
 
 
@@ -14097,6 +14401,22 @@ def _seed_two_genres_three_shared_books() -> None:
         book.genres.add(alpha, beta)
 
 
+def _shared_book_nodes(titles: Sequence[str], genres: Sequence[str]) -> list[JSONObject]:
+    """The exact selected title and nested-genre page of each shared book."""
+    return [
+        {
+            "title": title,
+            "genresConnection": {"edges": [{"node": {"name": name}} for name in genres]},
+        }
+        for title in titles
+    ]
+
+
+def _shared_book_edges(titles: Sequence[str], genres: Sequence[str]) -> list[JSONObject]:
+    """Relay edges around the shared books' exact selected payload."""
+    return [{"node": book} for book in _shared_book_nodes(titles, genres)]
+
+
 @pytest.mark.django_db
 def test_divergent_aliases_nested_same_key_conflict_serves_each_subtree_args() -> None:
     """A same-key nested conflict under divergent aliases serves each subtree's args.
@@ -14114,7 +14434,7 @@ def test_divergent_aliases_nested_same_key_conflict_serves_each_subtree_args() -
     def _nested_query(outer_extra: str) -> str:
         return f"""
         query {{
-          allLibraryGenres {{
+          allLibraryGenres(orderBy: [{{ name: ASC }}]) {{
             name
             a: booksConnection({outer_extra}first: 1) {{
               edges {{ node {{ title
@@ -14134,18 +14454,23 @@ def test_divergent_aliases_nested_same_key_conflict_serves_each_subtree_args() -
     assert response.status_code == 200
     payload = response_json(response)
     assert "errors" not in payload, payload
-    for genre_row in json_list(payload, "data", "allLibraryGenres"):
-        # ``a``'s subtree asked for 1 nested genre per book...
-        for edge in json_list(genre_row, "a", "edges"):
-            assert len(json_list(edge, "node", "genresConnection", "edges")) == 1
-        # ...and ``b``'s asked for 2, which a first-payload-wins window would serve as 1.
-        assert len(json_list(genre_row, "b", "edges")) == 3
-        for edge in json_list(genre_row, "b", "edges"):
-            nested = [
-                json_at(e, "node", "name")
-                for e in json_list(edge, "node", "genresConnection", "edges")
-            ]
-            assert nested == ["G-Alpha", "G-Beta"]
+    assert payload == {
+        "data": {
+            "allLibraryGenres": [
+                {
+                    "name": name,
+                    "a": {"edges": _shared_book_edges(["Aurora"], ["G-Alpha"])},
+                    "b": {
+                        "edges": _shared_book_edges(
+                            ["Aurora", "Binti", "Circe"],
+                            ["G-Alpha", "G-Beta"],
+                        ),
+                    },
+                }
+                for name in ("G-Alpha", "G-Beta")
+            ],
+        },
+    }, payload
 
     # Byte parity with the fully per-parent reference (outer sidecar fallback).
     reference = response_json(_post_graphql(_nested_query("orderBy: [{ title: ASC }], ")))
@@ -14168,7 +14493,7 @@ def test_identical_aliases_nested_same_key_conflict_serves_each_subtree_args() -
     response = _post_graphql(
         """
         query {
-          allLibraryGenres {
+          allLibraryGenres(orderBy: [{ name: ASC }]) {
             a: booksConnection(first: 2) {
               edges { node { title
                 genresConnection(first: 1) { edges { node { name } } }
@@ -14186,11 +14511,11 @@ def test_identical_aliases_nested_same_key_conflict_serves_each_subtree_args() -
     assert response.status_code == 200
     payload = response_json(response)
     assert "errors" not in payload, payload
-    for genre_row in json_list(payload, "data", "allLibraryGenres"):
-        for edge in json_list(genre_row, "a", "edges"):
-            assert len(json_list(edge, "node", "genresConnection", "edges")) == 1
-        for edge in json_list(genre_row, "b", "edges"):
-            assert len(json_list(edge, "node", "genresConnection", "edges")) == 2
+    expected = {
+        "a": {"edges": _shared_book_edges(["Aurora", "Binti"], ["G-Alpha"])},
+        "b": {"edges": _shared_book_edges(["Aurora", "Binti"], ["G-Alpha", "G-Beta"])},
+    }
+    assert payload == {"data": {"allLibraryGenres": [expected, expected]}}, payload
 
 
 @pytest.mark.django_db
@@ -14207,7 +14532,7 @@ def test_plain_list_aliases_nested_same_key_conflict_serves_each_subtree_args() 
     response = _post_graphql(
         """
         query {
-          allLibraryGenres {
+          allLibraryGenres(orderBy: [{ name: ASC }]) {
             a: books { title genresConnection(first: 1) { edges { node { name } } } }
             b: books { title genresConnection(first: 2) { edges { node { name } } } }
           }
@@ -14217,15 +14542,11 @@ def test_plain_list_aliases_nested_same_key_conflict_serves_each_subtree_args() 
     assert response.status_code == 200
     payload = response_json(response)
     assert "errors" not in payload, payload
-    for genre_row in json_list(payload, "data", "allLibraryGenres"):
-        assert len(json_list(genre_row, "a")) == 3
-        for book in json_list(genre_row, "a"):
-            assert len(json_list(book, "genresConnection", "edges")) == 1
-        for book in json_list(genre_row, "b"):
-            nested = [
-                json_at(e, "node", "name") for e in json_list(book, "genresConnection", "edges")
-            ]
-            assert nested == ["G-Alpha", "G-Beta"]
+    expected = {
+        "a": _shared_book_nodes(["Aurora", "Binti", "Circe"], ["G-Alpha"]),
+        "b": _shared_book_nodes(["Aurora", "Binti", "Circe"], ["G-Alpha", "G-Beta"]),
+    }
+    assert payload == {"data": {"allLibraryGenres": [expected, expected]}}, payload
 
 
 @pytest.mark.django_db
@@ -15202,9 +15523,6 @@ _PAGE_ARGUMENT_WIRES: dict[str, dict[str, str]] = {
     },
 }
 
-#: The offset cursor of each genre's first book (``arrayconnection:0``).
-_FIRST_ROW_CURSOR = base64.b64encode(b"arrayconnection:0").decode()
-
 
 def _page_argument_schema(converter: str) -> DjangoSchema:
     """The project's ``Query`` under ``converter``'s wire names, its optimizer raising on N+1."""
@@ -15238,6 +15556,19 @@ def _page_argument_document(converter: str, arguments: str) -> str:
     )
 
 
+def _minted_page_arguments(arguments: str) -> str:
+    """Fill a continuation boundary from the real nested page that precedes it."""
+    if "$first_cursor" not in arguments and "$third_cursor" not in arguments:
+        return arguments
+    page, _captured = _genre_books_connection("first: 3", "edges { cursor }")
+    edges = json_list(page, "edges")
+    assert len(edges) == 3, page
+    return string.Template(arguments).safe_substitute(
+        first_cursor=json_str(edges[0], "cursor"),
+        third_cursor=json_str(edges[2], "cursor"),
+    )
+
+
 def _post_page_arguments(
     schema: DjangoSchema,
     converter: str,
@@ -15245,6 +15576,7 @@ def _post_page_arguments(
     n: int | None = None,
 ) -> tuple[JSONObject, list[str]]:
     """POST the page document to ``schema``; return the payload and every statement it ran."""
+    arguments = _minted_page_arguments(arguments)
     with CaptureQueriesContext(connection) as captured:
         response = _post_holder(
             schema,
@@ -15267,12 +15599,8 @@ _WINDOWED_PAGES: dict[str, tuple[str, int | None, dict[str, list[str]]]] = {
     "first": ("first: 1", None, {"Alpha": ["a1"], "Beta": ["b1"]}),
     "last": ("last: 1", None, {"Alpha": ["a3"], "Beta": ["b3"]}),
     "variable-first": ("first: $n", 2, {"Alpha": ["a1", "a2"], "Beta": ["b1", "b2"]}),
-    "after": (f'first: 1, after: "{_FIRST_ROW_CURSOR}"', None, {"Alpha": ["a2"], "Beta": ["b2"]}),
-    "before": (
-        f'last: 1, before: "{base64.b64encode(b"arrayconnection:2").decode()}"',
-        None,
-        {"Alpha": ["a2"], "Beta": ["b2"]},
-    ),
+    "after": ('first: 1, after: "$first_cursor"', None, {"Alpha": ["a2"], "Beta": ["b2"]}),
+    "before": ('last: 1, before: "$third_cursor"', None, {"Alpha": ["a2"], "Beta": ["b2"]}),
 }
 
 
@@ -15355,8 +15683,9 @@ def test_nested_connection_literal_and_variable_aliases_share_one_window(convert
     """
     _seed_page_argument_genres()
     wire = _PAGE_ARGUMENT_WIRES[converter].get("first", "first")
+    root_order = _PAGE_ARGUMENT_WIRES[converter].get("orderBy", "orderBy")
     document = (
-        "query Page($n: Int) { allLibraryGenres { name "
+        f"query Page($n: Int) {{ allLibraryGenres({root_order}: [{{name: ASC}}]) {{ name "
         f"a: booksConnection({wire}: 2) {{ edges {{ node {{ title }} }} }} "
         f"b: booksConnection({wire}: $n) {{ edges {{ node {{ title }} }} }} }} }}"
     )
@@ -15364,20 +15693,37 @@ def test_nested_connection_literal_and_variable_aliases_share_one_window(convert
         response = _post_holder(_page_argument_schema(converter), document, variables={"n": 2})
     payload = response_json(response)
 
-    assert "errors" not in payload, payload
-    for genre in json_list(payload, "data", "allLibraryGenres"):
-        prefix = json_str(genre, "name")[0].lower()
-        for alias in ("a", "b"):
-            titles = [json_str(edge, "node", "title") for edge in json_list(genre, alias, "edges")]
-            assert titles == [f"{prefix}1", f"{prefix}2"], payload
-    assert len(captured.captured_queries) == 2, captured.captured_queries
+    assert payload == {
+        "data": {
+            "allLibraryGenres": [
+                {
+                    "name": name,
+                    "a": {
+                        "edges": [
+                            {"node": {"title": f"{prefix}1"}},
+                            {"node": {"title": f"{prefix}2"}},
+                        ],
+                    },
+                    "b": {
+                        "edges": [
+                            {"node": {"title": f"{prefix}1"}},
+                            {"node": {"title": f"{prefix}2"}},
+                        ],
+                    },
+                }
+                for name, prefix in (("Alpha", "a"), ("Beta", "b"))
+            ],
+        },
+    }
+    assert len(_sql_from_table(captured, "library_genre")) == 1
+    assert len(_sql_from_table(captured, "library_book")) == 1
 
 
 #: Page shapes the window cannot serve, by Python argument names: an order sidecar
 #: and an offset-bearing backward page. Each resolves per parent.
 _PER_PARENT_PAGES: dict[str, str] = {
     "order-sidecar": "first: 1, orderBy: [{title: DESC}]",
-    "after-last": f'last: 1, after: "{_FIRST_ROW_CURSOR}"',
+    "after-last": 'last: 1, after: "$first_cursor"',
 }
 
 
@@ -16141,7 +16487,7 @@ def _assert_genre_book_loan_shape(rows: list[object]) -> None:
 
 
 @pytest.mark.django_db
-def test_b8_consumer_descendant_prefetch_stays_flat_over_http() -> None:
+def test_consumer_descendant_prefetch_stays_flat_over_http() -> None:
     """A consumer ``prefetch_related("books__loans")`` cooperates with the optimizer.
 
     The live twin of ``test_b8_consumer_descendant_prefetch_does_not_raise``: the
@@ -16177,7 +16523,7 @@ def test_b8_consumer_descendant_prefetch_stays_flat_over_http() -> None:
 
 
 @pytest.mark.django_db
-def test_b8_consumer_exact_plus_descendant_prefetch_stays_flat_over_http() -> None:
+def test_consumer_exact_plus_descendant_prefetch_stays_flat_over_http() -> None:
     """A consumer ``prefetch_related("books", "books__loans")`` cooperates too.
 
     The live twin of ``test_b8_consumer_exact_plus_descendant_prefetch_does_not_raise``:
@@ -17506,9 +17852,9 @@ def test_create_shelf_via_schema_hook_serializer_executes_over_http() -> None:
     assert "errors" not in payload, payload
     result = json_object(payload, "data", "createShelfViaSchemaHookSerializer")
     assert result["errors"] == []
-    assert result["result"] == {"code": "HookShelf", "topic": "tenant:staff"}
+    assert result["result"] == {"code": "HookShelf", "topic": "tenant:staff_1"}
     shelf = models.Shelf.objects.get(code="HookShelf", branch=branch)
-    assert shelf.topic == "tenant:staff"
+    assert shelf.topic == "tenant:staff_1"
 
 
 @pytest.mark.django_db
@@ -21495,6 +21841,278 @@ def test_nested_shelf_validation_error_flattens_to_structured_path_over_http() -
     assert not models.Branch.objects.filter(name="NestedBadCode").exists()
 
 
+class _UpperCaseNames(NameConverter):
+    """Publishes every field, argument and input field upper-cased, pinned names included."""
+
+    @override
+    def get_graphql_name(self, obj: HasGraphQLName) -> str:
+        return super().get_graphql_name(obj).upper()
+
+
+def _upper_named_write_schema() -> DjangoSchema:
+    """The library's form and serializer writes on a schema whose converter upper-cases names."""
+
+    @strawberry.type
+    class Query:
+        branches: list[library_schema.BranchType] = DjangoListField(library_schema.BranchType)
+
+    @strawberry.type
+    class Mutation:
+        create_shelf_via_form = DjangoMutationField(library_schema.CreateShelfViaForm)
+        create_branch_with_shelf = DjangoMutationField(library_schema.CreateBranchWithShelf)
+        create_shelf_via_metadata_serializer = DjangoMutationField(
+            library_schema.CreateShelfViaMetadataSerializer,
+        )
+        create_branch_with_nested_shelves = DjangoMutationField(
+            library_schema.CreateBranchWithNestedShelves,
+        )
+
+    return DjangoSchema(
+        query=Query,
+        mutation=Mutation,
+        config=strawberry_config(name_converter=_UpperCaseNames()),
+    )
+
+
+#: Per write: the shipped root field, the input, and the errors expected.
+_UPPER_NAMED_WRITES: dict[str, tuple[str, Callable[[], JSONObject], list[JSONObject]]] = {
+    "model-form-relation": (
+        "createShelfViaForm",
+        lambda: {
+            "CODE": "UP-1",
+            "BRANCHID": models.Branch.objects.create(name="UpHidden", city="restricted").pk,
+        },
+        [{"FIELD": "BRANCHID", "PATH": ["BRANCHID"]}],
+    ),
+    "plain-form-validation": (
+        "createBranchWithShelf",
+        lambda: {"BRANCHNAME": "B" * 201, "SHELFCODE": "S" * 201},
+        [
+            {"FIELD": "BRANCHNAME", "PATH": ["BRANCHNAME"]},
+            {"FIELD": "SHELFCODE", "PATH": ["SHELFCODE"]},
+        ],
+    ),
+    "serializer-relation": (
+        "createShelfViaMetadataSerializer",
+        lambda: {
+            "CODE": "UP-2",
+            "BRANCHID": models.Branch.objects.create(name="UpHidden", city="restricted").pk,
+        },
+        [{"FIELD": "BRANCHID", "PATH": ["BRANCHID"]}],
+    ),
+    "serializer-validation": (
+        "createShelfViaMetadataSerializer",
+        lambda: {
+            "CODE": "UP-3",
+            "BRANCHID": models.Branch.objects.create(name="UpOpen", city="Boston").pk,
+            "LABEL": "L" * 41,
+        },
+        [{"FIELD": "LABEL", "PATH": ["LABEL"]}],
+    ),
+    "nested-serializer-relation": (
+        "createBranchWithNestedShelves",
+        lambda: {
+            "NAME": "UpNested",
+            "SHELVES": [
+                {
+                    "CODE": "N1",
+                    "ALTBRANCHES": [
+                        models.Branch.objects.create(name="UpHidden", city="restricted").pk,
+                    ],
+                },
+            ],
+        },
+        [{"FIELD": "SHELVES.0.ALTBRANCHES", "PATH": ["SHELVES", "0", "ALTBRANCHES"]}],
+    ),
+    "nested-serializer-validation": (
+        "createBranchWithNestedShelves",
+        lambda: {"NAME": "UpNested", "SHELVES": [{"CODE": "OK1"}, {"CODE": "BANNED"}]},
+        [{"FIELD": "SHELVES.1.CODE", "PATH": ["SHELVES", "1", "CODE"]}],
+    ),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("write", list(_UPPER_NAMED_WRITES))
+def test_form_and_serializer_errors_key_to_the_names_a_custom_converter_published(
+    write: str,
+) -> None:
+    """A form or serializer ``FieldError`` names the field as the executing schema published it.
+
+    Under a ``NameConverter`` that upper-cases every name, a pinned ``name=`` included, the
+    client sends ``BRANCHID`` / ``SHELVES`` / ``ALTBRANCHES``; a relation decode error, a
+    form's ``form.errors``, a serializer's ``is_valid()`` error and a nested serializer's
+    decode and validation errors each key ``field`` and ``path`` to those names, never to the
+    spelling the input bound under the default converter. Nothing is written.
+    """
+    shipped_root, data, expected = _UPPER_NAMED_WRITES[write]
+    # Type names are not field names: the converter leaves the input type as shipped.
+    input_type = _mutation_data_input_type_name(shipped_root)
+    root = shipped_root.upper()
+    response = _post_holder(
+        _upper_named_write_schema(),
+        f"mutation($d: {input_type}!) {{ {root}(DATA: $d) {{ ERRORS {{ FIELD PATH }} }} }}",
+        variables={"d": data()},
+    )
+
+    assert response.status_code == 200
+    assert response_json(response) == {"data": {root: {"ERRORS": expected}}}
+    written = (
+        "UP-1",
+        "UP-2",
+        "UP-3",
+        "N1",
+        "OK1",
+    )
+    assert not models.Shelf.objects.filter(code__in=written).exists()
+    assert not models.Branch.objects.filter(name="UpNested").exists()
+
+
+class _UpperCaseArguments(NameConverter):
+    """Publishes only argument names upper-cased; fields and input fields keep the default."""
+
+    @override
+    def from_argument(self, argument: StrawberryArgument) -> str:
+        return super().from_argument(argument).upper()
+
+
+def _upper_named_lookup_schema(converter: NameConverter) -> DjangoSchema:
+    """The library's update / delete writes on a schema whose ``converter`` renames ``id``."""
+
+    @strawberry.type
+    class Query:
+        branches: list[library_schema.BranchType] = DjangoListField(library_schema.BranchType)
+
+    @strawberry.type
+    class Mutation:
+        update_shelf_condition = DjangoMutationField(library_schema.UpdateShelfCondition)
+        update_patron_profile = DjangoMutationField(library_schema.UpdatePatronProfile)
+        update_edition = DjangoMutationField(library_schema.UpdateEdition)
+        delete_edition = DjangoMutationField(library_schema.DeleteEdition)
+        update_edition_via_form = DjangoMutationField(library_schema.UpdateEditionViaForm)
+        update_edition_via_serializer = DjangoMutationField(
+            library_schema.UpdateEditionViaSerializer,
+        )
+
+    return DjangoSchema(
+        query=Query,
+        mutation=Mutation,
+        config=strawberry_config(name_converter=converter),
+    )
+
+
+def _armed_edition_conflict(arm: DeleteAfterAuthorization) -> str:
+    """An edition whose ``updateEdition`` deletes it after authorization; answer its ISBN."""
+    publisher = models.Publisher.objects.create(name="UpConflictPress", house_code="UC")
+    edition = models.Edition.objects.create(isbn_13="9780000000002", publisher=publisher)
+    arm(
+        library_schema.UpdateEdition,
+        lambda: models.Edition.objects.filter(pk=edition.pk).delete(),
+    )
+    return edition.pk
+
+
+#: Per lookup: the shipped root field, its ``data`` (``None`` for a delete), the ``id``
+#: factory (it may arm the concurrent delete), and the error code expected on ``id``.
+_UPPER_NAMED_LOOKUPS: dict[
+    str,
+    tuple[str, JSONObject | None, Callable[[DeleteAfterAuthorization], str], str],
+] = {
+    "model-update-not-found": (
+        "updateShelfCondition",
+        {},
+        lambda _arm: "999999",
+        "not_found",
+    ),
+    "relay-invalid-id": (
+        "updatePatronProfile",
+        {},
+        lambda _arm: "not-a-global-id",
+        "invalid",
+    ),
+    "surrogate-text-id": (
+        "updateEdition",
+        {},
+        lambda _arm: "978\ud800",
+        "invalid",
+    ),
+    "delete-not-found": (
+        "deleteEdition",
+        None,
+        lambda _arm: "9789999999999",
+        "not_found",
+    ),
+    "form-not-found": (
+        "updateEditionViaForm",
+        {},
+        lambda _arm: "9789999999999",
+        "not_found",
+    ),
+    "serializer-not-found": (
+        "updateEditionViaSerializer",
+        {},
+        lambda _arm: "9789999999999",
+        "not_found",
+    ),
+    "conflict": (
+        "updateEdition",
+        {"IMPRINT": "Raced"},
+        _armed_edition_conflict,
+        "conflict",
+    ),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("lookup", "renamed"),
+    [
+        *[pytest.param(lookup, "all", id=f"upper-{lookup}") for lookup in _UPPER_NAMED_LOOKUPS],
+        pytest.param("model-update-not-found", "arguments", id="from-argument-only"),
+    ],
+)
+def test_lookup_id_errors_key_to_the_id_name_a_custom_converter_published(
+    lookup: str,
+    renamed: str,
+    delete_after_authorization: DeleteAfterAuthorization,
+) -> None:
+    """An update / delete ``id`` error names the argument as the executing schema published it.
+
+    Under a ``NameConverter`` that upper-cases every name, or one that overrides only
+    ``from_argument``, the client sends ``ID``: a model, form or serializer not-found, a
+    Relay id of the wrong shape, a raw text id holding a lone surrogate, and the
+    ``conflict`` of a row deleted after authorization each key ``field`` and ``path`` to
+    ``ID``, never to the parameter's Python name.
+    """
+    shipped_root, data, lookup_id, code = _UPPER_NAMED_LOOKUPS[lookup]
+    variables: dict[str, object] = {"id": lookup_id(delete_after_authorization)}
+    upper_fields = renamed == "all"
+    if upper_fields:
+        root, errors, selection = shipped_root.upper(), "ERRORS", "ERRORS { FIELD PATH CODES }"
+        converter: NameConverter = _UpperCaseNames()
+    else:
+        root, errors, selection = shipped_root, "errors", "errors { field path codes }"
+        converter = _UpperCaseArguments()
+    if data is None:
+        query = f"mutation($id: ID!) {{ {root}(ID: $id) {{ {selection} }} }}"
+    else:
+        input_type = _mutation_data_input_type_name(shipped_root)
+        query = (
+            f"mutation($id: ID!, $d: {input_type}!) "
+            f"{{ {root}(ID: $id, DATA: $d) {{ {selection} }} }}"
+        )
+        variables["d"] = data
+    response = _post_holder(_upper_named_lookup_schema(converter), query, variables=variables)
+
+    assert response.status_code == 200
+    expected = (
+        {"FIELD": "ID", "PATH": ["ID"], "CODES": [code]}
+        if upper_fields
+        else {"field": "ID", "path": ["ID"], "codes": [code]}
+    )
+    assert response_json(response) == {"data": {root: {errors: [expected]}}}
+
+
 @pytest.mark.parametrize(
     ("codes", "index"),
     [
@@ -22223,6 +22841,7 @@ def _post_hooked_holder(
     return payload, [entry["sql"] for entry in captured.captured_queries]
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("method", ["only", "defer"])
 async def test_library_root_hook_projection_loads_the_selection_on_async(method: str) -> None:
@@ -22565,6 +23184,7 @@ def _books_prefetching_loans_without_their_note() -> strawberry.Schema:
     )
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize(
     ("loan_selection", "refused"),
@@ -23752,6 +24372,7 @@ def _update_holder_shelf_variables() -> dict[str, object]:
     }
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 @pytest.mark.parametrize(
     "build",
@@ -23801,6 +24422,7 @@ def test_library_mutation_refetch_widens_the_child_hook_projection(
     assert '"library_book"."subtitle"' in book_sql, book_sql
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db(transaction=True)
 async def test_library_mutation_refetch_loads_the_child_hook_projection_on_async() -> None:
     """The hooked ``DjangoMutation`` re-fetch on the async transport.
@@ -24018,7 +24640,7 @@ def _unplanned_relation_holder_schema() -> strawberry.Schema:
 
     finalize_django_types()
     optimizer = DjangoOptimizerExtension()
-    return strawberry.Schema(query=Query, extensions=[lambda: optimizer])
+    return DjangoSchema(query=Query, extensions=[lambda: optimizer])
 
 
 def _seed_favoring_profiles() -> None:
@@ -24036,6 +24658,7 @@ def _seed_favoring_profiles() -> None:
         )
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 @pytest.mark.parametrize(
     (
@@ -24104,6 +24727,7 @@ def test_library_unplanned_relations_keep_their_link_columns(
     assert link_column in captured[0]["sql"]
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db(transaction=True)
 async def test_library_skip_non_pk_link_resolves_on_async() -> None:
     """The ``SKIP``-hinted non-pk link resolves on the async transport.
@@ -24404,7 +25028,8 @@ def test_library_consumer_prefetched_relation_keeps_target_visibility_over_http(
     ]
     assert "Proxy Vault" not in anonymous.content.decode(), withheld
 
-    staff = User.objects.create_user(username="staff", password="pw", is_staff=True)
+    create_users(1)
+    staff = User.objects.get(username="staff_1")
     client = TestClient()
     with client.login(staff):
         served = client.query(query)
@@ -25641,41 +26266,49 @@ def test_branch_filter_through_shelves_condition_iexact_blank_over_http(
 
 
 @pytest.mark.django_db
-def test_shelf_condition_blank_writes_empty_string_through_every_write_flavor_over_http() -> None:
-    """``condition: BLANK`` writes ``""`` through the model, form and serializer mutations.
-
-    Each flavor's input is the column's one enum (``ShelfTypeConditionEnum``), so the member
-    a read returns is the member a write accepts; a declared member writes its own value.
-    """
-    branch = models.Branch.objects.create(name="WriteConditionBranch", city="Boston")
-    for input_name in (
-        "ShelfAlt_ubranchesBranchCodeConditionInput",
-        "ShelfRelationsFormInput",
-        "ShelfMetadataSerializerInput",
-    ):
-        condition_type = _input_field_type(input_name, "condition")
-        assert condition_type["name"] == "ShelfTypeConditionEnum", input_name
-
-    cases = (
+@pytest.mark.parametrize(
+    ("field", "input_name"),
+    [
         ("createShelf", "ShelfAlt_ubranchesBranchCodeConditionInput"),
         ("createShelfViaForm", "ShelfRelationsFormInput"),
         ("createShelfViaMetadataSerializer", "ShelfMetadataSerializerInput"),
+    ],
+    ids=["model", "form", "serializer"],
+)
+@pytest.mark.parametrize(
+    ("member", "stored"),
+    [("BLANK", ""), ("damaged", "damaged")],
+    ids=["blank", "named"],
+)
+def test_shelf_condition_blank_writes_empty_string_through_every_write_flavor_over_http(
+    field: str,
+    input_name: str,
+    member: str,
+    stored: str,
+) -> None:
+    """A choice enum member writes its stored value through every mutation flavor.
+
+    Each flavor's input is the column's one enum (``ShelfTypeConditionEnum``), so the
+    member a read returns is the member a write accepts. ``BLANK`` and a nonblank
+    member each get their own request and independently reported verdict.
+    """
+    branch = models.Branch.objects.create(name="WriteConditionBranch", city="Boston")
+    condition_type = _input_field_type(input_name, "condition")
+    assert condition_type["name"] == "ShelfTypeConditionEnum", input_name
+
+    code = f"{field}-{member}"
+    response = _post_graphql(
+        f"mutation($d: {input_name}!) {{ {field}(data: $d) {{ "
+        "result { code condition } errors { field messages } } }",
+        variables={"d": {"code": code, "branchId": branch.pk, "condition": member}},
     )
-    for field, input_name in cases:
-        for member, stored in (("BLANK", ""), ("damaged", "damaged")):
-            code = f"{field}-{member}"
-            response = _post_graphql(
-                f"mutation($d: {input_name}!) {{ {field}(data: $d) {{ "
-                "result { code condition } errors { field messages } } }",
-                variables={"d": {"code": code, "branchId": branch.pk, "condition": member}},
-            )
-            assert response.status_code == 200
-            payload = response_json(response)
-            assert "errors" not in payload, payload
-            result = json_object(payload, "data", field)
-            assert result["errors"] == [], (field, member)
-            assert result["result"] == {"code": code, "condition": member}
-            assert models.Shelf.objects.get(code=code).condition == stored
+    assert response.status_code == 200
+    payload = response_json(response)
+    assert "errors" not in payload, payload
+    result = json_object(payload, "data", field)
+    assert result["errors"] == [], payload
+    assert result["result"] == {"code": code, "condition": member}, payload
+    assert models.Shelf.objects.get(code=code).condition == stored
 
 
 @pytest.mark.django_db
@@ -26720,6 +27353,7 @@ def _relay_edition_key_schema(edition_fields: tuple[str, ...]) -> strawberry.Sch
     return DjangoSchema(query=Query, config=strawberry_config(), extensions=[lambda: extension])
 
 
+@pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db
 @pytest.mark.parametrize(
     "edition_fields",
@@ -26860,3 +27494,895 @@ def test_relay_profile_id_under_annotation_reads_the_stored_key_when_the_key_is_
     sql = [query["sql"] for query in captured.captured_queries]
     assert len(sql) == 1, sql
     assert "library_patronprofile" not in sql[0], sql
+
+
+@pytest.mark.django_db
+def test_generated_predicate_root_is_absent_without_its_acceptance_flag() -> None:
+    """The generated-M2M acceptance field does not enter the default project schema."""
+    data = _assert_graphql_success('{ __type(name: "Query") { fields { name } } }')
+    assert "allLibraryRoutedBooks" not in {
+        json_str(field, "name") for field in json_list(data, "__type", "fields")
+    }
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "root",
+    ["allLibraryRoutedBooks", "allLibraryBooks"],
+    ids=["generated-path", "declared-hop"],
+)
+def test_many_to_many_text_leaf_preserves_rows_without_distinct_over_http(
+    project_schema_override: Callable[[], None],
+    root: str,
+) -> None:
+    """Two matching memberships return one book, with no root join or DISTINCT.
+
+    A ``Meta.fields`` traversal uses the audited generated-leaf adapter. The
+    same leaf on ``BookFilter`` walks its declared ``genres`` hop; both public
+    spellings preserve root rows. The fixture flag adds only the first root.
+    """
+    branch = models.Branch.objects.create(name="Predicate Branch", city="Boston")
+    shelf = models.Shelf.objects.create(code="P-1", branch=branch, topic="general")
+    matched = models.Book.objects.create(title="Matched", shelf=shelf)
+    matched.genres.add(
+        models.Genre.objects.create(name="cardiology"),
+        models.Genre.objects.create(name="cardio-thoracic"),
+    )
+    other = models.Book.objects.create(title="Other", shelf=shelf)
+    other.genres.add(models.Genre.objects.create(name="neurology"))
+    with override_settings(FAKESHOP_TEST_ROUTED_FILTERS=True):
+        project_schema_override()
+        with CaptureQueriesContext(connection) as captured:
+            payload = response_json(
+                _post_graphql(
+                    f'{{ {root}(filter: {{ genresName: {{ iContains: "cardio" }} }}, '
+                    "orderBy: [{ title: ASC }]) { title } }",
+                ),
+            )
+    assert payload == {"data": {root: [{"title": "Matched"}]}}, payload
+    book_sql = _sql_from_table(captured, "library_book")
+    assert len(book_sql) == 1, captured.captured_queries
+    _assert_row_preserving_root(
+        book_sql[0],
+        "library_book",
+        "library_book_genres",
+        "library_genre",
+    )
+    assert "EXISTS" in book_sql[0].upper(), book_sql
+
+
+def _routed_genre_holder_schema() -> DjangoSchema:
+    """Hook-free genre/book paths that the shipped Book visibility cannot represent.
+
+    Rung 3: making fakeshop's real ``BookType`` hook-free would remove its
+    visibility contract. This holder instead declares an ordinary consumer type
+    with a ``Meta.fields`` traversal and no scoped book type, so the generated
+    reverse-M2M leaf takes the audited predicate adapter.
+    """
+
+    class HolderRoutedGenreFilter(FilterSet):
+        class Meta:
+            model = models.Genre
+            fields = {"name": ["icontains"], "books__title": ["icontains"]}
+
+    class HolderRoutedGenreOrder(OrderSet):
+        class Meta:
+            model = models.Genre
+            fields = ["name"]
+
+    class HolderRoutedGenreType(DjangoType):
+        class Meta:
+            model = models.Genre
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+            filterset_class = HolderRoutedGenreFilter
+            orderset_class = HolderRoutedGenreOrder
+
+    @strawberry.type
+    class Query:
+        genres: DjangoConnection[HolderRoutedGenreType] = DjangoConnectionField(
+            HolderRoutedGenreType,
+        )
+
+    finalize_django_types()
+    return DjangoSchema(query=Query, config=strawberry_config())
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.parametrize(
+    ("filter_input", "expected"),
+    [
+        (
+            '{ and: [{ booksTitle: { iContains: "cardio" } }, { name: { iContains: "cardi" } }] }',
+            ["cardiology"],
+        ),
+        (
+            '{ or: [{ booksTitle: { iContains: "cardio" } }, { name: { iContains: "cardi" } }] }',
+            ["cardiology", "cardiovascular", "neurology"],
+        ),
+        ('{ not: { booksTitle: { iContains: "cardio" } } }', ["cardiovascular", "plain"]),
+    ],
+    ids=["and", "or", "not"],
+)
+def test_generated_reverse_many_leaf_keeps_its_logic_tree_position_over_http(
+    filter_input: str,
+    expected: list[str],
+) -> None:
+    """A generated reverse-M2M predicate preserves rows inside AND, OR, and NOT.
+
+    The holder's hook-free model shape is described by ``_routed_genre_holder_schema``;
+    changing the predicate back into a multiplying join cannot preserve this payload.
+    """
+    branch = models.Branch.objects.create(name="Logical Predicate Branch", city="Boston")
+    shelf = models.Shelf.objects.create(code="L-1", branch=branch, topic="general")
+    both = models.Genre.objects.create(name="cardiology")
+    for title in ("Cardio One", "Cardio Two"):
+        book = models.Book.objects.create(title=title, shelf=shelf)
+        book.genres.add(both)
+    models.Genre.objects.create(name="cardiovascular")
+    books_only = models.Genre.objects.create(name="neurology")
+    book = models.Book.objects.create(title="Cardio Three", shelf=shelf)
+    book.genres.add(books_only)
+    miss = models.Genre.objects.create(name="plain")
+    book = models.Book.objects.create(title="Neuro Atlas", shelf=shelf)
+    book.genres.add(miss)
+    schema = _routed_genre_holder_schema()
+    with CaptureQueriesContext(connection) as captured:
+        payload = response_json(
+            _post_holder(
+                schema,
+                f"{{ genres(filter: {filter_input}, orderBy: [{{ name: ASC }}]) "
+                "{ edges { node { name } } } }",
+            ),
+        )
+    assert payload == {
+        "data": {"genres": {"edges": [{"node": {"name": name}} for name in expected]}},
+    }, payload
+    genre_sql = _sql_from_table(captured, "library_genre")
+    assert len(genre_sql) == 1, captured.captured_queries
+    _assert_row_preserving_root(
+        genre_sql[0],
+        "library_genre",
+        "library_book_genres",
+        "library_book",
+    )
+    assert "EXISTS" in genre_sql[0].upper(), genre_sql
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    [
+        ("exact", ["A"]),
+        ("in", ["A", "B"]),
+        ("empty", []),
+        ("missing", []),
+        ("mixed", ["A"]),
+    ],
+    ids=[
+        "exact",
+        "in",
+        "empty",
+        "missing",
+        "mixed",
+    ],
+)
+def test_global_id_filter_over_a_non_pk_to_field_compares_the_target_key_over_http(
+    case: str,
+    expected: list[str],
+) -> None:
+    """A genre GlobalID selects its profile by genre pk, never by the name the FK stores.
+
+    The second genre is named as the first genre's pk, so a raw stored-key
+    comparison selects the wrong profile. The nonmatching third genre also
+    keeps a missing or empty membership from passing as an omitted filter.
+    """
+    alpha = models.Genre.objects.create(name="ALPHA")
+    beta = models.Genre.objects.create(name=str(alpha.pk))
+    gamma = models.Genre.objects.create(name="GAMMA")
+    for code, genre in (("A", alpha), ("B", beta), ("C", gamma)):
+        patron = models.Patron.objects.create(name=f"Profile {code}")
+        models.PatronProfile.objects.create(patron=patron, postal_code=code, favorite_genre=genre)
+    first = global_id_for(library_schema.GenreType, alpha.pk)
+    second = global_id_for(library_schema.GenreType, beta.pk)
+    missing = global_id_for(library_schema.GenreType, saved_pk(gamma.pk) + 1000)
+    inputs: dict[str, JSONObject] = {
+        "exact": {"exact": first},
+        "in": {"in": [first, second]},
+        "empty": {"in": []},
+        "missing": {"exact": missing},
+        "mixed": {"in": [first, missing]},
+    }
+    payload = response_json(
+        _post_graphql(
+            "query($filter: PatronProfileFilterInputType) { "
+            "allLibraryPatronProfilesConnection(filter: $filter, orderBy: [{ postalCode: ASC }]) { "
+            "edges { node { secondary_address } } } }",
+            variables={"filter": {"favoriteGenre": inputs[case]}},
+        ),
+    )
+    assert payload == {
+        "data": {
+            "allLibraryPatronProfilesConnection": {
+                "edges": [{"node": {"secondary_address": code}} for code in expected],
+            },
+        },
+    }, payload
+
+
+@pytest.mark.django_db
+def test_a_globalid_over_a_non_pk_to_field_refuses_an_empty_resource_id(
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """An empty target id is refused before the marked relation can read profile rows."""
+    selected = models.Genre.objects.create(name="selected")
+    other = models.Genre.objects.create(name="other")
+    for code, genre in (("A", selected), ("B", other)):
+        patron = models.Patron.objects.create(name=f"Profile {code}")
+        models.PatronProfile.objects.create(patron=patron, postal_code=code, favorite_genre=genre)
+    query = (
+        "query($filter: PatronProfileFilterInputType) { "
+        "allLibraryPatronProfilesConnection(filter: $filter, orderBy: [{ postalCode: ASC }]) { "
+        "edges { node { secondary_address } } } }"
+    )
+    accepted = response_json(
+        _post_graphql(
+            query,
+            variables={
+                "filter": {
+                    "favoriteGenre": {
+                        "exact": global_id_for(library_schema.GenreType, selected.pk),
+                    },
+                },
+            },
+        ),
+    )
+    assert accepted == {
+        "data": {
+            "allLibraryPatronProfilesConnection": {
+                "edges": [{"node": {"secondary_address": "A"}}],
+            },
+        },
+    }, accepted
+    statements = record_compiled_sql(models.PatronProfile._meta.db_table)
+
+    payload = response_json(
+        _post_graphql(
+            query,
+            variables={
+                "filter": {
+                    "favoriteGenre": {"exact": global_id_for(library_schema.GenreType, "")},
+                },
+            },
+        ),
+    )
+
+    assert payload["data"] is None, payload
+    assert len(json_list(payload, "errors")) == 1, payload
+    assert json_at(payload, "errors", 0, "extensions", "code") == "GLOBALID_INVALID", payload
+    assert "empty node id" in json_str(payload, "errors", 0, "message"), payload
+    assert json_at(payload, "errors", 0, "path") == ["allLibraryPatronProfilesConnection"], payload
+    assert statements == []
+
+
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.django_db
+def test_a_relay_relation_exact_list_refuses_an_empty_resource_id(
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """The per-element exact lookup refuses an empty member instead of widening the relation."""
+    branch = models.Branch.objects.create(name="Exact id branch")
+    shelf = models.Shelf.objects.create(branch=branch, code="EX-1")
+    selected = models.Genre.objects.create(name="selected")
+    models.Book.objects.create(title="Kept", shelf=shelf).genres.add(selected)
+    models.Book.objects.create(title="Other", shelf=shelf)
+    schema = _relay_relation_isnull_holder_schema()
+    genre_type = registry.get(models.Genre)
+    assert genre_type is not None
+    selected_id = global_id_for(genre_type, selected.pk)
+    accepted = response_json(
+        _post_holder(
+            schema,
+            f'{{ books(filter: {{ genres: {{ exact: ["{selected_id}"] }} }}) {{ title }} }}',
+        ),
+    )
+    assert accepted == {"data": {"books": [{"title": "Kept"}]}}, accepted
+    empty_id = global_id_for(genre_type, "")
+    statements = record_compiled_sql(models.Book._meta.db_table)
+
+    payload = response_json(
+        _post_holder(
+            schema,
+            f'{{ books(filter: {{ genres: {{ exact: ["{empty_id}"] }} }}) {{ title }} }}',
+        ),
+    )
+
+    assert payload["data"] is None, payload
+    assert len(json_list(payload, "errors")) == 1, payload
+    assert json_at(payload, "errors", 0, "extensions", "code") == "GLOBALID_INVALID", payload
+    assert "empty node id" in json_str(payload, "errors", 0, "message"), payload
+    assert "at index 0" in json_str(payload, "errors", 0, "message"), payload
+    assert json_at(payload, "errors", 0, "path") == ["books"], payload
+    assert statements == []
+
+
+@pytest.mark.django_db
+def test_bound_set_acceptance_roots_are_absent_without_the_flag() -> None:
+    """The owner/subclass fixture adds no root or output type to the default schema."""
+    data = _assert_graphql_success(
+        '{ queryType: __type(name: "Query") { fields { name } } '
+        'bindingType: __type(name: "BindingHidingBookType") { name } }',
+    )
+    assert data["bindingType"] is None
+    names = {json_str(field, "name") for field in json_list(data, "queryType", "fields")}
+    assert names.isdisjoint(
+        {
+            "allLibraryBindingHidingBooks",
+            "allLibraryBindingPlainBooks",
+            "allLibraryBindingUnwiredBooks",
+            "allLibraryBindingLoneBooks",
+        },
+    )
+
+
+def _seed_binding_shelves() -> tuple[models.Branch, models.Shelf]:
+    """A secret and a visible shelf on one branch, each with one ordinarily visible book."""
+    branch = models.Branch.objects.create(name="Binding", city="Boston")
+    hidden = models.Shelf.objects.create(branch=branch, code="H", topic="secret")
+    seen = models.Shelf.objects.create(branch=branch, code="S", topic="zzz")
+    models.Book.objects.create(title="on-hidden", shelf=hidden)
+    models.Book.objects.create(title="on-seen", shelf=seen)
+    return branch, seen
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("hiding_first", [True, False], ids=["hiding-first", "plain-first"])
+@pytest.mark.parametrize(
+    "base_on_hiding",
+    [True, False],
+    ids=["base-on-hiding", "subclass-on-hiding"],
+)
+@pytest.mark.parametrize("operation", ["filter", "order"], ids=["filter", "order"])
+def test_a_set_and_its_subclass_read_their_own_bound_owner_over_http(
+    project_schema_override: Callable[[], None],
+    *,
+    hiding_first: bool,
+    base_on_hiding: bool,
+    operation: str,
+) -> None:
+    """A base set and its subclass each read their owner's visibility in either declaration order.
+
+    The hiding owner's filter drops the secret shelf and its order treats it as
+    missing. The plain owner keeps it in both cases; inheriting the base's owner
+    would make one root silently answer like the other.
+    """
+    _seed_binding_shelves()
+    if operation == "filter":
+        arguments = 'filter: { shelf: { topic: { exact: "secret" } } }, orderBy: [{ title: ASC }]'
+        expected_hiding: list[str] = []
+        expected_plain = ["on-hidden"]
+    else:
+        arguments = "orderBy: [{ shelf: { topic: ASC_NULLS_LAST } }]"
+        expected_hiding = ["on-seen", "on-hidden"]
+        expected_plain = ["on-hidden", "on-seen"]
+    with override_settings(
+        FAKESHOP_TEST_BOUND_SETS=True,
+        FAKESHOP_TEST_BOUND_SETS_HIDING_FIRST=hiding_first,
+        FAKESHOP_TEST_BOUND_SETS_BASE_ON_HIDING=base_on_hiding,
+    ):
+        project_schema_override()
+        # Guard the arrangement itself: the schema reload must observe both flag values.
+        hiding_set = library_schema.BindingHidingBookType.Meta.filterset_class
+        plain_set = library_schema.BindingPlainBookType.Meta.filterset_class
+        hiding_order = library_schema.BindingHidingBookType.Meta.orderset_class
+        plain_order = library_schema.BindingPlainBookType.Meta.orderset_class
+        assert hiding_set is (
+            library_filters.BindingBaseHidingBookFilter
+            if base_on_hiding
+            else library_filters.BindingHidingBookFilter
+        )
+        assert plain_set is (
+            library_filters.BindingSubPlainBookFilter
+            if base_on_hiding
+            else library_filters.BindingPlainBookFilter
+        )
+        assert hiding_order is (
+            library_orders.BindingBaseHidingBookOrder
+            if base_on_hiding
+            else library_orders.BindingHidingBookOrder
+        )
+        assert plain_order is (
+            library_orders.BindingSubPlainBookOrder
+            if base_on_hiding
+            else library_orders.BindingPlainBookOrder
+        )
+        with CaptureQueriesContext(connection) as captured:
+            payload = response_json(
+                _post_graphql(
+                    f"{{ hiding: allLibraryBindingHidingBooks({arguments}) "
+                    "{ edges { node { title } } } "
+                    f"plain: allLibraryBindingPlainBooks({arguments}) "
+                    "{ edges { node { title } } } }",
+                ),
+            )
+    assert payload == {
+        "data": {
+            "hiding": {"edges": [{"node": {"title": title}} for title in expected_hiding]},
+            "plain": {"edges": [{"node": {"title": title}} for title in expected_plain]},
+        },
+    }, payload
+    sql = _sql_from_table(captured, "library_book")
+    assert len(sql) == 2, captured.captured_queries
+    assert "EXISTS" in sql[0].upper(), sql
+    assert "secret" in sql[0], sql
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("hiding_first", [True, False], ids=["hiding-first", "plain-first"])
+@pytest.mark.parametrize(
+    ("case", "titles"),
+    [
+        ("declared-branch", []),
+        ("raw-own-key", ["on-seen"]),
+        ("declared-re-entry", []),
+        ("flat-re-entry", []),
+        ("relation-primary-key", None),
+    ],
+    ids=[
+        "declared-branch",
+        "raw-own-key",
+        "declared-re-entry",
+        "flat-re-entry",
+        "relation-primary-key",
+    ],
+)
+def test_an_unwired_filter_subclass_answers_like_an_unrelated_unwired_set_over_http(
+    project_schema_override: Callable[[], None],
+    *,
+    hiding_first: bool,
+    case: str,
+    titles: list[str] | None,
+) -> None:
+    """An unwired subclass inherits no owner: primary visibility, raw own key and primary relation.
+
+    The same request asks an unrelated unwired set with the same declarations (the
+    relation case asks each root alone), so the inherited set cannot keep its bound
+    base's plain Node owner, its GlobalID own key, or its typename validation. An
+    unbound set's relation GlobalID validates against the relation model's registry
+    primary (``filters/base.py::_globalid_target``); fakeshop's ``BranchType`` is no
+    Relay node, so both roots refuse the branch key with the same coded error.
+    """
+    branch, seen = _seed_binding_shelves()
+    with override_settings(
+        FAKESHOP_TEST_BOUND_SETS=True,
+        FAKESHOP_TEST_BOUND_SETS_HIDING_FIRST=hiding_first,
+        FAKESHOP_TEST_BOUND_SETS_BASE_ON_HIDING=False,
+    ):
+        project_schema_override()
+        relation_id = json.dumps(global_id_for(library_schema.GenreType, branch.pk))
+        inputs = {
+            "declared-branch": '{ topic: { exact: "secret" } }',
+            "raw-own-key": f"{{ id: {{ exact: {seen.pk} }} }}",
+            "declared-re-entry": '{ back: { title: { exact: "on-hidden" } } }',
+            "flat-re-entry": '{ branchShelvesTopic: { exact: "secret" } }',
+            "relation-primary-key": f"{{ branchKey: {{ exact: {relation_id} }} }}",
+        }
+        arguments = f"filter: {{ shelf: {inputs[case]} }}, orderBy: [{{ title: ASC }}]"
+        if titles is None:
+            # A non-null root's refusal nulls the whole response, so each root asks alone.
+            for root in ("allLibraryBindingUnwiredBooks", "allLibraryBindingLoneBooks"):
+                refusal = response_json(
+                    _post_graphql(f"{{ {root}({arguments}) {{ edges {{ node {{ title }} }} }} }}"),
+                )
+                assert refusal["data"] is None, refusal
+                assert len(json_list(refusal, "errors")) == 1, refusal
+                code = json_at(refusal, "errors", 0, "extensions", "code")
+                assert code == "GLOBALID_UNVALIDATABLE", refusal
+                assert "BranchType" in json_str(refusal, "errors", 0, "message"), refusal
+                assert json_at(refusal, "errors", 0, "path") == [root], refusal
+            return
+        payload = response_json(
+            _post_graphql(
+                f"{{ subclass: allLibraryBindingUnwiredBooks({arguments}) "
+                "{ edges { node { title } } } "
+                f"unrelated: allLibraryBindingLoneBooks({arguments}) "
+                "{ edges { node { title } } } }",
+            ),
+        )
+    edges: list[JSONValue] = [{"node": {"title": title}} for title in titles]
+    assert payload == {"data": {"subclass": {"edges": edges}, "unrelated": {"edges": edges}}}, (
+        payload
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("hiding_first", [True, False], ids=["hiding-first", "plain-first"])
+@pytest.mark.parametrize("term", ["topic", "branchShelvesTopic"], ids=["declared-hop", "re-entry"])
+def test_an_unwired_order_subclass_answers_like_an_unrelated_unwired_set_over_http(
+    project_schema_override: Callable[[], None],
+    *,
+    hiding_first: bool,
+    term: str,
+) -> None:
+    """An unwired order subclass reads primary visibility, including a term re-entering its model."""
+    branch_x = models.Branch.objects.create(name="Binding X")
+    branch_y = models.Branch.objects.create(name="Binding Y")
+    hidden = models.Shelf.objects.create(branch=branch_x, code="H", topic="secret")
+    seen_x = models.Shelf.objects.create(branch=branch_x, code="X", topic="x")
+    seen_y = models.Shelf.objects.create(branch=branch_y, code="Y", topic="y")
+    for title, shelf in (("on-hidden", hidden), ("seen-x", seen_x), ("seen-y", seen_y)):
+        models.Book.objects.create(title=title, shelf=shelf)
+    arguments = f"orderBy: [{{ shelf: {{ {term}: ASC_NULLS_LAST }} }}]"
+    with override_settings(
+        FAKESHOP_TEST_BOUND_SETS=True,
+        FAKESHOP_TEST_BOUND_SETS_HIDING_FIRST=hiding_first,
+        FAKESHOP_TEST_BOUND_SETS_BASE_ON_HIDING=False,
+    ):
+        project_schema_override()
+        payload = response_json(
+            _post_graphql(
+                f"{{ subclass: allLibraryBindingUnwiredBooks({arguments}) "
+                "{ edges { node { title } } } "
+                f"unrelated: allLibraryBindingLoneBooks({arguments}) "
+                "{ edges { node { title } } } }",
+            ),
+        )
+    edges: list[JSONValue] = [
+        {"node": {"title": title}} for title in ("seen-x", "seen-y", "on-hidden")
+    ]
+    assert payload == {"data": {"subclass": {"edges": edges}, "unrelated": {"edges": edges}}}, (
+        payload
+    )
+
+
+def _published_filter_override_schema(shape: str, *, customize: bool) -> DjangoSchema:
+    """Rung 3: consumer publication rewrites vary per declaration, so no one shipped set can own them.
+
+    Each schema declares the complete consumer override and posts through the existing package
+    mount. The example's stable ShelfFilter cannot simultaneously remove, rename, replace and
+    add its code leaf; keeping those alternate declarations here preserves that public fixture.
+    """
+
+    class PublishedShelfFilter(FilterSet):
+        class Meta:
+            model = models.Shelf
+            fields = {"code": ["exact"]}
+
+        @classmethod
+        @override
+        def get_filters(cls) -> OrderedDict[str, Filter]:
+            table = OrderedDict(super().get_filters())
+            if shape == "rename":
+                table = OrderedDict(
+                    ("kode" if key == "code" else key, leaf) for key, leaf in table.items()
+                )
+            elif shape == "replace":
+                table["code"] = CharFilter(field_name="topic", lookup_expr="icontains")
+            elif shape == "deep-copies":
+                table = OrderedDict((key, copy.deepcopy(leaf)) for key, leaf in table.items())
+            elif shape == "add-in-place":
+                table["extra"] = CharFilter(field_name="topic", lookup_expr="icontains")
+            elif shape == "required-added":
+                table["must"] = CharFilter(field_name="code", required=True)
+            return table
+
+    child: type[FilterSet] = PublishedShelfFilter
+    if customize:
+
+        class CustomizedPublishedShelfFilter(PublishedShelfFilter):
+            def __init__(
+                self,
+                data: Mapping[str, object] | None = None,
+                queryset: QuerySet[Model] | None = None,
+                *,
+                request: HttpRequest | None = None,
+                prefix: str | None = None,
+            ) -> None:
+                super().__init__(data=data, queryset=queryset, request=request, prefix=prefix)
+
+        child = CustomizedPublishedShelfFilter
+
+    class PublishedBranchFilter(FilterSet):
+        shelves = RelatedFilter(child, field_name="shelves")
+
+        class Meta:
+            model = models.Branch
+            fields = {"name": ["exact"]}
+
+    class PublishedShelfType(DjangoType):
+        class Meta:
+            model = models.Shelf
+            fields = ("code",)
+            filterset_class = child
+            interfaces = (relay.Node,)
+
+    class PublishedBranchType(DjangoType):
+        class Meta:
+            model = models.Branch
+            fields = ("name",)
+            filterset_class = PublishedBranchFilter
+            interfaces = (relay.Node,)
+
+    finalize_django_types()
+
+    @strawberry.type
+    class Query:
+        shelves: DjangoConnection[PublishedShelfType] = DjangoConnectionField(PublishedShelfType)
+        branches: DjangoConnection[PublishedBranchType] = DjangoConnectionField(
+            PublishedBranchType,
+        )
+
+    return DjangoSchema(query=Query, config=strawberry_config())
+
+
+def _seed_published_filter_branches() -> None:
+    """Two different shelves on disjoint branches distinguish every publication spelling."""
+    first = models.Branch.objects.create(name="B1")
+    second = models.Branch.objects.create(name="B2")
+    models.Shelf.objects.create(branch=first, code="S1", topic="alpha")
+    models.Shelf.objects.create(branch=second, code="S2", topic="beta")
+
+
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "rename",
+        "replace",
+        "deep-copies",
+        "add-in-place",
+    ],
+)
+@pytest.mark.parametrize("customize", [False, True], ids=["expanded", "projected"])
+@pytest.mark.parametrize("spelling", ["standalone", "flat", "nested"])
+def test_a_published_filter_override_runs_through_every_wire_spelling(
+    shape: str,
+    spelling: str,
+    *,
+    customize: bool,
+) -> None:
+    """The table a consumer publishes is applied directly, through its flat copy and its child form."""
+    _seed_published_filter_branches()
+    key, value = {
+        "rename": ("kode", "S1"),
+        "replace": ("code", "alp"),
+        "deep-copies": ("code", "S1"),
+        "add-in-place": ("extra", "alp"),
+    }[shape]
+    lookup = "iContains" if shape in {"replace", "add-in-place"} else "exact"
+    leaf = "{ " + key + ": { " + lookup + ": " + json.dumps(value) + " } }"
+    if spelling == "standalone":
+        root, column, filter_input, expected = "shelves", "code", leaf, "S1"
+    elif spelling == "flat":
+        filter_input = (
+            "{ shelves"
+            + key[0].upper()
+            + key[1:]
+            + ": { "
+            + lookup
+            + ": "
+            + json.dumps(value)
+            + " } }"
+        )
+        root, column, expected = "branches", "name", "B1"
+    else:
+        filter_input = "{ shelves: " + leaf + " }"
+        root, column, expected = "branches", "name", "B1"
+    schema = _published_filter_override_schema(shape, customize=customize)
+    payload = response_json(
+        _post_holder(
+            schema,
+            "{ " + root + "(filter: " + filter_input + ") { edges { node { " + column + " } } } }",
+        ),
+    )
+    assert payload == {"data": {root: {"edges": [{"node": {column: expected}}]}}}, payload
+
+
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.django_db
+@pytest.mark.parametrize("customize", [False, True], ids=["expanded", "projected"])
+@pytest.mark.parametrize("named", [True, False], ids=["required-sent", "required-omitted"])
+def test_a_required_filter_added_at_publication_is_required_on_its_own_wire_form(
+    *,
+    customize: bool,
+    named: bool,
+) -> None:
+    """An added own filter validates its form even though no class-body declaration names it."""
+    _seed_published_filter_branches()
+    schema = _published_filter_override_schema("required-added", customize=customize)
+    filter_input = '{ must: { exact: "S1" } }' if named else '{ code: { exact: "S1" } }'
+    payload = response_json(
+        _post_holder(
+            schema,
+            "{ shelves(filter: " + filter_input + ") { edges { node { code } } } }",
+        ),
+    )
+    if named:
+        assert payload == {"data": {"shelves": {"edges": [{"node": {"code": "S1"}}]}}}, payload
+    else:
+        assert payload["data"] is None, payload
+        assert len(json_list(payload, "errors")) == 1
+        error = json_object(payload, "errors", 0)
+        assert error["path"] == ["shelves"]
+        assert json_object(error, "extensions") == {
+            "code": "FILTER_INVALID",
+            "errors": {"must": [{"message": "This field is required.", "code": "required"}]},
+        }
+
+
+def _required_child_filter_schema(
+    *,
+    projected: bool,
+    settled: bool,
+    collision: bool,
+) -> DjangoSchema:
+    """Rung 3: deliberately required child declarations distinguish parent, nested and flat forms.
+
+    The shipped relation filters are optional search criteria. These alternate consumer sets
+    deliberately require a child input, and optionally make a parent's generated key collide
+    with its expanded copy; one permanent declaration cannot express both ownership cases.
+    """
+    required_key = "code" if collision else "code_required"
+    code_filter = CharFilter(
+        field_name="code",
+        required=True,
+        method="filter_code" if projected else None,
+    )
+
+    class RequiredShelfFilter(FilterSet):
+        class Meta:
+            model = models.Shelf
+            fields = {"topic": ["exact"]}
+
+        def filter_code(
+            self,
+            queryset: QuerySet[models.Shelf],
+            name: str,
+            value: str,
+        ) -> QuerySet[models.Shelf]:
+            return queryset.filter(**{name: value})
+
+    # Build the declaration through the metaclass; assigning a Filter afterward would bypass it.
+    child = type("RequiredWireShelfFilter", (RequiredShelfFilter,), {required_key: code_filter})
+
+    class RequiredBranchFilter(FilterSet):
+        shelves = RelatedFilter(child, field_name="shelves")
+
+        class Meta:
+            model = models.Branch
+            fields = (
+                {"name": ["exact"], "shelves__code": ["exact"]}
+                if collision
+                else {"name": ["exact"]}
+            )
+
+    parent: type[FilterSet] = RequiredBranchFilter
+    if settled:
+
+        class SettledRequiredBranchFilter(RequiredBranchFilter):
+            def __init__(
+                self,
+                data: Mapping[str, object] | None = None,
+                queryset: QuerySet[Model] | None = None,
+                *,
+                request: HttpRequest | None = None,
+                prefix: str | None = None,
+            ) -> None:
+                super().__init__(data=data, queryset=queryset, request=request, prefix=prefix)
+                assert self.filters
+
+        parent = SettledRequiredBranchFilter
+
+    class RequiredShelfType(DjangoType):
+        class Meta:
+            model = models.Shelf
+            fields = ("code", "topic")
+
+    class RequiredBranchType(DjangoType):
+        class Meta:
+            model = models.Branch
+            fields = ("name",)
+            filterset_class = parent
+            interfaces = (relay.Node,)
+
+    finalize_django_types()
+
+    @strawberry.type
+    class Query:
+        branches: DjangoConnection[RequiredBranchType] = DjangoConnectionField(RequiredBranchType)
+
+    return DjangoSchema(query=Query, types=[RequiredShelfType], config=strawberry_config())
+
+
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.django_db
+@pytest.mark.parametrize("projected", [False, True], ids=["rebound", "projected"])
+@pytest.mark.parametrize("named", [False, True], ids=["flat-copy-omitted", "flat-copy-named"])
+def test_a_required_flat_copy_keeps_ownership_when_it_collides_with_a_generated_key(
+    *,
+    projected: bool,
+    named: bool,
+) -> None:
+    """The expanded copy wins its generated key without becoming a required own parent field."""
+    _seed_published_filter_branches()
+    schema = _required_child_filter_schema(projected=projected, settled=False, collision=True)
+    filter_input, expected = (
+        ('{ shelvesCode: { exact: "S2" } }', "B2")
+        if named
+        else ('{ name: { exact: "B1" } }', "B1")
+    )
+    payload = response_json(
+        _post_holder(
+            schema,
+            "{ branches(filter: " + filter_input + ") { edges { node { name } } } }",
+        ),
+    )
+    assert payload == {"data": {"branches": {"edges": [{"node": {"name": expected}}]}}}, payload
+
+
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.django_db
+@pytest.mark.parametrize("projected", [False, True], ids=["rebound", "projected"])
+@pytest.mark.parametrize("settled", [False, True], ids=["inherited-init", "init-reads-filters"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        "nothing",
+        "own-leaf",
+        "flat-sibling",
+        "logic-sibling",
+        "flat-named",
+        "nested-sibling",
+    ],
+)
+def test_a_required_child_leaf_belongs_only_to_the_form_the_http_request_builds(
+    case: str,
+    *,
+    projected: bool,
+    settled: bool,
+) -> None:
+    """A child's required leaf is inert on unnamed flat copies and required on its nested form."""
+    north = models.Branch.objects.create(name="North")
+    south = models.Branch.objects.create(name="South")
+    models.Shelf.objects.create(branch=north, code="N-1", topic="maps")
+    models.Shelf.objects.create(branch=south, code="S-1", topic="law")
+    cases = {
+        "nothing": ("{}", ["North", "South"]),
+        "own-leaf": ('{name: {exact: "South"}}', ["South"]),
+        "flat-sibling": ('{shelvesTopic: {exact: "maps"}}', ["North"]),
+        "logic-sibling": ('{or: [{shelvesTopic: {exact: "maps"}}]}', ["North"]),
+        "flat-named": ('{shelvesCodeRequired: {exact: "S-1"}}', ["South"]),
+        "nested-sibling": ('{shelves: {topic: {exact: "maps"}}}', None),
+    }
+    filter_input, expected = cases[case]
+    schema = _required_child_filter_schema(projected=projected, settled=settled, collision=False)
+    payload = response_json(
+        _post_holder(
+            schema,
+            "{ branches(filter: " + filter_input + ") { edges { node { name } } } }",
+        ),
+    )
+    if expected is None:
+        assert payload["data"] is None, payload
+        assert len(json_list(payload, "errors")) == 1
+        error = json_object(payload, "errors", 0)
+        assert error["path"] == ["branches"]
+        assert json_object(error, "extensions") == {
+            "code": "FILTER_INVALID",
+            "errors": {
+                "shelves__code_required": [
+                    {"message": "This field is required.", "code": "required"},
+                ],
+            },
+        }
+    else:
+        assert "errors" not in payload, payload
+        assert (
+            sorted(
+                json_str(row, "node", "name")
+                for row in json_list(payload, "data", "branches", "edges")
+            )
+            == expected
+        )

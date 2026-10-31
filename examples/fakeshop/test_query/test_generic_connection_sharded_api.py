@@ -1,28 +1,14 @@
-"""Sharded (``FAKESHOP_SHARDED=1``) GenericRelation connection alias-late morph test.
+"""Live HTTP tests for generic-connection content-type isolation across database aliases.
 
-Pins that the GenericRelation content-type predicate is resolved alias-LATE by
-Django's ``GenericRelatedObjectManager.get_prefetch_querysets`` at fetch time
-(against the parent instances' database), NEVER baked as a plan-time constant.
-A plan-time ``ContentType`` lookup on the unrouted child queryset (``.db`` ->
-``default``) would embed that alias's pk; when the parents live on ``shard_b``
-and ``shard_b``'s ``Branch`` content-type pk DIFFERS from ``default``'s, the
-baked constant would contradict Django's own fetch-time morph predicate and the
-connection would silently return zero rows.
-
-This test deliberately forces the two aliases' ``Branch`` content-type pks
-apart (manipulating the ``django_content_type`` rows in setup),
-seeds the branch and its tags on ``shard_b`` under ``shard_b``'s pk, and proves
-the generic connection returns the correct rows on the non-default alias.
-
-Sharded-only: gated by a module-level skip (``pytest.mark.skipif`` cannot be
-used - the env var reshapes ``config.settings.DATABASES`` at import time, before
-mark evaluation), mirroring
-``examples/fakeshop/test_query/test_multi_db.py``. Library acceptance tests use
-inline ``Model.objects.create`` (the library app has no ``services.py``).
+The non-default alias assigns Branch a different content-type key. A generic
+connection must use that alias's key at fetch time, rather than a default-alias
+constant during planning. The holder graph exposes the relation without changing
+fakeshop's intentionally unpublished generic fields.
 """
 
 import os
 from collections.abc import Iterator
+from functools import wraps
 
 import pytest
 
@@ -33,35 +19,60 @@ if os.environ.get("FAKESHOP_SHARDED") != "1":
     )
 
 import strawberry
+from apps.library.models import Branch, TaggedItem
 from django.contrib.contenttypes.models import ContentType
 from django.db.models import QuerySet
-from graphql_client import json_at, json_list, json_object
+from django.http import HttpRequest, HttpResponseBase
+from django.test import override_settings
+from django.urls import path
+from graphql_client import JSONObject, graphql_payload, json_at, json_list, json_object
 from strawberry import relay
 
-from apps.library.models import Branch, TaggedItem
 from django_strawberry_framework import (
     DjangoOptimizerExtension,
+    DjangoSchema,
     DjangoType,
     finalize_django_types,
     strawberry_config,
 )
-from django_strawberry_framework.connection import _connection_type_cache
 from django_strawberry_framework.registry import registry
+from django_strawberry_framework.views import DjangoGraphQLView
+
+pytestmark = pytest.mark.usefixtures("private_registry")
+_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
+
+
+@wraps(DjangoGraphQLView.as_view())
+def _graphql_view(request: HttpRequest) -> HttpResponseBase:
+    schema = _CURRENT["schema"]
+    assert schema is not None
+    return DjangoGraphQLView.as_view(schema=schema)(request)
+
+
+urlpatterns = [path("graphql-generic-sharded/", _graphql_view)]
+
+
+def _post(schema: DjangoSchema, query: str) -> JSONObject:
+    """Read the non-default alias through a real GraphQL HTTP request."""
+    _CURRENT["schema"] = schema
+    try:
+        with override_settings(ROOT_URLCONF=__name__):
+            payload = graphql_payload(query, url="/graphql-generic-sharded/")
+        assert "errors" not in payload, payload
+        return json_object(payload, "data")
+    finally:
+        _CURRENT["schema"] = None
 
 
 @pytest.fixture(autouse=True)
-def _isolate_registry() -> Iterator[None]:
-    """Reset the global registry and connection-type cache around each test."""
-    registry.clear()
-    _connection_type_cache.clear()
+def _isolate_content_types() -> Iterator[None]:
+    """Forget content-type ids before and after the test changes their rows."""
     ContentType.objects.clear_cache()
     yield
-    registry.clear()
-    _connection_type_cache.clear()
     ContentType.objects.clear_cache()
 
 
-def _build_schema() -> strawberry.Schema:
+def _build_schema() -> DjangoSchema:
     """Build a schema whose ``branches`` root reads from ``shard_b``."""
 
     class TaggedItemNode(DjangoType):
@@ -91,7 +102,7 @@ def _build_schema() -> strawberry.Schema:
 
     finalize_django_types()
     ext = DjangoOptimizerExtension()
-    return strawberry.Schema(
+    return DjangoSchema(
         query=Query,
         config=strawberry_config(),
         extensions=[lambda: ext],
@@ -139,7 +150,8 @@ def test_generic_connection_uses_shard_b_content_type_pk_not_default() -> None:
         )
 
     schema = _build_schema()
-    result = schema.execute_sync(
+    data = _post(
+        schema,
         """
         query {
           branches {
@@ -153,9 +165,7 @@ def test_generic_connection_uses_shard_b_content_type_pk_not_default() -> None:
         """,
     )
 
-    assert result.errors is None, result.errors
-    assert result.data is not None
-    conn = json_object(result.data, "branches", 0, "tagsConnection")
+    conn = json_object(data, "branches", 0, "tagsConnection")
     # Non-empty rows prove the fetch used ``shard_b``'s ct pk, not the baked
     # default pk (which would have matched zero rows on ``shard_b``).
     assert [json_at(edge, "node", "tag") for edge in json_list(conn, "edges")] == ["a1", "a2"]

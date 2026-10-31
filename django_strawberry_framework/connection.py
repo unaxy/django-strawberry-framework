@@ -71,7 +71,6 @@ from django.db import models
 from graphql import GraphQLError
 from strawberry import relay
 from strawberry.relay.types import NodeIterableType
-from strawberry.relay.utils import should_resolve_list_connection_edges
 from strawberry.types import Info, get_object_definition
 from strawberry.types.field import StrawberryField
 from strawberry.utils.await_maybe import AwaitableOrValue
@@ -138,6 +137,7 @@ from .utils.connections import (
     is_supplied,
     offset_engine_arguments,
     page_arguments,
+    published_page_argument_name,
     relation_connection_to_attr,
     resolve_relay_max_results,
     split_window_rows,
@@ -1016,6 +1016,7 @@ def _consume_fallback(
         last=last,
         cap=max_results,
         prefix=_offset_cursor_prefix(cls),
+        info=info,
     )
     # The cast states the source as ``ListConnection`` takes it: it slices a ``__getitem__``-only
     # source its iterable annotation leaves out. ``_pipeline_sync`` / ``_pipeline_async`` refuse
@@ -1145,7 +1146,7 @@ def _resolve_keyset_connection(
         )
     # Model rows are not checked; a consumer-returned QuerySet's rows stay ``object``.
     source: models.QuerySet[models.Model, object] = nodes
-    _guard_source_not_pre_sliced(source)
+    _guard_source_not_pre_sliced(source, info)
     columns, fingerprint, queryset = _keyset_order_state(state, source)
     count_source = queryset
     after_supplied = is_supplied(after)
@@ -1156,6 +1157,7 @@ def _resolve_keyset_connection(
             columns,
             fingerprint=fingerprint,
             argument="after",
+            info=info,
         )
         queryset = queryset.filter(KeysetSeek(columns=columns, cursor=cursor).q())
     if before_supplied:
@@ -1164,6 +1166,7 @@ def _resolve_keyset_connection(
             columns,
             fingerprint=fingerprint,
             argument="before",
+            info=info,
         )
         queryset = queryset.filter(KeysetSeek(columns=columns, cursor=cursor, flip=True).q())
     cap = resolve_relay_max_results(info, max_results)
@@ -1173,7 +1176,7 @@ def _resolve_keyset_connection(
     # ``last`` because it serves backward pages; the window helper only sees
     # forward shapes (backward raises UnwindowableConnection upstream).
     for argument, value in (("first", first), ("last", last)):
-        assert_relay_pagination_bound(argument, value, cap=cap)
+        assert_relay_pagination_bound(argument, value, cap=cap, info=info)
     backward = is_backward_shape(first, last)
     # ``_consume_fallback``'s ``page_arguments`` bounds every page with an ``int``:
     # ``last`` on a backward page, ``first`` on every other.
@@ -1185,12 +1188,13 @@ def _resolve_keyset_connection(
     # the same fact in both domains.
     fetch_limit = page_size + NEXT_PAGE_PROBE_ROWS
 
-    if not (should_resolve_list_connection_edges(info) or _page_requested(info)):
+    if not _page_requested(info):
         # ``ListConnection`` parity: nothing under ``edges`` / ``pageInfo``
         # is selected, so no row is fetched and the placeholder flags are
         # inert. ``totalCount`` is its own sibling selection and still
-        # counts when requested. Upstream's wire-name check answers first;
-        # ``_page_requested`` catches the spellings it misses.
+        # counts when requested. Upstream's wire-name check is not asked: it
+        # misses renamed fields, matches a fragment spread named ``edges`` and
+        # raises on an anonymous inline fragment.
         conn = cls(
             edges=[],
             page_info=relay.PageInfo(
@@ -1265,7 +1269,12 @@ def _resolve_keyset_connection(
     )
 
 
-def _guard_first_and_last(first: int | None, last: int | None) -> None:
+def _guard_first_and_last(
+    first: int | None,
+    last: int | None,
+    *,
+    info: Info[object, object] | None = None,
+) -> None:
     """Raise ``PaginationArgumentError`` when both ``first`` and ``last`` are supplied.
 
     The package's own pagination guard (spec-030 Decision 3): Strawberry's
@@ -1273,13 +1282,17 @@ def _guard_first_and_last(first: int | None, last: int | None) -> None:
     mutual-exclusivity check, so the package enforces it here - a query-runtime
     error landing in the GraphQL ``errors`` array, NOT a construction-time
     ``ConfigurationError``. Single-sited so the literal lives once and both the
-    base and the generated ``<TypeName>Connection`` reuse it.
+    base and the generated ``<TypeName>Connection`` reuse it. The message names
+    both arguments as ``info``'s schema published them.
     """
     first_supplied = is_supplied(first)
     last_supplied = is_supplied(last)
     if first_supplied and last_supplied:
+        first_name = published_page_argument_name(info, "first")
+        last_name = published_page_argument_name(info, "last")
         raise PaginationArgumentError(
-            "Connection arguments `first` and `last` are mutually exclusive; supply only one.",
+            f"Connection arguments `{first_name}` and `{last_name}` are mutually exclusive; "
+            "supply only one.",
         )
 
 
@@ -1353,8 +1366,10 @@ def _page_requested(info: Info[object, object]) -> bool:
     the wire names ``edges`` / ``pageInfo`` and answers ``False`` when a
     ``NameConverter`` respells both (``page_info`` under
     ``auto_camel_case=False``), which serves an empty page with
-    ``hasNextPage: false``. A caller asks upstream first and this second, so a
-    page is resolved when either answers ``True``.
+    ``hasNextPage: false``; it also matches a fragment spread named ``edges`` and
+    raises on an anonymous inline fragment. Both the keyset page and the patched
+    offset check (``_strawberry_patches.py::_patched_should_resolve_list_connection_edges``)
+    therefore ask this alone.
     """
     return _connection_field_requested(info, connection_page_selected)
 
@@ -1461,7 +1476,7 @@ class DjangoConnection(relay.ListConnection[NodeType], Generic[NodeType]):  # py
         # client from asking a root connection for a page wider than the policy -
         # the downstream paths all receive the already-clamped integer.
         max_results = resolve_relay_max_results(info, max_results)
-        _guard_first_and_last(first, last)
+        _guard_first_and_last(first, last, info=info)
         # The cooperative deadline (spec-047 Decision 9), at the one seam every connection
         # shape passes through: a connection is about to slice, count, or window
         # a queryset, which is the last point before this field hands work to the
@@ -1765,7 +1780,12 @@ def _connection_type_for(
 # =============================================================================
 
 
-def _guard_sidecar_input_against_non_queryset(source: object, *, has_sidecar_input: bool) -> None:
+def _guard_sidecar_input_against_non_queryset(
+    source: object,
+    info: Info[object, object],
+    *,
+    has_sidecar_input: bool,
+) -> None:
     """Raise ``GraphQLError`` when ``filter:`` / ``orderBy:`` is supplied over a non-queryset.
 
     The consumer-``resolver=`` contract (spec-030 Decision 7): a non-queryset iterable
@@ -1774,14 +1794,18 @@ def _guard_sidecar_input_against_non_queryset(source: object, *, has_sidecar_inp
     queryset operation and cannot apply to a plain iterable, so supplying
     sidecar input against one is a clear package error rather than a silently
     ignored argument. Symmetric with the ``totalCount`` rule in
-    ``_guard_total_count_countable``.
+    ``_guard_total_count_countable``. The message names both sidecars as
+    ``info``'s schema published them.
     """
     if has_sidecar_input and not isinstance(source, models.QuerySet):
+        filter_name = published_page_argument_name(info, CONNECTION_FILTER_KWARG)
+        order_name = published_page_argument_name(info, CONNECTION_ORDER_KWARG, "orderBy")
+        sidecars = f"`{filter_name}:` / `{order_name}:`"
         raise GraphQLError(
-            "`filter:` / `orderBy:` was supplied to a connection whose resolver "
+            f"{sidecars} was supplied to a connection whose resolver "
             "returned a non-queryset iterable; these arguments narrow a QuerySet "
             "and cannot apply to a plain iterable. Return a QuerySet (or a "
-            "Manager) from the connection resolver, or omit `filter:` / `orderBy:`.",
+            f"Manager) from the connection resolver, or omit {sidecars}.",
         )
 
 
@@ -1816,7 +1840,10 @@ def _guard_non_queryset_iterable(source: object) -> None:
     )
 
 
-def _guard_source_not_pre_sliced(source: models.QuerySet[models.Model, object]) -> None:
+def _guard_source_not_pre_sliced(
+    source: models.QuerySet[models.Model, object],
+    info: Info[object, object],
+) -> None:
     """Raise ``GraphQLError`` when the connection resolver returns an already-sliced QuerySet.
 
     A ``DjangoConnectionField`` owns pagination: ``_finalize_queryset`` appends a
@@ -1840,16 +1867,26 @@ def _guard_source_not_pre_sliced(source: models.QuerySet[models.Model, object]) 
 
     The visibility seal rejects this shape one step later with author-facing
     ``ConfigurationError``; this guard stays because the ``resolver=`` contract
-    owes the wire its own ``GraphQLError`` before visibility runs.
+    owes the wire its own ``GraphQLError`` before visibility runs. The message
+    names the page arguments as ``info``'s schema published them.
     """
     if source.query.is_sliced:
+        page_arguments = " / ".join(
+            f"`{published_page_argument_name(info, name)}`"
+            for name in (
+                "first",
+                "last",
+                "before",
+                "after",
+            )
+        )
         raise GraphQLError(
             "A connection resolver returned an already-sliced QuerySet (e.g. "
             "`qs[:10]`). A connection field manages its own ordering and cursor "
             "pagination, and Django forbids reordering or re-slicing a sliced "
             "query, so an already-sliced source cannot be paginated. Return an "
-            "unsliced QuerySet (or a Manager) and let the connection's `first` / "
-            "`last` / `before` / `after` arguments paginate it.",
+            "unsliced QuerySet (or a Manager) and let the connection's "
+            f"{page_arguments} arguments paginate it.",
         )
 
 
@@ -1950,6 +1987,7 @@ async def _finalize_queryset_async(
 def _prepare_pipeline_source(
     source: object,
     target_type: type[DjangoType],
+    info: Info[object, object],
     *,
     async_guard: Callable[[object, type[DjangoType]], None],
     filter_input: object,
@@ -1984,14 +2022,18 @@ def _prepare_pipeline_source(
         # regardless of any input supplied, while the sidecar rule reads
         # naturally only once the value IS a plain iterable.
         _guard_non_queryset_iterable(value)
-        _guard_sidecar_input_against_non_queryset(value, has_sidecar_input=has_sidecar_input)
+        _guard_sidecar_input_against_non_queryset(
+            value,
+            info,
+            has_sidecar_input=has_sidecar_input,
+        )
 
     return prepared_resolver_source(
         source,
         target_type,
         async_guard=async_guard,
         non_queryset_guard=non_queryset_guard,
-        queryset_guard=_guard_source_not_pre_sliced,
+        queryset_guard=functools.partial(_guard_source_not_pre_sliced, info=info),
     )
 
 
@@ -2077,6 +2119,7 @@ def _pipeline_sync(
     prepared = _prepare_pipeline_source(
         source,
         target_type,
+        info,
         async_guard=reject_awaitable_sync_source,
         filter_input=filter_input,
         order_by_input=order_by_input,
@@ -2143,6 +2186,7 @@ async def _pipeline_async(
     prepared = _prepare_pipeline_source(
         source,
         target_type,
+        info,
         async_guard=reject_residual_async_source,
         filter_input=filter_input,
         order_by_input=order_by_input,

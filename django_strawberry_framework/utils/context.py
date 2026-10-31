@@ -79,9 +79,9 @@ def get_context_value(context: object, key: str, default: object = None) -> obje
       (e.g. ``__slots__`` classes, or consumer contexts like
       ``strawberry-graphql-django``'s ``StrawberryDjangoContext`` whose
       ``__getitem__`` is bridged to ``__getattribute__``). Pinned by
-      ``tests/optimizer/test_extension.py::test_stash_on_non_dict_mapping_reads_correctly``
+      ``tests/utils/test_context.py::test_context_stash_round_trips_and_clears_object_dict_and_slots_mapping``
       (``__slots__`` mapping shape) and
-      ``tests/optimizer/test_extension.py::test_get_context_value_swallows_attribute_error_from_getitem``
+      ``tests/utils/test_context.py::test_get_context_value_swallows_attribute_error_from_getitem``
       (bridged-``AttributeError`` shape) - a future refactor that
       removes this fallback must trip those pins.
     - A missing key is an unavailable key and returns ``default``: the

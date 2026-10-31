@@ -53,6 +53,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Protocol, TypeGuard, TypeVar, cast
 
 from graphql import GraphQLError
+from strawberry import Info
 from strawberry.relay.utils import SliceMetadata, from_base64, to_base64
 from strawberry.schema.config import StrawberryConfig
 
@@ -61,12 +62,11 @@ from django_strawberry_framework.resource_policy import effective_bound, policy_
 
 from .errors import PAGINATION_INVALID_ERROR_CODE, coded_error_extensions
 from .input_values import UNSET, is_inactive_value
-from .typing import schema_config_from_info
+from .typing import published_argument_wire_name, schema_config_from_info
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
-    from strawberry import Info
     from strawberry.types.unset import UnsetType
 
     from .typing import EitherInfo
@@ -113,8 +113,10 @@ class PaginationArgumentError(GraphQLError, DjangoStrawberryFrameworkError):  # 
     (``utils/errors.py::PAGINATION_INVALID_ERROR_CODE``), set here so no raise
     site spells it, and a client branches on the code rather than the prose. The
     offset-cursor and page-size messages are Strawberry's own
-    ``SliceMetadata.from_arguments`` wording, byte for byte, so one invalid page
-    size gets one message on every path.
+    ``SliceMetadata.from_arguments`` wording with the argument named as the
+    executing schema published it (``published_page_argument_name``), so one
+    invalid page size gets one message on every path, and under the default
+    ``NameConverter`` the text is upstream's byte for byte.
 
     Raised only where the package validates an argument, never by catching an
     exception and re-raising its text: an exception from a consumer source or
@@ -718,7 +720,35 @@ _OFFSET_CURSOR_MAX_DIGITS = len(str(sys.maxsize))
 _OFFSET_CURSOR_INDEX_PATTERN = re.compile(r"0|[1-9][0-9]*")
 
 
-def decode_offset_cursor(value: str | None, *, argument: str, prefix: str) -> int | None:
+def published_page_argument_name(
+    info: EitherInfo | None,
+    argument: str,
+    default: str | None = None,
+) -> str:
+    """Return the name a client sent connection argument ``argument`` under.
+
+    A rejection names the argument the client sent, which is whatever the
+    executing schema's ``NameConverter`` published for the Python name
+    ``argument`` (``utils/typing.py::published_argument_wire_name``). Read only
+    while a rejection is being built, so an accepted page never pays the lookup.
+    ``default`` (else ``argument``, the default converter's spelling of
+    ``first`` / ``last`` / ``after`` / ``before``) answers where no Strawberry
+    ``Info`` is at hand: the plan-time walker's graphql-core info, whose
+    rejections it discards, and a direct call with no ``info``.
+    """
+    fallback = argument if default is None else default
+    if not isinstance(info, Info):
+        return fallback
+    return published_argument_wire_name(info, argument, fallback)
+
+
+def decode_offset_cursor(
+    value: str | None,
+    *,
+    argument: str,
+    prefix: str,
+    info: EitherInfo | None = None,
+) -> int | None:
     """Decode one ``after`` / ``before`` offset cursor into the row index it names.
 
     The one validator of an offset cursor's position, read by both offset
@@ -746,24 +776,30 @@ def decode_offset_cursor(value: str | None, *, argument: str, prefix: str) -> in
     pattern and the length are checked before ``int()`` runs, so ``int()`` is handed only ASCII
     digits it accepts and an arbitrarily long digit string is never converted: no undecodable
     payload escapes as ``ValueError``. Any other value raises ``PaginationArgumentError`` with
-    Strawberry's own foreign-prefix wording, which the walker reads as malformed pagination and
-    both resolve-time callers let surface as the field's own error.
+    Strawberry's own foreign-prefix wording, naming ``argument`` (its Python name) as ``info``'s
+    schema published it, which the walker reads as malformed pagination and both resolve-time
+    callers let surface as the field's own error.
     """
     if not value:
         return None
-    rejection = PaginationArgumentError(f"Argument '{argument}' contains a non-existing value.")
     try:
         cursor_prefix, raw = from_base64(value)
     except ValueError:
-        raise rejection from None
+        raise _non_existing_cursor_error(info, argument) from None
     if cursor_prefix != prefix or not _OFFSET_CURSOR_INDEX_PATTERN.fullmatch(raw):
-        raise rejection
+        raise _non_existing_cursor_error(info, argument)
     if len(raw) > _OFFSET_CURSOR_MAX_DIGITS:
-        raise rejection
+        raise _non_existing_cursor_error(info, argument)
     position = int(raw)
     if position >= sys.maxsize:
-        raise rejection
+        raise _non_existing_cursor_error(info, argument)
     return position
+
+
+def _non_existing_cursor_error(info: EitherInfo | None, argument: str) -> PaginationArgumentError:
+    """Build ``SliceMetadata``'s foreign-cursor rejection for ``argument``."""
+    name = published_page_argument_name(info, argument)
+    return PaginationArgumentError(f"Argument '{name}' contains a non-existing value.")
 
 
 def derive_connection_window_bounds(
@@ -838,6 +874,7 @@ def derive_connection_window_bounds(
         last=last,
         cap=effective_max_results,
         prefix=prefix,
+        info=info,
     )
     slice_meta = SliceMetadata.from_arguments(
         # The engine reads ``info`` only to find a cap when ``max_results`` is
@@ -871,7 +908,13 @@ def derive_connection_window_bounds(
     return ConnectionWindowBounds(slice_meta.start, limit, reverse)
 
 
-def assert_relay_pagination_bound(argument: str, value: object, *, cap: int) -> None:
+def assert_relay_pagination_bound(
+    argument: str,
+    value: object,
+    *,
+    cap: int,
+    info: EitherInfo | None = None,
+) -> None:
     """Raise ``SliceMetadata``'s ``PaginationArgumentError`` for a negative or over-cap page size.
 
     The ONE spelling of the Relay ``first`` / ``last`` bound check, on both
@@ -883,14 +926,17 @@ def assert_relay_pagination_bound(argument: str, value: object, *, cap: int) -> 
     consumer-visible pagination errors therefore cannot fork between the two
     vocabularies or between the windowed and per-parent paths. Non-``int``
     values are ignored - matching ``SliceMetadata``'s ``isinstance(..., int)``
-    gate that skips the bound.
+    gate that skips the bound. The message names ``argument`` (its Python name)
+    as ``info``'s schema published it.
     """
     if not isinstance(value, int):
         return
     if value < 0:
-        raise PaginationArgumentError(f"Argument '{argument}' must be a non-negative integer.")
+        name = published_page_argument_name(info, argument)
+        raise PaginationArgumentError(f"Argument '{name}' must be a non-negative integer.")
     if value > cap:
-        raise PaginationArgumentError(f"Argument '{argument}' cannot be higher than {cap}.")
+        name = published_page_argument_name(info, argument)
+        raise PaginationArgumentError(f"Argument '{name}' cannot be higher than {cap}.")
 
 
 def validate_offset_pagination(
@@ -901,13 +947,14 @@ def validate_offset_pagination(
     last: object,
     cap: int,
     prefix: str,
+    info: EitherInfo | None = None,
 ) -> int | None:
     """Reject every invalid offset pagination argument ``SliceMetadata.from_arguments`` rejects.
 
     The package's own validation of an offset page, run before anything slices,
     in the engine's check order: ``after``, ``before``, ``first``, ``last``, each
-    with the engine's exact message, so the first invalid argument a client
-    sends names the same argument with the same text it always did. The
+    with the engine's wording, so the first invalid argument a client sends is
+    the one the engine would have named, under the name the client sent. The
     cursors go through ``decode_offset_cursor`` (which is also strictly
     narrower than the engine: a negative or non-canonical index is refused,
     never sliced) and the bounds through ``assert_relay_pagination_bound``
@@ -915,7 +962,8 @@ def validate_offset_pagination(
     handed. ``first`` and ``last`` are each checked when supplied, as the
     engine checks them; their mutual exclusivity is the resolver's own guard.
     ``prefix`` is the connection's edge-class ``CURSOR_PREFIX``, the one the
-    engine is handed (``ListConnection`` passes its edge class's).
+    engine is handed (``ListConnection`` passes its edge class's). ``info``
+    names each rejected argument as its schema published it.
 
     Returns the row index ``after`` names (``None`` when it is absent), the one
     decode ``offset_engine_arguments`` bounds the page's end from. Once this
@@ -926,10 +974,10 @@ def validate_offset_pagination(
     ``ListConnection`` without a ``try``: anything they still raise comes from
     the source or the rows, not from the client's arguments.
     """
-    position = decode_offset_cursor(after, argument="after", prefix=prefix)
-    _ = decode_offset_cursor(before, argument="before", prefix=prefix)
-    assert_relay_pagination_bound("first", first, cap=cap)
-    assert_relay_pagination_bound("last", last, cap=cap)
+    position = decode_offset_cursor(after, argument="after", prefix=prefix, info=info)
+    _ = decode_offset_cursor(before, argument="before", prefix=prefix, info=info)
+    assert_relay_pagination_bound("first", first, cap=cap, info=info)
+    assert_relay_pagination_bound("last", last, cap=cap, info=info)
     return position
 
 
@@ -950,6 +998,7 @@ def offset_engine_arguments(
     last: object,
     cap: int,
     prefix: str,
+    info: EitherInfo | None = None,
 ) -> tuple[str | None, _FirstT | int]:
     """Validate an offset page and return the ``(after, first)`` the engine is handed.
 
@@ -978,6 +1027,7 @@ def offset_engine_arguments(
         last=last,
         cap=cap,
         prefix=prefix,
+        info=info,
     )
     if before or not isinstance(first, int):
         return after, first
@@ -1073,5 +1123,5 @@ def derive_keyset_window_bounds(
     first, last = page_arguments(first, last, cap=cap)
     if is_supplied(before) or is_backward_shape(first, last):
         raise UnwindowableConnection
-    assert_relay_pagination_bound("first", first, cap=cap)
+    assert_relay_pagination_bound("first", first, cap=cap, info=info)
     return ConnectionWindowBounds(offset=0, limit=first, reverse=False)

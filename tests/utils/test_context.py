@@ -22,30 +22,43 @@ from django_strawberry_framework.utils.context import (
 )
 
 
-def test_context_stash_round_trips_and_clears_object_dict_and_slots_mapping() -> None:
+class SlotsMapping:
+    """A non-dict mapping-only context: ``setattr`` is impossible, items work."""
+
+    __slots__: tuple[str, ...] = ("values",)
+
+    def __init__(self) -> None:
+        """Start with no stored items."""
+        self.values: dict[str, object] = {}
+
+    def __getitem__(self, key: str) -> object:
+        """Read ``key`` from the item store."""
+        return self.values[key]
+
+    def __setitem__(self, key: str, value: object) -> None:
+        """Store ``value`` under ``key``."""
+        self.values[key] = value
+
+    def __delitem__(self, key: str) -> None:
+        """Remove ``key`` from the item store."""
+        del self.values[key]
+
+
+@pytest.mark.parametrize(
+    "make",
+    [SimpleNamespace, dict, SlotsMapping],
+    ids=["object", "dict", "slots"],
+)
+def test_context_stash_round_trips_and_clears_object_dict_and_slots_mapping(
+    make: Callable[[], object],
+) -> None:
     """Each supported writable shape uses the same read and clear contract."""
-
-    class SlotsMapping:
-        __slots__ = ("values",)
-
-        def __init__(self) -> None:
-            self.values: dict[str, object] = {}
-
-        def __getitem__(self, key: str) -> object:
-            return self.values[key]
-
-        def __setitem__(self, key: str, value: object) -> None:
-            self.values[key] = value
-
-        def __delitem__(self, key: str) -> None:
-            del self.values[key]
-
-    dict_context: dict[str, object] = {}
-    for context in (SimpleNamespace(), dict_context, SlotsMapping()):
-        stash_on_context(context, "dst_context_test", 42)
-        assert get_context_value(context, "dst_context_test") == 42
-        clear_context_key(context, "dst_context_test")
-        assert get_context_value(context, "dst_context_test", "missing") == "missing"
+    context = make()
+    marker = object()
+    stash_on_context(context, "dst_context_test", marker)
+    assert get_context_value(context, "dst_context_test") is marker
+    clear_context_key(context, "dst_context_test")
+    assert get_context_value(context, "dst_context_test", "missing") == "missing"
 
 
 def test_context_read_propagates_a_consumer_descriptor_error() -> None:
@@ -106,55 +119,27 @@ def test_locked_dict_subclass_stash_and_clear_are_noops() -> None:
     assert get_context_value(ctx, "dst_context_test") == 42
 
 
-class SlotsMapping:
-    """A non-dict mapping-only context: ``setattr`` is impossible, items work."""
-
-    __slots__: tuple[str, ...] = ("values",)
-
-    def __init__(self) -> None:
-        """Start with no stored items."""
-        self.values: dict[str, object] = {}
-
-    def __getitem__(self, key: str) -> object:
-        """Read ``key`` from the item store."""
-        return self.values[key]
-
-    def __setitem__(self, key: str, value: object) -> None:
-        """Store ``value`` under ``key``."""
-        self.values[key] = value
-
-    def __delitem__(self, key: str) -> None:
-        """Remove ``key`` from the item store."""
-        del self.values[key]
-
-
 @pytest.mark.parametrize(
     "make",
     [SimpleNamespace, dict, SlotsMapping],
     ids=["object", "dict", "slots"],
 )
+@pytest.mark.parametrize("stashed", ["outer", None, MISSING], ids=["present", "none", "absent"])
 def test_restored_context_keys_round_trips_absent_present_and_none(
     make: Callable[[], object],
+    stashed: object,
 ) -> None:
     """The restore puts ABSENT keys back to absent and re-stashes found values.
 
     An explicit ``None`` snapshot is a VALUE: it is re-stashed, never cleared,
     on every writable context shape the helpers dispatch on.
     """
-    for stashed in ("outer", None):
-        context = make()
-        stash_on_context(context, "dst_context_test", stashed)
-        with restored_context_keys(context, "dst_context_test"):
-            stash_on_context(context, "dst_context_test", "inner")
-        if stashed is None:
-            assert get_context_value(context, "dst_context_test", "absent") is None
-        else:
-            assert get_context_value(context, "dst_context_test") == stashed
-
     context = make()
+    if stashed is not MISSING:
+        stash_on_context(context, "dst_context_test", stashed)
     with restored_context_keys(context, "dst_context_test"):
         stash_on_context(context, "dst_context_test", "inner")
-    assert get_context_value(context, "dst_context_test", "absent") == "absent"
+    assert get_context_value(context, "dst_context_test", MISSING) is stashed
 
 
 def test_restored_context_keys_still_restores_when_the_body_raises() -> None:
@@ -186,3 +171,48 @@ def test_the_public_missing_sentinel_is_the_round_trip_identity() -> None:
     """``MISSING`` is importable and is the exact sentinel the read dispatches on."""
     assert get_context_value({}, "dst_context_test", MISSING) is MISSING
     assert MISSING is not None
+
+
+def test_get_context_value_swallows_attribute_error_from_getitem() -> None:
+    """A ``__getitem__`` raising ``AttributeError`` on a missing key returns ``default``.
+
+    ``strawberry-graphql-django``'s ``StrawberryDjangoContext`` bridges
+    ``__getitem__`` to ``__getattribute__``, so reading a key that was never
+    stashed raises ``AttributeError`` out of the item access path. The read
+    helper's ``except`` tuple must catch ``AttributeError`` alongside
+    ``KeyError`` / ``TypeError`` so the resolver chain sees ``default`` rather
+    than a leaking ``AttributeError`` from deep inside item lookup.
+    """
+
+    class BridgedItemAccess:
+        """Mimics ``StrawberryDjangoContext.__getitem__`` shape."""
+
+        def __getitem__(self, key: str) -> NoReturn:
+            raise AttributeError(f"missing attribute {key!r}")
+
+    sentinel = object()
+    ctx = BridgedItemAccess()
+    assert get_context_value(ctx, "dst_optimizer_plan", sentinel) is sentinel
+
+
+def test_stash_does_not_swallow_unexpected_exceptions_from_setitem() -> None:
+    """The mapping-write ``except`` stays narrow.
+
+    Read-only mapping failures are intentionally limited to ``TypeError``
+    and ``AttributeError``. A guarded mapping that raises a different
+    exception from ``__setitem__`` must surface the error rather than
+    silently losing the optimizer stash.
+    """
+
+    class GuardedMapping(dict[str, object]):
+        @override
+        def __setattr__(self, _key: str, _value: object) -> None:
+            raise TypeError("no attribute writes")
+
+        @override
+        def __setitem__(self, _key: str, _value: object) -> None:
+            raise RuntimeError("guarded write rejected")
+
+    ctx = GuardedMapping()
+    with pytest.raises(RuntimeError, match="guarded write rejected"):
+        stash_on_context(ctx, "dst_optimizer_plan", object())

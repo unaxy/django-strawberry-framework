@@ -110,6 +110,20 @@ an id its deferred relation filter cannot use. For each source the exception's
 class name is nowhere in the body either, and its original is read back from
 the policy's server log.
 
+Every pagination rejection names its argument by the name the client sent.
+The project's ``Query`` is built again under a ``NameConverter`` that renames
+``first`` / ``last`` / ``after`` / ``before`` (and the ``filter`` / ``orderBy``
+sidecars) or swaps ``first`` and ``last``, and a negative ``first`` or
+``last``, an over-cap ``first``, ``first`` with ``last`` and a malformed
+``after`` or ``before`` each answer ``PAGINATION_INVALID`` under the published
+name on the root and nested offset and keyset connections. That build is a
+second one over the shipped types (Strawberry's ``ConnectionExtension.apply``
+appends the page arguments to the shared fields on every build), so the rows
+also pin that the name follows the executing schema: a renamed and a default
+build over the same types each answer under their own names. The
+sidecar-over-a-list and already-sliced-source refusals name the published
+sidecar and page arguments on a test-local ``Query`` under the same converters.
+
 Each test-local mount serves whichever schema the test in flight published in
 its holder: the acceptance harness reloads every contributing app schema
 around each test, so the local field is built inside the request helper, after
@@ -123,7 +137,8 @@ import json
 import logging
 import re
 import sys
-from collections.abc import Callable, Coroutine, Generator, Iterator
+from collections.abc import Callable, Coroutine, Generator, Iterator, Mapping
+from functools import wraps
 from typing import NoReturn, TypeAlias
 
 import pytest
@@ -134,6 +149,7 @@ from apps.library.filters_genre import GenreFilter
 from apps.library.orders_genre import GenreOrder
 from apps.products.services import seed_data
 from asgiref.sync import sync_to_async
+from config import schema as config_schema
 from django.db import connection, models
 from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
@@ -151,6 +167,7 @@ from graphql_client import (
     response_json,
 )
 from strawberry import relay
+from strawberry.schema.name_converter import HasGraphQLName, NameConverter
 from typing_extensions import override
 
 from django_strawberry_framework import DjangoConnectionField, DjangoSchema, strawberry_config
@@ -431,7 +448,7 @@ def test_root_connection_arguments_follow_declared_sidecars(field_name: str) -> 
     """``filter:`` / ``orderBy:`` are published when the node type declared those sidecars.
 
     ``GenreType`` and ``IssueType`` declare both. The shapes omitting a sidecar are
-    ``tests/test_connection.py::test_connection_field_omits_args_without_sidecars``.
+    ``examples/fakeshop/test_query/test_connection_fields_api.py::test_connection_field_omits_args_without_sidecars``.
     """
     data = assert_graphql_success(_QUERY_FIELD_ARGS)
     fields = {json_str(field, "name"): field for field in json_list(data, "__type", "fields")}
@@ -503,7 +520,7 @@ def test_nested_connection_arguments_follow_declared_sidecars() -> None:
     ``PeriodicalType.issuesConnection`` targets ``IssueType``, each declaring both
     ``filterset_class`` and ``orderset_class``, so each exposes its target's
     ``filter:`` input type and ``orderBy``; the shapes omitting a sidecar are
-    ``tests/test_connection.py::test_connection_field_omits_args_without_sidecars``.
+    ``examples/fakeshop/test_query/test_connection_fields_api.py::test_connection_field_omits_args_without_sidecars``.
     Opted-in connection types carry ``totalCount``, while unopted types omit it.
     """
     data = assert_graphql_success(_NESTED_CONNECTION_FIELD_ARGS)
@@ -869,6 +886,7 @@ def _async_genre_connection_schema() -> DjangoSchema:
     return DjangoSchema(query=Query, config=strawberry_config())
 
 
+@wraps(AsyncDjangoGraphQLView.as_view())
 async def _async_genre_graphql_view(request: HttpRequest) -> HttpResponseBase:
     """The test-local async-resolver schema on an async view."""
     schema = _ASYNC_CURRENT["schema"]
@@ -1769,12 +1787,14 @@ def _cursor_schema() -> DjangoSchema:
     )
 
 
+@wraps(DjangoGraphQLView.as_view())
 def _cursor_graphql_view(request: HttpRequest) -> HttpResponseBase:
     schema = _CURSOR_CURRENT["schema"]
     assert schema is not None
     return DjangoGraphQLView.as_view(schema=schema)(request)
 
 
+@wraps(AsyncDjangoGraphQLView.as_view())
 async def _async_cursor_graphql_view(request: HttpRequest) -> HttpResponseBase:
     schema = _CURSOR_CURRENT["schema"]
     assert schema is not None
@@ -2347,6 +2367,7 @@ def _unbounded_cap_schema() -> DjangoSchema:
     )
 
 
+@wraps(DjangoGraphQLView.as_view())
 def _unbounded_graphql_view(request: HttpRequest) -> HttpResponseBase:
     schema = _UNBOUNDED_CURRENT["schema"]
     assert schema is not None
@@ -2755,3 +2776,245 @@ async def test_an_async_view_consumer_source_that_raises_is_masked(
 
     payload = await _post_cursor_async(field, {"first": 2})
     _assert_source_failure_masked(payload, caplog, field)
+
+
+class _RenamePageArguments(NameConverter):
+    """Publishes every name Strawberry spells as a key of ``wire`` under its value."""
+
+    def __init__(self, wire: Mapping[str, str]) -> None:
+        super().__init__()
+        self.wire: Mapping[str, str] = wire
+
+    @override
+    def get_graphql_name(self, obj: HasGraphQLName) -> str:
+        name = super().get_graphql_name(obj)
+        return self.wire.get(name, name)
+
+
+#: Each converter's wire spelling of the Relay page arguments and the two sidecars:
+#: every name renamed, and ``first`` / ``last`` swapped.
+_PUBLISHED_PAGE_NAMES: dict[str, dict[str, str]] = {
+    "renamed": {
+        "first": "take",
+        "last": "tail",
+        "after": "since",
+        "before": "until",
+        "filter": "where",
+        "orderBy": "sort",
+    },
+    "swapped": {"first": "last", "last": "first"},
+}
+
+#: ``surface -> document template``; ``{args}`` takes the page arguments.
+_PAGE_NAME_SURFACES: dict[str, str] = {
+    "root-offset": "{{ allLibraryGenresConnection({args}) {{ edges {{ node {{ name }} }} }} }}",
+    "nested-offset": (
+        "{{ allLibraryGenres {{ booksConnection({args}) {{ edges {{ node {{ title }} }} }} }} }}"
+    ),
+    "root-keyset": "{{ allLibraryIssuesConnection({args}) {{ edges {{ node {{ id }} }} }} }}",
+    "nested-keyset": (
+        "{{ allLibraryPeriodicalsConnection {{ edges {{ node {{"
+        " issuesConnection({args}) {{ edges {{ node {{ id }} }} }} }} }} }} }}"
+    ),
+}
+
+#: ``(case, arguments by Python name, message template)``. ``{first}`` and the other
+#: placeholders take the published names; ``{cursor}`` the surface's cursor wording.
+_PAGE_NAME_CASES: list[tuple[str, str, str]] = [
+    ("first-negative", "first: -1", "Argument '{first}' must be a non-negative integer."),
+    ("last-negative", "last: -1", "Argument '{last}' must be a non-negative integer."),
+    ("first-over-cap", "first: 101", "Argument '{first}' cannot be higher than 100."),
+    (
+        "first-and-last",
+        "first: 1, last: 1",
+        "Connection arguments `{first}` and `{last}` are mutually exclusive; supply only one.",
+    ),
+    ("bad-after", 'after: "not-a-cursor"', "Argument '{after}' contains {cursor}."),
+    ("bad-before", 'before: "not-a-cursor"', "Argument '{before}' contains {cursor}."),
+]
+
+#: The Relay page arguments in the order the sliced-source refusal names them.
+_SLICED_MESSAGE_ORDER = (
+    "first",
+    "last",
+    "before",
+    "after",
+)
+_SIDECARS = ("filter", "orderBy")
+
+_CURSOR_WORDING = {
+    "offset": "a non-existing value",
+    "keyset": "an invalid cursor for this connection",
+}
+
+
+def _published(converter: str, name: str) -> str:
+    """The wire name ``converter`` publishes for the default-converter ``name``."""
+    return _PUBLISHED_PAGE_NAMES.get(converter, {}).get(name, name)
+
+
+def _spelled(converter: str, arguments: str) -> str:
+    """``arguments`` (keyed by default-converter names) respelled in ``converter``'s names."""
+    return re.sub(
+        r"\b(first|last|after|before|filter|orderBy):",
+        lambda match: f"{_published(converter, match.group(1))}:",
+        arguments,
+    )
+
+
+def _project_schema_under(converter: str) -> DjangoSchema:
+    """The project's ``Query`` built again, under ``converter``'s wire names."""
+    return DjangoSchema(
+        query=config_schema.Query,
+        config=strawberry_config(
+            name_converter=_RenamePageArguments(_PUBLISHED_PAGE_NAMES.get(converter, {})),
+        ),
+    )
+
+
+def _post_schema(schema: DjangoSchema, query: str) -> JSONObject:
+    """POST ``query`` to ``schema`` over the module's ``/graphql-cursor/`` mount."""
+    _CURSOR_CURRENT["schema"] = schema
+    try:
+        with override_settings(ROOT_URLCONF=__name__):
+            clear_url_caches()
+            return graphql_payload(query, url="/graphql-cursor/")
+    finally:
+        _CURSOR_CURRENT["schema"] = None
+        clear_url_caches()
+
+
+def _coded_errors(payload: JSONObject) -> list[tuple[object, object]]:
+    return [
+        (json_at(error, "message"), json_at(error, "extensions", "code"))
+        for error in json_list(payload, "errors")
+    ]
+
+
+def _seed_page_name_parents() -> None:
+    """One parent for each nested surface, so each nested connection resolves once."""
+    library_models.Genre.objects.create(name="Parent Genre")
+    library_models.Periodical.objects.create(name="Parent Journal")
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("converter", list(_PUBLISHED_PAGE_NAMES))
+@pytest.mark.parametrize("surface", list(_PAGE_NAME_SURFACES))
+@pytest.mark.parametrize(
+    ("arguments", "template"),
+    [case[1:] for case in _PAGE_NAME_CASES],
+    ids=[case[0] for case in _PAGE_NAME_CASES],
+)
+def test_pagination_errors_name_the_arguments_the_schema_published(
+    converter: str,
+    surface: str,
+    arguments: str,
+    template: str,
+) -> None:
+    """A pagination rejection names the page argument by the name the client sent.
+
+    The project's ``Query`` is built again under a ``NameConverter`` that renames
+    ``first`` / ``last`` / ``after`` / ``before`` or swaps ``first`` and ``last``,
+    so the schema this test posts to is a second build over the shipped types
+    (Strawberry's ``ConnectionExtension.apply`` appends the page arguments to the
+    shared fields on every build). Root and nested, offset and keyset: each
+    rejection keeps ``PAGINATION_INVALID`` and names the published argument.
+    """
+    _seed_page_name_parents()
+    names = {name: _published(converter, name) for name in _SLICED_MESSAGE_ORDER}
+    cursor = _CURSOR_WORDING["keyset" if "keyset" in surface else "offset"]
+    expected = template.format(cursor=cursor, **names)
+    document = _PAGE_NAME_SURFACES[surface].format(args=_spelled(converter, arguments))
+
+    payload = _post_schema(_project_schema_under(converter), document)
+
+    assert _coded_errors(payload) == [(expected, "PAGINATION_INVALID")], payload
+
+
+@pytest.mark.django_db
+def test_pagination_errors_follow_the_executing_schema_after_another_build() -> None:
+    """Two builds over the same types each name the page argument they published.
+
+    The renamed schema is built first and a default-converter schema second, so
+    the shared connection fields carry both builds' page arguments. Each
+    schema's rejection is still the coded pagination error, under its own name.
+    """
+    renamed = _project_schema_under("renamed")
+    default = _project_schema_under("default")
+    surface = _PAGE_NAME_SURFACES["root-offset"]
+
+    renamed_payload = _post_schema(renamed, surface.format(args="take: -1"))
+    default_payload = _post_schema(default, surface.format(args="first: -1"))
+
+    assert _coded_errors(renamed_payload) == [
+        ("Argument 'take' must be a non-negative integer.", "PAGINATION_INVALID"),
+    ], renamed_payload
+    assert _coded_errors(default_payload) == [
+        ("Argument 'first' must be a non-negative integer.", "PAGINATION_INVALID"),
+    ], default_payload
+
+
+def _sliced_genres(
+    _root: object,
+    _info: strawberry.Info[object, object],
+) -> models.QuerySet[library_models.Genre]:
+    return library_models.Genre.objects.order_by("pk")[:5]
+
+
+def _resolver_contract_schema(converter: str) -> DjangoSchema:
+    """A list-source and a sliced-source connection over ``GenreType``, under ``converter``."""
+    importlib.import_module("config.schema")
+
+    @strawberry.type
+    class Query:
+        list_genres = DjangoConnectionField(library_schema.GenreType, resolver=_list_genres)
+        sliced_genres = DjangoConnectionField(library_schema.GenreType, resolver=_sliced_genres)
+
+    return DjangoSchema(
+        query=Query,
+        config=strawberry_config(
+            name_converter=_RenamePageArguments(_PUBLISHED_PAGE_NAMES.get(converter, {})),
+        ),
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("converter", ["default", *_PUBLISHED_PAGE_NAMES])
+def test_resolver_contract_refusals_name_the_arguments_the_schema_published(
+    converter: str,
+) -> None:
+    """The sidecar-over-a-list and sliced-source refusals name the published arguments."""
+    schema = _resolver_contract_schema(converter)
+    names = {name: _published(converter, name) for name in (*_SLICED_MESSAGE_ORDER, *_SIDECARS)}
+
+    sidecar = _post_schema(
+        schema,
+        "{ listGenres("
+        + _spelled(converter, 'filter: {name: {iContains: "b"}}')
+        + ") { edges { node { name } } } }",
+    )
+    sliced = _post_schema(
+        schema,
+        "{ slicedGenres(" + _spelled(converter, "first: 1") + ") { edges { node { name } } } }",
+    )
+
+    sidecar_names = f"`{names['filter']}:` / `{names['orderBy']}:`"
+    sidecar_message = (
+        f"{sidecar_names} was supplied to a connection whose resolver returned a non-queryset "
+        "iterable; these arguments narrow a QuerySet and cannot apply to a plain iterable. "
+        f"Return a QuerySet (or a Manager) from the connection resolver, or omit {sidecar_names}."
+    )
+    assert [json_at(error, "message") for error in json_list(sidecar, "errors")] == [
+        sidecar_message,
+    ], sidecar
+    page_names = " / ".join(f"`{names[name]}`" for name in _SLICED_MESSAGE_ORDER)
+    sliced_message = (
+        "A connection resolver returned an already-sliced QuerySet (e.g. `qs[:10]`). A "
+        "connection field manages its own ordering and cursor pagination, and Django forbids "
+        "reordering or re-slicing a sliced query, so an already-sliced source cannot be "
+        "paginated. Return an unsliced QuerySet (or a Manager) and let the connection's "
+        f"{page_names} arguments paginate it."
+    )
+    assert [json_at(error, "message") for error in json_list(sliced, "errors")] == [
+        sliced_message,
+    ], sliced

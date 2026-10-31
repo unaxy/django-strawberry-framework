@@ -1,8 +1,12 @@
-"""Tests for the Strawberry request-body and connection-page patches.
+"""Tests for the Strawberry request-body and Relay patches.
 
 System-under-test: :mod:`django_strawberry_framework._strawberry_patches`,
 applied at app-load time by
 :meth:`django_strawberry_framework.apps.DjangoStrawberryFrameworkConfig.ready`.
+
+Relay rows pin only installation, idempotence, signature/source drift and the
+explicit upstream opt-out. Wire selection names and async row elision are owned
+by ``examples/fakeshop/test_query/test_connection_names_api.py``.
 
 The patch wraps :meth:`strawberry.http.base.BaseView.parse_json` to
 close two upstream gaps that otherwise surface as unhandled ``500``s:
@@ -73,9 +77,11 @@ consumer mounting Strawberry's own view is entitled to.
 """
 
 import functools
+import importlib
+import inspect
 import json
-import types
 from collections.abc import Callable, Mapping
+from types import FunctionType
 from unittest import mock
 
 import pytest
@@ -94,9 +100,11 @@ from strawberry.http.async_base_view import AsyncBaseHTTPView
 from strawberry.http.base import BaseView
 from strawberry.http.sync_base_view import SyncBaseHTTPView
 from strawberry.relay import types as relay_types
+from strawberry.relay import utils as relay_utils
 from typing_extensions import override
 
 from django_strawberry_framework import _strawberry_patches as patches
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 
@@ -658,12 +666,11 @@ class _InlinedCheckConnection:
 
 def test_apply_fails_loudly_when_resolve_connection_stops_calling_the_check() -> None:
     """A release that inlines the check would leave the rebind installed and inert."""
-    module = types.SimpleNamespace(
-        should_resolve_list_connection_edges=patches._original_should_resolve_list_connection_edges,
-        ListConnection=_InlinedCheckConnection,
+    inlined = truth.stored_function(
+        truth.class_dict(_InlinedCheckConnection).get("resolve_connection"),
     )
     with (
-        mock.patch.object(patches, "relay_types", module),
+        mock.patch.object(patches, "_original_relay_list_connection", inlined),
         pytest.raises(RuntimeError, match="no longer calls"),
     ):
         patches.apply()
@@ -830,3 +837,161 @@ async def test_patched_async_parse_multipart_translates_a_deep_operations_docume
 
     assert excinfo.value.status_code == 400
     assert excinfo.value.reason == patches._UPSTREAM_MULTIPART_PARSE_REASON
+
+
+def _relay_resolver_function() -> object:
+    """The classmethod's stored function, without invoking its descriptor."""
+    return truth.stored_function(
+        truth.class_dict(relay_types.ListConnection).get("resolve_connection"),
+    )
+
+
+def test_relay_patch_occupies_the_types_global_and_the_list_resolver() -> None:
+    """The ``strawberry.relay.types`` check and the list resolver are replaced; utils is not."""
+    patches.apply()
+    assert (
+        read_attr(relay_types, "should_resolve_list_connection_edges")
+        is patches._patched_should_resolve_list_connection_edges
+    )
+    assert (
+        relay_utils.should_resolve_list_connection_edges
+        is patches._original_should_resolve_list_connection_edges
+    )
+    assert _relay_resolver_function() is patches._patched_list_connection_resolve_connection
+    assert patches._patch_is_installed()
+
+
+def test_relay_apply_repairs_a_reverted_list_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reverting the adapted resolver alone makes the next apply reinstall it."""
+    patches.apply()
+    original_resolver = patches._original_relay_list_connection
+    assert callable(original_resolver)
+    monkeypatch.setattr(
+        relay_types.ListConnection,
+        "resolve_connection",
+        classmethod(original_resolver),
+    )
+    assert not patches._relay_patch_is_installed()
+    assert not patches._patch_is_installed()
+    patches.apply()
+    assert patches._relay_patch_is_installed()
+    assert patches._patch_is_installed()
+
+
+def test_relay_repeated_apply_keeps_the_same_replacements() -> None:
+    """Repeated app-ready calls do not layer wrappers or change the installed functions."""
+    patches.apply()
+    first = (
+        read_attr(relay_types, "should_resolve_list_connection_edges"),
+        _relay_resolver_function(),
+    )
+    patches.apply()
+    assert (
+        read_attr(relay_types, "should_resolve_list_connection_edges"),
+        _relay_resolver_function(),
+    ) == first
+
+
+def test_relay_reload_recovers_genuine_upstream_originals() -> None:
+    """A reload unwraps this module's old replacements instead of pinning its own source as upstream."""
+    originals = (
+        patches._original_should_resolve_list_connection_edges,
+        patches._original_relay_list_connection,
+        patches._original_parse_json,
+    )
+    importlib.reload(patches)
+    patches.apply()
+    assert (
+        patches._original_should_resolve_list_connection_edges,
+        patches._original_relay_list_connection,
+        patches._original_parse_json,
+    ) == originals
+    assert patches._patch_is_installed()
+
+
+def test_relay_apply_refuses_a_missing_list_resolver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A moved ``ListConnection.resolve_connection`` fails the Relay validation by name."""
+    monkeypatch.setattr(patches, "_original_relay_list_connection", None)
+    with pytest.raises(
+        RuntimeError,
+        match=r"expected ListConnection\.resolve_connection",
+    ) as excinfo:
+        patches.apply()
+    assert 'APPLY_UPSTREAM_PATCHES = {"strawberry": False}' in str(excinfo.value)
+    assert "Relay opt-out consequences" in str(excinfo.value)
+
+
+def _drifted_resolve_connection(_cls: object, info: strawberry.Info[object, object]) -> bool:
+    """A resolver that still asks the connection-page check but lost its pagination keywords."""
+    return relay_utils.should_resolve_list_connection_edges(info)
+
+
+def test_relay_apply_refuses_upstream_signature_drift(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A changed call shape cannot pass merely because the resolver still asks the check."""
+    monkeypatch.setattr(patches, "_original_relay_list_connection", _drifted_resolve_connection)
+    with pytest.raises(
+        RuntimeError,
+        match="upstream pagination signature changed",
+    ) as excinfo:
+        patches.apply()
+    assert 'APPLY_UPSTREAM_PATCHES = {"strawberry": False}' in str(excinfo.value)
+    assert "Relay opt-out consequences" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("source_state", ["changed", "unreadable"])
+def test_relay_apply_refuses_changed_or_unreadable_adapted_source(
+    monkeypatch: pytest.MonkeyPatch,
+    source_state: str,
+) -> None:
+    """The adapted body is pinned; unavailable source is not permission to supersede unknown code."""
+    target = patches._original_relay_list_connection
+    original_getsource = inspect.getsource
+
+    def source(value: object) -> str:
+        assert isinstance(value, FunctionType)
+        if value is target:
+            if source_state == "unreadable":
+                raise OSError("dependency source unavailable")
+            return original_getsource(value) + "\n# upstream algorithm changed\n"
+        return original_getsource(value)
+
+    monkeypatch.setattr(inspect, "getsource", source)
+    with pytest.raises(RuntimeError, match="resolve_connection no longer matches") as excinfo:
+        patches.apply()
+    assert 'APPLY_UPSTREAM_PATCHES = {"strawberry": False}' in str(excinfo.value)
+    assert "Relay opt-out consequences" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "toggle",
+    [False, {"strawberry": False}],
+    ids=["global-off", "dependency-off"],
+)
+def test_relay_patch_respects_the_existing_upstream_opt_out(
+    settings: pytest_django.Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    toggle: object,
+) -> None:
+    """Opting out leaves the native connection-page check and the native resolver unchanged."""
+    monkeypatch.setattr(
+        relay_types,
+        "should_resolve_list_connection_edges",
+        patches._original_should_resolve_list_connection_edges,
+    )
+    original_resolver = patches._original_relay_list_connection
+    assert callable(original_resolver)
+    monkeypatch.setattr(
+        relay_types.ListConnection,
+        "resolve_connection",
+        classmethod(original_resolver),
+    )
+    settings.DJANGO_STRAWBERRY_FRAMEWORK = {"APPLY_UPSTREAM_PATCHES": toggle}
+    patches.apply()
+    assert (
+        read_attr(relay_types, "should_resolve_list_connection_edges")
+        is patches._original_should_resolve_list_connection_edges
+    )
+    assert _relay_resolver_function() is patches._original_relay_list_connection
+    assert not patches._relay_patch_is_installed()

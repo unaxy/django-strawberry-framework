@@ -4,6 +4,7 @@ import asyncio
 import inspect
 from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Iterable
 from dataclasses import dataclass, field
+from functools import wraps
 from typing import NoReturn, cast
 
 import graphql
@@ -21,6 +22,7 @@ from graphql import FieldNode, GraphQLError, GraphQLObjectType
 from graphql.execution import ExecutionContext as CoreExecutionContext
 from graphql.pyutils import AwaitableOrValue, Path
 from graphql_client import (
+    JSONObject,
     JSONValue,
     json_at,
     json_list,
@@ -200,6 +202,7 @@ class AuditView(AsyncDjangoGraphQLView):
         return await super().process_result(request, result)
 
 
+@wraps(AsyncDjangoGraphQLView.as_view())
 async def view(request: HttpRequest) -> HttpResponseBase:
     """Mount the actual package async view through Django's in-process client."""
     view_class = AuditView if CURRENT.state.view == "audit" else AsyncDjangoGraphQLView
@@ -567,6 +570,27 @@ async def test_live_late_mutation_orm(
         await asyncio.wait_for(CURRENT.state.drained.wait(), timeout=15)
         names = [row.name async for row in Branch.objects.all()]
         assert response.status_code == 200
+        failing_field = "values" if mutation_shape == "mutation_list" else "fast"
+        location = graphql.get_location(graphql.Source(query), query.index(failing_field))
+        error_path: list[JSONValue] = ["create", "result", failing_field]
+        if mutation_shape == "mutation_list":
+            error_path.append(0)
+        expected: JSONObject = {
+            "data": {
+                "create": {
+                    "result": {"values": None} if mutation_shape == "mutation_list" else None,
+                    "errors": [],
+                },
+            },
+            "errors": [
+                {
+                    "message": "INITIAL_DELIBERATE",
+                    "locations": [{"line": location.line, "column": location.column}],
+                    "path": error_path,
+                },
+            ],
+        }
+        assert response_json(response) == expected
         assert names == []
         assert CURRENT.state.orm_atomic is True
         assert CURRENT.state.orm_pk is not None

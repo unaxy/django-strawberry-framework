@@ -249,38 +249,40 @@ def test_global_id_for_unfinalized_raises() -> None:
     assert "first (directly, or by importing a schema module that calls it)" in message
 
 
-def test_global_id_for_non_node_raises() -> None:
-    """A finalized non-Relay DjangoType raises the Relay gate; a plain class is rejected too."""
-    type_cls = _make_node_type("CategoryType", interfaces=())
-    finalize_django_types()
-    assert type_cls.__django_strawberry_definition__.finalized is True
+@pytest.mark.parametrize("shape", ["non-node", "not-a-django-type"], ids=str)
+def test_global_id_for_non_node_raises(shape: str) -> None:
+    """A finalized non-Relay DjangoType and a plain class receive their own typed refusal."""
+    if shape == "non-node":
+        type_cls = _make_node_type("CategoryType", interfaces=())
+        finalize_django_types()
+        assert type_cls.__django_strawberry_definition__.finalized is True
+        expected = (
+            "global_id_for: CategoryType requires a Relay-Node-shaped type; "
+            "add `relay.Node` to `Meta.interfaces` or inherit `relay.Node` directly."
+        )
+    else:
+        type_cls = object
+        expected = (
+            "global_id_for: <class 'object'> is not a registered DjangoType subclass; "
+            "pass the DjangoType class whose emitted id you want to mint."
+        )
     with pytest.raises(ConfigurationError) as excinfo:
         global_id_for(type_cls, 1)
-    message = str(excinfo.value)
-    assert "CategoryType" in message
-    assert "requires a Relay-Node-shaped type; add `relay.Node` to `Meta.interfaces`" in message
-    # Step-1a branch: an input that is not a DjangoType subclass at all.
-    with pytest.raises(ConfigurationError) as excinfo:
-        global_id_for(object, 1)
-    assert str(excinfo.value) == (
-        "global_id_for: <class 'object'> is not a registered DjangoType subclass; "
-        "pass the DjangoType class whose emitted id you want to mint."
-    )
+    assert str(excinfo.value) == expected
 
 
+@pytest.mark.parametrize("shape", ["replaced", "stale"], ids=str)
 def test_global_id_for_rejects_replaced_or_stale_definitions(
     monkeypatch: pytest.MonkeyPatch,
+    shape: str,
 ) -> None:
     """Only the active registry's own definition may mint a GlobalID."""
     type_cls = _make_node_type("CategoryNode")
     finalize_django_types()
-
-    with monkeypatch.context() as patch:
-        patch.setattr(type_cls, "__django_strawberry_definition__", object())
-        with pytest.raises(ConfigurationError, match="not a registered DjangoType subclass"):
-            global_id_for(type_cls, 1)
-
-    registry.clear()
+    if shape == "replaced":
+        monkeypatch.setattr(type_cls, "__django_strawberry_definition__", object())
+    else:
+        registry.clear()
     with pytest.raises(ConfigurationError, match="not a registered DjangoType subclass"):
         global_id_for(type_cls, 1)
 
@@ -333,21 +335,15 @@ def test_public_decode_round_trip_primary_and_type_name() -> None:
     assert testing_relay.decode_global_id is types_relay.decode_global_id
 
 
-def test_global_id_for_accepts_various_id_types_and_round_trips() -> None:
-    """global_id_for accepts int, str, and UUID objects, and round-trips through decode_global_id."""
+@pytest.mark.parametrize(
+    "pk",
+    [10, "slug-abc-123", uuid.UUID("12345678-1234-5678-1234-567812345678")],
+    ids=["int", "str", "uuid"],
+)
+def test_global_id_for_accepts_various_id_types_and_round_trips(pk: int | str | uuid.UUID) -> None:
+    """Each supported id type round-trips through both text and parsed GlobalID decoders."""
     category_node = _make_node_type("CategoryNode")
     finalize_django_types()
-
-    # int id
-    gid_int = global_id_for(category_node, 10)
-    assert decode_global_id(gid_int) == (category_node, "10")
-    assert decode_global_id(relay.GlobalID.from_id(gid_int)) == (category_node, "10")
-
-    # str id
-    gid_str = global_id_for(category_node, "slug-abc-123")
-    assert decode_global_id(gid_str) == (category_node, "slug-abc-123")
-
-    # UUID id
-    uid = uuid.uuid4()
-    gid_uuid = global_id_for(category_node, uid)
-    assert decode_global_id(gid_uuid) == (category_node, str(uid))
+    gid = global_id_for(category_node, pk)
+    assert decode_global_id(gid) == (category_node, str(pk))
+    assert decode_global_id(relay.GlobalID.from_id(gid)) == (category_node, str(pk))

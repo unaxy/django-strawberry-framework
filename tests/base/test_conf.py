@@ -18,7 +18,8 @@ have no live pin. Constructor precedence lives in
 request; its limit and validation rows live in ``tests/filters/test_sets.py``.
 """
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from functools import partial
 from types import MappingProxyType
 from typing import NoReturn
 from unittest import mock
@@ -402,47 +403,53 @@ def test_single_parent_fast_path_setting_reads_explicit_values_live(
     assert single_parent_fast_path_setting() is True
 
 
+@pytest.mark.parametrize(
+    "value",
+    [pytest.param(0, id="integer-zero"), pytest.param("yes", id="text")],
+)
 def test_single_parent_fast_path_setting_is_an_unvalidated_toggle(
     settings: pytest_django.Settings,
+    value: object,
 ) -> None:
-    """The toggle is a pure on/off read: any value passes through, consumed by truthiness.
-
-    Unlike ``NESTED_CONNECTION_STRATEGY`` (validated in ``resolve_strategy``
-    against the strategy registry), the fast path has no downstream registry to
-    validate against - the fetch-time consumer only asks
-    ``if not single_parent_fast_path_setting()``, so a non-bool value is returned
-    verbatim and interpreted by truthiness rather than raising.
-    """
-    settings.DJANGO_STRAWBERRY_FRAMEWORK = {"SINGLE_PARENT_FAST_PATH": 0}
-    assert single_parent_fast_path_setting() == 0  # falsy -> disables, no raise.
-    settings.DJANGO_STRAWBERRY_FRAMEWORK = {"SINGLE_PARENT_FAST_PATH": "yes"}
-    assert single_parent_fast_path_setting() == "yes"  # truthy -> enables, no raise.
+    """The reader preserves a non-bool value; downstream truthiness owns the toggle."""
+    settings.DJANGO_STRAWBERRY_FRAMEWORK = {"SINGLE_PARENT_FAST_PATH": value}
+    assert single_parent_fast_path_setting() is value
 
 
+@pytest.mark.parametrize(
+    ("key", "reader", "value"),
+    [
+        pytest.param(
+            "NESTED_CONNECTION_STRATEGY",
+            nested_connection_strategy_setting,
+            5,
+            id="nested-strategy",
+        ),
+        pytest.param("TESTING_ENDPOINT", testing_endpoint_setting, None, id="testing-endpoint"),
+        pytest.param("HIDE_FLAT_FILTERS", hide_flat_filters_setting, 1, id="flat-filters"),
+        pytest.param(
+            "RELAY_GLOBALID_STRATEGY",
+            relay_globalid_strategy_setting,
+            5,
+            id="globalid-strategy",
+        ),
+        pytest.param(
+            "MAX_REQUEST_BODY_BYTES",
+            max_request_body_bytes_setting,
+            "1024",
+            id="body-cap",
+        ),
+    ],
+)
 def test_setting_reader_helpers_return_wrong_typed_values_verbatim(
     settings: pytest_django.Settings,
+    key: str,
+    reader: Callable[[], object],
+    value: object,
 ) -> None:
-    """The thin readers hand back wrong-typed values unchanged; consumers coerce or validate.
-
-    The single-parent toggle's verbatim rows live in
-    ``test_single_parent_fast_path_setting_is_an_unvalidated_toggle``; this row
-    pins the other five readers. A wrong-typed value surfaces downstream
-    (``resolve_strategy`` / ``_resolved_max_request_body_bytes`` /
-    ``_validated_globalid_setting`` / the ``bool()`` coercion in
-    ``_build_input_fields``), never here.
-    """
-    settings.DJANGO_STRAWBERRY_FRAMEWORK = {
-        "NESTED_CONNECTION_STRATEGY": 5,
-        "TESTING_ENDPOINT": None,
-        "HIDE_FLAT_FILTERS": 1,
-        "RELAY_GLOBALID_STRATEGY": 5,
-        "MAX_REQUEST_BODY_BYTES": "1024",
-    }
-    assert nested_connection_strategy_setting() == 5
-    assert testing_endpoint_setting() is None
-    assert hide_flat_filters_setting() == 1
-    assert relay_globalid_strategy_setting() == 5
-    assert max_request_body_bytes_setting() == "1024"
+    """Each thin reader returns the exact wrong-typed setting for its downstream validator."""
+    settings.DJANGO_STRAWBERRY_FRAMEWORK = {key: value}
+    assert reader() is value
 
 
 # ---------------------------------------------------------------------------
@@ -505,41 +512,89 @@ def test_delattr_clears_stale_cache_and_restores_defaults(
     assert error_policy_setting() is None
 
 
+@pytest.mark.parametrize(
+    (
+        "key",
+        "reader",
+        "default",
+        "value",
+    ),
+    [
+        pytest.param(
+            "NESTED_CONNECTION_STRATEGY",
+            nested_connection_strategy_setting,
+            "windowed",
+            "in_memory",
+            id="nested-strategy",
+        ),
+        pytest.param(
+            "SINGLE_PARENT_FAST_PATH",
+            single_parent_fast_path_setting,
+            True,
+            False,
+            id="single-parent",
+        ),
+        pytest.param(
+            "TESTING_ENDPOINT",
+            testing_endpoint_setting,
+            "/graphql/",
+            "/api/graphql/",
+            id="testing-endpoint",
+        ),
+        pytest.param(
+            "HIDE_FLAT_FILTERS",
+            hide_flat_filters_setting,
+            False,
+            True,
+            id="flat-filters",
+        ),
+        pytest.param(
+            "RELAY_GLOBALID_STRATEGY",
+            relay_globalid_strategy_setting,
+            None,
+            "type+model",
+            id="globalid-strategy",
+        ),
+        pytest.param(
+            "MAX_REQUEST_BODY_BYTES",
+            max_request_body_bytes_setting,
+            1048576,
+            8192,
+            id="body-cap",
+        ),
+        pytest.param("MAX_FLAT_FILTERS", max_flat_filters_setting, 10000, 50, id="flat-cap"),
+        pytest.param(
+            "RESOURCE_POLICY",
+            resource_policy_setting,
+            None,
+            {"max_page_size": 20},
+            id="resource-policy",
+        ),
+        pytest.param(
+            "ERROR_POLICY",
+            error_policy_setting,
+            None,
+            {"enabled": True},
+            id="error-policy",
+        ),
+    ],
+)
 def test_setting_reader_helpers_default_and_override_values(
     settings: pytest_django.Settings,
+    key: str,
+    reader: Callable[[], object],
+    default: object,
+    value: object,
 ) -> None:
-    """Direct unit test for each thin reader helper in conf.py."""
+    """Each cached reader follows a default-to-explicit settings replacement."""
     settings.DJANGO_STRAWBERRY_FRAMEWORK = {}
-    assert nested_connection_strategy_setting() == "windowed"
-    assert single_parent_fast_path_setting() is True
-    assert testing_endpoint_setting() == "/graphql/"
-    assert hide_flat_filters_setting() is False
-    assert relay_globalid_strategy_setting() is None
-    assert max_request_body_bytes_setting() == 1_048_576
-    assert max_flat_filters_setting() == 10_000
-    assert resource_policy_setting() is None
-    assert error_policy_setting() is None
-
-    settings.DJANGO_STRAWBERRY_FRAMEWORK = {
-        "NESTED_CONNECTION_STRATEGY": "in_memory",
-        "SINGLE_PARENT_FAST_PATH": False,
-        "TESTING_ENDPOINT": "/api/graphql/",
-        "HIDE_FLAT_FILTERS": True,
-        "RELAY_GLOBALID_STRATEGY": "type+model",
-        "MAX_REQUEST_BODY_BYTES": 8192,
-        "MAX_FLAT_FILTERS": 50,
-        "RESOURCE_POLICY": {"max_page_size": 20},
-        "ERROR_POLICY": {"enabled": True},
-    }
-    assert nested_connection_strategy_setting() == "in_memory"
-    assert single_parent_fast_path_setting() is False
-    assert testing_endpoint_setting() == "/api/graphql/"
-    assert hide_flat_filters_setting() is True
-    assert relay_globalid_strategy_setting() == "type+model"
-    assert max_request_body_bytes_setting() == 8192
-    assert max_flat_filters_setting() == 50
-    assert resource_policy_setting() == {"max_page_size": 20}
-    assert error_policy_setting() == {"enabled": True}
+    actual = reader()
+    assert type(actual) is type(default)
+    assert actual == default
+    settings.DJANGO_STRAWBERRY_FRAMEWORK = {key: value}
+    actual = reader()
+    assert type(actual) is type(value)
+    assert actual == value
 
 
 def test_django_backed_resync_fails_loud_after_silent_bad_replacement(
@@ -596,23 +651,42 @@ def test_explicit_settings_instance_ignores_django_delattr(
 # ---------------------------------------------------------------------------
 
 
-def test_setting_rejection_messages_are_pinned(settings: pytest_django.Settings) -> None:
-    """The honest rejection messages, byte for byte."""
-    with pytest.raises(ConfigurationError) as normalize_info:
-        conf._normalize_user_settings("bad")
-    assert str(normalize_info.value) == (
-        "`DJANGO_STRAWBERRY_FRAMEWORK` must be a mapping or None; got str."
-    )
-    settings.DJANGO_STRAWBERRY_FRAMEWORK = {"APPLY_UPSTREAM_PATCHES": {"django": "no"}}
-    with pytest.raises(ConfigurationError) as value_info:
-        upstream_patches_enabled("django")
-    assert str(value_info.value) == "`APPLY_UPSTREAM_PATCHES['django']` must be a bool; got str."
-    settings.DJANGO_STRAWBERRY_FRAMEWORK = {"APPLY_UPSTREAM_PATCHES": {1: False}}
-    with pytest.raises(ConfigurationError) as key_info:
-        upstream_patches_enabled("django")
-    assert str(key_info.value) == (
-        "`APPLY_UPSTREAM_PATCHES` keys must be dependency name strings; got 1."
-    )
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        pytest.param(
+            "mapping",
+            "`DJANGO_STRAWBERRY_FRAMEWORK` must be a mapping or None; got str.",
+            id="mapping",
+        ),
+        pytest.param(
+            "value",
+            "`APPLY_UPSTREAM_PATCHES['django']` must be a bool; got str.",
+            id="dependency-value",
+        ),
+        pytest.param(
+            "key",
+            "`APPLY_UPSTREAM_PATCHES` keys must be dependency name strings; got 1.",
+            id="dependency-key",
+        ),
+    ],
+)
+def test_setting_rejection_messages_are_pinned(
+    settings: pytest_django.Settings,
+    case: str,
+    message: str,
+) -> None:
+    """Each independent normalization failure retains its own exact diagnostic."""
+    operation: Callable[[], object]
+    if case == "mapping":
+        operation = partial(conf._normalize_user_settings, "bad")
+    else:
+        value = {"django": "no"} if case == "value" else {1: False}
+        settings.DJANGO_STRAWBERRY_FRAMEWORK = {"APPLY_UPSTREAM_PATCHES": value}
+        operation = partial(upstream_patches_enabled, "django")
+    with pytest.raises(ConfigurationError) as error:
+        operation()
+    assert str(error.value) == message
 
 
 def test_normalize_mapping_iteration_error_propagates() -> None:

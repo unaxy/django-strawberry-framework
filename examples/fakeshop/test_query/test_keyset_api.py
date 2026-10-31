@@ -68,11 +68,13 @@ import datetime
 import enum
 import uuid
 from collections.abc import Callable, Mapping
+from functools import wraps
 
 import pytest
 import strawberry
 from apps.library import models
 from apps.library import schema as library_schema
+from apps.products.services import create_users
 from apps.scalars.models import ScalarSpecimen
 from asgiref.sync import sync_to_async
 from django.conf import settings
@@ -104,6 +106,7 @@ from strawberry.relay.utils import from_base64, to_base64
 
 from django_strawberry_framework import (
     DjangoConnectionField,
+    DjangoSchema,
     DjangoType,
     finalize_django_types,
     strawberry_config,
@@ -117,12 +120,14 @@ from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGrap
 _CURRENT: dict[str, strawberry.Schema | None] = {"schema": None}
 
 
+@wraps(DjangoGraphQLView.as_view())
 def _holder_view(request: HttpRequest) -> HttpResponseBase:
     schema = _CURRENT["schema"]
     assert schema is not None
     return DjangoGraphQLView.as_view(schema=schema)(request)
 
 
+@wraps(AsyncDjangoGraphQLView.as_view())
 async def _async_holder_view(request: HttpRequest) -> HttpResponseBase:
     schema = _CURRENT["schema"]
     assert schema is not None
@@ -290,18 +295,27 @@ def test_root_keyset_round_trip_and_pre_seek_total_count() -> None:
 
 
 @pytest.mark.django_db
-def test_root_keyset_page_survives_inserts_and_deletes_before_cursor() -> None:
-    """The motivating stability pin: mutations before the cursor cannot drift the page."""
+@pytest.mark.parametrize("change", ["insert", "delete"])
+def test_root_keyset_page_survives_inserts_and_deletes_before_cursor(change: str) -> None:
+    """Either mutation before the cursor leaves its next value-position page unchanged."""
     astronomy, _botany, _empty = _seed_periodicals()
     cursor = json_at(_root_page(first=3), "pageInfo", "endCursor")
-    baseline = _titles(_root_page(first=3, after=cursor))
+    expected = ["Bot #3", "Astro #2", "Bot #2"]
+    assert _titles(_root_page(first=3, after=cursor)) == expected
 
-    # Insert a row that sorts BEFORE the cursor position (number 9 > 5 sorts
-    # first under -number) and delete one from before it too - an offset
-    # cursor would shift by one in each direction; the value cursor cannot.
-    models.Issue.objects.create(periodical=astronomy, number=9, title="Astro #9")
-    models.Issue.objects.get(title="Astro #5").delete()
-    assert _titles(_root_page(first=3, after=cursor)) == baseline
+    # Each direction stands alone: inserting and deleting together could cancel
+    # offset drift and let an offset-based implementation pass this value-cursor row.
+    if change == "insert":
+        models.Issue.objects.create(periodical=astronomy, number=9, title="Astro #9")
+        expected_count = 9
+    else:
+        models.Issue.objects.get(title="Astro #5").delete()
+        expected_count = 7
+    page = _root_page(first=3, after=cursor)
+    assert _titles(page) == expected
+    assert json_at(page, "totalCount") == expected_count
+    assert json_at(page, "pageInfo", "hasPreviousPage") is True
+    assert json_at(page, "pageInfo", "hasNextPage") is True
 
 
 @pytest.mark.django_db
@@ -355,22 +369,22 @@ def test_root_keyset_cursor_survives_a_secret_key_rotation_that_keeps_the_fallba
 
 @pytest.mark.django_db
 def test_root_keyset_backward_pagination() -> None:
-    """``last:`` and ``last:``+``before:`` page backward through the value order."""
+    """Four finite backward pages cover every row once, including the exact head pair."""
     _seed_periodicals()
-    tail = _root_page(last=2)
-    assert _titles(tail) == ["Astro #1", "Bot #1"]
-    assert json_at(tail, "pageInfo", "hasPreviousPage") is True
-    assert json_at(tail, "pageInfo", "hasNextPage") is False
-    previous = _root_page(last=2, before=json_at(tail, "pageInfo", "startCursor"))
-    assert _titles(previous) == ["Astro #2", "Bot #2"]
-    assert json_at(previous, "pageInfo", "hasPreviousPage") is True
-    assert json_at(previous, "pageInfo", "hasNextPage") is True
-    # Walk all the way back: the head page reports no previous rows.
-    head = previous
-    while json_at(head, "pageInfo", "hasPreviousPage"):
-        head = _root_page(last=2, before=json_at(head, "pageInfo", "startCursor"))
-    assert _titles(head) == ["Astro #5"] or _titles(head) == ["Astro #5", "Astro #4"]
-    assert json_at(head, "pageInfo", "hasPreviousPage") is False
+    expected_pages = [
+        ["Astro #1", "Bot #1"],
+        ["Astro #2", "Bot #2"],
+        ["Astro #3", "Bot #3"],
+        ["Astro #5", "Astro #4"],
+    ]
+    before = None
+    for index, expected in enumerate(expected_pages):
+        page = _root_page(last=2, before=before)
+        assert _titles(page) == expected
+        assert json_at(page, "totalCount") == 8
+        assert json_at(page, "pageInfo", "hasPreviousPage") is (index < 3)
+        assert json_at(page, "pageInfo", "hasNextPage") is (index > 0)
+        before = json_at(page, "pageInfo", "startCursor")
 
 
 #: ``first: 0``'s empty-page ``pageInfo`` when rows exist past the page.
@@ -927,6 +941,7 @@ def test_nested_keyset_divergent_aliases_each_decode_their_own_cursor() -> None:
 @pytest.mark.django_db
 def test_keyset_cursor_decode_is_permission_aware() -> None:
     """A staff-minted cursor replays for anonymous viewers over ONLY their rows."""
+    create_users(1)
     astronomy, _botany, _empty = _seed_periodicals()
     models.Issue.objects.create(
         periodical=astronomy,
@@ -935,7 +950,7 @@ def test_keyset_cursor_decode_is_permission_aware() -> None:
         embargoed=True,
     )
 
-    staff = User.objects.create_user(username="keyset-staff", password="pw", is_staff=True)
+    staff = User.objects.get(username="staff_1")
     client = TestClient()
     with client.login(staff):
         staff_result = client.query(ROOT_PAGE_QUERY, variables={"first": 2}).response
@@ -990,13 +1005,19 @@ def test_root_keyset_order_by_related_path_seeks_via_annotation() -> None:
 
 @pytest.mark.django_db
 def test_root_keyset_unbounded_after_caps_at_relay_max_results() -> None:
-    """``after:`` with no ``first`` mirrors ``ListConnection``'s max-results cap."""
-    _seed_periodicals()
+    """An omitted first serves exactly the Relay cap even when more rows remain."""
+    periodical = models.Periodical.objects.create(name="Root cap journal")
+    models.Issue.objects.bulk_create(
+        [
+            models.Issue(periodical=periodical, number=number, title=f"Issue #{number}")
+            for number in range(1, 126)
+        ],
+    )
     cursor = json_at(_root_page(first=1), "pageInfo", "endCursor")
     page = _root_page(after=cursor)
-    # relay_max_results (100) far exceeds the seven remaining rows.
-    assert len(json_list(page, "edges")) == 7
-    assert json_at(page, "pageInfo", "hasNextPage") is False
+    assert _titles(page) == [f"Issue #{number}" for number in range(124, 24, -1)]
+    assert json_at(page, "totalCount") == 125
+    assert json_at(page, "pageInfo", "hasNextPage") is True
     assert json_at(page, "pageInfo", "hasPreviousPage") is True
 
 
@@ -1030,24 +1051,56 @@ def test_root_keyset_omitted_pagination_returns_the_full_set_under_the_cap() -> 
 
 @pytest.mark.django_db
 def test_nested_keyset_omitted_first_caps_at_relay_max_results() -> None:
-    """Optimized nested pages apply the same default cap as the root slicer."""
-    periodical = models.Periodical.objects.create(name="Large Periodical")
-    for number in range(1, 106):
-        models.Issue.objects.create(
-            periodical=periodical,
-            number=number,
-            title=f"Issue #{number}",
+    """Two unequal parent partitions are capped in one planned window, before and after seek."""
+    for name, width in [("First journal", 105), ("Second journal", 104)]:
+        periodical = models.Periodical.objects.create(name=name)
+        models.Issue.objects.bulk_create(
+            [
+                models.Issue(
+                    periodical=periodical,
+                    number=number,
+                    title=f"{name} #{number}",
+                )
+                for number in range(1, width + 1)
+            ],
         )
 
-    first_page = json_at(_nested_by_periodical(), "Large Periodical")
-    assert len(json_list(first_page, "edges")) == 100
-    assert json_at(first_page, "pageInfo", "hasNextPage") is True
+    with CaptureQueriesContext(connection) as first_queries:
+        first_pages = _nested_by_periodical()
+    issue_sql = [
+        query["sql"]
+        for query in first_queries.captured_queries
+        if 'FROM "library_issue"' in query["sql"]
+    ]
+    assert len(issue_sql) == 1, issue_sql
+    assert "ROW_NUMBER()" in issue_sql[0].upper(), issue_sql
+    assert set(first_pages) == {"First journal", "Second journal"}
+    for name, width in [("First journal", 105), ("Second journal", 104)]:
+        page = first_pages[name]
+        assert _titles(page) == [f"{name} #{number}" for number in range(width, width - 100, -1)]
+        assert json_at(page, "totalCount") == width
+        assert json_at(page, "pageInfo", "hasNextPage") is True
+        assert json_at(page, "pageInfo", "hasPreviousPage") is False
 
-    cursor = json_at(_nested_by_periodical(first=1), "Large Periodical", "pageInfo", "endCursor")
-    after_page = json_at(_nested_by_periodical(after=cursor), "Large Periodical")
-    assert len(json_list(after_page, "edges")) == 100
-    assert json_at(after_page, "pageInfo", "hasNextPage") is True
-    assert json_at(after_page, "pageInfo", "hasPreviousPage") is True
+    # The later-created journal's #104 cursor also lies after the earlier
+    # journal's #104 row under the mixed (-number, id) value order.
+    cursor = json_at(_nested_by_periodical(first=1), "Second journal", "pageInfo", "endCursor")
+    with CaptureQueriesContext(connection) as after_queries:
+        after_pages = _nested_by_periodical(after=cursor)
+    issue_sql = [
+        query["sql"]
+        for query in after_queries.captured_queries
+        if 'FROM "library_issue"' in query["sql"]
+    ]
+    assert len(issue_sql) == 1, issue_sql
+    assert "ROW_NUMBER()" in issue_sql[0].upper(), issue_sql
+    assert set(after_pages) == {"First journal", "Second journal"}
+    for name, width in [("First journal", 105), ("Second journal", 104)]:
+        page = after_pages[name]
+        assert _titles(page) == [f"{name} #{number}" for number in range(103, 3, -1)]
+        assert json_at(page, "totalCount") == width
+        assert json_at(page, "pageInfo", "hasNextPage") is True
+        assert json_at(page, "pageInfo", "hasPreviousPage") is True
 
 
 @pytest.mark.django_db
@@ -1096,6 +1149,7 @@ def test_nested_keyset_window_keeps_embargoed_rows_for_staff() -> None:
     newest-first order the embargoed issue leads its partition here, and the
     partition count is the staff viewer's.
     """
+    create_users(1)
     astronomy, _botany, _empty = _seed_periodicals()
     models.Issue.objects.create(
         periodical=astronomy,
@@ -1103,7 +1157,7 @@ def test_nested_keyset_window_keeps_embargoed_rows_for_staff() -> None:
         title="Embargoed #6",
         embargoed=True,
     )
-    staff = User.objects.create_user(username="nested-staff", password="pw", is_staff=True)
+    staff = User.objects.get(username="staff_1")
     client = TestClient()
     with client.login(staff), CaptureQueriesContext(connection) as ctx:
         payload = response_json(client.query(NESTED_QUERY, variables={"first": 2}).response)
@@ -1354,6 +1408,7 @@ def _hook_order_schema(
     keyset: bool = True,
     orderable: bool = False,
     order_hook: _ChildOrder | None = None,
+    expose_unplanned_error: bool = False,
 ) -> strawberry.Schema:
     """Holder schema: ``parents`` (a planned list root) plus a root ``children`` connection.
 
@@ -1428,7 +1483,14 @@ def _hook_order_schema(
 
     optimizer_extension = DjangoOptimizerExtension(strictness=strictness) if optimizer else None
     extensions = [lambda: optimizer_extension] if optimizer_extension is not None else []
-    return strawberry.Schema(query=Query, config=strawberry_config(), extensions=extensions)
+    # Only the offset/random strictness row exposes its internal OptimizerError text.
+    # Typed keyset refusals and successful pages keep the native masking policy.
+    return DjangoSchema(
+        error_policy={"enabled": False} if expose_unplanned_error else None,
+        query=Query,
+        config=strawberry_config(),
+        extensions=extensions,
+    )
 
 
 def _seed_hook_order_rows(shape: str, *, with_b: bool = True) -> None:
@@ -1796,7 +1858,13 @@ def test_random_hook_order_on_an_offset_relation_is_an_unplanned_access_under_st
     N+1, while the root connection, which orders its one page query once, serves.
     """
     _seed_hook_order_rows(shape, with_b=False)
-    schema = _hook_order_schema(shape, hook_order, keyset=False, strictness="raise")
+    schema = _hook_order_schema(
+        shape,
+        hook_order,
+        keyset=False,
+        strictness="raise",
+        expose_unplanned_error=True,
+    )
     root = _post_holder(schema, "{ children(first: 1) { edges { cursor } } }")
     nested = _post_holder(schema, _nested_hook_query(shape), variables={"first": 1})
     assert root.get("errors") is None, root
@@ -2840,7 +2908,7 @@ def _twin_children_schema(*, optimizer: bool = True) -> strawberry.Schema:
 
     optimizer_extension = DjangoOptimizerExtension() if optimizer else None
     extensions = [lambda: optimizer_extension] if optimizer_extension is not None else []
-    return strawberry.Schema(query=Query, config=strawberry_config(), extensions=extensions)
+    return DjangoSchema(query=Query, config=strawberry_config(), extensions=extensions)
 
 
 def _seed_twin_children() -> None:
