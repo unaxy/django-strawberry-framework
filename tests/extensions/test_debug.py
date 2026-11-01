@@ -7,19 +7,22 @@ and interpolated ``SELECT`` duration live in
 ``original_error`` chain handling, the reference-counted
 ``force_debug_cursor`` coordinator's restore contract and partial-acquisition
 unwind, bounded-log slicing, ``get_results``' no-stash / idempotence contract
-(including the real engine's conditional double call and the raising-teardown
-recovery path), masking-extension ordering, extensions-map merge precedence
-and result-map replacement, the async shared-wrapper overlap restore, nested
-same-thread attribution, concurrent sync instance isolation at the
-``strawberry-graphql==0.322.2`` floor, the post-execution diagnostic
-non-interference degrade, the cursor-construction capture-interval boundary,
-sibling-hook SQL ordering, the fail-closed ``settings.DEBUG`` gate's inert
+(including the real engine's conditional double call on the raising-teardown
+recovery path), extensions-map merge precedence and result-map replacement
+(upstream sentinels: those rows run a plain ``strawberry.Schema`` and no
+package line, so no package change can fail them), the async shared-wrapper
+overlap restore, nested same-thread attribution, concurrent sync instance
+isolation at the ``strawberry-graphql==0.322.2`` floor, the post-execution
+diagnostic non-interference degrade, the cursor-construction capture-interval
+boundary, the fail-closed ``settings.DEBUG`` gate's inert
 path (no acquire / no snapshot; spec-048 Decision 5), a DELETED ``DEBUG``
 attribute, Schema.stream (fakeshop has no ASGI/WS mount), and the payload
 caps' arithmetic (spec-048 Decision 6, exercised directly against the pure
 ``_apply_payload_caps``).
 
-Parse and validation ``debug``-key absence, a malformed truthy ``DEBUG`` on
+Parse and validation ``debug``-key absence (with and without a raising sibling
+teardown, sync and async), masking-extension ordering, sibling-hook SQL
+ordering, a refused non-bool acknowledgement, a malformed truthy ``DEBUG`` on
 the bare class entry, mutation ``BEGIN`` / ``COMMIT``, and the enclosing
 ``ATOMIC_REQUESTS`` interval live in
 ``examples/fakeshop/test_query/test_debug_extension_api.py``.
@@ -59,7 +62,6 @@ import warnings
 from collections import deque
 from collections.abc import AsyncIterator, Generator, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from functools import partial
 from types import SimpleNamespace
 from typing import NoReturn, SupportsIndex
 
@@ -73,7 +75,7 @@ from django.db.backends.base.base import BaseDatabaseWrapper
 from django.test.utils import override_settings
 from graphql import ExecutionResult as GraphQLExecutionResult
 from graphql import GraphQLError
-from strawberry.extensions import MaskErrors, SchemaExtension
+from strawberry.extensions import SchemaExtension
 from strawberry.types.execution import ExecutionResult
 from typing_extensions import override
 
@@ -651,7 +653,7 @@ def test_get_results_no_stash_shape_and_idempotent_read() -> None:
 
 
 @override_settings(DEBUG=True)
-def test_validation_failure_with_raising_teardown_calls_get_results_twice() -> None:
+def test_validation_failure_with_raising_teardown_reads_empty_results_twice() -> None:
     """The early-result plus teardown-failure recovery path invokes get_results twice.
 
     The validation early return evaluates the extension results INSIDE the
@@ -661,7 +663,10 @@ def test_validation_failure_with_raising_teardown_calls_get_results_twice() -> N
     ``get_results`` is pinned idempotent. Both calls must return ``{}``:
     teardown must not stash a payload unless ``execution_context.result`` is
     a graphql-core ``ExecutionResult``, or the second call would falsely
-    publish ``debug``.
+    publish ``debug``. That the response then carries no ``debug`` key is pinned
+    over HTTP in
+    ``examples/fakeshop/test_query/test_debug_extension_api.py::test_an_early_return_with_a_raising_teardown_publishes_no_debug_key``;
+    the call count is what no response shows.
     """
     calls: list[dict[str, _DebugPayload]] = []
 
@@ -685,51 +690,6 @@ def test_validation_failure_with_raising_teardown_calls_get_results_twice() -> N
     assert result.errors
     assert len(calls) == 2
     assert calls == [{}, {}]
-    assert "debug" not in (result.extensions or {})
-
-
-@override_settings(DEBUG=True)
-def test_parse_failure_with_raising_teardown_publishes_no_debug_key() -> None:
-    """Parse early-return + sibling teardown raise must still omit ``debug``."""
-
-    class _RaisingTeardown(SchemaExtension):
-        @override
-        def on_operation(self) -> Iterator[None]:
-            yield
-            raise RuntimeError("teardown boom")
-
-    schema = strawberry.Schema(
-        query=_OkQuery,
-        extensions=[_RaisingTeardown, DjangoDebugExtension],
-    )
-    result = schema.execute_sync("{ ok")
-
-    assert result.errors
-    assert "debug" not in (result.extensions or {})
-
-
-@override_settings(DEBUG=True)
-async def test_async_validation_failure_with_raising_teardown_publishes_no_debug_key() -> None:
-    """Async validation sets ``PreExecutionError`` on context before teardown.
-
-    That assignment must not be mistaken for GraphQL execution, or the
-    recovery path's second ``get_results`` would publish ``debug``.
-    """
-
-    class _RaisingTeardown(SchemaExtension):
-        @override
-        def on_operation(self) -> Iterator[None]:
-            yield
-            raise RuntimeError("teardown boom")
-
-    schema = strawberry.Schema(
-        query=_OkQuery,
-        extensions=[_RaisingTeardown, DjangoDebugExtension],
-    )
-    result = await schema.execute("{ definitelyNotAField }")
-
-    assert result.errors
-    assert "debug" not in (result.extensions or {})
 
 
 @override_settings(DEBUG=True)
@@ -779,41 +739,6 @@ def test_execute_sync_restores_the_prior_flag_value(
     # Saved-value restore: the nested-CaptureQueriesContext guarantee.
     assert default_wrapper.force_debug_cursor is prior
     assert debug_module._coordinator._active == {}
-
-
-# ---------------------------------------------------------------------------
-# Scenario 12 - masking-extension ordering, both directions.
-# ---------------------------------------------------------------------------
-
-
-@override_settings(DEBUG=True)
-@pytest.mark.parametrize(
-    "debug_after_masking",
-    [True, False],
-    ids=["debug-after-masking", "debug-before-masking"],
-)
-def test_mask_errors_ordering_controls_exception_visibility(*, debug_after_masking: bool) -> None:
-    if debug_after_masking:
-        extension_list = [partial(MaskErrors), DjangoDebugExtension]
-    else:
-        extension_list = [DjangoDebugExtension, partial(MaskErrors)]
-    schema = strawberry.Schema(query=_BoomQuery, extensions=extension_list)
-
-    result = schema.execute_sync("{ boom }")
-
-    # The GraphQL errors are masked either way.
-    assert result.errors is not None
-    assert [error.message for error in result.errors] == ["Unexpected error."]
-    assert result.extensions is not None
-    exceptions = json_list(result.extensions, "debug", "exceptions")
-    if debug_after_masking:
-        # Debug tears down FIRST (LIFO), reading the originals.
-        assert len(exceptions) == 1
-        assert json_at(exceptions, 0, "excType") == "<class 'ValueError'>"
-        assert json_at(exceptions, 0, "message") == "sensitive boom detail"
-    else:
-        # Masking already stripped original_error before debug's teardown.
-        assert exceptions == []
 
 
 # ---------------------------------------------------------------------------
@@ -1256,57 +1181,6 @@ def test_cursor_construction_defines_the_capture_interval(
 
 
 # ---------------------------------------------------------------------------
-# Scenario 20 - sibling-hook SQL ordering.
-# ---------------------------------------------------------------------------
-
-
-class _MarkerSQLExtension(SchemaExtension):
-    """A sibling whose ``on_operation`` performs marker SQL around its yield."""
-
-    @override
-    def on_operation(self) -> Iterator[None]:
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT 31")  # the setup marker
-        yield
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT 32")  # the teardown marker
-
-
-@override_settings(DEBUG=True)
-@pytest.mark.django_db
-@pytest.mark.parametrize(
-    "debug_listed_first",
-    [True, False],
-    ids=["debug-listed-first", "debug-listed-second"],
-)
-def test_sibling_hook_sql_capture_is_list_order_dependent(*, debug_listed_first: bool) -> None:
-    if debug_listed_first:
-        extension_list = [DjangoDebugExtension, _MarkerSQLExtension]
-    else:
-        extension_list = [_MarkerSQLExtension, DjangoDebugExtension]
-    schema = strawberry.Schema(query=_OkQuery, extensions=extension_list)
-
-    result = schema.execute_sync("{ ok }")
-
-    assert result.errors is None
-    assert result.extensions is not None
-    statements = [
-        require_instance(json_at(row, "sql"), str)
-        for row in json_list(result.extensions, "debug", "sql")
-    ]
-    if debug_listed_first:
-        # Debug enters first and tears down last: both sibling markers fall
-        # inside its active interval.
-        assert any("SELECT 31" in statement for statement in statements)
-        assert any("SELECT 32" in statement for statement in statements)
-    else:
-        # The sibling's setup ran before debug acquired, its teardown after
-        # debug released: neither marker is captured.
-        assert not any("SELECT 31" in statement for statement in statements)
-        assert not any("SELECT 32" in statement for statement in statements)
-
-
-# ---------------------------------------------------------------------------
 # spec-048 Decision 5 - the fail-closed gate: the acknowledgement default, the
 # inert path's absence of a bracket, and the acknowledged factory's payload.
 #
@@ -1366,31 +1240,6 @@ def test_a_non_bool_acknowledgement_is_refused_at_construction(
         # basedpyright: each non-bool acknowledgement is the hostile input under test;
         # DjangoDebugExtension types the parameter as bool
         DjangoDebugExtension(allow_unsafe_production=value)  # pyright: ignore[reportArgumentType]
-
-
-@override_settings(DEBUG=False)
-def test_a_refused_acknowledgement_never_becomes_an_armed_extension() -> None:
-    """The refusal happens at construction, so no operation can run with it.
-
-    The consequence worth pinning separately from the message: a schema whose
-    extensions list carries the misspelled acknowledgement fails when Strawberry
-    builds the instance for the operation, rather than answering that operation
-    with the disclosure. Nothing partially constructed is left holding a truthy
-    flag.
-    """
-    schema = strawberry.Schema(
-        query=_OkQuery,
-        # basedpyright: the string acknowledgement is the hostile input under test;
-        # DjangoDebugExtension types the parameter as bool
-        extensions=[lambda: DjangoDebugExtension(allow_unsafe_production="false")],  # pyright: ignore[reportArgumentType]
-    )
-    with pytest.raises(ConfigurationError) as excinfo:
-        schema.execute_sync("{ ok }")
-    assert str(excinfo.value) == (
-        "DjangoDebugExtension(allow_unsafe_production=...) must be a bool; got str 'false'. "
-        "A truthy non-bool would arm the production disclosure, so it is refused rather "
-        "than interpreted."
-    )
 
 
 @override_settings(DEBUG=False)

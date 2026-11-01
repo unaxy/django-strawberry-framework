@@ -38,7 +38,11 @@ retained ``path``, sync/async parity, the two ways out (``DEBUG=True`` and
 the boolean ``True`` (still masked), a resolver that writes
 ``info.schema.error_policy`` (still masked: the attribute is a copy), and an
 extension entry that resolves to the masking authority (the request is refused
-with the configuration code rather than masked by consumer code).
+with the configuration code rather than masked by consumer code), a directly
+listed masking extension beside a debug factory (one masker, and debug still
+captures the original), and a hand-wired plain ``strawberry.Schema`` carrying the
+exported extension (masked by the package default it falls back to, while a hook
+failure on it reaches the client unmasked: the hook seam is ``DjangoSchema``'s).
 
 The scaffolding is one probe-schema factory over fakeshop's own ``Query`` /
 ``Mutation``, extended with resolvers that raise on demand - a real schema
@@ -50,8 +54,9 @@ registry stale.
 ``tests/test_error_policy.py`` holds what no request can express: the policy
 object's validation and precedence ladder, the correlation-id format sampled
 from the generator, the extension's install position and what a directly
-supplied entry of its own kind declares, the standalone-schema fallback,
-teardown no-ops, and fail-closed degrades over objects no engine builds.
+supplied entry of its own kind declares, the standalone schema's absent policy
+attribute, teardown no-ops, and fail-closed degrades over objects no engine
+builds.
 """
 
 from __future__ import annotations
@@ -105,6 +110,7 @@ from django_strawberry_framework import (
     strawberry_config,
 )
 from django_strawberry_framework.error_policy import DEFAULT_ERROR_POLICY
+from django_strawberry_framework.extensions import DjangoDebugExtension
 from django_strawberry_framework.testing import AsyncTestClient, Response
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
@@ -232,7 +238,7 @@ class _ProbeSchemaOptions(TypedDict, total=False):
 
     error_policy: Mapping[str, object]
     resource_policy: Mapping[str, object]
-    extensions: list[type[SchemaExtension] | Callable[[], SchemaExtension]]
+    extensions: list[type[SchemaExtension] | Callable[[], SchemaExtension] | SchemaExtension]
 
 
 def _probe_schema(**schema_kwargs: Unpack[_ProbeSchemaOptions]) -> DjangoSchema:
@@ -405,6 +411,38 @@ HOOK_COLORS = ("sync", "async")
 
 HOOK_ROWS = [(where, color) for where in HOOK_HALVES for color in HOOK_COLORS]
 HOOK_IDS = [f"{where}-{color}" for where, color in HOOK_ROWS]
+
+
+def _acknowledged_debug() -> DjangoDebugExtension:
+    """A debug extension acknowledged for production, built fresh per operation."""
+    return DjangoDebugExtension(allow_unsafe_production=True)
+
+
+@strawberry.type
+class _PlainSchemaQuery:
+    """A standalone surface for the hand-wired plain ``strawberry.Schema`` mount."""
+
+    @strawberry.field
+    def boom(self) -> str | None:
+        """Raise a plain exception carrying the sensitive string."""
+        raise ValueError(_SENSITIVE)
+
+    @strawberry.field
+    def fine(self) -> str:
+        """Succeed, so the only failure on the hook mount is the hook's own."""
+        return "fine"
+
+
+#: A plain ``strawberry.Schema`` with the exported masking extension installed by
+#: hand: it has no ``error_policy`` of its own for the extension to read.
+_PLAIN_SCHEMA = strawberry.Schema(query=_PlainSchemaQuery, extensions=[DjangoErrorPolicyExtension])
+
+#: The same hand-wired schema with a consumer extension that can fail at a hook.
+_PLAIN_HOOK_SCHEMA = strawberry.Schema(
+    query=_PlainSchemaQuery,
+    extensions=[DjangoErrorPolicyExtension, _HookFailure],
+)
+
 
 #: Where the hook-failure mounts live, per view color, and the opt-out twin.
 HOOK_MOUNTS = {"sync": "/ep-hook/", "async": "/ep-hook-async/"}
@@ -606,6 +644,12 @@ urlpatterns = [
         for (spelling, color), mount in ENTRY_MOUNTS.items()
     ),
     path("ep-async/", _probe_async_view()),
+    path(
+        "ep-declared-debug/",
+        _probe_view(extensions=[DjangoErrorPolicyExtension(), _acknowledged_debug]),
+    ),
+    path("ep-plain/", DjangoGraphQLView.as_view(schema=_PLAIN_SCHEMA)),
+    path("ep-plain-hook/", DjangoGraphQLView.as_view(schema=_PLAIN_HOOK_SCHEMA)),
     path("ep-off/", _probe_view(error_policy={"enabled": False})),
     path(
         "ep-custom/",
@@ -833,6 +877,57 @@ def test_a_factory_resolving_to_the_masker_refuses_the_request_instead_of_maskin
         for record in records
     )
     assert all(record.exc_info is None for record in records)
+
+
+@pytest.mark.django_db
+def test_a_declared_policy_beside_a_debug_factory_preserves_debug_exception_capture() -> None:
+    """A directly listed masking extension is a declaration, so debug still reads the original.
+
+    The entry is folded into the schema's own configuration and never joins the
+    chain, so exactly one masker - the schema's, first in the chain and therefore
+    last to tear down - rewrites the error: the client reads one masked entry
+    with one correlation id, while the neighbouring debug factory, torn down
+    before it, captured the exception that was masked.
+    """
+    _, payload = _post("/ep-declared-debug/", "{ boom }")
+    _masked_error(payload)
+    exceptions = json_list(payload, "extensions", "debug", "exceptions")
+    assert len(exceptions) == 1, exceptions
+    assert json_str(exceptions, 0, "message") == _SENSITIVE
+
+
+def test_a_plain_schema_with_the_extension_installed_by_hand_falls_back_to_the_default() -> None:
+    """A hand-wired ``strawberry.Schema`` has no policy to read and still masks.
+
+    The fallback is the MASKING one on purpose: an extension whose whole job is to
+    mask must not quietly become a no-op because it could not find its
+    configuration, and a supported standalone use must not raise either.
+    """
+    assert _debug_setting() is False
+    response, payload = _post("/ep-plain/", "{ boom }")
+    error = _masked_error(payload)
+    assert error["path"] == ["boom"]
+    assert _SENSITIVE not in response.content.decode()
+
+
+@pytest.mark.django_db
+def test_a_plain_schema_leaves_a_hook_failure_unmasked() -> None:
+    """The hook seam lives on ``DjangoSchema``, so a hand-wired plain schema has none.
+
+    A hook exception is thrown into every enclosing teardown and converted into a
+    result only after all of them have unwound, so the exported extension never
+    holds a result to mask; ``DjangoSchema`` masks that result at its own return
+    (``schema.py::DjangoSchema._masked_return``). A plain ``strawberry.Schema``
+    carrying the extension by hand has no such return, so the identical hook
+    failure reaches the client with its own message and no correlation id - the
+    must-not beside ``test_an_exception_from_a_consumer_hook_is_masked_like_a_resolver_exception``.
+    """
+    assert _debug_setting() is False
+    with _failing_hook("operation-teardown"):
+        _, payload = _post("/ep-plain-hook/", "{ fine }")
+    errors = [json_object(error) for error in json_list(payload, "errors")]
+    assert [error["message"] for error in errors] == [_SENSITIVE], payload
+    assert all("extensions" not in error for error in errors), payload
 
 
 @pytest.mark.django_db

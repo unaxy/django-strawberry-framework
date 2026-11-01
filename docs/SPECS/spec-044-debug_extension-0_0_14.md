@@ -2070,14 +2070,16 @@ coverage-owning node — remain the sole owners of the 100% gate.
     `test_get_results_no_stash_shape_and_idempotent_read` (`{}` outside an
     operation and before a payload, never `{"debug": None}`; the stash under
     exactly `"debug"`, identical on two reads; `json.dumps` round-trip);
-    `test_validation_failure_with_raising_teardown_calls_get_results_twice`
-    (the real engine's double call, both `{}`);
-    `test_parse_failure_with_raising_teardown_publishes_no_debug_key`;
-    `test_async_validation_failure_with_raising_teardown_publishes_no_debug_key`
-    (a `PreExecutionError` is not execution); and
-    `test_generic_recovery_alone_calls_get_results_once`.
-- **12. Masking-extension ordering** —
-    `test_mask_errors_ordering_controls_exception_visibility`: with
+    `test_validation_failure_with_raising_teardown_reads_empty_results_twice`
+    (the real engine's double call, both `{}`); and
+    `test_generic_recovery_alone_calls_get_results_once`. The response half of
+    the recovery path is live:
+    `examples/fakeshop/test_query/test_debug_extension_api.py::test_an_early_return_with_a_raising_teardown_publishes_no_debug_key`
+    (validation and parse) and
+    `examples/fakeshop/test_query/test_debug_extension_api.py::test_an_async_validation_failure_with_a_raising_teardown_publishes_no_debug_key`
+    (a `PreExecutionError` is not execution).
+- **12. Masking-extension ordering** (live) —
+    `examples/fakeshop/test_query/test_debug_extension_api.py::test_mask_errors_ordering_controls_exception_visibility`: with
     `MaskErrors` before the debug class the masked `errors` sit beside one
     unmasked `exceptions` row; reversed, `debug.exceptions == []`
     ([Decision 9](#decision-9--exception-capture-the-results-original_error-chain-serialized-like-graphenes-wrap_exception--no-resolver-wrapping)).
@@ -2113,8 +2115,8 @@ coverage-owning node — remain the sole owners of the 100% gate.
     *before* acquire stays uninstrumented inside the bracket, and a debug
     cursor opened *inside* keeps logging after release
     ([Decision 4](#decision-4--fidelity-djangos-own-debug-cursor-via-a-force_debug_cursor-bracket-not-a-cursor-wrap-port)).
-- **20. Sibling-hook SQL ordering** —
-    `test_sibling_hook_sql_capture_is_list_order_dependent`: a sibling whose
+- **20. Sibling-hook SQL ordering** (live) —
+    `examples/fakeshop/test_query/test_debug_extension_api.py::test_sibling_hook_sql_capture_is_list_order_dependent`: a sibling whose
     `on_operation` runs marker SQL around its `yield`, in both list orders.
 - **21. `original_error` hop policy** —
     `test_hop_policy_self_cycle_terminates_deterministically`,

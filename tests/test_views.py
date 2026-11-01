@@ -2755,37 +2755,6 @@ def _wrapper_copying_only_csrf_exempt(
     return wrapped
 
 
-def _marked_callback_without_a_view_class(_request: HttpRequest) -> HttpResponse:
-    """A callback carrying the marker and none of the bookkeeping behind it.
-
-    The marker name is package-specific, so nothing supported produces this - but
-    the middleware dereferences ``view_class`` and ``view_initkwargs`` on the
-    strength of the marker, and a hook whose every other outcome is a controlled
-    response must not answer an unhandled ``500``.
-    """
-    return HttpResponse("marked, no view_class")
-
-
-def _marked_callback_with_unusable_initkwargs(_request: HttpRequest) -> HttpResponse:
-    """A callback whose ``view_initkwargs`` is not a mapping to splat.
-
-    The other half of the same recognition: ``view_class`` is real here, so only
-    the ``view_initkwargs`` test stands between ``**`` and a ``TypeError``.
-    """
-    return HttpResponse("marked, unusable initkwargs")
-
-
-def _marked_callback_with_initkwargs_the_class_rejects(_request: HttpRequest) -> HttpResponse:
-    """A callback whose bookkeeping has ``as_view``'s exact shape and no instance behind it.
-
-    The third shape, and the only one no test of the bookkeeping's *shape* can
-    reach: ``view_class`` is a class and ``view_initkwargs`` is a ``dict``, so what
-    distinguishes it from a real mount is that the class does not accept those
-    kwargs. Recognition therefore has to run as far as the instance.
-    """
-    return HttpResponse("marked, initkwargs the class rejects")
-
-
 class _NotAPackageView:
     """What calling a non-class ``view_class`` would hand the middleware."""
 
@@ -2900,22 +2869,11 @@ def _marked_callback_with_a_minimal_boundary_view_class(_request: HttpRequest) -
     return HttpResponse("marked, minimal boundary")
 
 
-setattr(_marked_callback_without_a_view_class, _BOUNDARY_MARKER, True)
-setattr(_marked_callback_with_unusable_initkwargs, _BOUNDARY_MARKER, True)
-setattr(_marked_callback_with_initkwargs_the_class_rejects, _BOUNDARY_MARKER, True)
 setattr(_marked_callback_with_a_callable_view_class, _BOUNDARY_MARKER, True)
 setattr(_marked_callback_with_a_foreign_view_class, _BOUNDARY_MARKER, True)
 setattr(_marked_callback_with_a_minimal_boundary_view_class, _BOUNDARY_MARKER, True)
 # Django's ``as_view()`` callback contract puts ``view_class`` / ``view_initkwargs`` in the
 # callback function's namespace, mimicked here with values ``as_view`` never produces.
-vars(_marked_callback_with_unusable_initkwargs).update(
-    view_class=DjangoGraphQLView,
-    view_initkwargs=[("schema", SCHEMA)],
-)
-vars(_marked_callback_with_initkwargs_the_class_rejects).update(
-    view_class=DjangoGraphQLView,
-    view_initkwargs={"not_a_view_kwarg": 1},
-)
 vars(_marked_callback_with_a_callable_view_class).update(
     view_class=_view_class_factory,
     view_initkwargs={},
@@ -2965,11 +2923,6 @@ urlpatterns = [
     path("async-capped/", _CAPPED_ASYNC_CALLBACK),
     path("wrapped-capped/", _wrapper_copying_only_csrf_exempt(_CAPPED_SYNC_CALLBACK)),
     path("wrapped-async-capped/", _wrapper_copying_only_csrf_exempt(_CAPPED_ASYNC_CALLBACK)),
-    path("marked-no-view-class/", _marked_callback_without_a_view_class),
-    path("marked-bad-initkwargs/", _marked_callback_with_unusable_initkwargs),
-    path("marked-rejected-initkwargs/", _marked_callback_with_initkwargs_the_class_rejects),
-    path("marked-callable-view-class/", _marked_callback_with_a_callable_view_class),
-    path("marked-foreign-view-class/", _marked_callback_with_a_foreign_view_class),
     path("plain/", _plain_view),
 ]
 
@@ -3295,54 +3248,10 @@ async def test_the_async_chain_refuses_a_downstream_answer_it_cannot_await() -> 
     assert bool(_CSRF_ORDERING_EXEMPTION) is True
 
 
-@pytest.mark.parametrize(
-    "route",
-    [
-        "/marked-no-view-class/",
-        "/marked-bad-initkwargs/",
-        "/marked-rejected-initkwargs/",
-        "/marked-callable-view-class/",
-        "/marked-foreign-view-class/",
-    ],
-)
-async def test_a_marked_callback_the_middleware_cannot_build_is_declined_not_crashed(
-    route: str,
-) -> None:
-    """The marker is a claim, not a guarantee that a view instance is behind it.
-
-    Running the boundary needs ``view_class`` and ``view_initkwargs`` as well, and a
-    class that actually carries the boundary, and reading any of that off the
-    strength of the marker alone turns a callback that carries one and not the rest
-    into an ``AttributeError`` or ``TypeError`` inside ``process_view`` - an
-    unhandled ``500`` from a hook whose every other outcome is a controlled
-    response.
-
-    The five routes are five ways the recognition decides no, and no two are
-    refused by the same clause: the bookkeeping can be absent, it can be the wrong
-    shape to splat, it can have ``as_view``'s exact shape while naming keywords the
-    class rejects - which only attempting the construction tells apart from a real
-    mount - the ``view_class`` can be callable without being a class, which only the
-    class test tells apart, because the construction would call it and succeed, and
-    the ``view_class`` can be a real class that is buildable with exactly those
-    keywords and simply is not a package view, which nothing but the boundary probe
-    tells apart from a real mount.
-
-    One recognition, one kind of no: a callback the middleware cannot run a boundary
-    for is declined, whether it cannot be built or carries no boundary to run, and
-    declining it leaves that request on the view-local arrangement rather than on
-    neither.
-    """
-    with _chain(_ORDERED_CHAIN):
-        response = Client().get(route)
-
-    assert response.status_code == 200
-    assert response.content.decode().startswith("marked, ")
-
-
 def test_a_callable_view_class_that_is_not_a_class_is_never_called() -> None:
     """Recognition refuses a non-class ``view_class`` before anything is called.
 
-    ``test_a_marked_callback_the_middleware_cannot_build_is_declined_not_crashed``
+    ``examples/fakeshop/test_query/test_transport_chain_api.py::test_a_marked_callback_the_middleware_cannot_build_is_declined_not_crashed``
     shows the request is answered rather than crashed; this row shows the property
     that makes declining safe rather than merely quiet. A recognition that called the
     factory and then rejected what came back would answer the same ``None`` and the
