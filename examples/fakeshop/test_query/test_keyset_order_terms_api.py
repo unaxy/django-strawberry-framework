@@ -11,9 +11,9 @@ supplies two non-null scalar carriers instead, with the same real Django query,
 connection pipeline and HTTP view. Its fixture table lifecycle remains explicit.
 
 A consumer ``get_queryset`` order is the page's effective order too: a JSON
-column and a related path through an optional or multivalued relation are
-refused by name, as is an annotation alias, beside controls ordering
-the same holders by a scalar column.
+column is refused by name, and a related path through an optional or
+multivalued relation or an annotation alias as no anchorable column, beside
+controls ordering the same holders by a scalar column, annotated or not.
 """
 
 import datetime
@@ -425,14 +425,30 @@ def test_keyset_hook_order_by_an_annotation_alias_is_refused() -> None:
 
 
 @pytest.mark.django_db
-def test_keyset_hook_order_by_the_patrons_own_column_pages() -> None:
-    """The control: the same holder ordered by the patron's own ``name`` pages both rows."""
+@pytest.mark.parametrize(
+    "annotations",
+    [None, {"loan_count": Count("loans")}],
+    ids=["plain", "annotated"],
+)
+def test_keyset_hook_order_by_the_patrons_own_column_pages(
+    annotations: Mapping[str, Count] | None,
+) -> None:
+    """The control: the same holder ordered by the patron's own ``name`` pages both rows.
+
+    The annotated row carries the alias the refused row orders by, so only ordering
+    by the alias is refused, not an annotated hook queryset.
+    """
     _seed_patrons_with_one_card()
     query = (
         "query ($after: String) { rows(first: 1, after: $after) "
         "{ edges { node { name } } pageInfo { hasNextPage endCursor } } }"
     )
-    schema = _hook_ordered_keyset_schema(Patron, ("id", "name"), ("-name", "id"))
+    schema = _hook_ordered_keyset_schema(
+        Patron,
+        ("id", "name"),
+        ("-name", "id"),
+        annotations=annotations,
+    )
     first = _post(schema, query)
     assert "errors" not in first, first
     assert _names(json_object(first, "data", "rows")) == ["Grace"]
