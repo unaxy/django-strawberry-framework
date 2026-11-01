@@ -14,7 +14,8 @@ What stays here, and why no live request can express it:
   ``examples/fakeshop/test_query/test_converter_outputs_api.py``;
 - ``_serialize_bigint`` on ``None`` (graphql-core completes ``None`` before
   ``serialize`` runs);
-- ``_parse_bigint`` on ``None`` (``null`` is stripped before ``parse_value``);
+- ``_parse_bigint`` on ``None`` (``null`` is stripped before ``parse_value``) and on
+  an object whose metaclass ``__name__`` hook raises (no argument carries an object);
   bool/float literal rejections belong to the live scalar filter matrix;
 - the public import surface and the subprocess deprecation-suppression
   contract;
@@ -151,7 +152,7 @@ def test_bigint_rejection_messages_are_pinned() -> None:
         _parse_bigint(object())
 
 
-def test_bigint_rejection_messages_survive_hostile_values() -> None:
+def test_bigint_parser_survives_hostile_values() -> None:
     """A hostile type-name hook or ``str`` subclass dunder never decides a parse rejection.
 
     The rejected value's kind is read from the interpreter, so a metaclass
