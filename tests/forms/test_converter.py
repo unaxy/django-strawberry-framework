@@ -11,6 +11,8 @@ Covers ``django_strawberry_framework/forms/converter.py``:
   load-bearing no-catch-all assertion);
 - the relation / file kind flags (``ModelChoiceField`` / ``ModelMultipleChoiceField``
   / ``FileField`` / ``ImageField``) the input builder finalizes;
+- ``FORM_FIELD_SCALARS``, the one form-field table: ``convert_form_field``'s registry
+  derived from it row for row, and ``form_field_scalar``'s nearest-registered-class read;
 - ``form_field_reads_list``: the list-reading form fields (subclasses included), the
   PostgreSQL array form fields on the Postgres tier, and those arms off when
   ``django.contrib.postgres.forms`` cannot import; ``form_field_reads_one_value``: the
@@ -43,16 +45,20 @@ from typing_extensions import override
 
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.forms.converter import (
+    _SCALAR_FORM_FIELDS,
     FILE,
+    FORM_FIELD_SCALARS,
     RELATION_MULTI,
     RELATION_SINGLE,
     SCALAR,
+    _null_boolean_converter,
     _postgres_form_field_class,
     convert_form_field,
     form_field_kind,
     form_field_reads_list,
     form_field_reads_one_value,
     form_field_required,
+    form_field_scalar,
 )
 from django_strawberry_framework.utils._narrowing import list_of
 from tests._soft_dependency import blocked_modules
@@ -138,6 +144,52 @@ def test_json_field_maps_to_json_scalar_not_charfield_str() -> None:
     conversion = convert_form_field(forms.JSONField())
     assert conversion.annotation is strawberry.scalars.JSON
     assert conversion.kind == SCALAR
+
+
+def test_the_form_converter_registry_is_derived_from_the_one_form_field_table() -> None:
+    """``convert_form_field``'s scalar registry is ``FORM_FIELD_SCALARS``, row for row.
+
+    The filter side reads the same table (``filters/inputs.py::_scalar_from_form_field``),
+    so a form field publishes one scalar in a form mutation and in a filter input. Each row
+    converts to its table scalar; ``NullBooleanField`` keeps its requiredness-matched
+    converter (``bool | None`` for the exact built-in field).
+    """
+    assert list(_SCALAR_FORM_FIELDS) == list(FORM_FIELD_SCALARS)
+    assert _SCALAR_FORM_FIELDS[forms.NullBooleanField] is _null_boolean_converter
+    converted = {
+        cls: converter(cls()).annotation
+        for cls, converter in _SCALAR_FORM_FIELDS.items()
+        if cls is not forms.NullBooleanField
+    }
+    assert converted == {
+        cls: scalar
+        for cls, scalar in FORM_FIELD_SCALARS.items()
+        if cls is not forms.NullBooleanField
+    }
+
+
+class _EvenIntegerField(forms.IntegerField):
+    """A consumer subclass of a registered form field, answering through its ancestor's row."""
+
+
+@pytest.mark.parametrize(
+    ("field", "expected"),
+    [
+        pytest.param(forms.EmailField(), str, id="text-subclass"),
+        pytest.param(forms.DecimalField(), decimal.Decimal, id="own-row-over-integer"),
+        pytest.param(forms.JSONField(), strawberry.scalars.JSON, id="own-row-over-text"),
+        pytest.param(_EvenIntegerField(), int, id="consumer-subclass"),
+        pytest.param(forms.Field(), None, id="bare-field"),
+        pytest.param(forms.MultipleChoiceField(), str, id="choice-subclass"),
+        pytest.param(object(), None, id="not-a-field"),
+    ],
+)
+def test_form_field_scalar_reads_the_nearest_registered_class(
+    field: object,
+    expected: object,
+) -> None:
+    """The most specific class of the field's real MRO the table keys answers; else ``None``."""
+    assert form_field_scalar(field) is expected
 
 
 @pytest.mark.parametrize("required", [True, False], ids=["required", "optional"])

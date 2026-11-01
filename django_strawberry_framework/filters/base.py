@@ -68,7 +68,7 @@ from django_filters import constants as _filter_constants
 from django_filters.fields import BaseCSVField, ChoiceField
 from django_filters.filters import BaseInFilter, BaseRangeFilter, FilterMethod
 from django_filters.filterset import BaseFilterSet, FilterSetOptions
-from django_filters.utils import get_model_field
+from django_filters.utils import get_field_parts, get_model_field
 from django_filters.widgets import BaseCSVWidget
 from graphql import GraphQLError
 from strawberry import relay
@@ -470,11 +470,15 @@ class _LookupOperand(NamedTuple):
     ``null_test`` is whether the terminal lookup past the transforms is Django's ``IsNull``
     (a ``year__isnull`` leaf), whose operand is a boolean, never a value of ``field``. It is
     the resolved lookup's class, not its name: a consumer lookup registered as ``isnull``
-    over a transform's output takes the operand its own class compares.
+    over a transform's output takes the operand its own class compares. ``lookup`` is that
+    class, ``None`` where no walk resolved one (a ``method=`` filter, whose method applies
+    no lookup of the filter's, a path the walk refuses): ``filters/inputs.py`` asks it
+    whether the value is prepared through the column (Django's ``FieldGetDbPrepValueMixin``).
     """
 
     field: ModelField | None
     null_test: bool
+    lookup: type[models.lookups.Lookup] | None = None
 
 
 @cache
@@ -503,7 +507,7 @@ def _lookup_operand(column: ConcreteField, lookup_expr: str) -> _LookupOperand |
         output, lookup = lookup_operand(generated_column_source(column) or column, lookup_expr)
     except (LookupValidationError, FieldError):
         return None
-    return _LookupOperand(output, issubclass(lookup, models.lookups.IsNull))
+    return _LookupOperand(output, issubclass(lookup, models.lookups.IsNull), lookup)
 
 
 class _ResolvedField(NamedTuple):
@@ -556,7 +560,12 @@ def _filterset_resolved_field(
     typo, a missing hop), the field itself for a forward ``GenericForeignKey``, and
     ``RuntimeError`` for a relation hop that is still an unresolved lazy string (a
     FilterSet used before Django's app registry is populated), surfaced rather than read
-    as an unknown field.
+    as an unknown field. A path django-filter's walk reads only by staying on a model past
+    a part it cannot cross (``get_field_parts``: a column, a forward ``GenericForeignKey``)
+    names no field, where django-filter would answer a sibling column sharing the next
+    part's name (``payload__flag`` is a key of the ``payload`` JSON column, not the
+    ``flag`` column); its value is read off the part's transforms
+    (``_filterset_value_field``).
     """
     model = _filterset_model(filterset)
     if model is None:
@@ -571,11 +580,20 @@ def _model_resolved_field(model: type[models.Model], field_path: str) -> _Resolv
     (``types/converters.py::generated_output_field``), so every read of a filter's column
     (its input type, the form field that cleans a value, the integer range guards of
     ``IntegerInFilter`` and ``IntegerRangeFilter``) sees the output's class; the path still
-    names the generated field, so the predicate is the one Django builds for it.
+    names the generated field, so the predicate is the one Django builds for it. A path the
+    classifier refuses keeps django-filter's answer only where its walk crossed a relation
+    at every part before the last (``_filterset_resolved_field``).
     """
     try:
         field: ModelField = _classify_path_cached(model, field_path).terminal
     except PathResolutionError:
+        # django-filter's walk stays on the model past a part it cannot cross
+        # (``get_field_parts`` reads ``payload__flag`` as the ``flag`` column); Django reads
+        # such a path as that part and its transforms (``Query.solve_lookup_type``).
+        # ``get_field_parts`` answers ``None`` for a part naming no field (typeshed omits it).
+        parts = get_field_parts(model, field_path)
+        if not parts or any(part.related_model is None for part in parts[:-1]):
+            return _ResolvedField(None, field_path)
         return _ResolvedField(get_model_field(model, field_path), field_path)
     if field_path.rpartition(LOOKUP_SEP)[2] != "pk":
         return _ResolvedField(generated_output_field(field) or field, field_path)

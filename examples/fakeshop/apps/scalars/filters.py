@@ -6,9 +6,10 @@ the same converters on the INPUT side: each ``Meta.fields`` lookup flows
 through ``convert_filter_to_input_annotation`` /
 ``_scalar_from_model_field`` to produce a Strawberry filter-input scalar
 (``Decimal``, ``UUID``, ``date`` / ``datetime`` / ``time``, ``BigInt``,
-``float``, ``bool``). ``JSONField`` (``payload``) is intentionally absent
+``float``, ``bool``). ``Meta.fields`` leaves ``JSONField`` (``payload``) out
 -- django-filter ships no default filter for it, so it raises at
-``get_filters()`` rather than producing an input.
+``get_filters()`` rather than producing an input -- and the declared
+``payload_*`` filters reach it instead.
 
 These types are NOT Relay nodes (no ``interfaces`` on the owning
 ``DjangoType``), so each model's own ``id`` is a plain integer filter --
@@ -79,6 +80,15 @@ output, never by the column or the declared form field.
 start, end } }``): the acceptance surface for a declared path through a column's transform,
 typed by the transform's ``IntegerField`` output (``Int``), never by the declared form field.
 
+``payload_n`` / ``payload_price`` (``CharFilter``), ``payload_flag`` (``BooleanFilter``),
+``payload_any_n`` (the package's pass-through ``TypedFilter``), ``payload_containing_n``
+(``NumberFilter``, ``icontains``) and ``payload_has_key`` (``CharFilter``, ``has_key``) on
+``ScalarSpecimenFilter`` are declared over ``payload`` and its key paths: the acceptance
+surface for a filter over a JSON column, which converts nothing, so each leaf publishes the
+scalar its own form cleans (``String``, ``Boolean``, ``Decimal``) and only the pass-through
+form keeps ``JSON``. ``payload__price`` and ``payload__flag`` are keys sharing a column's
+name, never the ``price`` or ``flag`` column.
+
 ``ScalarSpecimenParentStampFilter`` filters through a ``FilteredRelation`` alias rather than
 a field: ``parent_day_of`` is a declared ``DateTimeFilter`` whose ``field_name``
 (``par__occurred_at``) crosses ``par``, the ``FilteredRelation("parent")`` alias the
@@ -94,7 +104,13 @@ from django import forms
 from django_filters.widgets import SuffixedMultiWidget
 from typing_extensions import override
 
-from django_strawberry_framework.filters import FilterSet, ListFilter, RangeFilter, RelatedFilter
+from django_strawberry_framework.filters import (
+    FilterSet,
+    ListFilter,
+    RangeFilter,
+    RelatedFilter,
+    TypedFilter,
+)
 
 from . import models
 
@@ -157,7 +173,7 @@ class ScalarSpecimenTagFilter(FilterSet):
 
 
 class ScalarSpecimenFilter(FilterSet):
-    """Filters scalar specimens by the listed scalar columns (not ``payload``), the tag and price span."""
+    """Filters scalar specimens by the listed scalar columns, ``payload`` keys, the tag and price span."""
 
     tag = RelatedFilter(ScalarSpecimenTagFilter, field_name="tag")
     price_span = RangeFilter(field_name="price", lookup_expr="range")
@@ -181,6 +197,15 @@ class ScalarSpecimenFilter(FilterSet):
     occurred_day_of = django_filters.DateTimeFilter(field_name="occurred_at", lookup_expr="date")
     occurred_year_among = ListFilter(field_name="occurred_at__year", lookup_expr="in")
     occurred_year_span = RangeFilter(field_name="occurred_at__year", lookup_expr="range")
+    payload_n = django_filters.CharFilter(field_name="payload__n")
+    payload_any_n = TypedFilter(field_name="payload__n")
+    payload_containing_n = django_filters.NumberFilter(
+        field_name="payload__n",
+        lookup_expr="icontains",
+    )
+    payload_flag = django_filters.BooleanFilter(field_name="payload__flag")
+    payload_price = django_filters.CharFilter(field_name="payload__price")
+    payload_has_key = django_filters.CharFilter(field_name="payload", lookup_expr="has_key")
 
     class Meta:
         model = models.ScalarSpecimen

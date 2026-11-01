@@ -49,7 +49,8 @@ from __future__ import annotations
 import datetime
 import decimal
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from types import MappingProxyType
 
 import strawberry
 from django import forms
@@ -197,42 +198,64 @@ def _kind_converter(kind: str, annotation: object = None) -> FormFieldConverter:
     )
 
 
-# Each supported ``forms.Field`` class -> a ``make_scalar_converter`` callable.
+# Each supported ``forms.Field`` class -> the scalar one value it cleans is published as.
 # Registered individually (not via a base-``Field`` catch-all) so subclasses map
-# through the MRO walk in ``convert_form_field`` - ``EmailField`` / ``SlugField``
-# / ``URLField`` / ``RegexField`` resolve under ``CharField``, the parity
-# behavior. ``ChoiceField`` -> ``str`` is the model-less default; a ``ChoiceField``
-# over a ModelForm model's ``choices`` is routed through the read-side enum (or the
-# enum of the column values it admits) at the build site instead.
-# ``ModelChoiceField`` / ``ModelMultipleChoiceField`` /
-# ``MultipleChoiceField`` / ``FileField`` / ``ImageField`` are deliberately NOT in
-# this scalar table - they resolve by ``kind`` in ``convert_form_field`` before the
-# walk reaches it.
+# through the MRO walk - ``EmailField`` / ``SlugField`` / ``URLField`` /
+# ``RegexField`` resolve under ``CharField``, the parity behavior. ``ChoiceField``
+# -> ``str`` is the model-less default; a ``ChoiceField`` over a ModelForm model's
+# ``choices`` is routed through the read-side enum (or the enum of the column values
+# it admits) at the build site instead. ``ModelChoiceField`` /
+# ``ModelMultipleChoiceField`` / ``MultipleChoiceField`` / ``FileField`` /
+# ``ImageField`` are deliberately NOT in this table - they resolve by ``kind`` in
+# ``convert_form_field`` before the walk reaches it.
 #
-# Resolution is a ``type(field).__mro__`` walk against this dict (the same idiom
-# ``types/converters.py::scalar_for_field`` uses on the read side), so the
-# MOST-specific registered class wins regardless of dict insertion order:
-# ``FloatField`` / ``DecimalField`` both subclass ``IntegerField`` and
-# ``UUIDField`` / ``JSONField`` subclass ``CharField``, so a linear "first
-# ``isinstance`` wins" walk would mis-map them to the parent's scalar. The MRO
-# walk visits the field's own class first, so each resolves to its own entry.
+# Resolution is a walk of the field class's real MRO against this table
+# (``form_field_scalar``, the same idiom ``types/converters.py::scalar_for_field``
+# uses on the read side), so the MOST-specific registered class wins regardless of
+# insertion order: ``FloatField`` / ``DecimalField`` both subclass ``IntegerField``
+# and ``UUIDField`` / ``JSONField`` subclass ``CharField``, so a linear "first
+# ``isinstance`` wins" walk would mis-map them to the parent's scalar.
 # ``JSONField`` must stay an explicit row (``strawberry.scalars.JSON``) - without
 # it the CharField parent would silently type JSON payloads as ``String``,
 # rejecting object / array literals that Django's form field (and the serializer
-# / model scalar tables) accept as structured JSON.
+# / model scalar tables) accept as structured JSON. The one table both form
+# readers share: ``convert_form_field`` (``_SCALAR_FORM_FIELDS``) and a filter's
+# form-typed value (``filters/inputs.py::_scalar_from_form_field``).
+FORM_FIELD_SCALARS: Mapping[type[forms.Field], object] = MappingProxyType(
+    {
+        forms.CharField: str,
+        forms.ChoiceField: str,
+        forms.IntegerField: int,
+        forms.FloatField: float,
+        forms.DecimalField: decimal.Decimal,
+        forms.NullBooleanField: bool,
+        forms.BooleanField: bool,
+        forms.UUIDField: uuid.UUID,
+        forms.JSONField: strawberry.scalars.JSON,
+        forms.DateTimeField: datetime.datetime,
+        forms.DateField: datetime.date,
+        forms.TimeField: datetime.time,
+    },
+)
+
+
+def form_field_scalar(field: object) -> object | None:
+    """Return the scalar one value ``field`` cleans is published as, ``None`` for no row.
+
+    The row of the first class in ``field``'s real MRO the table keys
+    (``utils/truth.py::mro_entry``), so a subclass answers through its nearest
+    registered ancestor and a registered subclass through its own row. ``None`` for a
+    bare ``forms.Field``, a ``forms.Field`` subclass no row covers, and a non-field.
+    """
+    entry = truth.mro_entry(FORM_FIELD_SCALARS, truth.class_of(field))
+    return None if entry is None else entry[1]
+
+
+# ``FORM_FIELD_SCALARS`` as ``convert_form_field``'s scalar registry: each class -> a
+# ``make_scalar_converter`` callable, ``NullBooleanField``'s requiredness-matched.
 _SCALAR_FORM_FIELDS: dict[type[forms.Field], FormFieldConverter] = {
-    forms.CharField: _scalar_converter(str),
-    forms.ChoiceField: _scalar_converter(str),
-    forms.IntegerField: _scalar_converter(int),
-    forms.FloatField: _scalar_converter(float),
-    forms.DecimalField: _scalar_converter(decimal.Decimal),
-    forms.NullBooleanField: _null_boolean_converter,
-    forms.BooleanField: _scalar_converter(bool),
-    forms.UUIDField: _scalar_converter(uuid.UUID),
-    forms.JSONField: _scalar_converter(strawberry.scalars.JSON),
-    forms.DateTimeField: _scalar_converter(datetime.datetime),
-    forms.DateField: _scalar_converter(datetime.date),
-    forms.TimeField: _scalar_converter(datetime.time),
+    cls: _null_boolean_converter if cls is forms.NullBooleanField else _scalar_converter(scalar)
+    for cls, scalar in FORM_FIELD_SCALARS.items()
 }
 
 

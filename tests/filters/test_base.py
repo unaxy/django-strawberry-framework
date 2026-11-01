@@ -1531,6 +1531,19 @@ def test_filterset_value_field_is_none_where_django_reads_no_transform(field_nam
     assert _declared_leaf_value_field(field_name) is None
 
 
+def test_a_key_path_named_like_a_sibling_column_names_no_field_and_compares_its_json() -> None:
+    """``payload__flag`` is a key of the ``payload`` JSON column, never the ``flag`` column.
+
+    django-filter's ``get_field_parts`` stays on the model past ``payload`` and answers the
+    real ``BooleanField`` named ``flag``; Django reads the path as ``payload`` and its key
+    transform, so the path names no field and each value compares as the JSON column's.
+    """
+    payload = scalar_models.ScalarSpecimen._meta.get_field("payload")
+
+    assert _declared_leaf_field(scalar_models.ScalarSpecimen, "payload__flag") is None
+    assert _declared_leaf_value_field("payload__flag", "exact") is payload
+
+
 def test_filterset_value_field_is_none_without_a_filterset() -> None:
     """No filterset has no model to walk."""
     assert _filterset_value_field(None, ListFilter(field_name="occurred_on__year")) is None

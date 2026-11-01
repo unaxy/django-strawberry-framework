@@ -1112,7 +1112,12 @@ nothing written) until the request sends an admitted replacement. A **plain
 equivalent and necessarily uses the form-field → Strawberry table in
 [`forms/converter.py`][forms-converter] — which is therefore genuinely net-new
 machinery for the model-less case, **not** a parallel copy of the scalar table for the
-model-backed case (the explicit guard against the over-DRY-into-drift trap). An
+model-backed case (the explicit guard against the over-DRY-into-drift trap). That table
+(`django_strawberry_framework/forms/converter.py::FORM_FIELD_SCALARS`) is also the one a
+filter input reads to type a value its own form cleans
+(`django_strawberry_framework/filters/inputs.py::_scalar_from_form_field`), so a form field
+publishes one scalar on both surfaces (a class no row covers publishes `String` there,
+since a filter form cleans querystring text). An
 unknown form-field class raises [`ConfigurationError`][glossary-configurationerror]
 naming the field and class (the graphene-django `convert_form_field`
 `ImproperlyConfigured` parity, raised as the package's own exception).

@@ -366,7 +366,9 @@ def classify_path(model: type[models.Model], field_path: str) -> ClassifiedPath:
     it (cached), so a declared filter over ``pk`` resolves as the ORM resolves it; on a
     path this classifier refuses that reader keeps django-filter's own walk
     (``django_filters.utils.get_model_field``), whose answer there (``None``, a forward
-    ``GenericForeignKey``, a lazy-relation ``RuntimeError``) is the one its callers read.
+    ``GenericForeignKey``, a lazy-relation ``RuntimeError``) is the one its callers read,
+    unless that walk stayed on a model past a part it cannot cross (a key path into a
+    column, ``payload__flag``), which names no field there.
 
     Three other ``_meta`` path walkers share the split-and-``get_field``
     mechanism under different contracts and stay separate:
