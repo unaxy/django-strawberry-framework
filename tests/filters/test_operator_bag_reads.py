@@ -32,12 +32,12 @@ class _LookupName(str):
 
 def test_bag_pairs_come_from_the_dict_contents_not_its_items_override() -> None:
     """The pairs returned are the ones the dict holds, whatever ``items`` reports."""
-    assert FilterSet._operator_bag_items(_LyingBag({"exact": "held"})) == [("exact", "held")]
+    assert FilterSet._operator_bag_items(_LyingBag({"exact": "held"}), ()) == [("exact", "held")]
 
 
 def test_str_subclass_key_is_reduced_to_an_exact_str() -> None:
     """A ``str`` subclass key is matched and returned as the exact lookup name."""
-    pairs = FilterSet._operator_bag_items({_LookupName("exact"): "x"})
+    pairs = FilterSet._operator_bag_items({_LookupName("exact"): "x"}, ())
 
     assert pairs == [("exact", "x")]
     assert pairs is not None
@@ -46,9 +46,9 @@ def test_str_subclass_key_is_reduced_to_an_exact_str() -> None:
 
 def test_non_string_key_makes_the_dict_no_bag() -> None:
     """A key that is not a string names no lookup, so the dict is not an operator bag."""
-    assert FilterSet._operator_bag_items({1: "x"}) is None
+    assert FilterSet._operator_bag_items({1: "x"}, ()) is None
 
 
 def test_empty_dict_is_no_bag() -> None:
     """An empty dict carries no lookup, so it is not an operator bag."""
-    assert FilterSet._operator_bag_items({}) is None
+    assert FilterSet._operator_bag_items({}, ()) is None

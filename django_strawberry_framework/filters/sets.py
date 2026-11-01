@@ -243,6 +243,7 @@ _NO_VERDICTS: Mapping[str, tuple[object, bool]] = MappingProxyType({})
 if TYPE_CHECKING:
     from collections.abc import (
         Callable,
+        Collection,
         Generator,
         ItemsView,
         Iterable,
@@ -298,8 +299,8 @@ else:
 _QUERYSET: type[models.QuerySet[models.Model, object]] = models.QuerySet
 
 
-# Every operator-bag lookup attr ``LOOKUP_NAME_MAP`` can generate; with the attrs a
-# set's own bags carry (a transform chain's ``year_gt``), a mapping whose keys all
+# Every operator-bag lookup attr ``LOOKUP_NAME_MAP`` can generate; with the attrs the
+# field's own bag carries (a transform chain's ``year_gt``), a mapping whose keys all
 # name one is an operator bag (``FilterSet._operator_bag_items``).
 _LOOKUP_PYTHON_ATTRS: frozenset[str] = frozenset(
     python_attr for python_attr, _graphql_name in LOOKUP_NAME_MAP.values()
@@ -2166,10 +2167,11 @@ def _require_correlated_target(
     (``optimizer/predicates.py::correlates_related_rows``): the relation's target,
     a proxy on its table, or a multi-table-inheritance descendant keyed by its
     parent link, and an ancestor only across a forward or many-to-many link
-    whose columns it carries. Any other model matches parents whose link value
-    merely equals one of its columns (on a reverse link an ancestor's row
-    matches itself), so it is a declaration error, raised by the build that
-    expands the branch: the target is resolved here, whatever form it was
+    whose columns it carries and whose foreign key the database enforces. Any
+    other model matches parents whose link value merely equals one of its
+    columns (on a reverse link an ancestor's row matches itself; an unconstrained
+    key may name a missing target row), so it is a declaration error, raised by
+    the build that expands the branch: the target is resolved here, whatever form it was
     declared in (a class, an import path, a factory), so a lazily declared
     target is checked exactly when its leaves are first copied onto the parent.
     The ``None`` placeholder expands nothing and is not checked.
@@ -2196,7 +2198,7 @@ def _require_correlated_target(
         f"{truth.qualname(target)} {keyed_on}. A RelatedFilter's target FilterSet must be "
         f"keyed on {truth.qualname(reached)}, a proxy of it, or a multi-table-inheritance "
         "child of it (an ancestor only across a forward or many-to-many relation whose "
-        "columns it carries).",
+        "columns it carries and whose foreign key has a database constraint).",
     )
 
 
@@ -4944,7 +4946,7 @@ class FilterSet(
                 f"FilterSet {truth.qualname(cls)}: {python_attr!r} is not a filter input "
                 "field; it would apply nothing.",
             )
-        bag_items = cls._operator_bag_items(raw_value)
+        bag_items = cls._operator_bag_items(raw_value, lookups)
         if bag_items is None:
             entry = lookups.get("exact")
             if entry is None and len(lookups) == 1:
@@ -5016,8 +5018,11 @@ class FilterSet(
             "{start, end} input on a RangeFilter primitive).",
         )
 
-    @classmethod
-    def _operator_bag_items(cls, raw_value: object) -> list[tuple[str, object]] | None:
+    @staticmethod
+    def _operator_bag_items(
+        raw_value: object,
+        head_lookups: Collection[str],
+    ) -> list[tuple[str, object]] | None:
         """Return the ``(lookup_attr, value)`` pairs of a per-field operator bag.
 
         ``_build_input_fields`` wraps each scalar field's lookups in a
@@ -5069,9 +5074,10 @@ class FilterSet(
         #     keys the filter's widget reads.
         # Disambiguate by the keys: a dict is an operator bag only when
         # EVERY key names a known lookup attr (``_LOOKUP_PYTHON_ATTRS``, or
-        # one of this set's bags, ``FilterLookupTable.lookup_attrs``: a
-        # transform chain's ``year_gt`` - ``start`` / ``end`` are absent;
-        # a model-less set publishes no bag). Strawberry-input dataclass
+        # one of ``head_lookups``, the attrs the field's own bag carries: a
+        # transform chain's ``year_gt``). ``start`` / ``end`` are in neither
+        # unless this field publishes them, so a lookup another field
+        # publishes never turns a range value into a bag. Strawberry-input dataclass
         # bags (the schema-driven path) always delegate unchanged. The pairs
         # are read once through the base ``dict.items`` slot and each key is
         # reduced to an exact ``str`` before the membership test, so a dict
@@ -5080,16 +5086,11 @@ class FilterSet(
         # never answers for a lookup name.
         if is_dict(raw_value):
             pairs: list[tuple[str, object]] = []
-            published: frozenset[str] = (
-                filter_lookup_table(cls).lookup_attrs
-                if cls._meta.model is not None
-                else frozenset()
-            )
             for key, value in dict_items(raw_value):
                 if not truth.is_instance(key, str):
                     return None
                 lookup_attr = truth.text(key)
-                if lookup_attr not in _LOOKUP_PYTHON_ATTRS and lookup_attr not in published:
+                if lookup_attr not in _LOOKUP_PYTHON_ATTRS and lookup_attr not in head_lookups:
                     return None
                 pairs.append((lookup_attr, value))
             return pairs or None

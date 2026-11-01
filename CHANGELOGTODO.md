@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 161 to do.
+Progress: 0 done, 162 to do.
 
 ## From dry-0_0_15_3
 
@@ -116,6 +116,9 @@ Progress: 0 done, 161 to do.
   / `apply_async` names a chain by its python attr in the column's bag (`{"occurred_at": {"year_gt": 2020}}`); the
   flat `{"occurred_at__year__gt": 2020}` now raises `ConfigurationError` ("is not a filter input field"). Two lookups
   of one head that would publish one name raise `ConfigurationError` at finalize instead of one shadowing the other
+- [ ] 98. CHANGELOG entry for item 93's review: a generated lookup whose name is a Python keyword (a transform a project
+  registers as `from`, `class` or `is`) publishes under that name over the python attr `from_`; it raised a raw
+  `SyntaxError` when the schema was built
 
 ## From bug_hunt-0_0_15_2
 

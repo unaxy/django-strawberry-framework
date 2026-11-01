@@ -44,6 +44,9 @@ from apps.scalars import models as scalar_models
 from django import forms
 from django.db import models
 from django.db.models import QuerySet
+from django.db.models.functions import ExtractYear
+from django.db.models.lookups import GreaterThanOrEqual
+from django.test.utils import register_lookup
 from django_filters import (
     AllValuesFilter,
     AllValuesMultipleFilter,
@@ -85,7 +88,12 @@ from django_strawberry_framework.filters import (
     filter_input_type,
 )
 from django_strawberry_framework.filters import inputs as inputs_mod
-from django_strawberry_framework.filters.base import RelationPkFilter, RelationPkMultipleFilter
+from django_strawberry_framework.filters.base import (
+    RelationPkFilter,
+    RelationPkMultipleFilter,
+    _lookup_operand,
+    _model_lookup_operand,
+)
 from django_strawberry_framework.filters.factories import FilterArgumentsFactory
 from django_strawberry_framework.filters.inputs import (
     _FILTER_INPUT_KIND_TYPES,
@@ -446,6 +454,8 @@ def test_build_input_fields_pins_every_lookup_name_to_its_camel_name() -> None:
             id="chain-uppercase-run",
         ),
         pytest.param("iso_year__gte", ("iso_year_gte", "isoYearGte"), id="chain-unmapped-head"),
+        pytest.param("from", ("from_", "from"), id="unmapped-keyword-escaped"),
+        pytest.param("from__gt", ("from_gt", "fromGt"), id="chain-drops-an-unmapped-escape"),
     ],
 )
 def test_lookup_leaf_names_names_a_chain_segment_by_segment(
@@ -484,6 +494,60 @@ def test_two_lookups_of_one_head_named_by_one_attr_are_refused() -> None:
 
     with pytest.raises(ConfigurationError, match="both generate the lookup attribute 'year_gt'"):
         filter_lookup_table(CollidingFilter)
+
+
+@pytest.mark.parametrize("name", ["from", "class", "is"])
+def test_a_transform_named_by_a_python_keyword_publishes_under_an_escaped_attr(name: str) -> None:
+    """A consumer transform registered under a keyword builds its bag field as ``<name>_``.
+
+    The bare keyword cannot be a dataclass field, so the input class would not build.
+    """
+    transform = type("KeywordYear", (ExtractYear,), {"lookup_name": name})
+    with register_lookup(models.DateTimeField, transform):
+
+        class KeywordFilter(FilterSet):
+            class Meta:
+                model = scalar_models.ScalarSpecimen
+                fields = {"occurred_at": [name]}
+
+        assert _bag_lookup_attrs(KeywordFilter, "occurred_at") == [f"{name}_"]
+        assert KeywordFilter._normalize_input({"occurred_at": {f"{name}_": 2020}}) == {
+            f"occurred_at__{name}": 2020,
+        }
+
+
+class _YearAtLeast(GreaterThanOrEqual):
+    """A consumer comparison whose class names it ``isnull``: ``<value> >= <operand>``."""
+
+    lookup_name = "isnull"
+
+
+def test_a_consumer_lookup_registered_as_isnull_takes_its_own_operand() -> None:
+    """Only Django's ``IsNull`` past a transform publishes ``Boolean``, not any lookup so named.
+
+    ``year__isnull`` here compares the year to a number, which the declared
+    ``NumberFilter`` publishes; ``Boolean`` would refuse every value Django accepts.
+    """
+    _lookup_operand.cache_clear()
+    _model_lookup_operand.cache_clear()
+    try:
+        with register_lookup(models.IntegerField, _YearAtLeast):
+
+            class ShadowedNullFilter(FilterSet):
+                since = NumberFilter(field_name="occurred_at", lookup_expr="year__isnull")
+
+                class Meta:
+                    model = scalar_models.ScalarSpecimen
+                    fields = []
+
+            annotations = {
+                attr: ann for attr, ann, _kwargs in _build_input_fields(ShadowedNullFilter)
+            }
+            (lookup,) = dataclasses.fields(_class_arg(annotations["since"]))
+    finally:
+        _lookup_operand.cache_clear()
+        _model_lookup_operand.cache_clear()
+    assert lookup.type == "int | None"
 
 
 @pytest.mark.django_db
