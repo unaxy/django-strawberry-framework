@@ -87,7 +87,7 @@ from django.db.models.functions import Length, Upper
 from django.forms import ModelChoiceField, ModelMultipleChoiceField
 from django.http import HttpRequest, QueryDict
 from django.test import override_settings
-from django.test.utils import CaptureQueriesContext, isolate_apps
+from django.test.utils import CaptureQueriesContext, isolate_apps, register_lookup
 from django.utils.functional import SimpleLazyObject
 from django.utils.translation import gettext_lazy
 from django_filters import (
@@ -411,6 +411,48 @@ class _CrNoteDesk(_CrNoteRoot):
 
     class Meta(_CrUnmanagedModel.Meta):
         pass
+
+
+class _CrLooseLamp(django_models.Model):
+    """A lamp keyed to kiosk desks by their key, through links with and without a constraint.
+
+    ``kiosk`` / ``kiosks`` are enforced foreign keys; ``loose_kiosk`` /
+    ``loose_kiosks`` (``db_constraint=False``) and ``object_kiosk`` (a
+    ``ForeignObject``) create none, so each may hold a ``_CrDesk`` row's pk no
+    ``_CrKioskDesk`` row extends.
+    """
+
+    kiosk: _FK[_CrKioskDesk] = django_models.ForeignKey(
+        _CrKioskDesk,
+        on_delete=django_models.CASCADE,
+        related_name="+",
+    )
+    kiosks: django_models.ManyToManyField[_CrKioskDesk, django_models.Model] = (
+        django_models.ManyToManyField(_CrKioskDesk, related_name="+")
+    )
+    loose_kiosk: _FK[_CrKioskDesk] = django_models.ForeignKey(
+        _CrKioskDesk,
+        on_delete=django_models.DO_NOTHING,
+        db_constraint=False,
+        related_name="+",
+    )
+    loose_kiosks: django_models.ManyToManyField[_CrKioskDesk, django_models.Model] = (
+        django_models.ManyToManyField(_CrKioskDesk, db_constraint=False, related_name="+")
+    )
+    kiosk_ref: _PositiveInt = django_models.PositiveIntegerField()
+    object_kiosk: django_models.ForeignObject[_CrKioskDesk, _CrKioskDesk] = (
+        django_models.ForeignObject(
+            _CrKioskDesk,
+            on_delete=django_models.DO_NOTHING,
+            from_fields=["kiosk_ref"],
+            to_fields=["_crdesk_ptr"],
+            related_name="+",
+        )
+    )
+
+    class Meta:
+        app_label = "products"
+        managed = False
 
 
 @pytest.fixture(autouse=True)
@@ -7487,7 +7529,8 @@ def test_operator_bag_items_walks_lookup_attr_dict(
             model = Category
             fields = {"name": ["exact", "icontains"]}
 
-    assert CategoryFilter._operator_bag_items(value) == expected
+    lookups = CategoryFilter._leaf_lookups_by_attr()["name"]
+    assert CategoryFilter._operator_bag_items(value, lookups) == expected
 
 
 @pytest.mark.parametrize(
@@ -7509,7 +7552,74 @@ def test_operator_bag_items_returns_none_for_non_lookup_key_dict(
             model = Category
             fields = {"name": ["exact"]}
 
-    assert CategoryFilter._operator_bag_items(value) is None
+    lookups = CategoryFilter._leaf_lookups_by_attr()["name"]
+    assert CategoryFilter._operator_bag_items(value, lookups) is None
+
+
+@pytest.mark.parametrize(
+    ("lookups", "expected"),
+    [
+        pytest.param(["year__gt"], [("year_gt", 5)], id="published-chain"),
+        pytest.param(["year"], None, id="unpublished-chain"),
+    ],
+)
+def test_operator_bag_items_reads_a_chain_attr_the_set_publishes(
+    lookups: list[str],
+    expected: list[tuple[str, object]] | None,
+) -> None:
+    """A transform chain's attr (``year_gt``) makes a dict a bag only on a field publishing it.
+
+    No module vocabulary can list every chain a field's transforms compose, so the field's
+    own lookups answer.
+    """
+
+    class StampFilter(FilterSet):
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = {"occurred_at": lookups}
+
+    head_lookups = StampFilter._leaf_lookups_by_attr()["occurred_at"]
+    assert StampFilter._operator_bag_items({"year_gt": 5}, head_lookups) == expected
+
+
+@pytest.mark.django_db
+def test_a_range_value_stays_a_range_beside_another_field_publishing_its_bound_name() -> None:
+    """``{"start": n}`` is a ``RangeFilter``'s lower bound even when another field publishes ``start``.
+
+    A dict is an operator bag only by the lookups its own field carries, so the ``name``
+    field's ``start`` lookup neither turns ``span``'s range value into a bag nor stops
+    ``name``'s own bag applying.
+    """
+    first = Category.objects.create(name="alpha")
+    second = Category.objects.create(name="beta")
+    with register_lookup(dj_models.TextField, dj_models.lookups.StartsWith, lookup_name="start"):
+
+        class SpanFilter(FilterSet):
+            span = django_filters.RangeFilter(field_name="id")
+
+            class Meta:
+                model = Category
+                fields = {"name": ["start"]}
+
+        ranged = SpanFilter.apply_sync(
+            {"span": {"start": second.pk}},
+            Category.objects.all(),
+            _make_info(),
+        )
+        capped = SpanFilter.apply_sync(
+            {"span": {"end": first.pk}},
+            Category.objects.all(),
+            _make_info(),
+        )
+        named = SpanFilter.apply_sync(
+            {"name": {"start": "al"}},
+            Category.objects.all(),
+            _make_info(),
+        )
+
+        assert list(ranged.order_by("pk")) == [second]
+        assert list(capped.order_by("pk")) == [first]
+        assert list(named.order_by("pk")) == [first]
 
 
 @pytest.mark.parametrize("value", ["x", ["x"]], ids=["scalar", "sequence"])
@@ -7521,7 +7631,8 @@ def test_operator_bag_items_still_returns_none_for_scalars(value: object) -> Non
             model = Category
             fields = {"name": ["exact"]}
 
-    assert CategoryFilter._operator_bag_items(value) is None
+    lookups = CategoryFilter._leaf_lookups_by_attr()["name"]
+    assert CategoryFilter._operator_bag_items(value, lookups) is None
 
 
 def test_extract_branch_value_returns_none_for_none_input() -> None:
@@ -14364,6 +14475,24 @@ def _branch_parent(
             _CrNoteRoot,
             _CrNoteDesk,
         ),
+        (
+            _CrLooseLamp,
+            "loose_kiosk",
+            _CrDesk,
+            _CrKioskDesk,
+        ),
+        (
+            _CrLooseLamp,
+            "loose_kiosks",
+            _CrDesk,
+            _CrKioskDesk,
+        ),
+        (
+            _CrLooseLamp,
+            "object_kiosk",
+            _CrDesk,
+            _CrKioskDesk,
+        ),
     ],
     ids=[
         "unrelated-forward",
@@ -14379,6 +14508,9 @@ def _branch_parent(
         "mti-descendant-keyed-off-its-parent-link-by-one-to-one",
         "mti-descendant-keyed-off-its-parent-link-by-many-to-many",
         "mti-ancestor-across-a-reverse-generic-relation",
+        "mti-ancestor-across-an-unconstrained-foreign-key",
+        "mti-ancestor-across-an-unconstrained-many-to-many",
+        "mti-ancestor-across-a-foreign-object",
     ],
 )
 def test_branch_whose_target_set_model_the_relation_cannot_correlate_is_refused(
@@ -14397,6 +14529,8 @@ def test_branch_whose_target_set_model_the_relation_cannot_correlate_is_refused(
     matches itself whether or not a target row extends it. A reverse
     ``GenericRel``'s ``object_id`` is no foreign key, so it proves no target row
     exists either: an ancestor row would answer for a note no target row backs.
+    Nor does a key the database does not enforce (``db_constraint=False``, a
+    ``ForeignObject``): it may name an ancestor row no target row extends.
     """
     parent = _branch_parent(parent_model, field_name, child_model)
     with pytest.raises(
@@ -14443,6 +14577,8 @@ def test_branch_whose_target_set_declares_no_model_is_refused() -> None:
         (library_models.RepairTicket, "venue", library_models.SelfServeDesk),
         (library_models.VenueSponsor, "venues", library_models.LendingDesk),
         (library_models.SelfServeDesk, "lendingdesk_ptr", library_models.Venue),
+        (_CrLooseLamp, "kiosk", _CrDesk),
+        (_CrLooseLamp, "kiosks", _CrDesk),
     ],
     ids=[
         "the-target",
@@ -14453,6 +14589,8 @@ def test_branch_whose_target_set_declares_no_model_is_refused() -> None:
         "mti-grandchild",
         "mti-child-across-a-many-to-many",
         "mti-ancestor-across-a-forward-link",
+        "mti-ancestor-across-an-enforced-foreign-key",
+        "mti-ancestor-across-an-enforced-many-to-many",
     ],
 )
 def test_branch_whose_target_set_model_the_relation_correlates_expands(

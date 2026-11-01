@@ -32,7 +32,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from enum import Enum
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from typing import TYPE_CHECKING, Protocol, TypeAlias, get_args, get_origin, runtime_checkable
 
 import django_filters
@@ -44,6 +44,10 @@ from apps.scalars import models as scalar_models
 from django import forms
 from django.db import models
 from django.db.models import QuerySet
+from django.db.models.functions import ExtractYear
+from django.db.models.lookups import GreaterThanOrEqual
+from django.http import HttpRequest
+from django.test.utils import register_lookup
 from django_filters import (
     AllValuesFilter,
     AllValuesMultipleFilter,
@@ -85,7 +89,12 @@ from django_strawberry_framework.filters import (
     filter_input_type,
 )
 from django_strawberry_framework.filters import inputs as inputs_mod
-from django_strawberry_framework.filters.base import RelationPkFilter, RelationPkMultipleFilter
+from django_strawberry_framework.filters.base import (
+    RelationPkFilter,
+    RelationPkMultipleFilter,
+    _lookup_operand,
+    _model_lookup_operand,
+)
 from django_strawberry_framework.filters.factories import FilterArgumentsFactory
 from django_strawberry_framework.filters.inputs import (
     _FILTER_INPUT_KIND_TYPES,
@@ -111,6 +120,7 @@ from django_strawberry_framework.filters.inputs import (
     construct_search,
     convert_filter_to_input_annotation,
     filter_lookup_table,
+    lookup_leaf_names,
     materialize_input_class,
     normalize_input_value,
     range_form_keys,
@@ -121,6 +131,7 @@ from django_strawberry_framework.sets_mixins import ClassBasedTypeNameMixin
 from django_strawberry_framework.types.finalizer import finalize_django_types
 from django_strawberry_framework.utils._narrowing import dict_of, read_attr
 from django_strawberry_framework.utils.input_values import UNSET
+from tests._cleaned_filter_sets import cleaned_specimen
 from tests._generated_inputs import keyword_constructor as _keyword_constructor
 from tests._idioms import (
     ClaimsClass,
@@ -130,12 +141,13 @@ from tests._idioms import (
     consumer_query,
     is_object_list,
 )
+from tests._info import make_info
 from tests._postgres_fields import FakeArrayField, patch_array_field, real_array_of
 from tests._soft_dependency import blocked_modules
 
 if TYPE_CHECKING:
+    from django.db.backends.base.base import BaseDatabaseWrapper
     from django.db.models.expressions import Combinable
-    from django.http import HttpRequest
 
     from django_strawberry_framework.utils.typing import ModelField
 
@@ -428,6 +440,177 @@ def test_build_input_fields_pins_every_lookup_name_to_its_camel_name() -> None:
     id_fields = {field.python_name: field.graphql_name for field in _definition_fields(id_bag)}
     # `in_` -> alias `in`.
     assert id_fields["in_"] == "in"
+
+
+@pytest.mark.parametrize(
+    ("lookup", "names"),
+    [
+        pytest.param("exact", ("exact", "exact"), id="mapped"),
+        pytest.param("in", ("in_", "in"), id="keyword-escaped"),
+        pytest.param("iso_year", ("iso_year", "isoYear"), id="unmapped"),
+        pytest.param("year__gt", ("year_gt", "yearGt"), id="chain"),
+        pytest.param("year__in", ("year_in", "yearIn"), id="chain-drops-the-keyword-escape"),
+        pytest.param("year__isnull", ("year_is_null", "yearIsNull"), id="chain-mapped-tail"),
+        pytest.param(
+            "year__icontains",
+            ("year_i_contains", "yearIContains"),
+            id="chain-uppercase-run",
+        ),
+        pytest.param("iso_year__gte", ("iso_year_gte", "isoYearGte"), id="chain-unmapped-head"),
+        pytest.param("from", ("from_", "from"), id="unmapped-keyword-escaped"),
+        pytest.param("from__gt", ("from_gt", "fromGt"), id="chain-drops-an-unmapped-escape"),
+    ],
+)
+def test_lookup_leaf_names_names_a_chain_segment_by_segment(
+    lookup: str,
+    names: tuple[str, str],
+) -> None:
+    """A bag lookup's ``(python_attr, graphql_name)``, a transform chain's composed per segment.
+
+    A chain's GraphQL name is never the camel case of its joined attr, which marks the
+    uppercase run of ``year_i_contains`` as ``yearI__xContains``.
+    """
+    assert lookup_leaf_names(lookup) == names
+
+
+def test_two_lookups_of_one_head_named_by_one_attr_are_refused() -> None:
+    """A lookup a ``get_filters()`` override adds under a chain's attr would shadow the chain.
+
+    ``year_gt`` and ``year__gt`` both name the attr ``year_gt`` of the ``occurred_at`` head,
+    so one would be unreachable from the generated input.
+    """
+
+    class CollidingFilter(FilterSet):
+        @classmethod
+        @override
+        def get_filters(cls) -> OrderedDict[str, Filter]:
+            filters = OrderedDict(super().get_filters())
+            filters["occurred_at__year_gt"] = NumberFilter(
+                field_name="occurred_at",
+                lookup_expr="year_gt",
+            )
+            return filters
+
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = {"occurred_at": ["year__gt"]}
+
+    with pytest.raises(ConfigurationError, match="both generate the lookup attribute 'year_gt'"):
+        filter_lookup_table(CollidingFilter)
+
+
+@pytest.mark.parametrize("name", ["from", "class", "is"])
+def test_a_transform_named_by_a_python_keyword_publishes_under_an_escaped_attr(name: str) -> None:
+    """A consumer transform registered under a keyword builds its bag field as ``<name>_``.
+
+    The bare keyword cannot be a dataclass field, so the input class would not build.
+    """
+    transform = type("KeywordYear", (ExtractYear,), {"lookup_name": name})
+    with register_lookup(models.DateTimeField, transform):
+
+        class KeywordFilter(FilterSet):
+            class Meta:
+                model = scalar_models.ScalarSpecimen
+                fields = {"occurred_at": [name]}
+
+        assert _bag_lookup_attrs(KeywordFilter, "occurred_at") == [f"{name}_"]
+        assert KeywordFilter._normalize_input({"occurred_at": {f"{name}_": 2020}}) == {
+            f"occurred_at__{name}": 2020,
+        }
+
+
+class _YearAtLeast(GreaterThanOrEqual):
+    """A consumer comparison whose class names it ``isnull``: ``<value> >= <operand>``."""
+
+    lookup_name = "isnull"
+
+    @override
+    def get_rhs_op(self, connection: BaseDatabaseWrapper, rhs: str) -> str:
+        # Every supported backend renders ``gte`` so; its operator table is keyed by name.
+        del connection
+        return f">= {rhs}"
+
+
+@pytest.mark.django_db
+def test_a_consumer_lookup_registered_as_isnull_takes_its_own_operand() -> None:
+    """Only Django's ``IsNull`` past a transform publishes ``Boolean``, not any lookup so named.
+
+    ``year__isnull`` here compares the year to a number, which the declared
+    ``NumberFilter`` publishes and applies as Django does; ``Boolean`` would refuse every
+    value Django accepts.
+    """
+    cleaned_specimen("kept", kept=True)
+    cleaned_specimen("dropped", kept=False)
+    _lookup_operand.cache_clear()
+    _model_lookup_operand.cache_clear()
+    try:
+        with register_lookup(models.IntegerField, _YearAtLeast):
+
+            class ShadowedNullFilter(FilterSet):
+                since = NumberFilter(field_name="occurred_at", lookup_expr="year__isnull")
+
+                class Meta:
+                    model = scalar_models.ScalarSpecimen
+                    fields = []
+
+            annotations = {
+                attr: ann for attr, ann, _kwargs in _build_input_fields(ShadowedNullFilter)
+            }
+            (lookup,) = dataclasses.fields(_class_arg(annotations["since"]))
+            django_rows = scalar_models.ScalarSpecimen.objects.filter(
+                occurred_at__year__isnull=2021,
+            )
+            expected = list(django_rows.values_list("label", flat=True))
+            rows = ShadowedNullFilter.apply_sync(
+                {"since": {"year_is_null": 2021}},
+                scalar_models.ScalarSpecimen.objects.all(),
+                make_info(context=SimpleNamespace(request=HttpRequest())),
+            )
+            labels = list(rows.values_list("label", flat=True))
+    finally:
+        _lookup_operand.cache_clear()
+        _model_lookup_operand.cache_clear()
+    assert lookup.type == "int | None"
+    assert labels == expected == ["kept"]
+
+
+@pytest.mark.parametrize(
+    ("filter_class", "expected"),
+    [(NumberFilter, decimal.Decimal | None), (Filter, bool | None)],
+    ids=["form-cleans-a-number", "form-passes-any-value"],
+)
+def test_a_method_filter_named_isnull_is_typed_by_a_form_cleaning_its_own_kind(
+    filter_class: type[Filter],
+    expected: object,
+) -> None:
+    """A ``method=`` filter's method applies no ``isnull``, so a form cleaning a number types it.
+
+    The method receives what the form cleans: a ``NumberFilter`` hands it a number, which
+    ``Boolean`` would refuse; a bare ``Filter`` passes any value through and stays ``Boolean``.
+    """
+
+    class MethodNullFilter(FilterSet):
+        unset = filter_class(field_name="price", lookup_expr="isnull", method="by_value")
+
+        def by_value(
+            self,
+            queryset: QuerySet[scalar_models.ScalarSpecimen],
+            _name: str,
+            _value: object,
+        ) -> QuerySet[scalar_models.ScalarSpecimen]:
+            return queryset
+
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = []
+
+    annotation = convert_filter_to_input_annotation(
+        MethodNullFilter.base_filters["unset"],
+        scalar_models.ScalarSpecimen._meta.get_field("price"),
+        None,
+        MethodNullFilter,
+    )
+    assert annotation == expected
 
 
 @pytest.mark.django_db

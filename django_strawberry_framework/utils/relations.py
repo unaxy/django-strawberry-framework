@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias, TypeGuard, cast, overload
-from weakref import WeakKeyDictionary
+from typing import (
+    TYPE_CHECKING,
+    Literal,
+    NamedTuple,
+    Protocol,
+    TypeAlias,
+    TypeGuard,
+    cast,
+    overload,
+)
 
 from django.core.exceptions import FieldDoesNotExist
 from django.db import models
@@ -468,7 +477,7 @@ def validate_lookup_expr(terminal: ModelField, lookup_expr: str) -> type[models.
     part, an unresolvable mid-chain transform, or a final part that is neither
     a lookup nor a trailing transform with a supported ``exact``.
     """
-    return _walk_lookup_expr(terminal, lookup_expr)[1]
+    return _walk_lookup_expr(terminal, lookup_expr).lookup
 
 
 def lookup_operand(
@@ -487,11 +496,30 @@ def lookup_operand(
     answers as the column it computes (``generated_column``), so an identity test
     against that column holds. Raises ``LookupValidationError`` as the walk does.
     """
-    lhs, lookup = _walk_lookup_expr(field, lookup_expr)
-    output = require(read_attr(lhs, "output_field"), is_concrete_field)
+    walk = _walk_lookup_expr(field, lookup_expr)
+    output = require(read_attr(walk.lhs, "output_field"), is_concrete_field)
     if output is lookup_registry(field):
         output = generated_column(field) or output
-    return output, lookup
+    return output, walk.lookup
+
+
+def lookup_transform_parts(terminal: ModelField, lookup_expr: str) -> tuple[str, ...]:
+    """Return the parts of ``lookup_expr`` Django's query applies to ``terminal`` as transforms.
+
+    Every part ahead of the final one, and the final one too when it is a trailing
+    transform with an implicit ``exact`` (``validate_lookup_expr``'s rule, Django's own
+    ``Query.build_lookup``): ``genre_key__in`` applies ``genre_key``, and so does a bare
+    ``genre_key``. Raises ``LookupValidationError`` as the walk does.
+    """
+    return _walk_lookup_expr(terminal, lookup_expr).transforms
+
+
+class _LookupWalk(NamedTuple):
+    """``_walk_lookup_expr``'s answer: the lookup's left-hand side, the lookup, the transforms applied."""
+
+    lhs: Col | Transform | models.ForeignObjectRel
+    lookup: type[models.lookups.Lookup]
+    transforms: tuple[str, ...]
 
 
 def lookup_registry(field: ModelField) -> ModelField:
@@ -512,11 +540,8 @@ def lookup_registry(field: ModelField) -> ModelField:
     return field
 
 
-def _walk_lookup_expr(
-    terminal: ModelField,
-    lookup_expr: str,
-) -> tuple[Col | Transform | models.ForeignObjectRel, type[models.lookups.Lookup]]:
-    """Return the expression ``lookup_expr``'s final lookup applies to, and that lookup.
+def _walk_lookup_expr(terminal: ModelField, lookup_expr: str) -> _LookupWalk:
+    """Return the expression ``lookup_expr``'s final lookup applies to, that lookup, and its transforms.
 
     ``validate_lookup_expr``'s walk; see it for the cursor, the trailing-transform rule
     and the refusals.
@@ -541,13 +566,13 @@ def _walk_lookup_expr(
         cursor = transform(cursor)
     lookup = cursor.get_lookup(final_part)
     if lookup is not None:
-        return cursor, lookup
+        return _LookupWalk(cursor, lookup, tuple(transform_parts))
     transform = cursor.get_transform(final_part)
     if transform is not None:
         transformed = transform(cursor)
         exact = transformed.get_lookup("exact")
         if exact is not None:
-            return transformed, exact
+            return _LookupWalk(transformed, exact, tuple(parts))
     raise LookupValidationError(terminal, lookup_expr, final_part)
 
 
@@ -1253,9 +1278,10 @@ def is_stored_column(field: object) -> TypeGuard[ConcreteField]:
     return is_concrete_field(field) and field in field.model._meta.concrete_fields
 
 
-# One computed column per ``GeneratedField``, filed on its first read; see ``generated_column``.
-# Weakly keyed, so a field of a model that is discarded (a test's isolated app) drops its column.
-_GENERATED_COLUMNS: WeakKeyDictionary[models.GeneratedField, ConcreteField] = WeakKeyDictionary()
+# The attribute a ``GeneratedField`` files its computed column under, and the lock its
+# filing holds; see ``generated_column``.
+_GENERATED_COLUMN_ATTR = "_dsf_generated_column"
+_GENERATED_COLUMN_LOCK = threading.Lock()
 
 
 def generated_column(field: object) -> ConcreteField | None:
@@ -1280,18 +1306,39 @@ def generated_column(field: object) -> ConcreteField | None:
     may register its own (``Field.register_lookup`` on an instance). A lookup is read off
     that registry, and a walk starts from the generated field's own column
     (``lookup_operand``; ``generated_column_source`` reads the field back from the clone).
-    One column is filed per field, weakly (a ``WeakKeyDictionary`` keyed by the field: Django hashes it
-    by ``creation_counter`` and compares the bound model too), and every caller
-    gets the one filed (``setdefault``), so an identity test between two reads of it holds.
+    One column is filed per field, on the field itself (under a lock, so a concurrent first
+    read files no second one), and every caller gets the one filed, so an identity test
+    between two reads of it holds; the column lives exactly as long as its field, so a
+    discarded model (a test's isolated app) is collected with it. A column filed for
+    another model (a copy Django's abstract inheritance takes of a field already read) is
+    filed again.
     The type and filter conversions read it through
     ``types/converters.py::generated_output_field``, which refuses the outputs no
     conversion can publish; the identity codec reads it through ``stored_value_link``.
     """
     if not truth.is_instance(field, models.GeneratedField):
         return None
-    filed = _GENERATED_COLUMNS.get(field)
+    filed = _filed_generated_column(field)
     if filed is not None:
         return filed
+    with _GENERATED_COLUMN_LOCK:
+        filed = _filed_generated_column(field)
+        if filed is None:
+            filed = _computed_column(field)
+            setattr(field, _GENERATED_COLUMN_ATTR, filed)
+        return filed
+
+
+def _filed_generated_column(field: models.GeneratedField) -> ConcreteField | None:
+    """Return the column ``generated_column`` filed on ``field`` for its own model, or ``None``."""
+    filed = read_attr(field, _GENERATED_COLUMN_ATTR, None)
+    if is_concrete_field(filed) and filed.model is field.model:
+        return filed
+    return None
+
+
+def _computed_column(field: models.GeneratedField) -> ConcreteField:
+    """Return a new column computing ``field``, bound as ``generated_column`` describes."""
     output = require(read_attr(field, "output_field"), is_concrete_field)
     column = output.clone()
     column.model = field.model
@@ -1301,7 +1348,7 @@ def generated_column(field: object) -> ConcreteField | None:
     column.blank = field.blank
     column.help_text = field.help_text
     column.null = field.null or output.null
-    return _GENERATED_COLUMNS.setdefault(field, column)
+    return column
 
 
 def generated_column_source(column: ConcreteField) -> models.GeneratedField | None:

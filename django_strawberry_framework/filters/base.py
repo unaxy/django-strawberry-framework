@@ -131,6 +131,7 @@ from django_strawberry_framework.utils.relations import (
     is_model_class,
     lookup_operand,
     lookup_registry,
+    lookup_transform_parts,
     relation_bool,
     stored_value_column,
     stored_value_link,
@@ -463,14 +464,16 @@ def _reads_integer_transform(filter_instance: Filter) -> bool:
 
 
 class _LookupOperand(NamedTuple):
-    """What one value a filter applies is compared as: a value of ``field``, the operand of ``lookup``.
+    """What one value a filter applies is compared as: a value of ``field``, or a null test's flag.
 
-    ``lookup`` is the terminal lookup past the transforms (``isnull`` for a ``year__isnull``
-    leaf), whose operand is not a value of ``field`` when it is ``isnull``.
+    ``null_test`` is whether the terminal lookup past the transforms is Django's ``IsNull``
+    (a ``year__isnull`` leaf), whose operand is a boolean, never a value of ``field``. It is
+    the resolved lookup's class, not its name: a consumer lookup registered as ``isnull``
+    over a transform's output takes the operand its own class compares.
     """
 
     field: ModelField | None
-    lookup: str
+    null_test: bool
 
 
 @cache
@@ -499,7 +502,7 @@ def _lookup_operand(column: ConcreteField, lookup_expr: str) -> _LookupOperand |
         output, lookup = lookup_operand(generated_column_source(column) or column, lookup_expr)
     except (LookupValidationError, FieldError):
         return None
-    return _LookupOperand(output, require(lookup.lookup_name, is_str))
+    return _LookupOperand(output, issubclass(lookup, models.lookups.IsNull))
 
 
 class _ResolvedField(NamedTuple):
@@ -630,17 +633,22 @@ def _filterset_lookup_operand(
     filterset: type[BaseFilterSet] | BaseFilterSet | None,
     filter_instance: Filter,
 ) -> _LookupOperand:
-    """Return ``_filterset_value_field``'s field with the terminal lookup it is compared by.
+    """Return ``_filterset_value_field``'s field with whether its terminal lookup is a null test.
 
     The lookup is the walk's answer past the transforms (``_lookup_operand``), and the
-    filter's own ``lookup_expr`` wherever the field is not read off that walk.
+    filter's own ``lookup_expr`` (``isnull`` by name) wherever the field is not read off
+    that walk (a ``method=`` filter's too, whose method applies no lookup of the filter's:
+    ``filters/inputs.py`` lets its own form type a value it cleans).
     """
     lookup_expr = filter_instance.lookup_expr
     if read_attr(filter_instance, "method", None) is not None:
-        return _LookupOperand(_filterset_model_field(filterset, filter_instance), lookup_expr)
+        return _LookupOperand(
+            _filterset_model_field(filterset, filter_instance),
+            _names_null_test(lookup_expr),
+        )
     model = _filterset_model(filterset)
     if model is None:
-        return _LookupOperand(None, lookup_expr)
+        return _LookupOperand(None, _names_null_test(lookup_expr))
     return _model_lookup_operand(model, _bound_field_name(filter_instance), lookup_expr)
 
 
@@ -663,18 +671,23 @@ def _model_lookup_operand(
         try:
             transforms, field_parts, _expression = query.solve_lookup_type(field_path)
         except FieldError:
-            return _LookupOperand(None, lookup_expr)
+            return _LookupOperand(None, _names_null_test(lookup_expr))
         # The field part is the one Django's split just walked, so it names a column.
         path_column = require(
             lookup_target_fields(query, LOOKUP_SEP.join(field_parts))[0],
             is_concrete_field,
         )
         operand = _lookup_operand(path_column, LOOKUP_SEP.join((*transforms, lookup_expr)))
-        return _LookupOperand(None, lookup_expr) if operand is None else operand
+        return _LookupOperand(None, _names_null_test(lookup_expr)) if operand is None else operand
     if not is_concrete_field(column):
-        return _LookupOperand(column, lookup_expr)
+        return _LookupOperand(column, _names_null_test(lookup_expr))
     operand = _lookup_operand(column, lookup_expr)
-    return _LookupOperand(column, lookup_expr) if operand is None else operand
+    return _LookupOperand(column, _names_null_test(lookup_expr)) if operand is None else operand
+
+
+def _names_null_test(lookup_expr: str) -> bool:
+    """Whether a ``lookup_expr`` no walk resolved names Django's null test: ``isnull``."""
+    return lookup_expr == "isnull"
 
 
 def _column_form_field(filter_instance: Filter, *, element: bool = False) -> Field | None:
@@ -2510,11 +2523,14 @@ def _coerce_relation_identity(filter_instance: Filter, value: object, alias: str
     ``in`` member; the column's own validators are not run, so a key they would refuse
     still matches a row that holds it. A relation linked by more than one column, or by
     none (``_compared_columns``), has no single column one value can name, so every value
-    identifies no row. A filter whose path names no field (``_bound_model_field``: no
-    model to walk, or nothing on it) has no column and passes the value through
-    unchanged.
+    identifies no row. The relation is the field each value is compared as
+    (``_bound_value_field``), the one ``filters/inputs.py::_relation_identity_annotation``
+    types the input from: the path's own relation, or the relation a transform between
+    the column and the lookup outputs, whose key the value names rather than the
+    column's. A filter whose path names no such field (no model to walk, or nothing on
+    it) has no column and passes the value through unchanged.
     """
-    field = _bound_model_field(filter_instance)
+    field = _bound_value_field(filter_instance)
     if field is None:
         return value
     columns = _compared_columns(filter_instance, field)
@@ -2602,7 +2618,12 @@ class RelationPkMultipleFilter(Filter):
         ``exact`` on a multi-valued relation and ``in`` on any relation both mean "related
         to at least one of these rows", which a single ``__in`` over one join expresses
         for both (and for its ``exclude`` complement). The non-pk ``to_field`` marker
-        qualifies the path with ``__pk`` exactly as on ``RelationPkFilter``.
+        qualifies the path with ``__pk`` exactly as on ``RelationPkFilter``. The
+        transforms the ``lookup_expr`` applies stay in the path
+        (``<column>__<transform>__in`` for a transform whose output is a relation), read as
+        Django's query reads them (``_applied_transforms``: a bare ``<transform>`` is one
+        too), so the members are compared with the value the transform computes, as they
+        were coerced.
         """
         if value is None:
             return qs
@@ -2618,8 +2639,30 @@ class RelationPkMultipleFilter(Filter):
         ]
         if not kept:
             return _match_none_queryset(self, qs)
-        field_name = _marked_pk_field_name(self) or self.field_name
-        return _apply_lookups(self, qs, {f"{field_name}__in": kept})
+        path = LOOKUP_SEP.join(
+            (
+                _marked_pk_field_name(self) or _bound_field_name(self),
+                *_applied_transforms(self),
+                "in",
+            ),
+        )
+        return _apply_lookups(self, qs, {path: kept})
+
+
+def _applied_transforms(filter_instance: Filter) -> tuple[str, ...]:
+    """Return the transforms a bound filter's ``lookup_expr`` applies, as Django's query applies them.
+
+    Read off the field the filter's path names (``utils/relations.py::lookup_transform_parts``,
+    from a ``GeneratedField``'s own column as ``_lookup_operand`` walks it), so a final part
+    that is no lookup there is a trailing transform with an implicit ``exact``. A path naming
+    no field has no registry to ask; every part ahead of the final one is a transform there.
+    """
+    field = _bound_model_field(filter_instance)
+    lookup_expr = filter_instance.lookup_expr
+    if field is None:
+        return tuple(lookup_expr.split(LOOKUP_SEP)[:-1])
+    source = generated_column_source(field) if is_concrete_field(field) else None
+    return lookup_transform_parts(source or field, lookup_expr)
 
 
 def refuse_identityless_relation(
@@ -2637,9 +2680,14 @@ def refuse_identityless_relation(
     ``FieldError``, so the declaration could answer no request.
     ``filters/sets.py::FilterSet._publish_filters`` asks this of every leaf a set
     publishes: a set a type serves refuses it when the schema builds, an unserved set
-    applied over JSON at its first use. A path naming no field is not read here.
+    applied over JSON at its first use. A path naming no field is not read here, and
+    neither is a filter with a ``method``: django-filter dispatches it to that method,
+    which filters as it chooses (the content type and object id columns, say), never
+    through the relation its ``field_name`` names.
     """
     if not isinstance(filter_instance, (GlobalIDFilter, GlobalIDMultipleChoiceFilter)):
+        return
+    if read_attr(filter_instance, "method", None) is not None:
         return
     field = _filterset_model_field(filterset_cls, filter_instance)
     if field is None or not field.is_relation or _compared_columns(filter_instance, field):

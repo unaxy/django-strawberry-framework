@@ -31,6 +31,7 @@ import pytest
 import strawberry
 from apps.library import models
 from django import forms
+from django.db import connection
 from django.db import models as django_models
 from django.db.models.functions import Chr
 from django.db.models.lookups import Contains, Exact, Lookup, Transform
@@ -566,6 +567,22 @@ def _class_lookup(
         _clear_operand_caches()
 
 
+@pytest.fixture
+def _chr_takes_a_bigint(db: None) -> None:
+    """Give PostgreSQL a ``chr(bigint)`` for ``Chr`` over the ``BigIntegerField`` column.
+
+    PostgreSQL's own ``chr()`` takes only an ``integer``. The overload is created inside
+    the test's transaction, so its rollback drops it; other backends need none.
+    """
+    del db
+    if connection.vendor == "postgresql":
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "CREATE FUNCTION chr(bigint) RETURNS text LANGUAGE sql IMMUTABLE"
+                " AS 'SELECT pg_catalog.chr($1::integer)'",
+            )
+
+
 def _clear_operand_caches() -> None:
     """Drop the filter operands resolved while a test's lookup registration was live.
 
@@ -672,27 +689,29 @@ def _row_codes(where: str) -> list[str]:
     ]
 
 
+@pytest.mark.usefixtures("_chr_takes_a_bigint")
 @pytest.mark.django_db
 @pytest.mark.parametrize("owners", [("output",), ("generated", "output")], ids=["output", "both"])
 def test_transform_registered_on_the_generated_output_types_its_operand_over_http(
     owners: tuple[str, ...],
     private_registry: None,
 ) -> None:
-    """``codeLength`` through Django's ``Chr`` publishes and filters a ``String`` operand.
+    """``codeLength``'s ``chr`` leaf through Django's ``Chr`` publishes and filters a ``String``.
 
     Django resolves a generated column's lookups on its ``output_field`` instance, where
     ``Chr`` is registered, and the transform's output is a ``CharField``: the leaf is
     ``String``, ``"A"`` matches the shelf whose code is 65 characters long, and the
-    integer ``65`` is refused as the wrong type.
+    integer ``65`` is refused as the wrong type. ``chr__exact`` is the ``chr`` leaf of the
+    ``codeLength`` head, as django-filter names it ``code_length__chr``.
     """
     del private_registry
     _seed_shelves((("A" * 65, ""), ("B" * 66, "")))
 
     with _output_lookup_schema(owners, Chr, "chr__exact"):
-        assert _operand_types("codeLengthChr") == {"chr_Exact": "String"}
-        assert _row_codes('codeLengthChr: {chr_Exact: "A"}') == ["A" * 65]
+        assert _operand_types("codeLength") == {"chr": "String"}
+        assert _row_codes('codeLength: {chr: "A"}') == ["A" * 65]
         refused = _post_graphql(
-            "{ rows(filter: {codeLengthChr: {chr_Exact: 65}}) { edges { node { code } } } }",
+            "{ rows(filter: {codeLength: {chr: 65}}) { edges { node { code } } } }",
             url="/graphql-test/",
         )
         assert "errors" in response_json(refused)
@@ -815,6 +834,7 @@ def test_a_lookup_named_like_a_text_pattern_on_the_generated_output_takes_the_co
         assert _operand_types("codeLength")["contains"] == "BigInt"
 
 
+@pytest.mark.usefixtures("_chr_takes_a_bigint")
 @pytest.mark.django_db
 @pytest.mark.parametrize("leaf", ["generated", "declared"])
 def test_a_transform_replacing_a_lookup_on_the_generated_output_types_its_operand_over_http(
@@ -885,6 +905,7 @@ def test_globalid_filter_codes_its_node_id_through_a_lookup_registered_on_the_ge
         assert json_at(error, "extensions", "code") == "GLOBALID_INVALID", payload
 
 
+@pytest.mark.usefixtures("_chr_takes_a_bigint")
 @pytest.mark.django_db
 def test_globalid_filter_passes_its_node_id_to_a_transform_replacing_a_lookup_on_the_generated_output(
     private_registry: None,
@@ -949,6 +970,7 @@ def test_override_extra_lookup_expr_replaces_the_generated_leaf_lookup_over_http
         assert _row_codes("topicLength: {gte: 2}") == ["CC", "BBB"]
 
 
+@pytest.mark.usefixtures("_chr_takes_a_bigint")
 @pytest.mark.django_db
 def test_consumer_override_on_a_generated_leaf_across_a_to_many_keeps_its_distinct_over_http(
     private_registry: None,

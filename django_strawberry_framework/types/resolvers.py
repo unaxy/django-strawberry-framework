@@ -745,7 +745,7 @@ def _make_relation_resolver(
             # cache and the key read above serves it. Whatever reaches this line
             # was therefore never offered to the target's hook for this instance -
             # it is unprefetched, or Django serves it from a cache the instance
-            # does not own (from Django 6.1 a many-to-many manager also answers
+            # does not own (from Django 6.0 a many-to-many manager also answers
             # from the prefetch of an MTI ancestor the instance was reached
             # through) - so with a hook it is re-read through the boundary.
             if visibility_type is not None:

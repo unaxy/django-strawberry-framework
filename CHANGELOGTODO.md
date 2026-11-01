@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 160 to do.
+Progress: 0 done, 163 to do.
 
 ## From dry-0_0_15_3
 
@@ -108,6 +108,21 @@ Progress: 0 done, 160 to do.
   narrowed merged inputs that re-cased alike no longer fail the schema build. With item 96: a `DjangoType` with no
   `Meta.name` whose class name carries an underscore (`Cat_Node`, published `CatNode`) names its connection, filter
   inputs and choice enums after `CatNode`, not `Cat_Node`
+- [ ] 97. CHANGELOG entry for item 93: a generated lookup through a transform chain is a leaf of its column's head,
+  named segment by segment: `Meta.fields = {"occurred_at": ["year__gt", "year__in", "year__isnull"]}` publishes
+  `occurredAt: { yearGt, yearIn, yearIsNull }` (it published `occurredAtYearGt: { year_Gt }`, one head per chain), a
+  declared filter's chain leaf is camel-cased too (`yearsAmong: { yearIn }`, was `year_In`), and `year__exact` is the
+  `year` leaf (it published a second `occurredAtYear { year_Exact }` head). A hand-built mapping passed to `apply_sync`
+  / `apply_async` names a chain by its python attr in the column's bag (`{"occurred_at": {"year_gt": 2020}}`); the
+  flat `{"occurred_at__year__gt": 2020}` now raises `ConfigurationError` ("is not a filter input field"). Two lookups
+  of one head that would publish one name raise `ConfigurationError` at finalize instead of one shadowing the other
+- [ ] 98. CHANGELOG entry for item 93's review: a generated lookup whose name is a Python keyword (a transform a project
+  registers as `from`, `class` or `is`) publishes under that name over the python attr `from_`; it raised a raw
+  `SyntaxError` when the schema was built
+- [ ] 99. CHANGELOG entry for item 92's review: a `method=` filter with `lookup_expr="isnull"` whose form cleans its own
+  kind takes that kind (`NumberFilter(lookup_expr="isnull", method=...)` takes a number, which its method receives);
+  it took `Boolean`, which refused every value the form accepts. One whose form passes any value through (a bare
+  `Filter`) still takes `Boolean`
 
 ## From bug_hunt-0_0_15_2
 
