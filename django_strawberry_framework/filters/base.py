@@ -131,6 +131,7 @@ from django_strawberry_framework.utils.relations import (
     is_model_class,
     lookup_operand,
     lookup_registry,
+    lookup_transform_parts,
     relation_bool,
     stored_value_column,
     stored_value_link,
@@ -636,7 +637,8 @@ def _filterset_lookup_operand(
 
     The lookup is the walk's answer past the transforms (``_lookup_operand``), and the
     filter's own ``lookup_expr`` (``isnull`` by name) wherever the field is not read off
-    that walk.
+    that walk (a ``method=`` filter's too, whose method applies no lookup of the filter's:
+    ``filters/inputs.py`` lets its own form type a value it cleans).
     """
     lookup_expr = filter_instance.lookup_expr
     if read_attr(filter_instance, "method", None) is not None:
@@ -2617,9 +2619,11 @@ class RelationPkMultipleFilter(Filter):
         to at least one of these rows", which a single ``__in`` over one join expresses
         for both (and for its ``exclude`` complement). The non-pk ``to_field`` marker
         qualifies the path with ``__pk`` exactly as on ``RelationPkFilter``. The
-        transforms the ``lookup_expr`` applies ahead of its lookup stay in the path
-        (``<column>__<transform>__in`` for a transform whose output is a relation), so the
-        members are compared with the value the transform computes, as they were coerced.
+        transforms the ``lookup_expr`` applies stay in the path
+        (``<column>__<transform>__in`` for a transform whose output is a relation), read as
+        Django's query reads them (``_applied_transforms``: a bare ``<transform>`` is one
+        too), so the members are compared with the value the transform computes, as they
+        were coerced.
         """
         if value is None:
             return qs
@@ -2635,11 +2639,30 @@ class RelationPkMultipleFilter(Filter):
         ]
         if not kept:
             return _match_none_queryset(self, qs)
-        *transforms, _lookup = self.lookup_expr.split(LOOKUP_SEP)
         path = LOOKUP_SEP.join(
-            (_marked_pk_field_name(self) or _bound_field_name(self), *transforms, "in"),
+            (
+                _marked_pk_field_name(self) or _bound_field_name(self),
+                *_applied_transforms(self),
+                "in",
+            ),
         )
         return _apply_lookups(self, qs, {path: kept})
+
+
+def _applied_transforms(filter_instance: Filter) -> tuple[str, ...]:
+    """Return the transforms a bound filter's ``lookup_expr`` applies, as Django's query applies them.
+
+    Read off the field the filter's path names (``utils/relations.py::lookup_transform_parts``,
+    from a ``GeneratedField``'s own column as ``_lookup_operand`` walks it), so a final part
+    that is no lookup there is a trailing transform with an implicit ``exact``. A path naming
+    no field has no registry to ask; every part ahead of the final one is a transform there.
+    """
+    field = _bound_model_field(filter_instance)
+    lookup_expr = filter_instance.lookup_expr
+    if field is None:
+        return tuple(lookup_expr.split(LOOKUP_SEP)[:-1])
+    source = generated_column_source(field) if is_concrete_field(field) else None
+    return lookup_transform_parts(source or field, lookup_expr)
 
 
 def refuse_identityless_relation(

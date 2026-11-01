@@ -5,7 +5,16 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias, TypeGuard, cast, overload
+from typing import (
+    TYPE_CHECKING,
+    Literal,
+    NamedTuple,
+    Protocol,
+    TypeAlias,
+    TypeGuard,
+    cast,
+    overload,
+)
 
 from django.core.exceptions import FieldDoesNotExist
 from django.db import models
@@ -468,7 +477,7 @@ def validate_lookup_expr(terminal: ModelField, lookup_expr: str) -> type[models.
     part, an unresolvable mid-chain transform, or a final part that is neither
     a lookup nor a trailing transform with a supported ``exact``.
     """
-    return _walk_lookup_expr(terminal, lookup_expr)[1]
+    return _walk_lookup_expr(terminal, lookup_expr).lookup
 
 
 def lookup_operand(
@@ -487,11 +496,30 @@ def lookup_operand(
     answers as the column it computes (``generated_column``), so an identity test
     against that column holds. Raises ``LookupValidationError`` as the walk does.
     """
-    lhs, lookup = _walk_lookup_expr(field, lookup_expr)
-    output = require(read_attr(lhs, "output_field"), is_concrete_field)
+    walk = _walk_lookup_expr(field, lookup_expr)
+    output = require(read_attr(walk.lhs, "output_field"), is_concrete_field)
     if output is lookup_registry(field):
         output = generated_column(field) or output
-    return output, lookup
+    return output, walk.lookup
+
+
+def lookup_transform_parts(terminal: ModelField, lookup_expr: str) -> tuple[str, ...]:
+    """Return the parts of ``lookup_expr`` Django's query applies to ``terminal`` as transforms.
+
+    Every part ahead of the final one, and the final one too when it is a trailing
+    transform with an implicit ``exact`` (``validate_lookup_expr``'s rule, Django's own
+    ``Query.build_lookup``): ``genre_key__in`` applies ``genre_key``, and so does a bare
+    ``genre_key``. Raises ``LookupValidationError`` as the walk does.
+    """
+    return _walk_lookup_expr(terminal, lookup_expr).transforms
+
+
+class _LookupWalk(NamedTuple):
+    """``_walk_lookup_expr``'s answer: the lookup's left-hand side, the lookup, the transforms applied."""
+
+    lhs: Col | Transform | models.ForeignObjectRel
+    lookup: type[models.lookups.Lookup]
+    transforms: tuple[str, ...]
 
 
 def lookup_registry(field: ModelField) -> ModelField:
@@ -512,11 +540,8 @@ def lookup_registry(field: ModelField) -> ModelField:
     return field
 
 
-def _walk_lookup_expr(
-    terminal: ModelField,
-    lookup_expr: str,
-) -> tuple[Col | Transform | models.ForeignObjectRel, type[models.lookups.Lookup]]:
-    """Return the expression ``lookup_expr``'s final lookup applies to, and that lookup.
+def _walk_lookup_expr(terminal: ModelField, lookup_expr: str) -> _LookupWalk:
+    """Return the expression ``lookup_expr``'s final lookup applies to, that lookup, and its transforms.
 
     ``validate_lookup_expr``'s walk; see it for the cursor, the trailing-transform rule
     and the refusals.
@@ -541,13 +566,13 @@ def _walk_lookup_expr(
         cursor = transform(cursor)
     lookup = cursor.get_lookup(final_part)
     if lookup is not None:
-        return cursor, lookup
+        return _LookupWalk(cursor, lookup, tuple(transform_parts))
     transform = cursor.get_transform(final_part)
     if transform is not None:
         transformed = transform(cursor)
         exact = transformed.get_lookup("exact")
         if exact is not None:
-            return transformed, exact
+            return _LookupWalk(transformed, exact, tuple(parts))
     raise LookupValidationError(terminal, lookup_expr, final_part)
 
 

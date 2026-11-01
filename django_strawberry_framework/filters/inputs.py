@@ -1098,9 +1098,15 @@ def convert_filter_to_input_annotation(
         # from the form field its class builds; one whose ``field`` builds none on the
         # unbound declaration raises (spec-027 Decision 4).
         _refuse_method_without_form_field(matched, filterset_cls)
-        if _filterset_lookup_operand(filterset_cls, matched).null_test:
+        if _filterset_lookup_operand(filterset_cls, matched).null_test and (
+            read_attr(matched, "method", None) is None
+            or all(_passes_value_through(field) for field in _form_value_fields(matched))
+        ):
             # ``isnull`` is a boolean predicate regardless of the column type, past a
-            # transform too (``year__isnull``): the value field is irrelevant here.
+            # transform too (``year__isnull``): the value field is irrelevant here. A
+            # ``method=`` filter's method applies no lookup of the filter's, so a form that
+            # cleans its own kind types it (``NumberFilter(lookup_expr="isnull", method=...)``
+            # takes a number); one passing any value through keeps ``Boolean``.
             return bool
         value_field = _form_cleaned_value_field(matched, model_field, filterset_cls)
         return _element_annotation(matched, value_field, owner_definition, filterset_cls)
