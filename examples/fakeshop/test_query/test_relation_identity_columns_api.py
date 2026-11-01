@@ -1226,12 +1226,13 @@ def test_a_membership_lookup_expr_continuing_across_a_relation_keeps_the_hop() -
     """A raw-key membership whose ``lookup_expr`` crosses a relation compares across it.
 
     ``shelves`` + ``branch__in`` is Django's ``shelves__branch__in``: branches holding a
-    shelf of one of the listed branches. West's shelf is saved first, so its key is east's
-    and a predicate that dropped the ``branch`` hop (``shelves__in``) would answer west.
+    shelf of one of the listed branches. West's shelf is pinned to east's key (Postgres
+    sequences survive the test rollback, so saved order cannot align them), and a predicate
+    that dropped the ``branch`` hop (``shelves__in``) would answer west.
     """
     east, west, _north = (Branch.objects.create(name=name) for name in ("east", "west", "north"))
-    _ = Shelf.objects.create(code="W1", branch=west)
-    _ = Shelf.objects.create(code="E1", branch=east)
+    _ = Shelf.objects.create(pk=east.pk, code="W1", branch=west)
+    _ = Shelf.objects.create(pk=west.pk, code="E1", branch=east)
     assert [row.name for row in Branch.objects.filter(shelves__branch__in=[east.pk])] == ["east"]
     assert [row.name for row in Branch.objects.filter(shelves__in=[east.pk])] == ["west"]
     filterset = type(
