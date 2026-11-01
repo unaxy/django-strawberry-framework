@@ -4,8 +4,10 @@
 Traversal on the wire is ``examples/fakeshop/test_query/test_library_api.py``.
 """
 
+import gc
 import sys
 import typing
+import weakref
 from collections.abc import Callable
 from dataclasses import FrozenInstanceError, dataclass
 from types import SimpleNamespace
@@ -60,6 +62,7 @@ from django_strawberry_framework.utils.relations import (
     _lenient_traverses_to_many,
     carrier_backed_link,
     classify_path,
+    generated_column,
     has_composite_pk,
     instance_accessor,
     is_forward_concrete_relation,
@@ -2145,3 +2148,47 @@ def test_is_stored_column_keeps_only_the_columns_of_the_rows(
     concrete columns are, and so is a generated column.
     """
     assert sorted(field.name for field in _every_field(model) if is_stored_column(field)) == stored
+
+
+def _generated_model(label: str) -> type[Model]:
+    """A model with a generated column, declared in a registry of its own that nothing keeps."""
+    meta = type(
+        "Meta",
+        (),
+        {"app_label": label, "apps": Apps([AppConfig(label, sys.modules[__name__])])},
+    )
+    return type(
+        "_GcGenerated",
+        (models.Model,),
+        {
+            "__module__": __name__,
+            "seats": models.IntegerField(),
+            "double_seats": models.GeneratedField(
+                expression=models.F("seats") * 2,
+                output_field=models.IntegerField(),
+                db_persist=True,
+            ),
+            "Meta": meta,
+        },
+    )
+
+
+@pytest.mark.parametrize("read", [False, True], ids=["unread", "read"])
+def test_a_generated_column_lives_exactly_as_long_as_its_field(*, read: bool) -> None:
+    """Every read answers the one column filed on the field, which never outlives it.
+
+    A model whose registry is discarded (a test's isolated app) is collected, its
+    column read or not.
+    """
+    model = _generated_model(f"test_relations_generated_{'read' if read else 'unread'}")
+    field = model._meta.get_field("double_seats")
+    if read:
+        column = generated_column(field)
+        assert column is not None
+        assert column is generated_column(field)
+        assert column.model is model
+        del column
+    reference = weakref.ref(model)
+    del model, field
+    _ = gc.collect()
+    assert reference() is None

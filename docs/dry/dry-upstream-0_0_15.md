@@ -974,7 +974,9 @@ Progress: 33 of 39 landed; 6 yours (25, 28, 29, 30, 32, 33).
 - [x] F3, `utils/widgets.py::multi_widget_keys` / `widget_keys` / `widget_entries`, stays.
   - Filter widgets: 0 diffs over 6,874.
   - A key recorder cannot pair keys with sub-widgets, misses `QueryArrayWidget`'s iteration reads, and adds harmless
-    `x-clear` / `SelectDateWidget` part keys.
+    `x-clear` part keys.
+  - `widget_keys` reads `SelectDateWidget`'s year / month / day keys beside the bare name: a constructor binding
+    only those keys supplies the field.
 - [x] S2, `prime_selected_fields` → `convert_selections`, stays. Strawberry still dereferences
   `node.type_condition.name.value` in `InlineFragment.from_node` from 0.322.2 to 0.327.7, so no floor raise helps.
 - [x] The four patch modules are all live at the ceiling.

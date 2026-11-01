@@ -20,7 +20,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from django.contrib.postgres.validators import ArrayMaxLengthValidator
-from django.forms import MultiWidget, Widget
+from django.forms import MultiWidget, SelectDateWidget, Widget
 from django.utils.datastructures import MultiValueDict
 from django_filters.widgets import SuffixedMultiWidget
 
@@ -74,6 +74,9 @@ _SPLIT_ARRAY_WIDGET = _postgres_split_array_widget()
 #                                through ``widget`` for each index in ``range(size)``, and
 #                                ignores every key past ``size``; ``ArrayMaxLengthValidator``
 #                                (code ``max_length``) carries one message
+#   Django 5.2.16 -> 6.1.2       ``SelectDateWidget.value_from_datadict`` reads
+#                                ``year_field % name``, ``month_field % name`` and
+#                                ``day_field % name``, then ``name`` when any is missing
 #
 # A widget is asked for its own keys, never assumed to read one of these pairs, so a
 # consumer ``SuffixedMultiWidget`` with its own ``suffixes`` is read as it reads itself.
@@ -115,8 +118,14 @@ def widget_keys(widget: object, key: str) -> list[str]:
     """Return every form-data key ``widget`` reads for a field bound under ``key``.
 
     ``[key]`` for a widget reading one key; a ``MultiWidget`` or ``SplitArrayWidget``
-    reads the keys its sub-widgets read (``_sub_widgets``), recursively.
+    reads the keys its sub-widgets read (``_sub_widgets``), recursively. A
+    ``SelectDateWidget`` reads ``key`` and the year, month and day keys its own
+    ``year_field`` / ``month_field`` / ``day_field`` name, which are no sub-widgets:
+    a value binds whole under ``key`` (``widget_entries``), the key it falls back to.
     """
+    if isinstance(widget, SelectDateWidget):
+        fields = (widget.year_field, widget.month_field, widget.day_field)
+        return [key, *(field % key for field in fields)]
     subs = _sub_widgets(widget, key)
     if subs is None:
         return [key]
