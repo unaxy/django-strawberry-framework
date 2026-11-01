@@ -25,12 +25,13 @@ The private contracts in this module include:
   (``test_nested_keyset_backward_falls_back_per_parent_with_same_cursors``).
 - ``_keyset_order_state`` derivation (``plans.py::effective_cursor_state``)
   with hand-built states: column-object reuse. The expression, NULLS-positioned,
-  nullable-column, JSON-column and optional-or-multivalued related-path refusals
-  are live through a consumer ``get_queryset`` order
+  nullable-column, JSON-column, optional-or-multivalued related-path and
+  annotation-alias refusals are live through a consumer ``get_queryset`` order
   (``test_unanchorable_hook_order_raises_the_root_keyset_error_nested``,
   ``test_nullable_hook_order_column_raises_the_root_keyset_error_nested``,
   ``test_keyset_order_terms_api.py::test_keyset_hook_order_by_a_json_column_is_refused``,
-  ``test_keyset_order_terms_api.py::test_keyset_hook_order_through_an_optional_or_multivalued_relation_is_refused``),
+  ``test_keyset_order_terms_api.py::test_keyset_hook_order_through_an_optional_or_multivalued_relation_is_refused``,
+  ``test_keyset_order_terms_api.py::test_keyset_hook_order_by_an_annotation_alias_is_refused``),
   and related-path acceptance too
   (``test_root_keyset_order_by_related_path_seeks_via_annotation``).
 - Pure ``plans.py`` helpers ``_keyset_order_ref`` and ``_resolve_order_path_field``
