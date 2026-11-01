@@ -114,7 +114,9 @@ def test_bigint_serialize_rejects_none() -> None:
     graphql-core completes a ``None`` resolver value as ``null`` (or the non-null
     error) before it calls ``serialize``, so only a direct call reaches this arm.
     Every other non-int value is refused live by
-    ``examples/fakeshop/test_query/test_converter_outputs_api.py::test_an_outbound_bigint_refuses_a_non_int_resolver_value``.
+    ``examples/fakeshop/test_query/test_converter_outputs_api.py::test_an_outbound_bigint_refuses_a_non_int_resolver_value``
+    and
+    ``examples/fakeshop/test_query/test_converter_outputs_api.py::test_an_outbound_bigint_refusal_names_the_class_past_a_hostile_type_name_hook``.
     """
     with pytest.raises(TypeError, match="BigInt cannot serialize NoneType"):
         _serialize_bigint(None)
@@ -153,10 +155,11 @@ def test_bigint_rejection_messages_are_pinned() -> None:
 
 
 def test_bigint_parser_survives_hostile_values() -> None:
-    """A hostile type-name hook or ``str`` subclass dunder never decides a parse rejection.
+    """A hostile ``str`` subclass parses and a hostile type-name hook is rejected by real name.
 
-    The rejected value's kind is read from the interpreter, so a metaclass
-    ``__name__`` hook never runs and the message names the real class. No GraphQL
+    A ``str`` subclass whose dunders raise is read through its base slot, so it parses
+    to its integer. A rejected value's kind is read from the interpreter, so a
+    metaclass ``__name__`` hook never runs and the message names the real class. No GraphQL
     argument carries a Python object to the parser; the serializer's twin is live in
     ``examples/fakeshop/test_query/test_converter_outputs_api.py::test_an_outbound_bigint_refusal_names_the_class_past_a_hostile_type_name_hook``.
     """
