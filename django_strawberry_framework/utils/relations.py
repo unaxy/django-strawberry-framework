@@ -40,8 +40,7 @@ from . import truth
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from django.db.models.expressions import Col
-    from django.db.models.lookups import Transform
+    from django.db.models.expressions import Expression
     from django.db.models.options import Options
     from django.db.models.query_utils import PathInfo
     from typing_extensions import TypeIs
@@ -503,13 +502,15 @@ def lookup_operand(
     return output, walk.lookup
 
 
-def lookup_transform_parts(terminal: ModelField, lookup_expr: str) -> tuple[str, ...]:
+def lookup_transform_parts(terminal: ModelField | Expression, lookup_expr: str) -> tuple[str, ...]:
     """Return the parts of ``lookup_expr`` Django's query applies to ``terminal`` as transforms.
 
     Every part ahead of the final one, and the final one too when it is a trailing
     transform with an implicit ``exact`` (``validate_lookup_expr``'s rule, Django's own
     ``Query.build_lookup``): ``genre_key__in`` applies ``genre_key``, and so does a bare
-    ``genre_key``. Raises ``LookupValidationError`` as the walk does.
+    ``genre_key``. ``terminal`` may be a queryset expression (an annotation), which the
+    walk starts from as itself, as ``Query.build_lookup`` does. Raises
+    ``LookupValidationError`` as the walk does.
     """
     return _walk_lookup_expr(terminal, lookup_expr).transforms
 
@@ -517,7 +518,7 @@ def lookup_transform_parts(terminal: ModelField, lookup_expr: str) -> tuple[str,
 class _LookupWalk(NamedTuple):
     """``_walk_lookup_expr``'s answer: the lookup's left-hand side, the lookup, the transforms applied."""
 
-    lhs: Col | Transform | models.ForeignObjectRel
+    lhs: Expression | models.ForeignObjectRel
     lookup: type[models.lookups.Lookup]
     transforms: tuple[str, ...]
 
@@ -540,7 +541,7 @@ def lookup_registry(field: ModelField) -> ModelField:
     return field
 
 
-def _walk_lookup_expr(terminal: ModelField, lookup_expr: str) -> _LookupWalk:
+def _walk_lookup_expr(terminal: ModelField | Expression, lookup_expr: str) -> _LookupWalk:
     """Return the expression ``lookup_expr``'s final lookup applies to, that lookup, and its transforms.
 
     ``validate_lookup_expr``'s walk; see it for the cursor, the trailing-transform rule
@@ -554,7 +555,7 @@ def _walk_lookup_expr(terminal: ModelField, lookup_expr: str) -> _LookupWalk:
     for part in parts:
         if not part:
             raise LookupValidationError(terminal, lookup_expr, part)
-    cursor: Col | Transform | models.ForeignObjectRel = (
+    cursor: Expression | models.ForeignObjectRel = (
         terminal.cached_col if truth.is_instance(terminal, Field) else terminal
     )
     # ``str.split`` always yields at least one part, so the final part always exists.

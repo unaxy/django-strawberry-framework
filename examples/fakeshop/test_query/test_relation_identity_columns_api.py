@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 import strawberry
-from apps.library.models import PatronProfile
+from apps.library.models import Branch, PatronProfile, Shelf
 from django.core.validators import MinValueValidator
 from django.db import connection as db_connection
 from django.db import models as db_models
@@ -1145,6 +1145,13 @@ class _GenreKey(Transform):
         return require(PatronProfile._meta.get_field("favorite_genre"), is_concrete_field)
 
 
+class _KeepNumber(Transform):
+    """The column unchanged: a transform spelled in a ``field_name`` ahead of ``genre_key``."""
+
+    lookup_name = "keep_number"
+    template = "%(expressions)s"
+
+
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize(
     ("head", "lookup", "value"),
@@ -1152,6 +1159,12 @@ class _GenreKey(Transform):
         pytest.param("number", "genre_key", "G1", id="single"),
         pytest.param("number", "genre_key_in", ["G1"], id="membership"),
         pytest.param("selected", "genre_key", ["G1"], id="membership-on-a-trailing-transform"),
+        pytest.param(
+            "kept",
+            "genre_key",
+            ["G1"],
+            id="membership-on-a-trailing-transform-after-a-transformed-field-name",
+        ),
     ],
 )
 def test_a_transform_whose_output_is_a_relation_compares_that_relations_key(
@@ -1165,10 +1178,12 @@ def test_a_transform_whose_output_is_a_relation_compares_that_relations_key(
     coerced through the genre's ``name`` and kept in the transform's predicate, never
     coerced through the ``number`` column it would not fit. The declared ``selected``
     ends its ``lookup_expr`` on the transform, which Django applies with an implicit
-    ``exact``, so its membership keeps the transform too.
+    ``exact``, so its membership keeps the transform too, as ``kept``'s does behind the
+    ``keep_number`` transform its ``field_name`` spells.
     """
     number = require(_HttpNumberedRow._meta.get_field("number"), is_concrete_field)
     _ = number.register_instance_lookup(_GenreKey, "genre_key")
+    _ = number.register_instance_lookup(_KeepNumber, "keep_number")
     with db_connection.schema_editor() as editor:
         editor.create_model(_HttpNumberedRow)
     try:
@@ -1179,6 +1194,10 @@ def test_a_transform_whose_output_is_a_relation_compares_that_relations_key(
             (FilterSet,),
             {
                 "selected": RelationPkMultipleFilter(field_name="number", lookup_expr="genre_key"),
+                "kept": RelationPkMultipleFilter(
+                    field_name="number__keep_number",
+                    lookup_expr="genre_key",
+                ),
                 "Meta": type(
                     "Meta",
                     (),
@@ -1197,5 +1216,31 @@ def test_a_transform_whose_output_is_a_relation_compares_that_relations_key(
         with db_connection.schema_editor() as editor:
             editor.delete_model(_HttpNumberedRow)
         del vars(number)["instance_lookups"]["genre_key"]
+        del vars(number)["instance_lookups"]["keep_number"]
         _lookup_operand.cache_clear()
         _model_lookup_operand.cache_clear()
+
+
+@pytest.mark.django_db
+def test_a_membership_lookup_expr_continuing_across_a_relation_keeps_the_hop() -> None:
+    """A raw-key membership whose ``lookup_expr`` crosses a relation compares across it.
+
+    ``shelves`` + ``branch__in`` is Django's ``shelves__branch__in``: branches holding a
+    shelf of one of the listed branches. West's shelf is saved first, so its key is east's
+    and a predicate that dropped the ``branch`` hop (``shelves__in``) would answer west.
+    """
+    east, west, _north = (Branch.objects.create(name=name) for name in ("east", "west", "north"))
+    _ = Shelf.objects.create(code="W1", branch=west)
+    _ = Shelf.objects.create(code="E1", branch=east)
+    assert [row.name for row in Branch.objects.filter(shelves__branch__in=[east.pk])] == ["east"]
+    assert [row.name for row in Branch.objects.filter(shelves__in=[east.pk])] == ["west"]
+    filterset = type(
+        "ShelfBranchFilter",
+        (FilterSet,),
+        {
+            "selected": RelationPkMultipleFilter(field_name="shelves", lookup_expr="branch__in"),
+            "Meta": type("Meta", (), {"model": Branch, "fields": ()}),
+        },
+    )
+    payload = _post(_schema(Branch, filterset), {"selected": {"branch_in": [east.pk]}})
+    assert payload == _expected(["east"], universe=["east", "north", "west"]), payload

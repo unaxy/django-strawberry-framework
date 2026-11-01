@@ -574,6 +574,7 @@ def test_a_consumer_lookup_registered_as_isnull_takes_its_own_operand() -> None:
     assert labels == expected == ["kept"]
 
 
+@pytest.mark.parametrize("field_name", ["price", "label"], ids=["decimal-column", "text-column"])
 @pytest.mark.parametrize(
     ("filter_class", "expected"),
     [(NumberFilter, decimal.Decimal | None), (Filter, bool | None)],
@@ -582,15 +583,17 @@ def test_a_consumer_lookup_registered_as_isnull_takes_its_own_operand() -> None:
 def test_a_method_filter_named_isnull_is_typed_by_a_form_cleaning_its_own_kind(
     filter_class: type[Filter],
     expected: object,
+    field_name: str,
 ) -> None:
     """A ``method=`` filter's method applies no ``isnull``, so a form cleaning a number types it.
 
     The method receives what the form cleans: a ``NumberFilter`` hands it a number, which
-    ``Boolean`` would refuse; a bare ``Filter`` passes any value through and stays ``Boolean``.
+    ``Boolean`` would refuse, whatever the column (``label``'s ``String`` would refuse it
+    too); a bare ``Filter`` passes any value through and stays ``Boolean``.
     """
 
     class MethodNullFilter(FilterSet):
-        unset = filter_class(field_name="price", lookup_expr="isnull", method="by_value")
+        unset = filter_class(field_name=field_name, lookup_expr="isnull", method="by_value")
 
         def by_value(
             self,
@@ -606,7 +609,7 @@ def test_a_method_filter_named_isnull_is_typed_by_a_form_cleaning_its_own_kind(
 
     annotation = convert_filter_to_input_annotation(
         MethodNullFilter.base_filters["unset"],
-        scalar_models.ScalarSpecimen._meta.get_field("price"),
+        scalar_models.ScalarSpecimen._meta.get_field(field_name),
         None,
         MethodNullFilter,
     )

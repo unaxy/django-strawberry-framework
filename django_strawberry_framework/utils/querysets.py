@@ -540,6 +540,32 @@ def lookup_target_fields(query: sql.Query, lookup: str) -> tuple[object, ...]:
         return ()
 
 
+def split_lookup(
+    query: sql.Query,
+    lookup: str,
+) -> tuple[tuple[str, ...], ModelField | Expression, tuple[str, ...]]:
+    """Split ``lookup`` as ``Query.build_filter`` splits a filter argument over ``query``.
+
+    ``Query.solve_lookup_type`` divides it into the names walked as a path and the
+    transforms and lookup left over. The answer is the names the path is spelled with (a
+    relation hop and a name ``query`` annotates or aliases included), what
+    ``Query.build_lookup`` applies the leftover to, and the leftover. That start is the
+    expression an annotation or alias names, else the final field ``Query.names_to_path``
+    (the walk ``Query.setup_joins`` runs) ends on, the output field of the column Django
+    builds: the relation's own field where the path ends on a relation (a reverse
+    relation's ``ForeignObjectRel``, a many-to-many's through key onto its target).
+    Raises ``FieldError`` where Django refuses the path.
+    """
+    lookups, field_parts, expression = query.solve_lookup_type(lookup)
+    names = lookup.split(LOOKUP_SEP)
+    start = (
+        expression
+        if expression is not False
+        else _names_to_path(query, field_parts, query.get_meta())[1]
+    )
+    return tuple(names[: len(names) - len(lookups)]), start, tuple(lookups)
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class ResolvedOrderName:
     """An order name as ``Query.setup_joins`` resolves it (``resolve_order_name``).
