@@ -39,7 +39,11 @@ from django_strawberry_framework import (
     strawberry_config,
 )
 from django_strawberry_framework.filters import FilterSet, RelatedFilter
-from django_strawberry_framework.filters.base import _lookup_operand, _model_lookup_operand
+from django_strawberry_framework.filters.base import (
+    RelationPkMultipleFilter,
+    _lookup_operand,
+    _model_lookup_operand,
+)
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.utils._narrowing import (
     call_method,
@@ -1143,13 +1147,15 @@ class _GenreKey(Transform):
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize(
-    ("lookup", "value"),
+    ("head", "lookup", "value"),
     [
-        pytest.param("genre_key", "G1", id="single"),
-        pytest.param("genre_key_in", ["G1"], id="membership"),
+        pytest.param("number", "genre_key", "G1", id="single"),
+        pytest.param("number", "genre_key_in", ["G1"], id="membership"),
+        pytest.param("selected", "genre_key", ["G1"], id="membership-on-a-trailing-transform"),
     ],
 )
 def test_a_transform_whose_output_is_a_relation_compares_that_relations_key(
+    head: str,
     lookup: str,
     value: object,
 ) -> None:
@@ -1157,7 +1163,9 @@ def test_a_transform_whose_output_is_a_relation_compares_that_relations_key(
 
     ``genre_key`` computes ``'G' || number`` as a ``favorite_genre`` value, so ``"G1"`` is
     coerced through the genre's ``name`` and kept in the transform's predicate, never
-    coerced through the ``number`` column it would not fit.
+    coerced through the ``number`` column it would not fit. The declared ``selected``
+    ends its ``lookup_expr`` on the transform, which Django applies with an implicit
+    ``exact``, so its membership keeps the transform too.
     """
     number = require(_HttpNumberedRow._meta.get_field("number"), is_concrete_field)
     _ = number.register_instance_lookup(_GenreKey, "genre_key")
@@ -1170,6 +1178,7 @@ def test_a_transform_whose_output_is_a_relation_compares_that_relations_key(
             "GenreKeyFilter",
             (FilterSet,),
             {
+                "selected": RelationPkMultipleFilter(field_name="number", lookup_expr="genre_key"),
                 "Meta": type(
                     "Meta",
                     (),
@@ -1182,7 +1191,7 @@ def test_a_transform_whose_output_is_a_relation_compares_that_relations_key(
         )
         django_rows = _HttpNumberedRow.objects.filter(number__genre_key__in=["G1"])
         assert [row.name for row in django_rows] == ["one"]
-        payload = _post(_schema(_HttpNumberedRow, filterset), {"number": {lookup: value}})
+        payload = _post(_schema(_HttpNumberedRow, filterset), {head: {lookup: value}})
         assert payload == _expected(["one"], universe=["one", "two"]), payload
     finally:
         with db_connection.schema_editor() as editor:
