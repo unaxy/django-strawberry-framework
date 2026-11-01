@@ -183,7 +183,9 @@ def lookup_leaf_names(lookup: str) -> tuple[str, str]:
     """Return an operator-bag lookup's ``(python_attr, graphql_name)``.
 
     A single token reads ``LOOKUP_NAME_MAP`` (``in`` -> ``in_`` / ``in``); one the map
-    does not hold is named by itself (``iso_year`` -> ``isoYear``). A transform chain
+    does not hold is named by itself (``iso_year`` -> ``isoYear``), its python attr
+    escaped with a trailing ``_`` when it is a Python keyword (a transform registered as
+    ``from`` publishes ``from`` over the attr ``from_``). A transform chain
     (``year__gt``) is named segment by segment: its python attr joins each segment's attr
     with ``_`` (``year_gt``, ``year_i_contains``; a keyword escape such as ``in_`` is moot
     inside a chain, so ``year_in``) and its GraphQL name capitalizes each later
@@ -194,7 +196,9 @@ def lookup_leaf_names(lookup: str) -> tuple[str, str]:
     """
     segments = lookup.split(LOOKUP_SEP)
     if len(segments) == 1:
-        return LOOKUP_NAME_MAP.get(lookup, (lookup, graphql_camel_name(lookup)))
+        if lookup in LOOKUP_NAME_MAP:
+            return LOOKUP_NAME_MAP[lookup]
+        return f"{lookup}_" if keyword.iskeyword(lookup) else lookup, graphql_camel_name(lookup)
     named = [lookup_leaf_names(segment) for segment in segments]
     python_attr = "_".join(
         attr[:-1] if attr.endswith("_") and keyword.iskeyword(attr[:-1]) else attr
@@ -784,13 +788,16 @@ def _element_annotation(
     ``field_name`` (``occurred_at__year``, an ``ArrayField`` index ``counts__0``), the
     field is the last transform's output the leaf builder passes
     (``filters/base.py::_filterset_value_field``). The ``django-filter`` form
-    field is consulted ONLY as the fallback for a custom ``method=`` filter with no
-    backing model field, or a path that resolves to no column of the FilterSet model
-    (a ``FilteredRelation`` alias only the filter's queryset holds) --
-    otherwise ``django-filter``'s ``NumberFilter`` form (a ``DecimalField``)
-    mis-types integer columns and a CSV ``in`` over a choice column collapses
-    to ``str``. Callers that need a different shape for a specific lookup (e.g.
-    ``isnull`` is always boolean) handle that before calling this.
+    field types the value only where the caller passes no field: a custom
+    ``method=`` filter with no backing model field, a path that resolves to no
+    column of the FilterSet model (a ``FilteredRelation`` alias only the filter's
+    queryset holds), and a declared filter whose own form cleans another kind than
+    the field (``_form_cleaned_value_field``: a ``DateFilter`` with
+    ``lookup_expr="year"`` is ``Date``). Everywhere else the field wins, since
+    ``django-filter``'s ``NumberFilter`` form (a ``DecimalField``) would mis-type
+    integer columns and a CSV ``in`` over a choice column would collapse to ``str``.
+    Callers that need a different shape for a specific lookup (Django's ``isnull``
+    is always boolean) handle that before calling this.
 
     An ``ArrayField`` column reaches this only as its element column, which the list arms
     pass after ``_array_element_column`` admits the lookup; any other arm or lookup over an
@@ -1091,7 +1098,7 @@ def convert_filter_to_input_annotation(
         # from the form field its class builds; one whose ``field`` builds none on the
         # unbound declaration raises (spec-027 Decision 4).
         _refuse_method_without_form_field(matched, filterset_cls)
-        if _filterset_lookup_operand(filterset_cls, matched).lookup == "isnull":
+        if _filterset_lookup_operand(filterset_cls, matched).null_test:
             # ``isnull`` is a boolean predicate regardless of the column type, past a
             # transform too (``year__isnull``): the value field is irrelevant here.
             return bool
@@ -1574,9 +1581,7 @@ class FilterLookupTable:
     the child's ``check_home_branch_permission``, as the nested spelling does);
     any other head gates on its filter's ``field_name`` (the ORM path), so
     ``name`` and ``name__icontains`` share the ``name`` gate
-    (``leaf_gate_path``). ``lookup_attrs`` holds every lookup attr any head's
-    bag carries (``year_gt`` included), which ``FilterSet._operator_bag_items``
-    recognizes a hand-built bag by. ``source`` is the published filter table
+    (``leaf_gate_path``). ``source`` is the published filter table
     (``FilterSet._filter_table``) the lookup table was built from: the cache is
     valid only while that object is.
     """
@@ -1585,7 +1590,6 @@ class FilterLookupTable:
     heads: Mapping[str, Mapping[str, FormKeyedFilter]]
     by_input_attr: Mapping[str, Mapping[str, FormKeyedFilter]]
     gate_paths: Mapping[str, str]
-    lookup_attrs: frozenset[str]
 
 
 def _is_declared_head(filterset_cls: type[FilterSet], name: str, filter_instance: Filter) -> bool:
@@ -1734,7 +1738,6 @@ def filter_lookup_table(filterset_cls: type[FilterSet]) -> FilterLookupTable:
         heads=heads,
         by_input_attr=by_input_attr,
         gate_paths=gate_paths,
-        lookup_attrs=frozenset(attr for head in heads for attr in by_input_attr[head]),
     )
     filterset_cls._lookup_table = table
     return table

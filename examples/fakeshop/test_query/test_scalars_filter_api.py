@@ -96,7 +96,13 @@ from django_strawberry_framework import (
     finalize_django_types,
     strawberry_config,
 )
-from django_strawberry_framework.filters import FilterSet, ListFilter, RangeFilter, RelatedFilter
+from django_strawberry_framework.filters import (
+    Filter,
+    FilterSet,
+    ListFilter,
+    RangeFilter,
+    RelatedFilter,
+)
 from django_strawberry_framework.views import DjangoGraphQLView
 
 _DATE = datetime.date(2021, 6, 15)
@@ -978,7 +984,8 @@ def generated_year_schema(private_registry: None) -> Iterator[DjangoSchema]:
     ``RangeFilter`` (``year__range``); and the same list and range shapes with a ``method=``,
     whose method receives the column's values.
     A ``NullableScalarSpecimen`` set reaches it through ``partner``, nested and flat, and
-    carries the same two null tests over its own nullable ``occurred_at``.
+    carries the same two null tests over its own nullable ``occurred_at``, with a declared
+    pass-through ``Filter`` (``year_unset``) for the first.
     """
     del private_registry
 
@@ -1037,6 +1044,7 @@ def generated_year_schema(private_registry: None) -> Iterator[DjangoSchema]:
 
     class GeneratedYearPartnerFilter(FilterSet):
         partner = RelatedFilter(GeneratedYearFilter, field_name="partner")
+        year_unset = Filter(field_name="occurred_at", lookup_expr="year__isnull")
 
         class Meta:
             model = models.NullableScalarSpecimen
@@ -1180,6 +1188,9 @@ query {
   partners: __type(name: "GeneratedYearPartnerFilterOccurredAtFilterInputType") {
     inputFields { name type { name } }
   }
+  passThrough: __type(name: "GeneratedYearPartnerFilterYearUnsetFilterInputType") {
+    inputFields { name type { name } }
+  }
 }
 """
 
@@ -1193,7 +1204,10 @@ def test_generated_null_test_after_a_transform_takes_a_boolean() -> None:
     terminal lookup past the transform, never a value of ``year``'s ``Int`` or ``date``'s
     ``Date``. The partner set's ``occurredAt`` head carries only the two null tests; the
     holder's own carries them beside its other leaves
-    (``test_generated_year_leaf_is_typed_by_the_transforms_output``).
+    (``test_generated_year_leaf_is_typed_by_the_transforms_output``). The declared
+    ``year_unset`` is a bare ``Filter``, whose form passes any value through, so its type
+    comes from the lookup alone, where a generated leaf's ``BooleanFilter`` form is
+    ``Boolean`` either way.
     """
     payload = response_json(post_graphql(_TRANSFORMED_NULL_TEST_TYPES_QUERY, url="/graphql-test/"))
     assert payload == {
@@ -1204,7 +1218,30 @@ def test_generated_null_test_after_a_transform_takes_a_boolean() -> None:
                     {"name": "dateIsNull", "type": {"name": "Boolean"}},
                 ],
             },
+            "passThrough": {"inputFields": [{"name": "yearIsNull", "type": {"name": "Boolean"}}]},
         },
+    }
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("generated_year_schema")
+@pytest.mark.parametrize(
+    ("is_null", "labels"),
+    [(False, ["dated"]), (True, ["of-alpha", "of-beta"])],
+)
+def test_a_pass_through_null_test_after_a_transform_filters_as_django_does(
+    *,
+    is_null: bool,
+    labels: list[str],
+) -> None:
+    """A ``Boolean`` sent to the bare ``Filter``'s ``year__isnull`` filters the rows Django's does."""
+    _seed_year_partners()
+    models.NullableScalarSpecimen.objects.create(label="dated", occurred_at=_DATETIME)
+    django_rows = models.NullableScalarSpecimen.objects.filter(occurred_at__year__isnull=is_null)
+
+    assert sorted(django_rows.values_list("label", flat=True)) == labels
+    assert _holder_payload("partners", {"yearUnset": {"yearIsNull": is_null}}) == {
+        "data": {"partners": {"edges": [{"node": {"label": label}} for label in labels]}},
     }
 
 
