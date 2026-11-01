@@ -42,12 +42,13 @@ from apps.library import models as library_models
 from apps.products.models import Category, Item
 from apps.scalars import models as scalar_models
 from django import forms
+from django.core.serializers.json import DjangoJSONEncoder
 from django.db import models
 from django.db.models import QuerySet
 from django.db.models.functions import ExtractYear
 from django.db.models.lookups import GreaterThanOrEqual
 from django.http import HttpRequest
-from django.test.utils import register_lookup
+from django.test.utils import isolate_apps, register_lookup
 from django_filters import (
     AllValuesFilter,
     AllValuesMultipleFilter,
@@ -57,10 +58,19 @@ from django_filters import (
     CharFilter,
     ChoiceFilter,
     DateFilter,
+    DateFromToRangeFilter,
     DateRangeFilter,
+    DateTimeFilter,
+    DateTimeFromToRangeFilter,
+    DurationFilter,
     Filter,
     LookupChoiceFilter,
+    MultipleChoiceFilter,
     NumberFilter,
+    TimeFilter,
+    TimeRangeFilter,
+    TypedMultipleChoiceFilter,
+    UUIDFilter,
 )
 from django_filters import RangeFilter as DjangoRangeFilter
 from django_filters.filters import BaseInFilter as DjangoBaseInFilter
@@ -128,6 +138,7 @@ from django_strawberry_framework.filters.inputs import (
 from django_strawberry_framework.filters.sets import _widget_keys, filter_generation_provenance
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.sets_mixins import ClassBasedTypeNameMixin
+from django_strawberry_framework.types import converters as converters_mod
 from django_strawberry_framework.types.finalizer import finalize_django_types
 from django_strawberry_framework.utils._narrowing import dict_of, read_attr
 from django_strawberry_framework.utils.input_values import UNSET
@@ -155,6 +166,7 @@ if TYPE_CHECKING:
     # spelled out because the checker runs without the django-stubs mypy plugin.
     _Char: TypeAlias = models.CharField[str | int | Combinable, str]
     _Int: TypeAlias = models.IntegerField[float | int | str | Combinable, int]
+    _JSON: TypeAlias = models.JSONField[object, object]
 
 
 def _args(annotation: object) -> tuple[object, ...]:
@@ -2687,6 +2699,14 @@ def test_type_name_for_raises_for_no_word_character_field_path(bad: str) -> None
 # ---------------------------------------------------------------------------
 
 
+class _OwnKindField(forms.Field):
+    """A consumer form field cleaning its own kind, under no ``FORM_FIELD_SCALARS`` row."""
+
+    @override
+    def to_python(self, value: object) -> object:
+        return value
+
+
 @pytest.mark.parametrize(
     ("field_class", "expected"),
     [
@@ -2699,15 +2719,22 @@ def test_type_name_for_raises_for_no_word_character_field_path(bad: str) -> None
         pytest.param(forms.DateField, datetime.date, id="date"),
         pytest.param(forms.TimeField, datetime.time, id="time"),
         pytest.param(forms.UUIDField, uuid.UUID, id="uuid"),
+        pytest.param(forms.JSONField, strawberry.scalars.JSON, id="json"),
         pytest.param(forms.CharField, str, id="text"),
         pytest.param(forms.Field, str, id="generic-fallback"),
+        pytest.param(_OwnKindField, str, id="unregistered-fallback"),
     ],
 )
 def test_scalar_from_form_field_maps_each_recognized_shape(
     field_class: type[forms.Field],
-    expected: type[object],
+    expected: object,
 ) -> None:
-    """Each form field maps to its scalar, including float and decimal before their integer base."""
+    """Each form field maps to its ``FORM_FIELD_SCALARS`` row, a field no row covers to ``str``.
+
+    Float, decimal and JSON resolve to their own rows before the integer and text classes
+    they subclass. A form field no row covers cleans the text of a querystring, so it
+    publishes ``String`` where a form mutation refuses it.
+    """
     assert _scalar_from_form_field(field_class()) is expected
 
 
@@ -3762,3 +3789,567 @@ def test_a_list_filter_through_a_real_array_index_or_slice_is_typed_from_the_ele
         bag = _class_arg(_annotations(input_cls)[name])
         (annotation,) = _annotations(bag).values()
         assert _list_member(annotation) is int, name
+
+
+# ---------------------------------------------------------------------------
+# A column that converts nothing it is handed is typed by the filter's form
+# ---------------------------------------------------------------------------
+
+
+def _decimal_of(value: object) -> decimal.Decimal:
+    """A ``coerce`` callable that is no class, so its kind is unknown to the build."""
+    return decimal.Decimal(str(value))
+
+
+class _FloatFormFilter(Filter):
+    """A consumer filter whose form cleans a float, a kind ``json.dumps`` encodes."""
+
+    field_class = forms.FloatField
+
+
+class _FloatsInFilter(BaseInFilter, _FloatFormFilter):
+    """A consumer CSV filter whose members its form cleans as floats."""
+
+
+class _DurationsInFilter(BaseInFilter, DurationFilter):
+    """A consumer CSV filter whose members its form cleans as timedeltas."""
+
+
+class _OwnKindFilter(Filter):
+    """A consumer filter whose form field cleans a kind no row names."""
+
+    field_class = _OwnKindField
+
+
+class _NumberDatesInFilter(BaseInFilter, DateFilter):
+    """A consumer CSV filter whose members its form cleans as dates."""
+
+
+class _NumbersInFilter(BaseInFilter, NumberFilter):
+    """A consumer CSV filter whose members its form cleans as decimals."""
+
+
+class _DateTimesInFilter(BaseInFilter, DateTimeFilter):
+    """A consumer CSV filter whose members its form cleans as datetimes."""
+
+
+class _TimesInFilter(BaseInFilter, TimeFilter):
+    """A consumer CSV filter whose members its form cleans as times."""
+
+
+class _UUIDsInFilter(BaseInFilter, UUIDFilter):
+    """A consumer CSV filter whose members its form cleans as UUIDs."""
+
+
+class _JSONFormFilter(Filter):
+    """A consumer filter whose form cleans any JSON value (``forms.JSONField``)."""
+
+    field_class = forms.JSONField
+
+
+class _OwnFilterNumberFilter(NumberFilter):
+    """A consumer ``NumberFilter`` whose own ``filter`` decides what its value means."""
+
+    @override
+    def filter(self, qs: QuerySet[models.Model], value: object) -> QuerySet[models.Model]:
+        return qs
+
+
+def _payload_set(
+    declared: Filter,
+    *,
+    model: type[models.Model] = scalar_models.ScalarSpecimen,
+    overrides: Mapping[type[object], Mapping[str, object]] | None = None,
+) -> type[FilterSet]:
+    """A package ``FilterSet`` over ``model`` declaring ``declared`` as ``value``."""
+    meta: dict[str, object] = {"model": model, "fields": []}
+    if overrides is not None:
+        meta["filter_overrides"] = dict(overrides)
+
+    def filter_value(
+        _self: FilterSet,
+        queryset: QuerySet[models.Model],
+        _name: str,
+        _value: object,
+    ) -> QuerySet[models.Model]:
+        return queryset
+
+    return type(
+        "PayloadValueSet",
+        (FilterSet,),
+        {"value": declared, "filter_value": filter_value, "Meta": type("Meta", (), meta)},
+    )
+
+
+def _value_leaves(filterset: type[FilterSet]) -> dict[object, object]:
+    """The lookup annotations of ``filterset``'s ``value`` operator bag."""
+    annotations = {attr: ann for attr, ann, _kwargs in _build_input_fields(filterset)}
+    return _annotations(_class_arg(annotations["value"]))
+
+
+@pytest.mark.parametrize(
+    ("declare", "lookup", "expected"),
+    [
+        pytest.param(
+            lambda: CharFilter(field_name="payload"),
+            "exact",
+            str | None,
+            id="text-on-the-column",
+        ),
+        pytest.param(
+            lambda: MultipleChoiceFilter(field_name="payload__n", choices=[("5", "five")]),
+            "exact",
+            list[str] | None,
+            id="multiple-choice-on-a-key",
+        ),
+        pytest.param(
+            lambda: MultipleChoiceFilter(field_name="payload", choices=[("5", "five")]),
+            "exact",
+            list[str] | None,
+            id="multiple-choice-on-the-column",
+        ),
+        pytest.param(
+            lambda: _OwnFilterNumberFilter(field_name="payload__n"),
+            "exact",
+            decimal.Decimal | None,
+            id="decimal-own-filter",
+        ),
+        pytest.param(
+            lambda: _OwnFilterNumberFilter(field_name="payload"),
+            "exact",
+            decimal.Decimal | None,
+            id="decimal-own-filter-on-the-column",
+        ),
+        pytest.param(
+            lambda: _JSONFormFilter(field_name="raw", method="filter_value"),
+            "exact",
+            strawberry.scalars.JSON | None,
+            id="json-form-method",
+        ),
+        pytest.param(
+            lambda: Filter(field_name="payload"),
+            "exact",
+            strawberry.scalars.JSON | None,
+            id="pass-through-on-the-column",
+        ),
+        pytest.param(
+            lambda: TypedMultipleChoiceFilter(
+                field_name="payload__n",
+                coerce=_decimal_of,
+                choices=[("5", "5")],
+            ),
+            "exact",
+            list[str] | None,
+            id="unknown-coerce-is-not-refused",
+        ),
+        pytest.param(
+            lambda: _OwnKindFilter(field_name="payload__n"),
+            "exact",
+            str | None,
+            id="unknown-form-kind-is-not-refused",
+        ),
+        pytest.param(
+            lambda: _FloatFormFilter(field_name="payload__n"),
+            "exact",
+            float | None,
+            id="float-form-on-a-key",
+        ),
+        pytest.param(
+            lambda: _FloatsInFilter(field_name="payload__n", lookup_expr="in"),
+            "in_",
+            list[float] | None,
+            id="float-csv-on-a-key",
+        ),
+        pytest.param(
+            lambda: _JSONFormFilter(field_name="payload__n"),
+            "exact",
+            strawberry.scalars.JSON | None,
+            id="json-form-on-a-key",
+        ),
+        pytest.param(
+            lambda: _JSONFormFilter(field_name="payload"),
+            "exact",
+            strawberry.scalars.JSON | None,
+            id="json-form-on-the-column",
+        ),
+        pytest.param(
+            lambda: NumberFilter(field_name="payload__n", lookup_expr="isnull"),
+            "is_null",
+            bool | None,
+            id="null-test-on-a-key",
+        ),
+    ],
+)
+def test_a_filter_over_a_json_column_is_typed_by_what_its_form_cleans(
+    declare: Callable[[], Filter],
+    lookup: str,
+    expected: object,
+) -> None:
+    """A ``JSONField`` compares the kind a value is handed, so the filter's form types it.
+
+    The shapes neither fakeshop's ``ScalarSpecimenFilter`` (``test_scalars_filter_api.py``) nor
+    the ``test_json_filter_typing_api.py`` holder declares: a text filter on the whole column,
+    a ``MultipleChoiceFilter`` (``[String!]``), a consumer
+    ``filter`` override cleaning a ``Decimal`` (never refused: it owns what its value means),
+    a columnless ``method=`` filter cleaning ``forms.JSONField`` (``JSON``, through the shared
+    form table), a ``FloatField`` form (``Float``, a kind ``json.dumps`` encodes, so never
+    refused) and a ``coerce`` callable that is no class (its kind unknown, so not refused).
+    Deliberate controls, passing before the rule too: a bare ``Filter`` on the
+    column keeps ``JSON`` (it passes values through), a ``forms.JSONField`` form on a key
+    keeps ``JSON`` (it is exempt from the encoder refusal), and ``isnull`` stays ``Boolean``.
+    """
+    assert _value_leaves(_payload_set(declare())) == {lookup: expected}
+
+
+def test_a_filter_override_over_a_json_column_types_values_by_its_text_form() -> None:
+    """``filter_overrides={JSONField: CharFilter}`` cleans text, so its values publish ``String``.
+
+    The generated ``exact`` and a declared ``CharFilter`` clean text; a package ``ListFilter``
+    and ``RangeFilter`` clean each value with the override's ``CharField`` (django-filter's own
+    ``gte`` filter for the column), so ``5`` would reach the column as ``"5"``. The generated
+    ``isnull`` stays ``Boolean``.
+    """
+
+    class OverriddenPayloadSet(FilterSet):
+        text = CharFilter(field_name="payload__n")
+        among = ListFilter(field_name="payload", lookup_expr="in")
+        span = RangeFilter(field_name="payload__n")
+
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = {"payload": ["exact", "isnull"]}
+            filter_overrides = {models.JSONField: {"filter_class": CharFilter}}
+
+    annotations = {
+        attr: _annotations(_class_arg(ann))
+        for attr, ann, _kwargs in _build_input_fields(OverriddenPayloadSet)
+    }
+    span_axes = _annotations(_class_arg(annotations["span"]["exact"]))
+
+    assert annotations["payload"] == {"exact": str | None, "is_null": bool | None}
+    assert annotations["text"] == {"exact": str | None}
+    assert annotations["among"] == {"in_": list[str] | None}
+    assert span_axes == {"start": str | None, "end": str | None}
+
+
+@pytest.mark.parametrize(
+    ("declare", "kind"),
+    [
+        pytest.param(lambda: NumberFilter(field_name="payload__n"), "Decimal", id="decimal"),
+        pytest.param(lambda: DateFilter(field_name="payload__n"), "date", id="date"),
+        pytest.param(lambda: DateTimeFilter(field_name="payload__n"), "datetime", id="datetime"),
+        pytest.param(lambda: TimeFilter(field_name="payload__n"), "time", id="time"),
+        pytest.param(lambda: UUIDFilter(field_name="payload__n"), "UUID", id="uuid"),
+        pytest.param(
+            lambda: DurationFilter(field_name="payload__n"),
+            "timedelta",
+            id="timedelta-under-a-string-scalar",
+        ),
+        pytest.param(
+            lambda: TypedMultipleChoiceFilter(
+                field_name="payload__n",
+                coerce=decimal.Decimal,
+                choices=[("5", "5")],
+            ),
+            "Decimal",
+            id="decimal-coerce-class",
+        ),
+        pytest.param(
+            lambda: TypedMultipleChoiceFilter(
+                field_name="payload__n",
+                coerce=uuid.UUID,
+                choices=[("5", "5")],
+            ),
+            "UUID",
+            id="uuid-coerce-class",
+        ),
+        pytest.param(
+            lambda: _DurationsInFilter(field_name="payload__n", lookup_expr="in"),
+            "timedelta",
+            id="timedelta-csv",
+        ),
+        pytest.param(
+            lambda: NumberFilter(field_name="payload", lookup_expr="gt"),
+            "Decimal",
+            id="decimal-on-the-column",
+        ),
+        pytest.param(
+            lambda: DateFilter(field_name="payload", lookup_expr="contains"),
+            "date",
+            id="date-containment",
+        ),
+        pytest.param(
+            lambda: _NumbersInFilter(field_name="payload__n", lookup_expr="in"),
+            "Decimal",
+            id="decimal-csv",
+        ),
+        pytest.param(
+            lambda: _NumberDatesInFilter(field_name="payload__n", lookup_expr="in"),
+            "date",
+            id="date-csv",
+        ),
+        pytest.param(
+            lambda: _DateTimesInFilter(field_name="payload__n", lookup_expr="in"),
+            "datetime",
+            id="datetime-csv",
+        ),
+        pytest.param(
+            lambda: _TimesInFilter(field_name="payload__n", lookup_expr="in"),
+            "time",
+            id="time-csv",
+        ),
+        pytest.param(
+            lambda: _UUIDsInFilter(field_name="payload__n", lookup_expr="in"),
+            "UUID",
+            id="uuid-csv",
+        ),
+        pytest.param(
+            lambda: DjangoRangeFilter(field_name="payload__n"),
+            "Decimal",
+            id="decimal-range",
+        ),
+        pytest.param(
+            lambda: DateFromToRangeFilter(field_name="payload__n"),
+            "date",
+            id="date-range",
+        ),
+        pytest.param(
+            lambda: DateTimeFromToRangeFilter(field_name="payload__n"),
+            "datetime",
+            id="datetime-range",
+        ),
+        pytest.param(
+            lambda: TimeRangeFilter(field_name="payload__n"),
+            "time",
+            id="time-range",
+        ),
+    ],
+)
+def test_a_kind_an_encoderless_json_column_cannot_encode_is_refused_at_build(
+    declare: Callable[[], Filter],
+    kind: str,
+) -> None:
+    """A lookup preparing its value through a ``JSONField`` with no encoder cannot carry the kind.
+
+    ``JSONField.get_db_prep_value`` encodes through ``json.dumps``, which raises ``TypeError``
+    for a ``Decimal``, ``date``, ``datetime``, ``time``, ``timedelta`` or ``UUID``: every request
+    sending a value would fail, so the schema build refuses the filter naming the three fixes.
+    The kind is the one the form field's class cleans, not the published scalar: a
+    ``DurationFilter`` publishes ``String`` and cleans a ``timedelta``, and a
+    ``TypedMultipleChoiceFilter`` cleans what a class ``coerce`` builds.
+    """
+    declared = declare()
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        _ = _build_input_fields(_payload_set(declared))
+
+    assert str(excinfo.value) == (
+        f"PayloadValueSet: {type(declared).__name__} on {declared.field_name!r} cleans {kind}, "
+        "which its JSONField cannot encode with no encoder; give the filter a form field "
+        "cleaning text or a number (an IntegerField or FloatField field_class), a bare Filter "
+        "or TypedFilter to compare the JSON value as sent, or an encoder on the column."
+    )
+
+
+def test_a_package_list_under_a_number_override_over_json_is_refused_at_build() -> None:
+    """A ``ListFilter`` cleaning members with an override's ``DecimalField`` is refused too.
+
+    ``filter_overrides={JSONField: NumberFilter}`` hands each member to a ``DecimalField``, and
+    an ``in`` prepares each through the column, which cannot encode a ``Decimal``.
+    """
+    declared = ListFilter(field_name="payload", lookup_expr="in")
+    filterset = _payload_set(
+        declared,
+        overrides={models.JSONField: {"filter_class": NumberFilter}},
+    )
+
+    with pytest.raises(ConfigurationError, match=r"ListFilter on 'payload' cleans Decimal, "):
+        _ = _build_input_fields(filterset)
+
+
+class _CoercingJSONField(models.JSONField[object, object]):
+    """A consumer ``JSONField`` that prepares each value as an integer: it converts, so it types."""
+
+    @override
+    def get_prep_value(self, value: object) -> object:
+        return int(str(value))
+
+
+@isolate_apps("apps.scalars")
+@pytest.mark.parametrize(
+    ("declare", "expected"),
+    [
+        pytest.param(
+            lambda: NumberFilter(field_name="encoded__n"),
+            decimal.Decimal | None,
+            id="decimal-under-a-declared-encoder",
+        ),
+        pytest.param(
+            lambda: DateFilter(field_name="encoded"),
+            datetime.date | None,
+            id="date-under-a-declared-encoder",
+        ),
+        pytest.param(
+            lambda: NumberFilter(field_name="coerced"),
+            strawberry.scalars.JSON | None,
+            id="decimal-on-a-converting-subclass",
+        ),
+        pytest.param(
+            lambda: CharFilter(field_name="coerced"),
+            strawberry.scalars.JSON | None,
+            id="text-on-a-converting-subclass",
+        ),
+    ],
+)
+def test_an_encoder_or_a_converting_json_subclass_keeps_its_filter(
+    declare: Callable[[], Filter],
+    expected: object,
+) -> None:
+    """A declared encoder is trusted, and a ``JSONField`` that converts is typed by the column.
+
+    ``DjangoJSONEncoder`` encodes a ``Decimal`` and a ``date``, so each filter builds, typed by
+    its form, and compares the encoder's text. A subclass overriding ``get_prep_value``
+    converts what it is handed, so it types the leaf as any converting column does; those two
+    rows are deliberate controls, typed so before the rule too.
+    """
+
+    class EncodedSpecimen(models.Model):
+        encoded: _JSON = models.JSONField(encoder=DjangoJSONEncoder)
+        coerced = _CoercingJSONField()
+
+        class Meta:
+            app_label = "scalars"
+            managed = False
+
+    assert _value_leaves(_payload_set(declare(), model=EncodedSpecimen)) == {"exact": expected}
+
+
+class _IntCodeField(models.Field[object, object]):
+    """A consumer column converting each value in ``get_db_prep_value``, registered as ``int``."""
+
+    @override
+    def get_db_prep_value(
+        self,
+        value: object,
+        connection: BaseDatabaseWrapper,
+        prepared: bool = False,
+    ) -> object:
+        return int(str(value))
+
+
+@isolate_apps("apps.scalars")
+@pytest.mark.parametrize(
+    "declare",
+    [
+        pytest.param(lambda: NumberFilter(field_name="code"), id="number"),
+        pytest.param(lambda: CharFilter(field_name="code"), id="text"),
+    ],
+)
+def test_a_registered_non_json_column_keeps_its_scalar_whatever_its_methods(
+    declare: Callable[[], Filter],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a column whose own scalar is ``JSON`` is typed by the form; this one keeps ``Int``.
+
+    The column keeps Django's ``to_python`` / ``get_prep_value`` but converts in
+    ``get_db_prep_value``, and ``SCALAR_MAP`` registers it as ``int``: a ``Decimal``-typed
+    leaf would silently match ``5`` for ``5.5``, a ``String`` one raise on ``"abc"``.
+    Deliberate control: it is typed so before the rule too.
+    """
+    monkeypatch.setitem(converters_mod.SCALAR_MAP, _IntCodeField, int)
+
+    class CodedSpecimen(models.Model):
+        code = _IntCodeField()
+
+        class Meta:
+            app_label = "scalars"
+            managed = False
+
+    assert _value_leaves(_payload_set(declare(), model=CodedSpecimen)) == {"exact": int | None}
+
+
+@pytest.mark.parametrize(
+    ("model", "declare"),
+    [
+        pytest.param(
+            scalar_models.OverrideSpecimen,
+            lambda: CharFilter(field_name="token"),
+            id="text-on-an-unregistered-column",
+        ),
+        pytest.param(
+            scalar_models.OverrideSpecimen,
+            lambda: NumberFilter(field_name="token"),
+            id="number-on-an-unregistered-column",
+        ),
+        pytest.param(
+            library_models.Book,
+            lambda: CharFilter(field_name="genres"),
+            id="text-on-a-many-to-many",
+        ),
+    ],
+)
+def test_a_filter_over_a_column_with_no_scalar_stays_refused(
+    model: type[models.Model],
+    declare: Callable[[], Filter],
+) -> None:
+    """A column no ``SCALAR_MAP`` entry covers keeps the unsupported-field refusal.
+
+    ``OverrideSpecimen.token`` (``Base36Field``) keeps Django's ``to_python`` /
+    ``get_prep_value`` but its type is unknown, so no form types it, and a many-to-many is a
+    relation. Deliberate controls: both are refused before the rule too.
+    """
+    with pytest.raises(ConfigurationError, match="Unsupported Django field type"):
+        _ = _build_input_fields(_payload_set(declare(), model=model))
+
+
+def test_a_relation_registered_as_json_keeps_the_column_scalar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A many-to-many a consumer registers as ``JSON`` is typed by that entry, not the form.
+
+    ``ManyToManyField`` keeps Django's ``to_python`` / ``get_prep_value``, but Django
+    prepares a related lookup's value through the target field, so the relation converts.
+    Deliberate control: it is typed so before the rule too.
+    """
+    monkeypatch.setitem(converters_mod.SCALAR_MAP, models.ManyToManyField, strawberry.scalars.JSON)
+
+    leaves = _value_leaves(
+        _payload_set(CharFilter(field_name="genres"), model=library_models.Book),
+    )
+    assert leaves == {"exact": strawberry.scalars.JSON | None}
+
+
+@pytest.mark.parametrize(
+    "declare",
+    [
+        pytest.param(
+            lambda: MultipleChoiceFilter(field_name="occurred_at__month", choices=[("5", "May")]),
+            id="month-in-the-field-name",
+        ),
+        pytest.param(
+            lambda: MultipleChoiceFilter(
+                field_name="occurred_on",
+                lookup_expr="year",
+                choices=[("2021", "2021")],
+            ),
+            id="year-in-the-lookup",
+        ),
+        pytest.param(
+            lambda: TypedMultipleChoiceFilter(
+                field_name="occurred_at__year",
+                coerce=int,
+                choices=[("2021", "2021")],
+            ),
+            id="typed-year",
+        ),
+    ],
+)
+def test_a_multiple_choice_filter_past_a_transform_keeps_the_output_scalar(
+    declare: Callable[[], Filter],
+) -> None:
+    """A converting transform output types each member, never the ``MultipleChoiceField`` text.
+
+    Only a column holding values as given routes a ``MultipleChoiceFilter`` through its form.
+    Deliberate control: ``[Int!]`` before the rule too.
+    """
+    assert list(_value_leaves(_payload_set(declare())).values()) == [list[int] | None]

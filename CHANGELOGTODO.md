@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 163 to do.
+Progress: 0 done, 164 to do.
 
 ## From dry-0_0_15_3
 
@@ -123,6 +123,22 @@ Progress: 0 done, 163 to do.
   kind takes that kind (`NumberFilter(lookup_expr="isnull", method=...)` takes a number, which its method receives);
   it took `Boolean`, which refused every value the form accepts. One whose form passes any value through (a bare
   `Filter`) still takes `Boolean`
+- [ ] 100. CHANGELOG entry for item 94: a filter over a `JSONField` (the column or a key path) is typed by what its own
+  form cleans, since the column compares `5` and `"5"` as two values: `CharFilter(field_name="payload__n")` publishes
+  `String` (was `JSON`, which accepted `5`, cleaned it to `"5"` and silently matched nothing), a `NumberFilter` subclass
+  with `field_class = forms.IntegerField` publishes `Int` and its CSV `in` `[Int!]`, a `has_key` or whole-column
+  `CharFilter` `String`, a `MultipleChoiceFilter` `[String!]`, a `NumberFilter` under a text lookup
+  (`payload__n__icontains`) and a `method=` `NumberFilter` `Decimal`; a bare `Filter` / `TypedFilter` keeps `JSON` and
+  `isnull` stays `Boolean`. A key named like a sibling column (`payload__flag`, `payload__price`) is a key, no longer
+  typed by that column (`CharFilter(field_name="payload__price")` was `Decimal`, now `String`). A filter whose form
+  cleans a `Decimal`, `date`, `datetime`, `time`, `timedelta` or `UUID` (read off the form field's class, so a
+  `DurationFilter` and a `TypedMultipleChoiceFilter(coerce=Decimal)` count) over a `JSONField` with no `encoder` raises
+  `ConfigurationError` at schema build where it built and raised `TypeError` on every request that sent a value; a
+  declared `encoder` is trusted. Under `filter_overrides={JSONField: {"filter_class": CharFilter}}` the generated leaf
+  and a package `ListFilter` / `RangeFilter` publish `String` (were `JSON`, cleaned to text). A `method=` filter with no
+  column whose form is a `forms.JSONField` publishes `JSON` (was `String`). A `JSONField` subclass that overrides
+  `get_prep_value` or `to_python` keeps the column's type, as does every column registered under a scalar other than
+  `JSON`.
 
 ## From bug_hunt-0_0_15_2
 

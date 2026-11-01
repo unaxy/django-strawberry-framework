@@ -58,6 +58,11 @@ only on the text column ``label``, where ``prefix``, a lookup registered on the
 ``ScalarSpecimenTag`` label set. Listed explicitly on ``occurredAt`` or
 ``unsignedBig``, a pattern leaf is a ``String`` the backend matches against its text
 rendering of the column, on SQLite and PostgreSQL alike.
+The declared ``payload*`` filters over the ``payload`` JSON column and its keys publish the
+scalar their own form cleans, and only the pass-through ``payloadAnyN`` keeps ``JSON``: so
+``payloadN`` refuses the number ``5`` its ``CharField`` would turn into ``"5"``, ``5`` and
+``"5"`` match different rows, and ``payloadFlag`` / ``payloadPrice`` compare keys, never the
+same-named column.
 """
 
 import datetime
@@ -2029,4 +2034,88 @@ def test_explicit_integer_contains_matches_the_digits() -> None:
         _BY_NULLABLE_FILTER,
         {"allNullableScalarSpecimens": [{"label": "hit"}]},
         variables={"filter": {"unsignedBig": {"contains": "23"}}},
+    )
+
+
+def _seed_payload_keys() -> None:
+    """A number key, the same key as text, and a ``flag`` column disagreeing with each ``flag`` key."""
+    _seed_specimen("number", flag=False, payload={"n": 5, "flag": True})
+    _seed_specimen("text", flag=True, payload={"n": "5", "flag": False})
+    _seed_specimen("other", flag=True, payload={"n": 6, "flag": False})
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("type_name", "leaf", "scalar"),
+    [
+        pytest.param("PayloadN", "exact", "String", id="text-on-a-key"),
+        pytest.param("PayloadFlag", "exact", "Boolean", id="boolean-on-a-key"),
+        pytest.param("PayloadPrice", "exact", "String", id="text-on-a-key-named-like-a-column"),
+        pytest.param("PayloadHasKey", "hasKey", "String", id="text-has-key"),
+        pytest.param("PayloadContainingN", "iContains", "Decimal", id="decimal-text-lookup"),
+        pytest.param("PayloadAnyN", "exact", "JSON", id="pass-through-typed"),
+    ],
+)
+def test_a_filter_over_the_json_column_publishes_the_scalar_its_own_form_cleans(
+    type_name: str,
+    leaf: str,
+    scalar: str,
+) -> None:
+    """The JSON column converts nothing, so the form's kind is the published one.
+
+    Only a form passing values through keeps ``JSON``; ``payload__price`` is a key, never the
+    ``price`` column's ``Decimal``. Deliberate controls, typed so before the rule too:
+    ``boolean-on-a-key`` (the sibling ``flag`` column is a ``BooleanField`` as well) and
+    ``pass-through-typed``.
+    """
+    assert _leaf_types(f"ScalarSpecimenFilter{type_name}FilterInputType") == {leaf: scalar}
+
+
+@pytest.mark.django_db
+def test_a_text_filter_on_a_json_key_refuses_a_number_before_the_form() -> None:
+    """``String`` refuses ``5``, which a ``JSON`` leaf took and the ``CharField`` turned to ``"5"``."""
+    payload = response_json(
+        post_graphql(_BY_FILTER, variables={"filter": {"payloadN": {"exact": 5}}}),
+    )
+
+    assert payload["data"] is None, payload
+    assert json_str(payload, "errors", 0, "message") == (
+        "Variable '$filter' got invalid value 5 at 'filter.payloadN.exact'; "
+        "String cannot represent a non string value: 5"
+    ), payload
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("payload_filter", "labels"),
+    [
+        pytest.param({"payloadN": {"exact": "5"}}, ["text"], id="text-matches-the-text"),
+        pytest.param({"payloadAnyN": {"exact": 5}}, ["number"], id="pass-through-number"),
+        pytest.param({"payloadAnyN": {"exact": "5"}}, ["text"], id="pass-through-text"),
+        pytest.param({"payloadFlag": {"exact": True}}, ["number"], id="key-not-column-true"),
+        pytest.param(
+            {"payloadFlag": {"exact": False}},
+            ["text", "other"],
+            id="key-not-column-false",
+        ),
+    ],
+)
+def test_a_filter_over_the_json_column_compares_the_kind_its_form_cleans(
+    payload_filter: dict[str, object],
+    labels: list[str],
+) -> None:
+    """``5`` and ``"5"`` are two JSON values, and ``payload__flag`` is a key, not ``flag``.
+
+    The ``flag`` column disagrees with the ``flag`` key on every row, so a predicate on the
+    column would return the other rows. Every row is a deliberate control: each matched the
+    same rows before the rule (a ``JSON`` leaf accepted these values, and django-filter's
+    ``filter`` always hands Django the whole ``payload__flag`` path); the rule's proof is the
+    published types and the refused ``5`` above.
+    """
+    _seed_payload_keys()
+
+    _assert_graphql_data(
+        _BY_FILTER,
+        {"allScalarSpecimens": [{"label": label} for label in labels]},
+        variables={"filter": payload_filter},
     )

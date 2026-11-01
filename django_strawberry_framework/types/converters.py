@@ -411,18 +411,29 @@ def generated_output_field(field: object) -> "ConcreteField | None":
     return column
 
 
-def _scalar_map_entry(field: "ModelField") -> "tuple[type[ConcreteField], TypeForm[object]]":
+def _registered_scalar_entry(
+    field: "ModelField",
+) -> "tuple[type[ConcreteField], TypeForm[object]] | None":
     """Return the ``SCALAR_MAP`` ``(key, scalar)`` entry ``field``'s nearest MRO class keys.
 
-    The one ``SCALAR_MAP`` walk: ``scalar_for_field`` and ``scalar_route``'s map arm both
-    read it. A ``GeneratedField`` is walked as the column it computes
-    (``generated_output_field``). Raises ``ConfigurationError`` for an unsupported field
-    class.
+    The one ``SCALAR_MAP`` walk: ``_scalar_map_entry`` (``scalar_for_field``,
+    ``scalar_route``'s map arm) and ``filters/inputs.py::_holds_values_as_given`` read it. A
+    ``GeneratedField`` is walked as the column it computes (``generated_output_field``).
+    ``None`` for a field class no entry covers.
     """
     column = generated_output_field(field) or field
-    entry = truth.mro_entry(SCALAR_MAP, truth.class_of(column))
+    return truth.mro_entry(SCALAR_MAP, truth.class_of(column))
+
+
+def _scalar_map_entry(field: "ModelField") -> "tuple[type[ConcreteField], TypeForm[object]]":
+    """Return ``_registered_scalar_entry``'s entry, raising for an unsupported field class.
+
+    Raises ``ConfigurationError`` naming the column and pointing at ``SCALAR_MAP``.
+    """
+    entry = _registered_scalar_entry(field)
     if entry is not None:
         return entry
+    column = generated_output_field(field) or field
     raise ConfigurationError(
         f"Unsupported Django field type {truth.render(truth.kind(column))} on "
         f"{_field_label(column)}. Add an entry to "
