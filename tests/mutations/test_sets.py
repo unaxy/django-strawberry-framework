@@ -34,14 +34,13 @@ import importlib
 import re
 import sys
 from collections.abc import Iterator
-from typing import TYPE_CHECKING, ClassVar
+from typing import ClassVar
 
 import pytest
 import strawberry
 from apps.library import models as library_models
 from apps.products import models as product_models
 from apps.scalars import models as scalar_models
-from django.db import models
 from django.db.models import Model
 from django.utils.translation import gettext_lazy
 from strawberry import relay
@@ -102,15 +101,6 @@ from tests._idioms import (
     scrambled,
 )
 from tests.optimizer import _link_models
-
-if TYPE_CHECKING:
-    from typing import TypeAlias
-
-    from django.db.models.expressions import Combinable
-
-    # The field's descriptor types as django-stubs declares them (set type, get type), spelled
-    # out because the checker runs without the django-stubs mypy plugin that would infer them.
-    _Int: TypeAlias = models.IntegerField[float | int | str | Combinable, int]
 
 
 @pytest.fixture(autouse=True)
@@ -1496,64 +1486,6 @@ def test_bind_merged_narrowed_input_publishes_the_canonical_shape_name() -> None
 
     sdl = DjangoSchema(query=_PingQuery, mutation=Mutation).as_str()
     assert "input ItemIs_uprivateNameInput " in sdl
-
-
-def test_bind_merged_narrowed_shapes_recased_alike_stay_distinct() -> None:
-    """Two narrowed merged shapes Strawberry would re-case alike publish both names.
-
-    Columns ``a_b`` + ``c`` and ``a_bc`` name the distinct shapes ``CollA_ubCInput`` and
-    ``CollA_ubcInput``; ``to_camel_case`` maps both to ``CollAUbcinput``, so an unpinned
-    merge fails the schema build with Strawberry's ``DuplicatedTypeName``, past the
-    package's own name-collision guard. ``Coll`` stays synthetic: no fakeshop model
-    carries the column pair.
-    """
-
-    class Coll(models.Model):
-        a_b: _Int = models.IntegerField()
-        c: _Int = models.IntegerField()
-        a_bc: _Int = models.IntegerField()
-
-        class Meta:
-            app_label = "test_mutation_sets_naming"
-
-    class CollNode(DjangoType, relay.Node):
-        class Meta:
-            model = Coll
-            fields = ("id",)
-            primary = True
-
-    @strawberry.input
-    class CustomCInput:
-        c: int = strawberry.field(description="custom")
-
-    @strawberry.input
-    class CustomABCInput:
-        a_bc: int = strawberry.field(description="custom")
-
-    class CreateCollPair(DjangoMutation):
-        class Meta:
-            model = Coll
-            operation = "create"
-            fields = ("a_b", "c")
-            input_class = CustomCInput
-
-    class CreateCollJoined(DjangoMutation):
-        class Meta:
-            model = Coll
-            operation = "create"
-            fields = ("a_bc",)
-            input_class = CustomABCInput
-
-    @strawberry.type
-    class Mutation:
-        create_coll_pair = DjangoMutationField(CreateCollPair)
-        create_coll_joined = DjangoMutationField(CreateCollJoined)
-
-    finalize_django_types()
-    assert registry.get(Coll) is CollNode
-    sdl = DjangoSchema(query=_PingQuery, mutation=Mutation).as_str()
-    assert "input CollA_ubCInput " in sdl
-    assert "input CollA_ubcInput " in sdl
 
 
 def test_bind_duplicate_payload_name_distinct_shapes_raises() -> None:

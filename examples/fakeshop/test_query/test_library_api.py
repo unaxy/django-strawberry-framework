@@ -17571,6 +17571,54 @@ def test_update_book_via_custom_input_saves_circulation_status_choice_value() ->
     assert book.circulation_status == models.Book.CirculationStatus.CHECKED_OUT
 
 
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("data", "errors", "stored"),
+    [
+        pytest.param({"subtitle": None}, [], (None, "available"), id="nullable-subtitle-clears"),
+        pytest.param(
+            {"circulationStatus": None},
+            [
+                {
+                    "field": "circulationStatus",
+                    "messages": ["This field cannot be null."],
+                    "codes": ["null"],
+                },
+            ],
+            ("kept", "available"),
+            id="non-null-status-refused",
+        ),
+    ],
+)
+def test_update_book_via_custom_input_explicit_null_clears_only_a_nullable_column(
+    data: dict[str, None],
+    errors: list[dict[str, object]],
+    stored: tuple[str | None, str],
+) -> None:
+    """An explicit ``null`` clears the ``null=True`` ``subtitle`` and is refused on a ``null=False`` column.
+
+    ``django_strawberry_framework/mutations/resolvers.py::_explicit_null_error`` leaves a
+    provided ``None`` on a nullable scalar column alone, a valid clear the row stores as
+    ``NULL``; the same ``None`` on ``circulationStatus`` is that column's field-keyed
+    ``null`` error and nothing is written. ``[nullable-subtitle-clears]`` pins the
+    nullable arm; ``[non-null-status-refused]`` is the must-not control.
+    """
+    shelf = _seed_shelf()
+    book = models.Book.objects.create(title="NullClear", subtitle="kept", shelf=shelf)
+
+    data_out = _assert_graphql_success(
+        "mutation($id: ID!, $d: BookPartialInput!){ updateBookViaCustomInput(id:$id, data:$d){ "
+        "node{ title } errors{ field messages codes } } }",
+        variables={
+            "id": global_id_for(library_schema.BookType, book.pk),
+            "d": {"title": "NullClear", **data},
+        },
+    )
+    assert json_at(data_out, "updateBookViaCustomInput", "errors") == errors
+    book.refresh_from_db()
+    assert (book.subtitle, book.circulation_status) == stored
+
+
 #: ``updateBookViaCustomInput`` ``data`` additions and the genre names left on the book.
 _GENRES_OMIT_VS_EMPTY: list[tuple[dict[str, list[str]], set[str]]] = [
     ({}, {"KeepGenre"}),

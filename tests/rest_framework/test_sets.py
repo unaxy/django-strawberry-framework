@@ -38,8 +38,10 @@ System-under-test is the base / validation / bind, run against the products
 Mirrors ``tests/forms/test_sets.py`` fixture posture. Build-time invalid configs
 never reach a resolver, so this matrix is correctly owned here (package-internal),
 not live. Live bind/write siblings:
-``examples/fakeshop/test_query/test_library_api.py`` and
-``examples/fakeshop/test_query/test_products_api.py``.
+``examples/fakeshop/test_query/test_library_api.py``,
+``examples/fakeshop/test_query/test_products_api.py`` and, for a read-only or
+narrowed-away field whose name is no identifier,
+``examples/fakeshop/test_query/test_serializer_runtime_api.py``.
 """
 
 from __future__ import annotations
@@ -48,7 +50,6 @@ import re
 import sys
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import MISSING
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, Literal, NoReturn
 
 import pytest
@@ -57,9 +58,7 @@ import strawberry as _sb
 from apps.library import models as library_models
 from apps.library.models import Book
 from apps.products import models as product_models
-from django.contrib.auth.models import AnonymousUser
 from django.db import models
-from django.http import HttpRequest
 from django.utils.functional import SimpleLazyObject
 from django.utils.translation import gettext_lazy
 from rest_framework import serializers
@@ -2464,62 +2463,6 @@ def test_nested_serializer_input_field_name_must_be_a_non_keyword_identifier() -
                 operation = "create"
                 nested_fields = {"child": NestedSerializerConfig()}
                 permission_classes = []
-
-
-@pytest.mark.parametrize(
-    ("extra", "meta_fields"),
-    [
-        (lambda: {"with space": serializers.CharField(source="name", read_only=True)}, None),
-        (lambda: {"a-b": serializers.CharField(required=False, write_only=True)}, ("name",)),
-    ],
-    ids=["read-only", "narrowed-away"],
-)
-@pytest.mark.django_db
-def test_serializer_field_outside_the_input_may_carry_any_name(
-    extra: Callable[[], dict[str, DRFField]],
-    meta_fields: tuple[str, ...] | None,
-) -> None:
-    """Only the kept input set is checked: a read-only or narrowed-away field keeps any name.
-
-    The declaration builds, finalizes, and writes a row through a real mutation request.
-    """
-    _declare_products_primaries()
-    serializer_cls = _category_serializer_with(extra)
-
-    class AnyNameOutsideInput(SerializerMutation):
-        class Meta:
-            serializer_class = serializer_cls
-            operation = "create"
-            fields = meta_fields
-            permission_classes = []
-
-    @strawberry.type
-    class Query:
-        @strawberry.field
-        def ping(self) -> int:
-            return 1
-
-    @strawberry.type
-    class Mutation:
-        create_category = DjangoMutationField(AnyNameOutsideInput)
-
-    finalize_django_types()
-    input_cls = AnyNameOutsideInput._input_class
-    assert input_cls is not None
-    assert set(_input_fields(input_cls)) == {"name"}
-    input_definition = get_object_definition(input_cls, strict=True)
-    schema = DjangoSchema(query=Query, mutation=Mutation)
-    request = HttpRequest()
-    request.user = AnonymousUser()
-    result = schema.execute_sync(
-        f"mutation($d: {input_definition.name}!){{ createCategory(data: $d){{ "
-        "node{ name } errors{ field } } }",
-        variable_values={"d": {"name": "AnyName"}},
-        context_value=SimpleNamespace(request=request),
-    )
-    assert result.errors is None, result.errors
-    assert result.data == {"createCategory": {"node": {"name": "AnyName"}, "errors": []}}
-    assert list(product_models.Category.objects.values_list("name", flat=True)) == ["AnyName"]
 
 
 @pytest.mark.parametrize("key", ["type", "match", "_"])

@@ -21,7 +21,10 @@ model. They cover:
   schema execution -> JSON response);
 - the **update** path over a non-Relay primary: ``updateMediaSpecimen`` takes
   the raw pk ``id:``, and an uncoercible or missing pk is the not-found
-  ``FieldError`` on ``id``.
+  ``FieldError`` on ``id``;
+- a holder ``ModelForm`` update over the ``null=True, blank=False`` ``spare_image``
+  (no shipped form writes it): an explicit ``null`` is the form field's
+  ``required`` error, never a kept or cleared image.
 
 The suite drives through the package's own ``TestClient`` (spec-043):
 the JSON posts earn the helper's happy-path lines live, and the two multipart
@@ -31,20 +34,26 @@ operation is exactly the envelope the engine base's map builder cannot produce.
 """
 
 import io
+from functools import wraps
 from pathlib import Path
 from typing import NoReturn
 
 import pytest
+import strawberry
 from apps.products.services import create_users
 from apps.scalars import models
+from django import forms
 from django.contrib.auth.models import Permission, User
 from django.core.exceptions import SuspiciousFileOperation
 from django.core.files.base import ContentFile, File
 from django.core.files.storage import FileSystemStorage
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
+from django.urls import path
 from graphql_client import (
     JSONObject,
+    graphql_payload,
     json_at,
     json_list,
     json_object,
@@ -56,7 +65,15 @@ from graphql_client import (
 from PIL import Image
 from strawberry import relay
 
+from django_strawberry_framework import (
+    DjangoModelFormMutation,
+    DjangoMutationField,
+    DjangoSchema,
+    DjangoType,
+    finalize_django_types,
+)
 from django_strawberry_framework.testing import TestClient
+from django_strawberry_framework.views import DjangoGraphQLView
 
 
 def _read_all(handle: "File[bytes]") -> object:
@@ -864,3 +881,106 @@ def test_update_with_a_missing_raw_pk_is_the_not_found_field_error_over_http(
         ] == [
             ("id", ["not_found"]),
         ]
+
+
+_HOLDER: dict[str, DjangoSchema | None] = {"schema": None}
+
+
+@wraps(DjangoGraphQLView.as_view())
+def _holder_view(request: HttpRequest) -> HttpResponseBase:
+    schema = _HOLDER["schema"]
+    assert schema is not None
+    return DjangoGraphQLView.as_view(schema=schema)(request)
+
+
+urlpatterns = [path("graphql-media-form/", _holder_view)]
+
+
+def _spare_image_form_schema() -> DjangoSchema:
+    """A holder ``updateMedia`` ``ModelForm`` mutation over ``label`` and ``spare_image``."""
+
+    class SpareImageForm(forms.ModelForm[models.MediaSpecimen]):
+        class Meta:
+            model = models.MediaSpecimen
+            fields = ("label", "spare_image")
+
+    class MediaNode(DjangoType):
+        class Meta:
+            model = models.MediaSpecimen
+            fields = ("id", "label")
+
+    class UpdateMedia(DjangoModelFormMutation):
+        class Meta:
+            form_class = SpareImageForm
+            operation = "update"
+            permission_classes = []
+
+    @strawberry.type
+    class Query:
+        @strawberry.field
+        def ping(self) -> int:
+            return 1
+
+    @strawberry.type
+    class Mutation:
+        update_media = DjangoMutationField(UpdateMedia)
+
+    del MediaNode
+    finalize_django_types()
+    return DjangoSchema(query=Query, mutation=Mutation)
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("private_registry")
+def test_form_update_explicit_null_on_a_required_image_is_its_required_error_over_http(
+    tmp_path: Path,
+) -> None:
+    """``spareImage: null`` on the ``null=True, blank=False`` image is the ``required`` error.
+
+    ``ImageField.clean(False, initial)`` validates a required field's ``False`` as ``None``
+    and returns the stored image, so ``is_valid()`` passes; the form flavor answers it with
+    the form field's ``required`` error
+    (``django_strawberry_framework/forms/resolvers.py::_required_file_clears``), the create's
+    answer to the same ``null``. A ``null=True`` column is no exception. Nothing is written.
+    """
+    with override_settings(MEDIA_ROOT=str(tmp_path)):
+        specimen = models.MediaSpecimen.objects.create(
+            label="spare",
+            attachment="scalar_media/files/stored.txt",
+            image="scalar_media/images/stored.png",
+            spare_image="scalar_media/images/spare.png",
+        )
+        _HOLDER["schema"] = _spare_image_form_schema()
+        try:
+            with override_settings(ROOT_URLCONF=__name__):
+                payload = graphql_payload(
+                    "mutation($id: ID!, $d: SpareImageFormPartialInput!){ updateMedia(id:$id, "
+                    "data:$d){ result{ label } errors{ field messages codes } } }",
+                    variables={
+                        "id": str(specimen.pk),
+                        "d": {"label": "renamed", "spareImage": None},
+                    },
+                    url="/graphql-media-form/",
+                )
+        finally:
+            _HOLDER["schema"] = None
+
+    assert payload == {
+        "data": {
+            "updateMedia": {
+                "result": None,
+                "errors": [
+                    {
+                        "field": "spareImage",
+                        "messages": ["This field is required."],
+                        "codes": ["required"],
+                    },
+                ],
+            },
+        },
+    }
+    specimen.refresh_from_db()
+    assert (specimen.label, specimen.spare_image.name) == (
+        "spare",
+        "scalar_media/images/spare.png",
+    )

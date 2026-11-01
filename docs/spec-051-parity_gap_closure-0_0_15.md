@@ -537,7 +537,7 @@ on card `TODO-ALPHA-057-0.1.0` (the beta cut) true rather than asserted.
   requires a real database column, which a generated column is. Library
   `Shelf` declares two (`code_length`, `topic_length`);
   `tests/mutations/test_resolvers.py::LinkedDesk` declares an unmanaged one
-  (`db_persist=True`) for the package-tier write-side test.
+  (`db_persist=True`) for the package-tier `update_fields` rows.
 - **`help_text`**: `django_strawberry_framework/types/base.py::_build_annotations`
   synthesizes bare annotations; no description reaches a generated output
   field. The only description threading is the serializer input side
@@ -1087,8 +1087,10 @@ The write side changes nothing and pins everything: Django's
 the form flavor (a `ModelForm` never builds a field for a non-editable
 column) and the serializer flavor (DRF marks it `read_only`) all already
 exclude it. Slice 2 adds the tests that would catch a regression on each
-flavor; `tests/mutations/test_resolvers.py::LinkedDesk` is the existing
-unmanaged fixture. Whether a saved instance carries the recomputed value
+flavor, all live over `Shelf`: a holder model mutation naming no field list
+(`examples/fakeshop/test_query/test_library_generated_api.py::test_no_field_list_mutation_input_omits_generated_columns_over_http`)
+and holder `ModelForm` / `ModelSerializer` creates discovering their fields
+(`examples/fakeshop/test_query/test_library_generated_api.py::test_form_and_serializer_inputs_omit_generated_columns_over_http`). Whether a saved instance carries the recomputed value
 after an update depends on the backend and the Django version (the installed
 6.1 `Model._save_table` returns it through `RETURNING` where supported and
 otherwise defers it so the next read queries it); the live update-then-read
@@ -1661,8 +1663,10 @@ schema cannot express or an import-time refusal the live schema cannot load.
   refuse `Shelf.topic_length` as nullable and code `Shelf.code_length` as a
   `BigIntegerField`; `coerce_field_value_or_none` casts a decoded id through
   a generated column and through a key whose `to_field` is one;
-  `LinkedDesk` stays out of every flavor's input
-  (`editable_input_fields`, a `ModelForm` and a `ModelSerializer` input).
+  `Shelf`'s generated columns stay out of every flavor's input, live over
+  holder mutations (`editable_input_fields`, a `ModelForm` and a
+  `ModelSerializer` input,
+  `examples/fakeshop/test_query/test_library_generated_api.py::test_form_and_serializer_inputs_omit_generated_columns_over_http`).
 - **Slice 3** — live introspection: `Shelf.code`'s `help_text` describes
   `ShelfType.code` and the model-flavor and form-flavor input fields;
   `Book.genres`'s `help_text` (Slice 3's migration) describes

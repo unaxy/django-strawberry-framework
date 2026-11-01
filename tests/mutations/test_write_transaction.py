@@ -1,12 +1,17 @@
 """The mutation write-transaction contract (``DjangoSchema`` + ``utils/write_transaction.py``).
 
-Completion-spanning transaction internals: the plain-``strawberry.Schema``
-refusal, concurrent async windows on their own connections, ``BaseException``
-unwind, the async window's private thread (another socket's connection hygiene,
-client cancellation, an outer ``ThreadSensitiveContext``), the closed-connection
-failure rule in both modes, disappearing-row ``conflict``, and fingerprint
-helpers. Live HTTP (sync ``/graphql/`` and async ``/graphql-async/``) is
-``examples/fakeshop/test_query/test_mutation_atomicity.py``. The socket rows sit
+Completion-spanning transaction internals: concurrent async windows on their
+own connections, ``BaseException`` unwind, the async window's private thread
+(another socket's connection hygiene, client cancellation, an outer
+``ThreadSensitiveContext``), the closed-connection failure rule in both modes, the
+zero-row ``conflict`` probe, and fingerprint helpers. Live HTTP (sync ``/graphql/``
+and async ``/graphql-async/``, the plain-``strawberry.Schema`` refusal included) is
+``examples/fakeshop/test_query/test_mutation_atomicity.py``; a vanished post-write
+re-fetch and a visibility hook switching aliases are refused over HTTP in
+``examples/fakeshop/test_query/test_products_api.py``, the ``select_for_update``
+opt-out writes in ``examples/fakeshop/test_query/test_model_mutation_flows_api.py``,
+and the non-bool permission results are refused in
+``examples/fakeshop/test_query/test_mutation_permissions_api.py``. The socket rows sit
 here rather than live because fakeshop has no WebSocket mount, and a WSGI
 request cannot hold two windows open at once or cancel one mid-flight.
 """
@@ -72,7 +77,6 @@ from django_strawberry_framework import (
 )
 from django_strawberry_framework import schema as schema_module
 from django_strawberry_framework.exceptions import ConfigurationError
-from django_strawberry_framework.mutations import resolvers as mutation_resolvers
 from django_strawberry_framework.mutations.inputs import NON_FIELD_ERROR_KEY
 from django_strawberry_framework.mutations.permissions import DjangoModelPermission
 from django_strawberry_framework.registry import registry
@@ -163,13 +167,6 @@ def _json_object(value: object, *path: str | int) -> dict[object, object]:
     return found
 
 
-def _json_list(value: object, *path: str | int) -> list[object]:
-    """The JSON list at ``path`` under ``value`` (see ``_json_at``)."""
-    found = _json_at(value, *path)
-    assert is_object_list(found), found
-    return found
-
-
 @pytest.fixture(autouse=True)
 def _isolate_registry() -> Iterator[None]:
     registry.clear()
@@ -205,8 +202,8 @@ class _Query:
         return 1
 
 
-def _declare_item_types(*, item_get_queryset: object | None = None) -> tuple[type, type]:
-    """Declare the Item/Category primaries (optionally with an Item visibility hook)."""
+def _declare_item_types() -> tuple[type, type]:
+    """Declare the Item/Category primaries."""
 
     class CategoryT(DjangoType, relay.Node):
         class Meta:
@@ -217,71 +214,51 @@ def _declare_item_types(*, item_get_queryset: object | None = None) -> tuple[typ
             fields = ("id", "name", "created_date")
             primary = True
 
-    item_body: dict[str, object] = {
-        "Meta": type(
-            "Meta",
-            (),
-            {"model": product_models.Item, "fields": ("id", "name", "category"), "primary": True},
-        ),
-    }
-    if item_get_queryset is not None:
-        item_body["get_queryset"] = item_get_queryset
-    ItemT = type("ItemT", (DjangoType, relay.Node), item_body)
+    class ItemT(DjangoType, relay.Node):
+        class Meta:
+            model = product_models.Item
+            fields = ("id", "name", "category")
+            primary = True
+
     return CategoryT, ItemT
 
 
-def _declare_update_mutation(
-    *,
-    permission_classes: list[type] | None = None,
-    select_for_update: bool = True,
-) -> type:
-    meta_attrs = {
-        "model": product_models.Item,
-        "operation": "update",
-        "permission_classes": permission_classes
-        if permission_classes is not None
-        else [_AllowAll],
-        "select_for_update": select_for_update,
-    }
-    return type("UpdateItem", (DjangoMutation,), {"Meta": type("Meta", (), meta_attrs)})
+def _declare_update_mutation() -> type[DjangoMutation]:
+    class UpdateItem(DjangoMutation):
+        class Meta:
+            model = product_models.Item
+            operation = "update"
+            permission_classes = [_AllowAll]
+
+    return UpdateItem
 
 
-def _mutation_schema(
-    *mutations: type[DjangoMutation],
-    schema_cls: type[strawberry.Schema] = DjangoSchema,
-    extra_fields: dict[str, object] | None = None,
-) -> strawberry.Schema:
+def _mutation_schema(*mutations: type[DjangoMutation]) -> strawberry.Schema:
     """Build a probe schema over ``mutations``, with response-boundary masking OFF.
 
     The subject of this file is the WRITE pipeline - which alias a write is pinned
-    to, whether a phase violation or a non-bool permission result fails closed, and
+    to, whether a phase violation fails closed, and
     whether the row survived. Several rows prove that by reading the
     ``ConfigurationError`` text the pipeline raised, and the spec-048 error policy
     would replace exactly that text with its stable message. The policy is therefore
     opted out of on these in-process probe schemas (``error_policy={"enabled":
     False}``) rather than claiming a debug deployment; masking is pinned on its own
-    in ``tests/test_error_policy.py`` and the live tier. A plain
-    ``strawberry.Schema`` takes no such argument and installs no extension, so the
-    opt-out is passed only for the package schema class.
+    in ``tests/test_error_policy.py`` and the live tier.
     """
     body = {
         f"write{index}": DjangoMutationField(mutation_cls)
         for index, mutation_cls in enumerate(mutations)
     }
-    if extra_fields:
-        body.update(extra_fields)
     body["__annotations__"] = {}
     Mutation = strawberry.type(type("Mutation", (), body))
     finalize_django_types()
     optimizer = DjangoOptimizerExtension()
-    if issubclass(schema_cls, DjangoSchema):
-        return schema_cls(
-            query=_Query,
-            mutation=Mutation,
-            extensions=[lambda: optimizer],
-            error_policy={"enabled": False},
-        )
-    return schema_cls(query=_Query, mutation=Mutation, extensions=[lambda: optimizer])
+    return DjangoSchema(
+        query=_Query,
+        mutation=Mutation,
+        extensions=[lambda: optimizer],
+        error_policy={"enabled": False},
+    )
 
 
 def _item_gid(pk: object) -> str:
@@ -300,31 +277,6 @@ def _seed_item(name: str = "Seeded") -> product_models.Item:
     (item,) = items_from_seed(category, (name, False))
     product_models.Entry.objects.filter(item=item).delete()
     return item
-
-
-# ===========================================================================
-# The plain-Schema refusal (fail before any database work)
-# ===========================================================================
-
-
-@pytest.mark.django_db
-def test_plain_strawberry_schema_refuses_generated_mutations_before_writing() -> None:
-    """A generated mutation on a plain ``strawberry.Schema`` fails loudly, writing nothing."""
-    seed_data(1)
-    _declare_item_types()
-    UpdateItem = _declare_update_mutation()
-    schema = _mutation_schema(UpdateItem, schema_cls=strawberry.Schema)
-    item = _seed_item("Untouched")
-
-    result = schema.execute_sync(
-        _UPDATE,
-        variable_values={"id": _item_gid(saved_pk(item)), "d": {"name": "Written"}},
-    )
-
-    assert result.errors is not None
-    assert "DjangoSchema" in str(result.errors[0])
-    item.refresh_from_db()
-    assert item.name == "Untouched"
 
 
 # ===========================================================================
@@ -1179,59 +1131,6 @@ def test_execution_errors_reads_both_graphql_core_error_shapes() -> None:
     assert context._execution_errors() == ["legacy"]
 
 
-@pytest.mark.django_db
-def test_unmarked_mutation_fields_and_introspection_execute_unwrapped() -> None:
-    """Consumer-written mutation fields and ``__typename`` skip the transaction wrapper."""
-    _declare_item_types()
-    UpdateItem = _declare_update_mutation()
-
-    def _plain() -> int:
-        return 41
-
-    schema = _mutation_schema(
-        UpdateItem,
-        extra_fields={"plain": strawberry.mutation(resolver=_plain)},
-    )
-
-    result = schema.execute_sync("mutation { __typename plain }")
-    assert result.errors is None
-    assert result.data == {"__typename": "Mutation", "plain": 41}
-
-
-# ===========================================================================
-# Disappearing rows: a missing post-write re-fetch -> conflict
-# ===========================================================================
-
-
-@pytest.mark.django_db
-def test_missing_post_write_refetch_returns_conflict_envelope(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A write whose pk re-fetch finds nothing returns ``conflict``, and rolls back."""
-    seed_data(1)
-    _declare_item_types()
-    UpdateItem = _declare_update_mutation()
-    schema = _mutation_schema(UpdateItem)
-    item = _seed_item("RefetchGone")
-
-    def _refetch_nothing(*_args: object, **_kwargs: object) -> None:
-        return None
-
-    monkeypatch.setattr(mutation_resolvers, "refetch_optimized", _refetch_nothing)
-    result = schema.execute_sync(
-        _UPDATE,
-        variable_values={"id": _item_gid(saved_pk(item)), "d": {"name": "RefetchWritten"}},
-    )
-
-    assert result.errors is None, result.errors
-    assert result.data is not None
-    payload = _json_object(result.data, "write0")
-    assert payload["node"] is None
-    assert [_json_at(error, "field") for error in _json_list(payload, "errors")] == ["id"]
-    item.refresh_from_db()
-    assert item.name == "RefetchGone"  # the conflict envelope rolled the write back
-
-
 # ===========================================================================
 # The Django 5.2 / 6.0 zero-row compat disambiguation (unit level)
 # ===========================================================================
@@ -1317,37 +1216,8 @@ def test_lookup_id_name_is_the_pipelines_published_id_or_id_outside_one() -> Non
 
 
 # ===========================================================================
-# Alias pinning: fail-closed hook switch, instance-sensitive router, helpers
+# Alias pinning: pin_write_queryset, instance-sensitive router, helpers
 # ===========================================================================
-
-
-@pytest.mark.django_db
-def test_visibility_hook_switching_aliases_fails_closed() -> None:
-    """A ``get_queryset`` hook re-routing to another alias is a loud refusal, not a write."""
-    seed_data(1)
-
-    def _reroute(
-        _cls: type[DjangoType],
-        queryset: QuerySet[product_models.Item],
-        _info: strawberry.Info,
-        **_kwargs: object,
-    ) -> QuerySet[product_models.Item]:
-        return queryset.using("some_other_alias")
-
-    _declare_item_types(item_get_queryset=classmethod(_reroute))
-    UpdateItem = _declare_update_mutation()
-    schema = _mutation_schema(UpdateItem)
-    item = _seed_item("PinnedAlias")
-
-    result = schema.execute_sync(
-        _UPDATE,
-        variable_values={"id": _item_gid(saved_pk(item)), "d": {"name": "CrossAlias"}},
-    )
-
-    assert result.errors is not None
-    assert "pinned to alias" in str(result.errors[0])
-    item.refresh_from_db()
-    assert item.name == "PinnedAlias"
 
 
 def test_pin_write_queryset_passes_unrouted_and_matching_querysets() -> None:
@@ -1656,31 +1526,6 @@ def test_enforce_read_only_barrier_fails_closed_on_unsupported_backend() -> None
         _drop_fake_barrier_connection("ro_barrier_mysql")
 
 
-# ===========================================================================
-# Lock opt-out (``Meta.select_for_update = False``) end to end
-# ===========================================================================
-
-
-@pytest.mark.django_db
-def test_select_for_update_false_update_still_succeeds_unlocked() -> None:
-    """The explicit lock opt-out updates cleanly (weaker concurrency, same envelope contract)."""
-    seed_data(1)
-    _declare_item_types()
-    UpdateItem = _declare_update_mutation(select_for_update=False)
-    schema = _mutation_schema(UpdateItem)
-    item = _seed_item("Unlocked")
-
-    result = schema.execute_sync(
-        _UPDATE,
-        variable_values={"id": _item_gid(saved_pk(item)), "d": {"name": "UnlockedUpdated"}},
-    )
-    assert result.errors is None, result.errors
-    assert result.data is not None
-    assert result.data["write0"]["errors"] == []
-    item.refresh_from_db()
-    assert item.name == "UnlockedUpdated"
-
-
 def test_model_flavor_meta_select_for_update_defaults_true_and_rejects_non_bool() -> None:
     """The model flavor shares the row-lock validator: default True, non-bool refused."""
 
@@ -1721,75 +1566,6 @@ def test_modelform_flavor_meta_select_for_update_defaults_true() -> None:
 # ===========================================================================
 # Strict-boolean authorization
 # ===========================================================================
-
-
-class _TruthyNonBool:
-    """A permission class returning a truthy NON-bool (the silent-allow bug shape)."""
-
-    def has_permission(
-        self,
-        _info: object,
-        _mutation: type[object],
-        _operation: str,
-        _data: object,
-        _instance: object = None,
-    ) -> str:
-        return "yes"
-
-
-@pytest.mark.django_db
-def test_permission_class_returning_non_bool_is_a_configuration_error() -> None:
-    seed_data(1)
-    _declare_item_types()
-    UpdateItem = _declare_update_mutation(permission_classes=[_TruthyNonBool])
-    schema = _mutation_schema(UpdateItem)
-    item = _seed_item("StrictBool")
-
-    result = schema.execute_sync(
-        _UPDATE,
-        variable_values={"id": _item_gid(saved_pk(item)), "d": {"name": "Allowed?"}},
-    )
-
-    assert result.errors is not None
-    assert "must return a bool" in str(result.errors[0])
-    item.refresh_from_db()
-    assert item.name == "StrictBool"  # never written
-
-
-@pytest.mark.django_db
-def test_check_permission_override_returning_non_bool_is_a_configuration_error() -> None:
-    seed_data(1)
-    _declare_item_types()
-
-    class NonBoolCheck(DjangoMutation):
-        class Meta:
-            model = product_models.Item
-            operation = "update"
-            permission_classes = [_AllowAll]
-
-        @override
-        # basedpyright: deliberately a truthy non-bool, the result the write-auth check refuses
-        def check_permission(  # pyright: ignore[reportIncompatibleMethodOverride]
-            self,
-            info: strawberry.Info,
-            operation: str,
-            data: object,
-            instance: object = None,
-        ) -> int:
-            return 1  # truthy, not a bool
-
-    schema = _mutation_schema(NonBoolCheck)
-    item = _seed_item("StrictCheck")
-
-    result = schema.execute_sync(
-        _UPDATE,
-        variable_values={"id": _item_gid(saved_pk(item)), "d": {"name": "Allowed?"}},
-    )
-
-    assert result.errors is not None
-    assert "check_permission must return a bool" in str(result.errors[0])
-    item.refresh_from_db()
-    assert item.name == "StrictCheck"
 
 
 def test_has_perm_returning_non_bool_is_a_configuration_error() -> None:

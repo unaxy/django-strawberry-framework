@@ -30,6 +30,7 @@ from typing import ClassVar
 import pytest
 import strawberry
 from apps.library import models
+from django import forms
 from django.db import models as django_models
 from django.db.models.functions import Chr
 from django.db.models.lookups import Contains, Exact, Lookup, Transform
@@ -52,12 +53,14 @@ from strawberry import relay
 from django_strawberry_framework import (
     DjangoConnectionField,
     DjangoListField,
+    DjangoModelFormMutation,
     DjangoMutation,
     DjangoMutationField,
     DjangoNodeField,
     DjangoNodesField,
     DjangoSchema,
     DjangoType,
+    SerializerMutation,
     finalize_django_types,
     strawberry_config,
 )
@@ -66,6 +69,7 @@ from django_strawberry_framework.filters.base import _lookup_operand, _model_loo
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.views import DjangoGraphQLView
+from tests._idioms import ModelSerializerBase
 
 #: One past the largest value a signed 64-bit column stores.
 _PAST_BIGINT = 2**63
@@ -351,6 +355,105 @@ def test_no_field_list_mutation_input_omits_generated_columns_over_http() -> Non
     }
     assert "code" in names
     assert not names & {"codeLength", "topicLength"}, names
+
+
+def _discovered_fields_shelf_schema() -> DjangoSchema:
+    """Build a ``ModelForm`` and a ``ModelSerializer`` create that discover their shelf fields.
+
+    Neither names a field list: each excludes only the two relations, so every other
+    column the flavor discovers on ``Shelf`` reaches its generated input on its own terms.
+    """
+
+    class DiscoveredShelfType(DjangoType):
+        class Meta:
+            model = models.Shelf
+            fields = ("id", "code")
+
+    discovered_shelf_form = forms.modelform_factory(
+        models.Shelf,
+        exclude=("branch", "alt_branches"),
+    )
+
+    class DiscoveredShelfSerializer(ModelSerializerBase[models.Shelf]):
+        class Meta:
+            model = models.Shelf
+            exclude = ("branch", "alt_branches")
+
+    class CreateShelfViaDiscoveredForm(DjangoModelFormMutation):
+        class Meta:
+            form_class = discovered_shelf_form
+            operation = "create"
+            permission_classes = []
+
+    class CreateShelfViaDiscoveredSerializer(SerializerMutation):
+        class Meta:
+            serializer_class = DiscoveredShelfSerializer
+            operation = "create"
+            permission_classes = []
+
+    @strawberry.type
+    class Query:
+        shelves: list[DiscoveredShelfType] = DjangoListField(DiscoveredShelfType)
+
+    @strawberry.type
+    class Mutation:
+        create_shelf_via_discovered_form = DjangoMutationField(CreateShelfViaDiscoveredForm)
+        create_shelf_via_discovered_serializer = DjangoMutationField(
+            CreateShelfViaDiscoveredSerializer,
+        )
+
+    finalize_django_types()
+    return DjangoSchema(query=Query, mutation=Mutation, config=strawberry_config())
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.parametrize(
+    "mutation",
+    ["createShelfViaDiscoveredForm", "createShelfViaDiscoveredSerializer"],
+    ids=["modelform", "serializer"],
+)
+def test_form_and_serializer_inputs_omit_generated_columns_over_http(mutation: str) -> None:
+    """A form or serializer input discovering its shelf fields publishes neither generated column.
+
+    Django forces ``GeneratedField(editable=False)``: a ``ModelForm`` builds no field for a
+    non-editable column, and DRF's ``ModelSerializer`` makes it read-only, which the
+    serializer input leaves out. Both publish every other column they discover. The
+    ``[serializer]`` arm pins the package's read-only drop
+    (``django_strawberry_framework/rest_framework/inputs.py::writable_serializer_fields``);
+    ``[modelform]`` is a control whose verdict Django decides (``fields_for_model`` builds no
+    form field for a non-editable column), so no package line fails it.
+    """
+    _HOLDER["schema"] = _discovered_fields_shelf_schema()
+    try:
+        with override_settings(ROOT_URLCONF=__name__):
+            payload = _holder_payload(
+                "{ __schema { mutationType { fields { name args { name type { ofType { name } } } } } } }",
+            )
+            (field,) = (
+                field
+                for field in json_list(payload, "data", "__schema", "mutationType", "fields")
+                if json_at(field, "name") == mutation
+            )
+            (data_arg,) = (
+                arg for arg in json_list(field, "args") if json_at(arg, "name") == "data"
+            )
+            input_name = str(json_at(data_arg, "type", "ofType", "name"))
+            input_fields = _holder_payload(
+                f'{{ __type(name: "{input_name}") {{ inputFields {{ name }} }} }}',
+            )
+    finally:
+        _HOLDER["schema"] = None
+    names = {
+        str(json_at(input_field, "name"))
+        for input_field in json_list(input_fields, "data", "__type", "inputFields")
+    }
+    assert names == {
+        "code",
+        "topic",
+        "condition",
+        "tier",
+    }, names
 
 
 @pytest.fixture

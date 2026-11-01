@@ -6,6 +6,8 @@ from functools import wraps
 import pytest
 import strawberry
 from apps.library import models
+from apps.products import models as product_models
+from apps.products.services import seed_data
 from django import forms
 from django.db import connection
 from django.db.models import QuerySet
@@ -13,7 +15,7 @@ from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import path
-from graphql_client import JSONObject, graphql_payload, post_lock_rereads
+from graphql_client import JSONObject, graphql_payload, json_at, json_list, post_lock_rereads
 from strawberry import relay
 from typing_extensions import override
 
@@ -30,6 +32,7 @@ from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.utils._narrowing import dict_of, read_attr
 from django_strawberry_framework.views import DjangoGraphQLView
+from tests._catalog_data import categories_from_seed
 
 pytestmark = pytest.mark.usefixtures("private_registry")
 _CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
@@ -206,6 +209,184 @@ def test_form_m2m_member_with_an_empty_name_is_preserved_or_attached(value: str)
         and 'FROM "library_genre"' in query["sql"]
     ]
     assert len(genre_reads) == 4 + post_lock_rereads(int(value == "supplied")), genre_reads
+
+
+def _hiding_genre_book_schema() -> tuple[DjangoSchema, type[DjangoType], type[DjangoType]]:
+    """A ``ModelForm`` create over ``Book`` whose Relay ``genres`` target hides ``Hidden*`` rows."""
+
+    class GenreNode(DjangoType):
+        class Meta:
+            model = models.Genre
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+
+        @classmethod
+        @override
+        def get_queryset(
+            cls,
+            queryset: QuerySet[models.Genre],
+            info: strawberry.Info,
+        ) -> QuerySet[models.Genre]:
+            del cls, info
+            return queryset.exclude(name__startswith="Hidden")
+
+    class ShelfNode(DjangoType):
+        class Meta:
+            model = models.Shelf
+            fields = ("id", "code")
+            interfaces = (relay.Node,)
+
+    class BookNode(DjangoType):
+        class Meta:
+            model = models.Book
+            fields = ("id", "title")
+            interfaces = (relay.Node,)
+
+    class BookForm(forms.ModelForm[models.Book]):
+        class Meta:
+            model = models.Book
+            fields = ("title", "shelf", "genres")
+
+    class CreateBook(DjangoModelFormMutation):
+        class Meta:
+            form_class = BookForm
+            operation = "create"
+            permission_classes = []
+
+    @strawberry.type
+    class Mutation:
+        create_book = DjangoMutationField(CreateBook)
+
+    del BookNode
+    return _schema(Mutation), ShelfNode, GenreNode
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("member", ["hidden", "visible"])
+def test_form_relay_m2m_member_the_target_hook_hides_is_refused(member: str) -> None:
+    """A Relay ``GlobalID`` M2M member the target type hides is the ``genres`` relation error.
+
+    The form's multi-relation decode checks every member against ``GenreNode.get_queryset``:
+    a hidden genre answers the relation's ``invalid`` error keyed ``genres`` and no book is
+    written. ``[visible]`` is the must-not control: the same request over a visible genre
+    attaches it.
+    """
+    shelf = models.Shelf.objects.create(
+        code="Relay hidden shelf",
+        branch=models.Branch.objects.create(name="Relay hidden branch"),
+    )
+    genre = models.Genre.objects.create(name="Hidden genre" if member == "hidden" else "Shown")
+    schema, shelf_type, genre_type = _hiding_genre_book_schema()
+
+    payload = _post(
+        schema,
+        "mutation($d: BookFormInput!){ createBook(data:$d){ node{ title } "
+        "errors{ field messages codes path } } }",
+        {
+            "d": {
+                "title": "Relay member",
+                "shelfId": global_id_for(shelf_type, shelf.pk),
+                "genres": [global_id_for(genre_type, genre.pk)],
+            },
+        },
+    )
+
+    if member == "hidden":
+        assert payload == {
+            "data": {"createBook": {"node": None, "errors": [_relation_error("genres")]}},
+        }
+        assert not models.Book.objects.exists()
+    else:
+        assert payload == {
+            "data": {"createBook": {"node": {"title": "Relay member"}, "errors": []}},
+        }
+        assert list(models.Book.objects.get().genres.values_list("pk", flat=True)) == [genre.pk]
+
+
+@pytest.mark.django_db
+def test_sync_form_create_meeting_an_async_relation_hook_is_a_sync_misuse_error() -> None:
+    """A sync form create whose relation target declares ``async def get_queryset`` fails loudly.
+
+    The sync pipeline cannot await the hook's coroutine while it decodes ``categoryId``, so it
+    closes it and raises: a top-level error naming the hook, ``data`` null, no row.
+    """
+    seed_data(0)
+    (category,) = categories_from_seed(("Async hook category", False))
+
+    async def _async_get_queryset(
+        cls: type[DjangoType],
+        queryset: QuerySet[product_models.Category],
+        info: strawberry.Info,
+    ) -> QuerySet[product_models.Category]:
+        del cls, info
+        return queryset
+
+    # Built by ``type()``: an ``async def`` cannot override the base's sync hook in a class body.
+    category_node = type(
+        "CategoryNode",
+        (DjangoType,),
+        {
+            "Meta": type(
+                "Meta",
+                (),
+                {
+                    "model": product_models.Category,
+                    "fields": ("id", "name"),
+                    "interfaces": (relay.Node,),
+                },
+            ),
+            "get_queryset": classmethod(_async_get_queryset),
+        },
+    )
+    assert issubclass(category_node, DjangoType)
+
+    class ItemNode(DjangoType):
+        class Meta:
+            model = product_models.Item
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+
+    class ItemForm(forms.ModelForm[product_models.Item]):
+        class Meta:
+            model = product_models.Item
+            fields = ("name", "category")
+
+    class CreateItem(DjangoModelFormMutation):
+        class Meta:
+            form_class = ItemForm
+            operation = "create"
+            permission_classes = []
+
+    @strawberry.type
+    class Mutation:
+        create_item = DjangoMutationField(CreateItem)
+
+    del ItemNode
+    finalize_django_types()
+    schema = DjangoSchema(query=_Query, mutation=Mutation, error_policy={"enabled": False})
+
+    payload = _post(
+        schema,
+        "mutation($d: ItemFormInput!){ createItem(data:$d){ node{ name } errors{ field } } }",
+        {"d": {"name": "Async", "categoryId": global_id_for(category_node, category.pk)}},
+    )
+
+    assert payload["data"] is None, payload
+    assert [
+        (json_at(error, "message"), json_at(error, "path"))
+        for error in json_list(payload, "errors")
+    ] == [
+        (
+            (
+                "CategoryNode.get_queryset returned a coroutine in a sync resolver context. A "
+                "form mutation runs its ORM pipeline synchronously (under one sync_to_async "
+                "call on the async surface), so it cannot await an async get_queryset hook; "
+                "redefine the target type's get_queryset as a sync method."
+            ),
+            ["createItem"],
+        ),
+    ], payload
+    assert not product_models.Item.objects.filter(name="Async").exists()
 
 
 def _loan_schema() -> tuple[DjangoSchema, type[DjangoType], type[DjangoType]]:

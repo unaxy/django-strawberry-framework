@@ -10,9 +10,10 @@ import strawberry
 from apps.products import models as product_models
 from apps.products.services import seed_data
 from django import forms
-from django.db import models
+from django.db import connection, models
 from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
+from django.test.utils import CaptureQueriesContext
 from django.urls import path
 from graphql_client import JSONObject, graphql_payload, json_list, json_object
 from strawberry import relay
@@ -25,6 +26,7 @@ from django_strawberry_framework import (
     DjangoOptimizerExtension,
     DjangoSchema,
     DjangoType,
+    ResourcePolicy,
     finalize_django_types,
 )
 from django_strawberry_framework.mutations.inputs import NON_FIELD_ERROR_KEY
@@ -509,6 +511,112 @@ def test_perform_mutate_override_runs_only_on_success(*, message: str, ok: bool)
         },
     }
     assert calls == ([message] if ok else [])
+
+
+@pytest.mark.django_db
+def test_plain_form_clean_issuing_write_sql_fails_closed_before_perform_mutate() -> None:
+    """A plain-form ``clean_*`` that writes is a loud refusal, never a committed side effect.
+
+    The model-less flavor rides the write pipeline's phased alias guard: validation is
+    database-read-only, so the ORM create inside ``clean_message`` raises a top-level
+    ``ConfigurationError`` and the category is never stored.
+    """
+    seed_data(0)
+    leaked = "PhaseLeak"
+
+    class SideEffectForm(forms.Form):
+        message = forms.CharField()
+
+        def clean_message(self) -> object:
+            _ = product_models.Category.objects.create(name=leaked)
+            return dict_of(self.cleaned_data)["message"]
+
+    class Submit(DjangoFormMutation):
+        class Meta:
+            form_class = SideEffectForm
+            permission_classes = []
+
+    @strawberry.type
+    class Mutation:
+        submit = DjangoMutationField(Submit)
+
+    finalize_django_types()
+    result = _post(
+        _schema(Mutation),
+        "mutation($d: SideEffectFormInput!){ submit(data:$d){ ok errors{ field } } }",
+        variables={"d": {"message": "hi"}},
+    )
+
+    assert result["data"] is None, result
+    assert [json_object(error)["message"] for error in json_list(result, "errors")] == [
+        (
+            "Submit: write SQL was issued on the pinned database alias 'default' OUTSIDE the "
+            "mutation's write phase. Permission checks, decoding, hooks, and validation are "
+            "database-read-only; writes happen only inside the flavor's save step. Move the "
+            "side effect out of the read-only phase (or schedule it with "
+            "transaction.on_commit)."
+        ),
+    ], result
+    assert not product_models.Category.objects.filter(name=leaked).exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_plain_form_passed_deadline_stops_before_perform_mutate_or_any_read() -> None:
+    """An expired deadline stops the model-less write before ``perform_mutate`` or any SQL.
+
+    The rejection is the typed resource-limit error on ``submit``; the hook that would store
+    a category never runs, and only the schema's completion transaction opens and rolls back.
+    """
+    seed_data(0)
+    created: list[str] = []
+
+    class ContactForm(forms.Form):
+        message = forms.CharField()
+
+    class Submit(DjangoFormMutation):
+        class Meta:
+            form_class = ContactForm
+            permission_classes = []
+
+        @override
+        def perform_mutate(
+            self,
+            form: forms.BaseForm,
+            info: strawberry.Info[object, object],
+        ) -> None:
+            del form, info
+            _ = product_models.Category.objects.create(name="ExpiredPlainForm")
+            created.append("ExpiredPlainForm")
+
+    @strawberry.type
+    class Mutation:
+        submit = DjangoMutationField(Submit)
+
+    finalize_django_types()
+    schema = DjangoSchema(
+        query=_Query,
+        mutation=Mutation,
+        resource_policy=ResourcePolicy(execution_deadline_seconds=0.000000000001),
+        error_policy={"enabled": False},
+    )
+    with CaptureQueriesContext(connection) as captured:
+        result = _post(
+            schema,
+            "mutation($d: ContactFormInput!){ submit(data:$d){ ok errors{ field } } }",
+            variables={"d": {"message": "hi"}},
+        )
+
+    assert result["data"] is None, result
+    (error,) = json_list(result, "errors")
+    assert json_object(error)["path"] == ["submit"], result
+    extensions = json_object(error, "extensions")
+    assert (extensions["code"], extensions["bound"]) == (
+        "RESOURCE_LIMIT_EXCEEDED",
+        "execution_deadline_seconds",
+    ), result
+    assert created == []
+    assert [query["sql"].upper() for query in captured.captured_queries] == ["BEGIN", "ROLLBACK"]
+    assert not product_models.Category.objects.filter(name="ExpiredPlainForm").exists()
 
 
 @pytest.mark.django_db
