@@ -282,6 +282,11 @@ def _assert_answer(payload: JSONObject, names: list[str] | None, form_key: str) 
         }, payload
 
 
+#: A generated transform chain's form key -> the ``(head, lookup attr)`` its value is sent
+#: under: ``tags__len__in`` is the ``len_in`` lookup of the ``tags`` head.
+_CHAIN_LOOKUPS = {"tags__len__in": ("tags", "len_in")}
+
+
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize(
     ("form_key", "value", "names"),
@@ -341,10 +346,12 @@ def test_numeric_array_members_check_the_real_binding_type_and_keep_non_element_
 ) -> None:
     """Real array members obey the backend's integer range; len, slice bounds and annotations keep theirs."""
     statements = record_compiled_sql(array_consumer.table)
+    chain = _CHAIN_LOOKUPS.get(form_key)
+    where = {form_key: value} if chain is None else {chain[0]: {chain[1]: value}}
     payload = _post(
         array_consumer,
         "query($where: JSON!) { rows(where: $where) { label } allRows { label } }",
-        {"where": {form_key: value}},
+        {"where": where},
     )
     if form_key == "prices_after" and value == ["NaN"]:
         assert payload["data"] is None, payload

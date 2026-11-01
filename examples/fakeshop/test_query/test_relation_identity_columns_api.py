@@ -16,13 +16,15 @@ from typing import TYPE_CHECKING
 
 import pytest
 import strawberry
+from apps.library.models import PatronProfile
 from django.core.validators import MinValueValidator
 from django.db import connection as db_connection
 from django.db import models as db_models
-from django.db.models import Model, QuerySet
+from django.db.models import Model, QuerySet, Transform
 from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
 from django.urls import path
+from django.utils.functional import cached_property
 from graphql_client import JSONObject, graphql_payload, json_list
 from strawberry import relay
 from strawberry.scalars import JSON
@@ -37,9 +39,15 @@ from django_strawberry_framework import (
     strawberry_config,
 )
 from django_strawberry_framework.filters import FilterSet, RelatedFilter
+from django_strawberry_framework.filters.base import (
+    RelationPkMultipleFilter,
+    _lookup_operand,
+    _model_lookup_operand,
+)
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.utils._narrowing import (
     call_method,
+    is_concrete_field,
     read_attr,
     require,
     require_instance,
@@ -49,6 +57,8 @@ from django_strawberry_framework.views import DjangoGraphQLView
 
 if TYPE_CHECKING:
     from django.db.models.expressions import Combinable
+
+    from django_strawberry_framework.utils.typing import ConcreteField
 
 pytestmark = pytest.mark.usefixtures("private_registry")
 _CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
@@ -1109,3 +1119,83 @@ def test_relation_identity_reads_a_stored_key_that_its_model_validator_refuses(
         with db_connection.schema_editor() as editor:
             editor.delete_model(_HttpValidatedHolder)
             editor.delete_model(_HttpValidatedKey)
+
+
+class _HttpNumberedRow(_IdentityRow):
+    """A named row whose integer ``number`` a ``_GenreKey`` transform reads as a genre key."""
+
+    name: db_models.TextField[str | Combinable, str] = db_models.TextField()
+    number: db_models.IntegerField[float | int | str | Combinable, int] = db_models.IntegerField()
+
+    class Meta(_IdentityRow.Meta):
+        managed = False
+        app_label = "library"
+        db_table = "live_identity_numbered_row"
+
+
+class _GenreKey(Transform):
+    """``'G' || <column>``, a value of ``PatronProfile.favorite_genre`` (a genre name)."""
+
+    lookup_name = "genre_key"
+    template = "('G' || %(expressions)s)"
+
+    @cached_property
+    @override
+    def output_field(self) -> ConcreteField:
+        return require(PatronProfile._meta.get_field("favorite_genre"), is_concrete_field)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("head", "lookup", "value"),
+    [
+        pytest.param("number", "genre_key", "G1", id="single"),
+        pytest.param("number", "genre_key_in", ["G1"], id="membership"),
+        pytest.param("selected", "genre_key", ["G1"], id="membership-on-a-trailing-transform"),
+    ],
+)
+def test_a_transform_whose_output_is_a_relation_compares_that_relations_key(
+    head: str,
+    lookup: str,
+    value: object,
+) -> None:
+    """A raw-key leaf past a transform whose output is a relation compares that relation's key.
+
+    ``genre_key`` computes ``'G' || number`` as a ``favorite_genre`` value, so ``"G1"`` is
+    coerced through the genre's ``name`` and kept in the transform's predicate, never
+    coerced through the ``number`` column it would not fit. The declared ``selected``
+    ends its ``lookup_expr`` on the transform, which Django applies with an implicit
+    ``exact``, so its membership keeps the transform too.
+    """
+    number = require(_HttpNumberedRow._meta.get_field("number"), is_concrete_field)
+    _ = number.register_instance_lookup(_GenreKey, "genre_key")
+    with db_connection.schema_editor() as editor:
+        editor.create_model(_HttpNumberedRow)
+    try:
+        for count, name in ((1, "one"), (2, "two")):
+            _HttpNumberedRow.objects.create(name=name, number=count)
+        filterset = type(
+            "GenreKeyFilter",
+            (FilterSet,),
+            {
+                "selected": RelationPkMultipleFilter(field_name="number", lookup_expr="genre_key"),
+                "Meta": type(
+                    "Meta",
+                    (),
+                    {
+                        "model": _HttpNumberedRow,
+                        "fields": {"number": ["genre_key", "genre_key__in"]},
+                    },
+                ),
+            },
+        )
+        django_rows = _HttpNumberedRow.objects.filter(number__genre_key__in=["G1"])
+        assert [row.name for row in django_rows] == ["one"]
+        payload = _post(_schema(_HttpNumberedRow, filterset), {head: {lookup: value}})
+        assert payload == _expected(["one"], universe=["one", "two"]), payload
+    finally:
+        with db_connection.schema_editor() as editor:
+            editor.delete_model(_HttpNumberedRow)
+        del vars(number)["instance_lookups"]["genre_key"]
+        _lookup_operand.cache_clear()
+        _model_lookup_operand.cache_clear()

@@ -3,6 +3,7 @@
 A holder is required for this consumer configuration: one library declaration is served under
 both the default converter and a converter renaming every Relay selection and its page-size
 argument. Offset and keyset variants share the same real Genre rows and native package mounts.
+A node field whose arguments do not coerce leaves its error to the field that resolves it.
 """
 
 import asyncio
@@ -33,6 +34,7 @@ from typing_extensions import override
 from django_strawberry_framework import (
     DjangoConnection,
     DjangoConnectionField,
+    DjangoOptimizerExtension,
     DjangoSchema,
     DjangoType,
     finalize_django_types,
@@ -110,15 +112,26 @@ def _schema(*, keyset: bool, renamed: bool) -> DjangoSchema:
     return DjangoSchema(query=Query, config=strawberry_config(name_converter=converter))
 
 
-def _post(schema: strawberry.Schema, document: str, color: str) -> JSONObject:
+def _post(
+    schema: strawberry.Schema,
+    document: str,
+    color: str,
+    variables: JSONObject | None = None,
+) -> JSONObject:
     """Drive a real native transport, reading the held schema only when the request arrives."""
     _CURRENT["schema"] = schema
     try:
         with override_settings(ROOT_URLCONF=__name__):
             if color == "sync":
-                return response_json(post_graphql(document, url="/graphql-names/"))
+                return response_json(
+                    post_graphql(document, variables=variables, url="/graphql-names/"),
+                )
             response = asyncio.run(
-                AsyncTestClient("/graphql-names-async/").query(document, assert_no_errors=False),
+                AsyncTestClient("/graphql-names-async/").query(
+                    document,
+                    variables,
+                    assert_no_errors=False,
+                ),
             )
             assert response.response.status_code == 200
             return response_json(response.response)
@@ -409,3 +422,68 @@ def test_a_fragment_named_edges_does_not_select_the_connection_field(
     )
     assert payload == {"data": {"genres": {"__typename": "NamedGenreTypeConnection"}}}, payload
     assert sql == []
+
+
+def _shout_schema() -> DjangoSchema:
+    """A connection whose node publishes a field with a non-null argument."""
+
+    class ShoutGenreType(DjangoType):
+        class Meta:
+            model = models.Genre
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+
+        @strawberry.field
+        @staticmethod
+        def shout(root: strawberry.Parent[models.Genre], times: int) -> str | None:
+            return root.name * times
+
+    finalize_django_types()
+
+    @strawberry.type
+    class Query:
+        genres: DjangoConnection[ShoutGenreType] = DjangoConnectionField(ShoutGenreType)
+
+    optimizer = DjangoOptimizerExtension()
+    return DjangoSchema(query=Query, config=strawberry_config(), extensions=[lambda: optimizer])
+
+
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("color", ["sync", "async"])
+@pytest.mark.parametrize(
+    "directive",
+    ["@skip(if: true)", "@include(if: false)", ""],
+    ids=["skip", "include", "selected"],
+)
+def test_an_argument_that_does_not_coerce_fails_only_the_field_that_resolves_it(
+    color: str,
+    directive: str,
+) -> None:
+    """The planner reads a node field's arguments; the executor owns their coercion error.
+
+    A nullable variable with a non-null default may carry ``null`` to a non-null argument.
+    A field a directive leaves out never resolves, so the request answers its siblings;
+    a selected one answers the coercion error at its own path.
+    """
+    models.Genre.objects.create(name="A")
+    document = (
+        "query($n: Int = 2) { genres(first: 1) { edges { node { name shout(times: $n) "
+        + directive
+        + " } } } }"
+    )
+    payload = _post(_shout_schema(), document, color, {"n": None})
+    node: JSONObject = {"name": "A"} if directive else {"name": "A", "shout": None}
+    assert payload["data"] == {"genres": {"edges": [{"node": node}]}}, payload
+    if directive:
+        assert "errors" not in payload, payload
+        return
+    errors = json_list(payload, "errors")
+    assert len(errors) == 1, payload
+    assert json_object(errors, 0)["path"] == [
+        "genres",
+        "edges",
+        0,
+        "node",
+        "shout",
+    ], payload

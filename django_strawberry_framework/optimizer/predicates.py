@@ -90,7 +90,7 @@ if TYPE_CHECKING:
     from django.db.models import QuerySet
 
     from django_strawberry_framework.utils.relations import RelationLink
-    from django_strawberry_framework.utils.typing import ConcreteField, ModelField
+    from django_strawberry_framework.utils.typing import ConcreteField, ForeignKeyField, ModelField
 
 _M = TypeVar("_M", bound="models.Model")
 
@@ -236,10 +236,11 @@ class _CorrelationStep:
     column's attname, app_label, model name)``; ``None`` for every other link.
     ``segment`` is the index of the path segment whose target rows the link
     reads, ``None`` for a many-to-many's join-table link. ``referenced`` marks a
-    link whose outer columns are a foreign key onto the inner ones (a forward
-    single relation, a many-to-many's target link), so a set outer link
-    names an existing inner row; never a reverse ``GenericRel``, whose
-    ``object_id`` carrier constrains nothing.
+    link whose outer columns are a foreign key the database enforces onto the
+    inner ones (a forward single relation, a many-to-many's target link;
+    ``_enforces_reference``), so a set outer link names an existing inner row;
+    never a reverse ``GenericRel``, whose ``object_id`` carrier constrains nothing,
+    nor a ``db_constraint=False`` key or a bare ``ForeignObject``.
     """
 
     model: type[models.Model]
@@ -248,6 +249,17 @@ class _CorrelationStep:
     segment: int | None = None
     referenced: bool = False
     outer_restriction: tuple[type[models.Model], str, str, str] | None = None
+
+
+def _enforces_reference(field: ModelField | ForeignKeyField | None) -> bool:
+    """Whether ``field`` is a foreign key the database enforces, so a set value names a target row.
+
+    A ``db_constraint=False`` key and a ``ForeignObject`` that is no ``ForeignKey`` create
+    no constraint: their columns may hold a value no target row carries. A many-to-many's
+    join-table key carries the many-to-many's own ``db_constraint`` (an auto-created
+    through) or the custom through's.
+    """
+    return isinstance(field, ForeignKey) and read_attr(field, "db_constraint", None) is True
 
 
 def _column_ref(field: ConcreteField) -> str:
@@ -300,7 +312,7 @@ def _correlation_steps(
                     field.related_model,
                     tuple(zip(target.targets, target.carriers, strict=True)),
                     index,
-                    True,
+                    _enforces_reference(target_fk),
                 ),
             ]
         else:
@@ -318,7 +330,7 @@ def _correlation_steps(
                     index,
                     # A reverse ``GenericRel``'s ``object_id`` is no foreign key, so it
                     # proves no target row exists.
-                    kind == "forward_single",
+                    kind == "forward_single" and _enforces_reference(field),
                 ),
             ]
         for link_model, pairs, link_segment, referenced in links:
@@ -459,9 +471,10 @@ def correlates_related_rows(
     - each row is one of the link's target rows: ``rows_model`` is the target,
       a proxy on its table, or a multi-table-inheritance descendant of it. An
       ancestor's rows include rows no target row extends, so it qualifies only
-      when the outer row references the target (``_CorrelationStep.referenced``:
-      a forward link, or a many-to-many's join row), which proves the target
-      row exists; on a reverse link its own row would match itself.
+      when the outer row references the target by a key the database enforces
+      (``_CorrelationStep.referenced``: a forward link, or a many-to-many's join
+      row), which proves the target row exists; on a reverse link its own row
+      would match itself, and an unconstrained key may name a missing target row.
     - each column name means the same stored column on ``rows_model``: ``pk``
       the column the target's key is stored in (``_stored_column``, following
       parent links, so a descendant keyed on a column of its own fails), any

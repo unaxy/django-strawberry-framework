@@ -406,7 +406,7 @@ _REFUSALS = {
         (),
     ),
     "years-of-csv-dates": _TemporalCase(
-        ("years_of_days", "year__in"),
+        ("years_of_days", "year_in"),
         ("2021-01-01",),
         "list",
         "years_of_days",
@@ -536,7 +536,7 @@ _ACCEPTED = {
         ("match",),
     ),
     "generated-year-in": _TemporalCase(
-        ("occurred_on_year_in", "year__in"),
+        ("occurred_on", "year_in"),
         (2021, 2022),
         "list",
         "occurred_on__year__in",
@@ -721,11 +721,11 @@ def test_a_declared_filter_past_a_transform_publishes_what_its_own_form_cleans()
     assert _leaf_type_name(schema, ("text_year_of_day", "year")) == "String"
     assert _leaf_type_name(schema, ("text_day_year", "exact")) == "String"
     # The containers follow the same rule: a CSV member and a range axis.
-    assert _leaf_type_name(schema, ("years_of_days", "year__in")) == "Date"
+    assert _leaf_type_name(schema, ("years_of_days", "year_in")) == "Date"
     assert _range_axis_type_names(schema, ("years_of_day_span", "exact")) == {"Date"}
     # A generated ``year__in`` filter is built from the transform's output, so it keeps Int,
     # and a DateTime range past ``date`` cleans a datetime, which is a date: it keeps Date.
-    assert _leaf_type_name(schema, ("occurred_on_year_in", "year__in")) == "Int"
+    assert _leaf_type_name(schema, ("occurred_on", "year_in")) == "Int"
     assert _range_axis_type_names(schema, ("days_of_span", "exact")) == {"Date"}
     where = _where(schema, ("year_of_day", "year"), 2021)
     head = next(iter(where))

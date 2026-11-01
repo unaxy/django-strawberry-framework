@@ -20,6 +20,7 @@ from __future__ import annotations
 import datetime
 import decimal
 import enum
+import keyword
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -80,6 +81,7 @@ from django_strawberry_framework.utils.inputs import (
 )
 from django_strawberry_framework.utils.strings import (
     flatten_lookup_path,
+    graphql_camel_name,
     pascal_case_or_raise,
 )
 from django_strawberry_framework.utils.widgets import multi_widget_keys, widget_keys
@@ -144,10 +146,9 @@ LOOKUP_PREFIXES: dict[str, str] = {
 # Decision 3 Layer 5. Strawberry's auto-camel-case
 # cannot transform `icontains` to `iContains` (no underscore to split on),
 # and the Python keyword `in` cannot be a dataclass field - both are pinned
-# here. Consumed by `filter_lookup_table` (keying each head's lookups by their
-# Python attr, the names `FilterSet._normalize_input` reads), by
-# `_build_input_fields` (for `strawberry.field(name=...)` emission), and by
-# `FilterSet._operator_bag_items` (recognizing a hand-built operator bag).
+# here. Read through `lookup_leaf_names`, which names every bag lookup (a
+# transform chain segment by segment), and by `FilterSet._operator_bag_items`
+# (recognizing a hand-built operator bag).
 LOOKUP_NAME_MAP: dict[str, tuple[str, str]] = {
     "exact": ("exact", "exact"),
     "iexact": ("i_exact", "iExact"),
@@ -176,6 +177,36 @@ LOOKUP_NAME_MAP: dict[str, tuple[str, str]] = {
     "minute": ("minute", "minute"),
     "second": ("second", "second"),
 }
+
+
+def lookup_leaf_names(lookup: str) -> tuple[str, str]:
+    """Return an operator-bag lookup's ``(python_attr, graphql_name)``.
+
+    A single token reads ``LOOKUP_NAME_MAP`` (``in`` -> ``in_`` / ``in``); one the map
+    does not hold is named by itself (``iso_year`` -> ``isoYear``), its python attr
+    escaped with a trailing ``_`` when it is a Python keyword (a transform registered as
+    ``from`` publishes ``from`` over the attr ``from_``). A transform chain
+    (``year__gt``) is named segment by segment: its python attr joins each segment's attr
+    with ``_`` (``year_gt``, ``year_i_contains``; a keyword escape such as ``in_`` is moot
+    inside a chain, so ``year_in``) and its GraphQL name capitalizes each later
+    segment's name (``yearGt``, ``yearIContains``), never the camel case of the joined
+    attr, which ``graphql_camel_name`` marks at an uppercase run (``yearI__xContains``).
+    The one site that names a bag lookup: ``filter_lookup_table`` keys each head's
+    lookups by the attr and ``_build_input_fields`` publishes the pair.
+    """
+    segments = lookup.split(LOOKUP_SEP)
+    if len(segments) == 1:
+        if lookup in LOOKUP_NAME_MAP:
+            return LOOKUP_NAME_MAP[lookup]
+        return f"{lookup}_" if keyword.iskeyword(lookup) else lookup, graphql_camel_name(lookup)
+    named = [lookup_leaf_names(segment) for segment in segments]
+    python_attr = "_".join(
+        attr[:-1] if attr.endswith("_") and keyword.iskeyword(attr[:-1]) else attr
+        for attr, _graphql_name in named
+    )
+    head_name, *later_names = (graphql_name for _attr, graphql_name in named)
+    graphql_name = head_name + "".join(name[:1].upper() + name[1:] for name in later_names)
+    return python_attr, graphql_name
 
 
 def _compose_and(branch_qs: list[models.Q]) -> models.Q:
@@ -757,13 +788,16 @@ def _element_annotation(
     ``field_name`` (``occurred_at__year``, an ``ArrayField`` index ``counts__0``), the
     field is the last transform's output the leaf builder passes
     (``filters/base.py::_filterset_value_field``). The ``django-filter`` form
-    field is consulted ONLY as the fallback for a custom ``method=`` filter with no
-    backing model field, or a path that resolves to no column of the FilterSet model
-    (a ``FilteredRelation`` alias only the filter's queryset holds) --
-    otherwise ``django-filter``'s ``NumberFilter`` form (a ``DecimalField``)
-    mis-types integer columns and a CSV ``in`` over a choice column collapses
-    to ``str``. Callers that need a different shape for a specific lookup (e.g.
-    ``isnull`` is always boolean) handle that before calling this.
+    field types the value only where the caller passes no field: a custom
+    ``method=`` filter with no backing model field, a path that resolves to no
+    column of the FilterSet model (a ``FilteredRelation`` alias only the filter's
+    queryset holds), and a declared filter whose own form cleans another kind than
+    the field (``_form_cleaned_value_field``: a ``DateFilter`` with
+    ``lookup_expr="year"`` is ``Date``). Everywhere else the field wins, since
+    ``django-filter``'s ``NumberFilter`` form (a ``DecimalField``) would mis-type
+    integer columns and a CSV ``in`` over a choice column would collapse to ``str``.
+    Callers that need a different shape for a specific lookup (Django's ``isnull``
+    is always boolean) handle that before calling this.
 
     An ``ArrayField`` column reaches this only as its element column, which the list arms
     pass after ``_array_element_column`` admits the lookup; any other arm or lookup over an
@@ -1064,9 +1098,15 @@ def convert_filter_to_input_annotation(
         # from the form field its class builds; one whose ``field`` builds none on the
         # unbound declaration raises (spec-027 Decision 4).
         _refuse_method_without_form_field(matched, filterset_cls)
-        if _filterset_lookup_operand(filterset_cls, matched).lookup == "isnull":
+        if _filterset_lookup_operand(filterset_cls, matched).null_test and (
+            read_attr(matched, "method", None) is None
+            or all(_passes_value_through(field) for field in _form_value_fields(matched))
+        ):
             # ``isnull`` is a boolean predicate regardless of the column type, past a
-            # transform too (``year__isnull``): the value field is irrelevant here.
+            # transform too (``year__isnull``): the value field is irrelevant here. A
+            # ``method=`` filter's method applies no lookup of the filter's, so a form that
+            # cleans its own kind types it (``NumberFilter(lookup_expr="isnull", method=...)``
+            # takes a number); one passing any value through keeps ``Boolean``.
             return bool
         value_field = _form_cleaned_value_field(matched, model_field, filterset_cls)
         return _element_annotation(matched, value_field, owner_definition, filterset_cls)
@@ -1604,8 +1644,14 @@ def _group_filters_by_head(
 
     A declared filter, and a ``RelatedFilter`` expansion of a child's declared
     filter, is its own head: its name is its form key even when it ends in its
-    own lookup token (``name__exact``). A generated ``<path>__<lookup>`` entry
-    joins the ``<path>`` head under ``<lookup>``. Two filters claiming one
+    own lookup token (``name__exact``). A generated entry joins the head its
+    name spells ahead of the tail django-filter's ``get_filter_name`` appends for
+    its ``lookup_expr``, under that tail's lookup: ``occurred_at__year__gt`` joins
+    ``occurred_at`` under ``year__gt``, and ``occurred_at__year`` (a ``year`` or
+    ``year__exact`` lookup, which django-filter names alike) under ``year``, so a
+    ``RelatedFilter`` expansion keeps the alias it is published under
+    (``branch__name``). A name not ending in that tail (a ``get_filters()``
+    override re-keyed it) is its own head. Two filters claiming one
     ``(head, lookup)`` slot would leave one unreachable from the generated
     input, so that raises. Returns the grouping and the set of declared heads.
     """
@@ -1624,11 +1670,12 @@ def _group_filters_by_head(
             head, lookup_token = filter_name, lookup_expr
             declared_heads.add(head)
         else:
-            # django-filter names a generated filter ``<path>__<lookup>``, or the
-            # bare ``<path>`` for ``exact``; a trailing token that is not the
-            # filter's own lookup belongs to the path.
-            head, _, lookup_token = filter_name.rpartition("__")
-            if not head or lookup_token != lookup_expr:
+            # django-filter names a generated filter ``<path>`` plus this tail (empty
+            # for ``exact``, which keeps the bare ``<path>`` as its own head).
+            tail = filterset_cls.get_filter_name("", lookup_expr)
+            if tail and filter_name.endswith(tail) and len(filter_name) > len(tail):
+                head, lookup_token = filter_name[: -len(tail)], tail.removeprefix(LOOKUP_SEP)
+            else:
                 head, lookup_token = filter_name, lookup_expr
         bag = grouped.setdefault(head, OrderedDict())
         prior = bag.get(lookup_token)
@@ -1648,7 +1695,8 @@ def filter_lookup_table(filterset_cls: type[FilterSet]) -> FilterLookupTable:
 
     The flattened generated-input attr of a ``<path>__<field>`` head is an alias
     only when no head is literally spelled that way (a head's own spelling wins);
-    two heads sharing one alias raise, since one would be unreachable.
+    two heads sharing one alias raise, since one would be unreachable, and so do
+    two lookups of one head named by one attr (``lookup_leaf_names``).
     """
     all_filters = filterset_cls._filter_table()
     cached = filterset_cls._lookup_table
@@ -1658,9 +1706,18 @@ def filter_lookup_table(filterset_cls: type[FilterSet]) -> FilterLookupTable:
     by_input_attr: dict[str, Mapping[str, FormKeyedFilter]] = {}
     gate_paths: dict[str, str] = {}
     for head, bag in heads.items():
-        by_input_attr[head] = {
-            LOOKUP_NAME_MAP.get(token, (token, token))[0]: entry for token, entry in bag.items()
-        }
+        lookups: dict[str, FormKeyedFilter] = {}
+        for token, entry in bag.items():
+            lookup_attr = lookup_leaf_names(token)[0]
+            prior = lookups.setdefault(lookup_attr, entry)
+            if prior is not entry:
+                raise ConfigurationError(
+                    f"{truth.qualname(filterset_cls)}: filters {prior[0]!r} and {entry[0]!r} "
+                    f"both generate the lookup attribute {lookup_attr!r} of input field "
+                    f"{head!r}, so one would be unreachable. Rename one filter or drop one "
+                    "via Meta.fields / Meta.exclude.",
+                )
+        by_input_attr[head] = lookups
         _form_key, sample_filter = next(iter(bag.values()))
         # A declared head gates on its own name; so does an expansion of a child's
         # declared filter, whose flat spelling must fire the gates its nested twin
@@ -1779,7 +1836,7 @@ def _build_input_fields(
         bag_name = filterset_cls.type_name_for(python_attr)
         bag_specs: list[tuple[str, object, dict[str, object]]] = []
         for lookup, (_form_key, leaf_filter) in lookup_bag.items():
-            lookup_python_attr, lookup_graphql_name = LOOKUP_NAME_MAP.get(lookup, (lookup, lookup))
+            lookup_python_attr, lookup_graphql_name = lookup_leaf_names(lookup)
             if not lookup_python_attr.isidentifier():
                 raise _unnameable_lookup_refusal(leaf_filter, lookup, filterset_cls)
             # A leaf is typed by the field each value is cleaned as: the output of any

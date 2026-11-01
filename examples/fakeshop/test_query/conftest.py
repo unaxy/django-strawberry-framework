@@ -200,7 +200,8 @@ def record_compiled_sql(monkeypatch: pytest.MonkeyPatch) -> RecordCompiledSql:
     """Return a recording callable; each call returns the list it appends statements to.
 
     A query Django compiles to "no rows possible" never reaches the database, so it
-    is skipped rather than recorded. Only the plain SELECT compiler is read:
+    is skipped rather than recorded. Only the backend's plain SELECT compiler is read
+    (``connection.ops.compiler("SQLCompiler")``, a subclass on PostgreSQL below Django 6.1):
     compiling a write compiler a second time re-runs its pre-SQL setup, which for a
     multi-table update executes a SELECT and rewrites the query's own filter, so an
     instrument must not ask one for its SQL. The compiler is restored at teardown.
@@ -211,7 +212,7 @@ def record_compiled_sql(monkeypatch: pytest.MonkeyPatch) -> RecordCompiledSql:
         original_execute_sql = _pass_through(SQLCompiler.execute_sql)
 
         def _recording_execute_sql(self: SQLCompiler, *args: object, **kwargs: object) -> object:
-            if type(self) is SQLCompiler:
+            if type(self) is self.connection.ops.compiler("SQLCompiler"):
                 try:
                     sql = self.as_sql()[0]
                 except EmptyResultSet:
