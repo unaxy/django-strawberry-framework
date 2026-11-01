@@ -6,6 +6,7 @@ of relation visibility. Explicit pass-through error policy exposes configuration
 """
 
 import asyncio
+import datetime
 from collections.abc import Awaitable, Mapping, Sequence
 from functools import wraps
 from typing import TypeVar
@@ -19,7 +20,7 @@ from django.db.models import F, Model, QuerySet
 from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
 from django.urls import path
-from django_filters import BooleanFilter, CharFilter
+from django_filters import BooleanFilter, CharFilter, DateFilter
 from django_filters.filterset import BaseFilterSet
 from graphql_client import (
     JSONObject,
@@ -739,6 +740,75 @@ def test_a_consumer_constructor_edits_the_same_deferred_copy_the_request_runs(
     schema = _holder(ConsumerConstructor, targets=(_target(), desk), direct=direct)
     payload = _post(schema, {"desks__shelf__code": "MATCH"})
     assert payload == _expected(["alpha"] if edit else []), payload
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("direct", [False, True], ids=["pipeline", "direct-form"])
+def test_a_child_date_split_onto_its_select_keys_by_a_constructor_stays_supplied(
+    *,
+    direct: bool,
+) -> None:
+    """A ``SelectDateWidget`` reads its year, month and day keys, so they name the flat copy.
+
+    The constructor moves the supplied child date onto the keys the widget reads, which
+    Django cleans to the same date, so the copy filters to the one ticket whose venue
+    opened then.
+    """
+    openings = (
+        ("t-a", datetime.date(2024, 1, 1)),
+        ("t-b", datetime.date(2024, 2, 2)),
+        ("t-c", None),
+    )
+    for code, opened in openings:
+        venue = models.Venue.objects.create(name=code, opened_on=opened)
+        models.RepairTicket.objects.create(code=code, venue=venue)
+
+    class VenueFilter(FilterSet):
+        opened = DateFilter(field_name="opened_on", widget=forms.SelectDateWidget)
+
+        class Meta:
+            model = models.Venue
+            fields = []
+
+    class TicketFilter(FilterSet):
+        venue = RelatedFilter(VenueFilter, field_name="venue")
+
+        class Meta:
+            model = models.RepairTicket
+            fields = []
+
+        @override
+        def __init__(
+            self,
+            data: Mapping[str, object] | None = None,
+            queryset: QuerySet[Model] | None = None,
+            *,
+            request: HttpRequest | None = None,
+            prefix: str | None = None,
+        ) -> None:
+            if data is not None and "venue__opened" in data:
+                split = dict(data)
+                day = datetime.date.fromisoformat(str(split.pop("venue__opened")))
+                split["venue__opened_year"] = str(day.year)
+                split["venue__opened_month"] = str(day.month)
+                split["venue__opened_day"] = str(day.day)
+                data = split
+            super().__init__(data=data, queryset=queryset, request=request, prefix=prefix)
+
+    venue = type(
+        "PlainVenue",
+        (DjangoType,),
+        {"Meta": type("Meta", (), {"model": models.Venue, "fields": ("name",)})},
+    )
+    schema = _holder(
+        TicketFilter,
+        model=models.RepairTicket,
+        label="code",
+        targets=(venue,),
+        direct=direct,
+    )
+    payload = _post(schema, {"venue__opened": "2024-01-01"}, label="code")
+    assert payload == _expected(["t-a"], universe=("t-a", "t-b", "t-c")), payload
 
 
 @pytest.mark.django_db

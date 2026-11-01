@@ -44,7 +44,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
-from graphql import GraphQLInterfaceType, GraphQLObjectType, get_named_type
+from graphql import GraphQLError, GraphQLInterfaceType, GraphQLObjectType, get_named_type
 from graphql.execution.values import get_argument_values
 from graphql.language.ast import (
     DirectiveNode,
@@ -165,8 +165,17 @@ def _coerced_python_arguments(
     coercion (literal tokens to values, variables and defaults resolved) and keys
     its answer by the published name; ``published_python_name`` reads the
     declaration each published argument was built from back off the schema.
+
+    Empty when the arguments do not coerce: the executor raises that same error as
+    the field's own error when it resolves the field, and a field a ``@skip`` /
+    ``@include`` leaves out never resolves, so a valid request (a nullable
+    variable that is ``null`` on a skipped field's non-null argument) runs, and
+    the selection is planned with no arguments rather than failing its root.
     """
-    coerced = get_argument_values(field_def, node, variable_values)
+    try:
+        coerced = get_argument_values(field_def, node, variable_values)
+    except GraphQLError:
+        return {}
     by_python_name: dict[str, object] = {}
     for wire_name, argument in field_def.args.items():
         out_name = argument.out_name or wire_name

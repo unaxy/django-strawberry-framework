@@ -5,7 +5,7 @@ The JSON consumer applies its associated FilterSet; a typed GlobalID consumer us
 its bound public filter primitive to preserve Strawberry's already-decoded value.
 A GlobalID filter into a model no type exposes compares the node id on the relation's
 key, through a ``GenericRelation`` too; one on a ``GenericForeignKey`` is refused when
-its set publishes its filters, served or applied unbound.
+its set publishes its filters, served or applied unbound, unless a ``method`` filters it.
 """
 
 import logging
@@ -15,6 +15,7 @@ from functools import wraps
 import pytest
 import strawberry
 from apps.library import models
+from django.contrib.contenttypes.models import ContentType
 from django.db.models import QuerySet
 from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
@@ -486,3 +487,56 @@ def test_a_globalid_filter_through_a_generic_relation_compares_the_tag_key() -> 
     payload = _post(schema, query, {"where": {"tagged": malformed}})
     assert payload["data"] is None, payload
     assert json_at(payload, "errors", 0, "extensions", "code") == "GLOBALID_INVALID", payload
+
+
+def _tagged_object_method_filter() -> type[FilterSet]:
+    """A set whose GlobalID filter on the ``GenericForeignKey`` filters through a ``method``."""
+
+    class TaggedObjectMethodFilter(FilterSet):
+        tagged = GlobalIDFilter(field_name="content_object", method="by_target")
+
+        class Meta:
+            model = models.TaggedItem
+            fields = []
+
+        def by_target(
+            self,
+            queryset: QuerySet[models.TaggedItem],
+            name: str,
+            value: str,
+        ) -> QuerySet[models.TaggedItem]:
+            del name
+            return queryset.filter(
+                content_type=ContentType.objects.get_for_model(models.Branch),
+                object_id=relay.GlobalID.from_id(value).node_id,
+            )
+
+    return TaggedObjectMethodFilter
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("served", [True, False], ids=["served", "unserved"])
+def test_a_globalid_filter_on_a_generic_foreign_key_filters_through_its_method(
+    *,
+    served: bool,
+) -> None:
+    """A ``method`` filters as it chooses, so the refusal leaves the filter to it.
+
+    django-filter dispatches the filter to its method, never through the relation its
+    ``field_name`` names: this one keeps the tags whose content type and object id the
+    node id names.
+    """
+    target = models.Branch.objects.create(name="Target", city="Boston")
+    sibling = models.Branch.objects.create(name="Sibling", city="Boston")
+    _ = models.TaggedItem.objects.create(content_object=target, tag="t")
+    _ = models.TaggedItem.objects.create(content_object=sibling, tag="s")
+    schema = _tagged_item_schema(_tagged_object_method_filter(), served=served)
+    value = str(relay.GlobalID(type_name="BranchNode", node_id=str(target.pk)))
+
+    payload = _post(
+        schema,
+        "query($where: JSON!) { tags(where: $where) { tag } }",
+        {"where": {"tagged": value}},
+    )
+
+    assert payload == {"data": {"tags": [{"tag": "t"}]}}, payload

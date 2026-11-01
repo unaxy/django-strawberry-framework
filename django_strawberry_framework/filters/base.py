@@ -2637,9 +2637,14 @@ def refuse_identityless_relation(
     ``FieldError``, so the declaration could answer no request.
     ``filters/sets.py::FilterSet._publish_filters`` asks this of every leaf a set
     publishes: a set a type serves refuses it when the schema builds, an unserved set
-    applied over JSON at its first use. A path naming no field is not read here.
+    applied over JSON at its first use. A path naming no field is not read here, and
+    neither is a filter with a ``method``: django-filter dispatches it to that method,
+    which filters as it chooses (the content type and object id columns, say), never
+    through the relation its ``field_name`` names.
     """
     if not isinstance(filter_instance, (GlobalIDFilter, GlobalIDMultipleChoiceFilter)):
+        return
+    if read_attr(filter_instance, "method", None) is not None:
         return
     field = _filterset_model_field(filterset_cls, filter_instance)
     if field is None or not field.is_relation or _compared_columns(filter_instance, field):

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias, TypeGuard, cast, overload
-from weakref import WeakKeyDictionary
 
 from django.core.exceptions import FieldDoesNotExist
 from django.db import models
@@ -1253,9 +1253,10 @@ def is_stored_column(field: object) -> TypeGuard[ConcreteField]:
     return is_concrete_field(field) and field in field.model._meta.concrete_fields
 
 
-# One computed column per ``GeneratedField``, filed on its first read; see ``generated_column``.
-# Weakly keyed, so a field of a model that is discarded (a test's isolated app) drops its column.
-_GENERATED_COLUMNS: WeakKeyDictionary[models.GeneratedField, ConcreteField] = WeakKeyDictionary()
+# The attribute a ``GeneratedField`` files its computed column under, and the lock its
+# filing holds; see ``generated_column``.
+_GENERATED_COLUMN_ATTR = "_dsf_generated_column"
+_GENERATED_COLUMN_LOCK = threading.Lock()
 
 
 def generated_column(field: object) -> ConcreteField | None:
@@ -1280,18 +1281,39 @@ def generated_column(field: object) -> ConcreteField | None:
     may register its own (``Field.register_lookup`` on an instance). A lookup is read off
     that registry, and a walk starts from the generated field's own column
     (``lookup_operand``; ``generated_column_source`` reads the field back from the clone).
-    One column is filed per field, weakly (a ``WeakKeyDictionary`` keyed by the field: Django hashes it
-    by ``creation_counter`` and compares the bound model too), and every caller
-    gets the one filed (``setdefault``), so an identity test between two reads of it holds.
+    One column is filed per field, on the field itself (under a lock, so a concurrent first
+    read files no second one), and every caller gets the one filed, so an identity test
+    between two reads of it holds; the column lives exactly as long as its field, so a
+    discarded model (a test's isolated app) is collected with it. A column filed for
+    another model (a copy Django's abstract inheritance takes of a field already read) is
+    filed again.
     The type and filter conversions read it through
     ``types/converters.py::generated_output_field``, which refuses the outputs no
     conversion can publish; the identity codec reads it through ``stored_value_link``.
     """
     if not truth.is_instance(field, models.GeneratedField):
         return None
-    filed = _GENERATED_COLUMNS.get(field)
+    filed = _filed_generated_column(field)
     if filed is not None:
         return filed
+    with _GENERATED_COLUMN_LOCK:
+        filed = _filed_generated_column(field)
+        if filed is None:
+            filed = _computed_column(field)
+            setattr(field, _GENERATED_COLUMN_ATTR, filed)
+        return filed
+
+
+def _filed_generated_column(field: models.GeneratedField) -> ConcreteField | None:
+    """Return the column ``generated_column`` filed on ``field`` for its own model, or ``None``."""
+    filed = read_attr(field, _GENERATED_COLUMN_ATTR, None)
+    if is_concrete_field(filed) and filed.model is field.model:
+        return filed
+    return None
+
+
+def _computed_column(field: models.GeneratedField) -> ConcreteField:
+    """Return a new column computing ``field``, bound as ``generated_column`` describes."""
     output = require(read_attr(field, "output_field"), is_concrete_field)
     column = output.clone()
     column.model = field.model
@@ -1301,7 +1323,7 @@ def generated_column(field: object) -> ConcreteField | None:
     column.blank = field.blank
     column.help_text = field.help_text
     column.null = field.null or output.null
-    return _GENERATED_COLUMNS.setdefault(field, column)
+    return column
 
 
 def generated_column_source(column: ConcreteField) -> models.GeneratedField | None:
