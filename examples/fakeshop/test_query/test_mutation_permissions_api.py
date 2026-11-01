@@ -511,3 +511,114 @@ def test_hook_rebinding_the_validated_permission_slot_fails_closed() -> None:
     # The walk aborts at the FIRST entry (the raising hook) on every request:
     # the configured denier never ran at all under the seal.
     assert denier_runs == []
+
+
+@pytest.mark.django_db
+def test_permission_class_returning_a_truthy_non_bool_is_refused_not_allowed() -> None:
+    """A ``has_permission`` returning a truthy non-bool is a configuration error, never an allow.
+
+    A truthiness test would read ``"yes"`` as authorized; the strict-boolean contract refuses
+    it with a top-level ``ConfigurationError`` naming the class and the result, and the
+    create never runs.
+    """
+    seed_data(1)
+
+    class TruthyNonBool:
+        def has_permission(
+            self,
+            _info: object,
+            _mutation: type[object],
+            _operation: str,
+            _data: object,
+            _instance: object = None,
+        ) -> str:
+            return "yes"
+
+    schema, (category_type, _item_type) = _build_auth_schema(
+        create_permission_classes=[TruthyNonBool],
+    )
+    cat = product_models.Category.objects.earliest("pk")
+    res = _post(
+        schema,
+        _CREATE_Q,
+        AnonymousUser(),
+        {
+            "d": {
+                "name": "TruthyBlocked",
+                "categoryId": global_id_for(category_type, saved_pk(cat)),
+            },
+        },
+    )
+
+    _assert_refusal(
+        res,
+        "TruthyNonBool.has_permission must return a bool; got 'yes'. "
+        "Authorization results are never coerced from truthiness.",
+    )
+    assert not product_models.Item.objects.filter(name="TruthyBlocked").exists()
+
+
+@pytest.mark.django_db
+def test_check_permission_override_returning_a_truthy_non_bool_is_refused_not_allowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``check_permission`` override returning ``1`` is a configuration error, never an allow.
+
+    The override replaces the ``permission_classes`` walk, so its result runs through the
+    same strict-boolean contract: a top-level ``ConfigurationError`` naming the mutation and
+    the result, and no row.
+    """
+    seed_data(1)
+
+    class CategoryT(DjangoType):
+        class Meta:
+            model = product_models.Category
+            fields = ("id", "name")
+            primary = True
+            interfaces = (relay.Node,)
+
+    class ItemT(DjangoType):
+        class Meta:
+            model = product_models.Item
+            fields = ("id", "name")
+            primary = True
+            interfaces = (relay.Node,)
+
+    assert registry.get(product_models.Item) is ItemT
+
+    class NonBoolCheckCreateItem(DjangoMutation):
+        class Meta:
+            model = product_models.Item
+            operation = "create"
+
+    def _truthy_one(
+        _self: object,
+        _info: object,
+        _operation: str,
+        _data: object,
+        _instance: object = None,
+    ) -> int:
+        return 1
+
+    monkeypatch.setattr(NonBoolCheckCreateItem, "check_permission", _truthy_one)
+
+    @strawberry.type
+    class Mutation:
+        create_item = DjangoMutationField(NonBoolCheckCreateItem)
+
+    finalize_django_types()
+    schema = DjangoSchema(query=_Query, mutation=Mutation, error_policy=_NO_ERROR_MASKING)
+    cat = product_models.Category.objects.earliest("pk")
+    res = _post(
+        schema,
+        _CREATE_Q,
+        AnonymousUser(),
+        {"d": {"name": "OneBlocked", "categoryId": global_id_for(CategoryT, saved_pk(cat))}},
+    )
+
+    _assert_refusal(
+        res,
+        "NonBoolCheckCreateItem.check_permission must return a bool; got 1. "
+        "Authorization results are never coerced from truthiness.",
+    )
+    assert not product_models.Item.objects.filter(name="OneBlocked").exists()

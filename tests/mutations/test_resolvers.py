@@ -3,15 +3,17 @@
 Private checks cover constrained-field exclusion, lookup coercion and pinned
 aliases, metadata-based field indexing, row-lock and visibility re-read seams,
 exception identity, and transaction lifetime. Direct mutation probes also cover
-model inheritance, consumer save/delete hooks and update field sets, and a
-generated column's absence from every flavor's write input (the model flavor's
-is pinned live too; no fakeshop form or serializer discovers its fields over a
-generated column).
+model inheritance, consumer save/delete hooks and update field sets.
 
 Consumer model mutation identities, relation overrides, M2M visibility and
 assignment refusals, raw-pk existence with or without registered targets, error-field
 names, nullable foreign-key clears and scalar fields ending in ``_id`` are exercised over HTTP in
-``examples/fakeshop/test_query/test_model_mutation_flows_api.py``.
+``examples/fakeshop/test_query/test_model_mutation_flows_api.py``. A generated column's
+absence from every flavor's write input lives in
+``examples/fakeshop/test_query/test_library_generated_api.py``; the composite-key update
+input in ``examples/fakeshop/test_query/test_mti_composite_relations_api.py``; a
+``DoesNotExist`` escaping the write, a soft-delete ``delete()`` and the nullable-column
+explicit ``null`` in ``test_products_api.py`` / ``test_library_api.py``.
 Other consumer writes live in
 ``examples/fakeshop/test_query/test_products_api.py``,
 ``examples/fakeshop/test_query/test_library_api.py`` and
@@ -44,7 +46,6 @@ import strawberry
 from apps.library import models as library_models
 from apps.products import models as product_models
 from apps.products.services import seed_data
-from apps.scalars import models as scalars_models
 from asgiref.sync import sync_to_async
 from django import forms
 from django.core.exceptions import ValidationError
@@ -55,10 +56,9 @@ from django.db.models.functions import Lower
 from django.db.models.signals import post_save, pre_save
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
-from rest_framework.serializers import ModelSerializer
 from strawberry import relay
 from strawberry.types import ExecutionResult
-from strawberry.types.base import get_object_definition, has_object_definition
+from strawberry.types.base import has_object_definition
 from typing_extensions import Self, override
 
 from django_strawberry_framework import (
@@ -71,18 +71,14 @@ from django_strawberry_framework import (
     finalize_django_types,
 )
 from django_strawberry_framework.exceptions import ConfigurationError
-from django_strawberry_framework.forms.inputs import build_form_input_class
 from django_strawberry_framework.mutations import resolvers
 from django_strawberry_framework.mutations import resolvers as mutation_resolvers
 from django_strawberry_framework.mutations.inputs import (
-    CREATE,
     NON_FIELD_ERROR_KEY,
     _relation_field_index,
-    editable_input_fields,
     mutation_input_field_specs,
 )
 from django_strawberry_framework.registry import registry
-from django_strawberry_framework.rest_framework.inputs import build_serializer_input_class
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
@@ -117,7 +113,6 @@ from tests._idioms import (
     saved_pk,
 )
 from tests._info import make_info, unread_info
-from tests._relation_fixtures import RpCompositeParent, relation_fixture_tables
 from tests.optimizer import _link_models
 
 if TYPE_CHECKING:
@@ -178,24 +173,13 @@ class _Query:
         return 1
 
 
-def _schema(mutation_type: type, *, mask_errors: bool = True) -> strawberry.Schema:
-    """Build a finalized schema with the optimizer extension installed.
-
-    ``mask_errors=False`` opts out of the response-boundary error policy, so an
-    exception the pipeline propagates reaches ``original_error`` unmasked.
-    """
+def _schema(mutation_type: type) -> strawberry.Schema:
+    """Build a finalized schema with the optimizer extension installed."""
     optimizer = DjangoOptimizerExtension()
-    if mask_errors:
-        return DjangoSchema(
-            query=_Query,
-            mutation=mutation_type,
-            extensions=[lambda: optimizer],
-        )
     return DjangoSchema(
         query=_Query,
         mutation=mutation_type,
         extensions=[lambda: optimizer],
-        error_policy={"enabled": False},
     )
 
 
@@ -209,7 +193,6 @@ def _build_item_schema(
     category_get_queryset: object | None = None,
     item_get_queryset: object | None = None,
     input_cls: object | None = None,
-    mask_errors: bool = True,
 ) -> tuple[strawberry.Schema, tuple[type[DjangoType], type[DjangoType]]]:
     """Declare Item/Category primaries + create/update/delete mutations; return (schema, types)."""
     category_body: dict[str, object] = {
@@ -263,7 +246,7 @@ def _build_item_schema(
         delete_item = DjangoMutationField(DeleteItem)
 
     finalize_django_types()
-    return _schema(Mutation, mask_errors=mask_errors), (CategoryT, ItemT)
+    return _schema(Mutation), (CategoryT, ItemT)
 
 
 def _json_at(value: object, *path: str | int) -> object:
@@ -511,29 +494,6 @@ class OmittedAmountRow(models.Model):
         if vars(self)["amount"] is None:
             self.amount = 5
         call_forwarded(super().save, args, kwargs)
-
-
-class SoftDeletedRow(models.Model):
-    """A row whose ``delete()`` override flags and saves it, returning ``None`` (soft delete)."""
-
-    name: _Text = models.TextField(blank=True, default="")
-    deleted: _Bool = models.BooleanField(default=False)
-
-    class Meta:
-        app_label = "products"
-        managed = False
-        db_table = "tests_mutations_soft_deleted_row"
-
-    @override
-    # basedpyright: deliberately returns None, the soft-delete mixin shape Django's count is absent from
-    def delete(  # pyright: ignore[reportIncompatibleMethodOverride]
-        self,
-        using: str | None = None,
-        keep_parents: bool = False,
-    ) -> None:
-        del keep_parents
-        self.deleted = True
-        self.save(using=using)
 
 
 class TwiceSavedKeyedRow(models.Model):
@@ -854,34 +814,6 @@ def test_located_row_update_fields_names_a_multi_table_rows_loaded_non_key_colum
     assert resolvers.located_row_update_fields(row()) == update_fields
 
 
-def test_generated_column_is_absent_from_every_write_flavor_input() -> None:
-    """``LinkedDesk.double_seats`` reaches no generated write input, in any flavor.
-
-    Django forces ``GeneratedField(editable=False)``: the model flavor's column selector
-    drops a non-editable column, a ``ModelForm`` builds no field for one, and DRF's
-    ``ModelSerializer`` makes it read-only, which the serializer input leaves out. Each
-    flavor writes every other column it discovers (the parent link left out, its target
-    having no type here).
-    """
-    model_columns = [
-        column.name for column in editable_input_fields(LinkedDesk, operation_kind=CREATE)
-    ]
-    form_class = forms.modelform_factory(LinkedDesk, exclude=("venue",))
-    form_input, _ = build_form_input_class(form_class, operation_kind=CREATE)
-    serializer_meta = type("Meta", (), {"model": LinkedDesk, "exclude": ("venue",)})
-    serializer_class = type("LinkedDeskSerializer", (ModelSerializer,), {"Meta": serializer_meta})
-    serializer_input, _ = build_serializer_input_class(serializer_class, operation_kind=CREATE)
-
-    assert "double_seats" not in model_columns
-    assert "seats" in model_columns
-    for input_cls in (form_input, serializer_input):
-        names = {
-            field.python_name for field in get_object_definition(input_cls, strict=True).fields
-        }
-        assert "seats" in names
-        assert "double_seats" not in names
-
-
 @pytest.mark.django_db
 def test_located_row_update_fields_leaves_out_deferred_columns() -> None:
     """A deferred multi-table row names only its loaded columns, as Django's own save does.
@@ -893,152 +825,6 @@ def test_located_row_update_fields_leaves_out_deferred_columns() -> None:
     deferred = library_models.LendingDesk.objects.only("name").get(pk=desk.pk)
 
     assert resolvers.located_row_update_fields(deferred) == ("name",)
-
-
-_COMPOSITE_UPDATE = (
-    "mutation($id: ID!, $d: RpCompositeParentPartialInput!){ updateComposite(id: $id, "
-    "data: $d){ errors{ field messages codes } } }"
-)
-
-
-def _composite_update_schema() -> strawberry.Schema:
-    """Return a schema whose ``updateComposite`` updates an ``RpCompositeParent`` row.
-
-    No fakeshop model has a composite key (the live tier cannot reach it), so the unmanaged
-    ``RpCompositeParent`` stands in; the ``id`` argument names the row as the JSON list
-    ``CompositePrimaryKey.to_python`` reads.
-    """
-    type(
-        "RpCompositeParentT",
-        (DjangoType,),
-        {
-            "Meta": type(
-                "Meta",
-                (),
-                {
-                    "model": RpCompositeParent,
-                    "fields": ("tenant_id", "code", "label"),
-                    "primary": True,
-                },
-            ),
-        },
-    )
-
-    class UpdateComposite(DjangoMutation):
-        class Meta:
-            model = RpCompositeParent
-            operation = "update"
-            permission_classes = [_AllowAll]
-
-    @strawberry.type
-    class Mutation:
-        update_composite = DjangoMutationField(UpdateComposite)
-
-    finalize_django_types()
-    return _schema(Mutation)
-
-
-def _composite_update_variables(member: str | None) -> dict[str, object]:
-    """Variables relabelling row ``(1, "X")``, re-keying it onto row ``(2, "Y")`` via ``member``."""
-    data: dict[str, object] = {"label": "NEW"}
-    if member is not None:
-        data[member] = {"tenantId": 2, "code": "Y"}[member]
-    return {"id": json.dumps([1, "X"]), "d": data}
-
-
-def _composite_member_refusal(member: str) -> str:
-    """The validation error a composite update naming key ``member`` answers."""
-    sent = _composite_update_variables(member)["d"]
-    return (
-        f"Variable '$d' got invalid value {sent!r}; "
-        f"Field '{member}' is not defined by type 'RpCompositeParentPartialInput'."
-    )
-
-
-_COMPOSITE_MEMBERS = pytest.mark.parametrize("member", ["tenantId", "code"])
-
-
-@pytest.mark.django_db(transaction=True)
-@_COMPOSITE_MEMBERS
-def test_update_over_a_composite_key_offers_no_key_member(member: str) -> None:
-    """An update over a ``CompositePrimaryKey`` model takes its non-key columns and no key member.
-
-    The key's member columns carry ``primary_key=False``, yet a write to one re-keys the
-    located row, so the generated update input leaves every member out: a document naming
-    one fails validation with both rows untouched, and the same update without it writes.
-    """
-    schema = _composite_update_schema()
-    with relation_fixture_tables(connection):
-        RpCompositeParent.objects.create(tenant_id=1, code="X", label="OLD")
-        RpCompositeParent.objects.create(tenant_id=2, code="Y", label="OTHER")
-
-        refused = schema.execute_sync(
-            _COMPOSITE_UPDATE,
-            variable_values=_composite_update_variables(member),
-        )
-        assert refused.data is None
-        assert [error.message for error in refused.errors or ()] == [
-            _composite_member_refusal(member),
-        ]
-        assert sorted(RpCompositeParent.objects.values_list("tenant_id", "code", "label")) == [
-            (1, "X", "OLD"),
-            (2, "Y", "OTHER"),
-        ]
-
-        written = schema.execute_sync(
-            _COMPOSITE_UPDATE,
-            variable_values=_composite_update_variables(None),
-        )
-        assert written.errors is None, written.errors
-        assert written.data == {"updateComposite": {"errors": []}}
-        assert sorted(RpCompositeParent.objects.values_list("tenant_id", "code", "label")) == [
-            (1, "X", "NEW"),
-            (2, "Y", "OTHER"),
-        ]
-
-
-@pytest.mark.django_db(transaction=True)
-@pytest.mark.asyncio
-@_COMPOSITE_MEMBERS
-async def test_async_update_over_a_composite_key_offers_no_key_member(member: str) -> None:
-    """The async pipeline serves the same composite update input: no key member, one row written."""
-    schema = _composite_update_schema()
-
-    def _rows() -> list[tuple[int, str, str]]:
-        return sorted(RpCompositeParent.objects.values_list("tenant_id", "code", "label"))
-
-    async with contextlib.AsyncExitStack() as stack:
-        tables = contextlib.ExitStack()
-        await sync_to_async(tables.enter_context, thread_sensitive=True)(
-            relation_fixture_tables(connection),
-        )
-        stack.push_async_callback(sync_to_async(tables.close, thread_sensitive=True))
-        await RpCompositeParent.objects.acreate(tenant_id=1, code="X", label="OLD")
-        await RpCompositeParent.objects.acreate(tenant_id=2, code="Y", label="OTHER")
-
-        refused = await schema.execute(
-            _COMPOSITE_UPDATE,
-            variable_values=_composite_update_variables(member),
-        )
-        assert refused.data is None
-        assert [error.message for error in refused.errors or ()] == [
-            _composite_member_refusal(member),
-        ]
-        assert await sync_to_async(_rows, thread_sensitive=True)() == [
-            (1, "X", "OLD"),
-            (2, "Y", "OTHER"),
-        ]
-
-        written = await schema.execute(
-            _COMPOSITE_UPDATE,
-            variable_values=_composite_update_variables(None),
-        )
-        assert written.errors is None, written.errors
-        assert written.data == {"updateComposite": {"errors": []}}
-        assert await sync_to_async(_rows, thread_sensitive=True)() == [
-            (1, "X", "NEW"),
-            (2, "Y", "OTHER"),
-        ]
 
 
 @pytest.mark.django_db(transaction=True)
@@ -2147,100 +1933,6 @@ async def test_async_mutation_does_not_leak_into_later_read_optimizer_execution(
     assert read.data["allItems"][0]["category"]["name"] == user_name
 
 
-_ITEM_SAVE_LOOKUP_DISPATCH_UID = "tests.mutations.item_save_reads_a_missing_category"
-
-
-@contextlib.contextmanager
-def _item_save_reads_a_missing_category() -> Generator[None, None, None]:
-    """Make every ``Item`` save inside the block look up a category no row carries.
-
-    The ``pre_save`` receiver's ``Category.objects.get`` raises ``Category.DoesNotExist``
-    from inside the write, the trusted-code ``DoesNotExist`` a lookup in a receiver,
-    ``save()`` override or ``clean()`` raises.
-    """
-
-    def _lookup(**_kwargs: object) -> None:
-        _ = product_models.Category.objects.get(name="no category carries this name")
-
-    pre_save.connect(
-        _lookup,
-        sender=product_models.Item,
-        weak=False,
-        dispatch_uid=_ITEM_SAVE_LOOKUP_DISPATCH_UID,
-    )
-    try:
-        yield
-    finally:
-        _ = pre_save.disconnect(
-            sender=product_models.Item,
-            dispatch_uid=_ITEM_SAVE_LOOKUP_DISPATCH_UID,
-        )
-
-
-def _select_tables(sqls: list[str]) -> list[str]:
-    """The quoted table each ``SELECT`` in ``sqls`` reads first, in statement order."""
-    return [sql.split(" FROM ", 1)[1].split()[0] for sql in sqls if sql.startswith("SELECT")]
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize("operation", ["create", "update"])
-def test_does_not_exist_from_the_write_propagates_while_the_row_is_present(operation: str) -> None:
-    """A ``DoesNotExist`` escaping the write propagates unless the located row is gone.
-
-    The ``pre_save`` receiver's lookup raises ``Category.DoesNotExist`` inside the write.
-    An update probes its located row after the exception (the last read), finds it present
-    and re-raises: the error is about the trusted code, not a vanished row, and it reaches
-    the GraphQL boundary unchanged. A create has no located row and re-raises without a
-    probe. Nothing is written either way.
-    """
-    seed_data(1)
-    catalog_categories = categories_from_seed(("__fixture_category_0__", False))
-    catalog_items = items_from_seed(catalog_categories[0], ("__fixture_item_0__", False))
-    product_models.Entry.objects.filter(item__in=catalog_items).delete()
-    schema, (CategoryT, ItemT) = _build_item_schema(mask_errors=False)
-    category = catalog_categories[0]
-    product_models.Category.objects.filter(pk=category.pk).update(
-        description="",
-        is_private=False,
-        name=_category_name(),
-    )
-    category.refresh_from_db()
-    item = catalog_items[0]
-    product_models.Item.objects.filter(pk=item.pk).update(
-        description="",
-        is_private=False,
-        attachment="",
-        name="Kept",
-        category=category,
-    )
-    item.refresh_from_db()
-    if operation == "create":
-        query = "mutation($d: ItemInput!){ createItem(data:$d){ node{ id } errors{ field } } }"
-        variables: dict[str, object] = {
-            "d": {"name": "New", "categoryId": global_id_for(CategoryT, saved_pk(category))},
-        }
-    else:
-        query = (
-            "mutation($id: ID!, $d: ItemPartialInput!){ "
-            "updateItem(id:$id, data:$d){ node{ id } errors{ field } } }"
-        )
-        variables = {"id": global_id_for(ItemT, saved_pk(item)), "d": {"name": "Renamed"}}
-
-    with _item_save_reads_a_missing_category(), CaptureQueriesContext(connection) as captured:
-        res = schema.execute_sync(query, variable_values=variables)
-
-    assert res.data is None
-    assert res.errors is not None
-    assert [type(error.original_error) for error in res.errors] == [
-        product_models.Category.DoesNotExist,
-    ]
-    tables = _select_tables([query["sql"] for query in captured.captured_queries])
-    # The receiver's lookup is the last category read; only the update's probe follows it.
-    lookup = max(index for index, table in enumerate(tables) if table == '"products_category"')
-    assert tables[lookup + 1 :] == ([] if operation == "create" else ['"products_item"'])
-    assert list(product_models.Item.objects.values_list("name", flat=True)) == ["Kept"]
-
-
 @pytest.mark.django_db
 def test_raw_pk_m2m_existence_check_coerces_out_of_range_pk_no_overflow() -> None:
     """An out-of-range raw-pk M2M id is treated as not-found, never a raw ``OverflowError``.
@@ -2315,26 +2007,6 @@ def test_relation_field_index_excludes_generic_foreign_key() -> None:
     fk_by_attr, _m2m_by_name = _relation_field_index(library_models.TaggedItem)
     assert "content_object_id" not in fk_by_attr
     assert "content_type_id" in fk_by_attr
-
-
-def test_explicit_null_error_allows_null_on_nullable_column() -> None:
-    """``_explicit_null_error`` yields no error for ``null`` on a ``null=True`` column.
-
-    The complement of the live
-    ``test_uploads_api.py::test_update_explicit_null_on_the_required_file_is_a_field_error_over_http``
-    row: an explicit ``None`` on a nullable scalar column is a valid clear, so the guard
-    returns ``None`` (no ``FieldError``). ``NullableScalarSpecimen.score`` is
-    ``null=True``. No live products mutation exposes a nullable scalar column, so this
-    branch is earned against a real nullable example model rather than a live query.
-    """
-    assert (
-        resolvers._explicit_null_error(
-            scalars_models.NullableScalarSpecimen._meta.get_field("score"),
-            "score",
-            None,
-        )
-        is None
-    )
 
 
 def test_validation_error_to_field_errors_non_dict_uses_all_key() -> None:
@@ -3426,59 +3098,6 @@ def test_delete_of_zero_target_rows_is_conflict() -> None:
         errors = resolvers._delete_or_field_errors(cat)
     assert isinstance(errors, list)
     assert [(error.field, error.codes) for error in errors] == [("id", ["conflict"])]
-
-
-@pytest.mark.django_db(transaction=True)
-def test_soft_delete_override_returning_none_deletes_through_the_mutation() -> None:
-    """A delete mutation over a soft-delete ``delete()`` returning ``None`` succeeds.
-
-    The payload carries the pre-delete snapshot with empty ``errors`` and no top-level
-    error; the override's flag is committed and the row stays. No fakeshop model
-    soft-deletes.
-    """
-    type(
-        "SoftDeletedRowT",
-        (DjangoType,),
-        {
-            "Meta": type(
-                "Meta",
-                (),
-                {"model": SoftDeletedRow, "fields": ("id", "name"), "primary": True},
-            ),
-        },
-    )
-    delete = type(
-        "DeleteRow",
-        (DjangoMutation,),
-        {
-            "Meta": type(
-                "Meta",
-                (),
-                {
-                    "model": SoftDeletedRow,
-                    "operation": "delete",
-                    "permission_classes": [_AllowAll],
-                },
-            ),
-        },
-    )
-
-    @strawberry.type
-    class Mutation:
-        delete_row = DjangoMutationField(delete)
-
-    finalize_django_types()
-    with _tables(SoftDeletedRow):
-        pk = saved_pk(SoftDeletedRow.objects.create(name="Kept"))
-        res = _schema(Mutation).execute_sync(
-            "mutation($id: ID!){ deleteRow(id: $id){ result { id name } errors { field codes } } }",
-            variable_values={"id": str(pk)},
-        )
-        stored = list(SoftDeletedRow._base_manager.values_list("pk", "name", "deleted"))
-
-    assert res.errors is None, res.errors
-    assert _json_at(res.data, "deleteRow") == {"result": {"id": pk, "name": "Kept"}, "errors": []}
-    assert stored == [(pk, "Kept", True)]
 
 
 # ---------------------------------------------------------------------------

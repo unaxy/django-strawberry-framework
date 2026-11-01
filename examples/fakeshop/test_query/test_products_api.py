@@ -32,7 +32,11 @@ wired in ``apps.products.schema`` end to end:
 * an ``Item`` update (every flavor) or delete whose located row is deleted after
   authorization answered with the in-band ``conflict`` envelope and rolled back, a
   ``createItem`` on a request with no ``user`` at all denied with nothing written,
-  and a single-table update saving with ``update_fields=None``.
+  and a single-table update saving with ``update_fields=None``;
+* a ``DoesNotExist`` escaping the write propagated while the located row is present, a
+  saved row vanishing before the re-fetch answered ``conflict``, a soft-delete
+  ``delete()`` returning ``None`` trusted as success, and an ``ItemType.get_queryset``
+  switching aliases refused.
 
 Form-mutation async colour uses a module-local ``/graphql-async/`` mount
 (``graphql_client.py`` is sync-only).
@@ -73,7 +77,7 @@ from django.db.backends.base.base import BaseDatabaseWrapper
 from django.db.backends.signals import connection_created
 from django.db.models import QuerySet
 from django.db.models.fields.files import FieldFile
-from django.db.models.signals import pre_save
+from django.db.models.signals import post_save, pre_save
 from django.http import HttpRequest
 from django.http.response import HttpResponseBase
 from django.test import AsyncClient, Client, override_settings
@@ -928,7 +932,7 @@ _REQUIRED_FILE_PREFIXED_ROOTS = {
     ("change", "errors", "name"),
     [
         (
-            {"attachment": None},
+            {"name": "RenameSentBesideTheNull", "attachment": None},
             [
                 {
                     "field": "attachment",
@@ -953,8 +957,9 @@ def test_update_item_with_required_file_via_prefixed_form_keeps_the_file(
 
     The explicit ``attachment: null`` binds Django's clear sentinel ``False`` under
     ``item-attachment``; the required ``FileField`` cleans it to the stored file, so the
-    pre-write check reads it under the prefix and answers the field's ``required`` error,
-    nothing written. An update omitting the file renames the row and keeps the file.
+    pre-write check reads it under the prefix and answers the field's ``required`` error
+    with no node, and the rename sent beside the ``null`` is not written. An update omitting
+    the file renames the row and keeps the file.
     """
     create_users(1)
     seed_data(1)
@@ -985,7 +990,7 @@ def test_update_item_with_required_file_via_prefixed_form_keeps_the_file(
             variables={"id": _global_id("products.item", item.pk), "d": change},
         )
         result = json_at(data, root)
-        assert json_at(result, "errors") == errors, result
+        assert result == {"node": {"name": name} if not errors else None, "errors": errors}
         item.refresh_from_db()
         assert item.name == name
         assert item.attachment.name == stored_name
@@ -5207,6 +5212,36 @@ def test_update_item_via_form_explicit_null_category_id_is_the_form_required_err
 
 
 @pytest.mark.django_db(transaction=True)
+def test_update_item_via_form_explicit_null_name_keeps_the_form_required_error() -> None:
+    """An explicit ``name: null`` on the form-required field is its ``required`` error, not ``null``.
+
+    The coerced-``null`` check
+    (``django_strawberry_framework/forms/resolvers.py::_coerced_null_fields``) runs only on a
+    valid form, so the form's own error keeps its message and code, never the column's
+    ``null`` error the model flavor answers, and the stored name is unchanged.
+    """
+    create_users(1)
+    seed_data(1)
+    item = models.Item.objects.earliest("pk")
+    stored_name = item.name
+    client = _login_with_perm("staff_1", "change_item")
+
+    data = _graphql_data(
+        _UPDATE_ITEM_VIA_FORM_WITH_CODES,
+        client=client,
+        variables={"id": _global_id("products.item", item.pk), "d": {"name": None}},
+    )
+    assert json_at(data, "updateItemViaForm") == {
+        "node": None,
+        "errors": [
+            {"field": "name", "messages": ["This field is required."], "codes": ["required"]},
+        ],
+    }
+    item.refresh_from_db()
+    assert item.name == stored_name
+
+
+@pytest.mark.django_db(transaction=True)
 def test_update_item_via_form_partial_collision_fires_unique_constraint_on_name_change() -> None:
     """RIGHT-PATH / LOAD-BEARING: a `name`-only collision fires `unique_item_per_category`.
 
@@ -7816,3 +7851,194 @@ def test_item_update_saves_without_update_fields_over_http(mutation: str) -> Non
     assert [shape for shape in shapes if shape.startswith(("UPDATE", "INSERT"))] == [
         'UPDATE "products_item"',
     ]
+
+
+def _select_tables(sqls: list[str]) -> list[str]:
+    """The quoted table each ``SELECT`` in ``sqls`` reads first, in statement order."""
+    return [sql.split(" FROM ", 1)[1].split()[0] for sql in sqls if sql.startswith("SELECT")]
+
+
+@contextlib.contextmanager
+def _item_save_reads_a_missing_category() -> Generator[None, None, None]:
+    """Make every ``Item`` save inside the block look up a category no row carries.
+
+    The ``pre_save`` receiver's ``Category.objects.get`` raises ``Category.DoesNotExist``
+    from inside the write, the trusted-code ``DoesNotExist`` a lookup in a receiver,
+    ``save()`` override or ``clean()`` raises.
+    """
+
+    def _lookup(**_kwargs: object) -> None:
+        _ = models.Category.objects.get(name="no category carries this name")
+
+    pre_save.connect(_lookup, sender=models.Item, weak=False, dispatch_uid="missing-category")
+    try:
+        yield
+    finally:
+        _ = pre_save.disconnect(sender=models.Item, dispatch_uid="missing-category")
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("operation", "probe"),
+    [("create", []), ("update", ['"products_item"'])],
+    ids=["create", "update"],
+)
+def test_does_not_exist_from_the_write_propagates_while_the_row_is_present_over_http(
+    operation: str,
+    probe: list[str],
+) -> None:
+    """A ``DoesNotExist`` escaping the write propagates unless the located row is gone.
+
+    The ``pre_save`` receiver's lookup raises ``Category.DoesNotExist`` inside the write.
+    An update probes its located row after the exception (the last read), finds it present
+    and re-raises: the error is about the trusted code, not a vanished row, and it reaches
+    the GraphQL boundary as itself, never the ``conflict`` envelope. A create has no
+    located row and re-raises without a probe. Nothing is written either way.
+    """
+    create_users(1)
+    seed_data(1)
+    item = models.Item.objects.earliest("pk")
+    before = _stored_item(item.pk)
+    if operation == "create":
+        client = _login_with_perm("staff_1", "add_item")
+        document, root = _CREATE_ITEM, "createItem"
+        variables: JSONObject = {
+            "d": {"name": "New", "categoryId": _global_id("products.category", item.category_id)},
+        }
+    else:
+        client = _login_with_perm("staff_1", "change_item")
+        document, root = _UPDATE_ITEM, "updateItem"
+        variables = {"id": _global_id("products.item", item.pk), "d": {"name": "Renamed"}}
+
+    with (
+        override_settings(**_ERROR_POLICY_PASS_THROUGH),
+        _item_save_reads_a_missing_category(),
+        CaptureQueriesContext(connection) as captured,
+    ):
+        response = _post_graphql(document, client=client, variables=variables)
+
+    payload = response_json(response)
+    assert payload["data"] is None, payload
+    assert [
+        (json_at(error, "message"), json_at(error, "path"))
+        for error in json_list(payload, "errors")
+    ] == [("Category matching query does not exist.", [root])], payload
+    tables = _select_tables([query["sql"] for query in captured.captured_queries])
+    # The receiver's lookup is the last category read; only the update's probe follows it.
+    lookup = max(index for index, table in enumerate(tables) if table == '"products_category"')
+    assert tables[lookup + 1 :] == probe
+    assert _stored_item(item.pk) == before
+    assert not models.Item.objects.filter(name="New").exists()
+
+
+@pytest.mark.django_db
+def test_update_whose_saved_row_vanishes_before_the_refetch_is_conflict_over_http() -> None:
+    """A write whose post-write re-fetch finds no row answers ``conflict`` and rolls back.
+
+    A ``post_save`` receiver deletes the row the update just saved, so the optimizer's
+    re-fetch by pk finds nothing: the payload is the in-band ``conflict`` envelope on
+    ``id``, and the transaction rolls back, the rename and the receiver's delete with it.
+    """
+    create_users(1)
+    seed_data(1)
+    item = models.Item.objects.earliest("pk")
+    before = _stored_item(item.pk)
+    assert before[1] > 0
+    client = _login_with_perm("staff_1", "change_item")
+
+    def _delete_saved(instance: models.Item, **_kwargs: object) -> None:
+        _ = models.Item._base_manager.filter(pk=instance.pk).delete()
+
+    post_save.connect(_delete_saved, sender=models.Item, weak=False, dispatch_uid="refetch-gone")
+    try:
+        response = _post_graphql(
+            _update_item_query("updateItem"),
+            client=client,
+            variables={"id": _global_id("products.item", item.pk), "d": {"name": "Renamed"}},
+        )
+    finally:
+        _ = post_save.disconnect(sender=models.Item, dispatch_uid="refetch-gone")
+
+    payload = response_json(response)
+    assert "errors" not in payload, payload
+    assert json_at(payload, "data", "updateItem") == {"node": None, "errors": _CONFLICT_ERRORS}
+    assert _stored_item(item.pk) == before
+
+
+@pytest.mark.django_db
+def test_soft_delete_override_returning_none_deletes_through_the_mutation_over_http(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``deleteItem`` over a soft-delete ``delete()`` returning ``None`` succeeds.
+
+    The override flags the row private and saves it instead of deleting it, the shape a
+    soft-delete mixin takes. It reports no count, so the delete answers no ``conflict``:
+    the payload carries the pre-delete snapshot with empty ``errors`` and no top-level
+    error, and the flag is committed while the row stays.
+    """
+    create_users(1)
+    seed_data(1)
+    item = models.Item.objects.filter(is_private=False).earliest("pk")
+    client = _login_with_perm("staff_1", "delete_item")
+
+    def _soft_delete(self: models.Item, using: str | None = None, **_kwargs: object) -> None:
+        self.is_private = True
+        self.save(using=using)
+
+    monkeypatch.setattr(models.Item, "delete", _soft_delete)
+    response = _post_graphql(
+        "mutation($id: ID!) { deleteItem(id: $id) { node { name } errors { field codes } } }",
+        client=client,
+        variables={"id": _global_id("products.item", item.pk)},
+    )
+
+    payload = response_json(response)
+    assert payload == {"data": {"deleteItem": {"node": {"name": item.name}, "errors": []}}}
+    assert list(
+        models.Item._base_manager.filter(pk=item.pk).values_list("is_private", flat=True),
+    ) == [
+        True,
+    ]
+
+
+@pytest.mark.django_db
+def test_visibility_hook_switching_aliases_fails_closed_over_http(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ``ItemType.get_queryset`` re-routing to another alias is a loud refusal, not a write.
+
+    The write pipeline pins its locate to the write alias, so a visibility hook that calls
+    ``.using(...)`` on another alias fails the locate closed
+    (``django_strawberry_framework/utils/querysets.py::apply_type_visibility_sync``): a
+    top-level ``ConfigurationError`` naming both aliases, and the row is not renamed.
+    """
+    create_users(1)
+    seed_data(1)
+    item = models.Item.objects.earliest("pk")
+    client = _login_with_perm("staff_1", "change_item")
+
+    def _reroute(
+        _cls: type[object],
+        queryset: QuerySet[models.Item],
+        _info: object,
+    ) -> QuerySet[models.Item]:
+        return queryset.using("some_other_alias")
+
+    monkeypatch.setattr(products_schema.ItemType, "get_queryset", classmethod(_reroute))
+    with override_settings(**_ERROR_POLICY_PASS_THROUGH):
+        response = _post_graphql(
+            _UPDATE_ITEM,
+            client=client,
+            variables={"id": _global_id("products.item", item.pk), "d": {"name": "CrossAlias"}},
+        )
+
+    payload = response_json(response)
+    assert payload["data"] is None, payload
+    assert [json_at(error, "message") for error in json_list(payload, "errors")] == [
+        (
+            "ItemType.get_queryset returned a queryset routed to alias 'some_other_alias', but "
+            "this resolution is pinned to alias 'default'; a visibility hook cannot re-route a "
+            "pinned resolution. Remove the .using(...) call."
+        ),
+    ], payload
+    assert models.Item.objects.get(pk=item.pk).name == item.name

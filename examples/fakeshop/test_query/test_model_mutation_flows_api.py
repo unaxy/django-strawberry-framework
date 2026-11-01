@@ -944,3 +944,77 @@ def test_explicit_null_on_a_nullable_foreign_key_clears_the_stored_relation(chan
     assert read_attr(edition, "publisher_2_id") == (
         None if change == "explicit-null" else other.pk
     )
+
+
+def _lock_item_schema(*, select_for_update: bool) -> tuple[DjangoSchema, type[DjangoType]]:
+    """A holder ``updateItem`` whose ``Meta.select_for_update`` is ``select_for_update``."""
+
+    class CategoryNode(DjangoType):
+        class Meta:
+            model = product_models.Category
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+
+    class ItemNode(DjangoType):
+        class Meta:
+            model = product_models.Item
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+
+    lock = select_for_update
+
+    class UpdateItem(DjangoMutation):
+        class Meta:
+            model = product_models.Item
+            operation = "update"
+            permission_classes = []
+            select_for_update = lock
+
+    @strawberry.type
+    class Mutation:
+        update_item = DjangoMutationField(UpdateItem)
+
+    del CategoryNode
+    finalize_django_types()
+    return _schema(Mutation), ItemNode
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("select_for_update", [True, False], ids=["locked", "unlocked"])
+def test_update_locks_its_located_row_only_when_select_for_update_is_on(
+    *,
+    select_for_update: bool,
+) -> None:
+    """``Meta.select_for_update = False`` updates cleanly and drops only the row lock.
+
+    The opt-out weakens concurrency, never the envelope: the rename commits with empty
+    ``errors`` either way. On a backend with ``FOR UPDATE`` the located row's read carries it
+    exactly when the mutation keeps the default lock; SQLite has none, so there both arms read
+    alike. Both ids are controls on SQLite (no package line distinguishes them there); the
+    ``FOR UPDATE`` clause is pinned on the Postgres tier only.
+    """
+    seed_data(1)
+    item = product_models.Item.objects.earliest("pk")
+    schema, item_type = _lock_item_schema(select_for_update=select_for_update)
+
+    with CaptureQueriesContext(connection) as captured:
+        payload = _post(
+            schema,
+            "mutation($id: ID!, $d: ItemPartialInput!){ updateItem(id:$id, data:$d){ "
+            "node{ name } errors{ field } } }",
+            {"id": global_id_for(item_type, item.pk), "d": {"name": "Relocked"}},
+        )
+
+    assert payload == {"data": {"updateItem": {"node": {"name": "Relocked"}, "errors": []}}}
+    assert product_models.Item.objects.get(pk=item.pk).name == "Relocked"
+    item_table = connection.ops.quote_name(product_models.Item._meta.db_table)
+    locked_reads = [
+        row["sql"]
+        for row in captured
+        if row["sql"].startswith("SELECT")
+        and f"FROM {item_table}" in row["sql"]
+        and "FOR UPDATE" in row["sql"]
+    ]
+    assert bool(locked_reads) is (
+        select_for_update and connection.features.has_select_for_update
+    ), locked_reads

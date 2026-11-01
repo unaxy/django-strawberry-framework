@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from functools import wraps
 from typing import TYPE_CHECKING, NoReturn
 
@@ -548,3 +548,72 @@ def test_serializer_post_save_disappearance_returns_conflict_and_restores_the_pr
     writes = _writes(captured, product_models.Item)
     assert sum(sql.lstrip().startswith("UPDATE") for sql in writes) == 1, writes
     assert sum(sql.lstrip().startswith("DELETE") for sql in writes) == int(vanishes), writes
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("extra", "meta_fields"),
+    [
+        pytest.param(
+            lambda: {"with space": serializers.CharField(source="name", read_only=True)},
+            None,
+            id="read-only",
+        ),
+        pytest.param(
+            lambda: {"a-b": serializers.CharField(required=False, write_only=True)},
+            ("name",),
+            id="narrowed-away",
+        ),
+    ],
+)
+def test_serializer_field_outside_the_input_may_carry_any_name(
+    extra: Callable[[], dict[str, DRFField]],
+    meta_fields: tuple[str, ...] | None,
+) -> None:
+    """Only the kept input set is name-checked: a read-only or narrowed-away field keeps any name.
+
+    Neither ``"with space"`` nor ``"a-b"`` is a Python identifier, yet neither reaches the
+    generated input, so the declaration builds, the input publishes ``name`` alone, and a
+    real create writes the row.
+    """
+
+    class CategoryExtra(ModelSerializerBase[product_models.Category]):
+        class Meta:
+            model = product_models.Category
+            fields = ("name",)
+
+        @override
+        def get_fields(self) -> dict[str, DRFField]:
+            return {**base_fields(super()), **extra()}
+
+    class CategoryNode(DjangoType):
+        class Meta:
+            model = product_models.Category
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+
+    selected_fields = meta_fields
+
+    class AnyNameOutsideInput(SerializerMutation):
+        class Meta:
+            serializer_class = CategoryExtra
+            operation = "create"
+            fields = selected_fields
+            permission_classes = []
+
+    @strawberry.type
+    class Mutation:
+        write = DjangoMutationField(AnyNameOutsideInput)
+
+    del CategoryNode
+    finalize_django_types()
+    schema = DjangoSchema(query=_Query, mutation=Mutation)
+    document = _document(schema)
+    input_name = document.split("$d: ", 1)[1].split("!", 1)[0]
+    described = _post(schema, f'{{ __type(name: "{input_name}") {{ inputFields {{ name }} }} }}')
+    assert described == {"data": {"__type": {"inputFields": [{"name": "name"}]}}}
+
+    payload = _post(schema, document, {"d": {"name": "AnyName"}})
+
+    assert payload == {"data": {"write": {"node": {"name": "AnyName"}, "errors": []}}}
+    assert list(product_models.Category.objects.values_list("name", flat=True)) == ["AnyName"]

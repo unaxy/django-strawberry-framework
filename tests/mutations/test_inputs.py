@@ -21,7 +21,7 @@ Covers the spec-036 generation substrate
 
 System-under-test is the generator itself, run against real fakeshop columns:
 products ``Item`` / ``Category``, library ``Book`` (``shelf``, ``genres``, the
-``editable=False`` ``archive_genres``), ``MembershipCard.patron``, ``Genre`` /
+``editable=False`` ``archive_genres``), ``Genre`` /
 ``Branch`` as Relay / plain relation targets, and ``scalars.MediaSpecimen`` for
 the file columns. Generated wire shapes live in
 ``examples/fakeshop/test_query/test_products_api.py``,
@@ -37,10 +37,9 @@ could expose them: ``CamelCollide`` (``foo_bar`` beside ``fooBar``) pins the
 graphql-name arm and the ``category`` FK beside a ``category_id`` M2M pins the
 input-attr arm of
 ``django_strawberry_framework/mutations/inputs.py::build_mutation_input``'s
-collision guard; the two ``DigitBoundary`` models (``field_2`` beside ``field2``)
-pin the always-pinned wire name
-(``django_strawberry_framework/utils/inputs.py::build_strawberry_input_class``) and the
-injective narrowed type name (``django_strawberry_framework/utils/inputs.py::pascalize_token``).
+collision guard. The ``field_2`` / ``field2`` wire names and narrowed input types, and
+a forward one-to-one to a Relay-Node primary, are published by holder schemas in
+``examples/fakeshop/test_query/test_input_shapes_api.py``.
 """
 
 from __future__ import annotations
@@ -841,34 +840,6 @@ def _make_non_relay_target() -> tuple[type[library_models.Branch], type[DjangoTy
     return library_models.Branch, BranchPlainType
 
 
-def test_o2o_to_relay_target_uses_id_input() -> None:
-    """A forward OneToOne to a Relay-Node primary also becomes ``<field>_id: ID``.
-
-    ``MembershipCard.patron`` carries the shape; no fakeshop mutation writes a
-    membership card, so no generated input publishes it over HTTP.
-    """
-
-    class PatronNode(DjangoType, relay.Node):
-        class Meta:
-            model = library_models.Patron
-            fields = ("id", "name")
-
-    assert registry.get(library_models.Patron) is PatronNode
-
-    class MembershipCardNode(DjangoType, relay.Node):
-        class Meta:
-            model = library_models.MembershipCard
-            fields = ("id",)
-
-    cls = build_mutation_input(
-        library_models.MembershipCard,
-        operation_kind=CREATE,
-        primary_type=MembershipCardNode,
-    )
-    fields = _field_map(cls)
-    assert _inner_type(fields["patron_id"]) is strawberry.ID
-
-
 # ---------------------------------------------------------------------------
 # Consumer-override seam (spec-010 relation-override)
 # ---------------------------------------------------------------------------
@@ -1059,64 +1030,6 @@ def test_no_false_positive_collision_on_ordinary_model() -> None:
     }
 
 
-def test_digit_boundary_columns_do_not_silently_collide_in_generated_input() -> None:
-    """Two editable columns differing only by an underscore-adjacent digit survive distinctly.
-
-    ``field_2`` and ``field2`` produce DISTINCT ``graphql_camel_name`` values
-    (``field_2`` vs ``field2``), so the generated-input collision guard -- which
-    compares ``graphql_camel_name`` -- does NOT reject the pair. But with the
-    ``name=`` alias pinned only on divergence, ``field_2`` (equal to its own
-    camel-name) would carry no alias, so Strawberry's ``NameConverter`` would re-derive
-    it to ``field2`` via ``to_camel_case`` and silently overwrite the sibling
-    ``field2`` -- dropping one consumer-declared column from the generated
-    ``<Model>Input`` SDL with no error. The shared generated-input builder
-    pins every package-derived wire name, so both survive. ``DigitBoundary`` stays
-    synthetic: ``field_2`` beside ``field2`` is legal Django but a naming no fakeshop
-    domain model would carry, and it alone pins the always-set wire alias in
-    ``django_strawberry_framework/utils/inputs.py::build_strawberry_input_class``.
-    """
-
-    class DigitBoundary(models.Model):
-        field_2: _Int = models.IntegerField()
-        field2: _Int = models.IntegerField()
-
-        class Meta:
-            app_label = _unique_app_label()
-
-    class DigitBoundaryType(DjangoType, relay.Node):
-        class Meta:
-            model = DigitBoundary
-            fields = ("id",)
-
-    input_cls = build_mutation_input(
-        DigitBoundary,
-        operation_kind=CREATE,
-        primary_type=DigitBoundaryType,
-    )
-
-    # ``from __future__ import annotations`` stringizes source-level annotations,
-    # so set the resolver's ``__annotations__`` to real objects to reference the
-    # generated input class as a schema-field argument type.
-    # The ``object`` annotation is replaced below; Strawberry reads the argument type from there.
-    def _probe(inp: object) -> int:
-        del inp  # Strawberry reads it to put the input class in the SDL under test; never runs
-        return 1
-
-    _probe.__annotations__ = {"inp": input_cls, "return": int}
-
-    @strawberry.type
-    class Query:
-        probe: int = strawberry.field(resolver=_probe)
-
-    schema = strawberry.Schema(query=Query, config=strawberry_config())
-    sdl = schema.as_str()
-    block = sdl[sdl.index("input DigitBoundaryInput") :]
-    block = block[: block.index("}")]
-    # Both distinct wire names present -- no silent collapse to a single ``field2``.
-    assert "field_2:" in block
-    assert "field2:" in block
-
-
 # ---------------------------------------------------------------------------
 # mutation_input_type_name - stable full name + shape-derived narrowed name
 # ---------------------------------------------------------------------------
@@ -1185,83 +1098,6 @@ def test_type_name_token_boundaries_do_not_collide() -> None:
     assert left != right
     assert left == "ItemA_ubCInput"
     assert right == "ItemAB_ucInput"
-
-
-def test_type_name_digit_boundary_narrowings_stay_distinct() -> None:
-    """``field_2`` / ``field2`` Meta.fields narrowings mint distinct input type names.
-
-    A ``pascalize_token`` that stripped every underscore (``field_2`` / ``field2``
-    both -> ``Field2``) would let two legitimate narrowed shapes claim one GraphQL
-    input type name, and the second materialize would raise a distinct-shape
-    collision. Retaining underscore-before-digit keeps the tokens injective; the
-    shared builder pins ``strawberry.input(name=)`` so the underscore survives on
-    the wire. This ``DigitBoundary`` stays synthetic because the row builds and
-    materializes both narrowed inputs, which needs the two real columns, and
-    ``field_2`` beside ``field2`` is legal Django but a naming no fakeshop domain
-    model would carry; it alone pins the underscore-before-digit token of
-    ``django_strawberry_framework/utils/inputs.py::pascalize_token`` through a
-    materialized schema.
-    """
-    full = ("not_the_narrowed_set",)
-
-    class DigitBoundary(models.Model):
-        field_2: _Int = models.IntegerField()
-        field2: _Int = models.IntegerField()
-
-        class Meta:
-            app_label = _unique_app_label()
-
-    class DigitBoundaryType(DjangoType, relay.Node):
-        class Meta:
-            model = DigitBoundary
-            fields = ("id",)
-
-    left_name = mutation_input_type_name(
-        DigitBoundary,
-        CREATE,
-        ("field_2",),
-        full_field_names=full,
-    )
-    right_name = mutation_input_type_name(
-        DigitBoundary,
-        CREATE,
-        ("field2",),
-        full_field_names=full,
-    )
-    assert left_name == "DigitBoundaryField_u2Input"
-    assert right_name == "DigitBoundaryField2Input"
-    assert left_name != right_name
-
-    left = build_mutation_input(
-        DigitBoundary,
-        operation_kind=CREATE,
-        primary_type=DigitBoundaryType,
-        fields=("field_2",),
-    )
-    right = build_mutation_input(
-        DigitBoundary,
-        operation_kind=CREATE,
-        primary_type=DigitBoundaryType,
-        fields=("field2",),
-    )
-    materialize_mutation_input_class(left.__name__, left)
-    materialize_mutation_input_class(right.__name__, right)  # must not collide
-
-    # The ``object`` annotations are replaced below; Strawberry reads the argument types from there.
-    def _probe(left_inp: object, right_inp: object) -> int:
-        del left_inp, right_inp  # Strawberry reads both to put the inputs in the SDL; never runs
-        return 1
-
-    _probe.__annotations__ = {"left_inp": left, "right_inp": right, "return": int}
-
-    @strawberry.type
-    class Query:
-        probe: int = strawberry.field(resolver=_probe)
-
-    schema = strawberry.Schema(query=Query, config=strawberry_config())
-    sdl = schema.as_str()
-    assert "input DigitBoundaryField_u2Input" in sdl
-    assert "input DigitBoundaryField2Input" in sdl
 
 
 @pytest.mark.parametrize(

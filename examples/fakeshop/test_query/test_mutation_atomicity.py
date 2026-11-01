@@ -22,7 +22,8 @@ write rolled back).
 The success-side contract (a serializable payload still commits, and serial
 top-level mutation fields keep independent transactions) is pinned alongside, as is the
 mutation root's ``__typename`` meta-field, which carries no mutation class and resolves
-as a plain field.
+as a plain field, and the refusal of a generated mutation that a plain
+``strawberry.Schema`` serves.
 Async colour uses a module-local ``/graphql-async/`` mount (``graphql_client.py``
 is sync-only).
 """
@@ -34,6 +35,7 @@ from functools import wraps
 from typing import TYPE_CHECKING
 
 import pytest
+import strawberry
 from apps.products import models
 from apps.products.services import create_users, seed_data
 from asgiref.sync import sync_to_async
@@ -48,10 +50,11 @@ from django.test import AsyncClient, Client, override_settings
 from django.urls import path
 from graphql_client import JSONObject, json_at, json_list, read_attr, response_json
 
+from django_strawberry_framework import strawberry_config
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing import AsyncTestClient, TestClient
 from django_strawberry_framework.testing.relay import global_id_for
-from django_strawberry_framework.views import AsyncDjangoGraphQLView
+from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 from tests._idioms import saved_pk
 
 if TYPE_CHECKING:
@@ -500,7 +503,59 @@ async def _async_shipped_graphql_view(request: HttpRequest) -> HttpResponseBase:
     return await AsyncDjangoGraphQLView.as_view(schema=config_schema.schema)(request)
 
 
-urlpatterns = [path("graphql-async/", _async_shipped_graphql_view)]
+@wraps(DjangoGraphQLView.as_view())
+def _plain_schema_graphql_view(request: HttpRequest) -> HttpResponseBase:
+    """Serve fakeshop's composed ``Query`` / ``Mutation`` through a plain ``strawberry.Schema``."""
+    plain = strawberry.Schema(
+        query=config_schema.Query,
+        mutation=config_schema.Mutation,
+        config=strawberry_config(),
+    )
+    return DjangoGraphQLView.as_view(schema=plain)(request)
+
+
+urlpatterns = [
+    path("graphql-async/", _async_shipped_graphql_view),
+    path("graphql-plain/", _plain_schema_graphql_view),
+]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_plain_strawberry_schema_refuses_generated_mutations_before_writing() -> None:
+    """A generated mutation served by a plain ``strawberry.Schema`` fails loudly, writing nothing.
+
+    Only ``DjangoSchema``'s execution context holds the write transaction open through
+    response completion, so the write pipeline refuses to run under any other schema
+    (``django_strawberry_framework/utils/write_transaction.py::require_managed_write``):
+    the permitted ``updateItem`` is a top-level error naming the fix, and the row keeps
+    its name. A plain schema installs no error policy, so the message travels as raised.
+    """
+    create_users(1)
+    seed_data(1)
+    client = _login_with_perm("view_item_1", "view_category", "change_item")
+    category_pk = _prepare_category("plain-schema-category")
+    item_pk = _prepare_item("plain-schema-item", category_pk)
+
+    with override_settings(ROOT_URLCONF=__name__):
+        res = TestClient(client=client).query(
+            _UPDATE_ITEM,
+            variables={"id": _global_id("products.item", item_pk), "d": {"name": "written"}},
+            assert_no_errors=False,
+            url="/graphql-plain/",
+        )
+
+    payload = response_json(res.response)
+    assert payload["data"] is None, payload
+    assert [json_at(error, "message") for error in json_list(payload, "errors")] == [
+        (
+            "UpdateItem must be executed through django_strawberry_framework.DjangoSchema. A "
+            "plain strawberry.Schema commits the mutation's transaction when the resolver "
+            "returns - BEFORE GraphQL response completion - so a completion failure would leave "
+            "the write committed behind a null response. Build the schema as "
+            "DjangoSchema(query=..., mutation=...)."
+        ),
+    ], payload
+    assert _stored_item_name(item_pk) == "plain-schema-item"
 
 
 async def _post_async(

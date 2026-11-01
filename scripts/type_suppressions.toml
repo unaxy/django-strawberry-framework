@@ -357,13 +357,11 @@
 "tests/mutations/test_permissions.py::test_walk_ignores_mid_request_pollution_of_the_class_permission_list" = { reportArgumentType = 1 }
 "tests/mutations/test_permissions.py::test_walk_ignores_mid_request_pollution_of_the_class_permission_list.AllowAndPollute.has_permission" = { reportAttributeAccessIssue = 1, reportUnknownMemberType = 1 }
 "tests/mutations/test_resolvers.py::KeyedDesk.Meta" = { reportIncompatibleVariableOverride = 1 }
-"tests/mutations/test_resolvers.py::SoftDeletedRow.delete" = { reportIncompatibleMethodOverride = 1 }
 "tests/mutations/test_resolvers.py::test_async_mutation_does_not_leak_into_later_read_optimizer_execution.Query" = { reportGeneralTypeIssues = 1 }
 "tests/mutations/test_write_transaction.py::_HygieneWebsocketCommunicator.receive_output" = { reportArgumentType = 1, reportUnknownVariableType = 1 }
 "tests/mutations/test_write_transaction.py::_HygieneWebsocketCommunicator.send_input" = { reportUnknownMemberType = 1 }
 "tests/mutations/test_write_transaction.py::_with_fake_barrier_connection" = { reportArgumentType = 1 }
 "tests/mutations/test_write_transaction.py::test_assert_no_target_drift_propagates_a_planted_eq_error" = { reportAttributeAccessIssue = 1 }
-"tests/mutations/test_write_transaction.py::test_check_permission_override_returning_non_bool_is_a_configuration_error.NonBoolCheck.check_permission" = { reportIncompatibleMethodOverride = 1 }
 "tests/mutations/test_write_transaction.py::test_execution_errors_reads_both_graphql_core_error_shapes" = { reportAttributeAccessIssue = 3 }
 "tests/mutations/test_write_transaction.py::test_field_fingerprint_reads_hostile_containers_through_their_base_slots._LyingDict.items" = { reportIncompatibleMethodOverride = 1 }
 "tests/mutations/test_write_transaction.py::test_field_fingerprint_reads_hostile_containers_through_their_base_slots._LyingDict.keys" = { reportIncompatibleMethodOverride = 1 }

@@ -10,8 +10,13 @@ The composite-parent request reuses the existing Rp fixture: its explicit scalar
 NodeID lets the consumer publish a composite-PK parent, while the reverse
 ForeignObject has two carriers and cannot use one-column window partitioning.
 The shipped ShelfLabel shape has a scalar-PK parent and cannot pin that projection.
+The same fixture carries the composite-key update: no fakeshop model has a composite
+primary key, so a holder update over ``RpCompositeParent`` pins its generated input.
 """
 
+import contextlib
+import json
+from collections.abc import Mapping
 from functools import wraps
 
 import django
@@ -24,11 +29,20 @@ from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import path
-from graphql_client import JSONObject, RecordCompiledSql, graphql_payload, response_json
+from graphql_client import (
+    JSONObject,
+    RecordCompiledSql,
+    graphql_payload,
+    json_at,
+    json_list,
+    response_json,
+)
 from strawberry import relay
 from strawberry.relay import NodeID
 
 from django_strawberry_framework import (
+    DjangoMutation,
+    DjangoMutationField,
     DjangoOptimizerExtension,
     DjangoSchema,
     DjangoType,
@@ -70,21 +84,30 @@ urlpatterns = [
 ]
 
 
-def _post(schema: DjangoSchema, document: str) -> JSONObject:
+def _post(
+    schema: DjangoSchema,
+    document: str,
+    variables: Mapping[str, object] | None = None,
+) -> JSONObject:
     _CURRENT["schema"] = schema
     try:
         with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(document, url="/graphql-mti-composite/")
+            return graphql_payload(document, variables=variables, url="/graphql-mti-composite/")
     finally:
         _CURRENT["schema"] = None
 
 
-async def _post_async(schema: DjangoSchema, document: str) -> JSONObject:
+async def _post_async(
+    schema: DjangoSchema,
+    document: str,
+    variables: Mapping[str, object] | None = None,
+) -> JSONObject:
     _CURRENT["schema"] = schema
     try:
         with override_settings(ROOT_URLCONF=__name__):
             result = await AsyncTestClient().query(
                 document,
+                variables=variables,
                 assert_no_errors=False,
                 url="/graphql-mti-composite-async/",
             )
@@ -282,3 +305,123 @@ def test_composite_parent_reverse_connection_falls_back_per_parent_over_http() -
             where = sql.split(" WHERE ", 1)[1]
             assert '"parent_tenant_id"' in where, sql
             assert '"parent_code"' in where, sql
+
+
+_COMPOSITE_UPDATE = (
+    "mutation($id: ID!, $d: RpCompositeParentPartialInput!){ updateComposite(id: $id, "
+    "data: $d){ errors{ field messages codes } } }"
+)
+
+
+def _composite_update_schema() -> DjangoSchema:
+    """A holder ``updateComposite`` over ``RpCompositeParent``, located by its JSON-list key."""
+
+    class RpParentRow(DjangoType):
+        class Meta:
+            model = RpCompositeParent
+            fields = ("tenant_id", "code", "label")
+
+    class UpdateComposite(DjangoMutation):
+        class Meta:
+            model = RpCompositeParent
+            operation = "update"
+            permission_classes = []
+
+    @strawberry.type
+    class Query:
+        @strawberry.field
+        def ping(self) -> int:
+            return 1
+
+    @strawberry.type
+    class Mutation:
+        update_composite = DjangoMutationField(UpdateComposite)
+
+    del RpParentRow
+    finalize_django_types()
+    return DjangoSchema(query=Query, mutation=Mutation, config=strawberry_config())
+
+
+def _composite_update_variables(member: str | None) -> dict[str, object]:
+    """Variables relabelling row ``(1, "X")``, re-keying it onto row ``(2, "Y")`` via ``member``."""
+    data: dict[str, object] = {"label": "NEW"}
+    if member is not None:
+        data[member] = {"tenantId": 2, "code": "Y"}[member]
+    return {"id": json.dumps([1, "X"]), "d": data}
+
+
+def _assert_composite_member_refusal(payload: JSONObject, member: str) -> None:
+    """Pin the one validation error a composite update naming key ``member`` answers."""
+    sent = _composite_update_variables(member)["d"]
+    assert payload["data"] is None, payload
+    assert [json_at(error, "message") for error in json_list(payload, "errors")] == [
+        (
+            f"Variable '$d' got invalid value {sent!r}; "
+            f"Field '{member}' is not defined by type 'RpCompositeParentPartialInput'."
+        ),
+    ], payload
+
+
+def _composite_rows() -> list[tuple[int, str, str]]:
+    return sorted(RpCompositeParent.objects.values_list("tenant_id", "code", "label"))
+
+
+_COMPOSITE_MEMBERS = pytest.mark.parametrize("member", ["tenantId", "code"])
+
+
+@pytest.mark.django_db(transaction=True)
+@_COMPOSITE_MEMBERS
+def test_composite_key_update_input_offers_no_key_member_over_http(member: str) -> None:
+    """An update over a ``CompositePrimaryKey`` model takes its non-key columns and no key member.
+
+    The key's member columns carry ``primary_key=False``, yet a write to one re-keys the
+    located row, so the generated update input publishes ``label`` alone: a document naming
+    a member fails validation with both rows untouched, and the same update without it
+    writes the located row only.
+    """
+    schema = _composite_update_schema()
+    with relation_fixture_tables(connection):
+        RpCompositeParent.objects.create(tenant_id=1, code="X", label="OLD")
+        RpCompositeParent.objects.create(tenant_id=2, code="Y", label="OTHER")
+
+        described = _post(
+            schema,
+            '{ __type(name: "RpCompositeParentPartialInput") { inputFields { name } } }',
+        )
+        assert described == {
+            "data": {"__type": {"inputFields": [{"name": "label"}]}},
+        }
+
+        refused = _post(schema, _COMPOSITE_UPDATE, _composite_update_variables(member))
+        _assert_composite_member_refusal(refused, member)
+        assert _composite_rows() == [(1, "X", "OLD"), (2, "Y", "OTHER")]
+
+        written = _post(schema, _COMPOSITE_UPDATE, _composite_update_variables(None))
+        assert written == {"data": {"updateComposite": {"errors": []}}}
+        assert _composite_rows() == [(1, "X", "NEW"), (2, "Y", "OTHER")]
+
+
+@pytest.mark.django_db(transaction=True)
+@_COMPOSITE_MEMBERS
+async def test_async_composite_key_update_input_offers_no_key_member_over_http(
+    member: str,
+) -> None:
+    """The async view serves the same composite update input: no key member, one row written."""
+    schema = await sync_to_async(_composite_update_schema)()
+    tables = contextlib.ExitStack()
+    await sync_to_async(tables.enter_context, thread_sensitive=True)(
+        relation_fixture_tables(connection),
+    )
+    try:
+        await RpCompositeParent.objects.acreate(tenant_id=1, code="X", label="OLD")
+        await RpCompositeParent.objects.acreate(tenant_id=2, code="Y", label="OTHER")
+
+        refused = await _post_async(schema, _COMPOSITE_UPDATE, _composite_update_variables(member))
+        _assert_composite_member_refusal(refused, member)
+        assert await sync_to_async(_composite_rows)() == [(1, "X", "OLD"), (2, "Y", "OTHER")]
+
+        written = await _post_async(schema, _COMPOSITE_UPDATE, _composite_update_variables(None))
+        assert written == {"data": {"updateComposite": {"errors": []}}}
+        assert await sync_to_async(_composite_rows)() == [(1, "X", "NEW"), (2, "Y", "OTHER")]
+    finally:
+        await sync_to_async(tables.close, thread_sensitive=True)()
