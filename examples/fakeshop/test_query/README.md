@@ -610,7 +610,7 @@ Module docstring = authoritative description; this = index. Read the docstring b
 | [`test_form_relation_binding_api.py`][test-form-relation-binding-api] | Form relation-key reconstruction, replacement, empty-key refusals, visibility (a hidden Relay many-to-many member) and an `async def get_queryset` relation target refused as sync misuse. |
 | [`test_generic_connection_api.py`][test-generic-connection-api] | Generic relations, proxy content types, exact nested pages and optimizer query cost. |
 | [`test_generic_connection_sharded_api.py`][test-generic-connection-sharded-api] | Sharded generic-relation content types and database routing. |
-| [`test_keyset_order_terms_api.py`][test-keyset-order-terms-api] | Hidden related ordering terms and per-parent keyset cursors under effective ordering; a hook order by a JSON column or through an optional or multivalued relation refused by name, beside scalar-column controls. |
+| [`test_keyset_order_terms_api.py`][test-keyset-order-terms-api] | Hidden related ordering terms and per-parent keyset cursors under effective ordering; a hook order by a JSON column, through an optional or multivalued relation, or by an annotation alias refused, beside scalar-column controls. |
 | [`test_lateral_strategy_api.py`][test-lateral-strategy-api] | PostgreSQL lateral relation fetches, payloads, fallbacks and per-table SQL. |
 | [`test_model_mutation_flows_api.py`][test-model-mutation-flows-api] | Model mutation ID strategies, related visibility, typed save refusals, M2M replacement, raw relation existence and the `select_for_update` opt-out. |
 | [`test_mutation_error_keys_api.py`][test-mutation-error-keys-api] | Published mutation error keys across model, form and serializer writes. |

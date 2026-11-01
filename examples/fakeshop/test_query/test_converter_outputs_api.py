@@ -200,6 +200,42 @@ class _HostileStr(str):
         raise RuntimeError("int exploded")
 
 
+class _HostileTypeMeta(type):
+    """A metaclass whose ``__name__`` lookup raises, so naming the class through it explodes."""
+
+    @override
+    def __getattribute__(cls, name: str) -> object:
+        if name == "__name__":
+            raise RuntimeError("type name exploded")
+        return object_result(super().__getattribute__, name)
+
+
+class _HostileTypeName(metaclass=_HostileTypeMeta):
+    """A resolver value whose class name only the interpreter can read."""
+
+
+def _bigint_refusal(raw_value: object) -> list[tuple[object, object]]:
+    """Serve ``raw_value`` from a ``BigInt`` resolver; return its errors' ``(path, message)``.
+
+    The caller asserts, so a failing row's traceback never renders ``raw_value``.
+    """
+
+    def resolve_value() -> object:
+        return raw_value
+
+    @strawberry.type
+    class Query:
+        value: object = strawberry.field(resolver=resolve_value, graphql_type=BigInt)
+
+    schema = DjangoSchema(query=Query, config=strawberry_config(), error_policy={"enabled": False})
+    payload = _post(schema, "{ value }")
+    assert payload["data"] is None, payload
+    return [
+        (json_at(error, "path"), json_at(error, "message"))
+        for error in json_list(payload, "errors")
+    ]
+
+
 @pytest.mark.parametrize(
     ("raw_value", "kind"),
     [
@@ -225,20 +261,17 @@ def test_an_outbound_bigint_refuses_a_non_int_resolver_value(raw_value: object, 
     The serializer reads the value's real class, so a float is not truncated through
     ``str(float)`` and a numeric ``str`` (or a ``str`` subclass) is not passed through.
     """
+    assert _bigint_refusal(raw_value) == [(["value"], f"BigInt cannot serialize {kind}")]
 
-    def resolve_value() -> object:
-        return raw_value
 
-    @strawberry.type
-    class Query:
-        value: object = strawberry.field(resolver=resolve_value, graphql_type=BigInt)
+def test_an_outbound_bigint_refusal_names_the_class_past_a_hostile_type_name_hook() -> None:
+    """The refusal reads the class name from the interpreter, so a metaclass hook never runs.
 
-    schema = DjangoSchema(query=Query, config=strawberry_config(), error_policy={"enabled": False})
-    payload = _post(schema, "{ value }")
-    assert payload["data"] is None, payload
-    assert len(json_list(payload, "errors")) == 1
-    assert json_at(payload, "errors", 0, "path") == ["value"]
-    assert json_str(payload, "errors", 0, "message") == f"BigInt cannot serialize {kind}"
+    The value is built here and never reaches an assertion: pytest renders a failing
+    test's arguments and asserted operands, and naming this class through Python raises.
+    """
+    refusal = _bigint_refusal(_HostileTypeName())
+    assert refusal == [(["value"], "BigInt cannot serialize _HostileTypeName")]
 
 
 class _HostileInt(int):
