@@ -791,9 +791,10 @@ def _element_annotation(
     field types the value only where the caller passes no field: a custom
     ``method=`` filter with no backing model field, a path that resolves to no
     column of the FilterSet model (a ``FilteredRelation`` alias only the filter's
-    queryset holds), and a declared filter whose own form cleans another kind than
+    queryset holds), a declared filter whose own form cleans another kind than
     the field (``_form_cleaned_value_field``: a ``DateFilter`` with
-    ``lookup_expr="year"`` is ``Date``). Everywhere else the field wins, since
+    ``lookup_expr="year"`` is ``Date``), and a ``method=`` filter named ``isnull`` whose
+    form cleans its own kind (no column is its operand). Everywhere else the field wins, since
     ``django-filter``'s ``NumberFilter`` form (a ``DecimalField``) would mis-type
     integer columns and a CSV ``in`` over a choice column would collapse to ``str``.
     Callers that need a different shape for a specific lookup (Django's ``isnull``
@@ -1098,16 +1099,18 @@ def convert_filter_to_input_annotation(
         # from the form field its class builds; one whose ``field`` builds none on the
         # unbound declaration raises (spec-027 Decision 4).
         _refuse_method_without_form_field(matched, filterset_cls)
-        if _filterset_lookup_operand(filterset_cls, matched).null_test and (
-            read_attr(matched, "method", None) is None
-            or all(_passes_value_through(field) for field in _form_value_fields(matched))
-        ):
+        if _filterset_lookup_operand(filterset_cls, matched).null_test:
             # ``isnull`` is a boolean predicate regardless of the column type, past a
             # transform too (``year__isnull``): the value field is irrelevant here. A
             # ``method=`` filter's method applies no lookup of the filter's, so a form that
-            # cleans its own kind types it (``NumberFilter(lookup_expr="isnull", method=...)``
-            # takes a number); one passing any value through keeps ``Boolean``.
-            return bool
+            # cleans its own kind types it, whatever the column
+            # (``NumberFilter(field_name="name", lookup_expr="isnull", method=...)`` takes a
+            # number); one passing any value through keeps ``Boolean``.
+            if read_attr(matched, "method", None) is None or all(
+                _passes_value_through(field) for field in _form_value_fields(matched)
+            ):
+                return bool
+            return _element_annotation(matched, None, owner_definition, filterset_cls)
         value_field = _form_cleaned_value_field(matched, model_field, filterset_cls)
         return _element_annotation(matched, value_field, owner_definition, filterset_cls)
 

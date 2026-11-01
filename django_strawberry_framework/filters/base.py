@@ -123,6 +123,7 @@ from django_strawberry_framework.utils.querysets import (
     base_queryset,
     coerce_field_value_or_none,
     lookup_target_fields,
+    split_lookup,
     truncates_to_integer,
 )
 from django_strawberry_framework.utils.relations import (
@@ -2618,12 +2619,12 @@ class RelationPkMultipleFilter(Filter):
         ``exact`` on a multi-valued relation and ``in`` on any relation both mean "related
         to at least one of these rows", which a single ``__in`` over one join expresses
         for both (and for its ``exclude`` complement). The non-pk ``to_field`` marker
-        qualifies the path with ``__pk`` exactly as on ``RelationPkFilter``. The
-        transforms the ``lookup_expr`` applies stay in the path
-        (``<column>__<transform>__in`` for a transform whose output is a relation), read as
-        Django's query reads them (``_applied_transforms``: a bare ``<transform>`` is one
-        too), so the members are compared with the value the transform computes, as they
-        were coerced.
+        qualifies the path with ``__pk`` exactly as on ``RelationPkFilter``. Everything the
+        filter's path applies ahead of its lookup stays (``_membership_path``): a relation
+        the ``lookup_expr`` continues across, and every transform
+        (``<column>__<transform>__in`` for a transform whose output is a relation, a bare
+        trailing ``<transform>`` too), so the members are compared with the value the
+        transform computes, as they were coerced.
         """
         if value is None:
             return qs
@@ -2639,30 +2640,33 @@ class RelationPkMultipleFilter(Filter):
         ]
         if not kept:
             return _match_none_queryset(self, qs)
-        path = LOOKUP_SEP.join(
-            (
-                _marked_pk_field_name(self) or _bound_field_name(self),
-                *_applied_transforms(self),
-                "in",
-            ),
-        )
-        return _apply_lookups(self, qs, {path: kept})
+        path = _membership_path(self, qs.query)
+        return _apply_lookups(self, qs, {f"{path}{LOOKUP_SEP}in": kept})
 
 
-def _applied_transforms(filter_instance: Filter) -> tuple[str, ...]:
-    """Return the transforms a bound filter's ``lookup_expr`` applies, as Django's query applies them.
+def _membership_path(filter_instance: Filter, query: Query) -> str:
+    """Return the path a filter's predicate applies its lookup to, over the queryset's ``query``.
 
-    Read off the field the filter's path names (``utils/relations.py::lookup_transform_parts``,
-    from a ``GeneratedField``'s own column as ``_lookup_operand`` walks it), so a final part
-    that is no lookup there is a trailing transform with an implicit ``exact``. A path naming
-    no field has no registry to ask; every part ahead of the final one is a transform there.
+    The filter's path (its ``field_name``, or the non-pk ``to_field`` marker's ``__pk`` path,
+    then its ``lookup_expr``) less its final lookup, split as ``Query.build_filter`` splits
+    it (``utils/querysets.py::split_lookup``): every name Django walks as a path stays, a
+    relation the ``lookup_expr`` continues across included, then each transform
+    ``Query.build_lookup`` applies to where that walk ends
+    (``utils/relations.py::lookup_transform_parts``), a final part that is no lookup there
+    being a trailing transform with an implicit ``exact``. A path Django refuses raises its
+    ``FieldError``.
     """
-    field = _bound_model_field(filter_instance)
-    lookup_expr = filter_instance.lookup_expr
-    if field is None:
-        return tuple(lookup_expr.split(LOOKUP_SEP)[:-1])
-    source = generated_column_source(field) if is_concrete_field(field) else None
-    return lookup_transform_parts(source or field, lookup_expr)
+    path = LOOKUP_SEP.join(
+        (
+            _marked_pk_field_name(filter_instance) or _bound_field_name(filter_instance),
+            filter_instance.lookup_expr,
+        ),
+    )
+    head, start, lookups = split_lookup(query, path)
+    # ``Query.build_lookup`` reads an empty leftover (a path ending on a field) as ``exact``.
+    return LOOKUP_SEP.join(
+        (*head, *lookup_transform_parts(start, LOOKUP_SEP.join(lookups) or "exact")),
+    )
 
 
 def refuse_identityless_relation(
