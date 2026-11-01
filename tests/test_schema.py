@@ -25,11 +25,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 import pytest_django
 import strawberry
-from apps.library.models import Book, Branch, Shelf
+from apps.library.models import Branch, Shelf
 from django import forms
 from django.db import connection
 from django.db.models import IntegerField, Model, TextField
-from django.http import HttpRequest
 from django_filters import CharFilter
 from graphql import ExecutionContext, FieldNode, GraphQLError, NameNode, print_ast
 from graphql.pyutils import Path
@@ -2254,18 +2253,16 @@ async def test_a_stream_whose_runner_is_not_the_packages_is_handed_back_untouche
 
 @dataclass(frozen=True)
 class _ClashSide:
-    """One declaration's half of a generated type-name clash: its root fields and a probe.
+    """One declaration's half of a generated type-name clash: its root fields.
 
     ``query`` maps a root field name to its ``(annotation, field)`` pair (the root is
     built with ``type(...)`` because ``from __future__ import annotations`` would leave a
     class-body annotation naming a function local unresolved); ``mutation`` maps a root
-    mutation name to its field; ``operation`` is a document only this side's schema
-    serves, run against the fakeshop tables when the side reads one.
+    mutation name to its field.
     """
 
     query: dict[str, tuple[object, object]]
     mutation: dict[str, object] = field(default_factory=dict[str, object])
-    operation: str | None = None
 
 
 def _roots(*sides: _ClashSide) -> tuple[type, type | None]:
@@ -2328,17 +2325,8 @@ def _set_member_split() -> tuple[_ClashSide, _ClashSide]:
     branches = _node("BranchNode", Branch, ("id", "name"), filterset_class=BookFilter)
     shelves = _node("ShelfNode", Shelf, ("id", "code"), filterset_class=BookFilterSet)
     return (
-        _ClashSide(
-            _connection("branches", branches),
-            operation='{ branches(filter: {setCode: {exact: "x"}}) { edges { node { id } } } }',
-        ),
-        _ClashSide(
-            _connection("shelves", shelves),
-            operation=(
-                '{ shelves(filter: {code: {exact: {start: "a", end: "b"}}}) '
-                "{ edges { node { id } } } }"
-            ),
-        ),
+        _ClashSide(_connection("branches", branches)),
+        _ClashSide(_connection("shelves", shelves)),
     )
 
 
@@ -2398,14 +2386,8 @@ def _root_and_bag() -> tuple[_ClashSide, _ClashSide]:
     branches = _node("BranchNode", Branch, ("id", "name"), filterset_class=BookFilter)
     shelves = _node("ShelfNode", Shelf, ("id", "code"), filterset_class=BookFilterSetFilter)
     return (
-        _ClashSide(
-            _connection("branches", branches),
-            operation='{ branches(filter: {set: {exact: "x"}}) { edges { node { id } } } }',
-        ),
-        _ClashSide(
-            _connection("shelves", shelves),
-            operation='{ shelves(filter: {code: {exact: "x"}}) { edges { node { id } } } }',
-        ),
+        _ClashSide(_connection("branches", branches)),
+        _ClashSide(_connection("shelves", shelves)),
     )
 
 
@@ -2432,14 +2414,8 @@ def _filter_and_order_root() -> tuple[_ClashSide, _ClashSide]:
     branches = _node("BranchNode", Branch, ("id", "name"), filterset_class=Foo)
     shelves = _node("ShelfNode", Shelf, ("id", "code"), orderset_class=foo_order)
     return (
-        _ClashSide(
-            _connection("branches", branches),
-            operation='{ branches(filter: {name: {exact: "x"}}) { edges { node { id } } } }',
-        ),
-        _ClashSide(
-            _connection("shelves", shelves),
-            operation="{ shelves(orderBy: {code: ASC}) { edges { node { id } } } }",
-        ),
+        _ClashSide(_connection("branches", branches)),
+        _ClashSide(_connection("shelves", shelves)),
     )
 
 
@@ -2583,32 +2559,6 @@ _GENERATED_NAMES = [
 ]
 
 
-@pytest.mark.django_db
-@pytest.mark.usefixtures("isolate_global_registry")
-@pytest.mark.parametrize(("build", "name"), _GENERATED_NAMES)
-@pytest.mark.parametrize("side", [0, 1], ids=["first", "second"])
-@pytest.mark.parametrize("schema_class", [strawberry.Schema, DjangoSchema])
-def test_a_generated_name_clash_split_across_two_schemas_builds_and_executes(
-    build: Callable[[], tuple[_ClashSide, _ClashSide]],
-    name: str,
-    side: int,
-    schema_class: type[strawberry.Schema],
-) -> None:
-    """Each of two generated inputs of one name and different fields serves a schema of its own.
-
-    The clash is per schema: a process may build each declaration into its own schema,
-    which publishes that declaration's fields under the shared name and runs its operation.
-    """
-    served = build()[side]
-    finalize_django_types()
-    query, mutation = _roots(served)
-    schema = schema_class(query=query, mutation=mutation, config=strawberry_config())
-    assert f"input {name} " in str(schema)
-    if served.operation is not None:
-        result = schema.execute_sync(served.operation, context_value=HttpRequest())
-        assert result.errors is None, result.errors
-
-
 @pytest.mark.usefixtures("isolate_global_registry")
 @pytest.mark.parametrize(("build", "name"), _GENERATED_NAMES)
 def test_a_generated_name_clash_in_one_strawberry_schema_is_refused(
@@ -2652,46 +2602,6 @@ def test_django_schema_names_the_declarations_behind_a_generated_name_clash(
         "one so its generated type name is unique."
     )
     assert isinstance(raised.value.__cause__, DuplicatedTypeName)
-
-
-@pytest.mark.django_db
-@pytest.mark.usefixtures("isolate_global_registry")
-@pytest.mark.parametrize("schema_class", [strawberry.Schema, DjangoSchema])
-def test_two_bags_of_one_name_and_one_lookup_set_in_any_order_share_one_type(
-    schema_class: type[strawberry.Schema],
-) -> None:
-    """Bags whose lookups match in another declaration order are one shape.
-
-    ``BookFilter`` + ``shelf__code`` and ``BookFilterShelf`` + ``code`` both mint
-    ``BookFilterShelfCodeFilterInputType``; their lookups render the same fields, so one
-    schema serves both through one type and each member's operation runs.
-    """
-
-    class BookFilter(FilterSet):
-        class Meta:
-            model = Book
-            fields = {"shelf__code": ["exact", "icontains"]}
-
-    class BookFilterShelf(FilterSet):
-        class Meta:
-            model = Shelf
-            fields = {"code": ["icontains", "exact"]}
-
-    books = _node("BookNode", Book, ("id", "title"), filterset_class=BookFilter)
-    shelves = _node("ShelfNode", Shelf, ("id", "code"), filterset_class=BookFilterShelf)
-    finalize_django_types()
-    query, mutation = _roots(
-        _ClashSide(_connection("books", books)),
-        _ClashSide(_connection("shelves", shelves)),
-    )
-    schema = schema_class(query=query, mutation=mutation, config=strawberry_config())
-    assert str(schema).count("input BookFilterShelfCodeFilterInputType ") == 1
-    result = schema.execute_sync(
-        '{ books(filter: {shelfCode: {iContains: "x"}}) { edges { node { id } } } '
-        'shelves(filter: {code: {exact: "x", iContains: "x"}}) { edges { node { id } } } }',
-        context_value=HttpRequest(),
-    )
-    assert result.errors is None, result.errors
 
 
 def _same_named_enums() -> list[type]:

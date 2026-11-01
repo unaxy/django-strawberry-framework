@@ -1,14 +1,21 @@
-"""Published filter cycles and deferred consumer fields preserve their declared inputs over HTTP.
+"""Generated filter and write inputs keep their declared shapes over HTTP, shared names included.
 
 Alternate cycle registration orders, per-instance field edits and unordered declarations
 need separate consumer classes. Each holder declares native Meta types and exercises the
 public generated input or FilterSet entry point through the package view.
+
+Generated names: two operator bags of one name whose lookups are declared in opposite
+orders share one input type, and two declarations deriving one generated input name with
+different fields (set/member splits, two range axes of different types, a root beside a
+bag, a filter beside an order root, a model input beside a form or serializer input) each
+serve a schema of their own, two mounts side by side in one process.
 """
 
 from collections import OrderedDict
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from functools import wraps
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import pytest
 import strawberry
@@ -16,28 +23,50 @@ from apps.library import models
 from apps.products import services
 from apps.products.models import Category
 from django import forms
-from django.db.models import Model, QuerySet
+from django.db.models import IntegerField, Model, QuerySet, TextField
 from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
 from django.urls import path
 from django_filters import AllValuesFilter, BooleanFilter, CharFilter, Filter
-from graphql_client import JSONObject, graphql_payload, json_list, json_object
+from graphql_client import (
+    JSONObject,
+    graphql_payload,
+    json_at,
+    json_list,
+    json_object,
+    json_str,
+)
 from strategy_schemas import make_django_type
 from strawberry.scalars import JSON
 from typing_extensions import override
 
 from django_strawberry_framework import (
+    DjangoConnection,
+    DjangoConnectionField,
+    DjangoModelFormMutation,
+    DjangoMutation,
+    DjangoMutationField,
     DjangoSchema,
     DjangoType,
+    SerializerMutation,
     finalize_django_types,
     strawberry_config,
 )
-from django_strawberry_framework.filters import FilterSet, RelatedFilter, filter_input_type
+from django_strawberry_framework.filters import (
+    FilterSet,
+    RangeFilter,
+    RelatedFilter,
+    filter_input_type,
+)
+from django_strawberry_framework.orders import OrderSet
 from django_strawberry_framework.views import DjangoGraphQLView
-from tests._idioms import canonical_order, scrambled
+from tests._idioms import ModelSerializerBase, canonical_order, scrambled
+
+if TYPE_CHECKING:
+    from django.db.models.expressions import Combinable
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
+_CURRENT: dict[str, DjangoSchema | strawberry.Schema | None] = {"schema": None}
 
 
 @wraps(DjangoGraphQLView.as_view())
@@ -47,10 +76,32 @@ def _graphql_view(request: HttpRequest) -> HttpResponseBase:
     return DjangoGraphQLView.as_view(schema=schema)(request)
 
 
-urlpatterns = [path("graphql-filter-publication/", _graphql_view)]
+#: The two schemas a generated-name clash is split across, one per mount.
+_PAIR: dict[str, DjangoSchema | strawberry.Schema | None] = {"first": None, "second": None}
 
 
-def _post(schema: DjangoSchema, document: str, where: JSONObject | None = None) -> JSONObject:
+def _pair_view(side: str) -> Callable[[HttpRequest], HttpResponseBase]:
+    @wraps(DjangoGraphQLView.as_view())
+    def view(request: HttpRequest) -> HttpResponseBase:
+        schema = _PAIR[side]
+        assert schema is not None
+        return DjangoGraphQLView.as_view(schema=schema)(request)
+
+    return view
+
+
+urlpatterns = [
+    path("graphql-filter-publication/", _graphql_view),
+    path("graphql-clash/first/", _pair_view("first")),
+    path("graphql-clash/second/", _pair_view("second")),
+]
+
+
+def _post(
+    schema: DjangoSchema | strawberry.Schema,
+    document: str,
+    where: JSONObject | None = None,
+) -> JSONObject:
     _CURRENT["schema"] = schema
     try:
         with override_settings(ROOT_URLCONF=__name__):
@@ -621,3 +672,421 @@ def test_unordered_meta_declarations_publish_canonical_field_and_lookup_order(ro
         ]
         for index in range(len(expected))
     ] == [[_GRAPHQL_LOOKUPS[lookup] for lookup in lookups] for _, lookups in expected], lookups
+
+
+def _connection(name: str, node: type[DjangoType]) -> dict[str, tuple[object, object]]:
+    """One connection root field over ``node``, as an ``(annotation, field)`` pair."""
+    return {name: (DjangoConnection[node], DjangoConnectionField(node))}
+
+
+def _root(fields: Mapping[str, tuple[object, object]], name: str = "Query") -> type:
+    """A Strawberry root built from ``(annotation, field)`` pairs."""
+    return strawberry.type(
+        type(
+            name,
+            (),
+            {
+                "__annotations__": {key: pair[0] for key, pair in fields.items()},
+                **{key: pair[1] for key, pair in fields.items()},
+            },
+        ),
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("schema_class", [strawberry.Schema, DjangoSchema])
+def test_two_bags_of_one_name_and_one_lookup_set_in_any_order_share_one_type(
+    schema_class: type[strawberry.Schema],
+) -> None:
+    """Bags whose lookups match in another declaration order are one input type.
+
+    ``BookFilter`` + ``shelf__code`` and ``BookFilterShelf`` + ``code`` both mint
+    ``BookFilterShelfCodeFilterInputType`` with the same two lookups declared in
+    opposite orders, so one schema serves both members through one type and a
+    document filtering through each member runs.
+    """
+    branch = models.Branch.objects.create(name="Central", city="Boston")
+    near = models.Shelf.objects.create(code="x", topic="Near", branch=branch)
+    far = models.Shelf.objects.create(code="y", topic="Far", branch=branch)
+    models.Book.objects.create(title="Kindred", shelf=near)
+    models.Book.objects.create(title="Dune", shelf=far)
+
+    class BookFilter(FilterSet):
+        class Meta:
+            model = models.Book
+            fields = {"shelf__code": ["exact", "icontains"]}
+
+    class BookFilterShelf(FilterSet):
+        class Meta:
+            model = models.Shelf
+            fields = {"code": ["icontains", "exact"]}
+
+    books = make_django_type(
+        "BookNode",
+        models.Book,
+        ("id", "title"),
+        meta_extra={"filterset_class": BookFilter},
+    )
+    shelves = make_django_type(
+        "ShelfNode",
+        models.Shelf,
+        ("id", "code"),
+        meta_extra={"filterset_class": BookFilterShelf},
+    )
+    finalize_django_types()
+    query = _root({**_connection("books", books), **_connection("shelves", shelves)})
+    schema = schema_class(query=query, config=strawberry_config())
+
+    payload = _post(
+        schema,
+        """
+        {
+          bag: __type(name: "BookFilterShelfCodeFilterInputType") { inputFields { name } }
+          books(filter: {shelfCode: {iContains: "x"}}) { edges { node { title } } }
+          shelves(filter: {code: {exact: "x", iContains: "x"}}) { edges { node { code } } }
+        }
+        """,
+    )
+
+    assert "errors" not in payload, payload
+    data = json_object(payload["data"])
+    assert sorted(json_str(field, "name") for field in json_list(data, "bag", "inputFields")) == [
+        "exact",
+        "iContains",
+    ]
+    assert json_at(data, "books") == {"edges": [{"node": {"title": "Kindred"}}]}
+    assert json_at(data, "shelves") == {"edges": [{"node": {"code": "x"}}]}
+
+
+@dataclass
+class _ClashSide:
+    """One declaration's half of a generated input-name clash: its roots and a probe.
+
+    ``query`` maps a root field name to its ``(annotation, field)`` pair;
+    ``mutation`` maps a root mutation name to its field; ``operation`` is a
+    document only this side's schema serves.
+    """
+
+    query: dict[str, tuple[object, object]]
+    mutation: dict[str, object] = field(default_factory=dict[str, object])
+    operation: str | None = None
+
+
+def _set_member_split() -> tuple[_ClashSide, _ClashSide]:
+    """``BookFilter`` + ``set_code`` and ``BookFilterSet`` + ``code`` spell one bag name."""
+
+    class BookFilter(FilterSet):
+        set_code = CharFilter(field_name="name")
+
+        class Meta:
+            model = models.Branch
+            fields = []
+
+    class BookFilterSet(FilterSet):
+        code = RangeFilter(field_name="topic")
+
+        class Meta:
+            model = models.Shelf
+            fields = []
+
+    branches = make_django_type(
+        "BranchNode",
+        models.Branch,
+        ("id", "name"),
+        meta_extra={"filterset_class": BookFilter},
+    )
+    shelves = make_django_type(
+        "ShelfNode",
+        models.Shelf,
+        ("id", "code"),
+        meta_extra={"filterset_class": BookFilterSet},
+    )
+    return (
+        _ClashSide(
+            _connection("branches", branches),
+            operation='{ branches(filter: {setCode: {exact: "x"}}) { edges { node { id } } } }',
+        ),
+        _ClashSide(
+            _connection("shelves", shelves),
+            operation=(
+                '{ shelves(filter: {code: {exact: {start: "a", end: "b"}}}) '
+                "{ edges { node { id } } } }"
+            ),
+        ),
+    )
+
+
+def _root_and_bag() -> tuple[_ClashSide, _ClashSide]:
+    """FilterSet ``BookFilterSetFilter``'s root and ``BookFilter.set``'s bag share a name."""
+
+    class BookFilter(FilterSet):
+        set = CharFilter(field_name="name")
+
+        class Meta:
+            model = models.Branch
+            fields = []
+
+    class BookFilterSetFilter(FilterSet):
+        code = CharFilter(field_name="code")
+
+        class Meta:
+            model = models.Shelf
+            fields = []
+
+    branches = make_django_type(
+        "BranchNode",
+        models.Branch,
+        ("id", "name"),
+        meta_extra={"filterset_class": BookFilter},
+    )
+    shelves = make_django_type(
+        "ShelfNode",
+        models.Shelf,
+        ("id", "code"),
+        meta_extra={"filterset_class": BookFilterSetFilter},
+    )
+    return (
+        _ClashSide(
+            _connection("branches", branches),
+            operation='{ branches(filter: {set: {exact: "x"}}) { edges { node { id } } } }',
+        ),
+        _ClashSide(
+            _connection("shelves", shelves),
+            operation='{ shelves(filter: {code: {exact: "x"}}) { edges { node { id } } } }',
+        ),
+    )
+
+
+def _range_split() -> tuple[_ClashSide, _ClashSide]:
+    """``A`` over ``b_c`` and ``AB`` over ``c`` spell one range name, of two axis types.
+
+    The two rows are unmanaged models no operation reads: the sides are compared
+    by what each mount publishes under the shared name.
+    """
+
+    class _IntRangeRow(Model):
+        b_c: "IntegerField[float | int | str | Combinable, int]" = IntegerField()
+
+        class Meta:
+            app_label = "library"
+            managed = False
+
+        @override
+        def __str__(self) -> str:
+            return str(self.b_c)
+
+    class _TextRangeRow(Model):
+        c: "TextField[str | Combinable, str]" = TextField()
+
+        class Meta:
+            app_label = "library"
+            managed = False
+
+        @override
+        def __str__(self) -> str:
+            return self.c
+
+    class A(FilterSet):
+        x = RangeFilter(field_name="b_c")
+
+        class Meta:
+            model = _IntRangeRow
+            fields = []
+
+    class AB(FilterSet):
+        y = RangeFilter(field_name="c")
+
+        class Meta:
+            model = _TextRangeRow
+            fields = []
+
+    ints = make_django_type(
+        "IntRangeNode",
+        _IntRangeRow,
+        ("id",),
+        meta_extra={"filterset_class": A},
+    )
+    texts = make_django_type(
+        "TextRangeNode",
+        _TextRangeRow,
+        ("id",),
+        meta_extra={"filterset_class": AB},
+    )
+    return _ClashSide(_connection("ints", ints)), _ClashSide(_connection("texts", texts))
+
+
+def _filter_and_order_root() -> tuple[_ClashSide, _ClashSide]:
+    """A FilterSet and an OrderSet both named ``Foo`` both mint ``FooInputType``."""
+
+    class Foo(FilterSet):
+        name = CharFilter(field_name="name")
+
+        class Meta:
+            model = models.Branch
+            fields = []
+
+    # The order side's class is declared under the very name the filter side's holds.
+    foo_order = type(
+        "Foo",
+        (OrderSet,),
+        {
+            "__module__": Foo.__module__,
+            "__qualname__": Foo.__qualname__,
+            "Meta": type("Meta", (), {"model": models.Shelf, "fields": ["code"]}),
+        },
+    )
+    branches = make_django_type(
+        "BranchNode",
+        models.Branch,
+        ("id", "name"),
+        meta_extra={"filterset_class": Foo},
+    )
+    shelves = make_django_type(
+        "ShelfNode",
+        models.Shelf,
+        ("id", "code"),
+        meta_extra={"orderset_class": foo_order},
+    )
+    return (
+        _ClashSide(
+            _connection("branches", branches),
+            operation='{ branches(filter: {name: {exact: "x"}}) { edges { node { id } } } }',
+        ),
+        _ClashSide(
+            _connection("shelves", shelves),
+            operation="{ shelves(orderBy: {code: ASC}) { edges { node { id } } } }",
+        ),
+    )
+
+
+def _model_input_mutation() -> dict[str, object]:
+    """A ``DjangoMutation`` creating a ``Shelf`` from ``code`` and ``topic``."""
+
+    class CreateShelfFromCodeAndTopic(DjangoMutation):
+        class Meta:
+            model = models.Shelf
+            operation = "create"
+            fields = ("code", "topic")
+            permission_classes = []
+
+    return {"create_shelf": DjangoMutationField(CreateShelfFromCodeAndTopic)}
+
+
+def _write_roots() -> dict[str, tuple[object, object]]:
+    """Declare the primary types the write flavors resolve, and a query root over them."""
+    shelves = make_django_type("ShelfNode", models.Shelf, ("id", "code", "topic"))
+    make_django_type("BranchNode", models.Branch, ("id", "name", "city"))
+    return _connection("shelves", shelves)
+
+
+def _model_and_form_input() -> tuple[_ClashSide, _ClashSide]:
+    """A model input narrowed to ``(code, topic)`` and a ``ModelForm`` named ``ShelfCodeTopic``."""
+    query = _write_roots()
+
+    class ShelfCodeTopic(forms.ModelForm[models.Branch]):
+        class Meta:
+            model = models.Branch
+            fields = ("name", "city")
+
+    class CreateBranchViaForm(DjangoModelFormMutation):
+        class Meta:
+            form_class = ShelfCodeTopic
+            operation = "create"
+            permission_classes = []
+
+    return (
+        _ClashSide(query, _model_input_mutation()),
+        _ClashSide(query, {"create_branch": DjangoMutationField(CreateBranchViaForm)}),
+    )
+
+
+def _model_and_serializer_input() -> tuple[_ClashSide, _ClashSide]:
+    """A model input narrowed to ``(code, topic)`` and a serializer named ``ShelfCodeTopic``."""
+    query = _write_roots()
+
+    class ShelfCodeTopic(ModelSerializerBase[models.Branch]):
+        class Meta:
+            model = models.Branch
+            fields = ("name", "city")
+
+    class CreateBranchViaSerializer(SerializerMutation):
+        class Meta:
+            serializer_class = ShelfCodeTopic
+            operation = "create"
+            permission_classes = []
+
+    return (
+        _ClashSide(query, _model_input_mutation()),
+        _ClashSide(query, {"create_branch": DjangoMutationField(CreateBranchViaSerializer)}),
+    )
+
+
+def _clash_schema(side: _ClashSide, schema_class: type[strawberry.Schema]) -> strawberry.Schema:
+    """A schema serving ``side`` alone, with a mutation root when the side declares one."""
+    mutation = (
+        strawberry.type(type("Mutation", (), dict(side.mutation))) if side.mutation else None
+    )
+    return schema_class(query=_root(side.query), mutation=mutation, config=strawberry_config())
+
+
+def _type_shape(side: str, name: str) -> JSONObject:
+    """Introspect ``name``'s input fields on one clash mount."""
+    with override_settings(ROOT_URLCONF=__name__):
+        payload = graphql_payload(
+            '{ __type(name: "%s") { inputFields { name type { kind name ofType { name } } } } }'
+            % name,
+            url=f"/graphql-clash/{side}/",
+        )
+    assert "errors" not in payload, payload
+    return json_object(payload, "data", "__type")
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("build", "name"),
+    [
+        pytest.param(
+            _set_member_split,
+            "BookFilterSetCodeFilterInputType",
+            id="set-member-split",
+        ),
+        pytest.param(_root_and_bag, "BookFilterSetFilterInputType", id="root-and-bag"),
+        pytest.param(_range_split, "ABCRangeInputType", id="range-split"),
+        pytest.param(_filter_and_order_root, "FooInputType", id="filter-and-order-root"),
+        pytest.param(_model_and_form_input, "ShelfCodeTopicInput", id="model-and-form-input"),
+        pytest.param(
+            _model_and_serializer_input,
+            "ShelfCodeTopicInput",
+            id="model-and-serializer-input",
+        ),
+    ],
+)
+@pytest.mark.parametrize("schema_class", [strawberry.Schema, DjangoSchema])
+def test_a_generated_name_clash_split_across_two_schemas_builds_and_executes(
+    build: Callable[[], tuple[_ClashSide, _ClashSide]],
+    name: str,
+    schema_class: type[strawberry.Schema],
+) -> None:
+    """Two generated inputs of one name and different fields each serve a schema of their own.
+
+    The clash is per schema: one process builds each declaration into its own
+    schema, mounted side by side, and each mount publishes its own declaration's
+    fields under the shared name and runs its own operation.
+    """
+    first, second = build()
+    finalize_django_types()
+    _PAIR["first"] = _clash_schema(first, schema_class)
+    _PAIR["second"] = _clash_schema(second, schema_class)
+    try:
+        shapes = [_type_shape(side, name) for side in ("first", "second")]
+        assert all(shapes), shapes
+        assert shapes[0] != shapes[1], shapes
+        for side, clash in (("first", first), ("second", second)):
+            if clash.operation is None:
+                continue
+            with override_settings(ROOT_URLCONF=__name__):
+                payload = graphql_payload(clash.operation, url=f"/graphql-clash/{side}/")
+            assert "errors" not in payload, payload
+    finally:
+        _PAIR["first"] = None
+        _PAIR["second"] = None

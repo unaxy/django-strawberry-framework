@@ -32,9 +32,15 @@ replaces) and then flip ``DEBUG``. The bare CLASS entry's construction
 default and per-operation freshness stay in ``tests/extensions/test_debug.py``;
 what this tier owns of the bare entry is its REFUSAL.
 
-Serializer/coordinator, merge-precedence, async-overlap, masking-order,
-nested-reentrancy, the slow-query threshold, and the executemany log form
-belong in ``tests/extensions/test_debug.py``.
+Also live: the order-dependent rows - a masking extension listed before or after
+debug, and a sibling's hook SQL inside or outside debug's capture interval - the
+parse and validation early returns behind a raising sibling teardown (sync and
+async, through this module's ``/graphql-async/`` mount), and a non-bool
+acknowledgement refusing the operation instead of arming the disclosure.
+
+Serializer/coordinator, merge-precedence, async-overlap, nested-reentrancy, the
+slow-query threshold, the executemany log form, and the recovery path's
+results-read count belong in ``tests/extensions/test_debug.py``.
 """
 
 import contextlib
@@ -67,17 +73,21 @@ from graphql_client import (
     response_json,
 )
 from strawberry import relay
-from strawberry.extensions import SchemaExtension
+from strawberry.extensions import MaskErrors, SchemaExtension
+from typing_extensions import override
 
 from django_strawberry_framework import (
+    SCHEMA_CONFIGURATION_ERROR_CODE,
     DjangoOptimizerExtension,
     DjangoSchema,
     finalize_django_types,
     strawberry_config,
 )
+from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.extensions import DjangoDebugExtension
-from django_strawberry_framework.testing import Response, TestClient
-from django_strawberry_framework.views import DjangoGraphQLView
+from django_strawberry_framework.testing import AsyncTestClient, Response, TestClient
+from django_strawberry_framework.utils._narrowing import require_instance
+from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 
 if TYPE_CHECKING:
     from django.test.client import _MonkeyPatchedWSGIResponse
@@ -114,7 +124,25 @@ def _graphql_view(request: HttpRequest) -> HttpResponseBase:
     return DjangoGraphQLView.as_view(schema=schema)(request)
 
 
-urlpatterns = [path("graphql/", _graphql_view)]
+@wraps(AsyncDjangoGraphQLView.as_view())
+async def _async_graphql_view(request: HttpRequest) -> HttpResponseBase:
+    """The async twin of ``_graphql_view``, over the same held schema."""
+    schema = _current["schema"]
+    assert schema is not None, "install_probe_schema must run before any /graphql-async/ request"
+    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
+
+
+@wraps(DjangoGraphQLView.as_view())
+def _plain_graphql_view(request: HttpRequest) -> HttpResponseBase:
+    """The package view over ``_REFUSED_PLAIN_SCHEMA``, a plain ``strawberry.Schema``."""
+    return DjangoGraphQLView.as_view(schema=_REFUSED_PLAIN_SCHEMA)(request)
+
+
+urlpatterns = [
+    path("graphql/", _graphql_view),
+    path("graphql-async/", _async_graphql_view),
+    path("graphql-plain/", _plain_graphql_view),
+]
 
 # The one module-local optimizer singleton, exposed as ``lambda: _optimizer``
 # beside the debug factory - the canonical consumer shape (the shipped
@@ -155,6 +183,70 @@ _WITHHELD = DjangoDebugExtension()
 #: One acknowledged instance, for the entry spelling that resolves to the SAME
 #: object every operation: a factory returning a singleton.
 _SHARED_DEBUG = DjangoDebugExtension(allow_unsafe_production=True)
+
+
+class _RaisingTeardown(SchemaExtension):
+    """A sibling extension whose operation teardown raises.
+
+    Listed FIRST so it tears down LAST - after an early return has already read
+    the extension results - which sends the engine down its recovery path, where
+    the results are read a second time.
+    """
+
+    @override
+    def on_operation(self) -> Iterator[None]:
+        yield
+        raise RuntimeError("teardown boom")
+
+
+class _MarkerSQLExtension(SchemaExtension):
+    """A sibling whose ``on_operation`` runs marker SQL on each side of its yield."""
+
+    @override
+    def on_operation(self) -> Iterator[None]:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 31")  # the setup marker
+        yield
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 32")  # the teardown marker
+
+
+def _construct(constructor: Callable[..., object], **kwargs: object) -> object:
+    """Call ``constructor`` with keyword arguments its own annotations would refuse statically."""
+    return constructor(**kwargs)
+
+
+def _refused_acknowledgement() -> DjangoDebugExtension:
+    """Build the extension with the string ``"false"`` a deployment reads out of an env var.
+
+    The ``bool`` annotation refuses the string statically, so the class is called
+    through an untyped callable: the hostile input is what is under test.
+    """
+    built = _construct(DjangoDebugExtension, allow_unsafe_production="false")
+    return require_instance(built, DjangoDebugExtension)
+
+
+#: What constructing the extension with the string ``"false"`` raises, in full.
+_REFUSED_ACKNOWLEDGEMENT_MESSAGE = (
+    "DjangoDebugExtension(allow_unsafe_production=...) must be a bool; got str 'false'. "
+    "A truthy non-bool would arm the production disclosure, so it is refused rather "
+    "than interpreted."
+)
+
+
+@strawberry.type
+class _PlainQuery:
+    """A standalone one-field surface for the plain-schema mount."""
+
+    @strawberry.field
+    def ok(self) -> str:
+        return "ok"
+
+
+#: A plain ``strawberry.Schema`` listing the misspelled acknowledgement: nothing
+#: between upstream's extension resolution and the view turns the refusal into a
+#: response, so the construction error reaches the caller.
+_REFUSED_PLAIN_SCHEMA = strawberry.Schema(query=_PlainQuery, extensions=[_refused_acknowledgement])
 
 
 def _acknowledged_debug() -> DjangoDebugExtension:
@@ -828,3 +920,171 @@ def test_a_resolver_cannot_arm_the_production_disclosure_for_a_later_request(
 
     assert attacked.data == {"armDebugDisclosure": False}
     assert "debug" not in (client.query("query { __typename }").extensions or {})
+
+
+# ---------------------------------------------------------------------------
+# Hook ordering: what a sibling extension's position decides about the payload.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "debug_after_masking",
+    [True, False],
+    ids=["debug-after-masking", "debug-before-masking"],
+)
+def test_mask_errors_ordering_controls_exception_visibility(
+    install_probe_schema: _InstallProbeSchema,
+    *,
+    debug_after_masking: bool,
+) -> None:
+    """A masking extension listed AFTER debug strips the originals before debug reads them.
+
+    Teardowns unwind LIFO. Listed after ``MaskErrors``, debug tears down first
+    and its exception row carries the original; listed before it, masking has
+    already replaced the error and dropped ``original_error``, so debug's
+    exception list is empty. The client reads the masked message either way.
+    """
+    if debug_after_masking:
+        install_probe_schema([MaskErrors, _acknowledged_debug])
+    else:
+        install_probe_schema([_acknowledged_debug, MaskErrors])
+
+    res = TestClient().query("{ boom }", assert_no_errors=False)
+
+    assert [error.get("message") for error in res.errors or []] == ["Unexpected error."]
+    exceptions = _rows(_debug(res), "exceptions")
+    if debug_after_masking:
+        assert [(row["excType"], row["message"]) for row in exceptions] == [
+            ("<class 'ZeroDivisionError'>", "division by zero"),
+        ]
+    else:
+        assert exceptions == []
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "debug_listed_first",
+    [True, False],
+    ids=["debug-listed-first", "debug-listed-second"],
+)
+def test_sibling_hook_sql_capture_is_list_order_dependent(
+    install_probe_schema: _InstallProbeSchema,
+    *,
+    debug_listed_first: bool,
+) -> None:
+    """A sibling's hook SQL is captured only inside debug's own bracket.
+
+    Listed first, debug enters before and tears down after the sibling, so both
+    of the sibling's markers fall inside its capture interval; listed second, the
+    sibling's setup runs before debug acquires and its teardown after debug
+    releases, so neither is captured.
+    """
+    if debug_listed_first:
+        install_probe_schema([_acknowledged_debug, _MarkerSQLExtension])
+    else:
+        install_probe_schema([_MarkerSQLExtension, _acknowledged_debug])
+
+    res = TestClient().query("{ __typename }")
+
+    statements = [json_str(row, "sql") for row in _rows(_debug(res), "sql")]
+    markers = [
+        marker for marker in ("SELECT 31", "SELECT 32") if any(marker in s for s in statements)
+    ]
+    assert markers == (["SELECT 31", "SELECT 32"] if debug_listed_first else [])
+
+
+# ---------------------------------------------------------------------------
+# The early-return + raising-teardown recovery path: no ``debug`` key for an
+# operation that never executed, however often the results are read.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "document",
+    ["{ definitelyNotAField }", "{ __typename"],
+    ids=["validation", "parse"],
+)
+def test_an_early_return_with_a_raising_teardown_publishes_no_debug_key(
+    install_probe_schema: _InstallProbeSchema,
+    document: str,
+) -> None:
+    """The recovery path's second results read must not publish ``debug``.
+
+    A parse or validation failure returns early, reading the extension results
+    inside the operation; the sibling's raising teardown then sends the engine
+    down its recovery path, which reads them again. Nothing executed, so the
+    payload is stashed only for a real execution result and both reads answer
+    nothing.
+    """
+    install_probe_schema([_RaisingTeardown, _acknowledged_debug])
+
+    res = TestClient().query(document, assert_no_errors=False)
+
+    assert res.errors
+    assert "debug" not in (res.extensions or {})
+
+
+async def test_an_async_validation_failure_with_a_raising_teardown_publishes_no_debug_key(
+    install_probe_schema: _InstallProbeSchema,
+) -> None:
+    """The async engine's pre-execution error object is not mistaken for an execution result.
+
+    Async validation assigns a ``PreExecutionError`` to the execution context's
+    result before teardown; the recovery path's second results read must still
+    publish no ``debug`` key.
+    """
+    install_probe_schema([_RaisingTeardown, _acknowledged_debug])
+
+    res = await AsyncTestClient().query(
+        "{ definitelyNotAField }",
+        assert_no_errors=False,
+        url="/graphql-async/",
+    )
+
+    assert res.errors
+    assert "debug" not in (res.extensions or {})
+
+
+# ---------------------------------------------------------------------------
+# spec-048 Decision 5 - a non-bool acknowledgement never arms the disclosure.
+# ---------------------------------------------------------------------------
+
+
+@override_settings(DEBUG=False)
+def test_a_refused_acknowledgement_never_becomes_an_armed_extension(
+    install_probe_schema: _InstallProbeSchema,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A schema listing the misspelled acknowledgement refuses the operation, never discloses.
+
+    The refusal happens when the entry is built for the operation, so no operation
+    runs with it: the request is answered with the configuration code, no ``debug``
+    key, and the server log names the construction error.
+    """
+    install_probe_schema([_refused_acknowledgement])
+
+    with caplog.at_level(logging.ERROR, logger="django_strawberry_framework"):
+        res = TestClient().query("{ __typename }", assert_no_errors=False)
+
+    assert res.data is None
+    assert [error.get("extensions", {}).get("code") for error in res.errors or []] == [
+        SCHEMA_CONFIGURATION_ERROR_CODE,
+    ]
+    assert "debug" not in (res.extensions or {})
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(_REFUSED_ACKNOWLEDGEMENT_MESSAGE in message for message in messages), messages
+
+
+@override_settings(DEBUG=False)
+def test_a_refused_acknowledgement_on_a_plain_schema_raises_to_the_caller() -> None:
+    """On a plain ``strawberry.Schema`` the construction error itself is the observable.
+
+    No ``DjangoSchema`` stands between upstream's per-operation extension
+    resolution and the view, so the ``ConfigurationError`` the misspelled
+    acknowledgement raises escapes the request rather than any operation running
+    with the disclosure armed.
+    """
+    with pytest.raises(ConfigurationError) as excinfo:
+        TestClient().query("{ ok }", url="/graphql-plain/")
+
+    assert str(excinfo.value) == _REFUSED_ACKNOWLEDGEMENT_MESSAGE

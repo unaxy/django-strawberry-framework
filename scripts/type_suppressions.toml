@@ -296,7 +296,6 @@
 "tests/extensions/test_debug.py::test_a_nan_duration_costs_only_its_own_row_and_the_rest_keep_their_order._InjectingQuery.ok" = { reportArgumentType = 1 }
 "tests/extensions/test_debug.py::test_a_non_bool_acknowledgement_is_refused_at_construction" = { reportArgumentType = 1 }
 "tests/extensions/test_debug.py::test_a_non_finite_duration_is_refused_at_the_serializer" = { reportArgumentType = 1 }
-"tests/extensions/test_debug.py::test_a_refused_acknowledgement_never_becomes_an_armed_extension" = { reportArgumentType = 1 }
 "tests/extensions/test_debug.py::test_zero_argument_construction_defaults_to_the_safe_answer" = { reportCallIssue = 1 }
 "tests/extensions/test_operation_state.py::_RefusingAssignment.execution_context" = { reportIncompatibleVariableOverride = 1 }
 "tests/extensions/test_operation_state.py::test_a_resolver_assigning_to_a_managed_extension_leaves_nothing_behind.TamperingQuery.tamper" = { reportAttributeAccessIssue = 1 }

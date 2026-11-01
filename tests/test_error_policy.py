@@ -16,12 +16,14 @@ it matters. What is left here is the surface a request cannot express:
   inferred from two sampled responses;
 - the extension's INSTALL POSITION, which is a property of the extensions list
   rather than of any response, and the consumer-supplied suppression that keeps
-  a consumer's own entry exactly where they put it;
+  a consumer's own entry exactly where they put it (a declared entry beside a
+  debug factory leaving debug's exception capture intact is live);
 - the schema attribute answering a duplicate of the stored policy (identity is
   not on the wire; the resolver-write consequence is live);
-- the standalone fallback a plain ``strawberry.Schema`` takes, which has no
-  ``error_policy`` attribute to read, and the exact-type-gated fallback a schema
-  carrying a WRONG ``error_policy`` attribute takes;
+- the absent ``error_policy`` attribute behind the standalone fallback a plain
+  ``strawberry.Schema`` takes (the masked response it serves is live), the
+  exact-type-gated fallback a schema carrying a WRONG ``error_policy`` attribute
+  takes (the hook failure a plain schema leaves unmasked is live);
 - the two teardown no-ops (a ``None`` result, an error-free result) whose whole
   observable behavior is that nothing happened, and the async
   ``PreExecutionError`` whose ``original_error is None`` the JSON envelope cannot
@@ -43,7 +45,7 @@ it matters. What is left here is the surface a request cannot express:
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import NoReturn
 
@@ -66,7 +68,6 @@ from django_strawberry_framework.error_policy import (
     resolve_error_policy,
 )
 from django_strawberry_framework.exceptions import ConfigurationError
-from django_strawberry_framework.extensions.debug import DjangoDebugExtension
 from django_strawberry_framework.extensions.error_policy import (
     DjangoErrorPolicyExtension,
     mask_execution_result,
@@ -80,7 +81,7 @@ from django_strawberry_framework.utils._narrowing import (
 )
 from django_strawberry_framework.utils.typing import object_result
 from tests._execution import execution_result, make_execution_context
-from tests._idioms import ClassReadRaises, json_at, json_list
+from tests._idioms import ClassReadRaises, json_at
 
 _SENSITIVE = "standalone schema secret /srv/private/standalone.key"
 
@@ -436,30 +437,6 @@ def test_the_error_policy_extension_runs_first_in_every_chain() -> None:
     assert isinstance(resolved[-3], DjangoResourcePolicyExtension)
 
 
-def test_a_declared_policy_beside_a_debug_factory_preserves_debug_exception_capture() -> None:
-    """Declaring the masking extension must not duplicate it or preempt debug teardown.
-
-    A direct entry of the schema's own error-policy extension is read once as a
-    declaration and never joins the chain, so the schema still installs exactly
-    one masking authority - and the neighbouring factory entry still builds its
-    own extension per operation and still captures the exception that was
-    masked. Two masking extensions would mint a second correlation id for an
-    already-masked error and leave debug's teardown looking at the wrong one.
-    """
-
-    def debug_factory() -> DjangoDebugExtension:
-        return DjangoDebugExtension(allow_unsafe_production=True)
-
-    schema = DjangoSchema(
-        query=_Query,
-        extensions=[DjangoErrorPolicyExtension(), debug_factory],
-    )
-    result = schema.execute_sync("{ boom }")
-
-    assert result.extensions is not None
-    assert len(json_list(result.extensions, "debug", "exceptions")) == 1
-
-
 def test_a_consumer_extension_is_prepended_behind_the_policy_not_in_front_of_it() -> None:
     """A consumer's own extension keeps its order relative to its peers."""
 
@@ -502,15 +479,16 @@ def test_a_consumer_supplied_policy_entry_declares_the_automatic_one() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_a_plain_schema_with_the_extension_installed_by_hand_falls_back_to_the_default(
+def test_a_plain_schema_with_the_extension_installed_by_hand_masks_with_no_policy_attribute(
     settings: pytest_django.Settings,
 ) -> None:
-    """A hand-wired ``strawberry.Schema`` has no ``error_policy`` attribute to read.
+    """A hand-wired ``strawberry.Schema`` has no ``error_policy``; its masked error, no original.
 
-    The fallback is the MASKING one on purpose: an extension whose whole job is to
-    mask must not quietly become a no-op because it could not find its
-    configuration. This is a supported standalone use, so it must not raise
-    either.
+    What the client reads - the default policy's message and a correlation id, the
+    sensitive text absent - is pinned over HTTP in
+    ``examples/fakeshop/test_query/test_error_policy_api.py::test_a_plain_schema_with_the_extension_installed_by_hand_falls_back_to_the_default``.
+    What stays here has no wire shape: the schema really has no attribute to read,
+    and the error the policy hands back has shed its ``original_error``.
     """
     assert read_attr(settings, "DEBUG") is False
     schema = strawberry.Schema(query=_Query, extensions=[DjangoErrorPolicyExtension])
@@ -518,46 +496,7 @@ def test_a_plain_schema_with_the_extension_installed_by_hand_falls_back_to_the_d
 
     result = schema.execute_sync("{ boom }")
     assert result.errors is not None
-    error = result.errors[0]
-    assert error.message == DEFAULT_ERROR_POLICY.message
-    assert _SENSITIVE not in error.message
-    assert error.original_error is None
-    assert error.extensions is not None
-    correlation_id = json_at(error.extensions, DEFAULT_ERROR_POLICY.correlation_extension_key)
-    assert len(require_instance(correlation_id, str)) == 32
-
-
-class _FailingHookExtension(SchemaExtension):
-    """An ordinary consumer extension failing at the operation-teardown half."""
-
-    @override
-    def on_operation(self) -> Iterator[None]:
-        yield
-        raise RuntimeError(_SENSITIVE)
-
-
-def test_a_plain_schema_leaves_a_hook_failure_unmasked() -> None:
-    """The hook seam lives on the schema, so a hand-wired plain schema has none.
-
-    A hook exception is converted into a result only after every teardown has
-    unwound, so no extension is left to mask it; ``DjangoSchema`` masks that
-    result at its own return. A plain ``strawberry.Schema`` carrying the
-    exported extension by hand has no such return, so the identical hook
-    failure reaches the client with its own message and no correlation id.
-    """
-    assert read_attr(django_settings, "DEBUG") is False
-    schema = strawberry.Schema(
-        query=_Query,
-        extensions=[DjangoErrorPolicyExtension, _FailingHookExtension],
-    )
-    result = schema.execute_sync("{ ping }")
-    assert result.errors, result
-    messages = " ".join(error.message for error in result.errors)
-    assert _SENSITIVE in messages, messages
-    for error in result.errors:
-        assert (error.extensions or {}).get(
-            DEFAULT_ERROR_POLICY.correlation_extension_key,
-        ) is None, error.extensions
+    assert result.errors[0].original_error is None
 
 
 # ---------------------------------------------------------------------------

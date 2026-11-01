@@ -774,7 +774,7 @@ examples/fakeshop/test_query/    # Live GraphQL HTTP tests for fakeshop's consum
 ├── test_filter_logic_customization_api.py  # Authored excluded-empty memberships and queryset overrides keep their logical-arm meaning.
 ├── test_filter_lookup_catalog_api.py  # Consumer filter overrides retain usable text-pattern lookups in the all-lookup catalog.
 ├── test_filter_normalizer_arguments_api.py  # Ordinary JSON consumers retain each list normalizer arm's refusals and admitted forms.
-├── test_filter_publication_api.py  # Published filter cycles and deferred consumer fields preserve their declared inputs over HTTP.
+├── test_filter_publication_api.py  # Generated filter and write inputs keep their declared shapes over HTTP, shared names included.
 ├── test_filter_querysets_api.py  # Live HTTP filters preserve consumer row occurrences and paginate generated deep loan predicates.
 ├── test_filter_widget_binding_api.py  # Native filter widgets read supplied values through their bound forms over HTTP.
 ├── test_form_construction_api.py # Live HTTP form construction, validation and narrowed-update contracts.

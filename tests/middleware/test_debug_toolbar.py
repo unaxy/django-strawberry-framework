@@ -5,11 +5,13 @@ Covers the import guards, the unreachable postprocess bails, and the bridge temp
 Happy-path GraphiQL HTML, named JSON panel payloads (including ``has_content``-false
 ``title: null`` on RedirectsPanel, callable panel title/subtitle, and the
 TemplatesPanel skip), Content-Length refresh after CommonMiddleware, introspection
-skip, panel-route JSON leak guard, and ``Content-Encoding`` early-out live in
+skip, panel-route JSON leak guard, ``Content-Encoding`` early-out, and the
+``_get_payload`` bails for a batched JSON-array body and a consumer view's
+non-JSON or undecodable declared-JSON body live in
 ``examples/fakeshop/test_query/test_debug_toolbar_api.py``. What stays here has no
 wire shape: the soft-dependency absence matrix (a missing ``debug_toolbar`` is
-never a live path); ``_get_payload`` bails the real toolbar never takes (no
-``request_id``, a non-object JSON body, undecodable declared-JSON); streaming
+never a live path); the ``_get_payload`` bail the real toolbar never takes (no
+``request_id``); streaming
 responses (fakeshop's GraphQL view never streams); the non-class ``view_class``
 guard (stock RequestPanel still ``AttributeError``s on a string ``view_class``
 before a 200 can land); and the copied bridge template's source forms, which no
@@ -28,11 +30,10 @@ from types import ModuleType
 from typing import TYPE_CHECKING
 
 import pytest
-from debug_toolbar.toolbar import DebugToolbar
 from django.apps import apps
 from django.core.exceptions import ImproperlyConfigured
 from django.http import HttpRequest, HttpResponse, StreamingHttpResponse
-from django.test import RequestFactory, modify_settings, override_settings
+from django.test import RequestFactory, modify_settings
 from django.urls import include, path
 
 import django_strawberry_framework
@@ -362,56 +363,18 @@ def test_get_payload_panel_title_only_when_has_content(toolbar_leaf: ModuleType)
     assert "TemplatesPanel" not in panels
 
 
-def test_get_payload_bails_on_non_object_json_body(toolbar_leaf: ModuleType) -> None:
-    """A non-object JSON body yields ``None``.
-
-    A valid single GraphQL response is always a JSON object, so this branch is
-    unreachable through the real-request tests; without the guard the
-    subscript-assign would raise and 500 the request.
-    """
-    request = RequestFactory().post("/graphql/")
-    response = HttpResponse(b"[1, 2]", content_type="application/json")
-    toolbar = _FakeToolbar(request_id="riid")
-    assert call_method(toolbar_leaf, "_get_payload", request, response, toolbar) is None
-
-
-@pytest.mark.parametrize("content", [b"not json", b"\xff"])
-def test_malformed_json_body_gets_no_package_rewrite(
-    middleware: DebugToolbarMiddleware,
-    content: bytes,
-) -> None:
-    """A tagged declared-JSON body that cannot be parsed or decoded is not rewritten.
-
-    A valid Strawberry operation always returns a JSON object, so the custom
-    response/error-handler path is unreachable through fakeshop's real GraphQL
-    endpoint. Driving the full package postprocess proves the development
-    middleware neither masks the original response nor turns it into a 500. The
-    stock postprocess may still add its normal toolbar headers.
-    """
-    request = RequestFactory().post("/graphql/", data="{}", content_type="application/json")
-    setattr(request, _IS_GRAPHIQL, True)
-    response = HttpResponse(content, content_type="application/json; charset=utf-8")
-    response["Content-Length"] = len(response.content)
-
-    # No panels: the stock postprocess then has no instrumentation window to have missed.
-    with override_settings(DEBUG_TOOLBAR_PANELS=[], ROOT_URLCONF=__name__):
-        toolbar = DebugToolbar(request, middleware.get_response)
-        result = middleware._postprocess(request, response, toolbar)
-
-    assert result is response
-    assert result.content == content
-    assert int(result["Content-Length"]) == len(content)
-
-
 def test_process_view_tolerates_non_class_view_class(middleware: DebugToolbarMiddleware) -> None:
     """A non-class ``view_class`` -> ``False``, no ``TypeError`` from ``issubclass``.
 
     Live HTML negatives in
     ``examples/fakeshop/test_query/test_debug_toolbar_api.py`` drive real class
     and function views. A string ``view_class`` still 500s later inside stock
-    ``RequestPanel.generate_stats`` (``get_name_from_obj`` assumes a class), so
-    the ``isinstance(view, type)`` short-circuit has no independent 200 on the
-    wire.
+    ``RequestPanel.generate_stats`` (``get_name_from_obj`` assumes a class), and
+    with every panel disabled it 500s inside Django itself: the toolbar renders
+    and stores every processed response, that render reverses ``djdt`` URLs, and
+    populating the resolver reads ``URLPattern.lookup_str``, which takes
+    ``view_class.__module__`` off any callback carrying one. So the
+    ``isinstance(view, type)`` short-circuit has no independent 200 on the wire.
     """
     request = RequestFactory().get("/")
 

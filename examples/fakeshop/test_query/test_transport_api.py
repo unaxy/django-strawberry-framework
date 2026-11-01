@@ -34,6 +34,12 @@ answering ``200`` on ``cap-tiny/``. The parse witness's mount also shows a GET's
 request-body envelope guard off. Floor parity (the py3.10 / Django 5.2.16 floor) is a
 separately-invoked run of this same file, not a separate test.
 
+The multipart delegates are pinned on the same mounts: every structurally invalid
+``map`` a client can send is Strawberry's controlled ``400``, while a consumer view's
+own JSON-hook failure and a traversal-typed server bug outside the upload utility
+reach the server as raised (sync and async), and a batched ``operations`` list keeps
+its batch on a batching holder.
+
 The wire contract's encoding rejections add one more async row. The strict UTF-8
 wire contract (Decision 9) is enforced in
 ``views.py::_RequestBodyBoundaryMixin.parse_json``, which both views inherit, so
@@ -77,6 +83,7 @@ go through the shared helpers.
 
 import asyncio
 import contextlib
+import functools
 import json
 from collections.abc import Awaitable, Callable, Generator, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, ParamSpec, TypeVar, overload
@@ -109,6 +116,7 @@ from graphql_client import (
 )
 from strawberry.django.views import GraphQLView as UpstreamGraphQLView
 from strawberry.extensions import AddValidationRules
+from strawberry.file_uploads import Upload
 from strawberry.http.base import BaseView
 from typing_extensions import TypedDict, Unpack, override
 
@@ -118,6 +126,7 @@ from django_strawberry_framework import _strawberry_patches as strawberry_patche
 from django_strawberry_framework._boundary_ordering import _BOUNDARY_MARKER
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.middleware.request_body import _package_view_instance
+from django_strawberry_framework.utils._narrowing import call_method, require_instance
 from django_strawberry_framework.views import (
     _BODY_LIMIT_REASON,
     AsyncDjangoGraphQLView,
@@ -539,6 +548,90 @@ async def _async_cap_tiny_multipart_view(
     return await view(request, *args, **kwargs)
 
 
+class _FailingJsonHookView(DjangoGraphQLView):
+    """A consumer view whose JSON hook raises a non-structural exception of its own."""
+
+    @override
+    def parse_json(self, data: str | bytes) -> object:
+        raise RuntimeError("consumer decode hook failed")
+
+
+class _ServerBugJsonHookView(DjangoGraphQLView):
+    """A consumer view whose JSON hook has a server-side bug of a TRAVERSAL type."""
+
+    @override
+    def parse_json(self, data: str | bytes) -> object:
+        raise TypeError("server-side bug before the upload traversal")
+
+
+class _ServerBugJsonHookAsyncView(AsyncDjangoGraphQLView):
+    """The async twin of ``_ServerBugJsonHookView``."""
+
+    @override
+    def parse_json(self, data: str | bytes) -> object:
+        raise TypeError("server-side bug before the upload traversal")
+
+
+@_carrying_the_packages_csrf_mark(AsyncDjangoGraphQLView)
+async def _async_server_bug_multipart_view(
+    request: HttpRequest,
+    *args: object,
+    **kwargs: object,
+) -> HttpResponseBase:
+    """``_ServerBugJsonHookAsyncView`` with uploads on, for the async parser-exception row."""
+    view = _ServerBugJsonHookAsyncView.as_view(
+        schema=config_schema.schema,
+        max_request_body_bytes=_ROOMY_CAP,
+        multipart_uploads_enabled=True,
+    )
+    return await view(request, *args, **kwargs)
+
+
+@strawberry.type
+class _UploadEchoQuery:
+    """The batching holder's query root: one field, since a schema needs one."""
+
+    @strawberry.field
+    def ok(self) -> bool:
+        return True
+
+
+@strawberry.type
+class _UploadEchoMutation:
+    """A write that reports the file the multipart map substituted into its variable."""
+
+    @strawberry.mutation
+    def echo_upload(self, upload: Upload) -> str:
+        name = require_instance(read_attr(upload, "name"), str)
+        content = require_instance(call_method(upload, "read"), bytes)
+        return f"{name}:{content.decode()}"
+
+
+@functools.cache
+def _batching_upload_schema() -> DjangoSchema:
+    """The batching holder's schema: uploads reach a resolver, and batches are on."""
+    return DjangoSchema(
+        query=_UploadEchoQuery,
+        mutation=_UploadEchoMutation,
+        config=strawberry_config(batching_config={"max_operations": 2}),
+    )
+
+
+@_carrying_the_packages_csrf_mark(DjangoGraphQLView)
+def _batching_multipart_view(
+    request: HttpRequest,
+    *args: object,
+    **kwargs: object,
+) -> HttpResponseBase:
+    """The package view over ``_batching_upload_schema`` with uploads on."""
+    view = DjangoGraphQLView.as_view(
+        schema=_batching_upload_schema(),
+        max_request_body_bytes=_ROOMY_CAP,
+        multipart_uploads_enabled=True,
+    )
+    return view(request, *args, **kwargs)
+
+
 def _upstream_graphql_view(
     request: HttpRequest,
     *args: object,
@@ -575,6 +668,16 @@ urlpatterns = [
     path("async-cap-tiny/", _async_cap_tiny_view),
     path("setup-limited/<int:limit>/", _SETUP_LIMITED_CALLBACK),
     path("upstream-graphql/", _upstream_graphql_view),
+    path(
+        "multipart-failing-hook/",
+        _capped_view(_FailingJsonHookView, _ROOMY_CAP, uploads=True),
+    ),
+    path(
+        "multipart-server-bug/",
+        _capped_view(_ServerBugJsonHookView, _ROOMY_CAP, uploads=True),
+    ),
+    path("async-multipart-server-bug/", _async_server_bug_multipart_view),
+    path("multipart-batching/", _batching_multipart_view),
 ]
 
 
@@ -2631,15 +2734,49 @@ def _multipart_fields(field: str, raw: bytes) -> list[tuple[str, bytes]]:
     return list(documents.items())
 
 
+#: An ``operations`` document whose ``variables`` is a list, so a map path can index it.
+_LIST_VARIABLES_OPERATIONS = b'{"query": "{ __typename }", "variables": []}'
+
+
 @pytest.mark.django_db
-def test_a_multipart_map_must_be_an_object_not_a_batched_body() -> None:
-    """A JSON list in ``map`` is a controlled 400 rather than an unhandled 500.
+@pytest.mark.parametrize(
+    ("operations", "files_map", "files"),
+    [
+        pytest.param(_operations_bytes(), b"[{}]", (), id="array-instead-of-object"),
+        pytest.param(
+            _operations_bytes(),
+            b'{"0": [1]}',
+            (("0", "0.txt", b"x"),),
+            id="non-string-path",
+        ),
+        pytest.param(
+            _LIST_VARIABLES_OPERATIONS,
+            b'{"0": ["variables.not-an-index"]}',
+            (("0", "0.txt", b"x"),),
+            id="non-numeric-list-index",
+        ),
+        pytest.param(
+            _LIST_VARIABLES_OPERATIONS,
+            b'{"0": ["variables.0"]}',
+            (("0", "0.txt", b"x"),),
+            id="missing-list-index",
+        ),
+    ],
+)
+def test_a_multipart_map_must_be_an_object_not_a_batched_body(
+    operations: bytes,
+    files_map: bytes,
+    files: tuple[tuple[str, str, bytes], ...],
+) -> None:
+    """A structurally invalid ``map`` is a controlled 400 rather than an unhandled 500.
 
     The general JSON guard permits a list of objects because an HTTP request body
     may be a valid GraphQL batch. Multipart's ``map`` is not a request body: the
     upload utility consumes it as a mapping and calls ``.items()``, so a list
     of objects that passed the generic guard would escape from the utility as
-    ``AttributeError``. This live mount pins that the multipart
+    ``AttributeError``; a non-string path, a non-numeric list index and an index
+    past the list's end escape it as ``AttributeError``, ``ValueError`` and
+    ``IndexError``. This live mount pins that the multipart
     wrapper owns the narrower field contract while ordinary batched
     ``operations`` remain Strawberry's concern.
     """
@@ -2648,12 +2785,79 @@ def test_a_multipart_map_must_be_an_object_not_a_batched_body() -> None:
     response = _post_multipart(
         Client(raise_request_exception=False),
         "/graphql/",
-        _multipart_fields("map", b"[{}]"),
+        [("operations", operations), ("map", files_map)],
+        files=files,
     )
 
     assert response.status_code == 400
     assert response.content == b"Unable to parse the multipart body"
     _assert_no_graphql_envelope(response)
+
+
+def test_a_multipart_consumer_json_hook_failure_is_not_downgraded_to_a_400() -> None:
+    """A consumer ``parse_json`` raising its own exception reaches the server as raised.
+
+    The multipart delegates translate only a traversal failure the upload utility
+    raised. A view's JSON hook runs inside the same delegated parse, and a failure
+    of its own - not a malformed client document - must surface as the server
+    fault it is rather than as Strawberry's client ``400``.
+    """
+    with (
+        override_settings(ROOT_URLCONF=__name__),
+        pytest.raises(RuntimeError, match="consumer decode hook failed"),
+    ):
+        _post_multipart(Client(), "/multipart-failing-hook/", _multipart_fields("map", b"{}"))
+
+
+def test_a_traversal_typed_server_bug_outside_the_upload_utility_stays_a_server_error() -> None:
+    """A ``TypeError`` raised before the upload traversal is never translated to a ``400``.
+
+    It shares the traversal's exception type, so only the translation's provenance
+    scoping - the traceback must pass through the upload utility's own frame -
+    keeps it from being reported as a client error.
+    """
+    with (
+        override_settings(ROOT_URLCONF=__name__),
+        pytest.raises(TypeError, match="server-side bug before the upload traversal"),
+    ):
+        _post_multipart(Client(), "/multipart-server-bug/", _multipart_fields("map", b"{}"))
+
+
+async def test_the_async_view_keeps_a_traversal_typed_server_bug_a_server_error() -> None:
+    """The async multipart delegate scopes the translation to the upload utility identically."""
+    with (
+        override_settings(ROOT_URLCONF=__name__),
+        pytest.raises(TypeError, match="server-side bug before the upload traversal"),
+    ):
+        await _post_multipart(
+            AsyncClient(),
+            "/async-multipart-server-bug/",
+            _multipart_fields("map", b"{}"),
+        )
+
+
+@pytest.mark.django_db
+def test_a_batched_multipart_operations_document_keeps_its_batch() -> None:
+    """A batched ``operations`` list reaches Strawberry's batch execution with its upload.
+
+    The batch allowance belongs to ``operations``: only ``map`` must be an object,
+    so a list of operations whose map path indexes the batch has the file
+    substituted into that operation's variable, and the resolver reads it.
+    """
+    operations = (
+        b'[{"query": "mutation($upload: Upload!) { echoUpload(upload: $upload) }", '
+        b'"variables": {"upload": null}}]'
+    )
+    with override_settings(ROOT_URLCONF=__name__):
+        response = _post_multipart(
+            Client(),
+            "/multipart-batching/",
+            [("operations", operations), ("map", b'{"0": ["0.variables.upload"]}')],
+            files=(("0", "upload.txt", b"upload body"),),
+        )
+
+    assert response.status_code == 200
+    assert json.loads(response.content) == [{"data": {"echoUpload": "upload.txt:upload body"}}]
 
 
 async def test_the_async_view_rejects_the_same_multipart_map_shape() -> None:

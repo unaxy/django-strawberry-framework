@@ -16,8 +16,8 @@ where they matter. What is left here is the surface a request cannot express:
   build-time contract between a field and the schema policy (live sibling:
   ``/rp-rows/`` collection ceilings);
 - context threading against the frozen / dict / object context shapes, and the
-  fail-closed default a missing stash produces (live sibling: ``/rp-deadline/``
-  and the authority mounts);
+  fail-closed default a missing stash produces (live sibling: ``/rp-deadline/``,
+  the authority mounts, and the nested-schema restore on ``/rp-nested/``);
 - the walker's degenerate inputs - an unknown fragment, a cyclic fragment set,
   an operation kind the schema does not define, an untyped container, an upload
   that cannot report its size - which a valid request cannot produce but a
@@ -67,7 +67,7 @@ from dataclasses import FrozenInstanceError
 from dataclasses import fields as dataclass_fields
 from itertools import islice
 from types import MappingProxyType, SimpleNamespace
-from typing import NewType, NoReturn, SupportsIndex, TypeVar, overload
+from typing import NoReturn, SupportsIndex, TypeVar, overload
 
 import pytest
 import pytest_django
@@ -84,19 +84,17 @@ from graphql import (
     GraphQLSchema,
     OperationDefinitionNode,
     SelectionNode,
-    StringValueNode,
-    ValueNode,
     build_schema,
     parse,
 )
 from graphql.language.token_kind import TokenKind
 from strawberry.extensions import ValidationCache
 from strawberry.extensions.base_extension import SchemaExtension
-from strawberry.types import ExecutionResult, Info
+from strawberry.types import Info
 from typing_extensions import override
 
 import django_strawberry_framework.resource_policy as rp
-from django_strawberry_framework import DjangoSchema, Upload, strawberry_config
+from django_strawberry_framework import DjangoSchema, Upload
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.extensions.resource_policy import (
     _CLOSE_TOKEN_KINDS,
@@ -627,78 +625,6 @@ def test_a_non_policy_value_under_the_key_is_ignored() -> None:
     """A consumer key collision must not become "the request has no bounds"."""
     context = {DST_RESOURCE_POLICY: "not a policy"}
     assert policy_from_info(SimpleNamespace(context=context)) == DEFAULT_RESOURCE_POLICY
-
-
-def test_nested_sync_schema_restores_the_outer_policy_and_deadline() -> None:
-    """An inner schema must not widen later outer collection work."""
-
-    @strawberry.type
-    class InnerQuery:
-        @strawberry.field
-        def ping(self) -> str:
-            return "pong"
-
-    @strawberry.type
-    class OuterQuery:
-        @strawberry.field
-        def nested(self, info: Info[object, object]) -> str:
-            before = policy_from_info(info)
-            inner = DjangoSchema(query=InnerQuery)
-            inner_result = inner.execute_sync("{ ping }", context_value=info.context)
-            after = policy_from_info(info)
-            rows = bounded_rows(list(range(10)), info)
-            assert isinstance(rows, list)
-            return (
-                f"{before.max_list_rows}:{after.max_list_rows}:{len(rows)}:"
-                f"{before.execution_deadline_seconds}:{after.execution_deadline_seconds}:"
-                f"{inner_result.errors}"
-            )
-
-    schema = DjangoSchema(
-        query=OuterQuery,
-        resource_policy=ResourcePolicy(max_list_rows=1, execution_deadline_seconds=60),
-    )
-    result = schema.execute_sync("{ nested }", context_value={})
-
-    assert result.errors is None, result.errors
-    assert result.data is not None
-    assert result.data["nested"] == "1:1:1:60:60:None"
-
-
-async def test_nested_async_schema_restores_the_outer_policy_and_deadline() -> None:
-    """The same context restoration contract holds across awaited inner execution."""
-
-    @strawberry.type
-    class InnerQuery:
-        @strawberry.field
-        async def ping(self) -> str:
-            return "pong"
-
-    @strawberry.type
-    class OuterQuery:
-        @strawberry.field
-        async def nested(self, info: Info[object, object]) -> str:
-            before = policy_from_info(info)
-            inner = DjangoSchema(query=InnerQuery)
-            inner_result = await inner.execute("{ ping }", context_value=info.context)
-            after = policy_from_info(info)
-            rows = bounded_rows(list(range(10)), info)
-            assert isinstance(rows, list)
-            return (
-                f"{before.max_list_rows}:{after.max_list_rows}:{len(rows)}:"
-                f"{before.execution_deadline_seconds}:{after.execution_deadline_seconds}:"
-                f"{inner_result.errors}"
-            )
-
-    schema = DjangoSchema(
-        query=OuterQuery,
-        resource_policy=ResourcePolicy(max_list_rows=1, execution_deadline_seconds=60),
-    )
-    result = await schema.execute("{ nested }", context_value={})
-
-    assert result.errors is None, result.errors
-    assert result.data is not None
-    assert result.data["nested"] == "1:1:1:60:60:None"
 
 
 # ---------------------------------------------------------------------------
@@ -3054,83 +2980,6 @@ def test_argument_less_directives_are_read_once_however_often_their_fragment_exp
     assert resolved == ["include"] * 50
 
 
-#: Every literal the spy scalar below was asked to parse, in order.
-_literal_parses: list[str] = []
-
-
-def _record_literal(node: ValueNode, _variables: dict[str, object] | None = None) -> object:
-    """Parse a literal by recording its text and handing it back unchanged."""
-    assert isinstance(node, StringValueNode)
-    _literal_parses.append(node.value)
-    return node.value
-
-
-SpyText = NewType("SpyText", str)
-
-_SPY_SCALAR = strawberry.scalar(
-    name="SpyText",
-    serialize=str,
-    parse_value=str,
-    parse_literal=_record_literal,
-)
-
-
-@strawberry.type
-class _SpyQuery:
-    """A query root whose one argument is parsed by the recording scalar."""
-
-    @strawberry.field
-    def hello(self) -> str:
-        return "hi"
-
-    @strawberry.field
-    def echo(self, text: SpyText) -> str:
-        return text
-
-
-def _spy_result(
-    document: str,
-    variables: dict[str, object] | None = None,
-    operation_name: str | None = None,
-) -> ExecutionResult:
-    """Execute ``document`` on a DjangoSchema whose policy admits eight scalar bytes."""
-    schema = DjangoSchema(
-        query=_SpyQuery,
-        config=strawberry_config(extra_scalar_map={SpyText: _SPY_SCALAR}),
-        resource_policy=ResourcePolicy(max_scalar_bytes=8),
-    )
-    _literal_parses.clear()
-    return schema.execute_sync(
-        document,
-        variable_values=variables,
-        operation_name=operation_name,
-    )
-
-
-def test_a_literal_in_an_unselected_operation_is_refused_before_its_scalar_parses_it() -> None:
-    result = _spy_result(
-        'query A { hello } query B { echo(text: "%s") }' % ("x" * 9),
-        operation_name="A",
-    )
-    assert result.data is None
-    assert result.errors is not None
-    assert result.errors[0].extensions is not None
-    assert result.errors[0].extensions["bound"] == "max_scalar_bytes"
-    assert _literal_parses == []
-
-
-def test_a_shadowed_variable_default_is_refused_before_its_scalar_parses_it() -> None:
-    result = _spy_result(
-        'query Q($t: SpyText = "%s") { echo(text: $t) }' % ("x" * 9),
-        {"t": "small"},
-    )
-    assert result.data is None
-    assert result.errors is not None
-    assert result.errors[0].extensions is not None
-    assert result.errors[0].extensions["bound"] == "max_scalar_bytes"
-    assert _literal_parses == []
-
-
 def test_an_untyped_container_inside_a_scalar_is_still_charged() -> None:
     """A JSON-shaped scalar's contents are nodes too, or they are a free payload."""
     with pytest.raises(ResourceLimitExceeded) as caught:
@@ -3922,17 +3771,16 @@ class _DriftingPolicy(ResourcePolicy):
         return object_result(object.__getattribute__, self, name)
 
 
-def test_an_explicit_extension_policy_is_read_out_once_when_it_is_accepted() -> None:
-    """One operation is bounded by ONE policy, whatever its configuration answers.
+def test_an_explicit_extension_policy_is_read_once_across_an_operation() -> None:
+    """The extension reads an explicit policy's bound once, when it accepts it.
 
-    The extension reads an explicit ``_policy`` out once, when it accepts it.
-    If every hook got the raw ``_policy``, the armed budget would get a
-    canonical snapshot while the pre-parse scan and the post-validation
-    document walk each re-read the consumer object, and a policy whose reads
-    are its own code could hand those hooks a different bound than the one the
-    request is actually running under - a one-token budget for the
-    snapshot and a million-token budget for the scan that was supposed to
-    enforce it.
+    If every hook got the raw ``_policy``, the armed budget would get a canonical
+    snapshot while the pre-parse scan and the post-validation document walk each
+    re-read the consumer object, and a policy whose reads are its own code could
+    hand those hooks a different bound than the one the request is running under.
+    The bound the request is refused by is pinned over HTTP in
+    ``examples/fakeshop/test_query/test_resource_policy_api.py::test_an_explicit_extension_policy_bounds_the_request_by_its_first_read``;
+    what stays here is the read count, which no response shows.
     """
     drifting = _DriftingPolicy()
     object.__getattribute__(drifting, "__dict__")["_armed"] = True
@@ -3948,10 +3796,7 @@ def test_an_explicit_extension_policy_is_read_out_once_when_it_is_accepted() -> 
         extensions=[lambda: DjangoResourcePolicyExtension(policy=drifting)],
     )
     result = schema.execute_sync("{ echo }")
-    assert result.data is None
     assert result.errors is not None
-    assert isinstance(result.errors[0], ResourceLimitExceeded)
-    assert result.errors[0].bound == "max_document_tokens"
     assert object.__getattribute__(drifting, "__dict__")["_reads"] == 1
 
 

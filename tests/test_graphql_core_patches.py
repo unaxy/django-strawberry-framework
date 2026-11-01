@@ -16,16 +16,15 @@ What stays here, and why a live request cannot express it:
   synchronously: those are the retirement sentinels (spec-050 Decision 12). With
   the patch installed a live request sees completed list data, never the residual
   coroutine, and an async request's plain-resolver queryset completes off the loop.
-- The asynchronous executor's arm leaving a non-queryset that offers both protocols
-  to upstream: no fakeshop resolver returns one.
 - ``_captured_upstream_method(None, ...)`` returning ``None`` rather than
   raising: a graphql-core build that omits ``ExecutionContext`` never reaches a
   schema.
 
 Wire-observable async list completion lives in
 ``examples/fakeshop/test_query/test_list_field_async_api.py`` (queryset
-completion with synchronous children, and an async-iterable list whose child
-fields are awaitable).
+completion with synchronous children, an async-iterable list whose child
+fields are awaitable, and a non-queryset offering both iteration protocols, which
+the asynchronous executor's arm leaves to upstream).
 """
 
 import asyncio
@@ -149,26 +148,6 @@ def test_captured_upstream_still_iterates_a_dual_protocol_list_synchronously(
     result = asyncio.run(_both_protocols_schema().execute("{ f }"))
     assert result.errors is None, result.errors
     assert result.data == {"f": ["sync"]}
-
-
-def test_async_completion_adapts_only_a_queryset(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The asynchronous executor's arm leaves a non-queryset offering both protocols to upstream.
-
-    The arm wraps a Django ``QuerySet`` only, so any other value completes through
-    whichever protocol the captured upstream method prefers: the installed patch and
-    the captured method answer the same data.
-    """
-    assert patches._patch_is_installed() is True
-    patched = asyncio.run(_both_protocols_schema().execute("{ f }"))
-    monkeypatch.setattr(
-        ExecutionContext,
-        "complete_list_value",
-        patches._original_complete_list_value,
-    )
-    upstream = asyncio.run(_both_protocols_schema().execute("{ f }"))
-    assert patched.errors is None, patched.errors
-    assert upstream.errors is None, upstream.errors
-    assert patched.data == upstream.data
 
 
 def test_apply_fails_loudly_when_upstream_shape_changes() -> None:

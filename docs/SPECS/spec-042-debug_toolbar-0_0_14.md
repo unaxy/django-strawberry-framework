@@ -268,13 +268,15 @@ request tests.
         `requestId`** (asserting `render_panel`'s JSON `content`/`scripts`
         shape), the HTML passthroughs for both Django dispatch shapes, the
         unrelated-JSON-view leak guard, the `Content-Encoding` early-out at both
-        mutation sites, the `Content-Length` match after each mutation, and the
-        inert-under-shipped-settings baseline.
+        mutation sites, the `Content-Length` match after each mutation, the
+        `_get_payload` bails for a batched JSON-array body and a consumer view's
+        non-JSON or undecodable body, and the inert-under-shipped-settings
+        baseline.
         **Package-tier — `tests/middleware/test_debug_toolbar.py`**: the paths no
         live request reaches — the coverage-only targeted units (streaming
         early-out, no-`request_id` bail / `has_content` false and callable
-        title / subtitle / non-object and undecodable body bails, the non-class
-        `view_class` guard), the template-port guard, and **toolbar-absent**:
+        title / subtitle, the non-class `view_class` guard), the template-port
+        guard, and **toolbar-absent**:
         the shared `tests/_soft_dependency.py` eviction + two-sided
         parent-attribute restore with an importlib-compatible
         `sys.modules["debug_toolbar"] = None` sentinel —
@@ -1797,11 +1799,10 @@ that method consumes (`enabled_panels` and `render_toolbar()`):
     fires live. A sibling unit drives stub panels with `has_content` false (title
     `None`), callable `title` / `nav_subtitle` (called), and a `TemplatesPanel`
     (skipped) (`test_get_payload_panel_title_only_when_has_content`): stock panels
-    expose properties, so the callable arm is package-only. A further sibling drives
-    the **non-object-body bail**: a response whose decoded JSON is a list makes
-    `_get_payload` return `None`
-    (`test_get_payload_bails_on_non_object_json_body`). A valid single GraphQL
-    response is always an object, so this branch is unreachable live.
+    expose properties, so the callable arm is package-only. The **non-object-body
+    bail** is live: a batched operation on a holder mount with batching enabled
+    answers a JSON array, which passes through with no `debugToolbar` member
+    (`examples/fakeshop/test_query/test_debug_toolbar_api.py::TestToolbarPresent::test_a_batched_array_response_is_passed_through_without_a_payload`).
 
 14a. **`process_view` non-class `view_class` guard.** Call `process_view` with a
     `view_func` whose `view_class` attribute is the string `"not-a-class"` and assert
@@ -1809,15 +1810,17 @@ that method consumes (`enabled_panels` and `render_toolbar()`):
     (`test_process_view_tolerates_non_class_view_class`). The
     `isinstance(view, type)` guard short-circuits before `issubclass`, which would
     otherwise raise `TypeError`. No live request reaches it: a string `view_class`
-    still 500s later inside stock `RequestPanel.generate_stats`, so the guard has no
+    still 500s later inside stock `RequestPanel.generate_stats`, and with every panel
+    disabled inside Django's own `URLPattern.lookup_str`, which the toolbar's render
+    reaches by reversing `djdt` URLs against the same URLconf, so the guard has no
     independent 200 on the wire.
 
-14b. **Undecodable / unparseable declared-JSON body** — drive the full
-    `_postprocess` on a tagged request with a pre-set `Content-Length`, parametrized
-    over a body that is not JSON at all (`b"not json"`) and one whose bytes do not
-    decode under the declared charset (`b"\xff"`); each returns the same response
-    with its body and `Content-Length` unchanged
-    (`test_malformed_json_body_gets_no_package_rewrite`). This is the rest of the
+14b. **Undecodable / unparseable declared-JSON body** — a consumer view subclass
+    whose `encode_json` answers a body that is not JSON at all (`b"not json"`) or
+    whose bytes do not decode under the declared charset (`b"\xff"`), served through
+    the toolbar chain; each response keeps its body and `Content-Length`
+    (`examples/fakeshop/test_query/test_debug_toolbar_api.py::TestToolbarPresent::test_a_declared_json_body_that_does_not_decode_is_not_rewritten`).
+    This is the rest of the
     response-shape family Test 14's non-object case starts, and it is parametrized
     because a guard written against one spelling of a bad input is a guess where a
     guard written against the answer is a boundary.
@@ -1885,9 +1888,10 @@ round trip (Test 6); Test 2 pins the inert-under-`DEBUG=False` direction. Reache
 the **absence / guard tests (9–12a)**: the guard's raise path, the import-surface
 matrix, the raw-`ImportError` propagation for a present-but-broken install, and the
 `apps.is_installed` wiring gate's `ImproperlyConfigured` raise. Reached **only by the
-package-tier units (13–14b)**: the streaming early-out, the no-`request_id` bail, the
-callable title / subtitle arm, the non-object / undecodable / unparseable branches of
-`_get_payload`, and the `isinstance(view, type)` detection guard. The template-port
+package-tier units (13–14a)**: the streaming early-out, the no-`request_id` bail, the
+callable title / subtitle arm, and the `isinstance(view, type)` detection guard. The
+non-object / undecodable / unparseable branches of `_get_payload` are reached live
+(14, 14b) through holder mounts beside fakeshop's `/graphql/`. The template-port
 guard (16) earns no Python coverage — the asset is markup and JavaScript, not counted
 lines; it exists to pin the port's invariants and diverged forms mechanically. A
 branch unreachable through real requests gets its own targeted unit the same way —
@@ -2083,8 +2087,8 @@ each is in the [rationale][rationale-risks].
       save/clear/restore on setup/teardown. **Package —
       `tests/middleware/test_debug_toolbar.py`:** the two-sided-restore absence
       matrix, the coverage-only targeted units (streaming early-out,
-      no-`request_id` bail / callable title and subtitle / non-object and
-      undecodable body bails, the non-class `view_class` guard),
+      no-`request_id` bail / callable title and subtitle, the non-class
+      `view_class` guard), with the non-object and undecodable body bails live,
       the pyproject-row gate over the floor's three sites, and the template-port
       guard over the copied-asset invariants **and** the diverged guard forms as
       one parametrized row per predicate, each form pinned by the kind of row

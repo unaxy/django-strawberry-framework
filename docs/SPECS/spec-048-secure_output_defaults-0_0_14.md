@@ -1225,13 +1225,14 @@ the key the consumer wrote, and the safe-to-path type mapping over an `ImageFiel
 
 **Package tier — `tests/extensions/test_debug.py` additions.** The `__init__` signature's
 keyword-only default, its refusal of every non-bool acknowledgement (`"false"` above all, the
-truthy literal that would otherwise arm the disclosure) and the consequence that a schema
-carrying one fails when the engine builds the per-operation instance, the gate's
+truthy literal that would otherwise arm the disclosure), the gate's
 operation-time read and its inert path (no bracket, no snapshot), and the caps over
 synthetic rows: each string cut at its own limit and marked, the row-count caps keeping
 exactly the earliest rows, the shared budget admitting exceptions first and stopping at the
 first over-budget row, and both lists present when empty — the pure-function rows a live
-query cannot pin precisely.
+query cannot pin precisely. The consequence that a schema carrying a refused
+acknowledgement refuses the operation rather than disclosing is live:
+`examples/fakeshop/test_query/test_debug_extension_api.py::test_a_refused_acknowledgement_never_becomes_an_armed_extension`.
 
 **Base tier.** `tests/base/test_init.py` pins the `ErrorPolicy` /
 `DjangoErrorPolicyExtension` / `DjangoFilePathType` / `DjangoImagePathType` exports;

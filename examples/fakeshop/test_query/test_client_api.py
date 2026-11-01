@@ -7,18 +7,19 @@ an intentional missing-endpoint probe) using the package's own ``TestClient`` /
 payloads, authentication changes and the errors raised for invalid requests.
 
 Covered live here: the ``assert_no_errors=True`` raising direction on a real
-invalid selection; a non-``dict`` ``variables`` mapping (``MappingProxyType``,
-``UserDict``) sent as JSON; the source-level non-JSON ``ValueError`` from a real 404 on
-both transport colors; the ``AsyncTestClient`` happy path (awaited transport,
-async decode), its ``login()`` bracket including logout when the block raises,
-and its nested two-file multipart upload (the async color of
-``test_uploads_api.py``'s sync upload, so the DoD's "multipart ... on both
-clients" is earned live on both); the sync ``login()`` exception-logout twin
-(the clean-exit sync bracket and ``operation_name`` dispatch stay in
-``test_products_api.py``); and the unittest family end to end
-(``self.query(...)``, both assertion helpers' PASSING directions, the per-call
-and ``GRAPHQL_URL`` endpoint rungs against a real view, and the
-``TransactionTestCase`` combination).
+invalid selection; ``Response.extensions`` decoded from a holder mount's
+consumer extension and ``None`` from the shipped endpoint; a non-``dict``
+``variables`` mapping (``MappingProxyType``, ``UserDict``) sent as JSON; the
+source-level non-JSON ``ValueError`` from a real 404 on both transport colors;
+the ``AsyncTestClient`` happy path (awaited transport, async decode), its
+``login()`` bracket including logout when the block raises, and its nested
+two-file multipart upload (the async color of ``test_uploads_api.py``'s sync
+upload, so the DoD's "multipart ... on both clients" is earned live on both);
+the sync ``login()`` exception-logout twin (the clean-exit sync bracket and
+``operation_name`` dispatch stay in ``test_products_api.py``); and the unittest
+family end to end (``self.query(...)``, both assertion helpers' PASSING
+directions, the per-call and ``GRAPHQL_URL`` endpoint rungs against a real
+view, and the ``TransactionTestCase`` combination).
 
 The async tests that reach the GraphQL view carry ``django_db(transaction=True)``:
 ``django.test.AsyncClient`` runs the sync view on asgiref's executor thread,
@@ -40,6 +41,7 @@ import pytest
 from apps.products import schema as products_schema
 from apps.products.models import Category, Item
 from apps.products.services import create_users, seed_data
+from config import schema as config_schema
 from django.contrib.auth.models import Permission, User
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.http import HttpRequest
@@ -48,8 +50,10 @@ from django.test import override_settings
 from django.urls import include, path, resolve
 from graphql_client import json_at, json_list, json_object, read_attr
 from PIL import Image
+from strawberry.extensions import SchemaExtension
 from typing_extensions import override
 
+from django_strawberry_framework import DjangoSchema, strawberry_config
 from django_strawberry_framework.testing import (
     AsyncTestClient,
     GraphQLTestCase,
@@ -92,7 +96,42 @@ def _alt_graphql_view(request: HttpRequest, *args: object, **kwargs: object) -> 
     return response
 
 
-urlpatterns = [path("", include("config.urls")), path("alt/", _alt_graphql_view)]
+#: The response extensions member the ``/traced/`` mount's extension publishes.
+_TRACE_EXTENSIONS = {"traceId": "t-1"}
+
+
+class _TraceIdExtension(SchemaExtension):
+    """A consumer extension contributing one ``extensions`` member to every response."""
+
+    @override
+    def get_results(self) -> dict[str, object]:
+        return dict(_TRACE_EXTENSIONS)
+
+
+@wraps(DjangoGraphQLView.as_view())
+def _traced_graphql_view(
+    request: HttpRequest,
+    *args: object,
+    **kwargs: object,
+) -> HttpResponseBase:
+    """Serve fakeshop's reloaded ``Query`` with ``_TraceIdExtension`` installed.
+
+    The schema is built at request time, so it is composed of the types the reload
+    fixture just registered rather than ones captured at import.
+    """
+    schema = DjangoSchema(
+        query=config_schema.Query,
+        config=strawberry_config(),
+        extensions=[_TraceIdExtension],
+    )
+    return DjangoGraphQLView.as_view(schema=schema)(request, *args, **kwargs)
+
+
+urlpatterns = [
+    path("", include("config.urls")),
+    path("alt/", _alt_graphql_view),
+    path("traced/", _traced_graphql_view),
+]
 
 
 # The write-auth-gated products mutation the async ``login()`` bracket drives
@@ -154,6 +193,28 @@ def test_assert_no_errors_default_raises_with_the_errors_list() -> None:
     with pytest.raises(AssertionError) as excinfo:
         client.query("{ nope }")
     assert "nope" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [("/traced/", _TRACE_EXTENSIONS), ("/graphql/", None)],
+    ids=["extension-member", "shipped-endpoint"],
+)
+def test_response_extensions_surface_decoded_or_none(
+    url: str,
+    expected: dict[str, object] | None,
+) -> None:
+    """``Response.extensions`` is the decoded ``extensions`` member, or ``None`` when absent.
+
+    The ``/traced/`` mount's consumer extension publishes one member through a real
+    operation; fakeshop's shipped ``/graphql/`` publishes none, so the same read
+    answers ``None`` rather than an empty mapping.
+    """
+    with override_settings(ROOT_URLCONF=__name__):
+        res = TestClient().query("{ __typename }", url=url)
+
+    assert res.data == {"__typename": "Query"}
+    assert res.extensions == expected
 
 
 def test_wrong_configured_endpoint_surfaces_django_non_json_decode_error() -> None:

@@ -355,6 +355,45 @@ async def test_async_queryset_completion_async_def_queryset_resolver() -> None:
     assert json_at(payload, "data", "branches") == [{"name": "Bravo"}]
 
 
+class _BothProtocols:
+    """A non-queryset list value offering both iteration protocols, each naming itself."""
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(["sync"])
+
+    def __aiter__(self) -> AsyncIterator[str]:
+        async def gen() -> AsyncIterator[str]:
+            yield "async"
+
+        return gen()
+
+
+def _both_protocols() -> _BothProtocols:
+    """A plain ``def`` resolver handing its list field a ``_BothProtocols`` value."""
+    return _BothProtocols()
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_async_completion_adapts_only_a_queryset() -> None:
+    """The async executor's completion adapter leaves a non-queryset to upstream's preference.
+
+    ``_graphql_core_patches.py::_patched_complete_list_value`` wraps a Django
+    ``QuerySet`` in the async-only adapter under the asynchronous executor and
+    nothing else, so a consumer value offering both iteration protocols completes
+    through the one graphql-core prefers, ``__iter__``: the field answers the
+    synchronous protocol's row, never the asynchronous one's.
+    """
+
+    @strawberry.type
+    class _BothProtocolsQuery:
+        f: _BothProtocols = strawberry.field(resolver=_both_protocols, graphql_type=list[str])
+
+    schema = DjangoSchema(query=_BothProtocolsQuery, config=strawberry_config())
+    payload = await _post_async(schema, "{ f }")
+    assert "errors" not in payload, payload
+    assert json_at(payload, "data", "f") == ["sync"]
+
+
 @pytest.mark.django_db(transaction=True)
 async def test_async_get_queryset_is_awaited(monkeypatch: pytest.MonkeyPatch) -> None:
     """An ``async def get_queryset`` runs under the async view, not the sync skip."""

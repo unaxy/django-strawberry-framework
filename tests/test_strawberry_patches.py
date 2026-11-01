@@ -36,9 +36,10 @@ or lets malformed path values escape as low-level traversal errors. The delegate
 turn those client-input failures into Strawberry's controlled ``400`` while
 leaving accepted multipart behavior and non-structural consumer failures alone.
 A deep ``operations`` document's parse refusal is pinned over both HTTP views in
-``examples/fakeshop/test_query/test_transport_api.py``; the package rows keep delegate
-installation, the native-reason literal, structurally invalid maps and parser failures
-outside the upload utility.
+``examples/fakeshop/test_query/test_transport_api.py``, beside every structurally invalid
+map, a consumer JSON hook's own failure and a traversal-typed server bug outside the upload
+utility (both views), and a batched ``operations`` list; the package rows keep delegate
+installation and the native-reason literal.
 
 And it rebinds the ``strawberry.relay.types`` connection-page check
 ``ListConnection.resolve_connection`` calls, so a page whose ``edges`` /
@@ -64,8 +65,8 @@ The POST-body ``{not json`` row lives in
 The rows here pin the parse semantics that have no wire shape of their
 own (the falsy skip, the well-typed batch handed on to upstream's own
 validator), the ``__cause__`` values for UnicodeDecodeError and RecursionError
-a live JSON 400 cannot isolate from the view's own decode, multipart structural vs
-non-structural translation, and the full install lifecycle.
+a live JSON 400 cannot isolate from the view's own decode, and the full install
+lifecycle.
 
 **What is deliberately absent here.** The strict UTF-8 wire contract
 (spec-046 Decision 9) is not in this module: it is package *policy* with
@@ -93,7 +94,6 @@ import pytest_django
 import strawberry
 from cross_web import (
     AsyncDjangoHTTPRequestAdapter,
-    DjangoHTTPRequestAdapter,
     FormData,
     HTTPException,
 )
@@ -110,7 +110,7 @@ from typing_extensions import override
 from django_strawberry_framework import _strawberry_patches as patches
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import read_attr
-from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
+from django_strawberry_framework.views import AsyncDjangoGraphQLView
 
 
 def test_apply_is_idempotent() -> None:
@@ -325,72 +325,11 @@ def _multipart_request(operations: str, files_map: str, files: Mapping[str, str]
     )
 
 
-def _sync_request(
-    operations: str,
-    files_map: str,
-    files: Mapping[str, str] | None = None,
-) -> DjangoHTTPRequestAdapter:
-    """The real sync adapter over a multipart POST."""
-    return DjangoHTTPRequestAdapter(_multipart_request(operations, files_map, files or {}))
-
-
-def _async_request(
-    operations: str,
-    files_map: str,
-    files: Mapping[str, str] | None = None,
-) -> AsyncDjangoHTTPRequestAdapter:
-    """The real async adapter over a multipart POST."""
-    return AsyncDjangoHTTPRequestAdapter(_multipart_request(operations, files_map, files or {}))
-
-
-class _MultipartView(DjangoGraphQLView):
-    """The package's sync view: both upstream parsers read its ``parse_json`` hook."""
-
-    def __init__(self) -> None:
-        super().__init__(schema=_EMPTY_SCHEMA)
-
-
 class _AsyncMultipartView(AsyncDjangoGraphQLView):
     """The package's async view, read the same way."""
 
     def __init__(self) -> None:
         super().__init__(schema=_EMPTY_SCHEMA)
-
-
-_MULTIPART_OPERATIONS = '{"query": "{ __typename }", "variables": {"upload": null}}'
-_MULTIPART_LIST_OPERATIONS = '{"query": "{ __typename }", "variables": []}'
-
-
-@pytest.mark.parametrize(
-    ("operations", "files_map"),
-    [
-        pytest.param(_MULTIPART_OPERATIONS, "[{}]", id="array-instead-of-object"),
-        pytest.param(_MULTIPART_OPERATIONS, '{"0": [1]}', id="non-string-path"),
-        pytest.param(
-            _MULTIPART_LIST_OPERATIONS,
-            '{"0": ["variables.not-an-index"]}',
-            id="non-numeric-list-index",
-        ),
-        pytest.param(
-            _MULTIPART_LIST_OPERATIONS,
-            '{"0": ["variables.0"]}',
-            id="missing-list-index",
-        ),
-    ],
-)
-def test_patched_sync_parse_multipart_rejects_structurally_invalid_maps(
-    operations: str,
-    files_map: str,
-) -> None:
-    """Every malformed map that upstream leaks as a Python error becomes its 400."""
-    with pytest.raises(HTTPException) as excinfo:
-        patches._patched_sync_parse_multipart(
-            _MultipartView(),
-            _sync_request(operations, files_map, {"0": "x"}),
-        )
-
-    assert excinfo.value.status_code == 400
-    assert excinfo.value.reason == patches._UPSTREAM_MULTIPART_PARSE_REASON
 
 
 class _UnformableRequest(AsyncDjangoHTTPRequestAdapter):
@@ -411,10 +350,11 @@ async def test_the_multipart_reason_is_upstreams_own_native_literal() -> None:
     reason upstream raises - the async parser wraps a failing
     ``get_form_data()`` in exactly this ``HTTPException`` - so the structural
     failures the delegates translate are indistinguishable on the wire from
-    upstream's own multipart rejections. The malformed-map rows above compare
-    the wrapper's output to this very constant, so only a pin against the
-    native raise - the JSON reason's ``tests/test_views.py`` precedent - catches
-    an upstream rewording instead of letting the copy drift silently.
+    upstream's own multipart rejections. The live malformed-map rows
+    (``examples/fakeshop/test_query/test_transport_api.py::test_a_multipart_map_must_be_an_object_not_a_batched_body``)
+    read the wrapper's output off the wire, so only a pin against the native
+    raise - the JSON reason's ``tests/test_views.py`` precedent - catches an
+    upstream rewording instead of letting the copy drift silently.
     """
     original_async_parse_multipart = patches._original_async_parse_multipart
     assert original_async_parse_multipart is not None
@@ -423,74 +363,6 @@ async def test_the_multipart_reason_is_upstreams_own_native_literal() -> None:
 
     assert excinfo.value.status_code == 400
     assert excinfo.value.reason == patches._UPSTREAM_MULTIPART_PARSE_REASON
-
-
-def test_patched_sync_parse_multipart_preserves_a_non_structural_parser_exception() -> None:
-    """The malformed-envelope wrapper cannot hide a consumer JSON hook failure."""
-
-    class _ExplodingView(_MultipartView):
-        @override
-        def parse_json(self, data: str | bytes) -> object:
-            raise RuntimeError("consumer decode hook failed")
-
-    request = _sync_request(_MULTIPART_OPERATIONS, "{}", {})
-
-    with pytest.raises(RuntimeError, match="consumer decode hook failed"):
-        patches._patched_sync_parse_multipart(_ExplodingView(), request)
-
-
-class _StructurallyBuggyView(_MultipartView):
-    """A view whose JSON hook has a genuine server-side bug of a TRAVERSAL type."""
-
-    @override
-    def parse_json(self, data: str | bytes) -> object:
-        raise TypeError("server-side bug before the upload traversal")
-
-
-class _StructurallyBuggyAsyncView(_AsyncMultipartView):
-    """The async twin of ``_StructurallyBuggyView``."""
-
-    @override
-    def parse_json(self, data: str | bytes) -> object:
-        raise TypeError("server-side bug before the upload traversal")
-
-
-def test_patched_sync_parse_multipart_does_not_downgrade_a_server_bug_to_400() -> None:
-    """A traversal-typed failure raised OUTSIDE the upload utility keeps its 500 shape.
-
-    The wrapper delegates the whole upstream parser, which also runs the request
-    adapter's form handling and the view's own ``parse_json`` - work whose
-    genuine bugs share the traversal's exception types. Translating one into the
-    client-error ``400`` would hide a server fault, so the translation is scoped
-    to failures whose traceback passes through the upload utility's frame.
-    """
-    request = _sync_request(_MULTIPART_OPERATIONS, "{}", {})
-
-    with pytest.raises(TypeError, match="server-side bug before the upload traversal"):
-        patches._patched_sync_parse_multipart(_StructurallyBuggyView(), request)
-
-
-async def test_patched_async_parse_multipart_does_not_downgrade_a_server_bug_to_400() -> None:
-    """The async twin scopes the translation to the upload utility identically."""
-    request = _async_request(_MULTIPART_OPERATIONS, "{}", {})
-
-    with pytest.raises(TypeError, match="server-side bug before the upload traversal"):
-        await patches._patched_async_parse_multipart(_StructurallyBuggyAsyncView(), request)
-
-
-def test_patched_sync_parse_multipart_preserves_valid_batched_operations() -> None:
-    """The batch allowance belongs to ``operations`` and remains available to Strawberry."""
-    operations = '[{"query": "{ __typename }", "variables": {"upload": null}}]'
-    http_request = _multipart_request(operations, '{"0": ["0.variables.upload"]}', {"0": "upload"})
-
-    parsed = patches._patched_sync_parse_multipart(
-        _MultipartView(),
-        DjangoHTTPRequestAdapter(http_request),
-    )
-
-    assert parsed == [
-        {"query": "{ __typename }", "variables": {"upload": http_request.FILES["0"]}},
-    ]
 
 
 def test_patched_parse_query_params_skips_empty_string_param() -> None:

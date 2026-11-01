@@ -13,8 +13,7 @@ what a live request cannot (or need not) pin:
   the empty-``variables`` guard and the per-path walker that fails a malformed
   ``files=`` call at the source (the top-level, nested, list-index, and
   not-a-placeholder shapes fakeshop carries no live vehicle for);
-- ``files={}`` staying a plain JSON post, and ``extensions`` surfacing decoded
-  or ``None``;
+- ``files={}`` staying a plain JSON post;
 - the assertion helpers' FAILURE directions against canned responses (their
   PASSING directions ride the live unittest tests);
 - the mixin's ``self.client`` delegation and endpoint rungs against a recording
@@ -103,11 +102,10 @@ class _RecordingDjangoClient(Client):
     could never detect a change to it.
     """
 
-    def __init__(self, payload: dict[str, object] | None = None) -> None:
+    def __init__(self) -> None:
         super().__init__()
         self.posts: list[tuple[str, dict[str, object]]] = []
         self.responses: list[HttpResponseBase] = []
-        self._payload = payload if payload is not None else _DEFAULT_PAYLOAD
 
     @override
     def post(
@@ -131,7 +129,7 @@ class _RecordingDjangoClient(Client):
             content_type,
             follow,
             secure,
-            headers={**(headers or {}), _CANNED_PAYLOAD_HEADER: json.dumps(self._payload)},
+            headers={**(headers or {}), _CANNED_PAYLOAD_HEADER: json.dumps(_DEFAULT_PAYLOAD)},
             query_params=query_params,
             **extra,
         )
@@ -706,24 +704,6 @@ def test_build_body_sends_empty_operation_name_instead_of_dropping_it() -> None:
 
     absent = client._build_body("{ x }", None, None, None)
     assert "operationName" not in absent
-
-
-def test_response_extensions_surface_decoded_or_none() -> None:
-    """Scenario 1's ``extensions`` leg: the decoded value when present, ``None`` when absent.
-
-    The engine ``_decode`` hands back the raw JSON body; the package
-    ``Response`` construction reads all three GraphQL response members with
-    ``.get``, so an ``extensions`` member surfaces typed and an absent one
-    reads ``None`` (fakeshop's live responses carry none, hence the canned
-    transport here).
-    """
-    with_extensions = TestClient(
-        client=_RecordingDjangoClient({"data": {"ok": True}, "extensions": {"traceId": "t-1"}}),
-    ).query("{ ok }")
-    assert with_extensions.extensions == {"traceId": "t-1"}
-
-    without = TestClient(client=_RecordingDjangoClient()).query("{ ok }")
-    assert without.extensions is None
 
 
 # ---------------------------------------------------------------------------

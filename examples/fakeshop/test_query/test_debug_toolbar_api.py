@@ -18,6 +18,10 @@ always-true ``SHOW_TOOLBAR_CALLBACK``, ``RedirectsPanel`` taken out of
 reloaded INSIDE the override so its DEBUG-gated ``djdt`` routes populate.
 Everything else is fakeshop's shipped configuration, unmodified.
 
+Holder mounts beside the real ``/graphql/`` reach the ``_get_payload`` bails a
+shipped single operation never takes: a batched JSON-array response, and a
+consumer view whose encoder answers a non-JSON or undecodable declared-JSON body.
+
 The dependency-absent tests and the coverage-only ``_postprocess`` /
 ``_get_payload`` unit branches no live request can reach stay package-internal in
 ``tests/middleware/test_debug_toolbar.py`` (that file's module docstring maps the
@@ -29,10 +33,12 @@ from __future__ import annotations
 import contextlib
 import json
 from collections.abc import Callable, Generator, Iterator
+from functools import wraps
 from typing import TYPE_CHECKING
 
 import pytest
 from apps.products.services import seed_data
+from config import schema as config_schema
 from debug_toolbar import middleware as dt_middleware
 from debug_toolbar.toolbar import DebugToolbar
 from django.http import HttpRequest, HttpResponse
@@ -46,8 +52,11 @@ from graphql_client import (
     middleware,
     response_json,
 )
+from typing_extensions import override
 
+from django_strawberry_framework import DjangoSchema, strawberry_config
 from django_strawberry_framework.testing import TestClient
+from django_strawberry_framework.views import DjangoGraphQLView
 
 if TYPE_CHECKING:
     from django.test.client import _MonkeyPatchedWSGIResponse
@@ -223,6 +232,57 @@ def toolbar_client(project_schema_override: Callable[[], None]) -> Iterator[Clie
 def stock_client() -> Client:
     """A client under fakeshop's SHIPPED settings (pytest-django forces ``DEBUG=False``)."""
     return Client()
+
+
+@wraps(DjangoGraphQLView.as_view())
+def _batching_graphql_view(
+    request: HttpRequest,
+    *args: object,
+    **kwargs: object,
+) -> HttpResponseBase:
+    """The package view over fakeshop's reloaded ``Query`` with operation batching on.
+
+    A batched request answers a JSON ARRAY of results, the one ordinary GraphQL
+    response body that is valid JSON and not an object. Built per request, so the
+    schema is composed of the types the reload fixture just registered; ``wraps``
+    carries ``view_class``, which is what tags the request as a GraphQL view.
+    """
+    schema = DjangoSchema(
+        query=config_schema.Query,
+        config=strawberry_config(batching_config={"max_operations": 2}),
+    )
+    return DjangoGraphQLView.as_view(schema=schema)(request, *args, **kwargs)
+
+
+#: The declared-JSON bodies ``_MalformedJsonView`` answers with: text that is not
+#: JSON, and bytes the declared ``utf-8`` charset cannot decode.
+_MALFORMED_JSON_BODIES = {"not-json": b"not json", "undecodable": b"\xff"}
+
+
+class _MalformedJsonView(DjangoGraphQLView):
+    """A consumer view whose JSON encoder answers a body that does not decode as JSON."""
+
+    body = b""
+
+    @override
+    def encode_json(self, data: object) -> str | bytes:
+        del data
+        return self.body
+
+
+@wraps(_MalformedJsonView.as_view())
+def _malformed_json_graphql_view(
+    request: HttpRequest,
+    shape: str,
+    *args: object,
+    **kwargs: object,
+) -> HttpResponseBase:
+    """Serve fakeshop's reloaded schema through ``_MalformedJsonView`` answering ``shape``."""
+    view = _MalformedJsonView.as_view(
+        schema=config_schema.schema,
+        body=_MALFORMED_JSON_BODIES[shape],
+    )
+    return view(request, *args, **kwargs)
 
 
 @pytest.mark.django_db
@@ -440,5 +500,56 @@ class TestToolbarPresent:
         assert json.loads(response.content) == {"probe": "ok"}
         assert b"debugToolbar" not in response.content
 
+    def test_a_batched_array_response_is_passed_through_without_a_payload(
+        self,
+        toolbar_client: Client,
+    ) -> None:
+        """A JSON array body gets no ``debugToolbar`` member and is never a 500.
 
-urlpatterns = [path("", include("config.urls")), path("unrelated.json", _unrelated_json_view)]
+        The batching holder answers a batched operation with a JSON array: valid
+        JSON, a tagged GraphQL view, and no object to add a member to, so the
+        payload builder declines it and the body reaches the client unchanged.
+        """
+        batch = [{"query": "query One { __typename }", "operationName": "One"}]
+        with override_settings(ROOT_URLCONF=__name__):
+            # raw-envelope exemption: a batched JSON array body, which the client's
+            # single-operation builder cannot express.
+            response = toolbar_client.post(
+                "/graphql-batching/",
+                data=json.dumps(batch),
+                content_type="application/json",
+            )
+        assert response.status_code == 200
+        assert json.loads(response.content) == [{"data": {"__typename": "Query"}}]
+        assert b"debugToolbar" not in response.content
+        _assert_content_length_matches_body(response)
+
+    @pytest.mark.parametrize("shape", list(_MALFORMED_JSON_BODIES))
+    def test_a_declared_json_body_that_does_not_decode_is_not_rewritten(
+        self,
+        toolbar_client: Client,
+        shape: str,
+    ) -> None:
+        """A tagged ``application/json`` body that is not JSON, or not text, passes through.
+
+        A consumer view's encoder can answer bytes that are not JSON or that the
+        declared charset cannot decode; the development middleware must neither
+        rewrite that body nor turn the response into a 500.
+        """
+        with override_settings(ROOT_URLCONF=__name__):
+            response = TestClient(
+                path=f"/graphql-malformed/{shape}/",
+                client=toolbar_client,
+            ).request({"query": _TOOLBAR_ITEMS_QUERY, "operationName": "ToolbarItems"})
+        assert response.status_code == 200
+        assert _content_type(response) == "application/json"
+        assert response.content == _MALFORMED_JSON_BODIES[shape]
+        _assert_content_length_matches_body(response)
+
+
+urlpatterns = [
+    path("", include("config.urls")),
+    path("unrelated.json", _unrelated_json_view),
+    path("graphql-batching/", _batching_graphql_view),
+    path("graphql-malformed/<str:shape>/", _malformed_json_graphql_view),
+]

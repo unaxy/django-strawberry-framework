@@ -65,8 +65,12 @@ Row groups, in the order a request meets them:
   which the schema reads once and bounds the request with while the entry itself
   never reaches the chain, alongside the boundary the value budget sits on -
   the raw argument the request carried, charged before a custom scalar converts
-  it, whichever of the three places a request can carry one it came from - and
-  the largest configurable bound executing as a real ``LIMIT``; and
+  it, whichever of the three places a request can carry one it came from, and
+  in an unselected operation or a shadowed variable default too - the
+  largest configurable bound executing as a real ``LIMIT``, an explicit policy
+  handed to the extension on a plain schema bounding the request by its first
+  read, and an inner schema run on the request's context restoring the outer
+  policy, deadline and budget (``/rp-nested/``, sync and async); and
 - the cross-cutting proofs: zero ORM work after a rejection, and one typed error
   code shared by the sync and async transports.
 
@@ -150,9 +154,11 @@ from django_strawberry_framework.resource_policy import (
     MAX_RESOURCE_BOUND,
     ResourcePolicy,
     bounded_rows,
+    policy_from_info,
 )
 from django_strawberry_framework.testing import AsyncTestClient, Response, TestClient
 from django_strawberry_framework.testing.relay import global_id_for
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.utils._queryset_private import (
     queryset_db,
@@ -1579,8 +1585,133 @@ ENTRY_ROWS = list(ENTRY_MOUNTS)
 ENTRY_IDS = [f"{spelling}-{color}" for spelling, color in ENTRY_ROWS]
 
 
+@strawberry.type
+class _NestedInnerQuery:
+    """The inner schema's surface: one field and nothing bounded."""
+
+    @strawberry.field
+    def ping(self) -> str:
+        return "pong"
+
+
+@strawberry.type
+class _NestedInnerAsyncQuery:
+    """The inner schema's surface for the awaited nested execution."""
+
+    @strawberry.field
+    async def ping(self) -> str:
+        return "pong"
+
+
+def _nested_report(
+    info: strawberry.Info[object, object],
+    before: ResourcePolicy,
+    errors: object,
+) -> str:
+    """The outer policy before and after an inner execution, and a later collection's rows."""
+    after = policy_from_info(info)
+    rows = bounded_rows(list(range(10)), info)
+    assert isinstance(rows, list)
+    return (
+        f"{before.max_list_rows}:{after.max_list_rows}:{len(rows)}:"
+        f"{before.execution_deadline_seconds}:{after.execution_deadline_seconds}:{errors}"
+    )
+
+
+@strawberry.type
+class _NestedQuery:
+    """A resolver that runs a whole inner ``DjangoSchema`` on the request's own context."""
+
+    @strawberry.field
+    def nested(self, info: strawberry.Info[object, object]) -> str:
+        before = policy_from_info(info)
+        inner = DjangoSchema(query=_NestedInnerQuery).execute_sync(
+            "{ ping }",
+            context_value=info.context,
+        )
+        return _nested_report(info, before, inner.errors)
+
+    @strawberry.field
+    async def nested_async(self, info: strawberry.Info[object, object]) -> str:
+        before = policy_from_info(info)
+        inner = await DjangoSchema(query=_NestedInnerAsyncQuery).execute(
+            "{ ping }",
+            context_value=info.context,
+        )
+        return _nested_report(info, before, inner.errors)
+
+
+#: The outer policy the nested mounts run under: one list row and a one-minute
+#: deadline, both different from the package defaults the inner schema resolves.
+NESTED_POLICY = ResourcePolicy(max_list_rows=1, execution_deadline_seconds=60)
+
+
+@cache
+def _nested_schema() -> DjangoSchema:
+    return DjangoSchema(query=_NestedQuery, resource_policy=NESTED_POLICY)
+
+
+@wraps(DjangoGraphQLView.as_view())
+def _nested_view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
+    return DjangoGraphQLView.as_view(schema=_nested_schema())(request, *args, **kwargs)
+
+
+@wraps(AsyncDjangoGraphQLView.as_view())
+async def _nested_async_view(
+    request: HttpRequest,
+    *args: object,
+    **kwargs: object,
+) -> HttpResponseBase:
+    return await AsyncDjangoGraphQLView.as_view(schema=_nested_schema())(request, *args, **kwargs)
+
+
+class _DriftingPolicy(ResourcePolicy):
+    """A valid policy whose first read of ``max_document_tokens`` is narrow and the rest wide.
+
+    Every check a ``ResourcePolicy`` performs on itself happens at construction,
+    so a subclass answering honestly then and differently afterwards is a policy
+    that passed validation and enforces nothing unless it is read out once. The
+    drift starts only once ``_armed`` is set, which is what lets
+    ``__post_init__`` validate real values.
+    """
+
+    @override
+    def __getattribute__(self, name: str) -> object:
+        state = truth.instance_state(self)
+        if name == "max_document_tokens" and state.get("_armed"):
+            reads = state.get("_reads", 0)
+            assert isinstance(reads, int)
+            state["_reads"] = reads + 1
+            return 1 if reads == 0 else 1_000_000
+        return object_result(object.__getattribute__, self, name)
+
+
+def _drifting_extension() -> DjangoResourcePolicyExtension:
+    """A resource-policy extension over a FRESH drifting policy, once per operation."""
+    policy = _DriftingPolicy()
+    truth.instance_state(policy)["_armed"] = True
+    return DjangoResourcePolicyExtension(policy=policy)
+
+
+@strawberry.type
+class _EchoQuery:
+    """A one-field surface: any document of it is a handful of tokens."""
+
+    @strawberry.field
+    def echo(self) -> str:
+        return "ok"
+
+
+#: A plain ``strawberry.Schema`` whose consumer hands the extension an explicit
+#: policy through a factory, the supported spelling outside ``DjangoSchema``.
+_DRIFTING_SCHEMA = strawberry.Schema(query=_EchoQuery, extensions=[_drifting_extension])
+
+
 urlpatterns = [
     path("", include("config.urls")),
+    path("rp-nested/", _nested_view),
+    path("rp-nested-async/", _nested_async_view),
+    path("rp-drifting/", DjangoGraphQLView.as_view(schema=_DRIFTING_SCHEMA)),
     path("rp-authority/", _authority_view),
     # Mounted from ``ENTRY_MOUNTS`` rather than spelled out, so the mounts and the
     # parametrized rows cannot disagree about which spellings exist.
@@ -4473,6 +4604,37 @@ def test_a_scalar_argument_within_the_bound_reaches_its_parser(source: str) -> N
     assert all(parsed == members for parsed in _scalar_parses)
 
 
+def test_a_literal_in_an_unselected_operation_is_refused_before_its_scalar_parses_it() -> None:
+    """Admission refuses an unselected operation's literal before validation converts it.
+
+    Validation parses every literal argument in the document through its scalar,
+    the operation the request did not select included, so a budget charged after
+    validation would let the consumer's parser run on a request that is refused.
+    The parse log stays empty.
+    """
+    _scalar_parses.clear()
+    members = list(range(MAX_CONTAINER_WIDTH + 1))
+    query = f"query A {{ __typename }} query B {{ take(payload: {members}) }}"
+    extensions = _rejection(_post_named("/rp-authority/", query, "A"))
+    assert extensions["bound"] == "max_container_width"
+    assert _scalar_parses == []
+
+
+def test_a_shadowed_variable_default_is_refused_before_its_scalar_parses_it() -> None:
+    """A default the supplied variable shadows is still refused before its scalar parses it.
+
+    Validation parses a variable's default whether or not the request supplies
+    the variable, so the default is charged at admission and the parse log of the
+    refused request stays empty.
+    """
+    _scalar_parses.clear()
+    members = list(range(MAX_CONTAINER_WIDTH + 1))
+    query = f"query T($p: OpaqueValue = {members}) {{ take(payload: $p) }}"
+    extensions = _rejection(_post("/rp-authority/", query, {"p": [1]}))
+    assert extensions["bound"] == "max_container_width"
+    assert _scalar_parses == []
+
+
 def test_no_name_on_a_schema_answers_with_the_policy_enforcing_it() -> None:
     """The authority is not an attribute, asked by content rather than by name.
 
@@ -5259,3 +5421,48 @@ def test_an_overlapping_request_does_not_admit_an_oversized_one(spelling: str, c
     _ExecutionWitness.entered.clear()
     assert _rejection(_entry_request(entry, oversized)) == alone
     assert _ExecutionWitness.entered == []
+
+
+@pytest.mark.parametrize(
+    ("mount", "field"),
+    [("/rp-nested/", "nested"), ("/rp-nested-async/", "nestedAsync")],
+    ids=["sync", "async"],
+)
+def test_a_nested_schema_restores_the_outer_policy_and_deadline(mount: str, field: str) -> None:
+    """An inner schema run on the request's context must not widen the outer request.
+
+    The inner ``DjangoSchema`` arms the package defaults while it runs; once it
+    returns, the policy the outer resolver reads, its deadline and the budget a
+    later collection is bounded by are the outer operation's again. Two
+    restores in series answer it: the inner teardown resets the armed binding
+    (``resource_policy.py::end_resource_budget``) and puts the context mirror
+    back (``extensions/resource_policy.py::DjangoResourcePolicyExtension.on_operation``),
+    so either alone keeps this row green.
+    """
+    if mount.endswith("-async/"):
+        response = _await_response(
+            AsyncTestClient().query(f"{{ {field} }}", assert_no_errors=False, url=mount),
+        )
+        payload = response_json(response.response)
+    else:
+        payload = _post(mount, f"{{ {field} }}")
+    assert "errors" not in payload, payload
+    rows = NESTED_POLICY.max_list_rows
+    deadline = NESTED_POLICY.execution_deadline_seconds
+    assert payload["data"] == {field: f"{rows}:{rows}:{rows}:{deadline}:{deadline}:None"}
+
+
+def test_an_explicit_extension_policy_bounds_the_request_by_its_first_read() -> None:
+    """One operation is bounded by ONE policy, whatever its configuration answers later.
+
+    The extension reads an explicit policy out once, when it accepts it. A policy
+    whose first read of the token bound is one token and every later read a
+    million is therefore a one-token budget for the whole request: the document
+    scan refuses an ordinary one-field document rather than admitting it under a
+    bound re-read from the consumer object. Three guards stand in series: the
+    canonical copy taken at construction, the copy the extension hands out, and
+    the scan reading the armed snapshot
+    (``extensions/resource_policy.py::DjangoResourcePolicyExtension.on_operation``).
+    """
+    extensions = _rejection(_post("/rp-drifting/", "{ echo }"))
+    assert extensions["bound"] == "max_document_tokens"

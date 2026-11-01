@@ -1239,8 +1239,9 @@ run under the live tier's autouse schema reload and seed with `seed_data` /
    carries edges, `res.response.status_code == 200` and
    `res.response["Content-Type"].startswith("application/json")`. The
    `extensions` leg (decoded value when present, `None` when absent) is
-   package-tier, `::test_response_extensions_surface_decoded_or_none`, since
-   fakeshop's live responses carry none.
+   `examples/fakeshop/test_query/test_client_api.py::test_response_extensions_surface_decoded_or_none`:
+   a holder mount whose consumer extension publishes a member, beside fakeshop's
+   shipped `/graphql/`, which publishes none.
 2. **Errors, both directions.** The `assert_no_errors=False` outcome
    (`res.errors` non-empty, `res.data` `None`) rides the denied legs of
    `examples/fakeshop/test_query/test_products_api.py::test_create_item_login_bracket_via_test_client`;
