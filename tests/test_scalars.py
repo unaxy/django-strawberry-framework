@@ -152,10 +152,12 @@ def test_bigint_rejection_messages_are_pinned() -> None:
 
 
 def test_bigint_rejection_messages_survive_hostile_values() -> None:
-    """A hostile type-name hook or ``str`` subclass dunder never decides a typed rejection.
+    """A hostile type-name hook or ``str`` subclass dunder never decides a parse rejection.
 
     The rejected value's kind is read from the interpreter, so a metaclass
-    ``__name__`` hook never runs and the message names the real class.
+    ``__name__`` hook never runs and the message names the real class. No GraphQL
+    argument carries a Python object to the parser; the serializer's twin is live in
+    ``examples/fakeshop/test_query/test_converter_outputs_api.py::test_an_outbound_bigint_refusal_names_the_class_past_a_hostile_type_name_hook``.
     """
 
     class _HostileTypeMeta(type):
@@ -183,8 +185,6 @@ def test_bigint_rejection_messages_survive_hostile_values() -> None:
     assert _parse_bigint(_HostileString("7")) == 7
     with pytest.raises(ValueError, match=r"^BigInt cannot parse _HostileObject$"):
         _parse_bigint(_HostileObject())
-    with pytest.raises(TypeError, match=r"^BigInt cannot serialize _HostileObject$"):
-        _serialize_bigint(_HostileObject())
 
 
 # ---------------------------------------------------------------------------

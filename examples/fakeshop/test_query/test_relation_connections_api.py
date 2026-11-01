@@ -1474,16 +1474,19 @@ def test_strictness_raise_flags_only_the_sidecar_alias_beside_a_planned_sibling(
 
     Strictness is per response key: the sidecar alias ``a`` is a real per-parent
     access and flags with the filter/orderBy reason, while ``b`` was planned as a
-    window, so its identity is recorded and it never reaches the checker.
+    window, so its identity is recorded and it never reaches the checker. ``b`` is
+    selected first: ``booksConnection`` is non-null, so ``a``'s raise ends the
+    field loop and a ``b`` placed after it would never resolve, leaving its
+    silence unproven.
     """
     _seed_library_books(["apple", "banana", "avocado"])
     schema = _genres_filterable_book_schema(strictness="raise")
     result = _exec(
         schema,
         "{ objs { "
+        "b: booksConnection(first: 5) { edges { node { title } } } "
         'a: booksConnection(filter: { title: { exact: "banana" } }) '
         "{ edges { node { title } } } "
-        "b: booksConnection(first: 5) { edges { node { title } } } "
         "} }",
         expect_errors=True,
     )

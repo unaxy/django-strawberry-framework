@@ -12,7 +12,8 @@ connection pipeline and HTTP view. Its fixture table lifecycle remains explicit.
 
 A consumer ``get_queryset`` order is the page's effective order too: a JSON
 column and a related path through an optional or multivalued relation are
-refused by name, beside controls ordering the same holders by a scalar column.
+refused by name, as is an annotation alias, beside controls ordering
+the same holders by a scalar column.
 """
 
 import datetime
@@ -25,7 +26,7 @@ import strawberry
 from apps.library.models import Issue, MembershipCard, Patron, Periodical
 from apps.scalars.models import ScalarSpecimen
 from django.db import connection
-from django.db.models import Model, QuerySet
+from django.db.models import Count, Model, QuerySet
 from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
@@ -260,11 +261,14 @@ def _hook_ordered_keyset_schema(
     model: type[Model],
     fields: tuple[str, ...],
     hook_order: tuple[str, ...],
+    *,
+    annotations: Mapping[str, Count] | None = None,
 ) -> DjangoSchema:
     """A keyset connection (``cursor_field = ("id",)``) whose ``get_queryset`` orders by ``hook_order``.
 
     The hook's order is the page's effective order, so the cursor vocabulary is
-    derived from it entry by entry.
+    derived from it entry by entry. ``annotations`` are applied first, so an entry
+    may name one of their aliases.
     """
 
     def _ordered(
@@ -273,7 +277,7 @@ def _hook_ordered_keyset_schema(
         _info: object,
         **_kwargs: object,
     ) -> QuerySet[Model]:
-        return queryset.order_by(*hook_order)
+        return queryset.annotate(**(annotations or {})).order_by(*hook_order)
 
     node_type = make_django_type(
         "HookOrderedNode",
@@ -386,6 +390,31 @@ def test_keyset_hook_order_through_an_optional_or_multivalued_relation_is_refuse
     _seed_patrons_with_one_card()
     payload = _post(
         _hook_ordered_keyset_schema(Patron, ("id", "name"), hook_order),
+        "{ rows(first: 1) { edges { node { name } } } }",
+    )
+    assert payload["data"] is None, payload
+    assert [
+        (json_at(error, "message"), json_at(error, "path"))
+        for error in json_list(payload, "errors")
+    ] == [(_UNANCHORED_ORDER_REFUSAL, ["rows"])]
+
+
+@pytest.mark.django_db
+def test_keyset_hook_order_by_an_annotation_alias_is_refused() -> None:
+    """An annotation alias names no model column, so a value cursor cannot anchor it.
+
+    The hook annotates ``loan_count`` and orders by it; the alias resolves to no
+    field on the model and is refused by the same message as any other expression
+    order.
+    """
+    _seed_patrons_with_one_card()
+    payload = _post(
+        _hook_ordered_keyset_schema(
+            Patron,
+            ("id", "name"),
+            ("loan_count", "id"),
+            annotations={"loan_count": Count("loans")},
+        ),
         "{ rows(first: 1) { edges { node { name } } } }",
     )
     assert payload["data"] is None, payload

@@ -123,6 +123,11 @@ from django_strawberry_framework.views import AsyncDjangoGraphQLView
 #: its callback would not reliably take effect.
 _ERROR_POLICY_PASS_THROUGH = {"DEBUG": True, "MIDDLEWARE": middleware_without_debug_toolbar()}
 
+#: The shipped ``Category.name`` gates' denials, one per gate, so a request routed to
+#: the wrong gate (a filter denied by the order gate) fails the exact match.
+_FILTER_GATE_DENIAL = "You must be a staff user to filter by Category name."
+_ORDER_GATE_DENIAL = "You must be a staff user to order by Category name."
+
 #: Settings that serve requests carrying no ``request.user`` at all.
 _NO_AUTHENTICATION_MIDDLEWARE = {
     "MIDDLEWARE": [entry for entry in middleware() if "AuthenticationMiddleware" not in entry],
@@ -2879,7 +2884,7 @@ def test_products_categories_filter_by_name_denied_for_anonymous() -> None:
     payload = response_json(response)
     assert "errors" in payload, payload
     assert json_at(payload, "data") is None, payload
-    assert "staff user" in json_str(payload, "errors", 0, "message")
+    assert json_str(payload, "errors", 0, "message") == _FILTER_GATE_DENIAL
 
 
 @pytest.mark.django_db
@@ -2900,7 +2905,7 @@ def test_products_categories_name_permission_fires_for_non_exact_lookup() -> Non
     payload = response_json(response)
     assert "errors" in payload, payload
     assert json_at(payload, "data") is None, payload
-    assert "staff user" in json_str(payload, "errors", 0, "message")
+    assert json_str(payload, "errors", 0, "message") == _FILTER_GATE_DENIAL
 
 
 @pytest.mark.django_db
@@ -2915,7 +2920,7 @@ def test_products_items_related_category_name_permission_fires_for_anonymous() -
     payload = response_json(response)
     assert "errors" in payload, payload
     assert json_at(payload, "data") is None, payload
-    assert "staff user" in json_str(payload, "errors", 0, "message")
+    assert json_str(payload, "errors", 0, "message") == _FILTER_GATE_DENIAL
 
 
 @pytest.mark.django_db
@@ -2938,7 +2943,7 @@ def test_products_items_flat_category_name_permission_fires_for_anonymous() -> N
     payload = response_json(response)
     assert "errors" in payload, payload
     assert json_at(payload, "data") is None, payload
-    assert "staff user" in json_str(payload, "errors", 0, "message")
+    assert json_str(payload, "errors", 0, "message") == _FILTER_GATE_DENIAL
 
 
 @pytest.mark.django_db
@@ -2963,7 +2968,7 @@ def test_products_items_deep_flat_category_name_permission_fires_for_anonymous()
     payload = response_json(response)
     assert "errors" in payload, payload
     assert json_at(payload, "data") is None, payload
-    assert "staff user" in json_str(payload, "errors", 0, "message")
+    assert json_str(payload, "errors", 0, "message") == _FILTER_GATE_DENIAL
 
 
 def _category_name_filter(category: models.Category) -> str:
@@ -3229,7 +3234,7 @@ def test_products_entries_flat_property_leaf_stays_inside_the_explicit_queryset(
 
     if row.staff_only and not staff:
         assert json_at(payload, "data") is None, payload
-        assert "staff user" in json_str(payload, "errors", 0, "message")
+        assert json_str(payload, "errors", 0, "message") == _FILTER_GATE_DENIAL
         return
     visible = models.Entry.objects.all() if staff else _entries_visible_to_anonymous()
     reached_by_path = visible.filter(**{row.path: value})
@@ -3689,7 +3694,7 @@ def test_products_categories_order_by_name_denied_for_anonymous() -> None:
     payload = response_json(response)
     assert "errors" in payload, payload
     assert json_at(payload, "data") is None, payload
-    assert "staff user" in json_str(payload, "errors", 0, "message")
+    assert json_str(payload, "errors", 0, "message") == _ORDER_GATE_DENIAL
 
 
 @pytest.mark.django_db
@@ -3722,7 +3727,7 @@ def test_products_items_order_by_related_category_name_denied_for_anonymous() ->
     payload = response_json(response)
     assert "errors" in payload, payload
     assert json_at(payload, "data") is None, payload
-    assert "staff user" in json_str(payload, "errors", 0, "message")
+    assert json_str(payload, "errors", 0, "message") == _ORDER_GATE_DENIAL
 
 
 @pytest.mark.django_db
@@ -4370,7 +4375,7 @@ def test_cascade_composes_with_filter_and_order_live() -> None:
     gated_payload = response_json(gated)
     assert "errors" in gated_payload, gated_payload
     assert json_at(gated_payload, "data") is None, gated_payload
-    assert "staff user" in json_str(gated_payload, "errors", 0, "message")
+    assert json_str(gated_payload, "errors", 0, "message") == _ORDER_GATE_DENIAL
 
     # (b) anonymous filter (no gate on `id`) + order (no gate on Item.name) on top
     # of the cascade-narrowed set: the public category's non-private items, ordered
