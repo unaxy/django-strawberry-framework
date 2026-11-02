@@ -761,11 +761,23 @@ other owner for the Host question.
   second thing to keep in sync with `ALLOWED_HOSTS`, and [`AGENTS.md`][agents] forbids adding
   a settings key that no feature needs. WebSocket follows the project's existing Django
   configuration.
-- **Build a full `ASGIRequest` for the handshake scope.** Rejected: `ASGIRequest.__init__`
-  expects an HTTP scope (path, method, query string, a body file) and does work the Host
-  question does not need. The projection supplies the minimum `META` `get_host()` reads, which
-  is a smaller and more auditable compatibility surface than a request object built out of a
-  scope it was not written for.
+- **Build `ASGIRequest` over the handshake scope itself.** Rejected: the constructor parses
+  client-controlled fields eagerly. A crafted `Content-Type` raises `BadRequest` or
+  `ValueError` and a non-UTF-8 `query_string` raises `UnicodeDecodeError`, so the
+  `DisallowedHost`-only catch would let a client turn the Host check into a server error; Django
+  6.0.0's adapter also maps an underscore-spelled `x_forwarded_host` onto
+  `HTTP_X_FORWARDED_HOST`. The validator hands the adapter a fresh scope holding only the Host
+  headers and `scope["server"]`.
+- **A hand-built `HttpRequest` whose `META` reproduces the adapter's mapping.** Rejected: it
+  re-derives header casing, the duplicate join, the transport codec, the `META` key spelling
+  and the no-server literals, and diverges from HTTP the first time Django changes one of them;
+  the adapter's header loop already takes three shapes across the supported Django releases.
+  Calling the adapter on a filtered scope leaves the package one decision: which headers
+  reach it.
+- **Also pass `X-Forwarded-Port`, the `SECURE_PROXY_SSL_HEADER` header and the scope
+  `scheme`.** Rejected: a hostless handshake would then agree with HTTP, but a
+  client-supplied port would admit a handshake whose server address alone fails, and naming
+  the proxy-SSL header means inverting its `META` key, a new hand rule.
 
 <!-- LINK DEFINITIONS -->
 

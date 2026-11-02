@@ -28,7 +28,7 @@ How to read the entries:
 Every item is a candidate, not a plan. Each one still gets the research pass, a root-cause fix and a live test before
 it lands with its tick. An unticked item whose research note says "yours" waits on a maintainer decision.
 
-Progress: 33 of 39 landed; 6 yours (25, 28, 29, 30, 32, 33).
+Progress: 34 of 39 landed; 5 yours (28, 29, 30, 32, 33).
 
 ## Fixes behaviour (our copy is wrong today)
 
@@ -692,7 +692,7 @@ Progress: 33 of 39 landed; 6 yours (25, 28, 29, 30, 32, 33).
     alias. The arm also runs at declaration time, where a lookup would be database I/O. Pinned by
     `examples/fakeshop/test_query/test_multi_db.py::test_generic_relation_filter_matches_content_type_on_shard_b_alias`.
 
-- [ ] 25. (NET-2) The WebSocket Host projection re-derives `ASGIRequest.__init__`'s header-to-META mapping
+- [x] 25. (NET-2) The WebSocket Host projection re-derives `ASGIRequest.__init__`'s header-to-META mapping
   - Our code: `consumers.py::_host_validation_request` and `consumers.py #"_HOST_META_KEYS_BY_HEADER = "` (~16
     lines of code plus ~45 lines of justifying docstring).
   - Upstream: `django/core/handlers/asgi.py::ASGIRequest(scope, body_file)`, then `.get_host()`. Its host code is
@@ -736,6 +736,17 @@ Progress: 33 of 39 landed; 6 yours (25, 28, 29, 30, 32, 33).
       `tests/test_routers.py` subset row now state the exact condition.
     - Your options: keep (recommended), or project the two keys plus the scope `scheme` to agree with HTTP on a
       hostless handshake, which widens the hand-built `META`. The `ASGIRequest` seam has the same gap.
+  - Landed: `consumers.py::_host_validation_request` returns Django's own `ASGIRequest`, built
+    over a fresh scope holding only the `host` / `x-forwarded-host` headers (allowlist
+    `consumers.py::_HOST_HEADER_NAMES`, matched on the decoded case-folded name) and
+    `scope["server"]`; the adapter now owns the key spelling, duplicate join, Latin-1 codec and
+    `"unknown"` / `"0"` literals. 0 verdict diffs and 0 non-`DisallowedHost` raises vs the old
+    projection on 126,126 hostile cases at each of Django 5.2.16, 5.2.18, 6.0.0, 6.0.6, 6.0.9,
+    6.1.0 and 6.1.2. spec-046 Decision 19 and its rationale amended (the hand-built `META`
+    becomes the rejected alternative). Hostless gap left as is: closing it admits 30 hostless
+    cases the old code refuses. New pin
+    `tests/test_routers.py::test_client_controlled_handshake_fields_never_reach_djangos_adapter`;
+    three hand-typed `tests/test_consumers.py` rows deleted.
 
 - [x] 26. (NET-3) The Strawberry patch shields `parse_query_params` with a pinned copy of upstream's body
   - Our code: `_strawberry_patches.py::_patched_parse_query_params` (~17 lines), `_UPSTREAM_PARSE_QUERY_PARAMS_SOURCE`

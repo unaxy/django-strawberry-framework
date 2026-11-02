@@ -33,7 +33,6 @@ from django_strawberry_framework.utils.sessions import (
     _ACTOR_STATE_SCOPE_KEY,
     connection_actor_state,
 )
-from tests._idioms import websocket_scope
 
 # ---------------------------------------------------------------------------
 # utils/sessions - corrupted scope state (owning layer)
@@ -134,7 +133,7 @@ def test_resolved_window_huge_int_overflow_is_configuration_error() -> None:
 
 
 def test_host_validation_absent_headers_and_server_uses_defaults() -> None:
-    """A scope with neither Host headers nor ``server`` reconstructs Django's literals."""
+    """A scope carrying neither ``headers`` nor ``server`` still builds Django's request."""
     scope: dict[str, object] = {}
     # basedpyright: the absent keys (no headers, no server) are the input under test; asgiref's
     # WebSocketScope declares every key required
@@ -142,35 +141,3 @@ def test_host_validation_absent_headers_and_server_uses_defaults() -> None:
     assert req.META["SERVER_NAME"] == "unknown"
     assert req.META["SERVER_PORT"] == "0"
     assert "HTTP_HOST" not in req.META
-
-
-def test_host_validation_duplicate_hosts_are_comma_joined() -> None:
-    """Two Host headers become Django's comma-joined form, not a silently picked one."""
-    scope = websocket_scope([(b"host", b"a.com"), (b"host", b"b.com")], ("x", 80))
-    req = cmod._host_validation_request(scope)
-    assert req.META["HTTP_HOST"] == "a.com,b.com"
-
-
-def test_host_validation_case_insensitive_header() -> None:
-    """Header names are normalized; an odd-cased ``Host`` still projects."""
-    scope = websocket_scope([(b"Host", b"example.com")], ("x", 80))
-    req = cmod._host_validation_request(scope)
-    assert req.META["HTTP_HOST"] == "example.com"
-
-
-@pytest.mark.parametrize(
-    "server",
-    [
-        pytest.param(None, id="none"),
-        pytest.param(0, id="zero"),
-        pytest.param(False, id="false"),
-        pytest.param("", id="empty-str"),
-    ],
-)
-def test_host_validation_server_absent_vs_null(server: object) -> None:
-    """A falsy ``scope['server']`` uses the same ``unknown`` reconstruction as absence."""
-    scope: dict[str, object] = {"headers": [], "server": server}
-    # basedpyright: the ill-typed server value is the input under test; asgiref's WebSocketScope
-    # types server as tuple[str, int | None] | None
-    req = cmod._host_validation_request(scope)  # pyright: ignore[reportArgumentType]
-    assert req.META["SERVER_NAME"] == "unknown"

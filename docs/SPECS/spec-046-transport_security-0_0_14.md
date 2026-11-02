@@ -240,8 +240,9 @@ Each top-level item maps to one commit / PR.
         seam named
         ([Decision 12](#decision-12--maximum-connection-lifetime-is-documented-and-seamed-not-silently-enforced)).
   - [ ] `consumers.py::DjangoWebSocketHostValidator` — the private ASGI middleware that
-        projects the handshake's Host metadata into a minimal Django `HttpRequest` and calls
-        the public `request.get_host()`, composed **outside**
+        builds Django's own `ASGIRequest` over the handshake's `Host` / `X-Forwarded-Host`
+        headers and `scope["server"]` and calls the public `request.get_host()`, composed
+        **outside**
         `AllowedHostsOriginValidator` so Host and Origin stay two separate checks, denying
         through Channels' own `WebsocketDenier` so the two denials are indistinguishable on
         the wire
@@ -2237,9 +2238,9 @@ carry a rotated CSRF cookie; the `413` is raised outside the continuation entire
 
 **Decision.** The package adds a **WebSocket Host boundary**, and adds it by *calling Django*
 rather than by implementing one. One small **private** ASGI middleware,
-`DjangoWebSocketHostValidator`, projects the handshake's Host-related metadata into a minimal
-Django `HttpRequest` and calls the public `request.get_host()`. The package parses and matches
-no hostnames itself.
+`DjangoWebSocketHostValidator`, builds Django's own ASGI request adapter, `ASGIRequest`, over a
+fresh scope holding only the handshake's Host inputs, and calls the public `request.get_host()`.
+The package parses and matches no hostnames itself.
 
 The composition is:
 
@@ -2268,34 +2269,42 @@ already has for `AllowedHostsOriginValidator` and `AuthMiddlewareStack`. The mod
 docstring's first line names the Host boundary, which matters mechanically:
 `scripts/build_tree_md.py` renders that exact line.
 
-**The projection preserves Django's semantics, deliberately and item by item.** Each of these
-is a property of Django's own ASGI request adapter, reproduced so that WebSocket and HTTP
-answer the same question the same way:
+**Django's ASGI request adapter supplies the semantics; the package supplies its inputs.**
+The validator builds `django/core/handlers/asgi.py::ASGIRequest`, the request Django's ASGI
+handler builds for every HTTP request, so WebSocket and HTTP answer the same question through
+the same code. The package decides one thing, what the adapter is handed:
 
-- collect the ASGI host header **without trusting its casing** (ASGI header names are
-  lowercase bytes by spec, but the projection normalizes rather than assumes);
-- **preserve duplicate values in the same comma-joined form** Django's ASGI request adapter
-  uses (`django/core/handlers/asgi.py::ASGIRequest.__init__` #"join(value) for name"), so an
-  ambiguous duplicate `Host`
-  header fails validation exactly as it does on HTTP rather than being silently reduced to
-  one value;
-- include `X-Forwarded-Host`, so `USE_X_FORWARDED_HOST` behaves identically to HTTP;
-- include `scope["server"]` as `SERVER_NAME` / `SERVER_PORT`, and when the scope carries no
-  server at all, Django's own literals — `SERVER_NAME = "unknown"` and `SERVER_PORT = "0"`,
-  the exact pair `django/core/handlers/asgi.py::ASGIRequest.__init__` installs — because that
-  pair is what `HttpRequest._get_raw_host` reconstructs the host from when no host header is
-  present. The literals are Django's, not the package's invention, and naming them is what
-  makes the resulting **verdict** derivable rather than assumed: `"unknown"` with port `"0"`
+- the handshake's `Host` and `X-Forwarded-Host` headers, matched on the Latin-1-decoded,
+  case-folded header **name** (never on the `META` key the adapter derives from it: Django
+  6.0.0's adapter maps an underscore spelling such as `x_forwarded_host` onto the same key),
+  every occurrence kept in order, so an ambiguous duplicate `Host` reaches the adapter's
+  comma-join (`django/core/handlers/asgi.py::ASGIRequest.__init__` #"join(value) for name")
+  and fails validation exactly as it does on HTTP rather than being silently reduced to one
+  value; `X-Forwarded-Host` is included so `USE_X_FORWARDED_HOST` behaves identically to HTTP;
+- `scope["server"]`, unchanged, from which the adapter installs `SERVER_NAME` /
+  `SERVER_PORT`, and, when the scope carries no server at all, Django's own literals
+  `SERVER_NAME = "unknown"` and `SERVER_PORT = "0"`, the pair `HttpRequest._get_raw_host`
+  reconstructs the host from when no host header is present. Naming them is what makes the
+  resulting **verdict** derivable rather than assumed: `"unknown"` with port `"0"`
   reconstructs to `"unknown:0"`, so a handshake carrying no host header, no
   `X-Forwarded-Host` and no `scope["server"]` is **denied** under any `ALLOWED_HOSTS` that
   does not contain `"unknown"` or `"*"`;
-- decode header bytes with the **Latin-1** Django/ASGI transport convention, the same codec
-  Django's adapter and Channels' `OriginValidator` both use.
+- a **fresh** scope, never the handshake's own: `ASGIRequest.__init__` parses
+  client-controlled fields eagerly (the `Content-Type` header raises `BadRequest` or
+  `ValueError`, by Django release; a non-UTF-8 `query_string` raises `UnicodeDecodeError`),
+  and only `DisallowedHost` may become a denial. `method` and `path` are present only because
+  the constructor reads them; `get_host()` reads neither. No `scheme` is passed: the adapter
+  answers `"http"`, and `is_secure()` is false for a `ws` or `wss` scope as well;
+- nothing else. `X-Forwarded-Port` and the `SECURE_PROXY_SSL_HEADER` header move only a
+  hostless handshake's reconstructed port, and passing them would let a client-supplied port
+  admit a handshake whose server address alone fails (a `scope["server"]` port of `None`
+  under `USE_X_FORWARDED_PORT`). A hostless handshake is therefore validated against the
+  server's own name and port.
 
 `HttpRequest.get_host()` then **exclusively owns** syntax checking, port removal, IPv4 and
 IPv6 handling, trailing-dot behavior, `ALLOWED_HOSTS` matching, wildcards, and the
-`DEBUG`-and-empty-`ALLOWED_HOSTS` localhost defaults. The package contributes the projection
-and nothing else.
+`DEBUG`-and-empty-`ALLOWED_HOSTS` localhost defaults. The package contributes the choice of
+inputs and nothing else.
 
 **Only `DisallowedHost` becomes a denial.** The validator catches `DisallowedHost` and denies
 the handshake **before authentication and before the consumer is constructed**. Any other
@@ -2392,8 +2401,9 @@ wants a different Host policy configures `ALLOWED_HOSTS`, exactly as they would 
   the mirror reason: nothing outside this module transitions it, and the close attempt it owns
   is a connection-lifetime task rather than an operation-lifetime one.
 - **The WebSocket Host boundary calls Django and matches nothing itself.**
-  `DjangoWebSocketHostValidator` projects the handshake's Host metadata into a minimal
-  `HttpRequest` and calls the public `HttpRequest.get_host()`; `ALLOWED_HOSTS` matching,
+  `DjangoWebSocketHostValidator` builds Django's own `ASGIRequest` over the handshake's Host
+  headers and server address and calls the public `HttpRequest.get_host()`; `ALLOWED_HOSTS`
+  matching,
   wildcards, port and IPv6 handling, trailing dots, and the `DEBUG` localhost defaults are
   Django's alone, and no second allowed-host expression exists in the package
   ([Decision 19](#decision-19--a-django-backed-websocket-host-boundary-beside-channels-origin-check)).
@@ -3078,7 +3088,9 @@ package, communicator-driven):
     allowed-`Host` control so it cannot pass on a router that denies everything.
 51. Only `DisallowedHost` becomes a denial: an unexpected exception raised inside the
     projection propagates rather than being reported as a rejected host, and the row asserts
-    the exception type rather than a denial.
+    the exception type rather than a denial. A handshake whose client-controlled fields
+    Django's adapter parses eagerly (a crafted `Content-Type`, a non-UTF-8 query string) still
+    gets its Host verdict, because those fields never reach the adapter.
 
 **The async view's request actor** (live, plus package-tier for where the lookup runs):
 
