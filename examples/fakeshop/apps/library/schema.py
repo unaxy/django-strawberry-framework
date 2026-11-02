@@ -3299,11 +3299,10 @@ class UpdatePrintingViaSerializer(SerializerMutation):
 class EditionLegacyIsbn:
     """Consumer ``Meta.input_class`` override declaring ``Edition.isbn_10`` without ``name=``.
 
-    The field exists as a fixture: ``isbn_10`` is a name the two casers disagree on (the
-    package's generated field publishes ``isbn_10``, Strawberry's ``NameConverter``
-    ``isbn10``), so with no ``name=`` the merged ``EditionInput`` publishes ``isbn10`` and
-    every error on the column - the decode's, ``full_clean()``'s and a save-time
-    ``ValidationError``'s - keys to ``isbn10``, the name the schema published.
+    The field exists as a fixture: with no ``name=`` the schema's ``NameConverter`` names
+    it, as it names the generated fields, so the merged ``EditionInput`` publishes
+    ``isbn10`` and every error on the column - the decode's, ``full_clean()``'s and a
+    save-time ``ValidationError``'s - keys to ``isbn10``, the name the schema published.
     """
 
     isbn_10: str | None = strawberry.field(default=UNSET)
@@ -3313,10 +3312,10 @@ class CreateEdition(DjangoMutation):
     """Create an ``Edition`` via the model pipeline; the client assigns the ISBN key.
 
     The primary key is the text column ``isbn_13``, which has no default, so the create
-    input carries it as the required ``isbn_13``: a free ISBN creates the edition and a
-    taken one is the ``unique`` error on ``isbn_13``, never an overwrite of that edition.
-    ``EditionLegacyIsbn`` replaces the generated ``isbn_10`` with an unnamed field, so the
-    input publishes it as ``isbn10``.
+    input carries it as the required ``isbn13``: a free ISBN creates the edition and a
+    taken one is the ``unique`` error on ``isbn13``, never an overwrite of that edition.
+    ``EditionLegacyIsbn`` replaces the generated ``isbn_10`` with an unnamed field, which
+    the input publishes as ``isbn10`` too.
     """
 
     class Meta:

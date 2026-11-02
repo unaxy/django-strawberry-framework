@@ -1151,7 +1151,7 @@ makes the form think `category` is missing). So `forms/inputs.py` **retains, per
 generated input field, a [`utils/inputs.py`][utils-inputs]`::InputFieldSpec`** that
 `forms/resolvers.py` consults at decode. That is the single reverse-map record type
 every write flavor shares: `input_attr` (the generated Strawberry attr) and
-`graphql_name` (the camel-cased wire name) map to `target_name` — the form's own
+`graphql_name` (the bind-time prediction; a request reads the published name) map to `target_name` — the form's own
 declared field name on this path — plus a `kind ∈ {scalar, relation_single,
 relation_multi, file}` and, for a relation, the `related_model` recorded at build time
 so the decode never re-discovers it per request. The four `kind` constants are defined

@@ -46,6 +46,7 @@ from weakref import WeakKeyDictionary
 
 import strawberry
 from graphql import GraphQLInputObjectType, get_named_type
+from strawberry.schema.name_converter import NameConverter
 from strawberry.types.base import StrawberryList, StrawberryOptional, get_object_definition
 from strawberry.types.enum import StrawberryEnumDefinition
 from strawberry.types.lazy_type import LazyType
@@ -73,12 +74,7 @@ from .imports import import_attr_if_importable
 from .input_values import UNSET
 from .lazy import unwrap_lazy_object
 from .permissions import set_bound_definition
-
-# ``utils/strings.py`` is the owner of ``graphql_camel_name``;
-# re-imported here (the ``as`` form marks the explicit re-export) so
-# ``from ..utils.inputs import graphql_camel_name`` resolves too.
 from .strings import flatten_lookup_path
-from .strings import graphql_camel_name as graphql_camel_name  # noqa: PLC0414 - explicit re-export
 from .typing import (
     graphql_input_fields,
     graphql_type_of,
@@ -110,12 +106,10 @@ if TYPE_CHECKING:
     from django_strawberry_framework.types.definition import DjangoTypeDefinition
 
     class _NamedInputSpec(Protocol):
-        """A generated-input naming record: its dataclass attr and its GraphQL name."""
+        """A generated-input naming record: its dataclass attr."""
 
         @property
         def input_attr(self) -> str: ...
-        @property
-        def graphql_name(self) -> str: ...
 
     class _WritableSetMeta(Protocol):
         """A consumer class ``Meta`` whose ``fields`` the synonym write-back sets."""
@@ -155,43 +149,76 @@ if TYPE_CHECKING:
 class GeneratedInputFieldSpec:
     """Per-generated-input-field metadata shared across the set families.
 
-    Carries the Strawberry input dataclass field, its GraphQL wire-format name,
-    and its ``django_source_path``. On the order side that path is the Django
-    ORM path the normalizer orders by. On the filter side it is only the
-    ``check_<path>_permission`` gate path (a declared head's own name, else its
-    filter's ``field_name``); filter form keys come from
+    Carries the Strawberry input dataclass field, its ``django_source_path`` and
+    the ``member`` it is generated from (the set's declared name or ``Meta.fields``
+    entry, ``branch__name`` for the attr ``branch_name``). On the order side the
+    path is the Django ORM path the normalizer orders by. On the filter side it is
+    only the ``check_<path>_permission`` gate path (a declared head's own name,
+    else its filter's ``field_name``); filter form keys come from
     ``filters/inputs.py::filter_lookup_table``. Re-exported as ``FieldSpec`` by
     both ``filters/inputs.py`` and ``orders/inputs.py``.
     """
 
     python_attr: str
-    graphql_name: str
     django_source_path: str
+    member: str
 
 
-def optional_field_kwargs(python_attr: str, graphql_name: str) -> dict[str, object]:
-    """Return the optional default plus any non-identity GraphQL alias.
+@dataclass(frozen=True)
+class GeneratedFieldSources:
+    """The declaration a generated input class's fields are generated from, by input attr.
+
+    ``build_strawberry_input_class`` records it for the class it builds, so a schema
+    refusing two of the class's fields that its ``NameConverter`` names alike
+    (``schema.py::_refuse_field_name_collisions``) names what the consumer can change
+    (``field_name_collision_remedy``): a generated field takes no ``name=``, so the
+    remedy is its declaration's. The nouns are the flavor's own, the ones
+    ``iter_input_field_collisions`` words its refusals with: ``subject``
+    (``"FilterSet 'BookFilter'"``, ``"Form 'ShelfForm'"``), ``field_noun``
+    (``"members"``, ``"model fields"``) and ``rename_clause``. ``members`` maps each
+    input attr to the member it is generated from (``publisher_2_id`` ->
+    ``publisher_2``).
+    """
+
+    subject: str
+    field_noun: str
+    rename_clause: str
+    members: Mapping[str, str]
+
+
+# The converter a schema built with Strawberry's default config names its fields with.
+_DEFAULT_NAME_CONVERTER = NameConverter()
+
+
+def predicted_input_field_name(python_attr: str) -> str:
+    """Predict, at bind, the wire name a default-config schema publishes for ``python_attr``.
+
+    A generated input field carries no ``name=`` (a keyword escape aside), so the
+    executing schema's ``NameConverter`` names it at schema build, as it names every
+    output field; no schema exists at bind. This is the default converter's answer,
+    the bind-time ``InputFieldSpec.graphql_name``; a request reads the executing
+    schema's own name instead (``published_input_specs``).
+    """
+    return _DEFAULT_NAME_CONVERTER.apply_naming_config(python_attr)
+
+
+def optional_field_kwargs(wire_name: str | None = None) -> dict[str, object]:
+    """Return the optional default plus the wire name a Python keyword escape pins.
 
     Every generated filter / order input field is optional-with-``None``: an
     omitted ``default`` means REQUIRED under ``build_strawberry_input_class``'s
     required-vs-optional contract, so the explicit ``default: None`` keeps the
-    field omittable. ``build_strawberry_input_class`` pins the package-derived
-    name when this helper does not need to carry an alias, so Strawberry never
-    re-derives the wire name through a different converter.
+    field omittable. ``wire_name`` is passed only for an attr escaping a Python
+    keyword (``in_`` -> ``in``, ``and_`` -> ``and``); every other field is named
+    by the schema's ``NameConverter``.
     """
     kwargs: dict[str, object] = {"default": None}
-    if python_attr != graphql_name:
-        kwargs["name"] = graphql_name
+    if wire_name is not None:
+        kwargs["name"] = wire_name
     return kwargs
 
 
-def optional_input_field(
-    annotation: object,
-    *,
-    python_attr: str,
-    graphql_name: str,
-    widen: bool,
-) -> tuple[object, dict[str, object]]:
+def optional_input_field(annotation: object, *, widen: bool) -> tuple[object, dict[str, object]]:
     """Apply the write-input optional-widening tail to one field.
 
     The per-field tail the form and serializer input builders share, seated
@@ -203,14 +230,10 @@ def optional_input_field(
     ``strawberry.UNSET`` so the field is OMITTABLE. A non-widened field gets NO
     default, so GraphQL enforces presence. Returns the ``(annotation,
     field_kwargs)`` pair; a flavor may add further kwargs (the serializer's SDL
-    ``description``) on top.
-
-    ``build_strawberry_input_class`` pins the package-derived name when no alias
-    is needed, keeping Strawberry's converter out of generated-input naming.
+    ``description``) on top. No ``name=``: the schema's ``NameConverter`` names
+    the field.
     """
     field_kwargs: dict[str, object] = {}
-    if python_attr != graphql_name:
-        field_kwargs["name"] = graphql_name
     if widen:
         annotation = optional_annotation(annotation)
         field_kwargs["default"] = UNSET
@@ -230,8 +253,8 @@ def emit_set_input_field_triples(
 
     The triple-emission scaffold the filter and order ``_build_input_fields``
     share: for each ``(top_name, entry)`` pair derive the python attr
-    (``flatten_lookup_path``) + camel-cased GraphQL name + the
-    ``optional_field_kwargs`` shape, then branch:
+    (``flatten_lookup_path``) + the ``optional_field_kwargs`` shape, then
+    branch:
 
     - **related** (``related_of`` answers its ``(target, source path)`` pair, ``None``
       for a leaf): a ``Related*(None, ...)`` placeholder target skips silently;
@@ -255,30 +278,20 @@ def emit_set_input_field_triples(
     Fails loud on a generated-field collision. Two set members whose paths
     flatten (``__`` -> ``_`` via ``flatten_lookup_path``) to one python attr --
     e.g. a relation traversal ``branch__name`` beside a declared / scalar
-    ``branch_name`` -- or that camel-case to one GraphQL name
-    (``foo_bar`` / ``fooBar``) would make ``build_strawberry_input_class``
-    silently overwrite one field in the generated input dataclass, dropping a
-    filter / ordering the consumer declared from the public schema with NO
-    error. The schema build (``schema.py::_refuse_field_name_collisions``) and
-    the write-input surfaces (``iter_input_field_collisions``) already reject
-    this class of silent drop; this is the parity guard for the filter / order
-    generated-input surfaces, which both route their emission through here.
-
-    The package rejects this collision class at four points, and they are
-    deliberately NOT one walk. This one and ``iter_input_field_collisions`` read
-    generated specs and word the cause the consumer can act on (a flattened
-    ``__`` path here, a relation's ``<name>_id`` remap there);
-    ``schema.py::_refuse_field_name_collisions`` reads STRAWBERRY's own
-    resolved field definitions under the executing schema's ``NameConverter``,
-    because a consumer-authored field's name (a merged ``input_class``'s, a
-    DjangoType's) is that schema's; and
-    ``build_strawberry_input_class`` is the independent BACKSTOP at the
-    construction site, whose value is precisely that it does not share a body
-    with the domain guards - one walk would mean one bug disabling all of them.
+    ``branch_name`` -- would make ``build_strawberry_input_class`` silently
+    overwrite one field in the generated input dataclass, dropping a filter /
+    ordering the consumer declared from the public schema with NO error. This
+    is the python-attr guard for the filter / order generated-input surfaces,
+    which both route their emission through here, worded with the cause the
+    consumer can act on (a flattened ``__`` path); ``iter_input_field_collisions``
+    is the write inputs' (a relation's ``<name>_id`` remap), and
+    ``build_strawberry_input_class`` the construction-site backstop. Two attrs
+    the executing schema's ``NameConverter`` names alike (``foo_bar`` /
+    ``fooBar`` by default) are ``schema.py::_refuse_field_name_collisions``'s
+    alone, per schema, because the GraphQL name is that schema's.
     """
     triples: list[tuple[str, object, dict[str, object]]] = []
     seen_attr: dict[str, str] = {}
-    seen_graphql: dict[str, str] = {}
     # Provenance rows are staged and committed only after the whole set walks
     # clean. Writing them as each field is emitted would leave the family's
     # ``field_specs`` table half-populated when a later member collides - a
@@ -286,8 +299,7 @@ def emit_set_input_field_triples(
     staged_specs: list[tuple[tuple[type[object], str], GeneratedInputFieldSpec]] = []
     for top_name, entry in entries:
         python_attr = flatten_lookup_path(top_name)
-        graphql_name = graphql_camel_name(python_attr)
-        field_kwargs = optional_field_kwargs(python_attr, graphql_name)
+        field_kwargs = optional_field_kwargs()
         related = related_of(top_name, entry)
         if related is not None:
             target, django_source_path = related
@@ -313,25 +325,15 @@ def emit_set_input_field_triples(
                 "other in the generated input type. Rename one member or drop one via "
                 "Meta.fields / Meta.exclude.",
             )
-        prior_graphql = seen_graphql.get(graphql_name)
-        if prior_graphql is not None:
-            raise ConfigurationError(
-                f"{truth.qualname(set_cls)}: members {prior_graphql!r} and "
-                f"{top_name!r} both generate the GraphQL input field name {graphql_name!r} "
-                "under package camel-casing, so one would silently overwrite the other "
-                "in the generated input type. Rename one member or drop one via "
-                "Meta.fields / Meta.exclude.",
-            )
         seen_attr[python_attr] = top_name
-        seen_graphql[graphql_name] = top_name
         triples.append((python_attr, annotation, field_kwargs))
         staged_specs.append(
             (
                 (set_cls, python_attr),
                 GeneratedInputFieldSpec(
                     python_attr=python_attr,
-                    graphql_name=graphql_name,
                     django_source_path=django_source_path,
+                    member=top_name,
                 ),
             ),
         )
@@ -399,11 +401,9 @@ class InputFieldSpec:
     - ``input_attr`` - the generated Strawberry dataclass attr (``category_id``
       for an FK relation, ``name`` for a scalar).
     - ``graphql_name`` - the GraphQL wire name (``categoryId``) as the bind
-      records it: the name a generated field pins, or, for a model mutation's
-      ``Meta.input_class`` field declared without ``name=``, the bind-time
-      prediction. A request replaces it with the executing schema's name
-      (``published_input_specs``), since a schema's ``NameConverter`` can
-      respell even a pinned name.
+      records it: the bind-time prediction (``predicted_input_field_name``), or
+      a ``Meta.input_class`` field's explicit ``name=``. A request replaces it
+      with the executing schema's name (``published_input_specs``).
     - ``target_name`` - the per-flavor decode key. For the form flavor this is the
       form's declared field name (``category``); for the serializer flavor this is
       the DECLARED serializer field name (``category_pk``), which the framework
@@ -462,11 +462,10 @@ def published_input_specs(
     """Return a write mutation's bind specs, each named as the executing schema published it.
 
     A spec is recorded at bind, before any schema exists, so its ``graphql_name``
-    is the name the bind expects: the one a generated field pins, or the
-    prediction for a model mutation's ``Meta.input_class`` field declared without
-    ``name=`` (``mutations/inputs.py::_predicted_input_field_name``). The schema's
-    own ``NameConverter`` names every field at schema build, and a converter
-    overriding ``get_graphql_name`` or ``from_field`` respells even a pinned
+    is the name the bind expects: ``predicted_input_field_name``'s prediction,
+    or a ``Meta.input_class`` field's explicit ``name=``. The schema's own
+    ``NameConverter`` names every field at schema build, and a converter
+    overriding ``get_graphql_name`` or ``from_field`` respells even an explicit
     name; one input class can serve several schemas. The executable schema keys
     the ``data:`` input object's fields by the names it published and
     back-references each field's attr (``utils/typing.py::published_argument`` /
@@ -1336,11 +1335,12 @@ def build_strawberry_input_class(
     field_specs: Sequence[tuple[str, object, Mapping[str, object] | None]],
     *,
     empty_message: str | None = None,
+    sources: GeneratedFieldSources | None = None,
 ) -> type[WithStrawberryObjectDefinition]:
     """Construct a ``@strawberry.input``-decorated dataclass.
 
     ``field_specs`` is a list of ``(python_attr, annotation, field_kwargs)``
-    triples. ``field_kwargs`` may carry ``name=`` for a GraphQL alias,
+    triples. ``field_kwargs`` may carry ``name=`` for an explicit GraphQL name,
     ``default=`` for the dataclass default, and ``description=`` for the
     Strawberry field description.
 
@@ -1355,19 +1355,18 @@ def build_strawberry_input_class(
     tolerates a required field after a defaulted one; its inputs are
     keyword-only).
 
-    Every field receives an explicit GraphQL name. When a triple omits ``name``,
-    the package's injective ``graphql_camel_name`` result is pinned rather than
-    allowing Strawberry's converter to derive a different wire name. This
-    matters at underscore/digit boundaries: the package keeps ``field_2``
-    distinct from ``field2``, while Strawberry's default converter maps both to
-    ``field2``. Duplicate Python attrs and duplicate effective GraphQL names are
-    rejected before namespace construction so a caller can never silently lose
-    a field even if it misses its domain-level collision guard.
+    A triple's ``name`` is passed through; every other field is named by the
+    executing schema's ``NameConverter``. Duplicate Python attrs are rejected
+    before namespace construction so a caller can never silently lose a field
+    even if it misses its domain-level collision guard. ``sources`` names the
+    declaration the fields are generated from, recorded for the built class so a
+    schema refusing two fields it names alike names that declaration
+    (``field_name_collision_remedy``).
 
     The class is constructed via ``type(name, (), namespace)`` rather than
     ``dataclasses.make_dataclass`` because ``make_dataclass`` replaces any
     ``strawberry.field(...)`` default with a plain ``dataclasses.Field`` and
-    strips the strawberry-specific metadata (the ``name=`` alias would be
+    strips the strawberry-specific metadata (an explicit ``name=`` would be
     lost). Setting the ``strawberry.field`` as a class-level attribute
     alongside ``__annotations__`` preserves the metadata through the
     ``@strawberry.input`` decoration.
@@ -1386,7 +1385,6 @@ def build_strawberry_input_class(
     """
     annotations: dict[str, object] = {}
     namespace: dict[str, object] = {"__annotations__": annotations}
-    seen_graphql_names: dict[object, str] = {}
     specs = tuple(field_specs)
     if not specs and empty_message is not None:
         # The zero-field guard belongs at the CONSTRUCTION site, not only at the
@@ -1437,36 +1435,78 @@ def build_strawberry_input_class(
                 f"description; got {truth.kind(requested_name)} and "
                 f"{truth.kind(field_description)}.",
             )
-        graphql_name = (
-            requested_name if requested_name is not None else graphql_camel_name(python_attr)
-        )
-        if graphql_name in seen_graphql_names:
-            prior_attr = seen_graphql_names[graphql_name]
-            raise ConfigurationError(
-                f"Generated input {name!r} maps input attributes {prior_attr!r} and "
-                f"{python_attr!r} to the same GraphQL field name {graphql_name!r}; one would "
-                "silently overwrite the other.",
-            )
-        seen_graphql_names[graphql_name] = python_attr
         # The PRESENCE of ``default`` (not its value) decides required-vs-optional:
         # a required field gets NO class default at all, so ``None`` is a legal
         # explicit default for an optional field rather than the required sentinel.
         has_default = "default" in kwargs
         default = kwargs.pop("default", None)
         annotations[python_attr] = annotation
-        # Every field carries a pinned ``name``, so it always gets a
-        # ``strawberry.field``; pass ``default`` only when one was supplied so
-        # a required field (e.g. a required FK ``categoryId``) stays non-null
-        # and coercion rejects omission.
+        # Pass ``default`` only when one was supplied so a required field (e.g. a
+        # required FK ``categoryId``) stays non-null and coercion rejects omission.
         namespace[python_attr] = (
-            strawberry.field(default=default, name=graphql_name, description=field_description)
+            strawberry.field(default=default, name=requested_name, description=field_description)
             if has_default
-            else strawberry.field(name=graphql_name, description=field_description)
+            else strawberry.field(name=requested_name, description=field_description)
         )
     cls = type(name, (), namespace)
+    if sources is not None:
+        _generated_field_sources[cls] = sources
     # basedpyright: strawberry.input's signature returns its argument's type unchanged, so the
     # __strawberry_definition__ the decorator attaches is invisible without the cast
     return cast("type[WithStrawberryObjectDefinition]", strawberry.input(cls, name=name))
+
+
+# The declaration each generated class's fields come from, keyed by the class
+# ``build_strawberry_input_class`` built (the ``origin`` Strawberry stamps on each
+# of its fields, which a merged input's inherited fields keep).
+_generated_field_sources: WeakKeyDictionary[type[object], GeneratedFieldSources] = (
+    WeakKeyDictionary()
+)
+
+
+def _sources_of(field: StrawberryField) -> GeneratedFieldSources | None:
+    """Return the sources of the generated class ``field`` was collected from, else ``None``."""
+    # Strawberry types ``origin`` over resolver wrappers it leaves unparameterized; a
+    # resolver field's origin is its resolver, never a generated class.
+    origin: object = read_attr(field, "origin")
+    return _generated_field_sources.get(origin) if truth.is_type(origin) else None
+
+
+def field_name_collision_remedy(first: StrawberryField, second: StrawberryField) -> str:
+    """Say what the consumer can change about two fields a schema's converter names alike.
+
+    The remedy half of ``schema.py::_refuse_field_name_collisions``'s refusal. A
+    generated field takes no ``name=``: two fields one declaration generates
+    (``GeneratedFieldSources``) name that declaration, the members they are
+    generated from and the flavor's remedy; a generated field beside a declared one
+    (a model mutation's ``Meta.input_class`` field) names the declared field's
+    ``name=`` and the member to drop; two declared fields keep Strawberry's levers.
+    """
+    first_sources = _sources_of(first)
+    second_sources = _sources_of(second)
+    if first_sources is not None and second_sources is first_sources:
+        return (
+            f"{first_sources.subject} generates them from {first_sources.field_noun} "
+            f"{first_sources.members[first.python_name]!r} and "
+            f"{first_sources.members[second.python_name]!r}. "
+            f"{first_sources.rename_clause} or drop one via Meta.fields / Meta.exclude."
+        )
+    if first_sources is None and second_sources is None:
+        return "Rename one, give one an explicit name=, or drop one from the type."
+    # One side is generated, the other declared beside it; ``sorted`` is stable and
+    # puts the generated side first.
+    (generated, sources), (declared, _) = sorted(
+        ((first, first_sources), (second, second_sources)),
+        key=lambda pair: pair[1] is None,
+    )
+    generated_sources = require_instance(sources, GeneratedFieldSources)
+    member = generated_sources.members[generated.python_name]
+    return (
+        f"{generated_sources.subject} generates "
+        f"{generated.python_name!r} from {member!r}, and {declared.python_name!r} is declared "
+        f"beside it: give {declared.python_name!r} a different explicit name=, or drop "
+        f"{member!r} via Meta.fields / Meta.exclude."
+    )
 
 
 def materialize_generated_input_class(
@@ -1804,27 +1844,21 @@ def generated_type_name_collision(
 def iter_input_field_collisions(
     field_specs: Iterable[_SpecT],
     *,
-    subject: str,
-    field_noun: str,
-    rename_clause: str,
+    sources: GeneratedFieldSources,
     name_of: Callable[[_SpecT], str],
-    camel_case_note: str = "",
     source_of: Callable[[_SpecT], str] | None = None,
-    check_input_attrs: bool = True,
-    check_graphql_names: bool = True,
 ) -> Iterator[str]:
     """Yield every input-field collision message for one generated write input.
 
     The seen-dict walk + the collision arms behind the form and serializer
     input-attr guards, single-sited: two specs colliding on the generated
     ``input_attr`` (a relation's ``<name>_id`` remap vs a literal ``<name>_id``
-    field) or on the ``graphql_name`` (default camel-casing collapse) would make
-    ``build_strawberry_input_class`` / Strawberry SILENTLY drop one - so each
-    collision yields a fail-loud message. The per-flavor wording stays
-    byte-stable via the threaded nouns: ``subject`` (``"Form 'X'"`` /
+    field) would make ``build_strawberry_input_class`` SILENTLY drop one - so
+    each collision yields a fail-loud message. The per-flavor wording stays
+    byte-stable via the nouns of the flavor's ``sources``, the record its input
+    class is built with: ``subject`` (``"Form 'X'"`` /
     ``"SerializerMutation for 'X'"``), ``field_noun`` (``"form fields"`` /
-    ``"serializer fields"``), ``rename_clause``, and the serializer's
-    ``camel_case_note`` (the id-like-suffix parenthetical). ``name_of`` reads the
+    ``"serializer fields"``) and ``rename_clause``. ``name_of`` reads the
     flavor's display name off a spec (``target_name`` for form / serializer
     write inputs; ``model_field_name`` for the model mutation naming record).
 
@@ -1834,34 +1868,26 @@ def iter_input_field_collisions(
     ``attname`` or ``pk`` alias keys as the field it spells); forms have no
     ``source`` axis and leave it ``None``. The form guard raises on the
     FIRST yielded message; the serializer aggregates them all - the
-    consumption policy stays at each call site.
-
-    ``check_input_attrs`` / ``check_graphql_names`` let a caller audit the two
-    axes at different lifecycle points. Model mutation inputs use that split so
-    an impossible relation-attr ambiguity is checked across the whole selected
-    shape, while a consumer override may legitimately replace a generated
-    GraphQL name before the effective wire surface is audited.
+    consumption policy stays at each call site. Two fields the executing
+    schema's ``NameConverter`` names alike are
+    ``schema.py::_refuse_field_name_collisions``'s, per schema.
     """
+    subject, field_noun, rename_clause = (
+        sources.subject,
+        sources.field_noun,
+        sources.rename_clause,
+    )
     seen_attr: dict[str, str] = {}
-    seen_graphql: dict[str, str] = {}
     seen_source: dict[str, str] = {}
     for spec in field_specs:
         current = name_of(spec)
         prior_attr = seen_attr.get(spec.input_attr)
-        if check_input_attrs and prior_attr is not None:
+        if prior_attr is not None:
             yield (
                 f"{subject} generates two input fields with the same attribute "
                 f"{spec.input_attr!r}: {field_noun} {prior_attr!r} and {current!r} collide "
                 "(a relation field remaps to '<name>_id', clashing with a field literally "
                 f"named that). {rename_clause} or drop one via Meta.fields / Meta.exclude."
-            )
-        prior_graphql = seen_graphql.get(spec.graphql_name)
-        if check_graphql_names and prior_graphql is not None:
-            yield (
-                f"{subject} generates two input fields with the same GraphQL name "
-                f"{spec.graphql_name!r}: {field_noun} {prior_graphql!r} and {current!r} collide "
-                f"under default camel-casing{camel_case_note}. {rename_clause} or drop one via "
-                "Meta.fields / Meta.exclude."
             )
         if source_of is not None:
             write_source = source_of(spec)
@@ -1874,7 +1900,6 @@ def iter_input_field_collisions(
                 )
             seen_source[write_source] = current
         seen_attr[spec.input_attr] = current
-        seen_graphql[spec.graphql_name] = current
 
 
 def build_lazy_input_annotation(
@@ -2066,6 +2091,9 @@ class GeneratedInputArgumentsFactory(Generic[_FactorySetT]):
       attribute (``related_filters`` / ``related_orders``) and the attribute on
       each related entry that resolves the target set class (``filterset`` /
       ``orderset``).
+    - ``_field_specs`` -- the family's ``(set class, python attr)`` provenance
+      table ``emit_set_input_field_triples`` fills, read for the member each root
+      field is generated from (``GeneratedFieldSources``).
 
     Subclassing a CONCRETE family factory is rejected at class-creation time:
     the class-level caches are mutable dicts a grand-subclass would inherit
@@ -2084,6 +2112,7 @@ class GeneratedInputArgumentsFactory(Generic[_FactorySetT]):
     _rename_noun: ClassVar[str]
     _related_attr: ClassVar[str]
     _related_target_attr: ClassVar[str]
+    _field_specs: ClassVar[dict[tuple[type[object], str], GeneratedInputFieldSpec]]
 
     @override
     def __init_subclass__(cls, **kwargs: object) -> None:
@@ -2195,6 +2224,18 @@ class GeneratedInputArgumentsFactory(Generic[_FactorySetT]):
                 f"('Input Object type {type_name} must define one or more fields'). "
                 f"Declare at least one field via the {self._rename_noun}'s Meta.fields "
                 "(or add a RelatedOrder / RelatedFilter branch)."
+            ),
+            # A member field's spec names the member; the filter family's logic keys
+            # (``and_`` / ``or_`` / ``not_``) are no member and name themselves.
+            sources=GeneratedFieldSources(
+                subject=f"{self._family_label} {truth.qualname(set_cls)!r}",
+                field_noun="members",
+                rename_clause="Rename one member",
+                members={
+                    attr: spec.member if spec is not None else attr
+                    for attr, _annotation, _kwargs in triples
+                    for spec in (self._field_specs.get((set_cls, attr)),)
+                },
             ),
         )
         claim_generated_type_name(

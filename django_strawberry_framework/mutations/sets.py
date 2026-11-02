@@ -264,7 +264,7 @@ def _expected_input_attr_names(
         operation_kind=operation_kind,
     ):
         if getattr(field, "is_relation", False):
-            python_attr, _graphql_name, _annotation = relation_input_annotation(
+            python_attr, _annotation = relation_input_annotation(
                 field,
                 related_primary_type=None,
             )
@@ -957,7 +957,7 @@ def _validate_relation_override_types(
         related_primary_type = registry.get(require(field.related_model, is_model_class))
         if not relation_takes_global_id(related_primary_type):
             continue  # raw-pk relation (non-Relay target): no GlobalID decode to feed.
-        python_attr, _graphql_name, annotation = relation_input_annotation(
+        python_attr, annotation = relation_input_annotation(
             field,
             related_primary_type=related_primary_type,
         )

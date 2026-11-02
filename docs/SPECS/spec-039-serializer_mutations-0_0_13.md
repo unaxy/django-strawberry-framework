@@ -353,8 +353,9 @@ live-first mandate, so the resolver's reachable lines are covered by a real
     `source="category"` relation and a `source="name"` scalar derive the GraphQL name
     from the **declared** field name, resolve the backing `models.Field` via `source`,
     and preserve the declared name in the reverse map; **the id-like suffix rule** —
-    `category` → `categoryId`, `category_id` → `categoryId`, `category_pk` →
-    `categoryPk` (no doubled `…IdId` / `…PkId`); a **dotted `source`** / `source="*"` on
+    input attr `category` → `category_id`, `category_id` → `category_id`, `category_pk` →
+    `category_pk` (no doubled `…_id_id` / `…_pk_id`), each named by the schema's
+    converter (`categoryId` / `categoryPk` by default); a **dotted `source`** / `source="*"` on
     a model-column-converting field, a relation bound to its forward relation's
     `attname` or to the `pk` alias of a relation key, and a field whose kind (scalar /
     file / relation) disagrees with the column it writes, raise
@@ -406,7 +407,7 @@ live-first mandate, so the resolver's reachable lines are covered by a real
     `get_or_store_shape_build`), the suffix helper (`pascalize_token`), the four
     input-kind constants (`SCALAR` / `FILE` / `RELATION_SINGLE` / `RELATION_MULTI`),
     `build_strawberry_input_class`, `normalize_field_name_sequence`, and
-    `graphql_camel_name` in both consumer modules. One ceiling is stated rather than
+    `predicted_input_field_name` in both consumer modules. One ceiling is stated rather than
     implied: the input-kind constants are interned `str`, so their rows catch a deletion
     and a value drift but not a same-valued re-spelling.
 - [ ] Slice 2: the `SerializerMutation` base + `Meta` validation + the phase-2.5 bind
@@ -1440,19 +1441,21 @@ can declare `category_pk = PrimaryKeyRelatedField(source="category", queryset=�
 supported `source` scope:
 
 - **Omitted `source`** (the common case, `source == field_name`) and a **simple
-  one-segment `source`** (`source="category"`) are supported. The **GraphQL input name
-  is derived from the declared serializer field name** by the cross-flavor rule, with an
+  one-segment `source`** (`source="category"`) are supported. The **input attr is
+  derived from the declared serializer field name** by the cross-flavor rule
+  (`rest_framework/serializer_converter.py::serializer_field_input_attr`), with an
   **id-like-suffix normalization** so the relation convention does not double-suffix:
-  the relation `Id` suffix is appended **only when the declared field name is not
-  already id-like** (`*_id` / `*_pk`); an already-id-like name is just
-  camel-cased. So a relation field `category` → `categoryId` (suffix appended, the
-  package convention that surfaces FK `category` as `categoryId`), `category_id` →
-  `categoryId` (already id-like — camel-cased, **no** doubled `…IdId`), and
-  `category_pk` → `categoryPk` (already id-like — camel-cased, **no** `…PkId`). This
-  matters because DRF migrants routinely name write-only related-id fields `<name>_id`
-  already (`category_id = PrimaryKeyRelatedField(source="category", …)`); appending `Id`
-  regardless would emit `categoryIdId`. (A non-relation scalar
-  field is camel-cased with no suffix: `full_name` → `fullName`.) The **backing Django
+  the relation `_id` suffix is appended **only when the declared field name is not
+  already id-like** (`*_id` / `*_pk`). So a relation field `category` → `category_id`
+  (suffix appended, the package convention for FK `category`), `category_id` →
+  `category_id` (already id-like, **no** doubled `…_id_id`), and `category_pk` →
+  `category_pk` (**no** `…_pk_id`). The field carries no `name=`: the executing schema's
+  `NameConverter` names it from the attr (`categoryId` / `categoryPk` under the default
+  config, `category_id` / `category_pk` under `auto_camel_case=False`). This matters
+  because DRF migrants routinely name write-only related-id fields `<name>_id` already
+  (`category_id = PrimaryKeyRelatedField(source="category", …)`); appending `_id`
+  regardless would emit `categoryIdId`. (A non-relation scalar field keeps its declared
+  name as the attr: `full_name`, published `fullName` by default.) The **backing Django
   model field** (for the enum / relation-target resolution above) is looked up by
   **`source`**, not the field name. The reverse map **preserves the declared serializer
   field name** as the `provided_data` key — DRF's `to_internal_value` reads by the
@@ -2658,8 +2661,8 @@ held by the identity ratchet where a symbol is shared:
 
 ### Small reuses to pin; deliberately not applicable
 
-Pin as named import obligations (Slice DoD lines): `utils/strings.py::graphql_camel_name`
-(the `categoryId` alias naming — do not hand-roll camel-casing);
+Pin as named import obligations (Slice DoD lines): `utils/inputs.py::predicted_input_field_name`
+(the bind-time `graphql_name` prediction, Strawberry's default converter — no hand camel-casing);
 `utils/inputs.py::normalize_field_name_sequence(flavor="SerializerMutation")`;
 `utils/permissions.py::request_from_info(family_label="SerializerMutation")`;
 `mutations/inputs.py::{annotate_queryset_relation, model_column_write_annotation,
@@ -2695,9 +2698,6 @@ reuse:
   the serializer base); `unwrap_return_type` applies only to a
   consumer `input_class` override, which the serializer flavor does not accept
   ([Decision 6](#decision-6--base-class-strategy-serializermutation-rides-the-djangomutation-base-modelserializer-driven)).
-- **`utils/strings.py::snake_case`** — the inverse of `graphql_camel_name`, not a
-  serializer-input reuse; do not conflate it with `graphql_camel_name`, which lives in the same module and
-  **is** the GraphQL↔Django input-name boundary the serializer flavor imports.
 
 ### Import manifest — the DRY contract per `rest_framework/` module
 
@@ -2712,8 +2712,8 @@ the Slice-1 DRY bullet enumerates, and that one is executable
 
 | `rest_framework/` module | May import from | The substrate it must not re-implement |
 | --- | --- | --- |
-| [`serializer_converter.py`][rf-converter] | `exceptions`, `registry`, `scalars`, `mutations/inputs.py`, `types/converters.py`, `utils/converters.py`, `utils/inputs.py`, `utils/strings.py` | the shared fail-loud dispatch skeleton, the shared conversion base + field spec, the four input-kind constants, the read-side scalar / enum core (`convert_scalar`, `scalar_for_field`, `build_enum_from_choices`, `choice_enum_name`), the model-column relation classifiers (`model_column_write_kind`, `model_column_write_annotation`, `annotate_queryset_relation`), the [`Upload`][glossary-upload-scalar] scalar, `graphql_camel_name`, the `register_subsystem_clear` seam |
-| [`inputs.py`][rf-inputs] | `exceptions`, `registry`, `mutations/inputs.py`, `utils/inputs.py`, `utils/strings.py`, `.serializer_converter` | the input-namespace one-ledger trio, the shape-build cache pair, `build_strawberry_input_class`, `generated_input_type_name`, `guard_dropped_required`, `iter_input_field_collisions`, `optional_input_field`, `resolve_effective_fields`, `normalize_field_name_sequence`, `pascalize_token`, `InputFieldSpec`, `graphql_camel_name`, the `CREATE` / `PARTIAL` kinds, the `register_subsystem_clear` seam |
+| [`serializer_converter.py`][rf-converter] | `exceptions`, `registry`, `scalars`, `mutations/inputs.py`, `types/converters.py`, `utils/converters.py`, `utils/inputs.py` | the shared fail-loud dispatch skeleton, the shared conversion base + field spec, the four input-kind constants, the read-side scalar / enum core (`convert_scalar`, `scalar_for_field`, `build_enum_from_choices`, `choice_enum_name`), the model-column relation classifiers (`model_column_write_kind`, `model_column_write_annotation`, `annotate_queryset_relation`), the [`Upload`][glossary-upload-scalar] scalar, `predicted_input_field_name`, the `register_subsystem_clear` seam |
+| [`inputs.py`][rf-inputs] | `exceptions`, `registry`, `mutations/inputs.py`, `utils/inputs.py`, `.serializer_converter` | the input-namespace one-ledger trio, the shape-build cache pair, `build_strawberry_input_class`, `generated_input_type_name`, `guard_dropped_required`, `iter_input_field_collisions`, `optional_input_field`, `resolve_effective_fields`, `normalize_field_name_sequence`, `pascalize_token`, `InputFieldSpec`, `predicted_input_field_name`, the `CREATE` / `PARTIAL` kinds, the `register_subsystem_clear` seam |
 | [`sets.py`][rf-sets] | `exceptions`, `mutations/inputs.py`, `mutations/operations.py`, `mutations/sets.py`, `utils/inputs.py`, `write_mixins.py`, `.inputs`, `.serializer_converter` | `DjangoMutation`, `_ValidatedMutationMeta`, `_validate_permission_classes`, `reject_unknown_meta_keys`, `MODEL_BACKED_WRITE_META_KEYS`, `NON_DELETE_OPERATION_INPUT_KIND` + `require_non_delete_operation`, `build_and_stash_input`, `construction_kwargs`, `normalize_meta_field_selection`, `own_backing_class`, `require_backing_class` / `require_subclass`, `resolve_backed_model_or_raise` (the no-model raise + `require_model_class`) / `resolve_meta_model`, `resolver_seams`, `validate_select_for_update`, `normalize_field_name_sequence` |
 | [`resolvers.py`][rf-resolvers] | `exceptions`, `mutations/inputs.py`, `mutations/resolvers.py`, `utils/errors.py`, `utils/inputs.py`, `utils/permissions.py`, `utils/querysets.py`, `utils/relations.py`, `utils/write_transaction.py`, `utils/write_values.py`, `.hook_context`, `.inputs`, `.serializer_converter` | the shared sync-pipeline skeleton `run_write_pipeline_sync` + `make_resolver_entries`, the shared decode primitives in `utils/write_values.py` — `decode_visible_relation`, `decode_visible_relation_ids`, `decode_provided_fields`, `decode_field_handlers`, `decoded_into` — the shared leaf-error constructors in `utils/errors.py`, the `NON_FIELD_ERROR_KEY` sentinel and `FieldError`, the write-transaction substrate (`require_write_pipeline`, `pipeline_write_phase`, `pin_write_queryset`, `base_locked_queryset`, `assert_no_target_drift`, `pks_match`, `column_values_match`, `make_cross_alias_save_guard`), `related_visibility_queryset`, `request_from_info` |
 | [`__init__.py`][rf-init] | `utils/imports.py` | the shared `require_optional_module` core behind `require_drf()` (Decision 12) |
@@ -2927,18 +2927,20 @@ co-clear block) — `clear_serializer_input_namespace` registers through the
   [`ConfigurationError`][glossary-configurationerror] (the reused
   `materialize_generated_input_class` ledger raise); only repeats of the **same**
   `SerializerInputShape` descriptor dedupe.
-- **Two serializer fields colliding on one generated GraphQL input name.** Within
-  **one** serializer, two declared fields whose generated GraphQL input names collide — a
-  relation `category` that suffixes to `categoryId` clashing with a field literally named
-  `category_id` that camel-cases to `categoryId` (the id-like-suffix rule, Decision 7), or
-  two scalars `foo_bar` + `fooBar` that both camel-case to `fooBar` — raise a
+- **Two serializer fields colliding on one generated input field.** Within **one**
+  serializer, two declared fields whose generated input attrs collide — a relation
+  `category` that suffixes to `category_id` clashing with a field literally named
+  `category_id` (the id-like-suffix rule, Decision 7) — raise a
   [`ConfigurationError`][glossary-configurationerror] **before materialization**, naming both
   offending fields. This is the serializer analog of the form collision guard
-  [`forms/inputs.py`][forms-inputs]`::_guard_input_attr_collisions` (which guards both the
-  input-attr and the camel-cased GraphQL-name clash) and the per-schema
-  `django_strawberry_framework/schema.py::_refuse_field_name_collisions`; the serializer reuses that
-  guard's shape rather than re-forking it (a silent drop of one field would otherwise let
-  `build_strawberry_input_class` collapse the two).
+  [`forms/inputs.py`][forms-inputs]`::_guard_input_attr_collisions`; the serializer reuses
+  that guard's shape rather than re-forking it (a silent drop of one field would otherwise
+  let `build_strawberry_input_class` collapse the two). Two scalars the executing
+  schema's `NameConverter` names alike (`foo_bar` + `fooBar`, both `fooBar` by default)
+  are distinct attrs, so the GraphQL-name clash is
+  `django_strawberry_framework/schema.py::_refuse_field_name_collisions`'s, per schema:
+  refused at `DjangoSchema` build under the default config, two fields under
+  `auto_camel_case=False`.
 - **Two writable fields sharing one `source`.** A writable serializer `source`
   must be **unique across the whole write surface** — generated input fields **and**
   `Meta.injected_fields`. Uniqueness is keyed by the model field a `source` writes
@@ -3136,10 +3138,12 @@ same transport, different app.
     `ModelSerializer` generates under `serializer_choice_field = MultipleChoiceField`) raises with its full message, while
     over an `ArrayField` whose `base_field` carries the column's choices, a `JSONField` and a
     non-choice text column it is accepted; **two declared serializer
-    fields colliding on one generated GraphQL input name** (`category` relation → `categoryId`
-    clashing with a literal `category_id` → `categoryId`, or `foo_bar` + `fooBar` → `fooBar`)
-    raise [`ConfigurationError`][glossary-configurationerror] **before materialization** (the
+    fields colliding on one generated input attr** (`category` relation → `category_id`
+    clashing with a literal `category_id`) raise
+    [`ConfigurationError`][glossary-configurationerror] **before materialization** (the
     serializer analog of [`forms/inputs.py`][forms-inputs]`::_guard_input_attr_collisions`),
+    `foo_bar` + `fooBar` is refused at `DjangoSchema` build where the converter names them
+    alike,
     two **writable** serializer fields whose sources resolve to **one** model attribute
     (the same spelling, or a `pk` alias of it; a relation's `attname` alias is refused
     first, as a relation bound to its `attname`)

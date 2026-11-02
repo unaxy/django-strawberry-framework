@@ -29,7 +29,6 @@ from django_strawberry_framework.rest_framework import inputs as serializer_inpu
 from django_strawberry_framework.rest_framework import serializer_converter
 from django_strawberry_framework.utils import converters as utils_converters
 from django_strawberry_framework.utils import inputs as utils_inputs
-from django_strawberry_framework.utils import strings as utils_strings
 from tests._idioms import module_binding
 
 # (consumer module, symbol, module that owns the single definition)
@@ -41,7 +40,7 @@ SHARED_BINDINGS = (
     (serializer_inputs, "build_strawberry_input_class", utils_inputs),
     (serializer_inputs, "pascalize_token", utils_inputs),
     (serializer_inputs, "normalize_field_name_sequence", utils_inputs),
-    (serializer_inputs, "graphql_camel_name", utils_strings),
+    (serializer_inputs, "predicted_input_field_name", utils_inputs),
     (serializer_converter, "convert_with_mro", utils_converters),
     (serializer_converter, "make_kind_converter", utils_converters),
     (serializer_converter, "make_scalar_converter", utils_converters),
@@ -52,7 +51,7 @@ SHARED_BINDINGS = (
     (serializer_converter, "FILE", utils_inputs),
     (serializer_converter, "RELATION_SINGLE", utils_inputs),
     (serializer_converter, "RELATION_MULTI", utils_inputs),
-    (serializer_converter, "graphql_camel_name", utils_strings),
+    (serializer_converter, "predicted_input_field_name", utils_inputs),
 )
 
 # (consumer module, symbol, the flavor twin whose factory produced the same body)

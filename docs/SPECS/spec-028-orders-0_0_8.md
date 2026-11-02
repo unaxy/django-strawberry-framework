@@ -237,7 +237,7 @@ class Query:
         return queryset
 ```
 
-Strawberry's auto-camel-case converts the Python `order_by` parameter into the GraphQL `orderBy:` argument; consumers write `{ allGalaxies(orderBy: [{ name: ASC }, { celestialBodies: { bodyType: DESC } }]) { id } }`. The resolver pattern is **`get_queryset` → optional `Filter.apply_sync` → optional `Order.apply_sync`** — the same shape `DjangoConnectionField` composes internally.
+Strawberry's auto-camel-case converts the Python `order_by` parameter into the GraphQL `orderBy:` argument, and the generated order input fields follow the same converter (`bodyType` by default, `body_type` under `auto_camel_case=False`); consumers write `{ allGalaxies(orderBy: [{ name: ASC }, { celestialBodies: { bodyType: DESC } }]) { id } }`. The resolver pattern is **`get_queryset` → optional `Filter.apply_sync` → optional `Order.apply_sync`** — the same shape `DjangoConnectionField` composes internally.
 
 **Note on `noqa: A002`.** The Python parameter name `order_by` does NOT shadow a builtin, so it needs no `# noqa: A002`; the filter side's `filter` parameter does shadow Python's `filter`, hence the suppression on the `filter:` parameter in the [`examples/fakeshop/apps/library/schema.py`][fakeshop-library-schema] root resolvers. A future `input:` resolver argument would shadow Python's `input` builtin and need the same suppression.
 

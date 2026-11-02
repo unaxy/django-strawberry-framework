@@ -1425,8 +1425,6 @@ def _assert_field_agreement(
         )
         runtime_annotation, _field_kwargs = optional_input_field(
             runtime_annotation,
-            python_attr=spec.input_attr,
-            graphql_name=spec.graphql_name,
             widen=(
                 bool(runtime.allow_null or not runtime_required)
                 if spec.required is not None

@@ -57,12 +57,15 @@ from apps.library import models as library_models
 from apps.products import models as product_models
 from apps.products.schema import CategoryType, ItemType
 from apps.scalars.models import MediaSpecimen
+from django import forms
 from django.db import models
 from django.db.models import Value
 from django.db.models.fields import AutoFieldMixin
 from django.utils.functional import SimpleLazyObject, lazy
 from django.utils.translation import gettext_lazy
+from rest_framework import serializers
 from strawberry import relay
+from strawberry.schema.name_converter import NameConverter
 from strawberry.types.base import (
     StrawberryList,
     StrawberryOptional,
@@ -75,6 +78,11 @@ from strawberry.types.field import StrawberryField
 import django_strawberry_framework
 from django_strawberry_framework import DjangoSchema, DjangoType, strawberry_config
 from django_strawberry_framework.exceptions import ConfigurationError
+from django_strawberry_framework.forms.inputs import (
+    FORM,
+    build_form_input_class,
+    materialize_form_input_class,
+)
 from django_strawberry_framework.mutations import FieldError as FieldErrorFromPackage
 from django_strawberry_framework.mutations import inputs as mutation_inputs
 from django_strawberry_framework.mutations.inputs import (
@@ -104,6 +112,10 @@ from django_strawberry_framework.mutations.inputs import (
     require_queryset_related_model,
 )
 from django_strawberry_framework.registry import registry
+from django_strawberry_framework.rest_framework.inputs import (
+    build_serializer_input_class,
+    materialize_serializer_input_class,
+)
 from django_strawberry_framework.scalars import Upload
 from django_strawberry_framework.types.converters import convert_scalar
 from django_strawberry_framework.utils._narrowing import read_attr
@@ -114,7 +126,6 @@ from django_strawberry_framework.utils.inputs import (
     RELATION_SINGLE,
     SCALAR,
 )
-from django_strawberry_framework.utils.strings import graphql_camel_name
 from tests._idioms import module_binding
 from tests._relation_fixtures import RpCompositeParent, RpGenericTag
 from tests.optimizer import _link_models
@@ -513,11 +524,11 @@ def test_a_db_default_column_is_an_optional_create_input(name: str) -> None:
 def test_create_input_required_and_optional_shapes() -> None:
     """ItemInput: name + categoryId required; description / isPrivate optional + UNSET.
 
-    The FK ``category_id`` is required (no usable default) and camelCases to
-    ``categoryId``; its id TYPE (GlobalID vs raw pk) is pinned by the dedicated
-    Relay-vs-non-Relay tests, which control the related primary's Relay shape
-    without depending on finalization injecting ``relay.Node`` into the products
-    types' ``__bases__``.
+    The FK ``category_id`` is required (no usable default) and carries no ``name=``,
+    so the schema's converter names it (``categoryId`` by default); its id TYPE
+    (GlobalID vs raw pk) is pinned by the dedicated Relay-vs-non-Relay tests, which
+    control the related primary's Relay shape without depending on finalization
+    injecting ``relay.Node`` into the products types' ``__bases__``.
     """
     cls = build_mutation_input(product_models.Item, operation_kind=CREATE, primary_type=ItemType)
     fields = _field_map(cls)
@@ -526,7 +537,8 @@ def test_create_input_required_and_optional_shapes() -> None:
     assert _inner_type(fields["name"]) is str
 
     assert not _is_optional(fields["category_id"])
-    assert fields["category_id"].graphql_name == "categoryId"
+    assert fields["category_id"].graphql_name is None
+    assert NameConverter().from_field(fields["category_id"]) == "categoryId"
 
     assert _is_optional(fields["description"])
     assert _inner_type(fields["description"]) is str
@@ -535,7 +547,7 @@ def test_create_input_required_and_optional_shapes() -> None:
     assert _is_optional(fields["is_private"])
     assert _inner_type(fields["is_private"]) is bool
     assert _default_of(fields["is_private"]) is UNSET
-    assert fields["is_private"].graphql_name == "isPrivate"
+    assert NameConverter().from_field(fields["is_private"]) == "isPrivate"
 
     # The auto pk / timestamps never reach the input.
     assert "id" not in fields
@@ -674,23 +686,21 @@ def test_annotate_queryset_relation_packages_id_type_and_related_model() -> None
 
 def test_model_column_input_annotation_maps_file_and_scalar_columns() -> None:
     """A non-relation column types as ``Upload`` when it is a file, else ``convert_scalar``."""
-    python_attr, graphql_name, annotation = model_column_input_annotation(
+    python_attr, annotation = model_column_input_annotation(
         _concrete_field(MediaSpecimen, "attachment"),
         "MediaSpecimenInput",
         primary_of=lambda _model: None,
     )
     assert python_attr == "attachment"
-    assert graphql_name == "attachment"
     assert annotation is Upload
 
     label_field = _concrete_field(MediaSpecimen, "label")
-    python_attr, graphql_name, annotation = model_column_input_annotation(
+    python_attr, annotation = model_column_input_annotation(
         label_field,
         "MediaSpecimenInput",
         primary_of=lambda _model: None,
     )
     assert python_attr == "label"
-    assert graphql_name == "label"
     assert annotation == convert_scalar(label_field, "MediaSpecimenInput", force_nullable=False)
 
 
@@ -782,12 +792,11 @@ def test_relation_input_shape_follows_the_write_kind_collection_rule(
     expected_attr = name if multi else f"{name}_id"
     assert relation_input_python_attr(field) == expected_attr
     if isinstance(field, models.Field):
-        python_attr, graphql_name, annotation = relation_input_annotation(
+        python_attr, annotation = relation_input_annotation(
             field,
             related_primary_type=None,
         )
         assert python_attr == expected_attr
-        assert graphql_name == graphql_camel_name(expected_attr)
         assert (get_origin(annotation) is list) is multi
 
 
@@ -978,40 +987,6 @@ def test_fk_id_attr_collision_with_m2m_is_fail_loud() -> None:
             primary_type=OwnerType,
             overrides=frozenset({"category_id"}),
         )
-
-
-def test_camel_case_graphql_name_collision_is_fail_loud() -> None:
-    """Two columns whose names default-camel-case to ONE GraphQL name raise.
-
-    Raising beats silently dropping one input.
-
-    ``foo_bar`` and ``fooBar`` produce DISTINCT input attrs (the input-attr arm passes) but
-    the SAME ``graphql_name`` ``fooBar``; Strawberry would collapse the two onto one schema
-    field with no error. The graphql-name arm catches and names them, at parity with the
-    form / serializer flavors.
-    ``CamelCollide`` stays synthetic: two columns camel-casing to one name is a clash the
-    package refuses to build, so no fakeshop mutation can expose it, and it alone drives the
-    graphql-name arm of
-    ``django_strawberry_framework/mutations/inputs.py::_reject_generated_input_collisions``.
-    """
-
-    class CamelCollide(models.Model):
-        foo_bar: _Int = models.IntegerField()
-        fooBar: _Int = models.IntegerField()  # noqa: N815 - intentional collision fixture
-
-        class Meta:
-            app_label = _unique_app_label()
-
-    class CamelCollideType(DjangoType, relay.Node):
-        class Meta:
-            model = CamelCollide
-            fields = ("id",)
-
-    with pytest.raises(ConfigurationError) as exc:
-        build_mutation_input(CamelCollide, operation_kind=CREATE, primary_type=CamelCollideType)
-    message = str(exc.value)
-    assert "fooBar" in message
-    assert "collide" in message
 
 
 def test_no_false_positive_collision_on_ordinary_model() -> None:
@@ -1251,7 +1226,11 @@ def _schema_taking(
 
 
 def test_schema_build_rejects_consumer_alias_colliding_with_generated_remainder() -> None:
-    """A merged input's consumer alias beside the generated field it names fails the build."""
+    """A merged input's consumer alias beside the generated field it names fails the build.
+
+    The refusal names both remedies: the declared field's ``name=``, and the column
+    the generated field comes from.
+    """
 
     @strawberry.input
     class ConsumerInput:
@@ -1271,6 +1250,11 @@ def test_schema_build_rejects_consumer_alias_colliding_with_generated_remainder(
     assert message.startswith("MergedItemInput: fields ")
     assert "'custom'" in message
     assert "'name'" in message
+    assert message.endswith(
+        "DjangoMutation create input for Item generates 'name' from 'name', and 'custom' is "
+        "declared beside it: give 'custom' a different explicit name=, or drop 'name' via "
+        "Meta.fields / Meta.exclude.",
+    )
 
 
 def test_unnamed_consumer_field_collides_only_where_the_schema_names_it_alike() -> None:
@@ -1311,9 +1295,98 @@ def test_unnamed_consumer_field_collides_only_where_the_schema_names_it_alike() 
         "DigitCollideInput: fields 'field_2' and 'field2' both publish the GraphQL field "
         "name 'field2'",
     )
+    assert str(exc.value).endswith(
+        "DjangoMutation create input for DigitCollide generates 'field2' from 'field2', and "
+        "'field_2' is declared beside it: give 'field_2' a different explicit name=, or drop "
+        "'field2' via Meta.fields / Meta.exclude.",
+    )
     sdl = str(_schema_taking(merged, strawberry_config(auto_camel_case=False)))
     assert "field_2: Int!" in sdl
     assert "field2: Int!" in sdl
+
+
+def _camel_collide_write_input(flavor: str) -> type[WithStrawberryObjectDefinition]:
+    """A generated write input of ``flavor`` over two fields, ``foo_bar`` and ``fooBar``."""
+    if flavor == "model":
+
+        class CamelCollide(models.Model):
+            foo_bar: _Int = models.IntegerField()
+            fooBar: _Int = models.IntegerField()  # noqa: N815 - intentional collision fixture
+
+            class Meta:
+                app_label = _unique_app_label()
+
+        class CamelCollideType(DjangoType, relay.Node):
+            class Meta:
+                model = CamelCollide
+                fields = ("id",)
+
+        input_cls = build_mutation_input(
+            CamelCollide,
+            operation_kind=CREATE,
+            primary_type=CamelCollideType,
+        )
+        materialize_mutation_input_class(input_cls.__strawberry_definition__.name, input_cls)
+        return input_cls
+    if flavor == "form":
+
+        class CamelCollideForm(forms.Form):
+            foo_bar = forms.IntegerField()
+            fooBar = forms.IntegerField()  # noqa: N815 - intentional collision fixture
+
+        form_cls, _specs = build_form_input_class(CamelCollideForm, operation_kind=FORM)
+        materialize_form_input_class(form_cls.__name__, form_cls)
+        assert has_object_definition(form_cls)
+        return form_cls
+    assert flavor == "serializer"
+
+    class CamelCollideSer(serializers.Serializer[object]):
+        foo_bar = serializers.IntegerField()
+        fooBar = serializers.IntegerField()  # noqa: N815 - intentional collision fixture
+
+    serializer_cls, _shape = build_serializer_input_class(CamelCollideSer, operation_kind=CREATE)
+    materialize_serializer_input_class(serializer_cls.__name__, serializer_cls)
+    assert has_object_definition(serializer_cls)
+    return serializer_cls
+
+
+@pytest.mark.parametrize("flavor", ["model", "form", "serializer"])
+def test_generated_write_input_pair_is_refused_only_where_the_schema_names_it_alike(
+    flavor: str,
+) -> None:
+    """Every write flavor's generated ``foo_bar`` / ``fooBar`` pair is the schema's to refuse.
+
+    No generated field carries ``name=``: the pair builds, the default converter
+    names both ``fooBar`` so that schema's build refuses it naming the generated
+    input type and, for the remedy, the declaration and the two fields it is
+    generated from; ``auto_camel_case=False`` publishes both fields.
+    """
+    input_cls = _camel_collide_write_input(flavor)
+    type_name = input_cls.__strawberry_definition__.name
+    remedy = {
+        "model": (
+            "DjangoMutation create input for CamelCollide generates them from model fields "
+            "'foo_bar' and 'fooBar'. Rename one of the model fields,"
+        ),
+        "form": (
+            "Form 'CamelCollideForm' generates them from form fields 'foo_bar' and 'fooBar'. "
+            "Rename one of the form fields,"
+        ),
+        "serializer": (
+            "SerializerMutation for 'CamelCollideSer' generates them from serializer fields "
+            "'foo_bar' and 'fooBar'. Rename one,"
+        ),
+    }[flavor]
+
+    with pytest.raises(ConfigurationError) as exc:
+        _ = _schema_taking(input_cls)
+    assert str(exc.value).startswith(
+        f"{type_name}: fields 'foo_bar' and 'fooBar' both publish the GraphQL field name 'fooBar'",
+    )
+    assert str(exc.value).endswith(f"{remedy} or drop one via Meta.fields / Meta.exclude.")
+    sdl = str(_schema_taking(input_cls, strawberry_config(auto_camel_case=False)))
+    assert "foo_bar: Int!" in sdl
+    assert "fooBar: Int!" in sdl
 
 
 # ---------------------------------------------------------------------------
@@ -1795,6 +1868,35 @@ def test_mutation_input_field_specs_covers_generated_input() -> None:
     assert by_attr["category_id"].related_model is product_models.Category
     assert model_fields["category_id"] is product_models.Item._meta.get_field("category")
     assert model_fields["name"] is product_models.Item._meta.get_field("name")
+
+
+def test_mutation_input_field_specs_record_the_bind_time_wire_name() -> None:
+    """A spec records a field's explicit ``name=``, else the default converter's name.
+
+    The bind runs before any schema exists. A request renames each spec to the name
+    the executing schema published (``utils/inputs.py::published_input_specs``) and
+    keeps the bind's name only where it has no executable schema to read (a
+    direct-call stub), so the bind's name is the default converter's: the generated
+    ``category_id`` records ``categoryId``, and a consumer field declared with
+    ``name="title"`` records ``title``.
+    """
+
+    @strawberry.input
+    class ConsumerInput:
+        name: str = strawberry.field(name="title")
+
+    remainder = build_mutation_input(
+        product_models.Item,
+        operation_kind=CREATE,
+        primary_type=ItemType,
+        overrides=frozenset({"name"}),
+    )
+    merged = strawberry.input(type("BindNameItemInput", (ConsumerInput, remainder), {}))
+
+    specs, _model_fields = mutation_input_field_specs(product_models.Item, merged)
+    by_attr = {spec.input_attr: spec for spec in specs}
+    assert by_attr["name"].graphql_name == "title"
+    assert by_attr["category_id"].graphql_name == "categoryId"
 
 
 def test_mutation_input_field_specs_record_the_column_a_to_field_relation_stores() -> None:

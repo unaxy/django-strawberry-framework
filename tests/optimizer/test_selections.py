@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Annotated
 
 import strawberry
+from django.utils.text import camel_case_to_spaces
 from graphql import parse
 from graphql.language.ast import (
     DocumentNode,
@@ -51,7 +52,6 @@ from django_strawberry_framework.optimizer.selections import (
     should_include,
 )
 from django_strawberry_framework.utils._narrowing import is_list, read_attr, require
-from django_strawberry_framework.utils.strings import snake_case
 from tests._info import make_info, raw_info_of
 
 if TYPE_CHECKING:
@@ -99,7 +99,11 @@ def _field(
         directives=directives or {},
         arguments={},
         selections=selections or [],
-        **{PYTHON_NAME_ATTR: python_name if python_name is not None else snake_case(name)},
+        **{
+            PYTHON_NAME_ATTR: python_name
+            if python_name is not None
+            else camel_case_to_spaces(name).replace(" ", "_"),
+        },
     )
 
 

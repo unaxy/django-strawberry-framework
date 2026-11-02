@@ -216,34 +216,34 @@ def _isolate_registry() -> Iterator[None]:
 
 
 def test_lookup_name_map_full_table_matches_spec() -> None:
-    """Pin the spec-027 Decision 3 Layer-5 table verbatim against accidental drift."""
+    """Pin the spec-027 Decision 3 Layer-5 lookup -> python attr table against drift."""
     expected = {
-        "exact": ("exact", "exact"),
-        "iexact": ("i_exact", "iExact"),
-        "contains": ("contains", "contains"),
-        "icontains": ("i_contains", "iContains"),
-        "startswith": ("starts_with", "startsWith"),
-        "istartswith": ("i_starts_with", "iStartsWith"),
-        "endswith": ("ends_with", "endsWith"),
-        "iendswith": ("i_ends_with", "iEndsWith"),
-        "regex": ("regex", "regex"),
-        "iregex": ("i_regex", "iRegex"),
-        "gt": ("gt", "gt"),
-        "gte": ("gte", "gte"),
-        "lt": ("lt", "lt"),
-        "lte": ("lte", "lte"),
-        "isnull": ("is_null", "isNull"),
-        "in": ("in_", "in"),
-        "range": ("range", "range"),
-        "date": ("date", "date"),
-        "year": ("year", "year"),
-        "month": ("month", "month"),
-        "day": ("day", "day"),
-        "week_day": ("week_day", "weekDay"),
-        "quarter": ("quarter", "quarter"),
-        "hour": ("hour", "hour"),
-        "minute": ("minute", "minute"),
-        "second": ("second", "second"),
+        "exact": "exact",
+        "iexact": "i_exact",
+        "contains": "contains",
+        "icontains": "i_contains",
+        "startswith": "starts_with",
+        "istartswith": "i_starts_with",
+        "endswith": "ends_with",
+        "iendswith": "i_ends_with",
+        "regex": "regex",
+        "iregex": "i_regex",
+        "gt": "gt",
+        "gte": "gte",
+        "lt": "lt",
+        "lte": "lte",
+        "isnull": "is_null",
+        "in": "in_",
+        "range": "range",
+        "date": "date",
+        "year": "year",
+        "month": "month",
+        "day": "day",
+        "week_day": "week_day",
+        "quarter": "quarter",
+        "hour": "hour",
+        "minute": "minute",
+        "second": "second",
     }
     assert expected == LOOKUP_NAME_MAP
 
@@ -397,7 +397,6 @@ def test_build_input_fields_populates_field_specs_table() -> None:
     _build_input_fields(GalaxyFilter)
     spec = _field_specs[(GalaxyFilter, "name")]
     assert spec.python_attr == "name"
-    assert spec.graphql_name == "name"
     assert spec.django_source_path == "name"
 
 
@@ -415,72 +414,33 @@ def test_field_spec_maps_galaxy_name_flat_field_to_django_source_path() -> None:
     _build_input_fields(ShelfFilter)
     spec = _field_specs[(ShelfFilter, "branch_name")]
     assert spec.python_attr == "branch_name"
-    assert spec.graphql_name == "branchName"
     assert spec.django_source_path == "branch__name"
-
-
-@pytest.mark.django_db
-def test_build_input_fields_pins_every_lookup_name_to_its_camel_name() -> None:
-    """The operator-bag wire name is pinned to ``graphql_camel_name`` for EVERY lookup.
-
-    The shared input builder pins ``exact`` -> ``exact`` even though the optional-field
-    helper does not need to carry an identity alias. Strawberry's converter therefore
-    cannot re-derive generated names or collapse a digit-adjacent underscore.
-    """
-
-    class ItemFilter(FilterSet):
-        class Meta:
-            model = Item
-            fields = {"name": ["exact", "icontains", "isnull"], "id": ["in"]}
-
-    triples = _build_input_fields(ItemFilter)
-    by_attr = {python_attr: (annotation, kwargs) for python_attr, annotation, kwargs in triples}
-    # Find the `name` field's bag class and walk its Strawberry fields.
-    name_annotation = by_attr["name"][0]
-    # `bag_class | None` -> strip None to get the bag class.
-    bag = next(arg for arg in _args(name_annotation) if arg is not type(None))
-    bag_fields = {field.python_name: field.graphql_name for field in _definition_fields(bag)}
-    # `exact` -> attr `exact`, pinned by the shared builder rather than Strawberry.
-    assert bag_fields["exact"] == "exact"
-    # `icontains` -> attr `i_contains`, alias `iContains`.
-    assert bag_fields["i_contains"] == "iContains"
-    # `isnull` -> attr `is_null`, alias `isNull`.
-    assert bag_fields["is_null"] == "isNull"
-
-    id_annotation = by_attr["id"][0]
-    id_bag = next(arg for arg in _args(id_annotation) if arg is not type(None))
-    id_fields = {field.python_name: field.graphql_name for field in _definition_fields(id_bag)}
-    # `in_` -> alias `in`.
-    assert id_fields["in_"] == "in"
 
 
 @pytest.mark.parametrize(
     ("lookup", "names"),
     [
-        pytest.param("exact", ("exact", "exact"), id="mapped"),
+        pytest.param("exact", ("exact", None), id="mapped"),
+        pytest.param("icontains", ("i_contains", None), id="mapped-word-boundary"),
         pytest.param("in", ("in_", "in"), id="keyword-escaped"),
-        pytest.param("iso_year", ("iso_year", "isoYear"), id="unmapped"),
-        pytest.param("year__gt", ("year_gt", "yearGt"), id="chain"),
-        pytest.param("year__in", ("year_in", "yearIn"), id="chain-drops-the-keyword-escape"),
-        pytest.param("year__isnull", ("year_is_null", "yearIsNull"), id="chain-mapped-tail"),
-        pytest.param(
-            "year__icontains",
-            ("year_i_contains", "yearIContains"),
-            id="chain-uppercase-run",
-        ),
-        pytest.param("iso_year__gte", ("iso_year_gte", "isoYearGte"), id="chain-unmapped-head"),
+        pytest.param("iso_year", ("iso_year", None), id="unmapped"),
+        pytest.param("year__gt", ("year_gt", None), id="chain"),
+        pytest.param("year__in", ("year_in", None), id="chain-drops-the-keyword-escape"),
+        pytest.param("year__isnull", ("year_is_null", None), id="chain-mapped-tail"),
+        pytest.param("year__icontains", ("year_i_contains", None), id="chain-uppercase-run"),
+        pytest.param("iso_year__gte", ("iso_year_gte", None), id="chain-unmapped-head"),
         pytest.param("from", ("from_", "from"), id="unmapped-keyword-escaped"),
-        pytest.param("from__gt", ("from_gt", "fromGt"), id="chain-drops-an-unmapped-escape"),
+        pytest.param("from__gt", ("from_gt", None), id="chain-drops-an-unmapped-escape"),
     ],
 )
 def test_lookup_leaf_names_names_a_chain_segment_by_segment(
     lookup: str,
-    names: tuple[str, str],
+    names: tuple[str, str | None],
 ) -> None:
-    """A bag lookup's ``(python_attr, graphql_name)``, a transform chain's composed per segment.
+    """A bag lookup's ``(python_attr, keyword wire name or None)``, a chain's attr per segment.
 
-    A chain's GraphQL name is never the camel case of its joined attr, which marks the
-    uppercase run of ``year_i_contains`` as ``yearI__xContains``.
+    Only a single keyword token carries a wire name; the executing schema's
+    ``NameConverter`` names every other field from its attr.
     """
     assert lookup_leaf_names(lookup) == names
 

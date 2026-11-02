@@ -395,7 +395,7 @@ def test_build_input_class_handles_python_attr_to_graphql_alias_mapping() -> Non
 
 
 def test_field_specs_populated_by_build_input_fields_for_leaf() -> None:
-    """Leaf field -> ``FieldSpec(python_attr, graphql_name, django_source_path)``."""
+    """Leaf field -> ``FieldSpec(python_attr, django_source_path, member)``."""
 
     class BookOrderLeafSpec(OrderSet):
         class Meta:
@@ -406,12 +406,12 @@ def test_field_specs_populated_by_build_input_fields_for_leaf() -> None:
     spec = _field_specs[(BookOrderLeafSpec, "title")]
     assert isinstance(spec, FieldSpec)
     assert spec.python_attr == "title"
-    assert spec.graphql_name == "title"
     assert spec.django_source_path == "title"
+    assert spec.member == "title"
 
 
 def test_field_specs_populated_by_build_input_fields_for_flat_shorthand() -> None:
-    """``Meta.fields = ["shelf__code"]`` -> python attr ``shelf_code`` + graphql alias ``shelfCode``."""
+    """``Meta.fields = ["shelf__code"]`` -> python attr ``shelf_code`` over ``shelf__code``."""
 
     class BookOrderFlat(OrderSet):
         class Meta:
@@ -421,7 +421,6 @@ def test_field_specs_populated_by_build_input_fields_for_flat_shorthand() -> Non
     _build_input_fields(BookOrderFlat, None)
     spec = _field_specs[(BookOrderFlat, "shelf_code")]
     assert spec.python_attr == "shelf_code"
-    assert spec.graphql_name == "shelfCode"
     assert spec.django_source_path == "shelf__code"
 
 

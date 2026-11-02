@@ -17,8 +17,9 @@ model's primary ``DjangoType``:
 Holder schemas mounted beside fakeshop publish the shapes no shipped mutation
 writes: a forward one-to-one to a Relay-Node primary (``MembershipCard.patron``),
 two columns differing only by an underscore before a digit (``field_2`` /
-``field2``) and narrowings over them, and two merged narrowed inputs Strawberry
-would re-case to one name.
+``field2``), refused where the schema's converter names them alike and written
+under ``auto_camel_case=False``, with narrowings over them, and two merged
+narrowed inputs Strawberry would re-case to one name.
 """
 
 from functools import wraps
@@ -28,7 +29,7 @@ import pytest
 import strawberry
 from apps.library import models as library_models
 from django import forms
-from django.db import models
+from django.db import connection, models
 from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
 from django.urls import path
@@ -43,6 +44,7 @@ from graphql_client import (
     response_json,
 )
 from strawberry import relay
+from strawberry.schema.config import StrawberryConfig
 from typing_extensions import override
 
 from django_strawberry_framework import (
@@ -52,7 +54,9 @@ from django_strawberry_framework import (
     DjangoSchema,
     DjangoType,
     finalize_django_types,
+    strawberry_config,
 )
+from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.utils._narrowing import dict_of
 from django_strawberry_framework.views import DjangoGraphQLView
 
@@ -309,19 +313,24 @@ def test_a_validating_nullable_boolean_form_field_requires_a_boolean_over_http(
     assert called == written
 
 
-def _holder_input_fields(schema: DjangoSchema, type_name: str) -> dict[str, dict[str, object]]:
-    """Return ``{field name: type tree}`` for ``type_name`` as the holder ``schema`` serves it."""
+def _holder_payload(schema: DjangoSchema, document: str) -> JSONObject:
+    """Return the payload of ``document`` posted to the holder ``schema`` over HTTP."""
     _CURRENT_SCHEMA["schema"] = schema
     try:
         with override_settings(ROOT_URLCONF=__name__):
-            response = post_graphql(
-                f'{{ __type(name: "{type_name}") {{ inputFields {{ name type {{ {_TYPE_REF} }} }} }} }}',
-                url="/graphql-input/",
-            )
+            response = post_graphql(document, url="/graphql-input/")
     finally:
         _CURRENT_SCHEMA["schema"] = None
     assert response.status_code == 200
-    payload = response_json(response)
+    return response_json(response)
+
+
+def _holder_input_fields(schema: DjangoSchema, type_name: str) -> dict[str, dict[str, object]]:
+    """Return ``{field name: type tree}`` for ``type_name`` as the holder ``schema`` serves it."""
+    payload = _holder_payload(
+        schema,
+        f'{{ __type(name: "{type_name}") {{ inputFields {{ name type {{ {_TYPE_REF} }} }} }} }}',
+    )
     assert "errors" not in payload, payload
     return {
         json_str(field, "name"): json_object(field, "type")
@@ -380,10 +389,13 @@ def test_one_to_one_to_a_relay_primary_is_a_global_id_over_http() -> None:
     }
 
 
-def _digit_boundary_schema() -> DjangoSchema:
+def _digit_boundary_schema(
+    config: StrawberryConfig | None = None,
+) -> tuple[DjangoSchema, type[models.Model]]:
     """Serve a full create and one narrowed create per column over ``field_2`` beside ``field2``.
 
     ``field_2`` beside ``field2`` is legal Django but a naming no fakeshop domain model carries.
+    Returns the schema built under ``config`` and the model, whose table no migration creates.
     """
 
     class DigitBoundary(models.Model):
@@ -432,22 +444,62 @@ def _digit_boundary_schema() -> DjangoSchema:
 
     del DigitBoundaryNode
     finalize_django_types()
-    return DjangoSchema(query=_HolderQuery, mutation=Mutation)
+    return DjangoSchema(query=_HolderQuery, mutation=Mutation, config=config), DigitBoundary
 
 
 @pytest.mark.django_db
 @pytest.mark.usefixtures("private_registry")
-def test_digit_boundary_columns_keep_distinct_wire_names_over_http() -> None:
-    """``field_2`` and ``field2`` publish two input fields, never one silently overwritten.
+def test_digit_boundary_columns_the_default_converter_names_alike_refuse_the_schema() -> None:
+    """``field_2`` and ``field2`` both publish ``field2`` by default, so the build refuses them.
 
-    Their camel names differ, so the collision guard passes the pair; Strawberry would
-    re-derive an unpinned ``field_2`` to ``field2`` and drop one column from the SDL. Every
-    generated input field pins its wire name
-    (``django_strawberry_framework/utils/inputs.py::build_strawberry_input_class``).
+    Generated input fields carry no ``name=``; the schema's ``NameConverter`` names
+    each, and Strawberry would keep one of two fields it names alike and drop the
+    other, so ``django_strawberry_framework/schema.py::_refuse_field_name_collisions``
+    names the type, both fields and the columns to rename or narrow out.
     """
-    fields = _holder_input_fields(_digit_boundary_schema(), "DigitBoundaryInput")
+    with pytest.raises(ConfigurationError) as exc:
+        _ = _digit_boundary_schema()
 
-    assert fields == {"field_2": _non_null(_scalar("Int")), "field2": _non_null(_scalar("Int"))}
+    assert str(exc.value).startswith(
+        "DigitBoundaryInput: fields 'field_2' and 'field2' both publish the GraphQL field "
+        "name 'field2'",
+    )
+    assert str(exc.value).endswith(
+        "DjangoMutation create input for DigitBoundary generates them from model fields "
+        "'field_2' and 'field2'. Rename one of the model fields, or drop one via Meta.fields "
+        "/ Meta.exclude.",
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("private_registry")
+def test_digit_boundary_columns_publish_and_write_both_without_auto_camel_case_over_http() -> None:
+    """Under ``auto_camel_case=False`` the input carries both columns and a create writes both."""
+    schema, digit_boundary = _digit_boundary_schema(strawberry_config(auto_camel_case=False))
+
+    assert _holder_input_fields(schema, "DigitBoundaryInput") == {
+        "field_2": _non_null(_scalar("Int")),
+        "field2": _non_null(_scalar("Int")),
+    }
+    with connection.schema_editor() as editor:
+        editor.create_model(digit_boundary)
+    try:
+        payload = _holder_payload(
+            schema,
+            "mutation { create_digit_boundary(data: {field_2: 2, field2: 3}) "
+            "{ node { __typename } errors { field } } }",
+        )
+        stored = list(digit_boundary._default_manager.values_list("field_2", "field2"))
+    finally:
+        with connection.schema_editor() as editor:
+            editor.delete_model(digit_boundary)
+
+    assert payload == {
+        "data": {
+            "create_digit_boundary": {"node": {"__typename": "DigitBoundaryNode"}, "errors": []},
+        },
+    }
+    assert stored == [(2, 3)]
 
 
 @pytest.mark.django_db
@@ -465,9 +517,12 @@ def test_digit_boundary_narrowings_publish_distinct_input_types_over_http(
 
     The narrowed name's token keeps an underscore before a digit
     (``django_strawberry_framework/utils/inputs.py::pascalize_token``), so the two shapes
-    never claim one GraphQL type name; each type carries its one column.
+    never claim one GraphQL type name; each type carries its one column. The schema
+    serves the full create too, so it is built under ``auto_camel_case=False``, the
+    config that names its two columns apart.
     """
-    fields = _holder_input_fields(_digit_boundary_schema(), type_name)
+    schema, _ = _digit_boundary_schema(strawberry_config(auto_camel_case=False))
+    fields = _holder_input_fields(schema, type_name)
 
     assert fields == {field: _non_null(_scalar("Int"))}
 

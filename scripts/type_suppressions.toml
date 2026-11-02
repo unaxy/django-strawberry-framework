@@ -169,7 +169,6 @@
 "django_strawberry_framework/utils/querysets.py::materialized_rows" = { cast = 1 }
 "django_strawberry_framework/utils/relations.py::_link_field_tuple" = { cast = 1 }
 "django_strawberry_framework/utils/sessions.py::session_store_class" = { cast = 1 }
-"django_strawberry_framework/utils/strings.py::snake_case" = { cast = 1 }
 "django_strawberry_framework/utils/typing.py::ConcreteField" = { reportExplicitAny = 1 }
 "django_strawberry_framework/utils/typing.py::ForeignKeyField" = { reportExplicitAny = 1 }
 "django_strawberry_framework/utils/typing.py::graphql_type_of" = { reportUnknownMemberType = 1, reportUnknownVariableType = 1 }

@@ -23,9 +23,12 @@ from typing import TYPE_CHECKING, ClassVar
 
 from typing_extensions import override
 
-from django_strawberry_framework.utils.inputs import GeneratedInputArgumentsFactory
+from django_strawberry_framework.utils.inputs import (
+    GeneratedInputArgumentsFactory,
+    GeneratedInputFieldSpec,
+)
 
-from .inputs import _build_input_fields
+from .inputs import _build_input_fields, _field_specs
 from .sets import OrderSet
 
 if TYPE_CHECKING:
@@ -72,6 +75,7 @@ class OrderArgumentsFactory(GeneratedInputArgumentsFactory[OrderSet]):
     _rename_noun: ClassVar[str] = "orderset"
     _related_attr: ClassVar[str] = "related_orders"
     _related_target_attr: ClassVar[str] = "orderset"
+    _field_specs: ClassVar[dict[tuple[type[object], str], GeneratedInputFieldSpec]] = _field_specs
 
     @override
     def _build_input_triples(

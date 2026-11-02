@@ -688,6 +688,24 @@ Progress: 0 done, 167 to do.
   of `null` / `true` / `false` except all lower case (`Null`, `tRUE`) publishes as that enum member name, where it
   used to publish with a `MEMBER_` prefix (`MEMBER_NULL`); only the exact lower-case `true` / `false` / `null`, which
   GraphQL reserves, keep the prefix, and `True` / `False` / `None` keep their Python-keyword `_` prefix
+- [ ] 903. CHANGELOG entry for item 28 (breaking): generated filter, order and mutation input fields are named by the
+  schema's naming config, like output fields and arguments, instead of a package camel-casing. Under the default
+  config each generated input field now takes the output type's spelling where the package caser differed: an
+  underscore before a digit is dropped (`isbn_13` -> `isbn13`, `address_2` -> `address2`, `publisher_2Id` ->
+  `publisher2Id`, `editionIsbn_10` -> `editionIsbn10`), the `__x` marker the caser put before a segment following a
+  one-letter or upper-case one is gone (`a_b_c` was `aB__xC`, now `aBC`; `URL_name` was `URL__xName`, now
+  `URLName`), and a leading underscore is dropped (`_x` was `_x`, now `X`). On fakeshop the derived serializer
+  input `PatronProfileSerializerAddress_u2b828be281257a1c0Favorite_ugenre982b97c775a8d68dPartialInput`, whose
+  fields include `address_2`, is renamed
+  `PatronProfileSerializerAddress_u235621b729422e33eFavorite_ugenre982b97c775a8d68dPartialInput`: a derived
+  serializer input type name hashes its fields' names, so it renames with them. Under `auto_camel_case=False` every
+  generated input field and lookup is snake case (`i_contains`, `is_null`, `created_date`, `category_id`); a custom
+  `NameConverter` names them too. `in`, `and`, `or` and `not` keep those spellings under either `auto_camel_case`
+  setting; a converter overriding `get_graphql_name` respells them. Two generated fields the converter names alike
+  (`field_2` beside `field2` by default) are refused when the `DjangoSchema` is built, naming the set, model, form or
+  serializer and the two members they are generated from; a plain `strawberry.Schema` publishes one of the two and
+  drops the other. The helpers `django_strawberry_framework.utils.snake_case` and
+  `utils.strings.graphql_camel_name` are removed
 
 ## From test-compliance-review
 

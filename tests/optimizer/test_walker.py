@@ -33,6 +33,7 @@ from apps.products.models import Category, Entry, Item
 from apps.products.services import seed_data
 from django.contrib.contenttypes.models import ContentType
 from django.db.models import F, Field, ForeignObjectRel, Model, OrderBy, Prefetch, QuerySet
+from django.utils.text import camel_case_to_spaces
 from graphql import GraphQLResolveInfo, OperationType
 from strategy_schemas import make_django_type
 from strawberry import relay
@@ -113,7 +114,6 @@ from django_strawberry_framework.utils.connections import (
     relay_max_results_from_info,
 )
 from django_strawberry_framework.utils.querysets import _COMBINED_WHAT
-from django_strawberry_framework.utils.strings import snake_case
 from tests._definition import make_definition
 from tests._idioms import saved_pk
 from tests._info import make_info, raw_info_of
@@ -187,7 +187,9 @@ def _sel(
         arguments=arguments or {},
         selections=selections or [],
         **{
-            PYTHON_NAME_ATTR: python_name if python_name is not None else snake_case(name),
+            PYTHON_NAME_ATTR: python_name
+            if python_name is not None
+            else camel_case_to_spaces(name).replace(" ", "_"),
             PYTHON_ARGUMENTS_ATTR: arguments or {},
         },
     )

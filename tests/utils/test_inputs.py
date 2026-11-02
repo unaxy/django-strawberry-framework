@@ -20,13 +20,13 @@ from django.utils.translation import gettext_lazy
 from django_filters import CharFilter
 from strawberry import relay
 from strawberry.exceptions import DuplicatedTypeName, MissingReturnAnnotationError
+from strawberry.schema.name_converter import NameConverter
 from typing_extensions import override
 
 from django_strawberry_framework import (
     DjangoSchema,
     DjangoType,
     finalize_django_types,
-    strawberry_config,
     write_mixins,
 )
 from django_strawberry_framework.exceptions import ConfigurationError
@@ -53,6 +53,7 @@ from django_strawberry_framework.utils.canonical import base_container_values
 from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.inputs import (
     FILTERSET_FIELDS_ALIAS,
+    GeneratedFieldSources,
     GeneratedInputArgumentsFactory,
     GeneratedInputFieldSpec,
     InputFieldSpec,
@@ -67,7 +68,6 @@ from django_strawberry_framework.utils.inputs import (
     emit_set_input_field_triples,
     generated_type_name_collision,
     get_or_store_shape_build,
-    graphql_camel_name,
     is_input_attribute_name,
     is_re_readable_field_declaration,
     iter_input_field_collisions,
@@ -83,6 +83,7 @@ from django_strawberry_framework.utils.inputs import (
     optional_input_field,
     pascalize_token,
     plain_set_meta_fields,
+    predicted_input_field_name,
     promote_set_meta_fields,
     read_set_meta_fields,
     reject_unknown_meta_keys,
@@ -124,8 +125,8 @@ _NAME_LOOKUPS = (
 # ---------------------------------------------------------------------------
 
 
-def test_build_strawberry_input_class_emits_name_alias_and_description() -> None:
-    """``name=`` lands as the GraphQL alias and ``description=`` on the field."""
+def test_build_strawberry_input_class_emits_name_and_description() -> None:
+    """``name=`` lands as the GraphQL name, ``description=`` on the field; no ``name=`` is unset."""
     cls = build_strawberry_input_class(
         "SharedScratchInputType",
         [
@@ -138,60 +139,7 @@ def test_build_strawberry_input_class_emits_name_alias_and_description() -> None
     assert any(field.graphql_name == "in" for field in fields)
     note = next(field for field in fields if field.python_name == "note")
     assert note.description == "a note"
-
-
-def test_builder_pins_names_so_digit_boundary_fields_do_not_silently_collide() -> None:
-    """A ``field_2`` / ``field2`` pair survives as two distinct GraphQL input fields.
-
-    Leaving an identity ``name=`` alias to Strawberry's converter collides silently.
-    ``graphql_camel_name`` keeps ``field_2`` and ``field2`` distinct (the injective
-    camel-name convention), and the emit collision guard compares those values, so
-    it does NOT reject the pair. But with the alias emitted only on divergence,
-    ``field_2`` (equal to its own camel-name) would carry no ``name=``, so Strawberry's
-    ``NameConverter`` would collapse it to ``field2`` -- overwriting the sibling ``field2``
-    and dropping one consumer-declared field from the public schema with no error.
-    The shared builder pins every field's package-derived name, so both survive.
-    """
-
-    # stand-in set class; only ``__qualname__`` is read (error path).
-    class _ProbeSet(ClassBasedTypeNameMixin):
-        pass
-
-    entries = [("field_2", object()), ("field2", object())]
-    field_specs: dict[tuple[type[object], str], GeneratedInputFieldSpec] = {}
-    triples = emit_set_input_field_triples(
-        _ProbeSet,
-        entries,
-        related_of=lambda _t, _e: None,
-        leaf_of=lambda _t, _pa, _e: (int | None, _t),
-        module_path=__name__,
-        field_specs=field_specs,
-    )
-    assert [triple[0] for triple in triples] == ["field_2", "field2"]
-
-    input_cls = build_strawberry_input_class("ProbeDigitBoundaryInput", triples)
-
-    def resolve_probe(inp: object) -> int:
-        del inp  # Strawberry reads its annotation to put the input class in the SDL; never runs
-        return 1
-
-    # The input class is built by the helper under test, so Strawberry reads it from the
-    # resolver's run-time annotations rather than from a written annotation.
-    resolve_probe.__annotations__ = {"inp": input_cls, "return": int}
-    query = strawberry.type(
-        type("Query", (), {"probe": strawberry.field(resolver=resolve_probe)}),
-    )
-
-    schema = strawberry.Schema(query=query, config=strawberry_config())
-    sdl = schema.as_str()
-    block = sdl[sdl.index("input ProbeDigitBoundaryInput") :]
-    block = block[: block.index("}")]
-    # Both distinct wire names present -- no silent collapse to a single ``field2``.
-    assert "field_2:" in block
-    assert "field2:" in block
-    # The runtime provenance names match the pinned wire names.
-    assert field_specs[(_ProbeSet, "field_2")].graphql_name == "field_2"
-    assert field_specs[(_ProbeSet, "field2")].graphql_name == "field2"
+    assert note.graphql_name is None
 
 
 def test_builder_rejects_duplicate_python_attributes() -> None:
@@ -200,15 +148,6 @@ def test_builder_rejects_duplicate_python_attributes() -> None:
         build_strawberry_input_class(
             "DuplicateAttrInput",
             [("same", int, {}), ("same", str, {})],
-        )
-
-
-def test_builder_rejects_duplicate_effective_graphql_names() -> None:
-    """Explicit aliases cannot collapse two distinct attrs onto one GraphQL field."""
-    with pytest.raises(ConfigurationError, match="same GraphQL field name 'same'"):
-        build_strawberry_input_class(
-            "DuplicateGraphQLInput",
-            [("first", int, {"name": "same"}), ("second", str, {"name": "same"})],
         )
 
 
@@ -228,26 +167,6 @@ def test_builder_rejects_malformed_field_kwargs_with_configuration_error() -> No
         # basedpyright: the non-mapping field kwargs is the hostile input under test;
         # build_strawberry_input_class types each triple's kwargs as Mapping[str, object] | None
         build_strawberry_input_class("MalformedFieldKwargsInput", [("name", int, object())])  # pyright: ignore[reportArgumentType]
-
-
-# ---------------------------------------------------------------------------
-# graphql_camel_name
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [
-        ("galaxy_name", "galaxyName"),
-        ("shelf_code", "shelfCode"),
-        ("", ""),
-        ("_", "_"),
-        ("__", "__"),
-    ],
-)
-def test_graphql_camel_name(value: str, expected: str) -> None:
-    """Head lowercased, rest PascalCased; no-word-token inputs pass through."""
-    assert graphql_camel_name(value) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -510,8 +429,8 @@ def test_make_set_input_namespace_returns_heavy_ledger_field_specs_materialize_c
     assert module_binding(module, "ProbeSetInputType") is _ProbeInput
     field_specs[(_ProbeSet, "title")] = GeneratedInputFieldSpec(
         python_attr="title",
-        graphql_name="title",
         django_source_path="title",
+        member="title",
     )
     materialize("ProbeSetInputType", _ProbeInput)
 
@@ -1357,7 +1276,6 @@ class _CollisionSpec:
     """The naming record the collision walker reads, plus the target and source it is asked for."""
 
     input_attr: str
-    graphql_name: str
     target_name: str
     source: str
 
@@ -1367,13 +1285,11 @@ def test_input_collision_walker_reports_shared_write_sources() -> None:
     specs = [
         _CollisionSpec(
             input_attr="name",
-            graphql_name="name",
             target_name="name",
             source="name",
         ),
         _CollisionSpec(
             input_attr="alias",
-            graphql_name="alias",
             target_name="alias",
             source="name",
         ),
@@ -1382,9 +1298,12 @@ def test_input_collision_walker_reports_shared_write_sources() -> None:
     messages = list(
         iter_input_field_collisions(
             specs,
-            subject="Probe",
-            field_noun="fields",
-            rename_clause="Rename one",
+            sources=GeneratedFieldSources(
+                subject="Probe",
+                field_noun="fields",
+                rename_clause="Rename one",
+                members={},
+            ),
             name_of=lambda spec: spec.target_name,
             source_of=lambda spec: spec.source,
         ),
@@ -1394,35 +1313,38 @@ def test_input_collision_walker_reports_shared_write_sources() -> None:
     assert "'name' and 'alias' sharing one source 'name'" in messages[0]
 
 
-def test_optional_field_kwargs_defaults_none_and_aliases_only_on_divergence() -> None:
-    """The A4 helper carries aliases; the builder pins package-default names."""
-    assert optional_field_kwargs("exact", "exact") == {"default": None}
-    assert optional_field_kwargs("category_name", "categoryName") == {
-        "default": None,
-        "name": "categoryName",
-    }
-    assert optional_field_kwargs("field_2", "field_2") == {"default": None}
+def test_optional_field_kwargs_defaults_none_and_names_only_a_keyword_escape() -> None:
+    """Only a keyword escape carries ``name=``; the schema's converter names the rest."""
+    assert optional_field_kwargs() == {"default": None}
+    assert optional_field_kwargs("in") == {"default": None, "name": "in"}
 
 
-def test_optional_input_field_widens_and_aliases_per_flags() -> None:
-    """The A10 helper widens optional fields and carries only divergent aliases."""
-    annotation, kwargs = optional_input_field(
-        int,
-        python_attr="category_id",
-        graphql_name="categoryId",
-        widen=True,
-    )
+def test_optional_input_field_widens_per_flag_and_never_names() -> None:
+    """A widened field is ``T | None`` defaulting to ``UNSET``; neither carries ``name=``."""
+    annotation, kwargs = optional_input_field(int, widen=True)
     assert annotation == (int | None)
-    assert kwargs == {"name": "categoryId", "default": UNSET}
+    assert kwargs == {"default": UNSET}
 
-    annotation, kwargs = optional_input_field(
-        str,
-        python_attr="name",
-        graphql_name="name",
-        widen=False,
-    )
+    annotation, kwargs = optional_input_field(str, widen=False)
     assert annotation is str
     assert kwargs == {}
+
+
+@pytest.mark.parametrize(
+    "python_attr",
+    [
+        "category_id",
+        "field_2",
+        "is_null",
+        "in_",
+        "title",
+    ],
+)
+def test_predicted_input_field_name_is_the_default_converters_name(python_attr: str) -> None:
+    """The bind-time prediction is Strawberry's default ``NameConverter`` answer."""
+    assert predicted_input_field_name(python_attr) == NameConverter().apply_naming_config(
+        python_attr,
+    )
 
 
 def test_iter_provided_input_fields_handles_none_and_non_inputs() -> None:
@@ -1447,6 +1369,7 @@ def test_generated_input_arguments_factory_tolerates_none_or_missing_related_att
         _related_target_attr = "target"
         input_object_types = {}
         _collision_registry: dict[str, type[ClassBasedTypeNameMixin]] = {}
+        _field_specs = {}
 
         @override
         def _build_input_triples(
@@ -1489,31 +1412,6 @@ def test_build_strawberry_input_class_rejects_empty_specs_with_the_callers_remed
     # No message: the empty build is permitted, for the merged-override caller.
     built = build_strawberry_input_class("EmptyMergedInputType", [])
     assert built.__name__ == "EmptyMergedInputType"
-
-
-def test_emit_rejects_graphql_name_collision_across_distinct_python_attrs() -> None:
-    """The emit scaffold's SECOND arm: two members collapsing onto one GraphQL name.
-
-    ``foo_bar`` and ``fooBar`` flatten to distinct python attrs, but
-    ``graphql_camel_name`` sends both to ``fooBar`` -- the same silent-overwrite
-    class as the attr collision, rejected before the later member clobbers the
-    earlier one's field in the generated input dataclass.
-    """
-
-    class _ProbeSet(ClassBasedTypeNameMixin):
-        __qualname__ = "_ProbeSet"
-
-    field_specs: dict[tuple[type[object], str], GeneratedInputFieldSpec] = {}
-    with pytest.raises(ConfigurationError, match="GraphQL input field name 'fooBar'"):
-        emit_set_input_field_triples(
-            _ProbeSet,
-            [("foo_bar", object()), ("fooBar", object())],
-            related_of=lambda _t, _e: None,
-            leaf_of=lambda _t, _pa, _e: (int | None, _t),
-            module_path=__name__,
-            field_specs=field_specs,
-        )
-    assert field_specs == {}
 
 
 def test_emit_rejects_flatten_collision_between_traversal_and_declared_member() -> None:

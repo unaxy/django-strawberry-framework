@@ -68,6 +68,7 @@ from django_strawberry_framework.registry import register_subsystem_clear
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import is_mapping
 from django_strawberry_framework.utils.inputs import (
+    GeneratedFieldSources,
     InputFieldSpec,
     build_strawberry_input_class,
     generated_input_type_name,
@@ -80,10 +81,10 @@ from django_strawberry_framework.utils.inputs import (
     normalize_field_name_sequence,
     optional_input_field,
     pascalize_token,
+    predicted_input_field_name,
     resolve_effective_fields,
 )
 from django_strawberry_framework.utils.relations import is_row_key_column, written_model_field
-from django_strawberry_framework.utils.strings import graphql_camel_name
 from django_strawberry_framework.utils.typing import object_result
 from django_strawberry_framework.write_mixins import require_model_class
 
@@ -101,7 +102,7 @@ from .serializer_converter import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable, Iterable, Sequence
 
     from django.db import models
     from typing_extensions import TypeIs
@@ -1186,7 +1187,8 @@ def _shape_token(
     Full generated-field identity is folded into the token via a stable ``hash``-free
     digest - the EMITTED annotation (post-nullable-widening, so a ``T`` vs ``T | None``
     nullability difference diverges), requiredness, kind, ``input_attr``,
-    ``graphql_name``, ``source``, the relation ``related_model``, AND the generated SDL
+    ``graphql_name`` (the default converter's prediction, so a type name moves with
+    a field's default-config wire name), ``source``, the relation ``related_model``, AND the generated SDL
     ``description``. This keeps the deterministic name aligned with the descriptor cache key.
 
     The ``description`` discriminant is appended ONLY when it is non-``None``: a field
@@ -1371,6 +1373,19 @@ def guard_create_required_serializer_fields(
     )
 
 
+def _serializer_input_sources(
+    serializer_class: type[DRFBaseSerializer],
+    field_specs: Sequence[InputFieldSpec],
+) -> GeneratedFieldSources:
+    """Name the serializer a generated input is built from, and each field's serializer field."""
+    return GeneratedFieldSources(
+        subject=f"SerializerMutation for {truth.name(serializer_class)!r}",
+        field_noun="serializer fields",
+        rename_clause="Rename one,",
+        members={spec.input_attr: spec.target_name for spec in field_specs},
+    )
+
+
 def _collect_input_attr_collision_messages(
     serializer_class: type[DRFBaseSerializer],
     field_specs: list[InputFieldSpec],
@@ -1391,13 +1406,6 @@ def _collect_input_attr_collision_messages(
       field literally named ``category_id`` produces two specs with
       ``input_attr == "category_id"``; ``build_strawberry_input_class`` would write
       the second over the first.
-    * ``graphql_name`` clash - two distinct names that default-camel-case to ONE
-      GraphQL name (``foo_bar`` + ``fooBar`` -> ``fooBar``; or ``category`` ->
-      ``categoryId`` vs a literal ``category_id`` -> ``categoryId``). Strawberry
-      would collapse the two onto one schema field. Every generated name is
-      pinned, so this holds under any schema config; a field the schema's
-      converter names is refused per schema instead
-      (``schema.py::_refuse_field_name_collisions``).
     * ``source`` clash - two WRITABLE fields whose sources resolve to one model
       attribute would double-write it. A ``read_only`` field sharing a ``source``
       with a writable one is fine (read-only is dropped before this is reached), so
@@ -1410,22 +1418,22 @@ def _collect_input_attr_collision_messages(
       resolvers (star sources and a relation bound to its ``attname`` never reach this
       schema-time walk; the converter rejects them before a spec is built).
 
-    The seen-dict walk + the three collision arms are single-sited in
+    Two names the executing schema's ``NameConverter`` names alike (``foo_bar`` /
+    ``fooBar`` by default) are refused per schema
+    (``schema.py::_refuse_field_name_collisions``).
+
+    The seen-dict walk + the collision arms are single-sited in
     ``utils/inputs.py::iter_input_field_collisions``; the
     serializer flavor collects every yielded message for aggregation (the form
     raises on the first instead), with byte-stable wording via the threaded
-    serializer nouns (incl. the id-like-suffix ``camel_case_note`` and the
-    serializer-only ``source_of`` arm).
+    serializer nouns (incl. the serializer-only ``source_of`` arm).
     """
     model = serializer_model(serializer_class)
     return list(
         iter_input_field_collisions(
             field_specs,
-            subject=f"SerializerMutation for {truth.name(serializer_class)!r}",
-            field_noun="serializer fields",
-            rename_clause="Rename one,",
+            sources=_serializer_input_sources(serializer_class, field_specs),
             name_of=lambda spec: spec.target_name,
-            camel_case_note=" (or the id-like-suffix rule)",
             source_of=lambda spec: write_source_key(model, spec.source or spec.target_name),
         ),
     )
@@ -1547,12 +1555,7 @@ def _walk_serializer_fields(
         # The widening tail itself is single-sited in
         # ``utils/inputs.py::optional_input_field``.
         nullable = getattr(field, "allow_null", False) or not required
-        annotation, field_kwargs = optional_input_field(
-            annotation,
-            python_attr=python_attr,
-            graphql_name=spec.graphql_name,
-            widen=nullable,
-        )
+        annotation, field_kwargs = optional_input_field(annotation, widen=nullable)
         # Descriptions render into the generated type but are not implied by its annotation or
         # requiredness, so keep them as an independent descriptor axis.
         description = serializer_field_description(field)
@@ -1726,7 +1729,7 @@ def _resolve_nested_field(
     annotation: object = GenericAlias(list, (nested_cls,)) if many else nested_cls
     spec = InputFieldSpec(
         input_attr=field_name,
-        graphql_name=graphql_camel_name(field_name),
+        graphql_name=predicted_input_field_name(field_name),
         target_name=field_name,
         kind=kind,
         source=source,
@@ -1979,7 +1982,11 @@ def build_serializer_input_class(
     # which is the canonical name even for a divergent shape (the read DjangoType's
     # enum is cached per (model, field), so the name is stable regardless). No
     # rebuild needed.
-    input_cls = build_strawberry_input_class(type_name, triples)
+    input_cls = build_strawberry_input_class(
+        type_name,
+        triples,
+        sources=_serializer_input_sources(serializer_class, field_specs),
+    )
     shape = SerializerInputShape(
         serializer_class=serializer_class,
         operation_kind=operation_kind,

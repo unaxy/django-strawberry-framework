@@ -1707,7 +1707,7 @@ down (D-N2–D-N8).
   serve concerns the extension never touches (queryset visibility, generated
   inputs, input traversal, permissions, write decode, relation
   classification, converter dispatch). Three tempting near-misses, each
-  rejected: `strings.graphql_camel_name` must not manufacture `isSlow` /
+  rejected: a package casing helper must not manufacture `isSlow` /
   `isSelect` (the keys are a wire contract —
   [Decision 8](#decision-8--the-sql-row-shape-graphenes-wire-names-narrowed-to-what-djangos-log-supports)'s
   wire-casing table, with the casing-helper rejection recorded in the

@@ -30,6 +30,7 @@ from django_strawberry_framework import (
     finalize_django_types,
     strawberry_config,
 )
+from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.filters import FilterSet, RangeFilter, RelatedFilter
 from django_strawberry_framework.views import DjangoGraphQLView
 from tests._idioms import consumer_module, consumer_query
@@ -514,7 +515,14 @@ def test_flat_filter_hiding_uses_the_set_that_actually_declares_the_branch(
     }
 
 
-def _naming_schema(case: str) -> DjangoSchema:
+# The default converter names ``field_2`` and ``field2`` (``price_2`` / ``price2``) alike,
+# so a schema serving both is built under ``auto_camel_case=False``, which names them apart.
+_SNAKE_NAMING_CASES = frozenset({"digit-bags", "digit-ranges"})
+
+
+def _naming_schema(case: str, *, snake: bool | None = None) -> DjangoSchema:
+    if snake is None:
+        snake = case in _SNAKE_NAMING_CASES
     if case == "digit-bags":
         declarations = {
             "field_2": CharFilter(field_name="name", lookup_expr="exact"),
@@ -569,7 +577,7 @@ def _naming_schema(case: str) -> DjangoSchema:
         branches: DjangoConnection[NamingNode] = DjangoConnectionField(NamingNode)
 
     finalize_django_types()
-    return DjangoSchema(query=Query, config=strawberry_config())
+    return DjangoSchema(query=Query, config=strawberry_config(auto_camel_case=not snake))
 
 
 @pytest.mark.parametrize(
@@ -586,7 +594,7 @@ def _naming_schema(case: str) -> DjangoSchema:
             "NamingFilterField_2FilterInputType",
             "NamingFilterField2FilterInputType",
             [{"name": "exact", "type": {"kind": "SCALAR", "name": "String"}}],
-            [{"name": "iContains", "type": {"kind": "SCALAR", "name": "String"}}],
+            [{"name": "i_contains", "type": {"kind": "SCALAR", "name": "String"}}],
             id="digit-bags",
         ),
         pytest.param(
@@ -639,7 +647,11 @@ def test_filter_input_names_preserve_digit_and_underscore_boundaries_over_http(
     first_fields: list[JSONObject],
     second_fields: list[JSONObject],
 ) -> None:
-    """Both generated inputs survive with the declared names and their independent field shapes."""
+    """Both generated inputs survive with the declared names and their independent field shapes.
+
+    The type names come from ``pascal_case``, which keeps an underscore before a digit;
+    the digit cases are served under ``auto_camel_case=False`` (``_SNAKE_NAMING_CASES``).
+    """
     schema = _naming_schema(case)
     assert _post(
         schema,
@@ -651,3 +663,67 @@ def test_filter_input_names_preserve_digit_and_underscore_boundaries_over_http(
             "second": {"name": second, "inputFields": second_fields},
         },
     }
+
+
+def test_a_path_member_beside_a_declared_filter_the_converter_names_alike_names_the_path() -> None:
+    """The refusal names a ``Meta.fields`` path as declared, not by the attr it flattens to.
+
+    ``shelves__code`` flattens to the input attr ``shelves_code``, which the default
+    converter names ``shelvesCode``, the declared filter's name; the consumer changes
+    the ``Meta.fields`` entry, so the refusal names ``shelves__code``.
+    """
+
+    class PathNamingFilter(FilterSet):
+        shelvesCode = CharFilter(  # noqa: N815 - the camel-case member is the collision under test
+            field_name="name",
+            lookup_expr="exact",
+        )
+
+        class Meta:
+            model = Branch
+            fields = {"shelves__code": ["exact"]}
+
+    class PathNamingNode(DjangoType):
+        class Meta:
+            model = Branch
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+            filterset_class = PathNamingFilter
+
+    @strawberry.type
+    class Query:
+        branches: DjangoConnection[PathNamingNode] = DjangoConnectionField(PathNamingNode)
+
+    finalize_django_types()
+    with pytest.raises(ConfigurationError) as exc:
+        _ = DjangoSchema(query=Query, config=strawberry_config())
+
+    assert str(exc.value) == (
+        "PathNamingFilterInputType: fields 'shelves_code' and 'shelvesCode' both publish the "
+        "GraphQL field name 'shelvesCode' under this schema's name converter, so one would "
+        "silently replace the other. FilterSet 'test_a_path_member_beside_a_declared_filter_"
+        "the_converter_names_alike_names_the_path.<locals>.PathNamingFilter' generates them "
+        "from members 'shelves__code' and 'shelvesCode'. Rename one member or drop one via "
+        "Meta.fields / Meta.exclude."
+    )
+
+
+@pytest.mark.parametrize("case", ["digit-bags", "digit-ranges"])
+def test_filter_members_the_default_converter_names_alike_refuse_the_schema(case: str) -> None:
+    """``field_2`` beside ``field2`` both publish ``field2`` by default, so the build refuses them.
+
+    Generated filter fields carry no ``name=``; the executing schema's ``NameConverter``
+    names each, so the refusal names the generated filter input type, the set and the
+    two members to rename or drop.
+    """
+    first, second = ("field_2", "field2") if case == "digit-bags" else ("price_2", "price2")
+    with pytest.raises(ConfigurationError) as exc:
+        _ = _naming_schema(case, snake=False)
+    assert str(exc.value).startswith(
+        f"NamingFilterInputType: fields {first!r} and {second!r} both publish the GraphQL "
+        f"field name {second!r}",
+    )
+    assert str(exc.value).endswith(
+        f"FilterSet 'NamingFilter' generates them from members {first!r} and {second!r}. "
+        "Rename one member or drop one via Meta.fields / Meta.exclude.",
+    )

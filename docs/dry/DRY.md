@@ -58,7 +58,7 @@ same move makes things worse.
    explicit defaults, enumerated variants, loud unsupported path. Absent hook = no-op only where
    the contract says absence means "nothing to do"; absent permission hook never = "permitted".
 2. **One owned translation.** Two systems agreeing on a name → one grammar/table produces it, both
-   read it. `LOOKUP_NAME_MAP` (Django lookup → GraphQL spelling);
+   read it. `LOOKUP_NAME_MAP` (Django lookup → input attr the schema's converter names);
    `sets_mixins.py::ClassBasedTypeNameMixin.type_name_for` (the one set-family naming rule).
    Target = ONE translation, not zero. Structural relationships declared w/ stable identifiers,
    never parsed out of display text.

@@ -19,7 +19,7 @@ through ``module.__dict__`` (the same contract ``filters/inputs.py`` /
 phase-2.5 bind is the only caller of ``materialize_mutation_input_class`` and
 ``registry.clear()`` is the only caller of ``clear_mutation_input_namespace``.
 
-The materialize / build / camel-name / collision mechanics are single-sited in
+The materialize / build / collision mechanics are single-sited in
 ``utils/inputs.py``; this module is a thin domain wrapper,
 in the spirit of ``orders/inputs.py`` (the ``mutations/`` module names differ
 from ``orders/`` per spec-036 Decision 4). The divergence from the set families:
@@ -43,7 +43,6 @@ from typing import TYPE_CHECKING, NamedTuple, cast
 import strawberry
 from django.core.exceptions import FieldDoesNotExist
 from django.db import models
-from strawberry.utils.str_converters import to_camel_case
 
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.registry import register_subsystem_clear, registry
@@ -68,6 +67,7 @@ from django_strawberry_framework.utils.inputs import (
     RELATION_MULTI,
     RELATION_SINGLE,
     SCALAR,
+    GeneratedFieldSources,
     InputFieldSpec,
     build_strawberry_input_class,
     iter_input_field_collisions,
@@ -75,6 +75,7 @@ from django_strawberry_framework.utils.inputs import (
     name_set_input_type_name,
     normalize_field_name_sequence,
     optional_input_field,
+    predicted_input_field_name,
     resolve_effective_fields,
 )
 from django_strawberry_framework.utils.lazy import unwrap_lazy_object
@@ -92,7 +93,6 @@ from django_strawberry_framework.utils.relations import (
     relation_kind,
     stored_value_column,
 )
-from django_strawberry_framework.utils.strings import graphql_camel_name
 from django_strawberry_framework.utils.write_values import relation_takes_global_id
 
 if TYPE_CHECKING:
@@ -100,7 +100,6 @@ if TYPE_CHECKING:
     from typing import TypeAlias
 
     from strawberry.types.base import WithStrawberryObjectDefinition
-    from strawberry.types.field import StrawberryField
 
     from django_strawberry_framework.types.base import DjangoType
     from django_strawberry_framework.utils.typing import ConcreteField, ModelField
@@ -134,8 +133,8 @@ def _operation_kind_display_word(operation_kind: str) -> str:
 
     ``CREATE`` reads ``"create"``; any other kind (today only ``PARTIAL``)
     reads ``"update"``. Single-sites the mapping both configuration-error
-    subjects use (the collision subject in
-    ``_reject_generated_input_collisions`` and the empty-input message in
+    subjects use (the generated input's subject in
+    ``_generated_input_sources`` and the empty-input message in
     ``editable_input_fields``), so a new generator kind updates one body
     instead of two message sites.
     """
@@ -184,23 +183,6 @@ _materialized_names, _materialize_input, _clear_input_namespace = make_input_nam
 )
 
 
-def _predicted_input_field_name(field: StrawberryField) -> str:
-    """Predict, at bind, the wire name a default-config schema publishes for an input field.
-
-    An explicit ``name=`` is the default converter's answer, and every generated
-    field pins one. A consumer-authored field without one is named by the executing
-    schema's ``NameConverter`` at schema build, and no schema exists at bind; under the
-    default ``auto_camel_case=True`` the converter's ``apply_naming_config`` is
-    Strawberry's ``to_camel_case``, so that is the prediction - NOT the
-    package's ``graphql_camel_name``, which disagrees with it (``field_2`` ->
-    ``field2`` vs ``field_2``). A request never trusts the prediction: it reads
-    the executing schema's own name, as it does for a pinned one, which a converter
-    overriding ``get_graphql_name`` / ``from_field`` respells
-    (``utils/inputs.py::published_input_specs``).
-    """
-    return field.graphql_name or to_camel_case(field.python_name)
-
-
 def materialize_mutation_input_class(
     name: str,
     input_cls: type[WithStrawberryObjectDefinition],
@@ -210,8 +192,9 @@ def materialize_mutation_input_class(
 
     Delegates to the ``make_input_namespace`` materializer. Two fields of a
     merged input publishing one GraphQL name is refused per schema at build
-    (``schema.py::_refuse_field_name_collisions``), since a consumer-authored
-    field without ``name=`` is named by that schema's ``NameConverter``. See the
+    (``schema.py::_refuse_field_name_collisions``), since a field without
+    ``name=``, generated or consumer-authored, is named by that schema's
+    ``NameConverter``. See the
     materializer for the ``LazyType.resolve_type`` contract, the
     idempotent ``(name, input_cls)`` clause, the distinct-class name collision
     raise, and the cross-family type-name claim, whose collision message names
@@ -609,8 +592,8 @@ def relation_input_annotation(
     field: ConcreteField,
     *,
     related_primary_type: type[DjangoType] | None,
-) -> tuple[str, str, object]:
-    """Map a relation field to its ``(python_attr, graphql_name, annotation)`` triple.
+) -> tuple[str, object]:
+    """Map a relation field to its ``(python_attr, annotation)`` pair.
 
     Forward FK / OneToOne become a single ``<field>_id`` input; M2M becomes
     ``list[<id>]`` (spec-036 Decision 6). List-vs-single is
@@ -620,8 +603,8 @@ def relation_input_annotation(
 
     The python attr is ``<field.name>_id`` for FK / OneToOne so the
     resolver maps it back to the column with no per-field declaration (and a
-    custom ``input_class`` must follow the same scheme). The
-    GraphQL alias camel-cases that attr (``category_id`` -> ``categoryId``). M2M
+    custom ``input_class`` must follow the same scheme); the schema's
+    ``NameConverter`` names the field from it (``categoryId`` by default). M2M
     keeps the plain field name (``genres``) - it is already a collection of ids.
 
     ``related_primary_type`` is the resolved primary ``DjangoType`` of the
@@ -636,9 +619,7 @@ def relation_input_annotation(
         related_primary_type,
         many=many,
     )
-    python_attr = relation_input_python_attr(field)
-    graphql_name = graphql_camel_name(python_attr)
-    return python_attr, graphql_name, annotation
+    return relation_input_python_attr(field), annotation
 
 
 def model_column_write_kind(field: ModelField) -> str:
@@ -722,9 +703,8 @@ def mutation_input_field_specs(
     classifier is total here (no per-index kind branches). ``target_name`` is
     the model attr the decode writes (``category_id`` for a forward FK /
     OneToOne, the field name for a scalar / M2M). ``graphql_name`` is the
-    field's pinned wire name or, for a consumer-authored field without ``name=``,
-    ``_predicted_input_field_name``'s bind-time prediction, which a request
-    replaces with the executing schema's name
+    field's explicit ``name=`` or ``utils/inputs.py::predicted_input_field_name``'s
+    bind-time prediction, which a request replaces with the executing schema's name
     (``utils/inputs.py::published_input_specs``).
     """
     excluded = _frozenset_of_attr_names(excluded_attrs, parameter="excluded_attrs")
@@ -733,7 +713,7 @@ def mutation_input_field_specs(
     model_fields: ModelFieldIndex = {}
     for field in input_cls.__strawberry_definition__.fields:
         python_name = field.python_name
-        graphql_name = _predicted_input_field_name(field)
+        graphql_name = field.graphql_name or predicted_input_field_name(python_name)
         django_field = fk_by_attr.get(python_name) or m2m_by_name.get(python_name)
         if django_field is None:
             try:
@@ -779,7 +759,7 @@ def model_column_write_annotation(
     file -> ``Upload``; else ``convert_scalar(..., force_nullable=False)``.
     ``model_column_input_annotation`` adds the 036 ``<name>_id`` naming; the
     serializer overlay uses this for relation / file columns and then applies
-    ``serializer_field_graphql_name``. Serializer SCALAR type-override stays at
+    ``serializer_field_input_attr``. Serializer SCALAR type-override stays at
     ``_model_backed_scalar_annotation``.
     """
     kind = model_column_write_kind(field)
@@ -803,8 +783,8 @@ def model_column_input_annotation(
     type_name: str,
     *,
     primary_of: Callable[[type[models.Model]], type[DjangoType] | None],
-) -> tuple[str, str, object]:
-    """Return ``(python_attr, graphql_name, annotation)`` for a model column.
+) -> tuple[str, object]:
+    """Return ``(python_attr, annotation)`` for a model column.
 
     ``build_mutation_input`` and form ``_field_triple_and_spec`` (column arm)
     both type a backing ``models.Field`` the same way: kind via
@@ -826,13 +806,7 @@ def model_column_input_annotation(
             field,
             related_primary_type=primary_of(require(field.related_model, is_model_class)),
         )
-    python_attr = field.name
-    graphql_name = graphql_camel_name(python_attr)
-    return (
-        python_attr,
-        graphql_name,
-        model_column_write_annotation(field, type_name, primary_of=primary_of),
-    )
+    return field.name, model_column_write_annotation(field, type_name, primary_of=primary_of)
 
 
 def mutation_input_type_name(
@@ -952,28 +926,33 @@ class _GeneratedInputFieldName(NamedTuple):
     """Minimal model-field naming record consumed by the shared collision walk."""
 
     input_attr: str
-    graphql_name: str
     model_field_name: str
 
 
-def _reject_generated_input_collisions(
+def _generated_input_sources(
     model: type[models.Model],
     operation_kind: str,
     names: list[_GeneratedInputFieldName],
-    *,
-    check_input_attrs: bool,
-    check_graphql_names: bool,
-) -> None:
-    """Fail loud when distinct model fields collapse to one generated input field."""
+) -> GeneratedFieldSources:
+    """Name the model and operation a generated input is built for, and each field's column."""
     kind = _operation_kind_display_word(operation_kind)
-    for message in iter_input_field_collisions(
-        names,
+    return GeneratedFieldSources(
         subject=f"DjangoMutation {kind} input for {truth.name(model)}",
         field_noun="model fields",
         rename_clause="Rename one of the model fields,",
+        members={name.input_attr: name.model_field_name for name in names},
+    )
+
+
+def _reject_generated_input_collisions(
+    sources: GeneratedFieldSources,
+    names: list[_GeneratedInputFieldName],
+) -> None:
+    """Fail loud when distinct model fields collapse to one generated input field."""
+    for message in iter_input_field_collisions(
+        names,
+        sources=sources,
         name_of=lambda spec: spec.model_field_name,
-        check_input_attrs=check_input_attrs,
-        check_graphql_names=check_graphql_names,
     ):
         raise ConfigurationError(message)
 
@@ -1034,16 +1013,13 @@ def build_mutation_input(
 
     triples: list[tuple[str, object, dict[str, object]]] = []
     selected_names: list[_GeneratedInputFieldName] = []
-    emitted_names: list[_GeneratedInputFieldName] = []
     for field in selected:
-        python_attr, graphql_name, annotation = model_column_input_annotation(
+        python_attr, annotation = model_column_input_annotation(
             field,
             type_name,
             primary_of=registry.get,
         )
-
-        field_name = _GeneratedInputFieldName(python_attr, graphql_name, field.name)
-        selected_names.append(field_name)
+        selected_names.append(_GeneratedInputFieldName(python_attr, field.name))
         if python_attr in overrides:
             continue
 
@@ -1056,33 +1032,14 @@ def build_mutation_input(
         # is consulted only for scalar / FK columns.
         is_m2m = relation_bool(field, "many_to_many")
         required = is_create and not is_m2m and input_field_required(field)
-        annotation, field_kwargs = optional_input_field(
-            annotation,
-            python_attr=python_attr,
-            graphql_name=graphql_name,
-            widen=not required,
-        )
+        annotation, field_kwargs = optional_input_field(annotation, widen=not required)
         triples.append((python_attr, annotation, field_kwargs))
-        emitted_names.append(field_name)
 
     # An attr collision is ambiguous even when a consumer override hides both
-    # generated fields; GraphQL-name collisions are checked only across the
-    # generated remainder because a consumer alias may legitimately replace one.
-    _reject_generated_input_collisions(
-        model,
-        operation_kind,
-        selected_names,
-        check_input_attrs=True,
-        check_graphql_names=False,
-    )
-    _reject_generated_input_collisions(
-        model,
-        operation_kind,
-        emitted_names,
-        check_input_attrs=False,
-        check_graphql_names=True,
-    )
-    return build_strawberry_input_class(type_name, triples)
+    # generated fields.
+    sources = _generated_input_sources(model, operation_kind, selected_names)
+    _reject_generated_input_collisions(sources, selected_names)
+    return build_strawberry_input_class(type_name, triples, sources=sources)
 
 
 def payload_object_slot(primary_type: type[DjangoType]) -> str:

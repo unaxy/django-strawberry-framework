@@ -82,11 +82,7 @@ from django_strawberry_framework.utils.inputs import (
     make_set_input_namespace,
     optional_field_kwargs,
 )
-from django_strawberry_framework.utils.strings import (
-    flatten_lookup_path,
-    graphql_camel_name,
-    pascal_case_or_raise,
-)
+from django_strawberry_framework.utils.strings import flatten_lookup_path, pascal_case_or_raise
 from django_strawberry_framework.utils.widgets import multi_widget_keys, widget_keys
 
 from .base import (
@@ -146,71 +142,65 @@ LOOKUP_PREFIXES: dict[str, str] = {
 }
 
 
-# `django-filter` lookup -> (python_attr, graphql_name) pair per spec-027
-# Decision 3 Layer 5. Strawberry's auto-camel-case
-# cannot transform `icontains` to `iContains` (no underscore to split on),
-# and the Python keyword `in` cannot be a dataclass field - both are pinned
-# here. Read through `lookup_leaf_names`, which names every bag lookup (a
-# transform chain segment by segment), and by `FilterSet._operator_bag_items`
-# (recognizing a hand-built operator bag).
-LOOKUP_NAME_MAP: dict[str, tuple[str, str]] = {
-    "exact": ("exact", "exact"),
-    "iexact": ("i_exact", "iExact"),
-    "contains": ("contains", "contains"),
-    "icontains": ("i_contains", "iContains"),
-    "startswith": ("starts_with", "startsWith"),
-    "istartswith": ("i_starts_with", "iStartsWith"),
-    "endswith": ("ends_with", "endsWith"),
-    "iendswith": ("i_ends_with", "iEndsWith"),
-    "regex": ("regex", "regex"),
-    "iregex": ("i_regex", "iRegex"),
-    "gt": ("gt", "gt"),
-    "gte": ("gte", "gte"),
-    "lt": ("lt", "lt"),
-    "lte": ("lte", "lte"),
-    "isnull": ("is_null", "isNull"),
-    "in": ("in_", "in"),
-    "range": ("range", "range"),
-    "date": ("date", "date"),
-    "year": ("year", "year"),
-    "month": ("month", "month"),
-    "day": ("day", "day"),
-    "week_day": ("week_day", "weekDay"),
-    "quarter": ("quarter", "quarter"),
-    "hour": ("hour", "hour"),
-    "minute": ("minute", "minute"),
-    "second": ("second", "second"),
+# `django-filter` lookup -> python attr per spec-027 Decision 3 Layer 5. The
+# map spells each lookup's attr with its word boundary (`i_contains`); the
+# schema's `NameConverter` names the field from it (`iContains` by default,
+# `i_contains` under `auto_camel_case=False`). `in` is a Python keyword, so its
+# attr is `in_` and it publishes `in` through `name=`. Read through
+# `lookup_leaf_names`, which names every bag lookup (a transform chain segment
+# by segment), and by `FilterSet._operator_bag_items` (recognizing a hand-built
+# operator bag).
+LOOKUP_NAME_MAP: dict[str, str] = {
+    "exact": "exact",
+    "iexact": "i_exact",
+    "contains": "contains",
+    "icontains": "i_contains",
+    "startswith": "starts_with",
+    "istartswith": "i_starts_with",
+    "endswith": "ends_with",
+    "iendswith": "i_ends_with",
+    "regex": "regex",
+    "iregex": "i_regex",
+    "gt": "gt",
+    "gte": "gte",
+    "lt": "lt",
+    "lte": "lte",
+    "isnull": "is_null",
+    "in": "in_",
+    "range": "range",
+    "date": "date",
+    "year": "year",
+    "month": "month",
+    "day": "day",
+    "week_day": "week_day",
+    "quarter": "quarter",
+    "hour": "hour",
+    "minute": "minute",
+    "second": "second",
 }
 
 
-def lookup_leaf_names(lookup: str) -> tuple[str, str]:
-    """Return an operator-bag lookup's ``(python_attr, graphql_name)``.
+def lookup_leaf_names(lookup: str) -> tuple[str, str | None]:
+    """Return an operator-bag lookup's ``(python_attr, keyword wire name or None)``.
 
-    A single token reads ``LOOKUP_NAME_MAP`` (``in`` -> ``in_`` / ``in``); one the map
-    does not hold is named by itself (``iso_year`` -> ``isoYear``), its python attr
-    escaped with a trailing ``_`` when it is a Python keyword (a transform registered as
-    ``from`` publishes ``from`` over the attr ``from_``). A transform chain
-    (``year__gt``) is named segment by segment: its python attr joins each segment's attr
-    with ``_`` (``year_gt``, ``year_i_contains``; a keyword escape such as ``in_`` is moot
-    inside a chain, so ``year_in``) and its GraphQL name capitalizes each later
-    segment's name (``yearGt``, ``yearIContains``), never the camel case of the joined
-    attr, which ``graphql_camel_name`` marks at an uppercase run (``yearI__xContains``).
-    The one site that names a bag lookup: ``filter_lookup_table`` keys each head's
-    lookups by the attr and ``_build_input_fields`` publishes the pair.
+    A single token reads ``LOOKUP_NAME_MAP`` (``icontains`` -> ``i_contains``); one the
+    map does not hold is its own attr (``iso_year``). A Python keyword token escapes its
+    attr with a trailing ``_`` and carries the keyword as its wire name (``in`` ->
+    ``in_`` / ``in``; a transform registered as ``from`` publishes ``from`` over the attr
+    ``from_``). A transform chain (``year__gt``) joins each segment's attr with ``_``, a
+    keyword segment unescaped (``year_gt``, ``year_i_contains``, ``year_in``). Only a
+    single keyword token carries a wire name; the executing schema's ``NameConverter``
+    names every other field (``yearIContains`` by default). The one site that names a bag
+    lookup: ``filter_lookup_table`` keys each head's lookups by the attr and
+    ``_build_input_fields`` publishes the pair.
     """
     segments = lookup.split(LOOKUP_SEP)
     if len(segments) == 1:
-        if lookup in LOOKUP_NAME_MAP:
-            return LOOKUP_NAME_MAP[lookup]
-        return f"{lookup}_" if keyword.iskeyword(lookup) else lookup, graphql_camel_name(lookup)
-    named = [lookup_leaf_names(segment) for segment in segments]
-    python_attr = "_".join(
-        attr[:-1] if attr.endswith("_") and keyword.iskeyword(attr[:-1]) else attr
-        for attr, _graphql_name in named
-    )
-    head_name, *later_names = (graphql_name for _attr, graphql_name in named)
-    graphql_name = head_name + "".join(name[:1].upper() + name[1:] for name in later_names)
-    return python_attr, graphql_name
+        if keyword.iskeyword(lookup):
+            return f"{lookup}_", lookup
+        return LOOKUP_NAME_MAP.get(lookup, lookup), None
+    named = (lookup_leaf_names(segment) for segment in segments)
+    return "_".join(attr if wire_name is None else wire_name for attr, wire_name in named), None
 
 
 def _compose_and(branch_qs: list[models.Q]) -> models.Q:
@@ -1870,7 +1860,7 @@ def _build_logic_fields(type_name: str) -> list[tuple[str, object, dict[str, obj
         (
             op.python_attr,
             optional_annotation(list_ref if op.is_sequence else self_ref),
-            optional_field_kwargs(op.python_attr, op.wire_name),
+            optional_field_kwargs(op.wire_name),
         )
         for op in LOGIC_OPERATORS
     ]
@@ -2147,7 +2137,7 @@ def _build_input_fields(
         bag_name = filterset_cls.type_name_for(python_attr)
         bag_specs: list[tuple[str, object, dict[str, object]]] = []
         for lookup, (_form_key, leaf_filter) in lookup_bag.items():
-            lookup_python_attr, lookup_graphql_name = lookup_leaf_names(lookup)
+            lookup_python_attr, lookup_wire_name = lookup_leaf_names(lookup)
             if not lookup_python_attr.isidentifier():
                 raise _unnameable_lookup_refusal(leaf_filter, lookup, filterset_cls)
             # A leaf is typed by the field each value is cleaned as: the output of any
@@ -2160,18 +2150,14 @@ def _build_input_fields(
                 filterset_cls,
             )
             bag_specs.append(
-                (
-                    lookup_python_attr,
-                    annotation,
-                    optional_field_kwargs(lookup_python_attr, lookup_graphql_name),
-                ),
+                (lookup_python_attr, annotation, optional_field_kwargs(lookup_wire_name)),
             )
         bag_class = build_input_class(bag_name, bag_specs)
         # The ``FieldSpec`` source path is the head's permission gate path;
         # the form keys the normalizer emits come from the lookup table.
         return bag_class | None, lookup_table.gate_paths[top_name]
 
-    # The per-field emission scaffold (python-attr flatten -> camel-case ->
+    # The per-field emission scaffold (python-attr flatten ->
     # optional kwargs -> related lazy-ref vs leaf -> triple + ``FieldSpec``) is
     # single-sited in ``utils/inputs.py::emit_set_input_field_triples``; the
     # closures above carry the filter-family semantics.
