@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 401 done, 86 to do. The CHANGELOG entries filed here moved to
+Progress: 402 done, 86 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2348,6 +2348,17 @@ Progress: 401 done, 86 to do. The CHANGELOG entries filed here moved to
   `year` / `date`, an end-date 09:30 row kept) and a new `ScalarSpecimenParentStampFilter.parent_days_span` over the
   `par` `FilteredRelation` alias in `test_scalars_filter_api.py`, package rows for naming and the refusal; the
   `RangeFilter`, `RangeField`, `ListFilter`, `ArrayFilter` docstrings and spec-027 say so
+- [x] 625. not a defect: no contract row says which lookup a package `ListFilter` applies (spec-027's rows type and
+  clean by the declared lookup and never name `in` as its default; README and GLOSSARY do not mention it), so a
+  `ListFilter` keeping django-filter's default `exact`, or declared `gte`, hands the whole list to that lookup as
+  graphene-django's `ListFilter` does: one element `["beta"]` over text compares `'[''beta'']'` (0 rows; `gte` every
+  row), an integer or relation key answers a masked `TypeError`, a decimal or temporal column `FILTER_INVALID`, and a
+  one-element `range` a masked `IndexError` from Django's `Range`. `in`, its transforms, a two-element `range`,
+  `has_keys` / `has_any_keys` and every `method=` filter answer right (1680 wire cells). A bare `BaseCSVFilter` /
+  `BaseInFilter` / `BaseRangeFilter` declaration runs as plain django-filter runs it, rows identical in 1008 of 1008
+  cells (507 and 516). Django marks only `in` and `range` as taking an iterable (`get_db_prep_lookup_value_is_iterable`),
+  so no upstream seam names every list-consuming lookup. Whether to default `in`, refuse, or reinterpret is Waiting
+  row 716, beside 316
 
 ## Outside review of the fixes
 
@@ -2388,13 +2399,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 625. **SKIP for now** (upstream-seam refactor in flight: F6, `filters/base.py::_ColumnCleanedFilter`). (robustness) A package `ListFilter` declared with a lookup other than `in` (the default `exact`, `gte`)
-  hands the list to a scalar lookup: a masked `ValidationError` / `TypeError` over a decimal or number column and
-  silently no rows over text, even for one element. A consumer-declared bare `BaseCSVFilter` subclass does the same
-  with `exact` / `iexact` / `icontains` / `startswith` (as plain django-filter does), and with `range` a one-element
-  list raises `IndexError` from `Range.get_rhs_op`. A build-time refusal must allow every list-consuming lookup (`in`,
-  `range`, transforms ending in either, `ArrayField` `contains` / `contained_by` / `overlap`, `has_keys` /
-  `has_any_keys`, a consumer-registered lookup) and every `method=` filter. Found fixing 508; widened triaging 516
 - [ ] 524. **SKIP for now** (upstream-seam refactor in flight: F4, partial-update rebinding in `forms/resolvers.py`). (robustness) A `ModelForm` update that omits a field whose declared form field is lossier than its column
   (`forms.DateField` over a `DateTimeField`) rebinds the stored value through that field and rewrites the row: a
   stored `03:04:05` becomes the default-zone midnight, and a stored year-1 value under `Asia/Tokyo` answers an
@@ -2824,6 +2828,22 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `test_routers.py`, `tests/utils/test_directives.py`, `test_errors.py`, `test_input_values.py` and
   `tests/mutations/test_write_transaction.py`. No defect rides on it (a refactor of private helpers and test idioms): do
   it now, outside a DRY cycle, or leave it to the next DRY cycle?
+- [ ] 716. A package `ListFilter` declared with a lookup that takes no list (django-filter's default `exact`, or
+  `gte` / `iexact` / `icontains` / `startswith`) builds, publishes `[<scalar>!]` under that lookup's key, and hands
+  the whole list to it: text answers no rows (`gte` every row), an integer or relation key a masked `TypeError`, a
+  decimal or temporal column `FILTER_INVALID` "Enter a value the database can represent.", a one-element `range` a
+  masked `IndexError` (three elements a `TypeError`). Options: (a) default `ListFilter`'s `lookup_expr` to `in` (the
+  published leaf `exact` becomes `in`; ten package rows and one live set rely on the default today, none applying a
+  list through it); (b) refuse at class or schema build a lookup that cannot take a list, allowing `in`, `range`,
+  transforms ending in either, `ArrayField` `exact` / `contains` / `contained_by` / `overlap`, `has_keys` /
+  `has_any_keys` and every `method=` filter; Django flags only `in` and `range`
+  (`get_db_prep_lookup_value_is_iterable`), so the rest is a named list, and the existing `ArrayField` refusal's
+  four-name list (`filters/inputs.py::_ARRAY_ELEMENT_LIST_LOOKUPS`) already refuses `gt`, which consumes an array on
+  PostgreSQL; a consumer-registered lookup is refused at request by the visibility boundary whatever it does; (c)
+  keep the declaration and apply a list as membership whatever the lookup, as 316's (c) does for two bounds. A
+  `range` `ListFilter` checking its length is part of (b) or (c). Declared django-filter CSV classes stay as
+  django-filter runs them (507, 516). 316 and this row are one decision: a list- or range-shaped package filter
+  declared with a scalar lookup
 
 ## Hunt not finished in t3
 
