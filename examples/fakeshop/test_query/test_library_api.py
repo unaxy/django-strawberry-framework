@@ -3559,9 +3559,9 @@ def test_library_whole_set_filterset_without_its_primary_key_filters_over_http()
     payload = response_json(response)
     assert payload.get("data") is None, payload
     (error,) = json_list(payload, "errors")
-    assert "Field 'id' is not defined by type 'DeskDirectoryFilterInputType'." in json_str(
-        error,
-        "message",
+    assert (
+        "Expected value of type 'DeskDirectoryFilterInputType' not to include unknown field 'id'"
+        in json_str(error, "message")
     )
 
 
@@ -9199,9 +9199,10 @@ def test_library_order_by_a_column_public_patron_order_excludes_is_a_validation_
 
     assert payload.get("data") is None, payload
     message = json_str(payload, "errors", 0, "message")
-    assert f"Field '{excluded}' is not defined by type 'PublicPatronOrderInputType'." in message, (
-        message
-    )
+    assert (
+        f"Expected value of type 'PublicPatronOrderInputType' not to include unknown field "
+        f"'{excluded}'" in message
+    ), message
 
 
 @pytest.mark.django_db
@@ -21223,7 +21224,10 @@ def test_update_sending_the_primary_key_is_a_validation_error_over_http(
 
     assert payload["data"] is None
     message = json_str(payload, "errors", 0, "message")
-    assert "Field 'patronId' is not defined by type" in message, message
+    _field, input_type = _PROFILE_UPDATES[flavor]
+    assert (
+        f"Expected value of type '{input_type}' not to include unknown field 'patronId'" in message
+    ), message
     assert _profiles() == before
 
 
@@ -21572,7 +21576,9 @@ def test_model_create_edition_refuses_the_model_spelling_isbn_10_over_http() -> 
 
     assert payload.get("data") is None, payload
     message = json_str(payload, "errors", 0, "message")
-    assert "Field 'isbn_10' is not defined by type 'EditionInput'." in message, message
+    assert (
+        "Expected value of type 'EditionInput' not to include unknown field 'isbn_10'" in message
+    ), message
     assert not models.Edition.objects.exists()
 
 
@@ -26519,8 +26525,8 @@ def test_declared_pk_value_the_key_column_cannot_hold_is_refused_like_id(
     pk_message = json_str(pk_payload, "errors", 0, "message")
     assert "Int cannot represent" in pk_message, pk_payload
     id_message = json_str(id_payload, "errors", 0, "message")
-    pk_leaf = f"filter.{next(iter(pk_filter))}."
-    id_leaf = f"filter.{next(iter(id_filter))}."
+    pk_leaf = f".{next(iter(pk_filter))}."
+    id_leaf = f".{next(iter(id_filter))}."
     assert pk_leaf in pk_message, pk_message
     assert pk_message.replace(pk_leaf, id_leaf) == id_message
 

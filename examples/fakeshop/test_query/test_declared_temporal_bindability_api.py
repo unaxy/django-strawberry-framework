@@ -733,6 +733,6 @@ def test_a_declared_filter_past_a_transform_publishes_what_its_own_form_cleans()
     payload = _post(schema, where)
     assert payload["data"] is None, payload
     assert json_at(payload, "errors", 0, "message") == (
-        f"Variable '$where' got invalid value 2021 at 'where.{head}.{lookup}'; "
+        f"Variable '$where' has invalid value at .{head}.{lookup}: "
         'Value cannot represent a Date: "2021". Expected a string.'
     ), payload

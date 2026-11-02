@@ -242,13 +242,14 @@ def test_payload_of_a_plain_primary_carries_a_nullable_result_slot() -> None:
         pytest.param(
             "{}",
             [],
-            "Field 'RequiredFlagFormInput.flag' of required type 'Boolean!' was not provided.",
+            "Expected value of type 'RequiredFlagFormInput' to include required field 'flag', "
+            "found: {  }.",
             id="omitted",
         ),
         pytest.param(
             "{flag: null}",
             [],
-            "Expected value of type 'Boolean!', found null.",
+            "Expected value of non-null type 'Boolean!' not to be None.",
             id="null",
         ),
     ],

@@ -163,7 +163,7 @@ def test_a_required_deferred_filter_annotation_refuses_omission() -> None:
     assert payload["errors"] == [
         {
             "message": (
-                "Field 'byCall' argument 'filter' of type 'Pep563BranchFilterInputType!' "
+                "Argument 'Query.byCall(filter:)' of type 'Pep563BranchFilterInputType!' "
                 "is required, but it was not provided."
             ),
             "locations": [{"line": 1, "column": 3}],

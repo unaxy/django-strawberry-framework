@@ -1958,7 +1958,8 @@ def test_all_lookup_leaves_publish_no_contrib_postgres_lookup() -> None:
     )
     assert payload["data"] is None, payload
     assert (
-        "Field 'containedBy' is not defined by type 'ScalarSpecimenFilterIdFilterInputType'."
+        "Expected value of type 'ScalarSpecimenFilterIdFilterInputType' not to include unknown "
+        "field 'containedBy'"
         in json_str(
             payload,
             "errors",
@@ -2266,7 +2267,7 @@ def test_a_text_filter_on_a_json_key_refuses_a_number_before_the_form() -> None:
 
     assert payload["data"] is None, payload
     assert json_str(payload, "errors", 0, "message") == (
-        "Variable '$filter' got invalid value 5 at 'filter.payloadN.exact'; "
+        "Variable '$filter' has invalid value at .payloadN.exact: "
         "String cannot represent a non string value: 5"
     ), payload
 

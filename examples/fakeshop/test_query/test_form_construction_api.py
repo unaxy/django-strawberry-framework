@@ -454,8 +454,8 @@ def test_required_extra_field_omitted_on_update_is_coercion_error(*, provided: b
         assert len(errors) == 1
         error = json_object(errors[0])
         assert (
-            error["message"] == "Variable '$d' got invalid value {'name': 'Y'}; "
-            "Field 'confirm' of required type 'String!' was not provided."
+            error["message"] == "Variable '$d' has invalid value: Expected value of type "
+            "'ConfirmFormPartialInput' to include required field 'confirm', found: {'name': 'Y'}."
         )
     item.refresh_from_db()
     assert item.name == ("Y" if provided else "X")
