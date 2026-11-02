@@ -343,6 +343,34 @@ def test_a_dict_under_a_scalar_lookup_is_refused_without_losing_its_field(
     )
 
 
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+def test_a_dict_under_a_choice_lookup_is_refused_without_losing_its_field(transport: str) -> None:
+    """A leaf whose input is no ``JSON`` value refuses an object, as a ``CharFilter`` does.
+
+    ``condition`` is a choices column, so its ``exact`` leaf is an ``EnumChoiceFilter``,
+    published as the column's enum: an object reaching it through a consumer ``JSON``
+    argument is never one value to bind whole.
+    """
+
+    class CriteriaShelfFilter(FilterSet):
+        class Meta:
+            model = models.Shelf
+            fields = {"condition": ["exact"]}
+
+    branch = models.Branch.objects.create(name="east")
+    models.Shelf.objects.create(code="must not be returned", branch=branch)
+    schema = _schema(CriteriaShelfFilter, models.Shelf, transport=transport, fields=("code",))
+    _refused(
+        _post(schema, {"condition": {"exact": {"k": "v"}}}, transport=transport, selection="code"),
+        f"FilterSet {CriteriaShelfFilter.__qualname__}: filter 'condition' received a dict value "
+        "({'k': 'v'}) but EnumChoiceFilter consumes a single scalar form key. A dict value here "
+        "would be splatted into unknown form-data keys the form silently ignores, dropping "
+        "the filter. Pass the schema value shape for this filter (a scalar, a list, or a "
+        "range {start, end} input on a RangeFilter primitive).",
+    )
+
+
 def _fines_sets() -> tuple[type[FilterSet], type[FilterSet]]:
     class FinesWindowFilter(FilterSet):
         fines = RangeFilter(field_name="lifetime_fines_cents", lookup_expr="range")
