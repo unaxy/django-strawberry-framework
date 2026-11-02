@@ -43,7 +43,8 @@ over a stored ``NULL`` store ``NULL``.
 
 ``all_scalar_specimens_by_parent_stamp`` lists specimens over a queryset holding a
 ``FilteredRelation("parent")`` alias named ``par``, filtered by
-``filters.ScalarSpecimenParentStampFilter``, whose ``parentDayOf`` path crosses that alias.
+``filters.ScalarSpecimenParentStampFilter``, whose ``parentDayOf`` and ``parentDaysSpan``
+paths cross that alias.
 """
 
 import strawberry

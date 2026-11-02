@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 166 to do.
+Progress: 0 done, 167 to do.
 
 ## From dry-0_0_15_3
 
@@ -656,6 +656,13 @@ Progress: 0 done, 166 to do.
   `QueryDict(urlencode(data))`) answers a `ConfigurationError` naming the field's keys before `is_valid()`, with
   nothing written, instead of a raw `AttributeError`; a widget `decompress` answering no list is the same error
   instead of `TypeError`
+- [ ] 715. CHANGELOG entry for item 624: a package `RangeFilter` whose `lookup_expr` ends on a transform (`"date"`,
+  `"year"`, `"month"`, `"time"`, `"hour"`, a consumer-registered one) applies a lone `start` / `end` through it, so
+  an end date keeps that day's later rows and a lone `year` bound filters instead of answering `FILTER_INVALID`; its
+  range input type is named by what it compares (`<Set>OccurredAtDateRangeInputType`, was
+  `<Set>OccurredAtRangeInputType`), so a `range` and a `date` `RangeFilter` over one column no longer collide with a
+  `ConfigurationError`; a lone bound under a `lookup_expr` Django cannot walk is refused instead of filtering the
+  column
 
 ## From dry-upstream-0_0_15
 

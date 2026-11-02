@@ -52,7 +52,7 @@ from django_strawberry_framework import (
     DjangoType,
     finalize_django_types,
 )
-from django_strawberry_framework.exceptions import ConfigurationError
+from django_strawberry_framework.exceptions import ConfigurationError, LookupValidationError
 from django_strawberry_framework.filters import (
     ArrayFilter,
     ArrayFilterMethod,
@@ -876,8 +876,8 @@ def test_a_driver_free_array_form_cleans_members_to_upstreams_python_values(
 
 
 _ONE_SIDED_RANGES = [
-    pytest.param([5, None], {"price_span__gte": 5}, id="start-only"),
-    pytest.param([None, 9], {"price_span__lte": 9}, id="end-only"),
+    pytest.param([5, None], {"tier__gte": 5}, id="start-only"),
+    pytest.param([None, 9], {"tier__lte": 9}, id="end-only"),
 ]
 
 
@@ -893,7 +893,7 @@ def test_range_filter_one_sided_applies_lone_bound(
     """
     qs = _RecordingQs()
 
-    f = RangeFilter(field_name="price_span", lookup_expr="range")
+    f = RangeFilter(field_name="tier", lookup_expr="range")
     result = f.filter(qs, value)
     assert result is qs
     assert qs.captured == expected
@@ -912,9 +912,9 @@ def test_range_filter_two_bounds_keep_declared_lookup(value: list[int]) -> None:
     """
     qs = _RecordingQs()
 
-    f = RangeFilter(field_name="price_span", lookup_expr="range")
+    f = RangeFilter(field_name="tier", lookup_expr="range")
     f.filter(qs, value)
-    assert qs.captured == {"price_span__range": value}
+    assert qs.captured == {"tier__range": value}
 
 
 @pytest.mark.parametrize(
@@ -932,7 +932,7 @@ def test_range_filter_without_bounds_is_skipped(
     """
     qs = _RecordingQs()
 
-    f = RangeFilter(field_name="price_span", lookup_expr="range")
+    f = RangeFilter(field_name="tier", lookup_expr="range")
     assert f.filter(qs, value) is qs
     assert qs.captured == {}
 
@@ -949,7 +949,7 @@ def test_range_filter_one_sided_honours_exclude(
     """
     qs = _RecordingQs()
 
-    f = RangeFilter(field_name="price_span", lookup_expr="range", exclude=True)
+    f = RangeFilter(field_name="tier", lookup_expr="range", exclude=True)
     f.filter(qs, value)
     assert qs.exclude_calls == 1
     assert qs.captured == expected
@@ -967,10 +967,26 @@ def test_range_filter_one_sided_applies_distinct_when_flagged(
     """
     qs = _RecordingQs()
 
-    f = RangeFilter(field_name="price_span", lookup_expr="range", distinct=True)
+    f = RangeFilter(field_name="tier", lookup_expr="range", distinct=True)
     f.filter(qs, value)
     assert qs.distinct_calls == 1
     assert qs.captured == expected
+
+
+@pytest.mark.parametrize("value", [[5, None], [None, 9]], ids=["start-only", "end-only"])
+def test_range_filter_one_sided_over_an_unwalkable_lookup_expr_is_refused(
+    value: list[int | None],
+) -> None:
+    """A lone bound of a ``lookup_expr`` no walk from the column accepts raises, unapplied.
+
+    ``bogus`` is neither a lookup nor a transform of ``tier``, so no path names what the
+    range compares and the bound never reaches the queryset.
+    """
+    qs = _RecordingQs()
+
+    with pytest.raises(LookupValidationError, match="'bogus'"):
+        RangeFilter(field_name="tier", lookup_expr="bogus").filter(qs, value)
+    assert qs.captured == {}
 
 
 def test_integer_range_filter_decomposes_range_into_gte_lte() -> None:
